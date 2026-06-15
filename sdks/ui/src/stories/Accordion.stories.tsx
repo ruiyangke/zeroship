@@ -14,6 +14,7 @@ const meta: Meta<typeof Accordion> = {
 export default meta;
 
 type Story = StoryObj<typeof Accordion>;
+const accordionStoryRowClassName = "zs-story-row zs-story-row--wide";
 
 /* ─── shared content (so the stories stay focused on the prop matrix) */
 const sampleItems = [
@@ -75,7 +76,7 @@ export const Basic: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Basic">
+    <div className={accordionStoryRowClassName} role="group" aria-label="Basic">
       <Accordion type="single" data-testid="accordion-basic">
         {renderItems("accordion-basic")}
       </Accordion>
@@ -117,7 +118,7 @@ export const MultipleOpen: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Multiple open">
+    <div className={accordionStoryRowClassName} role="group" aria-label="Multiple open">
       <Accordion
         type="multiple"
         defaultValue={["shipping", "warranty"]}
@@ -166,7 +167,7 @@ export const Collapsible: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className={accordionStoryRowClassName}
       role="group"
       aria-label="Collapsible single"
     >
@@ -211,7 +212,7 @@ export const Controlled: Story = {
     const [value, setValue] = useState<string | undefined>("returns");
     return (
       <div
-        className="zs-story-row"
+        className={accordionStoryRowClassName}
         role="group"
         aria-label="Controlled"
         style={{ flexDirection: "column", alignItems: "stretch" }}
@@ -274,7 +275,7 @@ export const WithDefaultValue: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className={accordionStoryRowClassName}
       role="group"
       aria-label="With default value"
     >
@@ -333,7 +334,7 @@ export const Disabled: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Disabled">
+    <div className={accordionStoryRowClassName} role="group" aria-label="Disabled">
       <Accordion type="single" disabled data-testid="accordion-disabled">
         {renderItems("accordion-disabled")}
       </Accordion>
@@ -377,7 +378,7 @@ export const Horizontal: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className={accordionStoryRowClassName}
       role="group"
       aria-label="Horizontal"
       style={{ minBlockSize: "8rem" }}
@@ -433,7 +434,7 @@ export const RTL: Story = {
   render: () => (
     <div
       dir="rtl"
-      className="zs-story-row"
+      className={accordionStoryRowClassName}
       role="group"
       aria-label="RTL"
     >
@@ -497,23 +498,21 @@ export const RTL: Story = {
  * not race the aria-wiring script's interactions and leave the
  * accordion in a post-play state. The story preopens `shipping` so
  * the closing transition is one click away. */
-export const RegressionTransitions: Story = {
-  name: "Regression — transitions (fix #1)",
+export const TransitionBehavior: Story = {
+  name: "Transitions",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression baseline for the Slice 14 fix #1 panel-transition " +
-          "check. No play() — the aria-wiring script drives the click " +
-          "itself and samples mid-transition block-size.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className={accordionStoryRowClassName}
       role="group"
-      aria-label="Regression transitions"
+      aria-label="Behavior transitions"
     >
       <Accordion
         type="single"
@@ -533,23 +532,21 @@ export const RegressionTransitions: Story = {
  * aria-wiring script clicks `shipping` to open and clicks again to
  * verify the open Trigger STAYS open (RadioGroup semantics). No
  * play() — see fix #1 baseline above. */
-export const RegressionNonCollapsible: Story = {
-  name: "Regression — collapsible=false (fix #2)",
+export const NonCollapsibleSingle: Story = {
+  name: "Collapsible=false",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression baseline for the Slice 14 fix #2 non-collapsible " +
-          "single-mode check. No play() — the aria-wiring script clicks " +
-          "the same Trigger twice and asserts the second click is a no-op.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className={accordionStoryRowClassName}
       role="group"
-      aria-label="Regression non-collapsible"
+      aria-label="Behavior non-collapsible"
     >
       <Accordion
         type="single"
@@ -568,15 +565,13 @@ export const RegressionNonCollapsible: Story = {
  * cycle and verifies the external readout (`Open: <value>`) stays in
  * lockstep with `aria-expanded`. Pre-fix, `value === undefined`
  * silently exited controlled mode and the readout desynced. */
-export const RegressionControlled: Story = {
-  name: "Regression — controlled value cycle (fix #4)",
+export const ControlledValueCycle: Story = {
+  name: "Controlled value cycle",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression baseline for the Slice 14 fix #4 controlled-value " +
-          "check. No play() — the aria-wiring script open/close/reopens " +
-          "and asserts the readout matches state on every step.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -584,9 +579,9 @@ export const RegressionControlled: Story = {
     const [value, setValue] = useState<string | undefined>("returns");
     return (
       <div
-        className="zs-story-row"
+        className={accordionStoryRowClassName}
         role="group"
-        aria-label="Regression controlled"
+        aria-label="Behavior controlled"
         style={{ flexDirection: "column", alignItems: "stretch" }}
       >
         <Accordion
@@ -630,25 +625,21 @@ export const RegressionControlled: Story = {
  * block-size content-driven on horizontal panels at every frame and
  * only zero the inline-size. No play() so Storybook autoplay doesn't
  * race the script's clicks. */
-export const RegressionHorizontalTransition: Story = {
-  name: "Regression — horizontal panel keeps block-size (wave 7 fix)",
+export const HorizontalPanelTransition: Story = {
+  name: "Horizontal panel keeps block-size",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression baseline for the wave 7 fix: horizontal panels " +
-          "must keep their block-size content-driven during " +
-          "starting/ending-style frames. The aria-wiring script samples " +
-          "the closing panel's block-size mid-transition and asserts " +
-          "it stays > 0 (pre-fix it snapped to 0).",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className={accordionStoryRowClassName}
       role="group"
-      aria-label="Regression horizontal transition"
+      aria-label="Behavior horizontal transition"
       style={{ minBlockSize: "8rem" }}
     >
       <Accordion
@@ -679,7 +670,7 @@ export const RichContent: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Rich content">
+    <div className={accordionStoryRowClassName} role="group" aria-label="Rich content">
       <Accordion
         type="single"
         defaultValue="features"

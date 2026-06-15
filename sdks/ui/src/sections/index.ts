@@ -13,6 +13,34 @@
 export type { SectionTone } from "./_tone";
 
 export {
+  SectionFrame,
+  SectionHeader,
+  type SectionFrameProps,
+  type SectionFrameSpacing,
+  type SectionHeaderAlign,
+  type SectionHeaderLayout,
+  type SectionHeaderProps,
+  type SectionHeaderTitleSize,
+} from "./SectionFrame";
+
+export {
+  ScrollRail,
+  type ScrollRailProps,
+  type ScrollRailSnap,
+} from "./ScrollRail";
+
+export {
+  ResponsivePicture,
+  type ResponsivePictureFit,
+  type ResponsivePictureFrame,
+  type ResponsivePicturePosition,
+  type ResponsivePictureProps,
+  type ResponsivePictureRadius,
+  type ResponsivePictureRatio,
+  type ResponsivePictureSource,
+} from "./ResponsivePicture";
+
+export {
   Hero,
   type HeroProps,
   type HeroAlign,

@@ -19,6 +19,9 @@
  */
 
 .zs-container {
+  inline-size: 100%;
+  min-inline-size: 0;
+  box-sizing: border-box;
   max-width: var(--container-max-width, var(--zs-container-lg));
   margin-inline: var(--container-margin-inline, auto);
   padding-inline: var(--container-pad-x, var(--zs-space-4));

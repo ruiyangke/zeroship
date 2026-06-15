@@ -156,3 +156,30 @@ export const WideCentering: Story = {
     await expect(Math.abs(columnCenter - regionCenter)).toBeLessThanOrEqual(2);
   },
 };
+
+/* ─── 5. DuplicateTitleWarning — additive heading guard ─────────────── */
+export const DuplicateTitleWarning: Story = {
+  name: "Duplicate title warning (dev guard)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
+      },
+    },
+  },
+  render: () => (
+    <ErrorState title="Load failed">
+      <ErrorState.Title>Load failed</ErrorState.Title>
+      <ErrorState.Description>
+        Pick either the ergonomic title prop or the compound title part.
+      </ErrorState.Description>
+    </ErrorState>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.getAllByRole("heading", { name: /load failed/i, level: 2 }),
+    ).toHaveLength(2);
+  },
+};

@@ -69,7 +69,10 @@
  * inline size makes the band span its container; the composed Container's
  * max-width + margin-inline:auto still own the inner readable measure. */
 [data-section-band] {
+  box-sizing: border-box;
   inline-size: 100%;
+  min-inline-size: 0;
+  max-inline-size: 100%;
 }
 
 /* muted — a subtle surface fill so the band reads as its own panel.
@@ -89,16 +92,10 @@
      description / muted chrome recede WITHOUT dropping below contrast. The
      house color-mix idiom keeps it token-pure and theme-tracking. */
   --zs-section-ink: var(--zs-accent-ink);
-  /* Secondary copy reads a touch recessed but stays clear of AA on the accent
-     fill. Pure accent-ink on this accent measures ~5.26:1; mixing toward the
-     accent (NOT toward transparent, which punched through to the dark fill and
-     slipped under contrast) thins it — 92% accent-ink measures ~4.71:1, still
-     above the 4.5:1 normal-text threshold with margin. */
-  --zs-section-ink-secondary: color-mix(
-    in oklch,
-    var(--zs-accent-ink) 92%,
-    var(--zs-accent)
-  );
+  /* Secondary copy in an accent band must clear AA across every palette.
+     Some warmer accent fills leave too little margin for a recessed mix,
+     so the accent band uses the full ink token for all readable text. */
+  --zs-section-ink-secondary: var(--zs-accent-ink);
   color: var(--zs-section-ink);
 }
 
@@ -114,6 +111,7 @@
 
 /* Primary ink — titles, eyebrows, headings, billboard values. */
 [data-section-band][data-tone="accent"] .zs-section-eyebrow,
+[data-section-band][data-tone="accent"] .zs-section-header__title,
 [data-section-band][data-tone="accent"] .zs-hero__title,
 [data-section-band][data-tone="accent"] .zs-pricing__title,
 [data-section-band][data-tone="accent"] .zs-feature-grid__title,
@@ -131,6 +129,7 @@
 
 /* Secondary ink — descriptions, supporting lines, the muted chrome. */
 [data-section-band][data-tone="accent"] .zs-hero__description,
+[data-section-band][data-tone="accent"] .zs-section-header__description,
 [data-section-band][data-tone="accent"] .zs-pricing__lead-description,
 [data-section-band][data-tone="accent"] .zs-feature-grid__description,
 [data-section-band][data-tone="accent"] .zs-feature-grid__item-description,

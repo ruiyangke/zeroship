@@ -107,17 +107,12 @@ export const AsChild: Story = {
 
 /* ─── 4. Wide child stays contained (regression) ────────────────────── */
 export const WideChildContained: Story = {
-  name: "Wide child contained (regression)",
+  name: "Wide child contained",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression for the child-overflow fix: a wide unbreakable child " +
-          "inside a narrow Center. `.zs-center { min-inline-size: 0 }` plus " +
-          "`.zs-center > * { min-inline-size: 0; max-inline-size: 100% }` " +
-          "keep the child within the box instead of spilling out both " +
-          "sides. The `play()` asserts no horizontal overflow on the " +
-          "Center. Pre-fix the unbreakable token blew the box out.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

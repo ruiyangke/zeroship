@@ -130,8 +130,8 @@
   align-items: center;
   justify-content: center;
   flex: none;
-  inline-size: var(--zs-space-6);
-  block-size: var(--zs-space-6);
+  inline-size: var(--zs-hit-min);
+  block-size: var(--zs-hit-min);
   padding: 0;
   /* No inline-start margin: the row Stack's own gap already separates the
      dismiss button from the text column. A margin here would double that

@@ -51,8 +51,10 @@
 
 /* ─── root ──────────────────────────────────────────────────────────── */
 .zs-accordion {
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
+  inline-size: 100%;
   min-inline-size: 0;
   color: var(--zs-label);
   font-family: var(--zs-font-system);
@@ -75,8 +77,10 @@
  * Horizontal orientation rotates the separator to the trailing inline
  * edge instead. */
 .zs-accordion-item {
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
+  inline-size: 100%;
   min-inline-size: 0;
   border-block-end: var(--zs-selection-hairline) solid
     var(--zs-accordion-separator);
@@ -100,6 +104,7 @@
  * default font-weight so the heading sits flush — the Trigger inside
  * paints the actual visual weight. */
 .zs-accordion-header {
+  inline-size: 100%;
   margin: 0;
   font-size: inherit;
   font-weight: inherit;
@@ -112,6 +117,7 @@
  * so the focus ring + keyboard interactions work natively. */
 .zs-accordion-trigger {
   position: relative;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   justify-content: space-between;

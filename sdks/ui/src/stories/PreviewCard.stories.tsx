@@ -369,7 +369,7 @@ export const LongContent: Story = {
               <li>Vite plugin discovers server procedures at build.</li>
               <li>Builder service ships the M0 exit-gate harness.</li>
               <li>Drawer + Toast complete the modal-surface set.</li>
-              <li>PreviewCard slice closes Wave 4.</li>
+              <li>PreviewCard slice closes.</li>
             </ul>
           </PreviewCard.Popup>
         </PreviewCard.Portal>

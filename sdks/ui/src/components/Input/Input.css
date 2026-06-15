@@ -45,6 +45,8 @@
   padding-inline: var(--zs-control-px-md);
   border-radius: var(--zs-control-radius-md);
   background: var(--zs-input-bg);
+  backdrop-filter: var(--zs-control-backdrop-filter, none);
+  -webkit-backdrop-filter: var(--zs-control-backdrop-filter, none);
   color: var(--zs-input-ink);
   font-family: var(--zs-font-system);
   font-size: var(--zs-text-body-size);
@@ -54,7 +56,8 @@
      transparent so the focus-ring transition has something to morph
      into / out of without snapping. */
   box-shadow:
-    inset 0 0 0 0.0625rem var(--zs-input-border),
+    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
+    inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border),
     0 0 0 0 transparent;
   transition:
     background-color var(--zs-motion-fast) var(--zs-motion-ease),
@@ -93,6 +96,7 @@
 .zs-input--filled {
   background: var(--zs-input-bg-filled);
   box-shadow:
+    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
     inset 0 0 0 0.0625rem transparent,
     0 0 0 0 transparent;
 }
@@ -117,12 +121,14 @@
   .zs-input:not([data-disabled]):not([data-focused]):not([data-readonly]):hover {
     background: var(--zs-input-bg-hover);
     box-shadow:
-      inset 0 0 0 0.0625rem var(--zs-input-border-hover),
+      var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
+      inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border-hover),
       0 0 0 0 transparent;
   }
   .zs-input--filled:not([data-disabled]):not([data-focused]):not([data-readonly]):hover {
     background: var(--zs-input-bg-filled-hover);
     box-shadow:
+      var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
       inset 0 0 0 0.0625rem transparent,
       0 0 0 0 transparent;
   }
@@ -142,13 +148,15 @@
 .zs-input[data-focused] {
   background: var(--zs-input-bg-focus);
   box-shadow:
-    inset 0 0 0 0.0625rem var(--zs-input-border-focus),
+    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
+    inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border-focus),
     0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
 }
 .zs-input--filled[data-focused] {
   background: var(--zs-input-bg-filled);
   box-shadow:
-    inset 0 0 0 0.0625rem var(--zs-input-border-focus),
+    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
+    inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border-focus),
     0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
 }
 /* Plain on focus: intensify the baseline to the accent and keep the
@@ -163,12 +171,14 @@
 /* ─── invalid ────────────────────────────────────────────────────────── */
 .zs-input[data-invalid] {
   box-shadow:
-    inset 0 0 0 0.0625rem var(--zs-input-border-invalid),
+    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
+    inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border-invalid),
     0 0 0 0 transparent;
 }
 .zs-input[data-invalid][data-focused] {
   box-shadow:
-    inset 0 0 0 0.0625rem var(--zs-input-border-invalid),
+    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
+    inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border-invalid),
     0 0 0 var(--zs-focus-ring-width)
       color-mix(in oklch, var(--zs-system-red) 35%, transparent);
 }
@@ -197,7 +207,8 @@
   color: var(--zs-input-ink-disabled);
   cursor: not-allowed;
   box-shadow:
-    inset 0 0 0 0.0625rem var(--zs-input-border),
+    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
+    inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border),
     0 0 0 0 transparent;
 }
 .zs-input[data-disabled] .zs-input__control {

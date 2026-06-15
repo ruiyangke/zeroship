@@ -663,7 +663,7 @@ export const CloseAsChildComposition: Story = {
  * rendered child carries the className AND data-side-effect attribute
  * the caller set on `<Popover.Close>`. */
 export const CloseAsChildForwardsRest: Story = {
-  name: "Close asChild forwards wrapper rest (Round 5 regression)",
+  name: "Close asChild forwards wrapper rest",
   parameters: {
     docs: {
       description: {
@@ -744,16 +744,12 @@ const ALPHA_PAYLOAD: PopoverPayload = { label: "Alpha" };
 const BETA_PAYLOAD: PopoverPayload = { label: "Beta" };
 
 export const PayloadRender: Story = {
-  name: "Payload render-function child (Round 6 regression)",
+  name: "Payload render-function child",
   parameters: {
     docs: {
       description: {
         story:
-          "Base UI's `Popover.Root` accepts a render function child " +
-          "receiving the active trigger's payload. The wrapper must " +
-          "forward this API verbatim; pre-fix, the wrapper narrowed " +
-          "`children` to `ReactNode` and silently rejected the " +
-          "function form.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

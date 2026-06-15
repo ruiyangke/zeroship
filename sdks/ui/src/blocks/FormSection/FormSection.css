@@ -45,6 +45,8 @@
   --zs-form-section-aside-gap: var(--zs-space-8);
 
   display: grid;
+  inline-size: 100%;
+  min-inline-size: 0;
   font-family: var(--zs-font-system);
   color: var(--zs-label);
   /* Establish an inline-size containment context so the aside→stacked
@@ -170,7 +172,7 @@
  * wrong axis when the section is narrow inside a wide viewport (a settings
  * panel) or wide inside a narrow one. Custom properties can't appear in
  * the @container condition, so the literal 48rem mirrors --zs-bp-md. */
-@container (max-width: 48rem) {
+@media (max-width: 47.999rem) {
   .zs-form-section--aside {
     grid-template-columns: 1fr;
     grid-template-areas:

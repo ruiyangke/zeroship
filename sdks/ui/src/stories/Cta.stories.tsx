@@ -190,15 +190,12 @@ export const Accent: Story = {
  * to `inline-size: 100%`; this `play()` fails in that state (the bare button
  * would fill its 600px container) and passes once the rule is band-scoped. */
 export const ToneScopedToBands: Story = {
-  name: "ToneScopedToBands (regression: [data-tone] full-bleed must not leak)",
+  name: "ToneScopedToBands",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression guard: the shared full-bleed band rule is scoped to " +
-          "the `[data-section-band]` marker, so a bare `data-tone` element " +
-          "outside any section stays content-sized while a real section band " +
-          "spans its container.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

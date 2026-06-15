@@ -1,6 +1,6 @@
 /*
  * Capture-authform-evidence: serves storybook-static and writes a 2x PNG
- * of each AuthForm story under the Crystal theme to
+ * of each AuthForm story under both both Crystal themess to
  * storybook-static/theme-evidence/. Self-contained: ephemeral port,
  * cleans up server + browser on exit. Mirrors capture-card-evidence.mjs.
  */
@@ -16,7 +16,12 @@ const outDir = process.env.THEME_EVIDENCE_DIR
   ? resolve(process.env.THEME_EVIDENCE_DIR)
   : join(staticDir, "theme-evidence");
 
-const themes = [{ label: "Crystal", value: "crystal" }];
+const themes = [
+  { label: "Crystal Light", value: "crystal-light" },
+  { label: "Crystal Dark", value: "crystal-dark" },
+  { label: "Studio Light", value: "studio-light" },
+  { label: "Ghibli Light", value: "ghibli-light" },
+];
 
 const stories = [
   "blocks-authform--sign-in",

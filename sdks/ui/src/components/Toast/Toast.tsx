@@ -57,9 +57,9 @@
  *   - Silent dismissal on duplicate id: a second `toast({id: "x"})`
  *     UPDATES the existing toast (Base UI's documented contract). We
  *     surface this in `useToast` JSDoc.
- *   - Glass-surface invariant: `--zs-surface-raised` carries the panel
- *     opacity; Toast.Root paints an opaque background so axe's
- *     color-contrast walk terminates inside the toast.
+ *   - Crystal material pattern: `--zs-surface-raised` carries the
+ *     readable panel base; Toast.Root receives material, rim, and shadow
+ *     tokens without making contrast depend on page bleed.
  */
 import {
   createContext,

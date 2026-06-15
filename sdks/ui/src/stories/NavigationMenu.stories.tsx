@@ -60,9 +60,10 @@ function ContentPanel({
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+          gridTemplateColumns: "repeat(2, minmax(min(10rem, 100%), 1fr))",
           gap: "var(--zs-space-3)",
-          minInlineSize: "20rem",
+          inlineSize: "min(20rem, calc(100dvw - var(--zs-space-6)))",
+          maxInlineSize: "100%",
         }}
       >
         {children}
@@ -877,20 +878,13 @@ export const VerticalCustomChrome: Story = {
  *     via `data-wrapper-ref-tag`. Pre-fix the wrapper ref never
  *     attached (silently dropped because Slot overwrote it); post-fix
  *     it reads "A". */
-export const AsChildRefAttachRegression: Story = {
-  name: "AsChild ref attaches exactly once (wave10 🔴 #1)",
+export const AsChildRefAttach: Story = {
+  name: "AsChild ref attaches exactly once",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression for the asChild ref double-fire / wrapper-ref-drop " +
-          "bug. Pre-fix the child's callback ref ran twice on every " +
-          "attach and the outer `ref` never landed on the anchor at all. " +
-          "Post-fix the child ref runs once and the outer ref points at " +
-          "the rendered `<a>` element. The `data-attach-count` attribute " +
-          "on the anchor records callback-ref attachments; the wrapper " +
-          "ref's tagName is stamped on a status node so the aria-wiring " +
-          "script can read both without intervening hooks.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -950,7 +944,7 @@ export const AsChildRefAttachRegression: Story = {
       <div
         className="zs-story-row"
         role="group"
-        aria-label="AsChild ref-attach regression"
+        aria-label="AsChild ref-attach"
       >
         <NavigationMenu data-testid="navmenu-aschild-ref">
           <NavigationMenu.List>
@@ -1027,18 +1021,13 @@ export const AsChildRefAttachRegression: Story = {
  * Regression evidence: assert the `data-popup-open` attribute appears
  * on the Icon element while open and the computed `transform` is a
  * 180-degree rotation. */
-export const IconRotationRegression: Story = {
-  name: "Icon rotates 180° when open (wave10 🔴 #2)",
+export const IconRotation: Story = {
+  name: "Icon rotates 180° when open",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression for the chevron-rotation selector bug. Pre-fix " +
-          "`.zs-navmenu-icon[data-open]` selected nothing because Base " +
-          "UI emits `data-popup-open` (via the shared trigger state " +
-          "mapping) — not `data-open` — so the chevron never rotated. " +
-          "Post-fix the selector targets `[data-popup-open]` and the " +
-          "Icon flips on open.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -1046,7 +1035,7 @@ export const IconRotationRegression: Story = {
     <div
       className="zs-story-row"
       role="group"
-      aria-label="Icon rotation regression"
+      aria-label="Icon rotation"
     >
       <NavigationMenu data-testid="navmenu-icon-rotate">
         <NavigationMenu.List>
@@ -1100,19 +1089,13 @@ export const IconRotationRegression: Story = {
  * the regression itself is asserted by the aria-wiring script — it
  * resizes the viewport to a narrow width, opens a popup, and reads
  * `getBoundingClientRect().width` against the viewport width. */
-export const PopupMinWidthClampRegression: Story = {
-  name: "Popup width never exceeds viewport (wave10 🔴 #3)",
+export const PopupMinWidthClamp: Story = {
+  name: "Popup width never exceeds viewport",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression for the popup overflow on narrow viewports. " +
-          "Pre-fix `min-inline-size: 18rem` (288px) overrode the " +
-          "viewport-capped `max-inline-size` on phones, so the mega-" +
-          "menu painted wider than the screen. Post-fix the minimum is " +
-          "also clamped: `min(18rem, calc(100dvw - var(--zs-space-6) " +
-          "* 2))`. Resize the Storybook iframe to ≤ 300px to confirm " +
-          "the popup tracks the viewport.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -1120,7 +1103,7 @@ export const PopupMinWidthClampRegression: Story = {
     <div
       className="zs-story-row"
       role="group"
-      aria-label="Popup min-width regression"
+      aria-label="Popup min-width"
     >
       <NavigationMenu data-testid="navmenu-clamp">
         <NavigationMenu.List>
@@ -1153,9 +1136,8 @@ export const PopupMinWidthClampRegression: Story = {
     // We can't resize the canvas inside `play()` reliably, so the
     // narrow-viewport overflow gate lives in the aria-wiring script.
     // Here we just assert the popup mounts.
-    await expect(
-      await body.findByTestId("navmenu-clamp-popup"),
-    ).toBeVisible();
+    const popup = await body.findByTestId("navmenu-clamp-popup");
+    await waitFor(() => expect(popup).toBeVisible());
     await userEvent.keyboard("{Escape}");
   },
 };

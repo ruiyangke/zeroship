@@ -841,10 +841,7 @@ export const LinkItemAsChildSingleAttach: Story = {
     docs: {
       description: {
         story:
-          "Regression for the Menu.LinkItem double-ref-compose bug " +
-          "(wave9 🔴 2). The wrapper-level ref on `<Menu.LinkItem ref>` " +
-          "must fire exactly once per attach event; the DOM-level ref " +
-          "is the denominator the wrapper ratio is compared against.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

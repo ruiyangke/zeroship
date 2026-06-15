@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { useState } from "react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { Checkbox, CheckboxGroup, Fieldset } from "../components";
 
 const meta: Meta<typeof CheckboxGroup> = {
@@ -40,7 +41,7 @@ export const Basic: Story = {
       role="group"
       aria-label="Basic checkbox group"
     >
-      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+      <div className="zs-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
         <CheckboxGroup
           defaultValue={["newsletter", "beta"]}
           data-testid="checkboxgroup-basic"
@@ -57,6 +58,21 @@ export const Basic: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const newsletter = canvas.getByRole("checkbox", { name: /newsletter/i });
+    const product = canvas.getByRole("checkbox", { name: /product updates/i });
+    const beta = canvas.getByRole("checkbox", { name: /beta invites/i });
+
+    await expect(newsletter).toHaveAttribute("aria-checked", "true");
+    await expect(beta).toHaveAttribute("aria-checked", "true");
+    await expect(product).toHaveAttribute("aria-checked", "false");
+
+    await userEvent.click(product);
+    await waitFor(() =>
+      expect(product).toHaveAttribute("aria-checked", "true"),
+    );
+  },
 };
 
 /* ─── 2. Controlled ─────────────────────────────────────────────────── */
@@ -82,7 +98,12 @@ export const Controlled: Story = {
       >
         <div
           className="zs-story-cell"
-          style={{ minWidth: "20rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}
+          style={{
+            inlineSize: "min(20rem, 100%)",
+            display: "flex",
+            flexDirection: "column",
+            gap: "0.75rem",
+          }}
         >
           <CheckboxGroup
             value={value}
@@ -108,6 +129,15 @@ export const Controlled: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const readout = canvas.getByTestId("checkboxgroup-controlled-readout");
+    await expect(readout).toHaveTextContent("Selected: [product]");
+    await userEvent.click(canvas.getByRole("checkbox", { name: /newsletter/i }));
+    await waitFor(() =>
+      expect(readout).toHaveTextContent("Selected: [product, newsletter]"),
+    );
+  },
 };
 
 /* ─── 3. Disabled ───────────────────────────────────────────────────── */
@@ -128,7 +158,7 @@ export const Disabled: Story = {
       role="group"
       aria-label="Disabled checkbox group"
     >
-      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+      <div className="zs-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
         <CheckboxGroup
           disabled
           defaultValue={["newsletter"]}
@@ -162,7 +192,7 @@ export const Horizontal: Story = {
       role="group"
       aria-label="Horizontal checkbox group"
     >
-      <div className="zs-story-cell" style={{ minWidth: "26rem" }}>
+      <div className="zs-story-cell" style={{ inlineSize: "min(26rem, 100%)" }}>
         <CheckboxGroup
           orientation="horizontal"
           defaultValue={["mon", "wed", "fri"]}
@@ -209,7 +239,7 @@ export const NestedFieldset: Story = {
       role="group"
       aria-label="Fieldset checkbox group"
     >
-      <div className="zs-story-cell" style={{ minWidth: "22rem" }}>
+      <div className="zs-story-cell" style={{ inlineSize: "min(22rem, 100%)" }}>
         <Fieldset>
           <Fieldset.Legend>Email preferences</Fieldset.Legend>
           <p className="zs-story-description">
@@ -252,7 +282,7 @@ export const RTL: Story = {
       role="group"
       aria-label="RTL checkbox group"
     >
-      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+      <div className="zs-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
         <CheckboxGroup
           defaultValue={["news-he"]}
           data-testid="checkboxgroup-rtl"
@@ -285,7 +315,7 @@ export const AllSelected: Story = {
       role="group"
       aria-label="All selected checkbox group"
     >
-      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+      <div className="zs-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
         <CheckboxGroup
           defaultValue={NEWSLETTER_OPTIONS.map((opt) => opt.value)}
           data-testid="checkboxgroup-all-selected"
@@ -317,7 +347,7 @@ export const NoneSelected: Story = {
       role="group"
       aria-label="None selected checkbox group"
     >
-      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+      <div className="zs-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
         <CheckboxGroup data-testid="checkboxgroup-none-selected">
           {NEWSLETTER_OPTIONS.map((opt) => (
             <Checkbox key={opt.value} name={opt.value} label={opt.label} />

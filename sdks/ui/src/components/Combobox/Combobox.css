@@ -41,6 +41,7 @@
   line-height: var(--zs-text-body-line);
   cursor: text;
   box-shadow:
+    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
     inset 0 0 0 0.0625rem var(--zs-input-border),
     0 0 0 0 transparent;
   transition:
@@ -77,6 +78,7 @@
   .zs-combobox-input-group:not([data-disabled]):not([data-focused]):hover {
     background: var(--zs-input-bg-hover);
     box-shadow:
+      var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
       inset 0 0 0 0.0625rem var(--zs-input-border-hover),
       0 0 0 0 transparent;
   }
@@ -92,6 +94,7 @@
 .zs-combobox-input-group[data-popup-open] {
   background: var(--zs-input-bg-focus);
   box-shadow:
+    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
     inset 0 0 0 0.0625rem var(--zs-input-border-focus),
     0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
   outline: none;
@@ -111,6 +114,7 @@
   color: var(--zs-input-ink-disabled);
   cursor: not-allowed;
   box-shadow:
+    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
     inset 0 0 0 0.0625rem var(--zs-input-border),
     0 0 0 0 transparent;
 }
@@ -235,7 +239,10 @@
   border-radius: var(--zs-radius-5);
   box-shadow:
     var(--zs-shadow-dialog),
-    inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
+    var(
+      --zs-popup-surface-edge,
+      inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator)
+    );
   backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
   -webkit-backdrop-filter: var(
     --zs-dialog-backdrop-filter,

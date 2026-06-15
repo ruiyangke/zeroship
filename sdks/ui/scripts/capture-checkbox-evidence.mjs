@@ -1,7 +1,7 @@
 /*
  * Capture-checkbox-evidence: same shape as capture-input-evidence.mjs.
  * Boots an http-server over storybook-static, walks each Checkbox
- * story under the Crystal theme, writes a 2x PNG to
+ * story under both both Crystal themess, writes a 2x PNG to
  * storybook-static/theme-evidence/.
  */
 import { mkdir, writeFile } from "node:fs/promises";
@@ -17,7 +17,12 @@ const outDir = process.env.THEME_EVIDENCE_DIR
   ? resolve(process.env.THEME_EVIDENCE_DIR)
   : join(staticDir, "theme-evidence");
 
-const themes = [{ label: "Crystal", value: "crystal" }];
+const themes = [
+  { label: "Crystal Light", value: "crystal-light" },
+  { label: "Crystal Dark", value: "crystal-dark" },
+  { label: "Studio Light", value: "studio-light" },
+  { label: "Ghibli Light", value: "ghibli-light" },
+];
 
 const stories = [
   "components-checkbox--all-states",

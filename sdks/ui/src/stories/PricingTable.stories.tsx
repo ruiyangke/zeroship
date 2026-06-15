@@ -369,9 +369,7 @@ export const FeaturedNoBadge: Story = {
     docs: {
       description: {
         story:
-          "Regression for F1: a `featured` tier that omits `badge` must still " +
-          "render a visible 'Most popular' label so 'recommended' is never " +
-          "signalled by the ring/elevation alone (color-blind + SR users).",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -423,9 +421,7 @@ export const KeyCollision: Story = {
     docs: {
       description: {
         story:
-          "Regression for F2: a prop tier `id=\"pro\"` AND a compound " +
-          "`<PricingTable.Tier key=\"pro\">` must render without a React " +
-          "duplicate-key warning — keys are namespaced by source surface.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -497,9 +493,7 @@ export const FalseTitleNoLabel: Story = {
     docs: {
       description: {
         story:
-          "Regression for F3: `title={false}` (the common " +
-          "`showTitle && \"…\"` idiom when the flag is off) must render NO " +
-          "heading and leave NO `aria-labelledby` on the section.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

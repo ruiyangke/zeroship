@@ -120,6 +120,7 @@ export const Badge = forwardRef<HTMLElement, BadgeProps>(function Badge(
     "data-intent": intent,
     "data-variant": variant,
     "data-size": size,
+    ...(asChild ? { "data-as-child": "" } : null),
   };
 
   if (asChild) {

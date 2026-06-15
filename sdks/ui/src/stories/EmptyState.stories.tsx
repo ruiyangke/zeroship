@@ -189,10 +189,7 @@ export const DoubleHeading: Story = {
     docs: {
       description: {
         story:
-          "Regression: both a `title` prop AND an <EmptyState.Title> child " +
-          "are supplied, rendering two same-level headings. The block emits " +
-          "a dev-only `console.warn` (not observable in the prod build) " +
-          "telling the author to use one or the other.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

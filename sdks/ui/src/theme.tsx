@@ -16,20 +16,29 @@ import {
  * targets) is theme-invariant and lives in the foundation token block
  * in styles.css.
  *
- * Currently registered themes: `crystal` (light glass).
+ * Currently registered themes: `crystal-light`, `crystal-dark`,
+ * `studio-light`, and `ghibli-light`.
  */
-export const themes = ["crystal"] as const;
+export const themes = [
+  "crystal-light",
+  "crystal-dark",
+  "studio-light",
+  "ghibli-light",
+] as const;
 export type ThemeName = (typeof themes)[number] | (string & {});
 
-export const DEFAULT_THEME: ThemeName = "crystal";
+export const DEFAULT_THEME: ThemeName = "crystal-light";
 export const THEME_STORAGE_KEY = "zeroship-ui-theme";
 
 export const themeLabels: Record<string, string> = {
-  crystal: "Crystal",
+  "crystal-light": "Crystal Light",
+  "crystal-dark": "Crystal Dark",
+  "studio-light": "Studio Light",
+  "ghibli-light": "Ghibli Light",
 };
 
 export function isThemeName(value: string | null | undefined): value is ThemeName {
-  return typeof value === "string" && value.length > 0;
+  return themes.includes(value as (typeof themes)[number]);
 }
 
 interface ThemeContextValue {

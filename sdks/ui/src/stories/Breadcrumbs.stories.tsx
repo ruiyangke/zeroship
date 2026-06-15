@@ -405,10 +405,7 @@ export const MultipleCurrent: Story = {
     docs: {
       description: {
         story:
-          "Regression: two crumbs flagged `current`. `findIndex` honors only " +
-          "the first; the rest render as plain crumbs. Exactly one crumb " +
-          "carries `aria-current=\"page\"` (the first flagged). A dev-only " +
-          "`console.warn` (not observable in the prod build) names the case.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

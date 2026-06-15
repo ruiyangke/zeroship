@@ -5,10 +5,18 @@ import "../src/styles.css";
 import "../src/stories/story.css";
 
 const preview: Preview = {
+  initialGlobals: {
+    theme: "Crystal Light",
+  },
   decorators: [
     withThemeByDataAttribute({
-      themes: { Crystal: "crystal" },
-      defaultTheme: "Crystal",
+      themes: {
+        "Crystal Light": "crystal-light",
+        "Crystal Dark": "crystal-dark",
+        "Studio Light": "studio-light",
+        "Ghibli Light": "ghibli-light",
+      },
+      defaultTheme: "Crystal Light",
       attributeName: "data-theme",
       parentSelector: "html",
     }),
@@ -23,6 +31,9 @@ const preview: Preview = {
       ),
   ],
   parameters: {
+    themes: {
+      disable: true,
+    },
     a11y: {
       element: "#storybook-root",
       config: {

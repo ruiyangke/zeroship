@@ -50,6 +50,9 @@ const fourQuestions: FaqEntry[] = [
 /* ─── 1. Default — header + 4 Q/A, single-open ───────────────────────────── */
 export const Default: Story = {
   name: "Default (header + 4 Q/A, single-open)",
+  args: {
+    tone: "default",
+  },
   parameters: {
     docs: {
       description: {
@@ -62,8 +65,9 @@ export const Default: Story = {
       },
     },
   },
-  render: () => (
+  render: (args) => (
     <Faq
+      {...args}
       data-testid="faq-default"
       eyebrow="Help"
       title="Frequently asked questions"
@@ -104,6 +108,9 @@ export const Default: Story = {
 /* ─── 2. Multiple — openMultiple ─────────────────────────────────────────── */
 export const Multiple: Story = {
   name: "Multiple (multiple open at once)",
+  args: {
+    tone: "default",
+  },
   parameters: {
     docs: {
       description: {
@@ -113,8 +120,9 @@ export const Multiple: Story = {
       },
     },
   },
-  render: () => (
+  render: (args) => (
     <Faq
+      {...args}
       data-testid="faq-multiple"
       title="FAQ"
       multiple
@@ -139,6 +147,9 @@ export const Multiple: Story = {
 /* ─── 3. Compound — items prop + Faq.Item additive ───────────────────────── */
 export const Compound: Story = {
   name: "Compound (items prop + Faq.Item, additive)",
+  args: {
+    tone: "default",
+  },
   parameters: {
     docs: {
       description: {
@@ -149,8 +160,9 @@ export const Compound: Story = {
       },
     },
   },
-  render: () => (
+  render: (args) => (
     <Faq
+      {...args}
       data-testid="faq-compound"
       title="Questions"
       items={[
@@ -198,6 +210,9 @@ export const Compound: Story = {
 /* ─── 4. Headerless — no header → no aria-labelledby ─────────────────────── */
 export const Headerless: Story = {
   name: "Headerless (no header → no aria-labelledby)",
+  args: {
+    tone: "default",
+  },
   parameters: {
     docs: {
       description: {
@@ -209,7 +224,9 @@ export const Headerless: Story = {
       },
     },
   },
-  render: () => <Faq data-testid="faq-headerless" items={fourQuestions} />,
+  render: (args) => (
+    <Faq {...args} data-testid="faq-headerless" items={fourQuestions} />
+  ),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const root = canvas.getByTestId("faq-headerless");

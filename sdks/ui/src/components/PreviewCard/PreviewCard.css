@@ -13,15 +13,10 @@
  * visible state off those so motion is declarative and reduced-motion
  * respectful.
  *
- * Glass-surface invariant: the Popup declares an OPAQUE base
+ * Crystal material pattern: the Popup declares a computable base
  * (`--zs-surface`) so axe-core's color-contrast walk terminates inside
- * the popup. The optional `backdrop-filter` (gated by
- * `--zs-dialog-backdrop-filter`, falling back to `--zs-material-regular`)
- * layers a frosted material on TOP of that opaque base — augmentation
- * only, never the sole visual signal. The earlier revision painted on
- * `--zs-surface-raised`, which in the crystal theme resolves to a
- * translucent alpha-55% white, breaking the invariant: with
- * `backdrop-filter` unsupported the popup let the page bleed through.
+ * the popup. Material, rim, and shadow tokens are augmentation only,
+ * never the sole visual signal.
  * `--zs-surface` is the same opaque token Popover.Popup paints on.
  *
  * Forced-colors mirror (Slice-5/6/7 lesson): every painting selector
@@ -87,11 +82,7 @@
 
 /* ─── Popup ────────────────────────────────────────────────────────── */
 .zs-preview-card-popup {
-  /* Glass-surface invariant: opaque background-color + optional
-   * backdrop-filter augmentation. `--zs-surface` is the opaque token
-   * Popover.Popup uses; if a future theme genuinely wants a translucent
-   * popup it must layer the frosted material on top of the opaque
-   * base, never replace it. */
+  /* Computable background-color + active material/rim tokens. */
   background-color: var(--zs-surface);
   color: var(--zs-label);
   font-family: var(--zs-font-system);
@@ -99,9 +90,9 @@
   line-height: var(--zs-text-callout-line);
 
   /* Logical sizing so RTL flows naturally. */
-  min-inline-size: 16rem;
+  min-inline-size: min(16rem, calc(100dvw - var(--zs-space-6) * 2));
   /* Default (md). Per-size overrides below resolve via data-size. */
-  max-inline-size: 22rem;
+  max-inline-size: min(22rem, calc(100dvw - var(--zs-space-6) * 2));
 
   padding-block: var(--zs-space-4);
   padding-inline: var(--zs-space-4);
@@ -116,7 +107,10 @@
    * hairline at the surface edge the brief asks for. */
   box-shadow:
     var(--zs-shadow-popover),
-    inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
+    var(
+      --zs-popup-surface-edge,
+      inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator)
+    );
 
   /* The arrow's drop-shadow extends past the popup rect; keep it
    * visible. */
@@ -142,13 +136,13 @@
 /* Per-size max-inline-size presets. Sizes match the brief: sm 16rem,
  * md 22rem (default), lg 28rem. Logical so RTL is correct. */
 .zs-preview-card-popup[data-size="sm"] {
-  max-inline-size: 16rem;
+  max-inline-size: min(16rem, calc(100dvw - var(--zs-space-6) * 2));
 }
 .zs-preview-card-popup[data-size="md"] {
-  max-inline-size: 22rem;
+  max-inline-size: min(22rem, calc(100dvw - var(--zs-space-6) * 2));
 }
 .zs-preview-card-popup[data-size="lg"] {
-  max-inline-size: 28rem;
+  max-inline-size: min(28rem, calc(100dvw - var(--zs-space-6) * 2));
 }
 
 /* Default styling for common children — these are presentational only,

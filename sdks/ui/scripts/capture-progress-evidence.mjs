@@ -1,6 +1,6 @@
 /*
  * Capture-progress-evidence: mirrors capture-slider-evidence.mjs.
- * Walks each Progress story; writes a 2x PNG per story under Crystal.
+ * Walks each Progress story; writes a 2x PNG per story under both both Crystal themess.
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -15,7 +15,12 @@ const outDir = process.env.THEME_EVIDENCE_DIR
   ? resolve(process.env.THEME_EVIDENCE_DIR)
   : join(staticDir, "theme-evidence");
 
-const themes = [{ label: "Crystal", value: "crystal" }];
+const themes = [
+  { label: "Crystal Light", value: "crystal-light" },
+  { label: "Crystal Dark", value: "crystal-dark" },
+  { label: "Studio Light", value: "studio-light" },
+  { label: "Ghibli Light", value: "ghibli-light" },
+];
 
 const stories = [
   "components-progress--determinate",

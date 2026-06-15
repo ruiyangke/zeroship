@@ -164,18 +164,12 @@ export const AsChild: Story = {
 
 /* ─── 6. Row child stays contained (regression) ─────────────────────── */
 export const RowChildContained: Story = {
-  name: "Row child contained (regression)",
+  name: "Row child contained",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression for the row-child min-size fix: a row Stack holding a " +
-          "wide block of text inside a narrow wrapper. " +
-          "`.zs-stack > * { min-inline-size: 0; min-block-size: 0 }` lets " +
-          "the flex child shrink below its min-content size so the long " +
-          "breakable text wraps instead of forcing the Stack wider than its " +
-          "parent. The `play()` asserts no horizontal overflow on the Stack. " +
-          "Pre-fix the wide child blew the row out.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

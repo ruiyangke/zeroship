@@ -606,12 +606,7 @@ export const RTL: Story = {
     docs: {
       description: {
         story:
-          "Hebrew labels in an RTL container. Logical properties carry " +
-          "the layout flip — the chevron moves to the inline-end (visual " +
-          "left); start-aligned popups now align to the visual right. " +
-          "Wave-8 fix: seeded via `DirectionProvider direction=\"rtl\"` " +
-          "so Base UI's positioner reads the RTL axis across the portal " +
-          "boundary.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -692,12 +687,7 @@ export const FieldAriaAutowiring: Story = {
     docs: {
       description: {
         story:
-          "Regression hook for Wave-8 review-fix 🔴 #1: inside `<Field>` " +
-          "with `<Field.Label>` + `<Field.Description>`, Select must let " +
-          "Base UI's Field bridge auto-wire `aria-labelledby` and " +
-          "`aria-describedby` on the trigger. Pre-fix the wrapper passed " +
-          "`undefined` and overwrote those ids — the trigger had no " +
-          "accessible name. The story passes NO consumer aria-* props.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -746,10 +736,7 @@ export const AriaDescribedByMerge: Story = {
     docs: {
       description: {
         story:
-          "Regression hook for Wave-8 review-fix 🔴 #1: caller-provided " +
-          "`aria-describedby` is UNIONED with Base UI's auto-wired one " +
-          "via the trigger render callback. The external help id must " +
-          "appear alongside Field.Description's id, not replace it.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -813,10 +800,7 @@ export const InvalidFocusRing: Story = {
     docs: {
       description: {
         story:
-          "Regression hook for Wave-8 review-fix 🔴 #2: an invalid + " +
-          "focused / open Select trigger must keep its focus ring. " +
-          "Pre-fix the bare `[data-invalid]` selector outranked the " +
-          "focus rules and zeroed the ring slot.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
     /*

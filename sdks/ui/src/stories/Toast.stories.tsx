@@ -1116,12 +1116,7 @@ export const CloseLabelDefault: Story = {
     docs: {
       description: {
         story:
-          "Regression: `Toast.Close` keeps its default " +
-          "`aria-label=\"Dismiss notification\"` when a consumer " +
-          "spreads `aria-label={undefined}`, AND it never carries " +
-          "`aria-hidden=\"true\"` (which would make the button a " +
-          "focusable element inside an aria-hidden subtree — an " +
-          "`aria-hidden-focus` axe violation).",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

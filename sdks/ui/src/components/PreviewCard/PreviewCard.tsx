@@ -60,9 +60,9 @@
  *     `inline-end` so RTL flips physically.
  *   - No `disabled` on Root — guard via consumer logic (skip mounting,
  *     gate on a state). Base UI's Root has no `disabled` knob either.
- *   - Glass-surface invariant: the Popup paints an opaque
- *     `background-color` + optional `backdrop-filter`. `backdrop-filter`
- *     is augmentation only — never the sole visual signal.
+ *   - Crystal material pattern: the Popup paints a computable
+ *     `background-color`; material, rim, and shadow tokens are
+ *     augmentation only, never the sole visual signal.
  */
 import {
   createContext,

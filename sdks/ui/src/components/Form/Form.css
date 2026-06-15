@@ -24,8 +24,8 @@
  *
  * Card variant carries the same edge / shadow tokens Card.surface
  * uses, so a Form variant=card visually reads as a sibling of a
- * surface Card. backdrop-filter is gated through
- * --zs-card-backdrop-filter (opaque themes get `none`).
+ * surface Card. backdrop-filter follows the active material token so
+ * card-like forms participate in the same crystal chrome.
  *
  * RTL: every directional spacing rule uses logical properties — no
  * margin-left / margin-right in this file. Tested via the RTL story.

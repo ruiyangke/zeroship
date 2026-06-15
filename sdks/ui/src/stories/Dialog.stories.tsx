@@ -272,11 +272,7 @@ export const NonDismissible: Story = {
                 Acknowledge.
               </Dialog.Description>
             </Dialog.Header>
-            <Dialog.Body>
-              The dismissible=false setting disables BOTH outside-click
-              AND escape-key (anti-pattern #12: never disable one without
-              the other).
-            </Dialog.Body>
+            <Dialog.Body> The dismissible=false setting disables BOTH outside-click AND escape-key. </Dialog.Body>
             <Dialog.Footer>
               <Dialog.Close variant="filled">Acknowledge</Dialog.Close>
             </Dialog.Footer>
@@ -397,11 +393,7 @@ function CloseWithSaveOnClickStory() {
           <Dialog.Popup data-testid="dialog-close-onclick-popup">
             <Dialog.Header>
               <Dialog.Title>Save changes</Dialog.Title>
-              <Dialog.Description>
-                Pressing Save fires the caller onClick AND closes the
-                dialog. Both must happen — clobbering one is a bug
-                Dialog.Close now guards against (review-fix item 1).
-              </Dialog.Description>
+              <Dialog.Description> Pressing Save fires the caller onClick AND closes the dialog. Both must happen — clobbering one is a bug Dialog.Close now guards against. </Dialog.Description>
             </Dialog.Header>
             <Dialog.Body>
               <p>
@@ -460,11 +452,7 @@ export const CloseAsChild: Story = {
           <Dialog.Popup data-testid="dialog-close-aschild-popup">
             <Dialog.Header>
               <Dialog.Title>Custom close target</Dialog.Title>
-              <Dialog.Description>
-                The asChild Slot routes className, style, refs, and
-                onClick composition through the shared `_slot.ts`
-                helper (review-fix item 3).
-              </Dialog.Description>
+              <Dialog.Description> The asChild Slot routes className, style, refs, and onClick composition through the shared `_slot.ts` helper. </Dialog.Description>
             </Dialog.Header>
             <Dialog.Footer>
               <Dialog.Close asChild>
@@ -554,7 +542,7 @@ function CloseAsChildWrapperPropsStory() {
   );
 }
 export const CloseAsChildWrapperProps: Story = {
-  name: "Close — asChild wrapper-props forward (regression)",
+  name: "Close — asChild wrapper-props forward",
   render: () => <CloseAsChildWrapperPropsStory />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
@@ -675,7 +663,7 @@ function CreateDialogHandlePayloadStory() {
   );
 }
 export const CreateDialogHandlePayload: Story = {
-  name: "createHandle — payload render-function child (regression)",
+  name: "CreateHandle — payload render-function child",
   render: () => <CreateDialogHandlePayloadStory />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
@@ -755,6 +743,11 @@ export const ClosePreventDefault: Story = {
     await expect(dialog).toBeVisible();
 
     await userEvent.click(page.getByRole("button", { name: /close now/i }));
+    await waitFor(() =>
+      expect(
+        page.queryByRole("dialog", { name: /guarded close/i }),
+      ).not.toBeInTheDocument(),
+    );
   },
 };
 
@@ -810,6 +803,11 @@ export const CloseAsChildLink: Story = {
     await expect(link.tagName).toBe("A");
     await expect(link).toHaveAttribute("href", "#dialog-link-close");
     await userEvent.click(link);
+    await waitFor(() =>
+      expect(
+        page.queryByRole("dialog", { name: /link close target/i }),
+      ).not.toBeInTheDocument(),
+    );
   },
 };
 
@@ -820,12 +818,7 @@ export const RTL: Story = {
     docs: {
       description: {
         story:
-          "Hebrew / Arabic right-to-left. The Popup centers via " +
-          "PHYSICAL `top` + `left` paired with `translate(-50%, -50%)` " +
-          "(review-fix item 4) — logical inset-inline-start flips in " +
-          "RTL and shifts the popup off-center, so we anchor in " +
-          "physical coordinates while the inner content uses logical " +
-          "properties for natural flip.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -881,10 +874,7 @@ export const LongFooterLabels: Story = {
           >
             <Dialog.Header>
               <Dialog.Title>Review your reservation</Dialog.Title>
-              <Dialog.Description>
-                Footer wraps when many or long-labelled action buttons
-                exceed the popup width (review-fix item 8).
-              </Dialog.Description>
+              <Dialog.Description> Footer wraps when many or long-labelled action buttons exceed the popup width. </Dialog.Description>
             </Dialog.Header>
             <Dialog.Footer>
               <Dialog.Close>Dismiss</Dialog.Close>
@@ -907,10 +897,7 @@ export const UnlabeledPopupWarns: Story = {
     docs: {
       description: {
         story:
-          "Popup without Dialog.Title and without aria-label fires a " +
-          "dev console.warn (review-fix item 7). This story exists so " +
-          "we can verify the warning behavior end-to-end; the missing " +
-          "label is INTENTIONAL.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
     // axe will rightly flag this story; disable the a11y check on it.

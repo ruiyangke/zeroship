@@ -319,11 +319,7 @@ export const Required: Story = {
     docs: {
       description: {
         story:
-          "Two NumberFields side by side: a normal required-marker field " +
-          "(rest state, asterisk on the label) and an empty one inside a " +
-          "form that auto-submits on first paint so the post-submit invalid " +
-          "styling lands in the screenshot. Mirrors the Slice 4 Required-" +
-          "invalid pattern.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -431,11 +427,7 @@ export const AriaPropagation: Story = {
     docs: {
       description: {
         story:
-          "Regression for the Slice-7 review: `aria-describedby` must " +
-          "land on the focusable <input> (the spinbutton), not the Root " +
-          "wrapper div. The aria-wiring suite asserts the inner input " +
-          "carries the caller's id so a screen reader announces the " +
-          "external help text against the value-emitting element.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -467,12 +459,7 @@ export const BareFocus: Story = {
     docs: {
       description: {
         story:
-          "Bare (Field-less) NumberField — the focus ring must light " +
-          "the shell. Pre-fix Base UI's `data-focused` only fired inside " +
-          "Field.Root because the default field context's `setFocused` " +
-          "is NOOP; we now stamp `data-focused` via the Root's render " +
-          "callback. The aria-wiring suite focuses the input and " +
-          "asserts the attribute is present on the Root.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -507,11 +494,7 @@ export const ForcedColorsHover: Story = {
     docs: {
       description: {
         story:
-          "Hover assertion under `prefers-forced-colors: active`. The " +
-          "aria-wiring suite hovers the group and asserts the computed " +
-          "background resolves to a system color (Field), not an oklch " +
-          "token mix — catches Slice 5/6 specificity regressions where a " +
-          "variant or per-state rule outranks the forced-colors reset.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -634,12 +617,7 @@ export const FieldAutoAria: Story = {
     docs: {
       description: {
         story:
-          "Regression for the Wave-9 review aria-merge item. With NO " +
-          "caller-supplied `aria-label` / `aria-labelledby` / " +
-          "`aria-describedby`, the Field-auto-wired ids must still land " +
-          "on the inner <input>. Pre-fix, passing `undefined` for those " +
-          "props would silently wipe Base UI's auto-wired ids via its " +
-          "`mergeProps` (it copies `undefined` over its own values).",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -683,11 +661,7 @@ export const ConsumerFocusHandlers: Story = {
     docs: {
       description: {
         story:
-          "Regression for the Wave-9 review focus-handler item. A " +
-          "caller-supplied `onFocus` / `onBlur` on `<NumberField>` must " +
-          "fire when the inner input gains / loses focus — pre-fix the " +
-          "Root render callback replaced those handlers with our local " +
-          "bare-focus trackers and the consumer never saw the event.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

@@ -626,16 +626,12 @@ export const RTL: Story = {
  * assert the delta stays under ~1px. Pre-fix the delta would have been
  * roughly half the chip width. */
 export const RTLGlyphCentering: Story = {
-  name: "RTL — glyph centering regression",
+  name: "RTL — glyph centering",
   parameters: {
     docs: {
       description: {
         story:
-          "Wave-7 red regression. Renders a checked + an indeterminate " +
-          "checkbox under `dir=\"rtl\"` so the aria-wiring script can " +
-          "verify the indicator glyph remains centered inside the chip. " +
-          "Pre-fix the logical/physical centering mix slid the glyph off " +
-          "the chip in RTL.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

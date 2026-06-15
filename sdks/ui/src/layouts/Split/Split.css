@@ -20,6 +20,9 @@
  *     so start/end resolve to the correct inline edge under RTL.
  *   - The Main gets `min-inline-size: 0` so long/overflowing content can
  *     shrink or scroll instead of forcing the row wider than its parent.
+ *   - The root fills its parent inline-size by default. Split is a page
+ *     structure primitive; shrink-wrapping would collapse the fluid Main
+ *     when the parent centers auto-sized grid/flex items.
  *   - The rail is `flex: 0 1 min(--split-side-width, 100%)` — it holds its
  *     configured width but may shrink and is capped at the container width
  *     so an oversized `sideWidth` in a narrow container can't overflow the
@@ -32,9 +35,12 @@
  */
 
 .zs-split {
+  box-sizing: border-box;
   display: flex;
   flex-direction: row;
   gap: var(--split-gap, var(--zs-space-0));
+  inline-size: 100%;
+  min-inline-size: 0;
 }
 
 /* side="end" — rail on the trailing inline edge without reordering the

@@ -60,6 +60,9 @@ const threeFeatures: FeatureItem[] = [
 /* ─── 1. ThreeUp — header lead-in + 3 centered features ──────────────────── */
 export const ThreeUp: Story = {
   name: "ThreeUp (eyebrow + title + description, 3 features)",
+  args: {
+    tone: "default",
+  },
   parameters: {
     docs: {
       description: {
@@ -72,8 +75,9 @@ export const ThreeUp: Story = {
       },
     },
   },
-  render: () => (
+  render: ({ tone }) => (
     <FeatureGrid
+      tone={tone}
       data-testid="fg-three"
       eyebrow="Why zeroship"
       title="Everything you need to ship"
@@ -189,6 +193,9 @@ export const FourColumns: Story = {
 /* ─── 3. StartAligned — align="start", no eyebrow ────────────────────────── */
 export const StartAligned: Story = {
   name: "StartAligned (align=start, no eyebrow)",
+  args: {
+    tone: "default",
+  },
   parameters: {
     docs: {
       description: {
@@ -199,8 +206,9 @@ export const StartAligned: Story = {
       },
     },
   },
-  render: () => (
+  render: ({ tone }) => (
     <FeatureGrid
+      tone={tone}
       data-testid="fg-start"
       align="start"
       title="Built for builders"
@@ -279,6 +287,9 @@ export const Compound: Story = {
 /* ─── 5. Headerless — no eyebrow/title/description, no aria-labelledby ────── */
 export const Headerless: Story = {
   name: "Headerless (no header → no aria-labelledby)",
+  args: {
+    tone: "default",
+  },
   parameters: {
     docs: {
       description: {
@@ -291,8 +302,8 @@ export const Headerless: Story = {
       },
     },
   },
-  render: () => (
-    <FeatureGrid data-testid="fg-headerless" features={threeFeatures} />
+  render: ({ tone }) => (
+    <FeatureGrid tone={tone} data-testid="fg-headerless" features={threeFeatures} />
   ),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);

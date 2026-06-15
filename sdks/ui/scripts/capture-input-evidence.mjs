@@ -1,6 +1,6 @@
 /*
  * Capture-input-evidence: spins up an http-server over storybook-static,
- * loads each Input story under the Crystal theme, and writes a 2x PNG
+ * loads each Input story under both both Crystal themess, and writes a 2x PNG
  * to storybook-static/theme-evidence/.
  *
  * Self-contained: serves on a random free port, then cleans up the
@@ -19,7 +19,12 @@ const outDir = process.env.THEME_EVIDENCE_DIR
   ? resolve(process.env.THEME_EVIDENCE_DIR)
   : join(staticDir, "theme-evidence");
 
-const themes = [{ label: "Crystal", value: "crystal" }];
+const themes = [
+  { label: "Crystal Light", value: "crystal-light" },
+  { label: "Crystal Dark", value: "crystal-dark" },
+  { label: "Studio Light", value: "studio-light" },
+  { label: "Ghibli Light", value: "ghibli-light" },
+];
 
 const stories = [
   "components-input--all-variants",

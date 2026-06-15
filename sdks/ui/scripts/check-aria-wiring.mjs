@@ -241,7 +241,7 @@ function report(label, ok, extra) {
 
 async function open(storyId) {
   await page.goto(
-    `${baseUrl}/iframe.html?id=${storyId}&globals=theme:Crystal`,
+    `${baseUrl}/iframe.html?id=${storyId}&globals=theme:Crystal%20Light`,
     { waitUntil: "networkidle" },
   );
   // Storybook auto-runs each story's `play()` on iframe load. If a
@@ -1012,7 +1012,7 @@ if (devUrl) {
     }
   });
   await devPage.goto(
-    `${devUrl}/iframe.html?id=components-card--interactive-without-on-click&globals=theme:Crystal`,
+    `${devUrl}/iframe.html?id=components-card--interactive-without-on-click&globals=theme:Crystal%20Light`,
     { waitUntil: "networkidle" },
   );
   const card = devPage.locator('[data-testid="card-interactive-no-onclick"]');
@@ -1246,7 +1246,7 @@ if (devUrl) {
     }
   });
   await devPage.goto(
-    `${devUrl}/iframe.html?id=components-dialog--unlabeled-popup-warns&globals=theme:Crystal`,
+    `${devUrl}/iframe.html?id=components-dialog--unlabeled-popup-warns&globals=theme:Crystal%20Light`,
     { waitUntil: "networkidle" },
   );
   const trigger = devPage.locator('[data-testid="dialog-trigger"]');
@@ -8232,8 +8232,8 @@ await open("components-previewcard--detached-handle");
  *
  * Regression for the 🔴 glass-invariant violation. Pre-fix, the popup
  * painted `background-color: var(--zs-surface-raised)` which in the
- * crystal theme resolves to `oklch(1 0 0 / 0.55)` — a translucent
- * alpha-55% white. With `backdrop-filter` unsupported (older browsers,
+ * crystal-light used to resolve to a translucent alpha-white surface.
+ * With `backdrop-filter` unsupported (older browsers,
  * forced-colors aside), the page below bled through and axe-core's
  * color-contrast walk would not terminate inside the popup.
  *
@@ -8247,7 +8247,7 @@ await open("components-previewcard--detached-handle");
  *      reading the literal background-color declaration from the
  *      authored stylesheet — the computed value is theme-resolved and
  *      could in theory be opaque even from `--zs-surface-raised` under
- *      a non-crystal theme. */
+ *      a non-crystal-light theme. */
 await open("components-previewcard--basic");
 {
   // The Storybook addon-themes decorator only sets `data-theme` on
@@ -8258,7 +8258,7 @@ await open("components-previewcard--basic");
   // here would compute to a transparent fallback regardless of which
   // token the rule references.
   await page.evaluate(() => {
-    document.documentElement.setAttribute("data-theme", "crystal");
+    document.documentElement.setAttribute("data-theme", "crystal-light");
   });
   const trigger = page.locator(
     '[data-testid="previewcard-basic-trigger"]',

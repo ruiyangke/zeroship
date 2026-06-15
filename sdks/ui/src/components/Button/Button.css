@@ -34,7 +34,11 @@
   user-select: none;
   font-family: var(--zs-font-system);
   white-space: nowrap;
+  letter-spacing: 0;
   text-decoration: none;
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: transparent;
   /* When asChild renders an <a> as the button root, override the UA
      link color so the anchor adopts the button's color. */
   color: inherit;
@@ -44,7 +48,9 @@
      scale below does not scale the hit area. */
   transition:
     background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    color var(--zs-motion-fast) var(--zs-motion-ease);
+    color var(--zs-motion-fast) var(--zs-motion-ease),
+    box-shadow var(--zs-motion-fast) var(--zs-motion-ease),
+    filter var(--zs-motion-fast) var(--zs-motion-ease);
 }
 
 @media (pointer: coarse) {
@@ -121,7 +127,7 @@
 }
 
 .zs-button:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) .zs-button__inner {
-  transform: scale(0.97);
+  transform: scale(var(--zs-button-active-scale, 0.97));
 }
 
 .zs-button:disabled,
@@ -143,214 +149,230 @@
 
 /* ─── sizes ────────────────────────────────────────────────────────────── */
 .zs-button--small {
-  height: 2rem;                                /* 32 */
-  padding-inline: var(--zs-space-3);           /* 12 */
+  height: var(--zs-button-height-sm, 2rem);    /* 32 */
+  padding-inline: var(--zs-button-padding-sm, var(--zs-space-3));
   font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
-  font-weight: 600;
-  border-radius: var(--zs-radius-2);           /* 6 */
+  line-height: var(--zs-button-line-height-sm, var(--zs-text-subheadline-line));
+  font-weight: var(--zs-button-font-weight, 600);
+  border-radius: var(--zs-button-radius-sm, var(--zs-radius-2));
 }
 
 .zs-button--medium {
-  height: 2.5rem;                              /* 40 */
-  padding-inline: var(--zs-space-4);           /* 16 */
+  height: var(--zs-button-height-md, 2.5rem);  /* 40 */
+  padding-inline: var(--zs-button-padding-md, var(--zs-space-4));
   font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
-  font-weight: 600;
-  border-radius: var(--zs-radius-3);           /* 8 */
+  line-height: var(--zs-button-line-height-md, var(--zs-text-body-line));
+  font-weight: var(--zs-button-font-weight, 600);
+  border-radius: var(--zs-button-radius-md, var(--zs-radius-3));
 }
 
 .zs-button--large {
-  height: 3rem;                                /* 48 */
-  padding-inline: var(--zs-space-5);           /* 20 */
+  height: var(--zs-button-height-lg, 3rem);    /* 48 */
+  padding-inline: var(--zs-button-padding-lg, var(--zs-space-5));
   font-size: var(--zs-text-headline-size);
-  line-height: var(--zs-text-headline-line);
-  font-weight: 600;
-  border-radius: var(--zs-radius-4);           /* 10 */
+  line-height: var(--zs-button-line-height-lg, var(--zs-text-headline-line));
+  font-weight: var(--zs-button-font-weight, 600);
+  border-radius: var(--zs-button-radius-lg, var(--zs-radius-4));
 }
 
 /* ─── variants × accent (Style) ────────────────────────────────────────── */
 .zs-button--filled {
-  background: var(--zs-accent);
-  color: var(--zs-accent-ink);
+  background-color: var(--zs-button-filled-bg, var(--zs-accent));
+  color: var(--zs-button-filled-ink, var(--zs-accent-ink));
+  box-shadow: var(--zs-button-filled-shadow, none);
 }
 @media (hover: hover) {
   .zs-button--filled:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-    background: var(--zs-accent-hover);
+    background-color: var(--zs-button-filled-bg-hover, var(--zs-accent-hover));
+    filter: brightness(1.015);
   }
 }
 .zs-button--filled:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-  background: var(--zs-accent-active);
+  background-color: var(--zs-button-filled-bg-active, var(--zs-accent-active));
+  filter: brightness(0.985);
 }
 .zs-button--filled:disabled,
 .zs-button--filled[aria-disabled="true"],
 .zs-button--filled[aria-busy="true"] {
-  background: color-mix(in oklch, var(--zs-accent) 38%, transparent);
-  color: var(--zs-accent-ink);
+  background-color: var(
+    --zs-button-filled-bg-disabled,
+    color-mix(in oklch, var(--zs-accent) 38%, transparent)
+  );
+  color: var(--zs-button-filled-ink-disabled, var(--zs-accent-ink));
+  box-shadow: var(--zs-button-disabled-shadow, none);
+  filter: none;
 }
 
 .zs-button--tinted {
-  /* Button-polish item 4. Resting alpha dropped 18% → 14% so the wash
-     reads gentler — the previous 18% felt candy-bright over crystal's
-     near-white surface. Hover/active step the alpha proportionally so
-     the state delta stays legible. Tinted text uses the deeper accent
-     variant so contrast against the (now lighter) tinted fill clears
-     4.5:1 — the regular --zs-accent failed at ~3.8:1 on the previous
-     fill and the lighter 14% fill makes that gap larger, so keeping
-     --zs-accent-active is non-negotiable. */
-  background: color-mix(in oklch, var(--zs-accent) 14%, transparent);
-  color: var(--zs-accent-active);
+  background-color: var(
+    --zs-button-tinted-bg,
+    color-mix(in oklch, var(--zs-accent) 14%, transparent)
+  );
+  color: var(--zs-button-tinted-ink, var(--zs-accent-active));
+  backdrop-filter: var(--zs-control-backdrop-filter, none);
+  -webkit-backdrop-filter: var(--zs-control-backdrop-filter, none);
+  box-shadow: var(--zs-button-tinted-shadow, none);
 }
 @media (hover: hover) {
   .zs-button--tinted:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-    background: color-mix(in oklch, var(--zs-accent) 22%, transparent);
+    background-color: var(
+      --zs-button-tinted-bg-hover,
+      color-mix(in oklch, var(--zs-accent) 22%, transparent)
+    );
   }
 }
 .zs-button--tinted:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-  background: color-mix(in oklch, var(--zs-accent) 30%, transparent);
+  background-color: var(
+    --zs-button-tinted-bg-active,
+    color-mix(in oklch, var(--zs-accent) 30%, transparent)
+  );
 }
 .zs-button--tinted:disabled,
 .zs-button--tinted[aria-disabled="true"],
 .zs-button--tinted[aria-busy="true"] {
-  background: color-mix(in oklch, var(--zs-accent) 8%, transparent);
-  color: color-mix(in oklch, var(--zs-accent) 55%, var(--zs-label-tertiary));
+  background-color: var(
+    --zs-button-tinted-bg-disabled,
+    color-mix(in oklch, var(--zs-accent) 8%, transparent)
+  );
+  color: var(
+    --zs-button-tinted-ink-disabled,
+    color-mix(in oklch, var(--zs-accent) 55%, var(--zs-label-tertiary))
+  );
+  box-shadow: var(--zs-button-disabled-shadow, none);
 }
 
 .zs-button--gray {
-  /* Button-polish item 5. The fill-secondary (≈ 13% label-alpha) gray
-     read as disabled-adjacent in grouped layouts. A direct label-tinted
-     mix at 8% reads as a deliberate "neutral action" rather than a
-     missing-state. Hover/active deepen the mix instead of stepping into
-     --zs-fill, which previously sat on the same neutral and lost
-     state-step legibility. */
-  background: color-mix(in oklch, var(--zs-label) 8%, transparent);
+  background-color: var(
+    --zs-button-gray-bg,
+    color-mix(in oklch, var(--zs-label) 8%, transparent)
+  );
   color: var(--zs-label);
+  backdrop-filter: var(--zs-control-backdrop-filter, none);
+  -webkit-backdrop-filter: var(--zs-control-backdrop-filter, none);
+  box-shadow: var(--zs-button-gray-shadow, none);
 }
 @media (hover: hover) {
   .zs-button--gray:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-    background: color-mix(in oklch, var(--zs-label) 12%, transparent);
+    background-color: var(
+      --zs-button-gray-bg-hover,
+      color-mix(in oklch, var(--zs-label) 12%, transparent)
+    );
   }
 }
 .zs-button--gray:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-  background: color-mix(in oklch, var(--zs-label) 16%, transparent);
+  background-color: var(
+    --zs-button-gray-bg-active,
+    color-mix(in oklch, var(--zs-label) 16%, transparent)
+  );
 }
 .zs-button--gray:disabled,
 .zs-button--gray[aria-disabled="true"],
 .zs-button--gray[aria-busy="true"] {
-  background: color-mix(in oklch, var(--zs-label) 4%, transparent);
-  color: var(--zs-label-tertiary);
+  background-color: var(
+    --zs-button-gray-bg-disabled,
+    color-mix(in oklch, var(--zs-label) 4%, transparent)
+  );
+  color: var(--zs-button-gray-ink-disabled, var(--zs-label-tertiary));
+  box-shadow: var(--zs-button-disabled-shadow, none);
 }
 
 .zs-button--plain {
-  background: transparent;
-  color: var(--zs-accent);
+  background-color: transparent;
+  color: var(--zs-button-plain-ink, var(--zs-accent));
+  box-shadow: none;
 }
 @media (hover: hover) {
   .zs-button--plain:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-    background: var(--zs-fill-tertiary);
-    /* Button-polish item 6. Plain buttons floated in grouped layouts
-       (Footer/row beside filled). A hover-only underline anchors the
-       action without making the rest state busy. Thickness pinned to
-       a hairline (one device unit at default zoom) and offset so it
-       doesn't crowd the descenders. The decoration color rides
-       currentColor at 35% so it stays in family with the accent ink
-       on default plain AND the system-red ink on destructive-plain. */
-    text-decoration: underline;
-    text-decoration-color: color-mix(in oklch, currentColor 35%, transparent);
-    text-decoration-thickness: 0.0625rem;
-    text-underline-offset: 0.125rem;
+    background-color: var(--zs-button-plain-bg-hover, var(--zs-fill-tertiary));
   }
 }
 .zs-button--plain:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-  background: var(--zs-fill);
+  background-color: var(--zs-button-plain-bg-active, var(--zs-fill));
 }
 .zs-button--plain:disabled,
 .zs-button--plain[aria-disabled="true"],
 .zs-button--plain[aria-busy="true"] {
   color: var(--zs-label-tertiary);
-  background: transparent;
+  background-color: transparent;
 }
 
 /* ─── destructive override (intent; works across variants) ────────────── */
 .zs-button--destructive.zs-button--filled {
-  background: var(--zs-system-red);
-  color: var(--zs-accent-ink);
+  background-color: var(--zs-button-destructive-filled-bg, var(--zs-system-red));
+  color: var(--zs-button-destructive-filled-ink, var(--zs-button-filled-ink, var(--zs-accent-ink)));
+  box-shadow: var(--zs-button-destructive-filled-shadow, var(--zs-button-filled-shadow, none));
 }
 @media (hover: hover) {
   .zs-button--destructive.zs-button--filled:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-    background: var(--zs-system-red-hover);
+    background-color: var(--zs-button-destructive-filled-bg-hover, var(--zs-system-red-hover));
   }
 }
 .zs-button--destructive.zs-button--filled:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-  background: var(--zs-system-red-active);
+  background-color: var(--zs-button-destructive-filled-bg-active, var(--zs-system-red-active));
 }
 .zs-button--destructive.zs-button--filled:disabled,
 .zs-button--destructive.zs-button--filled[aria-disabled="true"],
 .zs-button--destructive.zs-button--filled[aria-busy="true"] {
-  /* Button-polish item 1. Previously mixed the system-red at 42% over
-     transparent, leaving a saturated faded-red that still read as
-     "tappable danger". Mixing toward --zs-fill-secondary (a neutral)
-     at 22% red lands a gray-with-a-red-hint: still legibly destructive
-     in intent but visibly NOT actionable.
-
-     The label drops from accent-ink (near-white) to label-tertiary
-     (the established neutral disabled label). The brief proposed
-     accent-ink 65% / label-tertiary 35% so a hint of white remained
-     in the disabled label — but the resulting near-white text on the
-     light fill-secondary-tinged background measured invisible at
-     glance (label and fill end up at near-identical L values). Pulled
-     fully to label-tertiary so the disabled state stays legibly muted
-     instead of legibly blank. Label-tertiary is the same color the
-     gray/plain disabled destructive cells use, so the four destructive
-     disabled variants now share label hierarchy.
-
-     The gray-and-red-hint signal also survives forced-colors (the
-     forced-colors block below maps disabled to GrayText regardless). */
-  background: color-mix(in oklch, var(--zs-system-red) 22%, var(--zs-fill-secondary));
+  background-color: var(
+    --zs-button-destructive-filled-bg-disabled,
+    color-mix(in oklch, var(--zs-system-red) 22%, var(--zs-fill-secondary))
+  );
   color: var(--zs-label-tertiary);
+  box-shadow: var(--zs-button-disabled-shadow, none);
 }
 
 .zs-button--destructive.zs-button--tinted {
-  /* Button-polish item 4 (destructive half). Mixed with --zs-system-red-active
-     instead of --zs-system-red so the resting wash is muted-red, not
-     dusty-pink. Alpha held at 18% (vs accent-tinted's 14%) because the
-     deeper base needs more presence to register as destructive; lowering
-     it further visually drained the intent. Hover/active climb the alpha
-     so progression is still legible against the deeper base. */
-  background: color-mix(in oklch, var(--zs-system-red-active) 18%, transparent);
-  /* Same pattern as tinted-accent: use the deeper red so contrast holds. */
-  color: var(--zs-system-red-active);
+  background-color: var(
+    --zs-button-destructive-tinted-bg,
+    color-mix(in oklch, var(--zs-system-red-active) 18%, transparent)
+  );
+  color: var(--zs-button-destructive-tinted-ink, var(--zs-system-red-active));
+  box-shadow: var(--zs-button-destructive-tinted-shadow, var(--zs-button-tinted-shadow, none));
 }
 @media (hover: hover) {
   .zs-button--destructive.zs-button--tinted:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-    background: color-mix(in oklch, var(--zs-system-red-active) 28%, transparent);
+    background-color: var(
+      --zs-button-destructive-tinted-bg-hover,
+      color-mix(in oklch, var(--zs-system-red-active) 28%, transparent)
+    );
   }
 }
 .zs-button--destructive.zs-button--tinted:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-  background: color-mix(in oklch, var(--zs-system-red-active) 36%, transparent);
+  background-color: var(
+    --zs-button-destructive-tinted-bg-active,
+    color-mix(in oklch, var(--zs-system-red-active) 36%, transparent)
+  );
 }
 .zs-button--destructive.zs-button--tinted:disabled,
 .zs-button--destructive.zs-button--tinted[aria-disabled="true"],
 .zs-button--destructive.zs-button--tinted[aria-busy="true"] {
-  /* Item 1 (destructive-tinted half). Mix toward --zs-fill-secondary
-     (neutral) instead of transparent so disabled destructive-tinted
-     reads as gray-with-red-hint instead of faded-pink. Alpha lowered
-     to 8% on the red side, with the remainder pulled into the neutral
-     fill, so the cell loses its tappable-red signal. */
-  background: color-mix(in oklch, var(--zs-system-red-active) 8%, var(--zs-fill-secondary));
-  color: color-mix(in oklch, var(--zs-system-red) 55%, var(--zs-label-tertiary));
+  background-color: var(
+    --zs-button-destructive-tinted-bg-disabled,
+    color-mix(in oklch, var(--zs-system-red-active) 8%, var(--zs-fill-secondary))
+  );
+  color: var(
+    --zs-button-destructive-tinted-ink-disabled,
+    color-mix(in oklch, var(--zs-system-red) 55%, var(--zs-label-tertiary))
+  );
+  box-shadow: var(--zs-button-disabled-shadow, none);
 }
 
 .zs-button--destructive.zs-button--plain {
-  color: var(--zs-system-red);
+  color: var(--zs-button-destructive-plain-ink, var(--zs-system-red));
 }
 @media (hover: hover) {
   .zs-button--destructive.zs-button--plain:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-    background: color-mix(in oklch, var(--zs-system-red) 12%, transparent);
+    background-color: var(
+      --zs-button-destructive-plain-bg-hover,
+      color-mix(in oklch, var(--zs-system-red) 12%, transparent)
+    );
   }
 }
 .zs-button--destructive.zs-button--plain:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-  background: color-mix(in oklch, var(--zs-system-red) 18%, transparent);
+  background-color: var(
+    --zs-button-destructive-plain-bg-active,
+    color-mix(in oklch, var(--zs-system-red) 18%, transparent)
+  );
 }
 .zs-button--destructive.zs-button--plain:disabled,
 .zs-button--destructive.zs-button--plain[aria-disabled="true"],
@@ -359,7 +381,7 @@
      text — wrong signal for a disabled control. Defer to the neutral
      disabled label color. */
   color: var(--zs-label-tertiary);
-  background: transparent;
+  background-color: transparent;
 }
 
 /* gray + destructive: keep the neutral gray fill (no strong combination

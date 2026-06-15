@@ -299,14 +299,7 @@ export const RoleLock: Story = {
     docs: {
       description: {
         story:
-          "Regression for the role-lock fix. The public `SeparatorProps` " +
-          "Omits `role` / `aria-orientation`; the runtime spread strips " +
-          "them defensively. Even an untyped consumer (e.g. " +
-          "`{...untypedProps}`) cannot contradict the controlled ARIA. " +
-          "We assert: decorative=true with role=\"navigation\" still " +
-          "renders role=\"none\"; decorative=false with " +
-          "aria-orientation=\"vertical\" on a horizontal Separator " +
-          "still emits aria-orientation=\"horizontal\".",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -378,13 +371,7 @@ export const RoleLockBypass: Story = {
     docs: {
       description: {
         story:
-          "Regression for the Wave-10 🔴 #1 role-lock bypass. A typed " +
-          "caller `<Separator decorative={false} aria-hidden>` (cast " +
-          "through `as any`) used to silently hide a semantic " +
-          "separator from AT; an untyped `render` callback used to " +
-          "swap the role. With the fix, both are Omit'd from the " +
-          "public props AND stripped at runtime; the semantic branch " +
-          "reasserts `aria-hidden={undefined}` so React drops it.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -445,10 +432,7 @@ export const RTL: Story = {
     docs: {
       description: {
         story:
-          "RTL containers — the vertical Separator's `border-inline-end` " +
-          "edge flips automatically. The visual stays identical because " +
-          "the Separator has no inline content; this story exists as a " +
-          "regression net.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

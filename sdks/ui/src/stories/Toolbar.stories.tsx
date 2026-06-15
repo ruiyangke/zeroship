@@ -447,16 +447,13 @@ export const Rtl: Story = {
  * always `role="toolbar"`. This story passes a `role="navigation"`
  * via a spread so the aria-wiring runner can confirm the strip
  * survives the type bypass. */
-export const RoleLockRegression: Story = {
+export const RoleLock: Story = {
   name: "Role lock — caller-passed role is stripped",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression for Slice 12 review fix #3. The wrapper strips a " +
-          "user-passed `role` at runtime so a `{...spread}` injection " +
-          "cannot override `role=\"toolbar\"`. The aria-wiring runner " +
-          "checks the rendered DOM stays `role=\"toolbar\"`.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -469,7 +466,7 @@ export const RoleLockRegression: Story = {
       <div
         className="zs-story-row"
         role="group"
-        aria-label="Role lock regression"
+        aria-label="Role lock"
       >
         <Toolbar data-testid="toolbar-role-lock" {...bypass}>
           <Toolbar.Button>Cut</Toolbar.Button>
@@ -500,11 +497,7 @@ export const Roving: Story = {
     docs: {
       description: {
         story:
-          "Regression coverage for the roving-tabindex contract: Tab " +
-          "lands on the first item, ArrowRight advances and skips the " +
-          "disabled item, then Tab leaves the cluster. Built with " +
-          "`Toolbar.Button` so each item registers as a composite item " +
-          "with Base UI's roving context.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -587,7 +580,7 @@ export const LinkAndInput: Story = {
  * orientation. The wrapper now omits `aria-orientation` at the type
  * level AND strips it at runtime so a typed-bypass spread cannot ship
  * the inconsistency. */
-export const AriaOrientationLockRegression: Story = {
+export const AriaOrientationLock: Story = {
   name: "aria-orientation lock — caller override is stripped",
   parameters: {
     docs: {
@@ -608,7 +601,7 @@ export const AriaOrientationLockRegression: Story = {
       <div
         className="zs-story-row"
         role="group"
-        aria-label="aria-orientation lock regression"
+        aria-label="aria-orientation lock"
       >
         <Toolbar
           data-testid="toolbar-aria-orientation-lock"
@@ -647,7 +640,7 @@ export const AriaOrientationLockRegression: Story = {
  * `aria-orientation="horizontal"` via an untyped bag. The runtime
  * strip MUST drop them so the rendered separator stays
  * `role="separator"` + `aria-orientation="vertical"`. */
-export const SeparatorOrientationLockRegression: Story = {
+export const SeparatorOrientationLock: Story = {
   name: "Separator orientation lock — caller override is stripped",
   parameters: {
     docs: {
@@ -676,7 +669,7 @@ export const SeparatorOrientationLockRegression: Story = {
       <div
         className="zs-story-row"
         role="group"
-        aria-label="Separator orientation lock regression"
+        aria-label="Separator orientation lock"
       >
         <Toolbar
           data-testid="toolbar-separator-lock-host"

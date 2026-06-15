@@ -31,7 +31,14 @@ import { Slot } from "../../components/_slot";
 import { classnames } from "../../components/_classnames";
 import { type Pad, spaceVar } from "../_layout-primitives";
 
-export type ContainerSize = "sm" | "md" | "lg" | "xl" | "full";
+export type ContainerSize =
+  | "sm"
+  | "md"
+  | "lg"
+  | "xl"
+  | "product"
+  | "wide"
+  | "full";
 
 export interface ContainerProps extends ComponentPropsWithoutRef<"div"> {
   /**
@@ -60,6 +67,8 @@ const CONTAINER_MAX_WIDTH: Record<ContainerSize, string> = {
   md: "var(--zs-container-md)",
   lg: "var(--zs-container-lg)",
   xl: "var(--zs-container-xl)",
+  product: "var(--zs-container-product)",
+  wide: "var(--zs-container-wide)",
   full: "none",
 };
 

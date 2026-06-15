@@ -107,6 +107,9 @@ export interface FooterColumn {
 /* ─── props ───────────────────────────────────────────────────────────── */
 
 export interface FooterProps extends ComponentPropsWithoutRef<"footer"> {
+  /** Fine print / legal notes rendered above the directory. */
+  footnotes?: ReactNode;
+
   /** Brand / logo / wordmark slot, rendered at the top-start of the band. */
   brand?: ReactNode;
 
@@ -123,6 +126,12 @@ export interface FooterProps extends ComponentPropsWithoutRef<"footer"> {
   /** Bottom-bar inline-start content — typically the copyright line. */
   copyright?: ReactNode;
 
+  /** Bottom-bar legal links rendered after the copyright line. */
+  legalLinks?: FooterLink[];
+
+  /** Bottom-bar locale / region slot, rendered near the actions endcap. */
+  locale?: ReactNode;
+
   /**
    * Bottom-bar inline-end content — a slot for social icons / secondary
    * links. Rendered as-is (the consumer supplies real anchors / icon buttons).
@@ -131,7 +140,7 @@ export interface FooterProps extends ComponentPropsWithoutRef<"footer"> {
 
   /**
    * Container width for the band body, from the `--zs-container-*` tokens.
-   * Default `lg`.
+   * Default `product`, matching dense product/legal page footers.
    */
   size?: ContainerSize;
 
@@ -248,12 +257,15 @@ function renderColumn(column: ResolvedColumn) {
 
 const FooterRoot = forwardRef<HTMLElement, FooterProps>(function FooterRoot(
   {
+    footnotes,
     brand,
     description,
     columns,
     copyright,
+    legalLinks,
+    locale,
     actions,
-    size = "lg",
+    size = "product",
     tone = "default",
     className,
     children,
@@ -291,9 +303,12 @@ const FooterRoot = forwardRef<HTMLElement, FooterProps>(function FooterRoot(
   });
 
   const allColumns = [...propColumns, ...compoundColumns];
+  const hasFootnotes = footnotes != null;
   const hasColumns = allColumns.length > 0;
   const hasBrandBlock = brand != null || description != null;
-  const hasBottom = copyright != null || actions != null;
+  const hasLegalLinks = (legalLinks?.length ?? 0) > 0;
+  const hasBottom =
+    copyright != null || hasLegalLinks || locale != null || actions != null;
 
   return (
     <footer
@@ -305,6 +320,19 @@ const FooterRoot = forwardRef<HTMLElement, FooterProps>(function FooterRoot(
       className={composedClassName}
     >
       <Container size={size} data-slot="footer-container">
+        {hasFootnotes ? (
+          <div data-slot="footer-footnotes" className="zs-footer__footnotes">
+            {footnotes}
+          </div>
+        ) : null}
+
+        {hasFootnotes && (hasBrandBlock || hasColumns) ? (
+          <Separator
+            className="zs-footer__separator"
+            data-slot="footer-footnotes-separator"
+          />
+        ) : null}
+
         {/* Top row: the brand+blurb block beside the link-group columns. The
             Grid owns the collapse to stacked below --zs-bp-md (its responsive
             base count is 1; columns={{ md }} only promotes at ≥ the bp). */}
@@ -348,17 +376,57 @@ const FooterRoot = forwardRef<HTMLElement, FooterProps>(function FooterRoot(
               data-slot="footer-separator"
             />
             <div data-slot="footer-bottom" className="zs-footer__bottom">
-              {copyright != null ? (
+              <div
+                data-slot="footer-bottom-start"
+                className="zs-footer__bottom-start"
+              >
+                {copyright != null ? (
+                  <div
+                    data-slot="footer-copyright"
+                    className="zs-footer__copyright"
+                  >
+                    {copyright}
+                  </div>
+                ) : null}
+                {hasLegalLinks ? (
+                  <ul
+                    data-slot="footer-legal-links"
+                    className="zs-footer__legal-links"
+                  >
+                    {legalLinks?.map((link, index) => (
+                      <li
+                        key={link.href + ":" + index}
+                        className="zs-footer__legal-link-item"
+                      >
+                        <a href={link.href} className="zs-footer__legal-link">
+                          {link.label}
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+              {locale != null || actions != null ? (
                 <div
-                  data-slot="footer-copyright"
-                  className="zs-footer__copyright"
+                  data-slot="footer-bottom-end"
+                  className="zs-footer__bottom-end"
                 >
-                  {copyright}
-                </div>
-              ) : null}
-              {actions != null ? (
-                <div data-slot="footer-actions" className="zs-footer__actions">
-                  {actions}
+                  {locale != null ? (
+                    <div
+                      data-slot="footer-locale"
+                      className="zs-footer__locale"
+                    >
+                      {locale}
+                    </div>
+                  ) : null}
+                  {actions != null ? (
+                    <div
+                      data-slot="footer-actions"
+                      className="zs-footer__actions"
+                    >
+                      {actions}
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
             </div>

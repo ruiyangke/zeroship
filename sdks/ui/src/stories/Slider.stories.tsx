@@ -394,12 +394,7 @@ export const AriaPropagation: Story = {
     docs: {
       description: {
         story:
-          "Regression for the Slice-7 review: `aria-describedby` must " +
-          "land on each Thumb (the AT-focusable element via its nested " +
-          "<input type=range>), not the Root. Mirrors `aria-label` and " +
-          "`aria-labelledby` forwarding. The aria-wiring suite asserts " +
-          "the thumb (and BOTH thumbs in range mode) carries the " +
-          "caller's id.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -449,11 +444,7 @@ export const ForcedColorsOutline: Story = {
     docs: {
       description: {
         story:
-          "Outline-variant assertion under `prefers-forced-colors: " +
-          "active`. The aria-wiring suite checks the outline thumb's " +
-          "computed background is Highlight (a system color), not the " +
-          "accent-derived oklch the rest paint uses. Catches Slice 5/6 " +
-          "specificity regressions on variant rules.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -578,7 +569,7 @@ export const RTL: Story = {
  * blanked by the explicit prop). The aria-wiring runner asserts that
  * the consumer-set `background-color` survives onto the slider root. */
 export const ConsumerStylePreserved: Story = {
-  name: "Consumer style preserved (Round 5 regression)",
+  name: "Consumer style preserved",
   parameters: {
     docs: {
       description: {
@@ -633,7 +624,7 @@ export const ConsumerStylePreserved: Story = {
  * callback (Base UI's Slider.Root has no `required` prop). The
  * aria-wiring runner asserts the input carries `aria-required="true"`. */
 export const RequiredCascade: Story = {
-  name: "Required cascade (Wave 5 regression)",
+  name: "Required cascade",
   parameters: {
     docs: {
       description: {
@@ -720,7 +711,7 @@ export const RequiredCascade: Story = {
  * announces "<external label> (n of N)" distinctly. The aria-wiring
  * runner asserts the two thumb inputs have distinct accessible names. */
 export const RangeLabelledBy: Story = {
-  name: "Range with aria-labelledby (Wave 5 regression)",
+  name: "Range with aria-labelledby",
   parameters: {
     docs: {
       description: {

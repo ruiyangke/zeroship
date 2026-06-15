@@ -42,6 +42,10 @@ function Rows() {
 /* ─── 1. Horizontal (default) ────────────────────────────────────────── */
 export const Horizontal: Story = {
   name: "Horizontal (default)",
+  args: {
+    orientation: "horizontal",
+    divider: false,
+  },
   parameters: {
     docs: {
       description: {
@@ -53,8 +57,8 @@ export const Horizontal: Story = {
       },
     },
   },
-  render: () => (
-    <DescriptionList data-testid="dl-horizontal">
+  render: (args) => (
+    <DescriptionList {...args} data-testid="dl-horizontal">
       <Rows />
     </DescriptionList>
   ),
@@ -81,6 +85,10 @@ export const Horizontal: Story = {
 /* ─── 2. Vertical ────────────────────────────────────────────────────── */
 export const Vertical: Story = {
   name: "Vertical",
+  args: {
+    orientation: "vertical",
+    divider: false,
+  },
   parameters: {
     docs: {
       description: {
@@ -90,8 +98,8 @@ export const Vertical: Story = {
       },
     },
   },
-  render: () => (
-    <DescriptionList orientation="vertical">
+  render: (args) => (
+    <DescriptionList {...args}>
       <Rows />
     </DescriptionList>
   ),
@@ -100,6 +108,10 @@ export const Vertical: Story = {
 /* ─── 3. With divider ────────────────────────────────────────────────── */
 export const WithDivider: Story = {
   name: "With divider",
+  args: {
+    orientation: "horizontal",
+    divider: true,
+  },
   parameters: {
     docs: {
       description: {
@@ -110,8 +122,8 @@ export const WithDivider: Story = {
       },
     },
   },
-  render: () => (
-    <DescriptionList divider>
+  render: (args) => (
+    <DescriptionList {...args}>
       <Rows />
     </DescriptionList>
   ),
@@ -125,6 +137,10 @@ export const WithDivider: Story = {
  * Pre-fix the container scrolls horizontally. */
 export const LongValueOverflow: Story = {
   name: "Long value (overflow guard)",
+  args: {
+    orientation: "horizontal",
+    divider: false,
+  },
   parameters: {
     docs: {
       description: {
@@ -135,12 +151,12 @@ export const LongValueOverflow: Story = {
       },
     },
   },
-  render: () => (
+  render: (args) => (
     <div
       data-testid="dl-narrow"
       style={{ inlineSize: "20rem", overflow: "hidden" }}
     >
-      <DescriptionList data-testid="dl-long">
+      <DescriptionList {...args} data-testid="dl-long">
         <DescriptionList.Item>
           <DescriptionList.Term>Token</DescriptionList.Term>
           <DescriptionList.Detail>

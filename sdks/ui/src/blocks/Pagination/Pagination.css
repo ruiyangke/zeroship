@@ -98,8 +98,12 @@
 
 .zs-pagination__pages {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--zs-space-1);
+  min-inline-size: 0;
+  max-inline-size: 100%;
   /* Push to the inline end so it drifts away from the start-anchored
      summary. */
   margin-inline-start: auto;

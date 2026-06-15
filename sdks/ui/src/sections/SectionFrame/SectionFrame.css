@@ -1,0 +1,149 @@
+/*
+ * SectionFrame / SectionHeader — governed page composition.
+ *
+ * SectionFrame owns full-bleed band rhythm and delegates inline measure to
+ * Container. SectionHeader owns the repeatable title/description/actions row
+ * used by high-fidelity product pages.
+ */
+
+.zs-section-frame {
+  display: block;
+  color: var(--zs-label);
+}
+
+.zs-section-frame[data-spacing="none"] {
+  padding-block: 0;
+}
+
+.zs-section-frame[data-spacing="compact"] {
+  padding-block: var(--zs-space-8);
+}
+
+.zs-section-frame[data-spacing="regular"] {
+  padding-block: var(--zs-space-10);
+}
+
+.zs-section-frame[data-spacing="spacious"] {
+  padding-block: calc(var(--zs-space-10) + var(--zs-space-8));
+}
+
+.zs-section-frame__inner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-8);
+  min-inline-size: 0;
+}
+
+.zs-section-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--zs-space-5);
+  align-items: end;
+}
+
+.zs-section-header[data-layout="split"] {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.zs-section-header[data-align="center"] {
+  justify-items: center;
+  text-align: center;
+}
+
+.zs-section-header__text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-3);
+  max-inline-size: 48rem;
+}
+
+.zs-section-header[data-layout="split"] .zs-section-header__text {
+  max-inline-size: 58rem;
+}
+
+.zs-section-header__eyebrow {
+  inline-size: fit-content;
+}
+
+.zs-section-header[data-align="center"] .zs-section-header__eyebrow {
+  margin-inline: auto;
+}
+
+.zs-section-header__title {
+  margin-block: 0;
+  color: var(--zs-label);
+  letter-spacing: 0;
+  text-wrap: balance;
+}
+
+.zs-section-header[data-title-size="display"] .zs-section-header__title {
+  font-size: var(--zs-text-display-2-size);
+  line-height: var(--zs-text-display-2-line);
+  font-weight: var(--zs-text-display-2-weight);
+}
+
+.zs-section-header[data-title-size="large"] .zs-section-header__title {
+  font-size: var(--zs-text-display-3-size);
+  line-height: var(--zs-text-display-3-line);
+  font-weight: var(--zs-text-display-3-weight);
+}
+
+.zs-section-header[data-title-size="title"] .zs-section-header__title {
+  font-size: var(--zs-text-title-1-size);
+  line-height: var(--zs-text-title-1-line);
+  font-weight: var(--zs-text-title-1-weight);
+}
+
+.zs-section-header__description {
+  max-inline-size: 40rem;
+  margin-block: 0;
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  text-wrap: pretty;
+}
+
+.zs-section-header__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--zs-space-3);
+  align-items: center;
+  justify-content: flex-end;
+}
+
+@media (max-width: 47.999rem) {
+  .zs-section-frame[data-spacing="compact"],
+  .zs-section-frame[data-spacing="regular"],
+  .zs-section-frame[data-spacing="spacious"] {
+    padding-block: var(--zs-space-7);
+  }
+
+  .zs-section-frame__inner {
+    gap: var(--zs-space-6);
+  }
+
+  .zs-section-header[data-layout="split"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .zs-section-header__text,
+  .zs-section-header[data-layout="split"] .zs-section-header__text {
+    max-inline-size: 100%;
+  }
+
+  .zs-section-header__actions {
+    justify-content: flex-start;
+  }
+
+  .zs-section-header[data-align="center"] .zs-section-header__actions {
+    justify-content: center;
+  }
+}
+
+@media (forced-colors: active) {
+  .zs-section-frame,
+  .zs-section-header__title,
+  .zs-section-header__description {
+    color: CanvasText;
+  }
+}

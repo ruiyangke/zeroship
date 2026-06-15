@@ -53,6 +53,13 @@
   min-inline-size: 0;
 }
 
+/* `asChild` has no inner label span, so apply the clamp to the routed root.
+   This primarily covers plain-text anchors used as linked badges. */
+.zs-badge[data-as-child] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* The text token. `display: block` + `min-inline-size: 0` make
    `text-overflow: ellipsis` effective (it is inert on the inline-flex
    root). Leading/trailing icons stay OUTSIDE this span so only the text

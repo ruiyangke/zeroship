@@ -31,11 +31,11 @@ export const Variants: Story = {
       aria-label="Skeleton variants"
       style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
     >
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+      <div className="zs-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
         <span className="zs-story-label">text</span>
         <Skeleton variant="text" data-testid="skeleton-text" />
       </div>
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+      <div className="zs-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
         <span className="zs-story-label">rect</span>
         <Skeleton variant="rect" height="6rem" data-testid="skeleton-rect" />
       </div>
@@ -78,7 +78,7 @@ export const MultiLineText: Story = {
   },
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Multi-line skeleton">
-      <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
+      <div className="zs-story-cell" style={{ inlineSize: "min(24rem, 100%)" }}>
         <Skeleton variant="text" lines={4} data-testid="skeleton-lines" />
       </div>
     </div>
@@ -151,14 +151,17 @@ export const ReducedMotion: Story = {
   },
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Reduced-motion skeleton">
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+      <div className="zs-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
         <Skeleton variant="rect" height="4rem" data-testid="skeleton-rm" />
       </div>
     </div>
   ),
   play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const el = canvas.getByTestId("skeleton-rm");
+    const el = canvasElement.querySelector<HTMLElement>(
+      '[data-testid="skeleton-rm"]',
+    );
+    await expect(el).not.toBeNull();
+    if (el == null) return;
     // Paint preserved: the base fill is always set (never transparent),
     // so the placeholder is visible with or without motion.
     const bg = getComputedStyle(el).backgroundColor;

@@ -52,6 +52,36 @@
   color: var(--zs-label);
 }
 
+/* ─── Footnotes — fine print above the directory ─────────────────────────── */
+.zs-footer__footnotes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-2);
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+}
+
+.zs-footer__footnotes :where(p, ol, ul) {
+  margin-block: 0;
+}
+
+.zs-footer__footnotes :where(ol, ul) {
+  padding-inline-start: 1.25em;
+}
+
+.zs-footer__footnotes :where(a) {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 0.125em;
+}
+
+.zs-footer__footnotes :where(a:focus-visible) {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
+  outline-offset: var(--zs-focus-ring-offset);
+  border-radius: var(--zs-radius-2);
+}
+
 /* ─── Top row — brand block beside the link columns ──────────────────────── */
 .zs-footer__top {
   display: flex;
@@ -186,10 +216,66 @@
   justify-content: space-between;
 }
 
+.zs-footer__bottom-start,
+.zs-footer__bottom-end {
+  min-inline-size: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--zs-space-3) var(--zs-space-4);
+}
+
+.zs-footer__bottom-end {
+  justify-content: flex-end;
+}
+
 .zs-footer__copyright {
   font-size: var(--zs-text-footnote-size);
   line-height: var(--zs-text-footnote-line);
   color: var(--zs-label-secondary);
+}
+
+.zs-footer__legal-links {
+  list-style: none;
+  margin-block: 0;
+  padding-inline-start: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--zs-space-2) var(--zs-space-4);
+}
+
+.zs-footer__legal-link-item {
+  margin: 0;
+}
+
+.zs-footer__legal-links a,
+.zs-footer__locale a {
+  color: var(--zs-label-secondary);
+  text-decoration: none;
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  border-radius: var(--zs-radius-2);
+  transition: color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+.zs-footer__legal-links a:hover,
+.zs-footer__locale a:hover {
+  color: var(--zs-label);
+  text-decoration: underline;
+}
+
+.zs-footer__legal-links a:focus-visible,
+.zs-footer__locale a:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
+  outline-offset: var(--zs-focus-ring-offset);
+  color: var(--zs-label);
+}
+
+.zs-footer__locale {
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
 }
 
 .zs-footer__actions {
@@ -209,17 +295,30 @@
   .zs-footer__brand,
   .zs-footer__description,
   .zs-footer__column-title,
+  .zs-footer__footnotes,
+  .zs-footer__locale,
   .zs-footer__copyright {
     color: CanvasText;
   }
-  .zs-footer__links a {
+
+  .zs-footer__links a,
+  .zs-footer__legal-links a,
+  .zs-footer__locale a {
     color: LinkText;
   }
+
   .zs-footer__links a:hover,
-  .zs-footer__links a:focus-visible {
+  .zs-footer__links a:focus-visible,
+  .zs-footer__legal-links a:hover,
+  .zs-footer__legal-links a:focus-visible,
+  .zs-footer__locale a:hover,
+  .zs-footer__locale a:focus-visible {
     color: LinkText;
   }
-  .zs-footer__links a:focus-visible {
+
+  .zs-footer__links a:focus-visible,
+  .zs-footer__legal-links a:focus-visible,
+  .zs-footer__locale a:focus-visible {
     outline-color: Highlight;
   }
 }
@@ -228,7 +327,9 @@
  * The only motion is the link color transition; flatten it so the hover/focus
  * ink change arrives instantly. */
 @media (prefers-reduced-motion: reduce) {
-  .zs-footer__links a {
+  .zs-footer__links a,
+  .zs-footer__legal-links a,
+  .zs-footer__locale a {
     transition: none;
   }
 }

@@ -91,6 +91,9 @@
    treatments (default/muted/accent + the accent ink remap). Imported AFTER
    the per-section sheets so its `[data-tone="…"]` rules win by both
    specificity and order over the sections' base ink colors. */
+@import "./sections/SectionFrame/SectionFrame.css";
+@import "./sections/ScrollRail/ScrollRail.css";
+@import "./sections/ResponsivePicture/ResponsivePicture.css";
 @import "./sections/Hero/Hero.css";
 @import "./sections/PricingTable/PricingTable.css";
 @import "./sections/FeatureGrid/FeatureGrid.css";
@@ -457,6 +460,8 @@
   --zs-container-md: 48rem;   /* 768 */
   --zs-container-lg: 64rem;   /* 1024 */
   --zs-container-xl: 80rem;   /* 1280 */
+  --zs-container-product: 61.25rem; /* 980 — dense product/legal pages */
+  --zs-container-wide: 78.75rem;    /* 1260 — premium marketing rails */
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -470,174 +475,736 @@
 }
 
 /* ════════════════════════════════════════════════════════════════════════
- * Theme: crystal — cool pastel mesh on near-white. Translucent surfaces.
- * System-blue (indigo-leaning) accent.
+ * Theme family: crystal
+ *
+ * Apple-like material, not decorative glass: quiet canvas, readable
+ * surfaces, soft blue accent, and optical depth from blur, gentle tint,
+ * rim light, and very soft contact shadow.
  * ════════════════════════════════════════════════════════════════════════ */
-[data-theme="crystal"] {
-  /* ─── Backdrop — layered radial mesh on near-white base. */
-  --zs-surface-bg:
-    radial-gradient(at 15% 15%, oklch(0.88 0.07 255 / 0.66), transparent 55%),
-    radial-gradient(at 85% 20%, oklch(0.9 0.06 195 / 0.56), transparent 55%),
-    radial-gradient(at 78% 85%, oklch(0.89 0.07 320 / 0.5), transparent 55%),
-    oklch(0.97 0.012 255);
+[data-theme="crystal-light"],
+[data-theme="crystal-dark"],
+[data-theme="studio-light"],
+[data-theme="ghibli-light"] {
+  --zs-button-focus-ring-width: 0.125rem;
+  --zs-button-font-weight: 400;
+  --zs-button-active-scale: 1;
+  --zs-button-height-md: 2.75rem;
+  --zs-button-line-height-md: 1.25rem;
+  --zs-button-padding-md: 1.3125rem;
+  --zs-button-radius-sm: var(--zs-radius-full);
+  --zs-button-radius-md: var(--zs-radius-full);
+  --zs-button-radius-lg: var(--zs-radius-full);
 
-  /* ─── Surfaces — translucent for panels (consumed by Card/Dialog later). */
-  --zs-surface: oklch(0.97 0.012 255);
-  --zs-surface-raised: oklch(1 0 0 / 0.55);
-  --zs-surface-overlay: oklch(1 0 0 / 0.66);
-  --zs-surface-sunken: oklch(0.95 0.01 255 / 0.5);
+  --zs-material-ultra-thin: blur(1rem) saturate(1.34);
+  --zs-material-thin: blur(1.625rem) saturate(1.4);
+  --zs-material-regular: blur(2.25rem) saturate(1.46);
+  --zs-material-thick: blur(3rem) saturate(1.5);
+  --zs-blur-overlay: var(--zs-material-thick);
 
-  /* ─── Label hierarchy: label / secondary / tertiary / quaternary. */
-  --zs-label: oklch(0.25 0.02 275);
-  --zs-label-secondary: oklch(0.42 0.02 275);
-  --zs-label-tertiary: oklch(0.55 0.02 275);
-  --zs-label-quaternary: oklch(0.68 0.02 275);
+  --zs-card-backdrop-filter: var(--zs-material-regular);
+  --zs-control-backdrop-filter: var(--zs-material-ultra-thin);
+  --zs-dialog-backdrop-filter: var(--zs-material-regular);
 
-  /* ─── Fill hierarchy: fill / secondary / tertiary / quaternary. */
-  --zs-fill: oklch(0.5 0.02 275 / 0.18);
-  --zs-fill-secondary: oklch(0.5 0.02 275 / 0.13);
-  --zs-fill-tertiary: oklch(0.5 0.02 275 / 0.09);
-  --zs-fill-quaternary: oklch(0.5 0.02 275 / 0.06);
-
-  /* ─── Separators */
-  --zs-separator: oklch(0.5 0.02 275 / 0.18);
-  --zs-separator-strong: oklch(0.5 0.02 275 / 0.4);
-
-  /* ─── Accent — iOS systemBlue analog. Hue centered at 250 (in
-     oklch's 0–360 hue space, ~245–255 is the canonical systemBlue
-     range); earlier 285 leaned visibly indigo-purple.
-     Lightness deepened from 0.55 → 0.52 on the base because the
-     hue-250 blue at L=0.55 measured 4.42:1 against the crystal
-     surface on Button-plain (just under the 4.5 AA threshold); the
-     deeper L=0.52 puts plain-button text back above 4.5 while
-     keeping the systemBlue character (within the brief's permitted
-     "deepen the lightness slightly" bound). Hover/active deepen
-     further; ink is the near-white label. Visual-polish item 5. */
-  --zs-accent: oklch(0.52 0.18 250);
-  --zs-accent-hover: oklch(0.47 0.19 250);
-  --zs-accent-active: oklch(0.43 0.2 250);
-  --zs-accent-ink: oklch(0.99 0.005 255);
-
-  /* ─── System colors (semantic).
-     Destructive uses system-red; pushed darker than canonical iOS red so
-     tinted/plain text on the mesh maintains 4.5:1 contrast. Chroma dropped
-     from 0.20 → 0.17 (button-polish item 7) for a more refined, less
-     web-blunt red; hover/active follow the same step pattern. If filled
-     destructive contrast drops below AA on the white accent ink, the
-     contingency is to deepen L (0.52 → 0.48) — captured inline below. */
-  --zs-system-red: oklch(0.52 0.17 25);
-  --zs-system-red-hover: oklch(0.47 0.18 25);
-  --zs-system-red-active: oklch(0.43 0.19 25);
-  --zs-system-green: oklch(0.6 0.16 145);
-  --zs-system-yellow: oklch(0.85 0.15 95);
-  --zs-system-orange: oklch(0.7 0.2 50);
-
-  /* ─── Focus — same hue/lightness family as accent so the focus ring
-     reads as a sibling of the systemBlue accent (visual-polish item 5).
-     Lightness matches the deepened accent base for consistency. */
-  --zs-focus: oklch(0.52 0.18 250);
-  --zs-focus-ring-color: oklch(0.52 0.18 250 / 0.35);
-  /* Input-specific focus ring — visual-polish item 7. Quieter form-control
-     focus uses a softer halo than buttons; Button keeps the 0.35 alpha
-     for its primary-action ring. Reducing alpha 0.35 → 0.25 tones the
-     double-edge effect codex flagged on inputs without touching
-     Button's heavier ring. */
-  --zs-input-focus-ring-color: oklch(0.52 0.18 250 / 0.25);
-  /* Button-specific focus ring — button-polish item 3. Lands BETWEEN the
-     Input's 0.25 (quiet form-field focus) and the original Button 0.35
-     (chunky primary-action ring) so Button's ring still reads heavier
-     than a form-field ring but no longer feels overbuilt. Paired with
-     a narrower 0.125rem outline (vs the default 0.1875rem) in
-     Button.css so the visible mass drops further. */
-  --zs-button-focus-ring-color: oklch(0.52 0.18 250 / 0.28);
-  /* Button-style focus-ring outline width. Narrower than the
-     foundation --zs-focus-ring-width (0.1875rem) so button-like
-     affordances (Button, Toggle, Collapsible.Trigger) read with a
-     lighter ring than form fields. Mirrors the alpha pairing on
-     --zs-button-focus-ring-color. */
-  --zs-button-focus-ring-width: 0.125rem;      /* 2 */
-
-  /* ─── Material — glass. Crystal is the light glass, so a less intense
-     saturation is gentler than the root default. */
-  --zs-material-regular: blur(1.5rem) saturate(1.25);
-  --zs-backdrop: oklch(0.5 0.05 275 / 0.3);
-
-  /* Scrim for the standard Dialog backdrop (visual-polish item 2).
-     Label-based dim at 30% replaces the earlier 40% black mix so the
-     Crystal mesh keeps its cool character through the scrim instead
-     of collapsing into a flat gray-violet field. The dimming still
-     suppresses the app, but reads as light glass rather than a
-     generic dimmer.
-
-     Contingency (item 2 of the visual-polish brief): if axe flags any
-     story for color-contrast after this drop, push to 35% — still
-     label-based but slightly darker. Verified clean at 30% on the
-     67-story sweep at the time of the change. */
-  --zs-scrim: color-mix(in oklch, var(--zs-label) 30%, transparent);
-  /* Material tint for the glass Dialog backdrop (translucent surface).
-     Uses --zs-surface-overlay (the Crystal panel overlay) at 78% so
-     the material backdrop carries a touch more depth than the plain
-     surface mix it replaced (visual-polish item 2). */
-  --zs-material-tint: color-mix(in oklch, var(--zs-surface-overlay) 78%, transparent);
-
-  /* ─── Card hover tint (review-fix item 2).
-     Translucent label overlay layered ON TOP of the opaque card surface.
-     Layering instead of replacing keeps the opaque base computable for
-     axe's color-contrast walk. 4% label-over-surface reads as a barely-
-     visible darken, matching the macOS list-row hover signal. */
-  --zs-card-hover-tint: color-mix(in oklch, var(--zs-label) 4%, transparent);
-
-  /* ─── Card / Dialog backdrop-filter gate (review-fix item 18).
-     Crystal surfaces are opaque (--zs-surface above), so backdrop-filter
-     has no visual contribution and pays compositing cost for nothing.
-     A future translucent theme would set these to var(--zs-material-*). */
-  --zs-card-backdrop-filter: none;
-  --zs-dialog-backdrop-filter: none;
-
-  /* ─── Input palette (slice 2).
-     Outline = subtle delineation from the surface; Filled = pronounced
-     neutral; Plain = no chrome (text-field-on-row look). Border colors
-     stay subtle and only shift on hover/focus/invalid so the field
-     never visually "thickens" between states (the box-shadow inset
-     keeps layout stable). */
-  --zs-input-bg: var(--zs-fill-quaternary);
-  --zs-input-bg-hover: var(--zs-fill-tertiary);
-  --zs-input-bg-focus: var(--zs-surface-raised);
-  --zs-input-bg-disabled: var(--zs-fill-quaternary);
-  /* Filled bumped from --zs-fill-secondary (~0.13 alpha) to --zs-fill
-     (~0.18 alpha) so outline (--zs-fill-quaternary ~0.06) and filled
-     read as visually distinct shells (visual-polish item 6). The hover
-     deepens via color-mix on label-over-transparent so a hovered filled
-     input lands ~12% label tint — clearly darker than the resting
-     filled state and clearly heavier than outline-hover. */
-  --zs-input-bg-filled: var(--zs-fill);
-  --zs-input-bg-filled-hover: color-mix(in oklch, var(--zs-label) 12%, transparent);
-  --zs-input-border: var(--zs-separator);
-  --zs-input-border-hover: var(--zs-separator-strong);
   --zs-input-border-focus: var(--zs-accent);
   --zs-input-border-invalid: var(--zs-system-red);
   --zs-input-ink: var(--zs-label);
   --zs-input-placeholder: var(--zs-label-tertiary);
-  /* Disabled ink stays on --zs-label-tertiary. The brief proposed
-     shifting to --zs-label-quaternary (one rung weaker) for a quieter
-     disabled feel; measured against --zs-input-bg-disabled
-     (--zs-fill-quaternary ≈ 0.06 alpha over the crystal surface), the
-     quaternary label (L=0.68) lands around 3.2:1 — below the readable
-     threshold even though axe exempts disabled controls from AA. Same
-     contingency the Card-polish commit hit with Description (kept on
-     label-secondary instead of tertiary). Visual-polish item 10
-     contingency fired; documented and reverted to tertiary. */
   --zs-input-ink-disabled: var(--zs-label-tertiary);
-  /* Readonly palette — visual-polish item 5. Background shifts up one
-     fill step so readonly reads as "presented, not editable" rather
-     than as another flavor of default. Ink softens to label-secondary
-     so the row visually recedes without going greyed-out. */
-  --zs-input-bg-readonly: var(--zs-fill-tertiary);
   --zs-input-ink-readonly: var(--zs-label-secondary);
 
-  /* ─── Field text */
   --zs-field-label-ink: var(--zs-label);
   --zs-field-description-ink: var(--zs-label-secondary);
   --zs-field-error-ink: var(--zs-system-red);
   --zs-field-required-ink: var(--zs-system-red);
+}
+
+[data-theme="crystal-light"] {
+  /* ─── Canvas: near-white Apple surface with faint warm/cool refraction. */
+  --zs-surface-bg:
+    radial-gradient(at 0% 18%, oklch(0.88 0.078 48 / 0.3), transparent 42%),
+    radial-gradient(at 18% 0%, oklch(0.96 0.048 28 / 0.2), transparent 36%),
+    radial-gradient(at 88% 6%, oklch(0.96 0.03 205 / 0.2), transparent 38%),
+    radial-gradient(at 76% 94%, oklch(0.95 0.028 300 / 0.12), transparent 44%),
+    linear-gradient(180deg, oklch(0.998 0.001 255), oklch(0.989 0.004 255) 58%, oklch(0.996 0.002 250));
+
+  --zs-surface: oklch(1 0 0 / 0.48);
+  --zs-surface-raised: oklch(1 0 0 / 0.42);
+  --zs-surface-overlay: oklch(1 0 0 / 0.5);
+  --zs-surface-sunken: oklch(0.98 0.005 255 / 0.3);
+
+  --zs-crystal-edge-light: oklch(1 0 0 / 0.5);
+  --zs-crystal-edge-dark: oklch(0.45 0.026 255 / 0.035);
+  --zs-crystal-rim: oklch(0.62 0.032 250 / 0.055);
+  --zs-crystal-rim-strong: oklch(0.56 0.048 250 / 0.11);
+  --zs-crystal-inner-glow: oklch(1 0 0 / 0.18);
+  --zs-crystal-contact: oklch(0.42 0.032 255 / 0.035);
+  --zs-crystal-cyan: oklch(0.95 0.026 210 / 0.13);
+  --zs-crystal-violet: oklch(0.95 0.024 295 / 0.08);
+  --zs-crystal-mint: oklch(0.96 0.026 175 / 0.08);
+  --zs-crystal-peach: oklch(0.92 0.05 44 / 0.22);
+  --zs-crystal-story-backdrop:
+    radial-gradient(at 11% 30%, oklch(0.82 0.15 28 / 0.26), transparent 16rem),
+    radial-gradient(at 28% 18%, oklch(0.72 0.11 63 / 0.16), transparent 14rem),
+    radial-gradient(at 44% 22%, oklch(0.52 0.12 252 / 0.14), transparent 16rem),
+    radial-gradient(at 64% 16%, oklch(0.84 0.06 214 / 0.14), transparent 18rem),
+    radial-gradient(at 86% 30%, oklch(0.74 0.1 320 / 0.1), transparent 16rem),
+    var(--zs-surface-bg);
+
+  --zs-label: oklch(0.22 0.018 255);
+  --zs-label-secondary: oklch(0.4 0.016 255);
+  --zs-label-tertiary: oklch(0.55 0.014 255);
+  --zs-label-quaternary: oklch(0.7 0.012 255);
+
+  --zs-fill: oklch(0.28 0.018 255 / 0.07);
+  --zs-fill-secondary: oklch(0.28 0.018 255 / 0.05);
+  --zs-fill-tertiary: oklch(0.28 0.018 255 / 0.034);
+  --zs-fill-quaternary: oklch(0.28 0.018 255 / 0.022);
+
+  --zs-separator: oklch(0.5 0.022 255 / 0.075);
+  --zs-separator-strong: oklch(0.44 0.034 255 / 0.15);
+
+  --zs-accent: oklch(0.55 0.17 254);
+  --zs-accent-hover: oklch(0.5 0.18 254);
+  --zs-accent-active: oklch(0.44 0.18 254);
+  --zs-accent-ink: oklch(0.99 0.004 255);
+
+  --zs-system-red: oklch(0.52 0.18 25);
+  --zs-system-red-hover: oklch(0.47 0.19 25);
+  --zs-system-red-active: oklch(0.41 0.2 25);
+  --zs-system-green: oklch(0.57 0.15 150);
+  --zs-system-yellow: oklch(0.82 0.14 95);
+  --zs-system-orange: oklch(0.67 0.18 48);
+
+  --zs-focus: var(--zs-accent);
+  --zs-focus-ring-color: oklch(0.58 0.17 254 / 0.22);
+  --zs-input-focus-ring-color: oklch(0.58 0.17 254 / 0.16);
+  --zs-button-focus-ring-color: oklch(0.58 0.17 254 / 0.2);
+
+  --zs-button-plain-ink: oklch(0.47 0.16 254);
+  --zs-button-filled-bg: oklch(0.54 0.18 254);
+  --zs-button-filled-bg-hover: oklch(0.54 0.18 254);
+  --zs-button-filled-bg-active: oklch(0.5 0.18 254);
+  --zs-button-filled-bg-disabled: color-mix(in oklch, var(--zs-accent) 16%, var(--zs-fill-quaternary));
+  --zs-button-filled-ink-disabled: var(--zs-label-tertiary);
+  --zs-button-tinted-bg: oklch(0.92 0.04 254 / 0.72);
+  --zs-button-tinted-bg-hover: oklch(0.9 0.052 254 / 0.78);
+  --zs-button-tinted-bg-active: oklch(0.87 0.064 254 / 0.84);
+  --zs-button-tinted-bg-disabled: oklch(0.94 0.018 254 / 0.45);
+  --zs-button-tinted-ink: var(--zs-accent-active);
+  --zs-button-tinted-ink-disabled: color-mix(in oklch, var(--zs-accent) 34%, var(--zs-label-tertiary));
+  --zs-button-gray-bg: color-mix(in oklch, var(--zs-label) 5%, var(--zs-surface-overlay));
+  --zs-button-gray-bg-hover: color-mix(in oklch, var(--zs-label) 7%, var(--zs-surface-overlay));
+  --zs-button-gray-bg-active: color-mix(in oklch, var(--zs-label) 9%, var(--zs-surface-overlay));
+  --zs-button-gray-bg-disabled: color-mix(in oklch, var(--zs-label) 2%, var(--zs-fill-quaternary));
+  --zs-button-gray-ink-disabled: var(--zs-label-tertiary);
+  --zs-button-plain-bg-hover: color-mix(in oklch, var(--zs-accent) 7%, transparent);
+  --zs-button-plain-bg-active: color-mix(in oklch, var(--zs-accent) 11%, transparent);
+  --zs-button-disabled-shadow: inset 0 0.0625rem 0 oklch(1 0 0 / 0.16);
+
+  --zs-button-destructive-filled-bg: oklch(0.51 0.18 25);
+  --zs-button-destructive-filled-bg-hover: oklch(0.51 0.18 25);
+  --zs-button-destructive-filled-bg-active: oklch(0.47 0.19 25);
+  --zs-button-destructive-filled-bg-disabled: color-mix(in oklch, var(--zs-system-red) 14%, var(--zs-fill-quaternary));
+  --zs-button-destructive-tinted-bg: color-mix(in oklch, var(--zs-system-red-active) 10%, var(--zs-surface-overlay));
+  --zs-button-destructive-tinted-bg-hover: color-mix(in oklch, var(--zs-system-red-active) 15%, var(--zs-surface-overlay));
+  --zs-button-destructive-tinted-bg-active: color-mix(in oklch, var(--zs-system-red-active) 20%, var(--zs-surface-overlay));
+  --zs-button-destructive-tinted-bg-disabled: color-mix(in oklch, var(--zs-system-red) 5%, var(--zs-fill-quaternary));
+  --zs-button-destructive-tinted-ink: var(--zs-system-red-active);
+  --zs-button-destructive-tinted-ink-disabled: color-mix(in oklch, var(--zs-system-red) 34%, var(--zs-label-tertiary));
+  --zs-button-destructive-plain-bg-hover: color-mix(in oklch, var(--zs-system-red) 7%, transparent);
+  --zs-button-destructive-plain-bg-active: color-mix(in oklch, var(--zs-system-red) 11%, transparent);
+
+  --zs-backdrop: oklch(0.42 0.03 255 / 0.13);
+  --zs-scrim: color-mix(in oklch, var(--zs-label) 14%, transparent);
+  --zs-material-tint: color-mix(in oklch, var(--zs-surface-overlay) 56%, transparent);
+  --zs-story-backdrop: var(--zs-crystal-story-backdrop);
+  --zs-story-surface: color-mix(in oklch, var(--zs-surface-overlay) 52%, transparent);
+  --zs-story-surface-radius: var(--zs-radius-7);
+  --zs-story-surface-edge:
+    inset 0 0.0625rem 0 oklch(1 0 0 / 0.46),
+    inset 0 -0.0625rem 0 oklch(0.45 0.026 255 / 0.026);
+
+  --zs-shadow-1:
+    0 0.25rem 1rem var(--zs-crystal-contact);
+  --zs-shadow-2:
+    0 0.625rem 1.625rem var(--zs-crystal-contact),
+    0 0.125rem 0.375rem oklch(0.42 0.028 255 / 0.022);
+  --zs-shadow-3:
+    0 1rem 2.5rem oklch(0.38 0.032 255 / 0.06),
+    0 0.25rem 0.75rem oklch(0.42 0.028 255 / 0.034);
+  --zs-shadow-4:
+    0 1.375rem 3.25rem oklch(0.35 0.034 255 / 0.075),
+    0 0.375rem 1.125rem oklch(0.42 0.028 255 / 0.04);
+  --zs-shadow-dialog:
+    0 1.75rem 4.5rem oklch(0.32 0.036 255 / 0.1),
+    0 0.5rem 1.25rem oklch(0.42 0.03 255 / 0.052),
+    0 0 0 0.0625rem var(--zs-crystal-rim),
+    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
+    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark);
+  --zs-shadow-popover:
+    0 0.875rem 2.125rem oklch(0.36 0.032 255 / 0.06),
+    0 0.1875rem 0.625rem oklch(0.42 0.028 255 / 0.034),
+    0 0 0 0.0625rem var(--zs-crystal-rim);
+
+  --zs-card-surface-edge:
+    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
+    inset 0 0.75rem 1.5rem var(--zs-crystal-inner-glow),
+    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark);
+  --zs-card-outline-edge:
+    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
+    inset 0 0.75rem 1.5rem var(--zs-crystal-inner-glow),
+    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark),
+    0 0 0 0.0625rem var(--zs-crystal-rim);
+  --zs-popup-surface-edge:
+    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
+    inset 0 0.75rem 1.5rem var(--zs-crystal-inner-glow),
+    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark);
+  --zs-input-surface-edge:
+    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
+    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark);
+
+  --zs-card-hover-tint: color-mix(in oklch, var(--zs-accent) 4%, transparent);
+
+  --zs-button-filled-shadow: none;
+  --zs-button-tinted-shadow: none;
+  --zs-button-gray-shadow: none;
+  --zs-button-destructive-filled-shadow: none;
+  --zs-button-destructive-tinted-shadow: none;
+
+  --zs-app-shell-bg: var(--zs-surface-bg);
+  --zs-shell-header-bg: color-mix(in oklch, var(--zs-surface-overlay) 58%, var(--zs-crystal-peach));
+  --zs-shell-sidebar-bg: color-mix(in oklch, var(--zs-surface-sunken) 58%, transparent);
+
+  --zs-input-bg: color-mix(in oklch, var(--zs-surface) 54%, transparent);
+  --zs-input-bg-hover: color-mix(in oklch, var(--zs-surface) 62%, var(--zs-fill-quaternary));
+  --zs-input-bg-focus: color-mix(in oklch, var(--zs-surface) 68%, var(--zs-crystal-mint));
+  --zs-input-bg-disabled: color-mix(in oklch, var(--zs-surface) 46%, transparent);
+  --zs-input-bg-filled: color-mix(in oklch, var(--zs-surface) 46%, var(--zs-fill-quaternary));
+  --zs-input-bg-filled-hover: color-mix(in oklch, var(--zs-surface) 52%, var(--zs-fill-secondary));
+  --zs-input-border: var(--zs-crystal-rim);
+  --zs-input-border-hover: var(--zs-crystal-rim-strong);
+  --zs-input-bg-readonly: color-mix(in oklch, var(--zs-surface) 58%, var(--zs-fill-tertiary));
+}
+
+[data-theme="studio-light"] {
+  /* Studio: a quiet creator-dashboard theme. Solid readable surfaces, restrained
+     depth, blue-teal accent, and just enough warm/cool backdrop color for
+     marketing sections without making operational UI feel decorative. */
+  --zs-surface-bg:
+    radial-gradient(at 0% 12%, oklch(0.93 0.048 44 / 0.22), transparent 34rem),
+    radial-gradient(at 90% 0%, oklch(0.9 0.046 215 / 0.2), transparent 32rem),
+    linear-gradient(180deg, oklch(0.982 0.006 235), oklch(0.962 0.008 245));
+
+  --zs-surface: oklch(1 0 0);
+  --zs-surface-raised: oklch(0.995 0.002 245);
+  --zs-surface-overlay: oklch(1 0 0 / 0.96);
+  --zs-surface-sunken: oklch(0.946 0.008 245);
+
+  --zs-crystal-edge-light: oklch(1 0 0 / 0.7);
+  --zs-crystal-edge-dark: oklch(0.38 0.018 245 / 0.055);
+  --zs-crystal-rim: oklch(0.56 0.026 245 / 0.12);
+  --zs-crystal-rim-strong: oklch(0.5 0.034 245 / 0.22);
+  --zs-crystal-inner-glow: oklch(1 0 0 / 0.12);
+  --zs-crystal-contact: oklch(0.36 0.03 245 / 0.075);
+  --zs-crystal-cyan: oklch(0.91 0.04 215 / 0.2);
+  --zs-crystal-violet: oklch(0.92 0.034 292 / 0.1);
+  --zs-crystal-mint: oklch(0.91 0.04 170 / 0.13);
+  --zs-crystal-peach: oklch(0.9 0.05 42 / 0.18);
+  --zs-crystal-story-backdrop:
+    radial-gradient(at 12% 24%, oklch(0.84 0.11 38 / 0.18), transparent 15rem),
+    radial-gradient(at 54% 12%, oklch(0.72 0.09 215 / 0.12), transparent 18rem),
+    radial-gradient(at 90% 24%, oklch(0.76 0.08 170 / 0.12), transparent 16rem),
+    var(--zs-surface-bg);
+
+  --zs-label: oklch(0.2 0.016 245);
+  --zs-label-secondary: oklch(0.38 0.016 245);
+  --zs-label-tertiary: oklch(0.54 0.014 245);
+  --zs-label-quaternary: oklch(0.68 0.012 245);
+
+  --zs-fill: oklch(0.28 0.018 245 / 0.075);
+  --zs-fill-secondary: oklch(0.28 0.018 245 / 0.052);
+  --zs-fill-tertiary: oklch(0.28 0.018 245 / 0.036);
+  --zs-fill-quaternary: oklch(0.28 0.018 245 / 0.024);
+
+  --zs-separator: oklch(0.48 0.02 245 / 0.11);
+  --zs-separator-strong: oklch(0.4 0.026 245 / 0.22);
+
+  --zs-accent: oklch(0.54 0.15 228);
+  --zs-accent-hover: oklch(0.48 0.16 228);
+  --zs-accent-active: oklch(0.42 0.16 228);
+  --zs-accent-ink: oklch(0.99 0.004 245);
+
+  --zs-system-red: oklch(0.5 0.17 25);
+  --zs-system-red-hover: oklch(0.45 0.18 25);
+  --zs-system-red-active: oklch(0.39 0.19 25);
+  --zs-system-green: oklch(0.54 0.14 148);
+  --zs-system-yellow: oklch(0.8 0.13 92);
+  --zs-system-orange: oklch(0.64 0.16 50);
+
+  --zs-focus: var(--zs-accent);
+  --zs-focus-ring-color: oklch(0.56 0.15 228 / 0.24);
+  --zs-input-focus-ring-color: oklch(0.56 0.15 228 / 0.16);
+  --zs-button-focus-ring-color: oklch(0.56 0.15 228 / 0.2);
+
+  --zs-button-plain-ink: oklch(0.45 0.14 228);
+  --zs-button-filled-bg: oklch(0.52 0.16 228);
+  --zs-button-filled-bg-hover: oklch(0.48 0.17 228);
+  --zs-button-filled-bg-active: oklch(0.43 0.17 228);
+  --zs-button-filled-bg-disabled: color-mix(in oklch, var(--zs-accent) 16%, var(--zs-fill-quaternary));
+  --zs-button-filled-ink-disabled: var(--zs-label-tertiary);
+  --zs-button-tinted-bg: color-mix(in oklch, var(--zs-accent) 12%, var(--zs-surface));
+  --zs-button-tinted-bg-hover: color-mix(in oklch, var(--zs-accent) 18%, var(--zs-surface));
+  --zs-button-tinted-bg-active: color-mix(in oklch, var(--zs-accent) 24%, var(--zs-surface));
+  --zs-button-tinted-bg-disabled: color-mix(in oklch, var(--zs-accent) 6%, var(--zs-surface));
+  --zs-button-tinted-ink: var(--zs-accent-active);
+  --zs-button-tinted-ink-disabled: color-mix(in oklch, var(--zs-accent) 34%, var(--zs-label-tertiary));
+  --zs-button-gray-bg: color-mix(in oklch, var(--zs-label) 6%, var(--zs-surface));
+  --zs-button-gray-bg-hover: color-mix(in oklch, var(--zs-label) 9%, var(--zs-surface));
+  --zs-button-gray-bg-active: color-mix(in oklch, var(--zs-label) 12%, var(--zs-surface));
+  --zs-button-gray-bg-disabled: color-mix(in oklch, var(--zs-label) 3%, var(--zs-surface));
+  --zs-button-gray-ink-disabled: var(--zs-label-tertiary);
+  --zs-button-plain-bg-hover: color-mix(in oklch, var(--zs-accent) 7%, transparent);
+  --zs-button-plain-bg-active: color-mix(in oklch, var(--zs-accent) 11%, transparent);
+  --zs-button-disabled-shadow: inset 0 0.0625rem 0 oklch(1 0 0 / 0.18);
+
+  --zs-button-destructive-filled-bg: oklch(0.49 0.17 25);
+  --zs-button-destructive-filled-bg-hover: oklch(0.45 0.18 25);
+  --zs-button-destructive-filled-bg-active: oklch(0.4 0.19 25);
+  --zs-button-destructive-filled-bg-disabled: color-mix(in oklch, var(--zs-system-red) 14%, var(--zs-fill-quaternary));
+  --zs-button-destructive-tinted-bg: color-mix(in oklch, var(--zs-system-red) 10%, var(--zs-surface));
+  --zs-button-destructive-tinted-bg-hover: color-mix(in oklch, var(--zs-system-red) 15%, var(--zs-surface));
+  --zs-button-destructive-tinted-bg-active: color-mix(in oklch, var(--zs-system-red) 20%, var(--zs-surface));
+  --zs-button-destructive-tinted-bg-disabled: color-mix(in oklch, var(--zs-system-red) 5%, var(--zs-surface));
+  --zs-button-destructive-tinted-ink: var(--zs-system-red-active);
+  --zs-button-destructive-tinted-ink-disabled: color-mix(in oklch, var(--zs-system-red) 34%, var(--zs-label-tertiary));
+  --zs-button-destructive-plain-bg-hover: color-mix(in oklch, var(--zs-system-red) 7%, transparent);
+  --zs-button-destructive-plain-bg-active: color-mix(in oklch, var(--zs-system-red) 11%, transparent);
+
+  --zs-backdrop: oklch(0.36 0.028 245 / 0.16);
+  --zs-scrim: color-mix(in oklch, var(--zs-label) 18%, transparent);
+  --zs-material-tint: color-mix(in oklch, var(--zs-surface-overlay) 86%, transparent);
+  --zs-story-backdrop: var(--zs-crystal-story-backdrop);
+  --zs-story-surface: var(--zs-surface-overlay);
+  --zs-story-surface-radius: var(--zs-radius-5);
+  --zs-story-surface-edge:
+    inset 0 0.0625rem 0 oklch(1 0 0 / 0.62),
+    inset 0 -0.0625rem 0 oklch(0.42 0.024 245 / 0.04),
+    0 0 0 0.0625rem var(--zs-crystal-rim);
+
+  --zs-shadow-1:
+    0 0.1875rem 0.875rem var(--zs-crystal-contact);
+  --zs-shadow-2:
+    0 0.5rem 1.375rem oklch(0.34 0.03 245 / 0.09),
+    0 0.125rem 0.375rem oklch(0.36 0.028 245 / 0.05);
+  --zs-shadow-3:
+    0 0.875rem 2rem oklch(0.32 0.032 245 / 0.12),
+    0 0.25rem 0.75rem oklch(0.34 0.03 245 / 0.065);
+  --zs-shadow-4:
+    0 1.25rem 3rem oklch(0.3 0.034 245 / 0.15),
+    0 0.375rem 1rem oklch(0.34 0.03 245 / 0.075);
+  --zs-shadow-dialog:
+    0 1.5rem 4rem oklch(0.3 0.034 245 / 0.16),
+    0 0.5rem 1.25rem oklch(0.34 0.03 245 / 0.09),
+    0 0 0 0.0625rem var(--zs-crystal-rim),
+    inset 0 0.0625rem 0 var(--zs-crystal-edge-light);
+  --zs-shadow-popover:
+    0 0.75rem 1.75rem oklch(0.32 0.032 245 / 0.11),
+    0 0.1875rem 0.5rem oklch(0.34 0.03 245 / 0.06),
+    0 0 0 0.0625rem var(--zs-crystal-rim);
+
+  --zs-card-backdrop-filter: none;
+  --zs-control-backdrop-filter: none;
+  --zs-dialog-backdrop-filter: none;
+  --zs-card-surface-edge:
+    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
+    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark);
+  --zs-card-outline-edge:
+    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
+    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark),
+    0 0 0 0.0625rem var(--zs-crystal-rim);
+  --zs-popup-surface-edge:
+    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
+    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark),
+    0 0 0 0.0625rem var(--zs-crystal-rim);
+  --zs-input-surface-edge:
+    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
+    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark);
+
+  --zs-card-hover-tint: color-mix(in oklch, var(--zs-accent) 4%, transparent);
+
+  --zs-button-filled-shadow:
+    inset 0 0.0625rem 0 oklch(1 0 0 / 0.18);
+  --zs-button-tinted-shadow: none;
+  --zs-button-gray-shadow: none;
+  --zs-button-destructive-filled-shadow:
+    inset 0 0.0625rem 0 oklch(1 0 0 / 0.16);
+  --zs-button-destructive-tinted-shadow: none;
+
+  --zs-app-shell-bg: var(--zs-surface-bg);
+  --zs-shell-header-bg: var(--zs-surface-overlay);
+  --zs-shell-sidebar-bg: color-mix(in oklch, var(--zs-surface-sunken) 82%, transparent);
+
+  --zs-input-bg: var(--zs-surface);
+  --zs-input-bg-hover: color-mix(in oklch, var(--zs-surface) 92%, var(--zs-fill-quaternary));
+  --zs-input-bg-focus: color-mix(in oklch, var(--zs-surface) 94%, var(--zs-crystal-cyan));
+  --zs-input-bg-disabled: color-mix(in oklch, var(--zs-surface) 86%, var(--zs-fill-quaternary));
+  --zs-input-bg-filled: color-mix(in oklch, var(--zs-surface-sunken) 72%, var(--zs-surface));
+  --zs-input-bg-filled-hover: color-mix(in oklch, var(--zs-surface-sunken) 82%, var(--zs-surface));
+  --zs-input-border: var(--zs-crystal-rim);
+  --zs-input-border-hover: var(--zs-crystal-rim-strong);
+  --zs-input-bg-readonly: color-mix(in oklch, var(--zs-surface-sunken) 68%, var(--zs-surface));
+}
+
+[data-theme="ghibli-light"] {
+  /* Ghibli: Matsu/shadcn's watercolor-paper mechanics translated into
+     zeroship tokens. Parchment canvas, moss primary actions, olive ink,
+     chunky illustrated rims, and flat stamp shadows. */
+  --zs-ghibli-paper: oklch(0.91 0.048 83.6);
+  --zs-ghibli-paper-raised: oklch(0.92 0.042 83.6);
+  --zs-ghibli-paper-muted: oklch(0.86 0.064 83.7);
+  --zs-ghibli-ink: oklch(0.41 0.077 78.9);
+  --zs-ghibli-border: oklch(0.74 0.063 80.8);
+  --zs-ghibli-primary: oklch(0.71 0.097 111.7);
+  --zs-ghibli-primary-border: oklch(0.59 0.096 111.8);
+
+  --zs-surface-bg:
+    radial-gradient(at 8% 12%, oklch(0.82 0.1 111.7 / 0.18), transparent 26rem),
+    radial-gradient(at 88% 0%, oklch(0.88 0.064 185 / 0.14), transparent 30rem),
+    repeating-linear-gradient(0deg, oklch(0.74 0.063 80.8 / 0.05) 0 0.0625rem, transparent 0.0625rem 0.375rem),
+    repeating-linear-gradient(90deg, oklch(1 0 0 / 0.04) 0 0.0625rem, transparent 0.0625rem 0.5rem),
+    var(--zs-ghibli-paper);
+
+  --zs-surface: var(--zs-ghibli-paper-raised);
+  --zs-surface-raised: oklch(0.94 0.04 83.6);
+  --zs-surface-overlay: var(--zs-ghibli-paper-raised);
+  --zs-surface-sunken: var(--zs-ghibli-paper-muted);
+
+  --zs-crystal-edge-light: oklch(1 0 0 / 0.45);
+  --zs-crystal-edge-dark: color-mix(in oklch, var(--zs-ghibli-border) 72%, transparent);
+  --zs-crystal-rim: var(--zs-ghibli-border);
+  --zs-crystal-rim-strong: oklch(0.62 0.075 80.8);
+  --zs-crystal-inner-glow: oklch(1 0 0 / 0.1);
+  --zs-crystal-contact: color-mix(in oklch, var(--zs-ghibli-border) 78%, transparent);
+  --zs-crystal-cyan: oklch(0.88 0.064 185 / 0.16);
+  --zs-crystal-violet: oklch(0.88 0.042 315 / 0.08);
+  --zs-crystal-mint: oklch(0.84 0.08 111.7 / 0.18);
+  --zs-crystal-peach: oklch(0.9 0.068 58 / 0.18);
+  --zs-crystal-story-backdrop:
+    radial-gradient(at 14% 18%, oklch(0.79 0.112 111.7 / 0.2), transparent 15rem),
+    radial-gradient(at 78% 12%, oklch(0.88 0.064 185 / 0.16), transparent 18rem),
+    repeating-linear-gradient(0deg, oklch(0.74 0.063 80.8 / 0.055) 0 0.0625rem, transparent 0.0625rem 0.375rem),
+    repeating-linear-gradient(90deg, oklch(1 0 0 / 0.045) 0 0.0625rem, transparent 0.0625rem 0.5rem),
+    var(--zs-surface-bg);
+
+  --zs-label: oklch(0.31 0.06 78.9);
+  --zs-label-secondary: var(--zs-ghibli-ink);
+  --zs-label-tertiary: oklch(0.51 0.077 74.3);
+  --zs-label-quaternary: oklch(0.64 0.062 80.8);
+
+  --zs-fill: oklch(0.41 0.077 78.9 / 0.1);
+  --zs-fill-secondary: oklch(0.41 0.077 78.9 / 0.072);
+  --zs-fill-tertiary: oklch(0.41 0.077 78.9 / 0.05);
+  --zs-fill-quaternary: oklch(0.41 0.077 78.9 / 0.035);
+
+  --zs-separator: var(--zs-ghibli-border);
+  --zs-separator-strong: var(--zs-ghibli-primary-border);
+
+  --zs-accent: var(--zs-ghibli-primary);
+  --zs-accent-hover: oklch(0.66 0.105 111.7);
+  --zs-accent-active: oklch(0.59 0.096 111.8);
+  --zs-accent-ink: oklch(0.26 0.016 0);
+
+  --zs-system-red: oklch(0.48 0.16 28);
+  --zs-system-red-hover: oklch(0.43 0.17 28);
+  --zs-system-red-active: oklch(0.37 0.18 28);
+  --zs-system-green: oklch(0.48 0.13 154);
+  --zs-system-yellow: oklch(0.78 0.13 88);
+  --zs-system-orange: oklch(0.61 0.15 55);
+
+  --zs-focus: var(--zs-accent);
+  --zs-focus-ring-color: oklch(0.51 0.077 74.3 / 0.28);
+  --zs-input-focus-ring-color: oklch(0.51 0.077 74.3 / 0.18);
+  --zs-button-focus-ring-color: oklch(0.51 0.077 74.3 / 0.24);
+
+  --zs-button-font-weight: 700;
+  --zs-button-radius-sm: var(--zs-radius-3);
+  --zs-button-radius-md: var(--zs-radius-3);
+  --zs-button-radius-lg: var(--zs-radius-3);
+  --zs-button-plain-ink: oklch(0.34 0.09 111.8);
+  --zs-button-filled-bg: oklch(0.71 0.097 111.7);
+  --zs-button-filled-ink: var(--zs-accent-ink);
+  --zs-button-filled-bg-hover: oklch(0.68 0.1 111.7);
+  --zs-button-filled-bg-active: oklch(0.62 0.098 111.8);
+  --zs-button-filled-bg-disabled: color-mix(in oklch, var(--zs-accent) 16%, var(--zs-fill-quaternary));
+  --zs-button-filled-ink-disabled: var(--zs-label-tertiary);
+  --zs-button-tinted-bg: oklch(0.88 0.055 83.6);
+  --zs-button-tinted-bg-hover: oklch(0.84 0.06 83.6);
+  --zs-button-tinted-bg-active: oklch(0.8 0.064 83.6);
+  --zs-button-tinted-bg-disabled: color-mix(in oklch, var(--zs-accent) 6%, var(--zs-surface));
+  --zs-button-tinted-ink: var(--zs-accent-active);
+  --zs-button-tinted-ink-disabled: color-mix(in oklch, var(--zs-accent) 34%, var(--zs-label-tertiary));
+  --zs-button-gray-bg: oklch(0.88 0.055 83.6);
+  --zs-button-gray-bg-hover: oklch(0.84 0.06 83.6);
+  --zs-button-gray-bg-active: oklch(0.8 0.064 83.6);
+  --zs-button-gray-bg-disabled: color-mix(in oklch, var(--zs-label) 3%, var(--zs-surface));
+  --zs-button-gray-ink-disabled: var(--zs-label-tertiary);
+  --zs-button-plain-bg-hover: color-mix(in oklch, var(--zs-accent) 7%, transparent);
+  --zs-button-plain-bg-active: color-mix(in oklch, var(--zs-accent) 11%, transparent);
+  --zs-button-disabled-shadow: inset 0 0.0625rem 0 oklch(1 0 0 / 0.18);
+
+  --zs-button-destructive-filled-bg: oklch(0.47 0.16 28);
+  --zs-button-destructive-filled-ink: oklch(0.97 0.018 0);
+  --zs-button-destructive-filled-bg-hover: oklch(0.43 0.17 28);
+  --zs-button-destructive-filled-bg-active: oklch(0.38 0.18 28);
+  --zs-button-destructive-filled-bg-disabled: color-mix(in oklch, var(--zs-system-red) 14%, var(--zs-fill-quaternary));
+  --zs-button-destructive-tinted-bg: color-mix(in oklch, var(--zs-system-red) 10%, var(--zs-surface));
+  --zs-button-destructive-tinted-bg-hover: color-mix(in oklch, var(--zs-system-red) 15%, var(--zs-surface));
+  --zs-button-destructive-tinted-bg-active: color-mix(in oklch, var(--zs-system-red) 20%, var(--zs-surface));
+  --zs-button-destructive-tinted-bg-disabled: color-mix(in oklch, var(--zs-system-red) 5%, var(--zs-surface));
+  --zs-button-destructive-tinted-ink: var(--zs-system-red-active);
+  --zs-button-destructive-tinted-ink-disabled: color-mix(in oklch, var(--zs-system-red) 34%, var(--zs-label-tertiary));
+  --zs-button-destructive-plain-bg-hover: color-mix(in oklch, var(--zs-system-red) 7%, transparent);
+  --zs-button-destructive-plain-bg-active: color-mix(in oklch, var(--zs-system-red) 11%, transparent);
+
+  --zs-backdrop: oklch(0.32 0.052 128 / 0.16);
+  --zs-scrim: color-mix(in oklch, var(--zs-label) 18%, transparent);
+  --zs-material-tint: color-mix(in oklch, var(--zs-surface-overlay) 86%, transparent);
+  --zs-story-backdrop: var(--zs-crystal-story-backdrop);
+  --zs-story-surface: var(--zs-ghibli-paper-raised);
+  --zs-story-surface-radius: var(--zs-radius-3);
+  --zs-story-surface-edge:
+    inset 0 0 0 0.125rem var(--zs-ghibli-border),
+    0 0.125rem 0 0 var(--zs-ghibli-border);
+
+  --zs-shadow-1:
+    0 0.125rem 0 0 var(--zs-ghibli-border);
+  --zs-shadow-2:
+    0 0.125rem 0 0 var(--zs-ghibli-border);
+  --zs-shadow-3:
+    0 0.1875rem 0 0 var(--zs-ghibli-border);
+  --zs-shadow-4:
+    0 0.25rem 0 0 var(--zs-ghibli-border);
+  --zs-shadow-dialog:
+    0 0.25rem 0 0 var(--zs-ghibli-border),
+    0 0 0 0.125rem var(--zs-ghibli-border),
+    inset 0 0.0625rem 0 var(--zs-crystal-edge-light);
+  --zs-shadow-popover:
+    0 0.1875rem 0 0 var(--zs-ghibli-border),
+    0 0 0 0.125rem var(--zs-ghibli-border);
+
+  --zs-card-backdrop-filter: none;
+  --zs-control-backdrop-filter: none;
+  --zs-dialog-backdrop-filter: none;
+  --zs-card-surface-edge:
+    inset 0 0 0 0.125rem var(--zs-ghibli-border);
+  --zs-card-outline-edge:
+    inset 0 0 0 0.125rem var(--zs-ghibli-border),
+    0 0.125rem 0 0 var(--zs-ghibli-border);
+  --zs-popup-surface-edge:
+    inset 0 0 0 0.125rem var(--zs-ghibli-border),
+    0 0.125rem 0 0 var(--zs-ghibli-border);
+  --zs-input-surface-edge:
+    inset 0 0 0 0 transparent;
+
+  --zs-card-hover-tint: color-mix(in oklch, var(--zs-accent) 5%, transparent);
+
+  --zs-button-filled-shadow:
+    inset 0 0 0 0.125rem var(--zs-ghibli-primary-border),
+    0 0.125rem 0 0 var(--zs-ghibli-primary-border);
+  --zs-button-tinted-shadow:
+    inset 0 0 0 0.125rem var(--zs-ghibli-border),
+    0 0.125rem 0 0 var(--zs-ghibli-border);
+  --zs-button-gray-shadow:
+    inset 0 0 0 0.125rem var(--zs-ghibli-border),
+    0 0.125rem 0 0 var(--zs-ghibli-border);
+  --zs-button-destructive-filled-shadow:
+    inset 0 0 0 0.125rem var(--zs-system-red-active),
+    0 0.125rem 0 0 var(--zs-system-red-active);
+  --zs-button-destructive-tinted-shadow:
+    inset 0 0 0 0.125rem var(--zs-system-red-active),
+    0 0.125rem 0 0 var(--zs-system-red-active);
+  --zs-button-disabled-shadow:
+    inset 0 0 0 0.125rem var(--zs-ghibli-border);
+
+  --zs-app-shell-bg: var(--zs-surface-bg);
+  --zs-shell-header-bg: var(--zs-surface-overlay);
+  --zs-shell-sidebar-bg: color-mix(in oklch, var(--zs-surface-sunken) 84%, transparent);
+
+  --zs-input-border-width: 0.125rem;
+  --zs-input-bg: oklch(0.92 0.042 83.6);
+  --zs-input-bg-hover: oklch(0.88 0.055 83.6);
+  --zs-input-bg-focus: oklch(0.92 0.042 83.6);
+  --zs-input-bg-disabled: color-mix(in oklch, var(--zs-surface-sunken) 78%, var(--zs-surface));
+  --zs-input-bg-filled: var(--zs-ghibli-paper-muted);
+  --zs-input-bg-filled-hover: oklch(0.83 0.068 83.7);
+  --zs-input-border: var(--zs-ghibli-border);
+  --zs-input-border-hover: var(--zs-ghibli-primary-border);
+  --zs-input-bg-readonly: color-mix(in oklch, var(--zs-surface-sunken) 72%, var(--zs-surface));
+}
+
+[data-theme="crystal-dark"] {
+  --zs-surface-bg:
+    radial-gradient(at 10% 0%, oklch(0.32 0.044 255 / 0.38), transparent 44%),
+    radial-gradient(at 88% 8%, oklch(0.28 0.048 205 / 0.24), transparent 40%),
+    radial-gradient(at 78% 92%, oklch(0.28 0.044 300 / 0.2), transparent 46%),
+    linear-gradient(180deg, oklch(0.18 0.012 260), oklch(0.135 0.012 260) 60%, oklch(0.158 0.012 250));
+
+  --zs-surface: oklch(0.3 0.012 260 / 0.46);
+  --zs-surface-raised: oklch(0.36 0.014 260 / 0.42);
+  --zs-surface-overlay: oklch(0.38 0.014 260 / 0.5);
+  --zs-surface-sunken: oklch(0.18 0.012 260 / 0.3);
+
+  --zs-crystal-edge-light: oklch(0.9 0.032 250 / 0.085);
+  --zs-crystal-edge-dark: oklch(0 0 0 / 0.16);
+  --zs-crystal-rim: oklch(0.72 0.05 250 / 0.08);
+  --zs-crystal-rim-strong: oklch(0.76 0.062 248 / 0.15);
+  --zs-crystal-inner-glow: oklch(0.7 0.044 230 / 0.045);
+  --zs-crystal-contact: oklch(0 0 0 / 0.16);
+  --zs-crystal-cyan: oklch(0.64 0.07 210 / 0.12);
+  --zs-crystal-violet: oklch(0.64 0.07 295 / 0.1);
+  --zs-crystal-mint: oklch(0.68 0.06 175 / 0.08);
+  --zs-crystal-story-backdrop:
+    radial-gradient(at 11% 30%, oklch(0.48 0.14 28 / 0.26), transparent 16rem),
+    radial-gradient(at 28% 18%, oklch(0.44 0.1 63 / 0.16), transparent 14rem),
+    radial-gradient(at 44% 22%, oklch(0.38 0.12 252 / 0.18), transparent 16rem),
+    radial-gradient(at 64% 16%, oklch(0.36 0.08 214 / 0.16), transparent 18rem),
+    radial-gradient(at 86% 30%, oklch(0.42 0.11 320 / 0.12), transparent 16rem),
+    var(--zs-surface-bg);
+
+  --zs-label: oklch(0.94 0.006 260);
+  --zs-label-secondary: oklch(0.78 0.01 260);
+  --zs-label-tertiary: oklch(0.64 0.012 260);
+  --zs-label-quaternary: oklch(0.5 0.014 260);
+
+  --zs-fill: oklch(1 0 0 / 0.09);
+  --zs-fill-secondary: oklch(1 0 0 / 0.064);
+  --zs-fill-tertiary: oklch(1 0 0 / 0.044);
+  --zs-fill-quaternary: oklch(1 0 0 / 0.03);
+
+  --zs-separator: oklch(0.84 0.018 255 / 0.07);
+  --zs-separator-strong: oklch(0.88 0.022 255 / 0.14);
+
+  --zs-accent: oklch(0.68 0.17 252);
+  --zs-accent-hover: oklch(0.73 0.16 252);
+  --zs-accent-active: oklch(0.62 0.18 252);
+  --zs-accent-ink: oklch(0.13 0.02 255);
+
+  --zs-system-red: oklch(0.68 0.18 25);
+  --zs-system-red-hover: oklch(0.73 0.17 25);
+  --zs-system-red-active: oklch(0.61 0.19 25);
+  --zs-system-green: oklch(0.72 0.14 150);
+  --zs-system-yellow: oklch(0.84 0.13 95);
+  --zs-system-orange: oklch(0.74 0.16 48);
+
+  --zs-focus: var(--zs-accent);
+  --zs-focus-ring-color: oklch(0.72 0.16 252 / 0.26);
+  --zs-input-focus-ring-color: oklch(0.72 0.16 252 / 0.18);
+  --zs-button-focus-ring-color: oklch(0.72 0.16 252 / 0.22);
+
+  --zs-button-plain-ink: var(--zs-accent-hover);
+  --zs-button-filled-ink: oklch(0.99 0.004 255);
+  --zs-button-filled-bg: oklch(0.54 0.18 254);
+  --zs-button-filled-bg-hover: oklch(0.54 0.18 254);
+  --zs-button-filled-bg-active: oklch(0.5 0.18 254);
+  --zs-button-filled-bg-disabled: color-mix(in oklch, var(--zs-accent) 14%, var(--zs-fill-quaternary));
+  --zs-button-filled-ink-disabled: var(--zs-label-tertiary);
+  --zs-button-tinted-bg: color-mix(in oklch, var(--zs-accent) 15%, var(--zs-surface-overlay));
+  --zs-button-tinted-bg-hover: color-mix(in oklch, var(--zs-accent) 20%, var(--zs-surface-overlay));
+  --zs-button-tinted-bg-active: color-mix(in oklch, var(--zs-accent) 25%, var(--zs-surface-overlay));
+  --zs-button-tinted-bg-disabled: color-mix(in oklch, var(--zs-accent) 6%, var(--zs-fill-quaternary));
+  --zs-button-tinted-ink: var(--zs-accent-hover);
+  --zs-button-tinted-ink-disabled: color-mix(in oklch, var(--zs-accent) 36%, var(--zs-label-tertiary));
+  --zs-button-gray-bg: color-mix(in oklch, var(--zs-label) 7%, var(--zs-surface-overlay));
+  --zs-button-gray-bg-hover: color-mix(in oklch, var(--zs-label) 10%, var(--zs-surface-overlay));
+  --zs-button-gray-bg-active: color-mix(in oklch, var(--zs-label) 13%, var(--zs-surface-overlay));
+  --zs-button-gray-bg-disabled: color-mix(in oklch, var(--zs-label) 3%, var(--zs-fill-quaternary));
+  --zs-button-gray-ink-disabled: var(--zs-label-tertiary);
+  --zs-button-plain-bg-hover: color-mix(in oklch, var(--zs-accent) 11%, transparent);
+  --zs-button-plain-bg-active: color-mix(in oklch, var(--zs-accent) 17%, transparent);
+  --zs-button-disabled-shadow: inset 0 0.0625rem 0 oklch(1 0 0 / 0.05);
+
+  --zs-button-destructive-filled-bg: oklch(0.51 0.18 25);
+  --zs-button-destructive-filled-ink: oklch(0.99 0.004 255);
+  --zs-button-destructive-filled-bg-hover: oklch(0.51 0.18 25);
+  --zs-button-destructive-filled-bg-active: oklch(0.47 0.19 25);
+  --zs-button-destructive-filled-bg-disabled: color-mix(in oklch, var(--zs-system-red) 14%, var(--zs-fill-quaternary));
+  --zs-button-destructive-tinted-bg: color-mix(in oklch, var(--zs-system-red) 14%, var(--zs-surface-overlay));
+  --zs-button-destructive-tinted-bg-hover: color-mix(in oklch, var(--zs-system-red) 20%, var(--zs-surface-overlay));
+  --zs-button-destructive-tinted-bg-active: color-mix(in oklch, var(--zs-system-red) 26%, var(--zs-surface-overlay));
+  --zs-button-destructive-tinted-bg-disabled: color-mix(in oklch, var(--zs-system-red) 6%, var(--zs-fill-quaternary));
+  --zs-button-destructive-tinted-ink: var(--zs-system-red-hover);
+  --zs-button-destructive-tinted-ink-disabled: color-mix(in oklch, var(--zs-system-red) 36%, var(--zs-label-tertiary));
+  --zs-button-destructive-plain-bg-hover: color-mix(in oklch, var(--zs-system-red) 11%, transparent);
+  --zs-button-destructive-plain-bg-active: color-mix(in oklch, var(--zs-system-red) 17%, transparent);
+
+  --zs-backdrop: oklch(0.08 0.012 260 / 0.34);
+  --zs-scrim: oklch(0 0 0 / 0.28);
+  --zs-material-tint: color-mix(in oklch, var(--zs-surface-overlay) 58%, transparent);
+  --zs-story-backdrop: var(--zs-crystal-story-backdrop);
+  --zs-story-surface: color-mix(in oklch, var(--zs-surface-overlay) 56%, transparent);
+  --zs-story-surface-radius: var(--zs-radius-7);
+  --zs-story-surface-edge:
+    inset 0 0.0625rem 0 oklch(0.9 0.032 250 / 0.08),
+    inset 0 -0.0625rem 0 oklch(0 0 0 / 0.12);
+
+  --zs-shadow-1:
+    0 0.25rem 1rem var(--zs-crystal-contact);
+  --zs-shadow-2:
+    0 0.75rem 1.75rem oklch(0 0 0 / 0.2),
+    0 0.125rem 0.375rem oklch(0 0 0 / 0.14);
+  --zs-shadow-3:
+    0 1rem 2.5rem oklch(0 0 0 / 0.26),
+    0 0.1875rem 0.75rem oklch(0 0 0 / 0.18);
+  --zs-shadow-4:
+    0 1.375rem 3.5rem oklch(0 0 0 / 0.3),
+    0 0.375rem 1rem oklch(0 0 0 / 0.2);
+  --zs-shadow-dialog:
+    0 1.75rem 4.5rem oklch(0 0 0 / 0.34),
+    0 0.5rem 1.25rem oklch(0 0 0 / 0.22),
+    0 0 0 0.0625rem var(--zs-crystal-rim),
+    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
+    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark);
+  --zs-shadow-popover:
+    0 1rem 2.25rem oklch(0 0 0 / 0.26),
+    0 0.1875rem 0.625rem oklch(0 0 0 / 0.18),
+    0 0 0 0.0625rem var(--zs-crystal-rim);
+
+  --zs-card-surface-edge:
+    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
+    inset 0 0.75rem 1.5rem var(--zs-crystal-inner-glow),
+    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark);
+  --zs-card-outline-edge:
+    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
+    inset 0 0.75rem 1.5rem var(--zs-crystal-inner-glow),
+    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark),
+    0 0 0 0.0625rem var(--zs-crystal-rim);
+  --zs-popup-surface-edge:
+    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
+    inset 0 0.75rem 1.5rem var(--zs-crystal-inner-glow),
+    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark);
+  --zs-input-surface-edge:
+    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
+    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark);
+
+  --zs-card-hover-tint: color-mix(in oklch, var(--zs-accent) 5%, transparent);
+
+  --zs-button-filled-shadow: none;
+  --zs-button-tinted-shadow: none;
+  --zs-button-gray-shadow: none;
+  --zs-button-destructive-filled-shadow: none;
+  --zs-button-destructive-tinted-shadow: none;
+
+  --zs-app-shell-bg: var(--zs-surface-bg);
+  --zs-shell-header-bg: color-mix(in oklch, var(--zs-surface-overlay) 62%, var(--zs-crystal-cyan));
+  --zs-shell-sidebar-bg: color-mix(in oklch, var(--zs-surface-sunken) 58%, transparent);
+
+  --zs-input-bg: color-mix(in oklch, var(--zs-surface) 64%, var(--zs-fill-tertiary));
+  --zs-input-bg-hover: color-mix(in oklch, var(--zs-surface) 72%, var(--zs-fill-secondary));
+  --zs-input-bg-focus: color-mix(in oklch, var(--zs-surface) 76%, var(--zs-crystal-cyan));
+  --zs-input-bg-disabled: color-mix(in oklch, var(--zs-surface) 56%, var(--zs-fill-quaternary));
+  --zs-input-bg-filled: color-mix(in oklch, var(--zs-surface) 58%, var(--zs-fill-secondary));
+  --zs-input-bg-filled-hover: color-mix(in oklch, var(--zs-surface) 68%, var(--zs-fill-secondary));
+  --zs-input-border: var(--zs-crystal-rim);
+  --zs-input-border-hover: var(--zs-crystal-rim-strong);
+  --zs-input-bg-readonly: color-mix(in oklch, var(--zs-surface) 62%, var(--zs-fill-tertiary));
 }

@@ -42,9 +42,8 @@
  *   - `role="dialog"`-style focus trap on by default: Popover defers to
  *     Base UI's `modal={false}` default, which keeps the popup non-
  *     trapping. Set `modal={true}` for the rare modal popover.
- *   - Glass-surface invariant: the Popup paints an opaque background-
- *     color + optional backdrop-filter (themes that swap surface to a
- *     translucent value get the frosted look automatically).
+ *   - Crystal material pattern: the Popup keeps a computable background-
+ *     color, then layers the active rim, shadow, and material tokens.
  */
 import {
   forwardRef,

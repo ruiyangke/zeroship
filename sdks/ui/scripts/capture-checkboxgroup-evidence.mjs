@@ -1,7 +1,7 @@
 /*
  * Capture-checkboxgroup-evidence: mirrors capture-radio-evidence.mjs.
  *
- * Walks each CheckboxGroup story; writes a Crystal-themed PNG per story.
+ * Walks each CheckboxGroup story; writes a Crystal-themed PNGs per story.
  * The group itself paints nothing of its own — the screenshots verify
  * the LAYOUT (vertical stack vs horizontal wrap), the child chip paint
  * inherited from Checkbox, and the RTL flip.
@@ -18,7 +18,12 @@ const outDir = process.env.THEME_EVIDENCE_DIR
   ? resolve(process.env.THEME_EVIDENCE_DIR)
   : join(staticDir, "theme-evidence");
 
-const themes = [{ label: "Crystal", value: "crystal" }];
+const themes = [
+  { label: "Crystal Light", value: "crystal-light" },
+  { label: "Crystal Dark", value: "crystal-dark" },
+  { label: "Studio Light", value: "studio-light" },
+  { label: "Ghibli Light", value: "ghibli-light" },
+];
 
 const stories = [
   "components-checkboxgroup--basic",

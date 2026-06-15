@@ -1,0 +1,42 @@
+/*
+ * ScrollRail — full-width horizontal rail aligned to a governed container.
+ */
+
+.zs-scroll-rail {
+  --zs-scroll-rail-edge: max(
+    var(--zs-scroll-rail-pad, var(--zs-space-6)),
+    calc((100vw - var(--zs-scroll-rail-max-width, var(--zs-container-wide))) / 2)
+  );
+
+  display: flex;
+  gap: var(--zs-scroll-rail-gap, var(--zs-space-5));
+  box-sizing: border-box;
+  inline-size: 100vw;
+  max-inline-size: 100vw;
+  min-inline-size: 0;
+  margin-inline: calc(50% - 50vw);
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-inline: contain;
+  padding-inline: var(--zs-scroll-rail-edge);
+  scroll-padding-inline: var(--zs-scroll-rail-edge);
+  scrollbar-width: none;
+}
+
+.zs-scroll-rail::-webkit-scrollbar {
+  display: none;
+}
+
+.zs-scroll-rail[data-snap="start"] {
+  scroll-snap-type: inline proximity;
+}
+
+.zs-scroll-rail[data-snap="start"] > * {
+  scroll-snap-align: start;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zs-scroll-rail {
+    scroll-behavior: auto;
+  }
+}

@@ -15,11 +15,10 @@
  * we hook the visible state off those so motion is declarative and
  * reduced-motion respectful.
  *
- * Glass-surface invariant: the Popup declares an opaque `background-
- * color` (--zs-surface) so axe-core's color-contrast walk terminates
- * inside the popup. The optional `backdrop-filter` (gated by
- * --zs-dialog-backdrop-filter, falling back to --zs-material-regular)
- * gives themes a frosted look when --zs-surface is translucent.
+ * Crystal material pattern: the Popup declares a computable
+ * `background-color` (--zs-surface) so axe-core's color-contrast walk
+ * terminates inside the popup. Material, rim, and shadow tokens augment
+ * that readable base.
  *
  * Forced-colors mirror (Slice-5/6/7 lesson): every state selector that
  * paints (background / color / box-shadow / border / filter) gets re-
@@ -66,9 +65,7 @@
 
 /* ─── Popup ─────────────────────────────────────────────────────────── */
 .zs-popover-popup {
-  /* Glass-surface invariant: opaque background-color + optional
-   * backdrop-filter. Themes that swap --zs-surface to translucent get
-   * the frosted look automatically. */
+  /* Computable background-color + active material/rim tokens. */
   background-color: var(--zs-surface);
   color: var(--zs-label);
   font-family: var(--zs-font-system);
@@ -91,7 +88,10 @@
    * the triangle visible when it sits half outside the popup. */
   box-shadow:
     var(--zs-shadow-popover),
-    inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
+    var(
+      --zs-popup-surface-edge,
+      inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator)
+    );
   overflow: visible;
   backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
   -webkit-backdrop-filter: var(

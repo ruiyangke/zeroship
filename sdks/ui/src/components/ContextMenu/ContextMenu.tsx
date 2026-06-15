@@ -162,6 +162,8 @@ const ContextMenuTrigger = forwardRef<HTMLDivElement, ContextMenuTriggerProps>(
       tabIndex,
       children,
       onContextMenu: callerOnContextMenu,
+      role,
+      "aria-haspopup": ariaHasPopup,
       ...rest
     },
     ref,
@@ -217,6 +219,8 @@ const ContextMenuTrigger = forwardRef<HTMLDivElement, ContextMenuTriggerProps>(
         ref={ref}
         className={composeBaseClass("zs-contextmenu-trigger", className)}
         tabIndex={resolvedTabIndex}
+        role={asChild ? role : role ?? "button"}
+        aria-haspopup={asChild ? ariaHasPopup : ariaHasPopup ?? "menu"}
         aria-disabled={disabled || undefined}
         onContextMenuCapture={handleContextMenu}
         render={

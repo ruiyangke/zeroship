@@ -186,20 +186,12 @@ export const AsChildRoot: Story = {
 
 /* ─── 6. Oversized rail in a narrow container (regression) ──────────── */
 export const OversizedRailNarrowContainer: Story = {
-  name: "Oversized rail, narrow container (regression)",
+  name: "Oversized rail, narrow container",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression for the rigid-rail fix: a `sideWidth` (32rem ≈ 512px) " +
-          "far wider than the wrapper (280px). The rail is `flex: 0 1 " +
-          "min(<sideWidth>, 100%)` (shrinkable, capped at the container) " +
-          "with `min-inline-size: 0`, so the oversized basis caps to the " +
-          "280px box instead of blowing past it. The `play()` asserts the " +
-          "rail is capped to the container (its width never exceeds the " +
-          "wrapper) AND there is no horizontal overflow on the split. " +
-          "Pre-fix the rigid `flex: 0 0 <sideWidth>` rail forced the row to " +
-          "the full 512rem basis and overflowed the box.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

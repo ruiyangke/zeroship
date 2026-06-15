@@ -153,11 +153,14 @@
    * surface-on-surface delineation; the popover shadow is the lift. */
   box-shadow:
     var(--zs-shadow-popover),
-    inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
+    var(
+      --zs-popup-surface-edge,
+      inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator)
+    );
   isolation: isolate;
   outline: none;
-  /* Crystal surfaces are opaque, but a future translucent theme inherits
-   * the popover material from --zs-material-regular automatically. */
+  /* Toasts sit above page chrome, so they keep the active material blur
+   * even when the readable surface base remains contrast-safe. */
   backdrop-filter: var(--zs-material-regular);
   -webkit-backdrop-filter: var(--zs-material-regular);
   transition:

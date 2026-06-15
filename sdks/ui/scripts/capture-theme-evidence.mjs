@@ -13,38 +13,45 @@ const outDir = process.env.THEME_EVIDENCE_DIR
   ? resolve(process.env.THEME_EVIDENCE_DIR)
   : join(packageRoot, "storybook-static/theme-evidence");
 const themes = [
-  { label: "Glass Dark", value: "glass-dark" },
-  { label: "Glass Light", value: "glass-light" },
+  { label: "Crystal Light", value: "crystal-light" },
+  { label: "Crystal Dark", value: "crystal-dark" },
+  { label: "Studio Light", value: "studio-light" },
+  { label: "Ghibli Light", value: "ghibli-light" },
 ];
 const captures = [
   {
-    storyId: "components-base-ui--field-inputs",
-    file: "components-base-ui--field-inputs",
+    storyId: "components-card--all-variants",
+    file: "card-all-variants",
     before: async (page) => {
-      await page.locator(".zs-story-form").waitFor({ state: "visible" });
+      await page.locator(".zs-card").first().waitFor({ state: "visible" });
     },
   },
   {
-    storyId: "components-base-ui--choice-controls",
-    file: "components-base-ui--choice-controls",
+    storyId: "components-button--all-styles",
+    file: "button-all-styles",
     before: async (page) => {
-      await page.locator(".zs-switch").waitFor({ state: "visible" });
+      await page.locator(".zs-button").first().waitFor({ state: "visible" });
     },
   },
   {
-    storyId: "components-base-ui--portaled-popup-proof",
-    file: "components-base-ui--portaled-popup-proof",
+    storyId: "components-input--all-variants",
+    file: "input-all-variants",
     before: async (page) => {
-      await page.locator(".zs-dialog__panel").waitFor({ state: "visible" });
-      await page.locator(".zs-select__popup").waitFor({ state: "visible" });
+      await page.locator(".zs-input").first().waitFor({ state: "visible" });
     },
   },
   {
-    storyId: "components-base-ui--button-states",
-    file: "components-base-ui--button-states",
+    storyId: "components-popover--with-title-description",
+    file: "popover-with-title-description",
     before: async (page) => {
-      await page.locator(".zs-button--primary").first().hover();
-      await page.locator(".zs-button--secondary").first().focus();
+      await page.locator(".zs-popover-popup").waitFor({ state: "visible" });
+    },
+  },
+  {
+    storyId: "layouts-appshell--full-shell",
+    file: "appshell-full",
+    before: async (page) => {
+      await page.locator(".zs-app-shell").waitFor({ state: "visible" });
     },
   },
 ];

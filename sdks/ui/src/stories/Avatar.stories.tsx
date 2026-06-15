@@ -434,10 +434,7 @@ export const RTL: Story = {
     docs: {
       description: {
         story:
-          "RTL containers flip the overlap direction automatically via " +
-          "logical properties — no separate Avatar rule needed. The " +
-          "lockup itself reads identical because it has no inline " +
-          "content; this story exists as a visual regression net.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

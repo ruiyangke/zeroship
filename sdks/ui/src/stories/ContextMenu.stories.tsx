@@ -470,10 +470,7 @@ export const DisabledTrigger: Story = {
     docs: {
       description: {
         story:
-          "`disabled` lives on the Root. Base UI's ContextMenu short-" +
-          "circuits its `contextmenu` / touch handlers AND the document-" +
-          "level contextmenu listener, so a right-click on a disabled " +
-          "trigger does NOT open the popup. Wave-9 fix.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

@@ -15,14 +15,18 @@ export default meta;
 
 type Story = StoryObj<typeof FormSection>;
 
+const shellStyle: React.CSSProperties = {
+  inlineSize: "100%",
+  maxInlineSize: "56rem",
+  boxSizing: "border-box",
+  margin: "var(--zs-space-8) auto",
+  padding: "0 var(--zs-space-6)",
+};
+
 /* A constrained shell so the fullscreen stories read as a real settings
    panel rather than a full-bleed band. */
 function Shell({ children }: { children: React.ReactNode }) {
-  return (
-    <div style={{ maxInlineSize: "56rem", margin: "var(--zs-space-8) auto", padding: "0 var(--zs-space-6)" }}>
-      {children}
-    </div>
-  );
+  return <div style={shellStyle}>{children}</div>;
 }
 
 /* ─── 1. Stacked (default) ─────────────────────────────────────────────
@@ -81,6 +85,22 @@ export const Stacked: Story = {
     const region = canvas.getByRole("region", { name: "Profile" });
     await expect(region).toBeInTheDocument();
     await expect(region.tagName).toBe("SECTION");
+
+    // Regression: fullscreen Storybook wraps the story in a centered canvas.
+    // The Shell must claim width explicitly so FormSection doesn't collapse
+    // under inline-size containment. Compare against the Shell's content box
+    // rather than a fixed viewport width so mobile previews remain valid.
+    const shell = region.parentElement;
+    await expect(shell).toBeTruthy();
+    const shellStyle = getComputedStyle(shell as HTMLElement);
+    const shellContentWidth =
+      (shell as HTMLElement).getBoundingClientRect().width -
+      Number.parseFloat(shellStyle.paddingInlineStart || "0") -
+      Number.parseFloat(shellStyle.paddingInlineEnd || "0");
+    await expect(region.getBoundingClientRect().width).toBeGreaterThan(0);
+    await expect(region.getBoundingClientRect().width).toBeGreaterThanOrEqual(
+      shellContentWidth - 1,
+    );
 
     // aria-labelledby points at the heading element, and that element is
     // present in the DOM with the title text.
@@ -243,7 +263,7 @@ export const Compound: Story = {
  * Fragment got wrapped in an implicit <FormSectionBody>, nesting the
  * Header inside the body region and breaking the grid-area layout. */
 export const CompoundPartsInFragment: Story = {
-  name: "Compound parts inside a Fragment (regression)",
+  name: "Compound parts inside a Fragment",
   parameters: {
     docs: {
       description: {

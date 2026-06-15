@@ -557,15 +557,13 @@ export const WithIcons: Story = {
  * Menubar wrapper strips `role` at runtime so the rendered element is
  * always `role="menubar"`. The aria-wiring runner checks the rendered
  * DOM stays `role="menubar"`. */
-export const RoleLockRegression: Story = {
+export const RoleLock: Story = {
   name: "Role lock — caller-passed role is stripped",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression for Slice 12 review fix #3. The Menubar wrapper " +
-          "strips a user-passed `role` at runtime so a `{...spread}` " +
-          "injection cannot override `role=\"menubar\"`.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -575,7 +573,7 @@ export const RoleLockRegression: Story = {
       <div
         className="zs-story-row"
         role="group"
-        aria-label="Menubar role lock regression"
+        aria-label="Menubar role lock"
       >
         <Menubar data-testid="menubar-role-lock" {...bypass}>
           <Menu>
@@ -610,16 +608,13 @@ export const RoleLockRegression: Story = {
  * alongside `role`; this story injects a render-prop that would
  * otherwise change the rendered tag and role, then asserts the DOM
  * still carries `role="menubar"` AND a `<div>` host element. */
-export const RenderInjectionRegression: Story = {
+export const RenderInjectionLock: Story = {
   name: "Render lock — caller-passed render is stripped",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression for wave10 🔴. The Menubar wrapper strips a " +
-          "user-passed `render` at runtime so a `{...spread}` injection " +
-          "cannot replace our `<div>` host or override the locked " +
-          "`role=\"menubar\"`.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -646,7 +641,7 @@ export const RenderInjectionRegression: Story = {
       <div
         className="zs-story-row"
         role="group"
-        aria-label="Menubar render injection regression"
+        aria-label="Menubar render injection"
       >
         <Menubar data-testid="menubar-render-lock" {...bypass}>
           <Menu>
@@ -693,16 +688,13 @@ export const RenderInjectionRegression: Story = {
  * present anywhere in the document. We also assert that `document.body`
  * has not received a scroll-lock `overflow: hidden` style.
  */
-export const NonModalDefaultRegression: Story = {
+export const NonModalDefault: Story = {
   name: "Modal default — wrapper overrides Base UI to non-modal",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression for wave10 rework 🔴. The Menubar wrapper defaults " +
-          "`modal` to `false` so omitted-prop callers get the non-modal " +
-          "desktop-style behavior — opening a menu must NOT scroll-lock " +
-          "the page or install Base UI's interaction backdrop.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -710,7 +702,7 @@ export const NonModalDefaultRegression: Story = {
     <div
       className="zs-story-row"
       role="group"
-      aria-label="Menubar modal default regression"
+      aria-label="Menubar modal default"
     >
       <Menubar data-testid="menubar-modal-default">
         <Menu>
@@ -773,16 +765,13 @@ export const NonModalDefaultRegression: Story = {
  * menubar and asserts the rendered DOM still carries
  * `aria-orientation="horizontal"`.
  */
-export const AriaOrientationLockRegression: Story = {
+export const AriaOrientationLock: Story = {
   name: "aria-orientation lock — caller-passed value is stripped",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression for wave10 rework 🔴. The Menubar wrapper omits " +
-          "`aria-orientation` from the public type AND strips it at " +
-          "runtime so a `{...spread}` injection cannot contradict the " +
-          "`orientation` prop's computed ARIA state.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -798,7 +787,7 @@ export const AriaOrientationLockRegression: Story = {
       <div
         className="zs-story-row"
         role="group"
-        aria-label="Menubar aria-orientation lock regression"
+        aria-label="Menubar aria-orientation lock"
       >
         <Menubar
           data-testid="menubar-aria-orientation-lock"

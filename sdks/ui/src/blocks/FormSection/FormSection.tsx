@@ -114,6 +114,23 @@ function flattenChildren(children: ReactNode): ReactNode[] {
   return out;
 }
 
+function containsDisplayName(children: ReactNode, displayName: string): boolean {
+  let found = false;
+  Children.forEach(children, (child) => {
+    if (found || !isValidElement(child)) return;
+    const t = child.type as { displayName?: string } | undefined;
+    if (t?.displayName === displayName) {
+      found = true;
+      return;
+    }
+    found = containsDisplayName(
+      (child.props as { children?: ReactNode }).children,
+      displayName,
+    );
+  });
+  return found;
+}
+
 /* ─── shared title-id context ─────────────────────────────────────────
  * The root mints one id (useId) and provides it. The Title (whether
  * rendered by the ergonomic path or via the compound FormSection.Header)
@@ -209,6 +226,8 @@ const FormSectionRoot = forwardRef<HTMLElement, FormSectionProps>(
 
     const hasErgonomicHeader = title != null || description != null;
     const hasErgonomicFooter = footer != null;
+    const hasCompoundTitle = containsDisplayName(children, "FormSection.Title");
+    const hasAccessibleTitle = title != null || hasCompoundTitle;
 
     if (process.env.NODE_ENV !== "production") {
       if (hasErgonomicHeader && hasCompoundHeader) {
@@ -264,7 +283,7 @@ const FormSectionRoot = forwardRef<HTMLElement, FormSectionProps>(
           // The section is named by its Title heading. Both ergonomic
           // and compound Titles stamp THIS id (read from context) onto
           // their heading element, so the relationship always resolves.
-          aria-labelledby={titleId}
+          aria-labelledby={hasAccessibleTitle ? titleId : undefined}
           data-slot="form-section"
           data-orientation={orientation}
           className={classnames(

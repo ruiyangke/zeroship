@@ -441,6 +441,7 @@ const AppShellBody = forwardRef<HTMLDivElement, AppShellBodyProps>(
         className={classnames("zs-app-shell__body", className)}
         side={ctx?.sidebarSide ?? "start"}
         sideWidth="var(--app-shell-sidebar-width, 16rem)"
+        collapseBelow="sm"
       >
         {children}
       </Split>

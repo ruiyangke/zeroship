@@ -740,10 +740,7 @@ export const WithLabel: Story = {
     docs: {
       description: {
         story:
-          "Toggle.Group wrapped in a Field. `Field.Label` carries the " +
-          "explicit id the group's `aria-labelledby` resolves to — no " +
-          "`aria-label` shortcut. Mirrors the Radio + Field idiom from " +
-          "Slice 4.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -884,16 +881,12 @@ export const RTL: Story = {
  * stay tinted with `--zs-label`. The mirrored selectors inside the
  * `@media (forced-colors: active)` block restore the cascade. */
 export const ForcedColorsHover: Story = {
-  name: "Forced-colors hover (regression)",
+  name: "Forced-colors hover",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression target for the forced-colors specificity fix. " +
-          "Playwright emulates `forced-colors: active`, hovers the " +
-          "unpressed segment, and asserts computed background paints " +
-          "with `Canvas` — the system color — not the token-derived " +
-          "oklch mix.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -901,7 +894,7 @@ export const ForcedColorsHover: Story = {
     <div
       className="zs-story-row"
       role="group"
-      aria-label="Forced colors hover regression"
+      aria-label="Forced colors hover"
     >
       <div className="zs-story-cell">
         <span className="zs-story-label">Standalone</span>
@@ -937,16 +930,12 @@ export const ForcedColorsHover: Story = {
  * This story renders a stock Toggle.Group; the aria-wiring assertion
  * queries `role` on the root and verifies it is exactly "toolbar". */
 export const RoleToolbarLock: Story = {
-  name: "Role toolbar lock (regression)",
+  name: "Role toolbar lock",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression target for the `role=\"toolbar\"` lock. The " +
-          "public ToggleGroupProps omits `role`, so a consumer cannot " +
-          "override it at the type level. Runtime defense pins the " +
-          "attribute via spread-order; the aria-wiring assertion " +
-          "verifies the DOM role is always `toolbar`.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -1029,16 +1018,12 @@ function ControlledClearableHarness() {
 }
 
 export const ControlledClearable: Story = {
-  name: "Controlled clearable (regression)",
+  name: "Controlled clearable",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression target for the controlled-`undefined` bug. " +
-          "Consumer holds a `Value | undefined` state; clearing it must " +
-          "leave the group with no pressed segment. Pre-fix the group " +
-          "fell off Base UI's controlled path and stuck on the last " +
-          "value; post-fix `aria-pressed` is `false` on every segment.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -1059,16 +1044,12 @@ export const ControlledClearable: Story = {
  * doesn't block the story render. The aria-wiring assertion reads the
  * DOM `role` attribute and confirms it is exactly `"toolbar"`. */
 export const RoleOverrideAttempt: Story = {
-  name: "Role override attempt (regression)",
+  name: "Role override attempt",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression target for the runtime `role=\"toolbar\"` lock. " +
-          "An untyped consumer escape-hatch (`{role: \"banner\"} as " +
-          "any`) attempts to overwrite the role on the group root. " +
-          "The runtime stamps `role` AFTER the `{...rest}` spread so " +
-          "the DOM role stays `toolbar` regardless.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

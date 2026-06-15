@@ -416,8 +416,7 @@ export const AriaPropagation: Story = {
     docs: {
       description: {
         story:
-          "Regression hook for Slice-6 review-fix 4: aria-* on " +
-          "`<Autocomplete>` lands on the focusable `<input>`.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -463,12 +462,7 @@ export const FieldAriaAutowiring: Story = {
     docs: {
       description: {
         story:
-          "Regression hook for Wave-10 review-fix A: inside `<Field>` with " +
-          "`<Field.Label>` + `<Field.Description>`, Autocomplete must let " +
-          "Base UI's Field bridge auto-wire `aria-labelledby` and " +
-          "`aria-describedby` on the input. Pre-fix the wrapper passed " +
-          "`undefined` and overwrote those ids — the input had no " +
-          "accessible name. The story passes NO consumer aria-* props.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -536,11 +530,7 @@ export const PlaceholderFallback: Story = {
     docs: {
       description: {
         story:
-          "Regression hook for Wave-10 review-fix B: a standalone " +
-          "Autocomplete without a Field wrapper, without `aria-label`, " +
-          "and without `aria-labelledby` falls back to using " +
-          "`placeholder` as its accessible name so screen readers still " +
-          "announce it.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

@@ -12,10 +12,10 @@
  * usual content surface). High contrast at small sizes; doesn't compete
  * with the page chrome for attention.
  *
- * Glass-surface invariant: even though the popup paints with a label-
- * tone fill (not the page surface), it stays OPAQUE so axe-core's
- * color-contrast walk terminates inside the popup. No backdrop-filter
- * — the tooltip is a chip, not a sheet.
+ * Crystal material pattern: even though the popup paints with a label-
+ * tone fill (not the page surface), it stays computable so axe-core's
+ * color-contrast walk terminates inside the popup. No backdrop-filter:
+ * the tooltip is a chip, not a sheet.
  *
  * Forced-colors mirror: every PAINTING selector (background / color /
  * box-shadow / filter) is re-emitted inside `@media (forced-colors:

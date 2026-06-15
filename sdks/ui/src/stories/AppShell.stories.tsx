@@ -15,11 +15,11 @@ import { DescriptionList, StatCard } from "../blocks";
  *
  * The AppShell stays STRUCTURAL — it ships the rail surface + divider but
  * no opinion on what a nav item looks like. These styles are the showcase
- * recipe for a grouped, icon+label navigation rail: a sunken-rail group
- * label, a comfortable hit-target link with a hover fill, a focus-visible
- * ring, and one accent-tinted ACTIVE item carrying a leading accent
- * indicator. Everything is expressed in `--zs-*` tokens (no raw hex/px) so
- * the recipe drops straight into a governed surface. Scoped under
+ * recipe for a grouped, icon+label navigation rail: a quiet group label,
+ * a comfortable rounded hit target with a hover fill, a focus-visible
+ * ring, and one accent-tinted active item. Everything is expressed in
+ * `--zs-*` tokens (no raw hex/px) so the recipe drops straight into a
+ * governed surface. Scoped under
  * `.zs-demo-nav` so it can't leak past the story.
  */
 const navRecipe = `
@@ -54,7 +54,7 @@ const navRecipe = `
   gap: var(--zs-space-2);
   padding-block: var(--zs-space-2);
   padding-inline: var(--zs-space-2);
-  border-radius: var(--zs-radius-2);
+  border-radius: var(--zs-radius-full);
   color: var(--zs-label-secondary);
   font-size: var(--zs-text-callout-size);
   line-height: var(--zs-text-callout-line);
@@ -65,34 +65,24 @@ const navRecipe = `
 }
 .zs-demo-nav__item:hover {
   background: var(--zs-fill-quaternary);
+  backdrop-filter: var(--zs-control-backdrop-filter, none);
+  -webkit-backdrop-filter: var(--zs-control-backdrop-filter, none);
   color: var(--zs-label);
 }
 .zs-demo-nav__item:focus-visible {
   outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
   outline-offset: var(--zs-focus-ring-offset);
 }
-/* Active item — the leading accent RAIL is the one dominant signal; a
- * light accent fill + a calmer accent ink support it without shouting.
- * The indicator is an inline-start border so it tracks the reading edge
- * under RTL automatically. */
 .zs-demo-nav__item[aria-current="page"] {
-  /* Lighter fill (8%, down from 14%) so the rail — not the tint — leads. */
-  background: color-mix(in oklch, var(--zs-accent) 8%, transparent);
-  /* The calmer accent-hover step (vs the louder accent-active) still
-   * clears WCAG AA on the lighter 8% fill (measured ~5.5:1), so the
-   * active item stays legible while reading quieter. The leading rail +
-   * heavier weight carry the active state without relying on color alone. */
+  background: color-mix(in oklch, var(--zs-accent) 10%, var(--zs-surface));
+  backdrop-filter: var(--zs-control-backdrop-filter, none);
+  -webkit-backdrop-filter: var(--zs-control-backdrop-filter, none);
+  box-shadow: var(--zs-input-surface-edge, none);
   color: var(--zs-accent-hover);
   font-weight: var(--zs-text-headline-weight);
 }
 .zs-demo-nav__item[aria-current="page"]::before {
-  content: "";
-  position: absolute;
-  inset-block: var(--zs-space-1);
-  inset-inline-start: 0;
-  inline-size: var(--zs-space-half);
-  border-radius: var(--zs-radius-full);
-  background: var(--zs-accent);
+  content: none;
 }
 .zs-demo-nav__icon {
   flex: 0 0 auto;
@@ -127,7 +117,7 @@ const navRecipe = `
   justify-content: center;
   inline-size: var(--zs-space-6);
   block-size: var(--zs-space-6);
-  border-radius: var(--zs-radius-2);
+  border-radius: var(--zs-radius-full);
   background: color-mix(in oklch, var(--zs-accent) 16%, transparent);
   color: var(--zs-accent);
 }
@@ -786,20 +776,12 @@ export const SidebarEnd: Story = {
 
 /* ─── 5. Scroll frame — Main owns the scroll (regression) ───────────────── */
 export const ScrollFrame: Story = {
-  name: "Scroll frame (regression)",
+  name: "Scroll frame",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression for the fixed-frame fix: the shell is a DEFINITE " +
-          "`block-size: 100dvh` (not a `min-block-size`), so when Main " +
-          "content is taller than the frame the `.zs-app-shell__main` " +
-          "element owns the scroll while Header/Footer stay pinned to the " +
-          "band edges. The `play()` constrains the shell to a fixed height, " +
-          "asserts Main is the scroller (`scrollHeight > clientHeight`), " +
-          "scrolls Main, and asserts the header's top stays put. Pre-fix the " +
-          "`min-block-size` let the document scroll instead and Main's " +
-          "`overflow: auto` never engaged.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

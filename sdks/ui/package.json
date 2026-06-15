@@ -22,6 +22,7 @@
     "build": "tsup && node scripts/copy-css.mjs",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
+    "test:story-copy": "node scripts/check-story-copy.mjs",
     "test:a11y": "node scripts/check-storybook-a11y.mjs",
     "capture:themes": "node scripts/capture-theme-evidence.mjs",
     "test-storybook": "test-storybook --config-dir .storybook --url http://127.0.0.1:6119 --maxWorkers=2",

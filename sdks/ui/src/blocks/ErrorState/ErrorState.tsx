@@ -45,6 +45,7 @@
  * Wrap the block in your own element if you need a custom/semantic root.
  */
 import {
+  Children,
   forwardRef,
   isValidElement,
   type ComponentPropsWithoutRef,
@@ -130,6 +131,27 @@ const ErrorStateRoot = forwardRef<HTMLDivElement, ErrorStateProps>(
       `zs-error-state--${intent}`,
       className,
     );
+
+    if (process.env.NODE_ENV !== "production" && title != null) {
+      let hasCompoundTitle = false;
+      for (const child of Children.toArray(children)) {
+        if (!isValidElement(child)) continue;
+        const t = child.type as { displayName?: string } | undefined;
+        if (t?.displayName === "ErrorState.Title") {
+          hasCompoundTitle = true;
+          break;
+        }
+      }
+      if (hasCompoundTitle) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "ErrorState received both a `title` prop AND an " +
+            "<ErrorState.Title> child. They are additive — you will get " +
+            "two same-level headings in the document outline. Use one or " +
+            "the other.",
+        );
+      }
+    }
 
     // `role="alert"` ONLY when `live` (see the file-header note). A
     // plain region otherwise.

@@ -18,10 +18,10 @@
  *   trigger:  --default | --outline · --sm | --md | --lg
  *   popup:    --sm | --md | --lg
  *
- * Glass-surface invariant (from Dialog/Card/story.css): the popup paints
- * with an OPAQUE background-color so axe-core's color-contrast walk
- * resolves cleanly, plus an optional backdrop-filter the active theme
- * may disable via `--zs-dialog-backdrop-filter: none`.
+ * Crystal material pattern (from Dialog/Card/story.css): the popup keeps
+ * a computable background-color so axe-core's color-contrast walk
+ * resolves cleanly, then layers the active rim and material tokens on
+ * top of that readable base.
  *
  * Hit-target floor: items use `min-block-size: 1.75rem` (28 device-units)
  * which lands above the brief's ≥ 1.75rem floor and keeps popup density
@@ -228,9 +228,7 @@
 
 /* ─── popup — opaque sheet, dialog-shadow ──────────────────────────── */
 .zs-select-popup {
-  /* Glass-surface invariant: opaque background-color + optional
-   * backdrop-filter. Themes that swap --zs-surface to a translucent
-   * value get the frosted look automatically. */
+  /* Computable background-color + active material/rim tokens. */
   background-color: var(--zs-surface);
   color: var(--zs-label);
   font-family: var(--zs-font-system);
@@ -239,7 +237,10 @@
   border-radius: var(--zs-radius-5);
   box-shadow:
     var(--zs-shadow-dialog),
-    inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
+    var(
+      --zs-popup-surface-edge,
+      inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator)
+    );
   backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
   -webkit-backdrop-filter: var(
     --zs-dialog-backdrop-filter,

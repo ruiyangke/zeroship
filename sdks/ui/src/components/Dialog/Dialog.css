@@ -22,11 +22,10 @@
  * We hook the visible state off those data attributes so animations
  * are declarative and reduced-motion-aware.
  *
- * Glass-surface invariant: the Popup declares an opaque background
- * (--zs-surface). The Backdrop uses --zs-scrim (a color-mix translucent
- * black) — the Popup itself is opaque so axe's color-contrast walk
- * terminates inside the Popup and never tries to resolve descendants
- * against the translucent Backdrop.
+ * Crystal material pattern: the Popup declares a computable background
+ * color so axe's color-contrast walk terminates inside the sheet. The
+ * glass feeling comes from the theme's rim, contact-shadow, and
+ * material-filter tokens layered onto that readable base.
  */
 
 /* ─── Backdrop ─────────────────────────────────────────────────────────── */
@@ -95,9 +94,7 @@
   max-inline-size: var(--zs-dialog-max-width-md);
   max-block-size: calc(100dvh - var(--zs-space-7) * 2);
   background-color: var(--zs-surface);
-  /* Themes set --zs-dialog-backdrop-filter to `none` when the surface
-   * is opaque (no visual contribution; skip compositing cost). Same
-   * gate pattern as Card. */
+  background-clip: padding-box;
   backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
   -webkit-backdrop-filter: var(
     --zs-dialog-backdrop-filter,

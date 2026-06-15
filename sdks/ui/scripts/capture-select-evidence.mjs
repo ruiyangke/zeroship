@@ -1,6 +1,6 @@
 /*
  * Capture-select-evidence: walks every Select story and writes a 2x PNG
- * under the Crystal theme. Triggers the popup open on stories whose
+ * under both both Crystal themess. Triggers the popup open on stories whose
  * point is the popup itself.
  *
  * Mirrors capture-toggle-evidence.mjs but adds a `open` flag per story
@@ -19,7 +19,12 @@ const outDir = process.env.THEME_EVIDENCE_DIR
   ? resolve(process.env.THEME_EVIDENCE_DIR)
   : join(staticDir, "theme-evidence");
 
-const themes = [{ label: "Crystal", value: "crystal" }];
+const themes = [
+  { label: "Crystal Light", value: "crystal-light" },
+  { label: "Crystal Dark", value: "crystal-dark" },
+  { label: "Studio Light", value: "studio-light" },
+  { label: "Ghibli Light", value: "ghibli-light" },
+];
 
 const stories = [
   { id: "components-select--basic", open: true, trigger: '[data-testid="select-basic"]' },

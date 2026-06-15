@@ -33,19 +33,20 @@
 .zs-otp-field {
   display: inline-flex;
   align-items: center;
-  gap: var(--zs-space-2);
+  gap: clamp(var(--zs-space-1), 2vw, var(--zs-space-2));
+  max-inline-size: 100%;
   font-family: var(--zs-font-system);
   color: var(--zs-label);
-  --zs-otp-cell-size: var(--zs-control-h-md);
+  --zs-otp-cell-size: min(var(--zs-control-h-md), 13vw);
 }
 
 .zs-otp-field--sm {
-  --zs-otp-cell-size: var(--zs-control-h-sm);
+  --zs-otp-cell-size: min(var(--zs-control-h-sm), 12vw);
   gap: var(--zs-space-1);
 }
 .zs-otp-field--lg {
-  --zs-otp-cell-size: var(--zs-control-h-lg);
-  gap: var(--zs-space-2);
+  --zs-otp-cell-size: min(var(--zs-control-h-lg), 14vw);
+  gap: clamp(var(--zs-space-1), 2vw, var(--zs-space-2));
 }
 
 /* Coarse-pointer hit-target floor — touch users need at least
@@ -61,12 +62,14 @@
 @media (pointer: coarse) {
   .zs-otp-field {
     --zs-otp-cell-size: max(var(--zs-control-h-md), var(--zs-hit-min));
+    gap: clamp(var(--zs-space-half), 1vw, var(--zs-space-1));
   }
   .zs-otp-field--sm {
     --zs-otp-cell-size: max(var(--zs-control-h-sm), var(--zs-hit-min));
   }
   .zs-otp-field--lg {
     --zs-otp-cell-size: max(var(--zs-control-h-lg), var(--zs-hit-min));
+    gap: clamp(var(--zs-space-half), 1vw, var(--zs-space-1));
   }
 }
 

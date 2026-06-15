@@ -15,11 +15,10 @@
  * We hook visibility off those data attributes so animations are
  * declarative and reduced-motion-aware.
  *
- * Glass-surface invariant: Content declares an opaque
+ * Crystal material pattern: Content declares a computable
  * `background-color: var(--zs-surface)`. The Backdrop layers a
- * translucent --zs-scrim plus a Crystal-gated `--zs-blur-overlay`
- * filter — but the Content underneath the Backdrop is opaque so axe's
- * color-contrast walk terminates on a solid surface.
+ * translucent --zs-scrim plus `--zs-blur-overlay`, while the Content
+ * keeps axe's color-contrast walk on a readable surface.
  *
  * RTL: `side="start"` / `side="end"` flip via `inset-inline-*` and a
  * mirrored translate under `[dir="rtl"]`. `translate` itself is a
@@ -67,6 +66,12 @@
   flex-direction: column;
   background-color: var(--zs-surface);
   color: var(--zs-label);
+  background-clip: padding-box;
+  backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
+  -webkit-backdrop-filter: var(
+    --zs-dialog-backdrop-filter,
+    var(--zs-material-regular)
+  );
   box-shadow: var(--zs-shadow-dialog);
   font-family: var(--zs-font-system);
   overflow: hidden;

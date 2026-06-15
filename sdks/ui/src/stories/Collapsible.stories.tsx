@@ -188,15 +188,13 @@ export const Disabled: Story = {
  * story renders closed; the script clicks once to open (measures the
  * settled open height), then clicks again to close and samples the
  * in-flight block-size. */
-export const RegressionTransitions: Story = {
-  name: "Regression — transitions (fix #1)",
+export const TransitionBehavior: Story = {
+  name: "Transitions",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression baseline for the Slice 14 Collapsible fix #1 " +
-          "panel-transition check. No play() — the aria-wiring script " +
-          "drives the click itself and samples mid-transition block-size.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -204,7 +202,7 @@ export const RegressionTransitions: Story = {
     <div
       className="zs-story-row"
       role="group"
-      aria-label="Regression transitions"
+      aria-label="Behavior transitions"
     >
       <Collapsible data-testid="collapsible-regression-transitions">
         <Collapsible.Trigger
@@ -536,24 +534,18 @@ function OnOpenChangeDetailsStory() {
         <Collapsible.Trigger data-testid="collapsible-details-trigger">
           Show changelog
         </Collapsible.Trigger>
-        <Collapsible.Panel data-testid="collapsible-details-panel">
-          Wave 10 rework wired the Base UI change details through
-          `onOpenChange`.
-        </Collapsible.Panel>
+        <Collapsible.Panel data-testid="collapsible-details-panel"> This example wired the Base UI change details through `onOpenChange`. </Collapsible.Panel>
       </Collapsible>
     </div>
   );
 }
-export const RegressionOnOpenChangeDetails: Story = {
-  name: "Regression — onOpenChange details (rework fix #2)",
+export const OnOpenChangeDetails: Story = {
+  name: "OnOpenChange details",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression for the Wave 10 rework: `onOpenChange` MUST forward " +
-          "Base UI's second `details` argument so consumers can read the " +
-          "reason / native event and call `details.cancel()`. The readout " +
-          "captures the `reason` field on the post-click call.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -594,17 +586,13 @@ export const RegressionOnOpenChangeDetails: Story = {
  * `forced-colors: active` emulation; the story just provides a
  * defaultOpen + disabled Collapsible mount so the assertion has a
  * stable target. */
-export const RegressionDisabledOpenForcedColors: Story = {
-  name: "Regression — disabled+open forced-colors (rework fix #3)",
+export const DisabledOpenForcedColors: Story = {
+  name: "Disabled+open forced-colors",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression baseline for the Wave 10 rework forced-colors fix. " +
-          "An open + disabled Collapsible.Trigger must paint GrayText (the " +
-          "disabled system color), NOT HighlightText. The aria-wiring " +
-          "script emulates `forced-colors: active` and reads computed " +
-          "color on the Trigger AND the chevron.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

@@ -16,10 +16,9 @@
  *           ├─ .zs-menu-submenu-trigger     adds chevron tail
  *           └─ .zs-menu-separator
  *
- * Glass-surface invariant: the popup paints an OPAQUE background-color
- * + optional backdrop-filter (themes that swap --zs-surface to a
- * translucent value get the frosted look automatically). Mirrors
- * Dialog / Popover / Select.
+ * Crystal material pattern: the popup paints a computable background
+ * color, then layers the active rim, shadow, and material tokens.
+ * Mirrors Dialog / Popover / Select.
  *
  * Hit-target floor: items use `min-block-size: 1.75rem` per the brief's
  * Slice-11 contingency. Same floor Select.Item uses.
@@ -63,9 +62,7 @@
 
 /* ─── Popup ────────────────────────────────────────────────────────── */
 .zs-menu-popup {
-  /* Glass-surface invariant: opaque background-color + optional
-   * backdrop-filter. Themes that swap --zs-surface to translucent get
-   * the frosted look automatically. */
+  /* Computable background-color + active material/rim tokens. */
   background-color: var(--zs-surface);
   color: var(--zs-label);
   font-family: var(--zs-font-system);
@@ -83,7 +80,10 @@
   border-radius: var(--zs-radius-5);
   box-shadow:
     var(--zs-shadow-dialog),
-    inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
+    var(
+      --zs-popup-surface-edge,
+      inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator)
+    );
   backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
   -webkit-backdrop-filter: var(
     --zs-dialog-backdrop-filter,

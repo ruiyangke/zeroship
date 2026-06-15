@@ -11,7 +11,10 @@ if (!baseUrl) {
  * appends its story IDs here; each new palette appends a theme entry.
  */
 const themes = [
-  { label: "Crystal", value: "crystal" },
+  { label: "Crystal Light", value: "crystal-light" },
+  { label: "Crystal Dark", value: "crystal-dark" },
+  { label: "Studio Light", value: "studio-light" },
+  { label: "Ghibli Light", value: "ghibli-light" },
 ];
 const stories = [
   "components-button--all-styles",

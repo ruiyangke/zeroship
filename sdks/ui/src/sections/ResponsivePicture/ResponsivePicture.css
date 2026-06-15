@@ -1,0 +1,89 @@
+/*
+ * ResponsivePicture — governed media crops.
+ */
+
+.zs-responsive-picture {
+  display: block;
+  inline-size: 100%;
+  overflow: hidden;
+}
+
+.zs-responsive-picture[data-ratio="square"] {
+  aspect-ratio: 1;
+}
+
+.zs-responsive-picture[data-ratio="video"] {
+  aspect-ratio: 16 / 9;
+}
+
+.zs-responsive-picture[data-ratio="wide"] {
+  aspect-ratio: 4 / 3;
+}
+
+.zs-responsive-picture[data-ratio="banner"] {
+  aspect-ratio: 21 / 9;
+}
+
+.zs-responsive-picture[data-ratio="portrait"] {
+  aspect-ratio: 3 / 4;
+}
+
+.zs-responsive-picture[data-ratio="product"] {
+  aspect-ratio: 5 / 4;
+}
+
+.zs-responsive-picture[data-radius="none"] {
+  border-radius: 0;
+}
+
+.zs-responsive-picture[data-radius="sm"] {
+  border-radius: var(--zs-radius-4);
+}
+
+.zs-responsive-picture[data-radius="md"] {
+  border-radius: var(--zs-radius-5);
+}
+
+.zs-responsive-picture[data-radius="lg"] {
+  border-radius: var(--zs-radius-6);
+}
+
+.zs-responsive-picture[data-radius="xl"] {
+  border-radius: var(--zs-radius-7);
+}
+
+.zs-responsive-picture[data-frame="none"] {
+  overflow: visible;
+}
+
+.zs-responsive-picture[data-frame="surface"] {
+  border: var(--zs-selection-hairline) solid var(--zs-separator);
+  background: var(--zs-surface-raised);
+  box-shadow: var(--zs-shadow-2);
+}
+
+.zs-responsive-picture__img {
+  display: block;
+  inline-size: 100%;
+  block-size: auto;
+}
+
+.zs-responsive-picture:not([data-ratio="auto"]) .zs-responsive-picture__img {
+  block-size: 100%;
+}
+
+.zs-responsive-picture[data-fit="cover"] .zs-responsive-picture__img {
+  object-fit: cover;
+}
+
+.zs-responsive-picture[data-fit="contain"] .zs-responsive-picture__img {
+  object-fit: contain;
+}
+
+@media (forced-colors: active) {
+  .zs-responsive-picture[data-frame="surface"] {
+    border-color: CanvasText;
+    background: Canvas;
+    box-shadow: none;
+  }
+}

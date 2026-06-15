@@ -185,3 +185,36 @@ export const LongLabelEllipsis: Story = {
     );
   },
 };
+
+/* ─── 5. asChild long link ellipsizes ───────────────────────────────── */
+export const AsChildLongLinkEllipsis: Story = {
+  name: "asChild long link ellipsizes",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "`asChild` routes the Badge class onto the child element, so " +
+          "there is no inner `.zs-badge__label` span. The routed root " +
+          "must still clamp long plain-text links inside narrow containers.",
+      },
+    },
+  },
+  render: () => (
+    <div style={{ inlineSize: "7rem" }} data-testid="badge-aschild-clamp-box">
+      <Badge asChild intent="info" data-testid="badge-aschild-long">
+        <a href="#super-long-filter">supercalifragilisticexpialidocious</a>
+      </Badge>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const badge = canvas.getByTestId("badge-aschild-long");
+    const box = canvas.getByTestId("badge-aschild-clamp-box");
+    await expect(badge.tagName).toBe("A");
+    await expect(getComputedStyle(badge).textOverflow).toBe("ellipsis");
+    await expect(getComputedStyle(badge).overflow).toBe("hidden");
+    await expect(badge.getBoundingClientRect().width).toBeLessThanOrEqual(
+      box.getBoundingClientRect().width + 1,
+    );
+  },
+};

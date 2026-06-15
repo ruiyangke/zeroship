@@ -64,10 +64,9 @@
  * `ComponentPropsWithoutRef` so consumers don't pass a `ref` that would
  * silently drop on React 18.
  *
- * Glass-surface invariant: the Popup paints an opaque `background-color`
- * (--zs-surface). The optional `backdrop-filter` (gated by
- * --zs-dialog-backdrop-filter) gives themes a frosted look when the
- * surface token is translucent.
+ * Crystal material pattern: the Popup keeps a computable
+ * `background-color`, then layers the active rim, shadow, and material
+ * tokens.
  */
 import {
   forwardRef,
@@ -466,18 +465,17 @@ NavMenuPositioner.displayName = "NavigationMenu.Positioner";
 
 /* ─── Popup ─────────────────────────────────────────────────────────── *
  *
- * The opaque sheet that hosts the Viewport. Glass-surface invariant
- * applies — opaque background-color + optional backdrop-filter so axe
- * never sees through to the underlying page. */
+ * The sheet that hosts the Viewport. It keeps a computable
+ * background-color so axe never sees through to the underlying page;
+ * rim, shadow, and material tokens provide the crystal chrome. */
 
 type BasePopupProps = ComponentPropsWithoutRef<typeof BaseNavMenu.Popup>;
 
 /**
  * Props for the NavigationMenu Popup — the opaque sheet that hosts
- * the Viewport. The popup paints `--zs-surface` opaquely so axe-core's
- * color-contrast walk terminates here; optional `backdrop-filter`
- * (gated by `--zs-dialog-backdrop-filter`) gives the frosted look when
- * the surface token is translucent.
+ * the Viewport. The popup keeps a computable background-color so
+ * axe-core's color-contrast walk terminates here, then receives the
+ * active rim, shadow, and material tokens from CSS.
  */
 export type NavMenuPopupProps = BasePopupProps;
 

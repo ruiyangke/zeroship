@@ -348,15 +348,12 @@ export const WithLabel: Story = {
  * spread; the rendered Root carries both `data-disabled` and Base UI's
  * own `data-status="indeterminate"`. */
 export const DisabledIndeterminate: Story = {
-  name: "Disabled indeterminate (Wave 10 fix #3)",
+  name: "Disabled indeterminate",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression for the Wave 10 fix #3: a disabled indeterminate " +
-          "progress row must keep its disabled paint under prefers-" +
-          "reduced-motion. The CSS cascade is verified by the aria-" +
-          "wiring runner against computed style.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

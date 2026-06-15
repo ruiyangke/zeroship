@@ -754,12 +754,7 @@ export const PageClamp: Story = {
     docs: {
       description: {
         story:
-          "Regression for body/footer page agreement: a CONTROLLED `page` is " +
-          "set beyond the last page (page 9 of a 3-page set). The body must " +
-          "render the CLAMPED last page's rows (non-empty) — matching the " +
-          "<Pagination> footer's current page — never an empty body. Pre-fix " +
-          "TanStack received the raw out-of-range pageIndex and sliced to " +
-          "zero rows while the footer clamped to the last page.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -808,12 +803,7 @@ export const NonFilterableIgnored: Story = {
     docs: {
       description: {
         story:
-          "Regression: a controlled `columnFilters` entry targeting a " +
-          "`filterable: false` column must be IGNORED — the rows are not " +
-          "narrowed by it. Pre-fix the projected `columnFiltersState` kept " +
-          "every non-empty entry and TanStack applied the column's filterFn " +
-          "(enableColumnFilter:false does NOT stop a present columnFilters " +
-          "entry), shrinking the rows against the contract.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -882,15 +872,7 @@ export const GlobalSearchNonString: Story = {
     docs: {
       description: {
         story:
-          "Regression: global search must work when NO searchable column's " +
-          "first-row value is a string/number. Both columns here are `date` " +
-          "type — every row's value is a Date object. Pre-fix TanStack's " +
-          "default `getColumnCanGlobalFilter` sniffed the first row's value " +
-          "type (Date → not string/number) and marked NO column globally " +
-          "filterable, so the search was a silent no-op (all rows stayed). " +
-          "Post-fix `enableGlobalFilter` + the table-level " +
-          "`getColumnCanGlobalFilter: () => true` keep our type-agnostic " +
-          "`globalFilterFn` (which matches each column's ISO text) running.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -943,13 +925,7 @@ export const FractionalPageSize: Story = {
     docs: {
       description: {
         story:
-          "Regression: a fractional `pageSize` (12.5) is coerced to a " +
-          "finite positive integer (floor → 12) before it feeds the page " +
-          "math or the body slice, mirroring <Pagination>'s `intOr` guard. " +
-          "Page 1 of 25 rows renders exactly 12 rows and the footer shows 3 " +
-          "pages. Pre-fix a fractional/NaN pageSize poisoned `pageCount` " +
-          "(ceil(total/NaN)=NaN) and the slice, rendering the wrong row " +
-          "count or an empty body.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -1007,11 +983,7 @@ export const BooleanAndDangerInk: Story = {
     docs: {
       description: {
         story:
-          "Regression: the `true` boolean glyph paints `--zs-system-green` " +
-          "and the destructive row-action paints `--zs-system-red`. Pre-fix " +
-          "the CSS used undefined `--zs-success` / `--zs-danger` tokens, so " +
-          "both lost their colour. The play() compares the rendered colour " +
-          "to a probe element resolving the system token.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -1129,12 +1101,7 @@ export const StickyTwoRowHeaderOffset: Story = {
     docs: {
       description: {
         story:
-          "Regression: with a sticky header + filter row, the filter row " +
-          "pins flush beneath the header even when a header label wraps to " +
-          "two lines. A ResizeObserver measures the header band and writes " +
-          "`--zs-data-table-header-offset` on the scroll container; the " +
-          "filter row reads it for its sticky offset. Pre-fix the offset was " +
-          "stuck at the 2.5rem fallback (gap/overlap under a tall header).",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -1231,10 +1198,7 @@ export const TruncateClamps: Story = {
     docs: {
       description: {
         story:
-          "Regression: a `truncate: true` column with a `width` clips a long " +
-          "value to a single line with an ellipsis instead of overflowing or " +
-          "growing the column. The play() asserts the cell does not overflow " +
-          "(`scrollWidth <= clientWidth + 1`).",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

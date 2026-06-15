@@ -1,6 +1,6 @@
 /*
  * Capture-fieldset-evidence: walks each Fieldset story under the
- * Crystal theme and writes a 2x PNG to storybook-static/theme-evidence/.
+ * both Crystal themes and writes a 2x PNG to storybook-static/theme-evidence/.
  */
 import { mkdir, writeFile, stat, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -14,7 +14,12 @@ const outDir = process.env.THEME_EVIDENCE_DIR
   ? resolve(process.env.THEME_EVIDENCE_DIR)
   : join(staticDir, "theme-evidence");
 
-const themes = [{ label: "Crystal", value: "crystal" }];
+const themes = [
+  { label: "Crystal Light", value: "crystal-light" },
+  { label: "Crystal Dark", value: "crystal-dark" },
+  { label: "Studio Light", value: "studio-light" },
+  { label: "Ghibli Light", value: "ghibli-light" },
+];
 
 const stories = [
   "components-fieldset--basic-with-legend",

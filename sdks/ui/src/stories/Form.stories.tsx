@@ -184,11 +184,19 @@ export const ValidationModes: Story = {
     );
     await expect(canvas.getByText("Email is required.")).toBeInTheDocument();
 
+    await userEvent.click(emailInputs[1]);
+    await userEvent.type(emailInputs[1], "not-an-email");
+    await userEvent.tab();
+    await waitFor(() =>
+      expect(emailInputs[1]).toHaveAttribute("aria-invalid", "true"),
+    );
+
     await userEvent.type(emailInputs[2], "not-an-email");
     await waitFor(() =>
       expect(emailInputs[2]).toHaveAttribute("aria-invalid", "true"),
     );
-    await expect(canvas.getByText("Enter a valid email.")).toBeInTheDocument();
+    await expect(canvas.getAllByText("Enter a valid email.").length)
+      .toBeGreaterThanOrEqual(1);
   },
 };
 

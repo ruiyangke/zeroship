@@ -16,6 +16,9 @@ export default meta;
 
 type Story = StoryObj<typeof FilterBar>;
 
+const removeStatusSpy = fn();
+const removeOwnerSpy = fn();
+
 /* A trailing actions Button used across the stories. */
 function FiltersButton() {
   return (
@@ -54,8 +57,8 @@ export const Default: Story = {
     // while still routing every keystroke through the spy.
     const [value, setValue] = useState("");
     const filters: FilterBarActiveFilter[] = [
-      { id: "status", label: "Status: Active", onRemove: fn() },
-      { id: "owner", label: "Owner: Me", onRemove: fn() },
+      { id: "status", label: "Status: Active", onRemove: removeStatusSpy },
+      { id: "owner", label: "Owner: Me", onRemove: removeOwnerSpy },
     ];
     return (
       <div style={{ padding: "var(--zs-space-4)" }}>
@@ -74,6 +77,8 @@ export const Default: Story = {
     );
   },
   play: async ({ canvasElement, args }) => {
+    removeStatusSpy.mockClear();
+    removeOwnerSpy.mockClear();
     const canvas = within(canvasElement);
 
     // Root is a search landmark because the bar owns a search field.
@@ -94,6 +99,8 @@ export const Default: Story = {
       name: /remove status: active/i,
     });
     await userEvent.click(removeStatus);
+    await expect(removeStatusSpy).toHaveBeenCalledTimes(1);
+    await expect(removeOwnerSpy).not.toHaveBeenCalled();
     // The owner chip's remove button is unaffected.
     await expect(
       canvas.getByRole("button", { name: /remove owner: me/i }),

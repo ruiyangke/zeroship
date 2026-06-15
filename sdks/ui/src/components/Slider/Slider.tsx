@@ -74,6 +74,7 @@ import {
   useCallback,
   useId,
   useRef,
+  useState,
   type ComponentPropsWithoutRef,
   type CSSProperties,
   type JSX,
@@ -286,12 +287,32 @@ const SliderForward = forwardRef<HTMLDivElement, SliderProps>(function Slider(
   // Input.tsx).
   const required = requiredProp ?? fieldCtx?.required ?? false;
 
-  // Detect range mode from the value/defaultValue shape. Base UI uses the
+  // Detect range mode from the current value shape. Base UI uses the
   // value's array-ness as its own range discriminant; mirror that here so
-  // we render the matching number of Thumb children.
-  const observed = value ?? defaultValue;
+  // we render the matching number of Thumb children. In uncontrolled mode
+  // we mirror Base UI's emitted value into local state so the value badge's
+  // CSS position follows keyboard/drag updates after the initial
+  // `defaultValue` render.
+  const isControlledValue = value !== undefined;
+  const [uncontrolledObserved, setUncontrolledObserved] = useState<
+    number | readonly number[] | undefined
+  >(defaultValue);
+  const observed = value ?? uncontrolledObserved ?? defaultValue;
   const isRange = Array.isArray(observed);
   const thumbCount = isRange ? (observed as readonly number[]).length : 1;
+
+  const handleValueChange = useCallback(
+    (
+      next: number | number[],
+      details: Parameters<NonNullable<BaseRootProps["onValueChange"]>>[1],
+    ) => {
+      if (!isControlledValue) {
+        setUncontrolledObserved(next);
+      }
+      onValueChange?.(next, details);
+    },
+    [isControlledValue, onValueChange],
+  );
 
   // ──────────────────────────────────────────────────────────────────
   // Value-label thumb-tracking (Slice 7 visual-polish item 1).
@@ -393,7 +414,7 @@ const SliderForward = forwardRef<HTMLDivElement, SliderProps>(function Slider(
       disabled={disabled || undefined}
       value={value as never}
       defaultValue={defaultValue as never}
-      onValueChange={onValueChange as never}
+      onValueChange={handleValueChange as never}
       onValueCommitted={onValueCommitted as never}
       format={format}
       className={classnames(

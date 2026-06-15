@@ -817,15 +817,12 @@ export const FieldDisabledPropagation: Story = {
  * `<Field disabled>` — the play assertion verifies BOTH surfaces
  * disable in the same way. */
 export const CombinedDisabledPropagation: Story = {
-  name: "Combined disabled propagation (regression)",
+  name: "Combined disabled propagation",
   parameters: {
     docs: {
       description: {
         story:
-          "Verifies that the combined-shorthand `<Input label disabled />` " +
-          "propagates `disabled` to the inline Field root, so the label " +
-          "and row visually disable together — matching the decomposed " +
-          "form. Pre-fix, only the native input was disabled.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -917,7 +914,7 @@ export const CombinedDisabledPropagation: Story = {
  * plus a readonly cell at a stable size for the aria-wiring script
  * to drive `page.emulateMedia({ forcedColors: "active" })` against. */
 export const ForcedColorsHoverReadonly: Story = {
-  name: "Forced-colors hover + readonly (regression)",
+  name: "Forced-colors hover + readonly",
   parameters: {
     docs: {
       description: {

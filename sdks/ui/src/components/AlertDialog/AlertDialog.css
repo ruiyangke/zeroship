@@ -13,13 +13,11 @@
  */
 
 /* ─── Backdrop ─────────────────────────────────────────────────────────── */
-/* AlertDialog backdrop intentionally bypasses the Crystal Dialog
- * backdrop-filter gate (visual-polish item 6). Alerts demand harder
- * focus than Dialogs — the background should feel structurally
- * unavailable — so the material blur is always applied regardless of
- * theme. Lands AFTER `.zs-dialog-backdrop` in the cascade (this file
- * is imported after Dialog.css in styles.css), so equal specificity
- * resolves in favor of the alert rule. */
+/* AlertDialog backdrop intentionally uses the thick material. Alerts
+ * demand harder focus than Dialogs, so the background should feel
+ * structurally unavailable. Lands AFTER `.zs-dialog-backdrop` in the
+ * cascade (this file is imported after Dialog.css in styles.css), so
+ * equal specificity resolves in favor of the alert rule. */
 .zs-alertdialog-backdrop {
   background-color: var(--zs-scrim);
   backdrop-filter: var(--zs-material-thick);

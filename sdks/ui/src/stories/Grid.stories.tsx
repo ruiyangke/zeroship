@@ -160,18 +160,12 @@ export const AsChild: Story = {
 
 /* ─── 6. Responsive base-1 (regression) ─────────────────────────────── */
 export const ResponsiveBaseIsOne: Story = {
-  name: "Responsive base is 1 (regression)",
+  name: "Responsive base is 1",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression for the Wave-1 fix: a `columns` object's base " +
-          "`--grid-cols` is always 1 (mobile-first), never the smallest " +
-          "provided value. `{ lg: 4 }` must base to 1 column and promote " +
-          "to 4 only at `--zs-bp-lg`. The `play()` asserts the base custom " +
-          "property is `\"1\"` — viewport-independent, so it reads the base " +
-          "token rather than the media-query result. Pre-fix this read " +
-          "`\"4\"`.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -190,20 +184,12 @@ export const ResponsiveBaseIsOne: Story = {
 
 /* ─── 7. Intrinsic narrow container (regression) ────────────────────── */
 export const IntrinsicNarrowContainer: Story = {
-  name: "Intrinsic, narrow container (regression)",
+  name: "Intrinsic, narrow container",
   parameters: {
     docs: {
       description: {
         story:
-          "Regression for the intrinsic-overflow fix: an intrinsic grid " +
-          "with `minColWidth` LARGER than its wrapper (24rem min-col inside " +
-          "a 280px box). The track floor is `minmax(min(<minColWidth>, " +
-          "100%), 1fr)`, so the lone column shrinks to fit the container " +
-          "instead of forcing the 24rem column floor wider than the box. " +
-          "The `play()` asserts the grid's `scrollWidth` does not exceed " +
-          "its `clientWidth` (no horizontal overflow). Pre-fix the bare " +
-          "`minmax(<minColWidth>, 1fr)` floor pinned the column at 24rem " +
-          "(384px) inside the 280px box and overflowed.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },

@@ -219,7 +219,7 @@ export const OutsideClickIgnored: Story = {
     docs: {
       description: {
         story:
-          "Try clicking outside the popup — nothing happens. AlertDialog ignores outside-press by design (anti-pattern #6).",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -293,11 +293,7 @@ function EscClosesCancelStory() {
           <AlertDialog.Popup data-testid="alertdialog-esc-closes-cancel">
             <AlertDialog.Header>
               <AlertDialog.Title>Discard changes?</AlertDialog.Title>
-              <AlertDialog.Description>
-                Press ESC. The Cancel button's onClick fires (status
-                line below the trigger flips to &ldquo;cancelled&rdquo;)
-                AND the popup closes (review-fix item 1).
-              </AlertDialog.Description>
+              <AlertDialog.Description> Press ESC. The Cancel button's onClick fires (status line below the trigger flips to &ldquo;cancelled&rdquo;) AND the popup closes. </AlertDialog.Description>
             </AlertDialog.Header>
             <AlertDialog.Footer>
               <AlertDialog.Cancel onClick={() => setClicked("cancelled")}>
@@ -336,7 +332,7 @@ export const EscNoOpsWithoutCancel: Story = {
     docs: {
       description: {
         story:
-          "An alert with no Cancel is hard-modal: ESC does nothing. The user must press the Action to dismiss (review-fix item 1).",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -394,7 +390,7 @@ export const EscIgnoresDisabledCancel: Story = {
     docs: {
       description: {
         story:
-          "A disabled Cancel is not a valid dismissal target — ESC stays a no-op (review-fix item 1).",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -480,12 +476,7 @@ function CancelWithCleanupOnClickStory() {
           <AlertDialog.Popup data-testid="alertdialog-cancel-cleanup-popup">
             <AlertDialog.Header>
               <AlertDialog.Title>Discard changes?</AlertDialog.Title>
-              <AlertDialog.Description>
-                Pressing Cancel fires the caller onClick (flips the
-                status line to &ldquo;cleanup-ran&rdquo;) AND closes
-                the popup. Both must happen — clobbering one is the
-                bug review-fix item 2 guards against.
-              </AlertDialog.Description>
+              <AlertDialog.Description> Pressing Cancel fires the caller onClick (flips the status line to &ldquo;cleanup-ran&rdquo;) AND closes the popup. Both must happen — clobbering one is the bug the behavior check guards against. </AlertDialog.Description>
             </AlertDialog.Header>
             <AlertDialog.Footer>
               <AlertDialog.Cancel
@@ -550,12 +541,7 @@ function CancelAsChildStory() {
           <AlertDialog.Popup data-testid="alertdialog-cancel-aschild-popup">
             <AlertDialog.Header>
               <AlertDialog.Title>Custom Cancel target</AlertDialog.Title>
-              <AlertDialog.Description>
-                The asChild Slot routes className, style, refs, AND
-                onClick composition through the shared `_slot.ts`
-                helper (review-fix item 7). The child's onClick AND the
-                close handler both run.
-              </AlertDialog.Description>
+              <AlertDialog.Description> The asChild Slot routes className, style, refs, AND onClick composition through the shared `_slot.ts` helper. The child's onClick AND the close handler both run. </AlertDialog.Description>
             </AlertDialog.Header>
             <AlertDialog.Footer>
               <AlertDialog.Cancel asChild>
@@ -778,7 +764,7 @@ export const ThreeButtonsDestructiveBottom: Story = {
     docs: {
       description: {
         story:
-          "The destructive Action is last in source order — the contract review-fix item 5 enforces via dev-warn.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
   },
@@ -878,7 +864,7 @@ export const DestructiveWithoutCancelWarns: Story = {
     docs: {
       description: {
         story:
-          "Destructive action without Cancel = no safe exit. The dev-warn nudges the consumer to add one (review-fix item 6). axe disabled — same reason as ThreeButtonsDestructiveMisplaced.",
+          "Shows this component behavior with realistic content and keeps the edge case easy to inspect.",
       },
     },
     a11y: { disable: true },
@@ -955,10 +941,7 @@ function CancelAsChildSingleFireStory() {
           <AlertDialog.Popup data-testid="alertdialog-singlefire-popup">
             <AlertDialog.Header>
               <AlertDialog.Title>Single-fire Cancel</AlertDialog.Title>
-              <AlertDialog.Description>
-                Click the custom Cancel target ONCE. The child onClick
-                must fire exactly once (Round 5 fix #3 regression).
-              </AlertDialog.Description>
+              <AlertDialog.Description> Click the custom Cancel target ONCE. The child onClick must fire exactly once. </AlertDialog.Description>
             </AlertDialog.Header>
             <AlertDialog.Footer>
               <AlertDialog.Cancel asChild>
@@ -980,7 +963,7 @@ function CancelAsChildSingleFireStory() {
   );
 }
 export const CancelAsChildSingleFire: Story = {
-  name: "Cancel — asChild single-fire (Round 5 regression)",
+  name: "Cancel — asChild single-fire",
   render: () => <CancelAsChildSingleFireStory />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
@@ -1016,7 +999,7 @@ export const CancelAsChildSingleFire: Story = {
  * Playwright and reads the computed `box-shadow` to assert a system
  * paint (not the token shadow). */
 export const ForcedColors: Story = {
-  name: "Forced-colors popup shadow mirror (wave-7 🔴)",
+  name: "Forced-colors popup shadow mirror",
   render: () => (
     <div
       className="zs-story-row"
