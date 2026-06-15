@@ -237,12 +237,16 @@ cleanup() {
     while read -r pid; do [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; done < "$PIDFILE"
   fi
   wait 2>/dev/null || true
-  # Best-effort: delete the test-mode connected accounts this run minted.
-  if [ -f "$CREATED_ACCTS" ]; then
+  # Best-effort: delete the test-mode connected accounts this run minted —
+  # UNLESS KEEP_CONNECTED_ACCOUNTS is set (leave them at Stripe for dashboard inspection).
+  if [ -z "${KEEP_CONNECTED_ACCOUNTS:-}" ] && [ -f "$CREATED_ACCTS" ]; then
     while read -r a; do [ -n "$a" ] && curl -s -X DELETE "$SAPI/accounts/$a" -u "$SK:" -o /dev/null 2>/dev/null || true; done < "$CREATED_ACCTS"
+    echo "  control down; test-mode connected accounts deleted; $WORK cleaned."
+  else
+    echo "  control down; $WORK cleaned. KEEP_CONNECTED_ACCOUNTS set — minted accounts LEFT at Stripe for inspection:"
+    [ -f "$CREATED_ACCTS" ] && while read -r a; do [ -n "$a" ] && echo "    connected account: $a"; done < "$CREATED_ACCTS"
   fi
   [ -n "${WORK:-}" ] && rm -rf "$WORK"
-  echo "  control down; test-mode connected accounts deleted; $WORK cleaned."
   echo "  (DB $DB left for inspection; the real zeroship DB + zeroship_billing_test were NEVER touched.)"
 }
 trap cleanup EXIT
