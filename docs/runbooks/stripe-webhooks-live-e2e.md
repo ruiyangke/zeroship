@@ -117,7 +117,11 @@ On the test account's default API version (`2025-09-30.clover`, Basil line):
   real connected accounts — blocked as above. The hosted Express onboarding
   browser flow is never fully automatable regardless. The `account.updated`
   gate-refresh IS delivered + ACK'd (an unlinked-account no-op, the correct
-  fail-safe); the gate-FLIP write path needs a real linked `acct_`.
+  fail-safe); the gate-FLIP write path needs a real linked `acct_`. The full
+  Connect money flow has its own dedicated harness —
+  `tests/e2e_stripe_connect_live.sh` (see `stripe-connect-live-e2e.md`) — which
+  probes for Connect and SKIPs cleanly until it is enabled at
+  `dashboard.stripe.com/connect`.
 - **Dispute resolution rides a NON-RECOVERABLE real-delivery timing race.** Stripe
   creates and DELIVERS `charge.dispute.created` within ~1s of the
   `tok_createDispute` confirm — frequently BEFORE the harness's `pi_`/`ch_`→invoice
