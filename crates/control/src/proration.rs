@@ -104,12 +104,14 @@ pub async fn record_plan_change<C: GenericClient + Sync>(
     to_plan_id: &str,
     now_unix: i64,
 ) -> Result<PlanChangeOutcome, RegistryError> {
-    // SERIALIZE against the month-end reconcile for THIS creator. The reconcile
-    // holds the same per-creator advisory lock for its whole build+finalize, so a
-    // plan change cannot interleave INSIDE a finalize — it lands fully before or
-    // fully after. `hashtext` (int4) → bigint for pg_advisory_xact_lock(bigint);
-    // the lock auto-releases at the caller's commit/rollback. Identical keying to
-    // `credit::consume_at_finalize`, so the two contend on the SAME lock.
+    // SERIALIZE against the month-end reconcile for THIS creator. The reconcile takes the
+    // same per-creator advisory lock inside its LOCAL finalize txn (`consume_at_finalize`),
+    // NOT across the whole build (the Stripe create/finalize calls run BEFORE the lock is
+    // taken — a network call never holds a DB txn open). So a plan change cannot interleave
+    // INSIDE that locked finalize txn — the credit-draw + invoice money math lands fully
+    // before or fully after a plan flip. `hashtext` (int4) → bigint for
+    // pg_advisory_xact_lock(bigint); the lock auto-releases at the caller's commit/rollback.
+    // Identical keying to `credit::consume_at_finalize`, so the two contend on the SAME lock.
     tx.execute(
         "SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)",
         &[&creator_id.to_string()],

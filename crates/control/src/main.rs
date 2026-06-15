@@ -7,9 +7,8 @@ use std::sync::Arc;
 use clap::Parser;
 use ntex::web;
 use zeroship_core::config::{
-    bootstrap_or_exit, env_is_truthy, is_loopback_url, parse_bool_flag, require_unless_dev,
-    resolve_overlay_string, validate_master_key_material, CheckConfigReport, CheckFormat,
-    CheckValue,
+    bootstrap_or_exit, env_is_truthy, is_loopback_url, parse_bool_flag, resolve_overlay_string,
+    validate_master_key_material, CheckConfigReport, CheckFormat, CheckValue,
 };
 use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
 use zeroship_control::{
@@ -1554,6 +1553,7 @@ fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroship_core::config::require_unless_dev;
 
     #[test]
     fn control_blob_store_flag_uses_unified_name() {
