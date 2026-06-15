@@ -51,6 +51,13 @@ struct MockState {
     /// Faithful Stripe dedup within the 24h window: a repeat key replays the
     /// ORIGINAL response rather than creating a second object.
     idempotency_replies: HashMap<String, String>,
+    /// Pending invoice items per customer: (customer, amount). A faithful sweep
+    /// (D1) totals these onto a draft ONLY when the create sends
+    /// `pending_invoice_items_behavior=include` (real Stripe defaults to exclude).
+    invoice_items: Vec<(String, i64)>,
+    /// Created invoices keyed by the `in_…` id → (customer, swept_total). The swept
+    /// total is 0 unless the create requested `include` (D1).
+    invoices: HashMap<String, (String, i64)>,
 }
 
 fn main() -> std::io::Result<()> {
@@ -187,6 +194,49 @@ fn handle_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> Vec<u
         }
     }
 
+    // POST /v1/refunds (D2 refund leg): faithful to real Stripe, `currency` is NOT an
+    // accepted parameter — a body that sends it gets a 400 `parameter_unknown`.
+    if req.method == "POST" && req.path.starts_with("/v1/refunds") {
+        state.lock().unwrap().requests.push(req.clone());
+        if form_param(&req.body, "currency").is_some() {
+            let err = r#"{"error":{"type":"invalid_request_error","code":"parameter_unknown","message":"Received unknown parameter: currency","param":"currency"}}"#;
+            return http_json(400, err);
+        }
+        return http_200_json(&format!(
+            r#"{{"id":"re_mock_{}","object":"refund","status":"succeeded"}}"#,
+            short()
+        ));
+    }
+
+    // GET /v1/invoices/{in_…}[?expand[]=…] (D2): surface the settling pi_/ch_ ONLY
+    // when the caller EXPANDS payments.data.payment.payment_intent — mirroring real
+    // Stripe (Basil removed the top-level fields; the webhook/bare invoice omit them).
+    if req.method == "GET" && req.path.starts_with("/v1/invoices/") {
+        let id = req
+            .path
+            .trim_start_matches("/v1/invoices/")
+            .split('?')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let expands_pi = req.path.contains("payments.data.payment.payment_intent");
+        let body = if expands_pi {
+            // A deterministic settlement pair derived from the invoice id.
+            format!(
+                r#"{{"id":"{id}","object":"invoice","status":"paid","payments":{{"object":"list","data":[{{"object":"invoice_payment","payment":{{"type":"payment_intent","payment_intent":{{"id":"pi_mock_{id}","object":"payment_intent","latest_charge":"ch_mock_{id}"}}}}}}]}}}}"#
+            )
+        } else {
+            // No expand → Basil invoice WITHOUT the settlement ids (the masking shape).
+            format!(r#"{{"id":"{id}","object":"invoice","status":"paid"}}"#)
+        };
+        state.lock().unwrap().requests.push(req.clone());
+        return http_200_json(&body);
+    }
+
+    let new_invoice_id = format!("in_mock_{}", short());
+    let is_invoice_create =
+        req.path.starts_with("/v1/invoices") && !req.path.contains("/finalize");
+
     let json: String = if req.path.starts_with("/v1/customers") {
         format!(r#"{{"id":"cus_mock_{}","object":"customer"}}"#, short())
     } else if req.path.starts_with("/v1/checkout/sessions") {
@@ -201,6 +251,8 @@ fn handle_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> Vec<u
             r#"{{"id":"in_mock_final_{}","object":"invoice","status":"open"}}"#,
             short()
         )
+    } else if is_invoice_create {
+        format!(r#"{{"id":"{new_invoice_id}","object":"invoice","status":"draft"}}"#)
     } else if req.path.starts_with("/v1/invoices") {
         format!(r#"{{"id":"in_mock_{}","object":"invoice","status":"draft"}}"#, short())
     } else {
@@ -209,6 +261,34 @@ fn handle_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> Vec<u
 
     {
         let mut st = state.lock().unwrap();
+        // Track pending invoice items so a D1-faithful sweep can total them.
+        if req.path.starts_with("/v1/invoiceitems") {
+            let customer = form_param(&req.body, "customer").unwrap_or_default();
+            let amount = form_param(&req.body, "amount")
+                .and_then(|a| a.parse::<i64>().ok())
+                .unwrap_or(0);
+            st.invoice_items.push((customer, amount));
+        }
+        // D1: sweep the customer's pending items onto a draft create ONLY when
+        // `pending_invoice_items_behavior=include` was sent (else a $0 draft).
+        if is_invoice_create {
+            let customer = form_param(&req.body, "customer").unwrap_or_default();
+            let include = form_param(&req.body, "pending_invoice_items_behavior").as_deref()
+                == Some("include");
+            let swept = if include {
+                let total: i64 = st
+                    .invoice_items
+                    .iter()
+                    .filter(|(c, _)| *c == customer)
+                    .map(|(_, a)| *a)
+                    .sum();
+                st.invoice_items.retain(|(c, _)| *c != customer);
+                total
+            } else {
+                0
+            };
+            st.invoices.insert(new_invoice_id.clone(), (customer, swept));
+        }
         st.requests.push(req.clone());
         if let Some(key) = req.idempotency_key.clone() {
             st.idempotency_replies.entry(key).or_insert_with(|| json.clone());
@@ -216,6 +296,51 @@ fn handle_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> Vec<u
     }
 
     http_200_json(&json)
+}
+
+/// Extract a form field from an `application/x-www-form-urlencoded` body. Keys are
+/// matched after percent-decoding so `pending_invoice_items_behavior` /
+/// `metadata[...]` match the wire's escaping.
+fn form_param(body: &str, name: &str) -> Option<String> {
+    for pair in body.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if percent_decode(k) == name {
+                return Some(percent_decode(v));
+            }
+        }
+    }
+    None
+}
+
+/// Minimal `application/x-www-form-urlencoded` decode: `+` → space, `%XX` → byte.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(h), Some(l)) = (hi, lo) {
+                    out.push((h * 16 + l) as u8);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Serialize the recorded requests to a JSON array (hand-rolled to avoid a
@@ -260,9 +385,18 @@ fn json_str(s: &str) -> String {
 }
 
 fn http_200_json(json: &str) -> Vec<u8> {
+    http_json(200, json)
+}
+
+fn http_json(status: u16, json: &str) -> Vec<u8> {
+    let reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        _ => "Error",
+    };
     let body = json.as_bytes();
     let mut resp = format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n",
         body.len()
     )
     .into_bytes();

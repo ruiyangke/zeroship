@@ -1268,6 +1268,12 @@ mod tests {
         ) -> Result<String, StripeError> {
             Ok("re_fake".to_string())
         }
+        async fn invoice_settlement_ids(
+            &self,
+            _provider_invoice_id: &str,
+        ) -> Result<(Option<String>, Option<String>), StripeError> {
+            Ok((None, None))
+        }
     }
 
     #[compio::test]

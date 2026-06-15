@@ -187,6 +187,12 @@ impl StripeApi for RecordingStripe {
             client_secret: None,
         })
     }
+    async fn invoice_settlement_ids(
+        &self,
+        _provider_invoice_id: &str,
+    ) -> Result<(Option<String>, Option<String>), StripeError> {
+        Ok((None, None))
+    }
     async fn create_refund(
         &self,
         _provider_invoice_id: &str,

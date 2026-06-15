@@ -225,15 +225,47 @@ impl RefundProvider for NativeRefundProvider {
     }
 }
 
-/// Resolve the Stripe invoice id (`in_…`) recorded on a `charge` payment row for
-/// this invoice — the money object a cash refund targets. Returns `None` if the
-/// invoice has no recorded charge (a fully-credit-covered $0 invoice, or a bill not
-/// yet paid) — in which case there is no cash to refund anyway (the over-refund cap
-/// = 0 already rejects it).
+/// Resolve the Stripe MONEY OBJECT a cash refund targets for this invoice. Returns
+/// `None` if the invoice has no recorded charge (a fully-credit-covered $0 invoice, or
+/// a bill not yet paid) — in which case there is no cash to refund anyway (the
+/// over-refund cap = 0 already rejects it).
+///
+/// PREFERENCE ORDER (D2): the settling `payment_intent` (`pi_…`) recorded in
+/// `billing_provider_refs` at `invoice.paid` time — captured from the REAL expanded
+/// invoice fetch — is the authoritative refund target and is preferred. We fall back to
+/// the recorded `charge` (`ch_…`), then to the `charge` payment row's `provider_ref`
+/// (the Stripe `in_…` invoice id). `create_refund` accepts whichever kind: a `pi_…`/
+/// `ch_…` is refunded DIRECTLY; an `in_…` is resolved to its settling PaymentIntent via
+/// an expanded fetch. Preferring the recorded `pi_…` means a refund works even when the
+/// Stripe invoice object itself does not inline the settlement (e.g. an out-of-band
+/// payment), and avoids a redundant invoice fetch on the hot path.
 pub async fn provider_invoice_id_for_cash_refund<C: GenericClient + Sync>(
     conn: &C,
     invoice_id: &str,
 ) -> Result<Option<String>, RegistryError> {
+    // 1) The settling pi_/ch_ recorded at invoice.paid (the real money object).
+    let recorded = conn
+        .query(
+            "SELECT ref_kind, external_id FROM zeroship.billing_provider_refs \
+             WHERE invoice_id = $1 AND provider = 'stripe' \
+               AND ref_kind IN ('payment_intent', 'charge')",
+            &[&invoice_id],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    let mut pi: Option<String> = None;
+    let mut ch: Option<String> = None;
+    for row in &recorded {
+        match row.get::<_, String>("ref_kind").as_str() {
+            "payment_intent" => pi = Some(row.get("external_id")),
+            "charge" => ch = Some(row.get("external_id")),
+            _ => {}
+        }
+    }
+    if let Some(target) = pi.or(ch) {
+        return Ok(Some(target));
+    }
+    // 2) Fall back to the charge row's provider_ref (the Stripe `in_…` invoice id).
     let rows = conn
         .query(
             "SELECT provider_ref FROM zeroship.invoice_payments \

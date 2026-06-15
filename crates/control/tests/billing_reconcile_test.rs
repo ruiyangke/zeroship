@@ -91,14 +91,44 @@ struct MockState {
     /// (>24h), proving the per-app LEDGER (not Stripe's key) is what guarantees
     /// at-most-once posting (CRIT-1).
     dedupe_by_key: bool,
-    /// Pending invoice items, in creation order: (id, customer, zs_item_key).
+    /// Pending invoice items, in creation order: (id, customer, zs_item_key, amount).
     /// A faithful Stripe lists these on `GET /v1/invoiceitems?...&pending=true`
     /// so the reconciler's `find_invoice_item_by_key` (C1) can adopt an
     /// already-posted item on a >24h re-drive instead of double-posting. An item
     /// swept onto a finalized invoice would drop off `pending=true`, but our
     /// finalize never sweeps a SECOND copy, so leaving them is faithful enough
-    /// for the >24h adopt path under test.
-    invoice_items: Vec<(String, String, Option<String>)>,
+    /// for the >24h adopt path under test. The `amount` lets the mock compute a
+    /// SWEPT invoice total — faithful to D1 (sweep only on
+    /// `pending_invoice_items_behavior=include`).
+    invoice_items: Vec<MockInvoiceItem>,
+    /// Created invoices, keyed by the `in_…` id the mock minted: the swept total
+    /// (D1) + the settlement ids the EXPANDED `GET /v1/invoices` returns (D2).
+    invoices: HashMap<String, MockInvoice>,
+}
+
+/// A pending invoice item recorded by the mock.
+#[derive(Clone)]
+struct MockInvoiceItem {
+    id: String,
+    customer: String,
+    zs_item_key: Option<String>,
+    amount: i64,
+}
+
+/// A created invoice recorded by the mock — enough to faithfully model D1 (the
+/// swept total) and D2 (the settlement ids surfaced only under the right expand).
+#[derive(Clone, Default)]
+struct MockInvoice {
+    customer: String,
+    /// Sum of the pending items swept onto this invoice at create time. ZERO
+    /// unless the create carried `pending_invoice_items_behavior=include` (D1 —
+    /// real Stripe defaults to `exclude`).
+    swept_total: i64,
+    /// The settling pi_/ch_ (set when the harness "pays" the invoice). Real
+    /// Stripe surfaces these ONLY via expand[]=payments.data.payment.payment_intent
+    /// — the mock mirrors that (D2): they appear in GET only when expand is asked.
+    payment_intent: Option<String>,
+    charge: Option<String>,
 }
 
 #[derive(Clone)]
@@ -146,6 +176,31 @@ impl MockStripe {
     /// Turn OFF Idempotency-Key replay to simulate Stripe's >24h key expiry.
     fn disable_dedupe(&self) {
         self.state.lock().unwrap().dedupe_by_key = false;
+    }
+
+    /// The swept total the mock attached to a created invoice (D1). ZERO when the
+    /// create did NOT send `pending_invoice_items_behavior=include` (real Stripe's
+    /// default — the masking bug). `None` when no such invoice was created.
+    fn invoice_swept_total(&self, invoice_id: &str) -> Option<i64> {
+        self.state
+            .lock()
+            .unwrap()
+            .invoices
+            .get(invoice_id)
+            .map(|inv| inv.swept_total)
+    }
+
+    /// Simulate the harness PAYING an invoice: stamp the settling pi_/ch_ so a
+    /// later EXPANDED `GET /v1/invoices/{id}?expand[]=payments.data.payment.payment_intent`
+    /// returns them (D2). On real Stripe these are surfaced ONLY under that expand.
+    /// `register_paid_invoice` lets a test stand up a paid invoice the handler can
+    /// then resolve through (for the invoice.paid linkage leg).
+    fn register_paid_invoice(&self, invoice_id: &str, customer: &str, pi: &str, ch: Option<&str>) {
+        let mut st = self.state.lock().unwrap();
+        let inv = st.invoices.entry(invoice_id.to_string()).or_default();
+        inv.customer = customer.to_string();
+        inv.payment_intent = Some(pi.to_string());
+        inv.charge = ch.map(str::to_string);
     }
 }
 
@@ -281,12 +336,13 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
         let data: Vec<String> = st
             .invoice_items
             .iter()
-            .filter(|(_, cust, _)| customer.as_deref() == Some(cust.as_str()))
-            .map(|(id, _, key)| match key {
+            .filter(|it| customer.as_deref() == Some(it.customer.as_str()))
+            .map(|it| match &it.zs_item_key {
                 Some(k) => format!(
-                    r#"{{"id":"{id}","object":"invoiceitem","metadata":{{"zs_item_key":"{k}"}}}}"#
+                    r#"{{"id":"{}","object":"invoiceitem","metadata":{{"zs_item_key":"{k}"}}}}"#,
+                    it.id
                 ),
-                None => format!(r#"{{"id":"{id}","object":"invoiceitem","metadata":{{}}}}"#),
+                None => format!(r#"{{"id":"{}","object":"invoiceitem","metadata":{{}}}}"#, it.id),
             })
             .collect();
         drop(st);
@@ -295,7 +351,76 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
         return http_200_json(&body);
     }
 
+    // GET /v1/invoices/{in_…}[?expand[]=…] — retrieve an invoice. Faithful to D2:
+    // the settling pi_/ch_ are surfaced via `payments.data[].payment` ONLY when the
+    // caller EXPANDS `payments.data.payment.payment_intent`. Without the expand, the
+    // Basil invoice carries NEITHER a top-level payment_intent/charge NOR an inline
+    // payments list (exactly what masked the bug). The pi_ comes back as the EXPANDED
+    // PaymentIntent object (its `id`=pi_, `latest_charge`=ch_).
+    if req.method == "GET" && req.path.starts_with("/v1/invoices/") {
+        let id = req
+            .path
+            .trim_start_matches("/v1/invoices/")
+            .split('?')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let expands_pi = req.path.contains("payments.data.payment.payment_intent");
+        let st = state.lock().unwrap();
+        let inv = st.invoices.get(&id).cloned().unwrap_or_default();
+        drop(st);
+        // Basil: NO top-level payment_intent/charge (they were removed). The payments
+        // list is present only when we expand; absent otherwise.
+        let body = if expands_pi {
+            match (&inv.payment_intent, &inv.charge) {
+                (Some(pi), ch) => {
+                    let lc = ch
+                        .as_deref()
+                        .map_or("null".to_string(), |c| format!("\"{c}\""));
+                    format!(
+                        r#"{{"id":"{id}","object":"invoice","status":"paid","payments":{{"object":"list","data":[{{"object":"invoice_payment","payment":{{"type":"payment_intent","payment_intent":{{"id":"{pi}","object":"payment_intent","latest_charge":{lc}}}}}}}]}}}}"#
+                    )
+                }
+                // Paid with no recorded settlement (a $0/credit invoice): empty list.
+                _ => format!(
+                    r#"{{"id":"{id}","object":"invoice","status":"paid","payments":{{"object":"list","data":[]}}}}"#
+                ),
+            }
+        } else {
+            // No expand → Basil invoice WITHOUT the settlement ids (the masking shape).
+            format!(r#"{{"id":"{id}","object":"invoice","status":"paid"}}"#)
+        };
+        state.lock().unwrap().requests.push(req.clone());
+        return http_200_json(&body);
+    }
+
+    // POST /v1/refunds (D2 refund leg). Faithful to real Stripe: `currency` is NOT an
+    // accepted parameter — a body that sends it gets a 400 `parameter_unknown`. The
+    // body MUST carry exactly one money target (`payment_intent` OR `charge`).
+    if req.method == "POST" && req.path.starts_with("/v1/refunds") {
+        state.lock().unwrap().requests.push(req.clone());
+        if form_param(&req.body, "currency").is_some() {
+            let err = r#"{"error":{"type":"invalid_request_error","code":"parameter_unknown","message":"Received unknown parameter: currency","param":"currency"}}"#;
+            return http_json(400, err);
+        }
+        let target = form_param(&req.body, "payment_intent")
+            .or_else(|| form_param(&req.body, "charge"));
+        if target.is_none() {
+            let err = r#"{"error":{"type":"invalid_request_error","code":"parameter_missing","message":"Missing payment_intent or charge"}}"#;
+            return http_json(400, err);
+        }
+        return http_200_json(&format!(r#"{{"id":"re_mock_{}","object":"refund","status":"succeeded"}}"#, short()));
+    }
+
     let new_item_id = format!("ii_mock_{}", short());
+    // For a draft-invoice CREATE we mint the id up front so we can register the
+    // swept MockInvoice (D1). `is_invoice_create` = POST /v1/invoices that is NOT a
+    // /finalize sub-resource.
+    let is_invoice_create = req.method == "POST"
+        && req.path.starts_with("/v1/invoices")
+        && !req.path.contains("/finalize");
+    let new_invoice_id = format!("in_mock_{}", short());
+
     let json: String = if req.path.starts_with("/v1/customers") {
         format!(r#"{{"id":"cus_mock_{}","object":"customer"}}"#, short())
     } else if req.path.starts_with("/v1/checkout/sessions") {
@@ -307,6 +432,8 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
         format!(r#"{{"id":"{new_item_id}","object":"invoiceitem"}}"#)
     } else if req.path.contains("/finalize") {
         format!(r#"{{"id":"in_mock_final_{}","object":"invoice","status":"open"}}"#, short())
+    } else if is_invoice_create {
+        format!(r#"{{"id":"{new_invoice_id}","object":"invoice","status":"draft"}}"#)
     } else if req.path.starts_with("/v1/invoices") {
         format!(r#"{{"id":"in_mock_{}","object":"invoice","status":"draft"}}"#, short())
     } else {
@@ -319,7 +446,47 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
         if req.method == "POST" && req.path.starts_with("/v1/invoiceitems") {
             let customer = form_param(&req.body, "customer").unwrap_or_default();
             let key = form_param(&req.body, "metadata[zs_item_key]");
-            st.invoice_items.push((new_item_id.clone(), customer, key));
+            let amount = form_param(&req.body, "amount")
+                .and_then(|a| a.parse::<i64>().ok())
+                .unwrap_or(0);
+            st.invoice_items.push(MockInvoiceItem {
+                id: new_item_id.clone(),
+                customer,
+                zs_item_key: key,
+                amount,
+            });
+        }
+        // D1: on a draft create, SWEEP the customer's pending items onto the invoice
+        // ONLY when `pending_invoice_items_behavior=include` was sent (real Stripe
+        // defaults to `exclude` → an empty $0 draft). We model the sweep by totalling
+        // the customer's pending item amounts and clearing them off the pending list.
+        if is_invoice_create {
+            let customer = form_param(&req.body, "customer").unwrap_or_default();
+            let include = form_param(&req.body, "pending_invoice_items_behavior")
+                .as_deref()
+                == Some("include");
+            let swept_total = if include {
+                let total: i64 = st
+                    .invoice_items
+                    .iter()
+                    .filter(|it| it.customer == customer)
+                    .map(|it| it.amount)
+                    .sum();
+                // Swept items leave the pending list (Stripe attaches them to the invoice).
+                st.invoice_items.retain(|it| it.customer != customer);
+                total
+            } else {
+                0
+            };
+            st.invoices.insert(
+                new_invoice_id.clone(),
+                MockInvoice {
+                    customer,
+                    swept_total,
+                    payment_intent: None,
+                    charge: None,
+                },
+            );
         }
         st.requests.push(req.clone());
         if let Some(key) = req.idempotency_key.clone() {
@@ -391,9 +558,19 @@ fn percent_decode(s: &str) -> String {
 
 /// Build a `200 OK` HTTP/1.1 response with a JSON body.
 fn http_200_json(json: &str) -> Vec<u8> {
+    http_json(200, json)
+}
+
+/// Build an HTTP/1.1 response with the given status + JSON body.
+fn http_json(status: u16, json: &str) -> Vec<u8> {
+    let reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        _ => "Error",
+    };
     let body = json.to_string().into_bytes();
     let mut resp = format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n",
         body.len()
     )
     .into_bytes();
@@ -895,6 +1072,175 @@ async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
     assert_eq!(finalize.idempotency_key.as_deref(), Some(format!("finalize:{draft}").as_str()), "finalize idempotency key keyed on draft id");
 }
 
+/// D1 (real-Stripe regression): `create_invoice` MUST send
+/// `pending_invoice_items_behavior=include` so the period's pending invoice items
+/// are SWEPT onto the draft. On API 2025-09-30.clover the param defaults to
+/// `exclude`, so omitting it finalizes a $0 invoice and bills NO infra usage. The
+/// mock now models the real default: it sweeps the customer's pending items onto a
+/// draft create ONLY when `include` is sent. We assert (a) the wire body carries
+/// the param AND (b) the swept invoice total equals the items' sum (not $0).
+///
+/// RED pre-fix: `create_invoice` omitted the param → the mock swept nothing →
+/// `invoice_swept_total` is 0 (≠ 1234+766) and the body lacks the param.
+#[compio::test]
+async fn create_invoice_sweeps_pending_items_via_include_behavior() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "d1-sweep").await;
+    let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
+        .with_base_url(fx.mock.base_url.clone());
+    let cus = format!("cus_d1_{}", Uuid::new_v4().simple());
+    let period = Period { start: 1_700_000_000, end: 1_702_000_000 };
+
+    // Two pending items on the customer (totalling 2000c).
+    client
+        .create_invoice_item(&cus, 1234, "usd", "infra a", period, "d1:k1", "d1:k1")
+        .await
+        .expect("item 1");
+    client
+        .create_invoice_item(&cus, 766, "usd", "infra b", period, "d1:k2", "d1:k2")
+        .await
+        .expect("item 2");
+
+    // Create the draft (the call under test).
+    let draft = client
+        .create_invoice(&cus, &Uuid::new_v4().to_string(), "d1:run")
+        .await
+        .expect("create draft");
+
+    // (a) the WIRE body carried the include behavior.
+    let reqs = fx.mock.requests();
+    let create = reqs
+        .iter()
+        .find(|r| r.method == "POST" && r.path == "/v1/invoices")
+        .expect("invoice create recorded");
+    assert!(
+        create.body.contains("pending_invoice_items_behavior=include"),
+        "create_invoice must send pending_invoice_items_behavior=include; body={}",
+        create.body
+    );
+
+    // (b) the mock swept the pending items onto the invoice → total = 2000c, NOT 0.
+    assert_eq!(
+        fx.mock.invoice_swept_total(&draft),
+        Some(2000),
+        "the pending items must be swept onto the draft (D1); a $0 sweep means the creator is not billed",
+    );
+}
+
+/// D2 (real-Stripe regression): a paid infra invoice's settling pi_/ch_ live ONLY
+/// under `expand[]=payments.data.payment.payment_intent` on API 2025-09-30.clover
+/// (Basil removed the top-level fields). `invoice_settlement_ids` must do the
+/// EXPANDED fetch and read them from the expanded PaymentIntent object
+/// (`id`=pi_, `latest_charge`=ch_). The mock surfaces them ONLY under that expand.
+///
+/// RED pre-fix: the handler read the ids off the (un-expandable) webhook payload,
+/// so against a Basil invoice it captured NOTHING. Here the un-expanded GET also
+/// returns nothing — proving the expand is load-bearing.
+#[compio::test]
+async fn invoice_settlement_ids_requires_expand_and_reads_pi_ch() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "d2-expand").await;
+    let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
+        .with_base_url(fx.mock.base_url.clone());
+
+    // A paid invoice whose settlement objects the mock surfaces ONLY under expand.
+    let inv = format!("in_d2_{}", Uuid::new_v4().simple());
+    fx.mock
+        .register_paid_invoice(&inv, "cus_d2", "pi_d2real", Some("ch_d2real"));
+
+    // The real client does the EXPANDED fetch and reads both ids.
+    let (pi, ch) = client
+        .invoice_settlement_ids(&inv)
+        .await
+        .expect("settlement ids");
+    assert_eq!(pi.as_deref(), Some("pi_d2real"), "pi_ resolved from expanded payment_intent.id");
+    assert_eq!(ch.as_deref(), Some("ch_d2real"), "ch_ resolved from payment_intent.latest_charge");
+
+    // Prove the expand is load-bearing: the client's GET carried the expand path.
+    // (The mock surfaces the ids ONLY under this expand — exactly mirroring real
+    // Stripe, whose bare invoice / webhook payload omits them, which is what
+    // masked the bug.)
+    let reqs = fx.mock.requests();
+    let get = reqs
+        .iter()
+        .find(|r| r.method == "GET" && r.path.starts_with(&format!("/v1/invoices/{inv}")))
+        .expect("expanded invoice GET recorded");
+    assert!(
+        get.path.contains("expand%5B%5D=payments.data.payment.payment_intent")
+            || get.path.contains("expand[]=payments.data.payment.payment_intent"),
+        "the settlement fetch must EXPAND payments.data.payment.payment_intent; path={}",
+        get.path
+    );
+}
+
+/// D2 (real-Stripe regression, refund leg): `POST /v1/refunds` does NOT accept a
+/// `currency` parameter — sending it is a 400 `parameter_unknown`. `create_refund`
+/// must NOT send `currency`. It also refunds a `pi_…`/`ch_…` DIRECTLY and resolves an
+/// `in_…` via the expanded fetch. The mock 400s a refund body that carries `currency`.
+///
+/// RED pre-fix: `create_refund` always sent `currency` → the mock 400s → the cash
+/// refund fails (the exact real-Stripe 400 the e2e hit).
+#[compio::test]
+async fn create_refund_omits_currency_and_targets_pi_directly() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "d2-refund").await;
+    let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
+        .with_base_url(fx.mock.base_url.clone());
+
+    // (a) Refund a pi_ directly → succeeds (no `currency` sent), one POST /v1/refunds.
+    let re = client
+        .create_refund("pi_real123", 200, "usd", "idem-refund-pi")
+        .await
+        .expect("refund a pi_ directly");
+    assert!(re.starts_with("re_mock_"), "got a re_ id: {re}");
+
+    let refund_reqs: Vec<_> = fx
+        .mock
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == "POST" && r.path.starts_with("/v1/refunds"))
+        .collect();
+    assert_eq!(refund_reqs.len(), 1, "exactly one refund POST");
+    let body = &refund_reqs[0].body;
+    assert!(
+        !body.contains("currency="),
+        "create_refund must NOT send `currency` (400 parameter_unknown); body={body}",
+    );
+    assert!(body.contains("payment_intent=pi_real123"), "refunds the pi_ directly; body={body}");
+    assert!(!body.contains("expand"), "no expand fetch needed when given a pi_ directly");
+
+    // (b) Refund an in_ → the expanded fetch resolves its settling pi_, then refunds.
+    let inv = format!("in_refund_{}", Uuid::new_v4().simple());
+    fx.mock.register_paid_invoice(&inv, "cus_r", "pi_frominvoice", Some("ch_frominvoice"));
+    let re2 = client
+        .create_refund(&inv, 100, "usd", "idem-refund-in")
+        .await
+        .expect("refund via in_ → expanded fetch");
+    assert!(re2.starts_with("re_mock_"));
+    let last = fx
+        .mock
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == "POST" && r.path.starts_with("/v1/refunds"))
+        .last()
+        .expect("second refund POST");
+    assert!(
+        last.body.contains("payment_intent=pi_frominvoice"),
+        "an in_ resolves to its settling pi_ via the expanded fetch; body={}",
+        last.body
+    );
+    assert!(!last.body.contains("currency="), "still no currency param");
+}
+
 /// `billing/setup` ensures a Customer exists, and a SECOND setup reuses the same
 /// `cus_…` (only one `POST /v1/customers` ever fires). Drives the real client
 /// through the store + mock; asserts the store persisted one customer id.
@@ -1252,6 +1598,9 @@ impl StripeApi for FailAfterFirstItem {
     async fn create_refund(&self, provider_invoice_id: &str, amount_cents: u64, currency: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
         self.inner.create_refund(provider_invoice_id, amount_cents, currency, idempotency_key).await
     }
+    async fn invoice_settlement_ids(&self, provider_invoice_id: &str) -> Result<(Option<String>, Option<String>), zeroship_control::stripe_store::StripeError> {
+        self.inner.invoice_settlement_ids(provider_invoice_id).await
+    }
 }
 
 /// CRIT-1: a partial post then crash, followed by a re-drive AFTER Stripe's
@@ -1399,6 +1748,9 @@ impl StripeApi for PostThenCrash {
     }
     async fn create_refund(&self, provider_invoice_id: &str, amount_cents: u64, currency: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
         self.inner.create_refund(provider_invoice_id, amount_cents, currency, idempotency_key).await
+    }
+    async fn invoice_settlement_ids(&self, provider_invoice_id: &str) -> Result<(Option<String>, Option<String>), zeroship_control::stripe_store::StripeError> {
+        self.inner.invoice_settlement_ids(provider_invoice_id).await
     }
 }
 
@@ -1592,6 +1944,9 @@ impl StripeApi for CrashOnFinalize {
     }
     async fn create_refund(&self, provider_invoice_id: &str, amount_cents: u64, currency: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
         self.inner.create_refund(provider_invoice_id, amount_cents, currency, idempotency_key).await
+    }
+    async fn invoice_settlement_ids(&self, provider_invoice_id: &str) -> Result<(Option<String>, Option<String>), zeroship_control::stripe_store::StripeError> {
+        self.inner.invoice_settlement_ids(provider_invoice_id).await
     }
 }
 
@@ -2032,6 +2387,9 @@ impl StripeApi for FinalizeAlreadyFinalized {
     async fn create_refund(&self, provider_invoice_id: &str, amount_cents: u64, currency: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
         self.inner.create_refund(provider_invoice_id, amount_cents, currency, idempotency_key).await
     }
+    async fn invoice_settlement_ids(&self, provider_invoice_id: &str) -> Result<(Option<String>, Option<String>), zeroship_control::stripe_store::StripeError> {
+        self.inner.invoice_settlement_ids(provider_invoice_id).await
+    }
 }
 
 // ===========================================================================
@@ -2160,6 +2518,9 @@ impl StripeApi for FinalizeReturnsFixedId {
     }
     async fn create_refund(&self, provider_invoice_id: &str, amount_cents: u64, currency: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
         self.inner.create_refund(provider_invoice_id, amount_cents, currency, idempotency_key).await
+    }
+    async fn invoice_settlement_ids(&self, provider_invoice_id: &str) -> Result<(Option<String>, Option<String>), zeroship_control::stripe_store::StripeError> {
+        self.inner.invoice_settlement_ids(provider_invoice_id).await
     }
 }
 

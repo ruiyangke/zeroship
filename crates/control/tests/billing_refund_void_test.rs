@@ -83,6 +83,11 @@ impl RecordingStripe {
     fn refund_count(&self) -> usize {
         self.refunds.lock().unwrap().len()
     }
+    /// The `provider_invoice_id` (refund target) passed to the most recent
+    /// `create_refund` — used to assert the resolver passed the recorded `pi_…`.
+    fn last_refund_target(&self) -> Option<String> {
+        self.refunds.lock().unwrap().last().map(|(t, _)| t.clone())
+    }
 }
 
 impl StripeApi for RecordingStripe {
@@ -185,6 +190,14 @@ impl StripeApi for RecordingStripe {
             id: "pi_fake".into(),
             client_secret: None,
         })
+    }
+    async fn invoice_settlement_ids(
+        &self,
+        _provider_invoice_id: &str,
+    ) -> Result<(Option<String>, Option<String>), StripeError> {
+        // This fake's create_refund is self-contained (it never calls back into
+        // invoice_settlement_ids), so a stub is sufficient for the refund leg.
+        Ok((None, None))
     }
     async fn create_refund(
         &self,
@@ -602,6 +615,75 @@ async fn over_refund_three_way_bound_blocks_credit_laundering() {
         )
         .await;
     assert!(direct.is_err(), "the over-refund trigger must RAISE on a direct over-cap INSERT");
+}
+
+/// D2 (refund-target resolution): a cash refund must target the SETTLING `pi_…`
+/// recorded in `billing_provider_refs` at `invoice.paid` (the real money object,
+/// captured from the expanded fetch) — NOT the Stripe `in_…` invoice id stamped on the
+/// `charge` row. Refunding the `in_…` against a real invoice with no inline settlement
+/// fails; the recorded `pi_…` always works. This exercises the resolver directly (no
+/// reconcile precondition) so it's deterministic.
+///
+/// RED pre-fix: `provider_invoice_id_for_cash_refund` returned the charge row's `in_…`
+/// provider_ref, so `create_refund` had to re-derive the pi_ from the invoice (and a
+/// real out-of-band-paid invoice has none → the refund 500s).
+#[compio::test]
+async fn cash_refund_targets_recorded_payment_intent_not_invoice() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "refund-target").await;
+    let creator = make_user(&fx.state, "refund-target").await;
+    ensure_creator_billing(&fx.state, creator).await;
+    // A finalized invoice (seeded directly — no reconcile needed for the resolver test).
+    let inv = zeroship_core::typed_id::new_invoice_id();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoices \
+               (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+                total_cents, finalized_at) \
+             VALUES ($1, $2, DATE '2026-01-01', 'finalized', 10000, 0, 0, 10000, NOW())",
+            &[&inv, &creator],
+        )
+        .await
+        .expect("seed invoice");
+    // Unique settlement ids per run (the global (provider,ref_kind,external_id) UNIQUE
+    // forbids reusing a constant across runs in the shared DB).
+    let suffix = Uuid::new_v4().simple().to_string();
+    let pi = format!("pi_settle_{suffix}");
+    let ch = format!("ch_settle_{suffix}");
+    // The charge row carries the Stripe invoice id (`in_…`) as its provider_ref…
+    append_payment(&fx.state, &inv, 10_000, &format!("in_target_{suffix}")).await;
+    // …and the webhook recorded the REAL settling pi_/ch_ in billing_provider_refs.
+    zeroship_control::invoice_payments::record_payment_object_refs(
+        &*fx.state.control_pg,
+        &inv,
+        Some(&pi),
+        Some(&ch),
+    )
+    .await
+    .expect("record refs");
+
+    // The resolver prefers the recorded pi_ (the money object), not the in_.
+    let target = refund::provider_invoice_id_for_cash_refund(&*fx.state.control_pg, &inv)
+        .await
+        .expect("resolve target")
+        .expect("a target exists");
+    assert_eq!(target, pi, "the recorded settling pi_ is the refund target");
+
+    // End-to-end: issue_refund passes that pi_ to the provider (RecordingStripe records it).
+    let stripe = RecordingStripe::default();
+    let mut conn = new_conn(&url).await;
+    let provider = refund::StripeRefundProvider { stripe: &stripe };
+    refund::issue_refund(
+        &mut conn, &provider, &inv, 2000, 2000, 0, RefundDestination::Cash, None, &key(&inv, "tgt"),
+    )
+    .await
+    .expect("issue");
+    let recorded_target = stripe.last_refund_target().expect("a refund was recorded");
+    assert_eq!(recorded_target, pi, "create_refund received the pi_ as its target");
 }
 
 // ===========================================================================

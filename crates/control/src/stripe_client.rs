@@ -225,16 +225,47 @@ pub trait StripeApi {
     /// (server-side truth), closing the "callback trusts the POSTed acct_…" hole.
     async fn retrieve_account(&self, account_id: &str) -> Result<ConnectAccount, StripeError>;
 
+    /// Resolve a finalized/paid invoice's SETTLEMENT object ids — the
+    /// PaymentIntent (`pi_…`) and Charge (`ch_…`) that actually moved the cash —
+    /// by an EXPANDED `GET /v1/invoices/{id}` (D2).
+    ///
+    /// Why a dedicated fetch (not the webhook payload): on Stripe API
+    /// `2025-09-30.clover` (Basil 2025-03-31+) the `payment_intent`/`charge`
+    /// fields were REMOVED from the Invoice object, and the delivered
+    /// `invoice.paid` event payload carries NEITHER them nor an inline
+    /// `payments` list. The settlement ids now live under
+    /// `invoice.payments.data[].payment.payment_intent`, and the only way to
+    /// read them is to EXPAND that path on a fresh retrieve
+    /// (`expand[]=payments.data.payment.payment_intent`, verified at
+    /// docs.stripe.com/changelog/basil/2025-03-31). A webhook payload cannot be
+    /// expanded, so the handler must call this.
+    ///
+    /// The expanded `payment.payment_intent` is the full PaymentIntent OBJECT:
+    /// its `id` is the `pi_…`, and its `latest_charge` (string) is the `ch_…`
+    /// (docs.stripe.com/api/payment_intents/object). Returns
+    /// `(payment_intent, charge)`, each `None` when absent (a $0/credit-only
+    /// invoice has no settlement object — a harmless no-op for the caller).
+    async fn invoice_settlement_ids(
+        &self,
+        provider_invoice_id: &str,
+    ) -> Result<(Option<String>, Option<String>), StripeError>;
+
     /// Create a **Refund** (`re_…`) returning the cash that was collected on a paid
-    /// invoice back to the original card (billing-ops gap #26, PR-3). `provider_invoice_id`
-    /// is the Stripe invoice (`in_…`) we recorded as the `invoice_payments.provider_ref`
-    /// of the `charge` row — this method resolves that invoice's PaymentIntent and issues
-    /// `POST /v1/refunds {payment_intent, amount}` (verified at
+    /// invoice back to the original card (billing-ops gap #26, PR-3).
+    /// `provider_invoice_id` is the refund TARGET the caller recorded: the settling
+    /// `pi_…`/`ch_…` (preferred — captured at `invoice.paid` from the expanded fetch) or
+    /// the Stripe invoice `in_…`. A `pi_…`/`ch_…` is refunded DIRECTLY; an `in_…` is first
+    /// resolved to its settling PaymentIntent via an EXPANDED fetch (D2 — the bare
+    /// `invoice.payment_intent` field was removed on API 2025-09-30.clover), then refunded.
+    /// Issues `POST /v1/refunds {payment_intent|charge, amount, reason}` (verified at
     /// docs.stripe.com/api/refunds/create: a `Refund` "Funds will be refunded to the
     /// credit or debit card that was originally charged" — a credit note alone does NOT
     /// move cash on a paid invoice, so a Refund is the authoritative money-movement object
     /// for `destination='cash'`). `amount_cents` is the positive amount to refund (cents,
     /// the smallest currency unit); a partial refund passes less than the charge.
+    /// `currency` is used by the CALLER's ledger/over-refund accounting and is
+    /// intentionally NOT sent to Stripe (the Refund API has no `currency` param — sending
+    /// one is a 400 `parameter_unknown`; the refund is in the charge's currency).
     /// `idempotency_key` is a deterministic key derived from `refund.id` so a crash-retry
     /// returns the SAME `re_…` rather than double-refunding. Returns the `re_…` id.
     async fn create_refund(
@@ -423,6 +454,58 @@ impl StripeClient {
     }
 }
 
+/// Parse the settling PaymentIntent (`pi_…`) and Charge (`ch_…`) out of an
+/// EXPANDED `GET /v1/invoices/{id}?expand[]=payments.data.payment.payment_intent`
+/// response (D2). Robust across API versions:
+///   * modern (Basil 2025-03-31+): `payments.data[].payment.payment_intent` is the
+///     expanded PaymentIntent OBJECT — its `id` is the `pi_…`, its `latest_charge`
+///     (a string) is the `ch_…`. (The top-level `payment_intent`/`charge` fields
+///     were removed on these versions, so the expand is the ONLY source.)
+///   * legacy (pre-Basil): top-level `invoice.payment_intent` / `invoice.charge`
+///     (also tolerated if `payment.payment_intent` is an un-expanded string).
+///
+/// Returns the FIRST non-empty id seen for each.
+fn parse_invoice_settlement_ids(
+    invoice: &serde_json::Value,
+) -> (Option<String>, Option<String>) {
+    let nonempty = |s: Option<&str>| s.map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
+    // Legacy top-level fields first (pre-Basil accounts/API versions).
+    let mut pi = nonempty(invoice.get("payment_intent").and_then(|v| v.as_str()));
+    let mut ch = nonempty(invoice.get("charge").and_then(|v| v.as_str()));
+
+    if let Some(entries) = invoice
+        .get("payments")
+        .and_then(|p| p.get("data"))
+        .and_then(|d| d.as_array())
+    {
+        for entry in entries {
+            let Some(payment) = entry.get("payment") else { continue };
+            let pi_field = payment.get("payment_intent");
+            // Expanded: payment.payment_intent is the full PaymentIntent object.
+            if let Some(pi_obj) = pi_field.filter(|v| v.is_object()) {
+                if pi.is_none() {
+                    pi = nonempty(pi_obj.get("id").and_then(|v| v.as_str()));
+                }
+                if ch.is_none() {
+                    // PaymentIntent.latest_charge is the ch_… (string id, or an
+                    // expanded Charge object whose own `id` is the ch_…).
+                    let lc = pi_obj.get("latest_charge");
+                    ch = nonempty(lc.and_then(|v| v.as_str()))
+                        .or_else(|| nonempty(lc.and_then(|v| v.get("id")).and_then(|v| v.as_str())));
+                }
+            } else if pi.is_none() {
+                // Un-expanded fallback: payment.payment_intent is a bare pi_… string.
+                pi = nonempty(pi_field.and_then(|v| v.as_str()));
+            }
+            // Some shapes also carry a bare `charge` string on the payment object.
+            if ch.is_none() {
+                ch = nonempty(payment.get("charge").and_then(|v| v.as_str()));
+            }
+        }
+    }
+    (pi, ch)
+}
+
 /// Pull the `id` field out of a Stripe object response, or surface a clear
 /// error if it is absent (a 2xx with no `id` is a protocol violation).
 fn extract_id(json: &serde_json::Value, what: &str) -> Result<String, StripeError> {
@@ -563,6 +646,17 @@ impl StripeApi for StripeClient {
             ("customer".to_string(), customer.to_string()),
             ("auto_advance".to_string(), "false".to_string()),
             ("collection_method".to_string(), "charge_automatically".to_string()),
+            // D1 (real-Stripe): on API version 2025-09-30.clover, POST /v1/invoices
+            // defaults `pending_invoice_items_behavior=exclude` — so the draft is
+            // created EMPTY and finalize sweeps NOTHING, totalling $0 and billing no
+            // infra usage (verified at docs.stripe.com/api/invoices/create:
+            // "Defaults to `exclude` if the parameter is omitted" — `include` =
+            // "Include any pending invoice items"). We MUST request `include` so the
+            // pending `invoice_item`s we posted this period are swept onto THIS draft.
+            (
+                "pending_invoice_items_behavior".to_string(),
+                "include".to_string(),
+            ),
             ("metadata[creator_id]".to_string(), creator_id.to_string()),
             ("metadata[invoice_kind]".to_string(), "infra".to_string()),
         ];
@@ -757,6 +851,22 @@ impl StripeApi for StripeClient {
         Ok(ConnectPaymentIntent { id, client_secret })
     }
 
+    async fn invoice_settlement_ids(
+        &self,
+        provider_invoice_id: &str,
+    ) -> Result<(Option<String>, Option<String>), StripeError> {
+        // EXPAND the per-payment PaymentIntent so the response inlines the full
+        // object (its `id` = pi_…, its `latest_charge` = ch_…). The legacy
+        // top-level `payment_intent`/`charge` fields are read too, for any
+        // pre-Basil account/API version.
+        let enc = encode_query_component(provider_invoice_id);
+        let path = format!(
+            "/v1/invoices/{enc}?expand[]=payments.data.payment.payment_intent"
+        );
+        let invoice = self.get_json(&path).await?;
+        Ok(parse_invoice_settlement_ids(&invoice))
+    }
+
     async fn create_refund(
         &self,
         provider_invoice_id: &str,
@@ -775,26 +885,46 @@ impl StripeApi for StripeClient {
                 "refund amount must be > 0 (got {amount})"
             )));
         }
-        // We persist the Stripe invoice id (`in_…`) as the charge row's provider_ref.
-        // `POST /v1/refunds` refunds a `charge` or a `payment_intent`, not an invoice —
-        // so resolve the invoice's PaymentIntent first (GET /v1/invoices/{in_…}), then
-        // refund THAT. The invoice's `payment_intent` is the money object the customer
-        // paid; refunding it returns the cash to the original card.
-        let enc = encode_query_component(provider_invoice_id);
-        let invoice = self.get_json(&format!("/v1/invoices/{enc}")).await?;
-        let payment_intent = invoice
-            .get("payment_intent")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| {
+        // `POST /v1/refunds` refunds a `charge` or a `payment_intent`, NOT an invoice.
+        // `provider_invoice_id` is whatever the caller recorded as the refund target —
+        // the authoritative settling `pi_…`/`ch_…` (captured at `invoice.paid` from the
+        // expanded fetch) when available, else the Stripe invoice `in_…`.
+        //
+        //   * `pi_…` / `ch_…` → refund that money object DIRECTLY (the common path).
+        //   * `in_…`          → resolve the invoice's settling PaymentIntent via an
+        //                        EXPANDED fetch, then refund THAT.
+        //
+        // D2 (real-Stripe): the bare `invoice.payment_intent` field was REMOVED on API
+        // 2025-09-30.clover (Basil 2025-03-31+) — reading it returns NULL and the cash
+        // refund 500s. For an `in_…` we therefore go via the EXPANDED
+        // `payments.data.payment.payment_intent` path (`invoice_settlement_ids`), never
+        // the bare field.
+        let (refund_key, refund_target) = if provider_invoice_id.starts_with("pi_") {
+            ("payment_intent", provider_invoice_id.to_string())
+        } else if provider_invoice_id.starts_with("ch_") {
+            ("charge", provider_invoice_id.to_string())
+        } else {
+            // An `in_…` (or any non-pi/ch id): resolve its settling PaymentIntent.
+            let (payment_intent, _charge) =
+                self.invoice_settlement_ids(provider_invoice_id).await?;
+            let payment_intent = payment_intent.ok_or_else(|| {
                 StripeError::Validation(format!(
-                    "stripe: invoice {provider_invoice_id} has no payment_intent — cannot refund cash"
+                    "stripe: invoice {provider_invoice_id} has no settling payment_intent \
+                     (expand payments.data.payment.payment_intent returned none) — cannot refund cash"
                 ))
             })?;
+            ("payment_intent", payment_intent)
+        };
+        // NOTE: `POST /v1/refunds` does NOT accept a `currency` parameter — the refund
+        // is denominated in the original charge's currency automatically. Sending one
+        // is a 400 `parameter_unknown` (verified at docs.stripe.com/api/refunds/create:
+        // the accepted params are amount/charge/payment_intent/reason/metadata/…, no
+        // `currency`). `currency` is retained on the method signature for the ledger /
+        // over-refund accounting the CALLER does, but is intentionally NOT sent to Stripe.
+        let _ = currency;
         let form = vec![
-            ("payment_intent".to_string(), payment_intent),
+            (refund_key.to_string(), refund_target),
             ("amount".to_string(), amount.to_string()),
-            ("currency".to_string(), currency.to_string()),
             // requested_by_customer is the closest Stripe reason for an operator
             // goodwill / over-charge correction. It is audit-only at Stripe.
             ("reason".to_string(), "requested_by_customer".to_string()),
@@ -891,6 +1021,62 @@ mod tests {
     #[test]
     fn encode_form_empty_is_empty() {
         assert!(encode_form(&[]).is_empty());
+    }
+
+    #[test]
+    fn settlement_ids_basil_expanded_payment_intent_object() {
+        // Real Basil shape after expand[]=payments.data.payment.payment_intent:
+        // the payment_intent is a FULL object; pi_ is its id, ch_ is latest_charge.
+        let inv = serde_json::json!({
+            "id": "in_basil",
+            "object": "invoice",
+            "payments": { "object": "list", "data": [
+                { "payment": { "type": "payment_intent",
+                    "payment_intent": { "id": "pi_basil", "object": "payment_intent",
+                        "latest_charge": "ch_basil" } } }
+            ] }
+        });
+        let (pi, ch) = parse_invoice_settlement_ids(&inv);
+        assert_eq!(pi.as_deref(), Some("pi_basil"), "pi_ from expanded payment_intent.id");
+        assert_eq!(ch.as_deref(), Some("ch_basil"), "ch_ from payment_intent.latest_charge");
+    }
+
+    #[test]
+    fn settlement_ids_basil_omits_top_level_fields() {
+        // The Basil invoice has NO top-level payment_intent/charge — confirm we do
+        // NOT depend on them (this is exactly what broke against real Stripe).
+        let inv = serde_json::json!({
+            "id": "in_basil2", "object": "invoice", "status": "paid",
+            "payments": { "object": "list", "data": [
+                { "payment": { "type": "payment_intent",
+                    "payment_intent": { "id": "pi_x", "latest_charge": "ch_x" } } }
+            ] }
+        });
+        assert!(inv.get("payment_intent").is_none(), "fixture has no top-level pi");
+        let (pi, ch) = parse_invoice_settlement_ids(&inv);
+        assert_eq!(pi.as_deref(), Some("pi_x"));
+        assert_eq!(ch.as_deref(), Some("ch_x"));
+    }
+
+    #[test]
+    fn settlement_ids_legacy_top_level() {
+        // Pre-Basil: ids live at the top level of the invoice object.
+        let inv = serde_json::json!({
+            "id": "in_legacy", "object": "invoice",
+            "payment_intent": "pi_legacy", "charge": "ch_legacy"
+        });
+        let (pi, ch) = parse_invoice_settlement_ids(&inv);
+        assert_eq!(pi.as_deref(), Some("pi_legacy"));
+        assert_eq!(ch.as_deref(), Some("ch_legacy"));
+    }
+
+    #[test]
+    fn settlement_ids_absent_is_none() {
+        // A $0 / credit-only invoice has no settlement object.
+        let inv = serde_json::json!({ "id": "in_zero", "object": "invoice",
+            "payments": { "object": "list", "data": [] } });
+        let (pi, ch) = parse_invoice_settlement_ids(&inv);
+        assert!(pi.is_none() && ch.is_none());
     }
 
     #[test]

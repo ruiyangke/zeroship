@@ -1140,6 +1140,15 @@ async fn dispatch_event(
                     tracing::error!(error = %e, "stripe: invoice.paid payment-row append failed — failing closed for retry");
                     return err_json(500, "internal error");
                 }
+                // D3: an INFRA `invoice.paid` is FULLY handled here — ACK 200 and
+                // RETURN. It must NOT fall through to the Stream-2 `record_payout`
+                // path below, whose `payouts.creator_id → creator_accounts(creator_id)`
+                // FK an infra-only creator (no Connect account) cannot satisfy. The
+                // fall-through 500'd AFTER the infra writes committed (non-atomic),
+                // so the event never acked and Stripe retried forever (poison). The
+                // payout path is for Connect REVENUE events, which are NOT infra
+                // invoices and are still reached for non-infra `invoice.paid` below.
+                return web::HttpResponse::Ok().json(&serde_json::json!({"status": "infra_recorded"}));
             }
         }
         _ => {
@@ -1386,45 +1395,76 @@ async fn record_infra_payment(
         return Ok(());
     }
     let currency = obj.currency.clone().unwrap_or_else(|| "usd".into());
-    let conn = state.registry.conn().await?;
-    let internal_id = match crate::invoice_payments::invoice_id_for_provider_invoice(
-        &conn,
-        provider_invoice_id,
-    )
-    .await?
-    {
-        Some(id) => id,
-        None => {
-            // No finalized internal invoice maps to this Stripe invoice (a
-            // pre-reconciler-finalize race, or not a platform invoice). Nothing
-            // to anchor a payment against — not an error, ack the webhook.
-            tracing::warn!(
-                "stripe: infra invoice.paid has no internal invoice ref — no payment row appended"
-            );
-            return Ok(());
-        }
-    };
-    let pay_id = crate::invoice_payments::append_charge(
-        &conn,
-        &internal_id,
-        amount,
-        &currency,
-        Some(provider_invoice_id),
-    )
-    .await?;
-    tracing::info!(
-        invoice_id = %internal_id,
-        payment_id = %pay_id,
-        amount_cents = amount,
-        "stripe: appended invoice_payments charge row"
-    );
 
-    // DISPUTE-RESOLUTION LINKAGE (PR-8 CRITICAL-1). A future `charge.dispute.*` carries
-    // only the settling `pi_…`/`ch_…` (never the `in_…`). Capture those off THIS paid
-    // invoice and persist them as `billing_provider_refs(ref_kind='payment_intent'|'charge')`
-    // → this invoice, so the dispute handler can resolve back to us. Idempotent (ON CONFLICT
-    // DO NOTHING); a paid invoice with neither id is a harmless no-op.
-    let (pi, ch) = invoice_payment_object_ids(obj);
+    // (1) Resolve the internal invoice + APPEND the cash charge row first. The
+    // connection is scoped to this block and DROPPED before the HTTP fetch below so we
+    // never hold a PG connection across a cyper `.await` (the same fresh-conn-per-step
+    // discipline the Connect `callback`/`onboard` handlers use: PG → HTTP → PG).
+    let internal_id = {
+        let conn = state.registry.conn().await?;
+        let internal_id = match crate::invoice_payments::invoice_id_for_provider_invoice(
+            &conn,
+            provider_invoice_id,
+        )
+        .await?
+        {
+            Some(id) => id,
+            None => {
+                // No finalized internal invoice maps to this Stripe invoice (a
+                // pre-reconciler-finalize race, or not a platform invoice). Nothing
+                // to anchor a payment against — not an error, ack the webhook.
+                tracing::warn!(
+                    "stripe: infra invoice.paid has no internal invoice ref — no payment row appended"
+                );
+                return Ok(());
+            }
+        };
+        let pay_id = crate::invoice_payments::append_charge(
+            &conn,
+            &internal_id,
+            amount,
+            &currency,
+            Some(provider_invoice_id),
+        )
+        .await?;
+        tracing::info!(
+            invoice_id = %internal_id,
+            payment_id = %pay_id,
+            amount_cents = amount,
+            "stripe: appended invoice_payments charge row"
+        );
+        internal_id
+        // `conn` dropped here (before the HTTP fetch).
+    };
+
+    // (2) DISPUTE-RESOLUTION LINKAGE (PR-8 CRITICAL-1). A future `charge.dispute.*`
+    // carries only the settling `pi_…`/`ch_…` (never the `in_…`). Capture those for THIS
+    // paid invoice and persist them as
+    // `billing_provider_refs(ref_kind='payment_intent'|'charge')` so the dispute handler
+    // can resolve back to us.
+    //
+    // D2 (real-Stripe): the delivered `invoice.paid` event payload carries NEITHER a
+    // top-level `payment_intent`/`charge` NOR an inline `payments` list on API
+    // 2025-09-30.clover (Basil 2025-03-31+) — reading them off `obj` records NOTHING, so
+    // a real dispute could never resolve. A webhook payload cannot be expanded, so FETCH
+    // the settlement ids via an expanded retrieve
+    // (`expand[]=payments.data.payment.payment_intent`) and record THOSE. We fall back to
+    // any ids already inline on `obj` (the faithful-envelope / legacy shape).
+    //
+    // FAIL-CLOSED: a transient fetch failure propagates → non-2xx → the event is left
+    // UNCLAIMED → Stripe retries. The charge row already committed, but `append_charge`
+    // is idempotent on `provider_ref` and `record_payment_object_refs` is ON CONFLICT DO
+    // NOTHING, so the retry never double-writes.
+    let (pi, ch) = settlement_ids_for(state, provider_invoice_id, obj)
+        .await
+        .map_err(|e| {
+            crate::registry::RegistryError::Database(format!(
+                "stripe: invoice.paid settlement-id fetch failed: {e}"
+            ))
+        })?;
+
+    // (3) Record the fetched linkage on a FRESH connection (post-HTTP).
+    let conn = state.registry.conn().await?;
     crate::invoice_payments::record_payment_object_refs(
         &conn,
         &internal_id,
@@ -1433,6 +1473,36 @@ async fn record_infra_payment(
     )
     .await?;
     Ok(())
+}
+
+/// Resolve the settling `(payment_intent, charge)` for an infra `invoice.paid` (D2).
+///
+/// PREFER ids already inline on the webhook `obj` (the legacy top-level shape, or the
+/// faithful Basil `payments.data[].payment.{payment_intent,charge}` envelope a correct
+/// integration would deliver). If NEITHER is present — the real-Stripe default on API
+/// 2025-09-30.clover — FETCH the invoice with `expand[]=payments.data.payment.payment_intent`
+/// and read the ids from the expanded object. A `StripeClient` is built from the same
+/// `state.stripe_secret_key`/`stripe_base_url` the other handlers use; when no secret is
+/// configured (a unit fixture exercising only the inline shape) the fetch is skipped.
+async fn settlement_ids_for(
+    state: &AppState,
+    provider_invoice_id: &str,
+    obj: &StripeObject,
+) -> Result<(Option<String>, Option<String>), crate::stripe_store::StripeError> {
+    let (pi, ch) = invoice_payment_object_ids(obj);
+    if pi.is_some() || ch.is_some() {
+        return Ok((pi, ch));
+    }
+    if state.stripe_secret_key.expose_secret().is_empty() {
+        // No Stripe credential (a unit fixture); nothing to fetch — the inline shape
+        // was the only source. Not an error: a $0/credit invoice legitimately has none.
+        return Ok((None, None));
+    }
+    let stripe = crate::stripe_client::StripeClient::new(crate::SecretString::new(
+        state.stripe_secret_key.expose_secret().to_string(),
+    ))
+    .with_base_url(state.stripe_base_url.clone());
+    stripe.invoice_settlement_ids(provider_invoice_id).await
 }
 
 /// Extract the settling PaymentIntent (`pi_…`) and Charge (`ch_…`) from a paid Stripe

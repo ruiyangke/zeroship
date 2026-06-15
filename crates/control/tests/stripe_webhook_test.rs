@@ -3,7 +3,11 @@
 #![allow(clippy::future_not_send)]
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+
+use compio::io::{AsyncRead, AsyncWriteExt};
+use compio::net::{TcpListener, TcpStream};
 
 use ntex::http::StatusCode;
 use ntex::web::{self, test};
@@ -53,6 +57,30 @@ impl Fixture {
         webhook_secret: &str,
         insecure_dev: bool,
     ) -> Self {
+        Self::new_full(db_url, label, webhook_secret, insecure_dev, "", "https://api.stripe.com").await
+    }
+
+    /// Fixture variant that wires a Stripe secret key + base URL — so the D2
+    /// settlement-id fetch (`record_infra_payment` → `invoice_settlement_ids`) is
+    /// actually exercised against a localhost mock.
+    async fn new_with_stripe(
+        db_url: &str,
+        label: &str,
+        stripe_secret_key: &str,
+        stripe_base_url: &str,
+    ) -> Self {
+        Self::new_full(db_url, label, "", true, stripe_secret_key, stripe_base_url).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn new_full(
+        db_url: &str,
+        label: &str,
+        webhook_secret: &str,
+        insecure_dev: bool,
+        stripe_secret_key: &str,
+        stripe_base_url: &str,
+    ) -> Self {
         let blob_root = tmpdir(&format!("blob-{label}"));
         let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
         let registry = Registry::new(db_url).await.expect("registry");
@@ -78,8 +106,8 @@ impl Fixture {
             control_key: SecretString::new("test-control-key".to_string()),
             master_key: SecretString::new("test-master-key".to_string()),
             stripe_webhook_secret: SecretString::new(webhook_secret.to_string()),
-            stripe_secret_key: SecretString::new(String::new()),
-            stripe_base_url: "https://api.stripe.com".to_string(),
+            stripe_secret_key: SecretString::new(stripe_secret_key.to_string()),
+            stripe_base_url: stripe_base_url.to_string(),
             worker_urls: Vec::new(),
             worker_key: SecretString::new(String::new()),
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
@@ -127,6 +155,91 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.blob_root);
         let _ = std::fs::remove_dir_all(&self.deploy_tmp_dir);
     }
+}
+
+/// A minimal mock-Stripe HTTP server that answers `GET /v1/invoices/{id}` with a
+/// Basil expanded invoice (settling pi_/ch_ under `payments.data[].payment`). The
+/// first `fail_n` GETs return HTTP 500 (a transient Stripe error → `StripeError::Api`
+/// → the handler's settlement fetch fails closed); subsequent GETs return 200. Used
+/// to exercise the D2 settlement fetch as the fallible LATER step inside
+/// `record_infra_payment` (post-D3 the payout path no longer provides that step for
+/// an infra invoice). Returns the base URL.
+async fn start_flaky_invoice_mock(fail_n: u32) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+    let base_url = format!("http://{}", listener.local_addr().expect("addr"));
+    let calls = Arc::new(AtomicU32::new(0));
+    compio::runtime::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else { break };
+            let calls = Arc::clone(&calls);
+            compio::runtime::spawn(async move {
+                serve_flaky_conn(stream, calls, fail_n).await;
+            })
+            .detach();
+        }
+    })
+    .detach();
+    base_url
+}
+
+async fn serve_flaky_conn(mut stream: TcpStream, calls: Arc<AtomicU32>, fail_n: u32) {
+    let mut acc: Vec<u8> = Vec::new();
+    loop {
+        // Parse one request (headers terminated by CRLFCRLF; GETs carry no body).
+        while let Some(end) = find_header_end(&acc) {
+            let head = String::from_utf8_lossy(&acc[..end]).to_string();
+            acc.drain(0..end + 4);
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            let resp = if n < fail_n {
+                // Transient Stripe-style 5xx error body.
+                let body = r#"{"error":{"type":"api_error","message":"transient"}}"#;
+                http_resp(500, body)
+            } else {
+                // Extract the invoice id from the request line for echoing.
+                let id = head
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .and_then(|p| p.strip_prefix("/v1/invoices/"))
+                    .map(|s| s.split('?').next().unwrap_or("").to_string())
+                    .unwrap_or_default();
+                // Derive UNIQUE settlement ids from the invoice id so concurrent /
+                // sequential tests in the shared DB never collide on the
+                // `billing_provider_refs (provider, ref_kind, external_id)` unique.
+                let suffix = id.trim_start_matches("in_idem_");
+                let pi = format!("pi_flaky_{suffix}");
+                let ch = format!("ch_flaky_{suffix}");
+                let body = format!(
+                    r#"{{"id":"{id}","object":"invoice","status":"paid","payments":{{"object":"list","data":[{{"object":"invoice_payment","payment":{{"type":"payment_intent","payment_intent":{{"id":"{pi}","object":"payment_intent","latest_charge":"{ch}"}}}}}}]}}}}"#
+                );
+                http_resp(200, &body)
+            };
+            if stream.write_all(resp).await.0.is_err() {
+                return;
+            }
+        }
+        let buf = vec![0u8; 4096];
+        let compio::BufResult(n, buf) = stream.read(buf).await;
+        match n {
+            Ok(0) | Err(_) => return,
+            Ok(read) => acc.extend_from_slice(&buf[..read]),
+        }
+    }
+}
+
+fn find_header_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+fn http_resp(status: u16, body: &str) -> Vec<u8> {
+    let reason = if status == 200 { "OK" } else { "Internal Server Error" };
+    let mut resp = format!(
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    resp.extend_from_slice(body.as_bytes());
+    resp
 }
 
 macro_rules! init_control {
@@ -235,10 +348,10 @@ async fn infra_invoice_paid_appends_charge_payment_row() {
     )
     .await
     .expect("creator_billing");
-    // An `invoice.paid` carrying `metadata.creator_id` also flows through the
-    // Stream-2 Connect payout-ledger path (record_payout), which FKs to a linked
-    // Connect account. Link one so that path succeeds and the webhook returns 200 —
-    // the infra `invoice_payments` append (PR-1) is what this test asserts.
+    // Post-D3 an INFRA `invoice.paid` is fully handled by the infra branch and
+    // returns 200 BEFORE the Stream-2 `record_payout` path — so no Connect link is
+    // needed. (Kept linked here only to keep the fixture's account state realistic;
+    // the assertion under test is the infra `invoice_payments` append, PR-1.)
     fx.state
         .stripe_store
         .link_account(creator_id, &format!("acct_{}", Uuid::new_v4().simple()))
@@ -437,12 +550,9 @@ async fn distinct_events_same_invoice_append_one_charge_row() {
     )
     .await
     .expect("creator_billing");
-    // record_payout FKs to a linked Connect account — link so both deliveries 200.
-    fx.state
-        .stripe_store
-        .link_account(creator_id, &format!("acct_{}", Uuid::new_v4().simple()))
-        .await
-        .expect("link stripe account");
+    // Post-D3 the infra branch returns before the payout FK, so no Connect link is
+    // needed for these infra deliveries to 200; this test isolates the PR-1 append
+    // idempotency across two DISTINCT event ids for the same Stripe invoice.
 
     let (inv_id, provider_invoice_id) =
         seed_finalized_infra_invoice(&conn, creator_id, 4500).await;
@@ -479,23 +589,29 @@ async fn distinct_events_same_invoice_append_one_charge_row() {
     assert_eq!(cash, 4500, "cash_collected must be the single amount, NOT doubled");
 }
 
-/// CRITICAL-1 (same-event retry leg): the append runs BEFORE the fallible payout
-/// path. Simulate "append committed, then a later step failed → event UNCLAIMED →
-/// Stripe re-dispatches the SAME event id". Here the first delivery has NO linked
-/// Connect account, so `record_infra_payment` appends the charge row and THEN
-/// `record_payout` FK-fails → 500 → event unclaimed. The retry (after linking)
-/// re-runs the idempotent append (ON CONFLICT DO NOTHING) and succeeds. Net: still
-/// exactly ONE charge row, cash_collected un-doubled.
+/// CRITICAL-1 (same-event retry leg): the charge-row append runs BEFORE the fallible
+/// D2 settlement-id FETCH, so "append committed, then a later step failed → event
+/// UNCLAIMED → Stripe re-dispatches the SAME event id" must STILL leave exactly one
+/// charge row across the retry.
 ///
-/// RED pre-fix: the first pass's unconditional INSERT already committed a row; the
-/// retry's INSERT adds a SECOND → 2 charge rows → cash_collected doubles.
+/// Post-D3 the infra `invoice.paid` branch RETURNS (it no longer falls through to the
+/// payout FK), so the fallible "later step" is the D2 settlement fetch
+/// (`record_infra_payment` → `invoice_settlement_ids`). A flaky mock fails the FIRST
+/// expanded `GET /v1/invoices` (HTTP 500 → `StripeError` → fail closed), then succeeds
+/// on the retry. The body inlines NO pi_/ch_, so the fetch is forced.
+///
+/// RED pre-fix (PR-1): the first pass's unconditional INSERT already committed a row;
+/// the retry's INSERT adds a SECOND → 2 charge rows → cash_collected doubles. The
+/// `(invoice_id, provider_ref)` idempotency index keeps it to one.
 #[compio::test]
 async fn same_event_retry_after_later_failure_appends_one_charge_row() {
     let Some(db_url) = db_url() else {
         eprintln!("[stripe_webhook_test] DB URL not set - skipping");
         return;
     };
-    let fx = Fixture::new(&db_url, "idem-same-evt-retry").await;
+    // Wire a flaky mock that fails the FIRST settlement-id GET, then succeeds.
+    let base_url = start_flaky_invoice_mock(1).await;
+    let fx = Fixture::new_with_stripe(&db_url, "idem-same-evt-retry", "sk_test_mock", &base_url).await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
     let creator_id = make_user(&conn).await;
@@ -510,45 +626,53 @@ async fn same_event_retry_after_later_failure_appends_one_charge_row() {
         seed_finalized_infra_invoice(&conn, creator_id, 4500).await;
 
     let evt = format!("evt_idem_retry_{}", Uuid::new_v4().simple());
+    // No inline pi_/ch_ → the handler MUST do the (flaky) settlement fetch.
     let body = infra_invoice_paid_body(&evt, &provider_invoice_id, creator_id, 4500);
 
-    // First delivery: NO linked Connect account → record_payout FK-fails AFTER the
-    // charge row was appended → 500, event NOT claimed.
+    // First delivery: the charge row is appended, THEN the settlement-id fetch 500s
+    // → 500, event NOT claimed.
     let r1 = post_webhook!(app, &body, None);
     assert_eq!(
         r1.status(),
         StatusCode::INTERNAL_SERVER_ERROR,
-        "later payout step fails (no Connect account) → retryable 5xx",
+        "settlement-fetch failure fails closed → retryable 5xx",
     );
     assert_eq!(ledger_count(&conn, &evt).await, 0, "event NOT claimed (will retry)");
     assert_eq!(
         charge_row_count(&conn, &inv_id).await,
         1,
-        "the append committed on the first pass before the later failure",
+        "the append committed on the first pass before the later (fetch) failure",
     );
 
-    // Now the Connect account exists (link landed before the retry).
-    fx.state
-        .stripe_store
-        .link_account(creator_id, &format!("acct_{}", Uuid::new_v4().simple()))
-        .await
-        .expect("link stripe account");
-
-    // Retry (SAME event id) — idempotent re-append, payout now succeeds → 200.
+    // Retry (SAME event id) — the mock now serves the invoice; append once → 200.
     let r2 = post_webhook!(app, &body, None);
     assert_eq!(r2.status(), StatusCode::OK, "retry processed (not lost)");
     assert_eq!(ledger_count(&conn, &evt).await, 1, "retry claimed once");
 
-    // STILL exactly one charge row — the retry's append was a no-op.
+    // EXACTLY one charge row across the two deliveries.
     assert_eq!(
         charge_row_count(&conn, &inv_id).await,
         1,
-        "the same-event retry must NOT add a second charge row (idempotent append)",
+        "the same-event retry appends exactly one charge row (idempotent)",
     );
     let cash = zeroship_control::invoice_payments::cash_collected(&conn, &inv_id)
         .await
         .expect("cash_collected");
-    assert_eq!(cash, 4500, "cash_collected stays the single amount across the retry");
+    assert_eq!(cash, 4500, "cash_collected is the single amount, NOT doubled");
+
+    // The retry recorded the settlement linkage fetched from the (now-healthy) mock.
+    // (The mock derives a unique pi_ from the invoice id to avoid cross-test collisions.)
+    let expected_pi = format!("pi_flaky_{}", provider_invoice_id.trim_start_matches("in_idem_"));
+    let pi_refs = conn
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.billing_provider_refs \
+             WHERE invoice_id = $1 AND ref_kind = 'payment_intent' AND external_id = $2",
+            &[&inv_id, &expected_pi],
+        )
+        .await
+        .expect("count pi refs")[0]
+        .get::<_, i64>("n");
+    assert_eq!(pi_refs, 1, "the fetched pi_ linkage was recorded on retry (D2)");
 }
 
 /// MAJOR-2: a TRANSIENT `append_charge` failure must NOT be swallowed-then-claimed
@@ -622,6 +746,174 @@ async fn append_failure_leaves_event_unclaimed_not_silently_dropped() {
     );
     // No charge row was committed (the INSERT itself failed).
     assert_eq!(charge_row_count(&conn, &inv_id).await, 0, "no partial charge row on failed append");
+}
+
+/// Count payout-ledger rows for a creator.
+async fn payout_row_count(conn: &compio_postgres::Client, creator_id: Uuid) -> i64 {
+    conn.query(
+        "SELECT COUNT(*)::bigint AS n FROM zeroship.payouts WHERE creator_id = $1",
+        &[&creator_id],
+    )
+    .await
+    .expect("count payouts")[0]
+        .get::<_, i64>("n")
+}
+
+/// D3 (real-Stripe regression): an INFRA `invoice.paid` for a creator with NO
+/// `creator_accounts` (Connect) row must ACK 200 and NOT touch the Stream-2 payout
+/// path. Pre-fix `dispatch_event` did not `return` after the infra branch, so it fell
+/// through to `record_payout`, whose `payouts.creator_id → creator_accounts(creator_id)`
+/// FK an infra-only creator cannot satisfy → 500 AFTER the infra writes committed
+/// (non-atomic; the event never acked → Stripe retried forever — a poison loop).
+///
+/// RED pre-fix: HTTP 500 + the event left UNCLAIMED (poison). Post-fix: 200, the
+/// charge row committed, and ZERO payout rows (the payout FK was never reached).
+#[compio::test]
+async fn infra_invoice_paid_without_connect_account_acks_200_no_payout() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "d3-infra-no-connect").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+    let creator_id = make_user(&conn).await;
+    conn.execute(
+        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        &[&creator_id],
+    )
+    .await
+    .expect("creator_billing");
+    // Deliberately NO link_account → no creator_accounts row (an infra-only creator).
+    let (inv_id, provider_invoice_id) =
+        seed_finalized_infra_invoice(&conn, creator_id, 4500).await;
+
+    let evt = format!("evt_d3_{}", Uuid::new_v4().simple());
+    let body = infra_invoice_paid_body(&evt, &provider_invoice_id, creator_id, 4500);
+    let r = post_webhook!(app, &body, None);
+
+    // ACKED 200 (no poison loop) — the infra branch returned before the payout FK.
+    assert_eq!(r.status(), StatusCode::OK, "infra invoice.paid acks 200 without a Connect account");
+    let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
+    assert_eq!(b["status"], "infra_recorded", "handled by the infra branch, not the payout path");
+    assert_eq!(ledger_count(&conn, &evt).await, 1, "event claimed (acked) — Stripe will NOT retry");
+    // The infra side-effect committed…
+    assert_eq!(charge_row_count(&conn, &inv_id).await, 1, "the infra charge row was appended");
+    // …and the payout path was NEVER reached (no FK violation, no payout row).
+    assert_eq!(
+        payout_row_count(&conn, creator_id).await,
+        0,
+        "an infra invoice.paid must NOT write a payout row (it returns before record_payout)",
+    );
+}
+
+/// D3 (no-regression companion): a NON-infra `invoice.paid` (a real Connect-revenue
+/// event — `metadata.creator_id` present, NO `invoice_kind=infra`) MUST still route to
+/// the Stream-2 `record_payout` path and record a payout for a creator with a linked
+/// Connect account. This proves the D3 `return` is scoped to infra invoices only and
+/// did NOT break the legitimate Connect payout path.
+#[compio::test]
+async fn non_infra_invoice_paid_still_routes_to_payout() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "d3-connect-payout").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+    let creator_id = make_user(&conn).await;
+    // A real Connect creator: linked account so the payout FK is satisfied.
+    fx.state
+        .stripe_store
+        .link_account(creator_id, &format!("acct_{}", Uuid::new_v4().simple()))
+        .await
+        .expect("link stripe account");
+
+    // NON-infra invoice.paid: creator_id present, NO invoice_kind=infra marker.
+    let evt = format!("evt_connect_{}", Uuid::new_v4().simple());
+    let body = json!({
+        "id": evt,
+        "type": "invoice.paid",
+        "created": 1_777_017_600i64,
+        "data": { "object": {
+            "id": format!("in_connect_{}", Uuid::new_v4().simple()),
+            "amount_paid": 1000,
+            "application_fee_amount": 150,
+            "currency": "usd",
+            "metadata": { "creator_id": creator_id.to_string() }
+        }}
+    })
+    .to_string();
+
+    let r = post_webhook!(app, &body, None);
+    assert_eq!(r.status(), StatusCode::OK, "connect-revenue invoice.paid processed");
+    let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
+    assert_eq!(b["status"], "recorded", "routed through the Stream-2 record_payout path");
+    assert_eq!(
+        payout_row_count(&conn, creator_id).await,
+        1,
+        "a real Connect creator's invoice.paid still records a payout (D3 did not break this)",
+    );
+}
+
+/// D2 (real-Stripe regression, webhook leg): a real `invoice.paid` payload carries NO
+/// inline pi_/ch_ (Basil removed the top-level fields and the event isn't expanded).
+/// `record_infra_payment` must FETCH the settlement ids via the expanded
+/// `GET /v1/invoices` and record the `billing_provider_refs(payment_intent|charge)`
+/// linkage from the FETCHED object — so a later real dispute can resolve back to us.
+///
+/// RED pre-fix: the handler read the ids off the (un-expandable) webhook payload, so a
+/// payload WITHOUT them recorded NO linkage → a real dispute could never resolve.
+#[compio::test]
+async fn infra_invoice_paid_fetches_settlement_linkage_when_payload_omits_it() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    // A healthy mock (fail_n=0) that serves the expanded invoice with pi_flaky/ch_flaky.
+    let base_url = start_flaky_invoice_mock(0).await;
+    let fx = Fixture::new_with_stripe(&db_url, "d2-fetch-linkage", "sk_test_mock", &base_url).await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+    let creator_id = make_user(&conn).await;
+    conn.execute(
+        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        &[&creator_id],
+    )
+    .await
+    .expect("creator_billing");
+    let (inv_id, provider_invoice_id) =
+        seed_finalized_infra_invoice(&conn, creator_id, 4500).await;
+
+    // Payload OMITS pi_/ch_ entirely (the real-Stripe shape) — forces the fetch.
+    let evt = format!("evt_d2_{}", Uuid::new_v4().simple());
+    let body = infra_invoice_paid_body(&evt, &provider_invoice_id, creator_id, 4500);
+    let r = post_webhook!(app, &body, None);
+    assert_eq!(r.status(), StatusCode::OK, "infra invoice.paid processed");
+
+    // The pi_/ch_ linkage was FETCHED and recorded (the dispute-resolution anchor).
+    let refs = conn
+        .query(
+            "SELECT ref_kind, external_id FROM zeroship.billing_provider_refs \
+             WHERE invoice_id = $1 AND ref_kind IN ('payment_intent','charge') ORDER BY ref_kind",
+            &[&inv_id],
+        )
+        .await
+        .expect("select refs");
+    let pairs: Vec<(String, String)> = refs
+        .iter()
+        .map(|row| (row.get::<_, String>("ref_kind"), row.get::<_, String>("external_id")))
+        .collect();
+    // The mock derives unique pi_/ch_ from the invoice id (avoids cross-test collisions).
+    let suffix = provider_invoice_id.trim_start_matches("in_idem_");
+    assert!(
+        pairs.contains(&("charge".to_string(), format!("ch_flaky_{suffix}"))),
+        "ch_ linkage fetched + recorded; got {pairs:?}",
+    );
+    assert!(
+        pairs.contains(&("payment_intent".to_string(), format!("pi_flaky_{suffix}"))),
+        "pi_ linkage fetched + recorded; got {pairs:?}",
+    );
 }
 
 // ─── G6 replay-dedup ledger tests ──────────────────────────────────────────
