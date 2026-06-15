@@ -71,6 +71,11 @@ ALTER TABLE zeroship.refunds ADD COLUMN failed_at TIMESTAMPTZ;
 -- (No new index needed — the existing UNIQUE(provider, ref_kind, external_id) on
 -- refund_provider_refs is the covering index for the re_… → refund_id reverse resolve.)
 SELECT 1;
+-- This changeset makes NO schema change (the covering index already exists), so the
+-- inverse is a no-op. The explicit directive below is still required: a raw-SQL change
+-- carrying no inverse directive throws RollbackFailedException on a deep rollback
+-- (Liquibase cannot infer an inverse for raw SQL).
+--rollback SELECT 1;
 
 --changeset zeroship:refunds-immutable-allow-failure splitStatements:false
 -- LOOSEN the refunds-immutable trigger (0049) to permit the TERMINAL FAILURE transition a
