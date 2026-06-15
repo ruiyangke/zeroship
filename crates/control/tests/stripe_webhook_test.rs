@@ -2327,21 +2327,21 @@ async fn payout_failed_without_connected_account_acks_no_row() {
         }}
     })
     .to_string();
-    let count_before = conn
-        .query("SELECT COUNT(*)::bigint AS n FROM zeroship.payout_failures", &[])
-        .await
-        .expect("count")[0]
-        .get::<_, i64>("n");
     let r = post_webhook!(app, &body, None);
     assert_eq!(r.status(), StatusCode::OK, "benign ack — not attributable");
     let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
     assert_eq!(b["status"], "no_connected_account");
-    let count_after = conn
-        .query("SELECT COUNT(*)::bigint AS n FROM zeroship.payout_failures", &[])
+    // Scope to THIS test's payout id: a global COUNT(*) races concurrent siblings in the
+    // same (multi-threaded) binary that legitimately write payout_failures rows.
+    let n = conn
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.payout_failures WHERE provider_payout_id = $1",
+            &[&po_id],
+        )
         .await
         .expect("count")[0]
         .get::<_, i64>("n");
-    assert_eq!(count_after, count_before, "no payout_failures row written");
+    assert_eq!(n, 0, "no payout_failures row written for this payout");
 }
 
 /// #29 (payment_intent.payment_failed with NO connected account): a platform (non-Connect)
@@ -2373,21 +2373,21 @@ async fn payment_intent_failed_without_connected_account_acks_no_row() {
         }}
     })
     .to_string();
-    let count_before = conn
-        .query("SELECT COUNT(*)::bigint AS n FROM zeroship.connect_checkout_failures", &[])
-        .await
-        .expect("count")[0]
-        .get::<_, i64>("n");
     let r = post_webhook!(app, &body, None);
     assert_eq!(r.status(), StatusCode::OK, "benign ack — not a Connect checkout");
     let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
     assert_eq!(b["status"], "no_connected_account");
-    let count_after = conn
-        .query("SELECT COUNT(*)::bigint AS n FROM zeroship.connect_checkout_failures", &[])
+    // Scope to THIS test's pi id: a global COUNT(*) races concurrent siblings in the same
+    // (multi-threaded) binary that legitimately write connect_checkout_failures rows.
+    let n = conn
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.connect_checkout_failures WHERE provider_payment_intent_id = $1",
+            &[&pi_id],
+        )
         .await
         .expect("count")[0]
         .get::<_, i64>("n");
-    assert_eq!(count_after, count_before, "no connect_checkout_failures row written");
+    assert_eq!(n, 0, "no connect_checkout_failures row written for this pi");
 }
 
 /// #27 (account.updated for an UNLINKED account): an `account.updated` for an `acct_…` we
