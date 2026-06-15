@@ -164,6 +164,15 @@ pub trait StripeApi {
     /// Idempotency-Key window has expired) can FIND an already-posted item via
     /// [`StripeApi::find_invoice_item_by_key`] instead of blindly re-posting it
     /// (C1). Returns the `ii_…` id.
+    ///
+    /// `metadata` carries the FULL CU/usage derivation (`compute_units`,
+    /// `billable_units`, `included_units`, `fx_pico_cents_per_unit`,
+    /// `base_fee_cents`, `period`, `segment`, and the packed per-metric `usage`
+    /// blob(s)) so the charge is fully visible + queryable in the Stripe
+    /// dashboard/API. `metadata.zs_item_key` is ALWAYS appended by this method
+    /// (the caller's `metadata` must NOT contain it) — the lookup key is the
+    /// adopt-path contract, not caller-supplied. DESCRIPTIVE only: the
+    /// authoritative `amount_cents` is unaffected by anything in `metadata`.
     #[allow(clippy::too_many_arguments)]
     async fn create_invoice_item(
         &self,
@@ -174,6 +183,7 @@ pub trait StripeApi {
         period: Period,
         idempotency_key: &str,
         lookup_key: &str,
+        metadata: &[(String, String)],
     ) -> Result<String, StripeError>;
 
     /// Delete a PENDING (not-yet-finalized-onto-an-invoice) invoice item by id
@@ -741,6 +751,7 @@ impl StripeApi for StripeClient {
         period: Period,
         idempotency_key: &str,
         lookup_key: &str,
+        metadata: &[(String, String)],
     ) -> Result<String, StripeError> {
         // Money MUST NOT silently clamp on overflow — a clamp would mis-bill.
         // Surface it as a hard validation error so the caller skips this line.
@@ -749,7 +760,7 @@ impl StripeApi for StripeClient {
                 "invoice item amount_cents {amount_cents} exceeds i64::MAX — refusing to clamp"
             ))
         })?;
-        let form = vec![
+        let mut form = vec![
             ("customer".to_string(), customer.to_string()),
             ("amount".to_string(), amount.to_string()),
             ("currency".to_string(), currency.to_string()),
@@ -761,6 +772,19 @@ impl StripeApi for StripeClient {
             // instead of POSTing a duplicate.
             ("metadata[zs_item_key]".to_string(), lookup_key.to_string()),
         ];
+        // The CU/usage breakdown (descriptive only — does NOT touch `amount`).
+        // The bracket form `metadata[<key>]` is what Stripe expects; the form
+        // encoder escapes the brackets on the wire. `zs_item_key` is reserved
+        // (set above), so a caller key colliding with it is rejected rather than
+        // silently shadowing the adopt-path key.
+        for (k, v) in metadata {
+            if k == "zs_item_key" {
+                return Err(StripeError::Validation(
+                    "invoice item metadata key 'zs_item_key' is reserved (set internally)".into(),
+                ));
+            }
+            form.push((format!("metadata[{k}]"), v.clone()));
+        }
         let json = self
             .post_form("/v1/invoiceitems", &form, Some(idempotency_key))
             .await?;

@@ -531,6 +531,10 @@ pub(crate) async fn bill_creator<S: StripeApi>(
                 // charge_cents succeeded above ⇒ the FX resolved to Some; freeze it.
                 fx_pico_cents_per_unit: seg.fx_pico_cents_per_unit.unwrap_or(0),
                 base_fee_cents: seg.base_fee_cents,
+                // Descriptive CU (frozen from the SAME breakdown that set `amount`).
+                total_units: breakdown.total_units,
+                billable_units: breakdown.billable_units,
+                segment_label: segment_label(seg, segments.len()),
             });
             total_cents = total_cents.saturating_add(breakdown.total_cents);
         }
@@ -787,6 +791,13 @@ pub(crate) async fn bill_creator<S: StripeApi>(
             }
         }
 
+        // Build the descriptive CU/usage enrichment from the SAME frozen line the
+        // snapshot/idempotency derive from (so the Stripe line, our `invoice_lines`
+        // snapshot, and the read-API all agree). DESCRIPTIVE ONLY — `line.amount`
+        // (the authoritative `ChargeBreakdown.total_cents`) is what bills.
+        let (enriched_desc, item_metadata) =
+            build_invoice_item_enrichment(line, period_start);
+
         // Not adopted ⇒ POST it. Within 24h the deterministic Idempotency-Key
         // makes this replay-safe; past 24h the line intent + the metadata lookup
         // above already ruled out an existing item, so a fresh POST is correct.
@@ -794,8 +805,14 @@ pub(crate) async fn bill_creator<S: StripeApi>(
             Some(id) => id,
             None => stripe
                 .create_invoice_item(
-                    &customer, line.amount, BILLING_CURRENCY, &line.desc, period_window, &item_key,
+                    &customer,
+                    line.amount,
+                    BILLING_CURRENCY,
+                    &enriched_desc,
+                    period_window,
                     &item_key,
+                    &item_key,
+                    &item_metadata,
                 )
                 .await
                 .map_err(|e| RegistryError::Database(format!("create_invoice_item: {e}")))?,
@@ -979,6 +996,9 @@ struct BilledLine {
     app_id: Uuid,
     segment_no: i16,
     plan_id: String,
+    /// The base, un-enriched per-segment description (`segment_description`). The
+    /// CU suffix is appended at POST time so the persisted/idempotent inputs and
+    /// the descriptive enrichment are derived from the SAME frozen snapshot.
     desc: String,
     amount: u64,
     /// The segment's usage DELTA (`max(0, end−start)` per metric), NOT a cumulative.
@@ -987,6 +1007,14 @@ struct BilledLine {
     included_units: u64,
     fx_pico_cents_per_unit: u64,
     base_fee_cents: u64,
+    /// Gross compute units for THIS segment (`ChargeBreakdown.total_units`), frozen
+    /// from the same `charge_cents` that produced `amount`. Descriptive only.
+    total_units: u64,
+    /// Post-included-units billable CU (`ChargeBreakdown.billable_units`).
+    billable_units: u64,
+    /// The human segment label for the description/metadata (`"full"` for a
+    /// single-segment period, else `"days 11–30"`).
+    segment_label: String,
 }
 
 /// Per-segment Stripe line-item description (MISSING-3). The no-change path (a
@@ -1011,6 +1039,84 @@ fn segment_description(
             seg.plan_id, seg.start_day, last_day
         )
     }
+}
+
+/// A compact human label for a segment used in the enriched description +
+/// metadata: `"full"` for a single-segment period, else the inclusive day-span
+/// `"days 11–30"` (matching `segment_description`'s half-open→inclusive render).
+fn segment_label(seg: &crate::proration::BilledSegment, segment_count: usize) -> String {
+    if segment_count <= 1 {
+        "full".to_string()
+    } else {
+        let last_day = seg.end_day.saturating_sub(1);
+        format!("days {}–{}", seg.start_day, last_day)
+    }
+}
+
+/// Build the enriched Stripe invoice-item `(description, metadata)` for a frozen
+/// [`BilledLine`] (billing-metering). The CU/usage shown is derived from the line's
+/// OWN frozen `usage`/`weights_snapshot`/breakdown — so a prorated segment shows
+/// ITS segment's CU + usage-delta, never the whole period. DESCRIPTIVE ONLY: the
+/// authoritative `amount` (`ChargeBreakdown.total_cents`) is untouched.
+///
+/// Description: the base `segment_description` prefix + `" — N compute units
+/// (top-3 metrics …)"`, length-capped to Stripe's 500-char line-item limit (we
+/// cap at [`crate::pricing::INVOICE_ITEM_DESC_MAX`] for readability), truncated on
+/// a char boundary.
+///
+/// Metadata (≤50 keys, each value ≤500 chars): `compute_units` (gross),
+/// `billable_units`, `included_units`, `fx_pico_cents_per_unit`, `base_fee_cents`,
+/// `period` (YYYY-MM), `segment`, and the packed per-metric `usage`/`usage_2`/…
+/// blob(s) (`metric=raw:cu`, non-zero, descending CU); `usage_truncated=true`
+/// when the metric set overflows the key budget (the read-API/dashboard carries
+/// the full set). `zs_item_key` is NOT included here — the stripe_client appends it.
+fn build_invoice_item_enrichment(
+    line: &BilledLine,
+    period_start: i64,
+) -> (String, Vec<(String, String)>) {
+    // Reconstruct the runtime weight table from the line's frozen snapshot so the
+    // per-metric CU is computed with the EXACT weights this line was priced under.
+    let weights: MetricWeights = line
+        .weights_snapshot
+        .iter()
+        .map(|(m, w)| (m.clone(), *w))
+        .collect();
+
+    // Per-metric (raw, cu), non-zero, descending CU. A frozen line cannot overflow
+    // here (it priced successfully), but be defensive: on the impossible overflow,
+    // fall back to an empty list (the gross CU is still shown) rather than abort —
+    // enrichment must never block the authoritative charge.
+    let per_metric = crate::pricing::per_metric_usage_cu(&line.usage, &weights)
+        .unwrap_or_default();
+
+    let description = crate::pricing::enriched_description(
+        &line.desc,
+        line.total_units,
+        &per_metric,
+        3, // top-3 metrics hint
+    );
+
+    let mut metadata: Vec<(String, String)> = vec![
+        ("compute_units".to_string(), line.total_units.to_string()),
+        ("billable_units".to_string(), line.billable_units.to_string()),
+        ("included_units".to_string(), line.included_units.to_string()),
+        (
+            "fx_pico_cents_per_unit".to_string(),
+            line.fx_pico_cents_per_unit.to_string(),
+        ),
+        ("base_fee_cents".to_string(), line.base_fee_cents.to_string()),
+        ("period".to_string(), month_label(period_start)),
+        ("segment".to_string(), line.segment_label.clone()),
+    ];
+    let (blobs, truncated) = crate::pricing::pack_usage_blobs(&per_metric);
+    for (i, blob) in blobs.into_iter().enumerate() {
+        let key = if i == 0 { "usage".to_string() } else { format!("usage_{}", i + 1) };
+        metadata.push((key, blob));
+    }
+    if truncated {
+        metadata.push(("usage_truncated".to_string(), "true".to_string()));
+    }
+    (description, metadata)
 }
 
 /// Resolve the apps owned by ONE creator (the per-creator slice of the same
@@ -1137,10 +1243,28 @@ mod tests {
     use crate::stripe_client::{Period, StripeApi};
     use crate::stripe_store::StripeError;
 
+    /// One recorded `create_invoice_item` call: enough to assert the
+    /// authoritative amount AND the descriptive enrichment (description + the
+    /// CU/usage metadata) the line carries.
+    #[derive(Clone)]
+    struct RecordedItem {
+        customer: String,
+        amount: u64,
+        idempotency_key: String,
+        description: String,
+        metadata: Vec<(String, String)>,
+    }
+
+    impl RecordedItem {
+        fn meta(&self, key: &str) -> Option<&str> {
+            self.metadata.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+        }
+    }
+
     #[derive(Default)]
     struct RecordingStripe {
-        items: RefCell<Vec<(String, u64, String)>>, // (customer, amount, idempotency_key)
-        invoices: RefCell<Vec<(String, String)>>,   // (customer, idempotency_key)
+        items: RefCell<Vec<RecordedItem>>,
+        invoices: RefCell<Vec<(String, String)>>, // (customer, idempotency_key)
     }
 
     impl StripeApi for RecordingStripe {
@@ -1160,16 +1284,19 @@ mod tests {
             customer: &str,
             amount_cents: u64,
             _currency: &str,
-            _description: &str,
+            description: &str,
             _period: Period,
             idempotency_key: &str,
             _lookup_key: &str,
+            metadata: &[(String, String)],
         ) -> Result<String, StripeError> {
-            self.items.borrow_mut().push((
-                customer.to_string(),
-                amount_cents,
-                idempotency_key.to_string(),
-            ));
+            self.items.borrow_mut().push(RecordedItem {
+                customer: customer.to_string(),
+                amount: amount_cents,
+                idempotency_key: idempotency_key.to_string(),
+                description: description.to_string(),
+                metadata: metadata.to_vec(),
+            });
             Ok(format!("ii_{}", self.items.borrow().len()))
         }
         async fn delete_invoice_item(&self, _item_id: &str) -> Result<(), StripeError> {
@@ -1301,16 +1428,51 @@ mod tests {
         let breakdown = charge_cents(&price, &usage, &weights).expect("charge");
         assert_eq!(breakdown.total_cents, 750);
 
+        // Build the enrichment from a frozen line carrying THIS breakdown (the
+        // same path the sweep takes), so the unit test exercises the real
+        // description + metadata derivation, not a hand-written stub.
+        let line = BilledLine {
+            app_id: app,
+            segment_no: 0,
+            plan_id: "pln_x".to_string(),
+            desc: segment_description(
+                app,
+                &crate::proration::BilledSegment {
+                    segment_no: 0,
+                    plan_id: "pln_x".to_string(),
+                    usage_delta: usage.clone(),
+                    included_units: 0,
+                    base_fee_cents: 0,
+                    fx_pico_cents_per_unit: Some(crate::pricing::FX_SCALE as u64),
+                    start_day: 1,
+                    end_day: 31,
+                },
+                period,
+                1,
+            ),
+            amount: breakdown.total_cents,
+            usage: usage.clone(),
+            weights_snapshot: weights.iter().map(|(m, w)| (m.clone(), *w)).collect(),
+            included_units: 0,
+            fx_pico_cents_per_unit: crate::pricing::FX_SCALE as u64,
+            base_fee_cents: 0,
+            total_units: breakdown.total_units,
+            billable_units: breakdown.billable_units,
+            segment_label: "full".to_string(),
+        };
+        let (enriched_desc, metadata) = build_invoice_item_enrichment(&line, period);
+
         let fake = RecordingStripe::default();
         let item_key = invoice_item_idempotency_key(&creator, &app, period, 0);
         fake.create_invoice_item(
             "cus_fake",
             breakdown.total_cents,
             "usd",
-            "infra",
+            &enriched_desc,
             Period { start: period, end: period_end_unix(period) },
             &item_key,
             &item_key,
+            &metadata,
         )
         .await
         .unwrap();
@@ -1320,8 +1482,25 @@ mod tests {
 
         let items = fake.items.borrow();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].1, 750, "the per-app amount equals charge_cents total");
-        assert_eq!(items[0].2, format!("billitem:{creator}:{app}:{period}:0"));
+        assert_eq!(items[0].amount, 750, "the per-app amount equals charge_cents total");
+        assert_eq!(items[0].idempotency_key, format!("billitem:{creator}:{app}:{period}:0"));
         assert_eq!(fake.invoices.borrow()[0].1, format!("billrun:{creator}:{period}"));
+
+        // Enrichment: the description carries the CU, the metadata the full
+        // derivation — and NONE of it changed the authoritative amount above.
+        assert!(
+            items[0].description.contains("750 compute units"),
+            "description shows the CU; got: {}",
+            items[0].description
+        );
+        assert_eq!(items[0].meta("compute_units"), Some("750"));
+        assert_eq!(items[0].meta("billable_units"), Some("750"));
+        assert_eq!(items[0].meta("included_units"), Some("0"));
+        assert_eq!(items[0].meta("segment"), Some("full"));
+        assert_eq!(
+            items[0].meta("usage"),
+            Some("requests=750:750"),
+            "per-metric raw:cu blob present",
+        );
     }
 }

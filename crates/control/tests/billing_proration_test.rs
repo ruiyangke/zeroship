@@ -780,6 +780,112 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
     assert!(total_days_quota_ok, "Σ prorated base ≤ one full base fee (base-fee invariant)");
 }
 
+/// billing-metering (b): a 2-segment proration invoice → EACH segment's Stripe
+/// invoice-item shows ITS OWN segment's CU + usage-delta on the Stripe line
+/// (description) and metadata — NOT the whole-period total. The amount on each
+/// item is UNCHANGED (the frozen segment `amount_cents`).
+///
+/// Segment 0 (Free): usage-delta 4000 requests = 4000 CU. Segment 1 (Pro):
+/// usage-delta 26000 requests = 26000 CU. The mock records each item POST's body;
+/// we match the two by their segment-aware Idempotency-Key (`…:0` / `…:1`) and
+/// assert each carries its own CU in description + `compute_units` metadata, and
+/// that the per-metric `usage` blob is the segment delta (not the period total).
+///
+/// RED pre-change (description-only): the item description had NO CU suffix and the
+/// POST carried NO `compute_units`/`usage` metadata — every assertion below fails.
+#[compio::test]
+async fn each_proration_segment_item_shows_its_own_cu_and_usage() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "segcu").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = now_for_closed_period();
+    let period = prev_period(now);
+
+    seed_weight(&fx.state).await;
+    let one_cent: i64 = 1_000_000_000_000;
+    let free = seed_plan(&fx.state, "free", 0, 1_000, one_cent).await;
+    let pro = seed_plan(&fx.state, "pro", 3_000, 10_000, one_cent * 2).await;
+
+    let creator = make_user(&fx.state, "segcu").await;
+    let app = make_owned_app(&fx.state, &free, creator).await;
+    fx.state
+        .stripe_store
+        .set_customer(creator, &format!("cus_test_segcu_{}", Uuid::new_v4().simple()))
+        .await
+        .unwrap();
+
+    ingest_at(&fx.state, app, 4_000, period, 1).await;
+    use chrono::{Datelike, TimeZone};
+    let pstart = chrono::Utc.timestamp_opt(period, 0).single().unwrap();
+    let day11 = chrono::Utc
+        .with_ymd_and_hms(pstart.year(), pstart.month(), 11, 0, 0, 0)
+        .unwrap()
+        .timestamp();
+    record_plan_change_like_set_plan(&fx.state, app, creator, &pro, day11).await;
+    ingest_at(&fx.state, app, 26_000, period, 2).await;
+
+    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+        .await
+        .expect("tick");
+    assert_eq!(billed, 1, "one creator billed");
+
+    // Find the two item POSTs by their segment-aware Idempotency-Key.
+    let reqs = fx.mock.requests();
+    let item_for_seg = |seg: &str| -> RecordedRequest {
+        reqs.iter()
+            .find(|r| {
+                r.method == "POST"
+                    && r.path.starts_with("/v1/invoiceitems")
+                    && r.idempotency_key.as_deref().is_some_and(|k| k.ends_with(seg))
+            })
+            .cloned()
+            .unwrap_or_else(|| panic!("no item POST for segment key suffix {seg}"))
+    };
+    let seg0 = item_for_seg(":0");
+    let seg1 = item_for_seg(":1");
+
+    // Segment 0 (Free): 4000 CU, usage delta requests=4000.
+    let d0 = form_param(&seg0.body, "description").unwrap_or_default();
+    assert!(d0.contains("4,000 compute units"), "seg0 description shows 4000 CU; got: {d0}");
+    assert_eq!(form_param(&seg0.body, "metadata[compute_units]").as_deref(), Some("4000"));
+    assert_eq!(
+        form_param(&seg0.body, "metadata[usage]").as_deref(),
+        Some("requests=4000:4000"),
+        "seg0 per-metric usage is the SEGMENT delta, not the period total",
+    );
+
+    // Segment 1 (Pro): 26000 CU, usage delta requests=26000.
+    let d1 = form_param(&seg1.body, "description").unwrap_or_default();
+    assert!(d1.contains("26,000 compute units"), "seg1 description shows 26000 CU; got: {d1}");
+    assert_eq!(form_param(&seg1.body, "metadata[compute_units]").as_deref(), Some("26000"));
+    assert_eq!(
+        form_param(&seg1.body, "metadata[usage]").as_deref(),
+        Some("requests=26000:26000"),
+        "seg1 per-metric usage is ITS OWN segment delta (26000), not 30000",
+    );
+
+    // The authoritative AMOUNT on each item is unchanged (== the frozen line amount).
+    let lines = read_segment_lines(&fx.state, creator, app).await;
+    let amt0: i64 = lines[0].5;
+    let amt1: i64 = lines[1].5;
+    assert_eq!(
+        form_param(&seg0.body, "amount").and_then(|a| a.parse::<i64>().ok()),
+        Some(amt0),
+        "seg0 Stripe amount == frozen line amount_cents (enrichment did NOT touch money)",
+    );
+    assert_eq!(
+        form_param(&seg1.body, "amount").and_then(|a| a.parse::<i64>().ok()),
+        Some(amt1),
+        "seg1 Stripe amount == frozen line amount_cents",
+    );
+    // And the metadata segment labels distinguish the two.
+    assert!(form_param(&seg0.body, "metadata[segment]").is_some(), "seg0 carries a segment label");
+    assert!(form_param(&seg1.body, "metadata[segment]").is_some(), "seg1 carries a segment label");
+}
+
 /// (b) Invariants: Σ segment_days == days_in_period, Σ base ≤ one full fee,
 /// telescoped usage == period total. Verified at the pure-function level over the
 /// REAL build_segments path (faithful, no DB needed for the math identity).

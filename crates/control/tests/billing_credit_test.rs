@@ -104,6 +104,7 @@ impl StripeApi for RecordingStripe {
         _period: Period,
         _idem: &str,
         _lookup: &str,
+        _metadata: &[(String, String)],
     ) -> Result<String, StripeError> {
         *self.item_seq.lock().unwrap() += 1;
         Ok(Self::unique("ii"))

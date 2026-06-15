@@ -244,6 +244,21 @@ else
   diverge "REAL finalized invoice $INV total=${INV_TOTAL}c status=$INV_STATUS (expected 750c). On Stripe API '2025-09-30.clover', POST /v1/invoices does NOT include pending invoice items unless 'pending_invoice_items_behavior=include' is passed — our create_invoice (crates/control/src/stripe_client.rs) omits it, so the creator is finalized a \$0 invoice and is NOT billed for infra usage. The mock-Stripe masked this."
 fi
 
+# billing-metering: the CU/usage must RENDER on the REAL Stripe invoice line — the
+# whole point of enriching the invoice_item description. Fetch the invoice's line
+# items and assert at least one description carries the "compute units" suffix +
+# that the item metadata carries compute_units (queryable in the dashboard/API).
+LINE_DESC="$(sget "invoices/$INV/lines?limit=10" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);const d=(o.data||[]).map(l=>l.description||"").find(x=>/compute units/.test(x));console.log(d||"")}catch(e){console.log("")}})')"
+case "$LINE_DESC" in
+  *"compute units"*) pass "REAL invoice line description renders the CU: $LINE_DESC";;
+  *) diverge "REAL finalized invoice $INV has NO line whose description carries 'compute units' (got: '$LINE_DESC') — the CU/usage enrichment did not render on the Stripe-hosted invoice line.";;
+esac
+ITEM_CU="$(sget "invoices/$INV/lines?limit=10" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);const m=(o.data||[]).map(l=>(l.metadata&&l.metadata.compute_units)||"").find(Boolean);console.log(m||"")}catch(e){console.log("")}})')"
+case "$ITEM_CU" in
+  ""|*[!0-9]*) diverge "REAL invoice line carries no numeric metadata.compute_units (got '$ITEM_CU') — the breakdown metadata did not attach to the Stripe item.";;
+  *) pass "REAL invoice line metadata carries compute_units=$ITEM_CU (the full breakdown is queryable on Stripe)";;
+esac
+
 # ===========================================================================
 echo ""
 echo "=== Stage 4: PAY the invoice on REAL Stripe → real ch_/pi_ ==="

@@ -322,6 +322,42 @@ pub struct InvoiceLineDetail {
     pub amount_cents: i64,
     pub usage_snapshot: serde_json::Value,
     pub weights_snapshot: serde_json::Value,
+    /// Gross compute units derived from the frozen `usage_snapshot` +
+    /// `weights_snapshot` — the SAME CU shown on the Stripe invoice line, so the
+    /// dashboard agrees with what the creator sees on Stripe. `None` only if the
+    /// frozen snapshot is malformed (an impossible state for a posted line).
+    pub compute_units: Option<u64>,
+    /// `max(0, compute_units − included_units)` — the post-included-units billable
+    /// CU. `None` mirrors `compute_units`.
+    pub billable_units: Option<u64>,
+}
+
+/// Derive `(compute_units, billable_units)` from a frozen line's `usage_snapshot`
+/// + `weights_snapshot` + `included_units`, reusing the EXACT pricing arithmetic
+/// (`pricing::total_units`). Returns `(None, None)` if the snapshot JSON can't be
+/// parsed (an impossible state for a posted line) so the read API degrades to the
+/// existing fields rather than erroring.
+fn derive_line_cu(
+    usage_snapshot: &serde_json::Value,
+    weights_snapshot: &serde_json::Value,
+    included_units: i64,
+) -> (Option<u64>, Option<u64>) {
+    let Ok(usage) =
+        serde_json::from_value::<std::collections::HashMap<String, i64>>(usage_snapshot.clone())
+    else {
+        return (None, None);
+    };
+    let Ok(weights) = serde_json::from_value::<crate::pricing::MetricWeights>(weights_snapshot.clone())
+    else {
+        return (None, None);
+    };
+    match crate::pricing::total_units(&weights, &usage) {
+        Ok(total) => {
+            let included = u64::try_from(included_units).unwrap_or(0);
+            (Some(total), Some(total.saturating_sub(included)))
+        }
+        Err(_) => (None, None),
+    }
 }
 
 /// The full line-detail view of one invoice: its money envelope + every frozen
@@ -382,16 +418,25 @@ pub async fn get_invoice_detail(
         .await?;
     let lines = line_rows
         .iter()
-        .map(|r| InvoiceLineDetail {
-            app_id: r.get("app_id"),
-            segment_no: r.get("segment_no"),
-            plan_id: r.get("plan_id"),
-            included_units: r.get("included_units"),
-            fx_pico_cents_per_unit: r.get("fx_pico_cents_per_unit"),
-            base_fee_cents: r.get("base_fee_cents"),
-            amount_cents: r.get("amount_cents"),
-            usage_snapshot: r.get("usage_snapshot"),
-            weights_snapshot: r.get("weights_snapshot"),
+        .map(|r| {
+            let included_units: i64 = r.get("included_units");
+            let usage_snapshot: serde_json::Value = r.get("usage_snapshot");
+            let weights_snapshot: serde_json::Value = r.get("weights_snapshot");
+            let (compute_units, billable_units) =
+                derive_line_cu(&usage_snapshot, &weights_snapshot, included_units);
+            InvoiceLineDetail {
+                app_id: r.get("app_id"),
+                segment_no: r.get("segment_no"),
+                plan_id: r.get("plan_id"),
+                included_units,
+                fx_pico_cents_per_unit: r.get("fx_pico_cents_per_unit"),
+                base_fee_cents: r.get("base_fee_cents"),
+                amount_cents: r.get("amount_cents"),
+                usage_snapshot,
+                weights_snapshot,
+                compute_units,
+                billable_units,
+            }
         })
         .collect();
 

@@ -706,6 +706,20 @@ async fn invoice_line_detail_reproduces_amount_from_frozen_snapshot() {
         "the frozen snapshot reproduces amount_cents via charge_cents",
     );
 
+    // billing-metering read-API parity: the line detail surfaces the SAME CU the
+    // Stripe invoice line shows (derived from the frozen snapshot), so the
+    // dashboard agrees with Stripe.
+    assert_eq!(
+        line["compute_units"].as_u64(),
+        Some(replay.total_units),
+        "read-API compute_units == the frozen snapshot's CU (matches the Stripe line)",
+    );
+    assert_eq!(
+        line["billable_units"].as_u64(),
+        Some(replay.billable_units),
+        "read-API billable_units == post-included-units CU",
+    );
+
     cleanup(&pg, &[creator], &[app], &[&pat]).await;
 }
 

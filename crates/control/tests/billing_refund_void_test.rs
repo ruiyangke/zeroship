@@ -111,6 +111,7 @@ impl StripeApi for RecordingStripe {
         _period: Period,
         _idem: &str,
         _lookup: &str,
+        _metadata: &[(String, String)],
     ) -> Result<String, StripeError> {
         Ok(Self::unique("ii"))
     }

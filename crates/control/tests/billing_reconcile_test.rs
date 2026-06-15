@@ -794,6 +794,53 @@ async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64
         .expect("ingest usage");
 }
 
+/// Ingest a set of CUSTOM metrics (name → raw) for `app` at `period_start`, after
+/// seeding a `1 CU / op` weight for each so they price through the real CU
+/// pipeline. Used by the description-cap / metadata-cap regression tests to drive
+/// a MANY-metric app through the REAL reconcile (not a stub).
+async fn ingest_custom_metrics(
+    state: &AppState,
+    app: Uuid,
+    metrics: &[(String, u64)],
+    period_start: i64,
+    seq: u64,
+) {
+    // Ingest FIRST: the real metering path auto-registers each `custom` metric in
+    // `billing_metrics` (the catalog `metric_weights.metric` FKs to) and writes its
+    // `usage_aggregates` delta. Seeding a weight before the catalog row exists would
+    // violate `metric_weights_metric_fkey`.
+    let mut custom = HashMap::new();
+    for (name, raw) in metrics {
+        custom.insert(name.clone(), *raw);
+    }
+    let mut counters = HashMap::new();
+    counters.insert(app, AppUsage { custom, ..Default::default() });
+    let report = UsageReport {
+        worker_id: format!("w-{}", Uuid::new_v4()),
+        report_id: Uuid::now_v7(),
+        sequence: seq,
+        counters,
+    };
+    Metering::new(state.registry.clone())
+        .ingest_at(&report, period_start)
+        .await
+        .expect("ingest custom metrics");
+
+    // Now that each metric is cataloged, seed a 1 CU/op weight so it prices through
+    // the real CU pipeline at reconcile time.
+    for (name, _) in metrics {
+        state
+            .control_pg
+            .execute(
+                "INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) \
+                 VALUES ($1, 1, 1) ON CONFLICT (metric) DO UPDATE SET units_per_op = 1, per_units = 1",
+                &[name],
+            )
+            .await
+            .expect("seed custom weight");
+    }
+}
+
 /// `now` placed mid-current-month so the CLOSED period is the previous month.
 fn now_for_closed_period() -> i64 {
     chrono::Utc::now().timestamp()
@@ -995,6 +1042,191 @@ async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
     );
 }
 
+/// billing-metering (a): a single-segment invoice → the `create_invoice_item`
+/// description CONTAINS the CU count, the metadata carries the FULL derivation
+/// (`compute_units`/`billable_units`/`included_units`/`fx`/per-metric `usage`),
+/// and the authoritative `amount` is UNCHANGED (== the frozen `amount_cents`).
+///
+/// `make_plan` = 1 CU/request, FX 1c/CU, no included CU. 750 requests ⇒ 750 CU,
+/// 750 billable, amount 750c.
+///
+/// RED pre-change (description-only): the item POST carried `description="Infra
+/// usage — app … — YYYY-MM"` with NO CU suffix and NO `compute_units`/`usage`
+/// metadata — every CU/metadata assertion below fails (the amount assertion held
+/// before and after: the money is provably unchanged).
+#[compio::test]
+async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "cu1seg").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = now_for_closed_period();
+    let period = prev_period(now);
+
+    let creator = make_user(&fx.state, "cu1seg").await;
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, creator).await;
+    fx.state
+        .stripe_store
+        .set_customer(creator, &format!("cus_cu1_{}", Uuid::new_v4().simple()))
+        .await
+        .unwrap();
+
+    ingest_at(&fx.state, app, 750, period, 1).await;
+
+    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+        .await
+        .expect("tick");
+    assert_eq!(billed, 1, "one creator billed");
+
+    let reqs = fx.mock.requests();
+    let item = reqs
+        .iter()
+        .find(|r| r.method == "POST" && r.path.starts_with("/v1/invoiceitems"))
+        .expect("invoice-item POST recorded");
+
+    // (1) the description shows the CU prominently.
+    let desc = form_param(&item.body, "description").unwrap_or_default();
+    assert!(
+        desc.contains("750 compute units"),
+        "description must show the CU count; got: {desc}",
+    );
+    assert!(desc.starts_with("Infra usage — app"), "keeps the existing prefix; got: {desc}");
+
+    // (2) the metadata carries the FULL derivation.
+    assert_eq!(form_param(&item.body, "metadata[compute_units]").as_deref(), Some("750"));
+    assert_eq!(form_param(&item.body, "metadata[billable_units]").as_deref(), Some("750"));
+    assert_eq!(form_param(&item.body, "metadata[included_units]").as_deref(), Some("0"));
+    assert_eq!(
+        form_param(&item.body, "metadata[fx_pico_cents_per_unit]").as_deref(),
+        Some("1000000000000"),
+        "FX frozen on the item metadata (1 cent/CU = 10^12 pico-cents)",
+    );
+    assert_eq!(form_param(&item.body, "metadata[base_fee_cents]").as_deref(), Some("0"));
+    assert_eq!(form_param(&item.body, "metadata[segment]").as_deref(), Some("full"));
+    assert_eq!(
+        form_param(&item.body, "metadata[usage]").as_deref(),
+        Some("requests=750:750"),
+        "per-metric raw:cu blob present",
+    );
+    // The zs_item_key adopt-path metadata is still there (not clobbered).
+    assert!(form_param(&item.body, "metadata[zs_item_key]").is_some(), "adopt-path key preserved");
+
+    // (3) the AUTHORITATIVE amount is UNCHANGED (== the frozen line amount_cents).
+    let amount: i64 = form_param(&item.body, "amount").and_then(|a| a.parse().ok()).expect("amount");
+    let line_amount: i64 = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT l.amount_cents FROM zeroship.invoice_lines l \
+             JOIN zeroship.invoices i ON i.id = l.invoice_id \
+             WHERE i.creator_id = $1 AND l.app_id = $2",
+            &[&creator, &app],
+        )
+        .await
+        .expect("read line amount")[0]
+        .get::<_, i64>("amount_cents");
+    assert_eq!(amount, line_amount, "Stripe amount == frozen line amount_cents");
+    assert_eq!(amount, 750, "amount is the authoritative ChargeBreakdown.total_cents, untouched");
+}
+
+/// billing-metering (c)+(d): a MANY-metric app drives the REAL reconcile, and the
+/// emitted Stripe item respects BOTH Stripe limits — the description ≤ the
+/// line-item cap (Stripe caps line-item descriptions at 500 chars; we cap at 350),
+/// and EVERY metadata value ≤ 500 chars — packing the per-metric `usage` across
+/// `usage`/`usage_2`/… and setting `usage_truncated=true` when the set overflows
+/// the key budget.
+///
+/// 80 custom metrics with long names (each 1 CU/op) → the packed usage blob far
+/// exceeds one 500-char metadata value, forcing the split + the truncation flag.
+///
+/// RED pre-change: no enriched description / no usage metadata at all — the
+/// description-length + per-value-cap + truncation-flag assertions have nothing to
+/// check (the keys are absent), so the test fails on the first metadata lookup.
+#[compio::test]
+async fn many_metric_item_respects_description_and_metadata_length_caps() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "cucap").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = now_for_closed_period();
+    let period = prev_period(now);
+
+    let creator = make_user(&fx.state, "cucap").await;
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, creator).await;
+    fx.state
+        .stripe_store
+        .set_customer(creator, &format!("cus_cucap_{}", Uuid::new_v4().simple()))
+        .await
+        .unwrap();
+
+    // 80 long-named custom metrics, each a distinct non-trivial raw → distinct CU.
+    let metrics: Vec<(String, u64)> = (0..80)
+        .map(|i| (format!("a_reasonably_long_custom_metric_name_index_{i:04}"), 1_000 + i as u64))
+        .collect();
+    ingest_custom_metrics(&fx.state, app, &metrics, period, 1).await;
+
+    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+        .await
+        .expect("tick");
+    assert_eq!(billed, 1, "one creator billed");
+
+    let reqs = fx.mock.requests();
+    let item = reqs
+        .iter()
+        .find(|r| r.method == "POST" && r.path.starts_with("/v1/invoiceitems"))
+        .expect("invoice-item POST recorded");
+
+    // (c) the description respects the cap (and still shows the gross CU).
+    let desc = form_param(&item.body, "description").unwrap_or_default();
+    assert!(
+        desc.chars().count() <= zeroship_control::pricing::INVOICE_ITEM_DESC_MAX,
+        "description ({} chars) exceeds the {}-char cap",
+        desc.chars().count(),
+        zeroship_control::pricing::INVOICE_ITEM_DESC_MAX,
+    );
+    assert!(desc.chars().count() < 500, "well under Stripe's 500-char line-item limit");
+    assert!(desc.contains("compute units"), "description still surfaces the CU; got: {desc}");
+
+    // (d) EVERY metadata value is ≤ 500 chars (Stripe's per-value cap).
+    let mut saw_usage = false;
+    for pair in item.body.split('&') {
+        if let Some((k, _)) = pair.split_once('=') {
+            let key = percent_decode(k);
+            if key.starts_with("metadata[usage") {
+                saw_usage = true;
+            }
+            if key.starts_with("metadata[") {
+                let val = form_param(&item.body, &key).unwrap_or_default();
+                assert!(
+                    val.chars().count() <= zeroship_control::pricing::METADATA_VALUE_MAX,
+                    "metadata value for {key} is {} chars (> 500 cap)",
+                    val.chars().count(),
+                );
+            }
+        }
+    }
+    assert!(saw_usage, "at least one packed usage blob present");
+    // 80 long metrics overflow the key budget → the truncation flag is set.
+    assert_eq!(
+        form_param(&item.body, "metadata[usage_truncated]").as_deref(),
+        Some("true"),
+        "a many-metric set that overflows the key budget sets usage_truncated=true",
+    );
+    // The gross CU metadata is still exact (sum of all 80 metric deltas).
+    let expected_cu: u64 = metrics.iter().map(|(_, r)| *r).sum();
+    assert_eq!(
+        form_param(&item.body, "metadata[compute_units]").and_then(|v| v.parse::<u64>().ok()),
+        Some(expected_cu),
+        "gross compute_units is exact even when the per-metric blob is truncated",
+    );
+}
+
 /// C1: EVERY outbound Stripe call — POST, GET, DELETE — carries the pinned
 /// `Stripe-Version` header. The mock REQUIRES the pinned version on every API call
 /// (400 `version_unpinned` otherwise), so each REAL `StripeClient` method below only
@@ -1125,7 +1357,7 @@ async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
         .with_base_url(fx.mock.base_url.clone());
     let period = Period { start: 1_700_000_000, end: 1_702_000_000 };
     let item = client
-        .create_invoice_item("cus_x", 1234, "usd", "infra", period, "billitem:k1", "billitem:k1")
+        .create_invoice_item("cus_x", 1234, "usd", "infra", period, "billitem:k1", "billitem:k1", &[])
         .await
         .expect("create invoice item");
     assert!(item.starts_with("ii_mock_"), "parsed the ii_ id from the mock JSON");
@@ -1177,11 +1409,11 @@ async fn create_invoice_sweeps_pending_items_via_include_behavior() {
 
     // Two pending items on the customer (totalling 2000c).
     client
-        .create_invoice_item(&cus, 1234, "usd", "infra a", period, "d1:k1", "d1:k1")
+        .create_invoice_item(&cus, 1234, "usd", "infra a", period, "d1:k1", "d1:k1", &[])
         .await
         .expect("item 1");
     client
-        .create_invoice_item(&cus, 766, "usd", "infra b", period, "d1:k2", "d1:k2")
+        .create_invoice_item(&cus, 766, "usd", "infra b", period, "d1:k2", "d1:k2", &[])
         .await
         .expect("item 2");
 
@@ -1633,6 +1865,7 @@ impl StripeApi for FailAfterFirstItem {
         period: Period,
         idempotency_key: &str,
         lookup_key: &str,
+        metadata: &[(String, String)],
     ) -> Result<String, zeroship_control::stripe_store::StripeError> {
         let n = self.items_seen.get();
         self.items_seen.set(n + 1);
@@ -1643,7 +1876,7 @@ impl StripeApi for FailAfterFirstItem {
             ));
         }
         self.inner
-            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key)
+            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key, metadata)
             .await
     }
     async fn delete_invoice_item(&self, item_id: &str) -> Result<(), zeroship_control::stripe_store::StripeError> {
@@ -1786,11 +2019,12 @@ impl StripeApi for PostThenCrash {
         period: Period,
         idempotency_key: &str,
         lookup_key: &str,
+        metadata: &[(String, String)],
     ) -> Result<String, zeroship_control::stripe_store::StripeError> {
         // Post for real (the item lands on Stripe)…
         let _id = self
             .inner
-            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key)
+            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key, metadata)
             .await?;
         // …then "crash" before bill_creator can confirm it in the ledger.
         Err(zeroship_control::stripe_store::StripeError::Db(
@@ -1984,9 +2218,10 @@ impl StripeApi for CrashOnFinalize {
         period: Period,
         idempotency_key: &str,
         lookup_key: &str,
+        metadata: &[(String, String)],
     ) -> Result<String, zeroship_control::stripe_store::StripeError> {
         self.inner
-            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key)
+            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key, metadata)
             .await
     }
     async fn delete_invoice_item(&self, item_id: &str) -> Result<(), zeroship_control::stripe_store::StripeError> {
@@ -2425,9 +2660,10 @@ impl StripeApi for FinalizeAlreadyFinalized {
         period: Period,
         idempotency_key: &str,
         lookup_key: &str,
+        metadata: &[(String, String)],
     ) -> Result<String, zeroship_control::stripe_store::StripeError> {
         self.inner
-            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key)
+            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key, metadata)
             .await
     }
     async fn delete_invoice_item(&self, item_id: &str) -> Result<(), zeroship_control::stripe_store::StripeError> {
@@ -2562,9 +2798,10 @@ impl StripeApi for FinalizeReturnsFixedId {
         period: Period,
         idempotency_key: &str,
         lookup_key: &str,
+        metadata: &[(String, String)],
     ) -> Result<String, zeroship_control::stripe_store::StripeError> {
         self.inner
-            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key)
+            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key, metadata)
             .await
     }
     async fn delete_invoice_item(&self, item_id: &str) -> Result<(), zeroship_control::stripe_store::StripeError> {

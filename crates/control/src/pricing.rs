@@ -300,6 +300,55 @@ pub fn total_units(
     Ok(acc)
 }
 
+/// The CU contribution of ONE metric under the global weight table:
+/// `floor( max(0, raw) × units_per_op / per_units )`. This is the SAME
+/// per-metric quantity [`total_units`] accumulates — factored out so the Stripe
+/// invoice description / metadata can show each metric's CU using the exact
+/// pricing arithmetic (never a re-derived approximation). An unweighted metric
+/// (or a `per_units == 0` weight) contributes 0; an overflow past `u64::MAX`
+/// surfaces [`PricingError::ComputeUnitOverflow`], matching [`total_units`].
+///
+/// # Errors
+/// [`PricingError::ComputeUnitOverflow`] when this metric's CU exceeds `u64::MAX`.
+pub fn per_metric_units(
+    metric: &str,
+    raw: i64,
+    weights: &MetricWeights,
+) -> Result<u64, PricingError> {
+    let Some(w) = weights.get(metric) else {
+        return Ok(0); // unweighted ⇒ free
+    };
+    if w.per_units == 0 {
+        return Ok(0); // degenerate ⇒ free
+    }
+    let used = u128::from(raw.max(0) as u64);
+    let metric_units = used * u128::from(w.units_per_op) / u128::from(w.per_units);
+    u64::try_from(metric_units).map_err(|_| PricingError::ComputeUnitOverflow {
+        metric: metric.to_string(),
+        raw,
+        units_per_op: w.units_per_op,
+        per_units: w.per_units,
+    })
+}
+
+/// Render an integer with `,` thousands separators (e.g. `25000` → `25,000`) for
+/// the human-readable Stripe invoice description. ASCII-only, so every byte is one
+/// `char` — the description length cap can truncate on a char boundary safely.
+#[must_use]
+pub fn group_thousands(n: u64) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    let len = bytes.len();
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*b as char);
+    }
+    out
+}
+
 /// Compute the full period charge for a plan price against a usage map and the
 /// global weight table.
 ///
@@ -358,6 +407,158 @@ fn div_round_half_up(numer: u128, denom: u128) -> u64 {
         );
         u64::MAX
     })
+}
+
+// ===========================================================================
+// Stripe invoice ENRICHMENT (billing-metering: CU/usage onto the Stripe line).
+//
+// These render the SAME frozen CU/usage a line was priced from into the human
+// description (what the creator sees on the rendered PDF/portal) and the
+// `invoice_item` metadata (the full derivation, queryable in the dashboard/API).
+// They are DESCRIPTIVE ONLY — the authoritative `amount` is unchanged.
+// ===========================================================================
+
+/// Stripe caps an invoice LINE-ITEM description at 500 chars (the 2018-10-31
+/// changelog: "Descriptions for invoice line items now have a character limit").
+/// We cap our own enriched description well under that for human readability on
+/// the rendered PDF. ASCII-safe truncation (see [`truncate_on_char_boundary`]).
+pub const INVOICE_ITEM_DESC_MAX: usize = 350;
+
+/// Stripe metadata value limit: each value ≤ 500 chars (≤ 50 keys, key ≤ 40
+/// chars). The packed `usage` blob is split across `usage`, `usage_2`, … to stay
+/// under this; if even the cap of split keys overflows, the remainder is dropped
+/// and `usage_truncated=true` is set (the full set lives in our read-API/dashboard).
+pub const METADATA_VALUE_MAX: usize = 500;
+
+/// How many `usage`/`usage_2`/… metadata keys we are willing to spend on the
+/// per-metric blob before declaring it truncated. 3 keys × ~500 chars covers a
+/// large metric set; beyond that the read-API is the source of truth.
+const USAGE_BLOB_MAX_KEYS: usize = 3;
+
+/// One metric's raw total + its CU contribution, for the enrichment renderers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetricUsageCu {
+    pub metric: String,
+    pub raw: i64,
+    pub cu: u64,
+}
+
+/// Derive the per-metric `(raw, cu)` list for a frozen line's usage under its
+/// frozen weights, NON-ZERO metrics only, sorted by CU descending (then metric
+/// name for determinism). Reuses [`per_metric_units`] so each metric's CU is the
+/// EXACT pricing quantity, never a re-derived approximation.
+///
+/// # Errors
+/// [`PricingError::ComputeUnitOverflow`] if any metric's CU exceeds `u64::MAX`
+/// (the same guard the pricer enforces).
+pub fn per_metric_usage_cu(
+    usage: &HashMap<String, i64>,
+    weights: &MetricWeights,
+) -> Result<Vec<MetricUsageCu>, PricingError> {
+    let mut out = Vec::with_capacity(usage.len());
+    for (metric, &raw) in usage {
+        if raw <= 0 {
+            continue; // a zero/negative raw contributes nothing to show
+        }
+        let cu = per_metric_units(metric, raw, weights)?;
+        out.push(MetricUsageCu { metric: metric.clone(), raw, cu });
+    }
+    // CU descending, then metric ascending — deterministic top-N + stable order.
+    out.sort_by(|a, b| b.cu.cmp(&a.cu).then_with(|| a.metric.cmp(&b.metric)));
+    Ok(out)
+}
+
+/// Build the CU suffix appended to the Stripe invoice-item description, e.g.
+/// `" — 25,000 compute units (requests 25,000 CU, egress_bytes 1,200 CU)"`.
+/// Lists up to `top_n` largest-CU metrics as a compact hint. ASCII-only.
+#[must_use]
+pub fn description_cu_suffix(total_units: u64, top: &[MetricUsageCu], top_n: usize) -> String {
+    let mut s = format!(" — {} compute units", group_thousands(total_units));
+    let shown: Vec<&MetricUsageCu> = top.iter().filter(|m| m.cu > 0).take(top_n).collect();
+    if !shown.is_empty() {
+        let parts: Vec<String> = shown
+            .iter()
+            .map(|m| format!("{} {} CU", m.metric, group_thousands(m.cu)))
+            .collect();
+        s.push_str(&format!(" ({})", parts.join(", ")));
+    }
+    s
+}
+
+/// Truncate `s` to at most `max` chars on a CHAR boundary (never mid-codepoint),
+/// appending an ellipsis `…` when truncation happened (the ellipsis fits within
+/// `max`). Returns `s` unchanged when already within `max`.
+#[must_use]
+pub fn truncate_on_char_boundary(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    // Reserve one char for the ellipsis.
+    let keep = max.saturating_sub(1);
+    let mut out: String = s.chars().take(keep).collect();
+    out.push('…');
+    out
+}
+
+/// Compose the FULL enriched, length-capped invoice-item description: the
+/// caller's base prefix (e.g. `"Infra usage — app … — 2026-05 (Pro, days 11–30)"`)
+/// plus the CU suffix, truncated to [`INVOICE_ITEM_DESC_MAX`] on a char boundary.
+#[must_use]
+pub fn enriched_description(
+    prefix: &str,
+    total_units: u64,
+    top: &[MetricUsageCu],
+    top_n: usize,
+) -> String {
+    let full = format!("{prefix}{}", description_cu_suffix(total_units, top, top_n));
+    truncate_on_char_boundary(&full, INVOICE_ITEM_DESC_MAX)
+}
+
+/// Pack the per-metric `metric=raw:cu` pairs (non-zero CU first, then descending
+/// CU) into a compact, space-separated blob, SPLIT across at most
+/// [`USAGE_BLOB_MAX_KEYS`] strings each ≤ [`METADATA_VALUE_MAX`] chars. Returns
+/// `(blobs, truncated)`: `truncated` is true when not every metric fit. The
+/// caller maps `blobs[0]→usage`, `blobs[1]→usage_2`, … and sets
+/// `usage_truncated=true` when `truncated`.
+#[must_use]
+pub fn pack_usage_blobs(metrics: &[MetricUsageCu]) -> (Vec<String>, bool) {
+    let mut blobs: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut truncated = false;
+    for m in metrics {
+        let token = format!("{}={}:{}", m.metric, m.raw, m.cu);
+        // A single token longer than the per-value cap can never fit — skip it
+        // (the read-API carries the full row) and mark truncated.
+        if token.len() > METADATA_VALUE_MAX {
+            truncated = true;
+            continue;
+        }
+        let needs = if cur.is_empty() { token.len() } else { cur.len() + 1 + token.len() };
+        if needs <= METADATA_VALUE_MAX {
+            if !cur.is_empty() {
+                cur.push(' ');
+            }
+            cur.push_str(&token);
+        } else {
+            // Current blob is full; start a new one if we have key budget left.
+            if !cur.is_empty() {
+                blobs.push(std::mem::take(&mut cur));
+            }
+            if blobs.len() >= USAGE_BLOB_MAX_KEYS {
+                truncated = true;
+                break;
+            }
+            cur.push_str(&token);
+        }
+    }
+    if !cur.is_empty() {
+        if blobs.len() < USAGE_BLOB_MAX_KEYS {
+            blobs.push(cur);
+        } else {
+            truncated = true;
+        }
+    }
+    (blobs, truncated)
 }
 
 #[cfg(test)]
@@ -689,5 +890,108 @@ mod tests {
         let mut usage = HashMap::new();
         usage.insert("x".to_string(), 999);
         assert_eq!(total_units(&t, &usage).unwrap(), 0);
+    }
+
+    // ── Stripe-invoice enrichment helpers ──────────────────────────────────
+
+    #[test]
+    fn per_metric_units_matches_total_units_arithmetic() {
+        // The per-metric CU shown on the invoice is the SAME flooring the pricer
+        // uses — never a separate approximation.
+        let ws = weights();
+        assert_eq!(per_metric_units("cpu_us", 5_500, &ws).unwrap(), 5); // floor(5500/1000)
+        assert_eq!(per_metric_units("requests", 107, &ws).unwrap(), 107);
+        assert_eq!(per_metric_units("unweighted", 9_999, &ws).unwrap(), 0);
+        // And the sum of per-metric CU equals total_units exactly.
+        let mut usage = HashMap::new();
+        usage.insert("requests".to_string(), 100);
+        usage.insert("cpu_us".to_string(), 5_500);
+        usage.insert("egress_bytes".to_string(), 2_999);
+        let summed: u64 = usage
+            .iter()
+            .map(|(m, &r)| per_metric_units(m, r, &ws).unwrap())
+            .sum();
+        assert_eq!(summed, total_units(&ws, &usage).unwrap());
+    }
+
+    #[test]
+    fn group_thousands_formats_with_separators() {
+        assert_eq!(group_thousands(0), "0");
+        assert_eq!(group_thousands(25_000), "25,000");
+        assert_eq!(group_thousands(1_234_567), "1,234,567");
+        assert_eq!(group_thousands(999), "999");
+    }
+
+    #[test]
+    fn description_cu_suffix_lists_top_metrics() {
+        let top = vec![
+            MetricUsageCu { metric: "requests".into(), raw: 25_000, cu: 25_000 },
+            MetricUsageCu { metric: "egress_bytes".into(), raw: 1_200_000, cu: 1_200 },
+        ];
+        let s = description_cu_suffix(26_200, &top, 2);
+        assert_eq!(
+            s,
+            " — 26,200 compute units (requests 25,000 CU, egress_bytes 1,200 CU)"
+        );
+    }
+
+    #[test]
+    fn enriched_description_respects_the_length_cap_on_a_char_boundary() {
+        // A long prefix + a long top-metric list must be truncated to the cap,
+        // and the result must be valid UTF-8 ending in the ellipsis.
+        let top: Vec<MetricUsageCu> = (0..40)
+            .map(|i| MetricUsageCu {
+                metric: format!("metric_with_a_fairly_long_name_number_{i:02}"),
+                raw: 1_000_000 + i,
+                cu: 1_000_000 + i as u64,
+            })
+            .collect();
+        let prefix = "Infra usage — app app_0123456789 — 2026-05 (Pro, days 11–30)";
+        let d = enriched_description(prefix, 99_999_999, &top, 8);
+        assert!(d.chars().count() <= INVOICE_ITEM_DESC_MAX, "capped at the limit");
+        assert!(d.chars().count() < 500, "well under Stripe's 500-char line-item cap");
+        assert!(d.ends_with('…'), "truncated marker present; got: {d}");
+        // The em dash in the prefix proves char-boundary truncation didn't corrupt UTF-8.
+        assert!(d.starts_with("Infra usage — app"));
+    }
+
+    #[test]
+    fn enriched_description_unchanged_when_short() {
+        let top = vec![MetricUsageCu { metric: "requests".into(), raw: 10, cu: 10 }];
+        let d = enriched_description("Infra usage — app x — 2026-05", 10, &top, 3);
+        assert_eq!(d, "Infra usage — app x — 2026-05 — 10 compute units (requests 10 CU)");
+        assert!(!d.ends_with('…'));
+    }
+
+    #[test]
+    fn pack_usage_blobs_packs_nonzero_metrics() {
+        let metrics = vec![
+            MetricUsageCu { metric: "requests".into(), raw: 25_000, cu: 25_000 },
+            MetricUsageCu { metric: "egress_bytes".into(), raw: 1_200_000, cu: 1_200 },
+        ];
+        let (blobs, truncated) = pack_usage_blobs(&metrics);
+        assert!(!truncated);
+        assert_eq!(blobs.len(), 1);
+        assert_eq!(blobs[0], "requests=25000:25000 egress_bytes=1200000:1200");
+        assert!(blobs[0].len() <= METADATA_VALUE_MAX);
+    }
+
+    #[test]
+    fn pack_usage_blobs_respects_value_cap_and_flags_truncation() {
+        // Many metrics with long names → must split across keys, each ≤ 500 chars,
+        // and flag truncation once it exceeds the key budget.
+        let metrics: Vec<MetricUsageCu> = (0..400)
+            .map(|i| MetricUsageCu {
+                metric: format!("a_reasonably_long_metric_name_index_{i:04}"),
+                raw: 123_456 + i as i64,
+                cu: 123 + i as u64,
+            })
+            .collect();
+        let (blobs, truncated) = pack_usage_blobs(&metrics);
+        assert!(blobs.len() <= USAGE_BLOB_MAX_KEYS, "at most the key budget");
+        for b in &blobs {
+            assert!(b.len() <= METADATA_VALUE_MAX, "each blob ≤ 500 chars; got {}", b.len());
+        }
+        assert!(truncated, "a 400-metric set overflows the key budget → truncated=true");
     }
 }
