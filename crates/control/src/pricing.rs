@@ -349,6 +349,33 @@ pub fn group_thousands(n: u64) -> String {
     out
 }
 
+/// The BILLABLE compute-units for ONE app under ONE plan price: the period's
+/// gross CU ([`total_units`]) floored by the plan's `included_units`
+/// (`max(0, gross − included)`).
+///
+/// This is THE single authoritative per-app billable-CU definition — shared by
+/// [`charge_cents`] (spend cap + invoicing) and the metering export's
+/// per-creator sum — so all three rails agree exactly. The included subtraction
+/// is per-app and MUST be floored per-app: summing gross across a creator's apps
+/// and subtracting one summed quota lets one app's unused quota offset another
+/// app's overage (under-billing). Callers that aggregate across apps sum THIS
+/// (already-floored) quantity, never the raw gross/included sums.
+///
+/// FX-independent by construction — the included subtraction precedes any
+/// currency conversion, so the export can derive billable CU without resolving
+/// FX.
+///
+/// # Errors
+/// [`PricingError::ComputeUnitOverflow`] — see [`total_units`].
+pub fn billable_units(
+    price: &PlanPrice,
+    usage: &HashMap<String, i64>,
+    weights: &MetricWeights,
+) -> Result<u64, PricingError> {
+    let total = total_units(weights, usage)?;
+    Ok(total.saturating_sub(price.included_units))
+}
+
 /// Compute the full period charge for a plan price against a usage map and the
 /// global weight table.
 ///
@@ -373,6 +400,8 @@ pub fn charge_cents(
     weights: &MetricWeights,
 ) -> Result<ChargeBreakdown, PricingError> {
     let total = total_units(weights, usage)?;
+    // The SAME per-app floored billable definition `billable_units` exports —
+    // derived from the already-computed `total` (no second `total_units` pass).
     let billable = total.saturating_sub(price.included_units);
     let Some(fx_pico) = price.fx_pico_cents_per_unit else {
         tracing::error!(

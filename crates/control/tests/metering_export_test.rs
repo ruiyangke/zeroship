@@ -1049,6 +1049,119 @@ async fn two_apps_one_creator_bills_the_sum_of_both_apps_cu() {
     assert_eq!(fx.mock.aggregate_for(&cus), 750, "aggregate unchanged after the idempotent re-drive");
 }
 
+/// THE per-app-included-quota bug (RED→GREEN). A creator owning TWO apps on
+/// DIFFERENT plans with DIFFERENT non-zero `included_units`, where ONE app is
+/// UNDER its quota. The included subtraction is PER APP, so the creator's
+/// billable CU must be `Σ_app max(0, gross_app − included_app)`, NOT
+/// `max(0, Σ gross − Σ included)`.
+///
+/// Concrete:
+///   * App A: gross 100, included 500 ⇒ per-app billable max(0, 100−500) = 0.
+///   * App B: gross 900, included 100 ⇒ per-app billable max(0, 900−100) = 800.
+///   * Authoritative Σ per-app billable = 0 + 800 = **800** (what `charge_cents`,
+///     the spend cap, and invoicing all bill).
+///
+/// PRE-FIX (`current = max(0, Σgross − Σincluded)` = `max(0, (100+900) −
+/// (500+100))` = `max(0, 1000−600)` = **400**): App A's 400 units of UNUSED
+/// included quota silently offset App B's overage ⇒ the export pushes 400, under-
+/// billing by 400 and DISAGREEING with the spend cap it claims parity with.
+///
+/// This test asserts the customer aggregate / single creator-level push == 800.
+/// It FAILS against the per-creator-subtraction code (sees 400) and PASSES once
+/// the included subtraction is floored per app via `pricing::billable_units`.
+#[compio::test]
+async fn two_apps_different_quotas_floor_included_per_app() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "mixedquota").await;
+    let _export = EXPORT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let period = month_period(2031, 9); // distinct isolated bucket
+
+    let creator = make_user(&fx.state, "mixedquota").await;
+    // TWO plans, DIFFERENT non-zero included quotas; both 1 CU/req.
+    let plan_a = make_plan_with_included(&fx.state, 500).await;
+    let plan_b = make_plan_with_included(&fx.state, 100).await;
+    // TWO apps, SAME creator (⇒ same customer / meter subject), DIFFERENT plans.
+    let app_a = make_owned_app(&fx.state, &plan_a, creator).await;
+    let app_b = make_owned_app(&fx.state, &plan_b, creator).await;
+    let cus = format!("cus_mixedquota_{}", Uuid::new_v4().simple());
+    fx.state.stripe_store.set_customer(creator, &cus).await.unwrap();
+
+    // App A: gross 100, included 500 ⇒ billable 0 (UNDER quota).
+    // App B: gross 900, included 100 ⇒ billable 800.
+    ingest_at(&fx.state, app_a, 100, period, 1).await;
+    ingest_at(&fx.state, app_b, 900, period, 2).await;
+
+    let n = metering_export::tick_at(&fx.state, period, mock_now()).await.expect("tick");
+    assert_eq!(n, 1, "ONE creator exported (a single customer-level delta)");
+
+    // THE core assertion: the included subtraction floors PER APP, then sums.
+    // Per-creator-subtraction (the bug) pushes 400; per-app floor pushes 800.
+    assert_eq!(
+        fx.mock.aggregate_for(&cus),
+        800,
+        "the customer aggregate == Σ per-app max(0, gross−included) = max(0,100−500) + \
+         max(0,900−100) = 0 + 800 = 800 — NOT the per-creator-subtraction 400 \
+         (App A's unused quota MUST NOT offset App B's overage)"
+    );
+
+    // Exactly one meter_event, carrying the per-app-floored summed CU.
+    let events = fx.mock.meter_events();
+    assert_eq!(events.len(), 1, "exactly one creator-level meter_event");
+    assert!(
+        events[0].body.contains("payload%5Bvalue%5D=800"),
+        "the single push carried 800 (per-app floor), not 400 (per-creator subtraction); body={}",
+        events[0].body
+    );
+
+    // The CREATOR-keyed high-water == the per-app-floored sum.
+    assert_eq!(
+        read_high_water(&fx.state, &creator, period).await,
+        Some(800),
+        "creator high-water == Σ per-app billable CU (800), not 400"
+    );
+
+    // Parity with the spend cap: the export's billable CU MUST equal the SUM of
+    // per-app `pricing::billable_units` (the EXACT quantity `charge_cents` bills),
+    // floored per app — NOT the per-creator-subtraction value.
+    let metering = Metering::new(fx.state.registry.clone());
+    let weights = zeroship_control::pricing_store::PricingStore::new(fx.state.registry.clone())
+        .weights()
+        .await
+        .expect("weights");
+    let totals_a = metering.period_totals(&app_a, period).await.expect("totals A");
+    let totals_b = metering.period_totals(&app_b, period).await.expect("totals B");
+    // Build the priced plans (1 CU/req; included 500 / 100) the apps run on.
+    let price_a = zeroship_control::pricing::PlanPrice {
+        included_units: 500,
+        ..Default::default()
+    };
+    let price_b = zeroship_control::pricing::PlanPrice {
+        included_units: 100,
+        ..Default::default()
+    };
+    let bill_a = zeroship_control::pricing::billable_units(&price_a, &totals_a, &weights)
+        .expect("billable A");
+    let bill_b = zeroship_control::pricing::billable_units(&price_b, &totals_b, &weights)
+        .expect("billable B");
+    assert_eq!(bill_a, 0, "App A is under quota ⇒ per-app billable 0");
+    assert_eq!(bill_b, 800, "App B over quota ⇒ per-app billable 800");
+    assert_eq!(
+        bill_a + bill_b,
+        800,
+        "spend-cap-parity sanity: Σ per-app billable_units == 800 (NOT the 400 a \
+         per-creator subtraction would yield)"
+    );
+
+    // Idempotent re-drive: a second tick with no new usage pushes nothing.
+    let n2 = metering_export::tick_at(&fx.state, period, mock_now()).await.expect("re-drive tick");
+    assert_eq!(n2, 0, "the re-drive is a no-op (creator high-water already covers current)");
+    assert_eq!(fx.mock.meter_events().len(), 1, "no double-push across the re-drive");
+    assert_eq!(fx.mock.aggregate_for(&cus), 800, "aggregate unchanged after the idempotent re-drive");
+}
+
 // ===========================================================================
 // M2 — durable per-creator export failure surface.
 // ===========================================================================

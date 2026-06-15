@@ -22,12 +22,17 @@
 //! CU CONSUMED SINCE THE LAST EXPORT (the delta), not the cumulative total, and
 //! must never double-push on a cron re-run / crash. Per CREATOR per tick:
 //!
-//!   1. Derive the creator's CURRENT cumulative GROSS CU by summing, over ALL the
-//!      creator's apps, `total_units(weights, period_totals(app, period_start))` —
-//!      the EXACT per-app derivation the spend cap uses (`pricing::total_units`),
-//!      re-derived from the raw, re-weightable `usage_aggregates` (NO CU column is
-//!      added). Subtract the creator-level included quota (Σ each app's plan
-//!      `included_units`) ONCE ⇒ `current_creator = max(0, gross − included)`.
+//!   1. Derive the creator's CURRENT cumulative BILLABLE CU by summing, over ALL
+//!      the creator's apps, the PER-APP floored billable
+//!      `pricing::billable_units(plan.price, period_totals(app, period_start),
+//!      weights)` = `max(0, total_units − plan.included_units)` — the EXACT
+//!      per-app quantity `charge_cents` bills (spend cap + invoicing), re-derived
+//!      from the raw, re-weightable `usage_aggregates` (NO CU column is added).
+//!      The included subtraction is floored PER APP (plans differ per app), THEN
+//!      summed ⇒ `current_creator = Σ_app max(0, gross_app − included_app)`.
+//!      Subtracting a single creator-level included quota would let one app's
+//!      unused quota offset another app's overage (under-bills, disagrees with
+//!      the spend cap).
 //!   2. Read the per-`(creator, period)` high-water `exported_units` from
 //!      `metering_exports` (0057). `delta = current_creator − exported`.
 //!   3. `delta == 0` ⇒ nothing new ⇒ SKIP (the no-op that makes a re-run/crash
@@ -69,7 +74,7 @@ use uuid::Uuid;
 use crate::cron::billing_reconcile::{lookup_plan_id_on, period_end_unix};
 use crate::metering::{current_period_start_unix, period_date, Metering};
 use crate::plan_catalog::PlanCatalog;
-use crate::pricing::total_units;
+use crate::pricing::{billable_units, total_units};
 use crate::pricing_store::PricingStore;
 use crate::registry::RegistryError;
 use crate::AppState;
@@ -333,19 +338,46 @@ async fn export_creator(
 
     let period_d = period_date(period.start);
 
-    // 1. CURRENT cumulative GROSS + INCLUDED CU summed ACROSS ALL the creator's
-    //    apps — each app's gross via the SAME `total_units` derivation the spend
-    //    cap uses, and each app's plan `included_units` (M1). Summing both at the
-    //    creator level and subtracting included ONCE gives the creator's billable
-    //    `current` — the quantity the customer-scoped external meter aggregates.
-    //    This is the core of the HIGH-severity fix: a per-app delta reconciled
-    //    against a per-customer aggregate silently zeroed every app after the
-    //    first; the creator-level sum cannot.
-    let mut gross_creator: u64 = 0;
-    let mut included_creator: u64 = 0;
+    // 1. CURRENT cumulative BILLABLE CU summed ACROSS ALL the creator's apps.
+    //    The included subtraction is PER APP (`plan_id` is per-app; apps under one
+    //    creator can carry DIFFERENT plans with DIFFERENT included quotas), so we
+    //    floor `max(0, gross − included)` for EACH app via the SAME authoritative
+    //    `pricing::billable_units` the spend cap + invoicing use (`charge_cents`),
+    //    THEN sum. Summing gross and subtracting one creator-level included quota
+    //    (the prior, broken form) lets one app's unused quota offset another app's
+    //    overage — under-billing and disagreeing with the spend cap. Per-app floor
+    //    then sum cannot.
+    //
+    //    This is also the core of the HIGH-severity grain fix: a per-app delta
+    //    reconciled against a per-customer aggregate silently zeroed every app
+    //    after the first; the creator-level SUM of per-app billable cannot.
+    let mut current_units: u64 = 0;
     for app_id in app_ids {
         let usage = Metering::period_totals_on(&conn, app_id, period.start).await?;
-        let app_gross = total_units(weights, &usage).map_err(|e| {
+
+        // The app's plan resolves its `included_units`. An app with no plan FK
+        // has no included quota (billable == gross); an app whose plan is missing
+        // from the catalog is SKIPPED entirely (contributes 0) so it neither
+        // over- nor under-counts. `billable_units(price, usage, weights)` is the
+        // EXACT per-app floored definition `charge_cents` bills, so the CU pushed
+        // == the CU the spend cap enforces == the CU invoicing charges.
+        let app_billable = match lookup_plan_id_on(&conn, app_id).await? {
+            Some(plan_id) => match catalog.get(&plan_id).await? {
+                Some(plan) => billable_units(&plan.price, &usage, weights),
+                None => {
+                    tracing::warn!(
+                        app_id = %app_id, plan_id = %plan_id,
+                        "metering_export: plan not in catalog — excluding app from the creator's export"
+                    );
+                    continue;
+                }
+            },
+            // No plan FK ⇒ no included quota ⇒ billable == gross. Mirror
+            // `billable_units` with an empty (zero-included) price would require a
+            // synthetic plan; instead derive gross directly via `total_units`.
+            None => total_units(weights, &usage),
+        }
+        .map_err(|e| {
             // An overflow is a hard error (never a clamp) — skip this creator's
             // export this tick; the high-water is untouched so a later (fixed) tick
             // retries.
@@ -353,31 +385,9 @@ async fn export_creator(
                 "metering_export: compute-unit overflow for app {app_id}: {e}"
             ))
         })?;
-        gross_creator = gross_creator.saturating_add(app_gross);
 
-        // The plan's `included_units` for this app — subtracted (summed) ONCE at
-        // the creator level so the CU pushed == the CU `charge_cents` (and thus the
-        // spend cap) treats as billable. An app with no plan FK contributes 0
-        // included; an app whose plan is missing from the catalog is SKIPPED from
-        // both sums (its gross is rolled back) so it neither over- nor under-counts.
-        match lookup_plan_id_on(&conn, app_id).await? {
-            Some(plan_id) => match catalog.get(&plan_id).await? {
-                Some(plan) => {
-                    included_creator = included_creator.saturating_add(plan.price.included_units);
-                }
-                None => {
-                    tracing::warn!(
-                        app_id = %app_id, plan_id = %plan_id,
-                        "metering_export: plan not in catalog — excluding app from the creator's export"
-                    );
-                    gross_creator = gross_creator.saturating_sub(app_gross);
-                }
-            },
-            None => { /* no plan FK ⇒ no included quota; gross still counts */ }
-        }
+        current_units = current_units.saturating_add(app_billable);
     }
-    // BILLABLE CU at the creator grain: `max(0, gross − included)`.
-    let current_units = gross_creator.saturating_sub(included_creator);
 
     // 2. The per-(creator, period) high-water (cumulative billable CU already
     //    pushed for this customer).
