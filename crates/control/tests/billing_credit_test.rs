@@ -39,6 +39,7 @@ use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::billing_reconcile;
 use zeroship_control::credit::{self, GrantOutcome};
 use zeroship_control::metering::Metering;
+use zeroship_control::registry::RegistryError;
 use zeroship_control::stripe_client::{Period, StripeApi};
 use zeroship_control::stripe_store::StripeError;
 use zeroship_control::{
@@ -1479,4 +1480,485 @@ async fn consume_takes_per_creator_advisory_lock() {
     let bal = credit::balance(&*fx.state.control_pg, &creator, "usd").await.unwrap();
     assert_eq!(bal, 0, "balance is non-negative and exact after both draws ($10 − $6 − $4)");
     assert!(bal >= 0, "balance MUST never go negative");
+}
+
+// ===========================================================================
+// #16: consume against an EMPTY ledger (no grants at all) ⇒ `applied_cents == 0` and
+//      ZERO `consumed` rows appended. The reconciler then finalizes total = subtotal.
+// ===========================================================================
+
+#[compio::test]
+async fn consume_with_empty_ledger_applies_zero_and_appends_nothing() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "emptyledger").await;
+    let creator = make_user(&fx.state, "emptyledger").await;
+    ensure_creator_billing(&fx.state, creator).await;
+    // NO grants for this creator.
+
+    // A draft invoice anchor.
+    let inv = zeroship_core::typed_id::new_invoice_id();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+             VALUES ($1, $2, $3::date, 'draft')",
+            &[&inv, &creator, &period_d(prev_period(now_for_closed_period()))],
+        )
+        .await
+        .expect("claim draft");
+
+    // Consume against a $5 subtotal with NO available credit.
+    let applied = credit::consume_at_finalize(&*fx.state.control_pg, &creator, &inv, 500, "usd")
+        .await
+        .expect("consume on empty ledger");
+    assert_eq!(applied.applied_cents, 0, "no credit available ⇒ applied = 0");
+    assert!(applied.draws.is_empty(), "no draws on an empty ledger");
+
+    // ZERO consumed rows for this invoice.
+    let n: i64 = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.credit_ledger \
+             WHERE applied_invoice_id = $1 AND kind = 'consumed'",
+            &[&inv],
+        )
+        .await
+        .expect("count")[0]
+        .get("n");
+    assert_eq!(n, 0, "an empty-ledger consume appends NO consumed entries");
+    // Balance stays exactly 0 (nothing granted, nothing drawn).
+    assert_eq!(credit::balance(&*fx.state.control_pg, &creator, "usd").await.unwrap(), 0);
+}
+
+// ===========================================================================
+// #15: a ZERO-subtotal consume short-circuits — `consume_at_finalize` returns
+//      `applied_cents == 0` with NO draws even though a grant IS available (the
+//      `subtotal_cents <= 0` guard fires before any draw). A grant must NOT be drawn
+//      against a $0 bill.
+// ===========================================================================
+
+#[compio::test]
+async fn consume_with_zero_subtotal_short_circuits() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "zerosub").await;
+    let creator = make_user(&fx.state, "zerosub").await;
+    ensure_creator_billing(&fx.state, creator).await;
+    // A LIVE $10 grant is available.
+    insert_grant(&fx.state, creator, 1000, "usd", chrono::Utc::now(), None).await;
+
+    let inv = zeroship_core::typed_id::new_invoice_id();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+             VALUES ($1, $2, $3::date, 'draft')",
+            &[&inv, &creator, &period_d(prev_period(now_for_closed_period()))],
+        )
+        .await
+        .expect("claim draft");
+
+    // Subtotal 0 ⇒ short-circuit (no draw against a $0 bill).
+    let applied = credit::consume_at_finalize(&*fx.state.control_pg, &creator, &inv, 0, "usd")
+        .await
+        .expect("consume zero subtotal");
+    assert_eq!(applied.applied_cents, 0, "a $0 subtotal draws no credit");
+    assert!(applied.draws.is_empty(), "no draws on a $0 subtotal");
+
+    let n: i64 = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.credit_ledger \
+             WHERE applied_invoice_id = $1 AND kind = 'consumed'",
+            &[&inv],
+        )
+        .await
+        .expect("count")[0]
+        .get("n");
+    assert_eq!(n, 0, "a zero-subtotal consume appends NO consumed entries");
+    // The $10 grant is untouched.
+    assert_eq!(
+        credit::balance(&*fx.state.control_pg, &creator, "usd").await.unwrap(),
+        1000, "the grant is preserved — never drawn against a $0 bill",
+    );
+}
+
+// ===========================================================================
+// #17: a grant that lands AFTER a consume is NOT drawn by that tick. We consume
+//      against the grants visible at consume time, then append a LATE grant; the
+//      already-consumed invoice's applied credit is unchanged (no retroactive draw),
+//      and the late grant's full value is preserved in the balance.
+//      (Models a grant landing concurrently with a consume: the consume reads its
+//      grant set at draw time; a later grant is simply available for the NEXT bill.)
+// ===========================================================================
+
+#[compio::test]
+async fn late_grant_is_not_drawn_by_an_earlier_consume() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "lategrant").await;
+    let creator = make_user(&fx.state, "lategrant").await;
+    ensure_creator_billing(&fx.state, creator).await;
+    // An initial $3 grant.
+    insert_grant(&fx.state, creator, 300, "usd", chrono::Utc::now() - chrono::Duration::hours(1), None).await;
+
+    let inv = zeroship_core::typed_id::new_invoice_id();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+             VALUES ($1, $2, $3::date, 'draft')",
+            &[&inv, &creator, &period_d(prev_period(now_for_closed_period()))],
+        )
+        .await
+        .expect("claim draft");
+
+    // Consume against a $5 subtotal: only the $3 grant is visible ⇒ applied = $3.
+    let applied = credit::consume_at_finalize(&*fx.state.control_pg, &creator, &inv, 500, "usd")
+        .await
+        .expect("consume");
+    assert_eq!(applied.applied_cents, 300, "only the $3 grant visible at consume time is drawn");
+    assert_eq!(applied.draws.len(), 1, "one consumed entry (the $3 grant)");
+
+    // A LATE $10 grant lands AFTER the consume.
+    let late = insert_grant(&fx.state, creator, 1000, "usd", chrono::Utc::now(), None).await;
+
+    // The already-consumed invoice's applied credit is UNCHANGED (no retroactive draw):
+    // a re-drive of the SAME invoice recomputes $3 (the re-run guard recomputes from the
+    // existing consumed rows; it does NOT draw the late grant).
+    let redrive = credit::consume_at_finalize(&*fx.state.control_pg, &creator, &inv, 500, "usd")
+        .await
+        .expect("re-drive consume");
+    assert_eq!(redrive.applied_cents, 300, "re-drive recomputes $3 — the late grant is NOT retroactively drawn");
+    assert!(redrive.draws.is_empty(), "re-drive appends nothing");
+
+    // No consumed entry was EVER drawn from the late grant.
+    let drawn_from_late: i64 = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.credit_ledger \
+             WHERE kind = 'consumed' AND consumed_from_grant_id = $1",
+            &[&late],
+        )
+        .await
+        .expect("count")[0]
+        .get("n");
+    assert_eq!(drawn_from_late, 0, "the late grant was never drawn by the earlier consume");
+
+    // Balance: $3 granted − $3 consumed + $10 late grant = $10 (the late grant is fully
+    // available for the NEXT bill — no over-draw, the consume never touched it).
+    assert_eq!(
+        credit::balance(&*fx.state.control_pg, &creator, "usd").await.unwrap(),
+        1000, "the late grant's full value is preserved for the next bill",
+    );
+}
+
+// ===========================================================================
+// #5: the `grant` Rust boundary rejects NON-OPERATOR kinds. `consumed`,
+//     `void_reversal`, and `refund_clawback` are reconciler-internal (negative-sign /
+//     grant-ref-bound) and MUST NOT be operator-grantable — `grant()` returns
+//     `InvalidInput` before any INSERT.
+// ===========================================================================
+
+#[compio::test]
+async fn grant_rejects_non_operator_kinds_at_the_boundary() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "kindreject").await;
+    let creator = make_user(&fx.state, "kindreject").await;
+    ensure_creator_billing(&fx.state, creator).await;
+
+    for kind in ["consumed", "void_reversal", "refund_clawback"] {
+        let r = credit::grant(
+            &*fx.state.control_pg,
+            &creator,
+            500,
+            "usd",
+            kind,
+            None,
+            None,
+            &format!("idem-{}", Uuid::new_v4()),
+        )
+        .await;
+        assert!(
+            matches!(r, Err(RegistryError::InvalidInput(_))),
+            "grant kind {kind:?} must be rejected at the Rust boundary, got {r:?}",
+        );
+    }
+
+    // NO ledger row was appended for any of the rejected kinds.
+    let n: i64 = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.credit_ledger WHERE creator_id = $1",
+            &[&creator],
+        )
+        .await
+        .expect("count")[0]
+        .get("n");
+    assert_eq!(n, 0, "a rejected-kind grant appends NO ledger row");
+}
+
+// ===========================================================================
+// #30: the `credit_ledger_grant_ref` CHECK (0048/0054) binds the grant-ref column to
+//      the entry kind: a NEGATIVE/consuming kind (consumed/void_reversal/refund_clawback)
+//      MUST carry `consumed_from_grant_id`; a positive grant-class kind MUST NOT. Two
+//      illegal rows are rejected by the CHECK:
+//        * a `consumed` row with NULL `consumed_from_grant_id`;
+//        * a `grant` row with a NON-NULL `consumed_from_grant_id`.
+//      RED if the `credit_ledger_grant_ref` CHECK is dropped.
+// ===========================================================================
+
+#[compio::test]
+async fn credit_ledger_grant_ref_check_binds_kind_to_grant_reference() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "grantref").await;
+    let creator = make_user(&fx.state, "grantref").await;
+    ensure_creator_billing(&fx.state, creator).await;
+    // A real grant to reference (so the FK on consumed_from_grant_id can resolve when
+    // we test the positive-with-ref rejection).
+    let grant_id = insert_grant(&fx.state, creator, 1000, "usd", chrono::Utc::now(), None).await;
+
+    // (1) A `consumed` row with NULL consumed_from_grant_id is rejected (a consume MUST
+    //     name the grant it drew). amount is negative (the kind↔sign CHECK requires it).
+    let bad_consumed = fx
+        .state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.credit_ledger \
+               (id, creator_id, kind, amount_cents, currency) \
+             VALUES ($1, $2, 'consumed', -100, 'usd')",
+            &[&zeroship_core::typed_id::new_credit_id(), &creator],
+        )
+        .await;
+    assert!(
+        bad_consumed.is_err(),
+        "a 'consumed' entry with NULL consumed_from_grant_id must be rejected by the grant-ref CHECK",
+    );
+
+    // (2) A `grant` row WITH a non-NULL consumed_from_grant_id is rejected (a grant
+    //     references no prior grant). amount is positive (grant sign).
+    let bad_grant = fx
+        .state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.credit_ledger \
+               (id, creator_id, kind, amount_cents, currency, consumed_from_grant_id) \
+             VALUES ($1, $2, 'grant', 100, 'usd', $3)",
+            &[&zeroship_core::typed_id::new_credit_id(), &creator, &grant_id],
+        )
+        .await;
+    assert!(
+        bad_grant.is_err(),
+        "a 'grant' entry with a non-NULL consumed_from_grant_id must be rejected by the grant-ref CHECK",
+    );
+
+    // Only the legitimate seed grant survives.
+    let n: i64 = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.credit_ledger WHERE creator_id = $1",
+            &[&creator],
+        )
+        .await
+        .expect("count")[0]
+        .get("n");
+    assert_eq!(n, 1, "neither illegal row was inserted — only the seed grant exists");
+}
+
+// ===========================================================================
+// #13: credit is CAPPED at the subtotal — a SINGLE grant far larger than the bill draws
+//      only `min(grant, subtotal)`. `applied == subtotal`, `total == 0`, and the leftover
+//      grant balance is preserved (one partial `consumed` entry against that one grant).
+// ===========================================================================
+
+#[compio::test]
+async fn single_large_grant_is_capped_at_subtotal_leftover_preserved() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "creditcap").await;
+    let creator = make_user(&fx.state, "creditcap").await;
+    ensure_creator_billing(&fx.state, creator).await;
+    // A SINGLE $100 grant — far larger than the $6 bill.
+    let big = insert_grant(&fx.state, creator, 10_000, "usd", chrono::Utc::now(), None).await;
+
+    let inv = zeroship_core::typed_id::new_invoice_id();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+             VALUES ($1, $2, $3::date, 'draft')",
+            &[&inv, &creator, &period_d(prev_period(now_for_closed_period()))],
+        )
+        .await
+        .expect("claim draft");
+
+    // Consume against a $6 subtotal: applied = min($100, $6) = $6.
+    let applied = credit::consume_at_finalize(&*fx.state.control_pg, &creator, &inv, 600, "usd")
+        .await
+        .expect("consume");
+    assert_eq!(applied.applied_cents, 600, "credit capped at the subtotal ($6), NOT the full $100 grant");
+    assert_eq!(applied.draws.len(), 1, "one partial draw against the single grant");
+    assert_eq!(applied.draws[0].grant_id, big, "the draw is against the big grant");
+    assert_eq!(applied.draws[0].amount_cents, 600, "exactly the subtotal was drawn");
+
+    // Leftover balance preserved: $100 − $6 = $94.
+    assert_eq!(
+        credit::balance(&*fx.state.control_pg, &creator, "usd").await.unwrap(),
+        9400, "the leftover grant balance ($94) is preserved",
+    );
+
+    // Exactly ONE consumed entry against the one grant; magnitude $6.
+    let drawn: i64 = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT COALESCE(SUM(amount_cents),0)::bigint AS s FROM zeroship.credit_ledger \
+             WHERE applied_invoice_id = $1 AND kind = 'consumed'",
+            &[&inv],
+        )
+        .await
+        .expect("sum")[0]
+        .get("s");
+    assert_eq!(drawn, -600, "one consumed entry of −$6 (the capped draw)");
+}
+
+// ===========================================================================
+// #33: the per-creator finalize lock serializes `consume_at_finalize` against a
+//      concurrent `record_plan_change_tx` for the SAME creator — they take the IDENTICAL
+//      `pg_advisory_xact_lock(hashtext(creator)::bigint)` key, so a plan change can never
+//      interleave a consume to over-draw. We hold the lock via a consume on an OPEN tx,
+//      prove a concurrent `record_plan_change_tx` BLOCKS on the same key, then release and
+//      assert the balance is exact + non-negative after both committed.
+//
+//      RED-proof: PINS that the consume op takes the per-creator lock (the lock "moved
+//      into the consume op to make non-negativity intrinsic"). If `consume_at_finalize`
+//      dropped its `pg_advisory_xact_lock`, the spawned `record_plan_change_tx` would NOT
+//      block on the creator key — the "must be WAITING" assertion would fail.
+// ===========================================================================
+
+#[compio::test]
+async fn consume_and_record_plan_change_serialize_on_the_creator_lock() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "consume-vs-planchange").await;
+    let creator = make_user(&fx.state, "cvp").await;
+    ensure_creator_billing(&fx.state, creator).await;
+    let plan_a = make_plan(&fx.state).await;
+    let plan_b = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan_a, creator).await;
+    insert_grant(&fx.state, creator, 1000, "usd", chrono::Utc::now(), None).await;
+
+    // A draft invoice anchor for the consume.
+    let inv = zeroship_core::typed_id::new_invoice_id();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+             VALUES ($1, $2, $3::date, 'draft')",
+            &[&inv, &creator, &period_d(prev_period(now_for_closed_period()))],
+        )
+        .await
+        .expect("claim draft");
+
+    // The advisory key the creator lock hashes to.
+    let lock_key: i64 = fx
+        .state
+        .control_pg
+        .query("SELECT hashtext($1::text)::bigint AS k", &[&creator.to_string()])
+        .await
+        .expect("hash key")[0]
+        .get("k");
+
+    // (1) Run `consume_at_finalize` inside an OPEN tx on a dedicated connection. It takes
+    //     the per-creator advisory lock as its first act and HOLDS it until we commit.
+    let (mut conn, conn_run) = compio_postgres::connect(&url, compio_postgres::NoTls)
+        .await
+        .expect("consume connect");
+    compio::runtime::spawn(async move {
+        let _ = conn_run.run().await;
+    })
+    .detach();
+    let tx = conn.transaction().await.expect("tx");
+    let applied = credit::consume_at_finalize(&tx, &creator, &inv, 600, "usd")
+        .await
+        .expect("consume drew $6 of the $10 grant");
+    assert_eq!(applied.applied_cents, 600);
+
+    // (2) SPAWN a concurrent `record_plan_change_tx` for the SAME creator. It must BLOCK
+    //     trying to acquire the SAME per-creator advisory key (proving they serialize).
+    let registry = fx.state.registry.clone();
+    let app_w = app;
+    let creator_w = creator;
+    let from_w = plan_a.clone();
+    let to_w = plan_b.clone();
+    let now_unix = now_for_closed_period();
+    let task = compio::runtime::spawn(async move {
+        zeroship_control::proration::record_plan_change_tx(
+            &registry, &app_w, &creator_w, Some(&from_w), &to_w, now_unix,
+        )
+        .await
+    });
+
+    // Poll pg_locks until the spawned plan-change is provably WAITING on the creator key.
+    let mut waiting = false;
+    for _ in 0..200 {
+        let n: i64 = fx
+            .state
+            .control_pg
+            .query(
+                "SELECT COUNT(*)::bigint AS n FROM pg_locks \
+                 WHERE locktype = 'advisory' AND NOT granted \
+                   AND ((classid::bigint << 32) | objid::bigint) = $1",
+                &[&lock_key],
+            )
+            .await
+            .expect("poll pg_locks")[0]
+            .get("n");
+        if n >= 1 {
+            waiting = true;
+            break;
+        }
+        compio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        waiting,
+        "a concurrent record_plan_change_tx must BLOCK on the SAME per-creator advisory key the \
+         consume holds — if it never waits, the two ops do not serialize (over-draw window)",
+    );
+
+    // (3) Commit the consume → release the lock. The plan-change now acquires it + commits.
+    tx.commit().await.expect("commit consume");
+    let outcome = task.await.expect("plan-change task did not panic").expect("plan-change commits");
+    assert!(
+        matches!(outcome, zeroship_control::proration::PlanChangeOutcome::Recorded { .. }),
+        "the plan change recorded once the lock freed, got {outcome:?}",
+    );
+
+    // Balance is exact + non-negative: $10 granted − $6 consumed = $4 (the plan change
+    // never touched credit; serialization prevented any over-draw).
+    let bal = credit::balance(&*fx.state.control_pg, &creator, "usd").await.unwrap();
+    assert_eq!(bal, 400, "balance after the serialized consume = $10 − $6 = $4");
+    assert!(bal >= 0, "balance never goes negative under consume↔plan-change serialization");
 }
