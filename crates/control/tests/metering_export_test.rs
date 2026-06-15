@@ -678,10 +678,10 @@ async fn export_pushes_cu_as_meter_event_with_correct_value_customer_and_identif
         ev.body.contains(&format!("payload%5Bstripe_customer_id%5D={cus}")),
         "payload[stripe_customer_id]={cus}; body={}", ev.body
     );
-    // The deterministic identifier for the (app, period, 0→750) window, present
+    // The deterministic identifier for the (creator, period, 0→750) window, present
     // on the wire (form `identifier=…`, percent-encoded colons) AND verbatim as
     // the Idempotency-Key header.
-    let expected_id = metering_export::export_identifier(&app, period, 0, 750);
+    let expected_id = metering_export::export_identifier(&creator, period, 0, 750);
     assert_eq!(
         form_param(&ev.body, "identifier").as_deref(),
         Some(expected_id.as_str()),
@@ -689,8 +689,8 @@ async fn export_pushes_cu_as_meter_event_with_correct_value_customer_and_identif
     );
     assert_eq!(ev.idempotency_key.as_deref(), Some(expected_id.as_str()), "identifier doubles as Idempotency-Key");
 
-    // The high-water advanced to the cumulative total.
-    let hw = read_high_water(&fx.state, &app, period).await;
+    // The high-water advanced to the cumulative total (keyed on the creator).
+    let hw = read_high_water(&fx.state, &creator, period).await;
     assert_eq!(hw, Some(750), "exported_units high-water == cumulative CU");
 }
 
@@ -772,7 +772,7 @@ async fn export_computes_delta_across_two_ticks() {
         "tick 2 pushed the DELTA 150, NOT the cumulative 250; body={}", events[1].body
     );
     // The Stripe-side SUM (100 + 150) == the cumulative 250 — and == the local CU.
-    let hw = read_high_water(&fx.state, &app, period).await;
+    let hw = read_high_water(&fx.state, &creator, period).await;
     assert_eq!(hw, Some(250), "high-water advanced to the new cumulative 250");
 
     // CU PARITY: the cumulative CU the export pushed == the CU the spend cap uses
@@ -884,7 +884,7 @@ async fn redrive_past_dedupe_window_does_not_double_count() {
     let n1 = metering_export::tick_at(&fx.state, period, now).await.expect("tick 1");
     assert_eq!(n1, 1);
     assert_eq!(fx.mock.aggregate_for(&cus), 400, "Stripe counted 400 after tick 1");
-    assert_eq!(read_high_water(&fx.state, &app, period).await, Some(400));
+    assert_eq!(read_high_water(&fx.state, &creator, period).await, Some(400));
 
     // Simulate the crash window: roll the high-water BACK to 0 (as if the push
     // had landed at Stripe but the high-water UPDATE never committed). Stripe's
@@ -893,8 +893,8 @@ async fn redrive_past_dedupe_window_does_not_double_count() {
         .control_pg
         .execute(
             "UPDATE zeroship.metering_exports SET exported_units = 0 \
-             WHERE app_id = $1",
-            &[&app],
+             WHERE creator_id = $1",
+            &[&creator],
         )
         .await
         .expect("roll back high-water to simulate crash-before-update");
@@ -914,7 +914,7 @@ async fn redrive_past_dedupe_window_does_not_double_count() {
     );
     assert_eq!(n2, 0, "the re-drive pushed nothing (the aggregate already covered current)");
     // The high-water self-heals back up to the reconciled current.
-    assert_eq!(read_high_water(&fx.state, &app, period).await, Some(400), "high-water self-healed");
+    assert_eq!(read_high_water(&fx.state, &creator, period).await, Some(400), "high-water self-healed");
 }
 
 // ===========================================================================
@@ -969,11 +969,88 @@ async fn export_pushes_billable_cu_honoring_included_units() {
     assert_eq!(billable, 550, "billable parity sanity");
     assert_eq!(fx.mock.aggregate_for(&cus), 550, "Stripe counted the BILLABLE 550");
     // The high-water tracks billable CU (so the next delta is computed on billable).
-    assert_eq!(read_high_water(&fx.state, &app, period).await, Some(550));
+    assert_eq!(read_high_water(&fx.state, &creator, period).await, Some(550));
 }
 
 // ===========================================================================
-// M2 — durable per-app export failure surface.
+// HIGH-severity multi-app revenue-loss fix — per-creator aggregation.
+// ===========================================================================
+
+/// THE HIGH-severity bug (RED→GREEN). A creator owning TWO metered apps, both
+/// with current-period usage. The external meter aggregates PER CUSTOMER, so the
+/// export must reconcile + push at the CREATOR grain: the customer aggregate (and
+/// the cumulative pushed total) must equal the SUM of BOTH apps' billable CU.
+///
+/// PRE-FIX (per-app export reconciled against the per-customer aggregate): app A
+/// pushes its CU → the customer aggregate covers it → when app B reconciles,
+/// `already = max(hw_B, customer_aggregate) ≥ current_B` → `delta_B = 0` → app B's
+/// CU NEVER bills and its high-water silently advances to mask it. So the
+/// aggregate would land at ONLY app A's CU (300), not 300+450=750. This test
+/// asserts 750 — it FAILS pre-fix (would see 300) and PASSES post-fix.
+///
+/// A re-drive (second tick, no new usage) must be a pure no-op (idempotent): the
+/// creator high-water already covers `current`, so nothing is pushed again.
+#[compio::test]
+async fn two_apps_one_creator_bills_the_sum_of_both_apps_cu() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "multiapp").await;
+    let _export = EXPORT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let period = month_period(2031, 8); // distinct isolated bucket
+
+    let creator = make_user(&fx.state, "multiapp").await;
+    let plan = make_plan(&fx.state).await; // 0 included; 1 CU/req
+    // TWO apps, SAME creator (⇒ same customer / meter subject).
+    let app_a = make_owned_app(&fx.state, &plan, creator).await;
+    let app_b = make_owned_app(&fx.state, &plan, creator).await;
+    let cus = format!("cus_multiapp_{}", Uuid::new_v4().simple());
+    fx.state.stripe_store.set_customer(creator, &cus).await.unwrap();
+
+    // App A: 300 CU. App B: 450 CU. Creator billable = 300 + 450 = 750.
+    ingest_at(&fx.state, app_a, 300, period, 1).await;
+    ingest_at(&fx.state, app_b, 450, period, 2).await;
+
+    let n = metering_export::tick_at(&fx.state, period, mock_now()).await.expect("tick");
+    assert_eq!(n, 1, "ONE creator exported (a single customer-level delta, not one-per-app)");
+
+    // THE core assertion: the customer aggregate == BOTH apps' CU summed. Pre-fix
+    // this is 300 (app B silently zeroed); post-fix it is 750.
+    assert_eq!(
+        fx.mock.aggregate_for(&cus),
+        750,
+        "the customer aggregate == Σ both apps' billable CU (300 + 450) — app B is NOT silently zeroed"
+    );
+
+    // Exactly one meter_event was pushed (per creator), carrying the summed CU.
+    let events = fx.mock.meter_events();
+    assert_eq!(events.len(), 1, "exactly one creator-level meter_event");
+    assert!(
+        events[0].body.contains("payload%5Bvalue%5D=750"),
+        "the single push carried the creator's SUMMED billable CU 750; body={}", events[0].body
+    );
+    assert!(
+        events[0].body.contains(&format!("payload%5Bstripe_customer_id%5D={cus}")),
+        "pushed under the creator's customer; body={}", events[0].body
+    );
+
+    // The high-water is CREATOR-keyed and equals the summed billable CU.
+    assert_eq!(
+        read_high_water(&fx.state, &creator, period).await,
+        Some(750),
+        "creator high-water == Σ both apps' billable CU"
+    );
+
+    // Idempotent re-drive: a second tick with no new usage pushes nothing.
+    let n2 = metering_export::tick_at(&fx.state, period, mock_now()).await.expect("re-drive tick");
+    assert_eq!(n2, 0, "the re-drive is a no-op (creator high-water already covers current)");
+    assert_eq!(fx.mock.meter_events().len(), 1, "no double-push across the re-drive");
+    assert_eq!(fx.mock.aggregate_for(&cus), 750, "aggregate unchanged after the idempotent re-drive");
+}
+
+// ===========================================================================
+// M2 — durable per-creator export failure surface.
 // ===========================================================================
 
 /// M2 (RED→GREEN): a failing `report_usage` must be DURABLE + queryable, not
@@ -1005,25 +1082,25 @@ async fn export_failure_is_recorded_durably() {
     let n = metering_export::tick_at(&fx.state, period, mock_now()).await.expect("tick");
     assert_eq!(n, 0, "nothing exported (the push failed)");
 
-    let (failures, last_error) = read_failure_state(&fx.state, &app, period).await;
+    let (failures, last_error) = read_failure_state(&fx.state, &creator, period).await;
     assert_eq!(failures, Some(1), "consecutive_failures bumped to 1 on the failed push");
     assert!(
         last_error.as_deref().is_some_and(|e| e.contains("report_usage")),
         "last_error records the failure (got {last_error:?})"
     );
     // The high-water did NOT advance (nothing was exported).
-    assert_eq!(read_high_water(&fx.state, &app, period).await, Some(0));
+    assert_eq!(read_high_water(&fx.state, &creator, period).await, Some(0));
 
-    // A SECOND failed tick bumps the counter again (observability of a stuck app).
+    // A SECOND failed tick bumps the counter again (observability of a stuck creator).
     let _ = metering_export::tick_at(&fx.state, period, mock_now()).await.expect("tick 2");
-    let (failures2, _) = read_failure_state(&fx.state, &app, period).await;
+    let (failures2, _) = read_failure_state(&fx.state, &creator, period).await;
     assert_eq!(failures2, Some(2), "a second failure bumps consecutive_failures to 2");
 
     // Now let pushes through; a SUCCESS resets the failure surface.
     fx.mock.allow_meter_events();
     let n3 = metering_export::tick_at(&fx.state, period, mock_now()).await.expect("tick 3");
     assert_eq!(n3, 1, "the recovered push exports");
-    let (failures3, last_error3) = read_failure_state(&fx.state, &app, period).await;
+    let (failures3, last_error3) = read_failure_state(&fx.state, &creator, period).await;
     assert_eq!(failures3, Some(0), "a successful export RESETS consecutive_failures to 0");
     assert_eq!(last_error3, None, "last_error cleared on success");
 }
@@ -1036,14 +1113,14 @@ fn period_d(period_start: i64) -> chrono::NaiveDate {
     chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1).unwrap()
 }
 
-/// Read the `metering_exports` high-water for an `(app, period)`.
-async fn read_high_water(state: &AppState, app: &Uuid, period: i64) -> Option<i64> {
+/// Read the `metering_exports` high-water for a `(creator, period)`.
+async fn read_high_water(state: &AppState, creator: &Uuid, period: i64) -> Option<i64> {
     state
         .control_pg
         .query(
             "SELECT exported_units FROM zeroship.metering_exports \
-             WHERE app_id = $1 AND period = $2::date",
-            &[app, &period_d(period)],
+             WHERE creator_id = $1 AND period = $2::date",
+            &[creator, &period_d(period)],
         )
         .await
         .expect("read high-water")
@@ -1051,19 +1128,19 @@ async fn read_high_water(state: &AppState, app: &Uuid, period: i64) -> Option<i6
         .map(|r| r.get::<_, i64>("exported_units"))
 }
 
-/// Read the M2 durable failure surface for an `(app, period)`:
+/// Read the M2 durable failure surface for a `(creator, period)`:
 /// `(consecutive_failures, last_error)`.
 async fn read_failure_state(
     state: &AppState,
-    app: &Uuid,
+    creator: &Uuid,
     period: i64,
 ) -> (Option<i32>, Option<String>) {
     let rows = state
         .control_pg
         .query(
             "SELECT consecutive_failures, last_error FROM zeroship.metering_exports \
-             WHERE app_id = $1 AND period = $2::date",
-            &[app, &period_d(period)],
+             WHERE creator_id = $1 AND period = $2::date",
+            &[creator, &period_d(period)],
         )
         .await
         .expect("read failure state");

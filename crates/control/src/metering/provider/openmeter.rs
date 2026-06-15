@@ -15,8 +15,9 @@
 //! the cron's existing per-creator handle keeps the cron 100% unchanged AND
 //! guarantees `report_usage` (push) and `reported_total` (read) address the
 //! EXACT same subject — which is what makes the inherited C2 reconcile correct.
-//! The per-app id rides along in the CloudEvent `data.app_id` for audit, so an
-//! operator can still attribute aggregated CU back to a single app.
+//! The export pushes per CREATOR (the meter aggregates per subject), so one
+//! CloudEvent carries the creator's whole billable-CU delta — there is no single
+//! app to attribute.
 //!
 //! - `ensure_customer` → **map / no-op**. Returns the creator's existing handle
 //!   (never talks to OpenMeter — there is no customer object to create).
@@ -38,8 +39,6 @@
 //! The LOCAL spend cap still enforces on the plan `fx` (`spend.rs` reads
 //! `usage_aggregates` directly, provider-independent), so the provider NEVER
 //! touches enforcement — it is export only.
-
-use uuid::Uuid;
 
 use super::types::{
     BillingPeriod, CreatorBilling, CustomerRef, InvoiceRef, MeteringProviderKind, ProviderError,
@@ -111,29 +110,29 @@ impl MeteringProvider for OpenMeterProvider {
         &self,
         _state: &AppState,
         customer: &CustomerRef,
-        app_id: Uuid,
         period: BillingPeriod,
         compute_units: u64,
         idempotency_key: &str,
         now: i64,
     ) -> Result<(), ProviderError> {
         // Push ONE CloudEvent carrying the CU DELTA (the export cron has already
-        // computed `compute_units` as the still-missing remainder — current minus
-        // OpenMeter's aggregate / high-water). OpenMeter SUMS events per subject,
-        // so we never push the cumulative total here.
+        // computed `compute_units` as the still-missing remainder — the creator's
+        // current billable CU minus OpenMeter's per-subject aggregate / high-water).
+        // OpenMeter SUMS events per subject, so we never push the cumulative total
+        // here.
         //
         // The CloudEvent `subject` is the cron's per-creator handle (the SAME id
-        // `reported_total` queries the aggregate under). The per-app id rides in
-        // `data.app_id` for audit. C1: stamp `time` at `now` — the CONSUMPTION
-        // instant — NOT `period.end`. The CloudEvent `id` is the deterministic
-        // dedup identifier so a transport retry / same-window re-push replays.
+        // `reported_total` queries the aggregate under). The push is per CREATOR —
+        // the meter aggregates per subject, so there is no single app to attribute.
+        // C1: stamp `time` at `now` — the CONSUMPTION instant — NOT `period.end`.
+        // The CloudEvent `id` is the deterministic dedup identifier so a transport
+        // retry / same-window re-push replays.
         let event = CloudEvent {
             id: idempotency_key.to_string(),
             event_type: self.config.event_type.clone(),
             subject: customer.as_str().to_string(),
             time_unix: now,
             value: compute_units,
-            app_id: app_id.to_string(),
             period_start_unix: period.start,
         };
         self.client().ingest_event(&event).await

@@ -36,8 +36,6 @@ pub mod openmeter;
 pub mod stripe_meters;
 pub mod types;
 
-use uuid::Uuid;
-
 pub use types::{
     BillingPeriod, CreatorBilling, CustomerRef, InvoiceRef, MeteringProviderKind, ProviderError,
 };
@@ -64,10 +62,14 @@ pub trait MeteringProvider: Send + Sync {
         creator: &CreatorBilling,
     ) -> Result<CustomerRef, ProviderError>;
 
-    /// Forward this period's CU for one app. `compute_units` is the integer CU
-    /// from `pricing::total_units`; `idempotency_key` is the deterministic
-    /// per-(app,period) key. `now` is the sweep's wall-clock unix seconds — the
-    /// CONSUMPTION instant the event is stamped at (Stripe rejects a timestamp
+    /// Forward this period's CU for one CUSTOMER (the per-creator export grain).
+    /// `compute_units` is the integer CU from `pricing::total_units` summed across
+    /// the creator's apps; `idempotency_key` is the deterministic
+    /// per-(creator,period) key. The meter aggregates per customer, so the push is
+    /// customer-scoped — there is no single app to attribute (an earlier per-app
+    /// signature mismatched the per-customer aggregate and silently under-billed
+    /// every app after the first). `now` is the sweep's wall-clock unix seconds —
+    /// the CONSUMPTION instant the event is stamped at (Stripe rejects a timestamp
     /// more than 5min in the future or older than 35d, and aggregates the event
     /// into whatever period its timestamp falls in, so "now during the current
     /// period" is correct — NEVER `period.end`, which is a future timestamp).
@@ -76,7 +78,6 @@ pub trait MeteringProvider: Send + Sync {
         &self,
         state: &AppState,
         customer: &CustomerRef,
-        app_id: Uuid,
         period: BillingPeriod,
         compute_units: u64,
         idempotency_key: &str,

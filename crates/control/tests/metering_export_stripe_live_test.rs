@@ -411,7 +411,7 @@ async fn live_export_pushes_cu_and_aggregate_reconciles() {
     assert_eq!(n, 1, "one app exported to LIVE Stripe");
 
     // High-water advanced locally (the push returned 2xx → the cron committed it).
-    let hw = read_high_water(&fx.state, &app, period).await;
+    let hw = read_high_water(&fx.state, &creator, period).await;
     assert_eq!(hw, Some(750), "exported_units high-water == cumulative CU after a 2xx push");
 
     // LIVE aggregate converges to 750 (eventual consistency on Stripe's side).
@@ -469,7 +469,7 @@ async fn live_export_computes_delta_via_real_aggregate() {
         after2, 250,
         "LIVE Stripe aggregate SUM == cumulative 250 (tick 2 pushed the DELTA 150, not 250)"
     );
-    assert_eq!(read_high_water(&fx.state, &app, period).await, Some(250));
+    assert_eq!(read_high_water(&fx.state, &creator, period).await, Some(250));
 }
 
 // ===========================================================================
@@ -506,7 +506,7 @@ async fn live_export_pushes_billable_cu_honoring_included_units() {
         agg, 550,
         "LIVE Stripe counted the BILLABLE 550 CU (gross 750 − included 200), not gross"
     );
-    assert_eq!(read_high_water(&fx.state, &app, period).await, Some(550));
+    assert_eq!(read_high_water(&fx.state, &creator, period).await, Some(550));
 }
 
 // ===========================================================================
@@ -589,13 +589,13 @@ fn period_d(period_start: i64) -> chrono::NaiveDate {
     chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1).unwrap()
 }
 
-async fn read_high_water(state: &AppState, app: &Uuid, period: i64) -> Option<i64> {
+async fn read_high_water(state: &AppState, creator: &Uuid, period: i64) -> Option<i64> {
     state
         .control_pg
         .query(
             "SELECT exported_units FROM zeroship.metering_exports \
-             WHERE app_id = $1 AND period = $2::date",
-            &[app, &period_d(period)],
+             WHERE creator_id = $1 AND period = $2::date",
+            &[creator, &period_d(period)],
         )
         .await
         .expect("read high-water")

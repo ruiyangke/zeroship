@@ -98,7 +98,6 @@ impl MeteringProvider for NativeProvider {
         &self,
         _state: &AppState,
         _customer: &CustomerRef,
-        _app_id: Uuid,
         _period: BillingPeriod,
         _compute_units: u64,
         _idempotency_key: &str,

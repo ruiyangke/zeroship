@@ -44,9 +44,10 @@ pub const CLOUDEVENT_SOURCE: &str = "zeroship-control";
 ///   * `type`    — the meter's configured `eventType` (e.g. `compute_units`).
 ///   * `subject` — the meter's aggregation subject (zeroship maps this to the
 ///     creator's customer handle — see [`crate::metering::provider::openmeter`]
-///     for the mapping; the per-app id rides in `data.app_id`).
+///     for the mapping). The push is per CREATOR (the meter aggregates per
+///     subject), so there is no single app to attribute.
 ///   * `time`    — the CONSUMPTION instant (the cron's `now`), RFC3339/UTC.
-///   * `data`    — `{ value: <CU>, app_id, period_start }`; OpenMeter's meter
+///   * `data`    — `{ value: <CU>, period_start }`; OpenMeter's meter
 ///     `valueProperty` reads `$.value` and SUMS it per subject per window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloudEvent {
@@ -57,8 +58,6 @@ pub struct CloudEvent {
     pub time_unix: i64,
     /// The compute-unit value this event carries (the DELTA the export pushes).
     pub value: u64,
-    /// The app the CU is attributed to (echoed into `data.app_id` for audit).
-    pub app_id: String,
     /// The billing period start in unix seconds (echoed into `data.period_start`).
     pub period_start_unix: i64,
 }
@@ -66,7 +65,7 @@ pub struct CloudEvent {
 impl CloudEvent {
     /// Render the CloudEvent as the `application/cloudevents+json` body
     /// OpenMeter's `/api/v1/events` ingest expects. `time` is RFC3339/UTC; `data`
-    /// carries the integer CU `value` plus the audit fields.
+    /// carries the integer CU `value` plus the period-start audit field.
     ///
     /// # Errors
     /// Returns [`ProviderError::Transport`] if `time_unix` is not a representable
@@ -91,7 +90,6 @@ impl CloudEvent {
             "subject": self.subject,
             "data": {
                 "value": self.value,
-                "app_id": self.app_id,
                 "period_start": self.period_start_unix,
             },
         }))
@@ -328,10 +326,9 @@ mod tests {
         let ev = CloudEvent {
             id: "export:abc:100:0:750".to_string(),
             event_type: "compute_units".to_string(),
-            subject: "app-123".to_string(),
+            subject: "cus_abc".to_string(),
             time_unix: 1_746_057_600, // 2025-05-01T00:00:00Z
             value: 750,
-            app_id: "app-123".to_string(),
             period_start_unix: 1_746_057_600,
         };
         let json = ev.to_json().expect("renders");
@@ -339,7 +336,7 @@ mod tests {
         assert_eq!(json.get("id").and_then(|v| v.as_str()), Some("export:abc:100:0:750"));
         assert_eq!(json.get("source").and_then(|v| v.as_str()), Some(CLOUDEVENT_SOURCE));
         assert_eq!(json.get("type").and_then(|v| v.as_str()), Some("compute_units"));
-        assert_eq!(json.get("subject").and_then(|v| v.as_str()), Some("app-123"));
+        assert_eq!(json.get("subject").and_then(|v| v.as_str()), Some("cus_abc"));
         // `time` is RFC3339/UTC at the consumption instant.
         assert_eq!(json.get("time").and_then(|v| v.as_str()), Some("2025-05-01T00:00:00Z"));
         // `data.value` carries the integer CU.
@@ -347,9 +344,14 @@ mod tests {
             json.get("data").and_then(|d| d.get("value")).and_then(serde_json::Value::as_u64),
             Some(750)
         );
+        // The push is per CUSTOMER now — no per-app id rides in `data`.
+        assert!(
+            json.get("data").and_then(|d| d.get("app_id")).is_none(),
+            "data carries no app_id on the per-creator export grain"
+        );
         assert_eq!(
-            json.get("data").and_then(|d| d.get("app_id")).and_then(|v| v.as_str()),
-            Some("app-123")
+            json.get("data").and_then(|d| d.get("period_start")).and_then(serde_json::Value::as_i64),
+            Some(1_746_057_600)
         );
     }
 
@@ -363,7 +365,6 @@ mod tests {
             subject: "s".to_string(),
             time_unix: 1_700_000_000,
             value: 150,
-            app_id: "a".to_string(),
             period_start_unix: 200,
         };
         let json = ev.to_json().unwrap();

@@ -23,8 +23,6 @@
 //! (`spend.rs` reads `usage_aggregates` directly, provider-independent), so the
 //! provider NEVER touches enforcement — it is export/invoice only.
 
-use uuid::Uuid;
-
 use super::types::{
     BillingPeriod, CreatorBilling, CustomerRef, InvoiceRef, MeteringProviderKind, ProviderError,
 };
@@ -104,17 +102,17 @@ impl MeteringProvider for StripeProvider {
         &self,
         _state: &AppState,
         customer: &CustomerRef,
-        _app_id: Uuid,
         _period: BillingPeriod,
         compute_units: u64,
         idempotency_key: &str,
         now: i64,
     ) -> Result<(), ProviderError> {
-        // Push the CU DELTA onto the Stripe Meter. The export cron has already
-        // computed `compute_units` as the still-missing remainder (current −
-        // Stripe's aggregate / high-water), so this is the consumed-since-last-
-        // export quantity Stripe will SUM. `idempotency_key` is the deterministic
-        // per-window dedup `identifier`.
+        // Push the CU DELTA onto the Stripe Meter for this CUSTOMER. The export
+        // cron has already computed `compute_units` as the still-missing remainder
+        // (current_creator − Stripe's per-customer aggregate / high-water), so this
+        // is the consumed-since-last-export quantity Stripe will SUM.
+        // `idempotency_key` is the deterministic per-(creator,period) dedup
+        // `identifier`.
         //
         // C1: stamp the event at `now` — the CONSUMPTION/sweep instant — NOT
         // `period.end` (the first of NEXT month). `period.end` is a FUTURE
