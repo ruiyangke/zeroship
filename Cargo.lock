@@ -6492,6 +6492,7 @@ dependencies = [
  "tempfile",
  "url",
  "zeroship-core",
+ "zeroship-metering",
  "zeroship-plugin-db",
  "zeroship-plugin-kv",
  "zeroship-plugin-storage",
@@ -6505,7 +6506,6 @@ dependencies = [
  "argon2",
  "askama",
  "async-trait",
- "aws-lc-rs",
  "base64",
  "chrono",
  "clap",
@@ -6517,7 +6517,6 @@ dependencies = [
  "hex",
  "http",
  "jsonwebtoken",
- "lettre",
  "mimalloc",
  "ntex",
  "password-hash",
@@ -6531,9 +6530,9 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
- "x509-parser",
  "zeroship-authz",
  "zeroship-core",
+ "zeroship-mailer",
 ]
 
 [[package]]
@@ -6609,6 +6608,8 @@ dependencies = [
  "zeroship-authz",
  "zeroship-bundle",
  "zeroship-core",
+ "zeroship-mailer",
+ "zeroship-metering",
  "zstd",
 ]
 
@@ -6684,6 +6685,42 @@ dependencies = [
  "zeroship-auth",
  "zeroship-bundle",
  "zeroship-core",
+ "zeroship-mailer",
+ "zeroship-metering",
+]
+
+[[package]]
+name = "zeroship-mailer"
+version = "0.1.0"
+dependencies = [
+ "askama",
+ "async-trait",
+ "aws-lc-rs",
+ "base64",
+ "clap",
+ "compio",
+ "compio-postgres",
+ "cyper",
+ "http",
+ "lettre",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+ "x509-parser",
+]
+
+[[package]]
+name = "zeroship-metering"
+version = "0.1.0"
+dependencies = [
+ "compio",
+ "cyper",
+ "serde_json",
+ "tracing",
+ "uuid",
+ "zeroship-core",
 ]
 
 [[package]]
@@ -6709,6 +6746,7 @@ dependencies = [
  "v8",
  "zeroize",
  "zeroship-core",
+ "zeroship-metering",
  "zeroship-runtime",
  "zeroship-runtime-macros",
 ]
@@ -6724,7 +6762,9 @@ dependencies = [
  "serde_json",
  "tempfile",
  "url",
+ "uuid",
  "v8",
+ "zeroship-metering",
  "zeroship-runtime",
  "zeroship-runtime-macros",
 ]
@@ -6742,7 +6782,9 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
+ "uuid",
  "v8",
+ "zeroship-metering",
  "zeroship-runtime",
 ]
 
@@ -6873,6 +6915,7 @@ dependencies = [
  "uuid",
  "zeroship-bundle",
  "zeroship-core",
+ "zeroship-metering",
  "zeroship-plugin-db",
  "zeroship-plugin-kv",
  "zeroship-plugin-storage",

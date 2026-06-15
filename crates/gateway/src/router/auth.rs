@@ -1691,6 +1691,7 @@ mod tests {
             session_verifier: Some(StdArc::new(session_verifier)),
             anchor_enc_key: [0u8; 32],
             pairwise_salt: [0u8; 32],
+            meter: StdArc::new(zeroship_metering::Meter::new()),
         })
     }
 
@@ -2660,6 +2661,7 @@ mod tests {
             session_verifier: Some(StdArc::new(session_verifier)),
             anchor_enc_key: [0u8; 32],
             pairwise_salt: [0u8; 32],
+            meter: StdArc::new(zeroship_metering::Meter::new()),
         })
     }
 

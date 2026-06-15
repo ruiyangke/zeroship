@@ -56,6 +56,7 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
     let registry = Registry::new(db_url).await.expect("registry");
+    zeroship_control::bootstrap_console::seed_plans(&registry).await.expect("seed built-in plans");
     let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, false).expect("env store");
     let stripe_store = StripeStore::new(registry.clone());
 
@@ -80,6 +81,8 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
         stripe_webhook_secret: SecretString::new(String::new()),
+        stripe_secret_key: SecretString::new(String::new()),
+        stripe_base_url: "https://api.stripe.com".to_string(),
         worker_urls: Vec::new(),
         worker_key: SecretString::new(String::new()),
         admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
@@ -101,7 +104,19 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
             "http://127.0.0.1:9",
         )),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+        metering_provider: zeroship_control::metering::provider::build_provider(
+            &zeroship_control::metering::provider::MeteringProviderConfig::native(),
+        )
+        .expect("native provider builds"),
+        tax_provider: zeroship_control::tax::build_tax_provider(
+            &zeroship_control::tax::TaxProviderConfig::native(),
+        )
+        .expect("native tax provider builds"),
+        notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
         pairwise_salt: [0u8; 32],
+        projected_charge_cache: std::sync::Arc::new(
+            zeroship_control::billing_read::ProjectedChargeCache::default(),
+        ),
     });
 
     Fixture {
@@ -122,14 +137,17 @@ async fn insert_app(
     created_age: &str,
 ) {
     let api_key = format!("k-{}", id.simple());
+    // PR4: plan_id is an FK into zeroship.plans — use the built-in free-plan
+    // catalog id (seeded by `seed_plans` in the test setup).
+    let free = zeroship_control::bootstrap_console::free_plan_id();
     state
         .control_pg
         .execute(
             &format!(
                 "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash, system, created_at) \
-                 VALUES ($1, $2, 'free', $3, '', $4, NOW() - INTERVAL '{created_age}')"
+                 VALUES ($1, $2, $5, $3, '', $4, NOW() - INTERVAL '{created_age}')"
             ),
-            &[id, &name, &api_key, &system],
+            &[id, &name, &api_key, &system, &free],
         )
         .await
         .expect("insert app");
@@ -225,7 +243,7 @@ async fn reaper_leaves_owned_app_untouched() {
     // create_app seeds the owner membership atomically.
     let app = state
         .registry
-        .create_app(&name, "free", &owner)
+        .create_app(&name, &zeroship_control::bootstrap_console::free_plan_id(), &owner)
         .await
         .expect("create_app")
         .id;

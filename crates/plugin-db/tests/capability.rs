@@ -48,7 +48,7 @@ fn dispatch_zs(source: &str, name: &str) -> (u16, serde_json::Value) {
     // Use a dummy URL — the capability gate fires BEFORE the pool is
     // touched, so the URL is never dialed.
     let plugins: Vec<Arc<dyn NativePlugin>> =
-        vec![Arc::new(DbPlugin::new("postgres://_capability_test_unused"))];
+        vec![Arc::new(DbPlugin::new("postgres://_capability_test_unused", None))];
     let runtime = Runtime::builder()
         .modules(modules)
         .plugins(plugins)

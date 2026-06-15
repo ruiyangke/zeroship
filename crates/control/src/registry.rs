@@ -8,6 +8,7 @@ use uuid::Uuid;
 use zeroship_core::auth::hash_api_key;
 use zeroship_core::types::{
     AppRecord, AppRuntimeLimits, AppVersionInfo, RouteEntry, RouteMap, VersionMap,
+    FREE_TIER_RUNTIME_LIMITS,
 };
 
 // ---------------------------------------------------------------------------
@@ -20,6 +21,18 @@ pub enum RegistryError {
     AlreadyExists(String),
     Database(String),
     InvalidInput(String),
+    /// The operation is refused because it would violate a business invariant
+    /// that is not a simple uniqueness clash — e.g. hard-deleting an app that has
+    /// financial history (an `invoice_lines` row pins it via `ON DELETE RESTRICT`,
+    /// and a billed app must be ANONYMIZED, not deleted). A TYPED conflict so the
+    /// caller can map it to a clear status instead of leaking a raw DB error.
+    Conflict(String),
+    /// The global default FX is missing, so the platform cannot price any
+    /// inheriting plan (billing-v2 MAJOR-2). A billing sweep that hits this
+    /// must ABORT (bill no one) rather than emit base-only $0 invoices — it is
+    /// surfaced as a distinct variant so the sweep can fail closed instead of
+    /// logging-and-continuing past a revenue leak.
+    FxUnresolved,
 }
 
 impl std::fmt::Display for RegistryError {
@@ -29,6 +42,12 @@ impl std::fmt::Display for RegistryError {
             Self::AlreadyExists(s) => write!(f, "already exists: {s}"),
             Self::Database(s) => write!(f, "database: {s}"),
             Self::InvalidInput(s) => write!(f, "invalid input: {s}"),
+            Self::Conflict(s) => write!(f, "conflict: {s}"),
+            Self::FxUnresolved => write!(
+                f,
+                "global default FX missing — platform cannot price; aborting billing sweep \
+                 rather than billing $0"
+            ),
         }
     }
 }
@@ -120,6 +139,38 @@ impl Registry {
         open_conn(&self.db_url).await.map_err(RegistryError::from)
     }
 
+    /// Validate that `plan_id` names a real, UNARCHIVED plan in the catalog.
+    /// Returns a clean [`RegistryError::InvalidInput`] (not a raw FK violation)
+    /// for an unknown or archived plan — the server-side gate that closes the
+    /// CT-A1 free-text self-escalation. Runs on a borrowed connection so it
+    /// composes inside an existing transaction.
+    async fn validate_plan<C: compio_postgres::GenericClient + Sync>(
+        conn: &C,
+        plan_id: &str,
+    ) -> Result<(), RegistryError> {
+        let rows = conn
+            .query(
+                "SELECT archived FROM zeroship.plans WHERE id = $1",
+                &[&plan_id],
+            )
+            .await?;
+        match rows.first() {
+            None => Err(RegistryError::InvalidInput(format!(
+                "unknown plan '{plan_id}' (not in the plan catalog)"
+            ))),
+            Some(row) => {
+                let archived: bool = row.get("archived");
+                if archived {
+                    Err(RegistryError::InvalidInput(format!(
+                        "plan '{plan_id}' is archived and cannot be assigned"
+                    )))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
     // -- App CRUD -----------------------------------------------------------
 
     /// Create a new application owned by `owner_id`. Returns the created
@@ -156,6 +207,13 @@ impl Registry {
         let key_hash = hash_api_key(&api_key);
         let mut conn = self.conn().await?;
         let tx = conn.transaction().await?;
+
+        // Server-side plan gate (PR4 / CT-A1): the plan must exist and be
+        // unarchived in the catalog. Checked inside the txn before the INSERT
+        // so an invalid plan returns a clean InvalidInput AND never leaves a
+        // half-written app/owner pair (the FK would also reject it, but this
+        // gives a typed error and an archived-plan check the FK can't).
+        Self::validate_plan(&tx, plan_id).await?;
 
         let rows = tx
             .query(
@@ -273,6 +331,28 @@ impl Registry {
     pub async fn delete_app(&self, id: &Uuid) -> Result<bool, RegistryError> {
         let client_id = crate::app_oauth_client::client_id_for_app(id);
         let mut conn = self.conn().await?;
+
+        // Schema MAJOR-1(i): a billed app is NOT hard-deletable. `invoice_lines.app_id
+        // → apps ON DELETE RESTRICT` (0042) would otherwise abort the DELETE with an
+        // opaque DB error for any ever-invoiced app. Pre-check + return a TYPED
+        // Conflict so the caller gets a clear 409 — consistent with the
+        // anonymize-don't-delete financial-history posture (the account reaper retains
+        // and anonymizes such apps' owners rather than erasing the billing trail).
+        let billed = conn
+            .query(
+                "SELECT EXISTS (SELECT 1 FROM zeroship.invoice_lines WHERE app_id = $1) AS billed",
+                &[id],
+            )
+            .await?
+            .first()
+            .is_some_and(|r| r.get::<_, bool>("billed"));
+        if billed {
+            return Err(RegistryError::Conflict(format!(
+                "app {id} has billing history (invoiced line items) and cannot be hard-deleted; \
+                 it must be anonymized instead"
+            )));
+        }
+
         let tx = conn.transaction().await?;
         let n = tx
             .execute("DELETE FROM zeroship.apps WHERE id = $1", &[id])
@@ -338,16 +418,49 @@ impl Registry {
     }
 
     /// Change the plan for an app.
+    ///
+    /// Race-free in ONE statement (PR4 / CT-A1): the UPDATE only fires when the
+    /// target plan EXISTS and is NOT archived, guarded by an `EXISTS` subquery in
+    /// the same statement. A separate validate-then-UPDATE had a TOCTOU window —
+    /// a plan archived between the check and the UPDATE would still be assigned
+    /// (the FK only guards existence, and archive is an UPDATE not a delete).
+    ///
+    /// Translates the result: a matched+updated app row → `Ok(true)`. Zero rows
+    /// is ambiguous (no such app OR the plan is unknown/archived), so we
+    /// disambiguate with a follow-up read to return a clean typed error rather
+    /// than a raw FK violation or a silent no-op.
     pub async fn set_plan(&self, id: &Uuid, plan_id: &str) -> Result<bool, RegistryError> {
         let conn = self.conn().await?;
         let n = conn
             .execute(
-                "UPDATE zeroship.apps SET plan_id = $1, \
-                 updated_at = NOW() WHERE id = $2",
+                "UPDATE zeroship.apps SET plan_id = $1, updated_at = NOW() \
+                 WHERE id = $2 \
+                   AND EXISTS (SELECT 1 FROM zeroship.plans \
+                               WHERE id = $1 AND NOT archived)",
                 &[&plan_id, id],
             )
             .await?;
-        Ok(n > 0)
+        if n > 0 {
+            return Ok(true);
+        }
+        // Zero rows: the app doesn't exist, or the plan is unknown/archived.
+        // Disambiguate so the caller gets a typed error for a bad plan rather
+        // than a misleading `Ok(false)` (= "no such app").
+        let app_exists = conn
+            .query("SELECT 1 FROM zeroship.apps WHERE id = $1", &[id])
+            .await?;
+        if app_exists.is_empty() {
+            return Ok(false); // genuinely no such app
+        }
+        // The app exists ⇒ the plan guard is why nothing updated. Reuse the
+        // shared validator to produce the precise unknown-vs-archived message.
+        Self::validate_plan(&conn, plan_id).await?;
+        // validate_plan said the plan is fine yet the guarded UPDATE matched 0
+        // rows — only possible under a concurrent archive between the two
+        // statements. Report it as the same typed error class.
+        Err(RegistryError::InvalidInput(format!(
+            "plan '{plan_id}' is not assignable (archived concurrently)"
+        )))
     }
 
     // -- Versions / Routes --------------------------------------------------
@@ -362,9 +475,17 @@ impl Registry {
     /// app on its reconcile pass.
     pub async fn get_versions(&self) -> Result<VersionMap, RegistryError> {
         let conn = self.conn().await?;
+        // LEFT JOIN the plan catalog so each app's runtime limits come from its
+        // plan row (PR4 — no more hardcoded `runtime_limits_for_plan` table). A
+        // missing plan (NULL `runtime_limits_json`) falls back to the
+        // conservative free-tier limits below, so the worker never receives
+        // `(None, None, None)` for an unpriced app.
         let rows = conn
             .query(
-                "SELECT id, deploy_hash, plan_id, env_version, manifest_json FROM zeroship.apps",
+                "SELECT a.id, a.deploy_hash, a.plan_id, a.env_version, a.manifest_json, \
+                        p.runtime_limits_json \
+                 FROM zeroship.apps a \
+                 LEFT JOIN zeroship.plans p ON p.id = a.plan_id",
                 &[],
             )
             .await?;
@@ -375,6 +496,7 @@ impl Registry {
             let plan_id: String = row.get("plan_id");
             let env_version: i64 = row.get("env_version");
             let manifest_json: Option<String> = row.get("manifest_json");
+            let runtime_limits_json: Option<serde_json::Value> = row.get("runtime_limits_json");
             let manifest = manifest_json.as_deref().and_then(|j| {
                 match serde_json::from_str::<zeroship_bundle::Manifest>(j) {
                     Ok(m) => Some(m),
@@ -390,7 +512,7 @@ impl Registry {
             });
             map.insert(id, AppVersionInfo {
                 deploy_hash: hash,
-                runtime: runtime_limits_for_plan(&plan_id),
+                runtime: runtime_limits_from_catalog(runtime_limits_json.as_ref(), &id),
                 plan_id,
                 env_version,
                 manifest,
@@ -424,13 +546,52 @@ impl Registry {
         // LEFT JOIN control.app_oauth_clients (§1.5): a provisioned app yields
         // Some(oauth_client_id)/Some(sector_identifier); an un-provisioned app
         // (no extension row) yields NULL ⇒ None. The join key is the app id.
+        // LEFT JOIN zeroship.app_spend_state (PR5): an app with a spend row
+        // carries its current `state` TEXT; an app without one yields NULL ⇒
+        // default `SpendState::Allow` (the common, unrestricted case). The
+        // gateway gates dispatch on this pulled value (decision D1 — spend
+        // state is PULLed on the RouteEntry, not pushed).
+        //
+        // LEFT JOIN zeroship.creator_billing_status (G2): payment/account state
+        // is CREATOR-keyed (one row per creator), so we surface it per-app via
+        // the app's `app_members(role='owner')` row — the same owner mapping the
+        // billing reconciler uses (there is no apps.creator_id column). An app
+        // whose creator has no status row (free/cardless, the common case) yields
+        // NULL ⇒ default `AccountState::Active`. The gateway gates dispatch on
+        // this pulled value as an OUTER AND with spend (Suspended → 402 before
+        // spend is even consulted).
+        //
+        // FAN-OUT SAFETY (critic #5): one owner per app by construction (0031),
+        // but a data-integrity fan-out of multiple `role='owner'` rows would make
+        // a plain join non-deterministic — `map.insert(id, …)` is last-write-wins,
+        // so `account_state` (and every other RouteEntry field) could flip
+        // arbitrarily, even un-suspending a suspended creator. `acct` collapses the
+        // owner→status join to AT MOST ONE row per app via `DISTINCT ON (app_id)`,
+        // and ORDERs so the MOST-RESTRICTIVE state wins on a fan-out (suspended >
+        // past_due > active > none) — a fan-out can never relax enforcement. This
+        // mirrors the reconciler's `DISTINCT ON (app_id)` owner collapse.
         let rows = conn
             .query(
                 "SELECT a.id, a.name, a.plan_id, a.api_key_hash, a.deploy_hash, \
                         a.manifest_json, c.client_id AS oauth_client_id, \
-                        c.sector_identifier \
+                        c.sector_identifier, s.state AS spend_state, \
+                        acct.account_state \
                  FROM zeroship.apps a \
-                 LEFT JOIN zeroship.app_oauth_clients c ON c.app_id = a.id",
+                 LEFT JOIN zeroship.app_oauth_clients c ON c.app_id = a.id \
+                 LEFT JOIN zeroship.app_spend_state s ON s.app_id = a.id \
+                 LEFT JOIN LATERAL ( \
+                     SELECT DISTINCT ON (m.app_id) cbs.state AS account_state \
+                     FROM zeroship.app_members m \
+                     LEFT JOIN zeroship.creator_billing_status cbs ON cbs.creator_id = m.user_id \
+                     WHERE m.app_id = a.id AND m.role = 'owner' \
+                     ORDER BY m.app_id, \
+                              CASE cbs.state \
+                                  WHEN 'suspended' THEN 0 \
+                                  WHEN 'past_due'  THEN 1 \
+                                  WHEN 'active'    THEN 2 \
+                                  ELSE 3 END, \
+                              m.user_id \
+                 ) acct ON TRUE",
                 &[],
             )
             .await?;
@@ -471,6 +632,26 @@ impl Registry {
                     // `CompiledRoute`/browser-auth/Bearer arm consume these.
                     oauth_client_id: row.get("oauth_client_id"),
                     sector_identifier: row.get("sector_identifier"),
+                    // PR5: spend state from the LEFT-JOINed app_spend_state.
+                    // NULL (no spend row) ⇒ Allow; an unrecognised TEXT value
+                    // fails closed to Block (defensive — should never happen,
+                    // the engine only writes the four known states).
+                    spend_state: row
+                        .get::<_, Option<String>>("spend_state")
+                        .as_deref()
+                        .map_or(zeroship_core::types::SpendState::Allow, crate::spend::parse_spend_state),
+                    // G2: creator account state from the LEFT-JOINed
+                    // creator_billing_status (via the owner membership). NULL
+                    // (no status row) ⇒ Active; an unrecognised TEXT value fails
+                    // closed to Suspended (defensive — the writer only ever
+                    // persists the three known states, guarded by a CHECK).
+                    account_state: row
+                        .get::<_, Option<String>>("account_state")
+                        .as_deref()
+                        .map_or(
+                            zeroship_core::types::AccountState::Active,
+                            crate::account_status::parse_account_state,
+                        ),
                 },
             );
         }
@@ -478,66 +659,37 @@ impl Registry {
     }
 
     // -- Usage / Metering ---------------------------------------------------
-
-    /// Increment a usage counter for an app (upsert).
-    pub async fn record_usage(
-        &self,
-        app_id: &Uuid,
-        resource: &str,
-        delta: i64,
-    ) -> Result<(), RegistryError> {
-        let conn = self.conn().await?;
-        conn.execute(
-            "INSERT INTO zeroship.app_usage AS u (app_id, resource, value) VALUES ($1, $2, $3) \
-             ON CONFLICT (app_id, resource) DO UPDATE SET value = u.value + EXCLUDED.value",
-            &[app_id, &resource, &delta],
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// Get all usage counters for an app.
-    pub async fn get_usage(
-        &self,
-        app_id: &Uuid,
-    ) -> Result<HashMap<String, i64>, RegistryError> {
-        let conn = self.conn().await?;
-        let rows = conn
-            .query(
-                "SELECT resource, value FROM zeroship.app_usage WHERE app_id = $1",
-                &[app_id],
-            )
-            .await?;
-        let mut map = HashMap::new();
-        for row in &rows {
-            map.insert(row.get::<_, String>("resource"), row.get::<_, i64>("value"));
-        }
-        Ok(map)
-    }
+    //
+    // Usage ingest + reads moved to `crate::metering::Metering` (the
+    // idempotent, period-aggregated pipeline backed by
+    // `zeroship.usage_aggregates` + `zeroship.usage_reports_seen`). The old
+    // raw-additive `record_usage`/`get_usage` over `zeroship.app_usage`
+    // (no idempotency, no period, no custom metrics) are gone — pre-launch,
+    // no deprecated aliases.
 }
 
-fn runtime_limits_for_plan(plan_id: &str) -> AppRuntimeLimits {
-    match plan_id {
-        "free" => AppRuntimeLimits {
-            cpu_limit_ms: Some(50),
-            wall_timeout_ms: Some(5_000),
-            heap_limit_mb: Some(64),
+/// Derive an app's [`AppRuntimeLimits`] from its plan-catalog
+/// `runtime_limits_json` (the LEFT-JOINed column in [`Registry::get_versions`]).
+/// A NULL column (no plan row) or a parse failure falls back to the
+/// conservative free-tier limits — limits come from the catalog, not a
+/// hardcoded plan-name table (PR4 deleted `runtime_limits_for_plan`).
+fn runtime_limits_from_catalog(
+    json: Option<&serde_json::Value>,
+    app_id: &Uuid,
+) -> AppRuntimeLimits {
+    match json {
+        Some(j) => match serde_json::from_value::<AppRuntimeLimits>(j.clone()) {
+            Ok(limits) => limits,
+            Err(e) => {
+                tracing::warn!(
+                    app_id = %app_id,
+                    error = %e,
+                    "registry: plan runtime_limits_json parse failure — using free-tier fallback"
+                );
+                FREE_TIER_RUNTIME_LIMITS
+            }
         },
-        "pro" => AppRuntimeLimits {
-            cpu_limit_ms: Some(30_000),
-            wall_timeout_ms: Some(30_000),
-            heap_limit_mb: Some(256),
-        },
-        "unlimited" | "enterprise" => AppRuntimeLimits {
-            cpu_limit_ms: None,
-            wall_timeout_ms: None,
-            heap_limit_mb: None, // platform default (128 MB)
-        },
-        _ => AppRuntimeLimits {
-            cpu_limit_ms: Some(50),
-            wall_timeout_ms: Some(5_000),
-            heap_limit_mb: Some(64),
-        },
+        None => FREE_TIER_RUNTIME_LIMITS,
     }
 }
 

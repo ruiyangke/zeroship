@@ -16,7 +16,26 @@ use zeroship_runtime::state::{OpError, OpResult, ResolveValue, SharedState};
 use zeroship_runtime::streams::response_forwarder;
 
 use crate::backend::{BoxByteStream, ChunkResult, ChunkSource, ObjectMeta};
-use crate::{Backend, STORAGE_BACKEND};
+use crate::{Backend, STORAGE_BACKEND, STORAGE_METER};
+
+/// Raw usage metrics a storage op emits in its success arm. `storage_ops`
+/// counts every successful object op; `storage_bytes` accumulates bytes
+/// WRITTEN (put), `storage_egress_bytes` bytes READ (get). Platform-
+/// measured — emitted by trusted Rust inside the primitive, not by app
+/// code. None are fixed platform counters, so they flow through
+/// `AppUsage.custom`.
+const STORAGE_OPS: &str = "storage_ops";
+const STORAGE_BYTES: &str = "storage_bytes";
+const STORAGE_EGRESS_BYTES: &str = "storage_egress_bytes";
+
+/// Build a per-app [`zeroship_metering::MeterHandle`] from the registered
+/// process-wide meter + the request's `app_id`. `None` when no meter is
+/// configured (test harness) — callers then skip the emit.
+fn meter_handle(app_id: &str) -> Option<zeroship_metering::MeterHandle> {
+    STORAGE_METER
+        .with(|m| m.borrow().clone())
+        .map(|m| zeroship_metering::MeterHandle::new(m, app_id))
+}
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -130,13 +149,21 @@ pub fn put(
         }
     };
 
+    let meter = meter_handle(&app_id);
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         match backend.put(&app_id, &bucket, &key, &bytes, content_type.as_deref()).await {
-            Ok(size) => OpResult::Completed {
-                op_id,
-                value: json!({ "bucket": bucket, "key": key, "size": size }).to_string(),
-                request_id,
-            },
+            Ok(size) => {
+                // Success arm only: one op + bytes written. Unforgeable.
+                if let Some(m) = &meter {
+                    m.record(STORAGE_OPS, 1);
+                    m.record(STORAGE_BYTES, size);
+                }
+                OpResult::Completed {
+                    op_id,
+                    value: json!({ "bucket": bucket, "key": key, "size": size }).to_string(),
+                    request_id,
+                }
+            }
             Err(e) => OpResult::Failed { op_id, error: e, request_id },
         }
     }));
@@ -173,14 +200,27 @@ pub fn get(
     };
 
     let max_bytes = crate::limits::max_object_bytes();
+    let meter = meter_handle(&app_id);
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         match backend.get(&app_id, &bucket, &key, max_bytes).await {
-            Ok(None) => OpResult::Completed {
-                op_id,
-                value: "null".into(),
-                request_id,
-            },
+            Ok(None) => {
+                // A miss is still a successful read op (one storage op,
+                // zero egress bytes).
+                if let Some(m) = &meter {
+                    m.record(STORAGE_OPS, 1);
+                }
+                OpResult::Completed {
+                    op_id,
+                    value: "null".into(),
+                    request_id,
+                }
+            }
             Ok(Some((bytes, meta))) => {
+                // Success arm only: one op + bytes read (egress). Unforgeable.
+                if let Some(m) = &meter {
+                    m.record(STORAGE_OPS, 1);
+                    m.record(STORAGE_EGRESS_BYTES, meta.size);
+                }
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
                 let out = json!({
                     "bytesBase64": b64,
@@ -224,13 +264,21 @@ pub fn delete(
         }
     };
 
+    let meter = meter_handle(&app_id);
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         match backend.delete(&app_id, &bucket, &key).await {
-            Ok(deleted) => OpResult::Completed {
-                op_id,
-                value: json!({ "deleted": deleted }).to_string(),
-                request_id,
-            },
+            Ok(deleted) => {
+                // Success arm only: one storage op (whether or not a key
+                // existed — the delete itself ran).
+                if let Some(m) = &meter {
+                    m.record(STORAGE_OPS, 1);
+                }
+                OpResult::Completed {
+                    op_id,
+                    value: json!({ "deleted": deleted }).to_string(),
+                    request_id,
+                }
+            }
             Err(e) => OpResult::Failed { op_id, error: e, request_id },
         }
     }));
@@ -266,9 +314,14 @@ pub fn list(
         }
     };
 
+    let meter = meter_handle(&app_id);
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         match backend.list(&app_id, &bucket, &prefix).await {
             Ok(entries) => {
+                // Success arm only: one storage op (the list).
+                if let Some(m) = &meter {
+                    m.record(STORAGE_OPS, 1);
+                }
                 let arr: Vec<serde_json::Value> = entries.into_iter().map(|e| {
                     let modified = e.modified_at
                         .duration_since(std::time::UNIX_EPOCH)
@@ -501,16 +554,24 @@ pub fn put_stream(
     response_forwarder::attach_writer(&state, stream_id, writer);
 
     let source = StreamReaderSource { reader, state: state.clone(), stream_id };
+    let meter = meter_handle(&app_id);
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         match backend
             .put_stream(&app_id, &bucket, &key, Box::new(source), content_type.as_deref())
             .await
         {
-            Ok(size) => OpResult::Completed {
-                op_id,
-                value: json!({ "bucket": bucket, "key": key, "size": size }).to_string(),
-                request_id,
-            },
+            Ok(size) => {
+                // Success arm only: one op + the final streamed byte count.
+                if let Some(m) = &meter {
+                    m.record(STORAGE_OPS, 1);
+                    m.record(STORAGE_BYTES, size);
+                }
+                OpResult::Completed {
+                    op_id,
+                    value: json!({ "bucket": bucket, "key": key, "size": size }).to_string(),
+                    request_id,
+                }
+            }
             Err(e) => OpResult::Failed { op_id, error: e, request_id },
         }
     }));
@@ -546,10 +607,26 @@ pub fn get_stream(
         }
     };
 
+    let meter = meter_handle(&app_id);
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         match backend.get_stream(&app_id, &bucket, &key).await {
-            Ok(None) => OpResult::Completed { op_id, value: "null".into(), request_id },
+            Ok(None) => {
+                // A miss is a successful read op (zero egress).
+                if let Some(m) = &meter {
+                    m.record(STORAGE_OPS, 1);
+                }
+                OpResult::Completed { op_id, value: "null".into(), request_id }
+            }
             Ok(Some((meta, source))) => {
+                // Success arm only: one op + the object's full byte count as
+                // egress. `meta.size` is the authoritative object size known
+                // at open; the per-chunk reads (readChunk) are the transport
+                // of those same bytes, so billing once here avoids
+                // double-counting.
+                if let Some(m) = &meter {
+                    m.record(STORAGE_OPS, 1);
+                    m.record(STORAGE_EGRESS_BYTES, meta.size);
+                }
                 let stream_id = alloc_get_stream_id();
                 GET_STREAMS.with(|m| {
                     m.borrow_mut()

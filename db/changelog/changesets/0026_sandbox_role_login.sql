@@ -16,7 +16,7 @@
 -- delta.
 --
 -- splitStatements:false: the DO block carries `;` inside `$bootstrap$`.
---changeset zeroship:sandbox-roles-login splitStatements:false
+--changeset zeroship:sandbox-roles-login splitStatements:false rollbackSplitStatements:false
 DO $bootstrap$
 DECLARE
     can_create_role BOOLEAN;

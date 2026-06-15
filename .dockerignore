@@ -1,7 +1,6 @@
 target/
 .git/
 crates/runtime/benches/ntex-bench/
-crates/platform/
 docs/
 tests/
 *.md

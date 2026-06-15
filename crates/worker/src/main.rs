@@ -484,6 +484,39 @@ fn main() -> std::io::Result<()> {
     // env entries for deleted apps don't leak forever.
     sync::start_version_poller(config.clone(), shared_versions.clone(), shared_envs.clone());
 
+    // ── Metering infrastructure ──────────────────────────────────────────
+    // ONE process-wide meter, shared with every ntex worker thread's
+    // `create_plugins` (via KernelConfig) AND the single flush task spawned
+    // here. Metering is infrastructure: there is NO `env.meter` creator API.
+    // The worker emits the five platform counters (`record_request`) and the
+    // db/kv/storage primitives emit raw usage metrics at their op boundary —
+    // all into this instance. The flush task drains it every ~10s and POSTs a
+    // `UsageReport` (idempotent, dedup'd on worker_id+sequence) to control.
+    let meter = Arc::new(zeroship_metering::Meter::new());
+    // Restart-unique metering identity for the (worker_id, sequence) dedup
+    // key. The per-process SequenceSource resets to 1 every boot, so the
+    // identity MUST change on every restart or post-restart sequences collide
+    // with pre-restart rows in usage_reports_seen and get dropped as phantom
+    // "duplicates" (silent under-billing). `boot_worker_id` folds a fresh
+    // per-process boot nonce onto the stable base ($HOSTNAME in k8s/compose,
+    // else the bind addr) to guarantee that. This identity is metering-only;
+    // CHWBL routing keys on bind addresses, not this string.
+    let worker_base = std::env::var("HOSTNAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| bind_addr.to_string());
+    let worker_id = zeroship_metering::boot_worker_id(&worker_base);
+    zeroship_metering::spawn_flush_task(
+        Arc::clone(&meter),
+        zeroship_metering::FlushConfig {
+            control_url: config.control_url.clone(),
+            control_key: config.control_key.clone(),
+            worker_id: worker_id.clone(),
+            interval: zeroship_metering::DEFAULT_FLUSH_INTERVAL,
+        },
+    );
+    tracing::info!(worker_id = %worker_id, "metering flush task started");
+
     // ntex installs SIGINT/SIGTERM handlers by default; `shutdown_timeout`
     // bounds how long worker threads have to drain in-flight requests
     // before they're force-dropped. Wire our flag through.
@@ -501,6 +534,8 @@ fn main() -> std::io::Result<()> {
                 db_url: config.db_url.clone(),
                 kv_url: config.kv_url.clone(),
                 storage_backend: config.storage_backend.clone(),
+                // The ONE process-wide meter the flush task drains.
+                meter: Arc::clone(&meter),
             },
         );
         // Per-thread reconcile loop — reads from the shared version map,

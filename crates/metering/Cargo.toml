@@ -1,0 +1,21 @@
+[package]
+name = "zeroship-metering"
+version = "0.1.0"
+edition = "2021"
+description = "Metering infrastructure — per-worker atomic usage counters + compio flush task. NO V8: the producer side is the trusted data plugins (db/kv/storage) + the worker's platform counters; there is NO creator-facing env.meter API."
+
+[dependencies]
+zeroship-core = { workspace = true }
+compio = { workspace = true }
+# cyper → hyper pulls `tokio` into the lock file at COMPILE time (as every
+# cyper-using crate in this workspace does), but NO tokio runtime is ever
+# instantiated here — the flush task runs on compio. The zero-tokio (no
+# reactor) invariant holds; the lock-file `tokio` entry is a transitive
+# compile-time artifact, not a runtime dependency.
+cyper = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

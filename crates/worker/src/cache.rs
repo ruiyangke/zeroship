@@ -36,6 +36,16 @@ thread_local! {
     /// or `S3` (S3/R2/MinIO — inherently shared). When `None`, the `storage`
     /// namespace is absent.
     static STORAGE_BACKEND: RefCell<Option<StorageBackendConfig>> = const { RefCell::new(None) };
+    /// The PROCESS-WIDE usage meter, cloned into every ntex worker thread's
+    /// thread-local on `init_cache`. Metering is INFRASTRUCTURE: there is no
+    /// creator-facing `env.meter` namespace. Instead `create_plugins` binds
+    /// this ONE `Arc<Meter>` into the db/kv/storage plugin constructors, so
+    /// each trusted primitive emits raw usage metrics (db_writes, kv_reads,
+    /// storage_ops, …) at its op boundary — app code can neither forge nor
+    /// suppress them. The worker itself feeds the five platform counters via
+    /// `record_request`. All of it lands in this single place that the one
+    /// per-process flush task drains. `None` until `init_cache` runs.
+    static METER: RefCell<Option<Arc<zeroship_metering::Meter>>> = const { RefCell::new(None) };
 }
 
 /// Per-thread runtime-kernel config the worker threads each install.
@@ -49,6 +59,11 @@ pub struct KernelConfig {
     pub db_url: Option<String>,
     pub kv_url: Option<String>,
     pub storage_backend: Option<StorageBackendConfig>,
+    /// The process-wide usage meter shared with the per-process flush task
+    /// (see `main`). Always set in the real worker; an `Arc<Meter>` is
+    /// cheap so there is no "absent" tier — the namespace is registered
+    /// unconditionally when present.
+    pub meter: Arc<zeroship_metering::Meter>,
 }
 
 pub fn init_cache(max_size: usize, kernel: KernelConfig) {
@@ -67,6 +82,7 @@ pub fn init_cache(max_size: usize, kernel: KernelConfig) {
     if let Some(backend) = kernel.storage_backend {
         STORAGE_BACKEND.with(|s| *s.borrow_mut() = Some(backend));
     }
+    METER.with(|m| *m.borrow_mut() = Some(kernel.meter));
 }
 
 /// Create plugins for a new Runtime — the kernel every deployed app boots
@@ -97,18 +113,29 @@ pub fn init_cache(max_size: usize, kernel: KernelConfig) {
 ///   on node B in both cases.
 fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
     let mut plugins: Vec<Arc<dyn NativePlugin>> = Vec::new();
+    // The process-wide meter, if configured. Metering is infrastructure:
+    // rather than a creator-facing `env.meter` namespace, the meter is
+    // bound into the db/kv/storage producers so each trusted primitive
+    // emits a raw usage metric at its op boundary (per-app scoped at mint
+    // time via the runtime's server-injected APP_ID). The five platform
+    // counters keep flowing through `record_request` (below, unchanged).
+    let meter = METER.with(|m| m.borrow().clone());
     if let Some(url) = DB_URL.with(|u| u.borrow().clone()) {
-        plugins.push(Arc::new(zeroship_plugin_db::DbPlugin::new(url)));
+        plugins.push(Arc::new(zeroship_plugin_db::DbPlugin::new(url, meter.clone())));
     }
     if let Some(url) = KV_URL.with(|u| u.borrow().clone()) {
-        plugins.push(Arc::new(zeroship_plugin_kv::KvPlugin::with_backend(
+        plugins.push(Arc::new(zeroship_plugin_kv::KvPlugin::with_backend_and_meter(
             Arc::new(zeroship_plugin_kv::Redis::new(url)),
+            meter.clone(),
         )));
     }
     if let Some(cfg) = STORAGE_BACKEND.with(|s| s.borrow().clone()) {
         match zeroship_plugin_storage::build_backend(&cfg) {
             Ok(backend) => plugins.push(Arc::new(
-                zeroship_plugin_storage::StoragePlugin::with_backend(backend),
+                zeroship_plugin_storage::StoragePlugin::with_backend_and_meter(
+                    backend,
+                    meter.clone(),
+                ),
             )),
             Err(e) => {
                 // Credentials were validated at boot (see worker main); a
@@ -120,6 +147,73 @@ fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
     }
     plugins.push(Arc::new(zeroship_runtime::auth::AuthPlugin));
     plugins
+}
+
+/// Auto-counter hook: record one completed dispatched request's platform
+/// counters against the process-wide meter for `app_id`. Called by the
+/// dispatch handler once a request has been served. No-op when the meter is
+/// unset (degraded config).
+///
+/// Feeds all five platform auto-counters in one shot via
+/// [`Meter::record_request`] — `requests` (always +1) plus the four the
+/// dispatch handler measures per request:
+/// - `cpu_us` — V8 thread CPU microseconds (CLOCK_THREAD_CPUTIME_ID delta
+///   around the synchronous isolate entry; the same clock the CPU limiter
+///   uses),
+/// - `wall_us` — wall-clock microseconds spanning the dispatch,
+/// - `egress_bytes` — response body bytes the worker produced,
+/// - `ingress_bytes` — request body bytes the worker received.
+pub fn record_request(
+    app_id: &Uuid,
+    cpu_us: u64,
+    wall_us: u64,
+    egress_bytes: u64,
+    ingress_bytes: u64,
+) {
+    METER.with(|m| {
+        if let Some(meter) = m.borrow().as_ref() {
+            meter.record_request(
+                &app_id.to_string(),
+                cpu_us,
+                wall_us,
+                egress_bytes,
+                ingress_bytes,
+            );
+        }
+    });
+}
+
+/// Record an INCREMENTAL streaming-usage delta (metering coverage #27, H1).
+///
+/// A long-lived SSE/streaming response accrues `egress_bytes` and
+/// `stream_wall_us` continuously while it is open, so (a) usage bills
+/// throughout a multi-hour stream instead of only at close, and (b) a worker
+/// crash loses at most one recording interval's delta rather than the whole
+/// stream. The streaming drain task ([`crate::handler::stream_response`])
+/// calls this every ~10s / ~1 MiB and once more at finalize with the
+/// trailing delta.
+///
+/// `requests`/`cpu_us`/`ingress_bytes` are NOT touched here — they are the
+/// unary parts of the request, recorded EXACTLY ONCE at stream start via
+/// [`record_request`]. A stream is one request, so `requests` must never be
+/// re-incremented per delta. `stream_wall_us` is a distinct metric from the
+/// unary `wall_us` (the held-open duration is priced/observed on its own).
+/// No-op when the meter is unset (degraded config) or both deltas are zero.
+pub fn record_stream_delta(app_id: &Uuid, egress_bytes_delta: u64, stream_wall_us_delta: u64) {
+    if egress_bytes_delta == 0 && stream_wall_us_delta == 0 {
+        return;
+    }
+    METER.with(|m| {
+        if let Some(meter) = m.borrow().as_ref() {
+            let id = app_id.to_string();
+            if egress_bytes_delta > 0 {
+                meter.increment(&id, "egress_bytes", egress_bytes_delta);
+            }
+            if stream_wall_us_delta > 0 {
+                meter.increment(&id, "stream_wall_us", stream_wall_us_delta);
+            }
+        }
+    });
 }
 
 /// Get or create a V8 runtime for an app. Returns None if the app isn't loaded.
@@ -367,17 +461,25 @@ mod tests {
                     storage_backend: Some(StorageBackendConfig::Local(PathBuf::from(
                         "/tmp/zs-cache-test-storage",
                     ))),
+                    meter: Arc::new(zeroship_metering::Meter::new()),
                 },
             );
             let plugins = create_plugins();
             let namespaces: Vec<String> =
                 plugins.iter().map(|p| p.namespace().to_string()).collect();
+            // Metering is infrastructure now: there is NO `meter` namespace.
+            // The meter is bound INTO the db/kv/storage producers, so the
+            // creator surface is exactly these four namespaces.
             for expected in ["db", "kv", "storage", "auth"] {
                 assert!(
                     namespaces.iter().any(|n| n == expected),
                     "create_plugins() must register the '{expected}' namespace when configured; got: {namespaces:?}"
                 );
             }
+            assert!(
+                !namespaces.iter().any(|n| n == "meter"),
+                "metering is infrastructure: there must be NO env.meter namespace; got: {namespaces:?}"
+            );
         })
         .join()
         .expect("kernel-config plugin guard thread panicked");
@@ -396,14 +498,21 @@ mod tests {
                     db_url: None,
                     kv_url: None,
                     storage_backend: None,
+                    // The meter is always provided (an `Arc<Meter>` is cheap;
+                    // there is no degraded "no meter" tier). It is bound into
+                    // the producers rather than exposed as a namespace, so it
+                    // adds NO entry to the plugin vector.
+                    meter: Arc::new(zeroship_metering::Meter::new()),
                 },
             );
             let plugins = create_plugins();
             let namespaces: Vec<String> =
                 plugins.iter().map(|p| p.namespace().to_string()).collect();
             let has = |n: &str| namespaces.iter().any(|x| x == n);
-            // auth is unconditional; kv/storage/db must NOT appear.
+            // auth is unconditional; kv/storage/db must NOT appear; and there
+            // is NO `meter` namespace (metering is infrastructure).
             assert!(has("auth"));
+            assert!(!has("meter"), "metering is infrastructure: no env.meter namespace");
             assert!(!has("kv"), "kv absent when unconfigured");
             assert!(!has("storage"), "storage absent when unconfigured");
             assert!(!has("db"), "db absent when unconfigured");

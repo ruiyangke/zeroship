@@ -4,28 +4,45 @@
 //! registry + env store + handler types. The `zeroship-control` binary
 //! (`src/main.rs`) is a thin wrapper around these modules.
 
+pub mod account_status;
 pub mod api;
 pub mod admin_handlers;
 pub mod app_oauth_client;
 pub mod audit;
 pub mod auth_audit;
 pub mod authz_guard;
+pub mod billing_read;
 pub mod bootstrap_builder;
 pub mod bootstrap_console;
+pub mod credit;
 pub mod cron;
 pub mod deploy;
+pub mod disputes;
 pub mod env_handlers;
 pub mod env_store;
+pub mod fee_policy;
 pub mod http_util;
 pub mod internal;
+pub mod invoice_payments;
 pub mod metering;
+pub mod notify;
 pub mod oauth_grants_handlers;
 pub mod oauth_handlers;
+pub mod openmeter_client;
+pub mod plan_catalog;
+pub mod pricing;
+pub mod pricing_store;
+pub mod proration;
 pub mod rate_limit;
+pub mod refund;
 pub mod registry;
+pub mod spend;
+pub mod stripe_client;
 pub mod stripe_handlers;
 pub mod stripe_store;
+pub mod tax;
 pub mod token_handlers;
+pub mod void_reissue;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -100,6 +117,14 @@ pub struct AppState {
     /// Stripe webhook signing secret. Required in prod; empty +
     /// `insecure_dev=true` skips verification.
     pub stripe_webhook_secret: SecretString,
+    /// Stripe secret API key (`sk_…`) for OUTBOUND calls (the billing PR6
+    /// reconciler + `billing/setup`). Required in prod; empty allowed only
+    /// under `insecure_dev`. Never logged — `SecretString`.
+    pub stripe_secret_key: SecretString,
+    /// Stripe REST API base URL the outbound client targets. Defaults to
+    /// `https://api.stripe.com`; the integration tests override it to point the
+    /// REAL `cyper` client at a localhost mock-Stripe server.
+    pub stripe_base_url: String,
     /// Worker HTTP base URLs used for admin log fan-out.
     pub worker_urls: Vec<String>,
     /// Shared secret for worker admin endpoints. Empty means dev-only
@@ -180,6 +205,26 @@ pub struct AppState {
     /// `logout_token.jti` claims. Replays are answered with 200 for
     /// webhook idempotency but do not run session revocation again.
     pub logout_jti_cache: Arc<zeroship_core::logout_token::LogoutJtiCache>,
+    /// The configured metering/billing provider, built once at boot
+    /// (`--metering-provider`, default `native`). The billing-reconcile cron
+    /// drives `Native` (invoice); the metering-export cron drives the export
+    /// backends `Stripe` (CU → meter_events) and `OpenMeter` (CU → CloudEvents).
+    /// `spend.rs`/`enforce.rs` NEVER touch it (enforcement is the local ledger,
+    /// provider-independent). See [`metering::provider::MeteringProvider`].
+    pub metering_provider: Arc<dyn metering::provider::MeteringProvider>,
+    /// The configured tax provider, built once at boot (`--tax-provider`, default
+    /// `native`). The billing-reconcile cron calls `compute_tax` at finalize and
+    /// freezes the result into `invoices.tax_cents`. `Native` computes `0` (the
+    /// USD launch owes no tax); enabling a real `StripeTaxProvider` later is a
+    /// provider swap, not a schema change (`tax_cents` already exists). See
+    /// [`tax::TaxProvider`].
+    pub tax_provider: Arc<dyn tax::TaxProvider>,
+    /// The billing notifier, built once at boot. The `cron::billing_notify` sweep
+    /// renders a per-kind template and sends it through this seam (over the relocated
+    /// `zeroship-mailer` `Mailer`), passing a provider-side `Idempotency-Key =
+    /// (creator_id, kind, transition_id)` so a re-driven send is idempotent at the
+    /// provider (billing-ops gap #26, PR-6, MAJOR-A). See [`notify::BillingNotifier`].
+    pub notifier: Arc<dyn notify::BillingNotifier>,
     /// Platform-wide pairwise salt (auth-sdk §6.2), derived from the SAME
     /// stash signing key the gateway uses via
     /// [`zeroship_core::auth::derive_pairwise_salt`]. Control needs it so a
@@ -189,6 +234,13 @@ pub struct AppState {
     /// arms read — killing the live access token, not just the relay alias
     /// (Batch A fix 4). MUST stay byte-identical to the gateway's salt.
     pub pairwise_salt: [u8; 32],
+    /// In-process TTL cache for the creator-facing OPEN-period projected charge
+    /// (billing-ops gap #26, PR-7, read API G / MAJOR-5). Memoises
+    /// `(app_id, period) → projected_cents` for
+    /// [`billing_read::PROJECTED_CHARGE_TTL_SECS`] so polling cannot hammer a
+    /// full pricing pass. The value is non-authoritative (only a finalized
+    /// invoice bills).
+    pub projected_charge_cache: Arc<billing_read::ProjectedChargeCache>,
 }
 
 impl AppState {

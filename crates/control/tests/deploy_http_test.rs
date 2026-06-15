@@ -250,6 +250,7 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
     );
 
     let registry = Registry::new(db_url).await.expect("registry");
+    zeroship_control::bootstrap_console::seed_plans(&registry).await.expect("seed built-in plans");
     let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, false)
         .expect("env store");
     let stripe_store = StripeStore::new(registry.clone());
@@ -274,6 +275,8 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
         stripe_webhook_secret: SecretString::new(String::new()),
+        stripe_secret_key: SecretString::new(String::new()),
+        stripe_base_url: "https://api.stripe.com".to_string(),
         worker_urls: Vec::new(),
         worker_key: SecretString::new(String::new()),
         admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
@@ -293,7 +296,19 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
             "http://127.0.0.1:9",
         )),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+        metering_provider: zeroship_control::metering::provider::build_provider(
+            &zeroship_control::metering::provider::MeteringProviderConfig::native(),
+        )
+        .expect("native provider builds"),
+        tax_provider: zeroship_control::tax::build_tax_provider(
+            &zeroship_control::tax::TaxProviderConfig::native(),
+        )
+        .expect("native tax provider builds"),
+        notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
         pairwise_salt: [0u8; 32],
+        projected_charge_cache: std::sync::Arc::new(
+            zeroship_control::billing_read::ProjectedChargeCache::default(),
+        ),
     });
 
     Fixture {
@@ -323,7 +338,7 @@ async fn deploy_happy_path_returns_200_with_deploy_hash() {
     let record = fx
         .state
         .registry
-        .create_app(&app_name, "free", &owner_id)
+        .create_app(&app_name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
         .await
         .expect("create app");
     let app_id = record.id;
@@ -539,7 +554,7 @@ async fn deploy_manifest_not_first_returns_400() {
     let record = fx
         .state
         .registry
-        .create_app(&app_name, "free", &owner_id)
+        .create_app(&app_name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
         .await
         .expect("create app");
     let app_id = record.id;
@@ -616,7 +631,7 @@ async fn deploy_colliding_scope_returns_400_invalid_scope() {
     let record = fx
         .state
         .registry
-        .create_app(&app_name, "free", &owner_id)
+        .create_app(&app_name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
         .await
         .expect("create app");
     let app_id = record.id;
@@ -708,7 +723,7 @@ async fn deploy_noncolliding_scope_returns_200() {
     let record = fx
         .state
         .registry
-        .create_app(&app_name, "free", &owner_id)
+        .create_app(&app_name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
         .await
         .expect("create app");
     let app_id = record.id;

@@ -8,6 +8,23 @@ description = "zeroship control plane — admin API, internal API, Postgres, VFS
 name = "zeroship-control"
 path = "src/main.rs"
 
+# Standalone mock-Stripe server for the billing & metering multi-node E2E
+# (tests/e2e_metering_billing.sh). Reuses the same Stripe-wire idiom as the
+# in-process mock in tests/billing_reconcile_test.rs, plus a /__mock/*
+# introspection surface for shell assertions.
+[[bin]]
+name = "zeroship-mock-stripe"
+path = "src/bin/mock_stripe.rs"
+
+# Metering / billing hot-path load + contention measurement (#29). A
+# `harness = false` binary (the runtime-crate bench convention) that drives the
+# REAL Metering::ingest_at / SpendEngine::evaluate_all / reconcile-read paths
+# against a DEDICATED live Postgres. Gated on METERING_LOAD_DB (no DB ⇒ prints a
+# how-to note and exits 0). See the file header for run instructions.
+[[bench]]
+name = "metering_load"
+harness = false
+
 [dependencies]
 zeroship-core = { workspace = true }
 zeroship-bundle = { workspace = true }
@@ -15,10 +32,17 @@ zeroship-authz = { workspace = true }
 # Builder OAuth bootstrap reuses auth/control migrations for
 # `control.oauth_clients` in dev-mode startup.
 zeroship-auth = { workspace = true }
+# Shared mailer (extracted to `crates/mailer` in PR-0). The billing-notify cron
+# (PR-6) sends creator lifecycle/money emails through the `Mailer` seam, honouring
+# the same `email_suppressions` contract auth uses. PR-0 deliberately left control
+# un-wired; this is the wiring.
+zeroship-mailer = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 # `with-chrono-0_4` so PAT issuance / the console seed can map
 # `TIMESTAMPTZ` columns to `chrono::DateTime<Utc>` directly.
-compio-postgres = { workspace = true, features = ["with-chrono-0_4"] }
+# `with-serde_json-1` so the plan catalog binds its JSONB price/quota/limits
+# columns as `serde_json::Value` (PR4).
+compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1"] }
 compio = { workspace = true }
 memmap2 = { workspace = true }
 ntex = { workspace = true }
@@ -66,5 +90,16 @@ zstd = { workspace = true }
 # inputs. The production helper is generic over `B: AsRef<[u8]>` so
 # `bytes` itself isn't a runtime dep.
 bytes = { workspace = true }
+# Metering coverage (#27): the faithful gateway-egress ingest test builds a
+# REAL gateway `Meter`, records `gateway_egress_bytes`, drains + `build_report`
+# with a `gate-…` producer id, and ingests through the real `Metering` path —
+# exercising the producer→ingest seam end to end, not a hand-built report.
+zeroship-metering = { workspace = true }
+# Webhook HTTP-boundary tests (#9/#2/#7) compute a REAL Stripe `v1=` HMAC so the
+# multi-v1 OR-fold and the signed-but-large-header paths exercise the production
+# `verify_stripe_signature`, not a hand-faked header. Same crates the lib uses.
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 [lints]
 workspace = true

@@ -48,12 +48,12 @@ use ntex::web::{
 
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
-use crate::mailer::bounce::{bounce_type_is_permanent, verify_basic_auth, PostmarkEvent};
-use crate::mailer::forward::{build_bounce, build_forward, BounceReason};
-use crate::mailer::inbound::{normalize_alias, InboundMessage, RELAY_MAX_HOPS, SPAM_SCORE_THRESHOLD};
-use crate::mailer::sns::{self, is_valid_sns_cert_url, SesEvent, SnsEnvelope};
-use crate::mailer::{Email, MailerError, RelayForwardMailer};
-use crate::store::{ratelimit, relay, suppressions};
+use crate::store::{ratelimit, relay};
+use zeroship_mailer::bounce::{bounce_type_is_permanent, verify_basic_auth, PostmarkEvent};
+use zeroship_mailer::forward::{build_bounce, build_forward, BounceReason};
+use zeroship_mailer::inbound::{normalize_alias, InboundMessage, RELAY_MAX_HOPS, SPAM_SCORE_THRESHOLD};
+use zeroship_mailer::sns::{self, is_valid_sns_cert_url, SesEvent, SnsEnvelope};
+use zeroship_mailer::{suppressions, Email, MailerError, RelayForwardMailer};
 
 /// Per-alias leaky-bucket capacity / refill (sub-spec §7): burst 20,
 /// ≈60/hour steady. Sized so a busy receipt/newsletter alias is never

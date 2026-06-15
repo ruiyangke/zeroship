@@ -65,7 +65,7 @@ fn dispatch(source: &str, name: &str) -> (u16, serde_json::Value) {
         source: source.into(),
     }];
     let plugins: Vec<Arc<dyn NativePlugin>> =
-        vec![Arc::new(DbPlugin::new("postgres://_platform_fence_unused"))];
+        vec![Arc::new(DbPlugin::new("postgres://_platform_fence_unused", None))];
     let runtime = Runtime::builder().modules(modules).plugins(plugins).build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());

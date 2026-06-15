@@ -21,9 +21,83 @@ pub enum Action {
     /// creator has opted to surface in `process.env`. Audited so ops
     /// can answer "when did we let X out of the secret namespace."
     SetEnvExpose,
+    /// A Connect Express account was MINTED on Stripe for a creator (the
+    /// `onboard` handler created a new `acct_…`). Distinct from `LinkAccount`
+    /// (which records the verified-link in `callback`) so the trail separates
+    /// "account minted" from "account verified-linked" (m6).
+    CreateAccount,
     LinkAccount,
     UnlinkAccount,
     RecordPayout,
+    /// A spend-enforcement state transition for an app, emitted by the
+    /// spend-reconcile cron (billing PR5). The detail JSON carries
+    /// `{ from, to, spend_cents, limit_cents }`.
+    SpendStateChange,
+    /// A creator changed an app's spend-limit override via the M4 endpoint.
+    SetSpendLimit,
+    /// A creator finished the Checkout setup flow and now has a saved default
+    /// PaymentMethod (`setup_intent.succeeded` webhook, billing PR6 Stream-1).
+    SetupIntentSucceeded,
+    /// A finalized infra-billing invoice could not be charged
+    /// (`invoice.payment_failed` webhook, billing PR6 Stream-1).
+    InvoicePaymentFailed,
+    /// A creator payment/account-state transition (billing G2): the
+    /// active→past_due→suspended→active dunning lifecycle. Written by the
+    /// webhook (`invoice.payment_failed`/`invoice.paid`) and the dunning cron.
+    /// The detail JSON carries `{ from, to, reason, creator_id }`.
+    AccountStateChange,
+    /// An operator created or updated a plan in the catalog via `PUT
+    /// /api/plans/:id` (billing-v2 MINOR-1). The plan's FX/price is the
+    /// highest-leverage money lever, so the write is audited with the actor +
+    /// the new price model in the detail JSON.
+    PlanUpserted,
+    /// An operator archived a plan via `DELETE /api/plans/:id` (billing-v2
+    /// MINOR-1). Audited with the actor + the plan id.
+    PlanArchived,
+    /// An operator set a creator's application-fee policy via `PUT
+    /// /api/creators/:id/fee-policy` (billing G1, ISS-29). The fee is
+    /// server-authoritative + operator-only — a creator may never lower it — so
+    /// every change is audited with the actor + the new policy in the detail JSON.
+    SetFeePolicy,
+    /// An operator changed the GLOBAL default FX via `PUT /api/pricing-config`
+    /// (gap #28). The global FX is the highest-leverage money lever — it reprices
+    /// every plan that inherits (`fx == None`) — so the write is audited with the
+    /// actor + the old→new value in the detail JSON.
+    SetGlobalFx,
+    /// An operator granted a creator credit via `POST /api/billing/credit`
+    /// (billing-ops gap #26, PR-2). Credit is a money lever (it reduces a future
+    /// bill), operator-only, so every grant is audited with the actor + the
+    /// creator / amount / kind in the detail JSON.
+    CreditGranted,
+    /// An operator refunded a finalized invoice via `POST
+    /// /api/invoices/{id}/refunds` (billing-ops gap #26, PR-3). A refund moves
+    /// real money (a Stripe `Refund` for `destination='cash'`) or grants
+    /// platform credit (`destination='credit'`), operator-only, so every refund is
+    /// audited with the actor + the invoice / amount / destination in the detail JSON.
+    InvoiceRefunded,
+    /// An operator voided a finalized invoice via `POST /api/invoices/{id}/void`
+    /// (billing-ops gap #26, PR-3). A void is the only legal finalized→void
+    /// correction transition; it restores consumed credit (`void_reversal`) and
+    /// reissues a corrected invoice, so it is audited with the actor + the
+    /// voided/reissued ids + any true-up refund in the detail JSON.
+    InvoiceVoided,
+    /// A chargeback/dispute lifecycle event was recorded from a `charge.dispute.*`
+    /// webhook (billing-ops gap #26, PR-8). A dispute claws back cash the cardholder
+    /// paid — a forced reversal recorded as a `billing_disputes` row + a signed
+    /// `invoice_payments` row — so every dispute create/resolve is audited with the
+    /// dispute / invoice / amount / status in the detail JSON.
+    RecordDispute,
+    /// A refund we recorded `issued` later FAILED/CANCELED at Stripe
+    /// (`charge.refund.updated`, webhook follow-up). The cash did not return to the
+    /// cardholder, so the refund is reversed (status→failed; a credit-destination grant
+    /// clawed back). Audited with the refund / terminal status / clawback in the detail JSON.
+    RefundFailed,
+    /// A payout to a creator's connected account FAILED (`payout.failed`, webhook
+    /// follow-up). Audited with the creator / payout / amount / failure code.
+    PayoutFailed,
+    /// An end-user's Connect checkout charge FAILED (`payment_intent.payment_failed`,
+    /// webhook follow-up). Informational; audited with the creator / PI / amount.
+    CheckoutFailed,
 }
 
 impl Action {
@@ -34,9 +108,26 @@ impl Action {
             Self::SetSecret => "set_secret",
             Self::DeleteSecret => "delete_secret",
             Self::SetEnvExpose => "set_env_expose",
+            Self::CreateAccount => "create_account",
             Self::LinkAccount => "link_account",
             Self::UnlinkAccount => "unlink_account",
             Self::RecordPayout => "record_payout",
+            Self::SpendStateChange => "spend_state_change",
+            Self::SetSpendLimit => "set_spend_limit",
+            Self::SetupIntentSucceeded => "setup_intent_succeeded",
+            Self::InvoicePaymentFailed => "invoice_payment_failed",
+            Self::AccountStateChange => "account_state_change",
+            Self::PlanUpserted => "plan_upserted",
+            Self::PlanArchived => "plan_archived",
+            Self::SetFeePolicy => "set_fee_policy",
+            Self::SetGlobalFx => "set_global_fx",
+            Self::CreditGranted => "credit_granted",
+            Self::InvoiceRefunded => "invoice_refunded",
+            Self::InvoiceVoided => "invoice_voided",
+            Self::RecordDispute => "record_dispute",
+            Self::RefundFailed => "refund_failed",
+            Self::PayoutFailed => "payout_failed",
+            Self::CheckoutFailed => "checkout_failed",
         }
     }
 }
@@ -82,8 +173,13 @@ pub async fn log_with_detail(registry: &Registry, entry: AuditEntry<'_>, detail:
     };
     let result = conn
         .execute(
+            // `$7::text::inet`: bind the param as TEXT (which `Option<&str>`
+            // serializes as) and let PG cast text→inet, instead of `$7::inet`
+            // which makes PG infer the param OID as `inet` and reject the `&str`
+            // bind at serialize time ("error serializing parameter"). The latter
+            // silently broke EVERY detail-audit insert (best-effort path).
             "INSERT INTO zeroship.app_audit(app_id, creator_id, actor_user_id, actor_token_id, action, resource, source_ip, detail)
-             VALUES($1, $2, $3, $4, $5, $6, $7::inet, $8)",
+             VALUES($1, $2, $3, $4, $5, $6, $7::text::inet, $8)",
             &[
                 &entry.app_id,
                 &entry.creator_id,

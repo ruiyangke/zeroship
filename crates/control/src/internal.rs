@@ -147,8 +147,104 @@ pub async fn get_routes(
     }
 }
 
-/// POST /internal/usage — accept usage report from workers.
-/// Uses common::types::UsageReport { worker_id, counters: { app_id → AppUsage } }
+/// POST /internal/billing/reconcile?period=<unix-seconds> — operator-gated
+/// on-demand trigger of the billing reconciler for a SPECIFIC closed period.
+///
+/// Same gate as every other `/internal/*` endpoint ([`check_auth`]): the
+/// control-key shared secret (or `--dev-insecure`). This is NOT an
+/// unauthenticated bypass — without a valid control-key bearer it 401s exactly
+/// like `/internal/usage`.
+///
+/// The production reconcile cron only ever bills the PREVIOUS calendar month
+/// (`previous_period_start_unix(now)`), which an end-to-end test cannot wait a
+/// month for. This endpoint drives the SAME [`billing_reconcile::tick_with`]
+/// sweep against a caller-chosen `period` so a harness (or an operator
+/// re-running a missed close) can reconcile a specific closed period on demand.
+/// Idempotency is unchanged: the `billing_runs` / `billing_run_items` guards
+/// make a repeat trigger for the same period a no-op.
+///
+/// `period` is the unix-seconds start of the calendar month to bill. We pass it
+/// as `now` to `tick_with`, which derives the period it bills as
+/// `previous_period_start_unix(now)` — so the caller passes a timestamp in the
+/// month AFTER the one they want billed (mirroring how the cron, ticking in
+/// month M, bills M-1). The response echoes the resolved `period_start` so the
+/// caller can assert which period was reconciled.
+pub async fn force_reconcile(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Some(resp) = check_auth(&req, &state) {
+        return resp;
+    }
+    // `?period=<unix-seconds>` — the `now` instant to reconcile against. Default
+    // to the live wall clock (bills the previous calendar month, like the cron).
+    let now_unix: i64 = req
+        .query_string()
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("period="))
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or_else(|| chrono::Utc::now().timestamp());
+
+    let stripe = crate::stripe_client::StripeClient::new(crate::SecretString::new(
+        state.stripe_secret_key.expose_secret().to_string(),
+    ))
+    .with_base_url(state.stripe_base_url.clone());
+
+    match crate::cron::billing_reconcile::tick_with(&state, &stripe, now_unix).await {
+        Ok(billed) => {
+            let period_start = crate::cron::billing_reconcile::previous_period_start_unix(now_unix);
+            web::HttpResponse::Ok().json(&serde_json::json!({
+                "billed": billed,
+                "period_start": period_start,
+                "now": now_unix,
+            }))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, now_unix, "control-internal: force_reconcile failed");
+            web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error": e.to_string()}))
+        }
+    }
+}
+
+/// POST /internal/spend/reconcile — operator-gated on-demand trigger of ONE
+/// spend-reconcile sweep ([`spend_reconcile::tick`]).
+///
+/// Same gate as every other `/internal/*` endpoint ([`check_auth`]). The
+/// spend cron runs every ~60s on its own; this lets an operator (or an E2E)
+/// force a single sweep immediately so the derived [`SpendState`] is persisted
+/// without waiting a full tick. The gateway still picks the new state up on its
+/// next `/internal/routes` poll (decision D1) — this endpoint only advances the
+/// CONTROL-side derivation, it does not push to the gateway. Idempotent: a
+/// no-op sweep simply reports `transitions: 0`.
+pub async fn force_spend_reconcile(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Some(resp) = check_auth(&req, &state) {
+        return resp;
+    }
+    match crate::cron::spend_reconcile::tick(&state).await {
+        Ok(transitions) => web::HttpResponse::Ok().json(&serde_json::json!({
+            "transitions": transitions,
+        })),
+        Err(e) => {
+            tracing::error!(error = %e, "control-internal: force_spend_reconcile failed");
+            web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error": e.to_string()}))
+        }
+    }
+}
+
+/// POST /internal/usage — accept a usage report from a worker.
+///
+/// `UsageReport { worker_id, report_id, sequence, counters: { app_id →
+/// AppUsage } }`. Ingest is IDEMPOTENT: the report is deduped on
+/// `(worker_id, sequence)` and aggregated per `(app_id, calendar-month,
+/// metric)` into `zeroship.usage_aggregates`. A duplicate (an at-least-once
+/// producer retry) is a no-op — it never double-counts. The response always
+/// carries the worker's `high_water` sequence so a producer can resync after
+/// a restart, plus a `duplicate` flag.
 pub async fn report_usage(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,
@@ -159,22 +255,22 @@ pub async fn report_usage(
     if let Some(resp) = check_auth(&req, &state) {
         return resp;
     }
-    for (app_id, usage) in &body.counters {
-        let deltas = [
-            ("requests", usage.requests as i64),
-            ("cpu_us", usage.cpu_us as i64),
-            ("wall_us", usage.wall_us as i64),
-            ("egress_bytes", usage.egress_bytes as i64),
-            ("ingress_bytes", usage.ingress_bytes as i64),
-        ];
-        for (resource, delta) in &deltas {
-            if *delta > 0 {
-                if let Err(e) = state.registry.record_usage(app_id, resource, *delta).await {
-                    return web::HttpResponse::InternalServerError()
-                        .json(&serde_json::json!({"error": e.to_string()}));
-                }
-            }
+    let metering = crate::metering::Metering::new(state.registry.clone());
+    match metering.ingest(&body).await {
+        Ok(outcome) => web::HttpResponse::Ok().json(&serde_json::json!({
+            "recorded": true,
+            "duplicate": outcome.duplicate,
+            "high_water": outcome.high_water_sequence,
+        })),
+        Err(e) => {
+            tracing::error!(
+                worker_id = %body.worker_id,
+                sequence = body.sequence,
+                error = %e,
+                "control-internal: usage ingest failed"
+            );
+            web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error": e.to_string()}))
         }
     }
-    web::HttpResponse::Ok().json(&serde_json::json!({"recorded": true}))
 }

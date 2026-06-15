@@ -198,4 +198,18 @@ pub struct GateState {
     /// `zeroship_core::crypto::derive_key`. Rotating it rotates every app's
     /// subjects (a deliberate break-glass).
     pub pairwise_salt: [u8; 32],
+    /// Process-wide usage meter — the gateway is a SECOND metering producer
+    /// (metering coverage #27). It emits `gateway_egress_bytes` for the
+    /// bodies the worker never sees (static assets, redirects, gateway error
+    /// pages) attributed to the route's server-resolved `app_id`. The
+    /// worker keeps owning `egress_bytes` for its proxied response bodies,
+    /// so the two metrics are DISJOINT BY CONSTRUCTION — the gateway never
+    /// meters a worker-proxy body, never increments `egress_bytes`. A single
+    /// `spawn_flush_task` (wired in `main.rs`) drains this and POSTs to the
+    /// same control `/internal/usage` ingest under a restart-unique
+    /// `gate-<base>-<nonce>` producer id. Recording is a cheap counter bump
+    /// on the response path (an `RwLock` read + a per-app `Mutex` for the
+    /// custom metric — uncontended, not literally lock-free); the flush is a
+    /// detached background task, so the proxy hot path is not slowed.
+    pub meter: Arc<zeroship_metering::Meter>,
 }

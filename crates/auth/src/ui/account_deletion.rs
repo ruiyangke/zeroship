@@ -25,12 +25,12 @@ use crate::config::AuthConfig;
 use crate::cron::account_reaper::GRACE_DAYS;
 use crate::csrf;
 use crate::hydra_client::HydraAdmin;
-use crate::mailer::templates::{
-    build_email, AccountDeletionRequestedHtml, AccountDeletionRequestedText,
-};
-use crate::mailer::{Address, Mailer};
 use crate::sessions::login as session_cookie;
 use crate::store::users::{self, UserRow};
+use zeroship_mailer::templates::{
+    build_email, AccountDeletionRequestedHtml, AccountDeletionRequestedText,
+};
+use zeroship_mailer::{Address, Mailer};
 use crate::store::sessions;
 
 #[derive(Debug, Deserialize)]

@@ -14,6 +14,13 @@ use uuid::Uuid;
 use zeroship_auth::cron::account_reaper;
 use zeroship_auth::store::users;
 
+/// `account_reaper::tick` is a FLEET-WIDE due-scan (it anonymizes/hard-deletes
+/// EVERY past-grace user, returning aggregate counts). Two reaper-tick tests run
+/// concurrently each see the OTHER's due user and the `report.{anonymized,
+/// hard_deleted} == 1` assertions break. Serialize the tick-driving tests with a
+/// process-wide lock (poison-recovered) so each owns the fleet for its tick.
+static REAPER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[allow(clippy::future_not_send)]
 async fn pg() -> Option<Client> {
     let dsn = std::env::var("AUTH_DB_URL")
@@ -147,6 +154,7 @@ async fn reaper_hard_deletes_non_billing_user_and_cascades() {
     let Some(db) = pg().await else {
         return;
     };
+    let _reaper = REAPER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let tag = Uuid::new_v4().simple().to_string();
     let email = format!("acctdel-hard-{tag}@zeroship.test");
     let user = users::create(&db, &email, "Hard Delete", Some("phc")).await.unwrap();
@@ -192,6 +200,7 @@ async fn reaper_anonymizes_creator_with_billing_and_retains_financials() {
     let Some(db) = pg().await else {
         return;
     };
+    let _reaper = REAPER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let tag = Uuid::new_v4().simple().to_string();
     let email = format!("acctdel-creator-{tag}@zeroship.test");
     let user = users::create(&db, &email, "Creator Person", Some("phc")).await.unwrap();
@@ -270,6 +279,7 @@ async fn reaper_sets_null_attribution_fk_pointing_at_deleted_user() {
     let Some(db) = pg().await else {
         return;
     };
+    let _reaper = REAPER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let tag = Uuid::new_v4().simple().to_string();
     // `victim` is being erased; `actor` is a SECOND user whose attribution
     // columns point at `victim`. A naive hard DELETE of `victim` would be
@@ -339,6 +349,7 @@ async fn reaper_skips_cancelled_request() {
     let Some(db) = pg().await else {
         return;
     };
+    let _reaper = REAPER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let tag = Uuid::new_v4().simple().to_string();
     let email = format!("acctdel-skip-{tag}@zeroship.test");
     let user = users::create(&db, &email, "Skip User", Some("phc")).await.unwrap();
@@ -362,5 +373,76 @@ async fn reaper_skips_cancelled_request() {
         .unwrap();
     assert_eq!(remaining.len(), 1, "user survives a cancelled request");
 
+    cleanup(&db, &[user.id]).await;
+}
+
+// ---------------------------------------------------------------------------
+// Redesign regression (change 8): `user_has_financial_history` is widened to
+// `creator_accounts OR invoices`. A creator with an INVOICE (the durable
+// infra-billing artifact) but NO Connect account must ANONYMIZE-retain (so the
+// invoice's creator_id FK target survives), NOT hard-delete. (RED before the
+// widening: only creator_accounts counted, so an invoiced-but-not-Connected
+// creator would be hard-deleted and the CASCADE would reap the invoice.)
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn reaper_anonymizes_invoiced_creator_with_no_connect_account() {
+    let Some(db) = pg().await else {
+        return;
+    };
+    let _reaper = REAPER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tag = Uuid::new_v4().simple().to_string();
+    let email = format!("acctdel-inv-{tag}@zeroship.test");
+    let user = users::create(&db, &email, "Invoiced Creator", Some("phc")).await.unwrap();
+
+    // Infra-billing financial history: a creator_billing identity + a finalized
+    // invoice. NO creator_accounts (this creator never used Connect).
+    db.execute(
+        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1)",
+        &[&user.id],
+    )
+    .await
+    .unwrap();
+    let inv_id = format!("inv_reaper_{tag}");
+    db.execute(
+        "INSERT INTO zeroship.invoices (id, creator_id, period, status, subtotal_cents, total_cents, finalized_at) \
+         VALUES ($1, $2, date_trunc('month', NOW())::date, 'finalized', 500, 500, NOW())",
+        &[&inv_id, &user.id],
+    )
+    .await
+    .unwrap();
+
+    users::request_deletion(&db, user.id, account_reaper::GRACE_DAYS)
+        .await
+        .unwrap()
+        .unwrap();
+    backdate_schedule(&db, user.id).await;
+
+    let report = account_reaper::tick(&db).await.expect("reaper tick");
+    assert_eq!(
+        report.anonymized, 1,
+        "an invoiced creator (no Connect account) is ANONYMIZED, not hard-deleted",
+    );
+    assert_eq!(report.hard_deleted, 0);
+
+    // The users row + the invoice (FK target alive) both survive.
+    let u = db
+        .query("SELECT anonymized_at FROM zeroship.users WHERE id = $1", &[&user.id])
+        .await
+        .unwrap();
+    assert_eq!(u.len(), 1, "users row retained (anonymize-in-place)");
+    assert!(
+        u[0].get::<_, Option<chrono::DateTime<chrono::Utc>>>("anonymized_at").is_some(),
+        "anonymized_at stamped",
+    );
+    let inv = db
+        .query("SELECT 1 FROM zeroship.invoices WHERE id = $1", &[&inv_id])
+        .await
+        .unwrap();
+    assert_eq!(inv.len(), 1, "the invoice is RETAINED (Art. 17(3)(b))");
+
+    // Teardown: drop the billing rows then the user.
+    let _ = db.execute("DELETE FROM zeroship.invoices WHERE id = $1", &[&inv_id]).await;
+    let _ = db.execute("DELETE FROM zeroship.creator_billing WHERE creator_id = $1", &[&user.id]).await;
     cleanup(&db, &[user.id]).await;
 }

@@ -26,6 +26,9 @@
     "build": "tsup",
     "test": "vitest run"
   },
+  "dependencies": {
+    "@zeroship/control": "workspace:*"
+  },
   "devDependencies": {
     "tsup": "^8.5.1",
     "typescript": "catalog:",

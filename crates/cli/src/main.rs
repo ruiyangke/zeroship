@@ -119,9 +119,24 @@ fn cmd_serve(args: &[String]) {
     // so JS `zeroship.db.*` works in the dev path (e.g. `vite-plugin` spawns
     // `zeroship serve` with DATABASE_URL forwarded from `.env`).
     let mut plugins: Vec<Arc<dyn NativePlugin>> = Vec::new();
+
+    // Dev metering infrastructure: a process-wide meter the db/kv/storage
+    // producers emit raw usage metrics into, for namespace/behaviour parity
+    // with the production worker kernel. There is NO `env.meter` creator API
+    // (metering is infrastructure — app code can't forge/suppress it). In dev
+    // there is no control plane to flush to, so NO flush task is spawned: the
+    // meter accumulates locally and is never drained (intentional — dev
+    // doesn't bill). The production worker pairs the same meter with a
+    // `spawn_flush_task` → control POST.
+    let dev_meter = Arc::new(zeroship_metering::Meter::new());
+    eprintln!("[zeroship] metering infrastructure on (dev: no flush — local accumulation only)");
+
     if let Ok(url) = std::env::var("DATABASE_URL") {
         if !url.is_empty() {
-            plugins.push(Arc::new(zeroship_plugin_db::DbPlugin::new(url)));
+            plugins.push(Arc::new(zeroship_plugin_db::DbPlugin::new(
+                url,
+                Some(Arc::clone(&dev_meter)),
+            )));
             eprintln!("[zeroship] db plugin registered (DATABASE_URL set)");
         }
     }
@@ -148,7 +163,10 @@ fn cmd_serve(args: &[String]) {
     let storage_kind = storage_cfg.kind();
     match zeroship_plugin_storage::build_backend(&storage_cfg) {
         Ok(backend) => {
-            plugins.push(Arc::new(zeroship_plugin_storage::StoragePlugin::with_backend(backend)));
+            plugins.push(Arc::new(zeroship_plugin_storage::StoragePlugin::with_backend_and_meter(
+                backend,
+                Some(Arc::clone(&dev_meter)),
+            )));
             eprintln!("[zeroship] storage plugin registered (backend={storage_kind})");
         }
         Err(e) => {
@@ -175,8 +193,9 @@ fn cmd_serve(args: &[String]) {
     let kv_plugin = match std::env::var("ZEROSHIP_KV_URL") {
         Ok(url) if !url.is_empty() => {
             eprintln!("[zeroship] kv plugin registered (redis)");
-            zeroship_plugin_kv::KvPlugin::with_backend(
-                Arc::new(zeroship_plugin_kv::Redis::new(url))
+            zeroship_plugin_kv::KvPlugin::with_backend_and_meter(
+                Arc::new(zeroship_plugin_kv::Redis::new(url)),
+                Some(Arc::clone(&dev_meter)),
             )
         }
         _ => {
@@ -203,7 +222,10 @@ fn cmd_serve(args: &[String]) {
                     std::process::exit(1);
                 });
             eprintln!("[zeroship] kv plugin registered (redb; path={})", kv_path.display());
-            zeroship_plugin_kv::KvPlugin::with_backend(Arc::new(backend))
+            zeroship_plugin_kv::KvPlugin::with_backend_and_meter(
+                Arc::new(backend),
+                Some(Arc::clone(&dev_meter)),
+            )
         }
     };
     plugins.push(Arc::new(kv_plugin));

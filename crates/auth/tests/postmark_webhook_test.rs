@@ -21,7 +21,7 @@ use ntex::web;
 use serde_json::json;
 use uuid::Uuid;
 use zeroship_auth::config::AuthConfig;
-use zeroship_auth::store::{suppressions};
+use zeroship_mailer::suppressions;
 
 /// Build an `AuthConfig` for the webhook tests. Only the
 /// `postmark_webhook_*` fields are interesting; everything else takes

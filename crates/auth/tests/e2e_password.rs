@@ -34,8 +34,8 @@ use uuid::Uuid;
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::hydra_client::types::OAuth2Client;
 use zeroship_auth::hydra_client::HydraAdmin;
-use zeroship_auth::mailer::{Mailer, StdoutMailer};
 use zeroship_auth::server;
+use zeroship_mailer::{Mailer, StdoutMailer};
 
 mod common;
 use common::{

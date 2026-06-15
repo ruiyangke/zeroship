@@ -62,6 +62,7 @@ impl Fixture {
         let blob_root = tmpdir(&format!("blob-{label}"));
         let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
         let registry = Registry::new(db_url).await.expect("registry");
+    zeroship_control::bootstrap_console::seed_plans(&registry).await.expect("seed built-in plans");
         let env_store =
             EnvStore::new(registry.clone(), TEST_MASTER_KEY, false).expect("env store");
         let stripe_store = StripeStore::new(registry.clone());
@@ -76,6 +77,8 @@ impl Fixture {
             control_key: SecretString::new("test-control-key".to_string()),
             master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
             stripe_webhook_secret: SecretString::new(String::new()),
+            stripe_secret_key: SecretString::new(String::new()),
+            stripe_base_url: "https://api.stripe.com".to_string(),
             worker_urls: Vec::new(),
             worker_key: SecretString::new(String::new()),
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
@@ -98,7 +101,19 @@ impl Fixture {
             // A real, non-zero pairwise salt so the disconnect-app cascade
             // writes a `token_revocations` marker under a `pws_` the test can
             // re-derive with the SAME salt + sector (Batch A fix 4).
+            metering_provider: zeroship_control::metering::provider::build_provider(
+                &zeroship_control::metering::provider::MeteringProviderConfig::native(),
+            )
+            .expect("native provider builds"),
+            tax_provider: zeroship_control::tax::build_tax_provider(
+                &zeroship_control::tax::TaxProviderConfig::native(),
+            )
+            .expect("native tax provider builds"),
+            notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
             pairwise_salt: zeroship_core::auth::derive_pairwise_salt(b"control-test-stash"),
+            projected_charge_cache: std::sync::Arc::new(
+                zeroship_control::billing_read::ProjectedChargeCache::default(),
+            ),
         });
 
         Self {
@@ -1284,7 +1299,7 @@ async fn app_delete_returns_200_atomic() {
     let record = fx
         .state
         .registry
-        .create_app(&app_name, "free", &owner_id)
+        .create_app(&app_name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
         .await
         .expect("create app");
     let app_id = record.id;

@@ -345,7 +345,11 @@ fn build_state(hydra_base: &str, db: Option<zeroship_gateway::db::DbConfig>) -> 
         .with_issuer(MOCK_ISSUER);
 
     let routes = RouteCache::new();
-    routes.update(build_route_map());
+    routes.update(
+        build_route_map(),
+        &zeroship_gateway::enforce::RateLimitRegistry::new(1000, 2000),
+        &zeroship_gateway::enforce::ConcurrencyRegistry::new(100),
+    );
 
     Arc::new(GateState {
         config: GateConfig {
@@ -382,6 +386,7 @@ fn build_state(hydra_base: &str, db: Option<zeroship_gateway::db::DbConfig>) -> 
         session_verifier: Some(Arc::new(session_verifier)),
         anchor_enc_key: zeroship_core::crypto::derive_key("anchor-test-key"),
         pairwise_salt: zeroship_core::crypto::derive_key("pairwise-test-salt"),
+        meter: Arc::new(zeroship_metering::Meter::new()),
     })
 }
 
@@ -398,6 +403,8 @@ fn build_route_map() -> zeroship_core::types::RouteMap {
             manifest: zeroship_bundle::Manifest::passthrough(),
             oauth_client_id: Some(CLIENT_ID.into()),
             sector_identifier: Some(format!("https://{APP_HOST}")),
+            spend_state: zeroship_core::types::SpendState::Allow,
+            account_state: zeroship_core::types::AccountState::Active,
         },
     );
     m

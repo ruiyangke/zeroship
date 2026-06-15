@@ -29,7 +29,7 @@ builder.
 
 | Tier | Issues |
 |---|---|
-| **T0** monetization | ISS-18 metering pipeline · ISS-29 server-enforced fee · ISS-30 Stripe onboarding · ISS-31 billing/spend engine (+ retire dead `crates/platform`) |
+| **T0** monetization | ISS-18 metering pipeline ✅ · ISS-31 billing/spend engine ✅ (dead `crates/platform` retired) · ISS-29 server-enforced fee + ISS-30 Stripe onboarding → Stream 2 (creator-payments epic) |
 | **T1** launch infra | ISS-32 prod object storage (S3/R2) · ISS-33 backups/DR · ISS-34 prod TLS/edge · ISS-35 DB connection proxy |
 | **T2** GA | ISS-15 deploy history+rollback · ISS-36 custom domains · ISS-37 edge observability · ISS-38 CD + prod orchestration · ISS-39 prod secrets backend · ISS-40 dynamic worker fleet · ISS-43 WebSocket-in-gateway |
 | **T3** capability | ISS-28 cron/scheduled primitive · ISS-41 end-user authz (P12) · ISS-42 `@zeroship/{email,ai}` SDKs · ISS-44 non-additive migrations · ISS-45 node-compat align · ISS-46 per-tenant fairness/quotas · ISS-47 `env.assets` writes |
@@ -58,26 +58,27 @@ direct charges settle to them); the platform *cannot* collect its cut, and there
 billing at all.
 
 ### ISS-18 · No metering pipeline (`env.meter` + usage producer)
-**Status:** re-scoped (was "perf metering for HealthCanvas") · **Effort:** L · **Tier:** T0
+**Status:** SHIPPED (billing epic PR1–3) · **Effort:** L · **Tier:** T0
 
-No `env.meter` primitive is registered (worker registers only db/kv/storage/auth). The
-control plane has a `POST /internal/usage` ingest + `UsageReport` type, but **nothing on the
-worker/gateway emits one** — the pipe is open with nothing feeding it. `metering.rs` is a
-1-line stub. Blocks metered billing AND observability. **Fix:** `MeterPlugin` + worker usage
-producer (per-tenant scoped, idempotent — see CT-B2) + a real aggregation in `metering.rs`.
+`MeterPlugin` (`crates/plugin-meter`) now registers `env.meter` and a per-worker atomic meter;
+a compio flush task POSTs idempotent `UsageReport`s (`(worker_id, sequence)` dedup) to
+`/internal/usage`, where `crates/control/src/metering.rs` ingests + aggregates per
+`(app_id, calendar-month, metric)` in Postgres. The five fixed counters + an open `custom`
+map are live. See `docs/reference/billing-metering.md`.
 
 ### ISS-29 · Platform fee (15%) not server-enforced
-**Status:** open · **Effort:** M · **Tier:** T0 · ref CT-B1
+**Status:** open — re-scoped to Stream 2 (creator-payments epic) · **Effort:** M · **Tier:** T0 · ref CT-B1
 
 The fee is a client-side default in creator-controlled code (`sdks/payments/checkout.ts`,
 `applicationFeePercent ?? 15`), overridable to 0 / bypassable; the webhook only records what
-Stripe reports (no floor, no creator↔account binding). **Fix:** move checkout-session
-creation server-side so control stamps `application_fee_percent` from a platform-held rate
-using the platform key; the creator receives only a session URL. Breaks the
-`@zeroship/payments` SDK contract (pre-launch — rewrite it).
+Stripe reports (no floor, no creator↔account binding). **Fix (Stream 2, after Stream-1 infra
+billing):** a server-controlled, per-creator `FeePolicy { Fixed | Percent + cap + floor }`
+(default 15%) stamped server-side on the Connect charge so creator code cannot bypass it. The
+fee is **not dropped** — only the bypassable fixed client default is. Breaks the
+`@zeroship/payments` SDK contract (pre-launch — rewrite it onto Connect).
 
 ### ISS-30 · Stripe Connect onboarding is a placeholder
-**Status:** open · **Effort:** M · **Tier:** T0 · ref CT-B4
+**Status:** open — re-scoped to Stream 2 (creator-payments epic) · **Effort:** M · **Tier:** T0 · ref CT-B4
 
 `stripe_handlers.rs::onboard` returns a hardcoded Express URL; no `/v1/account_links` call,
 no `STRIPE_SECRET_KEY` use, and `callback` links an `acct_` without verifying ownership.
@@ -85,15 +86,17 @@ no `STRIPE_SECRET_KEY` use, and `callback` links an `acct_` without verifying ow
 platform/creator before binding payouts.
 
 ### ISS-31 · No metered-billing / spending-limit engine (live)
-**Status:** open · **Effort:** L · **Tier:** T0
+**Status:** SHIPPED (billing epic PR4–7) · **Effort:** L · **Tier:** T0
 
-A complete-looking metering/billing/enforcement engine (~2000 LOC) exists in `crates/platform`
-but is **workspace-excluded and tokio-based** — it violates the zero-tokio invariant and can
-never run; nothing in the live binaries enforces spending limits or bills off usage. **Fix:**
-reimplement metering→pricing→spending-limit (`SpendAction::{Allow,Warn,Degrade,Block}`) in the
-compio stack (consumes ISS-18), then **delete the dead `crates/platform`** so it stops
-masquerading as a billing engine. Also: `plan_id` is free-text/self-escalatable (CT-A1) with
-no pricing model — add a server-side plan catalog (see the remediation plan).
+The dead tokio `crates/platform` engine has been **deleted** (PR7); its domain logic was
+salvaged into the live compio stack. A data-driven plan catalog + cents pricing
+(`crates/control/src/{plan_catalog,pricing}.rs`, fixing CT-A1's free-text `plan_id`) feed a
+spend engine (`spend.rs` + `cron/spend_reconcile.rs`) deriving `SpendState`
+{Allow,Warn,Degrade,Block}, enforced at the gateway edge (`crates/gateway/src/enforce.rs`:
+402 Block, throttle Degrade). Month-close Stripe invoice-item billing runs in
+`cron/billing_reconcile.rs` + `stripe_client.rs`. See `docs/reference/billing-metering.md`.
+This is Stream 1 (infra usage billing); Stream 2 (ISS-29/30) is the separate creator-payments
+epic below.
 
 ## T1 — Launch-blocking infrastructure
 

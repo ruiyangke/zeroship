@@ -592,6 +592,29 @@ async fn execute_resource_tree(
             .json(&serde_json::json!({"error": "no resource matched"}));
     };
 
+    // 1a. Account gate (G2): the OUTER AND, evaluated BEFORE spend at the SAME
+    //     hoist point so a `Suspended` creator's apps 402 across every action
+    //     class (worker, redirect, rewrite, AND static egress) before any worker
+    //     proxy — a suspended creator must not serve billed static/redirect
+    //     egress either. `Suspended` → 402 `ACCOUNT_SUSPENDED`; `PastDue` (the
+    //     grace window) and `Active` pass. Distinct from the spend 402 below
+    //     (`SPEND_LIMIT`) so a dead-card suspension is told apart from a usage cap.
+    if let Err(resp) = enforce::check_account(compiled_route.entry.account_state) {
+        return resp;
+    }
+
+    // 1b. Spend gate (PR5, decision D1): hoisted to the TOP — BEFORE the action
+    //     match — so `Block` 402s every action class uniformly (worker forward,
+    //     redirect, rewrite, AND static), not just the worker path. A Blocked
+    //     app must not serve static assets / redirects either: that egress is
+    //     billed work the platform eats. `Warn`/`Allow`/`Degrade` pass here;
+    //     Warn still only adds the `x-zs-spend-warn` header at the worker call
+    //     site, and Degrade is throttled by the degraded registries downstream.
+    //     Fail-closed: an unknown spend state maps to Block (see `check_spend`).
+    if let Err(resp) = enforce::check_spend(compiled_route.entry.spend_state) {
+        return resp;
+    }
+
     // Capture origin once for downstream CORS injection.
     let origin_value = req
         .headers()
@@ -780,6 +803,20 @@ async fn execute_resource_tree(
     };
 
     // 8. Execute the resolved action.
+    //
+    //    Metering coverage (#27): track whether THIS arm produced
+    //    gateway-originated egress — a body the worker never sees (static
+    //    asset, redirect, or the gateway's own error page for those arms).
+    //    Only such bodies are metered as `gateway_egress_bytes` in step 8b
+    //    below. The worker-proxy arms (`WorkerRpc`/`WorkerSsr`/`Rewrite`)
+    //    are NOT gateway-owned: the worker already counts its response body
+    //    as `egress_bytes`, so the gateway must never meter it (that would
+    //    double-bill the same byte — the one over-bill vector). The two
+    //    metrics are disjoint BY CONSTRUCTION (worker-body vs gateway-body).
+    let gateway_owned_egress = matches!(
+        policy.action,
+        ResolvedAction::Static { .. } | ResolvedAction::Redirect { .. }
+    );
     let mut response = match &policy.action {
         ResolvedAction::WorkerRpc | ResolvedAction::WorkerSsr => {
             // Subscription procedures need a WebSocket-aware proxy
@@ -853,11 +890,38 @@ async fn execute_resource_tree(
                 &req,
                 dispatch_path,
                 try_chain,
+                app_id,
                 wall_start,
             )
             .await
         }
     };
+
+    // 8b. Gateway egress metering (#27). For gateway-owned arms only, record
+    //     the served body length as `gateway_egress_bytes` against the
+    //     route's server-resolved `app_id` (never a client value).
+    //
+    //     Two recording points, by body shape:
+    //       * Buffered static (`Bytes`), redirect, and the static arm's own
+    //         error bodies (404/503) — `BodySize::Sized(n)` is the FULLY
+    //         delivered length, so a one-shot record here is exact.
+    //       * Streamed static (`SizedStream`) — the served length is only
+    //         INTENDED up front; a client disconnect delivers fewer bytes.
+    //         The streamed drain in `static_serve`/`streaming` therefore meters
+    //         DELIVERED bytes itself (incremental accrual + a final delta on
+    //         completion/disconnect) and stamps `EGRESS_METERED_HEADER`;
+    //         `record_gateway_egress` sees the marker and skips the up-front
+    //         size so a stream is never double-counted (finding #2).
+    //
+    //     The bump is cheap — `Meter::increment` takes an `RwLock` read plus a
+    //     per-app `Mutex` for the custom metric (uncontended, no await, no
+    //     blocking I/O); the flush to control runs in a detached task, so the
+    //     proxy hot path is not slowed (the worker arms skip this entirely).
+    //     This is disjoint from the worker's `egress_bytes` by construction;
+    //     the gateway NEVER touches `egress_bytes`.
+    if gateway_owned_egress {
+        record_gateway_egress(&state, app_id, &mut response);
+    }
 
     // 9. Idempotency capture — store the worker's response under the
     //    dedupe key when we held the in-flight lock through dispatch.
@@ -875,6 +939,50 @@ async fn execute_resource_tree(
     }
 
     response
+}
+
+/// Record a gateway-originated response's body length as
+/// `gateway_egress_bytes` for `app_id` (metering coverage #27).
+///
+/// Called ONLY for gateway-owned arms (static asset / redirect / the
+/// gateway error page those arms emit) — bodies the worker never sees. The
+/// worker owns `egress_bytes` for its proxied response bodies, so this
+/// function (and the gateway in general) NEVER touches `egress_bytes`: the
+/// two metrics are disjoint by construction and can never count the same
+/// byte. `app_id` is the route's server-resolved id (never a client value).
+///
+/// Records the FULLY-delivered body size for buffered bodies (`Bytes` static,
+/// redirect, the static arm's 404/503 error bodies) — `BodySize::Sized(n)` is
+/// the exact delivered length there. The streamed-static (`SizedStream`) path
+/// instead meters DELIVERED bytes inside its own drain (a disconnect bills
+/// only what was written, not the intended size — finding #2) and stamps
+/// `EGRESS_METERED_HEADER`; we detect that marker, strip it, and skip the
+/// up-front size so a stream is never double-counted.
+///
+/// The increment is a cheap counter bump (an `RwLock` read + a per-app
+/// `Mutex` for the custom metric — uncontended, not literally lock-free); the
+/// flush to control runs in a detached background task, so this adds no
+/// latency to the response path.
+fn record_gateway_egress(state: &GateState, app_id: &Uuid, response: &mut HttpResponse) {
+    use ntex::http::body::{BodySize, MessageBody};
+    // A streamed-static response self-meters delivered bytes in its drain.
+    // Strip the internal marker and skip the size record (no double-count).
+    if response
+        .headers()
+        .contains_key(super::static_serve::EGRESS_METERED_HEADER)
+    {
+        response
+            .headers_mut()
+            .remove(super::static_serve::EGRESS_METERED_HEADER);
+        return;
+    }
+    if let BodySize::Sized(n) = response.body().size() {
+        if n > 0 {
+            state
+                .meter
+                .increment(&app_id.to_string(), "gateway_egress_bytes", n);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1193,6 +1301,11 @@ async fn handle_subscription_dispatch(
     _tail: &str,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
+    // Spend gate (PR5): the `Block` 402 is enforced by `execute_resource_tree`
+    // (hoisted to the top, before the action match), so a Blocked subscription
+    // never reaches this stub. Degrade is throttled by the degraded registries
+    // below; Warn passes (no body header on the 501 stub path).
+
     // Rate limit + concurrency: subscriptions count against the same
     // accounting as unary dispatch. A subscription that's been open
     // for hours holds one slot; that's intentional — the operator
@@ -1316,6 +1429,14 @@ async fn handle_dispatch(
     user_header_value: Option<String>,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
+    // Spend gate (PR5, decision D1): the `Block` 402 is enforced by
+    // `execute_resource_tree` (hoisted to the top, before the action match) so
+    // it covers worker forward / redirect / rewrite / static uniformly — a
+    // Blocked app never reaches this worker-forwarding path. Here we only read
+    // the `Warn` flag to stamp the advisory `x-zs-spend-warn: 1` response
+    // header; Degrade is throttled by the degraded registries below.
+    let spend_warn = route.spend_state == zeroship_core::types::SpendState::Warn;
+
     // Rate limit
     if let Err(resp) = enforce::check_rate_limit(&state.rate_limiters, app_id) {
         return resp;
@@ -1396,6 +1517,14 @@ async fn handle_dispatch(
         ntex::http::header::HeaderName::from_static("x-request-id"),
         ntex::http::header::HeaderValue::from_str(&request_id.to_string()).unwrap(),
     );
+    // Spend Warn (~80%): served, but flag it so the SDK / dashboard can prompt
+    // the creator to raise their limit before Degrade/Block kicks in.
+    if spend_warn {
+        response.headers_mut().insert(
+            ntex::http::header::HeaderName::from_static("x-zs-spend-warn"),
+            ntex::http::header::HeaderValue::from_static("1"),
+        );
+    }
 
     response
 }
@@ -1928,6 +2057,7 @@ mod tests {
             session_verifier: None,
             anchor_enc_key: [0u8; 32],
             pairwise_salt: [0u8; 32],
+            meter: Arc::new(zeroship_metering::Meter::new()),
         })
     }
 
@@ -3231,5 +3361,718 @@ mod tests {
             html_escape(r#"<script>alert("x" & 'y')</script>"#),
             "&lt;script&gt;alert(&quot;x&quot; &amp; &#39;y&#39;)&lt;/script&gt;",
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // PR5 — faithful spend-enforcement at the gateway edge.
+    //
+    // These drive the REAL path: a `RouteEntry` (carrying the pulled
+    // `spend_state`) is pushed through the REAL `RouteCache::update` (which
+    // flips the degraded registries), then either the real `handle_dispatch`
+    // is invoked (402 gate) or the real `acquire_concurrency` is driven
+    // against the flipped registry (degrade tightening) — no shims.
+    // -----------------------------------------------------------------------
+
+    fn spend_route(spend_state: zeroship_core::types::SpendState) -> zeroship_core::types::RouteEntry {
+        zeroship_core::types::RouteEntry {
+            name: "spend-app.zeroship.localhost".to_string(),
+            plan_id: "free".to_string(),
+            api_key_hash: "h".to_string(),
+            deploy_hash: None,
+            manifest: zeroship_bundle::Manifest::passthrough(),
+            oauth_client_id: None,
+            sector_identifier: None,
+            spend_state,
+            account_state: zeroship_core::types::AccountState::Active,
+        }
+    }
+
+    /// A route whose manifest declares a public RPC query at wire-id `ping`,
+    /// so `/__zeroship/v1/ping` resolves to a `WorkerRpc` action through the
+    /// real `lookup_resource`. Used to drive the worker-dispatch path of the
+    /// hoisted spend gate via the public `handle_request` entry.
+    fn worker_spend_route(
+        spend_state: zeroship_core::types::SpendState,
+    ) -> zeroship_core::types::RouteEntry {
+        use zeroship_bundle::{ProcedureKind, ResourceEntry};
+        let mut resources = std::collections::HashMap::new();
+        resources.insert(
+            "rpc:ping".to_string(),
+            ResourceEntry {
+                kind: Some(ProcedureKind::Query),
+                auth: Some(zeroship_bundle::AuthLevel::Anon),
+                publicly_accessible: Some(true),
+                ..Default::default()
+            },
+        );
+        let manifest = zeroship_bundle::Manifest {
+            version: 1,
+            resources,
+            ..zeroship_bundle::Manifest::default()
+        };
+        zeroship_core::types::RouteEntry {
+            name: "spend-app.zeroship.localhost".to_string(),
+            plan_id: "free".to_string(),
+            api_key_hash: "h".to_string(),
+            deploy_hash: None,
+            manifest,
+            oauth_client_id: None,
+            sector_identifier: None,
+            spend_state,
+            account_state: zeroship_core::types::AccountState::Active,
+        }
+    }
+
+    /// A route whose manifest serves a publicly-accessible STATIC resource at
+    /// `/about`. Used to prove the spend gate covers the static-asset path
+    /// (#3): a Blocked app must 402 BEFORE serving static egress, not fall
+    /// through to the static server.
+    fn static_spend_route(
+        spend_state: zeroship_core::types::SpendState,
+    ) -> zeroship_core::types::RouteEntry {
+        use zeroship_bundle::{ResourceEntry, StaticAction};
+        let mut resources = std::collections::HashMap::new();
+        resources.insert(
+            "/about".to_string(),
+            ResourceEntry {
+                auth: Some(zeroship_bundle::AuthLevel::Anon),
+                publicly_accessible: Some(true),
+                r#static: Some(StaticAction {
+                    r#try: vec!["/about.html".into()],
+                }),
+                ..Default::default()
+            },
+        );
+        let manifest = zeroship_bundle::Manifest {
+            version: 1,
+            resources,
+            ..zeroship_bundle::Manifest::default()
+        };
+        zeroship_core::types::RouteEntry {
+            name: "static-spend-app.zeroship.localhost".to_string(),
+            plan_id: "free".to_string(),
+            api_key_hash: "h".to_string(),
+            deploy_hash: None,
+            manifest,
+            oauth_client_id: None,
+            sector_identifier: None,
+            spend_state,
+            account_state: zeroship_core::types::AccountState::Active,
+        }
+    }
+
+    /// Build an ntex `web::types::State<Arc<GateState>>` carrying `state` so a
+    /// test can invoke the REAL `handle_request` / `execute_resource_tree`
+    /// (their signatures take the extractor type, not `&Arc<GateState>`).
+    async fn web_state(state: Arc<GateState>) -> web::types::State<Arc<GateState>> {
+        use ntex::web::error::DefaultError;
+        use ntex::web::FromRequest;
+        let req = ntex::web::test::TestRequest::default()
+            .state(state)
+            .to_http_request();
+        let mut payload = ntex::http::Payload::None;
+        <web::types::State<Arc<GateState>> as FromRequest<DefaultError>>::from_request(
+            &req,
+            &mut payload,
+        )
+        .await
+        .expect("State extractor")
+    }
+
+    /// Block → 402 SPEND_LIMIT BEFORE any worker proxy. Fed via the REAL
+    /// `RouteCache::update` and driven through the REAL `handle_request` (the
+    /// public entry — the gate is hoisted into `execute_resource_tree`). The
+    /// stub hash-ring points at `0.0.0.0:0`; if the gate did NOT fire, the
+    /// proxy attempt would surface a 502 BadGateway — so a 402 proves the gate
+    /// short-circuited before the worker was ever contacted.
+    #[compio::test]
+    async fn over_limit_request_blocked_at_gateway() {
+        use zeroship_core::types::SpendState;
+        let state = build_idempotency_state();
+        let app_id = Uuid::new_v4();
+
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app_id, worker_spend_route(SpendState::Block));
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
+
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/__zeroship/v1/ping")
+            .header("host", "spend-app.zeroship.localhost")
+            .to_http_request();
+        let resp = handle_request(
+            req,
+            web_state(state.clone()).await,
+            "spend-app.zeroship.localhost",
+            "/__zeroship/v1/ping",
+            Bytes::new(),
+        )
+        .await;
+
+        assert_eq!(
+            resp.status(),
+            ntex::http::StatusCode::PAYMENT_REQUIRED,
+            "a Blocked app must 402 before any worker proxy",
+        );
+        let mut resp = resp;
+        let body = collect_body(resp.take_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("402 body is JSON");
+        assert_eq!(json["code"], "SPEND_LIMIT");
+    }
+
+    /// #3 (RED→GREEN): a Blocked app serving a STATIC resource must 402 BEFORE
+    /// any static egress. Pre-fix, the spend gate lived only in the worker
+    /// dispatch path, so `ResolvedAction::Static` fell straight through to the
+    /// static server (egress the platform eats). This drives the REAL
+    /// `handle_request` → `execute_resource_tree` → static action against a
+    /// Blocked route and asserts the 402/`SPEND_LIMIT` envelope fires first.
+    #[compio::test]
+    async fn over_limit_static_asset_blocked_at_gateway() {
+        use zeroship_core::types::SpendState;
+        let state = build_idempotency_state();
+        let app_id = Uuid::new_v4();
+
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app_id, static_spend_route(SpendState::Block));
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
+
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/about")
+            .header("host", "static-spend-app.zeroship.localhost")
+            .to_http_request();
+        let resp = handle_request(
+            req,
+            web_state(state.clone()).await,
+            "static-spend-app.zeroship.localhost",
+            "/about",
+            Bytes::new(),
+        )
+        .await;
+
+        assert_eq!(
+            resp.status(),
+            ntex::http::StatusCode::PAYMENT_REQUIRED,
+            "a Blocked app must 402 on a STATIC resource before serving egress",
+        );
+        let mut resp = resp;
+        let body = collect_body(resp.take_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("402 body is JSON");
+        assert_eq!(json["code"], "SPEND_LIMIT");
+    }
+
+    /// Allow → the gate passes on a static resource (so dispatch proceeds to the
+    /// static server, which 404s against the stub blob store — NOT 402). Pins
+    /// that the hoisted gate only fires on Block, so the static-Block 402 above
+    /// isn't a blanket reject of every static request.
+    #[compio::test]
+    async fn allowed_static_asset_passes_spend_gate() {
+        use zeroship_core::types::SpendState;
+        let state = build_idempotency_state();
+        let app_id = Uuid::new_v4();
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app_id, static_spend_route(SpendState::Allow));
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/about")
+            .header("host", "static-spend-app.zeroship.localhost")
+            .to_http_request();
+        let resp = handle_request(
+            req,
+            web_state(state.clone()).await,
+            "static-spend-app.zeroship.localhost",
+            "/about",
+            Bytes::new(),
+        )
+        .await;
+        assert_ne!(
+            resp.status(),
+            ntex::http::StatusCode::PAYMENT_REQUIRED,
+            "an Allowed app must NOT be spend-blocked on a static resource",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Metering coverage (#27) — gateway egress + the no-double-count partition
+    // -----------------------------------------------------------------------
+
+    /// THE load-bearing regression (§2.4): the egress ownership partition.
+    ///
+    /// A gateway-owned response (here a STATIC action whose blob 404s — the
+    /// gateway's own error body, a body the worker never sees) must record
+    /// `gateway_egress_bytes` for the route's app and must NOT touch
+    /// `egress_bytes` (which the WORKER owns). This drives the REAL
+    /// `handle_request` → `execute_resource_tree` → static arm against the
+    /// SAME `Arc<Meter>` in `GateState`, then drains it.
+    ///
+    /// RED pre-fix: the gateway had no meter and recorded nothing, so
+    /// `gateway_egress_bytes` is absent. GREEN post-fix: the static arm
+    /// records the served body length, and `egress_bytes` stays untouched.
+    #[compio::test]
+    async fn static_response_meters_gateway_egress_not_worker_egress() {
+        use zeroship_core::types::SpendState;
+        let state = build_idempotency_state();
+        let meter = Arc::clone(&state.meter);
+        let app_id = Uuid::new_v4();
+
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app_id, static_spend_route(SpendState::Allow));
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
+
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/about")
+            .header("host", "static-spend-app.zeroship.localhost")
+            .to_http_request();
+        let mut resp = handle_request(
+            req,
+            web_state(state.clone()).await,
+            "static-spend-app.zeroship.localhost",
+            "/about",
+            Bytes::new(),
+        )
+        .await;
+        // The stub blob store has no bytes, so the static arm emits a 404
+        // JSON error body — gateway-owned egress all the same.
+        let served = collect_body(resp.take_body()).await;
+        assert!(!served.is_empty(), "the gateway-owned 404 body is non-empty");
+
+        let snap = meter.drain();
+        let usage = snap
+            .get(&app_id)
+            .expect("gateway recorded usage for the static route's app");
+        assert_eq!(
+            usage.custom.get("gateway_egress_bytes").copied(),
+            Some(served.len() as u64),
+            "static (gateway-owned) egress must be metered as gateway_egress_bytes \
+             equal to the served body length",
+        );
+        assert_eq!(
+            usage.egress_bytes, 0,
+            "the gateway must NEVER touch the worker-owned egress_bytes metric",
+        );
+    }
+
+    /// The other half of the partition: a WORKER-proxied action must NOT
+    /// record `gateway_egress_bytes` — the worker already counts its body as
+    /// `egress_bytes`, and metering it here too would double-bill the same
+    /// byte (the one over-bill vector). The proxy 502s against the stub
+    /// hash-ring (no reachable worker), which is exactly the worker-arm path;
+    /// the gateway must still record NO gateway_egress_bytes for it.
+    ///
+    /// RED if someone later meters the worker-proxy body in the gateway.
+    #[compio::test]
+    async fn gateway_does_not_meter_worker_proxy_body() {
+        use zeroship_core::types::SpendState;
+        let state = build_idempotency_state();
+        let meter = Arc::clone(&state.meter);
+        let app_id = Uuid::new_v4();
+
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app_id, worker_spend_route(SpendState::Allow));
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
+
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/__zeroship/v1/ping")
+            .header("host", "spend-app.zeroship.localhost")
+            .to_http_request();
+        let _resp = handle_request(
+            req,
+            web_state(state.clone()).await,
+            "spend-app.zeroship.localhost",
+            "/__zeroship/v1/ping",
+            Bytes::new(),
+        )
+        .await;
+
+        let snap = meter.drain();
+        // Either the app has no entry at all, or it has one but with NO
+        // gateway_egress_bytes — the gateway must not meter the worker arm.
+        if let Some(usage) = snap.get(&app_id) {
+            assert_eq!(
+                usage.custom.get("gateway_egress_bytes").copied(),
+                None,
+                "the gateway must NOT meter a worker-proxied response body as \
+                 gateway_egress_bytes (no double-count vs the worker's egress_bytes)",
+            );
+        }
+    }
+
+    /// A worker RPC route that caps input at `max` bytes, so a body over the
+    /// cap trips the gateway's 413 early-return arm in `execute_resource_tree`
+    /// (a gateway-edge error envelope) BEFORE any worker proxy. Used to pin
+    /// finding #1: gateway error/4xx envelopes are platform overhead and are
+    /// deliberately NOT metered as `gateway_egress_bytes`.
+    fn max_input_route(max: u32) -> zeroship_core::types::RouteEntry {
+        use zeroship_bundle::{ProcedureKind, ResourceEntry};
+        let mut resources = std::collections::HashMap::new();
+        resources.insert(
+            "rpc:ping".to_string(),
+            ResourceEntry {
+                kind: Some(ProcedureKind::Mutation),
+                auth: Some(zeroship_bundle::AuthLevel::Anon),
+                publicly_accessible: Some(true),
+                max_input_bytes: Some(max),
+                ..Default::default()
+            },
+        );
+        let manifest = zeroship_bundle::Manifest {
+            version: 1,
+            resources,
+            ..zeroship_bundle::Manifest::default()
+        };
+        zeroship_core::types::RouteEntry {
+            name: "spend-app.zeroship.localhost".to_string(),
+            plan_id: "free".to_string(),
+            api_key_hash: "h".to_string(),
+            deploy_hash: None,
+            manifest,
+            oauth_client_id: None,
+            sector_identifier: None,
+            spend_state: zeroship_core::types::SpendState::Allow,
+            account_state: zeroship_core::types::AccountState::Active,
+        }
+    }
+
+    /// FINDING #1 (pinning): a gateway-EMITTED error envelope (here a 413 from
+    /// the `max_input_bytes` early-return arm — a body the worker never sees)
+    /// is PLATFORM OVERHEAD and must NOT emit `gateway_egress_bytes`. The
+    /// gateway only bills successful static + redirect bodies; error/4xx/5xx/204
+    /// envelopes (tiny, frequently attacker-driven) are deliberately unbilled.
+    ///
+    /// Drives the REAL `handle_request` → `execute_resource_tree` 413 arm with
+    /// a body over the declared cap, then drains the SAME `Arc<Meter>` and
+    /// asserts the gateway recorded NO usage at all for the route's app. Locks
+    /// the code↔design agreement so a future change that meters error arms
+    /// fails here.
+    #[compio::test]
+    async fn gateway_error_envelope_is_not_metered() {
+        let state = build_idempotency_state();
+        let meter = Arc::clone(&state.meter);
+        let app_id = Uuid::new_v4();
+
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app_id, max_input_route(8));
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
+
+        // A body over the 8-byte cap → 413 PayloadTooLarge from the gateway
+        // edge, before any worker proxy.
+        let oversized = Bytes::from_static(b"this body is well over eight bytes");
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/__zeroship/v1/ping")
+            .header("host", "spend-app.zeroship.localhost")
+            .header("origin", "https://spend-app.zeroship.localhost")
+            .method(ntex::http::Method::POST)
+            .to_http_request();
+        let mut resp = handle_request(
+            req,
+            web_state(state.clone()).await,
+            "spend-app.zeroship.localhost",
+            "/__zeroship/v1/ping",
+            oversized,
+        )
+        .await;
+
+        assert_eq!(
+            resp.status(),
+            ntex::http::StatusCode::PAYLOAD_TOO_LARGE,
+            "an over-cap body must 413 at the gateway edge",
+        );
+        // The 413 body is non-empty (a JSON error envelope) — proving the
+        // assertion below is about the DELIBERATE no-meter decision, not an
+        // empty body.
+        let body = collect_body(resp.take_body()).await;
+        assert!(!body.is_empty(), "the 413 envelope is a non-empty JSON body");
+
+        let snap = meter.drain();
+        // The gateway must record NOTHING for an error envelope: no
+        // gateway_egress_bytes, and (the gateway never owns it) no egress_bytes.
+        if let Some(usage) = snap.get(&app_id) {
+            assert_eq!(
+                usage.custom.get("gateway_egress_bytes").copied(),
+                None,
+                "a gateway error/4xx envelope is platform overhead and must NOT \
+                 be metered as gateway_egress_bytes",
+            );
+            assert_eq!(usage.egress_bytes, 0, "the gateway never touches egress_bytes");
+        }
+    }
+
+    /// Restart-safety (§2.3 / the boot-nonce lesson): two
+    /// `boot_worker_id("gate-…")` calls for the SAME stable base must differ,
+    /// so the gateway's per-process `SequenceSource` resetting to 1 each boot
+    /// can't collide with pre-restart `(producer_id, sequence)` rows and be
+    /// dropped as a phantom duplicate (silent under-bill).
+    #[test]
+    fn gateway_producer_id_is_restart_unique() {
+        let base = "gate-pod-3";
+        let a = zeroship_metering::boot_worker_id(base);
+        let b = zeroship_metering::boot_worker_id(base);
+        assert_ne!(a, b, "each gateway boot must get a fresh metering identity");
+        assert!(a.starts_with(&format!("{base}-")));
+        assert!(b.starts_with(&format!("{base}-")));
+    }
+
+    /// Allow → the gate passes (so dispatch proceeds to the proxy, which fails
+    /// against the stub ring → 502, NOT 402). Pins that the gate only fires on
+    /// Block, so the Block 402 above isn't a blanket reject.
+    #[compio::test]
+    async fn allowed_request_passes_spend_gate() {
+        use zeroship_core::types::SpendState;
+        let state = build_idempotency_state();
+        let app_id = Uuid::new_v4();
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app_id, worker_spend_route(SpendState::Allow));
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/__zeroship/v1/ping")
+            .header("host", "spend-app.zeroship.localhost")
+            .to_http_request();
+        let resp = handle_request(
+            req,
+            web_state(state.clone()).await,
+            "spend-app.zeroship.localhost",
+            "/__zeroship/v1/ping",
+            Bytes::new(),
+        )
+        .await;
+        assert_ne!(
+            resp.status(),
+            ntex::http::StatusCode::PAYMENT_REQUIRED,
+            "an Allowed app must NOT be spend-blocked",
+        );
+    }
+
+    /// Degrade flipped via the REAL `RouteCache::update` tightens the app's
+    /// effective concurrency ceiling. With a global limit of DEGRADE_FACTOR and
+    /// DEGRADE_FACTOR=8 the effective ceiling becomes 1, so the FIRST acquire
+    /// succeeds and the SECOND is rejected — proving `set_degraded` is not a
+    /// no-op. A non-degraded control app at the same limit admits both.
+    #[compio::test]
+    async fn degraded_route_tightens_concurrency() {
+        use crate::enforce::{acquire_concurrency, ConcurrencyRegistry, RateLimitRegistry, DEGRADE_FACTOR};
+        use zeroship_core::types::SpendState;
+
+        let cache = crate::sync::RouteCache::new();
+        let rate = RateLimitRegistry::new(1000, 2000);
+        let concurrency = ConcurrencyRegistry::new(DEGRADE_FACTOR);
+
+        let degraded_app = Uuid::new_v4();
+        let normal_app = Uuid::new_v4();
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        let mut degraded = spend_route(SpendState::Degrade);
+        degraded.name = "degraded.zeroship.localhost".into();
+        let mut normal = spend_route(SpendState::Allow);
+        normal.name = "normal.zeroship.localhost".into();
+        routes.insert(degraded_app, degraded);
+        routes.insert(normal_app, normal);
+
+        cache.update(routes, &rate, &concurrency);
+        assert!(concurrency.is_degraded(&degraded_app));
+        assert!(!concurrency.is_degraded(&normal_app));
+
+        let g1 = acquire_concurrency(&concurrency, &degraded_app).expect("first admits");
+        let r2 = acquire_concurrency(&concurrency, &degraded_app);
+        assert!(r2.is_err(), "degraded app's 2nd concurrent request must be rejected");
+        if let Err(resp) = r2 {
+            assert_eq!(resp.status(), ntex::http::StatusCode::TOO_MANY_REQUESTS);
+        }
+        drop(g1);
+
+        let _n1 = acquire_concurrency(&concurrency, &normal_app).expect("normal 1");
+        let _n2 = acquire_concurrency(&concurrency, &normal_app).expect("normal 2");
+    }
+
+    /// Degrade → Allow flipped via the REAL `RouteCache::update` restores full
+    /// throughput on the NEXT request with no warm-up — the gauge was never
+    /// rebuilt. Proves recovery is instant.
+    #[compio::test]
+    async fn degrade_clears_immediately_on_recovery() {
+        use crate::enforce::{acquire_concurrency, ConcurrencyRegistry, RateLimitRegistry, DEGRADE_FACTOR};
+        use zeroship_core::types::SpendState;
+
+        let cache = crate::sync::RouteCache::new();
+        let rate = RateLimitRegistry::new(1000, 2000);
+        let concurrency = ConcurrencyRegistry::new(DEGRADE_FACTOR);
+        let app = Uuid::new_v4();
+
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app, spend_route(SpendState::Degrade));
+        cache.update(routes, &rate, &concurrency);
+        assert!(concurrency.is_degraded(&app));
+        let g1 = acquire_concurrency(&concurrency, &app).expect("first admits");
+        assert!(
+            acquire_concurrency(&concurrency, &app).is_err(),
+            "degraded ceiling is 1",
+        );
+        drop(g1);
+
+        let mut routes2: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes2.insert(app, spend_route(SpendState::Allow));
+        cache.update(routes2, &rate, &concurrency);
+        assert!(!concurrency.is_degraded(&app));
+        let mut guards = Vec::new();
+        for i in 0..DEGRADE_FACTOR {
+            guards.push(
+                acquire_concurrency(&concurrency, &app)
+                    .unwrap_or_else(|_| panic!("recovered app admits request {i}")),
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // G2 — faithful account-suspension enforcement at the gateway edge.
+    //
+    // Drives the REAL path: a `RouteEntry` carrying the pulled `account_state`
+    // (and `spend_state`) is pushed through the REAL `RouteCache::update`, then
+    // the public `handle_request` is invoked. The stub hash-ring points at
+    // `0.0.0.0:0`, so a request that PASSES the gates surfaces a 502 (worker
+    // unreachable); a 402 therefore proves the gate short-circuited BEFORE any
+    // worker proxy. The account gate composes with spend as an AND.
+    // -----------------------------------------------------------------------
+
+    /// A worker route (public RPC query at `ping`) with explicit account + spend
+    /// state — exercises the hoisted G2 account gate AND its composition with
+    /// the spend gate through the real dispatch path.
+    fn account_worker_route(
+        account_state: zeroship_core::types::AccountState,
+        spend_state: zeroship_core::types::SpendState,
+    ) -> zeroship_core::types::RouteEntry {
+        let mut entry = worker_spend_route(spend_state);
+        entry.account_state = account_state;
+        entry
+    }
+
+    async fn drive_ping(state: Arc<GateState>) -> HttpResponse {
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/__zeroship/v1/ping")
+            .header("host", "spend-app.zeroship.localhost")
+            .to_http_request();
+        handle_request(
+            req,
+            web_state(state).await,
+            "spend-app.zeroship.localhost",
+            "/__zeroship/v1/ping",
+            Bytes::new(),
+        )
+        .await
+    }
+
+    async fn assert_402_code(mut resp: HttpResponse, code: &str) {
+        assert_eq!(
+            resp.status(),
+            ntex::http::StatusCode::PAYMENT_REQUIRED,
+            "expected a 402 with code {code}",
+        );
+        let body = collect_body(resp.take_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("402 body is JSON");
+        assert_eq!(json["code"], code, "402 envelope code");
+    }
+
+    /// A `Suspended` creator's app → 402 `ACCOUNT_SUSPENDED` BEFORE any worker
+    /// proxy. Fed via the REAL `RouteCache::update`, driven through the REAL
+    /// `handle_request`. Spend is `Allow`, so the ONLY thing that can 402 is the
+    /// account gate — proving suspension enforces independently of spend.
+    #[compio::test]
+    async fn suspended_account_blocked_at_gateway() {
+        use zeroship_core::types::{AccountState, SpendState};
+        let state = build_idempotency_state();
+        let app_id = Uuid::new_v4();
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app_id, account_worker_route(AccountState::Suspended, SpendState::Allow));
+        state.routes.update(routes, &state.rate_limiters, &state.concurrency);
+
+        assert_402_code(drive_ping(state.clone()).await, "ACCOUNT_SUSPENDED").await;
+    }
+
+    /// A `PastDue` creator's app is NOT blocked (the grace window). With spend
+    /// `Allow`, the request passes both gates and reaches the proxy (→ 502 vs the
+    /// stub ring, NOT 402). Proves past_due is the WARNING state, not a block.
+    #[compio::test]
+    async fn past_due_account_not_blocked_at_gateway() {
+        use zeroship_core::types::{AccountState, SpendState};
+        let state = build_idempotency_state();
+        let app_id = Uuid::new_v4();
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app_id, account_worker_route(AccountState::PastDue, SpendState::Allow));
+        state.routes.update(routes, &state.rate_limiters, &state.concurrency);
+
+        let resp = drive_ping(state.clone()).await;
+        assert_ne!(
+            resp.status(),
+            ntex::http::StatusCode::PAYMENT_REQUIRED,
+            "a past_due (grace) app must NOT be account-blocked",
+        );
+    }
+
+    /// An `Active` creator with `Allow` spend passes the account gate (→ proxy →
+    /// 502, NOT 402). Pins that the account gate only fires on Suspended.
+    #[compio::test]
+    async fn active_account_passes_gate() {
+        use zeroship_core::types::{AccountState, SpendState};
+        let state = build_idempotency_state();
+        let app_id = Uuid::new_v4();
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app_id, account_worker_route(AccountState::Active, SpendState::Allow));
+        state.routes.update(routes, &state.rate_limiters, &state.concurrency);
+
+        let resp = drive_ping(state.clone()).await;
+        assert_ne!(
+            resp.status(),
+            ntex::http::StatusCode::PAYMENT_REQUIRED,
+            "an active app with Allow spend must not be 402'd",
+        );
+    }
+
+    /// The two gates compose as an AND with DISTINCT codes:
+    ///   * Suspended + Allow spend → 402 ACCOUNT_SUSPENDED (account beats spend).
+    ///   * Active + Block spend     → 402 SPEND_LIMIT (spend fires when account ok).
+    ///   * Suspended + Block spend  → 402 ACCOUNT_SUSPENDED (account is the OUTER
+    ///     gate, evaluated first).
+    #[compio::test]
+    async fn account_and_spend_gates_compose() {
+        use zeroship_core::types::{AccountState, SpendState};
+
+        // Suspended beats Allow spend.
+        {
+            let state = build_idempotency_state();
+            let app_id = Uuid::new_v4();
+            let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+            routes.insert(app_id, account_worker_route(AccountState::Suspended, SpendState::Allow));
+            state.routes.update(routes, &state.rate_limiters, &state.concurrency);
+            assert_402_code(drive_ping(state.clone()).await, "ACCOUNT_SUSPENDED").await;
+        }
+
+        // Active account, Block spend → spend gate fires.
+        {
+            let state = build_idempotency_state();
+            let app_id = Uuid::new_v4();
+            let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+            routes.insert(app_id, account_worker_route(AccountState::Active, SpendState::Block));
+            state.routes.update(routes, &state.rate_limiters, &state.concurrency);
+            assert_402_code(drive_ping(state.clone()).await, "SPEND_LIMIT").await;
+        }
+
+        // Suspended account AND Block spend → the OUTER account gate wins (it is
+        // evaluated first), so the code is ACCOUNT_SUSPENDED, not SPEND_LIMIT.
+        {
+            let state = build_idempotency_state();
+            let app_id = Uuid::new_v4();
+            let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+            routes.insert(app_id, account_worker_route(AccountState::Suspended, SpendState::Block));
+            state.routes.update(routes, &state.rate_limiters, &state.concurrency);
+            assert_402_code(drive_ping(state.clone()).await, "ACCOUNT_SUSPENDED").await;
+        }
     }
 }

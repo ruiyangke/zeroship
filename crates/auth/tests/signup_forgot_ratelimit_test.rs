@@ -12,8 +12,8 @@ use ntex::web::{self, test};
 use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
-use zeroship_auth::mailer::{Email, Mailer, MailerError, MessageId};
 use zeroship_auth::store::{users};
+use zeroship_mailer::{Email, Mailer, MailerError, MessageId};
 
 #[derive(Debug, Default)]
 struct CountingMailer {

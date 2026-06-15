@@ -449,6 +449,7 @@ fn build_handler_state(db: DbConfig, auth_base: &str) -> Arc<GateState> {
         session_verifier: None::<Arc<zeroship_gateway::session_token::Verifier>>,
         anchor_enc_key: [0u8; 32],
             pairwise_salt: [0u8; 32],
+        meter: Arc::new(zeroship_metering::Meter::new()),
     })
 }
 
@@ -667,9 +668,11 @@ fn build_handler_state_with_route(
             manifest: zeroship_bundle::Manifest::passthrough(),
             oauth_client_id: Some(oauth_client_id.to_string()),
             sector_identifier: Some(sector.to_string()),
+            spend_state: zeroship_core::types::SpendState::Allow,
+            account_state: zeroship_core::types::AccountState::Active,
         },
     );
-    state.routes.update(map);
+    state.routes.update(map, &state.rate_limiters, &state.concurrency);
     // `build_handler_state` hard-codes an all-zero salt; rebuild with ours.
     // GateState is in an Arc with refcount 1 here, so get_mut succeeds.
     let mut state = state;

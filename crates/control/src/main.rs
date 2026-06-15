@@ -7,9 +7,8 @@ use std::sync::Arc;
 use clap::Parser;
 use ntex::web;
 use zeroship_core::config::{
-    bootstrap_or_exit, env_is_truthy, is_loopback_url, parse_bool_flag, require_unless_dev,
-    resolve_overlay_string, validate_master_key_material, CheckConfigReport, CheckFormat,
-    CheckValue,
+    bootstrap_or_exit, env_is_truthy, is_loopback_url, parse_bool_flag, resolve_overlay_string,
+    validate_master_key_material, CheckConfigReport, CheckFormat, CheckValue,
 };
 use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
 use zeroship_control::{
@@ -77,6 +76,139 @@ struct ControlCli {
         hide_env_values = true
     )]
     stripe_webhook_secret: String,
+
+    /// Stripe secret API key (`sk_…`) for OUTBOUND calls (the billing
+    /// reconciler + `billing/setup`). Required in prod; empty allowed only
+    /// under `--dev-insecure`.
+    #[arg(
+        long = "stripe-secret-key",
+        env = "STRIPE_SECRET_KEY",
+        default_value = "",
+        hide_env_values = true
+    )]
+    stripe_secret_key: String,
+
+    /// Stripe REST API base URL the outbound client targets. Defaults to
+    /// `https://api.stripe.com`; override only for testing against a mock.
+    #[arg(
+        long = "stripe-base-url",
+        env = "STRIPE_BASE_URL",
+        default_value = "https://api.stripe.com"
+    )]
+    stripe_base_url: String,
+
+    /// Metering/billing provider backend (M6). `native` (default) runs the
+    /// control-side aggregation → CU×FX → Stripe reconciler. `stripe` (Stripe
+    /// Billing Meters — CU → meter_events, Stripe self-invoices) and `openmeter`
+    /// (CU → CloudEvents, export-only — OpenMeter aggregates, invoicing stays
+    /// Native) are export backends; each refuses to boot without its creds.
+    #[arg(
+        long = "metering-provider",
+        env = "METERING_PROVIDER",
+        default_value = "native"
+    )]
+    metering_provider: String,
+
+    /// Tax provider backend (billing-ops gap #26, PR-5). `native` (default)
+    /// computes `0` — the USD launch owes no tax. The seam exists so enabling a
+    /// real `StripeTaxProvider` (Stripe `automatic_tax`) later is a provider swap,
+    /// not a schema change (`invoices.tax_cents` already exists).
+    #[arg(long = "tax-provider", env = "TAX_PROVIDER", default_value = "native")]
+    tax_provider: String,
+
+    /// Mailer driver for billing notifications (billing-ops gap #26, PR-6).
+    /// `stdout` (default, dev) | `smtp` | `resend`. The `resend` driver honours
+    /// the per-message `Idempotency-Key` the notifier passes, making a re-driven
+    /// notification an effective no-op at the provider (MAJOR-A). `smtp`/`stdout`
+    /// do not dedup (documented). SMTP creds via `CONTROL_SMTP_*`; Resend key via
+    /// `CONTROL_RESEND_API_KEY`.
+    #[arg(long = "mailer", env = "CONTROL_MAILER", default_value = "stdout")]
+    mailer: String,
+
+    /// SMTP host — required when `--mailer=smtp`.
+    #[arg(long = "smtp-host", env = "CONTROL_SMTP_HOST")]
+    smtp_host: Option<String>,
+    /// SMTP port (default 587, STARTTLS).
+    #[arg(long = "smtp-port", env = "CONTROL_SMTP_PORT", default_value_t = 587)]
+    smtp_port: u16,
+    /// SMTP username (optional; unauthenticated relay if unset).
+    #[arg(long = "smtp-username", env = "CONTROL_SMTP_USERNAME")]
+    smtp_username: Option<String>,
+    /// SMTP password (optional).
+    #[arg(long = "smtp-password", env = "CONTROL_SMTP_PASSWORD")]
+    smtp_password: Option<String>,
+    /// Resend API key — required when `--mailer=resend`.
+    #[arg(long = "resend-api-key", env = "CONTROL_RESEND_API_KEY")]
+    resend_api_key: Option<String>,
+
+    /// Stripe **Billing Meter** event name (M-Stripe). REQUIRED when
+    /// `--metering-provider stripe` (else the deployment refuses to boot — a
+    /// Stripe-Meters deployment with no meter is a silent revenue black hole).
+    /// This is the operator-provisioned Meter's configured `event_name` (e.g.
+    /// `compute_units`); the export cron pushes CU as `meter_events` against it.
+    #[arg(
+        long = "stripe-meter-event-name",
+        env = "STRIPE_METER_EVENT_NAME",
+        default_value = ""
+    )]
+    stripe_meter_event_name: String,
+
+    /// Stripe **Billing Meter id** (`mtr_…`) (M-Stripe). REQUIRED when
+    /// `--metering-provider stripe`. The export cron reads the meter's
+    /// AGGREGATED value for `(customer, period)` via this id to reconcile a
+    /// crash-then-re-drive push past Stripe's ~24h `identifier` dedup window
+    /// (C2) — without it a >24h re-drive could double-bill, so the deployment
+    /// refuses to boot.
+    #[arg(
+        long = "stripe-meter-id",
+        env = "STRIPE_METER_ID",
+        default_value = ""
+    )]
+    stripe_meter_id: String,
+
+    /// OpenMeter base URL (M-OpenMeter). REQUIRED when `--metering-provider
+    /// openmeter` (else the deployment refuses to boot — an OpenMeter deployment
+    /// with no endpoint would push CU nowhere). `https://openmeter.cloud` or a
+    /// self-hosted deployment. The export cron POSTs CloudEvents to
+    /// `{url}/api/v1/events`.
+    #[arg(
+        long = "openmeter-url",
+        env = "OPENMETER_URL",
+        default_value = ""
+    )]
+    openmeter_url: String,
+
+    /// OpenMeter API token (Bearer) (M-OpenMeter). REQUIRED when
+    /// `--metering-provider openmeter`. Never logged.
+    #[arg(
+        long = "openmeter-token",
+        env = "OPENMETER_TOKEN",
+        default_value = "",
+        hide_env_values = true
+    )]
+    openmeter_token: String,
+
+    /// OpenMeter CloudEvent `type` = the operator-provisioned meter's `eventType`
+    /// (M-OpenMeter, e.g. `compute_units`). The export cron pushes CU as
+    /// CloudEvents of this `type`.
+    #[arg(
+        long = "openmeter-event-type",
+        env = "OPENMETER_EVENT_TYPE",
+        default_value = "compute_units"
+    )]
+    openmeter_event_type: String,
+
+    /// OpenMeter meter **slug** (M-OpenMeter). REQUIRED when
+    /// `--metering-provider openmeter`. The export cron reads the meter's
+    /// AGGREGATED value for `(subject, period)` via this slug to reconcile a
+    /// crash-then-re-drive push past OpenMeter's dedup window (C2) — without it a
+    /// >24h re-drive could double-count, so the deployment refuses to boot.
+    #[arg(
+        long = "openmeter-meter-slug",
+        env = "OPENMETER_METER_SLUG",
+        default_value = ""
+    )]
+    openmeter_meter_slug: String,
 
     /// Comma-separated previous master keys accepted during key rotation.
     #[arg(
@@ -307,6 +439,40 @@ impl std::fmt::Debug for ControlCli {
 ///
 /// A configured-but-unreadable file is fatal — a misconfigured prod salt must
 /// fail loudly, not silently fall through to the dev default.
+/// Build the billing-notification mailer from `--mailer` (default stdout), mirroring
+/// auth's `build_mailer`. Returns a `String` error (consumed at the boot call site,
+/// which logs + exits) when a selected driver's required creds are missing.
+fn build_billing_mailer(cli: &ControlCli) -> Result<Arc<dyn zeroship_mailer::Mailer>, String> {
+    use zeroship_mailer::{
+        ResendConfig, ResendMailer, SmtpConfig, SmtpMailer, SmtpTls, StdoutMailer,
+    };
+    match cli.mailer.as_str() {
+        "stdout" => Ok(Arc::new(StdoutMailer)),
+        "smtp" => {
+            let host = cli
+                .smtp_host
+                .clone()
+                .ok_or_else(|| "CONTROL_SMTP_HOST is required when --mailer=smtp".to_string())?;
+            let driver = SmtpMailer::new(&SmtpConfig {
+                host,
+                port: cli.smtp_port,
+                username: cli.smtp_username.clone(),
+                password: cli.smtp_password.clone(),
+                tls: SmtpTls::Starttls,
+            })
+            .map_err(|e| format!("smtp mailer: {e}"))?;
+            Ok(Arc::new(driver))
+        }
+        "resend" => {
+            let api_key = cli.resend_api_key.clone().ok_or_else(|| {
+                "CONTROL_RESEND_API_KEY is required when --mailer=resend".to_string()
+            })?;
+            Ok(Arc::new(ResendMailer::new(ResendConfig { api_key })))
+        }
+        other => Err(format!("unknown mailer: {other:?}; use stdout|smtp|resend")),
+    }
+}
+
 fn resolve_pairwise_salt(
     salt_file: &str,
     salt_value: &str,
@@ -331,6 +497,16 @@ fn resolve_pairwise_salt(
 
 fn main() -> std::io::Result<()> {
     let cli = ControlCli::parse();
+    // Billing notifier mailer (PR-6): built from the --mailer flag up front, before any
+    // `cli` field is moved out below. An unknown driver / missing creds refuses to boot.
+    let billing_mailer: Arc<dyn zeroship_mailer::Mailer> = match build_billing_mailer(&cli) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!(error = %e, "control: refusing to start — billing mailer not available");
+            std::process::exit(1);
+        }
+    };
+    let mailer_kind = cli.mailer.clone();
     let boot = bootstrap_or_exit(
         cli.config_path.as_deref(),
         !cli.no_config,
@@ -444,6 +620,13 @@ fn main() -> std::io::Result<()> {
         file_secrets.stripe_webhook_secret.as_deref(),
         cli.check_config,
     );
+    let stripe_secret_key = zeroship_core::config::obtain_secret(
+        "STRIPE_SECRET_KEY / --stripe-secret-key",
+        &cli.stripe_secret_key,
+        file_secrets.stripe_secret_key.as_deref(),
+        cli.check_config,
+    );
+    let stripe_base_url = cli.stripe_base_url.clone();
     // Comma-separated list of previous master keys, tried as fallbacks on decrypt
     // failure during a rotation grace period. A CLI/env value is a comma-list where
     // EACH entry may be a literal or its own secret reference (resolved per entry); an
@@ -597,6 +780,73 @@ fn main() -> std::io::Result<()> {
                 "control: stripe_webhook_secret unset — /internal/webhooks/stripe will reject every request. \
                  Set --stripe-webhook-secret if you need Stripe integration."
             );
+        }
+        // The OUTBOUND Stripe secret key (sk_…) is REQUIRED in prod: the billing
+        // reconciler and `billing/setup` cannot bill without it, and silently
+        // running with an empty key would drop revenue on the floor. Empty is
+        // allowed ONLY under --dev-insecure (this block is the prod path). Skip
+        // when --check-config still holds a raw secret reference.
+        if stripe_secret_key.is_empty()
+            && (!cli.check_config || !zeroship_core::config::is_secret_ref(&stripe_secret_key))
+        {
+            tracing::error!(
+                "control: STRIPE_SECRET_KEY unset — the billing reconciler + /api/creators/:id/billing/setup \
+                 cannot call Stripe. Set --stripe-secret-key, or run with --dev-insecure for local dev."
+            );
+            std::process::exit(1);
+        }
+        // M-Stripe prod guard (blueprint §M6 / §M9 risk 3): a `stripe`
+        // (Billing Meters) deployment REQUIRES its operator-provisioned meter
+        // event name. Booting `stripe` with no meter would push CU nowhere —
+        // enforcing locally while billing Stripe $0 (a silent revenue black
+        // hole). Refuse to boot. (`build_provider` also rejects it; this is the
+        // earlier, clearer message on the prod path.)
+        if cli.metering_provider.trim().eq_ignore_ascii_case("stripe")
+            && cli.stripe_meter_event_name.trim().is_empty()
+        {
+            tracing::error!(
+                "control: --metering-provider stripe requires --stripe-meter-event-name (the \
+                 operator-provisioned Stripe Meter's event name). Refusing to boot a Stripe-Meters \
+                 deployment with no meter (it would bill Stripe $0)."
+            );
+            std::process::exit(1);
+        }
+        // C2: the >24h re-drive reconcile reads the meter's aggregate by id; a
+        // `stripe` deployment with no meter id would have to trust Stripe's 24h
+        // identifier window (the over-bill window the fix closes). Refuse to boot.
+        if cli.metering_provider.trim().eq_ignore_ascii_case("stripe")
+            && cli.stripe_meter_id.trim().is_empty()
+        {
+            tracing::error!(
+                "control: --metering-provider stripe requires --stripe-meter-id (the \
+                 operator-provisioned Stripe Meter's `mtr_…` id). It is needed to read the meter's \
+                 aggregate back for the >24h re-drive reconcile (C2); refusing to boot without it."
+            );
+            std::process::exit(1);
+        }
+        // M-OpenMeter prod guard (blueprint §M6 / §M9 risk 3): an `openmeter`
+        // deployment REQUIRES its base URL + API token (else CU pushes go nowhere
+        // — enforcing locally while exporting $0) AND a meter slug (needed to read
+        // the aggregate back for the >24h re-drive reconcile, C2). Refuse to boot.
+        // (`build_provider` also rejects these; this is the earlier, clearer
+        // message on the prod path.)
+        if cli.metering_provider.trim().eq_ignore_ascii_case("openmeter") {
+            if cli.openmeter_url.trim().is_empty() || cli.openmeter_token.trim().is_empty() {
+                tracing::error!(
+                    "control: --metering-provider openmeter requires --openmeter-url and \
+                     --openmeter-token. Refusing to boot an OpenMeter deployment with no endpoint \
+                     (it would export $0 while enforcing locally)."
+                );
+                std::process::exit(1);
+            }
+            if cli.openmeter_meter_slug.trim().is_empty() {
+                tracing::error!(
+                    "control: --metering-provider openmeter requires --openmeter-meter-slug (the \
+                     operator-provisioned meter's slug). It is needed to read the aggregate back \
+                     for the >24h re-drive reconcile (C2); refusing to boot without it."
+                );
+                std::process::exit(1);
+            }
         }
         // The dedicated pairwise-salt secret MUST be a strong, stable,
         // operator-set value outside dev — it seeds the PERMANENT per-app `pws_`
@@ -857,6 +1107,18 @@ fn main() -> std::io::Result<()> {
     // ordered after the `migrate` service. `ops/Caddyfile` routes
     // `console.zeroship.localhost` → the gateway (the console is a gateway-fronted
     // app); the separate Vite builder service is retired.
+    // Seed the built-in plan tiers (free/pro/unlimited) UNCONDITIONALLY at boot
+    // — independent of `--bootstrap-console`. PR4 made `apps.plan_id` an FK into
+    // `zeroship.plans`, so `create_app`/`set_plan` (and the console seed) all
+    // require the built-in plans to exist. Idempotent (ON CONFLICT DO UPDATE on
+    // the deterministic `pln_…` ids), so a re-boot is a no-op.
+    bootstrap_console::seed_plans(&registry)
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "control: plan-catalog seed failed");
+            std::io::Error::other(err.to_string())
+        })?;
+
     if bootstrap_console {
         let console_scheme = if insecure_dev { "http" } else { "https" };
         let cfg = bootstrap_console::ConsoleBootstrapConfig {
@@ -897,6 +1159,101 @@ fn main() -> std::io::Result<()> {
         })?;
     }
 
+    // Metering provider (M6): parse the kind, then build it. An unknown value
+    // or a not-yet-implemented backend (stripe/openmeter) refuses to boot with a
+    // clear message rather than silently mis-billing.
+    let metering_provider_kind =
+        match zeroship_control::metering::provider::MeteringProviderKind::parse(
+            &cli.metering_provider,
+        ) {
+            Ok(k) => k,
+            Err(bad) => {
+                tracing::error!(
+                    value = %bad,
+                    "control: unknown --metering-provider (expected native|stripe|openmeter)"
+                );
+                std::process::exit(1);
+            }
+        };
+    // Build the per-deployment provider config. For the `stripe` backend, carry
+    // the operator-provisioned meter creds (event name + the platform Stripe
+    // secret + base URL — the SAME account/url the Native rail uses). An empty
+    // event name leaves `stripe_meter = None`, which `build_provider` rejects
+    // (and the prod guard below catches earlier with a clearer message).
+    let metering_provider_config = match metering_provider_kind {
+        zeroship_control::metering::provider::MeteringProviderKind::Stripe
+            if !cli.stripe_meter_event_name.trim().is_empty() =>
+        {
+            zeroship_control::metering::provider::MeteringProviderConfig::stripe(
+                zeroship_control::metering::provider::StripeMeterConfig {
+                    event_name: cli.stripe_meter_event_name.trim().to_string(),
+                    meter_id: cli.stripe_meter_id.trim().to_string(),
+                    secret_key: zeroship_control::SecretString::new(stripe_secret_key.clone()),
+                    base_url: cli.stripe_base_url.clone(),
+                },
+            )
+        }
+        // OpenMeter: carry the operator-provisioned base URL + token + event type
+        // + meter slug. Empty url/token/slug leaves the config rejectable by
+        // `build_provider` (and the prod guard above catches it earlier).
+        zeroship_control::metering::provider::MeteringProviderKind::OpenMeter
+            if !cli.openmeter_url.trim().is_empty() =>
+        {
+            zeroship_control::metering::provider::MeteringProviderConfig::openmeter(
+                zeroship_control::metering::provider::OpenMeterConfig {
+                    base_url: cli.openmeter_url.trim().to_string(),
+                    token: zeroship_control::SecretString::new(cli.openmeter_token.clone()),
+                    event_type: cli.openmeter_event_type.trim().to_string(),
+                    meter_slug: cli.openmeter_meter_slug.trim().to_string(),
+                },
+            )
+        }
+        kind => zeroship_control::metering::provider::MeteringProviderConfig {
+            kind,
+            stripe_meter: None,
+            openmeter: None,
+        },
+    };
+    let metering_provider =
+        match zeroship_control::metering::provider::build_provider(&metering_provider_config) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(error = %e, "control: refusing to start — metering provider not available");
+                std::process::exit(1);
+            }
+        };
+    tracing::info!(
+        metering_provider = metering_provider_kind.as_str(),
+        "control: metering provider selected"
+    );
+
+    // Tax provider (PR-5): parse the kind, then build it. `native` (default)
+    // computes 0 (USD launch). An unknown value refuses to boot rather than
+    // silently mis-taxing.
+    let tax_provider_kind = match zeroship_control::tax::TaxProviderKind::parse(&cli.tax_provider) {
+        Ok(k) => k,
+        Err(bad) => {
+            tracing::error!(value = %bad, "control: unknown --tax-provider (expected native)");
+            std::process::exit(1);
+        }
+    };
+    let tax_provider = match zeroship_control::tax::build_tax_provider(
+        &zeroship_control::tax::TaxProviderConfig { kind: tax_provider_kind },
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(error = %e, "control: refusing to start — tax provider not available");
+            std::process::exit(1);
+        }
+    };
+    tracing::info!(tax_provider = tax_provider_kind.as_str(), "control: tax provider selected");
+
+    // Billing notifier (PR-6): a `BillingNotifier` over the relocated `zeroship-mailer`
+    // `Mailer` built above. Wraps the mailer + the per-message idempotency key.
+    let notifier: Arc<dyn zeroship_control::notify::BillingNotifier> =
+        Arc::new(zeroship_control::notify::MailerNotifier::new(billing_mailer));
+    tracing::info!(mailer = %mailer_kind, "control: billing notifier selected");
+
     let state = Arc::new(AppState {
         registry,
         env_store,
@@ -905,6 +1262,8 @@ fn main() -> std::io::Result<()> {
         control_key: zeroship_control::SecretString::new(control_key),
         master_key: zeroship_control::SecretString::new(master_key),
         stripe_webhook_secret: zeroship_control::SecretString::new(stripe_webhook_secret),
+        stripe_secret_key: zeroship_control::SecretString::new(stripe_secret_key),
+        stripe_base_url,
         worker_urls: workers_str
             .split(',')
             .map(str::trim)
@@ -927,7 +1286,13 @@ fn main() -> std::io::Result<()> {
         pat_issuer,
         hydra_introspector,
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+        metering_provider,
+        tax_provider,
+        notifier,
         pairwise_salt,
+        projected_charge_cache: Arc::new(
+            zeroship_control::billing_read::ProjectedChargeCache::default(),
+        ),
     });
 
     // Spawn the in-process control crons:
@@ -991,6 +1356,74 @@ fn main() -> std::io::Result<()> {
                 web::resource("/api/apps/{id}/plan")
                     .route(web::put().to(api::set_plan)),
             )
+            // --- Spend-limit override (PR5, M4): creator-facing cap ---
+            .service(
+                web::resource("/api/apps/{id}/spend-limit")
+                    .route(web::get().to(api::get_spend_limit))
+                    .route(web::put().to(api::set_spend_limit)),
+            )
+            // --- Creator billing READ APIs (PR-7, BillingRead) -------------
+            // Creator-scoped to OWNED apps; operator (Resource::Any) reads any.
+            .service(
+                web::resource("/api/apps/{id}/invoices")
+                    .route(web::get().to(api::list_app_invoices)),
+            )
+            .service(
+                web::resource("/api/apps/{id}/projected-charge")
+                    .route(web::get().to(api::get_projected_charge)),
+            )
+            .service(
+                web::resource("/api/apps/{id}/billing-status")
+                    .route(web::get().to(api::get_billing_status)),
+            )
+            .service(
+                web::resource("/api/invoices/{id}")
+                    .route(web::get().to(api::get_invoice)),
+            )
+            .service(
+                web::resource("/api/billing/credit-balance")
+                    .route(web::get().to(api::get_credit_balance)),
+            )
+            .service(
+                web::resource("/api/billing/payment-method")
+                    .route(web::get().to(api::get_payment_method)),
+            )
+            // --- Plan catalog (PR4): operator-editable pricing catalog ---
+            .service(
+                web::resource("/api/plans")
+                    .route(web::get().to(api::list_plans)),
+            )
+            .service(
+                web::resource("/api/plans/{id}")
+                    .route(web::get().to(api::get_plan))
+                    .route(web::put().to(api::upsert_plan))
+                    .route(web::delete().to(api::archive_plan)),
+            )
+            // Global default FX (gap #28) — operator-only (BillingRead/Write on
+            // Resource::Any); the missing runtime lever for the GLOBAL FX a plan
+            // inherits when `plans.fx` is NULL.
+            .service(
+                web::resource("/api/pricing-config")
+                    .route(web::get().to(api::get_pricing_config))
+                    .route(web::put().to(api::set_pricing_config)),
+            )
+            // Operator credit grant (billing-ops gap #26, PR-2) — OPERATOR-ONLY
+            // (BillingWrite on Resource::Any). Idempotency-Key header required.
+            .service(
+                web::resource("/api/billing/credit")
+                    .route(web::post().to(api::grant_credit)),
+            )
+            // Operator refund + void/reissue (billing-ops gap #26, PR-3) —
+            // OPERATOR-ONLY (BillingWrite on Resource::Any). Refund requires an
+            // Idempotency-Key header. {id} is the internal inv_… invoice id.
+            .service(
+                web::resource("/api/invoices/{id}/refunds")
+                    .route(web::post().to(api::refund_invoice)),
+            )
+            .service(
+                web::resource("/api/invoices/{id}/void")
+                    .route(web::post().to(api::void_invoice)),
+            )
             .service(
                 web::resource("/api/apps/{id}/usage")
                     .route(web::get().to(api::get_usage)),
@@ -1050,6 +1483,20 @@ fn main() -> std::io::Result<()> {
                 web::resource("/api/creators/{id}/stripe/callback")
                     .route(web::post().to(stripe_handlers::callback)),
             )
+            // --- Stream-2 Connect: server-stamped checkout + operator fee policy (G1) ---
+            .service(
+                web::resource("/api/creators/{id}/connect/checkout")
+                    .route(web::post().to(stripe_handlers::connect_checkout)),
+            )
+            .service(
+                web::resource("/api/creators/{id}/fee-policy")
+                    .route(web::put().to(stripe_handlers::set_fee_policy)),
+            )
+            // --- Stream-1 infra-billing setup (PR6): platform Customer + card ---
+            .service(
+                web::resource("/api/creators/{id}/billing/setup")
+                    .route(web::post().to(stripe_handlers::billing_setup)),
+            )
             .service(
                 web::resource("/api/creators/{id}/stripe")
                     .route(web::delete().to(stripe_handlers::unlink)),
@@ -1080,7 +1527,19 @@ fn main() -> std::io::Result<()> {
                     .route(web::post().to(internal::report_usage)),
             )
             .service(
+                web::resource("/internal/billing/reconcile")
+                    .route(web::post().to(internal::force_reconcile)),
+            )
+            .service(
+                web::resource("/internal/spend/reconcile")
+                    .route(web::post().to(internal::force_spend_reconcile)),
+            )
+            .service(
                 web::resource("/internal/webhooks/stripe")
+                    // Give the Bytes extractor headroom above the handler's body cap so
+                    // the handler (not the extractor's default-256KiB 400) owns the
+                    // oversized-body rejection with its descriptive 413.
+                    .state(stripe_handlers::webhook_payload_config())
                     .route(web::post().to(stripe_handlers::webhook)),
             )
             // --- Health ---
@@ -1098,6 +1557,7 @@ fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroship_core::config::require_unless_dev;
 
     #[test]
     fn control_blob_store_flag_uses_unified_name() {

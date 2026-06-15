@@ -10,6 +10,7 @@
 //!   in 64 KiB chunks via `compio::fs::File::read_at`, feed `SizedStream`.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use ntex::http::body::SizedStream;
 use ntex::util::Bytes;
@@ -21,10 +22,19 @@ use crate::GateState;
 use super::conditional::{etag_matches, parse_range, RangeSpec};
 use super::helpers::header_str_borrowed;
 use super::streaming::{
-    chunk_stream_from_path, chunk_stream_from_path_range, STREAM_CHUNK_BYTES,
+    chunk_stream_from_path, chunk_stream_from_path_range, StreamEgressMeter, STREAM_CHUNK_BYTES,
     STREAM_THRESHOLD_BYTES,
 };
 use super::variants::{pick_variant, ChosenVariant};
+
+/// Internal marker header stamped on a streamed-static (`SizedStream`)
+/// response whose `gateway_egress_bytes` is recorded INSIDE the drain (the
+/// delivered-bytes accounting in `streaming.rs`). `record_gateway_egress`
+/// (dispatch step 8b) checks for it and skips the up-front size record so a
+/// streamed asset is never double-counted. It is stripped before the response
+/// leaves the gateway. Buffered/error static bodies do NOT carry it and stay
+/// metered by their known `BodySize::Sized` at step 8b.
+pub(super) const EGRESS_METERED_HEADER: &str = "x-zs-egress-metered";
 
 /// Resolve a static action's `try` chain against the manifest's asset
 /// maps. First entry that hits wins; returns 404 on full miss.
@@ -34,6 +44,7 @@ pub(super) async fn serve_resource_tree_static(
     req: &HttpRequest,
     request_path: &str,
     try_chain: &[String],
+    app_id: &uuid::Uuid,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
     // Support the literal templates the build emits, plus the bare
@@ -46,7 +57,7 @@ pub(super) async fn serve_resource_tree_static(
             tpl.clone()
         };
         if let Some(hit) = lookup_static_hit(compiled_route, &resolved) {
-            return serve_static_hit(state, req, hit, wall_start).await;
+            return serve_static_hit(state, req, hit, app_id, wall_start).await;
         }
     }
     HttpResponse::NotFound().json(&serde_json::json!({"error": "asset not found"}))
@@ -273,6 +284,7 @@ async fn serve_static_streaming(
     hit: &crate::dispatch::StaticHit,
     chosen: &ChosenVariant,
     etag: &str,
+    app_id: &uuid::Uuid,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
     let path = match ensure_disk_path(
@@ -305,7 +317,15 @@ async fn serve_static_streaming(
         Some(RangeSpec::Unsatisfiable) => return build_range_not_satisfiable(chosen.size, etag),
         Some(RangeSpec::Single(start, end)) => {
             let length = end - start + 1;
-            let rx = chunk_stream_from_path_range(path, start, length, STREAM_CHUNK_BYTES);
+            // Stream-delivered egress metering (finding #2): bill bytes the
+            // drain actually writes to the socket, not the intended `length`.
+            let rx = chunk_stream_from_path_range(
+                path,
+                start,
+                length,
+                STREAM_CHUNK_BYTES,
+                Some(StreamEgressMeter::new(Arc::clone(&state.meter), *app_id)),
+            );
             let mut resp = HttpResponse::PartialContent();
             resp.content_type(hit.content_type.clone());
             resp.header("etag", etag);
@@ -315,6 +335,7 @@ async fn serve_static_streaming(
                 format!("bytes {start}-{end}/{}", chosen.size),
             );
             resp.header("accept-ranges", "bytes");
+            resp.header(EGRESS_METERED_HEADER, "1");
             apply_variant_headers(&mut resp, chosen);
             resp.header(
                 "x-wall-time-ms",
@@ -326,7 +347,15 @@ async fn serve_static_streaming(
         _ => {}
     }
 
-    let rx = chunk_stream_from_path(path, chosen.size, STREAM_CHUNK_BYTES);
+    // Stream-delivered egress metering (finding #2): the drain bills bytes
+    // actually written to the client; a disconnect mid-download bills only
+    // what was delivered, not the full asset size.
+    let rx = chunk_stream_from_path(
+        path,
+        chosen.size,
+        STREAM_CHUNK_BYTES,
+        Some(StreamEgressMeter::new(Arc::clone(&state.meter), *app_id)),
+    );
     let status = hit.status.unwrap_or(200);
     let st = ntex::http::StatusCode::from_u16(status).unwrap_or(ntex::http::StatusCode::OK);
     let mut resp = HttpResponse::build(st);
@@ -334,6 +363,7 @@ async fn serve_static_streaming(
     resp.header("etag", etag);
     resp.header("cache-control", cache_control_header(&hit.cache));
     resp.header("accept-ranges", "bytes");
+    resp.header(EGRESS_METERED_HEADER, "1");
     apply_variant_headers(&mut resp, chosen);
     resp.header(
         "x-wall-time-ms",
@@ -390,6 +420,7 @@ pub(super) async fn serve_static_hit(
     state: &GateState,
     req: &HttpRequest,
     hit: crate::dispatch::StaticHit,
+    app_id: &uuid::Uuid,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
     // 1. Pick the encoding variant first — ETag, Content-Length,
@@ -419,7 +450,7 @@ pub(super) async fn serve_static_hit(
     //    whole point of variant compression is making the body small
     //    enough to fit in memory cheaply.
     if chosen.size >= STREAM_THRESHOLD_BYTES {
-        return serve_static_streaming(state, req, &hit, &chosen, &etag, wall_start).await;
+        return serve_static_streaming(state, req, &hit, &chosen, &etag, app_id, wall_start).await;
     }
 
     // 4. Buffered path — fetch bytes through the cache tiers.
@@ -1007,6 +1038,7 @@ mod tests {
             session_verifier: None,
             anchor_enc_key: [0u8; 32],
             pairwise_salt: [0u8; 32],
+            meter: Arc::new(zeroship_metering::Meter::new()),
         }
     }
 
@@ -1066,7 +1098,7 @@ mod tests {
         let state = make_state(mock.store(), disk);
         let hit = static_hit(&hash, payload.len() as u64);
         let req = bare_request();
-        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
 
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         let body = resp.take_body();
@@ -1100,7 +1132,7 @@ mod tests {
         let state = make_state(mock.store(), disk);
         let hit = static_hit(&hash, payload.len() as u64);
         let req = bare_request();
-        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
 
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         let body = resp.take_body();
@@ -1145,7 +1177,7 @@ mod tests {
         let state = make_state(mock.store(), disk);
         let hit = static_hit(&hash, payload.len() as u64);
         let req = bare_request();
-        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
 
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         let body = resp.take_body();
@@ -1161,6 +1193,144 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// Read at least `min_bytes` worth of chunks off a streaming body, then
+    /// STOP and return the body still holding its receiver. Dropping the
+    /// returned body simulates a client disconnect (the `SizedStream`'s rx
+    /// goes away → the drain's `tx.send` fails → it flushes only delivered
+    /// bytes). Because the drain awaits `read_at` between chunks, it cannot
+    /// outrun this consumer by more than one in-flight chunk in the
+    /// single-threaded test runtime.
+    async fn drain_at_least(
+        mut body: ResponseBody<Body>,
+        min_bytes: usize,
+    ) -> (ResponseBody<Body>, usize) {
+        let mut got = 0usize;
+        std::future::poll_fn(|cx| {
+            loop {
+                if got >= min_bytes {
+                    return std::task::Poll::Ready(());
+                }
+                match body.poll_next_chunk(cx) {
+                    std::task::Poll::Ready(Some(Ok(chunk))) => got += chunk.len(),
+                    std::task::Poll::Ready(Some(Err(e))) => panic!("body error: {e}"),
+                    std::task::Poll::Ready(None) => return std::task::Poll::Ready(()),
+                    std::task::Poll::Pending => return std::task::Poll::Pending,
+                }
+            }
+        })
+        .await;
+        (body, got)
+    }
+
+    /// FINDING #2 (RED→GREEN): a streamed static asset whose client DISCONNECTS
+    /// after part of the body bills ~the delivered bytes, NOT the full asset
+    /// size. The drain meters delivered bytes (final delta on disconnect); the
+    /// up-front intended size is never billed for the streamed path.
+    ///
+    /// RED pre-fix: `serve_static_hit` (streaming) recorded nothing itself and
+    /// the dispatch step-8b recorded the full intended `size` up front — so an
+    /// aborted download billed the whole file. GREEN post-fix: only delivered
+    /// bytes are billed.
+    #[compio::test]
+    async fn streamed_static_disconnect_bills_delivered_not_intended() {
+        let (disk, root) =
+            fresh_disk_cache_with_budget("stream-disconnect", 32 * 1024 * 1024);
+        let mock = MockHandle::new();
+        let hash = hex_hash(0x88);
+        // 8 MiB asset, well above the 1 MiB stream threshold.
+        let size: usize = 8 * 1024 * 1024;
+        let payload = vec![0xEEu8; size];
+        disk.insert(&hash, &payload).expect("disk insert");
+
+        let state = make_state(mock.store(), disk);
+        let meter = Arc::clone(&state.meter);
+        let app_id = uuid::Uuid::new_v4();
+        let hit = static_hit(&hash, payload.len() as u64);
+        let req = bare_request();
+        let mut resp =
+            serve_static_hit(&state, &req, hit, &app_id, std::time::Instant::now()).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::OK);
+
+        // Consume ~1.5 MiB, then DROP the body → client disconnect.
+        let body = resp.take_body();
+        let target = 1536 * 1024;
+        let (body, delivered) = drain_at_least(body, target).await;
+        drop(body);
+
+        // Let the drain task observe the closed channel and flush its final
+        // delivered-bytes delta.
+        for _ in 0..16 {
+            let _ = compio::runtime::spawn(async {}).await;
+        }
+
+        let snap = meter.drain();
+        let usage = snap
+            .get(&app_id)
+            .expect("the streamed-static drain records delivered egress");
+        let billed = usage
+            .custom
+            .get("gateway_egress_bytes")
+            .copied()
+            .expect("gateway_egress_bytes recorded by the drain");
+        assert_eq!(usage.egress_bytes, 0, "the gateway never touches egress_bytes");
+        // Must bill far less than the full file (the over-bill fix): allow the
+        // delivered amount plus at most one extra in-flight chunk.
+        assert!(
+            billed < size as u64,
+            "a disconnect must NOT bill the full {size}-byte asset (billed {billed})",
+        );
+        assert!(
+            billed >= delivered as u64,
+            "billed ({billed}) must cover what was delivered ({delivered})",
+        );
+        assert!(
+            billed <= delivered as u64 + STREAM_CHUNK_BYTES as u64,
+            "billed ({billed}) must be ~delivered ({delivered}), within one chunk",
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The other half: a FULLY-delivered streamed static asset bills its whole
+    /// size (the drain's accrued deltas sum to the complete file). Pins that
+    /// the delivered-bytes accounting does not under-bill the happy path.
+    #[compio::test]
+    async fn streamed_static_full_delivery_bills_full_size() {
+        let (disk, root) =
+            fresh_disk_cache_with_budget("stream-full", 32 * 1024 * 1024);
+        let mock = MockHandle::new();
+        let hash = hex_hash(0x89);
+        let size: usize = 3 * 1024 * 1024 + 777;
+        let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        disk.insert(&hash, &payload).expect("disk insert");
+
+        let state = make_state(mock.store(), disk);
+        let meter = Arc::clone(&state.meter);
+        let app_id = uuid::Uuid::new_v4();
+        let hit = static_hit(&hash, payload.len() as u64);
+        let req = bare_request();
+        let mut resp =
+            serve_static_hit(&state, &req, hit, &app_id, std::time::Instant::now()).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::OK);
+
+        let got = collect_body(resp.take_body()).await;
+        assert_eq!(got.len(), size, "full body delivered");
+        for _ in 0..16 {
+            let _ = compio::runtime::spawn(async {}).await;
+        }
+
+        let snap = meter.drain();
+        let usage = snap.get(&app_id).expect("usage recorded");
+        assert_eq!(
+            usage.custom.get("gateway_egress_bytes").copied(),
+            Some(size as u64),
+            "full delivery bills the whole asset size across the drain's deltas",
+        );
+        assert_eq!(usage.egress_bytes, 0, "the gateway never touches egress_bytes");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[compio::test]
     async fn large_blob_not_found_returns_404() {
         let (disk, root) = fresh_disk_cache("large-404");
@@ -1168,7 +1338,7 @@ mod tests {
         let state = make_state(mock.store(), disk);
         let hit = static_hit(&hex_hash(0x77), STREAM_THRESHOLD_BYTES + 1);
         let req = bare_request();
-        let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::NOT_FOUND);
 
         std::fs::remove_dir_all(&root).ok();
@@ -1222,7 +1392,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("if-none-match", format!("\"{}\"", hash))
             .to_http_request();
-        let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
 
         assert_eq!(resp.status(), ntex::http::StatusCode::NOT_MODIFIED);
         // ETag, Cache-Control, Accept-Ranges all present on the 304.
@@ -1246,7 +1416,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("if-none-match", "*")
             .to_http_request();
-        let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::NOT_MODIFIED);
         assert_eq!(mock.calls_for(&hash), 0);
 
@@ -1265,7 +1435,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("if-none-match", format!("\"abc\", \"{}\", \"def\"", hash))
             .to_http_request();
-        let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::NOT_MODIFIED);
         assert_eq!(mock.calls_for(&hash), 0);
 
@@ -1287,7 +1457,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("if-none-match", format!("W/\"{}\"", hash))
             .to_http_request();
-        let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         assert_eq!(mock.calls_for(&hash), 1, "weak match must fetch the blob");
 
@@ -1309,7 +1479,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("range", "bytes=0-9")
             .to_http_request();
-        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::PARTIAL_CONTENT);
         assert_eq!(hdr(&resp, "content-range").as_deref(), Some("bytes 0-9/100"));
         assert_eq!(hdr(&resp, "accept-ranges").as_deref(), Some("bytes"));
@@ -1333,7 +1503,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("range", "bytes=10-")
             .to_http_request();
-        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::PARTIAL_CONTENT);
         assert_eq!(hdr(&resp, "content-range").as_deref(), Some("bytes 10-99/100"));
         let got = collect_body(resp.take_body()).await;
@@ -1355,7 +1525,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("range", "bytes=-20")
             .to_http_request();
-        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::PARTIAL_CONTENT);
         assert_eq!(hdr(&resp, "content-range").as_deref(), Some("bytes 80-99/100"));
         let got = collect_body(resp.take_body()).await;
@@ -1377,7 +1547,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("range", "bytes=200-300")
             .to_http_request();
-        let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::RANGE_NOT_SATISFIABLE);
         assert_eq!(hdr(&resp, "content-range").as_deref(), Some("bytes */100"));
 
@@ -1397,7 +1567,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("range", "bytes=0-10,20-30")
             .to_http_request();
-        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::OK, "multi-range degrades to 200");
         let got = collect_body(resp.take_body()).await;
         assert_eq!(got, payload, "full body served on multi-range");
@@ -1422,7 +1592,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("range", "bytes=100-199")
             .to_http_request();
-        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::PARTIAL_CONTENT);
         assert_eq!(
             hdr(&resp, "content-range"),
@@ -1497,7 +1667,7 @@ mod tests {
         // 200 OK
         let hit = hex_static_hit(0x40, payload.len() as u64);
         let req = bare_request();
-        let resp200 = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let resp200 = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
         assert_eq!(resp200.status(), ntex::http::StatusCode::OK);
         assert_eq!(hdr(&resp200, "accept-ranges").as_deref(), Some("bytes"));
 
@@ -1506,7 +1676,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("range", "bytes=0-9")
             .to_http_request();
-        let resp206 = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let resp206 = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
         assert_eq!(resp206.status(), ntex::http::StatusCode::PARTIAL_CONTENT);
         assert_eq!(hdr(&resp206, "accept-ranges").as_deref(), Some("bytes"));
 
@@ -1515,7 +1685,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("if-none-match", format!("\"{}\"", hash))
             .to_http_request();
-        let resp304 = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let resp304 = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
         assert_eq!(resp304.status(), ntex::http::StatusCode::NOT_MODIFIED);
         assert_eq!(hdr(&resp304, "accept-ranges").as_deref(), Some("bytes"));
 
@@ -1536,7 +1706,7 @@ mod tests {
         let hit = hex_static_hit(0x50, payload.len() as u64);
 
         let req = bare_request();
-        let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         assert_eq!(hdr(&resp, "accept-ranges").as_deref(), Some("bytes"));
 
@@ -1595,7 +1765,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("accept-encoding", "br, gzip")
             .to_http_request();
-        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         assert_eq!(hdr(&resp, "content-encoding").as_deref(), Some("br"));
         assert!(
@@ -1636,7 +1806,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("accept-encoding", "identity")
             .to_http_request();
-        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         assert!(
             resp.headers().get("content-encoding").is_none(),
@@ -1669,7 +1839,7 @@ mod tests {
 
         // No Accept-Encoding header → identity.
         let req = bare_request();
-        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         assert!(resp.headers().get("content-encoding").is_none());
         let got = collect_body(resp.take_body()).await;
@@ -1700,7 +1870,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("accept-encoding", "br")
             .to_http_request();
-        let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
         let vary = hdr(&resp, "vary").expect("vary header set when variant chosen");
         assert!(vary.contains("Accept-Encoding"), "Vary contains Accept-Encoding: {vary}");
 
@@ -1729,7 +1899,7 @@ mod tests {
             .header("accept-encoding", "br")
             .header("if-none-match", format!("\"{}\"", br_hash))
             .to_http_request();
-        let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::NOT_MODIFIED);
         // 304 must carry Vary so caches don't conflate variants.
         let vary = hdr(&resp, "vary").expect("vary on 304 with variant");
@@ -1767,7 +1937,7 @@ mod tests {
             .header("accept-encoding", "br")
             .header("range", "bytes=0-9")
             .to_http_request();
-        let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let resp = serve_static_hit(&state, &req, hit, &uuid::Uuid::new_v4(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::PARTIAL_CONTENT);
         assert_eq!(
             hdr(&resp, "content-range").as_deref(),

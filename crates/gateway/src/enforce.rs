@@ -3,9 +3,48 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use std::collections::HashSet;
+
 use ntex::web::HttpResponse;
 use uuid::Uuid;
 use zeroship_bundle::{RateLimit, RateLimitPer};
+use zeroship_core::types::{AccountState, SpendState};
+
+/// Throttle multiplier applied to a Degraded app: its effective concurrency
+/// ceiling is divided by this, and each of its requests consumes this many
+/// rate-limit tokens instead of one — a `1/DEGRADE_FACTOR` throughput cut
+/// against the SAME immutable buckets (no rebuild, instant recovery).
+pub const DEGRADE_FACTOR: u32 = 8;
+
+/// Spend-limit gate. Run BEFORE rate-limit/dispatch (decision D1 — state is
+/// pulled on the `RouteEntry`). `Block` → 402 `SPEND_LIMIT`; every other state
+/// passes (Warn stamps a header at the call site; Degrade is throttled by the
+/// degraded registries). A blocked request never reaches the worker proxy.
+pub fn check_spend(state: SpendState) -> Result<(), HttpResponse> {
+    match state {
+        SpendState::Block => Err(HttpResponse::PaymentRequired()
+            .json(&serde_json::json!({"code": "SPEND_LIMIT"}))),
+        SpendState::Allow | SpendState::Warn | SpendState::Degrade => Ok(()),
+    }
+}
+
+/// Payment/account gate (billing G2). The OUTER AND with [`check_spend`]: a
+/// request is served iff the creator's account is `Active`/`PastDue` AND spend
+/// is not `Block`. Run this BEFORE `check_spend` at the same hoist point spend
+/// uses, so a `Suspended` creator's apps 402 across EVERY action class (worker,
+/// redirect, rewrite, AND static egress) before any worker proxy.
+///
+/// `Suspended` → 402 `ACCOUNT_SUSPENDED`. `PastDue` is the GRACE window (still
+/// served — it is the warning state, not a block) and `Active` passes. The
+/// two gates emit DISTINCT codes (`ACCOUNT_SUSPENDED` vs `SPEND_LIMIT`) so a
+/// caller can tell a dead-card suspension from a usage-cap block.
+pub fn check_account(state: AccountState) -> Result<(), HttpResponse> {
+    match state {
+        AccountState::Suspended => Err(HttpResponse::PaymentRequired()
+            .json(&serde_json::json!({"code": "ACCOUNT_SUSPENDED"}))),
+        AccountState::Active | AccountState::PastDue => Ok(()),
+    }
+}
 
 // --- Token Bucket Rate Limiter ---
 
@@ -41,16 +80,33 @@ impl TokenBucket {
     }
 
     fn try_acquire(&self) -> bool {
+        self.try_acquire_n(1)
+    }
+
+    /// Consume `n` whole tokens (the token math is 1000-scaled internally, so
+    /// one logical token is `1000` units). A Degraded app calls this with
+    /// `DEGRADE_FACTOR`, so each request costs `DEGRADE_FACTOR` tokens — a
+    /// `1/DEGRADE_FACTOR` throughput cut against the SAME bucket with no
+    /// rebuild. `n == 0` is treated as `1` (never free).
+    ///
+    /// The cost is CLAMPED to the bucket capacity (`min(n*1000, capacity)`).
+    /// Without the clamp, a Degraded request costing `DEGRADE_FACTOR` tokens
+    /// against a bucket whose capacity is `< DEGRADE_FACTOR` (a tiny-burst
+    /// rule) could NEVER be satisfied — Degrade would silently become a hard
+    /// Block regardless of refill. Clamping guarantees Degrade is always a
+    /// throttle, never a hard Block, for any `(rate, burst)` config (#6).
+    fn try_acquire_n(&self, n: u32) -> bool {
+        let cost = (u64::from(n.max(1)) * 1000).min(self.capacity);
         loop {
             let state = self.state.load(Ordering::Acquire);
             let (tokens, last) = unpack(state);
             let now = now_secs();
             let elapsed = u64::from(now.saturating_sub(last));
             let refilled = (tokens + elapsed * self.refill_rate).min(self.capacity);
-            if refilled < 1000 {
+            if refilled < cost {
                 return false;
             }
-            let new_state = pack(refilled - 1000, now);
+            let new_state = pack(refilled - cost, now);
             if self
                 .state
                 .compare_exchange(state, new_state, Ordering::AcqRel, Ordering::Acquire)
@@ -71,6 +127,11 @@ impl std::fmt::Debug for RateLimitRegistry {
 
 pub struct RateLimitRegistry {
     buckets: RwLock<HashMap<Uuid, Arc<TokenBucket>>>,
+    /// Apps in spend-Degrade. A request from a degraded app consumes
+    /// `DEGRADE_FACTOR` tokens instead of 1 (a `1/DEGRADE_FACTOR` throughput
+    /// cut) against the SAME immutable bucket — no rebuild, instant recovery
+    /// on `clear_degraded`.
+    degraded: RwLock<HashSet<Uuid>>,
     default_rate: u32,
     default_burst: u32,
 }
@@ -79,6 +140,7 @@ impl RateLimitRegistry {
     pub fn new(rate: u32, burst: u32) -> Self {
         Self {
             buckets: RwLock::new(HashMap::new()),
+            degraded: RwLock::new(HashSet::new()),
             default_rate: rate,
             default_burst: burst,
         }
@@ -96,6 +158,27 @@ impl RateLimitRegistry {
             .or_insert_with(|| Arc::new(TokenBucket::new(self.default_rate, self.default_burst)))
             .clone()
     }
+
+    /// Mark `app_id` degraded (`on = true`) or clear it. Idempotent.
+    pub fn set_degraded(&self, app_id: &Uuid, on: bool) {
+        let mut w = self.degraded.write().unwrap();
+        if on {
+            w.insert(*app_id);
+        } else {
+            w.remove(app_id);
+        }
+    }
+
+    /// Convenience: clear `app_id`'s degraded flag. Recovery is instant — the
+    /// bucket was never rebuilt, so it serves at its normal rate immediately.
+    pub fn clear_degraded(&self, app_id: &Uuid) {
+        self.set_degraded(app_id, false);
+    }
+
+    #[must_use]
+    pub fn is_degraded(&self, app_id: &Uuid) -> bool {
+        self.degraded.read().unwrap().contains(app_id)
+    }
 }
 
 pub fn check_rate_limit(
@@ -103,7 +186,9 @@ pub fn check_rate_limit(
     app_id: &Uuid,
 ) -> Result<(), HttpResponse> {
     let bucket = registry.get_or_create(app_id);
-    if bucket.try_acquire() {
+    // A spend-Degraded app pays DEGRADE_FACTOR tokens per request.
+    let cost = if registry.is_degraded(app_id) { DEGRADE_FACTOR } else { 1 };
+    if bucket.try_acquire_n(cost) {
         Ok(())
     } else {
         Err(HttpResponse::TooManyRequests()
@@ -247,6 +332,11 @@ impl std::fmt::Debug for ConcurrencyRegistry {
 
 pub struct ConcurrencyRegistry {
     gauges: RwLock<HashMap<Uuid, Arc<AtomicU32>>>,
+    /// Apps in spend-Degrade. A degraded app's EFFECTIVE ceiling is
+    /// `(limit / DEGRADE_FACTOR).max(1)` instead of `limit` — the same gauge
+    /// is compared against a smaller ceiling (no rebuild, instant recovery on
+    /// `clear_degraded`).
+    degraded: RwLock<HashSet<Uuid>>,
     limit: u32,
 }
 
@@ -254,6 +344,7 @@ impl ConcurrencyRegistry {
     pub fn new(limit: u32) -> Self {
         Self {
             gauges: RwLock::new(HashMap::new()),
+            degraded: RwLock::new(HashSet::new()),
             limit,
         }
     }
@@ -269,6 +360,37 @@ impl ConcurrencyRegistry {
         w.entry(*app_id)
             .or_insert_with(|| Arc::new(AtomicU32::new(0)))
             .clone()
+    }
+
+    /// Mark `app_id` degraded (`on = true`) or clear it. Idempotent.
+    pub fn set_degraded(&self, app_id: &Uuid, on: bool) {
+        let mut w = self.degraded.write().unwrap();
+        if on {
+            w.insert(*app_id);
+        } else {
+            w.remove(app_id);
+        }
+    }
+
+    /// Convenience: clear `app_id`'s degraded flag (instant recovery).
+    pub fn clear_degraded(&self, app_id: &Uuid) {
+        self.set_degraded(app_id, false);
+    }
+
+    #[must_use]
+    pub fn is_degraded(&self, app_id: &Uuid) -> bool {
+        self.degraded.read().unwrap().contains(app_id)
+    }
+
+    /// Effective ceiling for `app_id`: the tightened `(limit /
+    /// DEGRADE_FACTOR).max(1)` when degraded, else the global `limit`.
+    #[must_use]
+    fn effective_limit(&self, app_id: &Uuid) -> u32 {
+        if self.is_degraded(app_id) {
+            (self.limit / DEGRADE_FACTOR).max(1)
+        } else {
+            self.limit
+        }
     }
 }
 
@@ -287,9 +409,10 @@ pub fn acquire_concurrency(
     app_id: &Uuid,
 ) -> Result<ConcurrencyGuard, HttpResponse> {
     let gauge = registry.get_or_create(app_id);
+    let ceiling = registry.effective_limit(app_id);
     loop {
         let current = gauge.load(Ordering::Acquire);
-        if current >= registry.limit {
+        if current >= ceiling {
             return Err(HttpResponse::TooManyRequests()
                 .json(&serde_json::json!({"error": "concurrency limit exceeded"})));
         }
@@ -415,6 +538,52 @@ mod tests {
         for _ in 0..1000 {
             assert!(reg.check(&app, 0, lim.per, "1.1.1.1", &lim).is_ok());
         }
+    }
+
+    /// #6: a Degraded app on a TINY-burst global bucket (capacity <
+    /// DEGRADE_FACTOR) must still be admitted at least once — Degrade is a
+    /// throttle, never a hard Block. Pre-fix, a degraded request cost
+    /// `DEGRADE_FACTOR` tokens against a 1-token bucket and could never be
+    /// satisfied (silent hard Block). The cost-clamp (`min(cost, capacity)`)
+    /// guarantees admission regardless of the burst config.
+    #[test]
+    fn degraded_tiny_burst_still_admits_some_requests() {
+        // rate=1, burst=1 → capacity 1 logical token, far below DEGRADE_FACTOR.
+        let reg = RateLimitRegistry::new(1, 1);
+        let app = Uuid::nil();
+        reg.set_degraded(&app, true);
+        assert!(
+            reg.is_degraded(&app),
+            "precondition: app is flagged degraded",
+        );
+        // The first degraded request must still be admitted (cost clamped to
+        // the 1-token capacity), proving Degrade did not become a hard Block.
+        assert!(
+            check_rate_limit(&reg, &app).is_ok(),
+            "a degraded app on a tiny-burst bucket must still admit a request \
+             (Degrade is a throttle, not a hard Block)",
+        );
+        // It IS still throttled: the bucket is now drained, so the immediate
+        // next request 429s (this is the throttle, not a permanent block).
+        assert!(
+            check_rate_limit(&reg, &app).is_err(),
+            "the drained bucket throttles the next immediate request",
+        );
+    }
+
+    /// G2: `check_account` is a pure match — Suspended 402s with
+    /// `ACCOUNT_SUSPENDED`; Active/PastDue pass. PastDue is the grace window
+    /// (NOT a block), distinguishing it from spend's Block.
+    #[test]
+    fn check_account_suspended_402s_others_pass() {
+        let err = check_account(AccountState::Suspended)
+            .expect_err("suspended must 402");
+        assert_eq!(err.status(), ntex::http::StatusCode::PAYMENT_REQUIRED);
+        assert!(check_account(AccountState::Active).is_ok(), "active passes");
+        assert!(
+            check_account(AccountState::PastDue).is_ok(),
+            "past_due is the grace window, not a block",
+        );
     }
 
     #[test]

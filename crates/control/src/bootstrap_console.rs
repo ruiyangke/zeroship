@@ -5,9 +5,11 @@
 //! a flag, NEVER an HTTP route), but instead of registering a confidential
 //! console OIDC client it seeds the console as a **platform-owned regular app**:
 //!
-//! 1. Upsert the `control.apps` row for the console host on the **enterprise**
-//!    plan (no CPU/wall cap — the console does heavy SSE/AI work; see
-//!    `registry.rs::runtime_limits_for_plan`). The app id is **derived
+//! 1. Upsert the `control.apps` row for the console host on the built-in
+//!    **unlimited** plan (no CPU/wall cap — the console does heavy SSE/AI
+//!    work; the plan's `runtime_limits_json` carries the unbounded limits).
+//!    The built-in tiers are seeded FIRST ([`seed_plans`]) so the new
+//!    `apps.plan_id → plans.id` FK is satisfied. The app id is **derived
 //!    deterministically** from the console host so re-running the seed (or
 //!    seeding dev vs. prod) is stable and idempotent.
 //! 2. Upsert the per-app **public PKCE** OAuth client (`oac_<base62>`) via the
@@ -49,6 +51,7 @@ use zeroship_bundle::BlobStore;
 
 use crate::app_oauth_client::{self, client_id_for_app};
 use crate::env_store::EnvStore;
+use crate::plan_catalog::{Plan, PlanCatalog};
 use crate::registry::Registry;
 
 /// Default console host in dev (compose / `*.zeroship.localhost`).
@@ -80,9 +83,9 @@ pub fn console_app_name(host: &str) -> String {
     host.split('.').next().unwrap_or(host).to_owned()
 }
 
-/// The console app's enterprise plan id — unlimited CPU/wall via
-/// `registry.rs::runtime_limits_for_plan` ("unlimited" | "enterprise").
-pub const CONSOLE_PLAN_ID: &str = "enterprise";
+// The console app's plan id is the built-in **unlimited** tier — see
+// [`console_plan_id`] below (PR4 replaced the free-text `"enterprise"` const
+// with the seeded `pln_<base62>` catalog id so the new FK is satisfied).
 
 /// How a console runtime env var lands in the per-app env store.
 ///
@@ -247,6 +250,165 @@ pub fn console_app_id(host: &str) -> Uuid {
 }
 
 // ---------------------------------------------------------------------------
+// Built-in plan tiers (billing PR4)
+// ---------------------------------------------------------------------------
+
+/// Deterministic `pln_<base62>` id for a built-in tier. Derived from a fixed,
+/// tier-specific domain-separation label (the host is constant `"builtin"`) so
+/// every boot — dev or prod — mints the SAME id. That stability is what lets
+/// `apps.plan_id` reference a built-in plan as a stable FK target and a
+/// re-bootstrap be a true no-op.
+fn builtin_plan_id(tier: &str) -> String {
+    let uuid = derive_uuid(&format!("zeroship:plan:{tier}:v1"), "builtin");
+    zeroship_core::typed_id::from_uuid_string(zeroship_core::typed_id::PLAN_PREFIX, &uuid.to_string())
+        .expect("derived uuid is a valid uuid string")
+}
+
+/// The built-in free tier id (`spend_limit ≈ base` ⇒ quota-capped, no card).
+#[must_use]
+pub fn free_plan_id() -> String {
+    builtin_plan_id("free")
+}
+
+/// The built-in pro tier id (pay-go overage into a configured cap).
+#[must_use]
+pub fn pro_plan_id() -> String {
+    builtin_plan_id("pro")
+}
+
+/// The built-in unlimited/enterprise tier id (no CPU/wall cap — what the
+/// console needs).
+#[must_use]
+pub fn unlimited_plan_id() -> String {
+    builtin_plan_id("unlimited")
+}
+
+/// The console app's plan id — the built-in **unlimited** tier (no CPU/wall
+/// cap; the console runs heavy SSE/AI work). PR4 replaced the free-text
+/// `"enterprise"` const with this real `pln_<base62>` catalog id so the new
+/// `apps.plan_id → plans.id` FK is satisfied at bootstrap.
+#[must_use]
+pub fn console_plan_id() -> String {
+    unlimited_plan_id()
+}
+
+/// Build the three built-in tiers. The `runtime_limits_json` reproduces the
+/// matrix the deleted `registry.rs::runtime_limits_for_plan` hardcoded:
+/// free = 50ms/5s/64MB, pro = 30s/30s/256MB, unlimited = None/None/None.
+///
+/// Under billing-v2 compute-unit pricing (Refactor B) the price model is scalar:
+/// each tier carries `base_fee_cents`, `included_units` (CU free before
+/// overage), and an FX (`fx == None` ⇒ inherit the global `pricing_config`
+/// default — the relative cost of requests-vs-cpu-vs-bytes now lives in the
+/// GLOBAL `metric_weights`, NOT the plan). Values (with the seeded default FX of
+/// 30000 pico-cents/CU = 0.00003 ¢/CU, and 1 CU ≈ 1 request under the seeded
+/// weights):
+///   - free:      base 0, included 100_000 CU (~100k requests free), inherit FX,
+///                spend_limit 0 (quota-capped, no card).
+///   - pro:       base $5 (500c), included 1_000_000 CU, inherit FX,
+///                spend_limit $50 (5000c) — pay-go overage into the cap.
+///   - unlimited: base 0, included 0, inherit FX, spend_limit 0 (uncapped;
+///                console is system-owned + reconciler-skipped anyway).
+/// Returns `[free, pro, unlimited]`.
+fn builtin_plans() -> Vec<Plan> {
+    use crate::pricing::PlanPrice;
+    use zeroship_core::types::{AppRuntimeLimits, FREE_TIER_RUNTIME_LIMITS};
+
+    // Free: spend_limit == base (0) ⇒ quota-capped, no card (the spend engine
+    // treats limit==0 as the free-tier cap). A small `included_units` of free CU
+    // bounds abuse without a billing relationship. Runtime limits come from the
+    // shared `FREE_TIER_RUNTIME_LIMITS` const so the seed and the registry's
+    // missing-plan fallback can never drift.
+    let free = Plan {
+        id: free_plan_id(),
+        name: "free".to_string(),
+        price: PlanPrice {
+            base_fee_cents: 0,
+            included_units: 100_000,
+            fx_pico_cents_per_unit: None, // inherit the global default
+            spend_limit_default_cents: 0,
+        },
+        runtime: FREE_TIER_RUNTIME_LIMITS,
+        archived: false,
+        // MAJOR-4: the free tier is a PUBLIC tier a creator may self-assign.
+        assignable_by_creator: true,
+    };
+
+    // Pro: a small base fee + a generous included CU allotment, pay-go overage
+    // past it at the global FX. Default spend cap $50.
+    let pro = Plan {
+        id: pro_plan_id(),
+        name: "pro".to_string(),
+        price: PlanPrice {
+            base_fee_cents: 500,
+            included_units: 1_000_000,
+            fx_pico_cents_per_unit: None, // inherit the global default
+            spend_limit_default_cents: 5_000,
+        },
+        runtime: AppRuntimeLimits {
+            cpu_limit_ms: Some(30_000),
+            wall_timeout_ms: Some(30_000),
+            heap_limit_mb: Some(256),
+        },
+        archived: false,
+        // MAJOR-4: the pro tier is a PUBLIC pay-go tier a creator may self-assign.
+        assignable_by_creator: true,
+    };
+
+    // Unlimited / enterprise: no runtime caps (what the console needs), no
+    // included CU, no spend cap. spend_limit_default 0 ⇒ the spend engine treats
+    // it as uncapped; the console is system-owned and skipped by the reconciler.
+    let unlimited = Plan {
+        id: unlimited_plan_id(),
+        name: "unlimited".to_string(),
+        price: PlanPrice {
+            base_fee_cents: 0,
+            included_units: 0,
+            fx_pico_cents_per_unit: None, // inherit the global default
+            spend_limit_default_cents: 0,
+        },
+        runtime: AppRuntimeLimits {
+            cpu_limit_ms: None,
+            wall_timeout_ms: None,
+            heap_limit_mb: None,
+        },
+        archived: false,
+        // MAJOR-4: the unlimited/enterprise tier is OPERATOR-only — a creator
+        // must NOT be able to self-assign it (it would underpay / escape caps).
+        assignable_by_creator: false,
+    };
+
+    vec![free, pro, unlimited]
+}
+
+/// Idempotently seed the built-in plan tiers (`free`, `pro`, `unlimited`) into
+/// the catalog. Every write is an `ON CONFLICT (id) DO UPDATE` keyed on the
+/// deterministic `pln_<base62>` ids, so a re-bootstrap is a no-op. Called at
+/// the start of [`bootstrap_console`] (and by `main.rs` ahead of it) so the
+/// `apps.plan_id → plans.id` FK is always satisfied before any app row is
+/// upserted.
+///
+/// # Errors
+/// [`ConsoleBootstrapError::Db`] if the catalog upsert fails.
+pub async fn seed_plans(registry: &Registry) -> Result<(), ConsoleBootstrapError> {
+    let catalog = PlanCatalog::new(registry.clone());
+    for plan in builtin_plans() {
+        catalog
+            // Built-in tiers are always unarchived; assert it explicitly.
+            .upsert(&plan, Some(plan.archived))
+            .await
+            .map_err(|e| ConsoleBootstrapError::Db(format!("seed plan '{}': {e}", plan.id)))?;
+    }
+    tracing::info!(
+        free = %free_plan_id(),
+        pro = %pro_plan_id(),
+        unlimited = %unlimited_plan_id(),
+        "control: built-in plan tiers seeded"
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Seed entry point
 // ---------------------------------------------------------------------------
 
@@ -283,7 +445,14 @@ pub async fn bootstrap_console(
     //    api_key (it deploys via the seed + serves via the gateway route), but
     //    the columns are NOT NULL. We use a deterministic, clearly-marked
     //    sentinel so a re-run doesn't churn the row.
-    upsert_console_app_row(control_pg, &app_id, &app_name).await?;
+    //
+    //    The built-in plan tiers are ALREADY seeded unconditionally by `main.rs`
+    //    BEFORE this function runs (so `create_app`/`set_plan` work even without
+    //    `--bootstrap-console`), which guarantees the console-app upsert's
+    //    `plan_id` FK target exists. We do NOT re-seed here — that was a
+    //    redundant second call that double-logged the "tiers seeded" line.
+    let console_plan = console_plan_id();
+    upsert_console_app_row(control_pg, &app_id, &app_name, &console_plan).await?;
 
     // 2. Upsert the per-app public PKCE OAuth client with an EXPLICIT sector.
     //    Reusing ensure_app_client (the SAME path every creator app uses) gives
@@ -333,7 +502,7 @@ pub async fn bootstrap_console(
         app_id = %app_id,
         client_id = %client_id,
         host = %cfg.console_host,
-        plan = CONSOLE_PLAN_ID,
+        plan = %console_plan,
         "control: console seeded as a regular app (pure creator, no control credential)"
     );
 
@@ -359,10 +528,11 @@ async fn upsert_console_app_row(
     pg: &Client,
     app_id: &Uuid,
     app_name: &str,
+    plan_id: &str,
 ) -> Result<(), ConsoleBootstrapError> {
     let api_key = console_api_key(app_id);
     let api_key_hash = zeroship_core::auth::hash_api_key(&api_key);
-    // Insert with the fixed id + enterprise plan. ON CONFLICT keeps the row's
+    // Insert with the fixed id + the built-in unlimited plan. ON CONFLICT keeps the row's
     // name/plan/key stable (so a re-run is a true no-op on these columns) while
     // leaving deploy_hash / manifest_json / env_version to the deploy-commit +
     // env steps. NOT touching updated_at here keeps the row quiet on no-op runs.
@@ -384,7 +554,7 @@ async fn upsert_console_app_row(
             name = EXCLUDED.name, \
             plan_id = EXCLUDED.plan_id, \
             system = true",
-        &[app_id, &app_name, &CONSOLE_PLAN_ID, &api_key, &api_key_hash],
+        &[app_id, &app_name, &plan_id, &api_key, &api_key_hash],
     )
     .await
     .map_err(|e| ConsoleBootstrapError::Db(e.to_string()))?;

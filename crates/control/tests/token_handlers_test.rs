@@ -214,6 +214,8 @@ impl Fixture {
             control_key: SecretString::new("test-control-key".to_string()),
             master_key: SecretString::new("test-master-key".to_string()),
             stripe_webhook_secret: SecretString::new(String::new()),
+            stripe_secret_key: SecretString::new(String::new()),
+            stripe_base_url: "https://api.stripe.com".to_string(),
             worker_urls: Vec::new(),
             worker_key: SecretString::new(String::new()),
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
@@ -233,7 +235,19 @@ impl Fixture {
                 &hydra.base,
             )),
             logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+            metering_provider: zeroship_control::metering::provider::build_provider(
+                &zeroship_control::metering::provider::MeteringProviderConfig::native(),
+            )
+            .expect("native provider builds"),
+            tax_provider: zeroship_control::tax::build_tax_provider(
+                &zeroship_control::tax::TaxProviderConfig::native(),
+            )
+            .expect("native tax provider builds"),
+            notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
             pairwise_salt: [0u8; 32],
+            projected_charge_cache: std::sync::Arc::new(
+                zeroship_control::billing_read::ProjectedChargeCache::default(),
+            ),
         });
 
         Self {

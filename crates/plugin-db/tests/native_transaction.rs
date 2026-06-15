@@ -152,7 +152,7 @@ fn dispatch_zs(url: &str, source: &str, name: &str) -> (u16, serde_json::Value) 
         specifier: "index.js".into(),
         source: source.into(),
     }];
-    let plugins: Vec<Arc<dyn NativePlugin>> = vec![Arc::new(DbPlugin::new(url.to_string()))];
+    let plugins: Vec<Arc<dyn NativePlugin>> = vec![Arc::new(DbPlugin::new(url.to_string(), None))];
     let runtime = Runtime::builder().modules(modules).plugins(plugins).build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());

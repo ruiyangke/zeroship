@@ -2,7 +2,6 @@
 members = ["crates/*", "crates/authz", "crates/compio-s3"]
 resolver = "3"
 exclude = [
-    "crates/platform",
     "crates/runtime/benches/ntex-bench",
     "refs",
 ]
@@ -183,10 +182,12 @@ compio-s3 = { path = "crates/compio-s3" }
 zeroship-plugin-db = { path = "crates/plugin-db" }
 zeroship-plugin-storage = { path = "crates/plugin-storage" }
 zeroship-plugin-kv = { path = "crates/plugin-kv" }
+zeroship-metering = { path = "crates/metering" }
 zeroship-runtime = { path = "crates/runtime" }
 zeroship-runtime-macros = { path = "crates/runtime-macros" }
 zeroship-auth = { path = "crates/auth" }
 zeroship-authz = { path = "crates/authz" }
+zeroship-mailer = { path = "crates/mailer" }
 
 # ---------------------------------------------------------------------------
 # Shared lints

@@ -50,6 +50,12 @@ pub struct Kv {
     /// The app_id this Kv belongs to, stamped at mint time from
     /// `SharedState.env_vars["APP_ID"]`. Never mutated.
     pub(crate) app_id: String,
+    /// Per-app metering handle (bound to `app_id` at mint time). `Some` on
+    /// the worker / dev-serve vectors; each successful kv op emits
+    /// `kv_reads` / `kv_writes` through it. `None` in meter-less test
+    /// harnesses. Cloned per dispatch into the spawned op future so the
+    /// emit happens in the op's Ok arm, after the backend returns.
+    pub(crate) meter: Option<zeroship_metering::MeterHandle>,
 }
 
 impl std::fmt::Debug for Kv {
@@ -196,7 +202,7 @@ impl Kv {
         key: String,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         validate_key(&key).map_err(crate::error::KvError::to_op_error)?;
-        Ok(dispatch_get(scope, Arc::clone(&self.backend), self.app_id.clone(), key).into())
+        Ok(dispatch_get(scope, Arc::clone(&self.backend), self.app_id.clone(), self.meter.clone(), key).into())
     }
 
     /// `kv.set(key, value, {ttlMs?})` → Promise<{ ok: true }>.
@@ -212,7 +218,7 @@ impl Kv {
         let value = extract_value(scope, value)?;
         validate_value(&value).map_err(crate::error::KvError::to_op_error)?;
         let ttl_ms = read_ttl_ms(scope, opts)?;
-        Ok(dispatch_set(scope, Arc::clone(&self.backend), self.app_id.clone(), key, value, ttl_ms)
+        Ok(dispatch_set(scope, Arc::clone(&self.backend), self.app_id.clone(), self.meter.clone(), key, value, ttl_ms)
             .into())
     }
 
@@ -224,7 +230,7 @@ impl Kv {
         key: String,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         validate_key(&key).map_err(crate::error::KvError::to_op_error)?;
-        Ok(dispatch_delete(scope, Arc::clone(&self.backend), self.app_id.clone(), key).into())
+        Ok(dispatch_delete(scope, Arc::clone(&self.backend), self.app_id.clone(), self.meter.clone(), key).into())
     }
 
     /// `kv.incr(key, {by?=1, ttlMs?})` → Promise<number> (BigInt if
@@ -243,7 +249,7 @@ impl Kv {
             None => 1,
         };
         let ttl_ms = read_ttl_ms(scope, opts)?;
-        Ok(dispatch_incr(scope, Arc::clone(&self.backend), self.app_id.clone(), key, delta, ttl_ms)
+        Ok(dispatch_incr(scope, Arc::clone(&self.backend), self.app_id.clone(), self.meter.clone(), key, delta, ttl_ms)
             .into())
     }
 
@@ -265,6 +271,7 @@ impl Kv {
             scope,
             Arc::clone(&self.backend),
             self.app_id.clone(),
+            self.meter.clone(),
             key,
             value,
             ttl_ms,
@@ -291,7 +298,7 @@ impl Kv {
             .number_value(scope)
             .ok_or_else(|| OpError::type_error("kv.expire: ttlMs must be a number"))?;
         let ms = validate_ttl_ms(ms).map_err(crate::error::KvError::to_op_error)?;
-        Ok(dispatch_expire(scope, Arc::clone(&self.backend), self.app_id.clone(), key, ms).into())
+        Ok(dispatch_expire(scope, Arc::clone(&self.backend), self.app_id.clone(), self.meter.clone(), key, ms).into())
     }
 
     /// `kv.ttl(key)` → Promise<{ ttlMs: number | null }> for an existing
@@ -303,7 +310,7 @@ impl Kv {
         key: String,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         validate_key(&key).map_err(crate::error::KvError::to_op_error)?;
-        Ok(dispatch_ttl(scope, Arc::clone(&self.backend), self.app_id.clone(), key).into())
+        Ok(dispatch_ttl(scope, Arc::clone(&self.backend), self.app_id.clone(), self.meter.clone(), key).into())
     }
 
     /// `kv.persist(key)` → Promise<{ updated: boolean }> (removes TTL).
@@ -314,7 +321,7 @@ impl Kv {
         key: String,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         validate_key(&key).map_err(crate::error::KvError::to_op_error)?;
-        Ok(dispatch_persist(scope, Arc::clone(&self.backend), self.app_id.clone(), key).into())
+        Ok(dispatch_persist(scope, Arc::clone(&self.backend), self.app_id.clone(), self.meter.clone(), key).into())
     }
 
     /// `kv.list(prefix?, {cursor?, limit?})` → Promise<{ keys: string[],
@@ -345,6 +352,7 @@ impl Kv {
             scope,
             Arc::clone(&self.backend),
             self.app_id.clone(),
+            self.meter.clone(),
             prefix,
             cursor,
             limit,
@@ -365,6 +373,7 @@ pub fn mint_kv<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     backend: Arc<dyn Backend>,
     app_id: &str,
+    meter: Option<zeroship_metering::MeterHandle>,
 ) -> Option<v8::Local<'s, v8::Object>> {
     let class_tmpl = Kv::install(scope);
     let inst_tmpl = class_tmpl.instance_template(scope);
@@ -375,7 +384,7 @@ pub fn mint_kv<'s>(
     let proto_v = class_fn.get(scope, proto_key.into())?;
     obj.set_prototype(scope, proto_v);
 
-    let state = Kv { backend, app_id: app_id.to_string() };
+    let state = Kv { backend, app_id: app_id.to_string(), meter };
     let boxed: Box<Kv> = Box::new(state);
     let raw = Box::into_raw(boxed);
     let raw_addr = raw as usize;

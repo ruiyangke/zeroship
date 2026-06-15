@@ -1,6 +1,6 @@
 # zeroship
 
-A platform where anyone can create, launch, and monetize software — without writing code. Creators describe what they want in natural language. AI builds it. The platform handles everything: hosting, database, auth, payments, scaling. The platform takes 15%; the creator keeps the rest. Think Shopify for AI-generated apps.
+A platform where anyone can create, launch, and monetize software — without writing code. Creators describe what they want in natural language. AI builds it. The platform handles everything: hosting, database, auth, payments, scaling. The platform earns two ways: creators pay for the infrastructure their apps consume (tiered plans + pay-as-you-go overage), and when a creator monetizes their app the platform takes a configurable application fee on end-user revenue (default 15%). Think Shopify for AI-generated apps.
 
 This file is the AI-agent landing page. Read the **task router** below first.
 
@@ -72,7 +72,9 @@ Creator Dashboard (web UI)
 ```
 End Users → Gateway          JWT, rate-limit, manifest dispatch, asset proxy, CHWBL routing
            → Auth Service    Login/signup, OAuth, consent, sessions
-           → Workers (V8)    App code · env.{db,auth,kv,storage,meter} primitives
+           → Workers (V8)    App code · env.{db,auth,kv,storage} primitives
+                              (metering is infra: the primitives emit usage
+                              metrics; there is no env.meter)
 ```
 
 ### Shared
@@ -114,6 +116,7 @@ crates/
 ├── plugin-db/        env.db.* native ops
 ├── plugin-kv/        env.kv.* native ops
 ├── plugin-storage/   env.storage.* native ops
+├── metering/         Meter (atomic per-(app,metric) counters) + compio flush task; NO V8. The data plugins emit usage metrics into it; there is no env.meter.
 │
 │ System 1 — Creator Platform
 ├── control/          Control plane (app CRUD, deploy, billing, env, route registry)
@@ -170,11 +173,19 @@ Planned or platform-internal namespaces must be documented as such until the
 runtime actually registers them:
 
 ```
-env.meter.*    billing counter increment
 env.assets.*   runtime-emitted static asset CRUD (manifest runtime_assets)
 ```
 
 Creators don't call these directly. SDK packages wrap them.
+
+**Metering is infrastructure — there is NO `env.meter`.** The billing signal
+is platform-measured so app code can neither forge nor suppress it: the worker
+emits the five platform counters (requests/cpu_us/wall_us/ingress/egress) per
+dispatch, and the trusted data primitives (`env.db`/`env.kv`/`env.storage`)
+emit raw usage metrics (`db_reads`, `db_writes`, `kv_reads`, `kv_writes`,
+`storage_ops`, `storage_bytes`, …) at their op boundary, in the success arm
+only. The `Meter` + flush task live in `crates/metering` (`MeterHandle` is the
+per-app injection vehicle the plugins stamp from the server-injected `app_id`).
 
 ### SDK packages (`@zeroship/*` npm scope)
 
@@ -325,13 +336,29 @@ Conventions for writing `play()` interactions and using
 
 ## Revenue model
 
-```
-Creator's app earns $100/mo from subscribers:
-  Stripe fees:    -$3.20
-  Platform (15%): -$15.00
-  Creator keeps:  $81.80
+Two independent revenue streams, built as two sequenced epics.
 
-Infrastructure cost per app: ~$0.12/mo (98% gross margin)
-```
+**Stream 1 — infra usage billing (shipped).** Creators pay the platform for the
+infrastructure their apps consume. Pricing is a data-driven, operator-editable
+plan catalog — per tier: `base_fee`, `included_quota[metric]`,
+`overage_rate[metric]`, `spend_limit_default`. Exceeding the included quota
+accrues pay-as-you-go overage (the app keeps running, not blocked):
+`charge = base_fee + Σ max(0, usage[m] − included[m]) × overage_rate[m]`. A
+per-app configurable **spend limit** (not the quota) drives enforcement:
+Warn (~80%) → Degrade (gateway throttle — tighter concurrency + rate limit, app
+stays up) → Block (402 before dispatch). The free tier sets `spend_limit ≈ base`,
+so it is quota-capped by construction and needs no card. The platform computes
+line items from this policy and bills them as Stripe **invoice items** on a
+platform-side Customer (no Stripe-side price objects). Live across the
+`metering` crate + the data primitives (producers: worker platform counters +
+`env.{db,kv,storage}` usage metrics) → `control` (idempotent ingest,
+aggregation, compute-unit pricing, spend engine, Stripe reconciler) →
+`gateway` (edge enforcement). See `docs/reference/billing-metering.md`.
 
-The platform only earns when creators earn. Aligned incentives.
+**Stream 2 — application fee on creator revenue (separate upcoming epic).** When
+a creator monetizes their app, end-users pay via Stripe **Connect** (the creator
+connects their own Stripe). The platform takes a server-controlled,
+per-creator-configurable application fee, stamped server-side on the Connect
+charge so creator code cannot bypass it. `FeePolicy { Fixed { amount_cents } |
+Percent { percent, cap_cents?, floor_cents? } }`; the default for a new creator
+is `Percent { 15%, no cap, no floor }`.

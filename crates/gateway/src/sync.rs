@@ -9,7 +9,10 @@ use uuid::Uuid;
 use zeroship_bundle::Manifest;
 use zeroship_core::types::{RouteEntry, RouteMap};
 
+use zeroship_core::types::SpendState;
+
 use crate::compiled::CompiledManifest;
+use crate::enforce::{ConcurrencyRegistry, RateLimitRegistry};
 use crate::GateState;
 
 const CONTROL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -48,11 +51,39 @@ impl RouteCache {
         }
     }
 
-    pub fn update(&self, new_routes: RouteMap) {
+    /// Replace the route table, recompiling each manifest.
+    ///
+    /// Spend enforcement (PR5): each `CompiledRoute` carries the pulled
+    /// `entry.spend_state`. For every app whose Degrade flag flips between the
+    /// previous and the new table, this calls `set_degraded`/`clear_degraded`
+    /// on the rate + concurrency registries so a Degraded app is throttled
+    /// (and recovers instantly) WITHOUT rebuilding any bucket. Block/Warn need
+    /// no registry mutation — they are gated per-request in `check_spend`.
+    pub fn update(
+        &self,
+        new_routes: RouteMap,
+        rate: &RateLimitRegistry,
+        concurrency: &ConcurrencyRegistry,
+    ) {
+        // Snapshot the Degrade flag of the OUTGOING table so we only flip the
+        // registries on an actual change (idempotent set is cheap, but this
+        // keeps the intent explicit and the logs quiet).
+        let prev_degraded: HashMap<Uuid, bool> = {
+            let r = self.routes.read().unwrap();
+            r.iter()
+                .map(|(id, route)| (*id, route.entry.spend_state == SpendState::Degrade))
+                .collect()
+        };
+
         let mut name_idx = HashMap::new();
         let mut compiled: HashMap<Uuid, Arc<CompiledRoute>> = HashMap::new();
         for (id, entry) in new_routes {
             name_idx.insert(entry.name.clone(), id);
+            let now_degraded = entry.spend_state == SpendState::Degrade;
+            if prev_degraded.get(&id).copied().unwrap_or(false) != now_degraded {
+                rate.set_degraded(&id, now_degraded);
+                concurrency.set_degraded(&id, now_degraded);
+            }
             // Validate first; on Err, fall back to passthrough for parity
             // with the rest of the platform's "always have a manifest"
             // invariant. Log so deploys with bad manifests are visible.
@@ -132,7 +163,9 @@ async fn sync_once(state: &GateState) -> Result<(), String> {
     let response = http_get(&url, &state.config.control_key).await?;
     let routes: RouteMap =
         serde_json::from_str(&response).map_err(|e| format!("parse routes: {e}"))?;
-    state.routes.update(routes);
+    state
+        .routes
+        .update(routes, &state.rate_limiters, &state.concurrency);
     Ok(())
 }
 
@@ -211,6 +244,8 @@ mod tests {
             manifest: Manifest::passthrough(),
             oauth_client_id: oauth_client_id.map(str::to_string),
             sector_identifier: sector.map(str::to_string),
+            spend_state: zeroship_core::types::SpendState::Allow,
+            account_state: zeroship_core::types::AccountState::Active,
         }
     }
 
@@ -239,7 +274,11 @@ mod tests {
         );
 
         let cache = RouteCache::new();
-        cache.update(routes);
+        cache.update(
+            routes,
+            &RateLimitRegistry::new(1000, 2000),
+            &ConcurrencyRegistry::new(100),
+        );
 
         // Provisioned host → Some(oauth_client_id) + Some(sector).
         let (id, compiled) = cache
@@ -321,11 +360,17 @@ mod tests {
                 manifest: parsed,
                 oauth_client_id: Some("oac_billing".to_string()),
                 sector_identifier: Some("https://billing-app.zeroship.localhost".to_string()),
+                spend_state: zeroship_core::types::SpendState::Allow,
+                account_state: zeroship_core::types::AccountState::Active,
             },
         );
 
         let cache = RouteCache::new();
-        cache.update(routes);
+        cache.update(
+            routes,
+            &RateLimitRegistry::new(1000, 2000),
+            &ConcurrencyRegistry::new(100),
+        );
 
         let (_, compiled) = cache
             .lookup_by_name("billing-app.zeroship.localhost")
@@ -364,7 +409,11 @@ mod tests {
         );
 
         let cache = RouteCache::new();
-        cache.update(routes);
+        cache.update(
+            routes,
+            &RateLimitRegistry::new(1000, 2000),
+            &ConcurrencyRegistry::new(100),
+        );
 
         let (id, compiled) = cache
             .lookup_by_oauth_client_id("oac_myapp")
