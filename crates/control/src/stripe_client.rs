@@ -10,10 +10,23 @@
 //! (`bootstrap_builder.rs`, `oauth_handlers.rs`) and the worker-log GET
 //! (`api.rs::fetch_worker_logs`). Bodies are `application/x-www-form-urlencoded`
 //! (Stripe's wire); we hand-encode so nested params (`period[start]`,
-//! `metadata[creator_id]`) come out in Stripe's bracket form. Every MUTATING
-//! call carries an `Idempotency-Key` header (defense in depth on top of the
-//! `billing_runs` per-period claim) so an at-least-once retry replays the same
-//! Stripe object instead of creating a duplicate.
+//! `metadata[creator_id]`) come out in Stripe's bracket form. Money-moving /
+//! object-minting MUTATING calls that the caller may retry under a deterministic
+//! key (invoice item / invoice / finalize / refund / meter event / connect
+//! PaymentIntent) carry an `Idempotency-Key` header (defense in depth on top of
+//! the `billing_runs` per-period claim) so an at-least-once retry replays the
+//! same Stripe object instead of creating a duplicate. The lazily-created,
+//! caller-deduped objects (customer, connect account, account_link, checkout
+//! setup session) do NOT carry one — at-most-once is enforced by the caller's
+//! own `creator_billing` / `creator_accounts` row check, and an account_link /
+//! checkout session is a short-lived hosted URL where a duplicate is harmless
+//! (m2).
+//!
+//! C1: EVERY request — GET, POST, DELETE — sends a pinned `Stripe-Version`
+//! header ([`STRIPE_API_VERSION`]) so the response wire shape is the one these
+//! parsers target, independent of the account's dashboard-default API version.
+//! A forced/dashboard bump cannot silently re-shape the payload under us (the
+//! exact failure mode of the D2/Basil `payment_intent`/`charge` removal).
 //!
 //! [`StripeApi`] is a trait so unit tests inject a recording fake; the
 //! integration tests drive the REAL [`StripeClient`] against a localhost
@@ -27,6 +40,20 @@ use crate::SecretString;
 
 /// Stripe's live API base. Overridable (tests point it at a localhost mock).
 pub const DEFAULT_STRIPE_BASE_URL: &str = "https://api.stripe.com";
+
+/// The Stripe API version this code is WRITTEN AGAINST, sent as the
+/// `Stripe-Version` header on EVERY outbound request (C1). Without it, a call
+/// renders against the account's *default* version, so a dashboard / forced
+/// version bump (exactly how the Basil `payment_intent`/`charge` removal —
+/// D2 — silently re-broke parsing) would change the response shape under us.
+/// Pinning the header here means the wire shape is the one our parsers expect,
+/// independent of the account's dashboard setting.
+///
+/// `2025-09-30.clover` (Basil 2025-03-31+) is the version whose Invoice shape
+/// the D2 settlement parsers target (`payments.data[].payment.payment_intent`,
+/// top-level `payment_intent`/`charge` removed). Verified at
+/// docs.stripe.com/api/versioning and the Basil changelog.
+pub const STRIPE_API_VERSION: &str = "2025-09-30.clover";
 
 /// Per-request timeout. Stripe's p99 is well under this; a hung socket must not
 /// wedge the reconcile cron tick.
@@ -342,7 +369,11 @@ impl StripeClient {
                 "authorization",
                 &format!("Bearer {}", self.secret_key.expose_secret()),
             )
-            .map_err(|e| StripeError::Db(format!("stripe: set auth header: {e}")))?;
+            .map_err(|e| StripeError::Db(format!("stripe: set auth header: {e}")))?
+            // C1: PIN the API version on every request so a dashboard/forced
+            // bump cannot silently re-shape the wire under our parsers.
+            .header("stripe-version", STRIPE_API_VERSION)
+            .map_err(|e| StripeError::Db(format!("stripe: set version header: {e}")))?;
         if let Some(key) = idempotency_key {
             builder = builder
                 .header("idempotency-key", key)
@@ -388,7 +419,10 @@ impl StripeClient {
                 "authorization",
                 &format!("Bearer {}", self.secret_key.expose_secret()),
             )
-            .map_err(|e| StripeError::Db(format!("stripe: set auth header: {e}")))?;
+            .map_err(|e| StripeError::Db(format!("stripe: set auth header: {e}")))?
+            // C1: pin the API version on the GET too.
+            .header("stripe-version", STRIPE_API_VERSION)
+            .map_err(|e| StripeError::Db(format!("stripe: set version header: {e}")))?;
         let response = compio::time::timeout(STRIPE_HTTP_TIMEOUT, builder.send())
             .await
             .map_err(|_| StripeError::Db("stripe: request timeout".to_string()))?
@@ -427,7 +461,10 @@ impl StripeClient {
                 "authorization",
                 &format!("Bearer {}", self.secret_key.expose_secret()),
             )
-            .map_err(|e| StripeError::Db(format!("stripe: set auth header: {e}")))?;
+            .map_err(|e| StripeError::Db(format!("stripe: set auth header: {e}")))?
+            // C1: pin the API version on the DELETE too.
+            .header("stripe-version", STRIPE_API_VERSION)
+            .map_err(|e| StripeError::Db(format!("stripe: set version header: {e}")))?;
         let response = compio::time::timeout(STRIPE_HTTP_TIMEOUT, builder.send())
             .await
             .map_err(|_| StripeError::Db("stripe: request timeout".to_string()))?
@@ -742,7 +779,13 @@ impl StripeApi for StripeClient {
                 .and_then(serde_json::Value::as_f64)
                 .unwrap_or(0.0);
             if v.is_finite() && v > 0.0 {
-                total = total.saturating_add(v as u64);
+                // m1: Stripe sums INTEGER CU, so a finite positive aggregate is an exact
+                // integer on the wire — but `as u64` floors, silently dropping a
+                // fractional remainder if a float repr ever appears (e.g. 41.9999999 →
+                // 41). ROUND to the nearest integer explicitly so a representation
+                // artefact can't under-count the re-drive delta. `.round()` on a finite
+                // value, then `as u64` (now exact), is well-defined.
+                total = total.saturating_add(v.round() as u64);
             }
         }
         Ok(total)

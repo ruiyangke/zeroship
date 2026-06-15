@@ -31,6 +31,10 @@ use std::sync::{Arc, Mutex};
 use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
 
+/// The pinned Stripe API version every call must carry (C1). Sourced from the
+/// production constant so the mock's expectation can never drift from the client.
+const PINNED_STRIPE_VERSION: &str = zeroship_control::stripe_client::STRIPE_API_VERSION;
+
 /// One recorded inbound HTTP request.
 #[derive(Clone, Default)]
 struct RecordedRequest {
@@ -38,6 +42,9 @@ struct RecordedRequest {
     path: String,
     idempotency_key: Option<String>,
     authorization: Option<String>,
+    /// The pinned `Stripe-Version` header (C1) — recorded so a harness can assert
+    /// every Stripe call pinned the API version.
+    stripe_version: Option<String>,
     body: String,
     /// True when served from the Idempotency-Key replay cache (Stripe would
     /// NOT have created a new object).
@@ -132,6 +139,7 @@ fn try_parse_request(buf: &[u8]) -> Option<(RecordedRequest, usize)> {
     let mut content_length = 0usize;
     let mut idempotency_key = None;
     let mut authorization = None;
+    let mut stripe_version = None;
     for line in lines {
         if let Some((k, v)) = line.split_once(':') {
             let key = k.trim().to_ascii_lowercase();
@@ -140,6 +148,7 @@ fn try_parse_request(buf: &[u8]) -> Option<(RecordedRequest, usize)> {
                 "content-length" => content_length = val.parse().unwrap_or(0),
                 "idempotency-key" => idempotency_key = Some(val),
                 "authorization" => authorization = Some(val),
+                "stripe-version" => stripe_version = Some(val),
                 _ => {}
             }
         }
@@ -157,6 +166,7 @@ fn try_parse_request(buf: &[u8]) -> Option<(RecordedRequest, usize)> {
             path,
             idempotency_key,
             authorization,
+            stripe_version,
             body,
             replayed: false,
         },
@@ -178,6 +188,16 @@ fn handle_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> Vec<u
         st.requests.clear();
         st.idempotency_replies.clear();
         return http_200_json(r#"{"reset":true}"#);
+    }
+
+    // C1: a faithful Stripe REQUIRES the pinned `Stripe-Version` header on every
+    // API call. Reject (record then 400) when it is ABSENT so a missing pin is
+    // a loud, mechanical failure rather than a silent render against the account
+    // default. The pinned value mirrors `STRIPE_API_VERSION` in stripe_client.rs.
+    if req.stripe_version.as_deref() != Some(PINNED_STRIPE_VERSION) {
+        state.lock().unwrap().requests.push(req.clone());
+        let err = r#"{"error":{"type":"invalid_request_error","code":"version_unpinned","message":"missing or wrong Stripe-Version"}}"#;
+        return http_json(400, err);
     }
 
     // Faithful Idempotency-Key replay (Stripe's <24h dedup): a repeat key
@@ -352,11 +372,12 @@ fn records_json(reqs: &[RecordedRequest]) -> String {
             out.push(',');
         }
         out.push_str(&format!(
-            r#"{{"method":{},"path":{},"idempotency_key":{},"authorization":{},"body":{},"replayed":{}}}"#,
+            r#"{{"method":{},"path":{},"idempotency_key":{},"authorization":{},"stripe_version":{},"body":{},"replayed":{}}}"#,
             json_str(&r.method),
             json_str(&r.path),
             r.idempotency_key.as_deref().map_or("null".to_string(), json_str),
             r.authorization.as_deref().map_or("null".to_string(), json_str),
+            r.stripe_version.as_deref().map_or("null".to_string(), json_str),
             json_str(&r.body),
             r.replayed,
         ));

@@ -30,7 +30,7 @@ use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::billing_reconcile;
 use zeroship_control::metering::Metering;
 use zeroship_control::pricing::{charge_cents, MetricWeight, MetricWeights, PlanPrice};
-use zeroship_control::stripe_client::{Period, StripeApi, StripeClient};
+use zeroship_control::stripe_client::{Period, StripeApi, StripeClient, STRIPE_API_VERSION};
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
@@ -53,6 +53,11 @@ static RECONCILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
+/// The Stripe API version the client MUST pin (C1). Sourced from the production
+/// constant so a drift between the code's pin and the mock's expectation fails
+/// the build, not silently at runtime.
+const PINNED_STRIPE_VERSION: &str = STRIPE_API_VERSION;
+
 fn tmpdir(label: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
     p.push(format!("zs-bill-{label}-{}", Uuid::new_v4().simple()));
@@ -71,6 +76,10 @@ struct RecordedRequest {
     path: String,
     idempotency_key: Option<String>,
     authorization: Option<String>,
+    /// The `Stripe-Version` header the client pinned (C1). A faithful mock
+    /// REQUIRES it on every Stripe call (a 400 otherwise) and serves the wire
+    /// shape of THAT version — so a regression test proves we send the pin.
+    stripe_version: Option<String>,
     body: String,
     /// True if the mock served this request from its Idempotency-Key replay
     /// cache (i.e. Stripe would NOT have created a new object).
@@ -273,6 +282,7 @@ fn try_parse_request(buf: &[u8]) -> Option<(RecordedRequest, usize)> {
     let mut content_length = 0usize;
     let mut idempotency_key = None;
     let mut authorization = None;
+    let mut stripe_version = None;
     for line in lines {
         if let Some((k, v)) = line.split_once(':') {
             let key = k.trim().to_ascii_lowercase();
@@ -281,6 +291,7 @@ fn try_parse_request(buf: &[u8]) -> Option<(RecordedRequest, usize)> {
                 "content-length" => content_length = val.parse().unwrap_or(0),
                 "idempotency-key" => idempotency_key = Some(val),
                 "authorization" => authorization = Some(val),
+                "stripe-version" => stripe_version = Some(val),
                 _ => {}
             }
         }
@@ -298,6 +309,7 @@ fn try_parse_request(buf: &[u8]) -> Option<(RecordedRequest, usize)> {
             path,
             idempotency_key,
             authorization,
+            stripe_version,
             body,
             replayed: false,
         },
@@ -309,6 +321,19 @@ fn try_parse_request(buf: &[u8]) -> Option<(RecordedRequest, usize)> {
 /// the request. The `id` returned is derived from the path so each endpoint
 /// yields a plausible object id.
 fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> Vec<u8> {
+    // C1: a faithful Stripe REQUIRES the pinned `Stripe-Version` header on every
+    // API call. Reject (record then 400) when it is ABSENT — proving the client
+    // sends the pin on EVERY method. (Real Stripe would simply render against the
+    // account default; we make the absence loud so the regression is mechanical.)
+    {
+        let pinned = req.stripe_version.as_deref() == Some(PINNED_STRIPE_VERSION);
+        if !pinned {
+            state.lock().unwrap().requests.push(req.clone());
+            let err = r#"{"error":{"type":"invalid_request_error","code":"version_unpinned","message":"missing or wrong Stripe-Version"}}"#;
+            return http_json(400, err);
+        }
+    }
+
     // Faithful Stripe idempotency: if dedupe is on and we've seen this
     // Idempotency-Key before, replay the EXACT original response (Stripe does
     // not create a second object). Mark the recorded request `replayed` so the
@@ -968,6 +993,62 @@ async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
         finalized_invoice_id(&fx.state, creator, period).await.is_some(),
         "provider invoice id recorded after finalize",
     );
+}
+
+/// C1: EVERY outbound Stripe call — POST, GET, DELETE — carries the pinned
+/// `Stripe-Version` header. The mock REQUIRES the pinned version on every API call
+/// (400 `version_unpinned` otherwise), so each REAL `StripeClient` method below only
+/// SUCCEEDS when the client sent the pin; we then assert the recorded header on
+/// every request.
+///
+/// Drives the client DIRECTLY (no reconcile tick) so it is light + deterministic
+/// under parallel load. Exercises a POST (`create_customer`), a GET
+/// (`find_invoice_item_by_key`), and a DELETE (`delete_invoice_item`) so all three
+/// request builders are covered.
+///
+/// RED pre-fix: with no `Stripe-Version` header sent, the mock 400s every call →
+/// each client method errors, and the per-request assertion (`stripe_version` is
+/// `None`) fails.
+#[compio::test]
+async fn every_stripe_call_pins_the_api_version() {
+    let mock = start_mock_stripe().await;
+    let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
+        .with_base_url(mock.base_url.clone());
+
+    // POST: succeeds only if the pinned version was sent.
+    let cus = client.create_customer("pin@test.invalid", "creator-pin").await;
+    assert!(cus.is_ok(), "create_customer (POST) must succeed with the pinned version: {cus:?}");
+
+    // GET: list pending items by key (returns None against the empty mock).
+    let got = client.find_invoice_item_by_key(&cus.unwrap(), "zs_key_pin").await;
+    assert!(got.is_ok(), "find_invoice_item_by_key (GET) must succeed with the pinned version: {got:?}");
+
+    // DELETE: a missing item converges to Ok (the mock returns a Stripe-shaped obj;
+    // the client treats resource_missing as success — here it's a 200 from the mock).
+    let del = client.delete_invoice_item("ii_pin_missing").await;
+    assert!(del.is_ok(), "delete_invoice_item (DELETE) must succeed with the pinned version: {del:?}");
+
+    // Every recorded request pinned the EXACT version on every method.
+    let reqs = mock.requests();
+    assert!(reqs.len() >= 3, "POST + GET + DELETE recorded, got {}", reqs.len());
+    let mut saw = (false, false, false);
+    for r in &reqs {
+        assert_eq!(
+            r.stripe_version.as_deref(),
+            Some(PINNED_STRIPE_VERSION),
+            "{} {} must pin Stripe-Version={PINNED_STRIPE_VERSION}, got {:?}",
+            r.method,
+            r.path,
+            r.stripe_version,
+        );
+        match r.method.as_str() {
+            "POST" => saw.0 = true,
+            "GET" => saw.1 = true,
+            "DELETE" => saw.2 = true,
+            _ => {}
+        }
+    }
+    assert_eq!(saw, (true, true, true), "all three HTTP methods exercised + pinned");
 }
 
 /// THE no-double-bill guarantee. Run the tick TWICE for the same (creator,

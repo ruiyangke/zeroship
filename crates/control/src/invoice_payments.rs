@@ -75,9 +75,22 @@ pub async fn invoice_id_for_provider_invoice<C: GenericClient + Sync>(
 ///
 /// A `pi_`/`ch_` is GLOBALLY unique at Stripe, so `billing_provider_refs`' existing
 /// `UNIQUE(provider, ref_kind, external_id)` makes the later dispute resolution
-/// deterministic (no ambiguity). The insert is webhook-idempotent: `ON CONFLICT DO
-/// NOTHING` against the `(invoice_id, provider, ref_kind)` PK, so a redelivered
-/// `invoice.paid` re-records the same linkage as a no-op.
+/// deterministic (no ambiguity).
+///
+/// IDEMPOTENT + POISON-SAFE (C2). The table has TWO uniques: the PK
+/// `(invoice_id, provider, ref_kind)` AND the global `(provider, ref_kind, external_id)`.
+/// A bare `ON CONFLICT (invoice_id, provider, ref_kind) DO NOTHING` covers only the PK —
+/// so a settling `pi_`/`ch_` that is ALREADY linked to invoice A and is then seen for a
+/// DIFFERENT internal invoice B (Stripe reuses a `pi_` across a void+reissue, which mints
+/// a new internal `invoice_id` while the same `pi_` settles) would violate the GLOBAL
+/// unique, raise SQLSTATE 23505, propagate to the webhook (500), and POISON the event —
+/// Stripe then retries forever, deterministically re-aborting.
+///
+/// A `pi_`/`ch_` legitimately maps to EXACTLY ONE settlement. When it is seen for a
+/// second internal invoice it BELONGS TO THE FIRST: we therefore INSERT only when neither
+/// unique is already satisfied (`WHERE NOT EXISTS` covers BOTH the PK and the global
+/// tuple), and treat "already mapped — possibly under another invoice" as a benign,
+/// idempotent no-op (logged). The webhook acks 200; no poison.
 ///
 /// `payment_intent`/`charge` are each optional — a paid invoice carries one OR the other
 /// (or both, across wire versions); whichever is present is persisted. Passing both `None`
@@ -94,15 +107,41 @@ pub async fn record_payment_object_refs<C: GenericClient + Sync>(
         let Some(external_id) = external_id.map(str::trim).filter(|s| !s.is_empty()) else {
             continue;
         };
-        conn.execute(
-            "INSERT INTO zeroship.billing_provider_refs \
-               (invoice_id, provider, ref_kind, external_id) \
-             VALUES ($1, 'stripe', $2, $3) \
-             ON CONFLICT (invoice_id, provider, ref_kind) DO NOTHING",
-            &[&invoice_id, &ref_kind, &external_id],
-        )
-        .await
-        .map_err(|e| RegistryError::Database(e.to_string()))?;
+        // INSERT only when this linkage does not already exist under ANY invoice for
+        // this (provider, ref_kind, external_id) AND the PK row is absent. `WHERE NOT
+        // EXISTS` covers BOTH uniques, so the INSERT can never trip the global-unique
+        // 23505 that poisons the webhook. `RETURNING invoice_id` lets us detect the
+        // "linkage already mapped elsewhere" case and log it (a void+reissue carried the
+        // same pi_ over) instead of silently dropping a coherence signal.
+        let inserted = conn
+            .query(
+                "INSERT INTO zeroship.billing_provider_refs \
+                   (invoice_id, provider, ref_kind, external_id) \
+                 SELECT $1, 'stripe', $2, $3 \
+                 WHERE NOT EXISTS ( \
+                     SELECT 1 FROM zeroship.billing_provider_refs \
+                     WHERE provider = 'stripe' AND ref_kind = $2 AND external_id = $3 \
+                 ) AND NOT EXISTS ( \
+                     SELECT 1 FROM zeroship.billing_provider_refs \
+                     WHERE invoice_id = $1 AND provider = 'stripe' AND ref_kind = $2 \
+                 ) \
+                 RETURNING invoice_id",
+                &[&invoice_id, &ref_kind, &external_id],
+            )
+            .await
+            .map_err(|e| RegistryError::Database(e.to_string()))?;
+        if inserted.is_empty() {
+            // Either already linked to THIS invoice (plain redelivery — fine) or already
+            // linked to ANOTHER invoice for this globally-unique pi_/ch_ (a void+reissue
+            // that carried the same settling object over). The pi_/ch_ belongs to the
+            // FIRST settlement; this is a benign idempotent no-op. Surface a debug line so
+            // the (rare, legitimate) cross-invoice reuse is observable.
+            tracing::debug!(
+                invoice_id = %invoice_id,
+                ref_kind = %ref_kind,
+                "stripe: payment-object linkage already recorded (idempotent; possibly under another invoice) — ack"
+            );
+        }
     }
     Ok(())
 }

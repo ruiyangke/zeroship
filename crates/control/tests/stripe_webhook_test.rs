@@ -182,6 +182,56 @@ async fn start_flaky_invoice_mock(fail_n: u32) -> String {
     base_url
 }
 
+/// A mock-Stripe that answers EVERY `GET /v1/invoices/{id}` with the SAME fixed
+/// settling `pi_`/`ch_` regardless of the invoice id — so two different internal
+/// invoices resolve to the SAME globally-unique payment object (C2: a `pi_` reused
+/// across a void+reissue). Returns the base URL.
+async fn start_fixed_settlement_mock(pi: String, ch: String) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+    let base_url = format!("http://{}", listener.local_addr().expect("addr"));
+    compio::runtime::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else { break };
+            let (pi, ch) = (pi.clone(), ch.clone());
+            compio::runtime::spawn(async move {
+                serve_fixed_conn(stream, pi, ch).await;
+            })
+            .detach();
+        }
+    })
+    .detach();
+    base_url
+}
+
+async fn serve_fixed_conn(mut stream: TcpStream, pi: String, ch: String) {
+    let mut acc: Vec<u8> = Vec::new();
+    loop {
+        while let Some(end) = find_header_end(&acc) {
+            let head = String::from_utf8_lossy(&acc[..end]).to_string();
+            acc.drain(0..end + 4);
+            let id = head
+                .lines()
+                .next()
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|p| p.strip_prefix("/v1/invoices/"))
+                .map(|s| s.split('?').next().unwrap_or("").to_string())
+                .unwrap_or_default();
+            let body = format!(
+                r#"{{"id":"{id}","object":"invoice","status":"paid","payments":{{"object":"list","data":[{{"object":"invoice_payment","payment":{{"type":"payment_intent","payment_intent":{{"id":"{pi}","object":"payment_intent","latest_charge":"{ch}"}}}}}}]}}}}"#
+            );
+            if stream.write_all(http_resp(200, &body)).await.0.is_err() {
+                return;
+            }
+        }
+        let buf = vec![0u8; 4096];
+        let compio::BufResult(n, buf) = stream.read(buf).await;
+        match n {
+            Ok(0) | Err(_) => return,
+            Ok(read) => acc.extend_from_slice(&buf[..read]),
+        }
+    }
+}
+
 async fn serve_flaky_conn(mut stream: TcpStream, calls: Arc<AtomicU32>, fail_n: u32) {
     let mut acc: Vec<u8> = Vec::new();
     loop {
@@ -281,6 +331,8 @@ async fn invoice_paid_webhook_records_app_audit_row() {
                 "amount_paid": 1234,
                 "application_fee_amount": 185,
                 "currency": "usd",
+                // M4: the settling account must be the claimed creator's own account.
+                "on_behalf_of": "acct_webhookAudit1",
                 "metadata": {
                     "creator_id": creator_id.to_string(),
                 }
@@ -823,13 +875,16 @@ async fn non_infra_invoice_paid_still_routes_to_payout() {
     let conn = side_conn(&db_url).await;
     let creator_id = make_user(&conn).await;
     // A real Connect creator: linked account so the payout FK is satisfied.
+    let acct = format!("acct_{}", Uuid::new_v4().simple());
     fx.state
         .stripe_store
-        .link_account(creator_id, &format!("acct_{}", Uuid::new_v4().simple()))
+        .link_account(creator_id, &acct)
         .await
         .expect("link stripe account");
 
     // NON-infra invoice.paid: creator_id present, NO invoice_kind=infra marker.
+    // M4: the settling account (on_behalf_of) is the creator's OWN account, so
+    // attribution passes and the payout is credited.
     let evt = format!("evt_connect_{}", Uuid::new_v4().simple());
     let body = json!({
         "id": evt,
@@ -840,6 +895,7 @@ async fn non_infra_invoice_paid_still_routes_to_payout() {
             "amount_paid": 1000,
             "application_fee_amount": 150,
             "currency": "usd",
+            "on_behalf_of": acct,
             "metadata": { "creator_id": creator_id.to_string() }
         }}
     })
@@ -853,6 +909,67 @@ async fn non_infra_invoice_paid_still_routes_to_payout() {
         payout_row_count(&conn, creator_id).await,
         1,
         "a real Connect creator's invoice.paid still records a payout (D3 did not break this)",
+    );
+}
+
+/// M4 (payout attribution): a Connect-revenue `invoice.paid` whose settling account
+/// (`on_behalf_of`) is NOT the claimed `metadata.creator_id`'s own account must be
+/// REJECTED — no payout credited. A forged creator id cannot steal another account's
+/// revenue.
+///
+/// RED pre-fix: `record_payout` trusted `metadata.creator_id` with no ownership
+/// check, so a payout was credited to the forged creator regardless of which account
+/// actually settled the charge.
+#[compio::test]
+async fn payout_with_mismatched_settling_account_is_rejected() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "m4-attribution").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+
+    // The CLAIMED creator owns acct A.
+    let claimed_creator = make_user(&conn).await;
+    let acct_a = format!("acct_{}", Uuid::new_v4().simple());
+    fx.state.stripe_store.link_account(claimed_creator, &acct_a).await.expect("link A");
+
+    // But the charge settled on behalf of acct B (a DIFFERENT account).
+    let other_creator = make_user(&conn).await;
+    let acct_b = format!("acct_{}", Uuid::new_v4().simple());
+    fx.state.stripe_store.link_account(other_creator, &acct_b).await.expect("link B");
+
+    let evt = format!("evt_m4_{}", Uuid::new_v4().simple());
+    let body = json!({
+        "id": evt,
+        "type": "invoice.paid",
+        "created": 1_777_017_600i64,
+        "data": { "object": {
+            "id": format!("in_m4_{}", Uuid::new_v4().simple()),
+            "amount_paid": 9999,
+            "application_fee_amount": 100,
+            "currency": "usd",
+            // Settled on B, but metadata CLAIMS the (different) creator who owns A.
+            "on_behalf_of": acct_b,
+            "metadata": { "creator_id": claimed_creator.to_string() }
+        }}
+    })
+    .to_string();
+
+    let r = post_webhook!(app, &body, None);
+    assert_eq!(r.status(), StatusCode::OK, "acked (no retry storm) but not credited");
+    let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
+    assert_eq!(b["status"], "attribution_mismatch", "the mismatch is rejected, not credited");
+    assert_eq!(
+        payout_row_count(&conn, claimed_creator).await,
+        0,
+        "no payout credited to the claimed creator whose account did NOT settle the charge",
+    );
+    assert_eq!(
+        payout_row_count(&conn, other_creator).await,
+        0,
+        "and certainly none mis-credited to the real settling account's creator",
     );
 }
 
@@ -914,6 +1031,382 @@ async fn infra_invoice_paid_fetches_settlement_linkage_when_payload_omits_it() {
         pairs.contains(&("payment_intent".to_string(), format!("pi_flaky_{suffix}"))),
         "pi_ linkage fetched + recorded; got {pairs:?}",
     );
+}
+
+/// C2 (webhook poison via the uncovered second unique): a settling `pi_`/`ch_`
+/// already linked to invoice A, then seen for a DIFFERENT internal invoice B
+/// (Stripe reuses a `pi_` across a void+reissue, which mints a new internal
+/// invoice_id), must NOT poison the webhook. The linkage insert is tolerant of the
+/// GLOBAL `UNIQUE(provider, ref_kind, external_id)`: invoice B's `invoice.paid`
+/// acks 200 (the pi_ belongs to invoice A; it is an idempotent no-op), the event is
+/// CLAIMED, and the cross-invoice ref is NOT created.
+///
+/// RED pre-fix: `record_payment_object_refs` did `ON CONFLICT (invoice_id, provider,
+/// ref_kind) DO NOTHING`, which does NOT cover the global unique — so invoice B's
+/// INSERT raised SQLSTATE 23505, propagated to a 500, left the event UNCLAIMED, and
+/// Stripe retried forever (poison).
+#[compio::test]
+async fn settling_pi_reused_across_invoices_does_not_poison_webhook() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    // A mock that returns the SAME fixed pi_/ch_ for EVERY invoice — modelling a
+    // settling object reused across the void+reissue. Uniquified per run so the
+    // persistent test DB's global-unique constraint never collides across runs.
+    let suffix = Uuid::new_v4().simple().to_string();
+    let shared_pi = format!("pi_shared_c2_{suffix}");
+    let shared_ch = format!("ch_shared_c2_{suffix}");
+    let base_url = start_fixed_settlement_mock(shared_pi.clone(), shared_ch.clone()).await;
+    let fx = Fixture::new_with_stripe(&db_url, "c2-poison", "sk_test_mock", &base_url).await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+    let creator_id = make_user(&conn).await;
+    conn.execute(
+        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        &[&creator_id],
+    )
+    .await
+    .expect("creator_billing");
+
+    // Invoice A: finalized, with the shared pi_ ALREADY linked (the prior settlement).
+    let (inv_a, _provider_a) = seed_finalized_infra_invoice(&conn, creator_id, 4500).await;
+    conn.execute(
+        "INSERT INTO zeroship.billing_provider_refs (invoice_id, provider, ref_kind, external_id) \
+         VALUES ($1, 'stripe', 'payment_intent', $2)",
+        &[&inv_a, &shared_pi],
+    )
+    .await
+    .expect("pre-link pi_ to invoice A");
+
+    // Invoice B: a DIFFERENT internal invoice (the reissue), whose invoice.paid
+    // fetches the SAME shared pi_ from the mock. Seeded in a DISTINCT period so the
+    // (creator, period) partial-unique index does not block the second invoice (the
+    // void+reissue scenario the C2 fix targets is about the SHARED pi_, not the period).
+    let inv_b = zeroship_core::typed_id::new_invoice_id();
+    let period_b = {
+        use chrono::Datelike;
+        let now = chrono::Utc::now().date_naive();
+        // The month before this one — guaranteed distinct from period_first_of_month().
+        let (y, m) = if now.month() == 1 { (now.year() - 1, 12) } else { (now.year(), now.month() - 1) };
+        chrono::NaiveDate::from_ymd_opt(y, m, 1).unwrap()
+    };
+    conn.execute(
+        "INSERT INTO zeroship.invoices \
+           (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, total_cents, finalized_at) \
+         VALUES ($1, $2, $3::date, 'finalized', 4500, 0, 0, 4500, NOW())",
+        &[&inv_b, &creator_id, &period_b],
+    )
+    .await
+    .expect("finalized invoice B");
+    let provider_b = format!("in_idem_{}", Uuid::new_v4().simple());
+    conn.execute(
+        "INSERT INTO zeroship.billing_provider_refs (invoice_id, provider, ref_kind, external_id) \
+         VALUES ($1, 'stripe', 'invoice', $2)",
+        &[&inv_b, &provider_b],
+    )
+    .await
+    .expect("provider ref B");
+    let evt = format!("evt_c2_{}", Uuid::new_v4().simple());
+    // Body omits inline pi_/ch_ → the handler MUST fetch (gets the shared pi_).
+    let body = infra_invoice_paid_body(&evt, &provider_b, creator_id, 4500);
+
+    let r = post_webhook!(app, &body, None);
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "invoice B's invoice.paid must ACK 200 — the reused pi_ must not poison the webhook",
+    );
+    assert_eq!(ledger_count(&conn, &evt).await, 1, "event CLAIMED — Stripe will NOT retry (no poison loop)");
+
+    // Invoice B's charge row was appended (the cash is still recorded)…
+    assert_eq!(charge_row_count(&conn, &inv_b).await, 1, "invoice B charge row appended");
+    // …but the shared pi_ ref still belongs ONLY to invoice A (the first settlement).
+    let pi_rows = conn
+        .query(
+            "SELECT invoice_id FROM zeroship.billing_provider_refs \
+             WHERE provider = 'stripe' AND ref_kind = 'payment_intent' AND external_id = $1",
+            &[&shared_pi],
+        )
+        .await
+        .expect("select pi refs");
+    assert_eq!(pi_rows.len(), 1, "exactly one row maps the globally-unique pi_");
+    assert_eq!(
+        pi_rows[0].get::<_, String>("invoice_id"),
+        inv_a,
+        "the reused pi_ stays linked to the FIRST settlement (invoice A), never re-pointed to B",
+    );
+}
+
+/// M1 (dunning must fail-closed): an error from `record_payment_failed` during an
+/// `invoice.payment_failed` webhook must FAIL CLOSED — return 5xx and leave the
+/// event UNCLAIMED so Stripe retries. Otherwise the event is marked processed,
+/// Stripe never redelivers, and the creator never enters dunning (consuming free
+/// infra on a dead card).
+///
+/// We force the error with a `metadata.creator_id` that is a well-formed UUID but
+/// NOT a real `users` row: `record_payment_failed`'s parent-first
+/// `INSERT INTO creator_billing (creator_id)` FK-violates `users(id)` → Err.
+///
+/// RED pre-fix: the handler logged the error and fell through to 200; the event was
+/// CLAIMED (1 ledger row) and dunning never armed.
+#[compio::test]
+async fn payment_failed_record_error_fails_closed_unclaimed() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "m1-dunning-failclosed").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+
+    // A creator_id that is NOT a real user → the parent-first creator_billing insert
+    // FK-violates → record_payment_failed errors.
+    let bogus_creator = Uuid::new_v4();
+    let evt = format!("evt_pf_failclosed_{}", Uuid::new_v4().simple());
+    let body = json!({
+        "id": evt,
+        "type": "invoice.payment_failed",
+        "created": 1_777_017_600i64,
+        "data": { "object": {
+            "id": format!("in_pf_{}", Uuid::new_v4().simple()),
+            "currency": "usd",
+            "metadata": { "creator_id": bogus_creator.to_string(), "invoice_kind": "infra" }
+        }}
+    })
+    .to_string();
+
+    let r = post_webhook!(app, &body, None);
+    assert_eq!(
+        r.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a record_payment_failed error must fail the webhook closed (retryable 5xx)",
+    );
+    assert_eq!(
+        ledger_count(&conn, &evt).await,
+        0,
+        "the event must NOT be claimed — Stripe retries so the creator still enters dunning",
+    );
+}
+
+/// M2 (the money hole): an `account.updated` flipping `charges_enabled=false`
+/// (Stripe risk/KYC hold) must update the CACHED flag so the `connect_checkout`
+/// gate (which reads `creator_accounts.charges_enabled`) now blocks the account.
+///
+/// RED pre-fix: `account.updated` fell into the silent `_ => ignored` arm — the
+/// cached `charges_enabled` stayed `true`, and a disabled account kept passing the
+/// checkout gate.
+#[compio::test]
+async fn account_updated_disables_cached_charges_flag() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "m2-account-updated").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+    let creator_id = make_user(&conn).await;
+    let acct = format!("acct_{}", Uuid::new_v4().simple());
+    // Link + mark the account fully enabled (the state before the risk hold).
+    fx.state.stripe_store.link_account(creator_id, &acct).await.expect("link");
+    fx.state
+        .stripe_store
+        .set_account_flags(creator_id, &acct, true, true, true)
+        .await
+        .expect("enable flags");
+    // Sanity: the gate would pass right now.
+    assert!(
+        fx.state.stripe_store.get_account(creator_id).await.unwrap().unwrap().charges_enabled,
+        "precondition: account is charges_enabled before the risk hold",
+    );
+
+    // account.updated with charges_enabled=false (the risk/KYC disable).
+    let evt = format!("evt_acct_{}", Uuid::new_v4().simple());
+    let body = json!({
+        "id": evt,
+        "type": "account.updated",
+        "created": 1_777_017_600i64,
+        "data": { "object": {
+            "id": acct,
+            "object": "account",
+            "charges_enabled": false,
+            "payouts_enabled": false,
+            "details_submitted": true
+        }}
+    })
+    .to_string();
+    let r = post_webhook!(app, &body, None);
+    assert_eq!(r.status(), StatusCode::OK, "account.updated processed");
+    let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
+    assert_eq!(b["status"], "account_flags_updated");
+    assert_eq!(ledger_count(&conn, &evt).await, 1, "event claimed");
+
+    // The CACHED flag the connect_checkout gate reads is now FALSE → gate blocks.
+    let acct_row = fx.state.stripe_store.get_account(creator_id).await.unwrap().unwrap();
+    assert!(
+        !acct_row.charges_enabled,
+        "account.updated must flip the cached charges_enabled to false so checkout is blocked",
+    );
+}
+
+/// M2 (no double-debit): a `charge.dispute.funds_withdrawn` event must NOT append a
+/// second `dispute_debit` `invoice_payments` row — the cash movement is owned by the
+/// dispute LIFECYCLE handler (`charge.dispute.created`). The funds event is
+/// audit-only, so `Σ(invoice_payments)` is debited EXACTLY ONCE.
+///
+/// RED pre-fix: `funds_withdrawn` fell into the silent `_ => ignored` arm, which
+/// (correctly) did nothing — but there was no explicit guard / test pinning the
+/// single-source-of-truth invariant; this test makes the no-double-debit explicit
+/// and guards against a future handler being wired to BOTH rails.
+#[compio::test]
+async fn dispute_funds_event_does_not_double_debit() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "m2-funds-nodouble").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+    let creator_id = make_user(&conn).await;
+    conn.execute(
+        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        &[&creator_id],
+    )
+    .await
+    .expect("creator_billing");
+
+    // A finalized invoice with a charge collected + the ch_ linkage the dispute resolves through.
+    let (inv_id, _provider) = seed_finalized_infra_invoice(&conn, creator_id, 4500).await;
+    append_charge_via_helper(&conn, &inv_id, 4500).await;
+    let ch = format!("ch_funds_{}", Uuid::new_v4().simple());
+    conn.execute(
+        "INSERT INTO zeroship.billing_provider_refs (invoice_id, provider, ref_kind, external_id) \
+         VALUES ($1, 'stripe', 'charge', $2)",
+        &[&inv_id, &ch],
+    )
+    .await
+    .expect("ch ref");
+
+    // Lifecycle: charge.dispute.created debits once.
+    let du = format!("du_{}", Uuid::new_v4().simple());
+    let created_evt = format!("evt_dispute_created_{}", Uuid::new_v4().simple());
+    let created = json!({
+        "id": created_evt,
+        "type": "charge.dispute.created",
+        "created": 1_777_017_600i64,
+        "data": { "object": {
+            "id": du, "amount": 4500, "currency": "usd", "reason": "fraudulent",
+            "charge": ch, "status": "needs_response"
+        }}
+    })
+    .to_string();
+    let r1 = post_webhook!(app, &created, None);
+    assert_eq!(r1.status(), StatusCode::OK, "dispute.created recorded");
+    let debits_after_created = dispute_debit_count(&conn, &inv_id).await;
+    assert_eq!(debits_after_created, 1, "exactly one dispute_debit from the lifecycle handler");
+
+    // Funds event: must NOT add a second debit.
+    let funds_evt = format!("evt_funds_{}", Uuid::new_v4().simple());
+    let funds = json!({
+        "id": funds_evt,
+        "type": "charge.dispute.funds_withdrawn",
+        "created": 1_777_017_700i64,
+        "data": { "object": {
+            "id": du, "amount": 4500, "currency": "usd", "charge": ch
+        }}
+    })
+    .to_string();
+    let r2 = post_webhook!(app, &funds, None);
+    assert_eq!(r2.status(), StatusCode::OK, "funds event acked");
+    let b: Value = serde_json::from_slice(&test::read_body(r2).await).unwrap();
+    assert_eq!(b["status"], "funds_event_audited");
+    assert_eq!(
+        dispute_debit_count(&conn, &inv_id).await,
+        1,
+        "the funds event must NOT add a second dispute_debit (single source of truth)",
+    );
+}
+
+/// Append a charge row through the REAL helper (keeps cash_collected honest).
+async fn append_charge_via_helper(conn: &compio_postgres::Client, inv_id: &str, amount: i64) {
+    zeroship_control::invoice_payments::append_charge(
+        conn,
+        inv_id,
+        amount,
+        "usd",
+        Some(&format!("in_paid_{}", Uuid::new_v4().simple())),
+    )
+    .await
+    .expect("append charge");
+}
+
+/// Count `dispute_debit` rows for an internal invoice.
+async fn dispute_debit_count(conn: &compio_postgres::Client, invoice_id: &str) -> i64 {
+    conn.query(
+        "SELECT COUNT(*)::bigint AS n FROM zeroship.invoice_payments \
+         WHERE invoice_id = $1 AND kind = 'dispute_debit'",
+        &[&invoice_id],
+    )
+    .await
+    .expect("count debits")[0]
+        .get::<_, i64>("n")
+}
+
+/// M3 (dedup concurrency): `lock_event` takes a SESSION advisory lock keyed on the
+/// event id, so a SECOND connection's `pg_try_advisory_lock` on the SAME key FAILS
+/// while it is held — the same-event redeliveries serialize. Mirrors the PR-2
+/// consume-lock test (`issue_refund_takes_per_creator_advisory_lock`).
+///
+/// RED pre-fix: there was no lock around the check-then-act, so the try-lock on the
+/// same key would succeed (no serialization).
+#[compio::test]
+async fn lock_event_serializes_same_event() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "m3-event-lock").await;
+    let probe = side_conn(&db_url).await;
+    let event_id = format!("evt_lock_{}", Uuid::new_v4().simple());
+
+    // Take the per-event session advisory lock (held on the returned connection).
+    let lock_conn = fx.state.stripe_store.lock_event(&event_id).await.expect("lock");
+
+    // A try-lock on the SAME key from a DIFFERENT connection must FAIL (lock held).
+    let got: bool = probe
+        .query(
+            "SELECT pg_try_advisory_lock(hashtext($1::text)::bigint) AS got",
+            &[&event_id],
+        )
+        .await
+        .expect("try-lock while held")[0]
+        .get("got");
+    assert!(
+        !got,
+        "while lock_event holds the per-event lock, a concurrent try-lock on the same key must fail (serialized)",
+    );
+    // (If the try-lock had somehow succeeded, release it so the probe conn is clean.)
+    if got {
+        let _ = probe
+            .execute("SELECT pg_advisory_unlock(hashtext($1::text)::bigint)", &[&event_id])
+            .await;
+    }
+
+    // Release the held lock; the same key is now acquirable.
+    zeroship_control::StripeStore::unlock_event(&lock_conn, &event_id).await;
+    let got2: bool = probe
+        .query(
+            "SELECT pg_try_advisory_lock(hashtext($1::text)::bigint) AS got",
+            &[&event_id],
+        )
+        .await
+        .expect("try-lock after release")[0]
+        .get("got");
+    assert!(got2, "after unlock_event the per-event lock is free again");
+    let _ = probe
+        .execute("SELECT pg_advisory_unlock(hashtext($1::text)::bigint)", &[&event_id])
+        .await;
+    drop(lock_conn);
 }
 
 // ─── G6 replay-dedup ledger tests ──────────────────────────────────────────

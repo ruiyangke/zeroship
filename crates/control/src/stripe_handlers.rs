@@ -83,6 +83,20 @@ fn is_valid_currency(s: &str) -> bool {
     s.len() == 3 && s.bytes().all(|b| b.is_ascii_lowercase())
 }
 
+/// Stripe's PaymentIntent `description` max length (chars). A longer value is a
+/// 400 `string_too_long` on the wire.
+const MAX_STRIPE_DESCRIPTION: usize = 1000;
+
+/// Cap `s` to [`MAX_STRIPE_DESCRIPTION`] chars on a CHAR boundary (m4) so a
+/// multi-byte UTF-8 char is never split mid-sequence (which would be invalid
+/// UTF-8). Returns the input unchanged when it already fits.
+fn cap_stripe_description(s: &str) -> &str {
+    match s.char_indices().nth(MAX_STRIPE_DESCRIPTION) {
+        Some((byte_idx, _)) => &s[..byte_idx],
+        None => s,
+    }
+}
+
 // ----------------------------------------------------------------
 // Onboarding (master-key)
 // ----------------------------------------------------------------
@@ -513,7 +527,12 @@ pub async fn connect_checkout(
         "connect_pi:{creator_id}:{cart}:{}:{}",
         body.amount_cents, body.currency
     );
-    let description = body.description.as_deref().unwrap_or("zeroship connect charge");
+    // m4: cap the description before it hits the wire. Stripe's PaymentIntent
+    // `description` max is 1000 chars; a longer one is a 400 `string_too_long`.
+    // Done here (not in the client) so the cap is visible at the creator-facing
+    // boundary where the value originates.
+    let raw_description = body.description.as_deref().unwrap_or("zeroship connect charge");
+    let description: &str = cap_stripe_description(raw_description);
 
     match stripe
         .create_connect_payment_intent(
@@ -871,6 +890,38 @@ struct StripeObject {
     /// legacy top-level `payment_intent`/`charge` fields above cover older API versions.
     #[serde(default)]
     payments: Option<InvoicePayments>,
+    // ── Connect Account (account.updated) fields (M2) ───────────────────────
+    /// `charges_enabled` on a connected `account` object — Stripe flips this to
+    /// FALSE on a risk/KYC hold. The `account.updated` handler caches it so the
+    /// `connect_checkout` gate reflects reality. Unset on non-account objects.
+    #[serde(default)]
+    charges_enabled: Option<bool>,
+    /// `payouts_enabled` on a connected `account` object (M2).
+    #[serde(default)]
+    payouts_enabled: Option<bool>,
+    /// `details_submitted` on a connected `account` object (M2).
+    #[serde(default)]
+    details_submitted: Option<bool>,
+    // ── Connect revenue attribution (M4) ────────────────────────────────────
+    /// The connected account the charge settled ON BEHALF OF (`acct_…`). On a
+    /// Connect-revenue invoice / charge this is the destination account that
+    /// actually received the funds. The payout handler confirms it matches the
+    /// claimed creator's `creator_accounts.stripe_account_id` before crediting —
+    /// so a forged `metadata.creator_id` cannot attribute another account's
+    /// revenue to itself.
+    #[serde(default)]
+    on_behalf_of: Option<String>,
+    /// `transfer_data[destination]` (`acct_…`) — the other place the destination
+    /// connected account surfaces on a Connect charge/PaymentIntent. Checked as a
+    /// fallback when `on_behalf_of` is absent.
+    #[serde(default)]
+    transfer_data: Option<TransferData>,
+}
+
+#[derive(Deserialize, Debug)]
+struct TransferData {
+    #[serde(default)]
+    destination: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -1021,6 +1072,40 @@ pub async fn webhook(
     // 2xx (see the tail of this fn). A handler that errored is NOT recorded, so
     // Stripe's retry re-processes it — exactly-once EFFECTIVE (no double-process
     // AND no lost event on handler failure).
+    //
+    // M3 (dedup concurrency): `event_processed` → dispatch → `mark_event_processed`
+    // is a check-then-act across un-serialized connections, so two CONCURRENT
+    // redeliveries of the SAME event could both pass the check and both dispatch
+    // (saved today only by per-handler idempotency — the ledger does nothing under
+    // concurrency). Take a SESSION advisory lock keyed on the event id FIRST so
+    // same-event deliveries serialize: the second waits for the first to release,
+    // by which point the first has CLAIMED the event, so the second 200-acks as a
+    // duplicate. A session lock (not xact) is required because the dispatch spans
+    // PG→HTTP→PG with fresh per-step connections (no single long transaction). The
+    // lock is held on a dedicated connection and released explicitly below (drop
+    // also releases it). Claim-after-success fail-closed semantics are unchanged.
+    let lock_conn = match state.stripe_store.lock_event(&event.id).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "stripe: failed to take per-event advisory lock — failing closed");
+            return err_json(500, "internal error");
+        }
+    };
+    let resp = process_locked_event(&req, &state, &event, raw).await;
+    crate::stripe_store::StripeStore::unlock_event(&lock_conn, &event.id).await;
+    drop(lock_conn);
+    resp
+}
+
+/// Run the dedup-checked dispatch for ONE event WHILE the per-event advisory lock
+/// is held (M3). Factored out of [`webhook`] so the lock is released on EVERY
+/// return path (the caller unlocks after this returns). Returns the HTTP response.
+async fn process_locked_event(
+    req: &web::HttpRequest,
+    state: &AppState,
+    event: &StripeEvent,
+    raw: &[u8],
+) -> web::HttpResponse {
     match state.stripe_store.event_processed(&event.id).await {
         Ok(true) => {
             // Already processed on a prior delivery — idempotent ack.
@@ -1035,7 +1120,7 @@ pub async fn webhook(
         }
     }
 
-    let resp = dispatch_event(&req, &state, &event, raw).await;
+    let resp = dispatch_event(req, state, event, raw).await;
 
     // Record PROCESSED only on handler success (2xx). On a non-2xx the event is
     // left unclaimed so Stripe's retry re-processes it (no lost event).
@@ -1089,6 +1174,29 @@ async fn dispatch_event(
         }
         "charge.dispute.closed" | "charge.dispute.updated" => {
             return handle_dispute_closed_or_updated(req, state, event, obj).await;
+        }
+        // M2 (the money hole): a connected account whose `charges_enabled`/
+        // `payouts_enabled` Stripe flips to FALSE (risk/KYC) must be observed —
+        // `connect_checkout` gates on the CACHED flag, so a stale `true` would let a
+        // disabled account keep taking charges. Update the cached flags for the
+        // `acct_…` so the gate reflects reality.
+        "account.updated" => {
+            return handle_account_updated(req, state, event, obj).await;
+        }
+        // M2 dispute FUNDS events. The cash movement has a SINGLE source of truth: the
+        // dispute LIFECYCLE handlers (`.created` debits, `.closed won` reverses). The
+        // funds-flow events (`funds_withdrawn`/`funds_reinstated`) describe the SAME
+        // money already accounted there, so acting on them too would DOUBLE-count. We
+        // therefore treat them as AUDIT-ONLY no-ops (record nothing to the ledger) — a
+        // loud info line, then ack. This keeps `Σ(invoice_payments)` driven by exactly
+        // one rail (no double-debit / double-restore).
+        "charge.dispute.funds_withdrawn" | "charge.dispute.funds_reinstated" => {
+            tracing::info!(
+                event_id = %sanitize_event_id(&event.id),
+                event_type = %event.event_type,
+                "stripe: dispute funds event acked (audit-only; cash movement is owned by the dispute lifecycle handlers, no double-count)"
+            );
+            return web::HttpResponse::Ok().json(&serde_json::json!({"status": "funds_event_audited"}));
         }
         // `invoice.paid` carries TWO concerns:
         //   * Stream-1 (infra recovery, G2): a previously-failed infra invoice
@@ -1151,6 +1259,34 @@ async fn dispatch_event(
                 return web::HttpResponse::Ok().json(&serde_json::json!({"status": "infra_recorded"}));
             }
         }
+        // M2: billing-relevant events we do NOT yet act on, but must NOT silently
+        // drop. A LOUD warn (not a silent `_ => ignored`) so they surface in logs and
+        // are not lost. DEFERRED handling (each is a follow-up):
+        //   * `payout.failed` — a payout to a connected account bounced (bad bank
+        //     details); ops should notify the creator. Deferred: needs a creator-facing
+        //     notification + a payout-failure ledger.
+        //   * `payment_intent.payment_failed` — a Connect end-user charge failed; the
+        //     creator's front-end already sees this via the client_secret confirm, so
+        //     there is no platform-ledger action, but we log it for observability.
+        //   * `charge.refund.updated` — a `re_…` we issued later transitioned (e.g. to
+        //     `failed` when the bank rejected the credit). Deferred: needs a refund
+        //     status column to reconcile a failed refund back into cash_collected.
+        //
+        // MUST-ENABLE webhook event set (configure these on the Stripe endpoint):
+        //   setup_intent.succeeded, invoice.payment_failed, invoice.paid,
+        //   account.updated, charge.dispute.created, charge.dispute.closed,
+        //   charge.dispute.updated, charge.dispute.funds_withdrawn,
+        //   charge.dispute.funds_reinstated  (handled above)
+        //   payout.failed, payment_intent.payment_failed, charge.refund.updated
+        //   (logged here, handling deferred)
+        "payout.failed" | "payment_intent.payment_failed" | "charge.refund.updated" => {
+            tracing::warn!(
+                event_id = %sanitize_event_id(&event.id),
+                event_type = %event.event_type,
+                "stripe: unhandled billing-relevant event — acked but NOT acted on (handling deferred; see dispatch_event doc)"
+            );
+            return web::HttpResponse::Ok().json(&serde_json::json!({"status": "acked_unhandled"}));
+        }
         _ => {
             return web::HttpResponse::Ok().json(&serde_json::json!({"status": "ignored"}));
         }
@@ -1178,6 +1314,54 @@ async fn dispatch_event(
             format!("bad creator_id in metadata: {}", stripe_store::sanitize_for_display(&creator_id_str)),
         );
     };
+
+    // M4 (payout attribution): `metadata.creator_id` is CLIENT-influenced — a
+    // forged or copy-pasted id could attribute ANOTHER account's revenue to a
+    // different creator. Resolve the connected account the charge actually settled
+    // ON BEHALF OF (`on_behalf_of`, else `transfer_data.destination`) and confirm it
+    // is the claimed creator's OWN live `creator_accounts.stripe_account_id` before
+    // crediting earnings. A mismatch (or a missing settling account on a revenue
+    // event) is REJECTED — not credited.
+    let settling_account = obj
+        .on_behalf_of
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            obj.transfer_data
+                .as_ref()
+                .and_then(|t| t.destination.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        });
+    let Some(settling_account) = settling_account else {
+        tracing::warn!(
+            event_id = %sanitize_event_id(&event.id),
+            "stripe: connect-revenue invoice.paid carries no settling account (on_behalf_of / transfer_data.destination) — refusing to credit a payout"
+        );
+        return web::HttpResponse::Ok().json(&serde_json::json!({"status": "no_settling_account"}));
+    };
+    match state
+        .stripe_store
+        .account_belongs_to_creator(creator_id, settling_account)
+        .await
+    {
+        Ok(true) => { /* attribution verified — the claimed creator owns the settling account */ }
+        Ok(false) => {
+            tracing::warn!(
+                event_id = %sanitize_event_id(&event.id),
+                creator_id = %creator_id,
+                settling_account = %stripe_store::sanitize_for_display(settling_account),
+                "stripe: payout attribution MISMATCH — claimed creator does not own the settling account; refusing to credit"
+            );
+            return web::HttpResponse::Ok().json(&serde_json::json!({"status": "attribution_mismatch"}));
+        }
+        Err(e) => {
+            // FAIL CLOSED on a transient lookup error — retry rather than credit blind.
+            tracing::error!(error = %e, "stripe: payout attribution check failed — failing closed for retry");
+            return err_json(500, "internal error");
+        }
+    }
 
     // SHA-256 of the raw body — lets us detect a same-event_id retry
     // arriving with different content (legitimate Stripe retries send
@@ -1286,6 +1470,79 @@ async fn handle_setup_intent_succeeded(
     }
 }
 
+/// `account.updated` (M2, the money hole). A connected account's onboarding /
+/// capability flags changed at Stripe — most importantly `charges_enabled` /
+/// `payouts_enabled` being flipped to FALSE on a risk / KYC hold. The
+/// `connect_checkout` gate reads the CACHED `charges_enabled`, so a stale `true`
+/// would let a now-disabled account keep taking charges. Re-cache the flags from
+/// the event's account object so the gate reflects Stripe's truth.
+///
+/// The account object's `id` IS the `acct_…`; we update the live row by that id
+/// (globally unique). An `account.updated` for an `acct_…` we never linked (a
+/// platform/express account not in `creator_accounts`) is a benign no-op ack.
+async fn handle_account_updated(
+    req: &web::HttpRequest,
+    state: &AppState,
+    event: &StripeEvent,
+    obj: &StripeObject,
+) -> web::HttpResponse {
+    let Some(account_id) = obj.id.as_deref().filter(|s| !s.is_empty()) else {
+        tracing::warn!(event_id = %sanitize_event_id(&event.id), "stripe: account.updated missing account id — ignored");
+        return web::HttpResponse::Ok().json(&serde_json::json!({"status": "missing_account_id"}));
+    };
+    // Default a missing flag to FALSE — the fail-closed direction (a charge gate
+    // should never be opened by an absent field).
+    let charges_enabled = obj.charges_enabled.unwrap_or(false);
+    let payouts_enabled = obj.payouts_enabled.unwrap_or(false);
+    let details_submitted = obj.details_submitted.unwrap_or(false);
+
+    match state
+        .stripe_store
+        .update_account_flags_by_account_id(
+            account_id,
+            charges_enabled,
+            payouts_enabled,
+            details_submitted,
+        )
+        .await
+    {
+        Ok(matched) => {
+            if matched {
+                let ip = source_ip(req, state);
+                audit::log_with_detail(
+                    &state.registry,
+                    AuditEntry {
+                        app_id: None,
+                        creator_id: None,
+                        actor_user_id: None,
+                        actor_token_id: None,
+                        action: Action::AccountStateChange,
+                        resource: Some(&event.id),
+                        source_ip: ip.as_deref(),
+                    },
+                    &serde_json::json!({
+                        "stripe_event_type": "account.updated",
+                        "stripe_account_id": account_id,
+                        "charges_enabled": charges_enabled,
+                        "payouts_enabled": payouts_enabled,
+                        "details_submitted": details_submitted,
+                    }),
+                )
+                .await;
+            }
+            web::HttpResponse::Ok().json(&serde_json::json!({
+                "status": if matched { "account_flags_updated" } else { "account_not_linked" },
+            }))
+        }
+        Err(e) => {
+            // FAIL CLOSED: a transient error updating the gate flags must retry, not
+            // be acked — otherwise a risk-disabled account stays cached as enabled.
+            tracing::error!(error = %e, "stripe: account.updated flag cache update failed — failing closed for retry");
+            stripe_err_response(e)
+        }
+    }
+}
+
 /// `invoice.payment_failed` — a finalized infra-billing invoice could not be
 /// charged. Audit it AND (billing G2) move the creator's account status to
 /// `past_due`, starting the dunning window. We do NOT mark the Stripe invoice
@@ -1321,7 +1578,16 @@ async fn handle_invoice_payment_failed(
             }
             Ok(None) => { /* no state change (redelivery / already past_due/suspended) */ }
             Err(e) => {
-                tracing::error!(error = %e, "stripe: invoice.payment_failed status update failed");
+                // M1: FAIL CLOSED. A transient error recording the dunning transition
+                // must NOT be swallowed-then-acked — that would mark the event processed
+                // (claim-after-success), Stripe would never redeliver, and the creator
+                // would never enter dunning (keeps consuming free infra on a dead card).
+                // Return 5xx so the event is left UNCLAIMED for retry, matching the
+                // infra-`invoice.paid` discipline. The transition is idempotent
+                // (last_recovered_at high-water + the active→past_due guard), so a retry
+                // re-arms exactly once.
+                tracing::error!(error = %e, "stripe: invoice.payment_failed status update failed — failing closed for retry");
+                return err_json(500, "internal error");
             }
         }
     }
@@ -1895,6 +2161,27 @@ mod verification_tests {
     #[test]
     fn invalid_json_message_is_constant() {
         assert_eq!(invalid_json_message(), "invalid json");
+    }
+
+    // m4: the connect-checkout description is capped at the Stripe max, on a char
+    // boundary (never splitting a multi-byte char).
+    #[test]
+    fn description_capped_at_stripe_max_on_char_boundary() {
+        // Short input passes through untouched.
+        assert_eq!(cap_stripe_description("hello"), "hello");
+        // Exactly at the cap is untouched.
+        let exact: String = "a".repeat(MAX_STRIPE_DESCRIPTION);
+        assert_eq!(cap_stripe_description(&exact), exact);
+        // One past the cap is truncated to exactly MAX chars.
+        let over: String = "a".repeat(MAX_STRIPE_DESCRIPTION + 50);
+        let capped = cap_stripe_description(&over);
+        assert_eq!(capped.chars().count(), MAX_STRIPE_DESCRIPTION);
+        // Multi-byte chars are never split: a string of 4-byte emoji capped stays
+        // valid UTF-8 and is exactly MAX chars.
+        let emoji: String = "😀".repeat(MAX_STRIPE_DESCRIPTION + 10);
+        let capped = cap_stripe_description(&emoji);
+        assert_eq!(capped.chars().count(), MAX_STRIPE_DESCRIPTION);
+        assert!(capped.chars().all(|c| c == '😀'), "no split multi-byte char");
     }
 
     // PR-8 CRITICAL-1: the pi_/ch_ capture must read BOTH Stripe Invoice wire shapes.

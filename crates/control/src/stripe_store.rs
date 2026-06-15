@@ -215,6 +215,47 @@ impl StripeStore {
         Ok(n > 0)
     }
 
+    /// Update the cached Connect flags for the LIVE account row identified by its
+    /// `acct_…` id (M2 `account.updated` webhook). Unlike [`Self::set_account_flags`]
+    /// this keys on the globally-unique `stripe_account_id` alone — the
+    /// `account.updated` event is delivered for the account object and does not carry
+    /// a creator id on the wire reliably. Only the not-unlinked row is touched.
+    ///
+    /// This is the money-hole closer: when Stripe flips `charges_enabled`/
+    /// `payouts_enabled` to FALSE (risk/KYC), the cached flag `connect_checkout`
+    /// gates on is brought into line with reality so a disabled account stops
+    /// passing the checkout gate. Returns `true` iff a live row matched.
+    pub async fn update_account_flags_by_account_id(
+        &self,
+        stripe_account_id: &str,
+        charges_enabled: bool,
+        payouts_enabled: bool,
+        details_submitted: bool,
+    ) -> Result<bool, StripeError> {
+        if !is_valid_stripe_account_id(stripe_account_id) {
+            return Err(StripeError::Validation(format!(
+                "stripe_account_id must match /^acct_[A-Za-z0-9]{{12,64}}$/, got '{}'",
+                sanitize_for_display(stripe_account_id),
+            )));
+        }
+        let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
+        let n = conn
+            .execute(
+                "UPDATE zeroship.creator_accounts \
+                    SET charges_enabled = $2, payouts_enabled = $3, details_submitted = $4 \
+                 WHERE stripe_account_id = $1 AND unlinked_at IS NULL",
+                &[
+                    &stripe_account_id,
+                    &charges_enabled,
+                    &payouts_enabled,
+                    &details_submitted,
+                ],
+            )
+            .await
+            .map_err(|e| StripeError::Db(e.to_string()))?;
+        Ok(n > 0)
+    }
+
     /// Return the link-history rows for a creator (newest first).
     /// Each row spans `[linked_at, unlinked_at)` for a single
     /// stripe_account_id binding.
@@ -243,6 +284,29 @@ impl StripeStore {
             linked_at: r.get("linked_at_text"),
             unlinked_at: r.get("unlinked_at_text"),
         }).collect())
+    }
+
+    /// `true` iff `stripe_account_id` is the LIVE (not-unlinked) Connect account of
+    /// `creator_id` (M4 payout attribution). The payout handler calls this with the
+    /// connected account that actually settled the charge (`on_behalf_of` /
+    /// `transfer_data.destination`) to confirm the claimed `metadata.creator_id`
+    /// OWNS that account before crediting earnings — so a forged creator id cannot
+    /// attribute another account's revenue to itself.
+    pub async fn account_belongs_to_creator(
+        &self,
+        creator_id: Uuid,
+        stripe_account_id: &str,
+    ) -> Result<bool, StripeError> {
+        let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
+        let rows = conn
+            .query(
+                "SELECT 1 FROM zeroship.creator_accounts \
+                 WHERE creator_id = $1 AND stripe_account_id = $2 AND unlinked_at IS NULL",
+                &[&creator_id, &stripe_account_id],
+            )
+            .await
+            .map_err(|e| StripeError::Db(e.to_string()))?;
+        Ok(!rows.is_empty())
     }
 
     // ------------------------------------------------------------------
@@ -510,6 +574,42 @@ impl StripeStore {
     // event AT MOST ONCE. See `zeroship.stripe_events_seen` (changeset 0047;
     // 0046 is invoice_payments).
     // ------------------------------------------------------------------
+
+    /// Acquire a SESSION-level advisory lock keyed on `event_id` on a dedicated
+    /// connection, returning that locked connection (M3). The webhook holds this for
+    /// the whole `event_processed` → dispatch → `mark_event_processed` sequence so
+    /// concurrent redeliveries of the SAME event serialize: the second waiter blocks
+    /// until the first releases (on `unlock_event` / connection drop), by which point
+    /// the first has CLAIMED the event and the second 200-acks as a duplicate.
+    ///
+    /// A SESSION lock (not `xact`) is used because the dispatch spans PG→HTTP→PG with
+    /// fresh per-step connections (no single long transaction). `pg_advisory_lock`
+    /// auto-releases when the connection is dropped, so a panicking/early-returning
+    /// path can never strand the lock. `hashtext(event_id)::bigint` matches the
+    /// per-key advisory-lock idiom used by the over-refund (PR-2) + void/reissue paths.
+    pub async fn lock_event(&self, event_id: &str) -> Result<compio_postgres::Client, StripeError> {
+        let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
+        conn.execute(
+            "SELECT pg_advisory_lock(hashtext($1::text)::bigint)",
+            &[&event_id],
+        )
+        .await
+        .map_err(|e| StripeError::Db(e.to_string()))?;
+        Ok(conn)
+    }
+
+    /// Release the session advisory lock taken by [`Self::lock_event`] on `conn`.
+    /// Dropping `conn` also releases it (defense in depth), but an explicit unlock
+    /// frees it promptly so a queued redelivery proceeds without waiting for the
+    /// connection to be reaped.
+    pub async fn unlock_event(conn: &compio_postgres::Client, event_id: &str) {
+        let _ = conn
+            .execute(
+                "SELECT pg_advisory_unlock(hashtext($1::text)::bigint)",
+                &[&event_id],
+            )
+            .await;
+    }
 
     /// `true` iff this webhook event-id was already processed (a prior delivery
     /// succeeded and was recorded). The webhook dispatcher checks this at the
