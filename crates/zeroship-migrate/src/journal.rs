@@ -671,7 +671,7 @@ pub async fn superseded_versions(
                  SELECT DISTINCT s.superseded_version AS v
                    FROM {meta}.schema_migrations_supersedes s
                    JOIN net_applied_squashes n ON n.version = s.squash_version
-                  ORDER BY s.superseded_version COLLATE \"C\""
+                  ORDER BY 1"
             ),
             &[],
         )

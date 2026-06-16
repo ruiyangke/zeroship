@@ -154,6 +154,37 @@ pub enum ApplyError {
         /// The depended-on expand migration that is not net-applied.
         expand: String,
     },
+    /// A pending squash migration (`supersedes = [v1..vN]`) was about to run its
+    /// `up`, but ALL of `[v1..vN]` are already net-applied — running `S.up` would
+    /// re-create existing objects (double-apply). On an existing DB the squash must
+    /// be recorded WITHOUT running its `up` via [`crate::squash`]; apply refuses
+    /// here before any execution. Nothing was applied.
+    #[error(
+        "squash migration {version} cannot be applied: all the versions it supersedes are already \
+         applied. Use squash() to record the supersession without re-running its up."
+    )]
+    SquashAlreadyApplied {
+        /// The squash migration being refused.
+        version: String,
+    },
+    /// A pending squash migration (`supersedes = [v1..vN]`) has a PARTIAL overlap
+    /// with the journal: some but not all of `[v1..vN]` are net-applied. A squash
+    /// may only run on a FRESH set (none applied) or be recorded on a fully-applied
+    /// set (all applied via [`crate::squash`]); a partial set is an inconsistent
+    /// state. Refused before any execution; nothing was applied.
+    #[error(
+        "squash migration {version} has a partial overlap: {applied} of {total} superseded \
+         versions are already applied. A squash requires either NONE applied (fresh: run its up) \
+         or ALL applied (existing: record via squash())."
+    )]
+    SquashPartialOverlap {
+        /// The squash migration being refused.
+        version: String,
+        /// How many of its superseded versions are net-applied.
+        applied: usize,
+        /// The total number of versions it supersedes.
+        total: usize,
+    },
     /// Applying a migration's `up` SQL failed (after the guard passed). The
     /// transaction (txn path) was rolled back; nothing was journaled.
     #[error("migration {version} failed to apply: {source}")]
@@ -530,9 +561,24 @@ async fn apply_locked(
     // the generic MissingDependency with a precise error.
     check_expand_contract_gate(migrations, &completed)?;
 
-    // Pending = set − completed. Ordered by `depends_on` when present
+    // SQUASH ALL-OR-NONE GATE (Plan 9 B) — a pending squash may run its `up` only
+    // when NONE of its superseded versions are applied (fresh DB). All-applied =>
+    // use squash() (record without running); partial => inconsistent. Refused
+    // before any execution, before order_pending hides the superseded versions.
+    check_squash_all_or_none(migrations, &completed)?;
+
+    // Supersession (Plan 9 B): a version superseded by a net-applied squash (read
+    // from the journal) OR by an in-set squash that will run this batch is SATISFIED
+    // — it must not (re-)run. `compute_superseded` unions both sources; the squash
+    // `S` itself is never in this set (it runs / is already applied).
+    let journal_superseded = journal::superseded_versions(conn, cfg).await?;
+    let superseded_owned = compute_superseded(migrations, &journal_superseded);
+    let superseded: std::collections::HashSet<&str> =
+        superseded_owned.iter().map(String::as_str).collect();
+
+    // Pending = set − completed − superseded. Ordered by `depends_on` when present
     // (topological, version-tiebroken & stable), else pure UUIDv7 version order.
-    let pending: Vec<&Migration> = order_pending(migrations, &completed)?;
+    let pending: Vec<&Migration> = order_pending(migrations, &completed, &superseded)?;
 
     let guard = SqlGuard::new(GuardConfig {
         project_schema: cfg.project_schema.clone(),
@@ -563,7 +609,13 @@ async fn apply_locked(
 
     let mut outcome = ApplyOutcome {
         applied: Vec::new(),
-        skipped: completed.keys().map(|v| (*v).to_string()).collect(),
+        // Skipped = already-completed versions PLUS versions skipped because a
+        // squash supersedes them (they will never run — `S` covers their effect).
+        skipped: completed
+            .keys()
+            .map(|v| (*v).to_string())
+            .chain(superseded_owned.iter().cloned())
+            .collect(),
         recovered: Vec::new(),
     };
 
@@ -584,6 +636,15 @@ async fn apply_locked(
             if recovered {
                 outcome.recovered.push(version.to_string());
             }
+        }
+        // Plan 9 B (fresh-DB squash): a squash whose `up` just RAN records its
+        // supersession edges so future pending computations know `S` satisfies
+        // `[v1..vN]`. Edges are appended AFTER the `completed` row exists (written
+        // by the apply paths above), as ADMIN. The all-or-none gate already proved
+        // NONE of the superseded versions were applied, so this is the fresh path.
+        if !m.supersedes.is_empty() {
+            let sups: Vec<&str> = m.supersedes.iter().map(MigrationId::as_str).collect();
+            journal::record_supersedes(conn, cfg, version, &sups).await?;
         }
         outcome.applied.push(version.to_string());
     }
@@ -696,14 +757,25 @@ fn check_expand_contract_gate(
 pub(crate) fn order_pending<'a>(
     migrations: &'a [Migration],
     completed: &HashMap<&str, &AppliedEntry>,
+    satisfied: &std::collections::HashSet<&str>,
 ) -> Result<Vec<&'a Migration>, ApplyError> {
     use std::collections::{BTreeMap, HashSet};
 
     // The pending set, indexed by version, plus the set of all known versions
     // (pending ∪ completed) for dependency-existence checks.
+    //
+    // `satisfied` (Plan 9 squash) is the set of versions made redundant by a
+    // SUPERSESSION — a version `v_i` superseded by a squash `S` that is net-applied
+    // OR being applied in this batch. Such a version is treated like a completed
+    // one: it is EXCLUDED from pending (its `up` must never run — `S` covers it),
+    // and it counts as a pre-met dependency (a later migration `depends_on v_i` is
+    // satisfied by `S`). `S` itself is NOT in `satisfied` (it is pending and runs).
     let pending: Vec<&Migration> = migrations
         .iter()
-        .filter(|m| !completed.contains_key(m.version.as_str()))
+        .filter(|m| {
+            !completed.contains_key(m.version.as_str())
+                && !satisfied.contains(m.version.as_str())
+        })
         .collect();
     let pending_versions: HashSet<&str> =
         pending.iter().map(|m| m.version.as_str()).collect();
@@ -711,6 +783,7 @@ pub(crate) fn order_pending<'a>(
         .iter()
         .copied()
         .chain(completed.keys().copied())
+        .chain(satisfied.iter().copied())
         .collect();
 
     // Validate every dependency resolves to a real version (set or journal), and
@@ -777,6 +850,93 @@ pub(crate) fn order_pending<'a>(
         return Err(ApplyError::DependencyCycle(cyclic.join(", ")));
     }
     Ok(ordered)
+}
+
+/// Compute the set of versions made redundant by a SUPERSESSION (Plan 9 squash),
+/// for the supplied set + the journal's net state.
+///
+/// A version `v_i` is satisfied-by-supersession when a squash `S` (with `v_i ∈
+/// S.supersedes`) is either:
+/// - **net-applied in the journal** (`journal_superseded`, read via
+///   [`crate::journal::superseded_versions`]); or
+/// - **present in the supplied set** — whether already net-applied OR pending. A
+///   pending `S` will run its `up` THIS batch, so its superseded versions must not
+///   also run (`order_pending` excludes them); an already-applied `S` is also
+///   covered by `journal_superseded`, so adding the in-set edges is at worst
+///   redundant.
+///
+/// The squash `S` itself is never added to the result (it is not superseded by
+/// itself; it runs or is already applied). Used by both [`apply_locked`] and the
+/// read-only [`crate::status`] so their "pending" views agree.
+pub(crate) fn compute_superseded(
+    migrations: &[Migration],
+    journal_superseded: &[String],
+) -> std::collections::HashSet<String> {
+    let mut out: std::collections::HashSet<String> =
+        journal_superseded.iter().cloned().collect();
+    for m in migrations {
+        if m.supersedes.is_empty() {
+            continue;
+        }
+        // An in-set squash covers its superseded versions whether it is already
+        // net-applied OR will be applied this batch (pending). Either way, the
+        // superseded versions must not (re-)run, so they enter the satisfied set.
+        for dep in &m.supersedes {
+            out.insert(dep.as_str().to_string());
+        }
+    }
+    out
+}
+
+/// Validate the squash all-or-none rule (Plan 9 sub-feature B) for every PENDING
+/// squash in the set, BEFORE any execution.
+///
+/// A squash `S` (`supersedes = [v1..vN]`) that is about to RUN its `up` (it is in
+/// the set and NOT net-applied) requires that NONE of `[v1..vN]` are net-applied —
+/// the fresh-DB path, where `S.up` builds the schema and the superseded versions
+/// are skipped. If ALL of `[v1..vN]` are net-applied, `S.up` would re-create
+/// existing objects (double-apply): the correct path is [`crate::squash`] (record
+/// the supersession WITHOUT running `up`), so apply refuses with
+/// [`ApplyError::SquashAlreadyApplied`]. A PARTIAL set (some but not all applied)
+/// is an inconsistent state refused with [`ApplyError::SquashPartialOverlap`].
+///
+/// A squash that is itself already net-applied imposes no rule here (its
+/// supersession is settled; `compute_superseded` already covers its versions).
+///
+/// # Errors
+/// - [`ApplyError::SquashAlreadyApplied`] — a pending squash whose superseded set
+///   is fully net-applied (use [`crate::squash`] instead of apply).
+/// - [`ApplyError::SquashPartialOverlap`] — a pending squash whose superseded set
+///   is partially net-applied.
+fn check_squash_all_or_none(
+    migrations: &[Migration],
+    completed: &HashMap<&str, &AppliedEntry>,
+) -> Result<(), ApplyError> {
+    for m in migrations {
+        if m.supersedes.is_empty() || completed.contains_key(m.version.as_str()) {
+            continue; // not a squash, or an already-applied squash (settled).
+        }
+        let total = m.supersedes.len();
+        let applied = m
+            .supersedes
+            .iter()
+            .filter(|d| completed.contains_key(d.as_str()))
+            .count();
+        if applied == 0 {
+            continue; // fresh path: S runs, supersedes skipped — OK.
+        }
+        if applied == total {
+            return Err(ApplyError::SquashAlreadyApplied {
+                version: m.version.as_str().to_string(),
+            });
+        }
+        return Err(ApplyError::SquashPartialOverlap {
+            version: m.version.as_str().to_string(),
+            applied,
+            total,
+        });
+    }
+    Ok(())
 }
 
 /// Order the migrations being rolled back in **REVERSE TOPOLOGICAL** order of
@@ -1906,7 +2066,7 @@ mod order_tests {
             m(b.clone(), vec![]),
         ];
         let completed: HashMap<&str, &AppliedEntry> = HashMap::new();
-        let ordered = order_pending(&set, &completed).expect("order");
+        let ordered = order_pending(&set, &completed, &std::collections::HashSet::new()).expect("order");
         let vs: Vec<&str> = ordered.iter().map(|x| x.version.as_str()).collect();
         assert_eq!(vs, vec![a.as_str(), b.as_str(), c.as_str()]);
     }
@@ -1926,7 +2086,7 @@ mod order_tests {
             m(later.clone(), vec![]),
         ];
         let completed: HashMap<&str, &AppliedEntry> = HashMap::new();
-        let ordered = order_pending(&set, &completed).expect("order");
+        let ordered = order_pending(&set, &completed, &std::collections::HashSet::new()).expect("order");
         assert!(
             pos(&ordered, later.as_str()) < pos(&ordered, earlier.as_str()),
             "the depended-on (later-version) migration must run first"
@@ -1944,7 +2104,7 @@ mod order_tests {
             m(b.clone(), vec![a.clone()]),
         ];
         let completed: HashMap<&str, &AppliedEntry> = HashMap::new();
-        let err = order_pending(&set, &completed).unwrap_err();
+        let err = order_pending(&set, &completed, &std::collections::HashSet::new()).unwrap_err();
         match err {
             ApplyError::DependencyCycle(members) => {
                 assert!(members.contains(a.as_str()) && members.contains(b.as_str()));
@@ -1959,7 +2119,7 @@ mod order_tests {
         let ghost = MigrationId::generate();
         let set = vec![m(a.clone(), vec![ghost.clone()])];
         let completed: HashMap<&str, &AppliedEntry> = HashMap::new();
-        let err = order_pending(&set, &completed).unwrap_err();
+        let err = order_pending(&set, &completed, &std::collections::HashSet::new()).unwrap_err();
         assert!(matches!(err, ApplyError::MissingDependency { .. }), "got {err:?}");
     }
 
@@ -1979,7 +2139,7 @@ mod order_tests {
         completed.insert(done.as_str(), &entry);
         // Only `pend` is in the supplied set (depends on the completed `done`).
         let set = vec![m(pend.clone(), vec![done.clone()])];
-        let ordered = order_pending(&set, &completed).expect("order");
+        let ordered = order_pending(&set, &completed, &std::collections::HashSet::new()).expect("order");
         let vs: Vec<&str> = ordered.iter().map(|x| x.version.as_str()).collect();
         assert_eq!(vs, vec![pend.as_str()], "only the pending one is ordered");
     }

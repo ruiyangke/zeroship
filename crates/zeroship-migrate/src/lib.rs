@@ -71,6 +71,7 @@ pub mod guard;
 pub mod journal;
 pub mod migration;
 pub mod role;
+pub mod squash;
 pub mod status;
 
 // ---------------------------------------------------------------------------
@@ -111,6 +112,7 @@ pub use journal::{
     superseded_versions, AppliedEntry, HistoryEvent, HistoryKind, JournalError, Phase,
     RolledBackEntry,
 };
+pub use squash::{squash, SquashError, SquashOutcome};
 pub use status::{history, status, MigrationStatus, StatusError};
 pub use migration::{
     Checksum, IdError, Migration, MigrationFlags, MigrationId, OnlinePhase, MIGRATION_PREFIX,
