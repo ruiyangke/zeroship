@@ -180,7 +180,7 @@ pub struct IndexSnapshot {
 }
 
 /// One constraint of a table, as introspected from
-/// `information_schema.table_constraints`.
+/// `information_schema.table_constraints` (kind) + `pg_get_constraintdef` (body).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstraintSnapshot {
     /// Constraint name.
@@ -188,6 +188,13 @@ pub struct ConstraintSnapshot {
     /// The constraint type as Postgres reports it: `PRIMARY KEY`, `FOREIGN KEY`,
     /// `UNIQUE`, `CHECK`.
     pub kind: String,
+    /// The full constraint definition as `pg_get_constraintdef(oid)` renders it,
+    /// e.g. `CHECK ((age > 0))`, `FOREIGN KEY (user_id) REFERENCES users(id)`.
+    /// This closes the CHECK-body hole: a same-name constraint whose predicate was
+    /// rewritten out-of-band has the same `kind` but a different `definition`, so
+    /// the attribute compare surfaces it. Empty only for an expected snapshot the
+    /// caller chose not to populate (then no `definition` mismatch is reported).
+    pub definition: String,
 }
 
 /// A live table's structure (deterministic ordering throughout).
@@ -212,6 +219,30 @@ pub struct SchemaSnapshot {
     pub tables: BTreeMap<String, TableSnapshot>,
 }
 
+/// One same-name object whose ATTRIBUTES diverge across the two snapshots.
+///
+/// A column / index / constraint present on BOTH sides but with a changed
+/// attribute — an out-of-band `ALTER` that name-only diffing would miss (e.g.
+/// `ALTER COLUMN … TYPE`, `DROP NOT NULL`, an index losing UNIQUE, a rewritten
+/// CHECK predicate). This is the tamper blind spot #1 closes.
+///
+/// Names only — never DDL. The caller decides what (if anything) to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlteredObject {
+    /// The table the object belongs to (e.g. `users`).
+    pub table: String,
+    /// The object, qualified within the table: a column as `column id`, an index
+    /// as `index users_email_idx`, a constraint as `constraint users_age_chk`.
+    pub object: String,
+    /// The attribute that diverged: `data_type`, `nullable`, `unique`, `kind`, or
+    /// `definition`.
+    pub field: String,
+    /// The expected snapshot's value for `field`.
+    pub expected: String,
+    /// The live DB's value for `field`.
+    pub actual: String,
+}
+
 /// A structural-drift report (the pure [`diff_snapshots`] output).
 ///
 /// Names only — never DDL. The caller (control plane) decides what, if anything,
@@ -225,13 +256,20 @@ pub struct StructuralDrift {
     /// creation (scenario 35): a table/column/index/constraint created by hand,
     /// outside the migration journal.
     pub unexpected_objects: Vec<String>,
+    /// Same-name objects (present on BOTH sides) whose ATTRIBUTES diverge — an
+    /// out-of-band `ALTER` (type/nullability/uniqueness/CHECK-body change). The
+    /// missing/unexpected name buckets cannot see these because the name still
+    /// matches; this bucket is the attribute-aware tamper surface (#1).
+    pub altered_objects: Vec<AlteredObject>,
 }
 
 impl StructuralDrift {
     /// True if the live schema matches the expected snapshot exactly.
     #[must_use]
     pub fn is_clean(&self) -> bool {
-        self.missing_objects.is_empty() && self.unexpected_objects.is_empty()
+        self.missing_objects.is_empty()
+            && self.unexpected_objects.is_empty()
+            && self.altered_objects.is_empty()
     }
 }
 
@@ -248,6 +286,13 @@ impl StructuralDrift {
 ///
 /// Determinism: the result map is a `BTreeMap` and every column/index/constraint
 /// vector is sorted by name, so the snapshot is stable across catalog scan order.
+///
+/// # Preconditions
+/// The caller MUST pass an **admin/read** connection — this function takes
+/// whatever [`Client`] it is handed and never elevates to the `migrator` role.
+/// Binding `project_schema` by `$1` prevents cross-schema leakage regardless of
+/// the connection, but choosing a least-privileged read connection is the
+/// caller's obligation.
 ///
 /// # Errors
 /// [`DriftError::Db`] on a catalog query failure.
@@ -321,22 +366,38 @@ pub async fn snapshot_schema(
         }
     }
 
-    // Constraints via information_schema (schema BOUND $1).
+    // Constraints via pg_catalog (schema BOUND $1 on the namespace name). We read
+    // the constraint BODY from `pg_get_constraintdef(oid)` so a same-name CHECK
+    // whose predicate was rewritten out-of-band is surfaced by the attribute diff
+    // (#1). `contype` is mapped to the same human label information_schema reports
+    // (`PRIMARY KEY` / `FOREIGN KEY` / `UNIQUE` / `CHECK`) so `kind` is unchanged.
     let con_rows = conn
         .query(
-            "SELECT table_name, constraint_name, constraint_type \
-             FROM information_schema.table_constraints \
-             WHERE table_schema = $1 \
-             ORDER BY table_name, constraint_name",
+            "SELECT c.relname AS table_name, con.conname AS constraint_name, \
+                    con.contype AS contype, pg_get_constraintdef(con.oid) AS definition \
+             FROM pg_constraint con \
+             JOIN pg_class c ON c.oid = con.conrelid \
+             JOIN pg_namespace n ON n.oid = con.connamespace \
+             WHERE n.nspname = $1 AND con.contype IN ('p', 'f', 'u', 'c') \
+             ORDER BY c.relname, con.conname",
             &[&project_schema],
         )
         .await?;
     for r in &con_rows {
         let table: String = r.get("table_name");
         if let Some(t) = tables.get_mut(&table) {
+            let contype: i8 = r.get("contype");
+            let kind = match u8::try_from(contype).ok().map(char::from) {
+                Some('p') => "PRIMARY KEY",
+                Some('f') => "FOREIGN KEY",
+                Some('u') => "UNIQUE",
+                Some('c') => "CHECK",
+                _ => "UNKNOWN",
+            };
             t.constraints.push(ConstraintSnapshot {
                 name: r.get("constraint_name"),
-                kind: r.get("constraint_type"),
+                kind: kind.to_string(),
+                definition: r.get("definition"),
             });
         }
     }
@@ -362,10 +423,16 @@ pub async fn snapshot_schema(
 /// Object names are qualified for legibility: a table as `"users"`, a column as
 /// `"users.email"`, an index as `"users index orders_email_idx"`, a constraint
 /// as `"users constraint users_pkey"`. Output vectors are sorted + deterministic.
+///
+/// Same-name objects present on BOTH sides are compared ATTRIBUTE-BY-ATTRIBUTE
+/// (#1): columns by `data_type` + `nullable`, indexes by `unique`, constraints by
+/// `kind` + `definition`. Any divergence becomes an [`AlteredObject`] — closing
+/// the out-of-band-`ALTER` blind spot that pure name diffing left open.
 #[must_use]
 pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> StructuralDrift {
     let mut missing = Vec::new();
     let mut unexpected = Vec::new();
+    let mut altered = Vec::new();
 
     // Tables present in expected but not actual → missing (whole table + its
     // children fold into the single table name; the table is the unit of
@@ -382,7 +449,8 @@ pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> Str
     }
 
     // For tables present on BOTH sides, diff their columns / indexes / constraints
-    // by name.
+    // by name (added/removed → missing/unexpected) AND, for same-name children,
+    // by attribute (→ altered).
     for (name, exp_t) in &expected.tables {
         let Some(act_t) = actual.tables.get(name) else {
             continue;
@@ -411,13 +479,84 @@ pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> Str
             &mut missing,
             &mut unexpected,
         );
+
+        // Attribute diff for same-name objects on both sides.
+        diff_attrs(name, exp_t, act_t, &mut altered);
     }
 
     missing.sort_unstable();
     unexpected.sort_unstable();
+    altered.sort_unstable_by(|a, b| {
+        (&a.table, &a.object, &a.field).cmp(&(&b.table, &b.object, &b.field))
+    });
     StructuralDrift {
         missing_objects: missing,
         unexpected_objects: unexpected,
+        altered_objects: altered,
+    }
+}
+
+/// Compare the attributes of same-name children (columns/indexes/constraints
+/// present on BOTH sides of one table), pushing an [`AlteredObject`] per diverging
+/// field. Added/removed children are NOT this function's concern (they go to the
+/// missing/unexpected buckets via [`diff_named`]); only matched names are compared.
+fn diff_attrs(
+    table: &str,
+    exp_t: &TableSnapshot,
+    act_t: &TableSnapshot,
+    altered: &mut Vec<AlteredObject>,
+) {
+    let mut push = |object: &str, field: &str, expected: &str, actual: &str| {
+        if expected != actual {
+            altered.push(AlteredObject {
+                table: table.to_string(),
+                object: object.to_string(),
+                field: field.to_string(),
+                expected: expected.to_string(),
+                actual: actual.to_string(),
+            });
+        }
+    };
+
+    // Columns: data_type + nullable.
+    let act_cols: BTreeMap<&str, &ColumnSnapshot> =
+        act_t.columns.iter().map(|c| (c.name.as_str(), c)).collect();
+    for ec in &exp_t.columns {
+        if let Some(ac) = act_cols.get(ec.name.as_str()) {
+            let obj = format!("column {}", ec.name);
+            push(&obj, "data_type", &ec.data_type, &ac.data_type);
+            push(
+                &obj,
+                "nullable",
+                &ec.nullable.to_string(),
+                &ac.nullable.to_string(),
+            );
+        }
+    }
+
+    // Indexes: unique.
+    let act_idx: BTreeMap<&str, &IndexSnapshot> =
+        act_t.indexes.iter().map(|i| (i.name.as_str(), i)).collect();
+    for ei in &exp_t.indexes {
+        if let Some(ai) = act_idx.get(ei.name.as_str()) {
+            push(
+                &format!("index {}", ei.name),
+                "unique",
+                &ei.unique.to_string(),
+                &ai.unique.to_string(),
+            );
+        }
+    }
+
+    // Constraints: kind + definition (definition closes the CHECK-body hole).
+    let act_con: BTreeMap<&str, &ConstraintSnapshot> =
+        act_t.constraints.iter().map(|c| (c.name.as_str(), c)).collect();
+    for ec in &exp_t.constraints {
+        if let Some(ac) = act_con.get(ec.name.as_str()) {
+            let obj = format!("constraint {}", ec.name);
+            push(&obj, "kind", &ec.kind, &ac.kind);
+            push(&obj, "definition", &ec.definition, &ac.definition);
+        }
     }
 }
 
@@ -472,6 +611,8 @@ pub struct DriftReport {
     pub missing_objects: Vec<String>,
     /// Live objects absent from the expected snapshot (out-of-band creation).
     pub unexpected_objects: Vec<String>,
+    /// Same-name objects whose attributes diverge (out-of-band `ALTER` — #1).
+    pub altered_objects: Vec<AlteredObject>,
     /// Net-applied versions with no migration in the supplied set.
     pub orphan_journal: Vec<OrphanJournal>,
 }
@@ -484,6 +625,7 @@ impl DriftReport {
             checksum_drift: checksum.checksum_drift,
             missing_objects: structural.missing_objects,
             unexpected_objects: structural.unexpected_objects,
+            altered_objects: structural.altered_objects,
             orphan_journal: checksum.orphan_journal,
         }
     }
@@ -494,6 +636,7 @@ impl DriftReport {
         self.checksum_drift.is_empty()
             && self.missing_objects.is_empty()
             && self.unexpected_objects.is_empty()
+            && self.altered_objects.is_empty()
             && self.orphan_journal.is_empty()
     }
 }

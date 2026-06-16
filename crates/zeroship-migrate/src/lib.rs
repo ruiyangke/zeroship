@@ -84,9 +84,9 @@ pub use engine::{
 };
 pub use db::{connect, ConnectError, ExecutorConfig};
 pub use drift::{
-    check_checksum_drift, diff_snapshots, snapshot_schema, ChecksumDrift, ChecksumDriftReport,
-    ColumnSnapshot, ConstraintSnapshot, DriftError, DriftReport, IndexSnapshot, OrphanJournal,
-    SchemaSnapshot, StructuralDrift, TableSnapshot,
+    check_checksum_drift, diff_snapshots, snapshot_schema, AlteredObject, ChecksumDrift,
+    ChecksumDriftReport, ColumnSnapshot, ConstraintSnapshot, DriftError, DriftReport, IndexSnapshot,
+    OrphanJournal, SchemaSnapshot, StructuralDrift, TableSnapshot,
 };
 pub use executor::{
     apply, rollback, ApplyError, ApplyOutcome, RollbackError, RollbackOptions, RollbackOutcome,
