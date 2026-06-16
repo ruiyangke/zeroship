@@ -134,6 +134,26 @@ pub enum ApplyError {
     /// order exists. Hard abort before any execution.
     #[error("dependency cycle among pending migrations: {0}")]
     DependencyCycle(String),
+    /// A `phase: Contract` online migration (Plan 8 v1.2) was about to be applied
+    /// while a depended-on `phase: Expand` migration is **not net-applied in the
+    /// journal**. The contract (drop trigger/function, drop old column) must never
+    /// land before its expand (add column, dual-write, backfill) is fully done and
+    /// recorded — otherwise old/new shapes stop coexisting and concurrent writes
+    /// are lost. Refused before any execution; nothing is applied.
+    ///
+    /// The single source of truth is the JOURNAL: the gate reads net-applied
+    /// expand completions there, so the expand and contract can land in SEPARATE
+    /// deploys (cross-deploy partition) and the gate still enforces ordering.
+    #[error(
+        "contract migration {version} requires its expand migration {expand} to be \
+         net-applied in the journal first (it is not); apply the expand phase before the contract"
+    )]
+    ExpandNotApplied {
+        /// The contract migration being refused.
+        version: String,
+        /// The depended-on expand migration that is not net-applied.
+        expand: String,
+    },
     /// Applying a migration's `up` SQL failed (after the guard passed). The
     /// transaction (txn path) was rolled back; nothing was journaled.
     #[error("migration {version} failed to apply: {source}")]
@@ -503,6 +523,61 @@ async fn apply_locked(
             project = %cfg.project_id,
             "zeroship-migrate: journal records a completed migration absent from the supplied set"
         );
+    }
+
+    // EXPAND/CONTRACT GATE (Plan 8 v1.2). The single source of truth is the
+    // JOURNAL: a `phase: Contract` online migration may apply only when every
+    // `phase: Expand` migration it `depends_on` is NET-APPLIED (completed) in the
+    // journal. The contract tears down the dual-write trigger + drops the old
+    // column; if it landed before the expand was fully applied + recorded,
+    // old/new shapes would stop coexisting and concurrent writes would be lost.
+    //
+    // Because the gate reads net-applied state from the journal (not from the
+    // in-batch set), the expand and contract land in SEPARATE deploys for free
+    // (cross-deploy partition): deploy N applies+journals the expand; deploy N+1
+    // supplies ONLY the contract, and the gate sees the expand already
+    // net-applied. Conversely, a deploy that supplies only the contract while the
+    // expand is NOT journaled is refused HERE (a clean, precise error) — run
+    // BEFORE `order_pending` so this beats the generic MissingDependency.
+    //
+    // Rule per depended-on version `dep` of a pending contract `m`:
+    //   - `dep` net-applied in the journal            ⇒ OK (the expand is done);
+    //   - `dep` is an Expand in THIS set, not completed ⇒ refuse (expand pending);
+    //   - `dep` absent from this set AND not completed  ⇒ refuse (cross-deploy
+    //     contract whose expand has not landed).
+    // A `dep` that is a NON-expand present in the set imposes no expand/contract
+    // ordering (the topo sort handles ordinary deps); we skip those.
+    {
+        use crate::migration::OnlinePhase;
+        let phase_by_version: HashMap<&str, Option<OnlinePhase>> = migrations
+            .iter()
+            .map(|m| (m.version.as_str(), m.flags.phase))
+            .collect();
+        for m in migrations {
+            if m.flags.phase != Some(OnlinePhase::Contract)
+                || completed.contains_key(m.version.as_str())
+            {
+                // Only PENDING contract migrations are gated.
+                continue;
+            }
+            for dep in &m.depends_on {
+                let dep_v = dep.as_str();
+                if completed.contains_key(dep_v) {
+                    continue; // expand net-applied — OK.
+                }
+                let dep_is_expand_or_absent = match phase_by_version.get(dep_v) {
+                    Some(Some(OnlinePhase::Expand)) => true, // expand in set, not done.
+                    Some(_) => false, // a non-expand dep in the set — not our concern.
+                    None => true,     // absent from the set AND not completed.
+                };
+                if dep_is_expand_or_absent {
+                    return Err(ApplyError::ExpandNotApplied {
+                        version: m.version.as_str().to_string(),
+                        expand: dep_v.to_string(),
+                    });
+                }
+            }
+        }
     }
 
     // Pending = set − completed. Ordered by `depends_on` when present
