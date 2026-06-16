@@ -40,6 +40,13 @@ pub struct ExecutorConfig {
     /// Mandatory per-statement lock-acquisition timeout (§1.5). Maps to
     /// `SET lock_timeout`.
     pub lock_timeout: Duration,
+    /// The least-privilege `migrator` role the apply flow runs each migration's
+    /// DDL + journal writes under, via `SET ROLE` / `RESET ROLE` (design §1.3,
+    /// the **line-2** DB-privilege defense). `None` runs as the connecting
+    /// (admin) role — used only by tests / single-tenant dev where the role
+    /// model is not provisioned. In the platform this is always `Some`,
+    /// matching a role created by [`crate::role::provision_migrator`].
+    pub migrator_role: Option<String>,
 }
 
 impl ExecutorConfig {
@@ -59,7 +66,18 @@ impl ExecutorConfig {
             // runaway migration cannot hold locks indefinitely.
             statement_timeout: Duration::from_secs(60),
             lock_timeout: Duration::from_secs(30),
+            // Defaults to no SET ROLE; the platform sets this to the provisioned
+            // `migrator_<project>` role. Tests opt in explicitly.
+            migrator_role: None,
         }
+    }
+
+    /// Set the least-privilege [`migrator_role`](Self::migrator_role) the apply
+    /// flow runs migrations under. Builder convenience.
+    #[must_use]
+    pub fn with_migrator_role(mut self, role: impl Into<String>) -> Self {
+        self.migrator_role = Some(role.into());
+        self
     }
 
     /// `statement_timeout` in whole milliseconds (the unit `SET` takes).

@@ -18,7 +18,7 @@
 //! 6. **second pass (execute):** for each pending migration, applies either:
 //!    - **transactionally** (default): `BEGIN; SET LOCAL …; <up>; INSERT
 //!      journal; COMMIT` — DDL + journal atomic, so a crash leaves
-//!      applied+recorded *or* neither. The `SET LOCAL` timeouts/search_path are
+//!      applied+recorded *or* neither. The `SET LOCAL` timeouts/`search_path` are
 //!      transaction-scoped, so they never leak onto the session;
 //!    - **non-transactionally** (opt-in, e.g. `CREATE INDEX CONCURRENTLY IF NOT
 //!      EXISTS`): two-phase `started` marker → run `<up>` → `completed` row +
@@ -189,6 +189,12 @@ async fn snapshot_session(conn: &Client) -> Result<SessionSnapshot, ApplyError> 
 /// (the snapshot strings are server-provided, but we keep the parameterized
 /// path regardless).
 async fn restore_session(conn: &Client, snap: &SessionSnapshot) -> Result<(), ApplyError> {
+    // RESET ROLE first: the non-txn path's `SET ROLE` mutates the session, so
+    // drop back to the admin role before anything else, ensuring the executor's
+    // least-privilege confinement never leaks onto the pooled/long-lived
+    // connection after `apply` returns (H2). Harmless no-op when no SET ROLE ran
+    // (txn-only applies use SET LOCAL ROLE, auto-reverted at COMMIT).
+    conn.batch_execute("RESET ROLE").await?;
     conn.execute(
         "SELECT set_config('statement_timeout', $1, false), \
                 set_config('lock_timeout', $2, false), \
@@ -213,9 +219,17 @@ fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
 /// `SET LOCAL …` clauses (transaction-scoped) for the **txn path** — they
 /// vanish at COMMIT/ROLLBACK, so nothing leaks onto the session (H2). Pins the
 /// project `search_path` and the mandatory timeouts (§1.5), with the
-/// per-migration timeout override applied (H3).
+/// per-migration timeout override applied (H3), and — when a `migrator_role` is
+/// configured — drops to that least-privilege role with `SET LOCAL ROLE` so the
+/// migration's DDL **and** its in-transaction journal INSERT execute under
+/// line-2 confinement (design §1.3). `SET LOCAL ROLE` is reverted automatically
+/// at COMMIT/ROLLBACK, so the admin session's effective role never leaks (H2).
+///
+/// Ordering matters: `SET LOCAL ROLE` comes **last** so the `search_path` /
+/// timeout `SET`s run while still the admin (always permitted), and the role
+/// switch governs only the subsequent `<up>` + journal write.
 fn set_local_session_sql(cfg: &ExecutorConfig, m: &Migration) -> String {
-    format!(
+    let mut sql = format!(
         "SET LOCAL search_path TO \"{}\", \"{}\"; \
          SET LOCAL statement_timeout = {}; \
          SET LOCAL lock_timeout = {};",
@@ -223,7 +237,12 @@ fn set_local_session_sql(cfg: &ExecutorConfig, m: &Migration) -> String {
         cfg.meta_schema.replace('"', "\"\""),
         effective_timeout_ms(cfg, m),
         cfg.lock_timeout_ms(),
-    )
+    );
+    if let Some(role) = &cfg.migrator_role {
+        use std::fmt::Write as _;
+        let _ = write!(sql, " SET LOCAL ROLE \"{}\";", role.replace('"', "\"\""));
+    }
+    sql
 }
 
 /// Session-level `SET …` for the **non-txn path** (no transaction to scope to).
@@ -235,13 +254,24 @@ async fn configure_session_non_txn(
     cfg: &ExecutorConfig,
     m: &Migration,
 ) -> Result<(), ApplyError> {
-    let stmt = format!(
+    let mut stmt = format!(
         "SET search_path TO \"{}\", \"{}\"; SET statement_timeout = {}; SET lock_timeout = {};",
         cfg.project_schema.replace('"', "\"\""),
         cfg.meta_schema.replace('"', "\"\""),
         effective_timeout_ms(cfg, m),
         cfg.lock_timeout_ms(),
     );
+    // Drop to the least-privilege migrator role for the duration of this non-txn
+    // migration (design §1.3). Unlike the txn path's `SET LOCAL ROLE`, there is
+    // no transaction to scope it to, so this mutates the session — `apply`
+    // restores the role (via `RESET ROLE` in `restore_session`) on exit, so the
+    // admin session's effective role never leaks (H2). The `SET` of search_path
+    // / timeouts above still runs as admin (always permitted); the role switch
+    // governs the subsequent `<up>` + journal writes.
+    if let Some(role) = &cfg.migrator_role {
+        use std::fmt::Write as _;
+        let _ = write!(stmt, " SET ROLE \"{}\";", role.replace('"', "\"\""));
+    }
     conn.batch_execute(&stmt).await?;
     Ok(())
 }
