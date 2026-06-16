@@ -831,6 +831,9 @@ pub fn flags_for(report: &GuardReport) -> MigrationFlags {
         destructive: report.destructive,
         online: false,
         requires_approval: report.destructive,
+        // No per-migration timeout derivable from a single SQL blob; the author
+        // sets it explicitly when a long backfill/index needs a higher ceiling.
+        timeout_ms: None,
     }
 }
 

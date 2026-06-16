@@ -96,6 +96,27 @@ fn mig_nontxn(version: MigrationId, name: &str, up: &str) -> Migration {
     m
 }
 
+async fn index_count(conn: &Client, schema: &str, index: &str) -> i64 {
+    let rows = conn
+        .query(
+            "SELECT 1 FROM pg_index x \
+             JOIN pg_class c ON c.oid = x.indexrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = $2 AND x.indisvalid = true",
+            &[&schema, &index],
+        )
+        .await
+        .expect("index count");
+    i64::try_from(rows.len()).unwrap()
+}
+
+async fn show_guc(conn: &Client, name: &str) -> String {
+    conn.query_one("SELECT current_setting($1) AS v", &[&name])
+        .await
+        .expect("show guc")
+        .get::<_, String>("v")
+}
+
 async fn table_exists(conn: &Client, schema: &str, table: &str) -> bool {
     let rows = conn
         .query(
@@ -451,7 +472,7 @@ async fn non_transactional_concurrently_applies_two_phase() {
         MigrationId::generate(),
         "idx_items_label",
         &format!(
-            "CREATE INDEX CONCURRENTLY idx_items_label ON \"{}\".items (label)",
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_items_label ON \"{}\".items (label)",
             cfg.project_schema
         ),
     );
@@ -501,7 +522,7 @@ async fn non_transactional_recovers_from_crashed_started_marker() {
         MigrationId::generate(),
         "idx_orders_sku",
         &format!(
-            "CREATE INDEX CONCURRENTLY idx_orders_sku ON \"{}\".orders (sku)",
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_orders_sku ON \"{}\".orders (sku)",
             cfg.project_schema
         ),
     );
@@ -603,6 +624,358 @@ async fn statement_timeout_aborts_long_migration_cleanly() {
         journal_count(&conn, &cfg).await,
         0,
         "timed-out migration must not be journaled"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// C1 — non-txn recovery is idempotent for a VALID index + lone started marker.
+//
+// A prior run created the index successfully (it is VALID), then crashed before
+// writing the `completed` row, leaving a lone `started` marker. The old recovery
+// only dropped INVALID indexes then blindly re-ran the up — a valid index +
+// `CREATE INDEX CONCURRENTLY` (without IF NOT EXISTS) would error `already
+// exists`. With idempotent non-txn ups (IF NOT EXISTS) + re-run recovery, this
+// completes cleanly.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn c1_non_txn_recovery_idempotent_for_valid_index_and_lone_started_marker() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    ensure_journal(&conn, &cfg).await.expect("bootstrap");
+
+    conn.batch_execute(&format!(
+        "CREATE TABLE \"{}\".accounts (id bigint primary key, email text)",
+        cfg.project_schema
+    ))
+    .await
+    .expect("seed table");
+
+    // Idempotent non-txn up (IF NOT EXISTS) — required by C2 validation.
+    let m = mig_nontxn(
+        MigrationId::generate(),
+        "idx_accounts_email",
+        &format!(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_accounts_email ON \"{}\".accounts (email)",
+            cfg.project_schema
+        ),
+    );
+
+    // Simulate success-then-crash: the index already exists and is VALID, and a
+    // lone `started` marker is present with NO completed row.
+    conn.batch_execute(&format!(
+        "CREATE INDEX idx_accounts_email ON \"{}\".accounts (email)",
+        cfg.project_schema
+    ))
+    .await
+    .expect("create valid index");
+    journal::record_started(
+        &conn,
+        &cfg,
+        m.version.as_str(),
+        &m.name,
+        m.checksum.as_str(),
+        "actor",
+    )
+    .await
+    .expect("seed started marker");
+
+    // Recovery must NOT error on the already-existing valid index.
+    let out = apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+        .await
+        .expect("recovery must complete idempotently, not error 'already exists'");
+    assert_eq!(out.applied.len(), 1);
+    assert_eq!(out.recovered, vec![m.version.as_str().to_string()]);
+
+    assert_eq!(
+        index_count(&conn, &cfg.project_schema, "idx_accounts_email").await,
+        1,
+        "exactly one valid index after recovery"
+    );
+    assert_eq!(journal_count(&conn, &cfg).await, 1, "one completed row");
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// C2 — completed-crash for `ALTER TYPE … ADD VALUE IF NOT EXISTS` recovers.
+//
+// The enum value was already added (op succeeded) but `completed` crashed,
+// leaving a lone `started` marker. Re-running a non-IF-NOT-EXISTS ADD VALUE
+// would error `label already exists`; the IF NOT EXISTS form re-runs cleanly.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn c2_non_txn_recovery_idempotent_for_alter_type_add_value() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    ensure_journal(&conn, &cfg).await.expect("bootstrap");
+
+    conn.batch_execute(&format!(
+        "CREATE TYPE \"{}\".mood AS ENUM ('happy', 'sad')",
+        cfg.project_schema
+    ))
+    .await
+    .expect("seed enum");
+
+    let m = mig_nontxn(
+        MigrationId::generate(),
+        "add_mood_excited",
+        &format!(
+            "ALTER TYPE \"{}\".mood ADD VALUE IF NOT EXISTS 'excited'",
+            cfg.project_schema
+        ),
+    );
+
+    // Simulate success-then-crash: value already added, lone `started` marker.
+    conn.batch_execute(&format!(
+        "ALTER TYPE \"{}\".mood ADD VALUE 'excited'",
+        cfg.project_schema
+    ))
+    .await
+    .expect("add enum value");
+    journal::record_started(
+        &conn,
+        &cfg,
+        m.version.as_str(),
+        &m.name,
+        m.checksum.as_str(),
+        "actor",
+    )
+    .await
+    .expect("seed started marker");
+
+    let out = apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+        .await
+        .expect("recovery must complete idempotently, not 'label already exists'");
+    assert_eq!(out.applied.len(), 1);
+    assert_eq!(out.recovered, vec![m.version.as_str().to_string()]);
+    assert_eq!(journal_count(&conn, &cfg).await, 1, "one completed row");
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// C2 validation — a non-txn CREATE INDEX CONCURRENTLY WITHOUT IF NOT EXISTS is
+// rejected at apply with a clear error, before any execution.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn non_txn_create_index_concurrently_without_if_not_exists_is_rejected() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    conn.batch_execute(&format!(
+        "CREATE TABLE \"{}\".people (id bigint primary key, name text)",
+        cfg.project_schema
+    ))
+    .await
+    .expect("seed table");
+
+    let m = mig_nontxn(
+        MigrationId::generate(),
+        "idx_people_name",
+        &format!(
+            "CREATE INDEX CONCURRENTLY idx_people_name ON \"{}\".people (name)",
+            cfg.project_schema
+        ),
+    );
+    let err = apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+        .await
+        .expect_err("non-idempotent non-txn up must be rejected");
+    assert!(
+        matches!(err, ApplyError::NonIdempotentNonTxn { .. }),
+        "expected NonIdempotentNonTxn, got {err:?}"
+    );
+
+    // Nothing ran, nothing journaled.
+    assert_eq!(
+        index_count(&conn, &cfg.project_schema, "idx_people_name").await,
+        0,
+        "rejected migration must not create the index"
+    );
+    assert_eq!(journal_count(&conn, &cfg).await, 0, "no journal row");
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// H1 — a mid-batch guard denial applies NOTHING (static guard is all-up-front).
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn h1_guard_denial_in_batch_applies_nothing() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    // A safe migration ORDERED BEFORE a denied one. The denied one must abort
+    // the whole batch before the safe one commits.
+    let v_safe = MigrationId::generate();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let v_denied = MigrationId::generate();
+    assert!(v_safe.as_str() < v_denied.as_str(), "safe must sort first");
+
+    let safe = mig(
+        v_safe.clone(),
+        "safe_table",
+        &format!(
+            "CREATE TABLE \"{}\".safe_t (id bigint primary key)",
+            cfg.project_schema
+        ),
+    );
+    let denied = mig(
+        v_denied,
+        "denied_copy",
+        &format!(
+            "COPY \"{}\".safe_t TO PROGRAM 'sh -c \"id\"'",
+            cfg.project_schema
+        ),
+    );
+
+    let err = apply(&conn, &cfg, &[safe, denied], "actor")
+        .await
+        .expect_err("guard must abort the whole batch");
+    assert!(
+        matches!(err, ApplyError::Guard { .. }),
+        "expected Guard error, got {err:?}"
+    );
+
+    assert!(
+        !table_exists(&conn, &cfg.project_schema, "safe_t").await,
+        "the earlier safe migration must NOT have been applied"
+    );
+    assert_eq!(
+        journal_count(&conn, &cfg).await,
+        0,
+        "a denied batch journals nothing"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// H2 — statement_timeout / search_path do not leak onto the session post-apply.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn h2_session_settings_do_not_leak_after_apply() {
+    let conn = pg().await;
+    let tok = token();
+    let mut cfg = cfg_for(&tok);
+    cfg.statement_timeout = Duration::from_millis(12_345);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let before_st = show_guc(&conn, "statement_timeout").await;
+    let before_sp = show_guc(&conn, "search_path").await;
+
+    let m = mig(
+        MigrationId::generate(),
+        "leak_check",
+        &format!(
+            "CREATE TABLE \"{}\".leakt (id bigint primary key)",
+            cfg.project_schema
+        ),
+    );
+    apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+        .await
+        .expect("apply");
+
+    let after_st = show_guc(&conn, "statement_timeout").await;
+    let after_sp = show_guc(&conn, "search_path").await;
+    assert_eq!(
+        before_st, after_st,
+        "statement_timeout must be unchanged after apply (was {before_st}, now {after_st})"
+    );
+    assert_eq!(
+        before_sp, after_sp,
+        "search_path must be unchanged after apply (was {before_sp}, now {after_sp})"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// H2 — also true for the non-txn path (it SETs session-level, must restore).
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn h2_session_settings_do_not_leak_after_non_txn_apply() {
+    let conn = pg().await;
+    let tok = token();
+    let mut cfg = cfg_for(&tok);
+    cfg.statement_timeout = Duration::from_millis(23_456);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    conn.batch_execute(&format!(
+        "CREATE TABLE \"{}\".nl (id bigint primary key, v text)",
+        cfg.project_schema
+    ))
+    .await
+    .expect("seed table");
+
+    let before_st = show_guc(&conn, "statement_timeout").await;
+    let before_sp = show_guc(&conn, "search_path").await;
+
+    let m = mig_nontxn(
+        MigrationId::generate(),
+        "idx_nl_v",
+        &format!(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_nl_v ON \"{}\".nl (v)",
+            cfg.project_schema
+        ),
+    );
+    apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+        .await
+        .expect("non-txn apply");
+
+    assert_eq!(before_st, show_guc(&conn, "statement_timeout").await);
+    assert_eq!(before_sp, show_guc(&conn, "search_path").await);
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// H3 — per-migration timeout: a longer override completes a pg_sleep the
+// default would kill; the default still kills an un-overridden long sleep.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn h3_per_migration_timeout_override_lets_long_migration_complete() {
+    let conn = pg().await;
+    let tok = token();
+    let mut cfg = cfg_for(&tok);
+    // Default would kill anything over 300ms.
+    cfg.statement_timeout = Duration::from_millis(300);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    // This migration sleeps 1s but raises its own ceiling to 5s.
+    let mut slow = mig(MigrationId::generate(), "slow_ok", "SELECT pg_sleep(1)");
+    slow.flags.timeout_ms = Some(5_000);
+    slow.checksum = Checksum::of(&slow.up, slow.down.as_deref());
+
+    let out = apply(&conn, &cfg, std::slice::from_ref(&slow), "actor")
+        .await
+        .expect("per-migration timeout override must let it complete");
+    assert_eq!(out.applied.len(), 1);
+
+    // A second migration with NO override sleeping past the default still dies.
+    let fast = mig(MigrationId::generate(), "slow_killed", "SELECT pg_sleep(2)");
+    let err = apply(&conn, &cfg, std::slice::from_ref(&fast), "actor")
+        .await
+        .expect_err("default timeout must still kill an un-overridden long sleep");
+    assert!(
+        matches!(err, ApplyError::MigrationFailed { .. }),
+        "expected MigrationFailed, got {err:?}"
     );
 
     drop_schemas(&conn, &cfg).await;
