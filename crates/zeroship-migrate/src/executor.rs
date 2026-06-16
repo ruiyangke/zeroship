@@ -1123,14 +1123,18 @@ async fn apply_transactional(
 
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
 
-    // Journal the completed row in the SAME transaction, as the admin.
+    // Journal the completed row in the SAME transaction, as the admin. A fresh-path
+    // squash (it has a non-empty `supersedes`) is stamped `kind='squash'` so its
+    // supersession edges are honored by `journal::superseded_versions` (#4 filters on
+    // `kind='squash'`); an ordinary migration keeps the default `kind='apply'`.
+    let kind = if supersedes.is_empty() { "apply" } else { "squash" };
     let meta = format!("\"{}\"", cfg.meta_schema.replace('"', "\"\""));
     if let Err(e) = conn
         .execute(
             &format!(
                 "INSERT INTO {meta}.schema_migrations
-                     (version, name, checksum, applied_by, exec_ms, phase, outcome)
-                 VALUES ($1, $2, $3, $4, $5, 'completed', 'success')"
+                     (version, name, checksum, applied_by, exec_ms, phase, outcome, kind)
+                 VALUES ($1, $2, $3, $4, $5, 'completed', 'success', $6)"
             ),
             &[
                 &m.version.as_str(),
@@ -1138,6 +1142,7 @@ async fn apply_transactional(
                 &m.checksum.as_str(),
                 &applied_by,
                 &exec_ms,
+                &kind,
             ],
         )
         .await
@@ -1260,24 +1265,32 @@ async fn apply_non_transactional(
         journal::record_completed(
             conn,
             cfg,
-            version,
-            &m.name,
-            m.checksum.as_str(),
-            applied_by,
-            exec_ms,
+            journal::CompletedRecord {
+                version,
+                name: &m.name,
+                checksum: m.checksum.as_str(),
+                applied_by,
+                exec_ms,
+                kind: "apply",
+            },
         )
         .await?;
     } else {
         conn.batch_execute("BEGIN").await?;
         let finalize = async {
+            // A fresh-path squash is stamped `kind='squash'` so its edges are honored
+            // by `superseded_versions` (#4 filters on `kind='squash'`).
             journal::record_completed(
                 conn,
                 cfg,
-                version,
-                &m.name,
-                m.checksum.as_str(),
-                applied_by,
-                exec_ms,
+                journal::CompletedRecord {
+                    version,
+                    name: &m.name,
+                    checksum: m.checksum.as_str(),
+                    applied_by,
+                    exec_ms,
+                    kind: "squash",
+                },
             )
             .await?;
             insert_supersedes_edges(conn, cfg, version, supersedes).await
