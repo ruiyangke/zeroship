@@ -145,13 +145,13 @@ const PG_MAX_IDENT_BYTES: usize = 63;
 /// long table/column sets still map to distinct, stable index names (mirrors the
 /// sanitize/truncate discipline of [`crate::role::migrator_role_name`]).
 fn index_name(table: &str, columns: &[String]) -> String {
+    use sha2::{Digest, Sha256};
     let natural = format!("idx_{}_{}", table, columns.join("_"));
     if natural.len() <= PG_MAX_IDENT_BYTES {
         return natural;
     }
     // Overflow: deterministic 10-hex-char hash of the full natural name, plus a
     // truncated readable prefix. `<prefix>_<10 hex>` stays ≤ 63 bytes.
-    use sha2::{Digest, Sha256};
     let digest = Sha256::digest(natural.as_bytes());
     let suffix = hex::encode(&digest[..5]); // 10 hex chars
     // Reserve room for the `_<suffix>` (1 + 10 = 11 bytes). Truncate the readable

@@ -81,7 +81,7 @@ pub use engine::{
 pub use db::{connect, ConnectError, ExecutorConfig};
 pub use executor::{
     apply, rollback, ApplyError, ApplyOutcome, RollbackError, RollbackOptions, RollbackOutcome,
-    RollbackTarget,
+    RollbackRequest, RollbackTarget,
 };
 pub use guard::{flags_for, GuardConfig, GuardError, GuardReport, SqlGuard};
 pub use journal::{

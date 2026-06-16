@@ -27,7 +27,7 @@ use compio_postgres::Client;
 
 use crate::db::ExecutorConfig;
 use crate::executor::{
-    self, ApplyError, ApplyOutcome, RollbackError, RollbackOptions, RollbackOutcome, RollbackTarget,
+    self, ApplyError, ApplyOutcome, RollbackError, RollbackOutcome, RollbackRequest,
 };
 use crate::guard::{GuardConfig, GuardError, GuardReport, SqlGuard};
 use crate::migration::Migration;
@@ -216,8 +216,8 @@ impl MigrationEngine {
     /// which **independently** runs every `down` through the guard and under the
     /// least-privilege `migrator` role (defense in depth, identical to the up
     /// path), refuses to cross an irreversible (`down: None`) migration unless
-    /// `opts.force` + `opts.backup_acknowledged`, and journals each rollback as an
-    /// append-only `rolled_back` event.
+    /// `request.options.force` + `request.options.backup_acknowledged`, and
+    /// journals each rollback as an append-only `rolled_back` event.
     ///
     /// `applied_by` is the actor recorded in the journal.
     ///
@@ -229,8 +229,7 @@ impl MigrationEngine {
     pub async fn rollback(
         &self,
         migrations: &[Migration],
-        target: RollbackTarget,
-        opts: RollbackOptions,
+        request: RollbackRequest,
         approval: Approval,
         conn: &Client,
         exec_cfg: &ExecutorConfig,
@@ -241,7 +240,7 @@ impl MigrationEngine {
             return Err(RollbackEngineError::ApprovalRequired);
         }
         let outcome =
-            executor::rollback(conn, exec_cfg, migrations, target, opts, applied_by).await?;
+            executor::rollback(conn, exec_cfg, migrations, request, applied_by).await?;
         Ok(outcome)
     }
 }

@@ -888,6 +888,15 @@ fn index_names_in_up(up: &str) -> Vec<String> {
 // Rollback (Plan 5) — apply `down` SQL in reverse to a target.
 // ===========================================================================
 
+/// One resolved step of a rollback plan (internal): either run a migration's
+/// `down`, or force-skip an irreversible (`down: None`) migration.
+enum RollbackStep<'a> {
+    /// Run this migration's `down` (it is `Some`) and journal a `rolled_back`.
+    Down(&'a Migration),
+    /// Skip this irreversible migration (force path); it stays applied.
+    SkipIrreversible(&'a Migration),
+}
+
 /// How far [`rollback`] should unwind the applied migrations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RollbackTarget {
@@ -901,6 +910,38 @@ pub enum RollbackTarget {
     Steps(usize),
     /// Roll back **all** net-applied migrations.
     All,
+}
+
+/// A complete rollback request.
+///
+/// How far to unwind ([`RollbackTarget`]) plus the irreversible-handling
+/// [`RollbackOptions`]. Bundled so [`rollback`] and
+/// [`MigrationEngine::rollback`](crate::engine::MigrationEngine::rollback) carry
+/// one parameter rather than two.
+#[derive(Debug, Clone)]
+pub struct RollbackRequest {
+    /// How far to unwind.
+    pub target: RollbackTarget,
+    /// Irreversible (`down: None`) handling.
+    pub options: RollbackOptions,
+}
+
+impl RollbackRequest {
+    /// A request for `target` with default (refuse-irreversible) options.
+    #[must_use]
+    pub fn new(target: RollbackTarget) -> Self {
+        Self {
+            target,
+            options: RollbackOptions::default(),
+        }
+    }
+
+    /// Set the irreversible-handling options (builder convenience).
+    #[must_use]
+    pub const fn with_options(mut self, options: RollbackOptions) -> Self {
+        self.options = options;
+        self
+    }
 }
 
 /// Options controlling [`rollback`] over irreversible (`down: None`) migrations.
@@ -1043,8 +1084,7 @@ pub async fn rollback(
     conn: &Client,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
-    target: RollbackTarget,
-    opts: RollbackOptions,
+    request: RollbackRequest,
     applied_by: &str,
 ) -> Result<RollbackOutcome, RollbackError> {
     // Acquire the project advisory lock directly (raw SQL, so the error type is
@@ -1056,7 +1096,7 @@ pub async fn rollback(
     )
     .await?;
     let snapshot = snapshot_session(conn).await.ok();
-    let result = rollback_locked(conn, cfg, migrations, target, opts, applied_by).await;
+    let result = rollback_locked(conn, cfg, migrations, request, applied_by).await;
     // Mirror apply's exit discipline: unconditional RESET ROLE, then restore GUCs,
     // then release the lock — so the migrator role / executor GUCs never leak.
     if let Err(e) = conn.batch_execute("RESET ROLE").await {
@@ -1084,10 +1124,10 @@ async fn rollback_locked(
     conn: &Client,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
-    target: RollbackTarget,
-    opts: RollbackOptions,
+    request: RollbackRequest,
     applied_by: &str,
 ) -> Result<RollbackOutcome, RollbackError> {
+    let RollbackRequest { target, options: opts } = request;
     journal::ensure_journal(conn, cfg).await?;
 
     // Net-applied versions (latest event is `completed`), with their recorded
@@ -1141,11 +1181,7 @@ async fn rollback_locked(
         extension_allowlist: Vec::new(),
     });
     // Collect the executable plan (skip force-skipped irreversibles).
-    enum Step<'a> {
-        Down(&'a Migration),
-        SkipIrreversible(&'a Migration),
-    }
-    let mut plan: Vec<Step> = Vec::with_capacity(to_roll.len());
+    let mut plan: Vec<RollbackStep> = Vec::with_capacity(to_roll.len());
     for entry in &to_roll {
         let v = entry.version.as_str();
         let Some(m) = by_version.get(v).copied() else {
@@ -1168,7 +1204,7 @@ async fn rollback_locked(
                         name: m.name.clone(),
                     });
                 }
-                plan.push(Step::SkipIrreversible(m));
+                plan.push(RollbackStep::SkipIrreversible(m));
             }
             Some(down) => {
                 // The down is privileged SQL — run it through the guard up-front.
@@ -1176,7 +1212,7 @@ async fn rollback_locked(
                     version: v.to_string(),
                     source,
                 })?;
-                plan.push(Step::Down(m));
+                plan.push(RollbackStep::Down(m));
             }
         }
     }
@@ -1188,7 +1224,7 @@ async fn rollback_locked(
     };
     for step in plan {
         match step {
-            Step::SkipIrreversible(m) => {
+            RollbackStep::SkipIrreversible(m) => {
                 tracing::warn!(
                     version = %m.version.as_str(),
                     project = %cfg.project_id,
@@ -1198,7 +1234,7 @@ async fn rollback_locked(
                     .skipped_irreversible
                     .push(m.version.as_str().to_string());
             }
-            Step::Down(m) => {
+            RollbackStep::Down(m) => {
                 rollback_one_transactional(conn, cfg, m, applied_by).await?;
                 outcome.rolled_back.push(m.version.as_str().to_string());
             }
@@ -1223,7 +1259,7 @@ async fn rollback_one_transactional(
     let down = m
         .down
         .as_deref()
-        .expect("rollback_one_transactional is only called for Step::Down (down is Some)");
+        .expect("rollback_one_transactional is only called for RollbackStep::Down (down is Some)");
     let started = Instant::now();
     conn.batch_execute("BEGIN").await?;
 
