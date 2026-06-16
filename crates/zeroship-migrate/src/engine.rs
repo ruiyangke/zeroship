@@ -25,6 +25,7 @@
 
 use compio_postgres::Client;
 
+pub use crate::approval::Approval;
 use crate::db::ExecutorConfig;
 use crate::executor::{
     self, ApplyError, ApplyOutcome, RollbackError, RollbackOutcome, RollbackRequest,
@@ -69,20 +70,6 @@ impl MigrationPlan {
     pub const fn is_appliable(&self) -> bool {
         self.denied.is_empty()
     }
-}
-
-/// The caller's approval decision for [`MigrationEngine::apply`].
-///
-/// A destructive plan (`requires_approval`) needs [`Approval::Approved`] to
-/// apply; a safe additive plan applies with [`Approval::None`]. The AI never
-/// auto-applies destructive ops (design §1.6) — it passes [`Approval::None`] and
-/// surfaces [`EngineError::ApprovalRequired`] to a human.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Approval {
-    /// No approval given — applies only a non-destructive plan.
-    None,
-    /// Explicitly approved — a destructive plan may apply.
-    Approved,
 }
 
 /// A failure from [`MigrationEngine::apply`].
@@ -202,7 +189,10 @@ impl MigrationEngine {
         // passing items (denied is empty here, so items == the full input set).
         let migrations: Vec<Migration> =
             plan.items.iter().map(|p| p.migration.clone()).collect();
-        let outcome = executor::apply(conn, exec_cfg, &migrations, applied_by).await?;
+        // Forward the approval decision: the executor re-runs its OWN destructive
+        // gate (defense in depth — design §1.6), so the gate here is additional,
+        // not a replacement.
+        let outcome = executor::apply(conn, exec_cfg, &migrations, approval, applied_by).await?;
         Ok(outcome)
     }
 
@@ -239,8 +229,11 @@ impl MigrationEngine {
         if approval != Approval::Approved {
             return Err(RollbackEngineError::ApprovalRequired);
         }
+        // Forward the approval decision: the executor re-runs its OWN approval
+        // gate (defense in depth — design §1.6), so the gate here is additional,
+        // not a replacement.
         let outcome =
-            executor::rollback(conn, exec_cfg, migrations, request, applied_by).await?;
+            executor::rollback(conn, exec_cfg, migrations, request, approval, applied_by).await?;
         Ok(outcome)
     }
 }

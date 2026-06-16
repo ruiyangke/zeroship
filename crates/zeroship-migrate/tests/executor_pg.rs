@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use compio_postgres::Client;
 use zeroship_migrate::{
-    apply, ensure_journal, executor::ApplyError, journal, ExecutorConfig, Migration,
+    apply, ensure_journal, executor::ApplyError, journal, Approval, ExecutorConfig, Migration,
     MigrationFlags, MigrationId,
 };
 use zeroship_migrate::migration::Checksum;
@@ -239,7 +239,7 @@ async fn apply_creates_table_and_records_journal_row() {
             cfg.project_schema
         ),
     );
-    let out = apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+    let out = apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
         .await
         .expect("apply");
 
@@ -271,10 +271,10 @@ async fn apply_is_idempotent_on_rerun() {
         ),
     );
     let set = [m];
-    let first = apply(&conn, &cfg, &set, "actor").await.expect("first apply");
+    let first = apply(&conn, &cfg, &set, Approval::None, "actor").await.expect("first apply");
     assert_eq!(first.applied.len(), 1);
 
-    let second = apply(&conn, &cfg, &set, "actor").await.expect("re-apply");
+    let second = apply(&conn, &cfg, &set, Approval::None, "actor").await.expect("re-apply");
     assert!(second.is_noop(), "re-run with same set is a no-op");
     assert!(second.applied.is_empty());
     assert_eq!(journal_count(&conn, &cfg).await, 1, "no double-journal");
@@ -299,7 +299,7 @@ async fn apply_guard_gate_blocks_dangerous_up_and_runs_nothing() {
             cfg.project_schema
         ),
     );
-    let err = apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+    let err = apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
         .await
         .expect_err("guard must abort the apply");
     assert!(
@@ -338,7 +338,7 @@ async fn apply_failing_sql_rolls_back_with_no_partial_ddl_or_journal() {
     );
     let m = mig(MigrationId::generate(), "bad_sql", &up);
 
-    let err = apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+    let err = apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
         .await
         .expect_err("bad SQL must fail");
     assert!(
@@ -375,7 +375,7 @@ async fn apply_aborts_on_checksum_drift() {
             cfg.project_schema
         ),
     );
-    apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+    apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
         .await
         .expect("initial apply");
 
@@ -388,7 +388,7 @@ async fn apply_aborts_on_checksum_drift() {
     );
     tampered.checksum = Checksum::of(&tampered.up, None);
 
-    let err = apply(&conn, &cfg, std::slice::from_ref(&tampered), "actor")
+    let err = apply(&conn, &cfg, std::slice::from_ref(&tampered), Approval::None, "actor")
         .await
         .expect_err("checksum drift must abort");
     assert!(
@@ -426,10 +426,10 @@ async fn concurrent_apply_serializes_via_advisory_lock_no_double_apply() {
     let cfg_b = cfg.clone();
 
     let ta = compio::runtime::spawn(async move {
-        apply(&conn_a, &cfg_a, &set_a, "actor-a").await
+        apply(&conn_a, &cfg_a, &set_a, Approval::None, "actor-a").await
     });
     let tb = compio::runtime::spawn(async move {
-        apply(&conn_b, &cfg_b, &set_b, "actor-b").await
+        apply(&conn_b, &cfg_b, &set_b, Approval::None, "actor-b").await
     });
     let out_a = ta.await.expect("join a").expect("apply a");
     let out_b = tb.await.expect("join b").expect("apply b");
@@ -476,7 +476,7 @@ async fn non_transactional_concurrently_applies_two_phase() {
             cfg.project_schema
         ),
     );
-    let out = apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+    let out = apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
         .await
         .expect("non-txn apply");
     assert_eq!(out.applied.len(), 1);
@@ -556,7 +556,7 @@ async fn non_transactional_recovers_from_crashed_started_marker() {
 
     // Re-run: recovery must drop the INVALID index, re-run CONCURRENTLY, and
     // record completed — idempotently.
-    let out = apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+    let out = apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
         .await
         .expect("recovery apply");
     assert_eq!(out.applied.len(), 1);
@@ -660,7 +660,7 @@ async fn recovery_does_not_drop_unrelated_invalid_index() {
     .await
     .expect("seed started marker");
 
-    let out = apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+    let out = apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
         .await
         .expect("recovery apply");
     assert_eq!(
@@ -731,7 +731,7 @@ async fn apply_honors_depends_on_over_version_order() {
     );
 
     // Supplied in version order (earlier first) — the executor must reorder.
-    let out = apply(&conn, &cfg, &[m_earlier.clone(), m_later.clone()], "actor")
+    let out = apply(&conn, &cfg, &[m_earlier.clone(), m_later.clone()], Approval::None, "actor")
         .await
         .expect("apply honoring depends_on");
     // applied order must be [later, earlier].
@@ -762,7 +762,7 @@ async fn apply_rejects_dependency_cycle() {
     ma.depends_on = vec![b.clone()];
     mb.depends_on = vec![a.clone()];
 
-    let err = apply(&conn, &cfg, &[ma, mb], "actor").await.unwrap_err();
+    let err = apply(&conn, &cfg, &[ma, mb], Approval::None, "actor").await.unwrap_err();
     assert!(matches!(err, ApplyError::DependencyCycle(_)), "got {err:?}");
     // Nothing applied — neither table exists.
     assert!(!table_exists(&conn, &cfg.project_schema, "ta").await);
@@ -788,7 +788,7 @@ async fn statement_timeout_aborts_long_migration_cleanly() {
         "slow_migration",
         "SELECT pg_sleep(5)",
     );
-    let err = apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+    let err = apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
         .await
         .expect_err("must time out");
     assert!(
@@ -860,7 +860,7 @@ async fn c1_non_txn_recovery_idempotent_for_valid_index_and_lone_started_marker(
     .expect("seed started marker");
 
     // Recovery must NOT error on the already-existing valid index.
-    let out = apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+    let out = apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
         .await
         .expect("recovery must complete idempotently, not error 'already exists'");
     assert_eq!(out.applied.len(), 1);
@@ -926,7 +926,7 @@ async fn c2_non_txn_recovery_idempotent_for_alter_type_add_value() {
     .await
     .expect("seed started marker");
 
-    let out = apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+    let out = apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
         .await
         .expect("recovery must complete idempotently, not 'label already exists'");
     assert_eq!(out.applied.len(), 1);
@@ -963,7 +963,7 @@ async fn non_txn_create_index_concurrently_without_if_not_exists_is_rejected() {
             cfg.project_schema
         ),
     );
-    let err = apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+    let err = apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
         .await
         .expect_err("non-idempotent non-txn up must be rejected");
     assert!(
@@ -1017,7 +1017,7 @@ async fn h1_guard_denial_in_batch_applies_nothing() {
         ),
     );
 
-    let err = apply(&conn, &cfg, &[safe, denied], "actor")
+    let err = apply(&conn, &cfg, &[safe, denied], Approval::None, "actor")
         .await
         .expect_err("guard must abort the whole batch");
     assert!(
@@ -1061,7 +1061,7 @@ async fn h2_session_settings_do_not_leak_after_apply() {
             cfg.project_schema
         ),
     );
-    apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+    apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
         .await
         .expect("apply");
 
@@ -1109,7 +1109,7 @@ async fn h2_session_settings_do_not_leak_after_non_txn_apply() {
             cfg.project_schema
         ),
     );
-    apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+    apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
         .await
         .expect("non-txn apply");
 
@@ -1138,19 +1138,135 @@ async fn h3_per_migration_timeout_override_lets_long_migration_complete() {
     slow.flags.timeout_ms = Some(5_000);
     slow.checksum = Checksum::of(&slow.up, slow.down.as_deref());
 
-    let out = apply(&conn, &cfg, std::slice::from_ref(&slow), "actor")
+    let out = apply(&conn, &cfg, std::slice::from_ref(&slow), Approval::None, "actor")
         .await
         .expect("per-migration timeout override must let it complete");
     assert_eq!(out.applied.len(), 1);
 
     // A second migration with NO override sleeping past the default still dies.
     let fast = mig(MigrationId::generate(), "slow_killed", "SELECT pg_sleep(2)");
-    let err = apply(&conn, &cfg, std::slice::from_ref(&fast), "actor")
+    let err = apply(&conn, &cfg, std::slice::from_ref(&fast), Approval::None, "actor")
         .await
         .expect_err("default timeout must still kill an un-overridden long sleep");
     assert!(
         matches!(err, ApplyError::MigrationFailed { .. }),
         "expected MigrationFailed, got {err:?}"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// Defense-in-depth approval gate (design §1.6) — the executor enforces approval
+// ITSELF, independent of the engine gate. A caller driving `apply`/`rollback`
+// directly (bypassing the engine) still cannot run a destructive batch /
+// rollback without explicit Approval::Approved.
+// ---------------------------------------------------------------------------
+
+/// A destructive migration (`flags.destructive = true`) with a benign,
+/// re-runnable `up`/`down` so the test isolates the APPROVAL gate (not the
+/// guard or a SQL failure).
+fn mig_destructive(version: MigrationId, name: &str, up: &str, down: &str) -> Migration {
+    let mut m = mig(version, name, up);
+    m.down = Some(down.to_string());
+    m.checksum = Checksum::of(up, Some(down));
+    m.flags.destructive = true;
+    m
+}
+
+#[compio::test]
+async fn executor_apply_refuses_destructive_batch_without_approval() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let m = mig_destructive(
+        MigrationId::generate(),
+        "create_destructive",
+        &format!(
+            "CREATE TABLE \"{}\".destructive_t (id bigint primary key)",
+            cfg.project_schema
+        ),
+        &format!("DROP TABLE \"{}\".destructive_t", cfg.project_schema),
+    );
+
+    // Approval::None → the executor's OWN gate refuses, applies NOTHING.
+    let err = apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
+        .await
+        .expect_err("destructive batch must be refused without approval");
+    assert!(
+        matches!(err, ApplyError::ApprovalRequired),
+        "expected ApprovalRequired, got {err:?}"
+    );
+    assert!(
+        !table_exists(&conn, &cfg.project_schema, "destructive_t").await,
+        "a refused destructive apply must create nothing"
+    );
+    // The gate refuses before even bootstrapping the journal, so the journal
+    // table must not exist — proof nothing was applied or recorded.
+    assert!(
+        !table_exists(&conn, &cfg.meta_schema, "schema_migrations").await,
+        "a refused destructive apply must not even bootstrap the journal"
+    );
+
+    // Approval::Approved → it applies.
+    let out = apply(&conn, &cfg, std::slice::from_ref(&m), Approval::Approved, "actor")
+        .await
+        .expect("approved destructive apply must run");
+    assert_eq!(out.applied, vec![m.version.as_str().to_string()]);
+    assert!(
+        table_exists(&conn, &cfg.project_schema, "destructive_t").await,
+        "an approved destructive apply must run the up"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn executor_rollback_refuses_without_approval() {
+    use zeroship_migrate::executor::{rollback, RollbackError, RollbackRequest, RollbackTarget};
+
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    // Seed one applied (reversible) migration, approving the seed apply.
+    let m = mig_destructive(
+        MigrationId::generate(),
+        "seed_for_rollback",
+        &format!(
+            "CREATE TABLE \"{}\".rollback_t (id bigint primary key)",
+            cfg.project_schema
+        ),
+        &format!("DROP TABLE \"{}\".rollback_t", cfg.project_schema),
+    );
+    apply(&conn, &cfg, std::slice::from_ref(&m), Approval::Approved, "actor")
+        .await
+        .expect("seed apply");
+    assert!(table_exists(&conn, &cfg.project_schema, "rollback_t").await);
+
+    // Approval::None → rollback refuses (every down is destructive), rolls back NOTHING.
+    let err = rollback(
+        &conn,
+        &cfg,
+        std::slice::from_ref(&m),
+        RollbackRequest::new(RollbackTarget::All),
+        Approval::None,
+        "actor",
+    )
+    .await
+    .expect_err("rollback must be refused without approval");
+    assert!(
+        matches!(err, RollbackError::ApprovalRequired),
+        "expected ApprovalRequired, got {err:?}"
+    );
+    assert!(
+        table_exists(&conn, &cfg.project_schema, "rollback_t").await,
+        "a refused rollback must NOT run the down (table still present)"
     );
 
     drop_schemas(&conn, &cfg).await;
