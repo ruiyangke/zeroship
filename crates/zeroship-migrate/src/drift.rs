@@ -1,0 +1,499 @@
+//! Drift detection (design §5 "Drift", scenarios 35 + 36) — **read-only**.
+//!
+//! Drift is any divergence between what the journal says happened and either
+//! (a) the migration set the operator now ships, or (b) the live database
+//! schema. This module **surfaces** drift; it NEVER emits DDL and NEVER mutates
+//! anything (design §5: *"surface, don't auto-fix"*). The whole module runs as
+//! the admin/read connection over `information_schema`/`pg_catalog`, never as
+//! the privileged `migrator` role, and binds every identifier so an injected
+//! schema/table name cannot break the introspection queries.
+//!
+//! Two independent axes:
+//!
+//! - **B1 — checksum / tamper / orphan drift** ([`check_checksum_drift`]):
+//!   compares the journal's recorded checksum for each NET-applied version
+//!   against the checksum of the same version in the supplied set. A mismatch
+//!   means the migration SQL was edited after it applied, or the journal row was
+//!   tampered (design §1.5 / scenario 36). A net-applied version with NO matching
+//!   migration in the supplied set is an **orphan** ([`OrphanJournal`]) — the
+//!   bundle is missing a migration the database already has. This is the exact
+//!   comparison the executor's apply flow does as its abort-on-drift pre-check
+//!   (design §2.3 step 3); [`apply`](crate::apply) calls this function and aborts
+//!   if it returns any [`ChecksumDrift`], so the report and the gate share one
+//!   implementation.
+//!
+//! - **B2 — structural introspection** ([`snapshot_schema`] + [`diff_snapshots`]):
+//!   introspect the LIVE project schema into a deterministic [`SchemaSnapshot`]
+//!   and `diff` it against an **expected** snapshot the CALLER supplies. The
+//!   expected snapshot is owned by the control-plane / authoring layer (it holds
+//!   the declared/union schema, design §0); this module does NOT rebuild a schema
+//!   model by replaying DDL — that is the authoring layer's job. `diff_snapshots`
+//!   is a pure function returning a [`StructuralDrift`] report; it never returns
+//!   DDL.
+
+use std::collections::BTreeMap;
+
+use compio_postgres::Client;
+
+use crate::db::ExecutorConfig;
+use crate::journal::{self, JournalError, Phase};
+use crate::migration::Migration;
+
+// ---------------------------------------------------------------------------
+// B1 — checksum / tamper / orphan drift
+// ---------------------------------------------------------------------------
+
+/// A net-applied version whose journal checksum no longer matches the supplied
+/// set's checksum for that version — tamper / edited-after-applied (scenario 36).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChecksumDrift {
+    /// The drifting migration's version (`mig_…`).
+    pub version: String,
+    /// The checksum recorded in the journal (the latest `completed` event).
+    pub recorded: String,
+    /// The checksum of the migration now in the supplied set.
+    pub expected: String,
+}
+
+/// A net-applied version with NO corresponding migration in the supplied set —
+/// the journal knows of a migration the shipped bundle does not (a dropped slice,
+/// a downgrade). Surfaced, not silently ignored (executor M1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanJournal {
+    /// The orphaned version recorded as net-applied in the journal.
+    pub version: String,
+    /// The journal's recorded checksum for it.
+    pub recorded: String,
+}
+
+/// Error from a drift query.
+#[derive(Debug, thiserror::Error)]
+pub enum DriftError {
+    /// A database error.
+    #[error("drift db error: {0}")]
+    Db(#[from] compio_postgres::Error),
+    /// A journal read failed.
+    #[error(transparent)]
+    Journal(#[from] JournalError),
+}
+
+/// The result of [`check_checksum_drift`]: the per-version checksum mismatches
+/// plus the journal versions absent from the supplied set.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChecksumDriftReport {
+    /// Versions whose journal checksum disagrees with the supplied set.
+    pub checksum_drift: Vec<ChecksumDrift>,
+    /// Net-applied versions with no migration in the supplied set.
+    pub orphan_journal: Vec<OrphanJournal>,
+}
+
+impl ChecksumDriftReport {
+    /// True if neither tamper nor orphan drift was found.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.checksum_drift.is_empty() && self.orphan_journal.is_empty()
+    }
+}
+
+/// Compare the journal's NET-applied checksums against the supplied migration
+/// set (design §2.3 step 3 / §5).
+///
+/// For each net-applied version (the latest event is `completed`, per
+/// [`journal::applied`]):
+///
+/// - the supplied set has a migration with that version whose checksum differs
+///   ⇒ [`ChecksumDrift`] (the migration SQL was mutated after apply, or the
+///   journal row was tampered — scenario 36);
+/// - the supplied set has NO migration with that version ⇒ [`OrphanJournal`].
+///
+/// The recorded checksum used is the one [`journal::applied`] returns, which is
+/// the **latest `completed` event's** checksum for the version — correct across
+/// rollback↔re-apply cycles (a re-applied migration's checksum is its newest
+/// incarnation, not a stale earlier one).
+///
+/// This is the canonical comparison; [`apply`](crate::apply) calls it as its
+/// abort-on-drift pre-check (it aborts if [`checksum_drift`](ChecksumDriftReport::checksum_drift)
+/// is non-empty), so the report and the apply gate cannot diverge.
+///
+/// **Read-only.** No mutation, no DDL.
+///
+/// # Errors
+/// [`DriftError::Journal`] if the journal read fails.
+pub async fn check_checksum_drift(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+) -> Result<ChecksumDriftReport, DriftError> {
+    let applied = journal::applied(conn, cfg).await?;
+    let by_version: BTreeMap<&str, &Migration> =
+        migrations.iter().map(|m| (m.version.as_str(), m)).collect();
+
+    let mut report = ChecksumDriftReport::default();
+    for entry in &applied {
+        // Only NET-applied (completed) versions can drift / be orphaned; a lone
+        // `started` inflight marker is a crash-recovery key, not a settled state.
+        if entry.phase != Phase::Completed {
+            continue;
+        }
+        match by_version.get(entry.version.as_str()) {
+            Some(m) => {
+                if entry.checksum != m.checksum.as_str() {
+                    report.checksum_drift.push(ChecksumDrift {
+                        version: entry.version.clone(),
+                        recorded: entry.checksum.clone(),
+                        expected: m.checksum.as_str().to_string(),
+                    });
+                }
+            }
+            None => report.orphan_journal.push(OrphanJournal {
+                version: entry.version.clone(),
+                recorded: entry.checksum.clone(),
+            }),
+        }
+    }
+    Ok(report)
+}
+
+// ---------------------------------------------------------------------------
+// B2 — structural introspection + pure diff
+// ---------------------------------------------------------------------------
+
+/// One column of a table, as introspected from `information_schema.columns`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnSnapshot {
+    /// Column name.
+    pub name: String,
+    /// The SQL data type (`information_schema.columns.data_type`), e.g. `text`,
+    /// `integer`, `timestamp with time zone`.
+    pub data_type: String,
+    /// `true` if the column is nullable.
+    pub nullable: bool,
+}
+
+/// One index of a table, as introspected from `pg_catalog`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexSnapshot {
+    /// Index name.
+    pub name: String,
+    /// `true` if it enforces uniqueness.
+    pub unique: bool,
+}
+
+/// One constraint of a table, as introspected from
+/// `information_schema.table_constraints`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstraintSnapshot {
+    /// Constraint name.
+    pub name: String,
+    /// The constraint type as Postgres reports it: `PRIMARY KEY`, `FOREIGN KEY`,
+    /// `UNIQUE`, `CHECK`.
+    pub kind: String,
+}
+
+/// A live table's structure (deterministic ordering throughout).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableSnapshot {
+    /// Columns, ordered by name.
+    pub columns: Vec<ColumnSnapshot>,
+    /// Indexes, ordered by name.
+    pub indexes: Vec<IndexSnapshot>,
+    /// Constraints, ordered by name.
+    pub constraints: Vec<ConstraintSnapshot>,
+}
+
+/// A deterministic snapshot of a project schema's structure.
+///
+/// The map is keyed by table name and iterates in sorted order (a `BTreeMap`),
+/// and every inner `Vec` is name-sorted, so two snapshots of the same schema are
+/// byte-for-byte equal regardless of catalog scan order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SchemaSnapshot {
+    /// Tables in the schema, keyed + ordered by name.
+    pub tables: BTreeMap<String, TableSnapshot>,
+}
+
+/// A structural-drift report (the pure [`diff_snapshots`] output).
+///
+/// Names only — never DDL. The caller (control plane) decides what, if anything,
+/// to do; this module's job ends at *surfacing* (design §5).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StructuralDrift {
+    /// Objects the EXPECTED snapshot has that the LIVE DB does not — e.g. a table
+    /// that should exist but is missing, or a column declared but absent.
+    pub missing_objects: Vec<String>,
+    /// Objects the LIVE DB has that the EXPECTED snapshot does not — out-of-band
+    /// creation (scenario 35): a table/column/index/constraint created by hand,
+    /// outside the migration journal.
+    pub unexpected_objects: Vec<String>,
+}
+
+impl StructuralDrift {
+    /// True if the live schema matches the expected snapshot exactly.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.missing_objects.is_empty() && self.unexpected_objects.is_empty()
+    }
+}
+
+/// Introspect the LIVE structure of `project_schema` into a [`SchemaSnapshot`]
+/// (design §5 structural drift).
+///
+/// **Read-only.** Hits `information_schema` / `pg_catalog` only; emits no DDL,
+/// mutates nothing. Run as the admin/read connection (NOT the `migrator` role).
+///
+/// **Injection-safe.** `project_schema` is passed as a **bind parameter** to
+/// every catalog query — never interpolated into SQL text — so a schema name
+/// containing a quote, a semicolon, or any SQL metacharacter selects zero rows
+/// rather than altering the query.
+///
+/// Determinism: the result map is a `BTreeMap` and every column/index/constraint
+/// vector is sorted by name, so the snapshot is stable across catalog scan order.
+///
+/// # Errors
+/// [`DriftError::Db`] on a catalog query failure.
+pub async fn snapshot_schema(
+    conn: &Client,
+    project_schema: &str,
+) -> Result<SchemaSnapshot, DriftError> {
+    let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
+
+    // Base tables in the schema. `table_schema` is BOUND ($1), never interpolated.
+    let table_rows = conn
+        .query(
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_schema = $1 AND table_type = 'BASE TABLE' \
+             ORDER BY table_name",
+            &[&project_schema],
+        )
+        .await?;
+    for r in &table_rows {
+        let name: String = r.get("table_name");
+        tables.insert(name, TableSnapshot {
+            columns: Vec::new(),
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+        });
+    }
+
+    // Columns (one query for the whole schema; bucket by table).
+    let col_rows = conn
+        .query(
+            "SELECT table_name, column_name, data_type, is_nullable \
+             FROM information_schema.columns \
+             WHERE table_schema = $1 \
+             ORDER BY table_name, column_name",
+            &[&project_schema],
+        )
+        .await?;
+    for r in &col_rows {
+        let table: String = r.get("table_name");
+        if let Some(t) = tables.get_mut(&table) {
+            let nullable: String = r.get("is_nullable");
+            t.columns.push(ColumnSnapshot {
+                name: r.get("column_name"),
+                data_type: r.get("data_type"),
+                nullable: nullable.eq_ignore_ascii_case("YES"),
+            });
+        }
+    }
+
+    // Indexes via pg_catalog (schema BOUND as a text comparison on the namespace
+    // name). `indisunique` distinguishes unique indexes.
+    let idx_rows = conn
+        .query(
+            "SELECT c.relname AS table_name, ic.relname AS index_name, x.indisunique \
+             FROM pg_index x \
+             JOIN pg_class c ON c.oid = x.indrelid \
+             JOIN pg_class ic ON ic.oid = x.indexrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 \
+             ORDER BY c.relname, ic.relname",
+            &[&project_schema],
+        )
+        .await?;
+    for r in &idx_rows {
+        let table: String = r.get("table_name");
+        if let Some(t) = tables.get_mut(&table) {
+            t.indexes.push(IndexSnapshot {
+                name: r.get("index_name"),
+                unique: r.get("indisunique"),
+            });
+        }
+    }
+
+    // Constraints via information_schema (schema BOUND $1).
+    let con_rows = conn
+        .query(
+            "SELECT table_name, constraint_name, constraint_type \
+             FROM information_schema.table_constraints \
+             WHERE table_schema = $1 \
+             ORDER BY table_name, constraint_name",
+            &[&project_schema],
+        )
+        .await?;
+    for r in &con_rows {
+        let table: String = r.get("table_name");
+        if let Some(t) = tables.get_mut(&table) {
+            t.constraints.push(ConstraintSnapshot {
+                name: r.get("constraint_name"),
+                kind: r.get("constraint_type"),
+            });
+        }
+    }
+
+    Ok(SchemaSnapshot { tables })
+}
+
+/// Diff an **expected** snapshot against the **actual** (live) snapshot — a PURE
+/// function, no I/O, no DDL (design §5: surface, don't auto-fix).
+///
+/// The expected snapshot is **supplied by the caller** — the control-plane /
+/// authoring layer owns the declared/union schema (design §0) and is the only
+/// component that knows the intended shape. This function does NOT rebuild that
+/// model by replaying the migration DDL; that is deliberately the authoring
+/// layer's responsibility, and this seam keeps the two concerns separate.
+///
+/// Returns:
+/// - `missing_objects` — present in `expected`, absent in `actual` (a declared
+///   table/column/index/constraint the DB never got).
+/// - `unexpected_objects` — present in `actual`, absent in `expected` (an
+///   out-of-band object created outside the journal — scenario 35).
+///
+/// Object names are qualified for legibility: a table as `"users"`, a column as
+/// `"users.email"`, an index as `"users index orders_email_idx"`, a constraint
+/// as `"users constraint users_pkey"`. Output vectors are sorted + deterministic.
+#[must_use]
+pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> StructuralDrift {
+    let mut missing = Vec::new();
+    let mut unexpected = Vec::new();
+
+    // Tables present in expected but not actual → missing (whole table + its
+    // children fold into the single table name; the table is the unit of
+    // missing-ness). Tables in actual but not expected → unexpected.
+    for name in expected.tables.keys() {
+        if !actual.tables.contains_key(name) {
+            missing.push(name.clone());
+        }
+    }
+    for name in actual.tables.keys() {
+        if !expected.tables.contains_key(name) {
+            unexpected.push(name.clone());
+        }
+    }
+
+    // For tables present on BOTH sides, diff their columns / indexes / constraints
+    // by name.
+    for (name, exp_t) in &expected.tables {
+        let Some(act_t) = actual.tables.get(name) else {
+            continue;
+        };
+        diff_named(
+            name,
+            "",
+            &exp_t.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+            &act_t.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+            &mut missing,
+            &mut unexpected,
+        );
+        diff_named(
+            name,
+            "index ",
+            &exp_t.indexes.iter().map(|i| i.name.clone()).collect::<Vec<_>>(),
+            &act_t.indexes.iter().map(|i| i.name.clone()).collect::<Vec<_>>(),
+            &mut missing,
+            &mut unexpected,
+        );
+        diff_named(
+            name,
+            "constraint ",
+            &exp_t.constraints.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+            &act_t.constraints.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+            &mut missing,
+            &mut unexpected,
+        );
+    }
+
+    missing.sort_unstable();
+    unexpected.sort_unstable();
+    StructuralDrift {
+        missing_objects: missing,
+        unexpected_objects: unexpected,
+    }
+}
+
+/// Diff two name lists belonging to one table, pushing qualified names into the
+/// missing / unexpected accumulators. `kind_prefix` is `""` for columns (so the
+/// name reads `table.col`), `"index "` / `"constraint "` otherwise.
+fn diff_named(
+    table: &str,
+    kind_prefix: &str,
+    expected: &[String],
+    actual: &[String],
+    missing: &mut Vec<String>,
+    unexpected: &mut Vec<String>,
+) {
+    use std::collections::BTreeSet;
+    let exp: BTreeSet<&str> = expected.iter().map(String::as_str).collect();
+    let act: BTreeSet<&str> = actual.iter().map(String::as_str).collect();
+    let label = |child: &str| {
+        if kind_prefix.is_empty() {
+            format!("{table}.{child}")
+        } else {
+            format!("{table} {kind_prefix}{child}")
+        }
+    };
+    for child in expected {
+        if !act.contains(child.as_str()) {
+            missing.push(label(child));
+        }
+    }
+    for child in actual {
+        if !exp.contains(child.as_str()) {
+            unexpected.push(label(child));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DriftReport — the aggregate surface (B1 + B2)
+// ---------------------------------------------------------------------------
+
+/// The full drift surface for a project: checksum/tamper drift, orphan journal
+/// entries, and (when a structural diff is run) missing / unexpected objects.
+///
+/// Assembled by the caller from [`check_checksum_drift`] and
+/// [`diff_snapshots`]; it carries reports only, never DDL or a remediation plan
+/// (design §5).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DriftReport {
+    /// Net-applied versions whose journal checksum disagrees with the set.
+    pub checksum_drift: Vec<ChecksumDrift>,
+    /// Expected objects absent from the live DB (from a structural diff).
+    pub missing_objects: Vec<String>,
+    /// Live objects absent from the expected snapshot (out-of-band creation).
+    pub unexpected_objects: Vec<String>,
+    /// Net-applied versions with no migration in the supplied set.
+    pub orphan_journal: Vec<OrphanJournal>,
+}
+
+impl DriftReport {
+    /// Assemble from a checksum-drift report and a structural diff.
+    #[must_use]
+    pub fn new(checksum: ChecksumDriftReport, structural: StructuralDrift) -> Self {
+        Self {
+            checksum_drift: checksum.checksum_drift,
+            missing_objects: structural.missing_objects,
+            unexpected_objects: structural.unexpected_objects,
+            orphan_journal: checksum.orphan_journal,
+        }
+    }
+
+    /// True if no drift of any kind was found.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.checksum_drift.is_empty()
+            && self.missing_objects.is_empty()
+            && self.unexpected_objects.is_empty()
+            && self.orphan_journal.is_empty()
+    }
+}
