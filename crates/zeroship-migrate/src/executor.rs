@@ -185,6 +185,24 @@ pub enum ApplyError {
         /// The total number of versions it supersedes.
         total: usize,
     },
+    /// Two distinct squash migrations IN THE SAME apply set both supersede the same
+    /// version — a malformed bundle (a version may be collapsed by at most one
+    /// squash). If both ran, the second's `up` would re-create what the first's
+    /// already built (double-apply); the fresh-path all-or-none gate cannot catch
+    /// this because neither squash is net-applied yet, so it is refused up-front,
+    /// before any execution. Nothing was applied.
+    #[error(
+        "squash migrations {first} and {second} both supersede {shared}: a version may be \
+         collapsed by at most one squash — split them across deploys or merge them"
+    )]
+    OverlappingSquashes {
+        /// One squash superseding the shared version.
+        first: String,
+        /// The other squash superseding the shared version.
+        second: String,
+        /// The version both squashes supersede.
+        shared: String,
+    },
     /// Applying a migration's `up` SQL failed (after the guard passed). The
     /// transaction (txn path) was rolled back; nothing was journaled.
     #[error("migration {version} failed to apply: {source}")]
@@ -586,6 +604,12 @@ async fn apply_locked(
         .copied()
         .chain(journal_superseded.iter().map(String::as_str))
         .collect();
+    // Two PENDING in-set squashes superseding the same version is malformed (a
+    // version may be collapsed by at most one squash). Neither is net-applied yet,
+    // so the all-or-none gate cannot catch it — refuse up-front, fail-closed. An
+    // ALREADY-APPLIED squash re-supplied alongside a new one (the legitimate
+    // chained case) is excluded — that is handled by the all-or-none gate.
+    check_no_overlapping_squashes(migrations, &completed)?;
     check_squash_all_or_none(migrations, &completed, &satisfied)?;
     let superseded: std::collections::HashSet<&str> =
         superseded_owned.iter().map(String::as_str).collect();
@@ -901,6 +925,48 @@ pub(crate) fn compute_superseded(
         }
     }
     out
+}
+
+/// Refuse a malformed set in which two distinct squashes both supersede the same
+/// version (Plan 9 sub-feature B). A version may be collapsed by at most one
+/// squash; two in-set squashes over an overlapping prefix would both be pending
+/// on a fresh DB (neither net-applied → the all-or-none gate sees nothing
+/// satisfied and lets both run), so the second's `up` would re-create what the
+/// first's already built. Caught here, before any execution — fail-closed on
+/// nonsensical authoring rather than erroring mid-batch.
+///
+/// # Errors
+/// - [`ApplyError::OverlappingSquashes`] — two squashes in the set supersede the
+///   same version.
+fn check_no_overlapping_squashes(
+    migrations: &[Migration],
+    completed: &HashMap<&str, &AppliedEntry>,
+) -> Result<(), ApplyError> {
+    // version superseded -> the first PENDING squash version seen superseding it.
+    let mut owner: HashMap<&str, &str> = HashMap::new();
+    for m in migrations {
+        // Only PENDING squashes conflict; an already-net-applied squash re-supplied
+        // in the set is settled (its supersession is recorded) — the all-or-none
+        // gate routes a new overlapping squash to SquashAlreadyApplied.
+        if m.supersedes.is_empty() || completed.contains_key(m.version.as_str()) {
+            continue;
+        }
+        for dep in &m.supersedes {
+            let dep_s = dep.as_str();
+            if let Some(&prev) = owner.get(dep_s) {
+                if prev != m.version.as_str() {
+                    return Err(ApplyError::OverlappingSquashes {
+                        first: prev.to_string(),
+                        second: m.version.as_str().to_string(),
+                        shared: dep_s.to_string(),
+                    });
+                }
+            } else {
+                owner.insert(dep_s, m.version.as_str());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Validate the squash all-or-none rule (Plan 9 sub-feature B) for every PENDING
