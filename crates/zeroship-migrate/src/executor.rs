@@ -111,6 +111,20 @@ pub enum ApplyError {
         /// The checksum of the migration now in the set.
         expected: String,
     },
+    /// A pending migration's `depends_on` names a version that is neither already
+    /// applied nor present in the supplied set — the dependency graph is
+    /// unsatisfiable, so no ordering exists. Hard abort before any execution.
+    #[error("migration {version} depends on unknown migration {missing} (not in the set or journal)")]
+    MissingDependency {
+        /// The migration with the dangling dependency.
+        version: String,
+        /// The unknown version it depends on.
+        missing: String,
+    },
+    /// The pending migrations' `depends_on` edges form a cycle, so no topological
+    /// order exists. Hard abort before any execution.
+    #[error("dependency cycle among pending migrations: {0}")]
+    DependencyCycle(String),
     /// Applying a migration's `up` SQL failed (after the guard passed). The
     /// transaction (txn path) was rolled back; nothing was journaled.
     #[error("migration {version} failed to apply: {source}")]
@@ -435,12 +449,9 @@ async fn apply_locked(
         }
     }
 
-    // Pending = set − completed, in UUIDv7 (version-string) order.
-    let mut pending: Vec<&Migration> = migrations
-        .iter()
-        .filter(|m| !completed.contains_key(m.version.as_str()))
-        .collect();
-    pending.sort_by(|a, b| a.version.as_str().cmp(b.version.as_str()));
+    // Pending = set − completed. Ordered by `depends_on` when present
+    // (topological, version-tiebroken & stable), else pure UUIDv7 version order.
+    let pending: Vec<&Migration> = order_pending(migrations, &completed)?;
 
     let guard = SqlGuard::new(GuardConfig {
         project_schema: cfg.project_schema.clone(),
@@ -497,6 +508,113 @@ async fn apply_locked(
     }
 
     Ok(outcome)
+}
+
+/// Order the pending migrations honoring `depends_on` (design §4 cross-slice
+/// ordering) when set, falling back to pure version order otherwise.
+///
+/// The default order is UUIDv7 version (time-ordered), but `depends_on` can pull a
+/// *higher*-version migration to run **after** a lower-version one it depends on —
+/// or, the converse the task calls out: a later-version migration whose
+/// `depends_on` is empty may still need to run *after* an earlier-version one
+/// because that earlier one depends on **it**. We therefore topologically sort the
+/// dependency DAG (edge `dep -> m` for each `dep` in `m.depends_on`), using a
+/// version-ordered worklist so the result is **stable** and version-tiebroken
+/// (among nodes with no outstanding deps, the lowest version goes first).
+///
+/// Dependencies already satisfied by the journal (a `completed` version not in the
+/// pending set) are treated as pre-met edges — they impose no ordering on the
+/// pending batch but must still resolve to a real version (set or journal),
+/// otherwise the graph is unsatisfiable.
+///
+/// # Errors
+/// - [`ApplyError::MissingDependency`] — a `depends_on` names a version absent
+///   from both the supplied set and the journal.
+/// - [`ApplyError::DependencyCycle`] — the pending edges form a cycle.
+fn order_pending<'a>(
+    migrations: &'a [Migration],
+    completed: &HashMap<&str, &AppliedEntry>,
+) -> Result<Vec<&'a Migration>, ApplyError> {
+    use std::collections::{BTreeMap, HashSet};
+
+    // The pending set, indexed by version, plus the set of all known versions
+    // (pending ∪ completed) for dependency-existence checks.
+    let pending: Vec<&Migration> = migrations
+        .iter()
+        .filter(|m| !completed.contains_key(m.version.as_str()))
+        .collect();
+    let pending_versions: HashSet<&str> =
+        pending.iter().map(|m| m.version.as_str()).collect();
+    let known: HashSet<&str> = pending_versions
+        .iter()
+        .copied()
+        .chain(completed.keys().copied())
+        .collect();
+
+    // Validate every dependency resolves to a real version (set or journal), and
+    // build the in-degree + adjacency over the PENDING subgraph only (an edge from
+    // an already-completed dep imposes no ordering on the batch).
+    //
+    // `adj[dep]` = pending migrations that must run AFTER `dep`.
+    // `indeg[m]` = number of *pending* deps `m` is still waiting on.
+    let mut indeg: BTreeMap<&str, usize> =
+        pending.iter().map(|m| (m.version.as_str(), 0usize)).collect();
+    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    for m in &pending {
+        for dep in &m.depends_on {
+            let dep_v = dep.as_str();
+            if !known.contains(dep_v) {
+                return Err(ApplyError::MissingDependency {
+                    version: m.version.as_str().to_string(),
+                    missing: dep_v.to_string(),
+                });
+            }
+            // Only deps that are themselves PENDING constrain batch order; a dep
+            // already in the journal is pre-satisfied.
+            if pending_versions.contains(dep_v) {
+                adj.entry(dep_v).or_default().push(m.version.as_str());
+                *indeg.get_mut(m.version.as_str()).expect("pending node") += 1;
+            }
+        }
+    }
+
+    // Kahn's algorithm with a version-ordered ready set (BTreeSet keys are sorted),
+    // so the topo order is deterministic and version-tiebroken: among migrations
+    // with no remaining unmet dep, the lowest version emits first. This degrades to
+    // pure version order when no `depends_on` edges exist.
+    let by_version: HashMap<&str, &Migration> =
+        pending.iter().map(|m| (m.version.as_str(), *m)).collect();
+    let mut ready: std::collections::BTreeSet<&str> = indeg
+        .iter()
+        .filter(|(_, &d)| d == 0)
+        .map(|(&v, _)| v)
+        .collect();
+    let mut ordered: Vec<&Migration> = Vec::with_capacity(pending.len());
+    while let Some(&v) = ready.iter().next() {
+        ready.remove(v);
+        ordered.push(by_version[v]);
+        if let Some(succs) = adj.get(v) {
+            for &s in succs {
+                let e = indeg.get_mut(s).expect("successor node");
+                *e -= 1;
+                if *e == 0 {
+                    ready.insert(s);
+                }
+            }
+        }
+    }
+
+    if ordered.len() != pending.len() {
+        // The leftover nodes (still indeg > 0) are exactly the cycle members.
+        let mut cyclic: Vec<&str> = indeg
+            .iter()
+            .filter(|(_, &d)| d > 0)
+            .map(|(&v, _)| v)
+            .collect();
+        cyclic.sort_unstable();
+        return Err(ApplyError::DependencyCycle(cyclic.join(", ")));
+    }
+    Ok(ordered)
 }
 
 /// Transactional apply (design §2.3): `BEGIN; <up>; INSERT journal; COMMIT`.
@@ -764,4 +882,122 @@ fn index_names_in_up(up: &str) -> Vec<String> {
         }
     }
     names
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+    use crate::journal::Phase;
+    use crate::migration::{Checksum, MigrationFlags, MigrationId};
+    use std::collections::HashMap;
+
+    fn m(version: MigrationId, depends_on: Vec<MigrationId>) -> Migration {
+        let up = format!("CREATE TABLE t_{}()", version.as_str());
+        Migration {
+            version,
+            name: "n".into(),
+            up: up.clone(),
+            down: None,
+            checksum: Checksum::of(&up, None),
+            flags: MigrationFlags::default(),
+            owner_app: "app_test".into(),
+            depends_on,
+        }
+    }
+
+    fn pos(ordered: &[&Migration], v: &str) -> usize {
+        ordered.iter().position(|x| x.version.as_str() == v).expect("present")
+    }
+
+    #[test]
+    fn no_depends_on_is_pure_version_order() {
+        // Three migrations, no edges: result is strict ascending version order.
+        let a = MigrationId::generate();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = MigrationId::generate();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let c = MigrationId::generate();
+        let set = vec![
+            m(c.clone(), vec![]),
+            m(a.clone(), vec![]),
+            m(b.clone(), vec![]),
+        ];
+        let completed: HashMap<&str, &AppliedEntry> = HashMap::new();
+        let ordered = order_pending(&set, &completed).expect("order");
+        let vs: Vec<&str> = ordered.iter().map(|x| x.version.as_str()).collect();
+        assert_eq!(vs, vec![a.as_str(), b.as_str(), c.as_str()]);
+    }
+
+    #[test]
+    fn later_version_runs_before_earlier_when_earlier_depends_on_it() {
+        // The task's case: the EARLIER-version migration depends on the
+        // LATER-version one, so topo order must run the later one FIRST, inverting
+        // pure version order.
+        let earlier = MigrationId::generate();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let later = MigrationId::generate();
+        assert!(later.as_str() > earlier.as_str(), "later must sort after earlier");
+        // earlier depends_on later; later depends_on nothing.
+        let set = vec![
+            m(earlier.clone(), vec![later.clone()]),
+            m(later.clone(), vec![]),
+        ];
+        let completed: HashMap<&str, &AppliedEntry> = HashMap::new();
+        let ordered = order_pending(&set, &completed).expect("order");
+        assert!(
+            pos(&ordered, later.as_str()) < pos(&ordered, earlier.as_str()),
+            "the depended-on (later-version) migration must run first"
+        );
+    }
+
+    #[test]
+    fn cycle_is_a_clear_error() {
+        let a = MigrationId::generate();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = MigrationId::generate();
+        // a -> b -> a
+        let set = vec![
+            m(a.clone(), vec![b.clone()]),
+            m(b.clone(), vec![a.clone()]),
+        ];
+        let completed: HashMap<&str, &AppliedEntry> = HashMap::new();
+        let err = order_pending(&set, &completed).unwrap_err();
+        match err {
+            ApplyError::DependencyCycle(members) => {
+                assert!(members.contains(a.as_str()) && members.contains(b.as_str()));
+            }
+            other => panic!("expected DependencyCycle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_dependency_is_an_error() {
+        let a = MigrationId::generate();
+        let ghost = MigrationId::generate();
+        let set = vec![m(a.clone(), vec![ghost.clone()])];
+        let completed: HashMap<&str, &AppliedEntry> = HashMap::new();
+        let err = order_pending(&set, &completed).unwrap_err();
+        assert!(matches!(err, ApplyError::MissingDependency { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn dependency_already_in_journal_is_pre_satisfied() {
+        // A dep that is already completed (in the journal, not in the pending set)
+        // resolves fine and imposes no batch ordering.
+        let done = MigrationId::generate();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let pend = MigrationId::generate();
+        let entry = AppliedEntry {
+            version: done.as_str().to_string(),
+            checksum: String::new(),
+            phase: Phase::Completed,
+        };
+        let mut completed: HashMap<&str, &AppliedEntry> = HashMap::new();
+        completed.insert(done.as_str(), &entry);
+        // Only `pend` is in the supplied set (depends on the completed `done`).
+        let set = vec![m(pend.clone(), vec![done.clone()])];
+        let ordered = order_pending(&set, &completed).expect("order");
+        let vs: Vec<&str> = ordered.iter().map(|x| x.version.as_str()).collect();
+        assert_eq!(vs, vec![pend.as_str()], "only the pending one is ordered");
+    }
 }

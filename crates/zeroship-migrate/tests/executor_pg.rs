@@ -695,6 +695,83 @@ async fn recovery_does_not_drop_unrelated_invalid_index() {
     drop_schemas(&conn, &cfg).await;
 }
 
+/// v1.x: the executor honors `depends_on` topologically, even when it inverts
+/// version order. The EARLIER-version migration depends on (and references a
+/// table created by) the LATER-version one, so pure version order would fail; the
+/// topo order applies the depended-on migration first and both succeed.
+#[compio::test]
+async fn apply_honors_depends_on_over_version_order() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let earlier = MigrationId::generate();
+    std::thread::sleep(Duration::from_millis(2));
+    let later = MigrationId::generate();
+    assert!(later.as_str() > earlier.as_str());
+
+    // earlier-version migration ADD COLUMN to a table created by the later one,
+    // and declares depends_on = [later]. If applied in version order it would
+    // fail ("relation does not exist"); topo order must run `later` first.
+    let mut m_earlier = mig(
+        earlier.clone(),
+        "add_col_referencing_later",
+        &format!(
+            "ALTER TABLE \"{}\".parent ADD COLUMN note text",
+            cfg.project_schema
+        ),
+    );
+    m_earlier.depends_on = vec![later.clone()];
+    let m_later = mig(
+        later.clone(),
+        "create_parent",
+        &format!("CREATE TABLE \"{}\".parent (id bigint)", cfg.project_schema),
+    );
+
+    // Supplied in version order (earlier first) — the executor must reorder.
+    let out = apply(&conn, &cfg, &[m_earlier.clone(), m_later.clone()], "actor")
+        .await
+        .expect("apply honoring depends_on");
+    // applied order must be [later, earlier].
+    assert_eq!(
+        out.applied,
+        vec![later.as_str().to_string(), earlier.as_str().to_string()],
+        "the depended-on (later-version) migration must apply first"
+    );
+    assert!(table_exists(&conn, &cfg.project_schema, "parent").await);
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+/// v1.x: a `depends_on` cycle is a clear hard error, and nothing is applied.
+#[compio::test]
+async fn apply_rejects_dependency_cycle() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let a = MigrationId::generate();
+    std::thread::sleep(Duration::from_millis(2));
+    let b = MigrationId::generate();
+    let mut ma = mig(a.clone(), "a", &format!("CREATE TABLE \"{}\".ta ()", cfg.project_schema));
+    let mut mb = mig(b.clone(), "b", &format!("CREATE TABLE \"{}\".tb ()", cfg.project_schema));
+    ma.depends_on = vec![b.clone()];
+    mb.depends_on = vec![a.clone()];
+
+    let err = apply(&conn, &cfg, &[ma, mb], "actor").await.unwrap_err();
+    assert!(matches!(err, ApplyError::DependencyCycle(_)), "got {err:?}");
+    // Nothing applied — neither table exists.
+    assert!(!table_exists(&conn, &cfg.project_schema, "ta").await);
+    assert!(!table_exists(&conn, &cfg.project_schema, "tb").await);
+    assert_eq!(journal_count(&conn, &cfg).await, 0);
+
+    drop_schemas(&conn, &cfg).await;
+}
+
 #[compio::test]
 async fn statement_timeout_aborts_long_migration_cleanly() {
     let conn = pg().await;
