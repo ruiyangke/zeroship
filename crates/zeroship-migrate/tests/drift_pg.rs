@@ -9,9 +9,9 @@ use std::collections::BTreeMap;
 use compio_postgres::Client;
 use zeroship_migrate::migration::Checksum;
 use zeroship_migrate::{
-    apply, check_checksum_drift, diff_snapshots, snapshot_schema, Approval, ColumnSnapshot,
+    apply, check_checksum_drift, diff_snapshots, rollback, snapshot_schema, Approval, ColumnSnapshot,
     ConstraintSnapshot, ExecutorConfig, IndexSnapshot, Migration, MigrationFlags, MigrationId,
-    SchemaSnapshot, TableSnapshot,
+    RollbackRequest, RollbackTarget, SchemaSnapshot, TableSnapshot,
 };
 
 const DEFAULT_DSN: &str =
@@ -198,6 +198,99 @@ async fn apply_aborts_on_checksum_drift_using_the_shared_check() {
         ),
         "got {err:?}"
     );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn checksum_drift_reads_latest_completed_checksum_across_reapply() {
+    // #2 — locks that `applied()` (and thus check_checksum_drift) reads the LATEST
+    // completed event's checksum, not a stale earlier one, across a
+    // apply(upA) → rollback → re-apply(upB) cycle.
+    //
+    //   apply v1 with upA (csA) → rollback v1 → re-apply v1 with a DIFFERENT
+    //   up upB (csB).
+    // The journal's net checksum for v1 must be csB (the newest incarnation).
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let sch = &cfg.project_schema;
+    let ver = MigrationId::generate();
+
+    // upA: create t1(id int); reversible.
+    let up_a = format!("CREATE TABLE \"{sch}\".\"t1\" (id int)");
+    let down_a = format!("DROP TABLE \"{sch}\".\"t1\"");
+    let mig_a = Migration {
+        version: ver.clone(),
+        name: "t1".into(),
+        up: up_a.clone(),
+        down: Some(down_a.clone()),
+        checksum: Checksum::of(&up_a, Some(&down_a)),
+        flags: MigrationFlags::default(),
+        owner_app: "app_test".into(),
+        depends_on: Vec::new(),
+    };
+    let cs_a = mig_a.checksum.as_str().to_string();
+
+    // upB: SAME version, DIFFERENT body (t1 with an extra column) → different cs.
+    let up_b = format!("CREATE TABLE \"{sch}\".\"t1\" (id int, label text)");
+    let down_b = format!("DROP TABLE \"{sch}\".\"t1\"");
+    let mig_b = Migration {
+        version: ver.clone(),
+        name: "t1".into(),
+        up: up_b.clone(),
+        down: Some(down_b.clone()),
+        checksum: Checksum::of(&up_b, Some(&down_b)),
+        flags: MigrationFlags::default(),
+        owner_app: "app_test".into(),
+        depends_on: Vec::new(),
+    };
+    let cs_b = mig_b.checksum.as_str().to_string();
+    assert_ne!(cs_a, cs_b, "upA and upB must have distinct checksums");
+
+    // apply upA.
+    apply(&conn, &cfg, std::slice::from_ref(&mig_a), Approval::None, "actor")
+        .await
+        .expect("apply upA");
+    // rollback v1 (so it's re-appliable).
+    rollback(
+        &conn,
+        &cfg,
+        std::slice::from_ref(&mig_a),
+        RollbackRequest::new(RollbackTarget::Steps(1)),
+        Approval::Approved,
+        "rollbacker",
+    )
+    .await
+    .expect("rollback v1");
+    // re-apply upB (a DIFFERENT incarnation of the same version).
+    apply(&conn, &cfg, std::slice::from_ref(&mig_b), Approval::None, "actor")
+        .await
+        .expect("re-apply upB");
+
+    // Against a set shipping upB: CLEAN — recorded (csB) == set checksum (csB).
+    let report_b = check_checksum_drift(&conn, &cfg, std::slice::from_ref(&mig_b))
+        .await
+        .expect("drift upB");
+    assert!(
+        report_b.is_clean(),
+        "set shipping upB must be clean (recorded==csB): {report_b:?}"
+    );
+
+    // Against a set still shipping upA: DRIFT — recorded is csB (the LATEST
+    // completed event), not the stale csA, and it disagrees with the set's csA.
+    let report_a = check_checksum_drift(&conn, &cfg, std::slice::from_ref(&mig_a))
+        .await
+        .expect("drift upA");
+    assert_eq!(report_a.checksum_drift.len(), 1, "one drift: {report_a:?}");
+    let d = &report_a.checksum_drift[0];
+    assert_eq!(d.version, ver.as_str());
+    assert_eq!(d.recorded, cs_b, "recorded is the LATEST completed checksum (csB)");
+    assert_eq!(d.expected, cs_a, "expected is the set's stale upA checksum (csA)");
+    assert!(report_a.orphan_journal.is_empty(), "{report_a:?}");
 
     drop_schemas(&conn, &cfg).await;
 }
@@ -419,7 +512,245 @@ async fn diff_of_identical_snapshots_is_clean() {
 
     // sanity: types referenced so unused-import lints don't fire on a thin test
     let _ = IndexSnapshot { name: "x".into(), unique: false };
-    let _ = ConstraintSnapshot { name: "x".into(), kind: "CHECK".into() };
+    let _ = ConstraintSnapshot {
+        name: "x".into(),
+        kind: "CHECK".into(),
+        definition: "CHECK (true)".into(),
+    };
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// #1 — attribute-aware structural drift (out-of-band ALTER blind spot)
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn diff_reports_altered_column_data_type() {
+    // (a) An out-of-band `ALTER COLUMN … TYPE` keeps the column NAME but changes
+    // data_type. Name-only diffing reports CLEAN; attribute diff surfaces it.
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let sch = &cfg.project_schema;
+    // LIVE: id is bigint (the out-of-band ALTERed shape).
+    conn.batch_execute(&format!("CREATE TABLE \"{sch}\".\"users\" (id bigint);"))
+        .await
+        .expect("seed");
+    let actual = snapshot_schema(&conn, sch).await.expect("actual");
+
+    // EXPECTED: same table+column NAME, but data_type = integer.
+    let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
+    tables.insert(
+        "users".to_string(),
+        TableSnapshot {
+            columns: vec![ColumnSnapshot {
+                name: "id".into(),
+                data_type: "integer".into(),
+                nullable: true,
+            }],
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+        },
+    );
+    let expected = SchemaSnapshot { tables };
+
+    let drift = diff_snapshots(&expected, &actual);
+    assert!(drift.missing_objects.is_empty(), "no missing: {drift:?}");
+    assert!(drift.unexpected_objects.is_empty(), "no unexpected: {drift:?}");
+    assert_eq!(drift.altered_objects.len(), 1, "one altered: {drift:?}");
+    let a = &drift.altered_objects[0];
+    assert_eq!(a.table, "users");
+    assert_eq!(a.object, "column id");
+    assert_eq!(a.field, "data_type");
+    assert_eq!(a.expected, "integer");
+    assert_eq!(a.actual, "bigint");
+    assert!(!drift.is_clean());
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn diff_reports_altered_column_nullability() {
+    // (b) An out-of-band `DROP NOT NULL` flips nullable while the name is stable.
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let sch = &cfg.project_schema;
+    // LIVE: email is nullable (NOT NULL was dropped out-of-band).
+    conn.batch_execute(&format!("CREATE TABLE \"{sch}\".\"users\" (email text);"))
+        .await
+        .expect("seed");
+    let actual = snapshot_schema(&conn, sch).await.expect("actual");
+
+    // EXPECTED: email NOT NULL.
+    let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
+    tables.insert(
+        "users".to_string(),
+        TableSnapshot {
+            columns: vec![ColumnSnapshot {
+                name: "email".into(),
+                data_type: "text".into(),
+                nullable: false,
+            }],
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+        },
+    );
+    let expected = SchemaSnapshot { tables };
+
+    let drift = diff_snapshots(&expected, &actual);
+    assert!(drift.missing_objects.is_empty(), "{drift:?}");
+    assert!(drift.unexpected_objects.is_empty(), "{drift:?}");
+    assert_eq!(drift.altered_objects.len(), 1, "one altered: {drift:?}");
+    let a = &drift.altered_objects[0];
+    assert_eq!(a.object, "column email");
+    assert_eq!(a.field, "nullable");
+    assert_eq!(a.expected, "false");
+    assert_eq!(a.actual, "true");
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn diff_reports_altered_index_uniqueness() {
+    // (c) An index that lost UNIQUE out-of-band — same name, unique true→false.
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let sch = &cfg.project_schema;
+    // LIVE: a NON-unique index named users_email_idx.
+    conn.batch_execute(&format!(
+        "CREATE TABLE \"{sch}\".\"users\" (email text);
+         CREATE INDEX users_email_idx ON \"{sch}\".\"users\" (email);"
+    ))
+    .await
+    .expect("seed");
+    let actual = snapshot_schema(&conn, sch).await.expect("actual");
+
+    // EXPECTED: same index name, but UNIQUE.
+    let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
+    tables.insert(
+        "users".to_string(),
+        TableSnapshot {
+            columns: actual.tables["users"].columns.clone(),
+            indexes: vec![IndexSnapshot {
+                name: "users_email_idx".into(),
+                unique: true,
+            }],
+            constraints: Vec::new(),
+        },
+    );
+    let expected = SchemaSnapshot { tables };
+
+    let drift = diff_snapshots(&expected, &actual);
+    assert!(drift.missing_objects.is_empty(), "{drift:?}");
+    assert!(drift.unexpected_objects.is_empty(), "{drift:?}");
+    assert_eq!(drift.altered_objects.len(), 1, "one altered: {drift:?}");
+    let a = &drift.altered_objects[0];
+    assert_eq!(a.object, "index users_email_idx");
+    assert_eq!(a.field, "unique");
+    assert_eq!(a.expected, "true");
+    assert_eq!(a.actual, "false");
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn diff_reports_altered_check_constraint_definition() {
+    // (d) A CHECK constraint whose PREDICATE was rewritten out-of-band — same
+    // name + same kind (CHECK), different body. The definition field surfaces it
+    // (the CHECK-body hole #1 closes).
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let sch = &cfg.project_schema;
+    // LIVE: CHECK (age > 18) under a stable constraint name.
+    conn.batch_execute(&format!(
+        "CREATE TABLE \"{sch}\".\"users\" (age int, CONSTRAINT users_age_chk CHECK (age > 18));"
+    ))
+    .await
+    .expect("seed");
+    let actual = snapshot_schema(&conn, sch).await.expect("actual");
+
+    // The live definition (whatever pg_get_constraintdef renders) is captured.
+    let live = actual.tables["users"]
+        .constraints
+        .iter()
+        .find(|c| c.name == "users_age_chk")
+        .expect("live constraint captured");
+    assert_eq!(live.kind, "CHECK");
+    assert!(
+        live.definition.contains("18"),
+        "live def reflects body: {:?}",
+        live.definition
+    );
+
+    // EXPECTED: same name, same kind, but the body says age > 0.
+    let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
+    tables.insert(
+        "users".to_string(),
+        TableSnapshot {
+            columns: actual.tables["users"].columns.clone(),
+            indexes: Vec::new(),
+            constraints: vec![ConstraintSnapshot {
+                name: "users_age_chk".into(),
+                kind: "CHECK".into(),
+                definition: "CHECK ((age > 0))".into(),
+            }],
+        },
+    );
+    let expected = SchemaSnapshot { tables };
+
+    let drift = diff_snapshots(&expected, &actual);
+    assert!(drift.missing_objects.is_empty(), "{drift:?}");
+    assert!(drift.unexpected_objects.is_empty(), "{drift:?}");
+    // kind matches (CHECK==CHECK); only the definition diverges.
+    assert_eq!(drift.altered_objects.len(), 1, "one altered: {drift:?}");
+    let a = &drift.altered_objects[0];
+    assert_eq!(a.object, "constraint users_age_chk");
+    assert_eq!(a.field, "definition");
+    assert_eq!(a.expected, "CHECK ((age > 0))");
+    assert!(a.actual.contains("18"), "actual def: {:?}", a.actual);
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn diff_of_self_snapshot_with_attributes_is_clean() {
+    // A snapshot diffed against ITSELF — including constraints+indexes+columns
+    // with full attributes — reports no altered_objects (regression guard that
+    // attribute compare doesn't false-positive on equal values).
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let sch = &cfg.project_schema;
+    conn.batch_execute(&format!(
+        "CREATE TABLE \"{sch}\".\"users\" (id int PRIMARY KEY, email text NOT NULL,
+            CONSTRAINT users_email_len CHECK (length(email) > 0));
+         CREATE UNIQUE INDEX users_email_idx ON \"{sch}\".\"users\" (email);"
+    ))
+    .await
+    .expect("seed");
+    let snap = snapshot_schema(&conn, sch).await.expect("snap");
+    let drift = diff_snapshots(&snap, &snap);
+    assert!(drift.altered_objects.is_empty(), "no false alters: {drift:?}");
+    assert!(drift.is_clean(), "{drift:?}");
 
     drop_schemas(&conn, &cfg).await;
 }
