@@ -394,6 +394,142 @@ async fn dual_write_correctness_under_app_role() {
     full_teardown(&conn, &cfg, Some(&app_role)).await;
 }
 
+/// MARQUEE 1b — the dual-write trigger is TOTAL: a single statement that
+/// changes BOTH columns to DIFFERENT values must NOT leave them divergent. The
+/// "to wins" precedence (the new column wins, consistent with the contract end
+/// state which keeps `to`) means after any such write the two columns are EQUAL
+/// to the `to` value. Covers the central data-integrity hole: a divergent pair
+/// would be silently destroyed by the contract's `DROP COLUMN <from>`.
+#[compio::test]
+async fn dual_write_is_total_to_wins_when_both_columns_change() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    full_teardown(&conn, &cfg, None).await;
+    ensure_project_schema(&conn, &cfg).await;
+    provision_migrator(&conn, &cfg).await.expect("provision");
+    seed_users(&conn, &cfg.project_schema).await;
+    give_table_to_migrator(&conn, &cfg).await;
+
+    let plan = rename_plan(&cfg);
+    apply_expand(&conn, &cfg, &plan).await;
+    let app_role = make_app_role(&conn, &cfg, &tok).await;
+    let schema = &cfg.project_schema;
+
+    // (1) A single UPDATE setting BOTH columns to DIFFERENT values → after the
+    //     trigger they are EQUAL, to the `to` (email_address) value.
+    as_app(
+        &conn,
+        &app_role,
+        &format!(
+            "UPDATE \"{schema}\".\"users\" \
+             SET email='from-side@x.test', email_address='to-side@x.test' WHERE id=1"
+        ),
+    )
+    .await;
+    assert_eq!(
+        row_pair(&conn, schema, 1).await,
+        (Some("to-side@x.test".into()), Some("to-side@x.test".into())),
+        "UPDATE changing BOTH columns must converge to the `to` value (to wins)"
+    );
+
+    // (2) An INSERT setting BOTH columns to DIFFERENT values → EQUAL, to-wins.
+    as_app(
+        &conn,
+        &app_role,
+        &format!(
+            "INSERT INTO \"{schema}\".\"users\" (id, email, email_address) \
+             VALUES (20, 'ins-from@x.test', 'ins-to@x.test')"
+        ),
+    )
+    .await;
+    assert_eq!(
+        row_pair(&conn, schema, 20).await,
+        (Some("ins-to@x.test".into()), Some("ins-to@x.test".into())),
+        "INSERT setting BOTH columns must converge to the `to` value (to wins)"
+    );
+
+    // (3) An INSERT setting BOTH to the SAME value stays that value (no-op arm).
+    as_app(
+        &conn,
+        &app_role,
+        &format!(
+            "INSERT INTO \"{schema}\".\"users\" (id, email, email_address) \
+             VALUES (21, 'same@x.test', 'same@x.test')"
+        ),
+    )
+    .await;
+    assert_eq!(
+        row_pair(&conn, schema, 21).await,
+        (Some("same@x.test".into()), Some("same@x.test".into())),
+        "INSERT with both set to the same value is unchanged"
+    );
+
+    // (4) An INSERT with BOTH NULL stays both NULL (no-op arm, no error).
+    as_app(
+        &conn,
+        &app_role,
+        &format!("INSERT INTO \"{schema}\".\"users\" (id) VALUES (22)"),
+    )
+    .await;
+    assert_eq!(
+        row_pair(&conn, schema, 22).await,
+        (None, None),
+        "INSERT with both NULL leaves both NULL"
+    );
+
+    // (5) Single-column legacy cases STILL mirror correctly (regression guard):
+    //     insert via OLD only, insert via NEW only, update OLD only, update NEW only.
+    as_app(
+        &conn,
+        &app_role,
+        &format!("INSERT INTO \"{schema}\".\"users\" (id, email) VALUES (23, 'a@x.test')"),
+    )
+    .await;
+    assert_eq!(
+        row_pair(&conn, schema, 23).await,
+        (Some("a@x.test".into()), Some("a@x.test".into())),
+        "(a) insert via OLD only still mirrors to NEW"
+    );
+    as_app(
+        &conn,
+        &app_role,
+        &format!(
+            "INSERT INTO \"{schema}\".\"users\" (id, email_address) VALUES (24, 'b@x.test')"
+        ),
+    )
+    .await;
+    assert_eq!(
+        row_pair(&conn, schema, 24).await,
+        (Some("b@x.test".into()), Some("b@x.test".into())),
+        "(b) insert via NEW only still mirrors to OLD"
+    );
+    as_app(
+        &conn,
+        &app_role,
+        &format!("UPDATE \"{schema}\".\"users\" SET email='c@x.test' WHERE id=23"),
+    )
+    .await;
+    assert_eq!(
+        row_pair(&conn, schema, 23).await,
+        (Some("c@x.test".into()), Some("c@x.test".into())),
+        "(c) update OLD only still mirrors to NEW"
+    );
+    as_app(
+        &conn,
+        &app_role,
+        &format!("UPDATE \"{schema}\".\"users\" SET email_address='d@x.test' WHERE id=24"),
+    )
+    .await;
+    assert_eq!(
+        row_pair(&conn, schema, 24).await,
+        (Some("d@x.test".into()), Some("d@x.test".into())),
+        "(d) update NEW only still mirrors to OLD"
+    );
+
+    full_teardown(&conn, &cfg, Some(&app_role)).await;
+}
+
 /// MARQUEE 2 — old + new shape coexist after expand, before contract: both
 /// physical columns present and CONSISTENT after arbitrary writes through either.
 #[compio::test]
