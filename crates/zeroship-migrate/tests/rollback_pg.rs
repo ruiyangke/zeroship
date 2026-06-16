@@ -121,6 +121,17 @@ async fn table_exists(conn: &Client, schema: &str, table: &str) -> bool {
     !rows.is_empty()
 }
 
+async fn index_exists(conn: &Client, schema: &str, index: &str) -> bool {
+    let rows = conn
+        .query(
+            "SELECT 1 FROM pg_indexes WHERE schemaname = $1 AND indexname = $2",
+            &[&schema, &index],
+        )
+        .await
+        .expect("query index existence");
+    !rows.is_empty()
+}
+
 /// The set of net-applied versions (latest event completed), ascending.
 async fn applied_versions(conn: &Client, cfg: &ExecutorConfig) -> Vec<String> {
     journal::applied(conn, cfg)
@@ -722,6 +733,77 @@ async fn down_runs_under_migrator_role_for_own_schema() {
     // The rolled_back event was written (by admin).
     assert_eq!(rolled_back_count(&conn, &cfg, m.version.as_str()).await, 1);
     assert!(applied_versions(&conn, &cfg).await.is_empty());
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// A non-transactional `down` is refused up-front (#5): the rollback executor
+// only has a transactional down path (each down runs inside BEGIN…COMMIT under
+// SET LOCAL ROLE migrator), so a `down` containing a statement that cannot run
+// in a transaction (CREATE/DROP INDEX CONCURRENTLY, ALTER TYPE ADD VALUE,
+// VACUUM, …) would otherwise die LATE with PG 25001 surfaced as a confusing
+// DownFailed. The pre-flight detects it up-front and refuses with a clear
+// NonTransactionalDown error, rolling back NOTHING.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn non_transactional_down_is_refused_up_front_and_nothing_rolled_back() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    // `up`: create a table + a normal (transactional) index — applies fine on
+    // the txn path. `down`: DROP INDEX CONCURRENTLY — guard-clean, but it cannot
+    // run inside a transaction, so the transactional down path would fail late
+    // with 25001 ("cannot run inside a transaction block").
+    let v = MigrationId::generate();
+    let up = format!(
+        "CREATE TABLE \"{0}\".\"t\" (id bigint); \
+         CREATE INDEX some_idx ON \"{0}\".\"t\" (id)",
+        cfg.project_schema
+    );
+    let down = format!("DROP INDEX CONCURRENTLY \"{}\".\"some_idx\"", cfg.project_schema);
+    let m = Migration {
+        version: v,
+        name: "non_txn_down".into(),
+        up: up.clone(),
+        down: Some(down.clone()),
+        checksum: Checksum::of(&up, Some(&down)),
+        flags: MigrationFlags::default(),
+        owner_app: "app_test".into(),
+        depends_on: Vec::new(),
+    };
+    apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
+        .await
+        .expect("seed (up is transactional)");
+    assert!(table_exists(&conn, &cfg.project_schema, "t").await);
+    assert!(index_exists(&conn, &cfg.project_schema, "some_idx").await, "seeded index present");
+
+    let err = rollback(
+        &conn,
+        &cfg,
+        std::slice::from_ref(&m),
+        RollbackRequest::new(RollbackTarget::All),
+        Approval::Approved,
+        "actor",
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err, RollbackError::NonTransactionalDown { .. }),
+        "a non-transactional down must be refused up-front, got {err:?}"
+    );
+    // Nothing rolled back: the table AND the seeded index survive, no event.
+    assert!(table_exists(&conn, &cfg.project_schema, "t").await, "refused down must not run");
+    assert!(
+        index_exists(&conn, &cfg.project_schema, "some_idx").await,
+        "the seeded index must still be present (nothing rolled back)"
+    );
+    assert_eq!(rolled_back_count(&conn, &cfg, m.version.as_str()).await, 0);
+    assert_eq!(applied_versions(&conn, &cfg).await.len(), 1, "still applied");
 
     drop_schemas(&conn, &cfg).await;
 }
