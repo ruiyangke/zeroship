@@ -608,6 +608,311 @@ async fn rollback_no_depends_on_degrades_to_reverse_version_order() {
 }
 
 // ---------------------------------------------------------------------------
+// HIGH — version-threshold keep-path dangling-dependency guard.
+//
+// The inverse hazard of #1/#2, via a DIFFERENT keep mechanism. A (version va)
+// `depends_on=[B]` with a REAL FK (A.child REFERENCES B.parent); B (version vb)
+// creates parent; va < vb. `rollback(ToVersion(va))` selects {B} (B.version > va)
+// and KEEPS A (A.version not > va — kept by the version threshold, NOT by
+// force-skip). `order_rollback([B]) = [B]`, no SkipIrreversible step, so the #2
+// guard never fires. B's down `DROP TABLE parent` would run while kept-A's
+// `child` still FK-references it → DownFailed mid-batch (or a silently dangling
+// reference). The version-threshold keep-set must get its OWN dangling-dependency
+// guard: refuse the whole rollback up-front. Roll-forward instead.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn rollback_to_version_refuses_when_a_kept_migration_depends_on_a_rolled_back_one() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let schema = &cfg.project_schema;
+    // A has the LOWER version but depends_on B (HIGHER version).
+    let va = MigrationId::generate();
+    std::thread::sleep(Duration::from_millis(2));
+    let vb = MigrationId::generate();
+    assert!(va.as_str() < vb.as_str(), "va < vb by construction");
+
+    // B: parent table (HIGHER version — selected by ToVersion(va) since vb > va).
+    let b_up = format!("CREATE TABLE \"{schema}\".\"parent\" (id bigint PRIMARY KEY)");
+    let b_down = format!("DROP TABLE \"{schema}\".\"parent\"");
+    let m_b = Migration {
+        version: vb.clone(),
+        name: "create_parent".into(),
+        up: b_up.clone(),
+        down: Some(b_down.clone()),
+        checksum: Checksum::of(&b_up, Some(&b_down)),
+        flags: MigrationFlags::default(),
+        owner_app: "app_test".into(),
+        depends_on: Vec::new(),
+    };
+    // A: child with a REAL FK to parent; depends_on B (LOWER version — KEPT by the
+    // ToVersion(va) threshold since va is NOT > va).
+    let a_up = format!(
+        "CREATE TABLE \"{schema}\".\"child\" \
+         (id bigint PRIMARY KEY, parent_id bigint REFERENCES \"{schema}\".\"parent\"(id))"
+    );
+    let a_down = format!("DROP TABLE \"{schema}\".\"child\"");
+    let m_a = Migration {
+        version: va.clone(),
+        name: "create_child".into(),
+        up: a_up.clone(),
+        down: Some(a_down.clone()),
+        checksum: Checksum::of(&a_up, Some(&a_down)),
+        flags: MigrationFlags::default(),
+        owner_app: "app_test".into(),
+        depends_on: vec![vb.clone()],
+    };
+
+    let set = [m_a.clone(), m_b.clone()];
+    apply(&conn, &cfg, &set, Approval::None, "actor").await.expect("seed apply (topo: B then A)");
+    assert!(table_exists(&conn, schema, "parent").await);
+    assert!(table_exists(&conn, schema, "child").await);
+
+    // rollback(ToVersion(va)) selects {B}, keeps A. A depends_on B → REFUSE the
+    // whole rollback before any down runs.
+    let err = rollback(
+        &conn,
+        &cfg,
+        &set,
+        RollbackRequest::new(RollbackTarget::ToVersion(va.clone())),
+        Approval::Approved,
+        "actor",
+    )
+    .await
+    .unwrap_err();
+    match &err {
+        RollbackError::KeptDependsOnRolledBack { kept, dependency } => {
+            assert_eq!(kept, m_a.version.as_str(), "kept = A (below the threshold)");
+            assert_eq!(dependency, m_b.version.as_str(), "dependency = B (selected for rollback)");
+        }
+        other => panic!("expected KeptDependsOnRolledBack, got {other:?}"),
+    }
+
+    // Nothing rolled back: both tables survive, both stay net-applied.
+    assert!(table_exists(&conn, schema, "parent").await, "parent survives refusal");
+    assert!(table_exists(&conn, schema, "child").await, "child survives refusal");
+    let applied = applied_versions(&conn, &cfg).await;
+    assert_eq!(applied.len(), 2, "both stay net-applied");
+    assert!(applied.contains(&va.as_str().to_string()));
+    assert!(applied.contains(&vb.as_str().to_string()));
+    assert_eq!(rolled_back_count(&conn, &cfg, vb.as_str()).await, 0, "no rolled_back event for B");
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// Graph-shape coverage — diamond. Locks in the reverse-topo transpose for a
+// non-linear DAG (the re-critic verified the transpose by hand; this exercises
+// it on a real schema).
+//
+//      A (parent)
+//     / \
+//    B   C   (B,C reference A)
+//     \ /
+//      D       (D references B and C)
+//
+// apply topo-order: A → {B,C} → D. rollback All MUST tear down in a valid
+// reverse-topo order: D before B/C, and B/C before A — never drop A or B/C out
+// from under a live FK.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn rollback_all_diamond_unwinds_in_reverse_topological_order() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let schema = &cfg.project_schema;
+    let va = MigrationId::generate();
+    std::thread::sleep(Duration::from_millis(2));
+    let vb = MigrationId::generate();
+    std::thread::sleep(Duration::from_millis(2));
+    let vc = MigrationId::generate();
+    std::thread::sleep(Duration::from_millis(2));
+    let vd = MigrationId::generate();
+
+    let mk = |version: MigrationId, name: &str, up: String, down: String, deps: Vec<MigrationId>| Migration {
+        version,
+        name: name.into(),
+        up: up.clone(),
+        down: Some(down.clone()),
+        checksum: Checksum::of(&up, Some(&down)),
+        flags: MigrationFlags::default(),
+        owner_app: "app_test".into(),
+        depends_on: deps,
+    };
+
+    let m_a = mk(
+        va.clone(),
+        "create_a",
+        format!("CREATE TABLE \"{schema}\".\"a\" (id bigint PRIMARY KEY)"),
+        format!("DROP TABLE \"{schema}\".\"a\""),
+        Vec::new(),
+    );
+    let m_b = mk(
+        vb.clone(),
+        "create_b",
+        format!(
+            "CREATE TABLE \"{schema}\".\"b\" \
+             (id bigint PRIMARY KEY, a_id bigint REFERENCES \"{schema}\".\"a\"(id))"
+        ),
+        format!("DROP TABLE \"{schema}\".\"b\""),
+        vec![va.clone()],
+    );
+    let m_c = mk(
+        vc.clone(),
+        "create_c",
+        format!(
+            "CREATE TABLE \"{schema}\".\"c\" \
+             (id bigint PRIMARY KEY, a_id bigint REFERENCES \"{schema}\".\"a\"(id))"
+        ),
+        format!("DROP TABLE \"{schema}\".\"c\""),
+        vec![va.clone()],
+    );
+    let m_d = mk(
+        vd.clone(),
+        "create_d",
+        format!(
+            "CREATE TABLE \"{schema}\".\"d\" \
+             (id bigint PRIMARY KEY, \
+              b_id bigint REFERENCES \"{schema}\".\"b\"(id), \
+              c_id bigint REFERENCES \"{schema}\".\"c\"(id))"
+        ),
+        format!("DROP TABLE \"{schema}\".\"d\""),
+        vec![vb.clone(), vc.clone()],
+    );
+
+    let set = [m_a.clone(), m_b.clone(), m_c.clone(), m_d.clone()];
+    apply(&conn, &cfg, &set, Approval::None, "actor").await.expect("seed diamond (A → B,C → D)");
+    for t in ["a", "b", "c", "d"] {
+        assert!(table_exists(&conn, schema, t).await, "{t} created");
+    }
+
+    let out = rollback(&conn, &cfg, &set, RollbackRequest::new(RollbackTarget::All), Approval::Approved, "actor")
+        .await
+        .expect("rollback all diamond in reverse-topo order");
+
+    // Validate a VALID reverse-topo order: D first; A last; B and C between D and A.
+    let order = &out.rolled_back;
+    assert_eq!(order.len(), 4, "all four torn down");
+    let pos = |v: &str| order.iter().position(|x| x == v).expect("present");
+    let (pa, pb, pc, pd) = (pos(va.as_str()), pos(vb.as_str()), pos(vc.as_str()), pos(vd.as_str()));
+    assert!(pd < pb && pd < pc, "D torn down before B and C");
+    assert!(pb < pa && pc < pa, "B and C torn down before A");
+
+    // Schema fully clean — no FK error mid-batch.
+    for t in ["a", "b", "c", "d"] {
+        assert!(!table_exists(&conn, schema, t).await, "{t} dropped");
+    }
+    assert!(applied_versions(&conn, &cfg).await.is_empty(), "applied() == [] after rollback all");
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// Graph-shape coverage — multi-root forest. Two INDEPENDENT dependency chains
+// rolled back together must each unwind cleanly (the transpose handles a
+// disconnected DAG, not just one connected component).
+//
+//   chain 1:  p1 (parent)  ← q1 (child, FK → p1)
+//   chain 2:  p2 (parent)  ← q2 (child, FK → p2)
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn rollback_all_multiroot_forest_unwinds_cleanly() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let schema = &cfg.project_schema;
+    let vp1 = MigrationId::generate();
+    std::thread::sleep(Duration::from_millis(2));
+    let vp2 = MigrationId::generate();
+    std::thread::sleep(Duration::from_millis(2));
+    let vq1 = MigrationId::generate();
+    std::thread::sleep(Duration::from_millis(2));
+    let vq2 = MigrationId::generate();
+
+    let mk = |version: MigrationId, name: &str, up: String, down: String, deps: Vec<MigrationId>| Migration {
+        version,
+        name: name.into(),
+        up: up.clone(),
+        down: Some(down.clone()),
+        checksum: Checksum::of(&up, Some(&down)),
+        flags: MigrationFlags::default(),
+        owner_app: "app_test".into(),
+        depends_on: deps,
+    };
+
+    let m_p1 = mk(
+        vp1.clone(),
+        "create_p1",
+        format!("CREATE TABLE \"{schema}\".\"p1\" (id bigint PRIMARY KEY)"),
+        format!("DROP TABLE \"{schema}\".\"p1\""),
+        Vec::new(),
+    );
+    let m_p2 = mk(
+        vp2.clone(),
+        "create_p2",
+        format!("CREATE TABLE \"{schema}\".\"p2\" (id bigint PRIMARY KEY)"),
+        format!("DROP TABLE \"{schema}\".\"p2\""),
+        Vec::new(),
+    );
+    let m_q1 = mk(
+        vq1.clone(),
+        "create_q1",
+        format!(
+            "CREATE TABLE \"{schema}\".\"q1\" \
+             (id bigint PRIMARY KEY, p_id bigint REFERENCES \"{schema}\".\"p1\"(id))"
+        ),
+        format!("DROP TABLE \"{schema}\".\"q1\""),
+        vec![vp1.clone()],
+    );
+    let m_q2 = mk(
+        vq2.clone(),
+        "create_q2",
+        format!(
+            "CREATE TABLE \"{schema}\".\"q2\" \
+             (id bigint PRIMARY KEY, p_id bigint REFERENCES \"{schema}\".\"p2\"(id))"
+        ),
+        format!("DROP TABLE \"{schema}\".\"q2\""),
+        vec![vp2.clone()],
+    );
+
+    let set = [m_p1.clone(), m_p2.clone(), m_q1.clone(), m_q2.clone()];
+    apply(&conn, &cfg, &set, Approval::None, "actor").await.expect("seed two independent chains");
+    for t in ["p1", "p2", "q1", "q2"] {
+        assert!(table_exists(&conn, schema, t).await, "{t} created");
+    }
+
+    let out = rollback(&conn, &cfg, &set, RollbackRequest::new(RollbackTarget::All), Approval::Approved, "actor")
+        .await
+        .expect("rollback all forest cleanly");
+
+    // Each child torn down before its own parent (per-chain reverse-topo).
+    let order = &out.rolled_back;
+    assert_eq!(order.len(), 4, "all four torn down");
+    let pos = |v: &str| order.iter().position(|x| x == v).expect("present");
+    assert!(pos(vq1.as_str()) < pos(vp1.as_str()), "q1 before p1");
+    assert!(pos(vq2.as_str()) < pos(vp2.as_str()), "q2 before p2");
+
+    for t in ["p1", "p2", "q1", "q2"] {
+        assert!(!table_exists(&conn, schema, t).await, "{t} dropped");
+    }
+    assert!(applied_versions(&conn, &cfg).await.is_empty(), "applied() == [] after rollback all");
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
 // The down is SQL too — guard denial + role permission-denied.
 // ---------------------------------------------------------------------------
 

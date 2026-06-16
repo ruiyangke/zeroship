@@ -1256,6 +1256,28 @@ pub enum RollbackError {
         /// The depended-on version that would be rolled back beneath it.
         dependency: String,
     },
+    /// A net-applied migration `kept` is BELOW the rollback's version threshold
+    /// (a [`RollbackTarget::ToVersion`]/[`RollbackTarget::Steps`] cut), so it is
+    /// kept applied — but it `depends_on` `dependency` (directly or transitively),
+    /// and `dependency` IS selected for rollback (above the cut). Tearing
+    /// `dependency` down would leave `kept` referencing a dropped object — a
+    /// dangling FK or a mid-batch `DownFailed`. This is the same hazard as
+    /// [`RollbackError::ForceSkipDependencyConflict`] reached via the
+    /// version-threshold keep-path instead of force-skip. Refused before any
+    /// `down` runs; nothing was rolled back. Roll-forward instead (author a
+    /// compensating migration), or roll back far enough to include `kept`.
+    #[error(
+        "cannot roll back {dependency} while keeping {kept}: {kept} is below the rollback \
+         threshold (kept applied) but depends_on {dependency} (directly or transitively), so it \
+         would be left referencing a torn-down object. Roll back far enough to include {kept}, or \
+         roll-forward instead (author a compensating migration)."
+    )]
+    KeptDependsOnRolledBack {
+        /// The below-threshold net-applied migration that is kept.
+        kept: String,
+        /// The selected-for-rollback version it depends on.
+        dependency: String,
+    },
 }
 
 /// Roll back applied migrations to a [`RollbackTarget`] (design §5).
@@ -1486,12 +1508,41 @@ fn build_rollback_plan<'a>(
         }
     }
 
-    // #2 — force-skip dependency guard. A force-skipped irreversible migration M is
-    // KEPT applied (its down never runs). If any migration selected for ACTUAL
-    // rollback (a `Down` step) is one M `depends_on` (directly or transitively),
-    // tearing it down would leave M referencing a dropped object — a dangling FK or
-    // a mid-batch `DownFailed`. Refuse the whole rollback even under force; the safe
-    // path is roll-forward. (No-op when nothing is force-skipped.)
+    // Dangling-dependency pre-flight: refuse if any KEPT migration depends_on
+    // something being rolled back (would leave it referencing a torn-down object).
+    // Covers BOTH keep mechanisms — force-skip (#2) and version-threshold (HIGH).
+    check_kept_dependencies(&plan, net_applied, &selected, &by_version)?;
+
+    Ok(plan)
+}
+
+/// Dangling-dependency pre-flight for rollback: a KEPT (still-applied) migration
+/// must not `depends_on` (transitively) any migration being rolled back, or its
+/// FK/reference would dangle the moment the dependency's `down` runs. There are
+/// TWO ways a net-applied migration is kept:
+///
+/// 1. **force-skip** — an irreversible (`down: None`) migration kept via
+///    `force`+`backup_acknowledged` (a [`RollbackStep::SkipIrreversible`] in
+///    `plan`). Conflict → [`RollbackError::ForceSkipDependencyConflict`].
+/// 2. **version-threshold** — a net-applied migration BELOW a
+///    [`RollbackTarget::ToVersion`]/[`RollbackTarget::Steps`] cut (in `net_applied`
+///    but not `selected`). Selection is purely version-based; `depends_on` only
+///    REORDERS the selected set, so a below-threshold dependent is silently kept.
+///    Conflict → [`RollbackError::KeptDependsOnRolledBack`].
+///
+/// Both reuse the same cycle-safe transitive BFS ([`first_dependency_in_set`]).
+/// Refused before any `down` runs; the safe path is roll-forward (or roll back far
+/// enough to include the kept migration). No-op when nothing is being rolled back.
+///
+/// # Errors
+/// [`RollbackError::ForceSkipDependencyConflict`] or
+/// [`RollbackError::KeptDependsOnRolledBack`].
+fn check_kept_dependencies(
+    plan: &[RollbackStep<'_>],
+    net_applied: &[&AppliedEntry],
+    selected: &[&AppliedEntry],
+    by_version: &HashMap<&str, &Migration>,
+) -> Result<(), RollbackError> {
     let rolling: std::collections::HashSet<&str> = plan
         .iter()
         .filter_map(|s| match s {
@@ -1499,20 +1550,49 @@ fn build_rollback_plan<'a>(
             RollbackStep::SkipIrreversible(_) => None,
         })
         .collect();
-    if !rolling.is_empty() {
-        for step in &plan {
-            if let RollbackStep::SkipIrreversible(kept) = step {
-                if let Some(dep) = first_dependency_in_set(kept, &rolling, &by_version) {
-                    return Err(RollbackError::ForceSkipDependencyConflict {
-                        kept: kept.version.as_str().to_string(),
-                        dependency: dep,
-                    });
-                }
+    if rolling.is_empty() {
+        return Ok(());
+    }
+
+    // #2 — force-skip keep-path: a force-skipped irreversible migration depends on
+    // something being torn down beneath it.
+    for step in plan {
+        if let RollbackStep::SkipIrreversible(kept) = step {
+            if let Some(dep) = first_dependency_in_set(kept, &rolling, by_version) {
+                return Err(RollbackError::ForceSkipDependencyConflict {
+                    kept: kept.version.as_str().to_string(),
+                    dependency: dep,
+                });
             }
         }
     }
 
-    Ok(plan)
+    // HIGH — version-threshold keep-path: a net-applied-but-NOT-selected migration
+    // (kept below the cut) depends on something being rolled back. (#2 above only
+    // covers the force-skip keep-path; this covers the version-threshold one.)
+    let selected_versions: std::collections::HashSet<&str> =
+        selected.iter().map(|e| e.version.as_str()).collect();
+    for entry in net_applied {
+        let kept_v = entry.version.as_str();
+        if selected_versions.contains(kept_v) {
+            continue; // being rolled back, not kept
+        }
+        // Resolve the kept migration in the supplied set to read its `depends_on`.
+        // If absent we cannot inspect its edges — that is the `MissingFromSet`
+        // full-history-contract concern, orthogonal to this guard, and only the
+        // SELECTED set is required to be resolvable.
+        let Some(kept) = by_version.get(kept_v).copied() else {
+            continue;
+        };
+        if let Some(dep) = first_dependency_in_set(kept, &rolling, by_version) {
+            return Err(RollbackError::KeptDependsOnRolledBack {
+                kept: kept_v.to_string(),
+                dependency: dep,
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// Walk `m`'s `depends_on` transitively (over `by_version`) and return the first
