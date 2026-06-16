@@ -405,6 +405,119 @@ async fn force_requires_both_force_and_backup_acknowledged() {
 }
 
 // ---------------------------------------------------------------------------
+// Rollback runs downs in REVERSE TOPOLOGICAL order of `depends_on` (#1).
+//
+// The inverse of apply's `apply_honors_depends_on_over_version_order`: a
+// LOWER-version migration A `depends_on=[B]` (HIGHER version) where the dep is a
+// real schema FK (A.child REFERENCES B.parent). Apply topo-orders B before A;
+// rollback MUST tear A (the dependent) down BEFORE B (the depended-on), i.e. the
+// transpose of apply order — NOT reverse-version (which would try to drop the
+// parent out from under the child's FK and fail / corrupt).
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn rollback_runs_downs_in_reverse_topological_order_of_depends_on() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    // A has the LOWER version but depends_on B (HIGHER version): the dependency
+    // INVERTS version order.
+    let va = MigrationId::generate();
+    std::thread::sleep(Duration::from_millis(2));
+    let vb = MigrationId::generate();
+    assert!(va.as_str() < vb.as_str(), "va < vb by construction");
+
+    let schema = &cfg.project_schema;
+    // B: parent table.
+    let b_up = format!("CREATE TABLE \"{schema}\".\"parent\" (id bigint PRIMARY KEY)");
+    let b_down = format!("DROP TABLE \"{schema}\".\"parent\"");
+    let m_b = Migration {
+        version: vb.clone(),
+        name: "create_parent".into(),
+        up: b_up.clone(),
+        down: Some(b_down.clone()),
+        checksum: Checksum::of(&b_up, Some(&b_down)),
+        flags: MigrationFlags::default(),
+        owner_app: "app_test".into(),
+        depends_on: Vec::new(),
+    };
+    // A: child with a REAL FK to parent; depends_on B.
+    let a_up = format!(
+        "CREATE TABLE \"{schema}\".\"child\" \
+         (id bigint PRIMARY KEY, parent_id bigint REFERENCES \"{schema}\".\"parent\"(id))"
+    );
+    let a_down = format!("DROP TABLE \"{schema}\".\"child\"");
+    let m_a = Migration {
+        version: va.clone(),
+        name: "create_child".into(),
+        up: a_up.clone(),
+        down: Some(a_down.clone()),
+        checksum: Checksum::of(&a_up, Some(&a_down)),
+        flags: MigrationFlags::default(),
+        owner_app: "app_test".into(),
+        depends_on: vec![vb.clone()],
+    };
+
+    // Supply A first (lower version) to prove ordering is by depends_on, not slice
+    // order. Apply topo-orders B (parent) before A (child).
+    let set = [m_a.clone(), m_b.clone()];
+    apply(&conn, &cfg, &set, Approval::None, "actor").await.expect("seed apply (topo: B then A)");
+    assert!(table_exists(&conn, schema, "parent").await);
+    assert!(table_exists(&conn, schema, "child").await);
+
+    let out = rollback(&conn, &cfg, &set, RollbackRequest::new(RollbackTarget::All), Approval::Approved, "actor")
+        .await
+        .expect("rollback all in reverse-topo order");
+
+    // A's down (drop child) ran BEFORE B's down (drop parent) — the transpose of
+    // apply. Reverse-version order would have put B (higher version) first.
+    assert_eq!(
+        out.rolled_back,
+        vec![m_a.version.as_str().to_string(), m_b.version.as_str().to_string()],
+        "dependent A torn down before depended-on B"
+    );
+    // Schema fully clean: both tables gone (no FK error mid-batch).
+    assert!(!table_exists(&conn, schema, "child").await, "child dropped");
+    assert!(!table_exists(&conn, schema, "parent").await, "parent dropped");
+    // Net applied is empty.
+    assert!(applied_versions(&conn, &cfg).await.is_empty(), "nothing applied after rollback all");
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+// Regression guard: with NO depends_on, rollback degrades to pure reverse-version
+// order (the pre-#1 behavior must be preserved for the version-aligned case).
+#[compio::test]
+async fn rollback_no_depends_on_degrades_to_reverse_version_order() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let [m1, m2, m3] = seed_three(&conn, &cfg).await;
+    let set = [m1.clone(), m2.clone(), m3.clone()];
+
+    let out = rollback(&conn, &cfg, &set, RollbackRequest::new(RollbackTarget::All), Approval::Approved, "actor")
+        .await
+        .expect("rollback all");
+    // v3, v2, v1 — strict reverse version order (no edges).
+    assert_eq!(
+        out.rolled_back,
+        vec![
+            m3.version.as_str().to_string(),
+            m2.version.as_str().to_string(),
+            m1.version.as_str().to_string()
+        ]
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
 // The down is SQL too — guard denial + role permission-denied.
 // ---------------------------------------------------------------------------
 

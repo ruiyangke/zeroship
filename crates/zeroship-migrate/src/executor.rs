@@ -647,6 +647,97 @@ fn order_pending<'a>(
     Ok(ordered)
 }
 
+/// Order the migrations being rolled back in **REVERSE TOPOLOGICAL** order of
+/// `depends_on` — the transpose of [`order_pending`].
+///
+/// Invariant (design §5): a migration's `down` must run **before** the `down` of
+/// any migration it `depends_on`. The depended-on object (e.g. a parent table)
+/// must survive until every dependent that references it (e.g. a child with an FK)
+/// has been torn down. This is exactly the reverse of apply's topo order, so we
+/// compute the forward topo order (Kahn, lowest-version-ready-first — identical to
+/// `order_pending`, restricted to the rollback set) and reverse it. The result is
+/// stable + version-tiebroken: with no `depends_on` edges it degrades to strict
+/// **reverse-version** order (preserving the pre-#1 behavior for the version-aligned
+/// case).
+///
+/// The graph is restricted to the set being rolled back: a `depends_on` pointing
+/// OUTSIDE the set (a migration that stays applied, or one already rolled back)
+/// imposes no ordering on the batch — it is not torn down here.
+///
+/// A `depends_on` pointing to a version selected for rollback but absent from the
+/// supplied set is already rejected by the caller's `MissingFromSet` pre-flight
+/// (every selected version is resolved to a `Migration` before this runs), so the
+/// graph is always buildable; the only fail-closed case here is a cycle.
+///
+/// # Errors
+/// - [`RollbackError::DependencyCycle`] — the selected migrations' `depends_on`
+///   edges form a cycle (impossible if apply enforced acyclicity; defended anyway).
+fn order_rollback<'a>(
+    selected: &[&'a Migration],
+) -> Result<Vec<&'a Migration>, RollbackError> {
+    use std::collections::{BTreeMap, HashSet};
+
+    // Versions in the rollback set; edges to deps OUTSIDE the set are ignored
+    // (those objects are not being torn down in this batch).
+    let in_set: HashSet<&str> = selected.iter().map(|m| m.version.as_str()).collect();
+    let by_version: HashMap<&str, &Migration> =
+        selected.iter().map(|m| (m.version.as_str(), *m)).collect();
+
+    // Forward topo over the rollback subgraph: edge `dep -> m` for each `dep` in
+    // `m.depends_on` that is ALSO in the set. `adj[dep]` = members that must apply
+    // AFTER `dep`; `indeg[m]` = # of in-set deps `m` still waits on.
+    let mut indeg: BTreeMap<&str, usize> =
+        selected.iter().map(|m| (m.version.as_str(), 0usize)).collect();
+    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    for m in selected {
+        for dep in &m.depends_on {
+            let dep_v = dep.as_str();
+            if in_set.contains(dep_v) {
+                adj.entry(dep_v).or_default().push(m.version.as_str());
+                *indeg.get_mut(m.version.as_str()).expect("in-set node") += 1;
+            }
+        }
+    }
+
+    // Kahn with a version-ordered ready set (BTreeSet → lowest version first), so
+    // the forward order is deterministic + version-tiebroken, mirroring
+    // `order_pending`.
+    let mut ready: std::collections::BTreeSet<&str> = indeg
+        .iter()
+        .filter(|(_, &d)| d == 0)
+        .map(|(&v, _)| v)
+        .collect();
+    let mut topo: Vec<&Migration> = Vec::with_capacity(selected.len());
+    while let Some(&v) = ready.iter().next() {
+        ready.remove(v);
+        topo.push(by_version[v]);
+        if let Some(succs) = adj.get(v) {
+            for &s in succs {
+                let e = indeg.get_mut(s).expect("successor node");
+                *e -= 1;
+                if *e == 0 {
+                    ready.insert(s);
+                }
+            }
+        }
+    }
+
+    if topo.len() != selected.len() {
+        let mut cyclic: Vec<&str> = indeg
+            .iter()
+            .filter(|(_, &d)| d > 0)
+            .map(|(&v, _)| v)
+            .collect();
+        cyclic.sort_unstable();
+        return Err(RollbackError::DependencyCycle(cyclic.join(", ")));
+    }
+
+    // Reverse the topo order → reverse-topological: dependents first, depended-on
+    // last (each migration's down runs before the downs of its `depends_on`).
+    topo.reverse();
+    Ok(topo)
+}
+
 /// Transactional apply (design §2.3): `BEGIN; <up>; INSERT journal; COMMIT`.
 /// DDL + journal are atomic — a failure rolls back leaving no partial DDL and
 /// no journal row.
@@ -995,7 +1086,11 @@ pub struct RollbackOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RollbackOutcome {
     /// Versions whose `down` ran + were journaled `rolled_back`, in the order they
-    /// were rolled back (reverse apply order).
+    /// were rolled back: **reverse topological order of `depends_on`** (each
+    /// migration's `down` ran before the downs of everything it `depends_on`). This
+    /// is the transpose of apply's topo order and degrades to strict
+    /// reverse-version order when there are no `depends_on` edges (the
+    /// version-aligned case), so it is ≈ reverse apply order.
     pub rolled_back: Vec<String>,
     /// Versions skipped because they are irreversible (`down: None`) and `force`
     /// was given (design §5). Empty unless forcing.
@@ -1088,12 +1183,22 @@ pub enum RollbackError {
         #[source]
         source: compio_postgres::Error,
     },
+    /// The `depends_on` edges among the versions selected for rollback form a
+    /// cycle, so no reverse-topological order exists. This should be impossible if
+    /// apply enforced acyclicity, but rollback defends anyway (fail-closed before
+    /// any down runs). Nothing was rolled back.
+    #[error("rollback dependency cycle among selected migrations: {0}")]
+    DependencyCycle(String),
 }
 
 /// Roll back applied migrations to a [`RollbackTarget`] (design §5).
 ///
 /// Applies the `down` SQL of net-applied-and-not-rolled-back migrations **after**
-/// the target, in **REVERSE** version order, each under the project advisory lock.
+/// the target, in **reverse topological order of `depends_on`** (the transpose of
+/// apply: a migration's `down` runs before the downs of everything it `depends_on`,
+/// so a depended-on object survives until every dependent is torn down). This
+/// degrades to reverse-version order when there are no `depends_on` edges. Each
+/// `down` runs under the project advisory lock.
 ///
 /// **The `down` is privileged SQL too — it gets the SAME defenses as an `up`:**
 /// every selected `down` is run through the [`SqlGuard`] up-front (a denial aborts
@@ -1171,34 +1276,32 @@ pub async fn rollback(
     }
 }
 
-/// The rollback body, run while holding the project advisory lock.
-async fn rollback_locked(
-    conn: &Client,
+/// Resolve which net-applied migrations to roll back and in what order — the pure
+/// (non-async) core of [`rollback_locked`]. Selects per [`RollbackTarget`], resolves
+/// each version to its `Migration` (checking `MissingFromSet` + checksum drift),
+/// reverse-topologically orders the downs by `depends_on` ([`order_rollback`], #1),
+/// then runs the all-up-front pre-flight (irreversible-without-force, guard) and
+/// returns the executable [`RollbackStep`] plan in execution order.
+///
+/// # Errors
+/// [`RollbackError::UnknownTarget`], [`RollbackError::MissingFromSet`],
+/// [`RollbackError::ChecksumDrift`], [`RollbackError::DependencyCycle`],
+/// [`RollbackError::Irreversible`], or [`RollbackError::Guard`] — all before any
+/// `down` runs.
+fn build_rollback_plan<'a>(
+    net_applied: &[&'a AppliedEntry],
+    migrations: &'a [Migration],
+    target: &RollbackTarget,
+    opts: RollbackOptions,
     cfg: &ExecutorConfig,
-    migrations: &[Migration],
-    request: RollbackRequest,
-    applied_by: &str,
-) -> Result<RollbackOutcome, RollbackError> {
-    let RollbackRequest { target, options: opts } = request;
-    journal::ensure_journal(conn, cfg).await?;
-
-    // Net-applied versions (latest event is `completed`), with their recorded
-    // checksums, in ascending version order.
-    let journal_rows = journal::applied(conn, cfg).await?;
-    let mut net_applied: Vec<&AppliedEntry> = journal_rows
-        .iter()
-        .filter(|e| e.phase == Phase::Completed)
-        .collect();
-    net_applied.sort_by(|a, b| a.version.cmp(&b.version));
-
+) -> Result<Vec<RollbackStep<'a>>, RollbackError> {
     // Index the supplied set by version (source of the `down` SQL + checksum).
     let by_version: HashMap<&str, &Migration> =
         migrations.iter().map(|m| (m.version.as_str(), m)).collect();
 
-    // Resolve which net-applied versions to roll back, in ASCENDING order first
-    // (we reverse to apply downs newest-first below).
-    let selected: Vec<&AppliedEntry> = match &target {
-        RollbackTarget::All => net_applied.clone(),
+    // Which net-applied versions to roll back (ascending order for now).
+    let selected: Vec<&AppliedEntry> = match target {
+        RollbackTarget::All => net_applied.to_vec(),
         RollbackTarget::Steps(n) => {
             let n = (*n).min(net_applied.len());
             net_applied[net_applied.len() - n..].to_vec()
@@ -1218,23 +1321,11 @@ async fn rollback_locked(
         }
     };
 
-    // Apply downs newest-first (reverse version order).
-    let mut to_roll: Vec<&AppliedEntry> = selected;
-    to_roll.sort_by(|a, b| b.version.cmp(&a.version));
-
-    // ---- PRE-FLIGHT (all-up-front, before ANY down runs) -------------------
-    // 1. Each selected version must be in the supplied set (its `down` is there).
-    // 2. Checksum must match (no drift/tamper on what we're about to reverse).
-    // 3. Irreversible (`down: None`): refuse unless force + backup_acknowledged.
-    // 4. The `down` SQL passes the guard (down is SQL too — same defenses).
-    let force_ok = opts.force && opts.backup_acknowledged;
-    let guard = SqlGuard::new(GuardConfig {
-        project_schema: cfg.project_schema.clone(),
-        extension_allowlist: Vec::new(),
-    });
-    // Collect the executable plan (skip force-skipped irreversibles).
-    let mut plan: Vec<RollbackStep> = Vec::with_capacity(to_roll.len());
-    for entry in &to_roll {
+    // Resolve each selected version to its `Migration`. MissingFromSet + checksum
+    // drift are version-order-stable, so check them here BEFORE ordering — the
+    // reverse-topo sort needs the `Migration`s in hand.
+    let mut selected_migs: Vec<&Migration> = Vec::with_capacity(selected.len());
+    for entry in &selected {
         let v = entry.version.as_str();
         let Some(m) = by_version.get(v).copied() else {
             return Err(RollbackError::MissingFromSet {
@@ -1248,6 +1339,27 @@ async fn rollback_locked(
                 expected: m.checksum.as_str().to_string(),
             });
         }
+        selected_migs.push(m);
+    }
+
+    // Order the downs in REVERSE TOPOLOGICAL order of `depends_on` (#1): a
+    // migration's `down` runs BEFORE the downs of everything it depends_on, so a
+    // depended-on object (parent table) survives until every dependent (child FK)
+    // is gone. Degrades to reverse-version order with no edges (regression-guarded).
+    let ordered = order_rollback(&selected_migs)?;
+
+    // ---- PRE-FLIGHT (all-up-front, before ANY down runs) -------------------
+    // 1. Irreversible (`down: None`): refuse unless force + backup_acknowledged.
+    // 2. The `down` SQL passes the guard (down is SQL too — same defenses).
+    // (MissingFromSet + checksum already verified above.)
+    let force_ok = opts.force && opts.backup_acknowledged;
+    let guard = SqlGuard::new(GuardConfig {
+        project_schema: cfg.project_schema.clone(),
+        extension_allowlist: Vec::new(),
+    });
+    let mut plan: Vec<RollbackStep> = Vec::with_capacity(ordered.len());
+    for m in ordered {
+        let v = m.version.as_str();
         match &m.down {
             None => {
                 if !force_ok {
@@ -1268,6 +1380,32 @@ async fn rollback_locked(
             }
         }
     }
+    Ok(plan)
+}
+
+/// The rollback body, run while holding the project advisory lock.
+async fn rollback_locked(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+    request: RollbackRequest,
+    applied_by: &str,
+) -> Result<RollbackOutcome, RollbackError> {
+    let RollbackRequest { target, options: opts } = request;
+    journal::ensure_journal(conn, cfg).await?;
+
+    // Net-applied versions (latest event is `completed`), with their recorded
+    // checksums, in ascending version order.
+    let journal_rows = journal::applied(conn, cfg).await?;
+    let mut net_applied: Vec<&AppliedEntry> = journal_rows
+        .iter()
+        .filter(|e| e.phase == Phase::Completed)
+        .collect();
+    net_applied.sort_by(|a, b| a.version.cmp(&b.version));
+
+    // Resolve selection + reverse-topo ordering + all-up-front pre-flight into the
+    // executable plan (pure / non-async — see `build_rollback_plan`).
+    let plan = build_rollback_plan(&net_applied, migrations, &target, opts, cfg)?;
 
     // ---- EXECUTE -----------------------------------------------------------
     let mut outcome = RollbackOutcome {
