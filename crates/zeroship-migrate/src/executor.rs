@@ -348,6 +348,32 @@ fn validate_non_txn_idempotent(m: &Migration) -> Result<(), ApplyError> {
     Ok(())
 }
 
+/// Detect whether a rollback `down` contains a statement that cannot run inside
+/// a transaction block (#5), reusing apply's classifier
+/// ([`crate::classify::classify`], whose [`StatementClass.non_transactional`] is
+/// the canonical "needs the two-phase non-txn path" flag — `CREATE`/`DROP INDEX
+/// CONCURRENTLY`, `ALTER TYPE … ADD VALUE`, `VACUUM`). Returns `Some(reason)`
+/// describing the first offending statement, or `None` if every statement is
+/// transaction-safe.
+///
+/// The rollback executor only has a transactional down path, so a `Some(_)`
+/// result means the `down` is unrunnable here and must be refused up-front with
+/// [`RollbackError::NonTransactionalDown`] (vs. dying late with PG `25001`).
+///
+/// A parse failure yields `None` (not our concern here): the guard runs the same
+/// parser on the `down` immediately before this and already rejects unparseable
+/// SQL, so a `down` that reaches this point parses.
+///
+/// [`StatementClass.non_transactional`]: crate::classify::StatementClass::non_transactional
+fn non_transactional_down_reason(down: &str) -> Option<String> {
+    let classes = crate::classify::classify(down).ok()?;
+    classes.iter().find(|c| c.non_transactional).map(|c| {
+        let raw = c.raw.trim();
+        let snippet = raw.split_whitespace().take(6).collect::<Vec<_>>().join(" ");
+        format!("`{snippet}` cannot run inside a transaction block")
+    })
+}
+
 /// Apply the project's pending migrations (design §2.3). Idempotent: a re-run
 /// with no new migrations is a no-op.
 ///
@@ -1136,6 +1162,29 @@ pub enum RollbackError {
         /// The applied-but-absent version.
         version: String,
     },
+    /// A selected migration's `down` contains a statement that cannot run inside
+    /// a transaction block (`CREATE INDEX CONCURRENTLY`, `DROP INDEX
+    /// CONCURRENTLY`, `ALTER TYPE … ADD VALUE`, `VACUUM`, …), but the rollback
+    /// executor has ONLY a transactional down path (each `down` runs inside
+    /// `BEGIN … COMMIT` under `SET LOCAL ROLE migrator`). Such a `down` would
+    /// otherwise fail LATE inside the transaction with Postgres `25001`
+    /// ("cannot run inside a transaction block"), surfacing as a confusing
+    /// [`DownFailed`](RollbackError::DownFailed). We detect it up-front (same
+    /// classifier apply uses, [`crate::classify`]) and refuse the WHOLE rollback
+    /// before any `down` runs — nothing is rolled back. The safe path is
+    /// **roll-forward**: author a compensating migration (its own non-transactional
+    /// `up` goes through apply's two-phase non-txn path).
+    #[error(
+        "migration {version} has a non-transactional `down` ({reason}); the rollback executor only \
+         runs each down inside a transaction, so this would fail at execution. Prefer ROLL-FORWARD: \
+         author a compensating migration instead of rolling this one back."
+    )]
+    NonTransactionalDown {
+        /// The migration whose `down` is non-transactional.
+        version: String,
+        /// What specifically cannot run in a transaction.
+        reason: String,
+    },
     /// The rollback would cross a migration with `down: None` (irreversible) and
     /// neither `force` nor `backup_acknowledged` was given. The default guidance
     /// is **roll-forward**: author a new compensating migration. Nothing was
@@ -1244,6 +1293,17 @@ pub enum RollbackError {
 /// §1.6), independent of (and additional to) the engine's gate, so a caller
 /// driving [`rollback`] directly cannot bypass approval.
 ///
+/// **Full-history contract:** `migrations` must carry the FULL historical `down`
+/// set, not just the tail. Every net-applied version (per the journal) must be
+/// present in `migrations` so its `down` SQL is available — the journal records
+/// no SQL, so the bundle is the only source of `down`. A net-applied version
+/// absent from the set is refused with [`RollbackError::MissingFromSet`] (nothing
+/// is rolled back; see `rollback_of_applied_version_absent_from_set_errors` in
+/// `tests/rollback_pg.rs`). The corollary: a migration's `down` must remain
+/// available FOREVER — a rolled-back-then-re-shipped migration's `down` cannot be
+/// dropped, or rolling it back later becomes permanently impossible. The
+/// engine / control-plane must always supply the complete applied history.
+///
 /// # Errors
 /// See [`RollbackError`]. All pre-flight checks (approval, unknown target,
 /// missing-from-set, guard denial, irreversible-without-force, checksum drift)
@@ -1298,8 +1358,21 @@ pub async fn rollback(
 /// (non-async) core of [`rollback_locked`]. Selects per [`RollbackTarget`], resolves
 /// each version to its `Migration` (checking `MissingFromSet` + checksum drift),
 /// reverse-topologically orders the downs by `depends_on` ([`order_rollback`], #1),
-/// then runs the all-up-front pre-flight (irreversible-without-force, guard) and
-/// returns the executable [`RollbackStep`] plan in execution order.
+/// then runs the all-up-front pre-flight (irreversible-without-force, guard,
+/// non-transactional-down) and returns the executable [`RollbackStep`] plan in
+/// execution order.
+///
+/// **Full-history contract (`MissingFromSet`):** `migrations` MUST carry the FULL
+/// historical `down` set — every version the journal records as net-applied must
+/// be resolvable here to its `Migration`, or rollback of that version is impossible
+/// ([`RollbackError::MissingFromSet`], asserted by
+/// `rollback_of_applied_version_absent_from_set_errors` in `tests/rollback_pg.rs`).
+/// A migration's `down` must therefore remain available FOREVER — even after that
+/// migration was rolled back and re-shipped: the caller (engine / control-plane)
+/// must always supply the complete applied history, never just the tail. We
+/// resolve against the supplied set (not the journal, which records no SQL) because
+/// the journal is deliberately SQL-free; the bundle is the source of truth for
+/// `down` SQL.
 ///
 /// # Errors
 /// [`RollbackError::UnknownTarget`], [`RollbackError::MissingFromSet`],
@@ -1394,6 +1467,20 @@ fn build_rollback_plan<'a>(
                     version: v.to_string(),
                     source,
                 })?;
+                // #5 — the rollback executor has ONLY a transactional down path
+                // (each down runs inside BEGIN…COMMIT under SET LOCAL ROLE
+                // migrator), so a `down` containing a statement that cannot run in
+                // a transaction would die LATE with PG 25001. Detect it up-front
+                // with the SAME classifier apply uses (`crate::classify`, whose
+                // `StatementClass.non_transactional` flags CONCURRENTLY / ALTER
+                // TYPE ADD VALUE / VACUUM) and refuse the whole rollback before any
+                // down runs. The safe path is roll-forward.
+                if let Some(reason) = non_transactional_down_reason(down) {
+                    return Err(RollbackError::NonTransactionalDown {
+                        version: v.to_string(),
+                        reason,
+                    });
+                }
                 plan.push(RollbackStep::Down(m));
             }
         }
