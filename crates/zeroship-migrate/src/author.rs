@@ -126,10 +126,46 @@ fn column_def(c: &Column) -> String {
     format!("{} {}{}", quote_ident(&c.name), c.ty, null)
 }
 
+/// The Postgres identifier length limit (`NAMEDATALEN - 1`), in bytes. An index
+/// name longer than this is silently truncated *by the server* on `CREATE`, which
+/// would break `IF NOT EXISTS` / `DROP INDEX` round-tripping (the name we emit in
+/// the `down` would not match the truncated name on disk). So we truncate
+/// deterministically *ourselves* and keep the result ≤ this many bytes.
+const PG_MAX_IDENT_BYTES: usize = 63;
+
 /// Derive an index name for a deterministic `CREATE INDEX` so `IF NOT EXISTS`
 /// has a stable target (idempotent across re-authors of the same shape).
+///
+/// Postgres truncates identifiers past [`PG_MAX_IDENT_BYTES`] server-side, which
+/// would desync the name in `up` (`CREATE INDEX … name …`) from the one the `down`
+/// (`DROP INDEX … name`) emits — and from the on-disk relation. We therefore cap
+/// the name to ≤63 bytes *ourselves*, deterministically: when the natural
+/// `idx_<table>_<cols>` fits, we use it verbatim; when it would overflow, we keep a
+/// readable prefix and append a short hash of the *full* natural name so distinct
+/// long table/column sets still map to distinct, stable index names (mirrors the
+/// sanitize/truncate discipline of [`crate::role::migrator_role_name`]).
 fn index_name(table: &str, columns: &[String]) -> String {
-    format!("idx_{}_{}", table, columns.join("_"))
+    let natural = format!("idx_{}_{}", table, columns.join("_"));
+    if natural.len() <= PG_MAX_IDENT_BYTES {
+        return natural;
+    }
+    // Overflow: deterministic 10-hex-char hash of the full natural name, plus a
+    // truncated readable prefix. `<prefix>_<10 hex>` stays ≤ 63 bytes.
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(natural.as_bytes());
+    let suffix = hex::encode(&digest[..5]); // 10 hex chars
+    // Reserve room for the `_<suffix>` (1 + 10 = 11 bytes). Truncate the readable
+    // part on a char boundary so we never split a multi-byte UTF-8 sequence
+    // (identifiers are ASCII in practice, but be safe).
+    let budget = PG_MAX_IDENT_BYTES - (1 + suffix.len());
+    let mut prefix = String::with_capacity(budget);
+    for ch in natural.chars() {
+        if prefix.len() + ch.len_utf8() > budget {
+            break;
+        }
+        prefix.push(ch);
+    }
+    format!("{prefix}_{suffix}")
 }
 
 /// The deterministic, no-AI author for trivial additive ops (design §3).
@@ -465,6 +501,69 @@ mod tests {
         // The down also drops concurrently + IF EXISTS.
         assert!(
             m.down.as_deref().unwrap().contains("DROP INDEX CONCURRENTLY IF EXISTS"),
+            "down = {:?}",
+            m.down
+        );
+    }
+
+    #[test]
+    fn index_name_stays_within_postgres_63_byte_limit_and_is_deterministic() {
+        // A pathologically long table + column set whose natural
+        // `idx_<table>_<cols>` would blow past Postgres's 63-byte identifier
+        // limit (and so be silently truncated server-side, desyncing up vs down).
+        let long_table = "a".repeat(50);
+        let long_cols: Vec<String> = (0..5).map(|i| format!("{}{i}", "c".repeat(20))).collect();
+        let n1 = index_name(&long_table, &long_cols);
+        // Must fit Postgres's NAMEDATALEN-1 limit so the name we emit in `up`
+        // matches the on-disk name and the `down`'s DROP INDEX.
+        assert!(
+            n1.len() <= PG_MAX_IDENT_BYTES,
+            "index name {} bytes exceeds {PG_MAX_IDENT_BYTES}",
+            n1.len()
+        );
+        // Deterministic: same inputs → same name (so re-authoring the same shape
+        // is idempotent and the `down` can target it).
+        assert_eq!(n1, index_name(&long_table, &long_cols));
+        // Distinct long shapes → distinct names (the hash suffix disambiguates,
+        // unlike a blind truncation that would collide on the shared prefix).
+        let mut other_cols = long_cols.clone();
+        other_cols.push("d".repeat(20));
+        let n2 = index_name(&long_table, &other_cols);
+        assert_ne!(n1, n2, "distinct column sets must yield distinct index names");
+        assert!(n2.len() <= PG_MAX_IDENT_BYTES);
+        // A valid Postgres identifier (starts with a letter, then [a-z0-9_]).
+        assert!(n1.starts_with("idx_"), "name should keep a readable prefix: {n1}");
+        assert!(
+            n1.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+            "index name must be a bare identifier: {n1}"
+        );
+    }
+
+    #[test]
+    fn index_name_short_case_is_unchanged() {
+        // The common (fitting) case is emitted verbatim — no surprise hashing.
+        assert_eq!(
+            index_name("users", &["email".to_string()]),
+            "idx_users_email"
+        );
+    }
+
+    #[test]
+    fn create_index_with_long_names_emits_matching_up_and_down_name() {
+        // End-to-end: the author's emitted up/down reference the SAME (capped)
+        // index name, so DROP INDEX in the down can actually find it.
+        let long_table = "t".repeat(40);
+        let req = AuthorRequest::CreateIndex {
+            table: long_table.clone(),
+            columns: vec!["x".repeat(30), "y".repeat(30)],
+            concurrently: false,
+        };
+        let m = &det().author(&req).expect("author")[0];
+        let expected = index_name(&long_table, &["x".repeat(30), "y".repeat(30)]);
+        assert!(expected.len() <= PG_MAX_IDENT_BYTES);
+        assert!(m.up.contains(&format!("\"{expected}\"")), "up = {}", m.up);
+        assert!(
+            m.down.as_deref().unwrap().contains(&format!("\"{expected}\"")),
             "down = {:?}",
             m.down
         );
