@@ -59,6 +59,7 @@
 
 pub mod approval;
 pub mod author;
+pub mod backfill;
 pub mod classify;
 pub mod db;
 pub mod drift;
@@ -75,6 +76,10 @@ pub mod status;
 // ---------------------------------------------------------------------------
 
 pub use approval::Approval;
+pub use backfill::{
+    backfill_progress, ensure_backfill_progress, list_backfills, run_backfill,
+    run_backfill_bounded, BackfillError, BackfillOutcome, BackfillProgress, BackfillSpec,
+};
 pub use author::{
     AuthorError, AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor,
 };
