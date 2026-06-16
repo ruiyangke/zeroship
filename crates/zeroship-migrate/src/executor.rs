@@ -189,7 +189,8 @@ async fn snapshot_session(conn: &Client) -> Result<SessionSnapshot, ApplyError> 
 /// (the snapshot strings are server-provided, but we keep the parameterized
 /// path regardless).
 async fn restore_session(conn: &Client, snap: &SessionSnapshot) -> Result<(), ApplyError> {
-    // RESET ROLE first: the non-txn path's `SET ROLE` mutates the session, so
+    // RESET ROLE first: belt-and-suspenders behind `apply`'s unconditional
+    // `RESET ROLE` (L1). The non-txn path's `SET ROLE` mutates the session, so
     // drop back to the admin role before anything else, ensuring the executor's
     // least-privilege confinement never leaks onto the pooled/long-lived
     // connection after `apply` returns (H2). Harmless no-op when no SET ROLE ran
@@ -218,60 +219,59 @@ fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
 
 /// `SET LOCAL …` clauses (transaction-scoped) for the **txn path** — they
 /// vanish at COMMIT/ROLLBACK, so nothing leaks onto the session (H2). Pins the
-/// project `search_path` and the mandatory timeouts (§1.5), with the
-/// per-migration timeout override applied (H3), and — when a `migrator_role` is
-/// configured — drops to that least-privilege role with `SET LOCAL ROLE` so the
-/// migration's DDL **and** its in-transaction journal INSERT execute under
-/// line-2 confinement (design §1.3). `SET LOCAL ROLE` is reverted automatically
-/// at COMMIT/ROLLBACK, so the admin session's effective role never leaks (H2).
+/// project `search_path` (project schema **only** — the meta schema is
+/// deliberately OFF the migration-time path so an unqualified name in the `up`
+/// can never resolve to the journal, C1 defense-in-depth) and the mandatory
+/// timeouts (§1.5), with the per-migration timeout override applied (H3).
 ///
-/// Ordering matters: `SET LOCAL ROLE` comes **last** so the `search_path` /
-/// timeout `SET`s run while still the admin (always permitted), and the role
-/// switch governs only the subsequent `<up>` + journal write.
+/// This intentionally does **not** switch role: the role scoping is done
+/// explicitly in [`apply_transactional`] so that `SET LOCAL ROLE migrator`
+/// brackets ONLY the `<up>` and is `RESET` (back to admin) before the journal
+/// INSERT — the migrator can no longer write the journal (its grant is revoked;
+/// C1 fix), so the journal write must run as the admin, atomically in the SAME
+/// transaction as the `up`.
 fn set_local_session_sql(cfg: &ExecutorConfig, m: &Migration) -> String {
-    let mut sql = format!(
-        "SET LOCAL search_path TO \"{}\", \"{}\"; \
+    format!(
+        "SET LOCAL search_path TO \"{}\"; \
          SET LOCAL statement_timeout = {}; \
          SET LOCAL lock_timeout = {};",
         cfg.project_schema.replace('"', "\"\""),
-        cfg.meta_schema.replace('"', "\"\""),
         effective_timeout_ms(cfg, m),
         cfg.lock_timeout_ms(),
-    );
-    if let Some(role) = &cfg.migrator_role {
-        use std::fmt::Write as _;
-        let _ = write!(sql, " SET LOCAL ROLE \"{}\";", role.replace('"', "\"\""));
-    }
-    sql
+    )
+}
+
+/// `SET LOCAL ROLE "<migrator>"` for the txn path, or empty when no migrator role
+/// is configured (tests / single-tenant dev). Brackets ONLY the `<up>`; the
+/// caller `RESET ROLE`s before the journal write (C1).
+fn set_local_role_sql(cfg: &ExecutorConfig) -> Option<String> {
+    cfg.migrator_role
+        .as_ref()
+        .map(|role| format!("SET LOCAL ROLE \"{}\"", role.replace('"', "\"\"")))
 }
 
 /// Session-level `SET …` for the **non-txn path** (no transaction to scope to).
 /// These DO mutate the session, but [`apply`] restores the original GUCs on exit
 /// via [`restore_session`] so they never leak (H2). Per-migration timeout
 /// override applied (H3).
+///
+/// Runs as the **admin** role (no `SET ROLE` here): the non-txn journal I/O
+/// (`record_started` / `record_completed` / `clear_inflight`) runs as admin, and
+/// only the `<up>` is bracketed by an explicit `SET ROLE migrator` / `RESET ROLE`
+/// in [`apply_non_transactional`] (C1 fix). `search_path` is the project schema
+/// **only** — the meta schema is off the migration-time path so an unqualified
+/// name in the `up` can never resolve to the journal.
 async fn configure_session_non_txn(
     conn: &Client,
     cfg: &ExecutorConfig,
     m: &Migration,
 ) -> Result<(), ApplyError> {
-    let mut stmt = format!(
-        "SET search_path TO \"{}\", \"{}\"; SET statement_timeout = {}; SET lock_timeout = {};",
+    let stmt = format!(
+        "SET search_path TO \"{}\"; SET statement_timeout = {}; SET lock_timeout = {};",
         cfg.project_schema.replace('"', "\"\""),
-        cfg.meta_schema.replace('"', "\"\""),
         effective_timeout_ms(cfg, m),
         cfg.lock_timeout_ms(),
     );
-    // Drop to the least-privilege migrator role for the duration of this non-txn
-    // migration (design §1.3). Unlike the txn path's `SET LOCAL ROLE`, there is
-    // no transaction to scope it to, so this mutates the session — `apply`
-    // restores the role (via `RESET ROLE` in `restore_session`) on exit, so the
-    // admin session's effective role never leaks (H2). The `SET` of search_path
-    // / timeouts above still runs as admin (always permitted); the role switch
-    // governs the subsequent `<up>` + journal writes.
-    if let Some(role) = &cfg.migrator_role {
-        use std::fmt::Write as _;
-        let _ = write!(stmt, " SET ROLE \"{}\";", role.replace('"', "\"\""));
-    }
     conn.batch_execute(&stmt).await?;
     Ok(())
 }
@@ -350,6 +350,15 @@ pub async fn apply(
     // leak onto the (pooled / long-lived) connection after apply (H2).
     let snapshot = snapshot_session(conn).await;
     let result = apply_locked(conn, cfg, migrations, applied_by).await;
+    // L1: RESET ROLE UNCONDITIONALLY — regardless of whether `snapshot_session`
+    // succeeded. The non-txn path's `SET ROLE` mutates the session; if the
+    // snapshot had failed we would otherwise skip `restore_session` entirely and
+    // leak the migrator role onto the pooled/long-lived connection. So drop the
+    // role back to admin on EVERY exit path first, then restore the GUCs if we
+    // have a snapshot. (Harmless no-op when no `SET ROLE` ran.)
+    if let Err(e) = conn.batch_execute("RESET ROLE").await {
+        tracing::warn!(error = %e, "zeroship-migrate: failed to RESET ROLE after apply (L1)");
+    }
     // Restore the original session settings (best-effort; logged on failure)
     // before releasing the lock. The txn path uses SET LOCAL so only the non-txn
     // path actually mutates the session, but restoring unconditionally is cheap
@@ -510,13 +519,29 @@ async fn apply_transactional(
 
     // Pin search_path + the mandatory timeouts (per-migration override applied)
     // with SET LOCAL so they are scoped to THIS transaction and vanish at
-    // COMMIT/ROLLBACK — nothing leaks onto the session (H2 / H3).
+    // COMMIT/ROLLBACK — nothing leaks onto the session (H2 / H3). This runs as
+    // the admin (always permitted); the role switch is applied separately around
+    // the `<up>` only.
     if let Err(e) = conn.batch_execute(&set_local_session_sql(cfg, m)).await {
         let _ = conn.batch_execute("ROLLBACK").await;
         return Err(ApplyError::Db(e));
     }
 
-    // Run the migration's up SQL.
+    // C1: drop to the least-privilege migrator role for the duration of the
+    // `<up>` ONLY. `SET LOCAL ROLE` is transaction-scoped, so the role switch is
+    // confined to this txn; we explicitly `RESET ROLE` (below) before the journal
+    // INSERT so the journal write runs as the admin — the migrator's journal
+    // grant is revoked (role.rs), so it could not write the journal even if it
+    // tried. The up's DDL is thereby confined to line-2 privileges (design §1.3)
+    // while the journal stays unforgeable by the migration.
+    if let Some(set_role) = set_local_role_sql(cfg) {
+        if let Err(e) = conn.batch_execute(&set_role).await {
+            let _ = conn.batch_execute("ROLLBACK").await;
+            return Err(ApplyError::Db(e));
+        }
+    }
+
+    // Run the migration's up SQL (as the migrator, if a role is configured).
     if let Err(e) = conn.batch_execute(&m.up).await {
         // Roll back; report the failure. No journal row was written.
         if let Err(rb) = conn.batch_execute("ROLLBACK").await {
@@ -528,9 +553,20 @@ async fn apply_transactional(
         });
     }
 
+    // C1: RESET ROLE back to the admin — still INSIDE the transaction — so the
+    // journal INSERT below runs as the admin (the migrator cannot write the
+    // journal). `RESET ROLE` mid-transaction is supported and does not end the
+    // txn, so atomicity of `<up>` + journal is preserved.
+    if cfg.migrator_role.is_some() {
+        if let Err(e) = conn.batch_execute("RESET ROLE").await {
+            let _ = conn.batch_execute("ROLLBACK").await;
+            return Err(ApplyError::Db(e));
+        }
+    }
+
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
 
-    // Journal the completed row in the SAME transaction.
+    // Journal the completed row in the SAME transaction, as the admin.
     let meta = format!("\"{}\"", cfg.meta_schema.replace('"', "\"\""));
     if let Err(e) = conn
         .execute(
@@ -572,9 +608,16 @@ async fn apply_non_transactional(
 ) -> Result<bool, ApplyError> {
     let version = m.version.as_str();
 
+    // Journal / inflight I/O runs as the ADMIN (C1): the migrator's grant on the
+    // meta schema is revoked, so `record_started` / `recover_non_transactional`
+    // (which clears the marker) / `record_completed` must NOT run under
+    // `SET ROLE migrator`. Only the `<up>` (and the recovery `DROP INDEX`, which
+    // the migrator owns) runs as the migrator.
     if had_inflight {
         // Recovery path: a prior run wrote `started` then crashed before
-        // `completed`. Inspect the real state and make the apply idempotent.
+        // `completed`. Inspect the real state and make the apply idempotent. The
+        // INVALID-index DROP inside runs as the migrator (it owns the index); the
+        // inflight `clear` runs as admin. See `recover_non_transactional`.
         recover_non_transactional(conn, cfg, m).await?;
     } else {
         journal::record_started(conn, cfg, version, &m.name, m.checksum.as_str(), applied_by)
@@ -582,16 +625,34 @@ async fn apply_non_transactional(
     }
 
     let started = Instant::now();
-    // Run the up SQL OUTSIDE any transaction (CONCURRENTLY etc. forbid it).
-    conn.batch_execute(&m.up)
-        .await
-        .map_err(|e| ApplyError::MigrationFailed {
-            version: version.to_string(),
-            source: e,
-        })?;
+    // C1: bracket the `<up>` with SET ROLE / RESET ROLE so the migration's DDL
+    // runs under line-2 confinement, but the journal writes above/below run as
+    // admin. `RESET ROLE` runs on ALL exit paths (including the error path) so
+    // the role never leaks onto the session even if the `<up>` fails — and
+    // `apply`'s `restore_session` is an unconditional backstop (L1).
+    if let Some(role) = &cfg.migrator_role {
+        conn.batch_execute(&format!("SET ROLE \"{}\"", role.replace('"', "\"\"")))
+            .await?;
+    }
+    let up_result = conn.batch_execute(&m.up).await;
+    if cfg.migrator_role.is_some() {
+        // RESET ROLE regardless of the up's success, so the journal writes below
+        // run as admin and no role leaks onto the session.
+        if let Err(e) = conn.batch_execute("RESET ROLE").await {
+            // If RESET ROLE itself fails, surface it (apply's restore_session is
+            // the L1 backstop). Prefer surfacing the up's error if it failed.
+            if up_result.is_ok() {
+                return Err(ApplyError::Db(e));
+            }
+        }
+    }
+    up_result.map_err(|e| ApplyError::MigrationFailed {
+        version: version.to_string(),
+        source: e,
+    })?;
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
 
-    // Phase 2: immutable completed row + clear the marker.
+    // Phase 2: immutable completed row + clear the marker (as admin).
     journal::record_completed(
         conn,
         cfg,
@@ -624,6 +685,12 @@ async fn apply_non_transactional(
 /// index satisfies `IF NOT EXISTS`, so it would otherwise never be rebuilt) —
 /// then clears the marker. The caller then **re-runs the idempotent `<up>`**,
 /// which is safe in both case (a) and case (b).
+///
+/// Runs as the **admin** (C1): it is called BEFORE the `<up>`'s `SET ROLE` and
+/// clears the inflight marker (`clear_inflight`), which is meta-schema I/O the
+/// migrator has no grant for. The admin owns the meta schema and is privileged
+/// over the project schema, so the project-schema `DROP INDEX` succeeds as admin
+/// without needing the migrator role.
 async fn recover_non_transactional(
     conn: &Client,
     cfg: &ExecutorConfig,
