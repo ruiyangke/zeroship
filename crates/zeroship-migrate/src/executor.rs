@@ -601,6 +601,15 @@ async fn recover_non_transactional(
 ) -> Result<(), ApplyError> {
     // Drop INVALID indexes in the project schema — the residue of an
     // interrupted CONCURRENTLY build. Querying pg_index.indisvalid = false.
+    //
+    // SCOPE NOTE: this drops EVERY invalid index in the project schema, not just
+    // the one this migration's `up` names. Safe for the engine's own operation:
+    // the per-project advisory lock (`acquire_project_lock`) serializes all engine
+    // applies, and the project schema is engine-owned, so during recovery the only
+    // invalid index present is this crashed migration's residue. The narrow
+    // residual risk is an OUT-OF-BAND invalid index (a manual CONCURRENTLY build
+    // elsewhere in the schema) being dropped here. v1.x hardening: parse the index
+    // name from `up` and scope the drop to it. Tracked.
     let invalid: Vec<String> = conn
         .query(
             "SELECT c.relname
