@@ -263,15 +263,18 @@ pub async fn applied(
                  ),
                  net_completed AS (
                      SELECT version, checksum FROM latest WHERE kind = 'completed'
+                 ),
+                 union_all AS (
+                     SELECT version, checksum, 'completed' AS phase FROM net_completed
+                     UNION ALL
+                     SELECT version, checksum, 'started' AS phase
+                       FROM {meta}.schema_migrations_inflight i
+                      WHERE NOT EXISTS (
+                          SELECT 1 FROM net_completed n WHERE n.version = i.version
+                      )
                  )
-                 SELECT version, checksum, 'completed' AS phase FROM net_completed
-                 UNION ALL
-                 SELECT version, checksum, 'started' AS phase
-                   FROM {meta}.schema_migrations_inflight i
-                  WHERE NOT EXISTS (
-                      SELECT 1 FROM net_completed n WHERE n.version = i.version
-                  )
-                 ORDER BY version"
+                 SELECT version, checksum, phase FROM union_all
+                 ORDER BY version COLLATE \"C\""
             ),
             &[],
         )
