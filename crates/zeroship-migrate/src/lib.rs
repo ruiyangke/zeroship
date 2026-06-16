@@ -7,9 +7,30 @@
 //! (§2.3): the append-only journal ([`journal`]), the project advisory lock,
 //! and the apply flow ([`executor::apply`]) — transactional + two-phase
 //! non-transactional with idempotent recovery, the guard wired in front of
-//! every `up`, and a drift/tamper checksum check. The least-privilege
-//! `migrator` role and the authoring pipeline (`plan`) are later plans built on
-//! these types.
+//! every `up`, and a drift/tamper checksum check — the least-privilege
+//! `migrator` role ([`role`]), and the **public authoring pipeline + engine
+//! API** ([`author`] + [`engine`]).
+//!
+//! # The pipeline
+//!
+//! ```text
+//! author -> plan (lint) -> gate (approval) -> executor::apply (guard + role)
+//! ```
+//!
+//! 1. an **author** ([`MigrationAuthor`]) produces versioned [`Migration`]s.
+//!    [`DeterministicAuthor`] handles the trivial additive set (create table,
+//!    add column, create index) with no AI; [`RawSqlAuthor`] is the **AI-author
+//!    hook** — the AI/builder generates complex migrations (renames, type
+//!    changes, backfills, expand-contract) *externally* and this engine
+//!    validates + executes them. The engine never calls an LLM.
+//! 2. [`MigrationEngine::plan`] runs the [`guard::SqlGuard`] read-only and
+//!    returns a [`MigrationPlan`] (the dry-run/preview): destructive flags,
+//!    approval requirement, and guard *denials*.
+//! 3. [`MigrationEngine::apply`] is the **gate** ([`Approval`]): it refuses a
+//!    denied plan, refuses a destructive plan without approval, and otherwise
+//!    delegates to [`executor::apply`] — which **independently re-runs the
+//!    guard and the least-privilege `migrator` role** (defense in depth: the
+//!    engine gate is an additional check, not a replacement for lines 1 & 2).
 //!
 //! # Security stance (§1)
 //!
@@ -36,8 +57,10 @@
 //! so it is plain synchronous logic — no tokio/compio — and exhaustively
 //! unit-testable without a database (`tests/guard_security.rs`).
 
+pub mod author;
 pub mod classify;
 pub mod db;
+pub mod engine;
 pub mod executor;
 pub mod guard;
 pub mod journal;
@@ -48,7 +71,11 @@ pub mod role;
 // Public API surface — re-exports (later plans depend on these names).
 // ---------------------------------------------------------------------------
 
+pub use author::{
+    AuthorError, AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor,
+};
 pub use classify::{classify, DdlKind, ParseError, StatementClass};
+pub use engine::{Approval, EngineError, MigrationEngine, MigrationPlan, PlannedMigration};
 pub use db::{connect, ConnectError, ExecutorConfig};
 pub use executor::{apply, ApplyError, ApplyOutcome};
 pub use guard::{flags_for, GuardConfig, GuardError, GuardReport, SqlGuard};
