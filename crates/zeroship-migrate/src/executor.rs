@@ -37,6 +37,7 @@ use std::time::Instant;
 use compio_postgres::Client;
 use pg_query::protobuf::node::Node as NodeEnum;
 
+use crate::approval::Approval;
 use crate::db::ExecutorConfig;
 use crate::guard::{GuardConfig, GuardError, SqlGuard};
 use crate::journal::{self, AppliedEntry, JournalError, Phase};
@@ -70,6 +71,14 @@ pub enum ApplyError {
     /// A journal operation failed.
     #[error(transparent)]
     Journal(#[from] JournalError),
+    /// The pending batch contains a destructive migration (`flags.destructive`)
+    /// but the caller passed [`Approval::None`]. This is the executor's OWN
+    /// defense-in-depth approval gate — independent of (and additional to) the
+    /// engine's gate ([`crate::engine::MigrationEngine::apply`]), so a caller that
+    /// drives [`apply`] directly, bypassing the engine, still cannot run a
+    /// destructive batch without explicit approval. Nothing was applied.
+    #[error("apply contains a destructive migration but Approval::Approved was not given")]
+    ApprovalRequired,
     /// The SQL guard denied a pending migration's `up` SQL — the whole apply is
     /// aborted and the migration never executed.
     #[error("migration {version} denied by guard: {source}")]
@@ -344,7 +353,18 @@ fn validate_non_txn_idempotent(m: &Migration) -> Result<(), ApplyError> {
 ///
 /// `applied_by` is the actor recorded in the journal (`app/actor/AI`).
 ///
+/// `approval` is the caller's approval decision. This is the executor's OWN
+/// defense-in-depth approval gate (design §1.6): if any pending migration is
+/// flagged [`destructive`](crate::migration::MigrationFlags::destructive) and
+/// `approval != Approval::Approved`, the apply is refused with
+/// [`ApplyError::ApprovalRequired`] before any migration executes — independent
+/// of (and additional to) the engine's gate, so a caller driving [`apply`]
+/// directly cannot bypass approval. A non-destructive batch runs with
+/// [`Approval::None`].
+///
 /// # Errors
+/// - [`ApplyError::ApprovalRequired`] — a destructive migration without approval;
+///   aborts before any migration runs.
 /// - [`ApplyError::Guard`] — a pending migration's `up` SQL was denied; the
 ///   whole apply aborts (all-up-front, before any migration runs).
 /// - [`ApplyError::NonIdempotentNonTxn`] — a non-transactional migration's `up`
@@ -356,8 +376,18 @@ pub async fn apply(
     conn: &Client,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
+    approval: Approval,
     applied_by: &str,
 ) -> Result<ApplyOutcome, ApplyError> {
+    // Defense-in-depth approval gate (design §1.6) — refuse a destructive batch
+    // without explicit approval BEFORE doing anything (not even the lock). The
+    // engine has its own gate; this is the independent executor-layer check so a
+    // direct caller cannot bypass it.
+    if approval != Approval::Approved
+        && migrations.iter().any(|m| m.flags.destructive)
+    {
+        return Err(ApplyError::ApprovalRequired);
+    }
     acquire_project_lock(conn, &cfg.project_id).await?;
     // Capture the session GUCs we will override so we can restore them on exit
     // — the executor's search_path / statement_timeout / lock_timeout must NOT
@@ -989,6 +1019,14 @@ pub enum RollbackError {
     /// A journal operation failed.
     #[error(transparent)]
     Journal(#[from] JournalError),
+    /// Rollback was requested with [`Approval::None`]. A `down` is inherently
+    /// destructive (it tears structure down), so rollback ALWAYS requires
+    /// [`Approval::Approved`]. This is the executor's OWN defense-in-depth gate,
+    /// independent of (and additional to) the engine's gate
+    /// ([`crate::engine::MigrationEngine::rollback`]), so a caller driving
+    /// [`rollback`] directly cannot bypass approval. Nothing was rolled back.
+    #[error("rollback requires Approval::Approved (every down is destructive) but it was not given")]
+    ApprovalRequired,
     /// The [`RollbackTarget::ToVersion`] target is not a currently net-applied
     /// migration (never applied, or already rolled back). Nothing was rolled back.
     #[error("rollback target {version} is not currently applied")]
@@ -1076,17 +1114,31 @@ pub enum RollbackError {
 /// [`RollbackOutcome::skipped_irreversible`]; the down cannot be journaled because
 /// it never ran, so no `rolled_back` event is written for it — it stays applied).
 ///
+/// `approval` is the caller's approval decision. A `down` is inherently
+/// destructive, so rollback ALWAYS requires [`Approval::Approved`]: with
+/// [`Approval::None`] this returns [`RollbackError::ApprovalRequired`] before any
+/// `down` executes. This is the executor's OWN defense-in-depth gate (design
+/// §1.6), independent of (and additional to) the engine's gate, so a caller
+/// driving [`rollback`] directly cannot bypass approval.
+///
 /// # Errors
-/// See [`RollbackError`]. All pre-flight checks (unknown target, missing-from-set,
-/// guard denial, irreversible-without-force, checksum drift) abort before any
-/// `down` executes.
+/// See [`RollbackError`]. All pre-flight checks (approval, unknown target,
+/// missing-from-set, guard denial, irreversible-without-force, checksum drift)
+/// abort before any `down` executes.
 pub async fn rollback(
     conn: &Client,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
     request: RollbackRequest,
+    approval: Approval,
     applied_by: &str,
 ) -> Result<RollbackOutcome, RollbackError> {
+    // Defense-in-depth approval gate (design §1.6) — every `down` is destructive,
+    // so rollback ALWAYS requires explicit approval. Refuse BEFORE doing anything
+    // (not even the lock). Independent of the engine's own gate.
+    if approval != Approval::Approved {
+        return Err(RollbackError::ApprovalRequired);
+    }
     // Acquire the project advisory lock directly (raw SQL, so the error type is
     // compio_postgres::Error → RollbackError::Db) — serializes against concurrent
     // apply/rollback for the same project, exactly like `apply`.

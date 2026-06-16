@@ -57,6 +57,7 @@
 //! so it is plain synchronous logic — no tokio/compio — and exhaustively
 //! unit-testable without a database (`tests/guard_security.rs`).
 
+pub mod approval;
 pub mod author;
 pub mod classify;
 pub mod db;
@@ -71,12 +72,13 @@ pub mod role;
 // Public API surface — re-exports (later plans depend on these names).
 // ---------------------------------------------------------------------------
 
+pub use approval::Approval;
 pub use author::{
     AuthorError, AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor,
 };
 pub use classify::{classify, DdlKind, ParseError, StatementClass};
 pub use engine::{
-    Approval, EngineError, MigrationEngine, MigrationPlan, PlannedMigration, RollbackEngineError,
+    EngineError, MigrationEngine, MigrationPlan, PlannedMigration, RollbackEngineError,
 };
 pub use db::{connect, ConnectError, ExecutorConfig};
 pub use executor::{

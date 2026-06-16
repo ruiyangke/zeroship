@@ -157,7 +157,7 @@ async fn seed_three(conn: &Client, cfg: &ExecutorConfig) -> [Migration; 3] {
     let m2 = create_table_mig(v2, cfg, "t2");
     let m3 = create_table_mig(v3, cfg, "t3");
     let set = [m1.clone(), m2.clone(), m3.clone()];
-    apply(conn, cfg, &set, "actor").await.expect("seed apply");
+    apply(conn, cfg, &set, Approval::None, "actor").await.expect("seed apply");
     set
 }
 
@@ -190,6 +190,7 @@ async fn rollback_to_version_unwinds_in_reverse_and_is_reappliable() {
         &cfg,
         &set,
         RollbackRequest::new(RollbackTarget::ToVersion(m1.version.clone())),
+        Approval::Approved,
         "actor",
     )
     .await
@@ -227,7 +228,7 @@ async fn rollback_to_version_unwinds_in_reverse_and_is_reappliable() {
     assert_eq!(applied_versions(&conn, &cfg).await, vec![m1.version.as_str()]);
 
     // RE-APPLY 2,3: they are pending again and re-apply cleanly.
-    let out2 = apply(&conn, &cfg, &set, "actor").await.expect("re-apply");
+    let out2 = apply(&conn, &cfg, &set, Approval::None, "actor").await.expect("re-apply");
     assert_eq!(
         out2.applied,
         vec![m2.version.as_str().to_string(), m3.version.as_str().to_string()],
@@ -259,7 +260,7 @@ async fn rollback_steps_one_unwinds_only_the_newest() {
     let [m1, m2, m3] = seed_three(&conn, &cfg).await;
     let set = [m1.clone(), m2.clone(), m3.clone()];
 
-    let out = rollback(&conn, &cfg, &set, RollbackRequest::new(RollbackTarget::Steps(1)), "actor")
+    let out = rollback(&conn, &cfg, &set, RollbackRequest::new(RollbackTarget::Steps(1)), Approval::Approved, "actor")
         .await
         .expect("rollback 1 step");
     assert_eq!(out.rolled_back, vec![m3.version.as_str().to_string()]);
@@ -284,7 +285,7 @@ async fn rollback_all_unwinds_everything_in_reverse() {
     let [m1, m2, m3] = seed_three(&conn, &cfg).await;
     let set = [m1.clone(), m2.clone(), m3.clone()];
 
-    let out = rollback(&conn, &cfg, &set, RollbackRequest::new(RollbackTarget::All), "actor")
+    let out = rollback(&conn, &cfg, &set, RollbackRequest::new(RollbackTarget::All), Approval::Approved, "actor")
         .await
         .expect("rollback all");
     assert_eq!(
@@ -335,11 +336,11 @@ async fn rollback_refuses_irreversible_without_force_then_skips_with_force() {
     };
     let m3 = create_table_mig(v3, &cfg, "t3");
     let set = [m1.clone(), m2.clone(), m3.clone()];
-    apply(&conn, &cfg, &set, "actor").await.expect("seed");
+    apply(&conn, &cfg, &set, Approval::None, "actor").await.expect("seed");
 
     // Rollback ALL: would cross the irreversible v2 → refuse by default, NOTHING
     // rolled back (not even v3, which precedes the refusal — all-up-front).
-    let err = rollback(&conn, &cfg, &set, RollbackRequest::new(RollbackTarget::All), "actor")
+    let err = rollback(&conn, &cfg, &set, RollbackRequest::new(RollbackTarget::All), Approval::Approved, "actor")
         .await
         .unwrap_err();
     assert!(matches!(err, RollbackError::Irreversible { .. }), "got {err:?}");
@@ -351,7 +352,7 @@ async fn rollback_refuses_irreversible_without_force_then_skips_with_force() {
 
     // With force + backup_acknowledged: proceeds, SKIPPING the irreversible v2.
     let opts = RollbackOptions { force: true, backup_acknowledged: true };
-    let out = rollback(&conn, &cfg, &set, RollbackRequest::new(RollbackTarget::All).with_options(opts), "actor")
+    let out = rollback(&conn, &cfg, &set, RollbackRequest::new(RollbackTarget::All).with_options(opts), Approval::Approved, "actor")
         .await
         .expect("forced rollback");
     // v3, v1 rolled back; v2 skipped (its down never ran).
@@ -391,11 +392,11 @@ async fn force_requires_both_force_and_backup_acknowledged() {
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
     };
-    apply(&conn, &cfg, std::slice::from_ref(&m1), "actor").await.expect("seed");
+    apply(&conn, &cfg, std::slice::from_ref(&m1), Approval::None, "actor").await.expect("seed");
 
     // force without backup_acknowledged is NOT enough.
     let opts = RollbackOptions { force: true, backup_acknowledged: false };
-    let err = rollback(&conn, &cfg, std::slice::from_ref(&m1), RollbackRequest::new(RollbackTarget::All).with_options(opts), "actor")
+    let err = rollback(&conn, &cfg, std::slice::from_ref(&m1), RollbackRequest::new(RollbackTarget::All).with_options(opts), Approval::Approved, "actor")
         .await
         .unwrap_err();
     assert!(matches!(err, RollbackError::Irreversible { .. }), "got {err:?}");
@@ -431,10 +432,10 @@ async fn dangerous_down_is_guard_denied_and_nothing_rolled_back() {
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
     };
-    apply(&conn, &cfg, std::slice::from_ref(&m), "actor").await.expect("seed (up is benign)");
+    apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor").await.expect("seed (up is benign)");
     assert!(table_exists(&conn, &cfg.project_schema, "t").await);
 
-    let err = rollback(&conn, &cfg, std::slice::from_ref(&m), RollbackRequest::new(RollbackTarget::All), "actor")
+    let err = rollback(&conn, &cfg, std::slice::from_ref(&m), RollbackRequest::new(RollbackTarget::All), Approval::Approved, "actor")
         .await
         .unwrap_err();
     assert!(matches!(err, RollbackError::Guard { .. }), "down RCE must be guard-denied, got {err:?}");
@@ -477,9 +478,9 @@ async fn cross_schema_down_is_permission_denied_by_the_migrator_role() {
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
     };
-    apply(&conn, &cfg, std::slice::from_ref(&m), "actor").await.expect("seed");
+    apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor").await.expect("seed");
 
-    let err = rollback(&conn, &cfg, std::slice::from_ref(&m), RollbackRequest::new(RollbackTarget::All), "actor")
+    let err = rollback(&conn, &cfg, std::slice::from_ref(&m), RollbackRequest::new(RollbackTarget::All), Approval::Approved, "actor")
         .await
         .unwrap_err();
     // The down ran under the migrator role and was denied at execution.
@@ -518,10 +519,10 @@ async fn down_runs_under_migrator_role_for_own_schema() {
 
     let v = MigrationId::generate();
     let m = create_table_mig(v, &cfg, "owned");
-    apply(&conn, &cfg, std::slice::from_ref(&m), "actor").await.expect("seed");
+    apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor").await.expect("seed");
     assert!(table_exists(&conn, &cfg.project_schema, "owned").await);
 
-    let out = rollback(&conn, &cfg, std::slice::from_ref(&m), RollbackRequest::new(RollbackTarget::All), "actor")
+    let out = rollback(&conn, &cfg, std::slice::from_ref(&m), RollbackRequest::new(RollbackTarget::All), Approval::Approved, "actor")
         .await
         .expect("rollback own-schema down");
     assert_eq!(out.rolled_back, vec![m.version.as_str().to_string()]);
@@ -548,7 +549,7 @@ async fn rollback_of_not_applied_version_is_a_clear_error() {
 
     // ToVersion targeting a version that was never applied.
     let ghost = MigrationId::generate();
-    let err = rollback(&conn, &cfg, &[], RollbackRequest::new(RollbackTarget::ToVersion(ghost.clone())), "actor")
+    let err = rollback(&conn, &cfg, &[], RollbackRequest::new(RollbackTarget::ToVersion(ghost.clone())), Approval::Approved, "actor")
         .await
         .unwrap_err();
     assert!(matches!(err, RollbackError::UnknownTarget { .. }), "got {err:?}");
@@ -564,7 +565,7 @@ async fn rollback_all_with_nothing_applied_is_a_noop() {
     drop_schemas(&conn, &cfg).await;
     ensure_project_schema(&conn, &cfg).await;
 
-    let out = rollback(&conn, &cfg, &[], RollbackRequest::new(RollbackTarget::All), "actor")
+    let out = rollback(&conn, &cfg, &[], RollbackRequest::new(RollbackTarget::All), Approval::Approved, "actor")
         .await
         .expect("no-op rollback");
     assert!(out.is_noop(), "rolling back an empty journal is a no-op");
@@ -582,10 +583,10 @@ async fn rollback_of_applied_version_absent_from_set_errors() {
 
     let v = MigrationId::generate();
     let m = create_table_mig(v, &cfg, "t");
-    apply(&conn, &cfg, std::slice::from_ref(&m), "actor").await.expect("seed");
+    apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor").await.expect("seed");
 
     // Roll back but supply an EMPTY set — its down SQL is unavailable.
-    let err = rollback(&conn, &cfg, &[], RollbackRequest::new(RollbackTarget::All), "actor")
+    let err = rollback(&conn, &cfg, &[], RollbackRequest::new(RollbackTarget::All), Approval::Approved, "actor")
         .await
         .unwrap_err();
     assert!(matches!(err, RollbackError::MissingFromSet { .. }), "got {err:?}");
@@ -609,7 +610,7 @@ async fn engine_rollback_requires_approval() {
 
     let v = MigrationId::generate();
     let m = create_table_mig(v, &cfg, "t");
-    apply(&conn, &cfg, std::slice::from_ref(&m), "actor").await.expect("seed");
+    apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor").await.expect("seed");
 
     let engine = MigrationEngine::new();
     // Without approval: gated, nothing rolled back.

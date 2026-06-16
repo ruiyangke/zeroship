@@ -17,7 +17,7 @@
 use compio_postgres::Client;
 use zeroship_migrate::{
     apply, ensure_journal, migrator_role_name, provision_migrator, role::deprovision_migrator,
-    Checksum, ExecutorConfig, Migration, MigrationFlags, MigrationId,
+    Approval, Checksum, ExecutorConfig, Migration, MigrationFlags, MigrationId,
 };
 
 const DEFAULT_DSN: &str =
@@ -326,7 +326,7 @@ async fn migrator_can_ddl_its_own_schema_and_apply_runs_under_the_role() {
         "create_t",
         "CREATE TABLE t (id bigint PRIMARY KEY, name text NOT NULL)",
     );
-    let out = apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+    let out = apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
         .await
         .expect("apply under migrator role");
     assert_eq!(out.applied.len(), 1, "one migration applied");
@@ -575,7 +575,7 @@ async fn backstop_through_apply_flow_is_denied() {
         "DO $$ DECLARE s text := 'con' || 'trol'; \
          BEGIN EXECUTE 'CREATE TABLE ' || s || '.evil (x int)'; END $$",
     );
-    let err = apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+    let err = apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
         .await
         .expect_err("the apply flow must surface the role's permission-denied");
     // The executor wraps the DB error as MigrationFailed; assert the wrapped DB
@@ -647,7 +647,7 @@ async fn migration_up_cannot_forge_journal_via_unqualified_insert() {
              (version, name, checksum, applied_by, exec_ms, phase, outcome) \
          VALUES ('mig_victim', 'victim', 'deadbeef', 'attacker', 0, 'completed', 'success')",
     );
-    let err = apply(&conn, &cfg, std::slice::from_ref(&forge), "actor")
+    let err = apply(&conn, &cfg, std::slice::from_ref(&forge), Approval::None, "actor")
         .await
         .expect_err("forging the journal via an unqualified INSERT must fail");
     // The executor wraps the DB error as MigrationFailed.
@@ -704,7 +704,7 @@ async fn migration_up_cannot_forge_journal_via_qualified_insert() {
             cfg.meta_schema
         ),
     );
-    let err = apply(&conn, &cfg, std::slice::from_ref(&forge), "actor")
+    let err = apply(&conn, &cfg, std::slice::from_ref(&forge), Approval::None, "actor")
         .await
         .expect_err("forging the journal via a qualified cross-schema INSERT must fail");
     // Either the guard rejects it up-front, or the role denies it at execution.
@@ -762,7 +762,7 @@ async fn forged_completed_row_does_not_suppress_a_future_victim_migration() {
             victim_version.as_str()
         ),
     );
-    let attack_err = apply(&conn, &cfg, std::slice::from_ref(&attack), "actor").await;
+    let attack_err = apply(&conn, &cfg, std::slice::from_ref(&attack), Approval::None, "actor").await;
     assert!(
         attack_err.is_err(),
         "the forge attack must fail (the migrator cannot write the journal)"
@@ -792,7 +792,7 @@ async fn forged_completed_row_does_not_suppress_a_future_victim_migration() {
             cfg.project_schema
         ),
     );
-    let out = apply(&conn, &cfg, std::slice::from_ref(&victim), "actor")
+    let out = apply(&conn, &cfg, std::slice::from_ref(&victim), Approval::None, "actor")
         .await
         .expect("the victim migration must still run (not suppressed)");
     assert_eq!(out.applied.len(), 1, "the victim migration applied");
@@ -823,7 +823,7 @@ async fn migration_up_cannot_delete_inflight_markers() {
         "delete_inflight",
         "DELETE FROM schema_migrations_inflight",
     );
-    let err = apply(&conn, &cfg, std::slice::from_ref(&forge), "actor")
+    let err = apply(&conn, &cfg, std::slice::from_ref(&forge), Approval::None, "actor")
         .await
         .expect_err("deleting inflight markers must fail");
     let zeroship_migrate::ApplyError::MigrationFailed { source, .. } = &err else {
