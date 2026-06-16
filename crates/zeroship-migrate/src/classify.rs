@@ -233,6 +233,17 @@ const fn is_alter_type_add_value(node: &NodeEnum) -> bool {
 }
 
 /// Collect every explicitly schema-qualified object name referenced anywhere
+/// in a statement tree (deduped, first-seen order).
+///
+/// Public so the security guard (`crate::guard`) can run the same
+/// cross-schema confinement check over any node, including ones nested in a
+/// re-parsed function/DO body.
+#[must_use]
+pub fn referenced_schemas(node: &NodeEnum) -> Vec<String> {
+    collect_schemas(node)
+}
+
+/// Collect every explicitly schema-qualified object name referenced anywhere
 /// in the statement tree (deduped, first-seen order).
 ///
 /// Walks all `RangeVar` nodes via the `libpg_query` node iterator — this catches

@@ -2,4 +2,5 @@
 //! databases (Plan 1: crate + types + SQL security guard).
 
 pub mod classify;
+pub mod guard;
 pub mod migration;
