@@ -597,6 +597,104 @@ async fn non_transactional_recovers_from_crashed_started_marker() {
     drop_schemas(&conn, &cfg).await;
 }
 
+/// v1.x scope fix: recovery of a crashed non-txn migration must drop ONLY the
+/// index its `up` names — an UNRELATED invalid index elsewhere in the project
+/// schema (e.g. a human's manual CONCURRENTLY build in progress) must survive.
+#[compio::test]
+async fn recovery_does_not_drop_unrelated_invalid_index() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    ensure_journal(&conn, &cfg).await.expect("bootstrap");
+
+    conn.batch_execute(&format!(
+        "CREATE TABLE \"{}\".orders (id bigint primary key, sku text, label text)",
+        cfg.project_schema
+    ))
+    .await
+    .expect("seed table");
+
+    // The migration we are recovering: its `up` names idx_orders_sku.
+    let m = mig_nontxn(
+        MigrationId::generate(),
+        "idx_orders_sku",
+        &format!(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_orders_sku ON \"{}\".orders (sku)",
+            cfg.project_schema
+        ),
+    );
+
+    // Its own crashed residue: an INVALID idx_orders_sku + a lone started marker.
+    conn.batch_execute(&format!(
+        "CREATE INDEX idx_orders_sku ON \"{}\".orders (sku);",
+        cfg.project_schema
+    ))
+    .await
+    .expect("create own index");
+    // An UNRELATED invalid index NOT named by m.up — simulates a manual
+    // CONCURRENTLY build a human is running elsewhere in the schema.
+    conn.batch_execute(&format!(
+        "CREATE INDEX idx_orders_label_manual ON \"{}\".orders (label);",
+        cfg.project_schema
+    ))
+    .await
+    .expect("create unrelated index");
+    conn.batch_execute(&format!(
+        "UPDATE pg_index SET indisvalid = false \
+         WHERE indexrelid IN ('\"{schema}\".idx_orders_sku'::regclass, \
+                              '\"{schema}\".idx_orders_label_manual'::regclass)",
+        schema = cfg.project_schema
+    ))
+    .await
+    .expect("mark both invalid");
+    journal::record_started(
+        &conn,
+        &cfg,
+        m.version.as_str(),
+        &m.name,
+        m.checksum.as_str(),
+        "actor",
+    )
+    .await
+    .expect("seed started marker");
+
+    let out = apply(&conn, &cfg, std::slice::from_ref(&m), "actor")
+        .await
+        .expect("recovery apply");
+    assert_eq!(
+        out.recovered,
+        vec![m.version.as_str().to_string()],
+        "recovery path must run"
+    );
+
+    // The migration's own index is rebuilt + valid.
+    assert_eq!(
+        index_count(&conn, &cfg.project_schema, "idx_orders_sku").await,
+        1,
+        "the recovered migration's own index must be valid"
+    );
+    // The UNRELATED invalid index must STILL EXIST (recovery scoped, did not
+    // drop it). It is still INVALID (recovery didn't touch it), so query by name.
+    let unrelated_still_present: i64 = conn
+        .query_one(
+            "SELECT count(*) AS n FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = 'idx_orders_label_manual'",
+            &[&cfg.project_schema],
+        )
+        .await
+        .expect("unrelated index query")
+        .get("n");
+    assert_eq!(
+        unrelated_still_present, 1,
+        "recovery of idx_orders_sku must NOT drop the unrelated idx_orders_label_manual"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
 #[compio::test]
 async fn statement_timeout_aborts_long_migration_cleanly() {
     let conn = pg().await;
