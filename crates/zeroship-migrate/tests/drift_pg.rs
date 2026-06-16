@@ -78,6 +78,7 @@ fn mig(version: MigrationId, name: &str, up: &str) -> Migration {
         flags: MigrationFlags::default(),
         owner_app: "app_test".to_string(),
         depends_on: Vec::new(),
+        supersedes: Vec::new(),
     }
 }
 
@@ -232,6 +233,7 @@ async fn checksum_drift_reads_latest_completed_checksum_across_reapply() {
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
+        supersedes: Vec::new(),
     };
     let cs_a = mig_a.checksum.as_str().to_string();
 
@@ -247,6 +249,7 @@ async fn checksum_drift_reads_latest_completed_checksum_across_reapply() {
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
+        supersedes: Vec::new(),
     };
     let cs_b = mig_b.checksum.as_str().to_string();
     assert_ne!(cs_a, cs_b, "upA and upB must have distinct checksums");

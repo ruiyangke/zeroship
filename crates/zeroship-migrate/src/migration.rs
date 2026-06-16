@@ -220,6 +220,21 @@ pub struct Migration {
     pub owner_app: String,
     /// Optional cross-slice ordering dependencies.
     pub depends_on: Vec<MigrationId>,
+    /// The versions this migration **supersedes** (Plan 9 squash). Empty for an
+    /// ordinary migration; non-empty only for a **squash** migration `S` that
+    /// collapses a contiguous prefix `[v1..vN]` of applied history into a single
+    /// equivalent step. `S.up` is the combined DDL of `[v1..vN]` (so a fresh
+    /// rebuild can run it), and `supersedes = [v1..vN]`.
+    ///
+    /// Supersession makes the journal append-only-safe (the old `v1..vN` events
+    /// are NEVER deleted): a version `v_i` is considered **satisfied** by either
+    /// `v_i` itself being net-applied OR a squash `S` that supersedes `v_i` being
+    /// net-applied. The executor's pending computation honors this, so on a fresh
+    /// DB applying `S` runs `S.up` once and the superseded `v1..vN` are skipped
+    /// (never double-applied), while on an existing DB that already ran `v1..vN`
+    /// the squash is recorded WITHOUT running `S.up` (see [`crate::squash`]).
+    #[serde(default)]
+    pub supersedes: Vec<MigrationId>,
 }
 
 #[cfg(test)]

@@ -1884,6 +1884,7 @@ mod order_tests {
             flags: MigrationFlags::default(),
             owner_app: "app_test".into(),
             depends_on,
+            supersedes: Vec::new(),
         }
     }
 

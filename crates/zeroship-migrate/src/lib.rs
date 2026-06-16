@@ -60,6 +60,7 @@
 pub mod approval;
 pub mod author;
 pub mod backfill;
+pub mod baseline;
 pub mod classify;
 pub mod db;
 pub mod drift;
@@ -77,6 +78,7 @@ pub mod status;
 // ---------------------------------------------------------------------------
 
 pub use approval::Approval;
+pub use baseline::{baseline, BaselineError, BaselineOutcome};
 pub use backfill::{
     backfill_progress, ensure_backfill_progress, list_backfills, run_backfill,
     run_backfill_bounded, BackfillError, BackfillOutcome, BackfillProgress, BackfillSpec,
@@ -104,9 +106,10 @@ pub use executor::{
 };
 pub use guard::{flags_for, GuardConfig, GuardError, GuardReport, SqlGuard};
 pub use journal::{
-    applied, ensure_journal, history as journal_history, net_rolled_back, record_completed,
-    record_rolled_back, record_started, AppliedEntry, HistoryEvent, HistoryKind, JournalError,
-    Phase, RolledBackEntry,
+    applied, applied_count, ensure_journal, history as journal_history, net_rolled_back,
+    record_baseline, record_completed, record_rolled_back, record_started, record_supersedes,
+    superseded_versions, AppliedEntry, HistoryEvent, HistoryKind, JournalError, Phase,
+    RolledBackEntry,
 };
 pub use status::{history, status, MigrationStatus, StatusError};
 pub use migration::{
