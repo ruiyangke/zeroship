@@ -294,6 +294,167 @@ pub async fn applied(
     Ok(out)
 }
 
+/// A net-rolled-back version: one whose **latest** event (on the shared
+/// `event_seq` scale) is a `rolled_back` event. Such a version is pending again
+/// and re-appliable; the status API surfaces it distinctly from net-applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RolledBackEntry {
+    /// The version (`mig_…`).
+    pub version: String,
+    /// The migration name recorded on the rollback event.
+    pub name: String,
+    /// The checksum recorded on the rollback event.
+    pub checksum: String,
+    /// Who performed the rollback (`applied_by`-equivalent actor string).
+    pub rolled_back_by: String,
+    /// The rollback `down` execution time in ms (the recorded `exec_ms`).
+    pub exec_ms: Option<i64>,
+    /// When the rollback was recorded (RFC-3339 / ISO-8601 from `timestamptz`).
+    pub at: String,
+}
+
+/// The kind of a [`HistoryEvent`] — a forward apply or a rollback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryKind {
+    /// A `completed` apply event (from `schema_migrations`).
+    Completed,
+    /// A `rolled_back` event (from `schema_migrations_rolled_back`).
+    RolledBack,
+}
+
+/// One event in the FULL append-only audit log (completed + rolled_back),
+/// returned by [`history`] in `event_seq` order.
+///
+/// Unlike [`applied`] (which computes NET state and hides rolled-back history),
+/// this is the raw audit trail: it shows EVERY event, including a version's
+/// rollback and any subsequent re-apply, in the order they happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryEvent {
+    /// The shared monotonic sequence number (the total event order).
+    pub event_seq: i64,
+    /// The migration version (`mig_…`).
+    pub version: String,
+    /// The migration name recorded on the event.
+    pub name: String,
+    /// Apply or rollback.
+    pub kind: HistoryKind,
+    /// The event timestamp (RFC-3339 / ISO-8601 from `timestamptz`).
+    pub at: String,
+    /// Execution time in ms (the `exec_ms` recorded on the event), if any.
+    pub exec_ms: Option<i64>,
+    /// The actor who performed the event (`applied_by` / `rolled_back_by`).
+    pub applied_by: String,
+    /// The checksum recorded on the event.
+    pub checksum: String,
+}
+
+/// Read the versions whose **latest** event is a `rolled_back` event (net
+/// rolled-back), ordered by version.
+///
+/// Mirrors [`applied`]'s DISTINCT-ON-latest-event logic, but keeps the versions
+/// whose winning event is `rolled_back` (not `completed`). Carries the rollback
+/// event's detail (name, checksum, actor, exec_ms, timestamp) for the status API.
+///
+/// # Errors
+/// [`JournalError::Db`] on query failure.
+pub async fn net_rolled_back(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+) -> Result<Vec<RolledBackEntry>, JournalError> {
+    let meta = quote_ident(&cfg.meta_schema);
+    let rows = conn
+        .query(
+            &format!(
+                "WITH events AS (
+                     SELECT version, name, checksum, applied_by AS actor, exec_ms,
+                            applied_at AS at, event_seq, 'completed' AS kind
+                       FROM {meta}.schema_migrations
+                     UNION ALL
+                     SELECT version, name, checksum, rolled_back_by AS actor, exec_ms,
+                            rolled_back_at AS at, event_seq, 'rolled_back' AS kind
+                       FROM {meta}.schema_migrations_rolled_back
+                 ),
+                 latest AS (
+                     SELECT DISTINCT ON (version)
+                            version, name, checksum, actor, exec_ms, at, kind
+                       FROM events
+                      ORDER BY version, event_seq DESC
+                 )
+                 SELECT version, name, checksum, actor,
+                        exec_ms, to_char(at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS at
+                   FROM latest
+                  WHERE kind = 'rolled_back'
+                  ORDER BY version COLLATE \"C\""
+            ),
+            &[],
+        )
+        .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(RolledBackEntry {
+            version: row.get("version"),
+            name: row.get("name"),
+            checksum: row.get("checksum"),
+            rolled_back_by: row.get("actor"),
+            exec_ms: row.get("exec_ms"),
+            at: row.get("at"),
+        });
+    }
+    Ok(out)
+}
+
+/// Read the FULL append-only event log (every `completed` + every `rolled_back`
+/// event) in `event_seq` order — the audit trail (design §2.2, scenario 46).
+///
+/// This is NOT net state: a version that was applied, rolled back, and re-applied
+/// appears as three events here. Read-only.
+///
+/// # Errors
+/// [`JournalError::Db`] on query failure.
+pub async fn history(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+) -> Result<Vec<HistoryEvent>, JournalError> {
+    let meta = quote_ident(&cfg.meta_schema);
+    let rows = conn
+        .query(
+            &format!(
+                "SELECT event_seq, version, name,
+                        to_char(applied_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS at,
+                        exec_ms, applied_by AS actor, checksum, 'completed' AS kind
+                   FROM {meta}.schema_migrations
+                 UNION ALL
+                 SELECT event_seq, version, name,
+                        to_char(rolled_back_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS at,
+                        exec_ms, rolled_back_by AS actor, checksum, 'rolled_back' AS kind
+                   FROM {meta}.schema_migrations_rolled_back
+                 ORDER BY event_seq"
+            ),
+            &[],
+        )
+        .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let kind_s: String = row.get("kind");
+        let kind = match kind_s.as_str() {
+            "completed" => HistoryKind::Completed,
+            "rolled_back" => HistoryKind::RolledBack,
+            other => return Err(JournalError::BadPhase(other.to_string())),
+        };
+        out.push(HistoryEvent {
+            event_seq: row.get("event_seq"),
+            version: row.get("version"),
+            name: row.get("name"),
+            kind,
+            at: row.get("at"),
+            exec_ms: row.get("exec_ms"),
+            applied_by: row.get("actor"),
+            checksum: row.get("checksum"),
+        });
+    }
+    Ok(out)
+}
+
 /// Append a `rolled_back` event for a version (Plan 5 rollback).
 ///
 /// Run by the **ADMIN** (the migrator has no grant on the meta schema — Plan 3
