@@ -56,6 +56,7 @@
 //! simply observed by the next batch's window.
 
 use compio_postgres::Client;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::approval::Approval;
@@ -191,6 +192,35 @@ pub enum BackfillError {
     /// any batch runs.
     #[error("backfill target not found: {0}")]
     TargetNotFound(String),
+    /// The [`BackfillSpec::cursor_column`] is not safe to page on: it is NOT
+    /// backed by a single-column `PRIMARY KEY` / `UNIQUE` index, or it is
+    /// nullable. The whole batched design's exactly-once + non-blocking +
+    /// filter-honoring correctness rests on a UNIQUE NOT NULL cursor — the UPDATE
+    /// matches `cursor IN (window keys)`, so a NON-unique cursor over-matches
+    /// every row sharing a key (updating far more than `batch_size` rows in one
+    /// txn, defeating the bound, and mutating rows that do NOT match the authored
+    /// filter), and a NULL cursor value is silently never paged. Rejected in
+    /// pre-flight before any batch runs.
+    #[error("cursor_column {cursor_column:?} on {table:?} is not safe to page on ({reason}); page on the table's PRIMARY KEY")]
+    CursorNotUniqueNotNull {
+        /// The target table.
+        table: String,
+        /// The offending cursor column.
+        cursor_column: String,
+        /// Why it was rejected (`"not backed by a single-column PRIMARY KEY or UNIQUE index"` / `"it is nullable"`).
+        reason: &'static str,
+    },
+    /// The authored [`BackfillSpec::set_clause`] assigns the
+    /// [`BackfillSpec::cursor_column`] itself. Mutating the cursor column breaks
+    /// paging: the window reads pre-update cursor values and advances to their
+    /// max, but the UPDATE changed those values, so rows whose cursor increased
+    /// re-enter a later window (`cursor > old_max`) — re-processed, looping, and
+    /// double-applying a non-idempotent transform. Rejected in pre-flight.
+    #[error("set_clause assigns the cursor_column {cursor_column:?}; a backfill must not mutate the column it pages on (author a separate migration / page on an immutable key)")]
+    CursorColumnMutated {
+        /// The cursor column the transform illegally assigns.
+        cursor_column: String,
+    },
     /// A batch's `UPDATE` failed at execution (after the guard passed). The batch
     /// transaction was rolled back, so its progress was NOT advanced — the
     /// backfill is left at the last committed cursor and is safely resumable.
@@ -482,6 +512,146 @@ async fn resolve_cursor_type(
         })
 }
 
+/// Assert the cursor column is safe to page on: backed by a single-column
+/// `PRIMARY KEY` / `UNIQUE` index AND `NOT NULL`.
+///
+/// The whole backfill's correctness depends on this. The per-batch UPDATE
+/// matches `cursor_column IN (SELECT key FROM window)` and advances the cursor to
+/// the window's `max(key)`:
+///   - a **non-unique** cursor over-matches EVERY row sharing a key value —
+///     updating far more than `batch_size` rows in one transaction (a
+///     low-cardinality cursor like a boolean rewrites a huge fraction of the
+///     table in a single txn, defeating the non-blocking bound and the
+///     `statement_timeout`), AND bypassing the authored `filter` (a row that does
+///     not match the filter but shares a key with one that does is mutated too);
+///   - a **NULL** cursor value never satisfies `cursor > $last` (NULL compares as
+///     unknown) and sorts last, so NULL-keyed rows are silently never paged.
+///
+/// Both are closed by requiring a UNIQUE NOT NULL key (a `PRIMARY KEY` is the
+/// canonical choice). Introspection binds schema/table/column as parameters
+/// (injection-safe, like [`resolve_cursor_type`]).
+async fn validate_cursor_column(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    spec: &BackfillSpec,
+) -> Result<(), BackfillError> {
+    // `indkey[0]` is the (0-based) single key attnum of a single-key
+    // (`indnkeyatts = 1`) unique/primary index — so we match a one-column
+    // PK/UNIQUE on exactly the cursor column (a composite or INCLUDE index does
+    // not qualify).
+    let rows = conn
+        .query(
+            "SELECT a.attnotnull AS not_null,
+                    EXISTS (
+                        SELECT 1 FROM pg_index i
+                        WHERE i.indrelid = c.oid
+                          AND (i.indisunique OR i.indisprimary)
+                          AND i.indnkeyatts = 1
+                          AND i.indkey[0] = a.attnum
+                    ) AS is_unique
+               FROM pg_attribute a
+               JOIN pg_class c ON c.oid = a.attrelid
+               JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = $1 AND c.relname = $2 AND a.attname = $3
+                AND a.attnum > 0 AND NOT a.attisdropped",
+            &[&cfg.project_schema, &spec.table, &spec.cursor_column],
+        )
+        .await?;
+    let Some(row) = rows.into_iter().next() else {
+        // The column does not exist (resolve_cursor_type would have caught this
+        // already, but stay defensive).
+        return Err(BackfillError::TargetNotFound(format!(
+            "{}.{} column {} not found",
+            cfg.project_schema, spec.table, spec.cursor_column
+        )));
+    };
+    let not_null: bool = row.get("not_null");
+    let is_unique: bool = row.get("is_unique");
+    if !is_unique {
+        return Err(BackfillError::CursorNotUniqueNotNull {
+            table: spec.table.clone(),
+            cursor_column: spec.cursor_column.clone(),
+            reason: "not backed by a single-column PRIMARY KEY or UNIQUE index",
+        });
+    }
+    if !not_null {
+        return Err(BackfillError::CursorNotUniqueNotNull {
+            table: spec.table.clone(),
+            cursor_column: spec.cursor_column.clone(),
+            reason: "it is nullable",
+        });
+    }
+    Ok(())
+}
+
+/// Reject an authored `set_clause` that assigns the cursor column itself.
+///
+/// Parses the ASSEMBLED statement (the exact `WITH … UPDATE … SET <set_clause> …`
+/// we run) with the real Postgres parser and inspects the `UPDATE` CTE's SET
+/// target list. If the cursor column is among the assigned targets the backfill
+/// is refused — mutating the paged column breaks the cursor (rows whose key is
+/// changed re-enter a later window → re-processing / infinite loop /
+/// double-apply). Done once in pre-flight, not per batch.
+fn assert_cursor_not_mutated(
+    assembled_sql: &str,
+    cursor_column: &str,
+) -> Result<(), BackfillError> {
+    // The assembled SQL has already passed the guard (which re-parses it), so a
+    // parse failure here is not expected; treat it as a target problem rather
+    // than panicking.
+    let parsed = pg_query::parse(assembled_sql).map_err(|e| {
+        BackfillError::TargetNotFound(format!("could not parse assembled backfill SQL: {e}"))
+    })?;
+    let json = serde_json::to_value(&parsed.protobuf).unwrap_or(Value::Null);
+    let mut mutates = false;
+    walk_update_set_targets(&json, &mut |name| {
+        if name.eq_ignore_ascii_case(cursor_column) {
+            mutates = true;
+            return true;
+        }
+        false
+    });
+    if mutates {
+        return Err(BackfillError::CursorColumnMutated {
+            cursor_column: cursor_column.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Walk the serialized parse tree for every `UpdateStmt` and invoke `visit` with
+/// each SET target column name (`UpdateStmt.target_list[].ResTarget.name`).
+/// `visit` returns `true` to short-circuit. Covers the UPDATE nested in the
+/// backfill's CTE (the walk is depth-agnostic).
+fn walk_update_set_targets(v: &Value, visit: &mut dyn FnMut(&str) -> bool) -> bool {
+    match v {
+        Value::Object(map) => {
+            if let Some(upd) = map.get("UpdateStmt") {
+                if let Some(Value::Array(targets)) = upd.get("target_list") {
+                    for t in targets {
+                        // Each target is a prost `Node` wrapper, serialized as
+                        // `{"node": {"ResTarget": {name, …}}}`; tolerate the
+                        // unwrapped `{"ResTarget": {…}}` shape too.
+                        let res = t
+                            .get("ResTarget")
+                            .or_else(|| t.get("node").and_then(|n| n.get("ResTarget")));
+                        if let Some(name) =
+                            res.and_then(|r| r.get("name")).and_then(Value::as_str)
+                        {
+                            if !name.is_empty() && visit(name) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            map.values().any(|c| walk_update_set_targets(c, visit))
+        }
+        Value::Array(items) => items.iter().any(|i| walk_update_set_targets(i, visit)),
+        _ => false,
+    }
+}
+
 /// Run (or resume) a large-table backfill (design §5).
 ///
 /// Pages over `spec.table` by `spec.cursor_column` in `spec.batch_size` chunks.
@@ -565,7 +735,13 @@ pub async fn run_backfill_bounded(
     // cast — never interpolated from the author.
     let cursor_type = resolve_cursor_type(conn, cfg, spec).await?;
 
-    // Gate 3 — GUARD the ASSEMBLED statement (both window shapes: with and without
+    // Gate 3a — the cursor column MUST be a single-column UNIQUE/PK key and NOT
+    // NULL. Without this the `cursor IN (window keys)` UPDATE over-matches every
+    // row sharing a key (defeating the batch bound + bypassing the filter) and
+    // NULL keys are silently skipped. Rejected before any batch runs.
+    validate_cursor_column(conn, cfg, spec).await?;
+
+    // Gate 3b — GUARD the ASSEMBLED statement (both window shapes: with and without
     // the cursor parameter), so the engine predicate + authored transform + filter
     // are validated as one unit before any batch runs. A denial aborts everything.
     let guard = SqlGuard::new(GuardConfig {
@@ -578,6 +754,14 @@ pub async fn run_backfill_bounded(
             .check(&sql)
             .map_err(|source| BackfillError::Guard { source })?;
     }
+
+    // Gate 3c — the authored transform MUST NOT assign the cursor column itself
+    // (mutating the paged key breaks the cursor → re-processing / loop /
+    // double-apply). Inspect the assembled UPDATE's SET target list.
+    assert_cursor_not_mutated(
+        &build_batch_sql(cfg, spec, &cursor_type, true),
+        &spec.cursor_column,
+    )?;
 
     // Read existing progress to resume from the last committed cursor (if any).
     let existing = backfill_progress(conn, cfg, &backfill_id).await?;

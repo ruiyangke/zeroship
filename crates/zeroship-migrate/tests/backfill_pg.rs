@@ -681,3 +681,154 @@ async fn backfill_runs_under_migrator_role_and_completes() {
 
     drop_schemas(&conn, &cfg).await;
 }
+
+// ---------------------------------------------------------------------------
+// DATA-INTEGRITY: the cursor column must be a single-column UNIQUE/PK key and
+// NOT NULL. A non-unique cursor would over-match (`cursor IN (window keys)`
+// catches every row sharing a key → defeats the batch bound + bypasses the
+// authored filter); a NULL key is silently skipped. Both refused in pre-flight.
+// ---------------------------------------------------------------------------
+
+async fn count_null(conn: &Client, schema: &str, table: &str) -> i64 {
+    conn.query_one(
+        &format!("SELECT count(*) AS c FROM \"{schema}\".{table} WHERE normalized IS NULL"),
+        &[],
+    )
+    .await
+    .expect("count")
+    .get::<_, i64>("c")
+}
+
+#[compio::test]
+async fn backfill_refuses_non_unique_cursor_column() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    // `grp` is NOT NULL but has NO unique index (deliberately duplicate values),
+    // so it is unsafe to page on.
+    conn.batch_execute(&format!(
+        "CREATE TABLE \"{}\".items (id INTEGER PRIMARY KEY, grp INTEGER NOT NULL, normalized TEXT)",
+        cfg.project_schema
+    ))
+    .await
+    .expect("create items");
+    conn.batch_execute(&format!(
+        "INSERT INTO \"{}\".items (id, grp) SELECT g, g % 3 FROM generate_series(1, 30) AS g",
+        cfg.project_schema
+    ))
+    .await
+    .expect("seed items");
+
+    let spec = BackfillSpec {
+        table: "items".into(),
+        cursor_column: "grp".into(),
+        batch_size: 10,
+        set_clause: "normalized = 'x'".into(),
+        filter: None,
+        name: "bad_cursor".into(),
+    };
+    let err = run_backfill(&conn, &cfg, &spec, Approval::Approved, "test")
+        .await
+        .expect_err("a non-unique cursor column must be refused");
+    assert!(
+        matches!(&err, BackfillError::CursorNotUniqueNotNull { cursor_column, .. } if cursor_column == "grp"),
+        "got {err:?}"
+    );
+    assert_eq!(
+        count_null(&conn, &cfg.project_schema, "items").await,
+        30,
+        "the refusal mutated nothing"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn backfill_refuses_nullable_cursor_column() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    // `code` is UNIQUE but NULLABLE — NULL-keyed rows would be silently skipped,
+    // so it is unsafe to page on even though it is unique.
+    conn.batch_execute(&format!(
+        "CREATE TABLE \"{}\".things (id INTEGER PRIMARY KEY, code INTEGER UNIQUE, normalized TEXT)",
+        cfg.project_schema
+    ))
+    .await
+    .expect("create things");
+    conn.batch_execute(&format!(
+        "INSERT INTO \"{}\".things (id, code) SELECT g, g FROM generate_series(1, 20) AS g",
+        cfg.project_schema
+    ))
+    .await
+    .expect("seed things");
+
+    let spec = BackfillSpec {
+        table: "things".into(),
+        cursor_column: "code".into(),
+        batch_size: 10,
+        set_clause: "normalized = 'x'".into(),
+        filter: None,
+        name: "nullable_cursor".into(),
+    };
+    let err = run_backfill(&conn, &cfg, &spec, Approval::Approved, "test")
+        .await
+        .expect_err("a nullable cursor column must be refused");
+    assert!(
+        matches!(&err, BackfillError::CursorNotUniqueNotNull { cursor_column, reason, .. }
+            if cursor_column == "code" && reason.contains("nullable")),
+        "got {err:?}"
+    );
+    assert_eq!(
+        count_null(&conn, &cfg.project_schema, "things").await,
+        20,
+        "the refusal mutated nothing"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// DATA-INTEGRITY: a set_clause that assigns the cursor column itself is refused
+// — mutating the paged key breaks the cursor (rows re-enter later windows →
+// re-processing / loop / double-apply).
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn backfill_refuses_set_clause_that_mutates_cursor_column() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    seed_widgets(&conn, &cfg.project_schema, 10).await;
+
+    // The transform assigns `id`, the very column it pages on.
+    let spec = BackfillSpec {
+        table: "widgets".into(),
+        cursor_column: "id".into(),
+        batch_size: 5,
+        set_clause: "id = id + 1000000".into(),
+        filter: None,
+        name: "mutate_cursor".into(),
+    };
+    let err = run_backfill(&conn, &cfg, &spec, Approval::Approved, "test")
+        .await
+        .expect_err("mutating the cursor column must be refused");
+    assert!(
+        matches!(&err, BackfillError::CursorColumnMutated { cursor_column } if cursor_column == "id"),
+        "got {err:?}"
+    );
+    // Nothing ran: no id was shifted into the +1_000_000 range.
+    assert_eq!(
+        count_where(&conn, &cfg.project_schema, "id > 1000").await,
+        0,
+        "the refusal mutated nothing"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
