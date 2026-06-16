@@ -64,6 +64,7 @@ pub mod classify;
 pub mod db;
 pub mod drift;
 pub mod engine;
+pub mod expand_contract;
 pub mod executor;
 pub mod guard;
 pub mod journal;
@@ -87,6 +88,9 @@ pub use classify::{classify, DdlKind, ParseError, StatementClass};
 pub use engine::{
     EngineError, MigrationEngine, MigrationPlan, PlannedMigration, RollbackEngineError,
 };
+pub use expand_contract::{
+    ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
+};
 pub use db::{connect, ConnectError, ExecutorConfig};
 pub use drift::{
     check_checksum_drift, diff_snapshots, snapshot_schema, AlteredObject, ChecksumDrift,
@@ -104,5 +108,7 @@ pub use journal::{
     Phase, RolledBackEntry,
 };
 pub use status::{history, status, MigrationStatus, StatusError};
-pub use migration::{Checksum, IdError, Migration, MigrationFlags, MigrationId, MIGRATION_PREFIX};
+pub use migration::{
+    Checksum, IdError, Migration, MigrationFlags, MigrationId, OnlinePhase, MIGRATION_PREFIX,
+};
 pub use role::{deprovision_migrator, migrator_role_name, provision_migrator, RoleError};

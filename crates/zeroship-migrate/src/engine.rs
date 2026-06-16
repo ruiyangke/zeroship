@@ -326,4 +326,31 @@ mod tests {
         let plan = MigrationEngine::new().plan(&[a, b], &guard_cfg());
         assert_eq!(plan.denied.len(), 2, "both denials surface");
     }
+
+    #[test]
+    fn expand_contract_rename_set_plans_with_zero_denials() {
+        use crate::expand_contract::{ExpandContractAuthor, OnlineIntent};
+        let plan_in = ExpandContractAuthor::new("proj_acme", "app_acme")
+            .author(&OnlineIntent::RenameColumn {
+                table: "users".into(),
+                from: "email".into(),
+                to: "email_address".into(),
+                ty: "text".into(),
+            })
+            .expect("author");
+        // The whole expand+contract set passes the guard with NO denials — the
+        // dual-write fn (INVOKER plpgsql, project-qualified), the trigger, the
+        // backfill marker, and the gated drops are all guard-safe.
+        let set = plan_in.all();
+        let plan = MigrationEngine::new().plan(&set, &guard_cfg());
+        assert!(
+            plan.denied.is_empty(),
+            "expand-contract set must have zero denials, got {:?}",
+            plan.denied
+        );
+        assert_eq!(plan.items.len(), set.len(), "every migration is planned");
+        // The contract DROP COLUMN makes the set destructive ⇒ requires approval.
+        assert!(plan.destructive);
+        assert!(plan.requires_approval);
+    }
 }
