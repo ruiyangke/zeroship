@@ -1073,9 +1073,20 @@ fn foreign_schema_in_tree(v: &Value, project_schema: &str) -> Option<String> {
 /// where naming it is routine and benign — never as a broad whitelist.
 fn slot_exempts_schema(slot: SchemaSlot, schema: &str) -> bool {
     match slot {
-        // Concrete relation/object targets reach a real object outside the
-        // pinned schema; nothing is exempt (catalog reads are denied here).
-        SchemaSlot::RangeVar | SchemaSlot::Object => false,
+        // Nothing is exempt:
+        //   - RangeVar/Object: concrete relation/object targets reach a real
+        //     object outside the pinned schema (catalog reads denied here);
+        //   - CreationTarget: planting/altering a type INTO a schema (CREATE
+        //     TYPE … AS ENUM/RANGE, ALTER TYPE …) — mirrors a function
+        //     *definition* target, so `public`/`pg_catalog`/`control` are all
+        //     denied, same as any other tenant schema.
+        SchemaSlot::RangeVar | SchemaSlot::Object | SchemaSlot::CreationTarget => false,
+        // Built-in-bearing object sub-slots: index `opclass` and `COLLATE`
+        // `collname` routinely name a `pg_catalog` builtin
+        // (`pg_catalog.text_ops`, `pg_catalog."C"`). `pg_catalog` ONLY is
+        // exempt here (not `public`, not other catalog schemas, not a tenant
+        // schema — `control.myops` stays denied).
+        SchemaSlot::BuiltinObject => schema.eq_ignore_ascii_case("pg_catalog"),
         // Type references (builtins desugar to `pg_catalog.<type>`) and
         // function *call* qualifiers: catalog + `public` are routine and
         // benign. Catalog table *reads* go via RangeVar (not exempt there);
@@ -1103,9 +1114,21 @@ enum SchemaSlot {
     /// NOT exempt here.
     RangeVar,
     /// A concrete object/schema target: `newschema`, `CreateSchemaStmt`
-    /// `schemaname`, COMMENT/DROP object lists, index `opclass`, `COLLATE`
-    /// `collname`, sequence `OWNED BY`.
+    /// `schemaname`, COMMENT/RENAME `object`, DROP `objects`, `ObjectWithArgs`
+    /// `objname`, sequence `OWNED BY` / identity `SEQUENCE NAME`.
     Object,
+    /// A creation/alter target carried in a `type_name` qualified-name *list*
+    /// (`CreateEnumStmt`/`CreateRangeStmt`/`AlterEnumStmt`/`AlterTypeStmt`):
+    /// planting/altering a type INTO a schema. Like a function-definition
+    /// target, NO shared-schema exemption — `public.e`/`pg_catalog.e`/
+    /// `control.e` are all denied. (Distinct from [`SchemaSlot::TypeRef`],
+    /// which is a `TypeName.names` *reference* where builtins are exempt.)
+    CreationTarget,
+    /// A built-in-bearing object sub-slot: index `opclass` / `COLLATE`
+    /// `collname`. These routinely name a `pg_catalog` builtin
+    /// (`pg_catalog.text_ops`, `pg_catalog."C"`), so `pg_catalog` ONLY is
+    /// exempt; a foreign tenant/platform opclass or collation is denied.
+    BuiltinObject,
     /// A type reference (`TypeName.names`): column/return/param/cast/`OF` type.
     TypeRef,
     /// A function-name *call* qualifier (`FuncCall`/trigger/CALL `funcname`).
@@ -1153,31 +1176,80 @@ fn walk_schema_names(v: &Value, visit: &mut dyn FnMut(&str, SchemaSlot) -> bool)
                     return true;
                 }
             }
+            // `type_name` as a qualified-name *list* (NOT a nested `TypeName`
+            // object): the creation/alter target of CreateEnumStmt /
+            // CreateRangeStmt / AlterEnumStmt / AlterTypeStmt. (`CreateStmt`/
+            // `ColumnDef` carry `type_name` as a nested `TypeName` *object*
+            // whose schema lives under `names`, handled above — a non-array
+            // `type_name` yields no parts here, so this is target-only.)
+            if let Some(schema) = qualified_list_schema(map.get("type_name")) {
+                if visit(&schema, SchemaSlot::CreationTarget) {
+                    return true;
+                }
+            }
             // Qualified function-name *call* lists: trigger/CALL/FuncCall.
             if let Some(schema) = qualified_list_schema(map.get("funcname")) {
                 if visit(&schema, SchemaSlot::FuncCall) {
                     return true;
                 }
             }
-            // Qualified object lists: COMMENT/DROP `object` ([schema, object]),
-            // index `opclass` ([schema, opclass]), COLLATE `collname`
-            // ([schema, collation]).
-            for key in ["object", "opclass", "collname"] {
+            // COMMENT/RENAME/DEPENDS `object` (singular) + `ObjectWithArgs`
+            // `objname` — a concrete object target ([schema, object]).
+            for key in ["object", "objname"] {
                 if let Some(schema) = qualified_list_schema(map.get(key)) {
                     if visit(&schema, SchemaSlot::Object) {
                         return true;
                     }
                 }
             }
-            // `OWNED BY <schema>.<table>.<column>` — the DefElem named
-            // `owned_by` carries a 2-part (`table.col`, no schema) or 3-part
-            // (`schema.table.col`) list. The schema is present only at 3 parts.
-            if map.get("defname").and_then(Value::as_str) == Some("owned_by") {
-                if let Some(schema) = owned_by_schema(map.get("arg")) {
-                    if visit(&schema, SchemaSlot::Object) {
+            // DROP/GRANT `objects` (PLURAL): a list whose *items* are each a
+            // qualified-name node (`List`/`TypeName`/`ObjectWithArgs`). Walk
+            // each item's own qualifier — flattening the outer array would
+            // mis-read it. (`DROP TYPE control.t` carries a `TypeName` item,
+            // already covered by the `names` walk above; tables/indexes/
+            // views/sequences/triggers/functions carry a `List`/`ObjectWithArgs`
+            // the singular `object`/`names` keys never reach.)
+            if let Some(Value::Array(items)) = map.get("objects") {
+                for item in items {
+                    if let Some(schema) = qualified_list_schema(Some(item)) {
+                        if visit(&schema, SchemaSlot::Object) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            // Built-in-bearing sub-slots: index `opclass` ([schema, opclass]),
+            // COLLATE `collname` ([schema, collation]). `pg_catalog` builtins
+            // are exempt here (and only here) via SchemaSlot::BuiltinObject.
+            for key in ["opclass", "collname"] {
+                if let Some(schema) = qualified_list_schema(map.get(key)) {
+                    if visit(&schema, SchemaSlot::BuiltinObject) {
                         return true;
                     }
                 }
+            }
+            // DefElem object slots:
+            //   - `owned_by`: `OWNED BY <schema>.<table>.<column>` — 2-part
+            //     (`table.col`, no schema) or 3-part (`schema.table.col`);
+            //     schema present only at 3 parts.
+            //   - `sequence_name`: identity `… (SEQUENCE NAME <schema>.s)` —
+            //     a `List[schema, name]` (schema present at 2+ parts).
+            match map.get("defname").and_then(Value::as_str) {
+                Some("owned_by") => {
+                    if let Some(schema) = owned_by_schema(map.get("arg")) {
+                        if visit(&schema, SchemaSlot::Object) {
+                            return true;
+                        }
+                    }
+                }
+                Some("sequence_name") => {
+                    if let Some(schema) = qualified_list_schema(map.get("arg")) {
+                        if visit(&schema, SchemaSlot::Object) {
+                            return true;
+                        }
+                    }
+                }
+                _ => {}
             }
             for child in map.values() {
                 if walk_schema_names(child, visit) {

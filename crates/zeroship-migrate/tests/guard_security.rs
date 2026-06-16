@@ -1350,6 +1350,235 @@ fn sequence_owned_by_own_table_passes() {
 }
 
 // ---------------------------------------------------------------------------
+// ROUND 3 — type-creation target confinement (MAJOR-1)
+//
+// `CREATE TYPE`/`CREATE TYPE … AS RANGE`/`ALTER TYPE … ADD VALUE` carry their
+// target schema in a `type_name` qualified-name list (NOT a `TypeName.names`
+// reference, NOT a RangeVar). The kinds are safe-listed, so without reading
+// `type_name` the target was un-confined: creating a type INTO `control`/
+// `public`/another tenant escaped. Like a function-definition target, there is
+// NO shared-schema exemption — defining a type into `public` or `pg_catalog`
+// is just as out-of-remit as into `control`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn create_enum_in_control_schema_is_cross_schema() {
+    assert_cross_schema("CREATE TYPE control.e AS ENUM ('a')");
+}
+
+#[test]
+fn create_enum_in_public_schema_is_cross_schema() {
+    // No shared-schema exemption for a creation target: `public` is denied too.
+    assert_cross_schema("CREATE TYPE public.e AS ENUM ('a')");
+}
+
+#[test]
+fn create_enum_in_other_tenant_schema_is_cross_schema() {
+    assert_cross_schema("CREATE TYPE project_evil.e AS ENUM ('a')");
+}
+
+#[test]
+fn create_range_in_control_schema_is_cross_schema() {
+    assert_cross_schema("CREATE TYPE control.r AS RANGE (subtype=int4)");
+}
+
+#[test]
+fn alter_enum_add_value_in_control_schema_is_cross_schema() {
+    assert_cross_schema("ALTER TYPE control.e ADD VALUE 'x'");
+}
+
+#[test]
+fn create_enum_in_own_schema_passes() {
+    assert_ok("CREATE TYPE project_acme.e AS ENUM('a')");
+}
+
+#[test]
+fn create_enum_unqualified_passes() {
+    // Resolves under the pinned search_path — fine.
+    assert_ok("CREATE TYPE e AS ENUM('a')");
+}
+
+#[test]
+fn create_range_in_own_schema_passes() {
+    assert_ok("CREATE TYPE project_acme.r AS RANGE (subtype=int4)");
+}
+
+#[test]
+fn alter_enum_add_value_in_own_schema_passes() {
+    assert_ok("ALTER TYPE project_acme.e ADD VALUE 'x'");
+}
+
+#[test]
+fn create_composite_type_in_control_schema_stays_cross_schema() {
+    // Already denied (composite carries TypeName.names); guard against regression.
+    assert_cross_schema("CREATE TYPE control.c AS (a int)");
+}
+
+#[test]
+fn alter_type_set_in_control_schema_is_cross_schema() {
+    // `ALTER TYPE … SET (…)` is the literal AlterTypeStmt (safe-listed) whose
+    // target also rides the `type_name` list slot.
+    assert_cross_schema("ALTER TYPE control.t SET (storage = plain)");
+}
+
+#[test]
+fn alter_type_set_in_own_schema_passes() {
+    assert_ok("ALTER TYPE project_acme.t SET (storage = plain)");
+}
+
+// ---------------------------------------------------------------------------
+// ROUND 3 — identity SEQUENCE NAME target confinement (MAJOR-2)
+//
+// `GENERATED … AS IDENTITY (SEQUENCE NAME <schema>.s)` carries the foreign
+// schema in a `sequence_name` DefElem whose arg is a `List[schema, name]` —
+// a slot the schema walk never read. The owning CREATE TABLE / ALTER TABLE is
+// safe-listed, so the implicit sequence could be planted in `control`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn identity_sequence_name_in_control_schema_is_cross_schema() {
+    assert_cross_schema(
+        "CREATE TABLE t (id int GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME control.s))",
+    );
+}
+
+#[test]
+fn identity_sequence_name_in_other_tenant_schema_is_cross_schema() {
+    assert_cross_schema(
+        "CREATE TABLE t (id int GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME project_evil.s))",
+    );
+}
+
+#[test]
+fn alter_table_add_identity_sequence_name_in_control_schema_is_cross_schema() {
+    assert_cross_schema(
+        "ALTER TABLE project_acme.t ALTER COLUMN id \
+         ADD GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME control.s)",
+    );
+}
+
+#[test]
+fn identity_sequence_name_in_own_schema_passes() {
+    assert_ok(
+        "CREATE TABLE project_acme.t (id int GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME project_acme.s))",
+    );
+}
+
+#[test]
+fn identity_sequence_name_unqualified_passes() {
+    assert_ok(
+        "CREATE TABLE project_acme.t (id int GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME s))",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ROUND 3 — qualified-builtin over-denial (MINOR)
+//
+// A qualified builtin opclass/collation (`pg_catalog.text_ops`,
+// `pg_catalog."C"`) is legitimate and must PASS — `pg_catalog` is exempt for
+// the builtin-bearing opclass/collname sub-slots specifically. A foreign
+// tenant/platform opclass or collation stays denied.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn collate_pg_catalog_builtin_passes() {
+    assert_ok("CREATE TABLE t (x text COLLATE pg_catalog.\"C\")");
+}
+
+#[test]
+fn index_opclass_pg_catalog_builtin_passes() {
+    assert_ok("CREATE INDEX i ON project_acme.t USING btree (a pg_catalog.text_ops)");
+}
+
+#[test]
+fn collate_control_schema_stays_cross_schema() {
+    assert_cross_schema("CREATE TABLE t (x text COLLATE control.mycollation)");
+}
+
+#[test]
+fn index_opclass_control_schema_stays_cross_schema() {
+    assert_cross_schema("CREATE INDEX i ON project_acme.t USING btree (a control.myops)");
+}
+
+// ---------------------------------------------------------------------------
+// ROUND 3 (convergence) — DROP <obj> <foreign>.x via the `objects` list slot
+//
+// `DropStmt.objects` is a *plural* list whose items are `List`/`TypeName`/
+// `ObjectWithArgs` nodes carrying the qualified object name. The walk read the
+// singular `object` (COMMENT/RENAME) but not `objects`, so every DROP of a
+// foreign-schema object (TABLE/INDEX/VIEW/SEQUENCE/TRIGGER/FUNCTION) escaped
+// confinement. Same root class (un-enumerated schema-bearing slot).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn drop_table_in_control_schema_is_cross_schema() {
+    assert_cross_schema("DROP TABLE control.t");
+}
+
+#[test]
+fn drop_index_in_control_schema_is_cross_schema() {
+    assert_cross_schema("DROP INDEX control.i");
+}
+
+#[test]
+fn drop_view_in_control_schema_is_cross_schema() {
+    assert_cross_schema("DROP VIEW control.v");
+}
+
+#[test]
+fn drop_sequence_in_control_schema_is_cross_schema() {
+    assert_cross_schema("DROP SEQUENCE control.s");
+}
+
+#[test]
+fn drop_multiple_tables_with_one_foreign_is_cross_schema() {
+    assert_cross_schema("DROP TABLE control.a, control.b");
+}
+
+#[test]
+fn drop_trigger_on_foreign_table_is_cross_schema() {
+    assert_cross_schema("DROP TRIGGER tg ON control.t");
+}
+
+#[test]
+fn drop_function_in_control_schema_is_cross_schema() {
+    assert_cross_schema("DROP FUNCTION control.f(int)");
+}
+
+#[test]
+fn drop_own_schema_objects_pass() {
+    assert_ok("DROP TABLE project_acme.t");
+    assert_ok("DROP INDEX project_acme.i");
+    assert_ok("DROP TABLE t");
+}
+
+#[test]
+fn round3_legit_own_schema_batch_has_no_new_over_denials() {
+    // A spread of realistic own-schema migrations touching every slot the
+    // round-3 fixes added: enums/range/identity-sequences/qualified-builtin
+    // opclass+collate/composite/OF-type. All must PASS.
+    for sql in [
+        "CREATE TYPE project_acme.mood AS ENUM ('happy','sad')",
+        "CREATE TYPE mood AS ENUM ('happy','sad')",
+        "ALTER TYPE project_acme.mood ADD VALUE 'meh'",
+        "CREATE TYPE project_acme.rng AS RANGE (subtype = int4)",
+        "CREATE TABLE project_acme.t (id int GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME project_acme.s))",
+        "CREATE TABLE project_acme.t2 (id int GENERATED BY DEFAULT AS IDENTITY)",
+        "CREATE TABLE project_acme.c (x text COLLATE pg_catalog.\"C\")",
+        "CREATE TABLE project_acme.c2 (x text COLLATE \"C\")",
+        "CREATE INDEX i ON project_acme.t USING btree (a pg_catalog.text_ops)",
+        "CREATE INDEX i2 ON project_acme.t USING btree (a)",
+        "CREATE TYPE project_acme.pt AS (x int, y int)",
+        "CREATE SEQUENCE project_acme.s OWNED BY project_acme.t.id",
+        "ALTER TYPE project_acme.t SET (storage = extended)",
+        "DROP TABLE project_acme.old",
+        "DROP INDEX project_acme.idx",
+    ] {
+        assert_ok(sql);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Task 6 — public API surface smoke test (uses only crate-root re-exports)
 // ---------------------------------------------------------------------------
 
