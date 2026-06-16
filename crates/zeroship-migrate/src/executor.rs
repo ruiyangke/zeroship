@@ -472,37 +472,37 @@ async fn apply_locked(
         }
     }
 
-    // Drift / tamper check: every migration in the set that the journal records
-    // as completed must still match its recorded checksum.
-    for m in migrations {
-        if let Some(entry) = completed.get(m.version.as_str()) {
-            if entry.checksum != m.checksum.as_str() {
-                return Err(ApplyError::ChecksumDrift {
-                    version: m.version.as_str().to_string(),
-                    recorded: entry.checksum.clone(),
-                    expected: m.checksum.as_str().to_string(),
-                });
-            }
-        }
+    // Drift / tamper check (design §2.3 step 3): every migration in the set that
+    // the journal records as net-applied must still match its recorded checksum.
+    // This is the SHARED comparison — `crate::drift::check_checksum_drift` builds
+    // the full report (used read-only by the status/drift API), and apply aborts
+    // on the FIRST checksum mismatch it surfaces. One implementation, two callers:
+    // the report and the abort-on-drift gate cannot diverge.
+    let drift_report = crate::drift::check_checksum_drift(conn, cfg, migrations)
+        .await
+        .map_err(|e| match e {
+            crate::drift::DriftError::Db(db) => ApplyError::Db(db),
+            crate::drift::DriftError::Journal(j) => ApplyError::Journal(j),
+        })?;
+    if let Some(d) = drift_report.checksum_drift.into_iter().next() {
+        return Err(ApplyError::ChecksumDrift {
+            version: d.version,
+            recorded: d.recorded,
+            expected: d.expected,
+        });
     }
 
-    // M1: a version recorded `completed` in the journal but ABSENT from the
-    // supplied set is surfaced, not silently ignored — it usually means the
-    // bundle is missing a migration the database already has (a downgrade / a
-    // dropped slice). We log a warning; correctness is unaffected (we still
-    // only apply what's pending), but the operator should know.
-    {
-        use std::collections::HashSet;
-        let supplied: HashSet<&str> = migrations.iter().map(|m| m.version.as_str()).collect();
-        for v in completed.keys() {
-            if !supplied.contains(*v) {
-                tracing::warn!(
-                    version = %v,
-                    project = %cfg.project_id,
-                    "zeroship-migrate: journal records a completed migration absent from the supplied set"
-                );
-            }
-        }
+    // M1: a version recorded net-applied in the journal but ABSENT from the
+    // supplied set (an orphan) is surfaced, not silently ignored — it usually
+    // means the bundle is missing a migration the database already has (a
+    // downgrade / a dropped slice). We log a warning; correctness is unaffected
+    // (we still only apply what's pending), but the operator should know.
+    for orphan in &drift_report.orphan_journal {
+        tracing::warn!(
+            version = %orphan.version,
+            project = %cfg.project_id,
+            "zeroship-migrate: journal records a completed migration absent from the supplied set"
+        );
     }
 
     // Pending = set − completed. Ordered by `depends_on` when present
@@ -587,7 +587,11 @@ async fn apply_locked(
 /// - [`ApplyError::MissingDependency`] — a `depends_on` names a version absent
 ///   from both the supplied set and the journal.
 /// - [`ApplyError::DependencyCycle`] — the pending edges form a cycle.
-fn order_pending<'a>(
+///
+/// `pub(crate)` so the read-only status API ([`crate::status`]) computes its
+/// `pending` list in the **exact same topo order** apply uses — there is one
+/// pending-ordering implementation, never a re-derived one.
+pub(crate) fn order_pending<'a>(
     migrations: &'a [Migration],
     completed: &HashMap<&str, &AppliedEntry>,
 ) -> Result<Vec<&'a Migration>, ApplyError> {

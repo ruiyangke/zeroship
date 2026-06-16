@@ -61,6 +61,7 @@ pub mod approval;
 pub mod author;
 pub mod classify;
 pub mod db;
+pub mod drift;
 pub mod engine;
 pub mod executor;
 pub mod guard;
@@ -81,6 +82,11 @@ pub use engine::{
     EngineError, MigrationEngine, MigrationPlan, PlannedMigration, RollbackEngineError,
 };
 pub use db::{connect, ConnectError, ExecutorConfig};
+pub use drift::{
+    check_checksum_drift, diff_snapshots, snapshot_schema, ChecksumDrift, ChecksumDriftReport,
+    ColumnSnapshot, ConstraintSnapshot, DriftError, DriftReport, IndexSnapshot, OrphanJournal,
+    SchemaSnapshot, StructuralDrift, TableSnapshot,
+};
 pub use executor::{
     apply, rollback, ApplyError, ApplyOutcome, RollbackError, RollbackOptions, RollbackOutcome,
     RollbackRequest, RollbackTarget,
