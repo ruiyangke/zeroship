@@ -613,9 +613,13 @@ async fn apply_locked(
 /// A `dep` that is a NON-expand present in the set imposes no expand/contract
 /// ordering (the topo sort handles ordinary deps); it is skipped.
 ///
+/// A pending Contract with an EMPTY `depends_on` is malformed and refused
+/// fail-closed (it declares no expand to gate on, so it would otherwise pass
+/// vacuously).
+///
 /// # Errors
 /// [`ApplyError::ExpandNotApplied`] — a pending contract's expand dependency is
-/// not net-applied.
+/// not net-applied, or the contract declares no dependency at all.
 fn check_expand_contract_gate(
     migrations: &[Migration],
     completed: &HashMap<&str, &AppliedEntry>,
@@ -631,6 +635,17 @@ fn check_expand_contract_gate(
             || completed.contains_key(m.version.as_str())
         {
             continue;
+        }
+        // Fail closed: a Contract migration MUST declare the expand it depends on.
+        // With an empty `depends_on` the loop below would check nothing and the
+        // contract would vacuously pass — dropping a column/trigger with no
+        // journaled expand. A contract that declares no expand is malformed.
+        if m.depends_on.is_empty() {
+            return Err(ApplyError::ExpandNotApplied {
+                version: m.version.as_str().to_string(),
+                expand: "<none declared: a contract must declare an expand dependency>"
+                    .to_string(),
+            });
         }
         for dep in &m.depends_on {
             let dep_v = dep.as_str();
