@@ -597,3 +597,47 @@ fn flags_for_non_transactional_sets_transactional_false() {
         "a CONCURRENTLY migration must be marked non-transactional"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 6 — public API surface smoke test (uses only crate-root re-exports)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn crate_root_reexports_compose_an_end_to_end_check() {
+    use zeroship_migrate::{
+        classify, flags_for, Checksum, DdlKind, GuardConfig, Migration, MigrationFlags,
+        MigrationId, SqlGuard,
+    };
+
+    // classify is reachable from the crate root.
+    let classes = classify("CREATE TABLE project_x.t(id int)").expect("parses");
+    assert_eq!(classes[0].kind, DdlKind::CreateTable);
+
+    // A guard + report + flags_for, all via root paths.
+    let g = SqlGuard::new(GuardConfig {
+        project_schema: "project_x".to_string(),
+        extension_allowlist: vec![],
+    });
+    let up = "CREATE TABLE project_x.t(id int primary key); DROP TABLE project_x.old;";
+    let report = g.check(up).expect("safe migration passes");
+    assert!(report.destructive, "the DROP makes the migration destructive");
+    let flags = flags_for(&report);
+    assert!(flags.requires_approval);
+
+    // A guard denial via the root GuardError type.
+    assert!(g.check("ALTER SYSTEM SET x = 1").is_err());
+
+    // Build a full Migration from the root types.
+    let m = Migration {
+        version: MigrationId::generate(),
+        name: "create_t".to_string(),
+        up: up.to_string(),
+        down: Some("DROP TABLE project_x.t".to_string()),
+        checksum: Checksum::of(up, Some("DROP TABLE project_x.t")),
+        flags: MigrationFlags::default(),
+        owner_app: "app_0000000000000000000000".to_string(),
+        depends_on: vec![],
+    };
+    assert!(m.version.as_str().starts_with("mig_"));
+    assert_eq!(m.checksum.as_str().len(), 64);
+}
