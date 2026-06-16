@@ -80,7 +80,8 @@ pub use db::{connect, ConnectError, ExecutorConfig};
 pub use executor::{apply, ApplyError, ApplyOutcome};
 pub use guard::{flags_for, GuardConfig, GuardError, GuardReport, SqlGuard};
 pub use journal::{
-    applied, ensure_journal, record_completed, record_started, AppliedEntry, JournalError, Phase,
+    applied, ensure_journal, record_completed, record_rolled_back, record_started, AppliedEntry,
+    JournalError, Phase,
 };
 pub use migration::{Checksum, IdError, Migration, MigrationFlags, MigrationId, MIGRATION_PREFIX};
 pub use role::{deprovision_migrator, migrator_role_name, provision_migrator, RoleError};

@@ -105,10 +105,30 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
     conn.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {meta}"))
         .await?;
 
+    // 1b. A single monotonic sequence shared by BOTH event tables
+    //     (schema_migrations + schema_migrations_rolled_back), so the latest event
+    //     per version is decided by a total order that never ties — `now()` can be
+    //     equal across two events in one transaction / fast succession, but the
+    //     sequence is strictly increasing. `applied()` reads net state off it.
+    conn.batch_execute(&format!(
+        "CREATE SEQUENCE IF NOT EXISTS {meta}.schema_migrations_event_seq"
+    ))
+    .await?;
+
     // 2. The append-only journal of record (design §2.2 columns).
+    //
+    //    Rollback is append-only too (Plan 5): a `completed` row is NEVER deleted
+    //    on rollback — a `rolled_back` event is appended to the side table below.
+    //    A rolled-back migration becomes pending again and may be RE-APPLIED,
+    //    which appends a NEW `completed` row for the same version. So `version` is
+    //    NOT a primary key here (multiple completed events per version are legal,
+    //    across rollback↔re-apply cycles); the surrogate `event_seq` is the PK and
+    //    the total order. The immutability trigger still forbids UPDATE/DELETE, so
+    //    the log stays append-only.
     conn.batch_execute(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations (
-            version     TEXT PRIMARY KEY,
+            event_seq   BIGINT PRIMARY KEY DEFAULT nextval('{meta}.schema_migrations_event_seq'),
+            version     TEXT NOT NULL,
             name        TEXT NOT NULL,
             checksum    TEXT NOT NULL,
             applied_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -116,6 +136,24 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
             exec_ms     BIGINT,
             phase       TEXT NOT NULL CHECK (phase IN ('started','completed')),
             outcome     TEXT NOT NULL
+        )"
+    ))
+    .await?;
+
+    // 2a. The append-only ROLLBACK event log (Plan 5). One row per `rolled_back`
+    //     event, written by the ADMIN (the migrator has no grant on the meta
+    //     schema — Plan 3 C1). It shares the same monotonic sequence as
+    //     schema_migrations so `applied()` can order a version's completed vs
+    //     rolled-back events on one total scale. Immutable too (trigger below).
+    conn.batch_execute(&format!(
+        "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations_rolled_back (
+            event_seq     BIGINT PRIMARY KEY DEFAULT nextval('{meta}.schema_migrations_event_seq'),
+            version       TEXT NOT NULL,
+            name          TEXT NOT NULL,
+            checksum      TEXT NOT NULL,
+            rolled_back_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            rolled_back_by TEXT NOT NULL,
+            exec_ms       BIGINT
         )"
     ))
     .await?;
@@ -134,47 +172,67 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
     ))
     .await?;
 
-    // 3. Immutability trigger on the journal of record (billing-ledger pattern,
-    //    0048_credit_ledger). Reject UPDATE + DELETE outright.
+    // 3. Immutability trigger function (billing-ledger pattern,
+    //    0048_credit_ledger). Reject UPDATE + DELETE outright. Shared by both
+    //    append-only event tables (schema_migrations + …_rolled_back).
     conn.batch_execute(&format!(
         "CREATE OR REPLACE FUNCTION {trg_fn}() RETURNS trigger AS $fn$
          BEGIN
-             RAISE EXCEPTION 'schema_migrations is append-only (no UPDATE/DELETE)';
+             RAISE EXCEPTION 'migration journal is append-only (no UPDATE/DELETE)';
          END;
          $fn$ LANGUAGE plpgsql"
     ))
     .await?;
 
-    // 4. Attach the trigger idempotently (PG 16 has no CREATE TRIGGER IF NOT
-    //    EXISTS; guard on pg_trigger).
-    conn.batch_execute(&format!(
-        "DO $do$ BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_trigger t
-                JOIN pg_class c ON c.oid = t.tgrelid
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE t.tgname = '{trg_name}'
-                  AND c.relname = 'schema_migrations'
-                  AND n.nspname = '{meta_lit}'
-            ) THEN
-                EXECUTE 'CREATE TRIGGER {trg_name}
-                         BEFORE UPDATE OR DELETE ON {meta}.schema_migrations
-                         FOR EACH ROW EXECUTE FUNCTION {trg_fn}()';
-            END IF;
-        END $do$"
-    ))
-    .await?;
+    // 4. Attach the trigger idempotently to BOTH append-only event tables (PG 16
+    //    has no CREATE TRIGGER IF NOT EXISTS; guard on pg_trigger).
+    for (tbl, trg) in [
+        ("schema_migrations", trg_name.clone()),
+        (
+            "schema_migrations_rolled_back",
+            format!("{}_schema_migrations_rolled_back_immutable_trg", cfg.meta_schema),
+        ),
+    ] {
+        conn.batch_execute(&format!(
+            "DO $do$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_trigger t
+                    JOIN pg_class c ON c.oid = t.tgrelid
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE t.tgname = '{trg}'
+                      AND c.relname = '{tbl}'
+                      AND n.nspname = '{meta_lit}'
+                ) THEN
+                    EXECUTE 'CREATE TRIGGER {trg}
+                             BEFORE UPDATE OR DELETE ON {meta}.{tbl}
+                             FOR EACH ROW EXECUTE FUNCTION {trg_fn}()';
+                END IF;
+            END $do$"
+        ))
+        .await?;
+    }
 
     Ok(())
 }
 
-/// Read the journal of record + inflight markers for the drift check + pending
+/// Read the **net applied state** of the journal for the drift check + pending
 /// computation, ordered by version (`UUIDv7` apply order).
 ///
-/// Completed rows come from `schema_migrations`; `started` markers come from
-/// `schema_migrations_inflight`. A version present in both (completed) wins —
-/// but in normal operation the inflight marker is cleared on completion, so the
-/// overlap only happens transiently.
+/// The journal is append-only, including rollback (Plan 5): a `completed` row is
+/// never deleted; rollback **appends** a `rolled_back` event to
+/// `schema_migrations_rolled_back`, and a re-apply appends a fresh `completed`
+/// row. So a version can carry several events over rollback↔re-apply cycles. The
+/// NET state of a version is decided by its **latest event** on the shared
+/// monotonic `event_seq` scale:
+///
+/// - latest event is `completed` ⇒ the version is **applied** (returned as a
+///   [`Phase::Completed`] entry carrying that latest completed row's checksum, so
+///   the drift check compares against the current incarnation);
+/// - latest event is `rolled_back` ⇒ the version is **pending again** (NOT
+///   returned as completed; it re-enters `pending = set − completed` and can be
+///   re-applied);
+/// - no completed row at all but a lone `started` inflight marker ⇒ returned as a
+///   [`Phase::Started`] entry (the non-txn crash-recovery key), exactly as before.
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure; [`JournalError::BadPhase`] if a stored
@@ -184,18 +242,36 @@ pub async fn applied(
     cfg: &ExecutorConfig,
 ) -> Result<Vec<AppliedEntry>, JournalError> {
     let meta = quote_ident(&cfg.meta_schema);
+    // Union every completed + rolled_back event onto one (event_seq, kind, …)
+    // stream, take the LATEST per version with DISTINCT ON, and keep only the
+    // versions whose latest event is `completed` (net-applied). Then UNION the
+    // lone `started` inflight markers for versions that are NOT net-completed.
     let rows = conn
         .query(
             &format!(
-                "SELECT version, checksum, phase FROM (
-                     SELECT version, checksum, phase FROM {meta}.schema_migrations
+                "WITH events AS (
+                     SELECT version, checksum, event_seq, 'completed' AS kind
+                       FROM {meta}.schema_migrations
                      UNION ALL
-                     SELECT version, checksum, 'started' AS phase
-                       FROM {meta}.schema_migrations_inflight i
-                      WHERE NOT EXISTS (
-                          SELECT 1 FROM {meta}.schema_migrations m WHERE m.version = i.version
-                      )
-                 ) j ORDER BY version"
+                     SELECT version, checksum, event_seq, 'rolled_back' AS kind
+                       FROM {meta}.schema_migrations_rolled_back
+                 ),
+                 latest AS (
+                     SELECT DISTINCT ON (version) version, checksum, kind
+                       FROM events
+                      ORDER BY version, event_seq DESC
+                 ),
+                 net_completed AS (
+                     SELECT version, checksum FROM latest WHERE kind = 'completed'
+                 )
+                 SELECT version, checksum, 'completed' AS phase FROM net_completed
+                 UNION ALL
+                 SELECT version, checksum, 'started' AS phase
+                   FROM {meta}.schema_migrations_inflight i
+                  WHERE NOT EXISTS (
+                      SELECT 1 FROM net_completed n WHERE n.version = i.version
+                  )
+                 ORDER BY version"
             ),
             &[],
         )
@@ -213,6 +289,41 @@ pub async fn applied(
         });
     }
     Ok(out)
+}
+
+/// Append a `rolled_back` event for a version (Plan 5 rollback).
+///
+/// Run by the **ADMIN** (the migrator has no grant on the meta schema — Plan 3
+/// C1): the executor brackets a rollback's `down` SQL under the migrator role,
+/// then `RESET ROLE`s back to admin before this journal append, exactly mirroring
+/// the up path. The append is immutable (UPDATE/DELETE forbidden by trigger); a
+/// later re-apply appends a fresh `completed` row, and `applied()` reads the
+/// latest event per version off the shared `event_seq`.
+///
+/// # Errors
+/// [`JournalError::Db`] on insert failure.
+pub async fn record_rolled_back(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    version: &str,
+    name: &str,
+    checksum: &str,
+    rolled_back_by: &str,
+    exec_ms: i64,
+) -> Result<(), JournalError> {
+    let meta = quote_ident(&cfg.meta_schema);
+    let n = conn
+        .execute(
+            &format!(
+                "INSERT INTO {meta}.schema_migrations_rolled_back
+                     (version, name, checksum, rolled_back_by, exec_ms)
+                 VALUES ($1, $2, $3, $4, $5)"
+            ),
+            &[&version, &name, &checksum, &rolled_back_by, &exec_ms],
+        )
+        .await?;
+    debug_assert_eq!(n, 1, "record_rolled_back must insert exactly one event row");
+    Ok(())
 }
 
 /// Write the `started` inflight marker for a non-transactional migration
@@ -258,11 +369,11 @@ pub async fn record_completed(
     exec_ms: i64,
 ) -> Result<(), JournalError> {
     let meta = quote_ident(&cfg.meta_schema);
-    // Plain INSERT — consistent with the transactional path (M3). A `completed`
-    // row is written EXACTLY once: the non-txn recovery path only ever runs when
-    // there is a lone `started` marker and NO completed row, so a unique-key
-    // conflict here is a genuine double-completion bug we must surface, not
-    // silently swallow with `ON CONFLICT DO NOTHING`.
+    // Plain INSERT (consistent with the transactional path, M3). `event_seq` is a
+    // surrogate identity PK, so this appends a fresh `completed` event — including
+    // a re-apply after a rollback (Plan 5), where a prior `completed` + a later
+    // `rolled_back` already exist for this version and `applied()` made it pending
+    // again. Append-only: never an UPDATE.
     let n = conn
         .execute(
             &format!(
