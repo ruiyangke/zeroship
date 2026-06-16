@@ -231,6 +231,67 @@ async fn provision_creates_locked_down_role_and_is_idempotent() {
         .get("o");
     assert_ne!(meta_owner, role, "migrator must NOT own the meta schema");
 
+    // C1: the migrator has NO access to the meta schema at all — neither USAGE on
+    // the schema nor any privilege on the journal tables. The journal is
+    // unforgeable by the migration because the grant is absent (deny-by-absence).
+    let has_usage: bool = conn
+        .query_one(
+            "SELECT has_schema_privilege($1, $2, 'USAGE') AS p",
+            &[&role, &cfg.meta_schema],
+        )
+        .await
+        .expect("has_schema_privilege")
+        .get("p");
+    assert!(!has_usage, "migrator must NOT have USAGE on the meta schema");
+
+    for (verb, ok) in [("INSERT", false), ("SELECT", false), ("UPDATE", false)] {
+        let priv_str = format!("{}.schema_migrations", cfg.meta_schema);
+        let has: bool = conn
+            .query_one(
+                "SELECT has_table_privilege($1, $2, $3) AS p",
+                &[&role, &priv_str, &verb],
+            )
+            .await
+            .expect("has_table_privilege")
+            .get("p");
+        assert_eq!(
+            has, ok,
+            "migrator {verb} on schema_migrations must be {ok} (journal unforgeable)"
+        );
+    }
+    let inflight_str = format!("{}.schema_migrations_inflight", cfg.meta_schema);
+    for verb in ["INSERT", "DELETE", "SELECT"] {
+        let has: bool = conn
+            .query_one(
+                "SELECT has_table_privilege($1, $2, $3) AS p",
+                &[&role, &inflight_str, &verb],
+            )
+            .await
+            .expect("has_table_privilege inflight")
+            .get("p");
+        assert!(
+            !has,
+            "migrator {verb} on schema_migrations_inflight must be denied (journal unforgeable)"
+        );
+    }
+
+    // The migrator's search_path is the PROJECT schema only — the meta schema is
+    // off the migration-time path (defense-in-depth).
+    let sp: String = conn
+        .query_one(
+            "SELECT setconfig[1] AS sp FROM pg_db_role_setting s \
+               JOIN pg_roles r ON r.oid = s.setrole \
+              WHERE r.rolname = $1 \
+                AND setconfig[1] LIKE 'search_path=%' LIMIT 1",
+            &[&role],
+        )
+        .await
+        .map_or_else(|_| String::new(), |row| row.get("sp"));
+    assert!(
+        !sp.contains(&cfg.meta_schema),
+        "migrator search_path must not include the meta schema (got {sp:?})"
+    );
+
     teardown(&conn, &cfg).await;
     assert!(!role_exists(&conn, &role).await, "deprovision drops the role");
 }
@@ -542,6 +603,238 @@ async fn backstop_through_apply_flow_is_denied() {
         .expect("journal count")
         .get("c");
     assert_eq!(n, 0, "denied migration journals nothing");
+
+    teardown(&conn, &cfg).await;
+}
+
+// ===========================================================================
+// C1 (CRITICAL) — JOURNAL FORGERY by a migration `up`.
+//
+// The journal of record (`<meta>.schema_migrations`) and the inflight side-table
+// MUST be unforgeable by a migration's `up`. A migration runs as the migrator
+// role; the executor performs ALL journal I/O as the admin. The migrator has NO
+// grants on the meta schema, so any attempt by an `up` to write the journal —
+// qualified or unqualified — fails with `permission denied` at execution.
+//
+// These tests reproduce the forge attack end-to-end through the real `apply()`.
+// Pre-fix they were RED: the migrator held `INSERT on schema_migrations` +
+// `INSERT,DELETE on schema_migrations_inflight` + `USAGE on meta_schema`, and the
+// migration-time search_path included the meta schema, so an unqualified
+// `INSERT INTO schema_migrations(...)` resolved to the journal and SUCCEEDED.
+// ===========================================================================
+
+/// A migration whose `up` is an UNQUALIFIED `INSERT INTO schema_migrations(...)`.
+/// With the meta schema dropped from the migration-time `search_path` AND the
+/// grant revoked, this must fail (either `permission denied` 42501 OR
+/// `relation does not exist` 42P01 — both prove the forge is impossible). The
+/// migration fails and nothing is forged.
+#[compio::test]
+async fn migration_up_cannot_forge_journal_via_unqualified_insert() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    teardown(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    ensure_journal(&conn, &cfg).await.expect("journal");
+    provision_migrator(&conn, &cfg).await.expect("provision");
+
+    // The forged row targets a fabricated victim version. UNQUALIFIED table name
+    // — pre-fix this resolved to the meta journal via the pinned search_path.
+    let forge = mig(
+        MigrationId::generate(),
+        "forge_unqualified",
+        "INSERT INTO schema_migrations \
+             (version, name, checksum, applied_by, exec_ms, phase, outcome) \
+         VALUES ('mig_victim', 'victim', 'deadbeef', 'attacker', 0, 'completed', 'success')",
+    );
+    let err = apply(&conn, &cfg, std::slice::from_ref(&forge), "actor")
+        .await
+        .expect_err("forging the journal via an unqualified INSERT must fail");
+    // The executor wraps the DB error as MigrationFailed.
+    let zeroship_migrate::ApplyError::MigrationFailed { source, .. } = &err else {
+        panic!("expected MigrationFailed, got {err:?}");
+    };
+    // Either permission-denied (grant revoked) or relation-not-found (meta off the
+    // search_path) — both prove the forge cannot land.
+    let code = source.code();
+    assert!(
+        code == Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+            || code == Some(&compio_postgres::error::SqlState::UNDEFINED_TABLE),
+        "unqualified journal forge must be denied (42501) or unresolved (42P01), got {code:?}"
+    );
+
+    // Nothing forged: the journal has no `mig_victim` row.
+    let n: i64 = conn
+        .query_one(
+            &format!(
+                "SELECT count(*)::bigint AS c FROM \"{}\".schema_migrations WHERE version = 'mig_victim'",
+                cfg.meta_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("journal count")
+        .get("c");
+    assert_eq!(n, 0, "no forged row may exist in the journal");
+
+    teardown(&conn, &cfg).await;
+}
+
+/// A migration whose `up` is a QUALIFIED `INSERT INTO <meta>.schema_migrations`.
+/// The SQL guard denies cross-schema writes; even if it somehow passed, the
+/// revoked grant denies it at execution. Assert the apply aborts and nothing is
+/// forged.
+#[compio::test]
+async fn migration_up_cannot_forge_journal_via_qualified_insert() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    teardown(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    ensure_journal(&conn, &cfg).await.expect("journal");
+    provision_migrator(&conn, &cfg).await.expect("provision");
+
+    let forge = mig(
+        MigrationId::generate(),
+        "forge_qualified",
+        &format!(
+            "INSERT INTO \"{}\".schema_migrations \
+                 (version, name, checksum, applied_by, exec_ms, phase, outcome) \
+             VALUES ('mig_victim2', 'victim', 'deadbeef', 'attacker', 0, 'completed', 'success')",
+            cfg.meta_schema
+        ),
+    );
+    let err = apply(&conn, &cfg, std::slice::from_ref(&forge), "actor")
+        .await
+        .expect_err("forging the journal via a qualified cross-schema INSERT must fail");
+    // Either the guard rejects it up-front, or the role denies it at execution.
+    assert!(
+        matches!(
+            err,
+            zeroship_migrate::ApplyError::Guard { .. }
+                | zeroship_migrate::ApplyError::MigrationFailed { .. }
+        ),
+        "expected Guard or MigrationFailed, got {err:?}"
+    );
+
+    let n: i64 = conn
+        .query_one(
+            &format!(
+                "SELECT count(*)::bigint AS c FROM \"{}\".schema_migrations WHERE version = 'mig_victim2'",
+                cfg.meta_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("journal count")
+        .get("c");
+    assert_eq!(n, 0, "no forged row may exist in the journal");
+
+    teardown(&conn, &cfg).await;
+}
+
+/// END-TO-END SUPPRESS ATTACK (the critic's reproduction): a malicious migration
+/// forges a `completed` row for a VICTIM version. Pre-fix, the forge succeeded,
+/// so a later legitimate deploy of the victim migration was silently SKIPPED
+/// (pending = set − completed). With the fix, the forge FAILS, so when the victim
+/// migration is later deployed it STILL RUNS — its table IS created.
+#[compio::test]
+async fn forged_completed_row_does_not_suppress_a_future_victim_migration() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    teardown(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    ensure_journal(&conn, &cfg).await.expect("journal");
+    provision_migrator(&conn, &cfg).await.expect("provision");
+
+    // The victim version the attacker wants to suppress.
+    let victim_version = MigrationId::generate();
+
+    // Step 1: a malicious migration forges a `completed` row for the victim.
+    let attack = mig(
+        MigrationId::generate(),
+        "suppress_attack",
+        &format!(
+            "INSERT INTO schema_migrations \
+                 (version, name, checksum, applied_by, exec_ms, phase, outcome) \
+             VALUES ('{}', 'victim', 'deadbeef', 'attacker', 0, 'completed', 'success')",
+            victim_version.as_str()
+        ),
+    );
+    let attack_err = apply(&conn, &cfg, std::slice::from_ref(&attack), "actor").await;
+    assert!(
+        attack_err.is_err(),
+        "the forge attack must fail (the migrator cannot write the journal)"
+    );
+
+    // The forged completed row must NOT be in the journal.
+    let forged: i64 = conn
+        .query_one(
+            &format!(
+                "SELECT count(*)::bigint AS c FROM \"{}\".schema_migrations WHERE version = $1",
+                cfg.meta_schema
+            ),
+            &[&victim_version.as_str()],
+        )
+        .await
+        .expect("journal count")
+        .get("c");
+    assert_eq!(forged, 0, "the suppress attack must NOT plant a completed row");
+
+    // Step 2: the LEGITIMATE victim migration is later deployed. Because nothing
+    // was forged, it is still pending and RUNS — its table is created.
+    let victim = mig(
+        victim_version.clone(),
+        "victim_creates_table",
+        &format!(
+            "CREATE TABLE \"{}\".victim_table (id bigint primary key)",
+            cfg.project_schema
+        ),
+    );
+    let out = apply(&conn, &cfg, std::slice::from_ref(&victim), "actor")
+        .await
+        .expect("the victim migration must still run (not suppressed)");
+    assert_eq!(out.applied.len(), 1, "the victim migration applied");
+    assert!(
+        table_exists(&conn, &cfg.project_schema, "victim_table").await,
+        "the victim migration's effect MUST be present — it was not silently suppressed"
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
+/// A migration whose `up` is an UNQUALIFIED `DELETE FROM schema_migrations_inflight`.
+/// The migrator no longer has DELETE on the inflight table (grant revoked) and the
+/// meta schema is off its `search_path`, so this fails — it cannot tamper with the
+/// inflight markers.
+#[compio::test]
+async fn migration_up_cannot_delete_inflight_markers() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    teardown(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    ensure_journal(&conn, &cfg).await.expect("journal");
+    provision_migrator(&conn, &cfg).await.expect("provision");
+
+    let forge = mig(
+        MigrationId::generate(),
+        "delete_inflight",
+        "DELETE FROM schema_migrations_inflight",
+    );
+    let err = apply(&conn, &cfg, std::slice::from_ref(&forge), "actor")
+        .await
+        .expect_err("deleting inflight markers must fail");
+    let zeroship_migrate::ApplyError::MigrationFailed { source, .. } = &err else {
+        panic!("expected MigrationFailed, got {err:?}");
+    };
+    let code = source.code();
+    assert!(
+        code == Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+            || code == Some(&compio_postgres::error::SqlState::UNDEFINED_TABLE),
+        "inflight DELETE must be denied (42501) or unresolved (42P01), got {code:?}"
+    );
 
     teardown(&conn, &cfg).await;
 }

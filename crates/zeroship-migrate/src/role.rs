@@ -39,19 +39,37 @@
 //! - **owns** the project schema (so its DDL + `ALTER DEFAULT PRIVILEGES`
 //!   targets work and objects it creates are owned/usable by it), with
 //!   `CREATE, USAGE` on it.
-//! - on the **meta schema** (which it does *not* own — the admin owns it so the
-//!   migrator cannot drop the immutability trigger / journal table): `USAGE`
-//!   only, plus `SELECT, INSERT` on `schema_migrations` and
-//!   `SELECT, INSERT, DELETE` on `schema_migrations_inflight` (the two-phase
-//!   non-txn protocol writes a `started` marker, inserts the immutable
-//!   `completed` row, then deletes the marker).
-//! - `search_path` pinned to the project schema (+ meta) via `ALTER ROLE`.
+//! - **NO access whatsoever to the meta schema.** This is the C1 fix: the
+//!   migrator must not be able to forge the journal. A migration's `up` runs as
+//!   the migrator, so if the migrator could `INSERT` into the journal it could
+//!   plant a `completed` row (silently suppressing a future legitimate
+//!   migration: `pending = set − completed`) or a bogus checksum (wedging the
+//!   apply on `ChecksumDrift`). All journal / inflight I/O is therefore done by
+//!   the **executor as the admin role** — the migrator gets neither `USAGE` on
+//!   the meta schema nor any grant on `schema_migrations` /
+//!   `schema_migrations_inflight`. The journal is unforgeable by deny-by-absence.
+//! - `search_path` pinned to the project schema **only** via `ALTER ROLE` (the
+//!   meta schema is off the migrator's path — defense-in-depth so an unqualified
+//!   name in an `up` can never resolve to the journal even if a grant were ever
+//!   reintroduced).
 //! - **`REVOKE` of `CREATE`/`USAGE` on `public`** so it cannot stage objects in
 //!   the shared `public` schema or resolve unqualified names there.
 //! - **No grant whatsoever** on `control` / `auth` / `billing` / `zeroship` /
 //!   any other project schema. Deny-by-absence: a role only has what it is
 //!   granted, so an unmentioned schema is unreachable. This is the line-2
 //!   backstop.
+//!
+//! # Known residuals (tracked, no behavior change)
+//!
+//! - **M2 — `CREATE FUNCTION … SET search_path`** is denied by the guard but is
+//!   NOT role-backstopped. This is harmless: functions the migrator creates are
+//!   `INVOKER` by default, so they run with the *caller's* privileges (no
+//!   escalation), and `SECURITY DEFINER` (which would run as the function owner,
+//!   the migrator) is itself guard-denied. So the line-2 role gives no extra
+//!   confinement here, and none is needed. Tracked only.
+//! - **M1 — `pg_roles` enumeration.** The migrator can read `pg_roles` (a
+//!   cluster-global catalog `USAGE`-free to all roles). Accepted: role names are
+//!   not secrets and there is no privilege to enumerate. No change.
 //!
 //! # Idempotency
 //!
@@ -155,14 +173,13 @@ pub fn migrator_role_name(project_id: &str) -> Result<String, RoleError> {
 /// Idempotently provision the least-privilege `migrator` role for a project
 /// (design §1.3). Run by an admin/control principal with `CREATEROLE`.
 ///
-/// Establishes the role, makes it own the **project schema**, grants it the
-/// minimal journal write surface on the (admin-owned) **meta schema**, pins its
-/// `search_path`, and revokes `public`. After this, the executor can `SET ROLE`
-/// to it to run migrations under least privilege.
+/// Establishes the role, makes it own the **project schema**, pins its
+/// `search_path` to the project schema, and revokes `public` and any residual
+/// access to the **meta schema**. After this, the executor can `SET ROLE` to it
+/// to run migrations under least privilege — but the migrator has **no** access
+/// to the journal (the executor does all journal I/O as admin; C1 fix).
 ///
-/// Both the project schema and the meta schema are expected to exist (the
-/// journal bootstrap and project provisioning create them). The grants on the
-/// meta journal tables therefore run after [`crate::journal::ensure_journal`].
+/// The project schema is expected to exist (project provisioning creates it).
 ///
 /// # Errors
 /// - [`RoleError::BadRoleName`] if the project id yields no valid role name.
@@ -234,29 +251,39 @@ pub async fn provision_migrator(admin: &Client, cfg: &ExecutorConfig) -> Result<
     )
     .await?;
 
-    // 5. The journal write surface on the admin-owned meta schema. USAGE only
-    //    (no CREATE — the migrator must not add objects to meta), and the exact
-    //    verbs the two-phase journal path needs:
-    //      schema_migrations           : SELECT, INSERT  (append-only; the
-    //                                    immutability trigger blocks UPDATE/DELETE
-    //                                    regardless, and we don't grant them)
-    //      schema_migrations_inflight  : SELECT, INSERT, DELETE (marker lifecycle)
+    // 5. The migrator must have NO access to the meta schema — the journal is
+    //    unforgeable by deny-by-absence (C1 fix). The executor does ALL journal /
+    //    inflight I/O as the admin role; the migrator's `up` (which runs as the
+    //    migrator) must never be able to write a forged `completed` row or tamper
+    //    with the inflight markers. REVOKE explicitly so a re-provision over a
+    //    role that previously held these grants (or a future grant slip) is
+    //    cleaned up — every REVOKE is idempotent.
+    //
+    //    NOTE: `IF EXISTS` on the table-level REVOKE so provisioning does not
+    //    fail before the journal bootstrap has created the tables (provisioning
+    //    no longer depends on `ensure_journal` ordering).
     exec_retry(
         admin,
         &format!(
-            "GRANT USAGE ON SCHEMA {meta_q} TO {role_q}; \
-             GRANT SELECT, INSERT ON {meta_q}.schema_migrations TO {role_q}; \
-             GRANT SELECT, INSERT, DELETE ON {meta_q}.schema_migrations_inflight TO {role_q};"
+            "DO $revoke$ BEGIN
+                IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = '{meta_lit}') THEN
+                    EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA {meta_q} FROM {role_q}';
+                    EXECUTE 'REVOKE ALL ON SCHEMA {meta_q} FROM {role_q}';
+                END IF;
+             END $revoke$",
+            meta_lit = quote_lit(&cfg.meta_schema),
         ),
     )
     .await?;
 
-    // 6. Pin search_path to the project + meta schema. Unqualified names in a
-    //    migration resolve into the project schema; the migrator never sees
-    //    `public` or `zeroship` on its path.
+    // 6. Pin search_path to the PROJECT schema only. Unqualified names in a
+    //    migration resolve into the project schema; the migrator never sees the
+    //    meta schema, `public`, or `zeroship` on its path — so an unqualified
+    //    `INSERT INTO schema_migrations` in an `up` can never resolve to the
+    //    journal (defense-in-depth behind the revoked grant; C1 fix).
     exec_retry(
         admin,
-        &format!("ALTER ROLE {role_q} SET search_path = {proj_q}, {meta_q}"),
+        &format!("ALTER ROLE {role_q} SET search_path = {proj_q}"),
     )
     .await?;
 
