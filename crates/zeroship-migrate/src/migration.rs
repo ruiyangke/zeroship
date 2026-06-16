@@ -82,6 +82,34 @@ impl MigrationId {
     }
 }
 
+/// The phase of a zero-downtime **expand-contract** online migration (design
+/// §5, Plan 8). Carried only by `online` migrations (`flags.online == true`);
+/// `None` for an ordinary one-shot migration.
+///
+/// An online column RENAME (or type change) is split across **two deploys**:
+///
+/// - **`Expand`** — additively grow the schema so old and new shapes coexist
+///   (add the new nullable column, install a dual-write trigger, backfill).
+///   Lands *before* dependent code switches over.
+/// - **`Contract`** — drop the old shape once no code uses it (drop the
+///   trigger + function, drop the old column). Lands *after* code switches over.
+///
+/// The engine enforces the split via a gate (design Plan 8 v1.2): a `Contract`
+/// migration is refused unless every `Expand` migration it `depends_on` is
+/// **net-applied in the journal**. This makes the journal the single source of
+/// truth for the expand→contract timeline and gives cross-deploy partitioning
+/// for free (a separate, later deploy can apply the contract).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum OnlinePhase {
+    /// The additive, coexistence-establishing half (add column, dual-write
+    /// trigger, backfill). Lands before dependent code switches over.
+    Expand,
+    /// The destructive, cleanup half (drop trigger/function, drop old column).
+    /// Lands after code stops using the old shape; gated on the matching
+    /// `Expand` being net-applied.
+    Contract,
+}
+
 /// Apply-time flags carried by a migration (design §2.1).
 ///
 /// These four booleans are the exact §2.1 migration-unit flag set; they are
@@ -89,7 +117,10 @@ impl MigrationId {
 /// online + requires-approval), not a state machine, so the wire shape is a
 /// flat record of bools by design. A fifth, optional `timeout_ms` lets a single
 /// long migration (a large backfill, an `INDEX CONCURRENTLY` over a huge table)
-/// raise its own `statement_timeout` ceiling above the executor-wide default.
+/// raise its own `statement_timeout` ceiling above the executor-wide default. A
+/// sixth, optional `phase` ([`OnlinePhase`]) tags an `online` expand-contract
+/// step as its expand or contract half — kept as a *separate optional facet*
+/// (not a fifth bool) so the bools stay orthogonal.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MigrationFlags {
@@ -109,6 +140,12 @@ pub struct MigrationFlags {
     /// backfill or a big concurrent index sets its own higher ceiling so the
     /// conservative executor default does not kill it mid-flight.
     pub timeout_ms: Option<u64>,
+    /// The expand/contract phase of an `online` migration ([`OnlinePhase`]).
+    /// `None` for an ordinary one-shot migration; `Some(Expand)` /
+    /// `Some(Contract)` for the two halves of a zero-downtime expand-contract
+    /// sequence. Read by the engine's expand/contract gate (Plan 8 v1.2). Kept
+    /// optional + separate from the four bools so they remain orthogonal facets.
+    pub phase: Option<OnlinePhase>,
 }
 
 impl Default for MigrationFlags {
@@ -119,6 +156,7 @@ impl Default for MigrationFlags {
             online: false,
             requires_approval: false,
             timeout_ms: None,
+            phase: None,
         }
     }
 }
@@ -258,5 +296,6 @@ mod tests {
         assert!(!f.destructive);
         assert!(!f.online);
         assert!(!f.requires_approval);
+        assert_eq!(f.phase, None);
     }
 }
