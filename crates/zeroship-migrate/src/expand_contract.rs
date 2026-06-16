@@ -130,6 +130,64 @@ fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
+/// Validate a bare SQL identifier: non-empty, starts with a letter/underscore,
+/// and contains only `[A-Za-z0-9_]`. Mirrors [`crate::backfill`]'s `validate_ident`
+/// so `table`/`from`/`to` are safe-by-construction at the AUTHOR boundary — not
+/// only safe-by-quoting downstream. Rejects schema-qualified names
+/// (`control.users`), quote-injection (`t"; DROP …`), whitespace, punctuation.
+///
+/// # Errors
+/// [`ExpandContractError::Invalid`] when `value` is not a bare identifier.
+fn validate_ident(what: &str, value: &str) -> Result<(), ExpandContractError> {
+    let mut chars = value.chars();
+    let ok_first = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_');
+    let ok_rest = chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if value.is_empty() || !ok_first || !ok_rest {
+        return Err(ExpandContractError::Invalid(format!(
+            "{what} is not a valid bare identifier: '{value}'"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a Postgres type name spliced verbatim into `ADD COLUMN <to> <ty>`.
+/// The author defends in depth (the downstream guard is the second line): a real
+/// Postgres type never contains a statement separator `;` and always has balanced
+/// parentheses, so we reject a `ty` that has either — closing
+/// `text; CREATE TABLE control.evil(...)` and truncated `numeric(10` at the
+/// author boundary while still accepting `numeric(10,2)`, `varchar(255)`, etc.
+///
+/// # Errors
+/// [`ExpandContractError::Invalid`] when `ty` contains `;` or unbalanced parens.
+fn validate_type(ty: &str) -> Result<(), ExpandContractError> {
+    if ty.contains(';') {
+        return Err(ExpandContractError::Invalid(format!(
+            "column type contains a statement separator ';': '{ty}'"
+        )));
+    }
+    let mut depth: i32 = 0;
+    for c in ty.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return Err(ExpandContractError::Invalid(format!(
+                        "column type has unbalanced parentheses: '{ty}'"
+                    )));
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return Err(ExpandContractError::Invalid(format!(
+            "column type has unbalanced parentheses: '{ty}'"
+        )));
+    }
+    Ok(())
+}
+
 /// Render `<schema>.<object>`, both parts quoted.
 fn qualified(schema: &str, object: &str) -> String {
     format!("{}.{}", quote_ident(schema), quote_ident(object))
@@ -257,6 +315,14 @@ impl ExpandContractAuthor {
         if ty.trim().is_empty() {
             return Err(ExpandContractError::Invalid("column type is empty".into()));
         }
+        // Defense-in-depth: bound the spliced inputs at the author boundary, not
+        // only at the downstream guard. table/from/to must be bare identifiers;
+        // ty (spliced verbatim) must carry no statement separator / unbalanced
+        // parens.
+        validate_ident("table", table)?;
+        validate_ident("from", from)?;
+        validate_ident("to", to)?;
+        validate_type(ty)?;
 
         let schema = &self.project_schema;
         let tbl_q = qualified(schema, table);
@@ -735,6 +801,86 @@ mod tests {
                 from: "x".into(),
                 to: "y".into(),
                 ty: "   ".into(),
+            }),
+            Err(ExpandContractError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_type_with_injected_statement_separator() {
+        // A `ty` carrying a second statement is rejected by the AUTHOR (before
+        // the downstream guard ever sees it) — safe by construction.
+        let a = author();
+        let err = a
+            .author(&OnlineIntent::RenameColumn {
+                table: "users".into(),
+                from: "email".into(),
+                to: "email_address".into(),
+                ty: "text; CREATE TABLE control.evil(x int)".into(),
+            })
+            .expect_err("a type with a ';' second statement must be rejected");
+        assert!(matches!(err, ExpandContractError::Invalid(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_type_with_unbalanced_parens() {
+        let a = author();
+        assert!(matches!(
+            a.author(&OnlineIntent::RenameColumn {
+                table: "users".into(),
+                from: "email".into(),
+                to: "email_address".into(),
+                ty: "numeric(10".into(),
+            }),
+            Err(ExpandContractError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn accepts_legitimate_parameterized_type() {
+        // A real parameterized type (balanced parens, no ';') is still accepted.
+        let a = author();
+        let plan = a
+            .author(&OnlineIntent::RenameColumn {
+                table: "amounts".into(),
+                from: "old".into(),
+                to: "new".into(),
+                ty: "numeric(10,2)".into(),
+            })
+            .expect("a balanced parameterized type is valid");
+        assert!(plan.expand[0].up.contains("numeric(10,2)"));
+    }
+
+    #[test]
+    fn rejects_injection_in_table_from_to_identifiers() {
+        let a = author();
+        // Injection in `table`.
+        assert!(matches!(
+            a.author(&OnlineIntent::RenameColumn {
+                table: "users\"; DROP TABLE control.users; --".into(),
+                from: "email".into(),
+                to: "email_address".into(),
+                ty: "text".into(),
+            }),
+            Err(ExpandContractError::Invalid(_))
+        ));
+        // Injection / schema-qualification in `from`.
+        assert!(matches!(
+            a.author(&OnlineIntent::RenameColumn {
+                table: "users".into(),
+                from: "control.secret".into(),
+                to: "email_address".into(),
+                ty: "text".into(),
+            }),
+            Err(ExpandContractError::Invalid(_))
+        ));
+        // Injection in `to`.
+        assert!(matches!(
+            a.author(&OnlineIntent::RenameColumn {
+                table: "users".into(),
+                from: "email".into(),
+                to: "to\"; DROP".into(),
+                ty: "text".into(),
             }),
             Err(ExpandContractError::Invalid(_))
         ));
