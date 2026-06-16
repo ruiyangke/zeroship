@@ -645,3 +645,71 @@ async fn fresh_squash_edge_failure_rolls_back_completed_row_same_txn() {
 
     drop_schemas(&conn, &cfg).await;
 }
+
+/// #3 — the existing-DB `squash()` path (`record_baseline`) writes S's `completed`
+/// row AND its supersession edges ATOMICALLY (one transaction).
+///
+/// Discriminator for the old non-atomic `record_baseline` (a bare INSERT followed by
+/// an autocommit edge loop, with no BEGIN around them): poison every insert into the
+/// supersedes table. Apply v1..v3 normally, then `squash(S)`. The edge insert fails;
+/// because `record_baseline` now brackets the row + edges in one `BEGIN…COMMIT`, the
+/// completed row rolls back too: NO completed row for S and NO edges. (Old code:
+/// S's completed row was already committed when the edge loop failed — partial-edge
+/// corruption.)
+#[compio::test]
+async fn existing_db_squash_record_baseline_is_atomic() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let (m1, m2, m3, s) = three_plus_squash(&cfg.project_schema).await;
+    apply(
+        &conn,
+        &cfg,
+        &[m1.clone(), m2.clone(), m3.clone()],
+        Approval::None,
+        "ci",
+    )
+    .await
+    .expect("apply v1..v3");
+
+    // Poison every INSERT into the supersedes table so the edge write in
+    // record_baseline fails.
+    let trg_fn = format!("poison_sup_{tok}");
+    conn.batch_execute(&format!(
+        "CREATE OR REPLACE FUNCTION \"{meta}\".\"{trg_fn}\"() RETURNS trigger AS $fn$
+         BEGIN RAISE EXCEPTION 'poison: supersedes insert blocked'; END;
+         $fn$ LANGUAGE plpgsql;
+         CREATE TRIGGER poison_sup_trg BEFORE INSERT ON \"{meta}\".schema_migrations_supersedes
+             FOR EACH ROW EXECUTE FUNCTION \"{meta}\".\"{trg_fn}\"();",
+        meta = cfg.meta_schema
+    ))
+    .await
+    .expect("install poison trigger");
+
+    // squash() on the existing DB: the completed-row insert succeeds, the edge
+    // insert raises → the whole record_baseline txn rolls back.
+    let err = squash(&conn, &cfg, &s, "operator")
+        .await
+        .expect_err("edge insert must fail and roll back record_baseline");
+    assert!(
+        matches!(err, SquashError::Journal(_)),
+        "expected a Journal error from the edge insert, got {err:?}"
+    );
+
+    // ATOMICITY: neither the completed row nor any edge survived (same txn).
+    assert_eq!(
+        completed_count(&conn, &cfg.meta_schema, s.version.as_str()).await,
+        0,
+        "S's completed row must NOT survive an edge-insert failure (record_baseline txn)"
+    );
+    assert_eq!(
+        edge_count(&conn, &cfg.meta_schema, s.version.as_str()).await,
+        0,
+        "no edges survive"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}

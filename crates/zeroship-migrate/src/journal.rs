@@ -709,13 +709,37 @@ pub struct BaselineRecord<'a> {
 /// (the adoption path: the schema already physically exists, so the `up` is
 /// recorded not run) and [`crate::squash`]'s existing-DB path (a supersession: the
 /// effect of `[v1..vN]` is already present, so the squash's `up` is recorded not
-/// run). The `completed` row + every supersession edge are inserted in the SAME
-/// caller transaction, so a net-applied squash always carries its full edge set
-/// (no partial-edge window). Append-only: never an UPDATE/DELETE.
+/// run). #3 fix: the `completed` row + every supersession edge are inserted in ONE
+/// transaction THIS function brackets (`BEGIN … COMMIT`, ROLLBACK on any error), so
+/// a net-applied squash always carries its full edge set (no partial-edge window) —
+/// a crash between the row and the edges can no longer leave `S` net-applied with
+/// partial/empty edges (the advisory lock the callers hold gives mutual exclusion,
+/// NOT atomicity). Append-only: never an UPDATE/DELETE.
 ///
 /// # Errors
-/// [`JournalError::Db`] on insert failure.
+/// [`JournalError::Db`] on insert failure (the partial work is rolled back).
 pub async fn record_baseline(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    rec: BaselineRecord<'_>,
+) -> Result<(), JournalError> {
+    conn.batch_execute("BEGIN").await?;
+    let result = record_baseline_inner(conn, cfg, rec).await;
+    if let Err(e) = result {
+        // Roll back the partial row/edges; surface the original error.
+        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+            tracing::warn!(error = %rb, version = %rec.version, "zeroship-migrate: ROLLBACK failed after a record_baseline error (#3)");
+        }
+        return Err(e);
+    }
+    conn.batch_execute("COMMIT").await?;
+    Ok(())
+}
+
+/// The row + edge INSERTs of [`record_baseline`], run INSIDE its `BEGIN … COMMIT`
+/// (#3). Split out so the caller can ROLLBACK on the first failure, making the
+/// completed row and its full edge set atomic.
+async fn record_baseline_inner(
     conn: &Client,
     cfg: &ExecutorConfig,
     rec: BaselineRecord<'_>,
