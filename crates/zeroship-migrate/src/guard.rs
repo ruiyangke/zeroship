@@ -165,6 +165,18 @@ impl SqlGuard {
         //     dangerous function as a TEXT literal the FuncCall walk never sees.
         Self::check_regproc_casts(json, raw)?;
 
+        // 3c. Cross-schema via a STRING LITERAL argument: a schema-qualified
+        //     object named inside a literal passed to a `reg*` cast or a
+        //     name-resolving builtin (`nextval`/`setval`/`to_regclass`/…) is an
+        //     `A_Const`, invisible to the structural schema walker. Re-check the
+        //     literal's leading `schema.` qualifier for confinement.
+        self.check_literal_schema_refs(json, raw)?;
+
+        // 3d. `set_config('search_path'|'role'|…, …)` is the function form of a
+        //     `SET <param>` the structural VariableSetStmt gate denies — deny
+        //     the call form identically.
+        Self::check_set_config_calls(json, raw)?;
+
         // 4. Recurse into DO blocks and function bodies — the must-inspect
         //    case. A dangerous construct hidden in a body is still dangerous.
         self.check_bodies(node, raw)?;
@@ -476,6 +488,86 @@ impl SqlGuard {
         });
         if let Some(r) = found {
             return Err(denied(r, raw));
+        }
+        Ok(())
+    }
+
+    /// Deny a schema-qualified object named inside a STRING LITERAL passed to a
+    /// `reg*` cast or a name-resolving builtin.
+    ///
+    /// `'control.users'::regclass`, `nextval('control.s')`,
+    /// `setval('control.billing_seq', 0)`, `to_regclass('control.users')`,
+    /// `pg_get_serial_sequence('control.t','id')` all reach (read *or*
+    /// mutate) a foreign-tenant object whose schema lives in an `A_Const`
+    /// string literal — invisible to [`foreign_schema_in_tree`], which only
+    /// sees structural qualified-name nodes. Here we parse the literal's
+    /// leading `schema.` qualifier and run it through the SAME cross-schema
+    /// policy (own-schema OK; otherwise denied — these are concrete object
+    /// targets, so no shared-schema exemption, same as
+    /// [`SchemaSlot::Object`]).
+    ///
+    /// SCOPE: only LITERAL arguments in these specific positions. A plain data
+    /// literal (`INSERT … VALUES ('control.t')`) is untouched. A
+    /// runtime-constructed argument (`nextval(some_var)`, `nextval('a'||'b')`)
+    /// is NOT an `A_Const` and cannot be resolved at parse time — that is the
+    /// line-2 (least-priv `migrator` role) defense's job, same limit the
+    /// `format('%I', …)` arm acknowledges.
+    fn check_literal_schema_refs(&self, json: &Value, raw: &str) -> Result<(), GuardError> {
+        let mut found: Option<String> = None;
+        walk_literal_schema_refs(json, &mut |literal, is_namespace_resolver| {
+            // For `regnamespace`/`to_regnamespace` the literal IS a bare schema
+            // name (`'control'`); for object resolvers the schema is the
+            // leading `schema.` qualifier (`'control.t'`).
+            let schema = if is_namespace_resolver {
+                let s = literal.trim().trim_matches('"').trim();
+                if s.is_empty() {
+                    return false;
+                }
+                s.to_string()
+            } else {
+                match literal_schema_qualifier(literal) {
+                    Some(s) => s,
+                    None => return false,
+                }
+            };
+            if schema.eq_ignore_ascii_case(&self.cfg.project_schema) {
+                return false;
+            }
+            // Concrete object target — Object-slot policy: no shared-schema
+            // exemption (`public.t`/`pg_catalog.t`/`control.t` all denied).
+            found = Some(schema);
+            true
+        });
+        if let Some(schema) = found {
+            return Err(GuardError::CrossSchema {
+                schema,
+                statement: raw.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Deny `set_config('search_path'|'role'|'session_authorization', …)`.
+    ///
+    /// `set_config(param, value, is_local)` is the function-call form of `SET
+    /// param = value`. The structural [`NodeEnum::VariableSetStmt`] gate denies
+    /// a `SET search_path`/`role`/`session_authorization`, but a `FuncCall`
+    /// slips past it — so the call form is denied identically by matching the
+    /// first string-literal argument against [`denylist::FORBIDDEN_SET_PARAMS`].
+    /// A benign GUC (`statement_timeout`) stays allowed, mirroring the
+    /// structural SET allowance. (Runtime-constructed param names are not
+    /// literals and are out of parse-time scope — the line-2 role defense.)
+    fn check_set_config_calls(json: &Value, raw: &str) -> Result<(), GuardError> {
+        let mut denied_param = false;
+        walk_set_config_calls(json, &mut |param| {
+            if denylist::list_contains_ci(denylist::FORBIDDEN_SET_PARAMS, param) {
+                denied_param = true;
+                return true;
+            }
+            false
+        });
+        if denied_param {
+            return Err(denied(rule::FORBIDDEN_SET, raw));
         }
         Ok(())
     }
@@ -992,6 +1084,254 @@ fn walk_regproc_casts(v: &Value, visit: &mut dyn FnMut(&str) -> bool) -> bool {
         }
         Value::Array(items) => items.iter().any(|i| walk_regproc_casts(i, visit)),
         _ => false,
+    }
+}
+
+/// Walk the ENTIRE serialized parse tree for the two string-literal-carried
+/// schema leaks and invoke `visit` with the literal text:
+///   - a `TypeCast` to any [`denylist::REG_TYPES`] member whose argument is a
+///     string literal (`'control.users'::regclass`);
+///   - a `FuncCall` to any [`denylist::NAME_RESOLVER_FUNCTIONS`] member whose
+///     FIRST argument is a string literal (`nextval('control.s')`,
+///     `pg_get_serial_sequence('control.t','id')`).
+///
+/// `visit(literal, is_namespace_resolver)` returns `true` to short-circuit.
+/// `is_namespace_resolver` is `true` for `regnamespace` / `to_regnamespace`,
+/// where the literal IS a bare schema name (no `schema.object` split); `false`
+/// for object resolvers where the schema is the leading `schema.` qualifier.
+/// Only literal (`A_Const`) arguments are inspected — runtime-constructed names
+/// are not visible at parse time.
+fn walk_literal_schema_refs(v: &Value, visit: &mut dyn FnMut(&str, bool) -> bool) -> bool {
+    match v {
+        Value::Object(map) => {
+            if let Some(cast) = map.get("TypeCast") {
+                if let Some(reg) = reg_family_name(cast.get("type_name")) {
+                    if let Some(lit) = type_cast_string_literal(cast.get("arg")) {
+                        if visit(&lit, reg.eq_ignore_ascii_case("regnamespace")) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            if let Some(call) = map.get("FuncCall") {
+                if let Some(name) = name_resolver_func(call.get("funcname")) {
+                    if let Some(lit) = first_arg_string_literal(call.get("args")) {
+                        if visit(&lit, name.eq_ignore_ascii_case("to_regnamespace")) {
+                            return true;
+                        }
+                    }
+                }
+                // Object-address resolvers carry the schema as the FIRST element
+                // of an array literal in the SECOND argument
+                // (`pg_get_object_address('table', '{control,t}', …)`). That
+                // element IS the schema (like a namespace resolver).
+                if func_is_object_address(call.get("funcname")) {
+                    if let Some(schema) = object_address_array_schema(call.get("args")) {
+                        if visit(&schema, true) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            map.values().any(|c| walk_literal_schema_refs(c, visit))
+        }
+        Value::Array(items) => items.iter().any(|i| walk_literal_schema_refs(i, visit)),
+        _ => false,
+    }
+}
+
+/// `type_name`'s trailing (bare) name if it is a member of the `reg*`
+/// pseudo-type family (`pg_catalog.regclass` resolves the same), else `None`.
+fn reg_family_name(type_name: Option<&Value>) -> Option<String> {
+    let parts = qualified_list_parts(type_name.and_then(|t| t.get("names")))?;
+    let last = parts.last()?;
+    denylist::list_contains_ci(denylist::REG_TYPES, last).then(|| last.clone())
+}
+
+/// `funcname`'s trailing (bare) name if it is a name-resolving builtin
+/// (`pg_catalog.nextval` resolves the same builtin), else `None`.
+fn name_resolver_func(funcname: Option<&Value>) -> Option<String> {
+    let parts = qualified_list_parts(funcname)?;
+    let last = parts.last()?;
+    denylist::list_contains_ci(denylist::NAME_RESOLVER_FUNCTIONS, last).then(|| last.clone())
+}
+
+/// Is `funcname`'s trailing (bare) name an object-address resolver whose schema
+/// rides in an array literal? (`pg_catalog.pg_get_object_address` resolves the
+/// same builtin.)
+fn func_is_object_address(funcname: Option<&Value>) -> bool {
+    let Some(parts) = qualified_list_parts(funcname) else {
+        return false;
+    };
+    parts
+        .last()
+        .is_some_and(|f| denylist::list_contains_ci(denylist::OBJECT_ADDRESS_FUNCTIONS, f))
+}
+
+/// The schema element of an object-address call's name array: the SECOND
+/// argument is a Postgres array text literal `'{schema,object,…}'` whose first
+/// element is the schema. Returns that first element, or `None` if absent.
+fn object_address_array_schema(args: Option<&Value>) -> Option<String> {
+    let Some(Value::Array(arr)) = args else {
+        return None;
+    };
+    // args[1] is the object-name array literal.
+    let second = arr.get(1)?;
+    let lit = second
+        .get("node")?
+        .get("AConst")?
+        .get("val")?
+        .get("Sval")?
+        .get("sval")?
+        .as_str()?;
+    parse_pg_array_first_element(lit)
+}
+
+/// First element of a Postgres array text literal (`{a,b}` → `a`, `{"a b",c}`
+/// → `a b`). Best-effort: handles the unquoted and double-quoted element forms.
+fn parse_pg_array_first_element(lit: &str) -> Option<String> {
+    let inner = lit.trim().strip_prefix('{')?;
+    let inner = inner.strip_suffix('}').unwrap_or(inner);
+    let inner = inner.trim_start();
+    if inner.is_empty() {
+        return None;
+    }
+    let Some(rest) = inner.strip_prefix('"') else {
+        // Unquoted element: up to the next comma.
+        let first = inner.split(',').next().unwrap_or(inner).trim();
+        return if first.is_empty() {
+            None
+        } else {
+            Some(first.to_string())
+        };
+    };
+    // Quoted element: read to the next unescaped quote.
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                if let Some(n) = chars.next() {
+                    out.push(n);
+                }
+            }
+            '"' => break,
+            other => out.push(other),
+        }
+    }
+    Some(out)
+}
+
+/// Walk the tree for `set_config(<param-literal>, …)` calls, invoking `visit`
+/// with the first string-literal argument (the GUC name). `visit` returns
+/// `true` to short-circuit.
+fn walk_set_config_calls(v: &Value, visit: &mut dyn FnMut(&str) -> bool) -> bool {
+    match v {
+        Value::Object(map) => {
+            if let Some(call) = map.get("FuncCall") {
+                if func_is_set_config(call.get("funcname")) {
+                    if let Some(param) = first_arg_string_literal(call.get("args")) {
+                        if visit(&param) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            map.values().any(|c| walk_set_config_calls(c, visit))
+        }
+        Value::Array(items) => items.iter().any(|i| walk_set_config_calls(i, visit)),
+        _ => false,
+    }
+}
+
+/// Is `funcname`'s trailing (bare) name `set_config`? (`pg_catalog.set_config`
+/// resolves the same builtin.)
+fn func_is_set_config(funcname: Option<&Value>) -> bool {
+    let Some(parts) = qualified_list_parts(funcname) else {
+        return false;
+    };
+    parts
+        .last()
+        .is_some_and(|f| f.eq_ignore_ascii_case(denylist::SET_CONFIG_FUNCTION))
+}
+
+/// The string-literal value of a `FuncCall.args[0]` (`A_Const { Sval }`), if the
+/// first argument is a bare string literal. Each arg is wrapped in a `node`.
+fn first_arg_string_literal(args: Option<&Value>) -> Option<String> {
+    let Some(Value::Array(arr)) = args else {
+        return None;
+    };
+    let first = arr.first()?;
+    first
+        .get("node")?
+        .get("AConst")?
+        .get("val")?
+        .get("Sval")?
+        .get("sval")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// The leading `schema.` qualifier of an object-name string literal, or `None`
+/// if the literal is unqualified (a bare name) or carries no schema part.
+///
+/// Drops any argument signature (`schema.f(text)` → schema part of `schema.f`)
+/// before splitting, then returns the first dotted component. Honors a
+/// double-quoted leading component (`"My Schema".t` → `My Schema`); a leading
+/// dot or empty schema yields `None`.
+fn literal_schema_qualifier(lit: &str) -> Option<String> {
+    // Strip a trailing argument signature (`f(int, text)`) — reg*procedure
+    // literals may carry one; the schema is in the head before `(`.
+    let head = lit.split('(').next().unwrap_or("").trim();
+    if head.is_empty() {
+        return None;
+    }
+    let (schema, rest) = split_first_qualifier(head);
+    // A schema is present only when there is a trailing component after the
+    // first dot (`control.t` → `control`; bare `t` → no schema).
+    if rest.is_empty() {
+        return None;
+    }
+    let schema = schema.trim();
+    if schema.is_empty() {
+        None
+    } else {
+        Some(schema.to_string())
+    }
+}
+
+/// Split an object-name string on its FIRST top-level `.` separator, honoring a
+/// double-quoted leading identifier (where `.` inside the quotes is literal).
+/// Returns `(first_component, rest_after_dot)`; `rest` is `""` when there is no
+/// dot (an unqualified name).
+fn split_first_qualifier(s: &str) -> (String, &str) {
+    let bytes = s.as_bytes();
+    if bytes.first() == Some(&b'"') {
+        // Quoted identifier: scan to the closing quote (doubled "" stays inside).
+        let mut i = 1;
+        let mut ident = String::new();
+        while i < bytes.len() {
+            if bytes[i] == b'"' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                    ident.push('"');
+                    i += 2;
+                    continue;
+                }
+                i += 1; // consume closing quote
+                break;
+            }
+            ident.push(bytes[i] as char);
+            i += 1;
+        }
+        // After the closing quote, a `.` introduces the rest.
+        let rest = s.get(i..).unwrap_or("");
+        let rest = rest.strip_prefix('.').unwrap_or("");
+        (ident, rest)
+    } else {
+        match s.split_once('.') {
+            Some((first, rest)) => (first.to_string(), rest),
+            None => (s.to_string(), ""),
+        }
     }
 }
 

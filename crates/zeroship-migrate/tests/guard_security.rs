@@ -1579,6 +1579,193 @@ fn round3_legit_own_schema_batch_has_no_new_over_denials() {
 }
 
 // ---------------------------------------------------------------------------
+// SEC round-4 — schema-as-string-literal-argument to a name-resolving function
+// or a reg* cast. The schema-qualified object hides inside an `A_Const` string
+// literal, invisible to the structural schema walker. These are cross-tenant
+// reads AND writes (setval/nextval mutate a foreign sequence).
+// ---------------------------------------------------------------------------
+
+// --- sequence name-resolvers (cross-tenant WRITES via setval/nextval) ---
+
+#[test]
+fn nextval_on_foreign_sequence_is_cross_schema() {
+    assert_cross_schema("SELECT nextval('control.s')");
+}
+
+#[test]
+fn currval_on_foreign_sequence_is_cross_schema() {
+    assert_cross_schema("SELECT currval('control.s')");
+}
+
+#[test]
+fn setval_on_foreign_sequence_is_cross_schema() {
+    // setval is a WRITE to a foreign tenant's sequence.
+    assert_cross_schema("SELECT setval('control.billing_seq', 0)");
+}
+
+#[test]
+fn nextval_foreign_sequence_in_insert_values_is_cross_schema() {
+    assert_cross_schema("INSERT INTO project_acme.log VALUES (nextval('control.invoice_seq'))");
+}
+
+#[test]
+fn nextval_foreign_sequence_in_column_default_is_cross_schema() {
+    assert_cross_schema(
+        "CREATE TABLE project_acme.t (a int DEFAULT nextval('control.s'))",
+    );
+}
+
+// --- reg* casts naming a foreign-schema object as a string literal ---
+
+#[test]
+fn regclass_cast_of_foreign_table_is_cross_schema() {
+    assert_cross_schema("SELECT 'control.users'::regclass");
+}
+
+#[test]
+fn regnamespace_cast_of_foreign_schema_is_cross_schema() {
+    assert_cross_schema("SELECT 'control'::regnamespace");
+}
+
+#[test]
+fn regtype_cast_of_foreign_type_is_cross_schema() {
+    assert_cross_schema("SELECT 'control.money'::regtype");
+}
+
+#[test]
+fn regrole_cast_passes_through_reg_family() {
+    // A bare role name has no schema qualifier — stays OK (no over-denial);
+    // exercises the full reg* family coverage.
+    assert_ok("SELECT 'app_user'::regrole");
+}
+
+// --- to_reg* / pg_get_serial_sequence name-resolving builtins ---
+
+#[test]
+fn to_regclass_of_foreign_table_is_cross_schema() {
+    assert_cross_schema("SELECT to_regclass('control.users')");
+}
+
+#[test]
+fn to_regnamespace_of_foreign_schema_is_cross_schema() {
+    assert_cross_schema("SELECT to_regnamespace('control')");
+}
+
+#[test]
+fn pg_get_serial_sequence_of_foreign_table_is_cross_schema() {
+    assert_cross_schema("SELECT pg_get_serial_sequence('control.t','id')");
+}
+
+// --- positive controls: must stay OK (precise scope, no over-denial) ---
+
+#[test]
+fn nextval_bare_sequence_passes() {
+    assert_ok("SELECT nextval('s')");
+}
+
+#[test]
+fn nextval_own_schema_sequence_passes() {
+    assert_ok("SELECT nextval('project_acme.s')");
+}
+
+#[test]
+fn setval_own_schema_sequence_passes() {
+    assert_ok("SELECT setval('project_acme.s', 1)");
+}
+
+#[test]
+fn regclass_cast_of_own_schema_table_passes() {
+    assert_ok("SELECT 'project_acme.t'::regclass");
+}
+
+#[test]
+fn regclass_cast_of_bare_table_passes() {
+    assert_ok("SELECT 't'::regclass");
+}
+
+#[test]
+fn plain_data_literal_holding_a_schema_string_passes() {
+    // The string sits in INSERT VALUES as DATA, NOT as a name-resolver arg.
+    // It must NOT be over-denied.
+    assert_ok("INSERT INTO project_acme.t VALUES ('control.t')");
+}
+
+#[test]
+fn plain_string_select_label_passes() {
+    assert_ok("SELECT 'control' AS label");
+}
+
+#[test]
+fn legit_own_schema_batch_with_sequence_passes() {
+    let report = assert_ok(
+        "CREATE SEQUENCE project_acme.s; \
+         CREATE TABLE project_acme.t (id int DEFAULT nextval('project_acme.s')); \
+         SELECT setval('project_acme.s', 100);",
+    );
+    let _ = report;
+}
+
+// --- quoted-identifier qualifiers in the literal must still be parsed ---
+
+#[test]
+fn regclass_cast_of_quoted_foreign_schema_is_cross_schema() {
+    assert_cross_schema("SELECT '\"My Schema\".t'::regclass");
+}
+
+#[test]
+fn setval_quoted_foreign_schema_is_cross_schema() {
+    assert_cross_schema("SELECT setval('\"control\".s', 1)");
+}
+
+#[test]
+fn nextval_foreign_schema_quoted_object_is_cross_schema() {
+    // schema unquoted, object quoted — schema qualifier still `control`.
+    assert_cross_schema("SELECT nextval('control.\"S\"')");
+}
+
+// --- PROACTIVE audit: set_config() is the SQL-callable SET search_path ---
+
+#[test]
+fn set_config_search_path_is_denied() {
+    // `set_config('search_path', …)` is the function form of `SET search_path`
+    // (already denied structurally). It escapes the pinned project schema, so
+    // it must be denied the same way regardless of the target schema.
+    assert_denied("SELECT set_config('search_path', 'control', false)");
+}
+
+#[test]
+fn set_config_role_is_denied() {
+    assert_denied("SELECT set_config('role', 'postgres', false)");
+}
+
+#[test]
+fn set_config_search_path_to_own_schema_is_still_denied() {
+    // Even targeting the own schema, mutating search_path at runtime defeats
+    // the pinned confinement — denied like the structural `SET`.
+    assert_denied("SELECT set_config('search_path', 'project_acme', false)");
+}
+
+#[test]
+fn set_config_benign_param_passes() {
+    // A non-confinement GUC is fine (matches the structural SET allowance).
+    assert_ok("SELECT set_config('statement_timeout', '5s', false)");
+}
+
+// --- PROACTIVE audit: pg_get_object_address array-literal-carried schema ---
+
+#[test]
+fn pg_get_object_address_foreign_schema_array_is_cross_schema() {
+    // The object name array `{control,t}` carries the schema as its first
+    // element — a value-carried schema the structural walker never sees.
+    assert_cross_schema("SELECT pg_get_object_address('table', '{control,t}', '{}')");
+}
+
+#[test]
+fn pg_get_object_address_own_schema_array_passes() {
+    assert_ok("SELECT pg_get_object_address('table', '{project_acme,t}', '{}')");
+}
+
+// ---------------------------------------------------------------------------
 // Task 6 — public API surface smoke test (uses only crate-root re-exports)
 // ---------------------------------------------------------------------------
 

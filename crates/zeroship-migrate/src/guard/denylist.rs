@@ -86,6 +86,74 @@ pub const NETWORK_FUNCTIONS: &[&str] = &[
     "dblink_get_result",
 ];
 
+/// The `reg*` pseudo-type family (a `text → reg*` cast resolves a named object).
+///
+/// A `text → reg*` cast resolves the named object
+/// (relation/schema/function/type/role/…) by name at runtime. A
+/// schema-qualified name inside the *string literal* being cast
+/// (`'control.users'::regclass`) is an `A_Const`, invisible to the structural
+/// schema walker — so its leading `schema.` qualifier must be re-checked for
+/// cross-schema confinement. Matched on the trailing (bare) type name.
+pub const REG_TYPES: &[&str] = &[
+    "regclass",
+    "regnamespace",
+    "regproc",
+    "regprocedure",
+    "regtype",
+    "regoper",
+    "regoperator",
+    "regrole",
+    "regcollation",
+    "regconfig",
+    "regdictionary",
+];
+
+/// Name-resolving builtins that take a text object name (the same leak in `FuncCall` form).
+///
+/// These take a text object name and resolve it (by
+/// name) to a catalog object — the same string-literal-carried-schema leak as
+/// the [`REG_TYPES`] casts, in `FuncCall` form. `setval`/`nextval`/`currval`
+/// are cross-tenant *mutations* of a foreign sequence; the `to_reg*` family and
+/// `pg_get_serial_sequence` are foreign-object resolvers/reads. The object name
+/// is the FIRST argument; its leading `schema.` qualifier is re-checked for
+/// cross-schema confinement. (`lastval` takes no argument and is omitted.)
+///
+/// Matched on the trailing (bare) function name — `pg_catalog.nextval(...)`
+/// resolves the same builtin.
+pub const NAME_RESOLVER_FUNCTIONS: &[&str] = &[
+    "nextval",
+    "currval",
+    "setval",
+    "to_regclass",
+    "to_regnamespace",
+    "to_regproc",
+    "to_regprocedure",
+    "to_regtype",
+    "to_regoper",
+    "to_regoperator",
+    "to_regrole",
+    "to_regcollation",
+    "pg_get_serial_sequence",
+];
+
+/// The `set_config()` builtin — the function-call form of `SET <param>`.
+///
+/// `set_config(<param>, <value>, <is_local>)` is the function-call form of
+/// `SET <param> = <value>`. The structural `VariableSetStmt` gate denies a
+/// `SET search_path`/`role`/`session_authorization`, but `set_config()` is a
+/// `FuncCall` that slips past it — so its FIRST string-literal argument is
+/// checked against [`FORBIDDEN_SET_PARAMS`] and denied identically.
+pub const SET_CONFIG_FUNCTION: &str = "set_config";
+
+/// Object-name resolvers whose object name is a Postgres ARRAY literal.
+///
+/// The object name is a Postgres array literal whose FIRST element is the
+/// schema (`pg_get_object_address('table','{schema,obj}', …)`). The schema is
+/// value-carried inside the array text, invisible to the structural walker; its
+/// first element is re-checked for cross-schema confinement. Matched on the
+/// trailing (bare) function name.
+pub const OBJECT_ADDRESS_FUNCTIONS: &[&str] = &["pg_get_object_address"];
+
 /// Built-in roles whose membership grants the host-escape capabilities above.
 /// Granting any of these (or to them) is privilege escalation.
 pub const PRIVILEGED_ROLES: &[&str] = &[
