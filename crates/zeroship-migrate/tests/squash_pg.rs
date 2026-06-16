@@ -523,3 +523,125 @@ async fn chained_squash_over_superseded_prefix_is_already_applied_not_double_run
 
     drop_schemas(&conn, &cfg).await;
 }
+
+/// Count `completed` rows for a version in the journal.
+async fn completed_count(conn: &Client, meta: &str, version: &str) -> i64 {
+    conn.query_one(
+        &format!(
+            "SELECT count(*)::bigint AS n FROM \"{meta}\".schema_migrations \
+             WHERE version = $1 AND phase = 'completed'"
+        ),
+        &[&version],
+    )
+    .await
+    .expect("completed_count")
+    .get::<_, i64>("n")
+}
+
+/// Count supersession edges recorded for a squash version.
+async fn edge_count(conn: &Client, meta: &str, squash_version: &str) -> i64 {
+    conn.query_one(
+        &format!(
+            "SELECT count(*)::bigint AS n FROM \"{meta}\".schema_migrations_supersedes \
+             WHERE squash_version = $1"
+        ),
+        &[&squash_version],
+    )
+    .await
+    .expect("edge_count")
+    .get::<_, i64>("n")
+}
+
+/// #2 — a fresh-path (transactional) squash records its `completed` row AND every
+/// supersession edge ATOMICALLY (same transaction). Happy path: after apply, BOTH
+/// the completed row and all N edges are present.
+#[compio::test]
+async fn fresh_squash_records_completed_row_and_edges_atomically() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    ensure_journal(&conn, &cfg).await.expect("journal");
+
+    let (_m1, _m2, _m3, s) = three_plus_squash(&cfg.project_schema).await;
+    apply(&conn, &cfg, std::slice::from_ref(&s), Approval::None, "ci")
+        .await
+        .expect("fresh apply of squash S");
+
+    assert_eq!(
+        completed_count(&conn, &cfg.meta_schema, s.version.as_str()).await,
+        1,
+        "S has exactly one completed row"
+    );
+    assert_eq!(
+        edge_count(&conn, &cfg.meta_schema, s.version.as_str()).await,
+        3,
+        "all three supersession edges present"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+/// #2 — the supersession edges share the SAME transaction as S's `completed` row.
+///
+/// Discriminator for the old separate-txn bug: inject a `BEFORE INSERT` trigger on
+/// `schema_migrations_supersedes` that always raises. A fresh-path (transactional)
+/// squash apply then FAILS on the edge insert. Because the edge insert now lives in
+/// the SAME transaction as S's `completed` row, the failure rolls BOTH back: NO
+/// completed row for S and NO edges. (Under the old post-commit edge write, S's
+/// `completed` row was already committed when the edge insert failed — the crash
+/// window this fix closes.)
+#[compio::test]
+async fn fresh_squash_edge_failure_rolls_back_completed_row_same_txn() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    ensure_journal(&conn, &cfg).await.expect("journal");
+
+    // Poison every INSERT into the supersedes table for this meta schema.
+    let trg_fn = format!("poison_sup_{tok}");
+    conn.batch_execute(&format!(
+        "CREATE OR REPLACE FUNCTION \"{meta}\".\"{trg_fn}\"() RETURNS trigger AS $fn$
+         BEGIN RAISE EXCEPTION 'poison: supersedes insert blocked'; END;
+         $fn$ LANGUAGE plpgsql;
+         CREATE TRIGGER poison_sup_trg BEFORE INSERT ON \"{meta}\".schema_migrations_supersedes
+             FOR EACH ROW EXECUTE FUNCTION \"{meta}\".\"{trg_fn}\"();",
+        meta = cfg.meta_schema
+    ))
+    .await
+    .expect("install poison trigger");
+
+    let (_m1, _m2, _m3, s) = three_plus_squash(&cfg.project_schema).await;
+
+    // Fresh apply: S.up succeeds, the completed-row insert succeeds, but the edge
+    // insert (same txn) raises → the WHOLE txn rolls back.
+    let err = apply(&conn, &cfg, std::slice::from_ref(&s), Approval::None, "ci")
+        .await
+        .expect_err("edge insert must fail and roll back the apply");
+    assert!(
+        matches!(err, ApplyError::Journal(_)),
+        "expected a Journal error from the edge insert, got {err:?}"
+    );
+
+    // ATOMICITY: neither the completed row nor any edge survived (same txn).
+    assert_eq!(
+        completed_count(&conn, &cfg.meta_schema, s.version.as_str()).await,
+        0,
+        "S's completed row must NOT survive an edge-insert failure (same txn)"
+    );
+    assert_eq!(
+        edge_count(&conn, &cfg.meta_schema, s.version.as_str()).await,
+        0,
+        "no edges survive"
+    );
+    // S.up's DDL also rolled back (transactional migration): t1 must not exist.
+    assert!(
+        !table_exists(&conn, &cfg.project_schema, "t1").await,
+        "S.up rolled back with the failed txn"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}

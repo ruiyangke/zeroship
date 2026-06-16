@@ -746,36 +746,6 @@ pub async fn record_baseline(
     Ok(())
 }
 
-/// Record the supersession edges of a squash whose `up` actually RAN.
-///
-/// This is the fresh-DB squash path (through [`crate::executor::apply`]): the
-/// `completed` row was already written by the executor's transactional/non-txn
-/// journal insert; this appends the `S → v_i` edges in the SAME transaction so the
-/// squash's satisfaction of `[v1..vN]` is visible to future pending computations.
-///
-/// # Errors
-/// [`JournalError::Db`] on insert failure.
-pub async fn record_supersedes(
-    conn: &Client,
-    cfg: &ExecutorConfig,
-    squash_version: &str,
-    supersedes: &[&str],
-) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.meta_schema);
-    for sup in supersedes {
-        conn.execute(
-            &format!(
-                "INSERT INTO {meta}.schema_migrations_supersedes
-                     (squash_version, superseded_version)
-                 VALUES ($1, $2)"
-            ),
-            &[&squash_version, sup],
-        )
-        .await?;
-    }
-    Ok(())
-}
-
 /// Drop a stale inflight marker (recovery path cleanup) without recording a
 /// completed row — used when recovery decides the partial work was undone.
 ///

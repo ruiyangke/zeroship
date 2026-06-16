@@ -108,7 +108,7 @@ pub use executor::{
 pub use guard::{flags_for, GuardConfig, GuardError, GuardReport, SqlGuard};
 pub use journal::{
     applied, applied_count, ensure_journal, history as journal_history, net_rolled_back,
-    record_baseline, record_completed, record_rolled_back, record_started, record_supersedes,
+    record_baseline, record_completed, record_rolled_back, record_started,
     superseded_versions, AppliedEntry, HistoryEvent, HistoryKind, JournalError, Phase,
     RolledBackEntry,
 };

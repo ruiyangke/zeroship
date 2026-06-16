@@ -638,27 +638,28 @@ async fn apply_locked(
         let version = m.version.as_str();
         let had_inflight = started.contains_key(version);
 
+        // Plan 9 B (fresh-DB squash): a squash whose `up` RUNS this batch records its
+        // supersession edges so future pending computations know `S` satisfies
+        // `[v1..vN]`. The all-or-none gate already proved NONE of the superseded
+        // versions were satisfied, so this is the fresh path. #2 fix: the edges are
+        // written in the SAME transaction that journals `S`'s `completed` row (not a
+        // separate post-commit statement) — a crash between would otherwise leave `S`
+        // net-applied with edges missing, re-entering `v1..vN` into pending and
+        // re-running them on top of `S`'s schema (double-apply).
+        let sups: Vec<&str> = m.supersedes.iter().map(MigrationId::as_str).collect();
+
         if m.flags.transactional {
-            apply_transactional(conn, cfg, m, applied_by).await?;
+            apply_transactional(conn, cfg, m, applied_by, &sups).await?;
         } else {
             // Mandatory timeouts + pinned search_path on the session (the non-txn
             // path has no transaction to SET LOCAL within). Restored on exit by
             // `apply` so nothing leaks (H2). Per-migration timeout applied (H3).
             configure_session_non_txn(conn, cfg, m).await?;
             let recovered =
-                apply_non_transactional(conn, cfg, m, applied_by, had_inflight).await?;
+                apply_non_transactional(conn, cfg, m, applied_by, had_inflight, &sups).await?;
             if recovered {
                 outcome.recovered.push(version.to_string());
             }
-        }
-        // Plan 9 B (fresh-DB squash): a squash whose `up` just RAN records its
-        // supersession edges so future pending computations know `S` satisfies
-        // `[v1..vN]`. Edges are appended AFTER the `completed` row exists (written
-        // by the apply paths above), as ADMIN. The all-or-none gate already proved
-        // NONE of the superseded versions were applied, so this is the fresh path.
-        if !m.supersedes.is_empty() {
-            let sups: Vec<&str> = m.supersedes.iter().map(MigrationId::as_str).collect();
-            journal::record_supersedes(conn, cfg, version, &sups).await?;
         }
         outcome.applied.push(version.to_string());
     }
@@ -1062,6 +1063,7 @@ async fn apply_transactional(
     cfg: &ExecutorConfig,
     m: &Migration,
     applied_by: &str,
+    supersedes: &[&str],
 ) -> Result<(), ApplyError> {
     let started = Instant::now();
     // `transaction()` needs `&mut Client`; the apply flow owns the connection,
@@ -1146,7 +1148,45 @@ async fn apply_transactional(
         return Err(ApplyError::Journal(JournalError::Db(e)));
     }
 
+    // #2 fix: write the fresh-DB squash supersession edges in the SAME transaction
+    // as the `completed` row above (admin). Edges-last-but-same-txn — so `S`'s
+    // net-applied state and its full edge set commit atomically. A failure here
+    // rolls back the entire apply (no `completed` row, no edges).
+    if let Err(e) = insert_supersedes_edges(conn, cfg, m.version.as_str(), supersedes).await {
+        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+            tracing::warn!(error = %rb, version = %m.version.as_str(), "zeroship-migrate: ROLLBACK failed after a supersedes-edge error (M4)");
+        }
+        return Err(ApplyError::Journal(e));
+    }
+
     conn.batch_execute("COMMIT").await?;
+    Ok(())
+}
+
+/// Insert the `S → v_i` supersession edges for a squash whose `up` RAN this batch
+/// (Plan 9 B fresh path). Each `conn.execute` participates in whatever transaction
+/// the caller has open — the txn apply path calls this INSIDE its `BEGIN…COMMIT`
+/// so the edges are atomic with `S`'s `completed` row (#2). No-op for a non-squash
+/// (`supersedes` empty). Admin write (the migrator has no meta-schema grant).
+async fn insert_supersedes_edges(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    squash_version: &str,
+    supersedes: &[&str],
+) -> Result<(), JournalError> {
+    let meta = format!("\"{}\"", cfg.meta_schema.replace('"', "\"\""));
+    for sup in supersedes {
+        conn.execute(
+            &format!(
+                "INSERT INTO {meta}.schema_migrations_supersedes
+                     (squash_version, superseded_version)
+                 VALUES ($1, $2)"
+            ),
+            &[&squash_version, sup],
+        )
+        .await
+        .map_err(JournalError::Db)?;
+    }
     Ok(())
 }
 
@@ -1160,6 +1200,7 @@ async fn apply_non_transactional(
     m: &Migration,
     applied_by: &str,
     had_inflight: bool,
+    supersedes: &[&str],
 ) -> Result<bool, ApplyError> {
     let version = m.version.as_str();
 
@@ -1207,17 +1248,49 @@ async fn apply_non_transactional(
     })?;
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
 
-    // Phase 2: immutable completed row + clear the marker (as admin).
-    journal::record_completed(
-        conn,
-        cfg,
-        version,
-        &m.name,
-        m.checksum.as_str(),
-        applied_by,
-        exec_ms,
-    )
-    .await?;
+    // Phase 2: immutable completed row + clear the marker (as admin). #2 fix: for a
+    // fresh-DB squash, the supersession edges must commit ATOMICALLY with the
+    // `completed` row, else a crash between leaves `S` net-applied with edges missing
+    // → `v1..vN` re-enter pending and re-run on top of `S` (double-apply). The non-txn
+    // `<up>` already committed (that is the nature of a non-txn migration), but the
+    // JOURNAL writes — the completed row, the inflight clear, and the edges — are
+    // bracketed in one transaction so they land together. No surrounding txn for a
+    // non-squash: keep the original single-statement finalize.
+    if supersedes.is_empty() {
+        journal::record_completed(
+            conn,
+            cfg,
+            version,
+            &m.name,
+            m.checksum.as_str(),
+            applied_by,
+            exec_ms,
+        )
+        .await?;
+    } else {
+        conn.batch_execute("BEGIN").await?;
+        let finalize = async {
+            journal::record_completed(
+                conn,
+                cfg,
+                version,
+                &m.name,
+                m.checksum.as_str(),
+                applied_by,
+                exec_ms,
+            )
+            .await?;
+            insert_supersedes_edges(conn, cfg, version, supersedes).await
+        }
+        .await;
+        if let Err(e) = finalize {
+            if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+                tracing::warn!(error = %rb, version = %version, "zeroship-migrate: ROLLBACK failed after a non-txn squash finalize error");
+            }
+            return Err(ApplyError::Journal(e));
+        }
+        conn.batch_execute("COMMIT").await?;
+    }
 
     Ok(had_inflight)
 }
