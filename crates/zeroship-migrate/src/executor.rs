@@ -1189,6 +1189,24 @@ pub enum RollbackError {
     /// any down runs). Nothing was rolled back.
     #[error("rollback dependency cycle among selected migrations: {0}")]
     DependencyCycle(String),
+    /// A force-skipped irreversible (`down: None`) migration `kept` `depends_on`
+    /// `dependency` (directly or transitively), but `dependency` is selected for
+    /// ACTUAL rollback. Tearing `dependency` down would leave `kept` (still applied,
+    /// because its down never runs) referencing a dropped object — a dangling FK or
+    /// a mid-batch `DownFailed`. Refused even under `force`+`backup_acknowledged`;
+    /// nothing was rolled back. Roll-forward instead (author a compensating
+    /// migration).
+    #[error(
+        "cannot force-skip irreversible migration {kept} while rolling back {dependency}: \
+         {kept} depends_on {dependency} (directly or transitively), so the kept migration would \
+         be left referencing a torn-down object. Roll-forward instead (author a compensating migration)."
+    )]
+    ForceSkipDependencyConflict {
+        /// The irreversible migration being force-skipped (kept applied).
+        kept: String,
+        /// The depended-on version that would be rolled back beneath it.
+        dependency: String,
+    },
 }
 
 /// Roll back applied migrations to a [`RollbackTarget`] (design §5).
@@ -1380,7 +1398,67 @@ fn build_rollback_plan<'a>(
             }
         }
     }
+
+    // #2 — force-skip dependency guard. A force-skipped irreversible migration M is
+    // KEPT applied (its down never runs). If any migration selected for ACTUAL
+    // rollback (a `Down` step) is one M `depends_on` (directly or transitively),
+    // tearing it down would leave M referencing a dropped object — a dangling FK or
+    // a mid-batch `DownFailed`. Refuse the whole rollback even under force; the safe
+    // path is roll-forward. (No-op when nothing is force-skipped.)
+    let rolling: std::collections::HashSet<&str> = plan
+        .iter()
+        .filter_map(|s| match s {
+            RollbackStep::Down(m) => Some(m.version.as_str()),
+            RollbackStep::SkipIrreversible(_) => None,
+        })
+        .collect();
+    if !rolling.is_empty() {
+        for step in &plan {
+            if let RollbackStep::SkipIrreversible(kept) = step {
+                if let Some(dep) = first_dependency_in_set(kept, &rolling, &by_version) {
+                    return Err(RollbackError::ForceSkipDependencyConflict {
+                        kept: kept.version.as_str().to_string(),
+                        dependency: dep,
+                    });
+                }
+            }
+        }
+    }
+
     Ok(plan)
+}
+
+/// Walk `m`'s `depends_on` transitively (over `by_version`) and return the first
+/// dependency version found in `target`. Used by the #2 force-skip guard to detect
+/// whether a kept (irreversible) migration depends on anything being torn down.
+/// Deterministic (sorted-version frontier) and cycle-safe via a visited set.
+fn first_dependency_in_set(
+    m: &Migration,
+    target: &std::collections::HashSet<&str>,
+    by_version: &HashMap<&str, &Migration>,
+) -> Option<String> {
+    use std::collections::{BTreeSet, HashSet};
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut frontier: BTreeSet<&str> = m.depends_on.iter().map(MigrationId::as_str).collect();
+    while let Some(&dep_v) = frontier.iter().next() {
+        frontier.remove(dep_v);
+        if !visited.insert(dep_v) {
+            continue;
+        }
+        if target.contains(dep_v) {
+            return Some(dep_v.to_string());
+        }
+        // Recurse into the dependency's own deps (if it is in the supplied set).
+        if let Some(dep_m) = by_version.get(dep_v) {
+            for d in &dep_m.depends_on {
+                let dv = d.as_str();
+                if !visited.contains(dv) {
+                    frontier.insert(dv);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// The rollback body, run while holding the project advisory lock.

@@ -372,6 +372,85 @@ async fn rollback_refuses_irreversible_without_force_then_skips_with_force() {
     drop_schemas(&conn, &cfg).await;
 }
 
+// ---------------------------------------------------------------------------
+// #2 — force-skip of an irreversible migration must REFUSE if a migration being
+// rolled back beneath it is one the skipped (kept-applied) migration depends_on.
+//
+// v1 `orders`; v2 IRREVERSIBLE (down: None) `depends_on=[v1]` with a REAL FK
+// (audit.order_id REFERENCES orders). force+backup_acknowledged would keep v2
+// applied (skip its down) but still roll v1 back — leaving v2's FK dangling /
+// failing mid-batch. Must refuse the whole rollback even under force.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn force_skip_irreversible_refuses_when_a_dependency_is_rolled_back_beneath_it() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let schema = &cfg.project_schema;
+    let v1 = MigrationId::generate();
+    std::thread::sleep(Duration::from_millis(2));
+    let v2 = MigrationId::generate();
+
+    // v1: orders (reversible).
+    let m1 = {
+        let up = format!("CREATE TABLE \"{schema}\".\"orders\" (id bigint PRIMARY KEY)");
+        let down = format!("DROP TABLE \"{schema}\".\"orders\"");
+        Migration {
+            version: v1.clone(),
+            name: "create_orders".into(),
+            up: up.clone(),
+            down: Some(down.clone()),
+            checksum: Checksum::of(&up, Some(&down)),
+            flags: MigrationFlags::default(),
+            owner_app: "app_test".into(),
+            depends_on: Vec::new(),
+        }
+    };
+    // v2: audit with FK to orders, IRREVERSIBLE, depends_on v1.
+    let m2 = {
+        let up = format!(
+            "CREATE TABLE \"{schema}\".\"audit\" \
+             (id bigint PRIMARY KEY, order_id bigint REFERENCES \"{schema}\".\"orders\"(id))"
+        );
+        Migration {
+            version: v2.clone(),
+            name: "irreversible_audit".into(),
+            up: up.clone(),
+            down: None,
+            checksum: Checksum::of(&up, None),
+            flags: MigrationFlags::default(),
+            owner_app: "app_test".into(),
+            depends_on: vec![v1.clone()],
+        }
+    };
+    let set = [m1.clone(), m2.clone()];
+    apply(&conn, &cfg, &set, Approval::None, "actor").await.expect("seed (orders then audit)");
+
+    // force + backup_acknowledged: would skip v2 (kept) but roll v1 back beneath
+    // it. v2 depends_on v1 → REFUSE the whole rollback.
+    let opts = RollbackOptions { force: true, backup_acknowledged: true };
+    let err = rollback(&conn, &cfg, &set, RollbackRequest::new(RollbackTarget::All).with_options(opts), Approval::Approved, "actor")
+        .await
+        .unwrap_err();
+    match &err {
+        RollbackError::ForceSkipDependencyConflict { kept, dependency } => {
+            assert_eq!(kept, m2.version.as_str(), "kept = the irreversible v2");
+            assert_eq!(dependency, m1.version.as_str(), "dependency = v1 (torn down beneath it)");
+        }
+        other => panic!("expected ForceSkipDependencyConflict, got {other:?}"),
+    }
+    // Nothing rolled back: both tables survive, both net-applied (all-up-front).
+    assert!(table_exists(&conn, schema, "orders").await, "orders survives refusal");
+    assert!(table_exists(&conn, schema, "audit").await, "audit survives refusal");
+    assert_eq!(applied_versions(&conn, &cfg).await.len(), 2);
+
+    drop_schemas(&conn, &cfg).await;
+}
+
 #[compio::test]
 async fn force_requires_both_force_and_backup_acknowledged() {
     let conn = pg().await;
