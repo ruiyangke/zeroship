@@ -131,13 +131,22 @@ async fn read_status_snapshot(
         .filter_map(|e| MigrationId::parse(&e.version).ok())
         .max();
 
-    // pending = set − net-applied, in the SAME order apply uses. order_pending
-    // wants a map of completed entries keyed by version; build it from the
-    // net-applied entries (NOT the raw rows — a rolled-back version must count as
-    // pending, and net state already excludes it).
+    // pending = set − net-applied − superseded, in the SAME order apply uses.
+    // order_pending wants a map of completed entries keyed by version; build it from
+    // the net-applied entries (NOT the raw rows — a rolled-back version must count
+    // as pending, and net state already excludes it).
     let completed: HashMap<&str, &AppliedEntry> =
         applied.iter().map(|e| (e.version.as_str(), e)).collect();
-    let ordered = order_pending(migrations, &completed).map_err(StatusError::Ordering)?;
+    // Supersession (Plan 9 squash): a version superseded by a net-applied squash OR
+    // by an in-set squash is NOT pending — status must agree with apply. Reuses the
+    // executor's `compute_superseded` so the two views never diverge.
+    let journal_superseded = journal::superseded_versions(conn, cfg).await?;
+    let superseded_owned =
+        crate::executor::compute_superseded(migrations, &journal_superseded);
+    let superseded: std::collections::HashSet<&str> =
+        superseded_owned.iter().map(String::as_str).collect();
+    let ordered =
+        order_pending(migrations, &completed, &superseded).map_err(StatusError::Ordering)?;
     let pending: Vec<MigrationId> = ordered.iter().map(|m| m.version.clone()).collect();
 
     let rolled_back = journal::net_rolled_back(conn, cfg).await?;
