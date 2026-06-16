@@ -134,6 +134,18 @@ pub mod rule {
     pub const LOAD_LIBRARY: &str = "load_library";
     pub const UNRECOGNIZED_DANGEROUS: &str = "unrecognized_dangerous_construct";
     pub const BODY_INSPECTION: &str = "dangerous_construct_in_body";
+    /// `CREATE/ALTER FUNCTION … SECURITY DEFINER` — runs with the definer's
+    /// (migrator) privileges, an escalation primitive once installed.
+    pub const SECURITY_DEFINER: &str = "security_definer_function";
+    /// `ALTER FUNCTION … SET search_path = …` — pins a confinement-escaping
+    /// `search_path` into a persisted function.
+    pub const FUNCTION_SET_SEARCH_PATH: &str = "function_set_search_path";
+    /// `ALTER … OWNER TO <privileged role>` — reparent an object to a
+    /// platform/superuser role (privilege transfer).
+    pub const OWNER_CHANGE: &str = "owner_change_to_privileged_role";
+    /// An `ALTER TABLE` subcommand outside the safe migration set (e.g. OWNER
+    /// TO, INHERIT, REPLICA IDENTITY, generic options).
+    pub const UNSAFE_ALTER_TABLE_CMD: &str = "unsafe_alter_table_subcommand";
 }
 
 /// Case-insensitive membership against a static list.

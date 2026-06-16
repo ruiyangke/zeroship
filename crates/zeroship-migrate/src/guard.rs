@@ -30,6 +30,7 @@ use pg_query::protobuf::AlterTableType;
 use crate::classify::{classify, ParseError, StatementClass};
 use crate::migration::MigrationFlags;
 use denylist::rule;
+use serde_json::Value;
 
 /// Per-project guard configuration.
 #[derive(Debug, Clone)]
@@ -111,7 +112,12 @@ impl SqlGuard {
                 continue;
             };
             let raw = stmt_text(sql, raw_stmt);
-            self.check_node(node, &raw)?;
+            // Serialize the ONE statement subtree to JSON for the generic
+            // full-tree walks (dangerous funcs + every schema reference). This
+            // sidesteps `node.nodes()`, whose hand-written traversal skips
+            // column DEFAULT / CHECK / VALUES / RULE-action subtrees.
+            let json = serde_json::to_value(raw_stmt).unwrap_or(Value::Null);
+            self.check_node(node, &json, &raw)?;
         }
 
         // Collect non-fatal lint advisories (lock-heavy ops, etc.).
@@ -131,16 +137,24 @@ impl SqlGuard {
     }
 
     /// Check one top-level statement node (and everything nested under it).
-    fn check_node(&self, node: &NodeEnum, raw: &str) -> Result<(), GuardError> {
-        // 1. Statement-kind denies (the coarse, structural rules).
+    ///
+    /// `json` is the `serde_json` serialization of the statement's `RawStmt`
+    /// subtree — used by the generic full-tree walks (Root Cause 2 fix) so we
+    /// visit EVERY node, including the slots `pg_query::nodes()` skips (column
+    /// DEFAULT, CHECK, VALUES lists, RULE actions, SET SCHEMA targets, …).
+    fn check_node(&self, node: &NodeEnum, json: &Value, raw: &str) -> Result<(), GuardError> {
+        // 1. Statement-kind gate: DENY-BY-DEFAULT. Only an enumerated set of
+        //    known-safe migration statements passes; everything else is denied.
         self.check_statement_kind(node, raw)?;
 
-        // 2. Cross-schema confinement — any explicit foreign schema is denied.
-        self.check_cross_schema(node, raw)?;
+        // 2. Cross-schema confinement — any explicit foreign schema, anywhere
+        //    in the full tree (RangeVar, SET SCHEMA newschema, CreateSchema,
+        //    trigger/CALL funcname, COMMENT object, INHERIT target, …).
+        self.check_cross_schema(json, raw)?;
 
-        // 3. Dangerous function calls anywhere in the expression tree
-        //    (file/network functions in SELECT/DML/DEFAULT/CHECK/etc.).
-        Self::check_dangerous_functions(node, raw)?;
+        // 3. Dangerous function calls anywhere in the FULL expression tree
+        //    (file/network functions in SELECT/DML/DEFAULT/CHECK/VALUES/etc.).
+        Self::check_dangerous_functions(json, raw)?;
 
         // 4. Recurse into DO blocks and function bodies — the must-inspect
         //    case. A dangerous construct hidden in a body is still dangerous.
@@ -149,10 +163,16 @@ impl SqlGuard {
         Ok(())
     }
 
-    /// Structural per-statement-kind deny rules.
+    /// Statement-kind gate, **deny-by-default** (Root Cause 1 fix).
+    ///
+    /// A curated allowlist of known-safe migration statement kinds passes;
+    /// every other statement node is denied (`UNRECOGNIZED_DANGEROUS`). The
+    /// recognized-dangerous kinds are matched first so they get a precise rule
+    /// id (better diagnostics) — but the *default* arm is DENY, not allow.
     #[allow(clippy::too_many_lines)]
     fn check_statement_kind(&self, node: &NodeEnum, raw: &str) -> Result<(), GuardError> {
         match node {
+            // ---- Recognized-dangerous: precise rule ids ----
             // COPY … PROGRAM = shell RCE; COPY … <file> = filesystem.
             // COPY … TO STDOUT / FROM STDIN (no program, no filename) is fine.
             NodeEnum::CopyStmt(c) => {
@@ -162,17 +182,65 @@ impl SqlGuard {
                 if !c.filename.is_empty() {
                     return Err(denied(rule::COPY_FILE, raw));
                 }
+                // Plain COPY … TO STDOUT / FROM STDIN — safe.
+                return Ok(());
             }
-            // CREATE FUNCTION/PROCEDURE in an untrusted language.
+            // ALTER SYSTEM — cluster-wide config, always denied.
+            NodeEnum::AlterSystemStmt(_) => return Err(denied(rule::ALTER_SYSTEM, raw)),
+            // Role management — privilege escalation.
+            NodeEnum::CreateRoleStmt(_)
+            | NodeEnum::AlterRoleStmt(_)
+            | NodeEnum::AlterRoleSetStmt(_)
+            | NodeEnum::DropRoleStmt(_) => return Err(denied(rule::ROLE_MANAGEMENT, raw)),
+            // GRANT / REVOKE / role-membership grants — privilege management.
+            NodeEnum::GrantStmt(_)
+            | NodeEnum::GrantRoleStmt(_)
+            | NodeEnum::AlterDefaultPrivilegesStmt(_) => {
+                return Err(denied(rule::PRIVILEGE_MANAGEMENT, raw))
+            }
+            // Database / FDW management — out of a project migrator's remit.
+            NodeEnum::CreatedbStmt(_)
+            | NodeEnum::AlterDatabaseStmt(_)
+            | NodeEnum::AlterDatabaseSetStmt(_)
+            | NodeEnum::DropdbStmt(_) => return Err(denied(rule::DATABASE_MANAGEMENT, raw)),
+            NodeEnum::CreateFdwStmt(_)
+            | NodeEnum::CreateForeignServerStmt(_)
+            | NodeEnum::CreateForeignTableStmt(_)
+            | NodeEnum::CreateUserMappingStmt(_)
+            | NodeEnum::ImportForeignSchemaStmt(_) => {
+                return Err(denied(rule::FDW_MANAGEMENT, raw))
+            }
+            // LOAD <library> — loads a shared object into the backend (RCE).
+            NodeEnum::LoadStmt(_) => return Err(denied(rule::LOAD_LIBRARY, raw)),
+
+            // ---- Allowlisted-safe (with per-kind sub-checks) ----
             NodeEnum::CreateFunctionStmt(f) => {
+                // Untrusted language (plpythonu/plperlu/c/…) — RCE.
                 if let Some(lang) = function_language(&f.options) {
                     if !denylist::is_trusted_language(&lang) {
                         return Err(denied(rule::UNTRUSTED_LANGUAGE, raw));
                     }
                 }
+                // SECURITY DEFINER — runs with the migrator's privilege once
+                // installed; an escalation primitive. Deny.
+                if function_is_security_definer(&f.options) {
+                    return Err(denied(rule::SECURITY_DEFINER, raw));
+                }
+                // A persisted `SET search_path` on the function escapes
+                // confinement; deny (the DefElem name is `set`).
+                if function_sets_forbidden_param(&f.options) {
+                    return Err(denied(rule::FUNCTION_SET_SEARCH_PATH, raw));
+                }
             }
-            // CREATE EXTENSION — deny-by-default unless allowlisted, and never
-            // the hard-forbidden set.
+            NodeEnum::AlterFunctionStmt(a) => {
+                // ALTER FUNCTION … SECURITY DEFINER / SET search_path = …
+                if alter_function_is_security_definer(&a.actions) {
+                    return Err(denied(rule::SECURITY_DEFINER, raw));
+                }
+                if alter_function_sets_forbidden_param(&a.actions) {
+                    return Err(denied(rule::FUNCTION_SET_SEARCH_PATH, raw));
+                }
+            }
             NodeEnum::CreateExtensionStmt(e) => {
                 let name = e.extname.to_ascii_lowercase();
                 if denylist::list_contains_ci(denylist::FORBIDDEN_EXTENSIONS, &name) {
@@ -187,28 +255,6 @@ impl SqlGuard {
                     return Err(denied(rule::EXTENSION_NOT_ALLOWLISTED, raw));
                 }
             }
-            // ALTER SYSTEM — cluster-wide config, always denied.
-            NodeEnum::AlterSystemStmt(_) => return Err(denied(rule::ALTER_SYSTEM, raw)),
-            // Role management — privilege escalation.
-            NodeEnum::CreateRoleStmt(_)
-            | NodeEnum::AlterRoleStmt(_)
-            | NodeEnum::AlterRoleSetStmt(_) => {
-                return Err(denied(rule::ROLE_MANAGEMENT, raw))
-            }
-            // DROP ROLE / DROP USER — its own statement node, plus the
-            // DropStmt-with-ObjectRole spelling some clients emit.
-            NodeEnum::DropRoleStmt(_) => return Err(denied(rule::ROLE_MANAGEMENT, raw)),
-            NodeEnum::DropStmt(d) if d.remove_type == ObjectType::ObjectRole as i32 => {
-                return Err(denied(rule::ROLE_MANAGEMENT, raw))
-            }
-            // GRANT / REVOKE / role-membership grants — privilege management.
-            NodeEnum::GrantStmt(_)
-            | NodeEnum::GrantRoleStmt(_)
-            | NodeEnum::AlterDefaultPrivilegesStmt(_) => {
-                return Err(denied(rule::PRIVILEGE_MANAGEMENT, raw))
-            }
-            // SET search_path / role / session authorization — confinement
-            // escape. VariableSetStmt.kind for SET ROLE is also caught here.
             NodeEnum::VariableSetStmt(s) => {
                 let name = s.name.to_ascii_lowercase();
                 if denylist::list_contains_ci(denylist::FORBIDDEN_SET_PARAMS, &name) {
@@ -223,56 +269,110 @@ impl SqlGuard {
                 {
                     return Err(denied(rule::SET_ROLE, raw));
                 }
+                // A benign typed SET (statement_timeout, etc.) is allowed.
             }
-            // Database / FDW management — out of a project migrator's remit.
-            NodeEnum::CreatedbStmt(_)
-            | NodeEnum::AlterDatabaseStmt(_)
-            | NodeEnum::AlterDatabaseSetStmt(_)
-            | NodeEnum::DropdbStmt(_) => {
-                return Err(denied(rule::DATABASE_MANAGEMENT, raw))
+            NodeEnum::AlterTableStmt(at) => {
+                // ALTER TABLE is safe ONLY for the enumerated subcommand set;
+                // OWNER TO / INHERIT / REPLICA IDENTITY / generic-options are
+                // out of remit and denied.
+                Self::check_alter_table_cmds(at, raw)?;
             }
-            NodeEnum::CreateFdwStmt(_)
-            | NodeEnum::CreateForeignServerStmt(_)
-            | NodeEnum::CreateForeignTableStmt(_)
-            | NodeEnum::CreateUserMappingStmt(_) => {
-                return Err(denied(rule::FDW_MANAGEMENT, raw))
+            NodeEnum::DropStmt(d) => {
+                // DROP is safe only for the enumerated object types; DROP ROLE
+                // (etc.) via the DropStmt spelling is denied.
+                if d.remove_type == ObjectType::ObjectRole as i32 {
+                    return Err(denied(rule::ROLE_MANAGEMENT, raw));
+                }
+                if !is_safe_drop_object(d.remove_type) {
+                    return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
+                }
             }
-            // LOAD <library> — loads a shared object into the backend (RCE).
-            NodeEnum::LoadStmt(_) => return Err(denied(rule::LOAD_LIBRARY, raw)),
-            _ => {}
+            NodeEnum::TransactionStmt(t) => {
+                // BEGIN/START/COMMIT/ROLLBACK/SAVEPOINT/RELEASE/ROLLBACK TO are
+                // fine; two-phase PREPARE TRANSACTION / COMMIT PREPARED /
+                // ROLLBACK PREPARED reach the cluster's prepared-xact namespace
+                // and are out of remit — denied.
+                if !is_safe_transaction_kind(t.kind) {
+                    return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
+                }
+            }
+
+            // ---- Unconditionally-safe migration statement kinds ----
+            NodeEnum::CreateStmt(_)
+            | NodeEnum::IndexStmt(_)
+            | NodeEnum::RenameStmt(_)
+            | NodeEnum::CommentStmt(_)
+            | NodeEnum::CreateTrigStmt(_)
+            | NodeEnum::ViewStmt(_)
+            | NodeEnum::CreateTableAsStmt(_)
+            | NodeEnum::RefreshMatViewStmt(_)
+            | NodeEnum::CreateEnumStmt(_)
+            | NodeEnum::CompositeTypeStmt(_)
+            | NodeEnum::CreateRangeStmt(_)
+            | NodeEnum::AlterEnumStmt(_)
+            | NodeEnum::AlterTypeStmt(_)
+            | NodeEnum::CreateSeqStmt(_)
+            | NodeEnum::AlterSeqStmt(_)
+            | NodeEnum::SelectStmt(_)
+            | NodeEnum::InsertStmt(_)
+            | NodeEnum::UpdateStmt(_)
+            | NodeEnum::DeleteStmt(_)
+            | NodeEnum::MergeStmt(_)
+            | NodeEnum::TruncateStmt(_)
+            | NodeEnum::VacuumStmt(_)
+            | NodeEnum::ClusterStmt(_)
+            | NodeEnum::ReindexStmt(_)
+            | NodeEnum::DoStmt(_) => {}
+
+            // ---- DENY-BY-DEFAULT: every unenumerated statement kind ----
+            _ => return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw)),
         }
         Ok(())
     }
 
-    /// Deny any explicit reference to a schema other than the project schema.
-    fn check_cross_schema(&self, node: &NodeEnum, raw: &str) -> Result<(), GuardError> {
-        let schemas = crate::classify::referenced_schemas(node);
-        for schema in schemas {
-            if !schema.eq_ignore_ascii_case(&self.cfg.project_schema) {
-                return Err(GuardError::CrossSchema {
-                    schema,
-                    statement: raw.to_string(),
-                });
+    /// Reject `ALTER TABLE` subcommands outside the safe migration set.
+    fn check_alter_table_cmds(
+        at: &protobuf::AlterTableStmt,
+        raw: &str,
+    ) -> Result<(), GuardError> {
+        for cmd in &at.cmds {
+            if let Some(NodeEnum::AlterTableCmd(c)) = cmd.node.as_ref() {
+                if !is_safe_alter_table_subtype(c.subtype) {
+                    return Err(denied(rule::UNSAFE_ALTER_TABLE_CMD, raw));
+                }
             }
         }
         Ok(())
     }
 
-    /// Deny file-access / network function calls anywhere in the tree.
-    fn check_dangerous_functions(node: &NodeEnum, raw: &str) -> Result<(), GuardError> {
-        for (n, _d, _c, _f) in node.nodes() {
-            let fname = match n {
-                NodeRef::FuncCall(fc) => last_name_part(&fc.funcname),
-                _ => None,
-            };
-            if let Some(name) = fname {
-                if denylist::list_contains_ci(denylist::FILE_ACCESS_FUNCTIONS, &name) {
-                    return Err(denied(rule::FILE_ACCESS_FUNCTION, raw));
-                }
-                if denylist::list_contains_ci(denylist::NETWORK_FUNCTIONS, &name) {
-                    return Err(denied(rule::NETWORK_FUNCTION, raw));
-                }
+    /// Deny any explicit reference to a schema other than the project schema,
+    /// found ANYWHERE in the full parse tree (Root Cause 2 fix).
+    fn check_cross_schema(&self, json: &Value, raw: &str) -> Result<(), GuardError> {
+        if let Some(schema) = foreign_schema_in_tree(json, &self.cfg.project_schema) {
+            return Err(GuardError::CrossSchema {
+                schema,
+                statement: raw.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Deny file-access / network function calls anywhere in the FULL tree.
+    fn check_dangerous_functions(json: &Value, raw: &str) -> Result<(), GuardError> {
+        let mut found: Option<&'static str> = None;
+        walk_func_names(json, &mut |name| {
+            if denylist::list_contains_ci(denylist::FILE_ACCESS_FUNCTIONS, name) {
+                found = Some(rule::FILE_ACCESS_FUNCTION);
+                return true;
             }
+            if denylist::list_contains_ci(denylist::NETWORK_FUNCTIONS, name) {
+                found = Some(rule::NETWORK_FUNCTION);
+                return true;
+            }
+            false
+        });
+        if let Some(r) = found {
+            return Err(denied(r, raw));
         }
         Ok(())
     }
@@ -307,9 +407,10 @@ impl SqlGuard {
             for raw_stmt in &parsed.protobuf.stmts {
                 if let Some(inner) = raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref()) {
                     let inner_raw = stmt_text(body, raw_stmt);
+                    let json = serde_json::to_value(raw_stmt).unwrap_or(Value::Null);
                     // Recurse with the inner statement's own text for accurate
                     // error reporting.
-                    self.check_node(inner, &inner_raw)?;
+                    self.check_node(inner, &json, &inner_raw)?;
                 }
             }
         }
@@ -320,7 +421,8 @@ impl SqlGuard {
             if let Ok(parsed) = pg_query::parse(&literal) {
                 for raw_stmt in &parsed.protobuf.stmts {
                     if let Some(inner) = raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref()) {
-                        self.check_node(inner, &literal)?;
+                        let json = serde_json::to_value(raw_stmt).unwrap_or(Value::Null);
+                        self.check_node(inner, &json, &literal)?;
                     }
                 }
             }
@@ -369,8 +471,78 @@ impl SqlGuard {
                 statement: raw.to_string(),
             });
         }
+        // (e) Runtime-constructed SQL: a PL/pgSQL body that builds a
+        //     schema-qualified name via `format('%I.…', s)` never shows the
+        //     target schema as a `schema.ident` adjacency — it's a bare
+        //     string literal (`s := 'control'`) or a `format()` arg. Flag any
+        //     bare literal that names a platform schema, and — when the body
+        //     uses an `%I` identifier template — any bare-identifier literal
+        //     that is not the project schema (reaching ANOTHER project's
+        //     schema). Deny-by-default for the dynamic-SQL class.
+        if let Some(schema) =
+            foreign_schema_literal_in_body(body, &self.cfg.project_schema)
+        {
+            return Err(GuardError::CrossSchema {
+                schema,
+                statement: raw.to_string(),
+            });
+        }
         Ok(())
     }
+}
+
+/// Scan a PL/pgSQL body's **bare string literals** for a cross-tenant schema
+/// name that `format('%I.…', s)`-style dynamic SQL would interpolate.
+///
+/// The structural/`schema.ident` checks never see these — the schema is a
+/// runtime value (`s := 'control'`) or a `format()` argument, not an adjacency.
+/// Two postures, both deny-by-default for the dynamic-SQL class:
+///   1. Any bare literal that *is* a platform schema (`control`/`auth`/
+///      `billing`) — these have no legitimate use as data in a creator body.
+///   2. If the body uses an `%I` identifier-format template (the tell of
+///      dynamic schema/relation interpolation), any bare *identifier* literal
+///      that is not the project schema — reaching another project's schema.
+fn foreign_schema_literal_in_body(body: &str, project_schema: &str) -> Option<String> {
+    let uses_ident_template = body.to_ascii_lowercase().contains("%i");
+    for literal in extract_string_literals(body) {
+        let lit = literal.trim();
+        // (1) platform schema named directly.
+        if denylist::list_contains_ci(denylist::PLATFORM_SCHEMAS, lit)
+            && !lit.eq_ignore_ascii_case(project_schema)
+        {
+            return Some(lit.to_string());
+        }
+        // (2) bare identifier reaching another schema under an %I template.
+        if uses_ident_template
+            && !lit.eq_ignore_ascii_case(project_schema)
+            && is_bare_identifier(lit)
+            && looks_like_schema_name(lit)
+        {
+            return Some(lit.to_string());
+        }
+    }
+    None
+}
+
+/// A literal that is a single bare SQL identifier (`[A-Za-z_][A-Za-z0-9_]*`),
+/// the shape a schema/relation name interpolated via `%I` would take.
+fn is_bare_identifier(s: &str) -> bool {
+    let mut bytes = s.bytes();
+    match bytes.next() {
+        Some(b) if b.is_ascii_alphabetic() || b == b'_' => {}
+        _ => return false,
+    }
+    bytes.all(is_ident_byte)
+}
+
+/// Heuristic: does a bare identifier look like a schema name a migration would
+/// target? We flag the platform schemas plus anything matching the project
+/// prefix convention (`project_…`) — the multi-tenant schemas a body could
+/// reach. A short data token like `'active'` does not match, avoiding
+/// false-positives on legitimate seed data passed through `%I`-bearing bodies.
+fn looks_like_schema_name(s: &str) -> bool {
+    let l = s.to_ascii_lowercase();
+    denylist::list_contains_ci(denylist::PLATFORM_SCHEMAS, &l) || l.starts_with("project_")
 }
 
 /// Scan a body string for a `<schema>.<object>` qualifier that names a known
@@ -504,21 +676,314 @@ fn expr_contains_func_call(expr: &NodeEnum) -> bool {
         .any(|(n, _, _, _)| matches!(n, NodeRef::FuncCall(_)))
 }
 
+// ---------------------------------------------------------------------------
+// Deny-by-default allowlist predicates (Root Cause 1)
+// ---------------------------------------------------------------------------
+
+/// The `ObjectType`s a creator migration may `DROP`. Anything else (role,
+/// schema, extension, FDW, subscription, publication, …) is denied-by-default.
+fn is_safe_drop_object(remove_type: i32) -> bool {
+    [
+        ObjectType::ObjectTable,
+        ObjectType::ObjectIndex,
+        ObjectType::ObjectView,
+        ObjectType::ObjectMatview,
+        ObjectType::ObjectSequence,
+        ObjectType::ObjectType,
+        ObjectType::ObjectDomain,
+        ObjectType::ObjectFunction,
+        ObjectType::ObjectTrigger,
+        ObjectType::ObjectRule,
+        ObjectType::ObjectColumn,
+    ]
+    .iter()
+    .any(|t| remove_type == *t as i32)
+}
+
+/// The `AlterTableType` subcommands a creator migration may use. OWNER TO,
+/// INHERIT, REPLICA IDENTITY, generic-options, tablespace moves, etc. are
+/// denied-by-default (privilege transfer / cross-tenant reparent / out of
+/// remit).
+fn is_safe_alter_table_subtype(subtype: i32) -> bool {
+    use AlterTableType as A;
+    [
+        A::AtAddColumn,
+        A::AtColumnDefault,
+        A::AtCookedColumnDefault,
+        A::AtDropNotNull,
+        A::AtSetNotNull,
+        A::AtSetStatistics,
+        A::AtSetOptions,
+        A::AtResetOptions,
+        A::AtSetStorage,
+        A::AtSetCompression,
+        A::AtDropColumn,
+        A::AtAddIndex,
+        A::AtAddConstraint,
+        A::AtAlterConstraint,
+        A::AtValidateConstraint,
+        A::AtAddIndexConstraint,
+        A::AtDropConstraint,
+        A::AtAlterColumnType,
+        A::AtSetRelOptions,
+        A::AtResetRelOptions,
+        A::AtSetIdentity,
+        A::AtDropIdentity,
+        A::AtAddIdentity,
+    ]
+    .iter()
+    .any(|t| subtype == *t as i32)
+}
+
+/// Transaction-control kinds a migration may issue. Two-phase commit kinds
+/// (`PREPARE TRANSACTION` / `COMMIT PREPARED` / `ROLLBACK PREPARED`) reach the
+/// cluster's prepared-transaction namespace and are denied-by-default.
+fn is_safe_transaction_kind(kind: i32) -> bool {
+    use protobuf::TransactionStmtKind as K;
+    [
+        K::TransStmtBegin,
+        K::TransStmtStart,
+        K::TransStmtCommit,
+        K::TransStmtRollback,
+        K::TransStmtSavepoint,
+        K::TransStmtRelease,
+        K::TransStmtRollbackTo,
+    ]
+    .iter()
+    .any(|k| kind == *k as i32)
+}
+
+/// True if a CREATE FUNCTION carries the `security` definer option.
+fn function_is_security_definer(options: &[protobuf::Node]) -> bool {
+    options.iter().any(|opt| {
+        matches!(opt.node.as_ref(), Some(NodeEnum::DefElem(d))
+            if d.defname.eq_ignore_ascii_case("security")
+                && def_elem_bool(d) == Some(true))
+    })
+}
+
+/// True if a CREATE FUNCTION pins a forbidden `SET <param>` (`search_path`/role).
+fn function_sets_forbidden_param(options: &[protobuf::Node]) -> bool {
+    options.iter().any(|opt| {
+        matches!(opt.node.as_ref(), Some(NodeEnum::DefElem(d))
+            if def_elem_is_forbidden_set(d))
+    })
+}
+
+/// True if any ALTER FUNCTION action is `SECURITY DEFINER`.
+fn alter_function_is_security_definer(actions: &[protobuf::Node]) -> bool {
+    actions.iter().any(|opt| {
+        matches!(opt.node.as_ref(), Some(NodeEnum::DefElem(d))
+            if d.defname.eq_ignore_ascii_case("security")
+                && def_elem_bool(d) == Some(true))
+    })
+}
+
+/// True if any ALTER FUNCTION action is a forbidden `SET <param>`.
+fn alter_function_sets_forbidden_param(actions: &[protobuf::Node]) -> bool {
+    actions.iter().any(|opt| {
+        matches!(opt.node.as_ref(), Some(NodeEnum::DefElem(d))
+            if def_elem_is_forbidden_set(d))
+    })
+}
+
+/// A function `DefElem` of the form `SET <param> = …` whose param is in
+/// [`denylist::FORBIDDEN_SET_PARAMS`] (e.g. `SET search_path = control`). The
+/// nested arg is a `VariableSetStmt` carrying the target param name.
+fn def_elem_is_forbidden_set(d: &protobuf::DefElem) -> bool {
+    if !d.defname.eq_ignore_ascii_case("set") {
+        return false;
+    }
+    if let Some(NodeEnum::VariableSetStmt(v)) = d.arg.as_ref().and_then(|a| a.node.as_ref()) {
+        return denylist::list_contains_ci(denylist::FORBIDDEN_SET_PARAMS, &v.name);
+    }
+    false
+}
+
+/// Read a boolean-valued `DefElem` (the `security` option carries a `Boolean`
+/// arg: `SECURITY DEFINER` → true, `SECURITY INVOKER` → false).
+fn def_elem_bool(d: &protobuf::DefElem) -> Option<bool> {
+    match d.arg.as_ref().and_then(|a| a.node.as_ref()) {
+        Some(NodeEnum::Boolean(b)) => Some(b.boolval),
+        Some(NodeEnum::Integer(i)) => Some(i.ival != 0),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Generic full-parse-tree JSON walkers (Root Cause 2)
+// ---------------------------------------------------------------------------
+
+/// Walk the ENTIRE serialized parse tree and invoke `visit` with the trailing
+/// name part of every `FuncCall` / `CallStmt` function name found anywhere
+/// (column DEFAULT, CHECK, VALUES lists, RULE actions, sub-selects — every
+/// slot, unlike `pg_query::nodes()`). `visit` returns `true` to short-circuit.
+fn walk_func_names(v: &Value, visit: &mut dyn FnMut(&str) -> bool) -> bool {
+    match v {
+        Value::Object(map) => {
+            // A FuncCall (or CallStmt's funccall) carries a `funcname` array of
+            // String nodes; the trailing element is the bare function name.
+            if let Some(Value::Array(parts)) = map.get("funcname") {
+                if let Some(name) = json_last_string_part(parts) {
+                    if visit(&name) {
+                        return true;
+                    }
+                }
+            }
+            for child in map.values() {
+                if walk_func_names(child, visit) {
+                    return true;
+                }
+            }
+            false
+        }
+        Value::Array(items) => items.iter().any(|i| walk_func_names(i, visit)),
+        _ => false,
+    }
+}
+
+/// Walk the ENTIRE serialized parse tree for any explicit reference to a schema
+/// other than `project_schema`, covering every slot a schema name can hide in:
+///   - `RangeVar.schemaname` (tables in FROM/DML/ALTER/DROP/INHERIT targets)
+///   - `AlterObjectSchemaStmt.newschema` (`… SET SCHEMA control`)
+///   - `CreateSchemaStmt.schemaname` (`CREATE SCHEMA control`)
+///   - qualified name lists: trigger/CALL `funcname`, `CommentStmt.object`,
+///     DROP object lists — a 2+-part `[schema, object]` String list.
+///
+/// Returns the first foreign schema found.
+///
+/// Neutral schemas are excluded so legitimate migrations are not over-denied:
+///   - the server's own catalogs (`pg_catalog`, `pg_temp`,
+///     `information_schema`) are never a tenant — qualified builtins like
+///     `pg_catalog.length(…)` or `value::pg_catalog.int4` are benign and
+///     skipped in **every** slot.
+///   - `public` is the shared default schema; an explicit `public.fn(…)`
+///     function qualification is routine, so `public` is skipped **only** in
+///     the function-name slot. A *table*/object reference to `public` (a
+///     `RangeVar` or COMMENT/DROP target) is still flagged — those reach a
+///     concrete object outside the pinned project schema.
+fn foreign_schema_in_tree(v: &Value, project_schema: &str) -> Option<String> {
+    let mut found: Option<String> = None;
+    walk_schema_names(v, &mut |schema, slot| {
+        if schema.is_empty() || schema.eq_ignore_ascii_case(project_schema) {
+            return false;
+        }
+        if is_system_catalog_schema(schema) {
+            return false;
+        }
+        if slot == SchemaSlot::FuncName && schema.eq_ignore_ascii_case("public") {
+            return false;
+        }
+        found = Some(schema.to_string());
+        true
+    });
+    found
+}
+
+/// True for the server's own catalog/temp schemas — never a cross-tenant
+/// target, so qualified references to them are benign in any slot.
+fn is_system_catalog_schema(schema: &str) -> bool {
+    ["pg_catalog", "pg_temp", "pg_toast", "information_schema"]
+        .iter()
+        .any(|s| schema.eq_ignore_ascii_case(s))
+}
+
+/// Which kind of parse-tree slot a candidate schema name came from. Drives the
+/// `public`-is-benign-for-functions relaxation in [`foreign_schema_in_tree`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchemaSlot {
+    /// `RangeVar.schemaname` / `AlterObjectSchemaStmt.newschema` /
+    /// `CreateSchemaStmt.schemaname` / `CommentStmt.object` — a concrete
+    /// relation/object/schema target.
+    Object,
+    /// A function-name qualifier (`FuncCall`/trigger/CALL `funcname`).
+    FuncName,
+}
+
+/// The traversal behind [`foreign_schema_in_tree`]. Invokes `visit(schema,
+/// slot)` for every candidate schema string; returns `true` once `visit`
+/// short-circuits.
+fn walk_schema_names(v: &Value, visit: &mut dyn FnMut(&str, SchemaSlot) -> bool) -> bool {
+    match v {
+        Value::Object(map) => {
+            // Direct schema-name string fields (concrete object/schema target).
+            for key in ["schemaname", "newschema"] {
+                if let Some(Value::String(s)) = map.get(key) {
+                    if !s.is_empty() && visit(s, SchemaSlot::Object) {
+                        return true;
+                    }
+                }
+            }
+            // Qualified function-name lists: trigger/CALL/FuncCall `funcname`.
+            if let Some(schema) = qualified_list_schema(map.get("funcname")) {
+                if visit(&schema, SchemaSlot::FuncName) {
+                    return true;
+                }
+            }
+            // Qualified object lists: COMMENT/DROP `object` ([schema, object]).
+            if let Some(schema) = qualified_list_schema(map.get("object")) {
+                if visit(&schema, SchemaSlot::Object) {
+                    return true;
+                }
+            }
+            for child in map.values() {
+                if walk_schema_names(child, visit) {
+                    return true;
+                }
+            }
+            false
+        }
+        Value::Array(items) => items.iter().any(|i| walk_schema_names(i, visit)),
+        _ => false,
+    }
+}
+
+/// If `v` is a qualified-name list with 2+ String parts, return the FIRST part
+/// (the schema qualifier). A single-part list is an unqualified name (no
+/// schema) and returns `None`.
+///
+/// Handles both spellings the parse tree uses:
+///   - a bare array (`CreateTrigStmt.funcname`, `CallStmt…funcname`):
+///     `[{node:{String}}, …]`
+///   - a `List` node (`CommentStmt.object`): `{node:{List:{items:[…]}}}`
+fn qualified_list_schema(v: Option<&Value>) -> Option<String> {
+    let arr = match v {
+        Some(Value::Array(a)) => a.as_slice(),
+        Some(obj) => match obj.get("node").and_then(|n| n.get("List")).and_then(|l| l.get("items"))
+        {
+            Some(Value::Array(a)) => a.as_slice(),
+            _ => return None,
+        },
+        None => return None,
+    };
+    let parts: Vec<String> = arr.iter().filter_map(json_string_node).collect();
+    if parts.len() >= 2 {
+        Some(parts[0].clone())
+    } else {
+        None
+    }
+}
+
+/// The trailing String of a `funcname`-style array (the bare name).
+fn json_last_string_part(parts: &[Value]) -> Option<String> {
+    parts.iter().rev().find_map(json_string_node)
+}
+
+/// Extract the inner string of a `{"node":{"String":{"sval":"…"}}}` value.
+fn json_string_node(v: &Value) -> Option<String> {
+    v.get("node")?
+        .get("String")?
+        .get("sval")?
+        .as_str()
+        .map(str::to_string)
+}
+
 /// Build a [`GuardError::Denied`].
 fn denied(rule: &'static str, statement: &str) -> GuardError {
     GuardError::Denied {
         rule,
         statement: statement.to_string(),
     }
-}
-
-/// The trailing identifier of a (possibly schema-qualified) name list, e.g.
-/// `pg_catalog.pg_read_file` → `pg_read_file`.
-fn last_name_part(parts: &[protobuf::Node]) -> Option<String> {
-    parts.iter().rev().find_map(|n| match n.node.as_ref() {
-        Some(NodeEnum::String(s)) => Some(s.sval.clone()),
-        _ => None,
-    })
 }
 
 /// Extract the `language` option of a CREATE FUNCTION.

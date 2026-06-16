@@ -6859,6 +6859,7 @@ dependencies = [
  "hex",
  "pg_query",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.18",
  "zeroship-core",

