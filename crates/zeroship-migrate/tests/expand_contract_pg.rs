@@ -181,6 +181,17 @@ async fn expand_then_separate_contract_apply_succeeds_cross_deploy() {
     seed_users(&conn, &cfg.project_schema).await;
 
     let plan = rename_plan(&cfg);
+
+    // Structural: C2 (DROP COLUMN) must declare C1 (DROP TRIGGER) as a dependency
+    // so the trigger reading <from> is always torn down before the column it
+    // reads — otherwise both are indeg-0 in a contract-only deploy and order only
+    // by incidental UUIDv7 version.
+    let (c1, c2) = (&plan.contract[0], &plan.contract[1]);
+    assert!(
+        c2.depends_on.contains(&c1.version),
+        "C2 DROP COLUMN must depend on C1 DROP TRIGGER"
+    );
+
     // Deploy N: expand only.
     apply_expand(&conn, &cfg, &plan).await;
     assert!(trigger_exists(&conn, &cfg.project_schema, "users").await);

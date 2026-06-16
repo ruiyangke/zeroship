@@ -19,7 +19,7 @@
 //! CONTRACT (deploy N+1, lands AFTER code stops using <from>; gated on EXPAND)
 //!   C1  DROP TRIGGER + DROP FUNCTION     -- requires_approval, depends_on [E2]
 //!   C2  DROP COLUMN <from>               -- destructive, requires_approval,
-//!                                           depends_on [E1]
+//!                                           depends_on [E1, E3, C1]
 //! ```
 //!
 //! # Why each piece is shaped the way it is
@@ -377,13 +377,19 @@ impl ExpandContractAuthor {
 
         // ---- C2: DROP COLUMN <from> (destructive, gated) ----
         //
-        // depends_on [E1, E3]: E1 is the column it reverses, and E3 (the backfill)
+        // depends_on [E1, E3, C1]: E1 is the column it reverses; E3 (the backfill)
         // MUST be net-applied first — dropping <from> before every pre-existing
-        // row's value is mirrored into <to> would lose un-backfilled data. The
-        // dual-write trigger only covers rows written DURING the transition; the
-        // backfill covers the rows that predate it. So the destructive drop is
-        // gated on the backfill's journaled completion (Plan 8: the backfill step
-        // records completion in the journal → the gate reads one timeline).
+        // row's value is mirrored into <to> would lose un-backfilled data; and C1
+        // (DROP TRIGGER + DROP FUNCTION) MUST run before C2 — the dual-write
+        // trigger references <from>, so dropping the column while the trigger is
+        // still live errors / leaves a dangling reference. In a contract-only
+        // deploy both C1 and C2 are indegree-0 and would otherwise order only by
+        // incidental UUIDv7 version; the explicit edge makes "drop the trigger
+        // before the column it reads" a structural guarantee. The dual-write
+        // trigger only covers rows written DURING the transition; the backfill
+        // covers the rows that predate it. So the destructive drop is gated on the
+        // backfill's journaled completion (Plan 8: the backfill step records
+        // completion in the journal → the gate reads one timeline).
         let c2_up = format!("ALTER TABLE {tbl_q} DROP COLUMN {from_q}");
         let c2 = self.make(
             &format!("contract_drop_column_{table}_{from}"),
@@ -397,7 +403,7 @@ impl ExpandContractAuthor {
                 requires_approval: true,
                 ..MigrationFlags::default()
             },
-            vec![e1.version.clone(), e3.version.clone()],
+            vec![e1.version.clone(), e3.version.clone(), c1.version.clone()],
         );
 
         Ok(ExpandContractPlan {
@@ -652,9 +658,18 @@ mod tests {
         assert_eq!(e3.depends_on, vec![e2.version.clone()]);
         // C1 depends on E2 (the trigger it drops).
         assert_eq!(c1.depends_on, vec![e2.version.clone()]);
-        // C2 depends on E1 (the column add it reverses) AND E3 (the backfill —
-        // dropping <from> before the backfill mirrors pre-existing rows loses data).
-        assert_eq!(c2.depends_on, vec![e1.version.clone(), e3.version.clone()]);
+        // C2 depends on E1 (the column add it reverses), E3 (the backfill —
+        // dropping <from> before the backfill mirrors pre-existing rows loses
+        // data), AND C1 (the trigger drop MUST run before the column it reads —
+        // a structural guarantee, not incidental UUIDv7 ordering).
+        assert_eq!(
+            c2.depends_on,
+            vec![e1.version.clone(), e3.version.clone(), c1.version.clone()]
+        );
+        assert!(
+            c2.depends_on.contains(&c1.version),
+            "C2 (DROP COLUMN) must declare C1 (DROP TRIGGER) as a dependency"
+        );
         // trigger_version is E2.
         assert_eq!(plan.trigger_version, e2.version);
     }
