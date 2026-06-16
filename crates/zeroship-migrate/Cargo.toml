@@ -1,0 +1,22 @@
+[package]
+name = "zeroship-migrate"
+version = "0.1.0"
+edition = "2021"
+description = "zeroship's versioned DB migration engine — migration types + SQL security guard (parse-time deny-list)"
+
+[dependencies]
+# Parse SQL with the REAL Postgres parser (libpg_query bindings) so the
+# security guard sees exactly what Postgres would execute. A deny-list must
+# not misparse or miss a dangerous statement; a pure-Rust parser
+# (sqlparser-rs) is incomplete for exotic PG syntax, which is a security gap.
+# pg_query carries a C build dep (libpg_query) — confirmed to build under the
+# Nix C toolchain (cc/clang present).
+pg_query = "6"
+sha2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+zeroship-core = { workspace = true }
+
+[lints]
+workspace = true

@@ -60,8 +60,19 @@
           # build time. Without these, `cargo build --features sqlite`
           # fails with "Unable to find libclang".
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+          # Two -isystem entries:
+          #   1. clang's own resource headers (stddef.h, stdarg.h, …) —
+          #      required by every bindgen consumer, incl. rusqlite.
+          #   2. glibc's dev headers (sys/types.h, …) — required by
+          #      `pg_query`/libpg_query (crates/zeroship-migrate), whose
+          #      generated `pg_query.h` pulls in `<sys/types.h>`. rusqlite's
+          #      bundled amalgamation never needed (2), so it was absent;
+          #      pg_query's bindgen fails with "'sys/types.h' file not found"
+          #      without it. `stdenv.cc.libc.dev` is the same glibc the
+          #      toolchain links against (no version skew).
           BINDGEN_EXTRA_CLANG_ARGS =
-            "-isystem ${pkgs.llvmPackages.libclang.lib}/lib/clang/${pkgs.lib.getVersion pkgs.llvmPackages.clang}/include";
+            "-isystem ${pkgs.llvmPackages.libclang.lib}/lib/clang/${pkgs.lib.getVersion pkgs.llvmPackages.clang}/include "
+            + "-isystem ${pkgs.stdenv.cc.libc.dev}/include";
           # Playwright: use Nix-provided browsers, npm provides the test runner
           PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
