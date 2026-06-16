@@ -696,41 +696,72 @@ async fn recover_non_transactional(
     cfg: &ExecutorConfig,
     m: &Migration,
 ) -> Result<(), ApplyError> {
-    // Drop INVALID indexes in the project schema — the residue of an
-    // interrupted CONCURRENTLY build. Querying pg_index.indisvalid = false.
+    // Drop the INVALID residue of an interrupted CONCURRENTLY build — but ONLY
+    // the index(es) this migration's `up` names (v1.x scope fix). An INVALID
+    // index satisfies `IF NOT EXISTS`, so the caller's re-run of `<up>` would
+    // never rebuild it; we must drop it first. We parse the `CREATE INDEX … name`
+    // out of the `up` and drop *that* name (if it is currently invalid), rather
+    // than every invalid index in the schema.
     //
-    // SCOPE NOTE: this drops EVERY invalid index in the project schema, not just
-    // the one this migration's `up` names. Safe for the engine's own operation:
-    // the per-project advisory lock (`acquire_project_lock`) serializes all engine
-    // applies, and the project schema is engine-owned, so during recovery the only
-    // invalid index present is this crashed migration's residue. The narrow
-    // residual risk is an OUT-OF-BAND invalid index (a manual CONCURRENTLY build
-    // elsewhere in the schema) being dropped here. v1.x hardening: parse the index
-    // name from `up` and scope the drop to it. Tracked.
-    let invalid: Vec<String> = conn
-        .query(
-            "SELECT c.relname
-               FROM pg_index x
-               JOIN pg_class c ON c.oid = x.indexrelid
-               JOIN pg_namespace n ON n.oid = c.relnamespace
-              WHERE n.nspname = $1 AND x.indisvalid = false",
-            &[&cfg.project_schema],
-        )
-        .await?
-        .into_iter()
-        .map(|r| r.get::<_, String>("relname"))
-        .collect();
-
-    for idx in invalid {
-        let stmt = format!(
-            "DROP INDEX IF EXISTS \"{}\".\"{}\"",
-            cfg.project_schema.replace('"', "\"\""),
-            idx.replace('"', "\"\""),
-        );
-        conn.batch_execute(&stmt).await?;
+    // Why scoped: an OUT-OF-BAND invalid index (a manual CONCURRENTLY build the
+    // operator is running elsewhere in the project schema) must NOT be collateral
+    // damage of recovering an unrelated migration. The per-project advisory lock
+    // serializes the engine's own applies, but it does not stop a human's manual
+    // session, so scoping is the correct fix.
+    for idx in index_names_in_up(&m.up) {
+        // Only drop it if it is currently INVALID — a valid index named here means
+        // the prior attempt actually succeeded (case (b): completed then crashed
+        // before journaling), and the re-run of the idempotent `up`'s
+        // `IF NOT EXISTS` will correctly no-op over it. Dropping a valid index
+        // would needlessly rebuild it.
+        let is_invalid: bool = conn
+            .query_one(
+                "SELECT EXISTS (
+                     SELECT 1
+                       FROM pg_index x
+                       JOIN pg_class c ON c.oid = x.indexrelid
+                       JOIN pg_namespace n ON n.oid = c.relnamespace
+                      WHERE n.nspname = $1 AND c.relname = $2 AND x.indisvalid = false
+                 ) AS invalid",
+                &[&cfg.project_schema, &idx],
+            )
+            .await?
+            .get("invalid");
+        if is_invalid {
+            let stmt = format!(
+                "DROP INDEX IF EXISTS \"{}\".\"{}\"",
+                cfg.project_schema.replace('"', "\"\""),
+                idx.replace('"', "\"\""),
+            );
+            conn.batch_execute(&stmt).await?;
+        }
     }
 
     // Clear the stale marker; the caller re-runs `<up>` and re-records.
     journal::clear_inflight(conn, cfg, m.version.as_str()).await?;
     Ok(())
+}
+
+/// Parse the index name(s) created by `CREATE INDEX … name … ON …` statements in
+/// a migration's `up`, via the real Postgres parser (so syntax we cannot parse
+/// simply yields no names — recovery then drops nothing, which is the safe
+/// default). Unnamed `CREATE INDEX` (no explicit name) is skipped: Postgres
+/// derives the name, and recovery cannot target a name it does not know — the
+/// non-txn idempotency rule already forbids unnamed `CONCURRENTLY` indirectly
+/// (the author always emits a name; raw SQL must too to be re-runnable).
+fn index_names_in_up(up: &str) -> Vec<String> {
+    let Ok(parsed) = pg_query::parse(up) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for raw_stmt in &parsed.protobuf.stmts {
+        if let Some(NodeEnum::IndexStmt(idx)) =
+            raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref())
+        {
+            if !idx.idxname.is_empty() {
+                names.push(idx.idxname.clone());
+            }
+        }
+    }
+    names
 }
