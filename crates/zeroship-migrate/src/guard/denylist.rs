@@ -146,6 +146,10 @@ pub mod rule {
     /// An `ALTER TABLE` subcommand outside the safe migration set (e.g. OWNER
     /// TO, INHERIT, REPLICA IDENTITY, generic options).
     pub const UNSAFE_ALTER_TABLE_CMD: &str = "unsafe_alter_table_subcommand";
+    /// A relation read/write targeting a system catalog
+    /// (`pg_catalog.*` / unqualified `pg_*` / `information_schema.*`) — leaks
+    /// roles/passwords/function source/cross-tenant metadata.
+    pub const SYSTEM_CATALOG_ACCESS: &str = "system_catalog_access";
 }
 
 /// Case-insensitive membership against a static list.

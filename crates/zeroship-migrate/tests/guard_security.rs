@@ -1107,6 +1107,248 @@ fn flags_for_non_transactional_sets_transactional_false() {
     );
 }
 
+// ===========================================================================
+// ROUND 2 — slot-class hardening (typed qualified-name walk)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// BYPASS-1 — TypeName.names schema qualifier (own `names` array slot)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn column_type_in_foreign_schema_is_cross_schema() {
+    assert_cross_schema("CREATE TABLE project_acme.t (c control.sometype)");
+}
+
+#[test]
+fn typecast_to_foreign_schema_type_is_cross_schema() {
+    assert_cross_schema("SELECT '1'::control.sometype");
+}
+
+#[test]
+fn create_table_of_foreign_schema_type_is_cross_schema() {
+    assert_cross_schema("CREATE TABLE project_acme.t OF control.mytype");
+}
+
+#[test]
+fn function_return_type_in_foreign_schema_is_cross_schema() {
+    assert_cross_schema(
+        "CREATE FUNCTION project_acme.f() RETURNS control.sometype AS $$select 1$$ LANGUAGE sql",
+    );
+}
+
+#[test]
+fn function_param_type_in_foreign_schema_is_cross_schema() {
+    assert_cross_schema(
+        "CREATE FUNCTION project_acme.f(a control.sometype) RETURNS int AS $$select 1$$ LANGUAGE sql",
+    );
+}
+
+#[test]
+fn alter_column_type_to_foreign_schema_is_cross_schema() {
+    assert_cross_schema("ALTER TABLE project_acme.t ALTER COLUMN c TYPE control.sometype");
+}
+
+#[test]
+fn own_schema_type_reference_passes() {
+    // A type qualified with the project's OWN schema is fine.
+    assert_ok("SELECT '1'::project_acme.mytype");
+    assert_ok("CREATE TABLE project_acme.t (c project_acme.sometype)");
+}
+
+#[test]
+fn builtin_type_casts_still_pass() {
+    // Builtin types desugar to `pg_catalog.<type>` in the `names` slot — must
+    // NOT be flagged as cross-schema.
+    assert_ok("SELECT '1'::int");
+    assert_ok("SELECT '1'::text");
+    assert_ok("CREATE TABLE project_acme.t (id int, name text, flag boolean)");
+}
+
+// ---------------------------------------------------------------------------
+// BYPASS-2 — system-catalog TABLE reads must NOT be exempt
+// ---------------------------------------------------------------------------
+
+#[test]
+fn read_pg_catalog_table_is_denied() {
+    assert_denied("SELECT * FROM pg_catalog.pg_authid");
+}
+
+#[test]
+fn read_unqualified_pg_shadow_is_denied() {
+    assert_denied("SELECT * FROM pg_shadow");
+}
+
+#[test]
+fn read_pg_proc_source_is_denied() {
+    assert_denied("SELECT prosrc FROM pg_catalog.pg_proc");
+}
+
+#[test]
+fn read_information_schema_table_is_denied() {
+    assert_denied("SELECT * FROM information_schema.tables");
+}
+
+#[test]
+fn qualified_builtin_function_call_still_passes() {
+    // pg_catalog / public function-CALL qualifiers stay benign.
+    assert_ok("SELECT pg_catalog.length('x')");
+    assert_ok("SELECT public.gen_random_uuid()");
+}
+
+#[test]
+fn own_tables_with_pg_substring_names_pass() {
+    // The `pg_` catalog-prefix guard must NOT over-deny ordinary creator
+    // relations that merely *contain* or *start near* "pg" — only the exact
+    // reserved `pg_` prefix on an UNqualified relation is a catalog read.
+    assert_ok("SELECT * FROM project_acme.pages");
+    assert_ok("SELECT * FROM project_acme.progress");
+    assert_ok("CREATE TABLE project_acme.pgmeta (id int)");
+}
+
+// ---------------------------------------------------------------------------
+// BYPASS-3 — function creation INTO a shared / system schema
+// ---------------------------------------------------------------------------
+
+#[test]
+fn create_function_in_public_is_denied() {
+    assert_denied("CREATE FUNCTION public.evil() RETURNS int AS $$select 1$$ LANGUAGE sql");
+}
+
+#[test]
+fn create_function_in_pg_catalog_is_denied() {
+    assert_denied("CREATE FUNCTION pg_catalog.evil() RETURNS int AS $$select 1$$ LANGUAGE sql");
+}
+
+#[test]
+fn create_function_in_information_schema_is_denied() {
+    assert_denied(
+        "CREATE FUNCTION information_schema.evil() RETURNS int AS $$select 1$$ LANGUAGE sql",
+    );
+}
+
+#[test]
+fn create_function_shadowing_builtin_in_public_is_denied() {
+    assert_denied("CREATE FUNCTION public.lower(text) RETURNS text AS $$select $1$$ LANGUAGE sql");
+}
+
+#[test]
+fn create_function_in_control_schema_is_denied() {
+    assert_denied("CREATE FUNCTION control.evil() RETURNS int AS $$select 1$$ LANGUAGE sql");
+}
+
+#[test]
+fn alter_function_in_public_is_denied() {
+    assert_denied("ALTER FUNCTION public.evil() SECURITY INVOKER");
+}
+
+#[test]
+fn alter_function_in_control_is_denied() {
+    assert_denied("ALTER FUNCTION control.evil() VOLATILE");
+}
+
+#[test]
+fn create_function_in_own_schema_passes() {
+    assert_ok("CREATE FUNCTION project_acme.f() RETURNS int AS $$select 1$$ LANGUAGE sql");
+}
+
+#[test]
+fn create_unqualified_function_passes() {
+    // No schema qualifier → resolves under the pinned search_path; fine.
+    assert_ok("CREATE FUNCTION f() RETURNS int AS $$select 1$$ LANGUAGE sql");
+}
+
+// ---------------------------------------------------------------------------
+// OVER-DENIAL-1 — own-schema partition attach/detach must PASS
+// ---------------------------------------------------------------------------
+
+#[test]
+fn own_schema_attach_partition_passes() {
+    assert_ok(
+        "ALTER TABLE project_acme.parent ATTACH PARTITION project_acme.child FOR VALUES IN (1)",
+    );
+}
+
+#[test]
+fn own_schema_detach_partition_passes() {
+    assert_ok("ALTER TABLE project_acme.parent DETACH PARTITION project_acme.child");
+}
+
+#[test]
+fn cross_schema_attach_partition_still_denied() {
+    assert_cross_schema(
+        "ALTER TABLE project_acme.parent ATTACH PARTITION control.secrets FOR VALUES IN (1)",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// BYPASS-4 — regprocedure / regproc casts naming a dangerous function
+// ---------------------------------------------------------------------------
+
+#[test]
+fn regprocedure_cast_to_file_function_is_denied() {
+    assert_denied("SELECT 'pg_read_file'::regprocedure");
+}
+
+#[test]
+fn regproc_cast_to_network_function_is_denied() {
+    assert_denied("SELECT 'dblink_connect'::regproc");
+}
+
+#[test]
+fn regprocedure_cast_with_signature_is_denied() {
+    assert_denied("SELECT 'pg_read_file(text)'::regprocedure");
+}
+
+#[test]
+fn benign_regprocedure_cast_passes() {
+    assert_ok("SELECT 'lower'::regprocedure");
+}
+
+// ---------------------------------------------------------------------------
+// PROACTIVE — other schema-qualified-name-bearing slots
+// ---------------------------------------------------------------------------
+
+#[test]
+fn index_opclass_in_foreign_schema_is_cross_schema() {
+    assert_cross_schema("CREATE INDEX ON project_acme.t USING gist (c control.myopclass)");
+}
+
+#[test]
+fn own_schema_opclass_passes() {
+    assert_ok("CREATE INDEX ON project_acme.t USING gist (c project_acme.myopclass)");
+}
+
+#[test]
+fn collate_clause_in_foreign_schema_is_cross_schema() {
+    assert_cross_schema(
+        "SELECT * FROM project_acme.t ORDER BY c COLLATE control.mycollation",
+    );
+    assert_cross_schema("CREATE TABLE project_acme.t (c text COLLATE control.mycol)");
+}
+
+#[test]
+fn operator_definition_referencing_foreign_function_is_denied() {
+    // CREATE OPERATOR is a DefineStmt — denied-by-default as an unrecognized
+    // statement kind (stronger than cross-schema), and the foreign `function=`
+    // qualifier is independently caught by the TypeRef slot walk.
+    assert_denied(
+        "CREATE OPERATOR project_acme.+ (leftarg=int, rightarg=int, function=control.f)",
+    );
+}
+
+#[test]
+fn sequence_owned_by_foreign_schema_column_is_cross_schema() {
+    assert_cross_schema("CREATE SEQUENCE project_acme.s OWNED BY control.t.c");
+}
+
+#[test]
+fn sequence_owned_by_own_table_passes() {
+    // 2-part `table.column` (no schema) and 3-part own-schema both fine.
+    assert_ok("CREATE SEQUENCE project_acme.s OWNED BY mytable.c");
+    assert_ok("CREATE SEQUENCE project_acme.s OWNED BY project_acme.t.c");
+}
+
 // ---------------------------------------------------------------------------
 // Task 6 — public API surface smoke test (uses only crate-root re-exports)
 // ---------------------------------------------------------------------------

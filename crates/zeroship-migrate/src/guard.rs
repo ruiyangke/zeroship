@@ -152,9 +152,18 @@ impl SqlGuard {
         //    trigger/CALL funcname, COMMENT object, INHERIT target, …).
         self.check_cross_schema(json, raw)?;
 
+        // 2b. System-catalog relation reads/writes — `pg_catalog.pg_authid`,
+        //     unqualified `pg_shadow`/`pg_user`, `information_schema.*`. These
+        //     leak roles/passwords/source and are never a project's own table.
+        Self::check_system_catalog_relations(json, raw)?;
+
         // 3. Dangerous function calls anywhere in the FULL expression tree
         //    (file/network functions in SELECT/DML/DEFAULT/CHECK/VALUES/etc.).
         Self::check_dangerous_functions(json, raw)?;
+
+        // 3b. Belt: a `'pg_read_file'::regprocedure` / `::regproc` cast names a
+        //     dangerous function as a TEXT literal the FuncCall walk never sees.
+        Self::check_regproc_casts(json, raw)?;
 
         // 4. Recurse into DO blocks and function bodies — the must-inspect
         //    case. A dangerous construct hidden in a body is still dangerous.
@@ -215,6 +224,11 @@ impl SqlGuard {
 
             // ---- Allowlisted-safe (with per-kind sub-checks) ----
             NodeEnum::CreateFunctionStmt(f) => {
+                // The funcname is the CREATION TARGET, not a call qualifier:
+                // defining a function INTO `public`/`pg_catalog`/
+                // `information_schema`/another tenant schema is denied (no
+                // shared-schema exemption — that applies only to call sites).
+                self.check_func_def_target(&f.funcname, raw)?;
                 // Untrusted language (plpythonu/plperlu/c/…) — RCE.
                 if let Some(lang) = function_language(&f.options) {
                     if !denylist::is_trusted_language(&lang) {
@@ -233,6 +247,12 @@ impl SqlGuard {
                 }
             }
             NodeEnum::AlterFunctionStmt(a) => {
+                // ALTER FUNCTION targets an existing function; touching one in
+                // a shared/system/foreign schema is out of remit (the func is
+                // named in `func.objname`, an ObjectWithArgs).
+                if let Some(func) = a.func.as_ref() {
+                    self.check_func_def_target(&func.objname, raw)?;
+                }
                 // ALTER FUNCTION … SECURITY DEFINER / SET search_path = …
                 if alter_function_is_security_definer(&a.actions) {
                     return Err(denied(rule::SECURITY_DEFINER, raw));
@@ -357,6 +377,64 @@ impl SqlGuard {
         Ok(())
     }
 
+    /// Deny a function-DEFINING statement whose funcname targets a schema
+    /// other than the project's own. The funcname here is a *creation target*
+    /// (`CREATE FUNCTION public.evil()` / `ALTER FUNCTION control.f()`), NOT a
+    /// call qualifier — so the `public`/`pg_catalog`/`information_schema`
+    /// exemptions that apply at call sites do NOT apply: defining into any
+    /// non-project schema is denied. `name` is the funcname/objname list of
+    /// protobuf String nodes; an unqualified name (single part) is fine — it
+    /// resolves under the pinned `search_path`.
+    fn check_func_def_target(
+        &self,
+        name: &[protobuf::Node],
+        raw: &str,
+    ) -> Result<(), GuardError> {
+        let parts: Vec<&str> = name
+            .iter()
+            .filter_map(|n| match n.node.as_ref() {
+                Some(NodeEnum::String(s)) => Some(s.sval.as_str()),
+                _ => None,
+            })
+            .collect();
+        if parts.len() >= 2 {
+            let schema = parts[0];
+            if !schema.eq_ignore_ascii_case(&self.cfg.project_schema) {
+                return Err(GuardError::CrossSchema {
+                    schema: schema.to_string(),
+                    statement: raw.to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Deny any `RangeVar` relation read/write that targets a system catalog.
+    ///
+    /// Catches both spellings the cross-schema walk cannot:
+    ///   - qualified `pg_catalog.pg_authid` / `information_schema.tables`
+    ///     (a `pg_catalog`/`information_schema` `RangeVar.schemaname`);
+    ///   - **unqualified** `pg_shadow` / `pg_user` / `pg_authid` — the schema
+    ///     is empty so the cross-schema walk sees nothing, but the `pg_`
+    ///     prefix is reserved for system catalogs (a creator relation may not
+    ///     use it), so an unqualified `pg_*` relation resolves to the catalog.
+    fn check_system_catalog_relations(json: &Value, raw: &str) -> Result<(), GuardError> {
+        let mut found = false;
+        walk_range_vars(json, &mut |schema, relname| {
+            let catalog_schema = is_neutral_catalog_schema(schema);
+            let catalog_relname = relname.len() >= 3 && relname[..3].eq_ignore_ascii_case("pg_");
+            if catalog_schema || (schema.is_empty() && catalog_relname) {
+                found = true;
+                return true;
+            }
+            false
+        });
+        if found {
+            return Err(denied(rule::SYSTEM_CATALOG_ACCESS, raw));
+        }
+        Ok(())
+    }
+
     /// Deny file-access / network function calls anywhere in the FULL tree.
     fn check_dangerous_functions(json: &Value, raw: &str) -> Result<(), GuardError> {
         let mut found: Option<&'static str> = None;
@@ -366,6 +444,31 @@ impl SqlGuard {
                 return true;
             }
             if denylist::list_contains_ci(denylist::NETWORK_FUNCTIONS, name) {
+                found = Some(rule::NETWORK_FUNCTION);
+                return true;
+            }
+            false
+        });
+        if let Some(r) = found {
+            return Err(denied(r, raw));
+        }
+        Ok(())
+    }
+
+    /// Deny a `<literal>::regprocedure` / `::regproc` cast whose literal names a
+    /// `FILE_ACCESS` / `NETWORK` function. `'pg_read_file'::regprocedure` resolves
+    /// the named function by OID at runtime — a dangerous capability the
+    /// `FuncCall` walk misses because the function name is a bare string
+    /// literal, not a call node. The literal may carry an argument signature
+    /// (`'pg_read_file(text)'`); we match on the leading identifier.
+    fn check_regproc_casts(json: &Value, raw: &str) -> Result<(), GuardError> {
+        let mut found: Option<&'static str> = None;
+        walk_regproc_casts(json, &mut |fname| {
+            if denylist::list_contains_ci(denylist::FILE_ACCESS_FUNCTIONS, fname) {
+                found = Some(rule::FILE_ACCESS_FUNCTION);
+                return true;
+            }
+            if denylist::list_contains_ci(denylist::NETWORK_FUNCTIONS, fname) {
                 found = Some(rule::NETWORK_FUNCTION);
                 return true;
             }
@@ -730,6 +833,12 @@ fn is_safe_alter_table_subtype(subtype: i32) -> bool {
         A::AtSetIdentity,
         A::AtDropIdentity,
         A::AtAddIdentity,
+        // Partition (de)attach. The partition's RangeVar is walked by
+        // `check_cross_schema` independently, so an own-schema partition is
+        // safe and a cross-schema one (`… ATTACH PARTITION control.x`) is
+        // still denied there.
+        A::AtAttachPartition,
+        A::AtDetachPartition,
     ]
     .iter()
     .any(|t| subtype == *t as i32)
@@ -842,36 +951,116 @@ fn walk_func_names(v: &Value, visit: &mut dyn FnMut(&str) -> bool) -> bool {
     }
 }
 
+/// Walk the ENTIRE serialized parse tree for `RangeVar` nodes (relation
+/// references), invoking `visit(schemaname, relname)` for each. A `RangeVar` is
+/// the object carrying a `relname` *and* a `schemaname` sibling. `visit`
+/// returns `true` to short-circuit.
+fn walk_range_vars(v: &Value, visit: &mut dyn FnMut(&str, &str) -> bool) -> bool {
+    match v {
+        Value::Object(map) => {
+            if let (Some(Value::String(rel)), Some(Value::String(schema))) =
+                (map.get("relname"), map.get("schemaname"))
+            {
+                if visit(schema, rel) {
+                    return true;
+                }
+            }
+            map.values().any(|c| walk_range_vars(c, visit))
+        }
+        Value::Array(items) => items.iter().any(|i| walk_range_vars(i, visit)),
+        _ => false,
+    }
+}
+
+/// Walk the ENTIRE serialized parse tree for `TypeCast` nodes whose target type
+/// is `regprocedure`/`regproc`/`regprocedureout`-family and whose argument is a
+/// string literal naming a function; invoke `visit` with the leading function
+/// identifier of that literal. `visit` returns `true` to short-circuit.
+fn walk_regproc_casts(v: &Value, visit: &mut dyn FnMut(&str) -> bool) -> bool {
+    match v {
+        Value::Object(map) => {
+            if let Some(cast) = map.get("TypeCast") {
+                if type_is_regproc(cast.get("type_name")) {
+                    if let Some(name) = type_cast_string_literal(cast.get("arg")) {
+                        if visit(regproc_leading_ident(&name)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            map.values().any(|c| walk_regproc_casts(c, visit))
+        }
+        Value::Array(items) => items.iter().any(|i| walk_regproc_casts(i, visit)),
+        _ => false,
+    }
+}
+
+/// Does a `type_name` resolve to the `regprocedure`/`regproc` reg* family
+/// (a function reference by name/OID)?
+fn type_is_regproc(type_name: Option<&Value>) -> bool {
+    let Some(parts) = qualified_list_parts(type_name.and_then(|t| t.get("names"))) else {
+        return false;
+    };
+    // The bare type name is the trailing part (a `pg_catalog.regprocedure`
+    // spelling is possible).
+    matches!(
+        parts.last().map(String::as_str),
+        Some("regprocedure" | "regproc")
+    )
+}
+
+/// Extract the string-literal value of a `TypeCast.arg` (`AConst { Sval }`).
+fn type_cast_string_literal(arg: Option<&Value>) -> Option<String> {
+    arg?.get("node")?
+        .get("AConst")?
+        .get("val")?
+        .get("Sval")?
+        .get("sval")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// The leading identifier of a regproc literal, dropping any argument signature
+/// and schema qualifier: `pg_read_file(text)` → `pg_read_file`,
+/// `pg_catalog.pg_read_file` → `pg_read_file`.
+fn regproc_leading_ident(lit: &str) -> &str {
+    let head = lit.trim().split('(').next().unwrap_or("").trim();
+    head.rsplit('.').next().unwrap_or(head).trim()
+}
+
 /// Walk the ENTIRE serialized parse tree for any explicit reference to a schema
-/// other than `project_schema`, covering every slot a schema name can hide in:
-///   - `RangeVar.schemaname` (tables in FROM/DML/ALTER/DROP/INHERIT targets)
-///   - `AlterObjectSchemaStmt.newschema` (`… SET SCHEMA control`)
-///   - `CreateSchemaStmt.schemaname` (`CREATE SCHEMA control`)
-///   - qualified name lists: trigger/CALL `funcname`, `CommentStmt.object`,
-///     DROP object lists — a 2+-part `[schema, object]` String list.
+/// other than `project_schema`, covering every slot a schema name can hide in.
+/// The walker is **typed by slot** (not a key-string allowlist): each
+/// schema-qualified-name-bearing node contributes its schema with the
+/// [`SchemaSlot`] that fixes the per-slot exemption policy. The slots:
+///   - [`SchemaSlot::RangeVar`] — `RangeVar.schemaname` (FROM/DML/ALTER/DROP/
+///     partition/INHERIT relation targets). Catalog reads
+///     (`pg_catalog.pg_authid`, `information_schema.tables`) are NOT exempt.
+///   - [`SchemaSlot::Object`] — `newschema` (SET SCHEMA), `CreateSchemaStmt`
+///     `schemaname`, `CommentStmt`/`DropStmt` object lists, index `opclass`,
+///     `COLLATE` `collname`, sequence `OWNED BY` — concrete object targets.
+///     No exemption beyond own-schema.
+///   - [`SchemaSlot::TypeRef`] — `TypeName.names` (column/return/param/cast/
+///     `OF` type). Builtins desugar to `pg_catalog.<t>`, so `pg_catalog` (+
+///     catalog/`public`) stay exempt here; a foreign tenant type is flagged.
+///   - [`SchemaSlot::FuncCall`] — `FuncCall`/trigger/CALL `funcname` *call*
+///     qualifier. `pg_catalog`/`information_schema`/`public` calls are routine
+///     and exempt; a tenant-schema call is flagged.
+///
+/// Function *definition* targets (`CreateFunctionStmt`/`AlterFunctionStmt`
+/// funcname) are NOT walked here — they are a *creation target*, never a call
+/// qualifier, so they are checked directly against the project schema in
+/// [`SqlGuard::check_func_def_target`] with NO shared-schema exemption
+/// (`public.evil`, `pg_catalog.evil`, `information_schema.evil` all denied).
 ///
 /// Returns the first foreign schema found.
-///
-/// Neutral schemas are excluded so legitimate migrations are not over-denied:
-///   - the server's own catalogs (`pg_catalog`, `pg_temp`,
-///     `information_schema`) are never a tenant — qualified builtins like
-///     `pg_catalog.length(…)` or `value::pg_catalog.int4` are benign and
-///     skipped in **every** slot.
-///   - `public` is the shared default schema; an explicit `public.fn(…)`
-///     function qualification is routine, so `public` is skipped **only** in
-///     the function-name slot. A *table*/object reference to `public` (a
-///     `RangeVar` or COMMENT/DROP target) is still flagged — those reach a
-///     concrete object outside the pinned project schema.
 fn foreign_schema_in_tree(v: &Value, project_schema: &str) -> Option<String> {
     let mut found: Option<String> = None;
     walk_schema_names(v, &mut |schema, slot| {
         if schema.is_empty() || schema.eq_ignore_ascii_case(project_schema) {
             return false;
         }
-        if is_system_catalog_schema(schema) {
-            return false;
-        }
-        if slot == SchemaSlot::FuncName && schema.eq_ignore_ascii_case("public") {
+        if slot_exempts_schema(slot, schema) {
             return false;
         }
         found = Some(schema.to_string());
@@ -880,50 +1069,114 @@ fn foreign_schema_in_tree(v: &Value, project_schema: &str) -> Option<String> {
     found
 }
 
-/// True for the server's own catalog/temp schemas — never a cross-tenant
-/// target, so qualified references to them are benign in any slot.
-fn is_system_catalog_schema(schema: &str) -> bool {
+/// Per-slot schema exemption. A neutral schema is exempt only in the slots
+/// where naming it is routine and benign — never as a broad whitelist.
+fn slot_exempts_schema(slot: SchemaSlot, schema: &str) -> bool {
+    match slot {
+        // Concrete relation/object targets reach a real object outside the
+        // pinned schema; nothing is exempt (catalog reads are denied here).
+        SchemaSlot::RangeVar | SchemaSlot::Object => false,
+        // Type references (builtins desugar to `pg_catalog.<type>`) and
+        // function *call* qualifiers: catalog + `public` are routine and
+        // benign. Catalog table *reads* go via RangeVar (not exempt there);
+        // function *definition* targets are checked separately (no exemption).
+        SchemaSlot::TypeRef | SchemaSlot::FuncCall => {
+            is_neutral_catalog_schema(schema) || schema.eq_ignore_ascii_case("public")
+        }
+    }
+}
+
+/// The server's own catalog/temp schemas — never a cross-tenant target. Used
+/// only for the slots where naming them is benign (type refs, function calls);
+/// table reads from them are caught via [`SchemaSlot::RangeVar`].
+fn is_neutral_catalog_schema(schema: &str) -> bool {
     ["pg_catalog", "pg_temp", "pg_toast", "information_schema"]
         .iter()
         .any(|s| schema.eq_ignore_ascii_case(s))
 }
 
 /// Which kind of parse-tree slot a candidate schema name came from. Drives the
-/// `public`-is-benign-for-functions relaxation in [`foreign_schema_in_tree`].
+/// per-slot exemption policy in [`slot_exempts_schema`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SchemaSlot {
-    /// `RangeVar.schemaname` / `AlterObjectSchemaStmt.newschema` /
-    /// `CreateSchemaStmt.schemaname` / `CommentStmt.object` — a concrete
-    /// relation/object/schema target.
+    /// `RangeVar.schemaname` — a relation read/write/target. Catalog reads are
+    /// NOT exempt here.
+    RangeVar,
+    /// A concrete object/schema target: `newschema`, `CreateSchemaStmt`
+    /// `schemaname`, COMMENT/DROP object lists, index `opclass`, `COLLATE`
+    /// `collname`, sequence `OWNED BY`.
     Object,
-    /// A function-name qualifier (`FuncCall`/trigger/CALL `funcname`).
-    FuncName,
+    /// A type reference (`TypeName.names`): column/return/param/cast/`OF` type.
+    TypeRef,
+    /// A function-name *call* qualifier (`FuncCall`/trigger/CALL `funcname`).
+    /// Function *definition* targets are NOT this slot — they are checked
+    /// against the project schema directly in [`SqlGuard::check_func_def_target`]
+    /// (no shared-schema exemption).
+    FuncCall,
 }
 
 /// The traversal behind [`foreign_schema_in_tree`]. Invokes `visit(schema,
 /// slot)` for every candidate schema string; returns `true` once `visit`
 /// short-circuits.
+///
+/// Typed by node shape, not a key-string allowlist: each schema-qualified-name
+/// node contributes its schema with the slot that fixes its exemption policy.
 fn walk_schema_names(v: &Value, visit: &mut dyn FnMut(&str, SchemaSlot) -> bool) -> bool {
     match v {
         Value::Object(map) => {
-            // Direct schema-name string fields (concrete object/schema target).
-            for key in ["schemaname", "newschema"] {
-                if let Some(Value::String(s)) = map.get(key) {
-                    if !s.is_empty() && visit(s, SchemaSlot::Object) {
+            // A `RangeVar` (relation target) carries its schema in
+            // `schemaname` AND a `relname` sibling — the relation slot.
+            if map.contains_key("relname") {
+                if let Some(Value::String(s)) = map.get("schemaname") {
+                    if !s.is_empty() && visit(s, SchemaSlot::RangeVar) {
+                        return true;
+                    }
+                }
+            } else if let Some(Value::String(s)) = map.get("schemaname") {
+                // `CreateSchemaStmt.schemaname` (no `relname` sibling) — a
+                // concrete schema target.
+                if !s.is_empty() && visit(s, SchemaSlot::Object) {
+                    return true;
+                }
+            }
+            // `AlterObjectSchemaStmt.newschema` (`… SET SCHEMA control`).
+            if let Some(Value::String(s)) = map.get("newschema") {
+                if !s.is_empty() && visit(s, SchemaSlot::Object) {
+                    return true;
+                }
+            }
+            // `TypeName.names` — column/return/param/cast/OF type reference.
+            // The presence of the `names` key alongside type-name siblings is
+            // the TypeName tell.
+            if let Some(schema) = qualified_list_schema(map.get("names")) {
+                if visit(&schema, SchemaSlot::TypeRef) {
+                    return true;
+                }
+            }
+            // Qualified function-name *call* lists: trigger/CALL/FuncCall.
+            if let Some(schema) = qualified_list_schema(map.get("funcname")) {
+                if visit(&schema, SchemaSlot::FuncCall) {
+                    return true;
+                }
+            }
+            // Qualified object lists: COMMENT/DROP `object` ([schema, object]),
+            // index `opclass` ([schema, opclass]), COLLATE `collname`
+            // ([schema, collation]).
+            for key in ["object", "opclass", "collname"] {
+                if let Some(schema) = qualified_list_schema(map.get(key)) {
+                    if visit(&schema, SchemaSlot::Object) {
                         return true;
                     }
                 }
             }
-            // Qualified function-name lists: trigger/CALL/FuncCall `funcname`.
-            if let Some(schema) = qualified_list_schema(map.get("funcname")) {
-                if visit(&schema, SchemaSlot::FuncName) {
-                    return true;
-                }
-            }
-            // Qualified object lists: COMMENT/DROP `object` ([schema, object]).
-            if let Some(schema) = qualified_list_schema(map.get("object")) {
-                if visit(&schema, SchemaSlot::Object) {
-                    return true;
+            // `OWNED BY <schema>.<table>.<column>` — the DefElem named
+            // `owned_by` carries a 2-part (`table.col`, no schema) or 3-part
+            // (`schema.table.col`) list. The schema is present only at 3 parts.
+            if map.get("defname").and_then(Value::as_str) == Some("owned_by") {
+                if let Some(schema) = owned_by_schema(map.get("arg")) {
+                    if visit(&schema, SchemaSlot::Object) {
+                        return true;
+                    }
                 }
             }
             for child in map.values() {
@@ -943,10 +1196,34 @@ fn walk_schema_names(v: &Value, visit: &mut dyn FnMut(&str, SchemaSlot) -> bool)
 /// schema) and returns `None`.
 ///
 /// Handles both spellings the parse tree uses:
-///   - a bare array (`CreateTrigStmt.funcname`, `CallStmt…funcname`):
+///   - a bare array (`CreateTrigStmt.funcname`, `CallStmt…funcname`,
+///     `TypeName.names`, `IndexElem.opclass`, `CollateClause.collname`):
 ///     `[{node:{String}}, …]`
 ///   - a `List` node (`CommentStmt.object`): `{node:{List:{items:[…]}}}`
 fn qualified_list_schema(v: Option<&Value>) -> Option<String> {
+    let parts = qualified_list_parts(v)?;
+    if parts.len() >= 2 {
+        Some(parts[0].clone())
+    } else {
+        None
+    }
+}
+
+/// The schema of an `OWNED BY` target. The list is `[table, col]` (no schema,
+/// 2 parts) or `[schema, table, col]` (3 parts) — so a schema is present only
+/// at 3+ parts, and is `parts[0]`.
+fn owned_by_schema(v: Option<&Value>) -> Option<String> {
+    let parts = qualified_list_parts(v)?;
+    if parts.len() >= 3 {
+        Some(parts[0].clone())
+    } else {
+        None
+    }
+}
+
+/// Flatten a qualified-name list (bare array or `List` node) to its String
+/// parts.
+fn qualified_list_parts(v: Option<&Value>) -> Option<Vec<String>> {
     let arr = match v {
         Some(Value::Array(a)) => a.as_slice(),
         Some(obj) => match obj.get("node").and_then(|n| n.get("List")).and_then(|l| l.get("items"))
@@ -956,12 +1233,7 @@ fn qualified_list_schema(v: Option<&Value>) -> Option<String> {
         },
         None => return None,
     };
-    let parts: Vec<String> = arr.iter().filter_map(json_string_node).collect();
-    if parts.len() >= 2 {
-        Some(parts[0].clone())
-    } else {
-        None
-    }
+    Some(arr.iter().filter_map(json_string_node).collect())
 }
 
 /// The trailing String of a `funcname`-style array (the bare name).
