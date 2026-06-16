@@ -42,6 +42,7 @@ pub mod executor;
 pub mod guard;
 pub mod journal;
 pub mod migration;
+pub mod role;
 
 // ---------------------------------------------------------------------------
 // Public API surface — re-exports (later plans depend on these names).
@@ -55,3 +56,4 @@ pub use journal::{
     applied, ensure_journal, record_completed, record_started, AppliedEntry, JournalError, Phase,
 };
 pub use migration::{Checksum, IdError, Migration, MigrationFlags, MigrationId, MIGRATION_PREFIX};
+pub use role::{deprovision_migrator, migrator_role_name, provision_migrator, RoleError};
