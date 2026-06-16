@@ -1808,3 +1808,141 @@ fn crate_root_reexports_compose_an_end_to_end_check() {
     assert!(m.version.as_str().starts_with("mig_"));
     assert_eq!(m.checksum.as_str().len(), 64);
 }
+
+// ---------------------------------------------------------------------------
+// RESIDUAL-1 — query_to_xml family: SQL passed as a string-literal first arg
+// is never re-parsed, so the func-walk + cross-schema walk are blind to it.
+// The literal must be re-parsed and run through the SAME guard recursively.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn query_to_xml_literal_cross_schema_is_denied() {
+    // The embedded SELECT reads a foreign-tenant table.
+    assert_cross_schema("SELECT query_to_xml('SELECT * FROM control.users', true, false, '')");
+}
+
+#[test]
+fn query_to_xml_literal_file_access_is_denied() {
+    // The embedded SQL calls a file-access function.
+    assert_denied("SELECT query_to_xml('SELECT pg_read_file(''/etc/passwd'')', true, false, '')");
+}
+
+#[test]
+fn query_to_xml_literal_drop_foreign_table_is_denied() {
+    // A DDL statement embedded in the literal targeting a foreign schema.
+    assert_denied("SELECT query_to_xml('DROP TABLE control.users', true, false, '')");
+}
+
+#[test]
+fn query_to_xml_literal_in_column_default_is_denied() {
+    // Nested in a column DEFAULT — exercises the full-tree walk reach.
+    assert_denied(
+        "CREATE TABLE project_acme.t (x text DEFAULT query_to_xml('SELECT pg_read_file(''/x'')', true, false, '')::text)",
+    );
+}
+
+#[test]
+fn query_to_xmlschema_family_literal_cross_schema_is_denied() {
+    // The whole family takes a SQL string as the first arg.
+    assert_cross_schema("SELECT query_to_xmlschema('SELECT * FROM control.users', true, false, '')");
+    assert_cross_schema(
+        "SELECT query_to_xml_and_xmlschema('SELECT * FROM control.users', true, false, '')",
+    );
+}
+
+#[test]
+fn cursor_to_xml_family_literal_cross_schema_is_denied() {
+    // cursor_to_xml(cursor, count, nulls, tableforest, targetns) — but the
+    // string-literal form `cursor_to_xml('SELECT …', …)` carries SQL.
+    assert_cross_schema("SELECT cursor_to_xml('SELECT * FROM control.users', 0, true, false, '')");
+    assert_cross_schema(
+        "SELECT cursor_to_xmlschema('SELECT * FROM control.users', true, false, '')",
+    );
+}
+
+#[test]
+fn query_to_xml_own_schema_select_passes() {
+    // No over-denial: the embedded SELECT reads the project's own table.
+    assert_ok("SELECT query_to_xml('SELECT * FROM project_acme.t', true, false, '')");
+}
+
+#[test]
+fn query_to_xml_unqualified_select_passes() {
+    // No over-denial: an unqualified relation resolves under the pinned path.
+    assert_ok("SELECT query_to_xml('SELECT * FROM t', true, false, '')");
+}
+
+// ---------------------------------------------------------------------------
+// RESIDUAL-2 — bare-text relation-name args to stat/predicate builtins. A
+// schema-qualified relation in a plain `text` arg (not a regclass cast) to
+// size/privilege builtins must be confined the same way as the name-resolver
+// family.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pg_relation_size_text_cross_schema_is_denied() {
+    assert_cross_schema("SELECT pg_relation_size('control.t')");
+    assert_cross_schema("SELECT pg_total_relation_size('control.t')");
+    assert_cross_schema("SELECT pg_table_size('control.t')");
+    assert_cross_schema("SELECT pg_indexes_size('control.t')");
+}
+
+#[test]
+fn has_privilege_text_cross_schema_is_denied() {
+    assert_cross_schema("SELECT has_table_privilege('control.users', 'SELECT')");
+    assert_cross_schema("SELECT has_any_column_privilege('control.users', 'SELECT')");
+    assert_cross_schema("SELECT has_column_privilege('control.users', 'id', 'SELECT')");
+}
+
+#[test]
+fn pg_relation_size_text_own_schema_passes() {
+    // No over-denial: own-schema / bare / unqualified all pass.
+    assert_ok("SELECT pg_relation_size('project_acme.t')");
+    assert_ok("SELECT pg_relation_size('t')");
+    assert_ok("SELECT has_table_privilege('project_acme.t', 'SELECT')");
+}
+
+#[test]
+fn pg_relation_size_regclass_cast_unaffected() {
+    // The regclass-cast path stays caught for foreign, allowed for own —
+    // proving the text-arg addition does not perturb the existing cast path.
+    assert_cross_schema("SELECT pg_relation_size('control.t'::regclass)");
+    assert_ok("SELECT pg_relation_size('project_acme.t'::regclass)");
+}
+
+// ---------------------------------------------------------------------------
+// AUDIT EXTENSION — table_to_xml / schema_to_xml export family. Found during
+// the RESIDUAL audit: these exfiltrate a FOREIGN relation (table_to_*, a
+// regclass-coercible relation-name literal) or an entire FOREIGN schema
+// (schema_to_*, a schema-name literal) as XML. Same name-arg leak class as
+// RESIDUAL-2 (table → relation-name) and the regnamespace resolver (schema →
+// namespace-name).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn table_to_xml_family_foreign_relation_is_denied() {
+    assert_cross_schema("SELECT table_to_xml('control.t', true, false, '')");
+    assert_cross_schema("SELECT table_to_xmlschema('control.t', true, false, '')");
+    assert_cross_schema("SELECT table_to_xml_and_xmlschema('control.t', true, false, '')");
+}
+
+#[test]
+fn schema_to_xml_family_foreign_schema_is_denied() {
+    assert_cross_schema("SELECT schema_to_xml('control', true, false, '')");
+    assert_cross_schema("SELECT schema_to_xmlschema('control', true, false, '')");
+    assert_cross_schema("SELECT schema_to_xml_and_xmlschema('control', true, false, '')");
+}
+
+#[test]
+fn table_and_schema_to_xml_own_passes() {
+    // No over-denial: the project's own relation / schema export is fine.
+    assert_ok("SELECT table_to_xml('project_acme.t', true, false, '')");
+    assert_ok("SELECT table_to_xml('t', true, false, '')");
+    assert_ok("SELECT schema_to_xml('project_acme', true, false, '')");
+}
+
+#[test]
+fn xpath_over_xml_value_passes() {
+    // No over-denial: xpath operates on an xml value, not a SQL/relation arg.
+    assert_ok("SELECT xpath('/x', xmlcol) FROM project_acme.t");
+}

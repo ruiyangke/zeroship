@@ -136,6 +136,77 @@ pub const NAME_RESOLVER_FUNCTIONS: &[&str] = &[
     "pg_get_serial_sequence",
 ];
 
+/// Builtins whose first `text` argument is a **relation name** (NOT a
+/// `regclass` cast).
+///
+/// A schema-qualified relation passed as a bare string
+/// literal here reaches a foreign-tenant object the structural schema walker
+/// never sees — the same leak class as [`NAME_RESOLVER_FUNCTIONS`], so the
+/// literal's leading `schema.` qualifier is re-checked for confinement.
+///
+/// `pg_relation_size`/`pg_total_relation_size`/`pg_table_size`/`pg_indexes_size`
+/// disclose a foreign table's on-disk size; the `has_*_privilege` family
+/// discloses access bits on a foreign table. (`pg_relation_size('s.t'::regclass)`
+/// goes through the [`REG_TYPES`] cast path instead — a non-literal/runtime arg
+/// is out of parse-time scope, the line-2 role's job.)
+///
+/// Matched on the trailing (bare) function name — `pg_catalog.pg_relation_size`
+/// resolves the same builtin.
+pub const TEXT_RELATION_NAME_FUNCTIONS: &[&str] = &[
+    "pg_relation_size",
+    "pg_total_relation_size",
+    "pg_table_size",
+    "pg_indexes_size",
+    "has_table_privilege",
+    "has_any_column_privilege",
+    "has_column_privilege",
+    // The XML table-export family takes a `regclass`-coercible relation NAME
+    // and dumps the relation's rows as XML — a foreign-table exfil vector.
+    "table_to_xml",
+    "table_to_xmlschema",
+    "table_to_xml_and_xmlschema",
+];
+
+/// Builtins whose first `text` argument is a bare **schema name**.
+///
+/// The `schema_to_xml` family dumps an ENTIRE schema's contents as XML; pointed
+/// at a foreign schema (`schema_to_xml('control', …)`) it exfiltrates the whole
+/// platform/other-tenant schema. The literal IS the bare schema name (no
+/// `schema.object` split — like `regnamespace`/`to_regnamespace`), so it is
+/// re-checked as a namespace name for cross-schema confinement. Matched on the
+/// trailing (bare) function name.
+///
+/// (`database_to_xml`/`database_to_xmlschema` carry NO schema literal — they
+/// dump everything the role can see — so they are out of parse-time scope and
+/// rely on the line-2 least-priv `migrator` role.)
+pub const NAMESPACE_NAME_FUNCTIONS: &[&str] = &[
+    "schema_to_xml",
+    "schema_to_xmlschema",
+    "schema_to_xml_and_xmlschema",
+];
+
+/// XML-emitting table functions whose first `text` argument is a free-form
+/// **SQL string** that the server executes.
+///
+/// The embedded SQL is never re-parsed
+/// by the structural walks, so a cross-schema read, a file-access function, or
+/// a DDL hidden in that literal slips past — it must be re-parsed and run
+/// through the SAME guard recursively.
+///
+/// `query_to_xml(text query, …)` / `query_to_xmlschema` /
+/// `query_to_xml_and_xmlschema` take the SQL as arg 0;
+/// `cursor_to_xml(refcursor, …)` / `cursor_to_xmlschema` take a cursor, but the
+/// string-literal call form `cursor_to_xml('SELECT …', …)` still carries SQL.
+/// Only the literal (`A_Const`) form is in parse-scope; a runtime-constructed
+/// query argument is the line-2 role's job. Matched on the trailing (bare) name.
+pub const SQL_STRING_ARG_FUNCTIONS: &[&str] = &[
+    "query_to_xml",
+    "query_to_xmlschema",
+    "query_to_xml_and_xmlschema",
+    "cursor_to_xml",
+    "cursor_to_xmlschema",
+];
+
 /// The `set_config()` builtin — the function-call form of `SET <param>`.
 ///
 /// `set_config(<param>, <value>, <is_local>)` is the function-call form of

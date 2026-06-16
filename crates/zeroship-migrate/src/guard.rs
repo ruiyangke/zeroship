@@ -177,6 +177,16 @@ impl SqlGuard {
         //     the call form identically.
         Self::check_set_config_calls(json, raw)?;
 
+        // 3e. `query_to_xml('SELECT … FROM control.users', …)` & family take a
+        //     free-form SQL string the server executes; the embedded SQL is
+        //     never re-parsed by the walks above, so a cross-schema read,
+        //     file-access function, or DDL hidden in the literal slips past.
+        //     Re-parse each such literal and run the SAME guard recursively
+        //     (reusing `check_body_text`, the body re-parse machinery).
+        //     A non-literal/runtime query arg is out of parse-scope — line-2
+        //     (least-priv `migrator` role) defense, same limit as `set_config`.
+        self.check_sql_string_arg_calls(json, raw)?;
+
         // 4. Recurse into DO blocks and function bodies — the must-inspect
         //    case. A dangerous construct hidden in a body is still dangerous.
         self.check_bodies(node, raw)?;
@@ -568,6 +578,31 @@ impl SqlGuard {
         });
         if denied_param {
             return Err(denied(rule::FORBIDDEN_SET, raw));
+        }
+        Ok(())
+    }
+
+    /// Deny dangerous SQL hidden in a `query_to_xml`-family string-literal arg.
+    ///
+    /// The XML-emitting table functions ([`denylist::SQL_STRING_ARG_FUNCTIONS`])
+    /// take a free-form SQL string as their first argument that the server then
+    /// executes. The structural func-walk and cross-schema walk are blind to it
+    /// (the SQL lives in an `A_Const` text literal, not a parse subtree). We
+    /// extract each such literal and run the SAME guard recursively via
+    /// [`Self::check_body_text`] — re-parse + recurse (catching cross-schema
+    /// reads, file/network funcs, embedded DDL) plus the token-scan + body
+    /// cross-schema backstops. Only the literal (`A_Const`) form is in
+    /// parse-scope; a runtime-constructed query arg is the line-2 role's job.
+    fn check_sql_string_arg_calls(&self, json: &Value, raw: &str) -> Result<(), GuardError> {
+        let mut sql_literals: Vec<String> = Vec::new();
+        walk_sql_string_arg_calls(json, &mut |literal| {
+            sql_literals.push(literal.to_string());
+            false
+        });
+        for literal in sql_literals {
+            // Re-run the FULL guard on the embedded SQL, attributing any denial
+            // to the enclosing statement's text for accurate reporting.
+            self.check_body_text(&literal, raw)?;
         }
         Ok(())
     }
@@ -1121,6 +1156,28 @@ fn walk_literal_schema_refs(v: &Value, visit: &mut dyn FnMut(&str, bool) -> bool
                         }
                     }
                 }
+                // Stat/predicate builtins whose first `text` arg is a relation
+                // NAME (`pg_relation_size('control.t')`,
+                // `has_table_privilege('control.users','SELECT')`). The schema
+                // is the literal's leading `schema.` qualifier — an object
+                // resolver, not a namespace one.
+                if func_is_text_relation_name(call.get("funcname")) {
+                    if let Some(lit) = first_arg_string_literal(call.get("args")) {
+                        if visit(&lit, false) {
+                            return true;
+                        }
+                    }
+                }
+                // Schema-export builtins (`schema_to_xml('control', …)`) whose
+                // first `text` arg is a bare SCHEMA NAME — a namespace resolver,
+                // like `regnamespace`/`to_regnamespace`.
+                if func_is_namespace_name(call.get("funcname")) {
+                    if let Some(lit) = first_arg_string_literal(call.get("args")) {
+                        if visit(&lit, true) {
+                            return true;
+                        }
+                    }
+                }
                 // Object-address resolvers carry the schema as the FIRST element
                 // of an array literal in the SECOND argument
                 // (`pg_get_object_address('table', '{control,t}', …)`). That
@@ -1166,6 +1223,30 @@ fn func_is_object_address(funcname: Option<&Value>) -> bool {
     parts
         .last()
         .is_some_and(|f| denylist::list_contains_ci(denylist::OBJECT_ADDRESS_FUNCTIONS, f))
+}
+
+/// Is `funcname`'s trailing (bare) name a stat/predicate builtin whose first
+/// `text` argument is a relation name? (`pg_catalog.pg_relation_size` resolves
+/// the same builtin.)
+fn func_is_text_relation_name(funcname: Option<&Value>) -> bool {
+    let Some(parts) = qualified_list_parts(funcname) else {
+        return false;
+    };
+    parts
+        .last()
+        .is_some_and(|f| denylist::list_contains_ci(denylist::TEXT_RELATION_NAME_FUNCTIONS, f))
+}
+
+/// Is `funcname`'s trailing (bare) name a schema-export builtin whose first
+/// `text` argument is a bare schema name? (`pg_catalog.schema_to_xml` resolves
+/// the same builtin.)
+fn func_is_namespace_name(funcname: Option<&Value>) -> bool {
+    let Some(parts) = qualified_list_parts(funcname) else {
+        return false;
+    };
+    parts
+        .last()
+        .is_some_and(|f| denylist::list_contains_ci(denylist::NAMESPACE_NAME_FUNCTIONS, f))
 }
 
 /// The schema element of an object-address call's name array: the SECOND
@@ -1242,6 +1323,40 @@ fn walk_set_config_calls(v: &Value, visit: &mut dyn FnMut(&str) -> bool) -> bool
         Value::Array(items) => items.iter().any(|i| walk_set_config_calls(i, visit)),
         _ => false,
     }
+}
+
+/// Walk the tree for `query_to_xml`-family calls (and the rest of
+/// [`denylist::SQL_STRING_ARG_FUNCTIONS`]), invoking `visit` with the first
+/// string-literal argument (the embedded SQL). `visit` returns `true` to
+/// short-circuit.
+fn walk_sql_string_arg_calls(v: &Value, visit: &mut dyn FnMut(&str) -> bool) -> bool {
+    match v {
+        Value::Object(map) => {
+            if let Some(call) = map.get("FuncCall") {
+                if func_is_sql_string_arg(call.get("funcname")) {
+                    if let Some(sql) = first_arg_string_literal(call.get("args")) {
+                        if visit(&sql) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            map.values().any(|c| walk_sql_string_arg_calls(c, visit))
+        }
+        Value::Array(items) => items.iter().any(|i| walk_sql_string_arg_calls(i, visit)),
+        _ => false,
+    }
+}
+
+/// Is `funcname`'s trailing (bare) name a `query_to_xml`-family SQL-string sink?
+/// (`pg_catalog.query_to_xml` resolves the same builtin.)
+fn func_is_sql_string_arg(funcname: Option<&Value>) -> bool {
+    let Some(parts) = qualified_list_parts(funcname) else {
+        return false;
+    };
+    parts
+        .last()
+        .is_some_and(|f| denylist::list_contains_ci(denylist::SQL_STRING_ARG_FUNCTIONS, f))
 }
 
 /// Is `funcname`'s trailing (bare) name `set_config`? (`pg_catalog.set_config`
