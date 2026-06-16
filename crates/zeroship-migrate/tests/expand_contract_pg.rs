@@ -15,8 +15,8 @@ use compio_postgres::Client;
 use zeroship_migrate::executor::{ApplyError, RollbackRequest, RollbackTarget};
 use zeroship_migrate::{
     apply, migrator_role_name, provision_migrator, rollback, role::deprovision_migrator, Approval,
-    ExecutorConfig, ExpandContractAuthor, ExpandContractPlan, GuardConfig, MigrationEngine,
-    OnlineIntent, RawSqlAuthor, SqlGuard,
+    Checksum, ExecutorConfig, ExpandContractAuthor, ExpandContractPlan, GuardConfig, Migration,
+    MigrationFlags, MigrationId, MigrationEngine, OnlineIntent, OnlinePhase, RawSqlAuthor, SqlGuard,
 };
 
 const DEFAULT_DSN: &str =
@@ -238,6 +238,58 @@ async fn full_bundle_both_phases_in_one_apply_is_refused() {
     // Nothing applied (the gate runs before any execution): no new column.
     assert!(!column_exists(&conn, &cfg.project_schema, "users", "email_address").await);
     assert!(!trigger_exists(&conn, &cfg.project_schema, "users").await);
+    assert!(column_exists(&conn, &cfg.project_schema, "users", "email").await);
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+/// A `phase: Contract` migration with EMPTY `depends_on` is MALFORMED and must
+/// be refused fail-closed: the gate's expand/contract guarantee keys entirely on
+/// the contract's declared expand dependency, so a contract that declares none
+/// would vacuously pass (nothing to check) and could drop a column/trigger with
+/// no journaled expand. Nothing is applied.
+#[compio::test]
+async fn contract_with_empty_depends_on_is_refused_fail_closed() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    seed_users(&conn, &cfg.project_schema).await;
+
+    let schema = &cfg.project_schema;
+    let up = format!("ALTER TABLE \"{schema}\".\"users\" DROP COLUMN email");
+    let malformed = Migration {
+        version: MigrationId::generate(),
+        name: "contract_no_deps".into(),
+        checksum: Checksum::of(&up, None),
+        up,
+        down: None,
+        flags: MigrationFlags {
+            online: true,
+            phase: Some(OnlinePhase::Contract),
+            destructive: true,
+            requires_approval: true,
+            ..MigrationFlags::default()
+        },
+        owner_app: "app_acme".into(),
+        depends_on: Vec::new(),
+    };
+
+    let err = apply(
+        &conn,
+        &cfg,
+        std::slice::from_ref(&malformed),
+        Approval::Approved,
+        "tester",
+    )
+    .await
+    .expect_err("a contract with no expand dependency must be refused");
+    assert!(
+        matches!(err, ApplyError::ExpandNotApplied { .. }),
+        "expected ExpandNotApplied (malformed contract), got {err:?}"
+    );
+    // Nothing applied: the old column is intact.
     assert!(column_exists(&conn, &cfg.project_schema, "users", "email").await);
 
     drop_schemas(&conn, &cfg).await;
