@@ -555,6 +555,27 @@ pub async fn record_started(
     Ok(())
 }
 
+/// The fields of a non-transactional `completed` journal event, bundled so
+/// [`record_completed`] takes one descriptor (keeping the arg count in check).
+#[derive(Debug, Clone, Copy)]
+pub struct CompletedRecord<'a> {
+    /// The migration version (`mig_…`).
+    pub version: &'a str,
+    /// The migration name.
+    pub name: &'a str,
+    /// The migration's checksum.
+    pub checksum: &'a str,
+    /// The actor recorded in the journal.
+    pub applied_by: &'a str,
+    /// Wall time the `up` took, in milliseconds.
+    pub exec_ms: i64,
+    /// The migration kind: `'apply'` for an ordinary migration, `'squash'` for a
+    /// fresh-path squash. A fresh-path squash MUST be stamped `'squash'` so its
+    /// supersession edges are honored by [`superseded_versions`] (#4 restricts to
+    /// `kind = 'squash'`).
+    pub kind: &'a str,
+}
+
 /// Finalize a non-transactional migration (phase 2): insert the immutable
 /// `completed` journal row, then clear the inflight marker.
 ///
@@ -563,11 +584,7 @@ pub async fn record_started(
 pub async fn record_completed(
     conn: &Client,
     cfg: &ExecutorConfig,
-    version: &str,
-    name: &str,
-    checksum: &str,
-    applied_by: &str,
-    exec_ms: i64,
+    rec: CompletedRecord<'_>,
 ) -> Result<(), JournalError> {
     let meta = quote_ident(&cfg.meta_schema);
     // Plain INSERT (consistent with the transactional path, M3). `event_seq` is a
@@ -579,16 +596,23 @@ pub async fn record_completed(
         .execute(
             &format!(
                 "INSERT INTO {meta}.schema_migrations
-                     (version, name, checksum, applied_by, exec_ms, phase, outcome)
-                 VALUES ($1, $2, $3, $4, $5, 'completed', 'success')"
+                     (version, name, checksum, applied_by, exec_ms, phase, outcome, kind)
+                 VALUES ($1, $2, $3, $4, $5, 'completed', 'success', $6)"
             ),
-            &[&version, &name, &checksum, &applied_by, &exec_ms],
+            &[
+                &rec.version,
+                &rec.name,
+                &rec.checksum,
+                &rec.applied_by,
+                &rec.exec_ms,
+                &rec.kind,
+            ],
         )
         .await?;
     debug_assert_eq!(n, 1, "record_completed must insert exactly one journal row");
     conn.execute(
         &format!("DELETE FROM {meta}.schema_migrations_inflight WHERE version = $1"),
-        &[&version],
+        &[&rec.version],
     )
     .await?;
     Ok(())
@@ -635,13 +659,18 @@ pub async fn applied_count(conn: &Client, cfg: &ExecutorConfig) -> Result<i64, J
 ///
 /// A version `v_i` is satisfied-by-supersession when some squash `S` with an edge
 /// `S → v_i` in `schema_migrations_supersedes` is itself **net-applied** (its
-/// latest event in `schema_migrations`/`…_rolled_back` is `completed`). The
-/// executor unions this with the net-applied set to compute `pending`, so a
-/// superseded `v_i` is never (re-)run.
+/// latest event in `schema_migrations`/`…_rolled_back` is `completed`) AND `S`'s
+/// recorded `kind` is `'squash'`. The executor unions this with the net-applied set
+/// to compute `pending`, so a superseded `v_i` is never (re-)run.
 ///
 /// Only edges of a NET-APPLIED squash count: if `S` was rolled back, its
 /// supersession no longer holds and the superseded versions become pending again
 /// (consistent with `S` itself being pending again).
+///
+/// #4 — the `kind = 'squash'` restriction is load-bearing: without it, any
+/// net-applied version whose `version` collided with a corrupted/forged edge's
+/// `squash_version` could over-supersede (suppress a real migration). Only a
+/// genuine recorded squash may supersede.
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure.
@@ -654,19 +683,25 @@ pub async fn superseded_versions(
         .query(
             &format!(
                 "WITH events AS (
-                     SELECT version, event_seq, 'completed' AS kind
+                     SELECT version, event_seq, 'completed' AS event_kind, kind AS mig_kind
                        FROM {meta}.schema_migrations
                      UNION ALL
-                     SELECT version, event_seq, 'rolled_back' AS kind
+                     SELECT version, event_seq, 'rolled_back' AS event_kind, NULL AS mig_kind
                        FROM {meta}.schema_migrations_rolled_back
                  ),
                  latest AS (
-                     SELECT DISTINCT ON (version) version, kind
+                     SELECT DISTINCT ON (version) version, event_kind, mig_kind
                        FROM events
                       ORDER BY version, event_seq DESC
                  ),
                  net_applied_squashes AS (
-                     SELECT version FROM latest WHERE kind = 'completed'
+                     -- #4: only a GENUINE recorded squash can supersede. Without the
+                     -- mig_kind = 'squash' filter, any net-applied version whose
+                     -- `version` collided with a (corrupted/forged) edge's
+                     -- `squash_version` would over-supersede — suppressing a real
+                     -- migration (the C1 forgery class).
+                     SELECT version FROM latest
+                      WHERE event_kind = 'completed' AND mig_kind = 'squash'
                  )
                  SELECT DISTINCT s.superseded_version AS v
                    FROM {meta}.schema_migrations_supersedes s

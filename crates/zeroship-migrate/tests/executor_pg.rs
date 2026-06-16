@@ -170,7 +170,16 @@ async fn journal_bootstrap_is_idempotent() {
     ensure_journal(&conn, &cfg).await.expect("first bootstrap");
     // Seed a row so we can prove re-bootstrap does not wipe it.
     journal::record_completed(
-        &conn, &cfg, "mig_keepit", "keep", "deadbeef", "actor", 1,
+        &conn,
+        &cfg,
+        journal::CompletedRecord {
+            version: "mig_keepit",
+            name: "keep",
+            checksum: "deadbeef",
+            applied_by: "actor",
+            exec_ms: 1,
+            kind: "apply",
+        },
     )
     .await
     .expect("seed row");
@@ -194,9 +203,20 @@ async fn journal_immutability_trigger_rejects_update_and_delete() {
     drop_schemas(&conn, &cfg).await;
     ensure_journal(&conn, &cfg).await.expect("bootstrap");
 
-    journal::record_completed(&conn, &cfg, "mig_immut", "n", "csum", "actor", 5)
-        .await
-        .expect("insert row");
+    journal::record_completed(
+        &conn,
+        &cfg,
+        journal::CompletedRecord {
+            version: "mig_immut",
+            name: "n",
+            checksum: "csum",
+            applied_by: "actor",
+            exec_ms: 5,
+            kind: "apply",
+        },
+    )
+    .await
+    .expect("insert row");
 
     let upd = conn
         .batch_execute(&format!(

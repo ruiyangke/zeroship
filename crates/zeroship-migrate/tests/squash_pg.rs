@@ -713,3 +713,81 @@ async fn existing_db_squash_record_baseline_is_atomic() {
 
     drop_schemas(&conn, &cfg).await;
 }
+
+/// #4 — `superseded_versions` only honors edges of a GENUINE squash
+/// (`kind = 'squash'`). An edge whose `squash_version` is an ORDINARY net-applied
+/// migration (`kind = 'apply'`) must NOT cause supersession.
+///
+/// Construct an applied ordinary migration `v_ord` (kind='apply'), an applied
+/// genuine squash `S` (kind='squash') with a real edge `S → v_a`, plus a FORGED
+/// edge `v_ord → v_b`. `superseded_versions` must return ONLY `v_a` (covered by the
+/// genuine squash) and NOT `v_b`. Without the `kind = 'squash'` filter, `v_ord`
+/// (net-applied-completed) was miscounted as a squash and `v_b` was over-superseded
+/// — suppressing a real migration (the C1 forgery class).
+#[compio::test]
+async fn superseded_versions_ignores_edges_of_non_squash_versions() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    ensure_journal(&conn, &cfg).await.expect("journal");
+
+    let meta = &cfg.meta_schema;
+    let v_ord = MigrationId::generate();
+    let s = MigrationId::generate();
+    let v_a = MigrationId::generate();
+    let v_b = MigrationId::generate();
+
+    // v_ord: an ordinary net-applied migration (kind='apply').
+    conn.execute(
+        &format!(
+            "INSERT INTO \"{meta}\".schema_migrations
+                 (version, name, checksum, applied_by, exec_ms, phase, outcome, kind)
+             VALUES ($1, 'ord', 'c', 'ci', 0, 'completed', 'success', 'apply')"
+        ),
+        &[&v_ord.as_str()],
+    )
+    .await
+    .expect("insert v_ord");
+    // S: a genuine net-applied squash (kind='squash').
+    conn.execute(
+        &format!(
+            "INSERT INTO \"{meta}\".schema_migrations
+                 (version, name, checksum, applied_by, exec_ms, phase, outcome, kind)
+             VALUES ($1, 'squash', 'c', 'ci', 0, 'completed', 'success', 'squash')"
+        ),
+        &[&s.as_str()],
+    )
+    .await
+    .expect("insert S");
+
+    // Real edge: S → v_a. Forged edge: v_ord → v_b (v_ord is NOT a squash).
+    for (sq, sup) in [(s.as_str(), v_a.as_str()), (v_ord.as_str(), v_b.as_str())] {
+        conn.execute(
+            &format!(
+                "INSERT INTO \"{meta}\".schema_migrations_supersedes
+                     (squash_version, superseded_version) VALUES ($1, $2)"
+            ),
+            &[&sq, &sup],
+        )
+        .await
+        .expect("insert edge");
+    }
+
+    let superseded = journal::superseded_versions(&conn, &cfg)
+        .await
+        .expect("superseded_versions");
+
+    assert!(
+        superseded.contains(&v_a.as_str().to_string()),
+        "v_a (covered by the genuine squash S) must be superseded; got {superseded:?}"
+    );
+    assert!(
+        !superseded.contains(&v_b.as_str().to_string()),
+        "v_b must NOT be superseded — its edge's squash_version v_ord is an ordinary \
+         migration, not a squash; got {superseded:?}"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
