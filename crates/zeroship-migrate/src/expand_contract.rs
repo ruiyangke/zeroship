@@ -375,7 +375,15 @@ impl ExpandContractAuthor {
             vec![e2.version.clone()],
         );
 
-        // ---- C2: DROP COLUMN <from> (destructive, gated, depends_on E1) ----
+        // ---- C2: DROP COLUMN <from> (destructive, gated) ----
+        //
+        // depends_on [E1, E3]: E1 is the column it reverses, and E3 (the backfill)
+        // MUST be net-applied first — dropping <from> before every pre-existing
+        // row's value is mirrored into <to> would lose un-backfilled data. The
+        // dual-write trigger only covers rows written DURING the transition; the
+        // backfill covers the rows that predate it. So the destructive drop is
+        // gated on the backfill's journaled completion (Plan 8: the backfill step
+        // records completion in the journal → the gate reads one timeline).
         let c2_up = format!("ALTER TABLE {tbl_q} DROP COLUMN {from_q}");
         let c2 = self.make(
             &format!("contract_drop_column_{table}_{from}"),
@@ -389,7 +397,7 @@ impl ExpandContractAuthor {
                 requires_approval: true,
                 ..MigrationFlags::default()
             },
-            vec![e1.version.clone()],
+            vec![e1.version.clone(), e3.version.clone()],
         );
 
         Ok(ExpandContractPlan {
@@ -624,8 +632,9 @@ mod tests {
         assert_eq!(e3.depends_on, vec![e2.version.clone()]);
         // C1 depends on E2 (the trigger it drops).
         assert_eq!(c1.depends_on, vec![e2.version.clone()]);
-        // C2 depends on E1 (the column add it reverses).
-        assert_eq!(c2.depends_on, vec![e1.version.clone()]);
+        // C2 depends on E1 (the column add it reverses) AND E3 (the backfill —
+        // dropping <from> before the backfill mirrors pre-existing rows loses data).
+        assert_eq!(c2.depends_on, vec![e1.version.clone(), e3.version.clone()]);
         // trigger_version is E2.
         assert_eq!(plan.trigger_version, e2.version);
     }

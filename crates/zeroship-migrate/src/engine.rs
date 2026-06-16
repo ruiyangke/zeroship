@@ -236,6 +236,89 @@ impl MigrationEngine {
             executor::rollback(conn, exec_cfg, migrations, request, approval, applied_by).await?;
         Ok(outcome)
     }
+
+    /// Orchestrate the EXPAND phase of an online expand-contract migration
+    /// (Plan 8 v1.3): apply the additive + dual-write steps, run the backfill,
+    /// then journal the backfill step's completion — in that order, so the
+    /// v1.2 gate's single source of truth (the journal) only shows the expand as
+    /// fully done **after the data is actually mirrored**.
+    ///
+    /// The sequence is deliberately NOT "apply all of `plan.expand` then
+    /// backfill": E3 (the backfill-marker migration) must be journaled **after**
+    /// [`run_backfill`](crate::backfill::run_backfill) succeeds, never before —
+    /// otherwise the gate would let the destructive `DROP COLUMN` (which
+    /// `depends_on` E3) run while pre-existing rows are still un-mirrored, losing
+    /// data. So:
+    ///
+    /// 1. apply E1 (`ADD COLUMN`) + E2 (`CREATE FUNCTION`/`TRIGGER`) — the
+    ///    dual-write trigger is now live, so every concurrent write mirrors;
+    /// 2. [`run_backfill`] mirrors the pre-existing rows (`<to> := <from>` paged
+    ///    on the PK), resumable, bounded — the trigger covers anything written
+    ///    during it;
+    /// 3. apply E3 (the no-op backfill marker) — this records the backfill's
+    ///    completion in the journal, so the gate now sees the expand complete.
+    ///
+    /// E1+E2 and E3 each go through [`apply`](crate::executor::apply) (guard +
+    /// least-privilege role + journal), and the backfill goes through its own
+    /// guarded, role-bracketed batches. `approval` must be
+    /// [`Approval::Approved`] (the backfill mutates data).
+    ///
+    /// # Errors
+    /// - [`OnlineError::Approval`] — `approval != Approved`.
+    /// - [`OnlineError::Apply`] — applying E1/E2 or the E3 marker failed.
+    /// - [`OnlineError::Backfill`] — the backfill failed (E3 is NOT journaled, so
+    ///   the gate keeps the expand incomplete and the contract stays blocked; the
+    ///   backfill is resumable on a re-run).
+    pub async fn run_expand(
+        &self,
+        plan: &crate::expand_contract::ExpandContractPlan,
+        approval: Approval,
+        conn: &Client,
+        exec_cfg: &ExecutorConfig,
+        applied_by: &str,
+    ) -> Result<ApplyOutcome, OnlineError> {
+        if approval != Approval::Approved {
+            return Err(OnlineError::Approval);
+        }
+        // The expand sequence is E1, E2, E3 (the marker) in order. Split off E3:
+        // it is journaled LAST, after the real backfill, never as part of the
+        // structural apply.
+        let Some((e3, head)) = plan.expand.split_last() else {
+            return Ok(ApplyOutcome {
+                applied: Vec::new(),
+                skipped: Vec::new(),
+                recovered: Vec::new(),
+            });
+        };
+        // 1. Apply E1 + E2 — trigger live before any backfill row is touched.
+        let mut outcome = executor::apply(conn, exec_cfg, head, approval, applied_by).await?;
+        // 2. Run the real backfill (mirrors pre-existing rows).
+        crate::backfill::run_backfill(conn, exec_cfg, &plan.backfill, approval, applied_by).await?;
+        // 3. Journal E3 (the backfill marker) — records the backfill complete, so
+        //    the gate now sees the expand fully applied and the contract may land.
+        let e3_outcome =
+            executor::apply(conn, exec_cfg, std::slice::from_ref(e3), approval, applied_by).await?;
+        outcome.applied.extend(e3_outcome.applied);
+        outcome.recovered.extend(e3_outcome.recovered);
+        Ok(outcome)
+    }
+}
+
+/// A failure from [`MigrationEngine::run_expand`].
+#[derive(Debug, thiserror::Error)]
+pub enum OnlineError {
+    /// The online expand needs explicit [`Approval::Approved`] (its backfill
+    /// mutates data). Nothing was applied.
+    #[error("online expand requires approval (the backfill mutates data) but none was given")]
+    Approval,
+    /// Applying E1/E2 or the E3 backfill marker failed.
+    #[error(transparent)]
+    Apply(#[from] ApplyError),
+    /// The backfill step failed — E3 is NOT journaled, so the gate keeps the
+    /// expand incomplete (the contract stays blocked) and the backfill is
+    /// resumable on a re-run.
+    #[error(transparent)]
+    Backfill(#[from] crate::backfill::BackfillError),
 }
 
 #[cfg(test)]

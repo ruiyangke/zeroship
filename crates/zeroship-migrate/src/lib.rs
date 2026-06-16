@@ -86,7 +86,8 @@ pub use author::{
 };
 pub use classify::{classify, DdlKind, ParseError, StatementClass};
 pub use engine::{
-    EngineError, MigrationEngine, MigrationPlan, PlannedMigration, RollbackEngineError,
+    EngineError, MigrationEngine, MigrationPlan, OnlineError, PlannedMigration,
+    RollbackEngineError,
 };
 pub use expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
