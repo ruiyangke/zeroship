@@ -66,6 +66,25 @@ pub enum StatusError {
 /// topo order as apply); `current_version` is the highest net-applied version;
 /// `rolled_back` is from [`journal::net_rolled_back`].
 ///
+/// **Consistent snapshot.** The two journal reads (`applied` and
+/// `net_rolled_back`) run inside ONE `REPEATABLE READ READ ONLY` transaction, so a
+/// concurrent apply/rollback committing between them can never split the view into
+/// an inconsistent applied-vs-rolled-back bucketing. The transaction is driven
+/// explicitly over the shared `&Client` (`BEGIN … COMMIT`), mirroring how the
+/// executor drives its apply/rollback transactions. `ensure_journal` (which emits
+/// `CREATE … IF NOT EXISTS` DDL) runs BEFORE the snapshot, since a `READ ONLY`
+/// transaction forbids DDL and bootstrap must stay idempotent regardless.
+///
+/// "Current" = highest-VERSION net-applied (`UUIDv7`/`MigrationId` total order),
+/// NOT most-recently-applied. The two coincide unless a `depends_on` graph drove
+/// apply order away from version order.
+///
+/// # Preconditions
+/// The caller MUST pass an **admin/read** connection. This function takes whatever
+/// [`Client`] it is handed and never elevates to the `migrator` role; schema
+/// scoping by `cfg.meta_schema` keeps reads bound to this project's journal, but
+/// the privilege of the connection is the caller's obligation.
+///
 /// # Errors
 /// - [`StatusError::Journal`] on a journal read/bootstrap failure.
 /// - [`StatusError::Ordering`] if the supplied set's `depends_on` is
@@ -77,6 +96,26 @@ pub async fn status(
 ) -> Result<MigrationStatus, StatusError> {
     journal::ensure_journal(conn, cfg).await?;
 
+    // One consistent snapshot over both journal reads (applied + rolled_back). A
+    // REPEATABLE READ READ ONLY txn pins a single MVCC view, so a concurrent
+    // commit between the two reads can't produce a split bucket view.
+    conn.batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .await
+        .map_err(|e| StatusError::Journal(JournalError::Db(e)))?;
+    let snapshot = read_status_snapshot(conn, cfg, migrations).await;
+    // Always close the txn; a read-only snapshot has nothing to roll back, but we
+    // must not leak an open transaction onto the shared session.
+    let _ = conn.batch_execute("COMMIT").await;
+    snapshot
+}
+
+/// The body of [`status`]'s consistent-snapshot read: both journal reads + the
+/// derived fields, run inside the caller's open `REPEATABLE READ READ ONLY` txn.
+async fn read_status_snapshot(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+) -> Result<MigrationStatus, StatusError> {
     let entries = journal::applied(conn, cfg).await?;
     // NET-applied entries only (drop lone `started` inflight markers — those are
     // crash-recovery keys, not settled applied state).
@@ -117,6 +156,12 @@ pub async fn status(
 /// **Read-only.** Unlike [`status`], this does NOT collapse to net state: a
 /// version applied → rolled back → re-applied shows all three events. Bootstraps
 /// the journal idempotently first so a fresh project returns an empty log.
+///
+/// # Preconditions
+/// The caller MUST pass an **admin/read** connection. Like [`status`] and
+/// [`snapshot_schema`](crate::snapshot_schema), this takes whatever [`Client`] it
+/// is handed and never elevates to the `migrator` role; the reads are scoped to
+/// `cfg.meta_schema`, but the connection's privilege is the caller's obligation.
 ///
 /// # Errors
 /// [`StatusError::Journal`] on a journal read/bootstrap failure.
