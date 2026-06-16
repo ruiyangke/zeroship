@@ -11,7 +11,7 @@
 //! think of, plus the same vectors nested inside `DO $$…$$` and function
 //! bodies (which the guard must inspect, not just top-level statements).
 
-use zeroship_migrate::guard::{GuardConfig, GuardError, SqlGuard};
+use zeroship_migrate::guard::{flags_for, GuardConfig, GuardError, SqlGuard};
 
 /// A guard whose project schema is `project_acme` and which allowlists only
 /// `pgcrypto` + `uuid-ossp` extensions — a realistic per-project config.
@@ -518,4 +518,82 @@ fn mixed_migration_with_a_drop_is_flagged_but_passes() {
         "CREATE TABLE t2(id int); DROP TABLE old_table;",
     );
     assert!(r.destructive);
+}
+
+// ---------------------------------------------------------------------------
+// Task 5 — lint warnings + flags_for mapping
+// ---------------------------------------------------------------------------
+
+#[test]
+fn add_not_null_volatile_default_warns_lock() {
+    // ADD COLUMN NOT NULL DEFAULT <volatile> forces a full table rewrite under
+    // an ACCESS EXCLUSIVE lock — lint must warn (not deny).
+    let r = assert_ok("ALTER TABLE products ADD COLUMN created_at timestamptz NOT NULL DEFAULT now()");
+    assert!(
+        r.warnings.iter().any(|w| w.to_lowercase().contains("lock")
+            || w.to_lowercase().contains("rewrite")),
+        "expected a lock/rewrite warning, got: {:?}",
+        r.warnings
+    );
+}
+
+#[test]
+fn add_not_null_constant_default_does_not_warn() {
+    // A constant default is the PG11+ metadata-only fast path — no warning.
+    let r = assert_ok("ALTER TABLE products ADD COLUMN active boolean NOT NULL DEFAULT true");
+    assert!(
+        !r.warnings.iter().any(|w| w.to_lowercase().contains("lock")),
+        "constant default must not warn, got: {:?}",
+        r.warnings
+    );
+}
+
+#[test]
+fn non_concurrent_create_index_warns() {
+    // A plain CREATE INDEX takes a write lock for the build — warn to suggest
+    // CONCURRENTLY.
+    let r = assert_ok("CREATE INDEX idx_name ON products(name)");
+    assert!(
+        r.warnings.iter().any(|w| w.to_lowercase().contains("concurrently")),
+        "expected a CONCURRENTLY suggestion, got: {:?}",
+        r.warnings
+    );
+}
+
+#[test]
+fn concurrent_create_index_does_not_warn_concurrently() {
+    let r = assert_ok("CREATE INDEX CONCURRENTLY idx_name ON products(name)");
+    assert!(
+        !r.warnings.iter().any(|w| w.to_lowercase().contains("concurrently")),
+        "CONCURRENTLY index must not get a CONCURRENTLY warning, got: {:?}",
+        r.warnings
+    );
+}
+
+#[test]
+fn flags_for_destructive_requires_approval() {
+    let r = assert_ok("DROP TABLE products");
+    let flags = flags_for(&r);
+    assert!(r.destructive);
+    assert!(flags.requires_approval, "destructive ⇒ requires_approval");
+    assert!(flags.destructive);
+}
+
+#[test]
+fn flags_for_safe_additive_does_not_require_approval() {
+    let r = assert_ok("CREATE TABLE products(id int primary key)");
+    let flags = flags_for(&r);
+    assert!(!flags.requires_approval, "additive ⇒ no approval needed");
+    assert!(!flags.destructive);
+    assert!(flags.transactional, "default additive migration is transactional");
+}
+
+#[test]
+fn flags_for_non_transactional_sets_transactional_false() {
+    let r = assert_ok("CREATE INDEX CONCURRENTLY idx ON products(name)");
+    let flags = flags_for(&r);
+    assert!(
+        !flags.transactional,
+        "a CONCURRENTLY migration must be marked non-transactional"
+    );
 }
