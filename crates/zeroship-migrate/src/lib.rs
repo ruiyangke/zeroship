@@ -68,6 +68,7 @@ pub mod guard;
 pub mod journal;
 pub mod migration;
 pub mod role;
+pub mod status;
 
 // ---------------------------------------------------------------------------
 // Public API surface — re-exports (later plans depend on these names).
@@ -93,8 +94,10 @@ pub use executor::{
 };
 pub use guard::{flags_for, GuardConfig, GuardError, GuardReport, SqlGuard};
 pub use journal::{
-    applied, ensure_journal, record_completed, record_rolled_back, record_started, AppliedEntry,
-    JournalError, Phase,
+    applied, ensure_journal, history as journal_history, net_rolled_back, record_completed,
+    record_rolled_back, record_started, AppliedEntry, HistoryEvent, HistoryKind, JournalError,
+    Phase, RolledBackEntry,
 };
+pub use status::{history, status, MigrationStatus, StatusError};
 pub use migration::{Checksum, IdError, Migration, MigrationFlags, MigrationId, MIGRATION_PREFIX};
 pub use role::{deprovision_migrator, migrator_role_name, provision_migrator, RoleError};
