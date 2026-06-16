@@ -90,6 +90,7 @@ fn mig(version: MigrationId, name: &str, up: &str) -> Migration {
         flags: MigrationFlags::default(),
         owner_app: "app_test".to_string(),
         depends_on: Vec::new(),
+        supersedes: Vec::new(),
     }
 }
 

@@ -499,6 +499,7 @@ impl ExpandContractAuthor {
             flags,
             owner_app: self.owner_app.clone(),
             depends_on,
+            supersedes: Vec::new(),
         }
     }
 }

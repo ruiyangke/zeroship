@@ -125,6 +125,13 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
     //    across rollback↔re-apply cycles); the surrogate `event_seq` is the PK and
     //    the total order. The immutability trigger still forbids UPDATE/DELETE, so
     //    the log stays append-only.
+    //    The `kind` column (Plan 9) distinguishes how the `completed` event was
+    //    recorded, for auditing: an ordinary `apply` (the `up` actually ran), a
+    //    `baseline` (the schema already existed; the `up` was recorded NOT run —
+    //    adoption path), or a `squash` (a supersession; the squash's `up` was
+    //    recorded NOT run because `[v1..vN]` were already applied — see
+    //    [`record_baseline`] / [`crate::squash`]). It does NOT alter the
+    //    append-only model — it is just a fact stamped on each immutable event row.
     conn.batch_execute(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations (
             event_seq   BIGINT PRIMARY KEY DEFAULT nextval('{meta}.schema_migrations_event_seq'),
@@ -135,7 +142,9 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
             applied_by  TEXT NOT NULL,
             exec_ms     BIGINT,
             phase       TEXT NOT NULL CHECK (phase IN ('started','completed')),
-            outcome     TEXT NOT NULL
+            outcome     TEXT NOT NULL,
+            kind        TEXT NOT NULL DEFAULT 'apply'
+                          CHECK (kind IN ('apply','baseline','squash'))
         )"
     ))
     .await?;
@@ -154,6 +163,30 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
             rolled_back_at TIMESTAMPTZ NOT NULL DEFAULT now(),
             rolled_back_by TEXT NOT NULL,
             exec_ms       BIGINT
+        )"
+    ))
+    .await?;
+
+    // 2a-bis. The append-only SUPERSESSION log (Plan 9 squash). One row per
+    //     (squash_version → superseded_version) edge, written by the ADMIN when a
+    //     squash migration `S` is journaled (whether via `apply` running its `up`
+    //     on a fresh DB, or via [`crate::squash`] recording it baseline-style on a
+    //     DB that already ran `[v1..vN]`). The pending computation joins this
+    //     against net-applied squashes to decide that a superseded version is
+    //     SATISFIED. Append-only + immutable (trigger below): a squash's
+    //     supersession edges are part of history and never edited/deleted. Edges
+    //     are recorded LAST (after the `completed` row), so a net-applied squash
+    //     always has its full edge set; a partial edge set never exists because the
+    //     squash's `completed` row + its edges are written in one transaction by the
+    //     caller. (No FK to `schema_migrations` — that table allows multiple
+    //     `completed` rows per version, so there is no single PK to reference; the
+    //     squash_version is validated by the caller before journaling.)
+    conn.batch_execute(&format!(
+        "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations_supersedes (
+            event_seq          BIGINT PRIMARY KEY DEFAULT nextval('{meta}.schema_migrations_event_seq'),
+            squash_version     TEXT NOT NULL,
+            superseded_version TEXT NOT NULL,
+            recorded_at        TIMESTAMPTZ NOT NULL DEFAULT now()
         )"
     ))
     .await?;
@@ -191,6 +224,10 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
         (
             "schema_migrations_rolled_back",
             format!("{}_schema_migrations_rolled_back_immutable_trg", cfg.meta_schema),
+        ),
+        (
+            "schema_migrations_supersedes",
+            format!("{}_schema_migrations_supersedes_immutable_trg", cfg.meta_schema),
         ),
     ] {
         conn.batch_execute(&format!(
@@ -554,6 +591,188 @@ pub async fn record_completed(
         &[&version],
     )
     .await?;
+    Ok(())
+}
+
+/// Count the number of versions the journal currently records as **net-applied**
+/// (latest event per version is `completed`) — the first-entry test for
+/// [`crate::baseline`].
+///
+/// Baseline is a FIRST-entry operation: you cannot baseline a DB the engine
+/// already manages. This counts net-applied versions exactly as [`applied`]
+/// computes them (latest event per version is `completed`), so a version that was
+/// applied then rolled back does NOT count (it is pending again). A non-zero count
+/// means the engine already manages real history ⇒ baseline must refuse.
+///
+/// # Errors
+/// [`JournalError::Db`] on query failure.
+pub async fn applied_count(conn: &Client, cfg: &ExecutorConfig) -> Result<i64, JournalError> {
+    let meta = quote_ident(&cfg.meta_schema);
+    let row = conn
+        .query_one(
+            &format!(
+                "WITH events AS (
+                     SELECT version, event_seq, 'completed' AS kind
+                       FROM {meta}.schema_migrations
+                     UNION ALL
+                     SELECT version, event_seq, 'rolled_back' AS kind
+                       FROM {meta}.schema_migrations_rolled_back
+                 ),
+                 latest AS (
+                     SELECT DISTINCT ON (version) version, kind
+                       FROM events
+                      ORDER BY version, event_seq DESC
+                 )
+                 SELECT count(*)::bigint AS n FROM latest WHERE kind = 'completed'"
+            ),
+            &[],
+        )
+        .await?;
+    Ok(row.get("n"))
+}
+
+/// Read the set of versions **superseded by a net-applied squash** (Plan 9).
+///
+/// A version `v_i` is satisfied-by-supersession when some squash `S` with an edge
+/// `S → v_i` in `schema_migrations_supersedes` is itself **net-applied** (its
+/// latest event in `schema_migrations`/`…_rolled_back` is `completed`). The
+/// executor unions this with the net-applied set to compute `pending`, so a
+/// superseded `v_i` is never (re-)run.
+///
+/// Only edges of a NET-APPLIED squash count: if `S` was rolled back, its
+/// supersession no longer holds and the superseded versions become pending again
+/// (consistent with `S` itself being pending again).
+///
+/// # Errors
+/// [`JournalError::Db`] on query failure.
+pub async fn superseded_versions(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+) -> Result<Vec<String>, JournalError> {
+    let meta = quote_ident(&cfg.meta_schema);
+    let rows = conn
+        .query(
+            &format!(
+                "WITH events AS (
+                     SELECT version, event_seq, 'completed' AS kind
+                       FROM {meta}.schema_migrations
+                     UNION ALL
+                     SELECT version, event_seq, 'rolled_back' AS kind
+                       FROM {meta}.schema_migrations_rolled_back
+                 ),
+                 latest AS (
+                     SELECT DISTINCT ON (version) version, kind
+                       FROM events
+                      ORDER BY version, event_seq DESC
+                 ),
+                 net_applied_squashes AS (
+                     SELECT version FROM latest WHERE kind = 'completed'
+                 )
+                 SELECT DISTINCT s.superseded_version AS v
+                   FROM {meta}.schema_migrations_supersedes s
+                   JOIN net_applied_squashes n ON n.version = s.squash_version
+                  ORDER BY s.superseded_version COLLATE \"C\""
+            ),
+            &[],
+        )
+        .await?;
+    Ok(rows.iter().map(|r| r.get::<_, String>("v")).collect())
+}
+
+/// The fields of a baseline/squash `completed` event recorded WITHOUT running its
+/// `up` (Plan 9), bundled so [`record_baseline`] takes one descriptor.
+#[derive(Debug, Clone, Copy)]
+pub struct BaselineRecord<'a> {
+    /// The migration version (`mig_…`).
+    pub version: &'a str,
+    /// The migration name.
+    pub name: &'a str,
+    /// The migration's checksum (so the drift check compares correctly later).
+    pub checksum: &'a str,
+    /// The actor recorded in the journal (operator / admin).
+    pub applied_by: &'a str,
+    /// The event `kind`: `'baseline'` (adoption) or `'squash'` (supersession).
+    pub kind: &'a str,
+    /// The versions this event supersedes (empty for a baseline; `[v1..vN]` for a
+    /// squash recorded on an existing DB).
+    pub supersedes: &'a [&'a str],
+}
+
+/// Journal a baseline/squash `completed` event WITHOUT running its `up` (Plan 9).
+///
+/// The event carries an explicit `kind` (`'baseline'` or `'squash'`) and an
+/// optional supersession edge set. Run by the ADMIN (the migrator has no
+/// meta-schema grant), exactly like [`record_completed`]. `exec_ms` is recorded as
+/// 0 (no SQL ran).
+///
+/// This is the journal-without-running primitive shared by [`crate::baseline`]
+/// (the adoption path: the schema already physically exists, so the `up` is
+/// recorded not run) and [`crate::squash`]'s existing-DB path (a supersession: the
+/// effect of `[v1..vN]` is already present, so the squash's `up` is recorded not
+/// run). The `completed` row + every supersession edge are inserted in the SAME
+/// caller transaction, so a net-applied squash always carries its full edge set
+/// (no partial-edge window). Append-only: never an UPDATE/DELETE.
+///
+/// # Errors
+/// [`JournalError::Db`] on insert failure.
+pub async fn record_baseline(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    rec: BaselineRecord<'_>,
+) -> Result<(), JournalError> {
+    let meta = quote_ident(&cfg.meta_schema);
+    let n = conn
+        .execute(
+            &format!(
+                "INSERT INTO {meta}.schema_migrations
+                     (version, name, checksum, applied_by, exec_ms, phase, outcome, kind)
+                 VALUES ($1, $2, $3, $4, 0, 'completed', 'success', $5)"
+            ),
+            &[&rec.version, &rec.name, &rec.checksum, &rec.applied_by, &rec.kind],
+        )
+        .await?;
+    debug_assert_eq!(n, 1, "record_baseline must insert exactly one journal row");
+    for sup in rec.supersedes {
+        conn.execute(
+            &format!(
+                "INSERT INTO {meta}.schema_migrations_supersedes
+                     (squash_version, superseded_version)
+                 VALUES ($1, $2)"
+            ),
+            &[&rec.version, sup],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Record the supersession edges of a squash whose `up` actually RAN.
+///
+/// This is the fresh-DB squash path (through [`crate::executor::apply`]): the
+/// `completed` row was already written by the executor's transactional/non-txn
+/// journal insert; this appends the `S → v_i` edges in the SAME transaction so the
+/// squash's satisfaction of `[v1..vN]` is visible to future pending computations.
+///
+/// # Errors
+/// [`JournalError::Db`] on insert failure.
+pub async fn record_supersedes(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    squash_version: &str,
+    supersedes: &[&str],
+) -> Result<(), JournalError> {
+    let meta = quote_ident(&cfg.meta_schema);
+    for sup in supersedes {
+        conn.execute(
+            &format!(
+                "INSERT INTO {meta}.schema_migrations_supersedes
+                     (squash_version, superseded_version)
+                 VALUES ($1, $2)"
+            ),
+            &[&squash_version, sup],
+        )
+        .await?;
+    }
     Ok(())
 }
 

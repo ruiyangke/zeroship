@@ -274,6 +274,7 @@ async fn contract_with_empty_depends_on_is_refused_fail_closed() {
         },
         owner_app: "app_acme".into(),
         depends_on: Vec::new(),
+        supersedes: Vec::new(),
     };
 
     let err = apply(

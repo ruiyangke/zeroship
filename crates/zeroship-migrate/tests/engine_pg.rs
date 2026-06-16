@@ -375,6 +375,7 @@ async fn executor_reruns_guard_even_on_a_hand_built_clean_plan() {
         flags: zeroship_migrate::MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
+        supersedes: Vec::new(),
     };
     let version = evil.version.as_str().to_string();
     let forged_plan = MigrationPlan {

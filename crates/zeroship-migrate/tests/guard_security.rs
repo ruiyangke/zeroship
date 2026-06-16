@@ -1804,6 +1804,7 @@ fn crate_root_reexports_compose_an_end_to_end_check() {
         flags: MigrationFlags::default(),
         owner_app: "app_0000000000000000000000".to_string(),
         depends_on: vec![],
+        supersedes: Vec::new(),
     };
     assert!(m.version.as_str().starts_with("mig_"));
     assert_eq!(m.checksum.as_str().len(), 64);

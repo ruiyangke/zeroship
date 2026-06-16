@@ -204,6 +204,7 @@ impl DeterministicAuthor {
             flags,
             owner_app: self.owner_app.clone(),
             depends_on: Vec::new(),
+            supersedes: Vec::new(),
         }
     }
 }
@@ -392,6 +393,7 @@ impl RawSqlAuthor {
             flags,
             owner_app: self.owner_app.clone(),
             depends_on: Vec::new(),
+            supersedes: Vec::new(),
         })
     }
 }
