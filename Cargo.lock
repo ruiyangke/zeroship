@@ -6856,12 +6856,15 @@ dependencies = [
 name = "zeroship-migrate"
 version = "0.1.0"
 dependencies = [
+ "compio",
+ "compio-postgres",
  "hex",
  "pg_query",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.18",
+ "tracing",
  "zeroship-core",
 ]
 
