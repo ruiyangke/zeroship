@@ -441,3 +441,85 @@ async fn re_squash_is_idempotent() {
 
     drop_schemas(&conn, &cfg).await;
 }
+
+/// #1 regression — a CHAINED squash over a prefix already covered by an EARLIER
+/// net-applied squash must NOT double-apply on a clean run.
+///
+/// Fresh DB: apply `{v1, v2, S1(supersedes[v1,v2])}` → `S1.up` runs once; `v1`/`v2`
+/// are superseded and NEVER journaled (they live only as supersession edges). Then
+/// apply a set containing `S2(supersedes[v1,v2])`. `v1`/`v2` are not in `completed`
+/// (only in `superseded`, covered by net-applied `S1`), so the old all-or-none gate
+/// counted `applied=0` → "fresh path" → re-ran `S2.up` → re-created already-built
+/// objects (double-apply / MigrationFailed). The satisfied-set classification must
+/// see `v1`/`v2` as SATISFIED (covered by net-applied `S1`) and refuse `S2` with
+/// `SquashAlreadyApplied`.
+#[compio::test]
+async fn chained_squash_over_superseded_prefix_is_already_applied_not_double_run() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    ensure_journal(&conn, &cfg).await.expect("journal");
+
+    // v1, v2 each create a table; S1 supersedes [v1,v2] with the combined up.
+    let v1 = MigrationId::generate();
+    compio::time::sleep(Duration::from_millis(2)).await;
+    let v2 = MigrationId::generate();
+    compio::time::sleep(Duration::from_millis(2)).await;
+    let s1v = MigrationId::generate();
+    let schema = &cfg.project_schema;
+    let m1 = mig(v1.clone(), "t1", &format!("CREATE TABLE \"{schema}\".\"t1\" (id bigint)"));
+    let m2 = mig(v2.clone(), "t2", &format!("CREATE TABLE \"{schema}\".\"t2\" (id bigint)"));
+    let s1_up = format!(
+        "CREATE TABLE \"{schema}\".\"t1\" (id bigint); \
+         CREATE TABLE \"{schema}\".\"t2\" (id bigint);"
+    );
+    let s1 = squash_mig(s1v.clone(), "squash_t1_t2", &s1_up, vec![v1.clone(), v2.clone()]);
+
+    // Fresh apply of {v1,v2,S1} — S1.up runs, v1/v2 superseded (never journaled).
+    let out1 = apply(
+        &conn,
+        &cfg,
+        &[m1.clone(), m2.clone(), s1.clone()],
+        Approval::None,
+        "ci",
+    )
+    .await
+    .expect("fresh apply with S1");
+    assert_eq!(
+        out1.applied,
+        vec![s1.version.as_str().to_string()],
+        "only S1 runs; v1/v2 superseded"
+    );
+    // Confirm v1/v2 are NOT journaled (they live only as supersession edges).
+    let applied = journal::applied(&conn, &cfg).await.expect("applied");
+    let versions: Vec<&str> = applied.iter().map(|e| e.version.as_str()).collect();
+    assert!(versions.contains(&s1.version.as_str()));
+    assert!(!versions.contains(&v1.as_str()), "v1 not journaled");
+    assert!(!versions.contains(&v2.as_str()), "v2 not journaled");
+
+    // S2 supersedes the SAME prefix [v1,v2]. Its up (with no IF NOT EXISTS) would
+    // FAIL if re-run, because t1/t2 already exist. The all-or-none gate must
+    // classify v1/v2 against the satisfied set (completed ∪ superseded): both are
+    // covered by net-applied S1 → fully satisfied → SquashAlreadyApplied, NOT a
+    // fresh re-run.
+    let s2v = MigrationId::generate();
+    let s2 = squash_mig(s2v.clone(), "squash_t1_t2_again", &s1_up, vec![v1.clone(), v2.clone()]);
+
+    let err = apply(
+        &conn,
+        &cfg,
+        &[m1.clone(), m2.clone(), s1.clone(), s2.clone()],
+        Approval::None,
+        "ci",
+    )
+    .await
+    .expect_err("S2 over an already-superseded prefix must be SquashAlreadyApplied");
+    assert!(
+        matches!(err, ApplyError::SquashAlreadyApplied { ref version } if version == s2v.as_str()),
+        "expected SquashAlreadyApplied for S2, got {err:?}"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}

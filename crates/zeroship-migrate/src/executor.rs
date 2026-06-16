@@ -561,18 +561,32 @@ async fn apply_locked(
     // the generic MissingDependency with a precise error.
     check_expand_contract_gate(migrations, &completed)?;
 
-    // SQUASH ALL-OR-NONE GATE (Plan 9 B) — a pending squash may run its `up` only
-    // when NONE of its superseded versions are applied (fresh DB). All-applied =>
-    // use squash() (record without running); partial => inconsistent. Refused
-    // before any execution, before order_pending hides the superseded versions.
-    check_squash_all_or_none(migrations, &completed)?;
-
     // Supersession (Plan 9 B): a version superseded by a net-applied squash (read
     // from the journal) OR by an in-set squash that will run this batch is SATISFIED
     // — it must not (re-)run. `compute_superseded` unions both sources; the squash
-    // `S` itself is never in this set (it runs / is already applied).
+    // `S` itself is never in this set (it runs / is already applied). Computed
+    // BEFORE the all-or-none gate so the gate can classify each squash's superseded
+    // set against the SAME satisfied set the pending computation uses.
     let journal_superseded = journal::superseded_versions(conn, cfg).await?;
     let superseded_owned = compute_superseded(migrations, &journal_superseded);
+
+    // SQUASH ALL-OR-NONE GATE (Plan 9 B) — a pending squash may run its `up` only
+    // when NONE of its superseded versions are SATISFIED (fresh DB). All-satisfied
+    // => use squash() (record without running); partial => inconsistent. A version
+    // is satisfied when it is directly net-applied (`completed`) OR covered by a
+    // net-applied squash (`journal_superseded`) — the #1 fix: a chained/overlapping
+    // squash over a prefix already covered by an EARLIER net-applied squash (whose
+    // members were superseded-not-journaled) was miscounted `applied=0` and re-ran
+    // its `up`, double-applying. We classify against `completed ∪ journal_superseded`
+    // (net-applied coverage only — NOT in-set pending edges, which would wrongly mark
+    // a squash's own targets as satisfied on the genuine fresh path). Refused before
+    // any execution, before order_pending hides the superseded versions.
+    let satisfied: std::collections::HashSet<&str> = completed
+        .keys()
+        .copied()
+        .chain(journal_superseded.iter().map(String::as_str))
+        .collect();
+    check_squash_all_or_none(migrations, &completed, &satisfied)?;
     let superseded: std::collections::HashSet<&str> =
         superseded_owned.iter().map(String::as_str).collect();
 
@@ -892,25 +906,35 @@ pub(crate) fn compute_superseded(
 /// squash in the set, BEFORE any execution.
 ///
 /// A squash `S` (`supersedes = [v1..vN]`) that is about to RUN its `up` (it is in
-/// the set and NOT net-applied) requires that NONE of `[v1..vN]` are net-applied —
+/// the set and NOT net-applied) requires that NONE of `[v1..vN]` are SATISFIED —
 /// the fresh-DB path, where `S.up` builds the schema and the superseded versions
-/// are skipped. If ALL of `[v1..vN]` are net-applied, `S.up` would re-create
-/// existing objects (double-apply): the correct path is [`crate::squash`] (record
-/// the supersession WITHOUT running `up`), so apply refuses with
-/// [`ApplyError::SquashAlreadyApplied`]. A PARTIAL set (some but not all applied)
+/// are skipped. If ALL of `[v1..vN]` are satisfied, `S.up` would re-create existing
+/// objects (double-apply): the correct path is [`crate::squash`] (record the
+/// supersession WITHOUT running `up`), so apply refuses with
+/// [`ApplyError::SquashAlreadyApplied`]. A PARTIAL set (some but not all satisfied)
 /// is an inconsistent state refused with [`ApplyError::SquashPartialOverlap`].
+///
+/// `satisfied` is the SAME set the pending computation uses: a version is satisfied
+/// when it is directly net-applied (`completed`) OR covered by a net-applied squash
+/// (`journal::superseded_versions`). This is the #1 fix: a version covered by an
+/// EARLIER net-applied squash was superseded-not-journaled, so it lives only as a
+/// supersession edge (in `satisfied`, NOT in `completed`). Counting against
+/// `completed` alone miscounted `applied=0` for a chained/overlapping squash and
+/// re-ran its `up`, double-applying. Classifying against `satisfied` sees the prefix
+/// as already built and routes to [`ApplyError::SquashAlreadyApplied`].
 ///
 /// A squash that is itself already net-applied imposes no rule here (its
 /// supersession is settled; `compute_superseded` already covers its versions).
 ///
 /// # Errors
 /// - [`ApplyError::SquashAlreadyApplied`] — a pending squash whose superseded set
-///   is fully net-applied (use [`crate::squash`] instead of apply).
+///   is fully satisfied (use [`crate::squash`] instead of apply).
 /// - [`ApplyError::SquashPartialOverlap`] — a pending squash whose superseded set
-///   is partially net-applied.
+///   is partially satisfied.
 fn check_squash_all_or_none(
     migrations: &[Migration],
     completed: &HashMap<&str, &AppliedEntry>,
+    satisfied: &std::collections::HashSet<&str>,
 ) -> Result<(), ApplyError> {
     for m in migrations {
         if m.supersedes.is_empty() || completed.contains_key(m.version.as_str()) {
@@ -920,7 +944,7 @@ fn check_squash_all_or_none(
         let applied = m
             .supersedes
             .iter()
-            .filter(|d| completed.contains_key(d.as_str()))
+            .filter(|d| satisfied.contains(d.as_str()))
             .count();
         if applied == 0 {
             continue; // fresh path: S runs, supersedes skipped — OK.
