@@ -87,7 +87,9 @@ impl MigrationId {
 /// These four booleans are the exact §2.1 migration-unit flag set; they are
 /// independent orthogonal facets (a migration can be e.g. non-transactional +
 /// online + requires-approval), not a state machine, so the wire shape is a
-/// flat record of bools by design.
+/// flat record of bools by design. A fifth, optional `timeout_ms` lets a single
+/// long migration (a large backfill, an `INDEX CONCURRENTLY` over a huge table)
+/// raise its own `statement_timeout` ceiling above the executor-wide default.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MigrationFlags {
@@ -102,6 +104,11 @@ pub struct MigrationFlags {
     pub online: bool,
     /// Must be confirmed before apply (AI never auto-applies destructive).
     pub requires_approval: bool,
+    /// Optional per-migration `statement_timeout`, in **milliseconds**. `None`
+    /// falls back to [`crate::db::ExecutorConfig::statement_timeout`]. A long
+    /// backfill or a big concurrent index sets its own higher ceiling so the
+    /// conservative executor default does not kill it mid-flight.
+    pub timeout_ms: Option<u64>,
 }
 
 impl Default for MigrationFlags {
@@ -111,6 +118,7 @@ impl Default for MigrationFlags {
             destructive: false,
             online: false,
             requires_approval: false,
+            timeout_ms: None,
         }
     }
 }

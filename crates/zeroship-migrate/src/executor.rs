@@ -9,15 +9,25 @@
 //! 3. computes `pending = set − applied`, in `UUIDv7` version order;
 //! 4. re-verifies the checksums of already-applied migrations — a mismatch is a
 //!    hard abort (drift / tamper, design §1.5 / §3.6);
-//! 5. for each pending migration: sets `statement_timeout` + `lock_timeout`,
-//!    runs the **[`SqlGuard`]** over the `up` SQL FIRST (deny ⇒ abort the whole
-//!    apply; the DDL never executes), then applies either:
-//!    - **transactionally** (default): `BEGIN; <up>; INSERT journal; COMMIT` —
-//!      DDL + journal atomic, so a crash leaves applied+recorded *or* neither;
-//!    - **non-transactionally** (opt-in, e.g. `CREATE INDEX CONCURRENTLY`):
-//!      two-phase `started` marker → run `<up>` → `completed` row + clear
-//!      marker. A lone `started` marker on a re-run triggers the recovery path.
-//! 6. releases the lock.
+//! 5. **first pass (static, all-up-front):** runs the **[`SqlGuard`]** over the
+//!    `up` SQL of EVERY pending migration, and validates that every
+//!    non-transactional `up` is **idempotent** (each non-txn statement uses the
+//!    `IF NOT EXISTS` form). A denial / non-idempotent op aborts the whole apply
+//!    before ANY migration executes — a denied batch applies *nothing* (no
+//!    earlier migration half-commits);
+//! 6. **second pass (execute):** for each pending migration, applies either:
+//!    - **transactionally** (default): `BEGIN; SET LOCAL …; <up>; INSERT
+//!      journal; COMMIT` — DDL + journal atomic, so a crash leaves
+//!      applied+recorded *or* neither. The `SET LOCAL` timeouts/search_path are
+//!      transaction-scoped, so they never leak onto the session;
+//!    - **non-transactionally** (opt-in, e.g. `CREATE INDEX CONCURRENTLY IF NOT
+//!      EXISTS`): two-phase `started` marker → run `<up>` → `completed` row +
+//!      clear marker. A lone `started` marker on a re-run triggers the recovery
+//!      path, which (because the `up` is required to be idempotent) simply drops
+//!      any INVALID-index residue and **re-runs `<up>`** — safe whether the
+//!      prior attempt failed mid-build OR succeeded then crashed before
+//!      recording `completed`.
+//! 7. restores the session GUCs it touched and releases the lock.
 //!
 //! Runs out-of-band at deploy, async on compio — ZERO tokio.
 
@@ -25,6 +35,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use compio_postgres::Client;
+use pg_query::protobuf::node::Node as NodeEnum;
 
 use crate::db::ExecutorConfig;
 use crate::guard::{GuardConfig, GuardError, SqlGuard};
@@ -69,6 +80,26 @@ pub enum ApplyError {
         #[source]
         source: GuardError,
     },
+    /// A non-transactional migration's `up` contains a statement that is not
+    /// safe to re-run idempotently — e.g. `CREATE INDEX CONCURRENTLY` without
+    /// `IF NOT EXISTS`, or `ALTER TYPE … ADD VALUE` without `IF NOT EXISTS`.
+    ///
+    /// The two-phase non-txn path's crash-recovery re-runs `<up>` verbatim
+    /// (C1/C2), so a non-idempotent op would wedge the migration permanently on
+    /// a success-then-crash (`already exists` / `label already exists`). We
+    /// reject such a migration **before any execution** with this clear error;
+    /// the author must write the `IF NOT EXISTS` form.
+    #[error(
+        "migration {version} is non-transactional but its `up` is not idempotent: {reason}. \
+         Non-transactional migrations may be re-run by crash recovery, so each statement \
+         must use the `IF NOT EXISTS` form."
+    )]
+    NonIdempotentNonTxn {
+        /// The offending migration's version.
+        version: String,
+        /// What specifically is not idempotent.
+        reason: String,
+    },
     /// An already-applied migration's recorded checksum no longer matches the
     /// migration in the set — drift / tamper. Hard abort (design §3.6).
     #[error("checksum drift on {version}: journal has {recorded}, set has {expected}")]
@@ -100,6 +131,14 @@ pub enum ApplyError {
 /// Holding it for the whole apply serializes concurrent deploys for the same
 /// project (design §2.3 step 1); a second apply waits, then sees the first's
 /// committed journal and no-ops.
+///
+/// M2 (known limitation): `hashtext` yields a 32-bit hash, so two *unrelated*
+/// project ids can collide onto the same advisory-lock key. The consequence is
+/// liveness-only — two unrelated projects would serialize against each other
+/// (one waits for the other's apply) — never a correctness/cross-tenant defect,
+/// since each apply still operates strictly within its own meta + project
+/// schema. Acceptable for v1. Revisit at scale with a 64-bit key
+/// (`pg_advisory_lock(int4, int4)` from a SHA-256 prefix, or two keys).
 async fn acquire_project_lock(conn: &Client, project_id: &str) -> Result<(), ApplyError> {
     conn.execute(
         "SELECT pg_advisory_lock(hashtext($1)::bigint)",
@@ -118,20 +157,141 @@ async fn release_project_lock(conn: &Client, project_id: &str) -> Result<(), App
     Ok(())
 }
 
-/// Pin `search_path` to the project schema and set the mandatory per-statement
-/// timeouts (§1.5). Applied on the session before each migration's SQL runs.
-async fn configure_session(conn: &Client, cfg: &ExecutorConfig) -> Result<(), ApplyError> {
-    // search_path: project schema first, then the meta schema (so the journal
-    // is reachable unqualified if a migration ever needed it — it does not, we
-    // always qualify). Identifiers are platform-controlled but quoted.
+/// The session GUCs the executor must restore on exit so its settings never
+/// leak onto the pooled/long-lived connection after `apply` returns (H2).
+struct SessionSnapshot {
+    statement_timeout: String,
+    lock_timeout: String,
+    search_path: String,
+}
+
+/// Read the session GUCs we are about to override, so they can be restored when
+/// `apply` finishes. Uses `current_setting(name)` (text form, exactly what `SET`
+/// round-trips).
+async fn snapshot_session(conn: &Client) -> Result<SessionSnapshot, ApplyError> {
+    let row = conn
+        .query_one(
+            "SELECT current_setting('statement_timeout') AS st, \
+                    current_setting('lock_timeout')      AS lt, \
+                    current_setting('search_path')       AS sp",
+            &[],
+        )
+        .await?;
+    Ok(SessionSnapshot {
+        statement_timeout: row.get("st"),
+        lock_timeout: row.get("lt"),
+        search_path: row.get("sp"),
+    })
+}
+
+/// Restore the GUCs captured by [`snapshot_session`]. Uses `set_config(name,
+/// value, false)` so the *value* is a bound literal, not interpolated SQL
+/// (the snapshot strings are server-provided, but we keep the parameterized
+/// path regardless).
+async fn restore_session(conn: &Client, snap: &SessionSnapshot) -> Result<(), ApplyError> {
+    conn.execute(
+        "SELECT set_config('statement_timeout', $1, false), \
+                set_config('lock_timeout', $2, false), \
+                set_config('search_path', $3, false)",
+        &[
+            &snap.statement_timeout,
+            &snap.lock_timeout,
+            &snap.search_path,
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+/// The effective `statement_timeout` for a migration: its per-migration
+/// override ([`crate::migration::MigrationFlags::timeout_ms`], H3) if set, else
+/// the executor-wide default.
+fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
+    m.flags.timeout_ms.unwrap_or_else(|| cfg.statement_timeout_ms())
+}
+
+/// `SET LOCAL …` clauses (transaction-scoped) for the **txn path** — they
+/// vanish at COMMIT/ROLLBACK, so nothing leaks onto the session (H2). Pins the
+/// project `search_path` and the mandatory timeouts (§1.5), with the
+/// per-migration timeout override applied (H3).
+fn set_local_session_sql(cfg: &ExecutorConfig, m: &Migration) -> String {
+    format!(
+        "SET LOCAL search_path TO \"{}\", \"{}\"; \
+         SET LOCAL statement_timeout = {}; \
+         SET LOCAL lock_timeout = {};",
+        cfg.project_schema.replace('"', "\"\""),
+        cfg.meta_schema.replace('"', "\"\""),
+        effective_timeout_ms(cfg, m),
+        cfg.lock_timeout_ms(),
+    )
+}
+
+/// Session-level `SET …` for the **non-txn path** (no transaction to scope to).
+/// These DO mutate the session, but [`apply`] restores the original GUCs on exit
+/// via [`restore_session`] so they never leak (H2). Per-migration timeout
+/// override applied (H3).
+async fn configure_session_non_txn(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    m: &Migration,
+) -> Result<(), ApplyError> {
     let stmt = format!(
         "SET search_path TO \"{}\", \"{}\"; SET statement_timeout = {}; SET lock_timeout = {};",
         cfg.project_schema.replace('"', "\"\""),
         cfg.meta_schema.replace('"', "\"\""),
-        cfg.statement_timeout_ms(),
+        effective_timeout_ms(cfg, m),
         cfg.lock_timeout_ms(),
     );
     conn.batch_execute(&stmt).await?;
+    Ok(())
+}
+
+/// Validate that a non-transactional migration's `up` is **idempotent** (C1/C2).
+///
+/// The two-phase non-txn recovery path re-runs `<up>` verbatim after a crash, so
+/// every statement that cannot run in a transaction must tolerate already having
+/// run. We enforce this statically, before any execution:
+///
+/// - `CREATE INDEX CONCURRENTLY …` MUST be `CREATE INDEX CONCURRENTLY IF NOT
+///   EXISTS …`.
+/// - `ALTER TYPE … ADD VALUE …` MUST be `… ADD VALUE IF NOT EXISTS …`.
+///
+/// (Other non-txn ops the classifier recognizes — `DROP INDEX CONCURRENTLY`,
+/// `VACUUM` — are themselves naturally re-runnable.) A violation is rejected
+/// with [`ApplyError::NonIdempotentNonTxn`].
+fn validate_non_txn_idempotent(m: &Migration) -> Result<(), ApplyError> {
+    let parsed = pg_query::parse(&m.up).map_err(|e| ApplyError::NonIdempotentNonTxn {
+        version: m.version.as_str().to_string(),
+        reason: format!("could not parse `up` SQL: {e}"),
+    })?;
+    for raw_stmt in &parsed.protobuf.stmts {
+        let Some(node) = raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref()) else {
+            continue;
+        };
+        match node {
+            NodeEnum::IndexStmt(idx) if idx.concurrent && !idx.if_not_exists => {
+                return Err(ApplyError::NonIdempotentNonTxn {
+                    version: m.version.as_str().to_string(),
+                    reason: format!(
+                        "`CREATE INDEX CONCURRENTLY {}` lacks `IF NOT EXISTS`",
+                        if idx.idxname.is_empty() { "<unnamed>" } else { &idx.idxname }
+                    ),
+                });
+            }
+            NodeEnum::AlterEnumStmt(e)
+                if !e.new_val.is_empty() && !e.skip_if_new_val_exists =>
+            {
+                return Err(ApplyError::NonIdempotentNonTxn {
+                    version: m.version.as_str().to_string(),
+                    reason: format!(
+                        "`ALTER TYPE … ADD VALUE '{}'` lacks `IF NOT EXISTS`",
+                        e.new_val
+                    ),
+                });
+            }
+            _ => {}
+        }
+    }
     Ok(())
 }
 
@@ -142,7 +302,9 @@ async fn configure_session(conn: &Client, cfg: &ExecutorConfig) -> Result<(), Ap
 ///
 /// # Errors
 /// - [`ApplyError::Guard`] — a pending migration's `up` SQL was denied; the
-///   whole apply aborts and that migration never executes.
+///   whole apply aborts (all-up-front, before any migration runs).
+/// - [`ApplyError::NonIdempotentNonTxn`] — a non-transactional migration's `up`
+///   is not idempotent (missing `IF NOT EXISTS`); aborts before any run.
 /// - [`ApplyError::ChecksumDrift`] — an already-applied migration was tampered.
 /// - [`ApplyError::MigrationFailed`] — a migration's SQL failed (rolled back).
 /// - [`ApplyError::Db`] / [`ApplyError::Journal`] — infrastructure failures.
@@ -153,7 +315,20 @@ pub async fn apply(
     applied_by: &str,
 ) -> Result<ApplyOutcome, ApplyError> {
     acquire_project_lock(conn, &cfg.project_id).await?;
+    // Capture the session GUCs we will override so we can restore them on exit
+    // — the executor's search_path / statement_timeout / lock_timeout must NOT
+    // leak onto the (pooled / long-lived) connection after apply (H2).
+    let snapshot = snapshot_session(conn).await;
     let result = apply_locked(conn, cfg, migrations, applied_by).await;
+    // Restore the original session settings (best-effort; logged on failure)
+    // before releasing the lock. The txn path uses SET LOCAL so only the non-txn
+    // path actually mutates the session, but restoring unconditionally is cheap
+    // and keeps the guarantee total.
+    if let Ok(snap) = &snapshot {
+        if let Err(e) = restore_session(conn, snap).await {
+            tracing::warn!(error = %e, "zeroship-migrate: failed to restore session GUCs after apply");
+        }
+    }
     // Always release the lock, even on error. Surface the original error.
     let unlock = release_project_lock(conn, &cfg.project_id).await;
     // Surface the apply error first if there was one; otherwise surface any
@@ -202,6 +377,25 @@ async fn apply_locked(
         }
     }
 
+    // M1: a version recorded `completed` in the journal but ABSENT from the
+    // supplied set is surfaced, not silently ignored — it usually means the
+    // bundle is missing a migration the database already has (a downgrade / a
+    // dropped slice). We log a warning; correctness is unaffected (we still
+    // only apply what's pending), but the operator should know.
+    {
+        use std::collections::HashSet;
+        let supplied: HashSet<&str> = migrations.iter().map(|m| m.version.as_str()).collect();
+        for v in completed.keys() {
+            if !supplied.contains(*v) {
+                tracing::warn!(
+                    version = %v,
+                    project = %cfg.project_id,
+                    "zeroship-migrate: journal records a completed migration absent from the supplied set"
+                );
+            }
+        }
+    }
+
     // Pending = set − completed, in UUIDv7 (version-string) order.
     let mut pending: Vec<&Migration> = migrations
         .iter()
@@ -214,30 +408,46 @@ async fn apply_locked(
         extension_allowlist: Vec::new(),
     });
 
+    // FIRST PASS — static validation over EVERY pending migration BEFORE any
+    // execution (H1). The guard runs per-migration inside the apply loop in the
+    // original design, which means an earlier migration could commit before a
+    // later one is denied (a half-applied batch). Hoisting the static checks
+    // (guard deny-list + non-txn idempotency) up front makes a denial apply
+    // NOTHING. (A migration failing at EXECUTION still legitimately leaves the
+    // earlier ones applied — standard migration semantics; only the STATIC
+    // checks are all-or-nothing.)
+    for m in &pending {
+        let version = m.version.as_str();
+        // GUARD GATE — RCE / priv-esc / cross-tenant / file / network denials.
+        guard.check(&m.up).map_err(|source| ApplyError::Guard {
+            version: version.to_string(),
+            source,
+        })?;
+        // C1/C2 — a non-transactional `up` must be idempotent (re-runnable by
+        // crash recovery). Reject the non-idempotent form with a clear error.
+        if !m.flags.transactional {
+            validate_non_txn_idempotent(m)?;
+        }
+    }
+
     let mut outcome = ApplyOutcome {
         applied: Vec::new(),
         skipped: completed.keys().map(|v| (*v).to_string()).collect(),
         recovered: Vec::new(),
     };
 
+    // SECOND PASS — execute. All static checks have already passed.
     for m in pending {
         let version = m.version.as_str();
-
-        // GUARD GATE — run BEFORE any execution. A denial aborts the entire
-        // apply; the migration's DDL never runs and no journal row is written.
-        guard.check(&m.up).map_err(|source| ApplyError::Guard {
-            version: version.to_string(),
-            source,
-        })?;
-
-        // Mandatory timeouts + pinned search_path for this statement.
-        configure_session(conn, cfg).await?;
-
         let had_inflight = started.contains_key(version);
 
         if m.flags.transactional {
             apply_transactional(conn, cfg, m, applied_by).await?;
         } else {
+            // Mandatory timeouts + pinned search_path on the session (the non-txn
+            // path has no transaction to SET LOCAL within). Restored on exit by
+            // `apply` so nothing leaks (H2). Per-migration timeout applied (H3).
+            configure_session_non_txn(conn, cfg, m).await?;
             let recovered =
                 apply_non_transactional(conn, cfg, m, applied_by, had_inflight).await?;
             if recovered {
@@ -268,10 +478,20 @@ async fn apply_transactional(
     // `&mut` plumbing through the whole apply loop.
     conn.batch_execute("BEGIN").await?;
 
+    // Pin search_path + the mandatory timeouts (per-migration override applied)
+    // with SET LOCAL so they are scoped to THIS transaction and vanish at
+    // COMMIT/ROLLBACK — nothing leaks onto the session (H2 / H3).
+    if let Err(e) = conn.batch_execute(&set_local_session_sql(cfg, m)).await {
+        let _ = conn.batch_execute("ROLLBACK").await;
+        return Err(ApplyError::Db(e));
+    }
+
     // Run the migration's up SQL.
     if let Err(e) = conn.batch_execute(&m.up).await {
         // Roll back; report the failure. No journal row was written.
-        let _ = conn.batch_execute("ROLLBACK").await;
+        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+            tracing::warn!(error = %rb, version = %m.version.as_str(), "zeroship-migrate: ROLLBACK failed after a migration error (M4)");
+        }
         return Err(ApplyError::MigrationFailed {
             version: m.version.as_str().to_string(),
             source: e,
@@ -299,7 +519,9 @@ async fn apply_transactional(
         )
         .await
     {
-        let _ = conn.batch_execute("ROLLBACK").await;
+        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+            tracing::warn!(error = %rb, version = %m.version.as_str(), "zeroship-migrate: ROLLBACK failed after a journal-insert error (M4)");
+        }
         return Err(ApplyError::Journal(JournalError::Db(e)));
     }
 
@@ -354,14 +576,24 @@ async fn apply_non_transactional(
     Ok(had_inflight)
 }
 
-/// Idempotent recovery for a crashed non-transactional migration (design §2.4).
+/// Idempotent recovery for a crashed non-transactional migration (design §2.4,
+/// C1/C2).
 ///
-/// A `started` marker with no `completed` row means the DDL may have partially
-/// run. For the canonical case — `CREATE INDEX CONCURRENTLY` interrupted — the
-/// index is left `INVALID`. We find every invalid index in the project schema
-/// and drop it, so the subsequent re-run of `<up>` rebuilds it cleanly. Other
-/// non-txn ops (`ALTER TYPE … ADD VALUE`, `VACUUM`) are themselves idempotent /
-/// safe to re-run, so the marker is simply cleared and the SQL re-applied.
+/// A `started` marker with no `completed` row means the prior attempt may have
+/// (a) failed mid-DDL, or (b) **succeeded then crashed** before recording
+/// `completed`. The old recovery reasoned per-op-type and blindly re-ran a
+/// possibly-non-idempotent `<up>`, which permanently wedged case (b)
+/// (`CREATE INDEX CONCURRENTLY` → `already exists`; `ALTER TYPE … ADD VALUE` →
+/// `label already exists`).
+///
+/// The robust model: non-txn `up`s are **required to be idempotent**
+/// (enforced up-front by [`validate_non_txn_idempotent`] — every non-txn
+/// statement uses `IF NOT EXISTS`), so recovery does not need per-op reasoning.
+/// It performs ONE cleanup that `IF NOT EXISTS` cannot itself do — dropping the
+/// `INVALID` index residue of an interrupted CONCURRENTLY build (an INVALID
+/// index satisfies `IF NOT EXISTS`, so it would otherwise never be rebuilt) —
+/// then clears the marker. The caller then **re-runs the idempotent `<up>`**,
+/// which is safe in both case (a) and case (b).
 async fn recover_non_transactional(
     conn: &Client,
     cfg: &ExecutorConfig,

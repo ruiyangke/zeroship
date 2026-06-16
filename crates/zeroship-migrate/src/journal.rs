@@ -258,16 +258,22 @@ pub async fn record_completed(
     exec_ms: i64,
 ) -> Result<(), JournalError> {
     let meta = quote_ident(&cfg.meta_schema);
-    conn.execute(
-        &format!(
-            "INSERT INTO {meta}.schema_migrations
-                 (version, name, checksum, applied_by, exec_ms, phase, outcome)
-             VALUES ($1, $2, $3, $4, $5, 'completed', 'success')
-             ON CONFLICT (version) DO NOTHING"
-        ),
-        &[&version, &name, &checksum, &applied_by, &exec_ms],
-    )
-    .await?;
+    // Plain INSERT — consistent with the transactional path (M3). A `completed`
+    // row is written EXACTLY once: the non-txn recovery path only ever runs when
+    // there is a lone `started` marker and NO completed row, so a unique-key
+    // conflict here is a genuine double-completion bug we must surface, not
+    // silently swallow with `ON CONFLICT DO NOTHING`.
+    let n = conn
+        .execute(
+            &format!(
+                "INSERT INTO {meta}.schema_migrations
+                     (version, name, checksum, applied_by, exec_ms, phase, outcome)
+                 VALUES ($1, $2, $3, $4, $5, 'completed', 'success')"
+            ),
+            &[&version, &name, &checksum, &applied_by, &exec_ms],
+        )
+        .await?;
+    debug_assert_eq!(n, 1, "record_completed must insert exactly one journal row");
     conn.execute(
         &format!("DELETE FROM {meta}.schema_migrations_inflight WHERE version = $1"),
         &[&version],
