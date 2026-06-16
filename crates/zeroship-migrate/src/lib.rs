@@ -1,12 +1,15 @@
 //! `zeroship-migrate` — zeroship's versioned DB migration engine for **creator
 //! project databases** (design `docs/proposals/2026-06-16-db-migration-engine-design.md`).
 //!
-//! This crate (Plan 1) implements the **security core** + the **migration
-//! unit**: the migration data types (§2.1) and the parse-time SQL security
-//! guard (§1.4 deny-list, §1.5 cross-schema confinement). The executor on
-//! Postgres (journal, advisory lock, apply flow), the least-privilege
-//! `migrator` role, and the authoring pipeline are later plans built on these
-//! types.
+//! This crate implements the **security core** + the **migration unit** (the
+//! migration data types §2.1 and the parse-time SQL security guard §1.4
+//! deny-list / §1.5 cross-schema confinement), and the **Postgres executor**
+//! (§2.3): the append-only journal ([`journal`]), the project advisory lock,
+//! and the apply flow ([`executor::apply`]) — transactional + two-phase
+//! non-transactional with idempotent recovery, the guard wired in front of
+//! every `up`, and a drift/tamper checksum check. The least-privilege
+//! `migrator` role and the authoring pipeline (`plan`) are later plans built on
+//! these types.
 //!
 //! # Security stance (§1)
 //!
@@ -34,7 +37,10 @@
 //! unit-testable without a database (`tests/guard_security.rs`).
 
 pub mod classify;
+pub mod db;
+pub mod executor;
 pub mod guard;
+pub mod journal;
 pub mod migration;
 
 // ---------------------------------------------------------------------------
@@ -42,5 +48,10 @@ pub mod migration;
 // ---------------------------------------------------------------------------
 
 pub use classify::{classify, DdlKind, ParseError, StatementClass};
+pub use db::{connect, ConnectError, ExecutorConfig};
+pub use executor::{apply, ApplyError, ApplyOutcome};
 pub use guard::{flags_for, GuardConfig, GuardError, GuardReport, SqlGuard};
+pub use journal::{
+    applied, ensure_journal, record_completed, record_started, AppliedEntry, JournalError, Phase,
+};
 pub use migration::{Checksum, IdError, Migration, MigrationFlags, MigrationId, MIGRATION_PREFIX};
