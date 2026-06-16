@@ -524,6 +524,67 @@ async fn chained_squash_over_superseded_prefix_is_already_applied_not_double_run
     drop_schemas(&conn, &cfg).await;
 }
 
+/// Two distinct squashes in the SAME apply set superseding the same prefix is
+/// malformed: on a fresh DB neither is net-applied, so the all-or-none gate sees
+/// nothing satisfied and (without this check) would let BOTH run → the second's
+/// up re-creates what the first built. Must be refused UP-FRONT (fail-closed),
+/// not error mid-batch.
+#[compio::test]
+async fn two_squashes_over_same_prefix_in_one_batch_is_refused_up_front() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    ensure_journal(&conn, &cfg).await.expect("journal");
+
+    let v1 = MigrationId::generate();
+    compio::time::sleep(Duration::from_millis(2)).await;
+    let v2 = MigrationId::generate();
+    compio::time::sleep(Duration::from_millis(2)).await;
+    let s1v = MigrationId::generate();
+    compio::time::sleep(Duration::from_millis(2)).await;
+    let s2v = MigrationId::generate();
+    let schema = &cfg.project_schema;
+    let m1 = mig(v1.clone(), "t1", &format!("CREATE TABLE \"{schema}\".\"t1\" (id bigint)"));
+    let m2 = mig(v2.clone(), "t2", &format!("CREATE TABLE \"{schema}\".\"t2\" (id bigint)"));
+    let up = format!(
+        "CREATE TABLE \"{schema}\".\"t1\" (id bigint); CREATE TABLE \"{schema}\".\"t2\" (id bigint);"
+    );
+    // Two distinct squashes, BOTH superseding [v1, v2], in one fresh set.
+    let s1 = squash_mig(s1v.clone(), "squash_a", &up, vec![v1.clone(), v2.clone()]);
+    let s2 = squash_mig(s2v.clone(), "squash_b", &up, vec![v1.clone(), v2.clone()]);
+
+    let err = apply(
+        &conn,
+        &cfg,
+        &[m1, m2, s1, s2],
+        Approval::None,
+        "ci",
+    )
+    .await
+    .expect_err("two squashes over the same prefix must be refused up-front");
+    assert!(
+        matches!(&err, ApplyError::OverlappingSquashes { shared, .. } if shared == v1.as_str() || shared == v2.as_str()),
+        "expected OverlappingSquashes, got {err:?}"
+    );
+    // Nothing applied — neither t1 nor t2 exists.
+    let n: i64 = conn
+        .query_one(
+            &format!(
+                "SELECT count(*)::bigint AS n FROM information_schema.tables \
+                 WHERE table_schema = '{schema}' AND table_name IN ('t1','t2')"
+            ),
+            &[],
+        )
+        .await
+        .expect("count tables")
+        .get::<_, i64>("n");
+    assert_eq!(n, 0, "the refusal ran nothing");
+
+    drop_schemas(&conn, &cfg).await;
+}
+
 /// Count `completed` rows for a version in the journal.
 async fn completed_count(conn: &Client, meta: &str, version: &str) -> i64 {
     conn.query_one(
