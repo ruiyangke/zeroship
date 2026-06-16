@@ -286,13 +286,13 @@ impl ExpandContractAuthor {
 
         // ---- E2: dual-write function + trigger (SECURITY INVOKER plpgsql) ----
         //
-        // BEFORE INSERT OR UPDATE. The body mirrors <from> ⇄ <to> with
-        // IS-DISTINCT-FROM guards so it only writes the mirror column when the
-        // source actually changed (no write amplification), and the trigger's
-        // WHEN clause short-circuits it entirely when neither column is distinct
-        // across an UPDATE. A BEFORE trigger assigning NEW.* never re-fires, so
-        // there is no recursion by construction (the IS DISTINCT FROM is the
-        // amplification guard, not a recursion guard).
+        // BEFORE INSERT OR UPDATE. The body is TOTAL: after it runs <from> and
+        // <to> are ALWAYS equal (to wins), so no write can leave them divergent
+        // for the contract's DROP COLUMN <from> to destroy. A BEFORE trigger
+        // assigning NEW.* never re-fires, so there is no recursion by
+        // construction; the only-from arm's IS DISTINCT FROM is the
+        // amplification guard (a no-op UPDATE falls into the self-copy else arm),
+        // not a recursion guard.
         let e2_up = build_dual_write_sql(&fn_q, &trg_q, &tbl_q, &from_q, &to_q);
         // Structural rollback of E2 (before backfill) tears down trigger then
         // function — IF EXISTS so it is idempotent / safe if partly applied.
@@ -435,15 +435,21 @@ impl ExpandContractAuthor {
 /// `down`, so they are byte-identical).
 ///
 /// `CREATE OR REPLACE FUNCTION … LANGUAGE plpgsql` (SECURITY INVOKER — the
-/// plpgsql default; we deliberately emit NO `SECURITY DEFINER`). The body:
+/// plpgsql default; we deliberately emit NO `SECURITY DEFINER`). The body is
+/// **total**: after it runs, `from` and `to` are ALWAYS equal, for every INSERT
+/// and UPDATE — no input row is left divergent (a divergent pair would be
+/// silently destroyed by the contract's `DROP COLUMN <from>`). Precedence is
+/// **`to` wins** (consistent with the contract keeping `to`):
 ///
-/// - on INSERT: fill whichever of the pair the app left NULL from the other;
-/// - on UPDATE: if `from` changed (and `to` did not), mirror `from → to`; if
-///   `to` changed (and `from` did not), mirror `to → from`.
+/// - on INSERT: if only `from` is set, mirror `from → to`; otherwise (`to` set,
+///   both set, or both NULL) copy `to → from`;
+/// - on UPDATE: if only `from` changed, mirror `from → to`; otherwise (`to`
+///   changed, both changed → to wins, or neither changed → no-op) copy
+///   `to → from`.
 ///
-/// All branches are `IS DISTINCT FROM`-guarded (NULL-safe, no write
-/// amplification). The trigger's `WHEN` clause skips the call entirely on an
-/// UPDATE where neither column is distinct.
+/// The only-`from` arm is `IS DISTINCT FROM`-guarded (NULL-safe). The else arm
+/// is the total catch-all; when nothing changed it is a no-op self-copy, so an
+/// UPDATE that touches neither column is not amplified.
 fn build_dual_write_sql(
     fn_q: &str,
     trg_q: &str,
@@ -453,45 +459,59 @@ fn build_dual_write_sql(
 ) -> String {
     // The function body. `$zsdw$` dollar-quote so embedded SQL needs no escaping.
     // BEGIN … RETURN NEW: a BEFORE trigger mutates NEW in place (never re-issues
-    // a write → no recursion). On INSERT, OLD is NULL so the TG_OP branch fills
-    // the empty side. On UPDATE, mirror only the side that the app changed.
+    // a write → no recursion).
+    //
+    // BOTH arms are TOTAL — they ALWAYS leave `from` == `to`, for every INSERT
+    // and every UPDATE, no input row left divergent. This is the coexistence
+    // model's central data-integrity invariant: a divergent pair would be
+    // silently destroyed by the contract's `DROP COLUMN <from>`. When a single
+    // statement changes BOTH columns (to different values), the old guarded form
+    // matched NEITHER branch and let the pair diverge; the totalized form below
+    // closes that hole.
+    //
+    // Precedence: **`to` (the new column) WINS** — consistent with the end state
+    // (the contract keeps `to`). The `from`-only arm is the single exception: it
+    // is the one case where `from` is the source of truth (the app wrote only the
+    // legacy name), so `from → to`. Every other shape resolves to `to`.
+    //
+    // INSERT (OLD is undefined): if ONLY `from` is set, mirror `from → to`;
+    // otherwise (`to` set, both set, or both NULL) the else arm copies
+    // `to → from` (to-wins; both-NULL is a no-op self-copy).
+    //
+    // UPDATE: if ONLY `from` changed, mirror `from → to`; otherwise (`to`
+    // changed, BOTH changed → to wins, or NEITHER changed → no-op self-copy) the
+    // else arm copies `to → from`.
     let func = format!(
         "CREATE OR REPLACE FUNCTION {fn_q}() RETURNS trigger AS $zsdw$\n\
          BEGIN\n\
          \x20   IF TG_OP = 'INSERT' THEN\n\
          \x20       IF NEW.{to_q} IS NULL AND NEW.{from_q} IS NOT NULL THEN\n\
-         \x20           NEW.{to_q} := NEW.{from_q};\n\
-         \x20       ELSIF NEW.{from_q} IS NULL AND NEW.{to_q} IS NOT NULL THEN\n\
-         \x20           NEW.{from_q} := NEW.{to_q};\n\
+         \x20           NEW.{to_q} := NEW.{from_q};   -- only from set\n\
+         \x20       ELSE\n\
+         \x20           NEW.{from_q} := NEW.{to_q};   -- to set / both set (to wins) / both null (no-op)\n\
          \x20       END IF;\n\
          \x20   ELSE\n\
-         \x20       -- UPDATE: mirror only the column the app actually changed.\n\
+         \x20       -- UPDATE: TOTAL, to wins. Only-from-changed mirrors from→to;\n\
+         \x20       -- to-changed / both-changed / neither-changed all resolve to→from.\n\
          \x20       IF NEW.{from_q} IS DISTINCT FROM OLD.{from_q}\n\
          \x20          AND NEW.{to_q} IS NOT DISTINCT FROM OLD.{to_q} THEN\n\
-         \x20           NEW.{to_q} := NEW.{from_q};\n\
-         \x20       ELSIF NEW.{to_q} IS DISTINCT FROM OLD.{to_q}\n\
-         \x20             AND NEW.{from_q} IS NOT DISTINCT FROM OLD.{from_q} THEN\n\
-         \x20           NEW.{from_q} := NEW.{to_q};\n\
+         \x20           NEW.{to_q} := NEW.{from_q};   -- only from changed\n\
+         \x20       ELSE\n\
+         \x20           NEW.{from_q} := NEW.{to_q};   -- to changed / both changed (to wins) / neither (no-op)\n\
          \x20       END IF;\n\
          \x20   END IF;\n\
          \x20   RETURN NEW;\n\
          END;\n\
          $zsdw$ LANGUAGE plpgsql"
     );
-    // The trigger. BEFORE INSERT OR UPDATE, FOR EACH ROW. The WHEN clause skips
-    // the body on an UPDATE that changed neither column (write-amplification
-    // guard at the trigger level); INSERT always fires (OLD is undefined in WHEN
-    // for INSERT, so the WHEN must reference only NEW or be INSERT-tolerant — we
-    // gate the WHEN to the UPDATE case via pg's per-event semantics by using a
-    // WHEN that is always true for INSERT and distinct-checking for UPDATE).
-    //
-    // Postgres does not allow OLD in a WHEN clause for INSERT triggers, so we
-    // attach a single trigger for both events with a WHEN that only references
-    // NEW would be wrong for the UPDATE skip. Instead we keep the WHEN out and
-    // let the function's own IS DISTINCT FROM guards no-op the amplification —
-    // the function body is the authoritative guard. (A separate UPDATE-only
-    // trigger with a WHEN (OLD.* IS DISTINCT FROM NEW.*) is a possible v2
-    // optimization; v1's body-level guard is correct and simpler.)
+    // The trigger. BEFORE INSERT OR UPDATE, FOR EACH ROW. We attach a single
+    // trigger for both events and keep no WHEN clause: Postgres forbids OLD in a
+    // WHEN for the INSERT event, and the body is already total + self-no-op (a
+    // no-op UPDATE falls into the to→from else arm, which writes the same value
+    // back — no amplification). The function body is the authoritative guard.
+    // (A separate UPDATE-only trigger with a WHEN (OLD.* IS DISTINCT FROM NEW.*)
+    // is a possible v2 optimization; v1's body-level total form is correct and
+    // simpler.)
     let trigger = format!(
         "CREATE TRIGGER {trg_q} BEFORE INSERT OR UPDATE ON {tbl_q}\n\
          FOR EACH ROW EXECUTE FUNCTION {fn_q}()"
