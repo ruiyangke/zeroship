@@ -40,7 +40,7 @@ use pg_query::protobuf::node::Node as NodeEnum;
 use crate::db::ExecutorConfig;
 use crate::guard::{GuardConfig, GuardError, SqlGuard};
 use crate::journal::{self, AppliedEntry, JournalError, Phase};
-use crate::migration::Migration;
+use crate::migration::{Migration, MigrationId};
 
 /// What [`apply`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -882,6 +882,411 @@ fn index_names_in_up(up: &str) -> Vec<String> {
         }
     }
     names
+}
+
+// ===========================================================================
+// Rollback (Plan 5) — apply `down` SQL in reverse to a target.
+// ===========================================================================
+
+/// How far [`rollback`] should unwind the applied migrations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RollbackTarget {
+    /// Roll back every net-applied migration whose version is **strictly after**
+    /// this one — i.e. unwind *down to* (and keeping) this version. The target
+    /// itself is NOT rolled back.
+    ToVersion(MigrationId),
+    /// Roll back the `n` most-recently-applied migrations (the `n` highest
+    /// net-applied versions). `Steps(0)` is a no-op; `Steps(k)` with `k` ≥ the
+    /// applied count behaves like [`RollbackTarget::All`].
+    Steps(usize),
+    /// Roll back **all** net-applied migrations.
+    All,
+}
+
+/// Options controlling [`rollback`] over irreversible (`down: None`) migrations.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RollbackOptions {
+    /// Proceed across a migration with `down: None` (irreversible) by **skipping**
+    /// its down step instead of refusing. Off by default: rollback refuses to
+    /// cross an irreversible migration and directs the operator to roll-forward
+    /// (author a compensating migration). Requires [`backup_acknowledged`] too.
+    ///
+    /// [`backup_acknowledged`]: RollbackOptions::backup_acknowledged
+    pub force: bool,
+    /// The operator's acknowledgement that a backup exists. `force` is honored
+    /// ONLY when this is also set — forcing past an irreversible step is a
+    /// data-loss operation, so it requires both a deliberate force and a backup
+    /// acknowledgement (design §5).
+    pub backup_acknowledged: bool,
+}
+
+/// What [`rollback`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RollbackOutcome {
+    /// Versions whose `down` ran + were journaled `rolled_back`, in the order they
+    /// were rolled back (reverse apply order).
+    pub rolled_back: Vec<String>,
+    /// Versions skipped because they are irreversible (`down: None`) and `force`
+    /// was given (design §5). Empty unless forcing.
+    pub skipped_irreversible: Vec<String>,
+}
+
+impl RollbackOutcome {
+    /// True if nothing was rolled back (and nothing force-skipped).
+    #[must_use]
+    pub const fn is_noop(&self) -> bool {
+        self.rolled_back.is_empty() && self.skipped_irreversible.is_empty()
+    }
+}
+
+/// Error from [`rollback`].
+#[derive(Debug, thiserror::Error)]
+pub enum RollbackError {
+    /// A database error outside a guarded/journaled step.
+    #[error("db error: {0}")]
+    Db(#[from] compio_postgres::Error),
+    /// A journal operation failed.
+    #[error(transparent)]
+    Journal(#[from] JournalError),
+    /// The [`RollbackTarget::ToVersion`] target is not a currently net-applied
+    /// migration (never applied, or already rolled back). Nothing was rolled back.
+    #[error("rollback target {version} is not currently applied")]
+    UnknownTarget {
+        /// The requested target version.
+        version: String,
+    },
+    /// A version selected for rollback is not present in the supplied migration
+    /// set, so its `down` SQL is unavailable. Nothing was rolled back.
+    #[error("migration {version} is applied but absent from the supplied set; cannot roll back (its `down` is unavailable)")]
+    MissingFromSet {
+        /// The applied-but-absent version.
+        version: String,
+    },
+    /// The rollback would cross a migration with `down: None` (irreversible) and
+    /// neither `force` nor `backup_acknowledged` was given. The default guidance
+    /// is **roll-forward**: author a new compensating migration. Nothing was
+    /// rolled back (refuse-by-default, before ANY down runs).
+    #[error(
+        "migration {version} ('{name}') is irreversible (down: None); rollback refuses by default. \
+         Prefer ROLL-FORWARD: author a compensating migration. To override, pass \
+         RollbackOptions {{ force: true, backup_acknowledged: true }} (skips the irreversible step; data loss)."
+    )]
+    Irreversible {
+        /// The irreversible migration's version.
+        version: String,
+        /// Its human-readable name.
+        name: String,
+    },
+    /// The SQL guard denied a `down`'s SQL — the down is SQL too and goes through
+    /// the SAME defenses as an up (design §5). The whole rollback aborts before
+    /// any down runs (all-up-front, mirroring apply).
+    #[error("rollback of {version} denied by guard: {source}")]
+    Guard {
+        /// The denied migration's version.
+        version: String,
+        /// The underlying guard rejection.
+        #[source]
+        source: GuardError,
+    },
+    /// An already-applied migration's recorded checksum no longer matches the
+    /// migration in the set — drift / tamper. Hard abort (mirrors apply).
+    #[error("checksum drift on {version}: journal has {recorded}, set has {expected}")]
+    ChecksumDrift {
+        /// The drifting migration's version.
+        version: String,
+        /// The checksum recorded in the journal.
+        recorded: String,
+        /// The checksum of the migration now in the set.
+        expected: String,
+    },
+    /// Running a migration's `down` SQL failed (after the guard passed). The
+    /// transaction (txn path) was rolled back; no `rolled_back` event was written.
+    #[error("rollback of {version} failed: {source}")]
+    DownFailed {
+        /// The failing migration's version.
+        version: String,
+        /// The DB error from the failed `down`.
+        #[source]
+        source: compio_postgres::Error,
+    },
+}
+
+/// Roll back applied migrations to a [`RollbackTarget`] (design §5).
+///
+/// Applies the `down` SQL of net-applied-and-not-rolled-back migrations **after**
+/// the target, in **REVERSE** version order, each under the project advisory lock.
+///
+/// **The `down` is privileged SQL too — it gets the SAME defenses as an `up`:**
+/// every selected `down` is run through the [`SqlGuard`] up-front (a denial aborts
+/// the whole rollback before any down runs), and each `down` executes under the
+/// least-privilege `migrator` role (`SET LOCAL ROLE` for the txn path), exactly
+/// like the up path. A malicious/buggy `down` (cross-schema, RCE) is just as
+/// dangerous as an up.
+///
+/// **Append-only journaling:** each `down` + its `rolled_back` journal append run
+/// in ONE transaction (txn path: `BEGIN; SET LOCAL ROLE migrator; <down>; RESET
+/// ROLE; INSERT rolled_back as admin; COMMIT`). The completed row is never
+/// deleted; a rolled-back version becomes pending again (re-appliable).
+///
+/// **Irreversible (`down: None`):** by default rollback **refuses** to cross such
+/// a migration ([`RollbackError::Irreversible`]) and directs the operator to
+/// roll-forward. With [`RollbackOptions::force`] + [`RollbackOptions::backup_acknowledged`]
+/// it proceeds, **skipping** the irreversible step (recorded in
+/// [`RollbackOutcome::skipped_irreversible`]; the down cannot be journaled because
+/// it never ran, so no `rolled_back` event is written for it — it stays applied).
+///
+/// # Errors
+/// See [`RollbackError`]. All pre-flight checks (unknown target, missing-from-set,
+/// guard denial, irreversible-without-force, checksum drift) abort before any
+/// `down` executes.
+pub async fn rollback(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+    target: RollbackTarget,
+    opts: RollbackOptions,
+    applied_by: &str,
+) -> Result<RollbackOutcome, RollbackError> {
+    // Acquire the project advisory lock directly (raw SQL, so the error type is
+    // compio_postgres::Error → RollbackError::Db) — serializes against concurrent
+    // apply/rollback for the same project, exactly like `apply`.
+    conn.execute(
+        "SELECT pg_advisory_lock(hashtext($1)::bigint)",
+        &[&cfg.project_id],
+    )
+    .await?;
+    let snapshot = snapshot_session(conn).await.ok();
+    let result = rollback_locked(conn, cfg, migrations, target, opts, applied_by).await;
+    // Mirror apply's exit discipline: unconditional RESET ROLE, then restore GUCs,
+    // then release the lock — so the migrator role / executor GUCs never leak.
+    if let Err(e) = conn.batch_execute("RESET ROLE").await {
+        tracing::warn!(error = %e, "zeroship-migrate: failed to RESET ROLE after rollback (L1)");
+    }
+    if let Some(snap) = &snapshot {
+        if let Err(e) = restore_session(conn, snap).await {
+            tracing::warn!(error = %e, "zeroship-migrate: failed to restore session GUCs after rollback");
+        }
+    }
+    let unlock = conn
+        .execute(
+            "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
+            &[&cfg.project_id],
+        )
+        .await;
+    match result {
+        Ok(o) => unlock.map(|_| o).map_err(RollbackError::Db),
+        Err(e) => Err(e),
+    }
+}
+
+/// The rollback body, run while holding the project advisory lock.
+async fn rollback_locked(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+    target: RollbackTarget,
+    opts: RollbackOptions,
+    applied_by: &str,
+) -> Result<RollbackOutcome, RollbackError> {
+    journal::ensure_journal(conn, cfg).await?;
+
+    // Net-applied versions (latest event is `completed`), with their recorded
+    // checksums, in ascending version order.
+    let journal_rows = journal::applied(conn, cfg).await?;
+    let mut net_applied: Vec<&AppliedEntry> = journal_rows
+        .iter()
+        .filter(|e| e.phase == Phase::Completed)
+        .collect();
+    net_applied.sort_by(|a, b| a.version.cmp(&b.version));
+
+    // Index the supplied set by version (source of the `down` SQL + checksum).
+    let by_version: HashMap<&str, &Migration> =
+        migrations.iter().map(|m| (m.version.as_str(), m)).collect();
+
+    // Resolve which net-applied versions to roll back, in ASCENDING order first
+    // (we reverse to apply downs newest-first below).
+    let selected: Vec<&AppliedEntry> = match &target {
+        RollbackTarget::All => net_applied.clone(),
+        RollbackTarget::Steps(n) => {
+            let n = (*n).min(net_applied.len());
+            net_applied[net_applied.len() - n..].to_vec()
+        }
+        RollbackTarget::ToVersion(v) => {
+            let tv = v.as_str();
+            if !net_applied.iter().any(|e| e.version == tv) {
+                return Err(RollbackError::UnknownTarget {
+                    version: tv.to_string(),
+                });
+            }
+            net_applied
+                .iter()
+                .copied()
+                .filter(|e| e.version.as_str() > tv)
+                .collect()
+        }
+    };
+
+    // Apply downs newest-first (reverse version order).
+    let mut to_roll: Vec<&AppliedEntry> = selected;
+    to_roll.sort_by(|a, b| b.version.cmp(&a.version));
+
+    // ---- PRE-FLIGHT (all-up-front, before ANY down runs) -------------------
+    // 1. Each selected version must be in the supplied set (its `down` is there).
+    // 2. Checksum must match (no drift/tamper on what we're about to reverse).
+    // 3. Irreversible (`down: None`): refuse unless force + backup_acknowledged.
+    // 4. The `down` SQL passes the guard (down is SQL too — same defenses).
+    let force_ok = opts.force && opts.backup_acknowledged;
+    let guard = SqlGuard::new(GuardConfig {
+        project_schema: cfg.project_schema.clone(),
+        extension_allowlist: Vec::new(),
+    });
+    // Collect the executable plan (skip force-skipped irreversibles).
+    enum Step<'a> {
+        Down(&'a Migration),
+        SkipIrreversible(&'a Migration),
+    }
+    let mut plan: Vec<Step> = Vec::with_capacity(to_roll.len());
+    for entry in &to_roll {
+        let v = entry.version.as_str();
+        let Some(m) = by_version.get(v).copied() else {
+            return Err(RollbackError::MissingFromSet {
+                version: v.to_string(),
+            });
+        };
+        if entry.checksum != m.checksum.as_str() {
+            return Err(RollbackError::ChecksumDrift {
+                version: v.to_string(),
+                recorded: entry.checksum.clone(),
+                expected: m.checksum.as_str().to_string(),
+            });
+        }
+        match &m.down {
+            None => {
+                if !force_ok {
+                    return Err(RollbackError::Irreversible {
+                        version: v.to_string(),
+                        name: m.name.clone(),
+                    });
+                }
+                plan.push(Step::SkipIrreversible(m));
+            }
+            Some(down) => {
+                // The down is privileged SQL — run it through the guard up-front.
+                guard.check(down).map_err(|source| RollbackError::Guard {
+                    version: v.to_string(),
+                    source,
+                })?;
+                plan.push(Step::Down(m));
+            }
+        }
+    }
+
+    // ---- EXECUTE -----------------------------------------------------------
+    let mut outcome = RollbackOutcome {
+        rolled_back: Vec::new(),
+        skipped_irreversible: Vec::new(),
+    };
+    for step in plan {
+        match step {
+            Step::SkipIrreversible(m) => {
+                tracing::warn!(
+                    version = %m.version.as_str(),
+                    project = %cfg.project_id,
+                    "zeroship-migrate: force-skipping irreversible migration during rollback (down: None)"
+                );
+                outcome
+                    .skipped_irreversible
+                    .push(m.version.as_str().to_string());
+            }
+            Step::Down(m) => {
+                rollback_one_transactional(conn, cfg, m, applied_by).await?;
+                outcome.rolled_back.push(m.version.as_str().to_string());
+            }
+        }
+    }
+    Ok(outcome)
+}
+
+/// Roll back ONE migration transactionally: `BEGIN; SET LOCAL …; SET LOCAL ROLE
+/// migrator; <down>; RESET ROLE; INSERT rolled_back (as admin); COMMIT`.
+///
+/// Atomic: the `down` + its `rolled_back` journal append commit together, so a
+/// crash leaves either both (rolled back + recorded) or neither. The `down` runs
+/// under the migrator role; the journal append runs as admin (the migrator has no
+/// meta grant — C1), exactly mirroring [`apply_transactional`].
+async fn rollback_one_transactional(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    m: &Migration,
+    applied_by: &str,
+) -> Result<(), RollbackError> {
+    let down = m
+        .down
+        .as_deref()
+        .expect("rollback_one_transactional is only called for Step::Down (down is Some)");
+    let started = Instant::now();
+    conn.batch_execute("BEGIN").await?;
+
+    // Pin search_path + mandatory timeouts (SET LOCAL — vanish at COMMIT/ROLLBACK).
+    if let Err(e) = conn.batch_execute(&set_local_session_sql(cfg, m)).await {
+        let _ = conn.batch_execute("ROLLBACK").await;
+        return Err(RollbackError::Db(e));
+    }
+    // Drop to the migrator role for the `<down>` ONLY (line-2 confinement). RESET
+    // ROLE before the journal append so the admin writes the rolled_back event.
+    if let Some(set_role) = set_local_role_sql(cfg) {
+        if let Err(e) = conn.batch_execute(&set_role).await {
+            let _ = conn.batch_execute("ROLLBACK").await;
+            return Err(RollbackError::Db(e));
+        }
+    }
+    // Run the `<down>` as the migrator.
+    if let Err(e) = conn.batch_execute(down).await {
+        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+            tracing::warn!(error = %rb, version = %m.version.as_str(), "zeroship-migrate: ROLLBACK failed after a down error");
+        }
+        return Err(RollbackError::DownFailed {
+            version: m.version.as_str().to_string(),
+            source: e,
+        });
+    }
+    // RESET ROLE back to admin — still inside the txn — so the journal append runs
+    // as the admin (the migrator cannot write the journal).
+    if cfg.migrator_role.is_some() {
+        if let Err(e) = conn.batch_execute("RESET ROLE").await {
+            let _ = conn.batch_execute("ROLLBACK").await;
+            return Err(RollbackError::Db(e));
+        }
+    }
+    let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+
+    // Append the immutable `rolled_back` event in the SAME transaction, as admin.
+    let meta = format!("\"{}\"", cfg.meta_schema.replace('"', "\"\""));
+    if let Err(e) = conn
+        .execute(
+            &format!(
+                "INSERT INTO {meta}.schema_migrations_rolled_back
+                     (version, name, checksum, rolled_back_by, exec_ms)
+                 VALUES ($1, $2, $3, $4, $5)"
+            ),
+            &[
+                &m.version.as_str(),
+                &m.name,
+                &m.checksum.as_str(),
+                &applied_by,
+                &exec_ms,
+            ],
+        )
+        .await
+    {
+        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+            tracing::warn!(error = %rb, version = %m.version.as_str(), "zeroship-migrate: ROLLBACK failed after a rolled_back-insert error");
+        }
+        return Err(RollbackError::Journal(JournalError::Db(e)));
+    }
+
+    conn.batch_execute("COMMIT").await?;
+    Ok(())
 }
 
 #[cfg(test)]

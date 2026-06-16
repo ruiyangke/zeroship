@@ -75,9 +75,14 @@ pub use author::{
     AuthorError, AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor,
 };
 pub use classify::{classify, DdlKind, ParseError, StatementClass};
-pub use engine::{Approval, EngineError, MigrationEngine, MigrationPlan, PlannedMigration};
+pub use engine::{
+    Approval, EngineError, MigrationEngine, MigrationPlan, PlannedMigration, RollbackEngineError,
+};
 pub use db::{connect, ConnectError, ExecutorConfig};
-pub use executor::{apply, ApplyError, ApplyOutcome};
+pub use executor::{
+    apply, rollback, ApplyError, ApplyOutcome, RollbackError, RollbackOptions, RollbackOutcome,
+    RollbackTarget,
+};
 pub use guard::{flags_for, GuardConfig, GuardError, GuardReport, SqlGuard};
 pub use journal::{
     applied, ensure_journal, record_completed, record_rolled_back, record_started, AppliedEntry,

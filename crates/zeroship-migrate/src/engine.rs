@@ -26,7 +26,9 @@
 use compio_postgres::Client;
 
 use crate::db::ExecutorConfig;
-use crate::executor::{self, ApplyError, ApplyOutcome};
+use crate::executor::{
+    self, ApplyError, ApplyOutcome, RollbackError, RollbackOptions, RollbackOutcome, RollbackTarget,
+};
 use crate::guard::{GuardConfig, GuardError, GuardReport, SqlGuard};
 use crate::migration::Migration;
 
@@ -98,6 +100,20 @@ pub enum EngineError {
     /// executor's own re-run of the guard denied a migration — defense in depth).
     #[error(transparent)]
     Apply(#[from] ApplyError),
+}
+
+/// A failure from [`MigrationEngine::rollback`].
+#[derive(Debug, thiserror::Error)]
+pub enum RollbackEngineError {
+    /// Rollback is destructive (a `down` typically drops/reverses schema) and
+    /// requires explicit [`Approval::Approved`], which was not given. Nothing was
+    /// rolled back.
+    #[error("rollback requires approval (a down is destructive) but none was given")]
+    ApprovalRequired,
+    /// The executor's rollback failed (guard denial on a `down`, irreversible
+    /// without force, checksum drift, mid-rollback DB error, …).
+    #[error(transparent)]
+    Rollback(#[from] RollbackError),
 }
 
 /// The public migration engine (design §3 `MigrationEngine` seam).
@@ -187,6 +203,45 @@ impl MigrationEngine {
         let migrations: Vec<Migration> =
             plan.items.iter().map(|p| p.migration.clone()).collect();
         let outcome = executor::apply(conn, exec_cfg, &migrations, applied_by).await?;
+        Ok(outcome)
+    }
+
+    /// Roll back applied migrations to a [`RollbackTarget`] through the gate
+    /// (design §5).
+    ///
+    /// A `down` is privileged SQL that typically **reverses** schema (drops the
+    /// objects an `up` created), so rollback is treated as destructive: it
+    /// **requires [`Approval::Approved`]** — the AI never auto-rolls-back. Given
+    /// approval, it delegates to [`executor::rollback`](crate::executor::rollback),
+    /// which **independently** runs every `down` through the guard and under the
+    /// least-privilege `migrator` role (defense in depth, identical to the up
+    /// path), refuses to cross an irreversible (`down: None`) migration unless
+    /// `opts.force` + `opts.backup_acknowledged`, and journals each rollback as an
+    /// append-only `rolled_back` event.
+    ///
+    /// `applied_by` is the actor recorded in the journal.
+    ///
+    /// # Errors
+    /// - [`RollbackEngineError::ApprovalRequired`] — `approval != Approved`.
+    /// - [`RollbackEngineError::Rollback`] — the executor's rollback failed
+    ///   (guard denial on a `down`, irreversible without force, checksum drift,
+    ///   missing-from-set, unknown target, or a mid-rollback DB error).
+    pub async fn rollback(
+        &self,
+        migrations: &[Migration],
+        target: RollbackTarget,
+        opts: RollbackOptions,
+        approval: Approval,
+        conn: &Client,
+        exec_cfg: &ExecutorConfig,
+        applied_by: &str,
+    ) -> Result<RollbackOutcome, RollbackEngineError> {
+        // Gate: rollback is destructive ⇒ explicit approval required.
+        if approval != Approval::Approved {
+            return Err(RollbackEngineError::ApprovalRequired);
+        }
+        let outcome =
+            executor::rollback(conn, exec_cfg, migrations, target, opts, applied_by).await?;
         Ok(outcome)
     }
 }
