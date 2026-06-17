@@ -17,13 +17,16 @@
 //! Requires `CREATEDB` on the connecting role (the test `postgres` role is a
 //! superuser, so CREATEDB is available).
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use compio_postgres::Client;
+use zeroship_migrate::guard::GuardConfig;
 use zeroship_migrate::migration::Checksum;
 use zeroship_migrate::{
-    deprovision_migrator, dry_run, migrator_role_name, ExecutorConfig, Migration, MigrationFlags,
-    MigrationId, ShadowConfig,
+    deprovision_migrator, dry_run, dry_run_declarative, migrator_role_name, CollectionDescriptor,
+    DeclarativeAuthor, ExecutorConfig, FieldDescriptor, Migration, MigrationEngine,
+    MigrationFlags, MigrationId, SchemaSnapshot, ShadowConfig, desired_snapshot,
 };
 
 const DEFAULT_DSN: &str =
@@ -300,6 +303,151 @@ async fn dry_run_concurrently_index_runs_in_shadow() {
         .expect("dry_run harness");
     assert!(report.ok, "CONCURRENTLY index must dry-run ok: {report:?}");
     assert!(report.per_migration.iter().all(|r| r.applied_ok));
+
+    cleanup_role(&admin, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — declarative dry-run with resulting-drift validation.
+// ---------------------------------------------------------------------------
+
+fn guard_cfg(cfg: &ExecutorConfig) -> GuardConfig {
+    GuardConfig {
+        project_schema: cfg.project_schema.clone(),
+        extension_allowlist: Vec::new(),
+    }
+}
+
+fn descriptor(name: &str, fields: Vec<FieldDescriptor>) -> CollectionDescriptor {
+    CollectionDescriptor {
+        name: name.into(),
+        owner_app: "app_test".into(),
+        fields,
+        indexes: vec![],
+    }
+}
+
+fn field(name: &str, ty: &str, required: bool) -> FieldDescriptor {
+    FieldDescriptor {
+        name: name.into(),
+        ty: ty.into(),
+        required,
+        unique: false,
+        references: None,
+    }
+}
+
+/// Phase 2 test 1: a clean declarative diff (desired vs an EMPTY live) yields a
+/// CLEAN resulting-drift + ok. The generated plain CREATE-TABLE plan, dry-run on
+/// the shadow, realises EXACTLY the desired schema (zero drift).
+#[compio::test]
+async fn dry_run_declarative_clean_diff_is_ok_with_clean_drift() {
+    let admin = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+
+    let desc = descriptor(
+        "members",
+        vec![
+            field("handle", "string", true),
+            field("score", "number", false),
+        ],
+    );
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
+
+    // Plan the diff against an EMPTY live snapshot (everything additive).
+    let engine = MigrationEngine::new();
+    let author = DeclarativeAuthor::new(cfg.project_schema.clone(), "app_test");
+    let empty_live = SchemaSnapshot::default();
+    let plan = engine
+        .plan_declarative(
+            &desired,
+            &empty_live,
+            &HashMap::new(),
+            &author,
+            &[],
+            &guard_cfg(&cfg),
+        )
+        .expect("plan_declarative");
+
+    let report =
+        dry_run_declarative(&admin, &plan, &desired, &cfg, &shadow_cfg(), "actor")
+            .await
+            .expect("dry_run_declarative harness");
+
+    let drift = report
+        .resulting_drift
+        .as_ref()
+        .expect("declarative dry-run carries resulting_drift");
+    assert!(
+        drift.is_clean(),
+        "the generated plan must realise the desired schema (clean drift): {drift:?}"
+    );
+    assert!(report.ok, "clean declarative diff must be ok: {report:?}");
+
+    cleanup_role(&admin, &cfg).await;
+}
+
+/// Phase 2 test 2: a plan that does NOT realise the schema we validate against
+/// yields a NON-empty resulting-drift + ok == false. We build the plan from
+/// `desired_a` (table `widgets`) but validate the shadow result against
+/// `desired_b` (table `gadgets`) — the shadow ends up with `widgets`, so diffing
+/// against `gadgets` surfaces `gadgets` missing + `widgets` unexpected. This is
+/// the faithful analogue of an intentionally-wrong generated op: the realised
+/// schema diverges from the desired snapshot, caught before any real apply.
+#[compio::test]
+async fn dry_run_declarative_wrong_result_has_nonempty_drift_and_not_ok() {
+    let admin = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+
+    let desc_a = descriptor("widgets", vec![field("label", "string", true)]);
+    let desired_a = desired_snapshot(&cfg.project_schema, &[desc_a]).expect("desired_a");
+
+    let desc_b = descriptor("gadgets", vec![field("label", "string", true)]);
+    let desired_b = desired_snapshot(&cfg.project_schema, &[desc_b]).expect("desired_b");
+
+    // The plan is generated for desired_a (creates `widgets`)...
+    let engine = MigrationEngine::new();
+    let author = DeclarativeAuthor::new(cfg.project_schema.clone(), "app_test");
+    let empty_live = SchemaSnapshot::default();
+    let plan_a = engine
+        .plan_declarative(
+            &desired_a,
+            &empty_live,
+            &HashMap::new(),
+            &author,
+            &[],
+            &guard_cfg(&cfg),
+        )
+        .expect("plan_declarative");
+
+    // ...but we validate the shadow result against desired_b (expects `gadgets`).
+    let report =
+        dry_run_declarative(&admin, &plan_a, &desired_b, &cfg, &shadow_cfg(), "actor")
+            .await
+            .expect("dry_run_declarative harness");
+
+    let drift = report
+        .resulting_drift
+        .as_ref()
+        .expect("declarative dry-run carries resulting_drift");
+    assert!(
+        !drift.is_clean(),
+        "the realised schema diverges from desired_b — drift must be non-empty"
+    );
+    assert!(
+        drift.missing_objects.iter().any(|m| m == "gadgets"),
+        "gadgets is desired but the shadow never got it: {drift:?}"
+    );
+    assert!(
+        drift.unexpected_objects.iter().any(|m| m == "widgets"),
+        "widgets was created but is not in desired_b: {drift:?}"
+    );
+    assert!(!report.ok, "a non-clean resulting drift must set ok=false");
+
+    // Even on the not-ok path the shadow DB is gone.
+    assert_eq!(shadow_db_count(&admin, "zsmig_shadow_").await, 0);
 
     cleanup_role(&admin, &cfg).await;
 }
