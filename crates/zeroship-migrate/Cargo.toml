@@ -23,6 +23,10 @@ zeroship-core = { workspace = true }
 # out-of-band at deploy (not the request hot path), async on compio.
 compio-postgres = { workspace = true }
 compio = { workspace = true }
+# `FutureExt::catch_unwind` for panic-safe shadow-DB teardown (C1) — mirrors the
+# runtime crate's panic_util seam. Zero tokio: `futures` is the executor-agnostic
+# combinator crate, not a runtime.
+futures = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

@@ -6858,6 +6858,7 @@ version = "0.1.0"
 dependencies = [
  "compio",
  "compio-postgres",
+ "futures",
  "hex",
  "pg_query",
  "serde",

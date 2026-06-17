@@ -130,3 +130,5 @@ pub use shadow::{
     dry_run, dry_run_declarative, sweep_leaked_shadows, DryRunError, DryRunReport, MigrationResult,
     ShadowConfig,
 };
+#[doc(hidden)]
+pub use shadow::arm_panic_after_provision;
