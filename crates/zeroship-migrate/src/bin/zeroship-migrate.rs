@@ -4,7 +4,7 @@
 //! a THIN arg-parser: it parses flags with `clap`, builds a
 //! [`RunConfig`](zeroship_migrate::guard::platform_runner::RunConfig)-equivalent,
 //! and delegates to the `guard::platform_runner::run_*` functions — the ONLY place
-//! the `PlatformCapability` token is minted (the §5 trust invariant). `main` never
+//! the `OperatorCapability` token is minted (the §5 trust invariant). `main` never
 //! touches the guard internals or mints a capability itself.
 //!
 //! compio, ZERO tokio: `#[compio::main]` drives the same compio-native `connect`

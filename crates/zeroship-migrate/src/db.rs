@@ -50,25 +50,28 @@ pub struct ExecutorConfig {
     /// PRIVATE (`pub(crate)`). The trust posture every executor-path guard build
     /// derives from (design §4.1 / §5). `Confined` for the creator path (set by
     /// [`ExecutorConfig::new`]); `Platform` ONLY via [`ExecutorConfig::platform`]
-    /// (requires a [`PlatformCapability`] token). Not `pub`, so the control plane
-    /// — outside this crate — can neither name `Platform` (it is
-    /// `#[non_exhaustive]`) nor reach the constructor: it cannot flip the
-    /// executor into Platform.
+    /// and `Trusted` ONLY via [`ExecutorConfig::trusted`] (both require an
+    /// [`OperatorCapability`] token). Not `pub`, so the control plane — outside
+    /// this crate — can neither name `Platform`/`Trusted` (the enum is
+    /// `#[non_exhaustive]`) nor reach the constructors: it cannot flip the
+    /// executor into a privileged profile.
     pub(crate) trust: crate::guard::TrustProfile,
     /// PRIVATE (`pub(crate)`). The schema allowlist a Platform guard permits
     /// references to (e.g. `zeroship` / `oauth_hydra` / `public`). Empty for
-    /// Confined (the `project_schema` is the sole permitted schema there).
+    /// Confined (the `project_schema` is the sole permitted schema there) and for
+    /// Trusted (no cross-schema confinement at all).
     pub(crate) platform_schemas: Vec<String>,
     /// PRIVATE (`pub(crate)`). The `CREATE EXTENSION` allowlist a Platform guard
-    /// permits (e.g. `citext` / `uuid-ossp`). Empty for Confined.
+    /// permits (e.g. `citext` / `uuid-ossp`). Empty for Confined and Trusted.
     pub(crate) platform_exts: Vec<String>,
-    /// PRIVATE (`pub(crate)`). The Platform capability token, present ONLY on a
-    /// config built via [`ExecutorConfig::platform`]. It rides here so the
-    /// executor-path guard builds ([`ExecutorConfig::guard_config`]) can mint a
-    /// Platform [`GuardConfig`](crate::guard::GuardConfig) without a fresh
-    /// out-of-band mint — the holder already proved Platform legitimacy when it
-    /// constructed this config. `None` for every Confined config.
-    pub(crate) platform_cap: Option<crate::guard::PlatformCapability>,
+    /// PRIVATE (`pub(crate)`). The OPERATOR capability token, present ONLY on a
+    /// config built via [`ExecutorConfig::platform`] or [`ExecutorConfig::trusted`].
+    /// It rides here so the executor-path guard builds
+    /// ([`ExecutorConfig::guard_config`]) can mint the privileged
+    /// [`GuardConfig`](crate::guard::GuardConfig) without a fresh out-of-band mint
+    /// — the holder already proved operator legitimacy when it constructed this
+    /// config. `None` for every Confined config.
+    pub(crate) operator_cap: Option<crate::guard::OperatorCapability>,
 }
 
 impl ExecutorConfig {
@@ -96,7 +99,7 @@ impl ExecutorConfig {
             trust: crate::guard::TrustProfile::Confined,
             platform_schemas: Vec::new(),
             platform_exts: Vec::new(),
-            platform_cap: None,
+            operator_cap: None,
         }
     }
 
@@ -109,22 +112,30 @@ impl ExecutorConfig {
     /// `Platform` ⇒ `GuardConfig::platform(&cap, self.platform_schemas,
     /// self.platform_exts)`, re-using the token that rides on this config — so
     /// the Platform plan is not re-denied by the executor's own guard.
+    /// `Trusted` ⇒ `GuardConfig::trusted(&cap)` — the deny-list is skipped
+    /// entirely (the public dbmate-like posture), re-using the operator token.
+    ///
+    /// A privileged profile WITHOUT a token (never constructible via the
+    /// `pub(crate)` ctors, which always stamp one) FAILS CLOSED to Confined.
     #[must_use]
     pub(crate) fn guard_config(&self) -> crate::guard::GuardConfig {
-        match (self.trust, self.platform_cap.as_ref()) {
+        match (self.trust, self.operator_cap.as_ref()) {
             (crate::guard::TrustProfile::Platform, Some(cap)) => crate::guard::GuardConfig::platform(
                 cap,
                 self.platform_schemas.clone(),
                 self.platform_exts.clone(),
             ),
-            // Confined, or a (never-constructed) Platform-without-token: fail
+            (crate::guard::TrustProfile::Trusted, Some(cap)) => {
+                crate::guard::GuardConfig::trusted(cap)
+            }
+            // Confined, or a (never-constructed) privileged-without-token: fail
             // closed to Confined.
             _ => crate::guard::GuardConfig::confined(self.project_schema.clone()),
         }
     }
 
     /// Build a **Platform** executor config (design §4.1 / §5). REQUIRES a
-    /// [`PlatformCapability`](crate::guard::PlatformCapability) token, mintable
+    /// [`OperatorCapability`](crate::guard::OperatorCapability) token, mintable
     /// only inside `guard::platform_runner`, so neither the control plane
     /// (external; cannot name `Platform` nor mint the token) nor any in-crate
     /// module (`submit`/`engine`; cannot mint the token) can flip the executor
@@ -135,7 +146,7 @@ impl ExecutorConfig {
     /// Phase 3); the token is the in-crate enforcement primitive.
     #[must_use]
     pub(crate) fn platform(
-        cap: &crate::guard::PlatformCapability,
+        cap: &crate::guard::OperatorCapability,
         project_id: impl Into<String>,
         project_schema: impl Into<String>,
         schemas: Vec<String>,
@@ -145,7 +156,41 @@ impl ExecutorConfig {
         cfg.trust = crate::guard::TrustProfile::Platform;
         cfg.platform_schemas = schemas;
         cfg.platform_exts = extensions;
-        cfg.platform_cap = Some(cap.clone());
+        cfg.operator_cap = Some(cap.clone());
+        cfg
+    }
+
+    /// Build a **Trusted** executor config — the public dbmate-like posture
+    /// (Track A). REQUIRES an
+    /// [`OperatorCapability`](crate::guard::OperatorCapability) token, EXACTLY
+    /// like [`ExecutorConfig::platform`], mintable only inside
+    /// `guard::platform_runner`. So neither the control plane (external; cannot
+    /// name `Trusted` nor mint the token) nor any in-crate creator-path module
+    /// (`submit`/`engine`; cannot mint the token) can flip the executor into
+    /// Trusted — only the operator-side runner can.
+    ///
+    /// Trusted runs as the **connecting role** (`migrator_role = None`, like
+    /// Platform's admin), with **no schema confinement** and **no deny-list**
+    /// (the executor's [`guard_config`](Self::guard_config) returns the Trusted
+    /// guard, whose `check()` skips the deny-list/cross-schema/body walks). The
+    /// destructive flags are still derived, so the CLI's `--yes` gate still
+    /// applies.
+    ///
+    /// The real caller is the operator-side `guard::platform_runner` (the public
+    /// CLI, Phase A2); the token is the in-crate enforcement primitive.
+    #[must_use]
+    pub(crate) fn trusted(
+        cap: &crate::guard::OperatorCapability,
+        project_id: impl Into<String>,
+        project_schema: impl Into<String>,
+    ) -> Self {
+        let mut cfg = Self::new(project_id, project_schema);
+        cfg.trust = crate::guard::TrustProfile::Trusted;
+        // No schema allowlist, no extension allowlist — Trusted has no
+        // confinement and no deny-list; these stay inert/empty.
+        cfg.operator_cap = Some(cap.clone());
+        // `migrator_role` stays `None` (the `new()` default): Trusted runs as the
+        // connecting role, exactly like Platform's admin (no `SET ROLE`).
         cfg
     }
 
@@ -172,6 +217,12 @@ impl ExecutorConfig {
     ///   resolution between `zeroship`/`oauth_hydra`/`public` also needs them all
     ///   on the path. This mirrors the Liquibase deployment, where the `postgres`
     ///   principal runs with `search_path = zeroship, public`.
+    /// - **Trusted** ⇒ the project schema (the `_` fallback). Trusted has no
+    ///   confinement — pinning the project schema is merely the default
+    ///   resolution target; an explicitly-qualified reference to any other schema
+    ///   still resolves (and is no longer guard-blocked), preserving dbmate
+    ///   parity. The operator owns the DB, so this pin is convenience, not a
+    ///   boundary.
     pub(crate) fn search_path_clause(&self) -> String {
         let quote = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
         match self.trust {

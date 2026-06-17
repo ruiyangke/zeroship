@@ -38,15 +38,17 @@ use serde_json::Value;
 /// The EXTERNAL trust boundary is closed by construction, but NOT by enum
 /// un-nameability (the design doc §4.1/§5 overclaims that — `#[non_exhaustive]`
 /// only forbids *exhaustive matching* and *constructing fielded variants*
-/// externally; an external crate CAN still name the fieldless `Platform` as a
-/// value). The real external lock is that [`GuardConfig`]'s fields are PRIVATE
-/// and [`GuardConfig::platform`] is `pub(crate)` and requires a `pub(crate)`
-/// [`PlatformCapability`] token: so naming `TrustProfile::Platform` externally
-/// is *harmless* — there is no `pub` API that accepts it and no way to build a
-/// Platform `GuardConfig`. Within the crate, `Platform` is produced ONLY inside
-/// [`GuardConfig::platform`] / [`crate::db::ExecutorConfig::platform`], each of
-/// which REQUIRES the token (below) — so in-crate code (`submit`/`engine`)
-/// cannot mint it either without holding the token (§5). `#[non_exhaustive]`
+/// externally; an external crate CAN still name the fieldless `Platform` /
+/// `Trusted` as a value). The real external lock is that [`GuardConfig`]'s
+/// fields are PRIVATE and [`GuardConfig::platform`] / [`GuardConfig::trusted`]
+/// are `pub(crate)` and require a `pub(crate)` [`OperatorCapability`] token: so
+/// naming `TrustProfile::Platform` / `TrustProfile::Trusted` externally is
+/// *harmless* — there is no `pub` API that accepts it and no way to build a
+/// privileged `GuardConfig`. Within the crate, `Platform`/`Trusted` are
+/// produced ONLY inside [`GuardConfig::platform`] / [`GuardConfig::trusted`] /
+/// [`crate::db::ExecutorConfig::platform`] / [`crate::db::ExecutorConfig::trusted`],
+/// each of which REQUIRES the token (below) — so in-crate code (`submit`/`engine`)
+/// cannot mint either without holding the token (§5). `#[non_exhaustive]`
 /// remains valuable: it keeps the variant set evolvable and forces external
 /// matches to carry a wildcard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,10 +56,22 @@ use serde_json::Value;
 pub enum TrustProfile {
     /// Untrusted creator/AI SQL. The full deny-list (today's behaviour).
     Confined,
-    /// Trusted operator SQL for the platform schemas. Constructed ONLY by
-    /// `GuardConfig::platform` / `ExecutorConfig::platform`, which require a
-    /// [`PlatformCapability`] token.
+    /// Trusted operator SQL for the zeroship platform schemas — the WIDENED
+    /// deny-list (role/grant/policy/schema management admitted against a fixed
+    /// schema allowlist). Constructed ONLY by `GuardConfig::platform` /
+    /// `ExecutorConfig::platform`, which require an [`OperatorCapability`] token.
     Platform,
+    /// **No untrusted boundary at all** — the public dbmate-like CLI posture
+    /// where the operator owns the database. The deny-list / cross-schema /
+    /// body walks are SKIPPED entirely (arbitrary SQL applies as the connecting
+    /// role: `CREATE ROLE`, touch any schema, etc. — dbmate parity). The
+    /// destructive/transactional/approval flags are STILL derived (via
+    /// `classify`/[`flags_for`], trust-independent) so the CLI's `--yes`
+    /// data-loss gate still applies; Trusted disables the deny-list, NOT the
+    /// destructive classification. Constructed ONLY by `GuardConfig::trusted` /
+    /// `ExecutorConfig::trusted`, which require an [`OperatorCapability`] token —
+    /// `submit_migration` and any external crate can NEVER reach it.
+    Trusted,
 }
 
 /// The schemas a guard permits references to (design §4.1).
@@ -91,38 +105,45 @@ impl SchemaScope {
     }
 }
 
-/// The in-crate enforcement primitive for the Platform profile (design §4.1,
-/// HIGH-1). A zero-sized capability token whose ONLY constructor (`new`) is
-/// private to the [`platform_runner`] submodule.
+/// The in-crate enforcement primitive for the OPERATOR-gated profiles —
+/// `Platform` (the zeroship internal posture) AND `Trusted` (the public
+/// dbmate-like posture) — (design §4.1, HIGH-1). A zero-sized capability token
+/// whose ONLY constructor (`new`) is private to the [`platform_runner`]
+/// submodule.
 ///
-/// [`GuardConfig::platform`] and [`crate::db::ExecutorConfig::platform`] take a
-/// `&PlatformCapability`, so the ability to produce `Platform` is gated on
-/// *holding a token you can only get inside `platform_runner`* — not on a
-/// `pub(crate)` function any in-crate module could call. This is what upgrades
-/// the in-crate trust story from "reviewed convention" to "by construction":
-/// `submit`/`engine`/`executor`/… cannot mint a token, so they cannot mint
-/// Platform. The TYPE is re-exported crate-wide (so `platform()` can name it in
-/// its signature); the constructor is NOT.
+/// [`GuardConfig::platform`] / [`GuardConfig::trusted`] and
+/// [`crate::db::ExecutorConfig::platform`] / [`crate::db::ExecutorConfig::trusted`]
+/// take a `&OperatorCapability`, so the ability to produce `Platform`/`Trusted`
+/// is gated on *holding a token you can only get inside `platform_runner`* —
+/// not on a `pub(crate)` function any in-crate module could call. This is what
+/// upgrades the in-crate trust story from "reviewed convention" to "by
+/// construction": `submit`/`engine`/`executor`/… cannot mint a token, so they
+/// cannot mint a privileged profile. The TYPE is re-exported crate-wide (so the
+/// `platform()`/`trusted()` ctors can name it in their signatures); the
+/// constructor is NOT. The token is GENERIC across the two operator profiles
+/// because both share the identical security model: the operator running the
+/// binary holds it; no creator path can.
 // PUBLIC module so the `zeroship-migrate` bin (a SEPARATE compilation target,
 // thus outside `pub(crate)` visibility) can call the `run_*` operator runners.
-// The token mint stays confined regardless: `PlatformCapability::new()` is
+// The token mint stays confined regardless: `OperatorCapability::new()` is
 // `pub(super)` (visible only within `guard`), so neither the bin, an external
 // crate, nor an in-crate creator-path module (`submit`/`engine`) can MINT a
 // token — they can only invoke the operator runner, which mints internally.
-// The `PlatformCapability` TYPE is re-exported only `pub(crate)` (below), so it
+// The `OperatorCapability` TYPE is re-exported only `pub(crate)` (below), so it
 // stays un-nameable externally (T8 doctest snippet 3).
 pub mod platform_runner;
 
-pub(crate) use platform_runner::PlatformCapability;
+pub(crate) use platform_runner::OperatorCapability;
 
 /// Per-guard configuration (design §4.1).
 ///
 /// All fields are **private**: a `GuardConfig` is obtained ONLY through
-/// [`GuardConfig::confined`] (the safe default anyone may construct) or
-/// [`GuardConfig::platform`] (requires a [`PlatformCapability`] token). This is
-/// what makes the §5 trust invariant statically true — an external crate cannot
-/// write a `GuardConfig { trust: Platform, .. }` literal, and no in-crate module
-/// can produce `Platform` without the token.
+/// [`GuardConfig::confined`] (the safe default anyone may construct),
+/// [`GuardConfig::platform`], or [`GuardConfig::trusted`] (both require an
+/// [`OperatorCapability`] token). This is what makes the §5 trust invariant
+/// statically true — an external crate cannot write a
+/// `GuardConfig { trust: Platform, .. }` / `{ trust: Trusted, .. }` literal, and
+/// no in-crate module can produce `Platform`/`Trusted` without the token.
 #[derive(Debug, Clone)]
 pub struct GuardConfig {
     /// PRIVATE. The trust posture. Settable only through `confined()`/`platform()`.
@@ -162,7 +183,7 @@ impl GuardConfig {
         self
     }
 
-    /// Platform profile. REQUIRES a [`PlatformCapability`] token (mintable only
+    /// Platform profile. REQUIRES a [`OperatorCapability`] token (mintable only
     /// in `platform_runner`), so neither an external crate (cannot name
     /// `Platform` nor construct the token) NOR an in-crate module (cannot
     /// construct the token) can produce a Platform guard outside the operator
@@ -171,7 +192,7 @@ impl GuardConfig {
     /// `TrustProfile::Platform` is named.
     #[must_use]
     pub(crate) fn platform(
-        _cap: &PlatformCapability,
+        _cap: &OperatorCapability,
         schemas: Vec<String>,
         extension_allowlist: Vec<String>,
     ) -> Self {
@@ -179,6 +200,30 @@ impl GuardConfig {
             trust: TrustProfile::Platform,
             schemas: SchemaScope::Allowlist(schemas),
             extension_allowlist,
+        }
+    }
+
+    /// Trusted profile — the public dbmate-like posture (Track A). REQUIRES an
+    /// [`OperatorCapability`] token, EXACTLY like [`GuardConfig::platform`], so
+    /// neither an external crate nor an in-crate creator-path module
+    /// (`submit`/`engine`) can produce a Trusted guard. The deny-list, the
+    /// cross-schema confinement, and the body walks are all SKIPPED by
+    /// [`SqlGuard::check`] under `Trusted` (arbitrary SQL applies as the
+    /// connecting role); the destructive/transactional/approval flags are still
+    /// derived. The `schemas`/`extension_allowlist` fields are unused under
+    /// Trusted (no confinement, no extension allowlisting) — they are set to the
+    /// inert empty shapes so the struct stays uniform. This is the single place
+    /// `TrustProfile::Trusted` is named.
+    #[must_use]
+    pub(crate) fn trusted(_cap: &OperatorCapability) -> Self {
+        Self {
+            trust: TrustProfile::Trusted,
+            // Inert: the Trusted early-return never consults `schemas` (no
+            // cross-schema walk) nor `extension_allowlist` (no statement-kind
+            // gate). Kept empty so a future code path can never accidentally
+            // read a stale allowlist.
+            schemas: SchemaScope::Allowlist(Vec::new()),
+            extension_allowlist: Vec::new(),
         }
     }
 
@@ -202,7 +247,7 @@ impl Default for GuardConfig {
 /// plane / builder sit behind. Each snippet below MUST fail to compile.
 ///
 /// (1) An external crate cannot write a `GuardConfig { .. }` struct literal —
-/// the fields are private:
+/// the fields are private (shown for both privileged profiles):
 ///
 /// ```compile_fail
 /// use zeroship_migrate::guard::{GuardConfig, TrustProfile, SchemaScope};
@@ -213,14 +258,23 @@ impl Default for GuardConfig {
 /// };
 /// ```
 ///
+/// ```compile_fail
+/// use zeroship_migrate::guard::{GuardConfig, TrustProfile, SchemaScope};
+/// let _ = GuardConfig {
+///     trust: TrustProfile::Trusted,
+///     schemas: SchemaScope::Allowlist(vec![]),
+///     extension_allowlist: vec![],
+/// };
+/// ```
+///
 /// (2) `TrustProfile` is `#[non_exhaustive]`, so an external crate cannot
 /// exhaustively match it (it must add a wildcard) — it can never assume it has
 /// seen every variant, and cannot construct a future fielded variant. (NOTE:
 /// `#[non_exhaustive]` does NOT make naming an existing fieldless variant like
-/// `Platform` a compile error — naming it is harmless because the external
-/// boundary is enforced by the PRIVATE `GuardConfig` fields + the `pub(crate)`
-/// `platform()` ctor + the `pub(crate)` token, snippets (1) and (3), not by
-/// un-nameability of the variant.)
+/// `Platform` / `Trusted` a compile error — naming it is harmless because the
+/// external boundary is enforced by the PRIVATE `GuardConfig` fields + the
+/// `pub(crate)` `platform()`/`trusted()` ctors + the `pub(crate)` token,
+/// snippets (1) and (3), not by un-nameability of the variant.)
 ///
 /// ```compile_fail
 /// use zeroship_migrate::guard::TrustProfile;
@@ -228,17 +282,20 @@ impl Default for GuardConfig {
 ///     match t {
 ///         TrustProfile::Confined => 0,
 ///         TrustProfile::Platform => 1,
+///         TrustProfile::Trusted => 2,
 ///         // no wildcard arm — rejected because the enum is #[non_exhaustive].
 ///     }
 /// }
 /// ```
 ///
-/// (3) …nor even NAME the `PlatformCapability` token type (it is `pub(crate)`,
-/// so it does not exist in the external crate's view of the module):
+/// (3) …nor even NAME the `OperatorCapability` token type (it is `pub(crate)`,
+/// so it does not exist in the external crate's view of the module) — so neither
+/// `GuardConfig::platform` nor `GuardConfig::trusted` can be called externally
+/// (they require a `&OperatorCapability` that cannot be named):
 ///
 /// ```compile_fail
-/// use zeroship_migrate::guard::PlatformCapability;
-/// fn _needs_a_token(_c: &PlatformCapability) {}
+/// use zeroship_migrate::guard::OperatorCapability;
+/// fn _needs_a_token(_c: &OperatorCapability) {}
 /// ```
 ///
 /// For contrast, the safe Confined constructor IS reachable externally:
@@ -312,8 +369,34 @@ impl SqlGuard {
     ///   inside `DO $$…$$` blocks and function bodies).
     /// - [`GuardError::CrossSchema`] — a reference outside the project schema.
     /// - [`GuardError::Parse`] — unparseable SQL (deny-by-default).
+    ///
+    /// Under [`TrustProfile::Trusted`] the deny-list / cross-schema / body walks
+    /// are SKIPPED entirely (the operator owns the DB; arbitrary SQL applies) —
+    /// only `classify` + `analyze` run so the destructive/transactional/approval
+    /// flags are still derived. A [`GuardError::Parse`] can still surface
+    /// (malformed SQL has no parse tree to classify), but no `Denied`/`CrossSchema`
+    /// can: there is no deny arm on the Trusted path.
     pub fn check(&self, sql: &str) -> Result<GuardReport, GuardError> {
         let classes = classify(sql)?;
+
+        // TRUSTED early-return — the public dbmate-like posture (Track A). The
+        // operator owns the database, so there is NO untrusted boundary: skip the
+        // deny-list, cross-schema confinement, and body walks ENTIRELY and apply
+        // arbitrary SQL. We still derive the report from `classify` (above) +
+        // `analyze` (below) so `flags_for` keeps gating destructive ops via the
+        // CLI's `--yes`. This branch is UNREACHABLE unless `trust == Trusted`,
+        // which is constructible ONLY via the operator-gated `GuardConfig::trusted`
+        // — so the Confined and Platform code paths below are byte-identical to
+        // before this profile existed.
+        if self.cfg.trust() == TrustProfile::Trusted {
+            let advisories = crate::analyze::analyze(sql);
+            let destructive = classes.iter().any(|c| c.destructive);
+            return Ok(GuardReport {
+                classes,
+                destructive,
+                advisories,
+            });
+        }
 
         // Walk the full parse tree once per statement for danger + bodies.
         let parsed = pg_query::parse(sql).map_err(|e| ParseError::Syntax(e.to_string()))?;
@@ -2192,7 +2275,7 @@ fn stmt_text(sql: &str, raw_stmt: &protobuf::RawStmt) -> String {
 }
 
 // ===========================================================================
-// In-crate tests — these MUST live in-crate because `PlatformCapability::for_test`
+// In-crate tests — these MUST live in-crate because `OperatorCapability::for_test`
 // and `GuardConfig::platform` are `pub(crate)` (the external trust boundary is
 // pinned separately by the `tests/trybuild_*` compile-fail tests, T8).
 //
@@ -2213,7 +2296,7 @@ mod tests {
     /// / `public`) + the two ported extensions. Minted via the `for_test` seam
     /// — the ONLY non-`platform_runner` path to a token, `#[cfg(test)]`-only.
     fn platform_guard() -> SqlGuard {
-        let cap = PlatformCapability::for_test();
+        let cap = OperatorCapability::for_test();
         SqlGuard::new(GuardConfig::platform(
             &cap,
             vec![
@@ -2244,7 +2327,7 @@ mod tests {
     /// seam is `#[cfg(test)]`-gated and the production `new` is `pub(super)`.
     #[test]
     fn t11_platform_capability_mints_only_via_runner_seam() {
-        let cap = PlatformCapability::for_test();
+        let cap = OperatorCapability::for_test();
         // The token grants a Platform GuardConfig + ExecutorConfig.
         let gcfg = GuardConfig::platform(&cap, vec!["zeroship".into()], vec![]);
         assert_eq!(gcfg.trust(), TrustProfile::Platform);
@@ -2256,7 +2339,7 @@ mod tests {
             vec![],
         );
         assert_eq!(ecfg.guard_config().trust(), TrustProfile::Platform);
-        // NOTE: `PlatformCapability::new` is `pub(super)` to `platform_runner`,
+        // NOTE: `OperatorCapability::new` is `pub(super)` to `platform_runner`,
         // so NO sibling module (incl. this test) can call it directly — only
         // the `#[cfg(test)] for_test` seam, which delegates to it, is reachable.
         // The external un-nameability is pinned by tests/trybuild_* (T8).
@@ -2446,5 +2529,90 @@ mod tests {
         assert!(SchemaScope::Single("Zeroship".into()).permits("zeroship"));
         assert!(SchemaScope::Allowlist(vec!["OAuth_Hydra".into()]).permits("oauth_hydra"));
         assert!(!SchemaScope::Single("zeroship".into()).permits("control"));
+    }
+
+    // ---- Track A: the Trusted profile (public dbmate-like posture) ---------
+
+    /// A Trusted guard, minted via the same `for_test` operator-token seam.
+    fn trusted_guard() -> SqlGuard {
+        let cap = OperatorCapability::for_test();
+        SqlGuard::new(GuardConfig::trusted(&cap))
+    }
+
+    /// The Trusted early-return SKIPS the deny-list ENTIRELY: SQL the Confined
+    /// guard hard-denies (role mgmt, cross-schema, even RCE/host-escape shapes)
+    /// passes the GUARD under Trusted (the operator owns the DB — there is no
+    /// untrusted boundary; PG itself remains the only authority). This is the
+    /// guard-level proof; `db.rs`/`shadow.rs`/`executor.rs` ride on it.
+    #[test]
+    fn trusted_skips_the_denylist_that_confined_enforces() {
+        let trusted = trusted_guard();
+        let confined = confined_guard();
+        // Each of these is a HARD Confined denial (role mgmt / cross-schema / RCE
+        // tokens / host escape). Under Trusted the guard must not deny any.
+        let arbitrary = [
+            "CREATE ROLE zsmig_arbitrary NOLOGIN",
+            "GRANT ALL ON SCHEMA public TO postgres",
+            "CREATE TABLE other_schema.t (id int)",
+            "ALTER SYSTEM SET wal_level = minimal",
+            "COPY t TO PROGRAM 'sh -c id'",
+            "SELECT pg_read_file('/etc/passwd')",
+            "CREATE EXTENSION dblink",
+        ];
+        for sql in arbitrary {
+            assert!(
+                confined.check(sql).is_err(),
+                "precondition: Confined must DENY {sql} for this test to be meaningful"
+            );
+            assert!(
+                trusted.check(sql).is_ok(),
+                "Trusted must SKIP the deny-list and PASS {sql}\n  got: {:?}",
+                trusted.check(sql)
+            );
+        }
+    }
+
+    /// Trusted still DERIVES the destructive flag (classify is trust-independent):
+    /// a `DROP TABLE` passes the guard (no deny) but the report is `destructive`
+    /// and `flags_for` sets `requires_approval` — so the CLI's `--yes` gate holds.
+    #[test]
+    fn trusted_still_derives_destructive_flag_at_guard_level() {
+        let g = trusted_guard();
+        let report = g
+            .check("DROP TABLE users")
+            .expect("Trusted must not deny a DROP TABLE");
+        assert!(report.destructive, "DROP TABLE is destructive under Trusted");
+        let flags = flags_for(&report);
+        assert!(flags.destructive);
+        assert!(
+            flags.requires_approval,
+            "a destructive op still requires approval (CLI --yes) under Trusted"
+        );
+    }
+
+    /// The Trusted early-return is gated on `trust == Trusted` ONLY: a Confined
+    /// guard still DENIES, and a Platform guard still APPLIES its (bounded)
+    /// widening — neither leaks the deny-list-off behaviour. This pins that the
+    /// Confined/Platform code paths are unchanged by the new branch.
+    #[test]
+    fn trusted_early_return_is_gated_on_trust_trusted_only() {
+        // Confined: a privileged op is STILL denied (the early-return never fires).
+        let confined = confined_guard();
+        assert!(
+            is_denied(&confined, "CREATE ROLE zsmig_x NOLOGIN"),
+            "Confined must still deny CREATE ROLE — the Trusted branch must not fire"
+        );
+        // Platform: a privileged-but-bounded op still APPLIES, and a NON-allowlisted
+        // cross-schema op still DENIES (Platform's deny-list is intact, NOT skipped).
+        let platform = platform_guard();
+        assert!(
+            platform.check("CREATE ROLE zeroship_auth NOLOGIN").is_ok(),
+            "Platform widening intact"
+        );
+        assert!(
+            is_denied(&platform, "CREATE TABLE proj_acme.steal(id int)"),
+            "Platform must still deny a NON-allowlisted cross-schema op — \
+             the Trusted deny-list-off branch must NOT fire under Platform"
+        );
     }
 }
