@@ -11,7 +11,7 @@
 use compio_postgres::Client;
 use zeroship_migrate::migration::Checksum;
 use zeroship_migrate::{
-    apply, Approval, ExecutorConfig, Migration, MigrationFlags, MigrationId,
+    apply, executor::ApplyError, Approval, ExecutorConfig, Migration, MigrationFlags, MigrationId,
 };
 
 const DEFAULT_DSN: &str =
@@ -298,6 +298,160 @@ async fn repeatables_run_after_versioned_pending() {
         scalar_int(&conn, &format!("SELECT n FROM \"{schema}\".v")).await,
         7
     );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// COMMIT 2 — drift exemption (once-only STILL aborts), ordering, security
+// ---------------------------------------------------------------------------
+
+/// CRITICAL: a repeatable's CHANGED checksum re-runs (no tamper-abort) WHILE a
+/// once-only migration's CHANGED checksum STILL aborts with `ChecksumDrift`. This
+/// proves the drift exemption is scoped strictly to repeatables and does NOT
+/// weaken the once-only tamper guard.
+#[compio::test]
+async fn repeatable_changed_checksum_reruns_but_once_only_still_aborts() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    let schema = &cfg.project_schema;
+
+    // First deploy: a once-only versioned migration + a repeatable view.
+    let once_v = MigrationId::generate();
+    let once = versioned(
+        once_v.clone(),
+        "create_t",
+        &format!("CREATE TABLE \"{schema}\".t (id int)"),
+    );
+    let rep_v = MigrationId::generate();
+    let rep1 = repeatable(
+        rep_v.clone(),
+        "v_view",
+        &format!("CREATE OR REPLACE VIEW \"{schema}\".v AS SELECT 1 AS n"),
+    );
+    apply(&conn, &cfg, &[once.clone(), rep1.clone()], Approval::None, "actor")
+        .await
+        .expect("first deploy");
+
+    // Part A — the repeatable's checksum CHANGES: it must re-run, NOT abort.
+    let rep2 = with_up(
+        rep1.clone(),
+        &format!("CREATE OR REPLACE VIEW \"{schema}\".v AS SELECT 2 AS n"),
+    );
+    assert_ne!(rep1.checksum, rep2.checksum);
+    let out = apply(&conn, &cfg, &[once.clone(), rep2.clone()], Approval::None, "actor")
+        .await
+        .expect("a changed repeatable must re-run, never abort on drift");
+    assert_eq!(out.applied, vec![rep_v.as_str().to_string()]);
+    assert_eq!(
+        scalar_int(&conn, &format!("SELECT n FROM \"{schema}\".v")).await,
+        2
+    );
+
+    // Part B — the ONCE-ONLY migration's checksum CHANGES (same identity, mutated
+    // `up`): this STILL aborts with `ChecksumDrift`. We pair it with the (now
+    // unchanged) repeatable to show the repeatable path does not mask the abort.
+    let once_tampered = with_up(
+        once.clone(),
+        &format!("CREATE TABLE \"{schema}\".t (id bigint)"),
+    );
+    assert_ne!(once.checksum, once_tampered.checksum);
+    let err = apply(
+        &conn,
+        &cfg,
+        &[once_tampered.clone(), rep2.clone()],
+        Approval::None,
+        "actor",
+    )
+    .await
+    .expect_err("a once-only migration's changed checksum must STILL abort");
+    assert!(
+        matches!(err, ApplyError::ChecksumDrift { ref version, .. } if version == once_v.as_str()),
+        "expected `ChecksumDrift` on the once-only migration, got {err:?}"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+/// Repeatables are ordered among themselves by `depends_on` (topo), regardless of
+/// input order: `b` depends on `a`, so `a` re-applies before `b` even when `b` is
+/// supplied first. `b`'s view reads `a`'s view, so a wrong order would fail.
+#[compio::test]
+async fn repeatables_ordered_by_depends_on() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    let schema = &cfg.project_schema;
+
+    let a_v = MigrationId::generate();
+    let a = repeatable(
+        a_v.clone(),
+        "v_a",
+        &format!("CREATE OR REPLACE VIEW \"{schema}\".a AS SELECT 5 AS n"),
+    );
+    let b_v = MigrationId::generate();
+    let mut b = repeatable(
+        b_v.clone(),
+        "v_b",
+        // b reads a — if b ran before a, the relation would not exist.
+        &format!("CREATE OR REPLACE VIEW \"{schema}\".b AS SELECT n FROM \"{schema}\".a"),
+    );
+    b.depends_on = vec![a_v.clone()];
+
+    // Supply b BEFORE a in the slice — ordering must come from depends_on, not input.
+    let out = apply(&conn, &cfg, &[b.clone(), a.clone()], Approval::None, "actor")
+        .await
+        .expect("dependency-ordered repeatables must apply a before b");
+
+    assert_eq!(
+        out.applied,
+        vec![a_v.as_str().to_string(), b_v.as_str().to_string()],
+        "a (the dependency) must re-apply before b"
+    );
+    assert_eq!(
+        scalar_int(&conn, &format!("SELECT n FROM \"{schema}\".b")).await,
+        5
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+/// SECURITY: a repeatable's `up` is held to the SAME guard deny-list as any `up`.
+/// A cross-schema reference (the `control` schema — cross-tenant) is guard-denied;
+/// nothing is applied and nothing is journaled.
+#[compio::test]
+async fn repeatable_cross_schema_up_is_guard_denied() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let rv = MigrationId::generate();
+    let evil = repeatable(
+        rv.clone(),
+        "evil_view",
+        // References the `control` schema — cross-tenant, must be denied.
+        "CREATE OR REPLACE VIEW control.leak AS SELECT 1 AS n",
+    );
+    let err = apply(&conn, &cfg, std::slice::from_ref(&evil), Approval::None, "actor")
+        .await
+        .expect_err("a cross-schema repeatable up must be guard-denied");
+    assert!(
+        matches!(err, ApplyError::Guard { ref version, .. } if version == rv.as_str()),
+        "expected a guard denial on the repeatable, got {err:?}"
+    );
+
+    // Nothing journaled (the denial fires before any execution).
+    let applied = zeroship_migrate::journal::applied(&conn, &cfg)
+        .await
+        .unwrap_or_default();
+    assert!(applied.is_empty(), "a guard-denied repeatable journals nothing");
 
     drop_schemas(&conn, &cfg).await;
 }
