@@ -1384,6 +1384,26 @@ fn create_domain_into_foreign_schema_is_cross_schema() {
 }
 
 #[test]
+fn create_domain_with_dangerous_check_is_still_denied() {
+    // Admitting CreateDomainStmt/AlterDomainStmt at the KIND gate must NOT bypass
+    // the kind-independent full-tree walks: a domain's CHECK / DEFAULT expression
+    // is traversed by check_dangerous_functions + check_cross_schema exactly like a
+    // column CHECK/DEFAULT. A domain CHECK that reaches a file/network builtin or a
+    // foreign schema is STILL denied under Confined — pins that the Phase-4
+    // widening opened no hole.
+    assert_denied(
+        "CREATE DOMAIN project_acme.evil AS text CHECK (pg_read_file('/etc/passwd') IS NOT NULL)",
+    );
+    assert_denied(
+        "ALTER DOMAIN project_acme.d ADD CONSTRAINT c CHECK (pg_read_file('/etc/passwd') = '')",
+    );
+    // A domain CHECK that cross-references a foreign-schema relation is cross-schema.
+    assert_cross_schema(
+        "CREATE DOMAIN project_acme.d AS int CHECK (VALUE IN (SELECT id FROM control.secrets))",
+    );
+}
+
+#[test]
 fn sequence_owned_by_own_table_passes() {
     // 2-part `table.column` (no schema) and 3-part own-schema both fine.
     assert_ok("CREATE SEQUENCE project_acme.s OWNED BY mytable.c");
