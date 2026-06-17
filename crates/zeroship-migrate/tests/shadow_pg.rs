@@ -81,6 +81,23 @@ fn shadow_cfg() -> ShadowConfig {
     }
 }
 
+/// A shadow config with a UNIQUE db-name prefix, so a teardown assertion that
+/// counts `<prefix>%` databases is scoped to ONE test and never races with
+/// sibling tests that share the default `zsmig_shadow_` prefix.
+fn unique_shadow_cfg() -> (ShadowConfig, String) {
+    let prefix: String = format!("zsmig_u_{}_", token().replace('_', ""))
+        .chars()
+        .take(40)
+        .collect();
+    (
+        ShadowConfig {
+            admin_dsn: dsn(),
+            db_name_prefix: prefix.clone(),
+        },
+        prefix,
+    )
+}
+
 fn mig(version: MigrationId, name: &str, up: &str) -> Migration {
     Migration {
         version,
@@ -226,7 +243,9 @@ async fn dry_run_broken_migration_fails_and_never_touches_prod() {
 #[compio::test]
 async fn dry_run_tears_down_shadow_on_ok_and_error_paths() {
     let admin = pg().await;
-    let prefix = "zsmig_shadow_";
+    // A UNIQUE prefix scopes the count to THIS test (the default-prefix shadow
+    // DBs of concurrent sibling tests must not race this assertion).
+    let (scfg, prefix) = unique_shadow_cfg();
 
     // OK path.
     let tok_ok = token();
@@ -239,7 +258,7 @@ async fn dry_run_tears_down_shadow_on_ok_and_error_paths() {
             cfg_ok.project_schema
         ),
     );
-    let _ = dry_run(&admin, &[good], &cfg_ok, &shadow_cfg(), "actor")
+    let _ = dry_run(&admin, &[good], &cfg_ok, &scfg, "actor")
         .await
         .expect("ok dry_run");
     cleanup_role(&admin, &cfg_ok).await;
@@ -255,14 +274,14 @@ async fn dry_run_tears_down_shadow_on_ok_and_error_paths() {
             schema = cfg_err.project_schema
         ),
     );
-    let _ = dry_run(&admin, &[bad], &cfg_err, &shadow_cfg(), "actor")
+    let _ = dry_run(&admin, &[bad], &cfg_err, &scfg, "actor")
         .await
         .expect("err dry_run harness still returns Ok(report)");
     cleanup_role(&admin, &cfg_err).await;
 
-    // No shadow database from EITHER path remains.
+    // No shadow database from EITHER path remains (scoped to this test's prefix).
     assert_eq!(
-        shadow_db_count(&admin, prefix).await,
+        shadow_db_count(&admin, &prefix).await,
         0,
         "no <prefix>% shadow database may remain after teardown"
     );
@@ -424,10 +443,11 @@ async fn dry_run_declarative_wrong_result_has_nonempty_drift_and_not_ok() {
         .expect("plan_declarative");
 
     // ...but we validate the shadow result against desired_b (expects `gadgets`).
-    let report =
-        dry_run_declarative(&admin, &plan_a, &desired_b, &cfg, &shadow_cfg(), "actor")
-            .await
-            .expect("dry_run_declarative harness");
+    // Use a unique prefix so the not-ok-path teardown count is race-free.
+    let (scfg, prefix) = unique_shadow_cfg();
+    let report = dry_run_declarative(&admin, &plan_a, &desired_b, &cfg, &scfg, "actor")
+        .await
+        .expect("dry_run_declarative harness");
 
     let drift = report
         .resulting_drift
@@ -447,8 +467,8 @@ async fn dry_run_declarative_wrong_result_has_nonempty_drift_and_not_ok() {
     );
     assert!(!report.ok, "a non-clean resulting drift must set ok=false");
 
-    // Even on the not-ok path the shadow DB is gone.
-    assert_eq!(shadow_db_count(&admin, "zsmig_shadow_").await, 0);
+    // Even on the not-ok path the shadow DB is gone (scoped to this test's prefix).
+    assert_eq!(shadow_db_count(&admin, &prefix).await, 0);
 
     cleanup_role(&admin, &cfg).await;
 }
