@@ -810,6 +810,93 @@ async fn concurrent_identical_submissions_apply_exactly_once() {
     teardown(&observer, &cfg).await;
 }
 
+/// MED-1 — a `RENAME COLUMN` is gated (it is backward-incompatible, app-breaking):
+/// with `Approval::None` ⇒ `ApprovalRequired` (NOT auto-applied); with `Approved`
+/// ⇒ `Applied`. FAILS pre-fix (flags_for ignored RenameStmt, so it auto-applied).
+#[compio::test]
+async fn rename_column_is_gated_then_applies_with_approval() {
+    let conn = pg().await;
+    let admin = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    let (shadow_cfg, _sprefix) = unique_shadow_cfg();
+    setup(&conn, &cfg).await;
+
+    submit_migration(
+        &conn,
+        &admin,
+        &cfg,
+        &shadow_cfg,
+        submission(
+            "create_people",
+            &format!(
+                "CREATE TABLE \"{}\".people (id bigint, fullname text)",
+                cfg.project_schema
+            ),
+        ),
+        &no_owners(),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("create people");
+
+    let rename = submission(
+        "rename_fullname",
+        &format!(
+            "ALTER TABLE \"{}\".people RENAME COLUMN fullname TO name",
+            cfg.project_schema
+        ),
+    );
+
+    // Without approval ⇒ ApprovalRequired; the old column is still present.
+    let gated = submit_migration(
+        &conn,
+        &admin,
+        &cfg,
+        &shadow_cfg,
+        rename.clone(),
+        &owns(&["people"]),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("submit rename");
+    assert!(
+        matches!(gated, SubmissionOutcome::ApprovalRequired { .. }),
+        "a RENAME COLUMN must be gated, got {gated:?}"
+    );
+    assert!(
+        column_exists(&conn, &cfg.project_schema, "people", "fullname").await,
+        "a gated rename must NOT have renamed the column"
+    );
+
+    // With approval ⇒ Applied; the column is renamed.
+    let applied = submit_migration(
+        &conn,
+        &admin,
+        &cfg,
+        &shadow_cfg,
+        rename,
+        &owns(&["people"]),
+        Approval::Approved,
+        "app_test",
+    )
+    .await
+    .expect("submit rename approved");
+    assert!(
+        matches!(applied, SubmissionOutcome::Applied { .. }),
+        "an approved RENAME COLUMN must Apply, got {applied:?}"
+    );
+    assert!(
+        column_exists(&conn, &cfg.project_schema, "people", "name").await
+            && !column_exists(&conn, &cfg.project_schema, "people", "fullname").await,
+        "the approved rename must have renamed the column"
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
 /// HIGH-2 — `owner_app` is UNTRUSTED. `app_B` may NOT ALTER/DROP/INSERT a table
 /// owned by `app_A` (per the ownership map), even though it CLAIMS
 /// `owner_app: "app_B"`. The refusal applies NOTHING (real DB + journal

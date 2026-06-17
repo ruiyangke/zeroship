@@ -27,7 +27,7 @@ use pg_query::protobuf::{self, ObjectType};
 use pg_query::protobuf::AlterTableType;
 
 use crate::analyze::Advisory;
-use crate::classify::{classify, ParseError, StatementClass};
+use crate::classify::{classify, DdlKind, ParseError, StatementClass};
 use crate::migration::MigrationFlags;
 use denylist::rule;
 use serde_json::Value;
@@ -823,17 +823,30 @@ fn foreign_schema_in_body(body: &str, project_schema: &str) -> Option<String> {
 ///   AI never auto-applies destructive ops).
 /// - any non-transactional statement (CONCURRENTLY, ALTER TYPE ADD VALUE,
 ///   VACUUM) ⇒ `transactional = false` (the two-phase apply path).
+/// - a `RENAME COLUMN` / `RENAME TABLE` ⇒ `requires_approval` even though it is
+///   NOT data-loss `destructive` (MED-1): a rename is app-breaking /
+///   backward-incompatible (it silently breaks every reader of the old name), so
+///   it must be operator-confirmed, never auto-applied. (The declarative
+///   expand-contract rename path does NOT emit a bare `RenameStmt` — it emits
+///   ADD COLUMN + trigger + backfill + DROP via `ExpandContractAuthor` — so this
+///   gate is scoped to a literal `RENAME` in a submitted `up`.)
 ///
 /// `online` is an authoring-time facet (expand-contract sequencing), not
 /// derivable from a single SQL blob, so it stays at its default here.
 #[must_use]
 pub fn flags_for(report: &GuardReport) -> MigrationFlags {
     let non_transactional = report.classes.iter().any(|c| c.non_transactional);
+    // MED-1 — a bare RENAME COLUMN / RENAME TABLE is gated (requires_approval) even
+    // though it is not data-loss-destructive: it is backward-incompatible.
+    let has_rename = report
+        .classes
+        .iter()
+        .any(|c| matches!(c.kind, DdlKind::RenameColumn | DdlKind::RenameTable));
     MigrationFlags {
         transactional: !non_transactional,
         destructive: report.destructive,
         online: false,
-        requires_approval: report.destructive,
+        requires_approval: report.destructive || has_rename,
         // No per-migration timeout derivable from a single SQL blob; the author
         // sets it explicitly when a long backfill/index needs a higher ceiling.
         timeout_ms: None,
