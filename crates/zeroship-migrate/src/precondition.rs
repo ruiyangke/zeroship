@@ -22,12 +22,23 @@
 //!   1. it MUST pass the [`SqlGuard`](crate::guard::SqlGuard) (read-only SELECT;
 //!      a cross-schema / file / network / dangerous precondition is denied — the
 //!      same line-1 defense the `up` gets);
-//!   2. it MUST be a **single `SELECT`** returning exactly **one boolean** column
-//!      (multi-statement / non-SELECT / wrong-shape is rejected up-front, before
-//!      it touches the DB — a precondition can NEVER mutate state);
+//!   2. it MUST pass the **shape gate** ([`validate_single_select`]): a SINGLE
+//!      `SELECT` (no second statement, no non-SELECT) with NO data-modifying
+//!      statement (`INSERT`/`UPDATE`/`DELETE`/`MERGE`) anywhere in its tree
+//!      (catches a data-modifying CTE at any nesting), NO locking clause (`FOR
+//!      UPDATE`/`FOR SHARE`/…), and NO sequence-mutating or advisory-lock builtin
+//!      (`nextval`/`setval`/`pg_advisory_*lock`/…). This gate is the REAL
+//!      pre-execution line: it is statically provable that a precondition can
+//!      **NEVER mutate state or acquire a leaking lock — it is rejected before it
+//!      touches the DB**. It returns exactly one boolean column (verified
+//!      result-side at execution);
 //!   3. it runs under the least-privilege **`migrator` role** (`SET LOCAL ROLE`,
-//!      transaction-scoped, inside a read-only transaction) — the same line-2
-//!      DB-privilege confinement the `up` gets.
+//!      transaction-scoped) inside a **`BEGIN READ ONLY`** transaction — the same
+//!      line-2 DB-privilege confinement the `up` gets. These are
+//!      DEFENSE-IN-DEPTH: the shape gate (step 2) already proves no mutation, but
+//!      `READ ONLY` + the migrator role backstop it. (Note `READ ONLY` does NOT
+//!      block advisory locks or sequence mutation — which is exactly why the
+//!      shape gate, not `READ ONLY`, owns that confinement.)
 //!
 //! # Where this is evaluated
 //!
@@ -39,9 +50,34 @@
 
 use compio_postgres::Client;
 use pg_query::protobuf::node::Node as NodeEnum;
+use serde_json::Value;
 
 use crate::db::ExecutorConfig;
 use crate::guard::{GuardConfig, GuardError, SqlGuard};
+
+/// Sequence-mutating and lock-acquiring builtins a read-only precondition may
+/// NEVER call. `nextval`/`setval` mutate a sequence (NOT blocked by `READ
+/// ONLY`); the `pg_advisory_*lock`/`unlock` family acquire/release advisory
+/// locks (also NOT blocked by `READ ONLY`) — a SESSION-scoped advisory lock
+/// taken in a precondition LEAKS onto the pooled connection and can collide with
+/// the engine's own apply lock. `currval`/`lastval` are read-only (they only
+/// read the session's last value), so they are deliberately ABSENT here. Matched
+/// case-insensitively against the trailing (bare) function-name part, so a
+/// `pg_catalog.`-qualified spelling resolves to the same builtin.
+const MUTATING_OR_LOCK_BUILTINS: &[&str] = &[
+    "nextval",
+    "setval",
+    "pg_advisory_lock",
+    "pg_advisory_lock_shared",
+    "pg_advisory_xact_lock",
+    "pg_advisory_xact_lock_shared",
+    "pg_advisory_unlock",
+    "pg_advisory_unlock_all",
+    "pg_try_advisory_lock",
+    "pg_try_advisory_lock_shared",
+    "pg_try_advisory_xact_lock",
+    "pg_try_advisory_xact_lock_shared",
+];
 
 /// A comparison operator for a [`Precondition::RowCount`] assertion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -236,9 +272,11 @@ fn quote_ident(ident: &str) -> String {
 /// applies the [`OnUnmet`] policy).
 ///
 /// All evaluation is **read-only**: structured checks are parameterized catalog
-/// reads; [`Precondition::SqlBoolean`] is gated to a single read-only `SELECT`
-/// (guard + shape) and run under the migrator role inside a `READ ONLY`
-/// transaction. A precondition can never mutate state.
+/// reads; [`Precondition::SqlBoolean`] is gated to a no-mutation, no-lock single
+/// `SELECT` by [`validate_single_select`] (the real pre-execution line) and then
+/// run under the migrator role inside a `READ ONLY` transaction
+/// (defense-in-depth). A precondition can never mutate state or acquire a leaking
+/// lock — it is rejected before it touches the DB.
 ///
 /// # Errors
 /// - [`PreconditionError::InvalidIdentifier`] — a structured check's table/column
@@ -341,30 +379,43 @@ async fn row_count(
     Ok(row.get("n"))
 }
 
-/// Statically validate that a `SqlBoolean`'s SQL is a SINGLE `SELECT` (no other
-/// statement kind, no multi-statement) BEFORE it touches the DB — so a
-/// precondition can never run DML/DDL or smuggle a second statement.
+/// Statically validate that a `SqlBoolean`'s SQL is a no-mutation, no-lock
+/// SELECT BEFORE it touches the DB — so a precondition can NEVER run DML/DDL,
+/// smuggle a second statement, acquire a lock, or mutate a sequence. This gate
+/// (not the `READ ONLY` transaction) is the REAL pre-execution confinement line;
+/// `READ ONLY` + the migrator role are defense-in-depth on top of it.
+///
+/// Rejects (all as [`PreconditionError::NotABooleanSelect`], before any query
+/// runs):
+///   - more than one statement, or a single statement that is not a `SELECT`;
+///   - a data-modifying statement (`INSERT`/`UPDATE`/`DELETE`/`MERGE`) ANYWHERE
+///     in the parsed tree — a data-modifying CTE
+///     (`WITH x AS (DELETE … RETURNING …) SELECT …`) hangs its `DeleteStmt` off
+///     the `SelectStmt`'s `with_clause`, so a top-node check alone would miss it. We
+///     walk the whole serialized tree (the same `serde_json` approach the guard
+///     uses) and reject any DML node at any nesting;
+///   - a non-empty locking clause (`FOR UPDATE`/`FOR SHARE`/`FOR NO KEY
+///     UPDATE`/`FOR KEY SHARE`) — a `LockingClause` node acquires row locks, not
+///     a read-only assertion;
+///   - a sequence-mutating or advisory-lock builtin
+///     ([`MUTATING_OR_LOCK_BUILTINS`]) — `READ ONLY` does NOT block these, and a
+///     session-scoped advisory lock would leak onto the pooled connection.
 ///
 /// Shape (single boolean column) is enforced at execution by reading exactly one
-/// `bool` column from the single result row; here we only enforce
-/// single-statement-and-it-is-a-SELECT. Parse failure is rejected (deny-by-default,
-/// though the guard's parse already covers it).
+/// `bool` column from the single result row. Parse failure is rejected
+/// (deny-by-default, though the guard's parse already covers it).
 fn validate_single_select(sql: &str) -> Result<(), PreconditionError> {
     let parsed = pg_query::parse(sql).map_err(|e| PreconditionError::NotABooleanSelect {
         reason: format!("could not parse SQL: {e}"),
     })?;
-    let stmts: Vec<_> = parsed
-        .protobuf
-        .stmts
+    let raw_stmts = &parsed.protobuf.stmts;
+    let stmts: Vec<_> = raw_stmts
         .iter()
         .filter_map(|s| s.stmt.as_ref().and_then(|n| n.node.as_ref()))
         .collect();
     if stmts.len() != 1 {
         return Err(PreconditionError::NotABooleanSelect {
-            reason: format!(
-                "expected exactly one statement, found {}",
-                stmts.len()
-            ),
+            reason: format!("expected exactly one statement, found {}", stmts.len()),
         });
     }
     if !matches!(stmts[0], NodeEnum::SelectStmt(_)) {
@@ -372,7 +423,103 @@ fn validate_single_select(sql: &str) -> Result<(), PreconditionError> {
             reason: "the single statement is not a SELECT".to_string(),
         });
     }
+
+    // Serialize the single statement's full subtree for the generic tree-walks
+    // (the same pattern the SqlGuard uses): this visits EVERY node — CTE bodies,
+    // sub-selects, expression args — not just the slots a hand-written traversal
+    // would reach.
+    let json = serde_json::to_value(&raw_stmts[0]).unwrap_or(Value::Null);
+
+    // (a) No data-modifying statement anywhere (catches data-modifying CTEs).
+    if let Some(kind) = first_dml_node(&json) {
+        return Err(PreconditionError::NotABooleanSelect {
+            reason: format!("contains a data-modifying statement ({kind}) — a precondition must be read-only"),
+        });
+    }
+
+    // (b) No locking clause (`FOR UPDATE`/`FOR SHARE`/…).
+    if tree_has_key(&json, "LockingClause") {
+        return Err(PreconditionError::NotABooleanSelect {
+            reason: "contains a locking clause (FOR UPDATE/SHARE) — a precondition must be lock-free".to_string(),
+        });
+    }
+
+    // (c) No sequence-mutating / advisory-lock builtin.
+    if let Some(name) = first_mutating_or_lock_builtin(&json) {
+        return Err(PreconditionError::NotABooleanSelect {
+            reason: format!("calls a mutating/lock builtin ({name}) — not blocked by READ ONLY, so denied at the gate"),
+        });
+    }
+
     Ok(())
+}
+
+/// The first data-modifying statement node key found anywhere in the serialized
+/// parse tree, or `None`. DML nodes serialize as the `PascalCase` variant keys
+/// `InsertStmt`/`UpdateStmt`/`DeleteStmt`/`MergeStmt` (e.g. a `DeleteStmt` nested
+/// in a CTE's `with_clause`).
+fn first_dml_node(v: &Value) -> Option<&'static str> {
+    const DML_NODES: &[&str] = &["InsertStmt", "UpdateStmt", "DeleteStmt", "MergeStmt"];
+    match v {
+        Value::Object(map) => {
+            for &k in DML_NODES {
+                if map.contains_key(k) {
+                    return Some(k);
+                }
+            }
+            map.values().find_map(first_dml_node)
+        }
+        Value::Array(items) => items.iter().find_map(first_dml_node),
+        _ => None,
+    }
+}
+
+/// True if any object node in the serialized tree carries `key` (used to detect a
+/// `LockingClause` node anywhere — top-level or in a sub-select).
+fn tree_has_key(v: &Value, key: &str) -> bool {
+    match v {
+        Value::Object(map) => {
+            map.contains_key(key) || map.values().any(|c| tree_has_key(c, key))
+        }
+        Value::Array(items) => items.iter().any(|i| tree_has_key(i, key)),
+        _ => false,
+    }
+}
+
+/// The first [`MUTATING_OR_LOCK_BUILTINS`] function name called anywhere in the
+/// serialized tree, or `None`. Reuses the guard's `funcname`-array convention:
+/// a `FuncCall`/`CallStmt` carries a `funcname` array of `String` nodes whose
+/// trailing element is the bare function name.
+fn first_mutating_or_lock_builtin(v: &Value) -> Option<String> {
+    match v {
+        Value::Object(map) => {
+            if let Some(Value::Array(parts)) = map.get("funcname") {
+                if let Some(name) = last_string_part(parts) {
+                    if MUTATING_OR_LOCK_BUILTINS
+                        .iter()
+                        .any(|b| b.eq_ignore_ascii_case(&name))
+                    {
+                        return Some(name);
+                    }
+                }
+            }
+            map.values().find_map(first_mutating_or_lock_builtin)
+        }
+        Value::Array(items) => items.iter().find_map(first_mutating_or_lock_builtin),
+        _ => None,
+    }
+}
+
+/// The trailing `{"node":{"String":{"sval":"…"}}}` value of a `funcname` array
+/// (the bare function name), mirroring the guard's `json_last_string_part`.
+fn last_string_part(parts: &[Value]) -> Option<String> {
+    parts.iter().rev().find_map(|v| {
+        v.get("node")?
+            .get("String")?
+            .get("sval")?
+            .as_str()
+            .map(str::to_string)
+    })
 }
 
 /// Evaluate an untrusted `SqlBoolean` precondition: guard → shape gate → run
@@ -391,15 +538,21 @@ async fn evaluate_sql_boolean(
     });
     guard.check(sql)?;
 
-    // 2. Shape gate: a single SELECT (no DML/DDL, no second statement).
+    // 2. Shape gate (THE pre-execution line): a single SELECT with no DML
+    //    anywhere (incl. data-modifying CTEs), no locking clause, and no
+    //    sequence-mutating / advisory-lock builtin. After this gate it is
+    //    statically provable the SQL cannot mutate state or take a leaking lock —
+    //    before it touches the DB.
     validate_single_select(sql)?;
 
-    // 3. Run read-only under the least-privilege migrator role. A READ ONLY
-    //    transaction is a hard backstop on top of the SELECT-only shape gate and
-    //    the migrator role: even if a write somehow slipped through, the txn
-    //    rejects it. `SET LOCAL` (search_path/role) is transaction-scoped, so it
-    //    vanishes at COMMIT and never leaks onto the session — the same H2
-    //    discipline the executor uses.
+    // 3. Run read-only under the least-privilege migrator role — DEFENSE-IN-DEPTH
+    //    on top of the shape gate (step 2 already proves no mutation). A READ ONLY
+    //    transaction backstops any write; the migrator role backstops privilege.
+    //    NOTE READ ONLY does NOT block advisory locks or sequence mutation —
+    //    those are denied by the shape gate above, which is why the gate (not
+    //    READ ONLY) is the real line. `SET LOCAL` (search_path/role) is
+    //    transaction-scoped, so it vanishes at COMMIT and never leaks onto the
+    //    session — the same H2 discipline the executor uses.
     conn.batch_execute("BEGIN READ ONLY").await?;
     let result = run_sql_boolean_in_txn(conn, cfg, sql).await;
     // Always end the transaction. A read-only txn has nothing to persist, so we
@@ -505,5 +658,64 @@ mod tests {
         assert!(validate_single_select("DROP TABLE t").is_err());
         // A SELECT smuggling a second DML statement.
         assert!(validate_single_select("SELECT true; DELETE FROM t").is_err());
+    }
+
+    #[test]
+    fn shape_gate_rejects_data_modifying_cte() {
+        // The DeleteStmt hangs off the SelectStmt's with_clause — a top-node-only
+        // gate would miss it; the tree walk catches it.
+        assert!(
+            validate_single_select("WITH x AS (DELETE FROM t RETURNING 1) SELECT count(*)=0 FROM x")
+                .is_err()
+        );
+        assert!(validate_single_select(
+            "WITH x AS (INSERT INTO t VALUES (1) RETURNING 1) SELECT count(*)=0 FROM x"
+        )
+        .is_err());
+        assert!(validate_single_select(
+            "WITH x AS (UPDATE t SET a=1 RETURNING 1) SELECT count(*)=0 FROM x"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn shape_gate_rejects_locking_clause() {
+        assert!(validate_single_select("SELECT * FROM t FOR UPDATE").is_err());
+        assert!(validate_single_select("SELECT * FROM t FOR SHARE").is_err());
+        assert!(validate_single_select("SELECT * FROM t FOR NO KEY UPDATE").is_err());
+        assert!(validate_single_select("SELECT * FROM t FOR KEY SHARE").is_err());
+        // A locking clause nested in a sub-select is still caught.
+        assert!(
+            validate_single_select("SELECT count(*)=0 FROM (SELECT id FROM t FOR UPDATE) s")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn shape_gate_rejects_mutating_and_lock_builtins() {
+        assert!(validate_single_select("SELECT nextval('s')").is_err());
+        assert!(validate_single_select("SELECT setval('s', 1)").is_err());
+        assert!(validate_single_select("SELECT pg_advisory_lock(1)").is_err());
+        assert!(validate_single_select("SELECT pg_advisory_xact_lock(1)").is_err());
+        assert!(validate_single_select("SELECT pg_try_advisory_lock(1)").is_err());
+        assert!(validate_single_select("SELECT pg_advisory_unlock_all()").is_err());
+        // pg_catalog-qualified resolves to the same builtin.
+        assert!(validate_single_select("SELECT pg_catalog.nextval('s')").is_err());
+        // Nested inside an expression / sub-select.
+        assert!(
+            validate_single_select("SELECT (SELECT nextval('s')) > 0").is_err()
+        );
+    }
+
+    #[test]
+    fn shape_gate_allows_read_only_selects_and_read_only_builtins() {
+        assert!(validate_single_select("SELECT count(*) = 0 FROM t").is_ok());
+        // currval / lastval are READ-ONLY (read the session's last value) — allowed.
+        assert!(validate_single_select("SELECT currval('s') > 0").is_ok());
+        assert!(validate_single_select("SELECT lastval() > 0").is_ok());
+        // A CTE with no DML is fine.
+        assert!(
+            validate_single_select("WITH x AS (SELECT 1 AS a) SELECT count(*)=1 FROM x").is_ok()
+        );
     }
 }
