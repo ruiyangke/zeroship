@@ -442,7 +442,7 @@ fn decl_author(cfg: &ExecutorConfig) -> DeclarativeAuthor {
 }
 
 /// A plain (no-rename) additive declarative deploy plan: create one table.
-async fn plain_declarative_plan(
+fn plain_declarative_plan(
     engine: &MigrationEngine,
     cfg: &ExecutorConfig,
 ) -> zeroship_migrate::DeclarativeDeployPlan {
@@ -480,7 +480,7 @@ async fn declarative_verified_correct_manifest_applies_normally() {
     setup(&conn, &cfg).await;
 
     let engine = MigrationEngine::new();
-    let plan = plain_declarative_plan(&engine, &cfg).await;
+    let plan = plain_declarative_plan(&engine, &cfg);
     // The control plane stamps the manifest over the generated plan's effective
     // set using the SAME single implementation the verify side calls.
     let expected = plan.manifest();
@@ -504,7 +504,7 @@ async fn declarative_verified_tampered_plain_set_is_refused_before_apply() {
     setup(&conn, &cfg).await;
 
     let engine = MigrationEngine::new();
-    let plan = plain_declarative_plan(&engine, &cfg).await;
+    let plan = plain_declarative_plan(&engine, &cfg);
     let expected = plan.manifest();
     assert!(!plan.plain.items.is_empty(), "plain set is non-empty");
 
@@ -540,7 +540,7 @@ async fn declarative_verified_content_flipped_plain_migration_is_refused() {
     setup(&conn, &cfg).await;
 
     let engine = MigrationEngine::new();
-    let plan = plain_declarative_plan(&engine, &cfg).await;
+    let plan = plain_declarative_plan(&engine, &cfg);
     let expected = plan.manifest();
 
     let mut tampered = plan.clone();

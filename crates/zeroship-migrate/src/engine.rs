@@ -31,7 +31,7 @@ use crate::executor::{
     self, ApplyError, ApplyOutcome, LockMode, RollbackError, RollbackOutcome, RollbackRequest,
 };
 use crate::guard::{GuardConfig, GuardError, GuardReport, SqlGuard};
-use crate::manifest::{verify_manifest, ManifestError, ManifestHash};
+use crate::manifest::{compute_manifest, verify_manifest, ManifestError, ManifestHash};
 use crate::migration::Migration;
 
 /// One linted migration in a [`MigrationPlan`].
@@ -331,6 +331,81 @@ impl MigrationEngine {
         }
 
         result
+    }
+
+    /// Apply a declarative deploy plan, **verifying its set-level integrity
+    /// manifest first** (v3 Plan F — the declarative peer of
+    /// [`apply_verified`](Self::apply_verified), closing the H1 coverage gap).
+    ///
+    /// This is the trusted-deploy entry point for the DECLARATIVE (AI-driven)
+    /// path. Before ANY apply work — before the denial/approval gate, before the
+    /// H10 outer project advisory lock, before a single statement of DDL —
+    /// it recomputes the integrity manifest over the plan's **full effective
+    /// migration set** ([`DeclarativeDeployPlan::manifest`]) and compares it to
+    /// `expected`. A mismatch (the generated plan was reordered / content-edited /
+    /// inserted-into / removed-from between the control plane STAMPING it and this
+    /// APPLY) returns [`EngineError::Manifest`] — surfaced as
+    /// [`DeclarativeApplyError::Plain`] — and applies NOTHING: no lock taken, no
+    /// journal touched, no DDL run. A match falls through to the normal
+    /// [`apply_declarative`](Self::apply_declarative) orchestration.
+    ///
+    /// # The effective set is what the executor actually runs
+    ///
+    /// A declarative deploy is the plain migrations PLUS, per rename, that
+    /// rename's expand AND its (deferred) contract migrations. The manifest is
+    /// computed over EXACTLY that set (see [`DeclarativeDeployPlan::manifest`]),
+    /// folded in the canonical executed order [`compute_manifest`] already
+    /// applies. So a tamper of a plain migration, a rename's expand, OR the
+    /// deferred contract is all caught at deploy N's verify — even though the
+    /// contract is only APPLIED in a later deploy N+1. The stamp must cover the
+    /// whole generated plan, including the deferred drop.
+    ///
+    /// # Determinism caveat — stamp + apply ONE generated plan instance
+    ///
+    /// Declarative migration versions are freshly minted per
+    /// [`plan_declarative`](Self::plan_declarative) call (`UUIDv7`), so a given
+    /// manifest is only stable for a SPECIFIC generated [`DeclarativeDeployPlan`]
+    /// instance. The control plane MUST generate the plan ONCE, compute the stamp
+    /// with [`DeclarativeDeployPlan::manifest`] over THAT instance, hold the plan
+    /// out-of-band, and apply THAT SAME plan here — it must NOT re-generate
+    /// between stamp and apply (a fresh `plan_declarative` would mint new versions
+    /// and never match). The stamp side and this verify side call the SAME
+    /// `manifest()` implementation, so they cannot diverge.
+    ///
+    /// # Trust model — caller contract
+    ///
+    /// `expected` MUST come from a TRUSTED source (the control plane, stamping at
+    /// build / review time and holding it out-of-band), NOT from the same bundle
+    /// the plan arrived in — see [`crate::manifest`]'s trust model and
+    /// [`apply_verified`](Self::apply_verified).
+    ///
+    /// # Errors
+    /// - [`DeclarativeApplyError::Plain`] wrapping [`EngineError::Manifest`] — the
+    ///   effective set did not match `expected`. Refused before the gate / lock /
+    ///   DDL; nothing applied.
+    /// - [`DeclarativeApplyError::Plain`] / [`DeclarativeApplyError::Expand`] — the
+    ///   same gate + executor + expand errors as
+    ///   [`apply_declarative`](Self::apply_declarative), after a successful
+    ///   manifest check.
+    pub async fn apply_declarative_verified(
+        &self,
+        plan: &DeclarativeDeployPlan,
+        expected: &ManifestHash,
+        approval: Approval,
+        conn: &Client,
+        exec_cfg: &ExecutorConfig,
+        applied_by: &str,
+    ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
+        // Pre-apply manifest gate over the plan's FULL EFFECTIVE set (plain +
+        // every rename's expand + contract), folded in canonical executed order by
+        // the SAME implementation the control plane stamped with. This runs BEFORE
+        // `apply_declarative` (and therefore before the H10 outer advisory lock and
+        // any DDL): a tampered plan is rejected without contending for the lock or
+        // opening a transaction, leaving the database + journal untouched.
+        verify_manifest(&plan.effective_set(), expected).map_err(EngineError::from)?;
+        // Verified ⇒ the normal gated, lock-wrapped declarative orchestration.
+        self.apply_declarative(plan, approval, conn, exec_cfg, applied_by)
+            .await
     }
 
     /// The body of [`apply_declarative`](Self::apply_declarative), run while the
@@ -741,6 +816,51 @@ pub struct DeclarativeDeployPlan {
     /// (expand migs + `BackfillSpec` + contract migs). Driven through
     /// [`run_expand`](MigrationEngine::run_expand), NOT the plain `apply`.
     pub renames: Vec<crate::expand_contract::ExpandContractPlan>,
+}
+
+impl DeclarativeDeployPlan {
+    /// The plan's **full effective migration set** — every migration the deploy
+    /// will execute (across all of its deploys), in apply order.
+    ///
+    /// It is the plain migrations ([`plain.items`](MigrationPlan::items) → their
+    /// `migration`s, in order) PLUS, for each rename in
+    /// [`renames`](Self::renames), that rename's expand migrations AND its
+    /// (deferred) contract migrations — i.e. each rename's full
+    /// [`ExpandContractPlan::all`](crate::expand_contract::ExpandContractPlan::all)
+    /// (expand then contract). This is the SET the integrity manifest is computed
+    /// over: a declarative deploy applies the plain set + every rename's expand at
+    /// deploy N and the renames' contract at deploy N+1, so the stamp must cover
+    /// the contract too even though it lands later.
+    ///
+    /// The SLICE order here is cosmetic: [`compute_manifest`] re-sorts into the
+    /// canonical executed order before folding, so the manifest is invariant to
+    /// how this set is sliced (M2) and stable for a given generated plan instance.
+    #[must_use]
+    pub fn effective_set(&self) -> Vec<Migration> {
+        let mut set: Vec<Migration> =
+            self.plain.items.iter().map(|p| p.migration.clone()).collect();
+        for rename in &self.renames {
+            set.extend(rename.all());
+        }
+        set
+    }
+
+    /// Compute the integrity manifest over this plan's
+    /// [`effective_set`](Self::effective_set) — the SINGLE implementation both the
+    /// control plane (stamp side) and
+    /// [`apply_declarative_verified`](MigrationEngine::apply_declarative_verified)
+    /// (verify side) call, so the stamped hash and the verified hash can never
+    /// diverge.
+    ///
+    /// The control plane MUST call this over the SAME generated plan instance it
+    /// will later apply (declarative versions are minted per `plan_declarative`
+    /// call, so the manifest is only stable for one instance — see
+    /// [`apply_declarative_verified`](MigrationEngine::apply_declarative_verified)'s
+    /// determinism caveat).
+    #[must_use]
+    pub fn manifest(&self) -> ManifestHash {
+        compute_manifest(&self.effective_set())
+    }
 }
 
 /// The result of
