@@ -56,6 +56,23 @@ impl PlatformCapability {
     }
 }
 
+/// Mint a [`PlatformCapability`] for the OPERATOR-SIDE shadow dry-run harness
+/// ([`crate::shadow`]).
+///
+/// The shadow harness must mirror the SOURCE config's trust profile so a
+/// privileged Platform set dry-runs faithfully: for a Platform source it builds
+/// the shadow's own Platform [`ExecutorConfig`] (admin connection, NO migrator
+/// `SET ROLE`, §8), which requires a token. The token mint stays CONFINED to the
+/// `guard` module — `PlatformCapability::new()` remains `pub(super)`; this is a
+/// single named `pub(crate)` seam the harness (also operator-side, like the CLI
+/// runners) calls, rather than widening `new()` itself. The shadow is a throwaway
+/// DB and the deny-list guard still runs on the shadow SQL, so this is NOT a
+/// privilege escalation — it reproduces the real Platform apply on a clone.
+#[must_use]
+pub(crate) const fn mint_shadow_platform_capability() -> PlatformCapability {
+    PlatformCapability::new()
+}
+
 /// The trust profile the runner builds its configs under (design §9 `--profile`).
 ///
 /// `Platform` is the binary's default (the CLI is the only place `platform` is
