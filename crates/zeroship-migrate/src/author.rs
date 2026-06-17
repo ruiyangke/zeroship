@@ -131,24 +131,23 @@ fn column_def(c: &Column) -> String {
 /// would break `IF NOT EXISTS` / `DROP INDEX` round-tripping (the name we emit in
 /// the `down` would not match the truncated name on disk). So we truncate
 /// deterministically *ourselves* and keep the result ≤ this many bytes.
-const PG_MAX_IDENT_BYTES: usize = 63;
+pub(crate) const PG_MAX_IDENT_BYTES: usize = 63;
 
-/// Derive an index name for a deterministic `CREATE INDEX` so `IF NOT EXISTS`
-/// has a stable target (idempotent across re-authors of the same shape).
+/// Cap an arbitrary generated identifier to ≤ [`PG_MAX_IDENT_BYTES`],
+/// deterministically: when `natural` fits, return it verbatim; when it would
+/// overflow, keep a readable prefix and append a short hash of the *full* name so
+/// distinct long inputs still map to distinct, stable names.
 ///
-/// Postgres truncates identifiers past [`PG_MAX_IDENT_BYTES`] server-side, which
-/// would desync the name in `up` (`CREATE INDEX … name …`) from the one the `down`
-/// (`DROP INDEX … name`) emits — and from the on-disk relation. We therefore cap
-/// the name to ≤63 bytes *ourselves*, deterministically: when the natural
-/// `idx_<table>_<cols>` fits, we use it verbatim; when it would overflow, we keep a
-/// readable prefix and append a short hash of the *full* natural name so distinct
-/// long table/column sets still map to distinct, stable index names (mirrors the
-/// sanitize/truncate discipline of [`crate::role::migrator_role_name`]).
-fn index_name(table: &str, columns: &[String]) -> String {
+/// This is the single source of truth for the cap discipline both the
+/// deterministic author ([`index_name`]) and the declarative author
+/// (`declarative::unique_index_name`) use, so an over-long generated index name
+/// can never desync `up`/`down`/on-disk (which would cause CREATE/DROP churn —
+/// the emitted full name ≠ the server-truncated live name on a re-diff). Mirrors
+/// the sanitize/truncate discipline of [`crate::role::migrator_role_name`].
+pub(crate) fn cap_ident_name(natural: &str) -> String {
     use sha2::{Digest, Sha256};
-    let natural = format!("idx_{}_{}", table, columns.join("_"));
     if natural.len() <= PG_MAX_IDENT_BYTES {
-        return natural;
+        return natural.to_string();
     }
     // Overflow: deterministic 10-hex-char hash of the full natural name, plus a
     // truncated readable prefix. `<prefix>_<10 hex>` stays ≤ 63 bytes.
@@ -166,6 +165,14 @@ fn index_name(table: &str, columns: &[String]) -> String {
         prefix.push(ch);
     }
     format!("{prefix}_{suffix}")
+}
+
+/// Derive an index name for a deterministic `CREATE INDEX` so `IF NOT EXISTS`
+/// has a stable target (idempotent across re-authors of the same shape). The
+/// natural `idx_<table>_<cols>` form is capped to ≤63 bytes by
+/// [`cap_ident_name`].
+fn index_name(table: &str, columns: &[String]) -> String {
+    cap_ident_name(&format!("idx_{}_{}", table, columns.join("_")))
 }
 
 /// The deterministic, no-AI author for trivial additive ops (design §3).
