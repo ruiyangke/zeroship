@@ -135,7 +135,8 @@ pub use journal::{
     HistoryKind, JournalError, JournaledKind, Phase, RolledBackEntry,
 };
 pub use loader::{
-    load_dir, migration_id_for_version, repeatable_id_for_name, LoaderError, PLATFORM_OWNER_APP,
+    load_dir, migration_id_for_version, new_dbmate_migration, repeatable_id_for_name, LoaderError,
+    PLATFORM_OWNER_APP,
 };
 pub use squash::{squash, SquashError, SquashOutcome};
 pub use status::{history, status, MigrationStatus, StatusError};
