@@ -35,7 +35,7 @@
 //! [`desired_snapshot`]-round-trips-to-live test (`tests/declarative_pg.rs`) is
 //! the guard against the two copies drifting apart.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 
@@ -493,6 +493,57 @@ pub enum DeclarativeError {
         from_type: String,
         /// The desired `to` column's data type.
         to_type: String,
+    },
+    /// Two [`RenameHint`]s on the same table shared a `from` (e.g. `[a→c, a→d]`)
+    /// or a `to` (e.g. `[a→c, b→c]`) column. Each hint resolves INDEPENDENTLY, so
+    /// a shared endpoint produces two colliding expand-contract sequences: a
+    /// duplicated `ADD COLUMN <to>` (the second fails `already exists`), divergent
+    /// dual-write triggers, or a double `DROP COLUMN <from>`. The cross-hint
+    /// validation pass rejects it before any SQL is authored (H1). `side` is
+    /// `"from"` or `"to"` — which endpoint was duplicated.
+    #[error(
+        "duplicate rename hint endpoint: column {table}.{column} appears as the \
+         {side} of more than one hint; a column may be renamed at most once per \
+         deploy"
+    )]
+    DuplicateRenameHint {
+        /// The table the colliding hints named.
+        table: String,
+        /// The column that appeared more than once on the same side.
+        column: String,
+        /// Which endpoint collided: `"from"` or `"to"`.
+        side: &'static str,
+    },
+    /// A [`RenameHint`]'s `to` equals another hint's `from` on the same table
+    /// (e.g. `[a→b, b→c]`) — a rename CHAIN. Chains are not supported: the engine
+    /// resolves each hint against the single live/desired snapshot pair, where the
+    /// intermediate name (`b`) cannot be simultaneously a live-only drop and a
+    /// desired-only add. Reject it EXPLICITLY rather than leave it to surface
+    /// incidentally as an [`DeclarativeError::RenameHintUnmatched`] (H2).
+    #[error(
+        "rename hint chain on {table}: column {column} is both the target of one \
+         hint and the source of another; chained renames are unsupported (resolve \
+         them as separate deploys)"
+    )]
+    RenameHintChained {
+        /// The table the chained hints named.
+        table: String,
+        /// The intermediate column that is both a `to` and a `from`.
+        column: String,
+    },
+    /// A [`RenameHint`] had `from == to` — a no-op rename of a column to its own
+    /// name. This is rejected with a PRECISE error rather than the misleading
+    /// [`DeclarativeError::RenameHintUnmatched`] it would otherwise produce (the
+    /// identical name is neither live-only nor desired-only) (M1).
+    #[error(
+        "no-op rename hint on {table}: from and to are the same column ({column}); \
+         a rename must change the column name"
+    )]
+    RenameHintNoop {
+        /// The table the hint named.
+        table: String,
+        /// The identical `from`/`to` column name.
+        column: String,
     },
     /// Authoring the expand-contract rename sequence for a matched [`RenameHint`]
     /// failed (e.g. an identifier that passed the declarative author boundary was
@@ -1001,8 +1052,72 @@ impl DeclarativeAuthor {
         live: &SchemaSnapshot,
         hints: &[RenameHint],
     ) -> Result<Vec<ResolvedRename>, DeclarativeError> {
+        // --- Cross-hint validation (H1/H2). ---------------------------------
+        //
+        // The per-hint resolution below validates each hint INDEPENDENTLY
+        // (`from` live-only, `to` desired-only, type identity). That misses
+        // collisions ACROSS hints on the same table, which produce colliding /
+        // duplicated expand-contract sequences (a doubled `ADD COLUMN <to>`,
+        // divergent dual-write triggers, a double `DROP COLUMN <from>`) or a
+        // rename chain the single-snapshot resolution cannot express. Reject
+        // those EXPLICITLY here, before any sequence is authored.
+        //
+        // Scoped PER TABLE: `from`/`to` are column names, unique only within a
+        // table, so a `from` on table A and a `to` on table B sharing a spelling
+        // is not a collision.
+        {
+            let mut froms: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+            let mut tos: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+            for h in hints {
+                // H1: the multiset of `from`s per table must be duplicate-free.
+                if !froms.entry(h.table.as_str()).or_default().insert(h.from.as_str()) {
+                    return Err(DeclarativeError::DuplicateRenameHint {
+                        table: h.table.clone(),
+                        column: h.from.clone(),
+                        side: "from",
+                    });
+                }
+                // H1: …and so must the multiset of `to`s.
+                if !tos.entry(h.table.as_str()).or_default().insert(h.to.as_str()) {
+                    return Err(DeclarativeError::DuplicateRenameHint {
+                        table: h.table.clone(),
+                        column: h.to.clone(),
+                        side: "to",
+                    });
+                }
+            }
+            // H2: no chain — a `to` on a table must not equal any OTHER hint's
+            // `from` on the same table (e.g. `[a→b, b→c]`: `b` is both a target
+            // and a source). A `from == to` hint trivially "matches" its own
+            // `from`; that is a no-op handled by M1 below, not a chain, so skip it
+            // here.
+            for h in hints {
+                if h.from == h.to {
+                    continue;
+                }
+                if let Some(table_froms) = froms.get(h.table.as_str()) {
+                    if table_froms.contains(h.to.as_str()) {
+                        return Err(DeclarativeError::RenameHintChained {
+                            table: h.table.clone(),
+                            column: h.to.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
         let mut resolved = Vec::with_capacity(hints.len());
         for h in hints {
+            // M1: a `from == to` hint is a no-op rename. Reject it with a PRECISE
+            // error rather than the misleading `RenameHintUnmatched` it would
+            // otherwise produce (an identical name is neither live-only nor
+            // desired-only).
+            if h.from == h.to {
+                return Err(DeclarativeError::RenameHintNoop {
+                    table: h.table.clone(),
+                    column: h.from.clone(),
+                });
+            }
             // The named table must exist on BOTH sides (a rename is in-place on an
             // existing table). If it is missing on either side the hint cannot be
             // a drop+add pair → unmatched.
