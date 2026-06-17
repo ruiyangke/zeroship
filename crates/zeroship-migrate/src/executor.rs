@@ -218,6 +218,47 @@ pub enum ApplyError {
         /// evaluation error — e.g. a guard denial or invalid identifier).
         which: String,
     },
+    /// A `repeatable=true` migration ALSO carried a non-empty `supersedes` — a
+    /// repeatable cannot be a squash (v3 Plan E re-critic #4a). A repeatable has a
+    /// stable identity and re-applies on change; a squash collapses once-only
+    /// history. The two are mutually exclusive. Refused in the pre-flight over the
+    /// FULL supplied set, before partition/apply; nothing was applied.
+    #[error(
+        "migration {version} is repeatable but also declares `supersedes`: a repeatable \
+         cannot be a squash — remove `supersedes` or make it a once-only squash"
+    )]
+    RepeatableCannotSquash {
+        /// The malformed repeatable-with-supersedes migration.
+        version: String,
+    },
+    /// A VERSIONED (once-only) migration's `depends_on` names a REPEATABLE in the
+    /// same supplied set (v3 Plan E re-critic #3d). Repeatables run AFTER all
+    /// versioned migrations, so a once-only migration can never have a repeatable
+    /// dependency satisfied in order. This is a DEDICATED error (not the misleading
+    /// [`MissingDependency`] the partition would otherwise raise). Refused in the
+    /// pre-flight before any execution; nothing was applied.
+    #[error(
+        "once-only migration {version} may not depend on repeatable {dependency}: a repeatable \
+         applies after all versioned migrations, so the dependency can never be ordered before it"
+    )]
+    OnceOnlyDependsOnRepeatable {
+        /// The once-only migration with the illegal dependency.
+        version: String,
+        /// The repeatable it depends on.
+        dependency: String,
+    },
+    /// A `repeatable=true` migration declared a `down` (v3 Plan E re-critic #4c).
+    /// A repeatable is replace-style (`CREATE OR REPLACE …`) with no true reverse,
+    /// so its `down` MUST be `None` (the stated invariant). Refused in the pre-flight
+    /// before any execution; nothing was applied.
+    #[error(
+        "repeatable migration {version} must not declare a `down`: a repeatable is \
+         replace-style and has no true reverse"
+    )]
+    RepeatableHasDown {
+        /// The repeatable that wrongly declared a `down`.
+        version: String,
+    },
     /// Applying a migration's `up` SQL failed (after the guard passed). The
     /// transaction (txn path) was rolled back; nothing was journaled.
     #[error("migration {version} failed to apply: {source}")]
@@ -532,6 +573,75 @@ pub async fn apply(
     }
 }
 
+/// Pre-flight over the FULL supplied set (v3 Plan E re-critic): reject malformed
+/// repeatable/versioned combinations BEFORE the partition or any apply, so a
+/// dropped or misrouted facet can never silently apply. Fail-closed per the
+/// no-back-compat stance — these shapes are author errors, not legacy inputs.
+///
+/// Three rejections, each before any execution (nothing applied):
+///
+/// - **#4a** — a `repeatable=true` migration with a non-empty `supersedes`: a
+///   repeatable cannot be a squash ([`ApplyError::RepeatableCannotSquash`]). Without
+///   this, the partition routes it into the repeatable phase and its `supersedes` is
+///   silently dropped (never gated).
+/// - **#4c** — a `repeatable=true` migration with `down.is_some()`: a repeatable is
+///   replace-style with no true reverse ([`ApplyError::RepeatableHasDown`]).
+/// - **#3d** — a VERSIONED (once-only) migration whose `depends_on` names a
+///   REPEATABLE in the same set: a once-only migration may not depend on a
+///   repeatable (repeatables run AFTER all versioned migrations), so the dependency
+///   can never be ordered ([`ApplyError::OnceOnlyDependsOnRepeatable`]). This is the
+///   DEDICATED error, raised before `order_pending` would otherwise produce the
+///   misleading `MissingDependency` (the repeatable is partitioned out of the
+///   versioned set the ordering sees).
+///
+/// # Errors
+/// One of the three [`ApplyError`] variants above on the first malformed migration
+/// found (deterministic order: the rejections are checked in version order).
+fn check_repeatable_wellformed(migrations: &[Migration]) -> Result<(), ApplyError> {
+    use std::collections::BTreeSet;
+
+    // The set of versions whose SUPPLIED flag marks them repeatable — used by the
+    // #3d once-only-depends-on-repeatable check.
+    let repeatable_versions: BTreeSet<&str> = migrations
+        .iter()
+        .filter(|m| m.flags.repeatable)
+        .map(|m| m.version.as_str())
+        .collect();
+
+    // Deterministic iteration order (version order) so the first-found rejection is
+    // stable across runs.
+    let mut ordered: Vec<&Migration> = migrations.iter().collect();
+    ordered.sort_by(|a, b| a.version.as_str().cmp(b.version.as_str()));
+
+    for m in ordered {
+        if m.flags.repeatable {
+            // #4a — a repeatable cannot be a squash.
+            if !m.supersedes.is_empty() {
+                return Err(ApplyError::RepeatableCannotSquash {
+                    version: m.version.as_str().to_string(),
+                });
+            }
+            // #4c — a repeatable must not declare a down.
+            if m.down.is_some() {
+                return Err(ApplyError::RepeatableHasDown {
+                    version: m.version.as_str().to_string(),
+                });
+            }
+        } else {
+            // #3d — a once-only migration may not depend on a repeatable in the set.
+            for dep in &m.depends_on {
+                if repeatable_versions.contains(dep.as_str()) {
+                    return Err(ApplyError::OnceOnlyDependsOnRepeatable {
+                        version: m.version.as_str().to_string(),
+                        dependency: dep.as_str().to_string(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The apply body, run while holding the project advisory lock.
 async fn apply_locked(
     conn: &Client,
@@ -540,6 +650,13 @@ async fn apply_locked(
     applied_by: &str,
 ) -> Result<ApplyOutcome, ApplyError> {
     journal::ensure_journal(conn, cfg).await?;
+
+    // v3 Plan E (re-critic) — PRE-FLIGHT over the FULL supplied set, before the
+    // partition or any apply, rejecting malformed repeatable/versioned combinations
+    // fail-closed (a dropped/misrouted facet must never silently apply). Refusing
+    // here, before the partition, means the rejected shapes never reach the
+    // versioned pipeline or the repeatable phase.
+    check_repeatable_wellformed(migrations)?;
 
     // v3 Plan E — partition the supplied set into VERSIONED (run-once) and
     // REPEATABLE migrations. The entire versioned pipeline below (drift/tamper
