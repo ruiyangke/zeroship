@@ -167,7 +167,7 @@ async fn assert_type_fidelity(dsl_type: &str, ddl_type: &str, required: bool) {
         }],
         indexes: vec![],
     };
-    let desired = desired_snapshot(&cfg.project_schema, &[desc]);
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
 
     // The columns must round-trip with ZERO drift. (We compare columns only;
     // the live snapshot's PK constraint definition is compared loosely below.)
@@ -301,7 +301,7 @@ async fn type_fidelity_whole_table_round_trips_to_zero_drift() {
         ],
         indexes: vec![],
     };
-    let desired = desired_snapshot(&cfg.project_schema, &[desc]);
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
     let drift = diff_snapshots(&desired, &live);
 
     // No column drift at all. (The PK constraint definition may differ in
@@ -351,7 +351,7 @@ async fn additive_create_table_with_column_and_index_applies_to_zero_drift() {
         ],
         indexes: vec![IndexDescriptor { name: "tasks_title_idx".into(), columns: vec!["title".into()], unique: false }],
     };
-    let desired = desired_snapshot(&cfg.project_schema, &[desc]);
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
     let empty = SchemaSnapshot::default();
 
     apply_plan(&engine, &desired, &empty, &author, &cfg, &conn, Approval::None)
@@ -427,7 +427,7 @@ async fn full_shape_round_trips_to_zero_drift_the_canonical_idempotency_oracle()
             IndexDescriptor { name: "weird_custom_name".into(), columns: vec!["a".into()], unique: true },
         ],
     };
-    let desired = desired_snapshot(&cfg.project_schema, &[posts_tbl, authors_tbl]);
+    let desired = desired_snapshot(&cfg.project_schema, &[posts_tbl, authors_tbl]).expect("desired_snapshot");
     let empty = SchemaSnapshot::default();
 
     apply_plan(&engine, &desired, &empty, &author, &cfg, &conn, Approval::None)
@@ -490,7 +490,7 @@ async fn changed_fk_target_is_unsupported_in_v1_not_silently_skipped() {
         }],
         indexes: vec![],
     };
-    let d1 = desired_snapshot(&cfg.project_schema, &[alpha.clone(), beta.clone(), child_v1]);
+    let d1 = desired_snapshot(&cfg.project_schema, &[alpha.clone(), beta.clone(), child_v1]).expect("desired_snapshot");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
         .await
         .expect("create alpha/beta/child");
@@ -508,7 +508,7 @@ async fn changed_fk_target_is_unsupported_in_v1_not_silently_skipped() {
         }],
         indexes: vec![],
     };
-    let d2 = desired_snapshot(&cfg.project_schema, &[alpha, beta, child_v2]);
+    let d2 = desired_snapshot(&cfg.project_schema, &[alpha, beta, child_v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
     let err = author.diff(&d2, &live).unwrap_err();
     assert!(matches!(err, DeclarativeError::UnsupportedInV1(_)), "got {err:?}");
@@ -545,7 +545,7 @@ async fn long_table_and_field_unique_index_name_is_capped_and_re_diffs_clean() {
         }],
         indexes: vec![],
     };
-    let desired = desired_snapshot(&cfg.project_schema, &[desc]);
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
 
     // The generated unique-index name is ≤63 bytes (and deterministic across two
     // builds of the same desired snapshot).
@@ -592,7 +592,7 @@ async fn index_uniqueness_flip_on_same_name_is_unsupported_in_v1_not_silent() {
         fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![IndexDescriptor { name: "logs_level_idx".into(), columns: vec!["level".into()], unique: false }],
     };
-    let d1 = desired_snapshot(&cfg.project_schema, &[v1]);
+    let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
         .await
         .expect("create logs");
@@ -603,7 +603,7 @@ async fn index_uniqueness_flip_on_same_name_is_unsupported_in_v1_not_silent() {
         fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![IndexDescriptor { name: "logs_level_idx".into(), columns: vec!["level".into()], unique: true }],
     };
-    let d2 = desired_snapshot(&cfg.project_schema, &[v2]);
+    let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
     let err = author.diff(&d2, &live).unwrap_err();
     assert!(matches!(err, DeclarativeError::UnsupportedInV1(_)), "got {err:?}");
@@ -626,7 +626,7 @@ async fn additive_diff_is_idempotent_second_plan_is_empty() {
         fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
-    let desired = desired_snapshot(&cfg.project_schema, &[desc]);
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
     let empty = SchemaSnapshot::default();
 
     apply_plan(&engine, &desired, &empty, &author, &cfg, &conn, Approval::None)
@@ -663,7 +663,7 @@ async fn additive_add_column_to_existing_table_applies_clean() {
         fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
-    let d1 = desired_snapshot(&cfg.project_schema, &[v1]);
+    let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
         .await
         .expect("create items");
@@ -677,7 +677,7 @@ async fn additive_add_column_to_existing_table_applies_clean() {
         ],
         indexes: vec![],
     };
-    let d2 = desired_snapshot(&cfg.project_schema, &[v2]);
+    let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
     apply_plan(&engine, &d2, &live, &author, &cfg, &conn, Approval::None)
         .await
@@ -719,7 +719,7 @@ async fn fk_ordering_referencing_table_after_target_applies_clean() {
         fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
-    let desired = desired_snapshot(&cfg.project_schema, &[b, a]);
+    let desired = desired_snapshot(&cfg.project_schema, &[b, a]).expect("desired_snapshot");
     apply_plan(&engine, &desired, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
         .await
         .expect("apply FK batch");
@@ -747,7 +747,7 @@ async fn type_change_is_unsupported_in_v1_not_silently_skipped() {
             fields: vec![FieldDescriptor { name: "attr".into(), ty: "string".into(), required: false, unique: false, references: None }],
             indexes: vec![],
         };
-        desired_snapshot(&cfg.project_schema, &[desc])
+        desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let desired = {
         let desc = CollectionDescriptor {
@@ -755,7 +755,7 @@ async fn type_change_is_unsupported_in_v1_not_silently_skipped() {
             fields: vec![FieldDescriptor { name: "attr".into(), ty: "number".into(), required: false, unique: false, references: None }],
             indexes: vec![],
         };
-        desired_snapshot(&cfg.project_schema, &[desc])
+        desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
 
     let err = author.diff(&desired, &live).unwrap_err();
@@ -771,7 +771,7 @@ async fn malicious_table_name_is_rejected_at_author_boundary() {
         fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
-    let desired = desired_snapshot(&cfg.project_schema, &[desc]);
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
     let err = author.diff(&desired, &SchemaSnapshot::default()).unwrap_err();
     assert!(matches!(err, DeclarativeError::Invalid(_)), "got {err:?}");
 }
@@ -791,7 +791,7 @@ async fn malicious_column_name_is_rejected_at_author_boundary() {
         }],
         indexes: vec![],
     };
-    let desired = desired_snapshot(&cfg.project_schema, &[desc]);
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
     let err = author.diff(&desired, &SchemaSnapshot::default()).unwrap_err();
     assert!(matches!(err, DeclarativeError::Invalid(_)), "got {err:?}");
 }
@@ -815,7 +815,7 @@ async fn every_generated_migration_passes_through_the_guard_no_bypass() {
             ],
             indexes: vec![IndexDescriptor { name: "events_kind_idx".into(), columns: vec!["kind".into()], unique: false }],
         };
-        desired_snapshot(&cfg.project_schema, &[desc])
+        desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let migs = author.diff(&desired, &SchemaSnapshot::default()).expect("diff");
     assert!(!migs.is_empty(), "diff should generate migrations");
@@ -848,7 +848,7 @@ async fn drop_table_is_gated_and_not_auto_applied() {
         fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
-    let d1 = desired_snapshot(&cfg.project_schema, &[v1]);
+    let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
         .await
         .expect("create legacy");
@@ -912,7 +912,7 @@ async fn drop_column_is_destructive_and_gated() {
         ],
         indexes: vec![],
     };
-    let d1 = desired_snapshot(&cfg.project_schema, &[v1]);
+    let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
         .await
         .expect("create people");
@@ -923,7 +923,7 @@ async fn drop_column_is_destructive_and_gated() {
         fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
-    let d2 = desired_snapshot(&cfg.project_schema, &[v2]);
+    let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
     let plan = engine
         .plan_declarative(&d2, &live, &author, &guard_cfg(&cfg))
@@ -972,7 +972,7 @@ async fn drop_index_is_not_data_loss_so_it_is_not_gated() {
         fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![IndexDescriptor { name: "logs_level_idx".into(), columns: vec!["level".into()], unique: false }],
     };
-    let d1 = desired_snapshot(&cfg.project_schema, &[v1]);
+    let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
         .await
         .expect("create logs");
@@ -983,7 +983,7 @@ async fn drop_index_is_not_data_loss_so_it_is_not_gated() {
         fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
-    let d2 = desired_snapshot(&cfg.project_schema, &[v2]);
+    let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
     let plan = engine
         .plan_declarative(&d2, &live, &author, &guard_cfg(&cfg))
@@ -1004,16 +1004,13 @@ async fn drop_index_is_not_data_loss_so_it_is_not_gated() {
 }
 
 #[compio::test]
-async fn malicious_type_in_descriptor_never_reaches_db_unguarded() {
-    // A malicious DSL type string maps to `text` (the conservative fallback) and
-    // can never inject DDL: the desired column's data_type is a fixed mapping
-    // output, validated by validate_type at the author boundary, and the
-    // generated SQL still passes through the guard. Build a descriptor whose
-    // type is a SQL-injection attempt and assert it produces a guard-safe,
-    // denial-free plan (no bypass) AND the emitted type is the safe fallback.
+async fn malicious_type_in_descriptor_is_rejected_not_silently_mapped_to_text() {
+    // #2: a malicious / unknown DSL type token must be REJECTED at the author
+    // boundary, NOT silently degraded to a `text` column (the old `_ => text`
+    // fallback let a SQL-injection payload — and any typo — become a `text`
+    // column the creator never declared). The injection can never reach DDL
+    // because `desired_snapshot` errors out before any column is emitted.
     let cfg = cfg_for(&token());
-    let author = author_for(&cfg);
-    let engine = MigrationEngine::new();
 
     let desc = CollectionDescriptor {
         name: "safe".into(),
@@ -1026,16 +1023,84 @@ async fn malicious_type_in_descriptor_never_reaches_db_unguarded() {
         }],
         indexes: vec![],
     };
-    let desired = desired_snapshot(&cfg.project_schema, &[desc]);
-    // The malicious type maps to the `text` fallback — no injection in the
-    // desired snapshot at all.
-    assert_eq!(desired.tables["safe"].columns.iter().find(|c| c.name == "f").unwrap().data_type, "text");
+    let err = desired_snapshot(&cfg.project_schema, &[desc]).unwrap_err();
+    assert!(
+        matches!(err, DeclarativeError::UnsupportedType { .. }),
+        "got {err:?}"
+    );
+}
 
-    let migs = author.diff(&desired, &SchemaSnapshot::default()).expect("diff");
-    let plan = engine.plan(&migs, &guard_cfg(&cfg));
-    assert!(plan.denied.is_empty(), "generated SQL must be guard-safe: {:?}", plan.denied);
-    // And the rendered CREATE TABLE contains the safe `text` type, not the payload.
-    let create = migs.iter().find(|m| m.name == "create_table_safe").unwrap();
-    assert!(create.up.contains("\"f\" text"), "up = {}", create.up);
-    assert!(!create.up.contains("DROP TABLE control"), "payload leaked into SQL: {}", create.up);
+#[compio::test]
+async fn out_of_scope_vector_type_is_rejected_not_silently_text() {
+    // #2: `vector` is an out-of-v1-scope extension type. It must be rejected
+    // with UnsupportedType, NOT silently materialised as a `text` column (which
+    // would permanently diverge from what plugin-db's runtime materialises).
+    let cfg = cfg_for(&token());
+    let desc = CollectionDescriptor {
+        name: "embeddings".into(),
+        fields: vec![FieldDescriptor {
+            name: "vec".into(),
+            ty: "vector".into(),
+            required: false,
+            unique: false,
+            references: None,
+        }],
+        indexes: vec![],
+    };
+    let err = desired_snapshot(&cfg.project_schema, &[desc]).unwrap_err();
+    assert!(
+        matches!(err, DeclarativeError::UnsupportedType { ref ty } if ty == "vector"),
+        "got {err:?}"
+    );
+}
+
+#[compio::test]
+async fn typo_type_token_is_rejected_not_silently_text() {
+    // #2: a typo / wrong spelling (`bigint` is a Postgres type, not a DSL token)
+    // is rejected, not silently degraded to `text`.
+    let cfg = cfg_for(&token());
+    let desc = CollectionDescriptor {
+        name: "t".into(),
+        fields: vec![FieldDescriptor {
+            name: "n".into(),
+            ty: "bigint".into(),
+            required: false,
+            unique: false,
+            references: None,
+        }],
+        indexes: vec![],
+    };
+    let err = desired_snapshot(&cfg.project_schema, &[desc]).unwrap_err();
+    assert!(
+        matches!(err, DeclarativeError::UnsupportedType { ref ty } if ty == "bigint"),
+        "got {err:?}"
+    );
+}
+
+#[compio::test]
+async fn all_twelve_supported_types_still_map() {
+    // #2 regression: the twelve in-scope tokens must all still map (the fix
+    // removed the `_ => text` fallback, not any real mapping).
+    use zeroship_migrate::dsl_to_pg_data_type;
+    for (tok, expected) in [
+        ("string", "text"),
+        ("ref", "text"),
+        ("actor", "text"),
+        ("id", "text"),
+        ("number", "double precision"),
+        ("boolean", "boolean"),
+        ("date", "timestamp with time zone"),
+        ("calendarDate", "date"),
+        ("json", "jsonb"),
+        ("object", "jsonb"),
+        ("array", "jsonb"),
+        ("union", "jsonb"),
+        ("bytes", "bytea"),
+    ] {
+        assert_eq!(
+            dsl_to_pg_data_type(tok).expect("supported type maps"),
+            expected,
+            "type {tok}"
+        );
+    }
 }

@@ -128,21 +128,21 @@ pub struct CollectionDescriptor {
 /// `information_schema` spelling (`text`, `double precision`,
 /// `timestamp with time zone`, …) — NOT the DDL alias.
 ///
-/// An unknown token maps to `text`, mirroring `def_to_pg_type`'s `_ => "TEXT"`
-/// fallback, so an unrecognised type is stored conservatively rather than
-/// failing the compile.
-#[must_use]
-#[allow(
-    clippy::match_same_arms,
-    reason = "the named arms and the `_` fallback both map to `text` by \
-              coincidence, not intent — keeping them separate documents which \
-              DSL types are KNOWN-text (string/ref/actor/id) versus the \
-              conservative unknown-type fallback (mirrors plugin-db's `_ => TEXT`)"
-)]
-pub fn dsl_to_pg_data_type(dsl_type: &str) -> &'static str {
-    match dsl_type {
-        // string / ref / actor / id all land on `text` (def_to_pg_type +
-        // the `_ => TEXT` default; `ref` is the FK column, `id` is the PK).
+/// Exactly the twelve in-scope DSL tokens map; anything else (an out-of-scope
+/// extension/parameterised type — `vector`/`geoPoint`/`encrypted` — OR a typo /
+/// wrong spelling — `bigint`/`uuid`/`int4`/`serial`/`__proto__`) is rejected
+/// with [`DeclarativeError::UnsupportedType`] BEFORE any SQL is emitted. There
+/// is deliberately NO `_ => text` fallback: silently degrading an unrecognised
+/// type to `text` (#2) gave the creator a column they never declared and a
+/// permanent divergence from what plugin-db's runtime materialises.
+///
+/// # Errors
+/// [`DeclarativeError::UnsupportedType`] if `dsl_type` is not one of the twelve
+/// supported tokens.
+pub fn dsl_to_pg_data_type(dsl_type: &str) -> Result<&'static str, DeclarativeError> {
+    Ok(match dsl_type {
+        // string / ref / actor / id all land on `text` (def_to_pg_type;
+        // `ref` is the FK column, `id` is the PK).
         "string" | "ref" | "actor" | "id" => "text",
         // t.number() → DOUBLE PRECISION (FLOAT8).
         "number" => "double precision",
@@ -155,9 +155,12 @@ pub fn dsl_to_pg_data_type(dsl_type: &str) -> &'static str {
         "json" | "object" | "array" | "union" => "jsonb",
         // t.bytes() → BYTEA.
         "bytes" => "bytea",
-        // Conservative fallback (matches def_to_pg_type's `_ => TEXT`).
-        _ => "text",
-    }
+        // No silent fallback: an unrecognised or out-of-scope type is an error,
+        // not a `text` column (#2).
+        other => {
+            return Err(DeclarativeError::UnsupportedType { ty: other.to_string() });
+        }
+    })
 }
 
 /// The seven platform-managed system fields, in canonical order, as
@@ -211,11 +214,20 @@ fn system_field_columns() -> Vec<ColumnSnapshot> {
 /// every FK shows permanent phantom drift (1b). It is NOT used for any non-FK
 /// part of the snapshot.
 ///
-/// **Pure.** No I/O, no DDL, no validation side effects. Name/type validation
-/// happens at the *author* boundary ([`DeclarativeAuthor::diff`]); this compiler
-/// is a pure projection so it can be reused for drift comparison too.
-#[must_use]
-pub fn desired_snapshot(project_schema: &str, descriptors: &[CollectionDescriptor]) -> SchemaSnapshot {
+/// **Pure.** No I/O, no DDL. It performs the minimal author-boundary check that
+/// guards the *projection itself* — an unrecognised/out-of-scope field type (#2)
+/// — so a degraded snapshot (the creator declared X, would have got `text`) is
+/// never produced. Full identifier re-validation still happens in
+/// [`DeclarativeAuthor::diff`] (defense in depth) and the guard is the second
+/// line.
+///
+/// # Errors
+/// - [`DeclarativeError::UnsupportedType`] — a field used a type token outside
+///   the twelve supported (or an out-of-scope `vector`/`geoPoint`/`encrypted`).
+pub fn desired_snapshot(
+    project_schema: &str,
+    descriptors: &[CollectionDescriptor],
+) -> Result<SchemaSnapshot, DeclarativeError> {
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
 
     for d in descriptors {
@@ -249,7 +261,7 @@ pub fn desired_snapshot(project_schema: &str, descriptors: &[CollectionDescripto
         for f in &d.fields {
             columns.push(ColumnSnapshot {
                 name: f.name.clone(),
-                data_type: dsl_to_pg_data_type(&f.ty).to_string(),
+                data_type: dsl_to_pg_data_type(&f.ty)?.to_string(),
                 nullable: !f.required,
             });
             // A `unique: true` field becomes a unique index (A1 rule). The
@@ -303,7 +315,7 @@ pub fn desired_snapshot(project_schema: &str, descriptors: &[CollectionDescripto
         tables.insert(d.name.clone(), TableSnapshot { columns, indexes, constraints });
     }
 
-    SchemaSnapshot { tables }
+    Ok(SchemaSnapshot { tables })
 }
 
 /// True if `index_name` is the implicit index a PRIMARY KEY materialises
@@ -347,6 +359,22 @@ pub enum DeclarativeError {
     /// handled in P2 as gated migrations, not this error.)
     #[error("unsupported in v1 (deferred to a later phase): {0}")]
     UnsupportedInV1(String),
+    /// A declared field used a DSL type token the v1 differ does not map. This
+    /// covers both out-of-scope parameterised/extension types
+    /// (`vector`/`geoPoint`/`encrypted`) AND typos / wrong spellings
+    /// (`bigint`, `uuid`, `int4`, `serial`, …). It is rejected at the author
+    /// boundary BEFORE any SQL is emitted, rather than silently degrading to a
+    /// `text` column (#2 — the creator declared X, would have got `text`, with
+    /// permanent divergence from what plugin-db materialises).
+    #[error(
+        "unsupported field type '{ty}' (not mapped in v1; vector/geoPoint/encrypted \
+         are out of v1 scope). Supported: string, number, boolean, date, calendarDate, \
+         json, object, array, union, ref, bytes, actor, id"
+    )]
+    UnsupportedType {
+        /// The unrecognised / out-of-scope DSL type token.
+        ty: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
