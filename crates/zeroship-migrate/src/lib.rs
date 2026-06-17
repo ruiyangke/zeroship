@@ -63,6 +63,7 @@ pub mod backfill;
 pub mod baseline;
 pub mod classify;
 pub mod db;
+pub mod declarative;
 pub mod drift;
 pub mod engine;
 pub mod expand_contract;
@@ -88,6 +89,9 @@ pub use author::{
     AuthorError, AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor,
 };
 pub use classify::{classify, DdlKind, ParseError, StatementClass};
+pub use declarative::{
+    desired_snapshot, dsl_to_pg_data_type, CollectionDescriptor, FieldDescriptor, IndexDescriptor,
+};
 pub use engine::{
     EngineError, MigrationEngine, MigrationPlan, OnlineError, PlannedMigration,
     RollbackEngineError,
