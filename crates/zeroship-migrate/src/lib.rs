@@ -71,6 +71,7 @@ pub mod expand_contract;
 pub mod executor;
 pub mod guard;
 pub mod journal;
+pub mod manifest;
 pub mod migration;
 pub mod precondition;
 pub mod role;
@@ -123,6 +124,9 @@ pub use journal::{
 };
 pub use squash::{squash, SquashError, SquashOutcome};
 pub use status::{history, status, MigrationStatus, StatusError};
+pub use manifest::{
+    compute_manifest, verify_manifest, ManifestError, ManifestHash, MismatchKind,
+};
 pub use migration::{
     Checksum, IdError, Migration, MigrationFlags, MigrationId, OnlinePhase, MIGRATION_PREFIX,
 };
