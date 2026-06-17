@@ -52,11 +52,13 @@ pub struct PlannedMigration {
 pub struct MigrationPlan {
     /// The migrations that passed the guard, with their reports, in input order.
     pub items: Vec<PlannedMigration>,
-    /// `true` if any planned item is destructive (data loss).
+    /// `true` if any planned item is destructive (data loss) — either the guard's
+    /// SQL-text classification or the migration's own `flags.destructive`.
     pub destructive: bool,
-    /// `true` if applying this plan requires explicit approval (any destructive
-    /// item). Mirrors `destructive` today; kept distinct so a future authoring
-    /// facet (a non-destructive-but-gated op) can require approval independently.
+    /// `true` if applying this plan requires explicit approval. Usually tracks
+    /// `destructive`, but an author may stamp `flags.requires_approval` on an op
+    /// the guard reads as non-destructive (e.g. a UNIQUE-index DROP, #4) so it is
+    /// gated independently of the SQL-text data-loss judgement.
     pub requires_approval: bool,
     /// Migrations the guard **denied**, as `(version, error)`. A non-empty list
     /// makes the whole plan un-appliable — `apply` returns
@@ -129,10 +131,22 @@ impl MigrationEngine {
         let mut items = Vec::new();
         let mut denied = Vec::new();
         let mut destructive = false;
+        let mut requires_approval = false;
         for m in migrations {
             match guard.check(&m.up) {
                 Ok(report) => {
-                    destructive |= report.destructive;
+                    // A plan is destructive / approval-gated if EITHER the guard's
+                    // SQL-text classification flags data loss OR the author stamped
+                    // the migration's own flags. The author flag matters for ops
+                    // the guard cannot judge from SQL text alone: a `DROP INDEX` of
+                    // a UNIQUE index reads as a plain (reversible) index drop to the
+                    // guard, but it silently removes a data-integrity guarantee, so
+                    // the declarative author marks it `destructive + requires_approval`
+                    // (#4) — and the executor's own gate already honours that flag,
+                    // so the plan summary must agree (otherwise the engine would
+                    // report a non-gated plan that the executor then refuses).
+                    destructive |= report.destructive || m.flags.destructive;
+                    requires_approval |= report.destructive || m.flags.requires_approval;
                     items.push(PlannedMigration {
                         migration: m.clone(),
                         report,
@@ -144,7 +158,7 @@ impl MigrationEngine {
         MigrationPlan {
             items,
             destructive,
-            requires_approval: destructive,
+            requires_approval,
             denied,
         }
     }

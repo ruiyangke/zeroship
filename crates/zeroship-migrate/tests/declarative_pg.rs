@@ -1156,3 +1156,98 @@ async fn malicious_ref_target_is_rejected_at_author_boundary() {
     }
 }
 
+
+#[compio::test]
+async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
+    // #4: dropping a UNIQUE index silently removes a data-integrity guarantee
+    // (duplicate rows become possible; a later re-add fails on dirty data), so
+    // it must be classified destructive + requires_approval (gated, like DROP
+    // COLUMN). A PLAIN index DROP stays ungated (reversible, perf-only).
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    // Create a table carrying BOTH a plain named index and a unique named index.
+    let v1 = CollectionDescriptor {
+        name: "members".into(),
+        fields: vec![
+            FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None },
+            FieldDescriptor { name: "tier".into(), ty: "string".into(), required: false, unique: false, references: None },
+        ],
+        indexes: vec![
+            IndexDescriptor { name: "members_email_uq".into(), columns: vec!["email".into()], unique: true },
+            IndexDescriptor { name: "members_tier_idx".into(), columns: vec!["tier".into()], unique: false },
+        ],
+    };
+    let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
+    apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("create members");
+
+    // --- Drop the UNIQUE index: must be gated. ---
+    let v2 = CollectionDescriptor {
+        name: "members".into(),
+        fields: vec![
+            FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None },
+            FieldDescriptor { name: "tier".into(), ty: "string".into(), required: false, unique: false, references: None },
+        ],
+        indexes: vec![
+            // unique index dropped; plain index kept.
+            IndexDescriptor { name: "members_tier_idx".into(), columns: vec!["tier".into()], unique: false },
+        ],
+    };
+    let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+    let plan = engine
+        .plan_declarative(&d2, &live, &author, &guard_cfg(&cfg))
+        .expect("plan drop unique index");
+    assert!(plan.destructive, "DROP of a UNIQUE index must be destructive");
+    assert!(plan.requires_approval, "DROP of a UNIQUE index must require approval");
+
+    // Refused without approval; the unique index still present.
+    let err = engine.apply(&plan, Approval::None, &conn, &cfg, "app_test").await.unwrap_err();
+    assert!(matches!(err, EngineError::ApprovalRequired), "got {err:?}");
+    let live_after = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
+    assert!(
+        live_after.tables["members"].indexes.iter().any(|i| i.name == "members_email_uq"),
+        "unique index must survive a refused drop"
+    );
+
+    // Approved → applied, the unique index is gone, re-diff clean.
+    engine.apply(&plan, Approval::Approved, &conn, &cfg, "app_test").await.expect("approved drop");
+    let live_final = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap3");
+    assert!(
+        !live_final.tables["members"].indexes.iter().any(|i| i.name == "members_email_uq"),
+        "unique index must be gone after an approved drop"
+    );
+    assert!(diff_snapshots(&d2, &live_final).is_clean(), "re-diff clean after approved unique-index drop");
+
+    // --- Now drop the PLAIN index: must stay UNGATED. ---
+    let v3 = CollectionDescriptor {
+        name: "members".into(),
+        fields: vec![
+            FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None },
+            FieldDescriptor { name: "tier".into(), ty: "string".into(), required: false, unique: false, references: None },
+        ],
+        indexes: vec![],
+    };
+    let d3 = desired_snapshot(&cfg.project_schema, &[v3]).expect("desired_snapshot");
+    let live3 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap4");
+    let plan3 = engine
+        .plan_declarative(&d3, &live3, &author, &guard_cfg(&cfg))
+        .expect("plan drop plain index");
+    assert!(!plan3.destructive, "DROP of a PLAIN index must NOT be destructive");
+    assert!(!plan3.requires_approval, "DROP of a PLAIN index must NOT require approval");
+    engine.apply(&plan3, Approval::None, &conn, &cfg, "app_test").await.expect("ungated plain drop applies");
+    let live5 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap5");
+    assert!(
+        !live5.tables["members"].indexes.iter().any(|i| i.name == "members_tier_idx"),
+        "plain index must be gone after the ungated drop"
+    );
+
+    teardown(&conn, &cfg).await;
+}

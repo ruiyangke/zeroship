@@ -474,10 +474,11 @@ impl DeclarativeAuthor {
     /// - **DROP TABLE / DROP COLUMN** — DATA LOSS: the classifier/guard marks
     ///   these destructive, so the existing engine gate refuses them without
     ///   [`Approval::Approved`](crate::Approval). NEVER auto-applied.
-    /// - **DROP INDEX** — NOT data loss (reversible by recreating the index), so
-    ///   the guard does not mark it destructive and it flows through ungated, the
-    ///   same as an additive op. (The gate is guard-driven; the differ does not
-    ///   override the security core's data-loss judgement.)
+    /// - **DROP INDEX** — a PLAIN index DROP is NOT data loss (reversible by
+    ///   recreating the index), so it flows through ungated, the same as an
+    ///   additive op. A **UNIQUE** index DROP, however, silently removes a
+    ///   data-integrity guarantee (#4), so it is classified `destructive +
+    ///   requires_approval` (gated, like DROP COLUMN) — see [`render_drop_index`].
     ///
     /// A same-name column whose **type or nullability** differs (an ALTER) is
     /// [`DeclarativeError::UnsupportedInV1`] — explicit, never silent (deferred
@@ -891,19 +892,33 @@ impl DeclarativeAuthor {
         )
     }
 
-    /// Render a `DROP INDEX`. Unlike DROP TABLE / DROP COLUMN, dropping an index
-    /// is **not data loss** — it is fully reversible by recreating the index — so
-    /// the classifier/guard does NOT mark it destructive and the engine gate does
-    /// not require approval for it. The migration carries default
-    /// (non-destructive) flags accordingly; `down` recreates nothing because the
-    /// declarative re-diff would re-add the index from the desired snapshot.
+    /// Render a `DROP INDEX`.
+    ///
+    /// Dropping a PLAIN (non-unique) index is **not data loss** — it is fully
+    /// reversible by recreating the index — so it carries default (non-destructive)
+    /// flags and flows through the engine gate ungated, like an additive op.
+    ///
+    /// Dropping a **UNIQUE** index, however, silently removes a data-integrity
+    /// guarantee (#4): duplicate rows become possible afterwards and a later
+    /// re-add fails on the now-dirty data. That is an integrity change the
+    /// creator never approved, so it is classified `destructive +
+    /// requires_approval` (gated, like DROP COLUMN). (The implicit PK index is
+    /// never reached here — `diff` filters it via `is_pk_index`.)
+    ///
+    /// `down` recreates nothing because the declarative re-diff would re-add the
+    /// index from the desired snapshot.
     fn render_drop_index(&self, idx: &IndexSnapshot) -> Migration {
         let up = format!("DROP INDEX {}", self.qualified(&idx.name));
+        let flags = if idx.unique {
+            destructive_flags()
+        } else {
+            MigrationFlags::default()
+        };
         self.make(
             &format!("drop_index_{}", idx.name),
             up,
             None,
-            MigrationFlags::default(),
+            flags,
             Vec::new(),
         )
     }
