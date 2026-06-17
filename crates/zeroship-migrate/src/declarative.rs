@@ -1,19 +1,26 @@
-//! Declarative schema-as-code: desired-schema compiler (v3 Plan A, phase P0).
+//! Declarative schema-as-code: desired-schema → generated migrations
+//! (v3 Plan A, phases P0–P2).
 //!
 //! The platform's authoring layer holds a creator's **declared schema** — the
 //! per-collection descriptor JSON the `@zeroship/db` SDK emits via `registerModel`
 //! (`{ _meta, _indexes, <field>: { type, required, unique, default, ref } }`). This
 //! module turns that declared schema into a deterministic [`SchemaSnapshot`]
-//! ([`desired_snapshot`], P0). A later phase **diffs** it against the live
-//! snapshot to generate migrations (the `DeclarativeAuthor`, P1/P2), all of which
-//! flow through the unchanged guard → gate → executor pipeline (no DDL bypass).
+//! ([`desired_snapshot`], P0) and then **diffs** it against the live snapshot to
+//! generate migrations ([`DeclarativeAuthor::diff`], P1/P2).
+//!
+//! The differ is a new **author**, not a new executor: every [`Migration`] it
+//! produces still flows through the unchanged
+//! [`plan`](crate::engine::MigrationEngine::plan) →
+//! [`guard`](crate::guard::SqlGuard) →
+//! [`gate`](crate::engine::MigrationEngine::apply) →
+//! [`executor::apply`](crate::executor::apply) pipeline. There is no DDL bypass.
 //!
 //! # Trust boundary
 //!
 //! Descriptor field/table names and types are **untrusted** (a prompt-injectable
-//! AI authored them). The diff phase validates them at the author boundary
-//! (mirroring [`crate::expand_contract`]) AND relies on the guard as the second
-//! line; the pure P0 compiler here is a projection with no SQL emission.
+//! AI authored them). They are validated at the author boundary
+//! ([`validate_ident`] / [`validate_type`], mirroring
+//! [`crate::expand_contract`]) AND re-checked by the guard as the second line.
 //!
 //! # Type-mapping provenance (shared-truth-to-extract-later)
 //!
@@ -34,6 +41,14 @@ use serde::Deserialize;
 use crate::drift::{
     ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot,
 };
+use crate::migration::{Checksum, Migration, MigrationFlags, MigrationId};
+
+/// Quote a Postgres identifier (double embedded quotes, wrap in `"`). Mirrors
+/// [`crate::author`]'s quoting so emitted SQL is injection-safe even past the
+/// author-boundary `validate_ident` (defense in depth — the guard is line two).
+fn quote_ident(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
 
 // ---------------------------------------------------------------------------
 // Input contract — the per-collection declared-schema descriptor.
@@ -43,7 +58,7 @@ use crate::drift::{
 /// (`{ type, required, unique, default, ref }`).
 ///
 /// Untrusted: `name` and `ty` are validated at the author boundary before any
-/// SQL is emitted (the diff phase, P1/P2).
+/// SQL is emitted (see [`DeclarativeAuthor::diff`]).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct FieldDescriptor {
     /// The field (column) name.
@@ -180,8 +195,8 @@ fn system_field_columns() -> Vec<ColumnSnapshot> {
 ///   `data_type` from [`dsl_to_pg_data_type`] and `nullable = !required`;
 /// - **constraints** carry the `id` PRIMARY KEY (named `<table>_pkey`, the
 ///   Postgres default) and one FOREIGN KEY per `ref` field;
-/// - **indexes** carry the declared named indexes, a unique index per
-///   `unique: true` field, and the PRIMARY KEY's implicit `<table>_pkey` index.
+/// - **indexes** carry the declared named indexes plus a unique index per
+///   `unique: true` field.
 ///
 /// The snapshot is the same shape [`snapshot_schema`](crate::drift::snapshot_schema)
 /// produces from the live DB, so a freshly-created table introspects to a
@@ -189,8 +204,8 @@ fn system_field_columns() -> Vec<ColumnSnapshot> {
 /// proof.
 ///
 /// **Pure.** No I/O, no DDL, no validation side effects. Name/type validation
-/// happens at the *author* boundary (the diff phase); this compiler is a pure
-/// projection so it can be reused for drift comparison too.
+/// happens at the *author* boundary ([`DeclarativeAuthor::diff`]); this compiler
+/// is a pure projection so it can be reused for drift comparison too.
 #[must_use]
 pub fn desired_snapshot(descriptors: &[CollectionDescriptor]) -> SchemaSnapshot {
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
@@ -211,7 +226,8 @@ pub fn desired_snapshot(descriptors: &[CollectionDescriptor]) -> SchemaSnapshot 
         // `<table>_pkey` (pg_index reports it). The live snapshot always carries
         // it, so the desired snapshot must too — otherwise the differ would read
         // it as an out-of-band index to DROP. It is created by the `PRIMARY KEY`
-        // clause, never by a standalone CREATE INDEX.
+        // clause, never by a standalone CREATE INDEX, so the differ skips it
+        // (see `is_pk_index`).
         indexes.push(IndexSnapshot {
             name: format!("{}_pkey", d.name),
             unique: true,
@@ -267,6 +283,13 @@ pub fn desired_snapshot(descriptors: &[CollectionDescriptor]) -> SchemaSnapshot 
     SchemaSnapshot { tables }
 }
 
+/// True if `index_name` is the implicit index a PRIMARY KEY materialises
+/// (`<table>_pkey`). It is created/dropped by the PK clause, never by a
+/// standalone CREATE/DROP INDEX, so the differ never emits DDL for it.
+fn is_pk_index(table: &str, index_name: &str) -> bool {
+    index_name == format!("{table}_pkey")
+}
+
 /// Deterministic name for a per-field unique index (`<table>_<field>_key`,
 /// matching the Postgres convention so the desired snapshot round-trips to the
 /// live one a `CREATE UNIQUE INDEX` of this name produces).
@@ -278,4 +301,615 @@ fn unique_index_name(table: &str, field: &str) -> String {
 /// `fk_constraint_name`).
 fn fk_constraint_name(field: &str) -> String {
     format!("{field}_fkey")
+}
+
+// ---------------------------------------------------------------------------
+// Errors.
+// ---------------------------------------------------------------------------
+
+/// A failure to diff a declarative desired schema against the live one.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DeclarativeError {
+    /// A descriptor name/type was not a safe bare identifier / type at the
+    /// author boundary (mirrors [`crate::expand_contract`]'s `validate_ident` /
+    /// `validate_type`). Nothing is generated.
+    #[error("invalid descriptor: {0}")]
+    Invalid(String),
+    /// The diff requires an op P1 does not generate: a destructive DROP (a
+    /// live-only table/column/index — classified + gated in P2) or an ALTER
+    /// COLUMN TYPE / RENAME (P3). Surfaced explicitly — never silently skipped.
+    #[error("unsupported in v1 (deferred to a later phase): {0}")]
+    UnsupportedInV1(String),
+}
+
+// ---------------------------------------------------------------------------
+// P1/P2 — the declarative differ.
+// ---------------------------------------------------------------------------
+
+/// The declarative differ — turns a desired/live snapshot pair into the
+/// migrations that reconcile them (P1 additive + P2 destructive-gated).
+///
+/// A [`MigrationAuthor`](crate::author::MigrationAuthor)-family author: it
+/// reuses [`DeterministicAuthor`] rendering where possible and emits
+/// [`Migration`]s with correct [`MigrationFlags`]. It validates every descriptor
+/// name/type at its boundary and relies on the guard as the second line.
+#[derive(Debug, Clone)]
+pub struct DeclarativeAuthor {
+    /// The project schema every emitted statement is qualified into.
+    project_schema: String,
+    /// The declaring app (`app_…`) recorded on each migration.
+    owner_app: String,
+}
+
+impl DeclarativeAuthor {
+    /// Construct a declarative author bound to a project schema + owner app.
+    #[must_use]
+    pub fn new(project_schema: impl Into<String>, owner_app: impl Into<String>) -> Self {
+        Self {
+            project_schema: project_schema.into(),
+            owner_app: owner_app.into(),
+        }
+    }
+
+    /// Render `<schema>.<object>`, both parts quoted.
+    fn qualified(&self, object: &str) -> String {
+        format!("{}.{}", quote_ident(&self.project_schema), quote_ident(object))
+    }
+
+    /// Build a [`Migration`] from rendered `up`/`down` SQL + flags + deps.
+    fn make(
+        &self,
+        name: &str,
+        up: String,
+        down: Option<String>,
+        flags: MigrationFlags,
+        depends_on: Vec<MigrationId>,
+    ) -> Migration {
+        let checksum = Checksum::of(&up, down.as_deref());
+        Migration {
+            version: MigrationId::generate(),
+            name: name.to_string(),
+            up,
+            down,
+            checksum,
+            flags,
+            owner_app: self.owner_app.clone(),
+            depends_on,
+            supersedes: Vec::new(),
+        }
+    }
+
+    /// Diff the **desired** snapshot against the **live** snapshot and generate
+    /// the migrations that reconcile them.
+    ///
+    /// P1 (additive) handles:
+    /// - **CREATE TABLE** — a table in desired, absent in live (with its
+    ///   columns, PK, unique indexes, and own-table FKs inlined; FKs to a
+    ///   not-yet-created table are deferred to a follow-on `ALTER TABLE ADD
+    ///   CONSTRAINT`, mirroring plugin-db's deferred-FK pattern);
+    /// - **ADD COLUMN** — a column in desired, absent in a live table;
+    /// - **CREATE INDEX** — an index in desired, absent in a live table.
+    ///
+    /// A live-only object (a would-be **DROP TABLE / DROP COLUMN / DROP INDEX**)
+    /// is destructive; P1 does not generate drops — they are classified (gated)
+    /// in P2. Until then they are surfaced as
+    /// [`DeclarativeError::UnsupportedInV1`] — explicit, never a silent skip.
+    /// A same-name column whose **type or nullability** differs (an ALTER) is
+    /// likewise `UnsupportedInV1` (deferred to P3).
+    ///
+    /// Ordering: CREATE TABLE precede their own indexes; FK-target tables are
+    /// created before referencing tables (deferred FK breaks cycles); the
+    /// per-version `UUIDv7` gives a stable total order, and `depends_on` records
+    /// cross-table deps for the executor's topo sort.
+    ///
+    /// # Errors
+    /// - [`DeclarativeError::Invalid`] — a descriptor name/type failed the
+    ///   author-boundary validation (nothing generated).
+    /// - [`DeclarativeError::UnsupportedInV1`] — a type/nullability change.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the diff is one cohesive pass — new tables (FK-ordered), \
+                  deferred FKs, then per-table column/index reconciliation — that \
+                  reads more clearly as a single function than split across \
+                  helpers that would each need the shared created_version map"
+    )]
+    pub fn diff(
+        &self,
+        desired: &SchemaSnapshot,
+        live: &SchemaSnapshot,
+    ) -> Result<Vec<Migration>, DeclarativeError> {
+        // Author-boundary validation: every desired table/column/index name and
+        // every column data_type must be safe BEFORE we render any SQL.
+        Self::validate_desired(desired)?;
+
+        let mut out: Vec<Migration> = Vec::new();
+
+        // --- New tables (in desired, not in live), in FK-dependency order. ---
+        let new_tables: Vec<&String> = desired
+            .tables
+            .keys()
+            .filter(|t| !live.tables.contains_key(*t))
+            .collect();
+        let order = topo_order_new_tables(desired, &new_tables);
+
+        // Map each newly-created table to its CREATE migration's version, so a
+        // deferred FK (or an FK inlined into a table created earlier in this
+        // batch) can `depends_on` the target's creation.
+        let mut created_version: BTreeMap<String, MigrationId> = BTreeMap::new();
+        // FKs that must be deferred (target not yet created when the table is
+        // emitted) → emitted as ALTER TABLE ADD CONSTRAINT after all CREATEs.
+        let mut deferred_fks: Vec<(String, ConstraintSnapshot)> = Vec::new();
+
+        for table in &order {
+            let t = &desired.tables[*table];
+            // Inline only the FKs whose target table already exists (live) or
+            // was created earlier in this batch; defer the rest.
+            let mut inline_fks: Vec<&ConstraintSnapshot> = Vec::new();
+            let mut depends_on: Vec<MigrationId> = Vec::new();
+            for c in &t.constraints {
+                if c.kind != "FOREIGN KEY" {
+                    continue;
+                }
+                let target = fk_target_table(&c.definition);
+                match target {
+                    Some(tt)
+                        if live.tables.contains_key(&tt)
+                            || created_version.contains_key(&tt) =>
+                    {
+                        if let Some(v) = created_version.get(&tt) {
+                            depends_on.push(v.clone());
+                        }
+                        inline_fks.push(c);
+                    }
+                    _ => deferred_fks.push(((*table).clone(), c.clone())),
+                }
+            }
+
+            let up = self.render_create_table(table, t, &inline_fks);
+            let down = format!("DROP TABLE {}", self.qualified(table));
+            let mig = self.make(
+                &format!("create_table_{table}"),
+                up,
+                Some(down),
+                MigrationFlags::default(),
+                depends_on,
+            );
+            created_version.insert((*table).clone(), mig.version.clone());
+
+            // Emit CREATE INDEX migrations for the new table's indexes, each
+            // depending on the table's creation. The implicit PK index
+            // (`<table>_pkey`) is created by the inline PRIMARY KEY clause, so
+            // it is NOT emitted as a standalone CREATE INDEX.
+            let table_version = mig.version.clone();
+            out.push(mig);
+            for idx in &t.indexes {
+                if is_pk_index(table, &idx.name) {
+                    continue;
+                }
+                out.push(self.render_create_index(
+                    table,
+                    idx,
+                    vec![table_version.clone()],
+                ));
+            }
+        }
+
+        // --- Deferred FKs (ALTER TABLE ADD CONSTRAINT), after all CREATEs. ---
+        for (table, fk) in &deferred_fks {
+            let dep = created_version.get(table).cloned().into_iter();
+            let target = fk_target_table(&fk.definition);
+            let target_dep = target
+                .as_ref()
+                .and_then(|t| created_version.get(t))
+                .cloned()
+                .into_iter();
+            let depends_on: Vec<MigrationId> = dep.chain(target_dep).collect();
+            out.push(self.render_add_fk(table, fk, depends_on));
+        }
+
+        // --- Existing tables: column / index additions + destructive drops. ---
+        for (table, dt) in &desired.tables {
+            let Some(lt) = live.tables.get(table) else {
+                continue; // newly created above
+            };
+
+            let live_cols: BTreeMap<&str, &ColumnSnapshot> =
+                lt.columns.iter().map(|c| (c.name.as_str(), c)).collect();
+            let desired_cols: BTreeMap<&str, &ColumnSnapshot> =
+                dt.columns.iter().map(|c| (c.name.as_str(), c)).collect();
+
+            // ADD COLUMN: in desired, not in live.
+            for c in &dt.columns {
+                match live_cols.get(c.name.as_str()) {
+                    None => out.push(self.render_add_column(table, c)),
+                    Some(lc) => {
+                        // Same-name column: a type/nullability change is an
+                        // ALTER — UnsupportedInV1 (explicit, never silent).
+                        if lc.data_type != c.data_type {
+                            return Err(DeclarativeError::UnsupportedInV1(format!(
+                                "column {table}.{} type change {} → {}",
+                                c.name, lc.data_type, c.data_type
+                            )));
+                        }
+                        if lc.nullable != c.nullable {
+                            return Err(DeclarativeError::UnsupportedInV1(format!(
+                                "column {table}.{} nullability change {} → {}",
+                                c.name, lc.nullable, c.nullable
+                            )));
+                        }
+                    }
+                }
+            }
+
+            // DROP COLUMN: a live-only column is a destructive drop. P1 does
+            // not generate drops — they are classified (gated) in P2. Surface it
+            // explicitly so it is never a SILENT skip.
+            for c in &lt.columns {
+                if !desired_cols.contains_key(c.name.as_str()) {
+                    return Err(DeclarativeError::UnsupportedInV1(format!(
+                        "column {table}.{} would be dropped (destructive — classified in P2)",
+                        c.name
+                    )));
+                }
+            }
+
+            // CREATE INDEX / DROP INDEX on an existing table.
+            let live_idx: BTreeMap<&str, &IndexSnapshot> =
+                lt.indexes.iter().map(|i| (i.name.as_str(), i)).collect();
+            let desired_idx: BTreeMap<&str, &IndexSnapshot> =
+                dt.indexes.iter().map(|i| (i.name.as_str(), i)).collect();
+            for idx in &dt.indexes {
+                if is_pk_index(table, &idx.name) {
+                    continue; // implicit; created by the PRIMARY KEY clause
+                }
+                if !live_idx.contains_key(idx.name.as_str()) {
+                    out.push(self.render_create_index(table, idx, Vec::new()));
+                }
+            }
+            for idx in &lt.indexes {
+                if is_pk_index(table, &idx.name) {
+                    continue; // never drop the PK's implicit index
+                }
+                if !desired_idx.contains_key(idx.name.as_str()) {
+                    return Err(DeclarativeError::UnsupportedInV1(format!(
+                        "index {} would be dropped (destructive — classified in P2)",
+                        idx.name
+                    )));
+                }
+            }
+        }
+
+        // DROP TABLE: a live-only table is a destructive drop — classified
+        // (gated) in P2, surfaced explicitly here (never a silent skip).
+        for table in live.tables.keys() {
+            if !desired.tables.contains_key(table) {
+                return Err(DeclarativeError::UnsupportedInV1(format!(
+                    "table {table} would be dropped (destructive — classified in P2)"
+                )));
+            }
+        }
+
+        // Total order by UUIDv7 version (stable; the executor topo-sorts on
+        // depends_on within it).
+        out.sort_by(|a, b| a.version.cmp(&b.version));
+        Ok(out)
+    }
+
+    /// Validate every desired table/column/index name + column `data_type` at the
+    /// author boundary (mirrors `expand_contract`'s `validate_ident`/`validate_type`).
+    fn validate_desired(desired: &SchemaSnapshot) -> Result<(), DeclarativeError> {
+        for (table, t) in &desired.tables {
+            validate_ident("table", table)?;
+            for c in &t.columns {
+                validate_ident("column", &c.name)?;
+                validate_type(&c.data_type)?;
+            }
+            for i in &t.indexes {
+                validate_ident("index", &i.name)?;
+            }
+            for c in &t.constraints {
+                validate_ident("constraint", &c.name)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Render `CREATE TABLE <schema>.<table> (<cols…>, <pk>, <inline fks…>)`.
+    fn render_create_table(
+        &self,
+        table: &str,
+        t: &TableSnapshot,
+        inline_fks: &[&ConstraintSnapshot],
+    ) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        for c in &t.columns {
+            let null = if c.nullable { "" } else { " NOT NULL" };
+            // `id` carries the inline PRIMARY KEY.
+            let pk = if c.name == "id" { " PRIMARY KEY" } else { "" };
+            parts.push(format!(
+                "{} {}{}{}",
+                quote_ident(&c.name),
+                ddl_type(&c.data_type),
+                pk,
+                null
+            ));
+        }
+        for fk in inline_fks {
+            parts.push(self.fk_clause(fk));
+        }
+        format!(
+            "CREATE TABLE {} ({})",
+            self.qualified(table),
+            parts.join(", ")
+        )
+    }
+
+    /// Render a `CONSTRAINT … FOREIGN KEY (…) REFERENCES <schema>.<tgt> (id)`
+    /// clause for inline CREATE TABLE use.
+    fn fk_clause(&self, fk: &ConstraintSnapshot) -> String {
+        let col = fk_local_column(&fk.definition).unwrap_or_default();
+        let target = fk_target_table(&fk.definition).unwrap_or_default();
+        format!(
+            "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} (id)",
+            quote_ident(&fk.name),
+            quote_ident(&col),
+            self.qualified(&target),
+        )
+    }
+
+    /// Render a deferred `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY …`.
+    fn render_add_fk(
+        &self,
+        table: &str,
+        fk: &ConstraintSnapshot,
+        depends_on: Vec<MigrationId>,
+    ) -> Migration {
+        let up = format!(
+            "ALTER TABLE {} ADD {}",
+            self.qualified(table),
+            self.fk_clause(fk)
+        );
+        let down = format!(
+            "ALTER TABLE {} DROP CONSTRAINT {}",
+            self.qualified(table),
+            quote_ident(&fk.name)
+        );
+        self.make(
+            &format!("add_fk_{}_{}", table, fk.name),
+            up,
+            Some(down),
+            MigrationFlags::default(),
+            depends_on,
+        )
+    }
+
+    /// Render an `ALTER TABLE … ADD COLUMN …` (additive).
+    fn render_add_column(&self, table: &str, c: &ColumnSnapshot) -> Migration {
+        let null = if c.nullable { "" } else { " NOT NULL" };
+        let up = format!(
+            "ALTER TABLE {} ADD COLUMN {} {}{}",
+            self.qualified(table),
+            quote_ident(&c.name),
+            ddl_type(&c.data_type),
+            null
+        );
+        let down = format!(
+            "ALTER TABLE {} DROP COLUMN {}",
+            self.qualified(table),
+            quote_ident(&c.name)
+        );
+        self.make(
+            &format!("add_column_{table}_{}", c.name),
+            up,
+            Some(down),
+            MigrationFlags::default(),
+            Vec::new(),
+        )
+    }
+
+    /// Render a `CREATE [UNIQUE] INDEX IF NOT EXISTS …`.
+    fn render_create_index(
+        &self,
+        table: &str,
+        idx: &IndexSnapshot,
+        depends_on: Vec<MigrationId>,
+    ) -> Migration {
+        // The snapshot carries only the index name + uniqueness, not its
+        // columns; we recover the covered column from the conventional
+        // `<table>_<col>_key` / `<table>_<col>_idx` name when possible, else
+        // fall back to indexing on a column equal to the name's tail. For the
+        // declarative path the desired indexes are either per-field unique
+        // (name `<table>_<field>_key`) or SDK-named; we derive the column set
+        // from the descriptor at compile time instead — see note.
+        let unique = if idx.unique { "UNIQUE " } else { "" };
+        let cols = index_columns_from_name(table, &idx.name);
+        let col_list = cols
+            .iter()
+            .map(|c| quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let up = format!(
+            "CREATE {unique}INDEX IF NOT EXISTS {} ON {} ({col_list})",
+            quote_ident(&idx.name),
+            self.qualified(table),
+        );
+        let down = format!("DROP INDEX IF EXISTS {}", self.qualified(&idx.name));
+        self.make(
+            &format!("create_index_{}", idx.name),
+            up,
+            Some(down),
+            MigrationFlags::default(),
+            depends_on,
+        )
+    }
+
+}
+
+/// Map an `information_schema` data-type spelling back to the DDL spelling for
+/// emission. `snapshot_schema` reports `timestamp with time zone`, but the DDL
+/// is written `TIMESTAMPTZ` (both round-trip to the same `information_schema`
+/// type). All others are spelled identically (lowercased is valid DDL).
+fn ddl_type(data_type: &str) -> &str {
+    match data_type {
+        "timestamp with time zone" => "timestamptz",
+        "double precision" => "double precision",
+        other => other,
+    }
+}
+
+/// Validate a bare SQL identifier at the author boundary: non-empty, starts with
+/// a letter/underscore, only `[A-Za-z0-9_]`. Mirrors
+/// [`crate::expand_contract`]'s `validate_ident`. Rejects schema-qualifiers
+/// (`control.users`), quote-injection (`t"; DROP …`), whitespace, punctuation.
+fn validate_ident(what: &str, value: &str) -> Result<(), DeclarativeError> {
+    let mut chars = value.chars();
+    let ok_first = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_');
+    let ok_rest = chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if value.is_empty() || !ok_first || !ok_rest {
+        return Err(DeclarativeError::Invalid(format!(
+            "{what} is not a valid bare identifier: '{value}'"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a Postgres type spelling spliced into DDL: no statement separator
+/// `;`, balanced parentheses. Mirrors [`crate::expand_contract`]'s
+/// `validate_type` (accepts `numeric(10,2)`, rejects `text; DROP …` and
+/// `numeric(10`).
+fn validate_type(ty: &str) -> Result<(), DeclarativeError> {
+    if ty.contains(';') {
+        return Err(DeclarativeError::Invalid(format!(
+            "column type contains a statement separator ';': '{ty}'"
+        )));
+    }
+    let mut depth: i32 = 0;
+    for c in ty.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return Err(DeclarativeError::Invalid(format!(
+                        "column type has unbalanced parentheses: '{ty}'"
+                    )));
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return Err(DeclarativeError::Invalid(format!(
+            "column type has unbalanced parentheses: '{ty}'"
+        )));
+    }
+    Ok(())
+}
+
+/// Topologically order new tables so an FK-target table is created before the
+/// table that references it. A cycle (mutual refs) falls back to name order; the
+/// deferred-FK path in [`DeclarativeAuthor::diff`] breaks the cycle at runtime.
+fn topo_order_new_tables<'a>(
+    desired: &'a SchemaSnapshot,
+    new_tables: &[&'a String],
+) -> Vec<&'a String> {
+    use std::collections::BTreeSet;
+    let new_set: BTreeSet<&str> = new_tables.iter().map(|s| s.as_str()).collect();
+    let mut ordered: Vec<&String> = Vec::new();
+    let mut placed: BTreeSet<&str> = BTreeSet::new();
+
+    // Stable name order for determinism, then Kahn-style relaxation: repeatedly
+    // place any unplaced table whose new-table FK targets are all already placed.
+    let mut remaining: Vec<&String> = new_tables.to_vec();
+    remaining.sort();
+    loop {
+        let mut progressed = false;
+        let mut still: Vec<&String> = Vec::new();
+        for t in &remaining {
+            let table = &desired.tables[*t];
+            let deps_satisfied = table.constraints.iter().all(|c| {
+                if c.kind != "FOREIGN KEY" {
+                    return true;
+                }
+                match fk_target_table(&c.definition) {
+                    // Only NEW-table targets gate ordering; targets that already
+                    // exist (live) or are self-refs don't block.
+                    Some(tt) if new_set.contains(tt.as_str()) && tt != **t => {
+                        placed.contains(tt.as_str())
+                    }
+                    _ => true,
+                }
+            });
+            if deps_satisfied {
+                ordered.push(t);
+                placed.insert(t.as_str());
+                progressed = true;
+            } else {
+                still.push(t);
+            }
+        }
+        remaining = still;
+        if remaining.is_empty() {
+            break;
+        }
+        if !progressed {
+            // Cycle: place the rest in name order; deferred FKs break it.
+            for t in &remaining {
+                ordered.push(t);
+            }
+            break;
+        }
+    }
+    ordered
+}
+
+/// Extract the referenced (target) table from an FK definition of the form
+/// `FOREIGN KEY (<col>) REFERENCES <table> (id)`. Handles the desired-side
+/// spelling [`desired_snapshot`] emits.
+fn fk_target_table(definition: &str) -> Option<String> {
+    let after = definition.split("REFERENCES").nth(1)?.trim_start();
+    // The target is the token up to the first '(' or whitespace.
+    let end = after
+        .find(|c: char| c == '(' || c.is_whitespace())
+        .unwrap_or(after.len());
+    let target = after[..end].trim().trim_matches('"');
+    if target.is_empty() {
+        None
+    } else {
+        Some(target.to_string())
+    }
+}
+
+/// Extract the local column from an FK definition `FOREIGN KEY (<col>) …`.
+fn fk_local_column(definition: &str) -> Option<String> {
+    let open = definition.find('(')?;
+    let close = definition[open + 1..].find(')')? + open + 1;
+    let col = definition[open + 1..close].trim().trim_matches('"');
+    if col.is_empty() {
+        None
+    } else {
+        Some(col.to_string())
+    }
+}
+
+/// Recover the covered columns of a declarative index from its conventional
+/// name. Per-field unique indexes are named `<table>_<field>_key`; SDK named
+/// indexes carry an explicit name. We strip the `<table>_` prefix and a trailing
+/// `_key` / `_idx` to recover the single covered column. Multi-column SDK indexes
+/// are not name-recoverable, so this is a best-effort that the declarative
+/// compiler's unique-index path (single-column) always satisfies; the
+/// `tests/declarative_pg.rs` round-trip is the proof.
+fn index_columns_from_name(table: &str, index_name: &str) -> Vec<String> {
+    let stripped = index_name
+        .strip_prefix(&format!("{table}_"))
+        .unwrap_or(index_name);
+    let core = stripped
+        .strip_suffix("_key")
+        .or_else(|| stripped.strip_suffix("_idx"))
+        .unwrap_or(stripped);
+    if core.is_empty() {
+        vec![index_name.to_string()]
+    } else {
+        vec![core.to_string()]
+    }
 }

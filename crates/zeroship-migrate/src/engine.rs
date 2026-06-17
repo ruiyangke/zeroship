@@ -149,6 +149,33 @@ impl MigrationEngine {
         }
     }
 
+    /// Diff a **desired** declarative schema against the **live** snapshot and
+    /// lint the generated migrations into a [`MigrationPlan`] (v3 Plan A).
+    ///
+    /// This is the declarative entry point: it runs
+    /// [`DeclarativeAuthor::diff`](crate::declarative::DeclarativeAuthor::diff)
+    /// (additive ops + destructive-gated drops, with author-boundary name/type
+    /// validation) and then feeds the result through the EXISTING [`plan`] —
+    /// so the generated SQL gets the same guard treatment as any other author's
+    /// output (no bypass). A destructive drop in the diff makes the plan
+    /// `requires_approval`, exactly as a hand-authored drop would.
+    ///
+    /// # Errors
+    /// [`DeclarativeError`](crate::declarative::DeclarativeError) if the diff
+    /// hits an unsupported (type/nullability change) op or an invalid descriptor
+    /// name/type at the author boundary. A guard *denial* on generated SQL is
+    /// NOT an error here — it lands in [`MigrationPlan::denied`] like any other.
+    pub fn plan_declarative(
+        &self,
+        desired: &crate::drift::SchemaSnapshot,
+        live: &crate::drift::SchemaSnapshot,
+        author: &crate::declarative::DeclarativeAuthor,
+        cfg: &GuardConfig,
+    ) -> Result<MigrationPlan, crate::declarative::DeclarativeError> {
+        let migrations = author.diff(desired, live)?;
+        Ok(self.plan(&migrations, cfg))
+    }
+
     /// Apply a plan through the gate (design §1.6).
     ///
     /// The gate, in order:

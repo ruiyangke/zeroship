@@ -90,7 +90,8 @@ pub use author::{
 };
 pub use classify::{classify, DdlKind, ParseError, StatementClass};
 pub use declarative::{
-    desired_snapshot, dsl_to_pg_data_type, CollectionDescriptor, FieldDescriptor, IndexDescriptor,
+    desired_snapshot, dsl_to_pg_data_type, CollectionDescriptor, DeclarativeAuthor,
+    DeclarativeError, FieldDescriptor, IndexDescriptor,
 };
 pub use engine::{
     EngineError, MigrationEngine, MigrationPlan, OnlineError, PlannedMigration,
