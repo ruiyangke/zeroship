@@ -260,13 +260,23 @@ mod tests {
 
     /// Build a versioned migration with a correct content checksum.
     fn mig(name: &str, up: &str, down: Option<&str>) -> Migration {
+        let flags = MigrationFlags::default();
+        let checksum = Checksum::of(&crate::migration::ChecksumInput {
+            up,
+            down,
+            flags: &flags,
+            owner_app: "app_test",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        });
         Migration {
             version: MigrationId::generate(),
             name: name.to_string(),
             up: up.to_string(),
             down: down.map(str::to_string),
-            checksum: Checksum::of(up, down, &[]),
-            flags: MigrationFlags::default(),
+            checksum,
+            flags,
             owner_app: "app_test".to_string(),
             depends_on: Vec::new(),
             supersedes: Vec::new(),

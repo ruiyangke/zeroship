@@ -128,7 +128,8 @@ pub use manifest::{
     compute_manifest, verify_manifest, ManifestError, ManifestHash, MismatchKind,
 };
 pub use migration::{
-    Checksum, IdError, Migration, MigrationFlags, MigrationId, OnlinePhase, MIGRATION_PREFIX,
+    Checksum, ChecksumInput, IdError, Migration, MigrationFlags, MigrationId, OnlinePhase,
+    MIGRATION_PREFIX,
 };
 pub use precondition::{
     evaluate as evaluate_precondition, CmpOp, OnUnmet, Precondition, PreconditionCheck,

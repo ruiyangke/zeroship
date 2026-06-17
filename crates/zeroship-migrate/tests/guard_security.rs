@@ -1800,18 +1800,18 @@ fn crate_root_reexports_compose_an_end_to_end_check() {
     assert!(g.check("ALTER SYSTEM SET x = 1").is_err());
 
     // Build a full Migration from the root types.
-    let m = Migration {
+    let m = { let mut __mig = Migration {
         version: MigrationId::generate(),
         name: "create_t".to_string(),
         up: up.to_string(),
         down: Some("DROP TABLE project_x.t".to_string()),
-        checksum: Checksum::of(up, Some("DROP TABLE project_x.t"), &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
         flags: MigrationFlags::default(),
         owner_app: "app_0000000000000000000000".to_string(),
         depends_on: vec![],
         supersedes: Vec::new(),
         preconditions: Vec::new(),
-    };
+    }; __mig.recompute_checksum(); __mig };
     assert!(m.version.as_str().starts_with("mig_"));
     assert_eq!(m.checksum.as_str().len(), 64);
 }

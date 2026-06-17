@@ -74,7 +74,15 @@ fn mig(version: MigrationId, name: &str, up: &str) -> Migration {
         name: name.to_string(),
         up: up.to_string(),
         down: None,
-        checksum: Checksum::of(up, None, &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput {
+            up,
+            down: None,
+            flags: &MigrationFlags::default(),
+            owner_app: "app_test",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        }),
         flags: MigrationFlags::default(),
         owner_app: "app_test".to_string(),
         depends_on: Vec::new(),
@@ -225,35 +233,35 @@ async fn checksum_drift_reads_latest_completed_checksum_across_reapply() {
     // upA: create t1(id int); reversible.
     let up_a = format!("CREATE TABLE \"{sch}\".\"t1\" (id int)");
     let down_a = format!("DROP TABLE \"{sch}\".\"t1\"");
-    let mig_a = Migration {
+    let mig_a = { let mut __mig = Migration {
         version: ver.clone(),
         name: "t1".into(),
         up: up_a.clone(),
         down: Some(down_a.clone()),
-        checksum: Checksum::of(&up_a, Some(&down_a), &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
-    };
+    }; __mig.recompute_checksum(); __mig };
     let cs_a = mig_a.checksum.as_str().to_string();
 
     // upB: SAME version, DIFFERENT body (t1 with an extra column) → different cs.
     let up_b = format!("CREATE TABLE \"{sch}\".\"t1\" (id int, label text)");
     let down_b = format!("DROP TABLE \"{sch}\".\"t1\"");
-    let mig_b = Migration {
+    let mig_b = { let mut __mig = Migration {
         version: ver.clone(),
         name: "t1".into(),
         up: up_b.clone(),
         down: Some(down_b.clone()),
-        checksum: Checksum::of(&up_b, Some(&down_b), &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
-    };
+    }; __mig.recompute_checksum(); __mig };
     let cs_b = mig_b.checksum.as_str().to_string();
     assert_ne!(cs_a, cs_b, "upA and upB must have distinct checksums");
 

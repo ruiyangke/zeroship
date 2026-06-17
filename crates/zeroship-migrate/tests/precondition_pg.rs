@@ -95,18 +95,20 @@ fn mig_with_pre(
     up: &str,
     pre: Vec<PreconditionCheck>,
 ) -> Migration {
-    Migration {
+    let mut __mig = Migration {
         version,
         name: name.to_string(),
         up: up.to_string(),
         down: None,
-        checksum: Checksum::of(up, None, &pre),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
         flags: MigrationFlags::default(),
         owner_app: "app_test".to_string(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: pre,
-    }
+    };
+    __mig.recompute_checksum();
+    __mig
 }
 
 /// Count net-applied (completed) journal rows.
@@ -598,6 +600,7 @@ fn dependent_of_a_skipped_migration_does_not_run() {
             vec![],
         );
         m2.depends_on = vec![m1.version.clone()];
+        m2.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&m2));
 
         // Run 1: m1 skipped; m2 (depends on the not-yet-applied m1) must NOT run.
         let out = apply(&conn, &cfg, &[m1.clone(), m2.clone()], Approval::None, "tester")

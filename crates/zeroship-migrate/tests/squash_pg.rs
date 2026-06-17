@@ -81,7 +81,15 @@ fn mig(version: MigrationId, name: &str, up: &str) -> Migration {
         name: name.to_string(),
         up: up.to_string(),
         down: None,
-        checksum: Checksum::of(up, None, &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput {
+            up,
+            down: None,
+            flags: &MigrationFlags::default(),
+            owner_app: "app_test",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        }),
         flags: MigrationFlags::default(),
         owner_app: "app_test".to_string(),
         depends_on: Vec::new(),
@@ -94,6 +102,7 @@ fn mig(version: MigrationId, name: &str, up: &str) -> Migration {
 fn squash_mig(version: MigrationId, name: &str, up: &str, sup: Vec<MigrationId>) -> Migration {
     let mut m = mig(version, name, up);
     m.supersedes = sup;
+    m.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&m));
     m
 }
 
@@ -294,6 +303,7 @@ async fn later_depends_on_superseded_version_satisfied_by_squash() {
         &format!("CREATE TABLE \"{}\".\"t5\" (id bigint)", cfg.project_schema),
     );
     m5.depends_on = vec![m2.version.clone()];
+    m5.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&m5));
 
     let out = apply(
         &conn,

@@ -70,18 +70,20 @@ async fn drop_schemas(conn: &Client, cfg: &ExecutorConfig) {
 fn mig(version: MigrationId, name: &str, schema: &str, table: &str) -> Migration {
     let up = format!("CREATE TABLE \"{schema}\".\"{table}\" (id int primary key)");
     let down = format!("DROP TABLE \"{schema}\".\"{table}\"");
-    Migration {
+    let mut __mig = Migration {
         version,
         name: name.to_string(),
         up: up.clone(),
         down: Some(down.clone()),
-        checksum: Checksum::of(&up, Some(&down), &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
         flags: MigrationFlags::default(),
         owner_app: "app_test".to_string(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
-    }
+    };
+    __mig.recompute_checksum();
+    __mig
 }
 
 // ---------------------------------------------------------------------------

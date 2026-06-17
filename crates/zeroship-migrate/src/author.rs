@@ -201,7 +201,15 @@ impl DeterministicAuthor {
 
     /// Build a [`Migration`] from already-rendered `up`/`down` SQL + flags.
     fn make(&self, name: &str, up: String, down: Option<String>, flags: MigrationFlags) -> Migration {
-        let checksum = Checksum::of(&up, down.as_deref(), &[]);
+        let checksum = Checksum::of(&crate::migration::ChecksumInput {
+            up: &up,
+            down: down.as_deref(),
+            flags: &flags,
+            owner_app: &self.owner_app,
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        });
         Migration {
             version: MigrationId::generate(),
             name: name.to_string(),
@@ -391,7 +399,15 @@ impl RawSqlAuthor {
                 ..MigrationFlags::default()
             },
         };
-        let checksum = Checksum::of(up, down, &[]);
+        let checksum = Checksum::of(&crate::migration::ChecksumInput {
+            up,
+            down,
+            flags: &flags,
+            owner_app: &self.owner_app,
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        });
         Ok(Migration {
             version: MigrationId::generate(),
             name: name.to_string(),
@@ -452,8 +468,8 @@ mod tests {
             m.down.as_deref(),
             Some("DROP TABLE \"proj_acme\".\"orders\"")
         );
-        // Checksum matches the emitted SQL.
-        assert_eq!(m.checksum, Checksum::of(&m.up, m.down.as_deref(), &[]));
+        // Checksum matches the emitted migration's whole apply-relevant unit.
+        assert_eq!(m.checksum, Checksum::of(&crate::migration::ChecksumInput::from_migration(m)));
     }
 
     #[test]
@@ -603,7 +619,7 @@ mod tests {
         assert!(!m.flags.destructive);
         assert!(!m.flags.requires_approval);
         assert!(m.flags.transactional);
-        assert_eq!(m.checksum, Checksum::of(&m.up, None, &[]));
+        assert_eq!(m.checksum, Checksum::of(&crate::migration::ChecksumInput::from_migration(&m)));
     }
 
     #[test]
