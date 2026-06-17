@@ -91,7 +91,7 @@ pub use author::{
 pub use classify::{classify, DdlKind, ParseError, StatementClass};
 pub use declarative::{
     desired_snapshot, dsl_to_pg_data_type, CollectionDescriptor, DeclarativeAuthor,
-    DeclarativeError, DeclarativePlan, FieldDescriptor, IndexDescriptor, RenameHint,
+    DeclarativeError, DeclarativePlan, DesiredSchema, FieldDescriptor, IndexDescriptor, RenameHint,
 };
 pub use engine::{
     DeclarativeApplyError, DeclarativeDeployOutcome, DeclarativeDeployPlan, EngineError,
