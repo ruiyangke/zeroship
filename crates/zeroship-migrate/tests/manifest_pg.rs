@@ -160,9 +160,8 @@ async fn correct_manifest_applies_the_set_normally() {
     let expected = compute_manifest(&set);
 
     let engine = MigrationEngine::new();
-    let plan = engine.plan(&set, &guard_cfg(&cfg));
     let outcome = engine
-        .apply_verified(&plan, Some(&expected), Approval::None, &conn, &cfg, "app_test")
+        .apply_verified(&set, &guard_cfg(&cfg), Some(&expected), Approval::None, &conn, &cfg, "app_test")
         .await
         .expect("a matching manifest must apply the set");
 
@@ -180,9 +179,8 @@ async fn none_expected_applies_unverified() {
 
     let set = additive_set(&cfg);
     let engine = MigrationEngine::new();
-    let plan = engine.plan(&set, &guard_cfg(&cfg));
     let outcome = engine
-        .apply_verified(&plan, None, Approval::None, &conn, &cfg, "app_test")
+        .apply_verified(&set, &guard_cfg(&cfg), None, Approval::None, &conn, &cfg, "app_test")
         .await
         .expect("None expected applies unverified");
     assert_eq!(outcome.applied.len(), 2);
@@ -233,9 +231,8 @@ async fn cosmetic_slice_reorder_verifies_and_applies(/* M2 */) {
     let reordered = vec![set[1].clone(), set[0].clone()];
 
     let engine = MigrationEngine::new();
-    let plan = engine.plan(&reordered, &guard_cfg(&cfg));
     let outcome = engine
-        .apply_verified(&plan, Some(&expected), Approval::None, &conn, &cfg, "app_test")
+        .apply_verified(&reordered, &guard_cfg(&cfg), Some(&expected), Approval::None, &conn, &cfg, "app_test")
         .await
         .expect("a cosmetic slice reorder must verify against the stamped manifest (M2)");
     assert_eq!(outcome.applied.len(), 2, "both migrations applied");
@@ -266,9 +263,8 @@ async fn inserted_migration_is_refused_before_apply() {
     tampered.extend(extra);
 
     let engine = MigrationEngine::new();
-    let plan = engine.plan(&tampered, &guard_cfg(&cfg));
     let err = engine
-        .apply_verified(&plan, Some(&expected), Approval::None, &conn, &cfg, "app_test")
+        .apply_verified(&tampered, &guard_cfg(&cfg), Some(&expected), Approval::None, &conn, &cfg, "app_test")
         .await
         .expect_err("an inserted migration must be refused");
     assert_refused_before_apply(&conn, &cfg, err).await;
@@ -289,9 +285,8 @@ async fn removed_migration_is_refused_before_apply() {
     let tampered = vec![set[0].clone()];
 
     let engine = MigrationEngine::new();
-    let plan = engine.plan(&tampered, &guard_cfg(&cfg));
     let err = engine
-        .apply_verified(&plan, Some(&expected), Approval::None, &conn, &cfg, "app_test")
+        .apply_verified(&tampered, &guard_cfg(&cfg), Some(&expected), Approval::None, &conn, &cfg, "app_test")
         .await
         .expect_err("a removed migration must be refused");
     assert_refused_before_apply(&conn, &cfg, err).await;
@@ -319,9 +314,8 @@ async fn content_edited_migration_is_refused_before_apply() {
     let tampered = vec![edited, set[1].clone()];
 
     let engine = MigrationEngine::new();
-    let plan = engine.plan(&tampered, &guard_cfg(&cfg));
     let err = engine
-        .apply_verified(&plan, Some(&expected), Approval::None, &conn, &cfg, "app_test")
+        .apply_verified(&tampered, &guard_cfg(&cfg), Some(&expected), Approval::None, &conn, &cfg, "app_test")
         .await
         .expect_err("a content-edited migration must be refused");
     assert_refused_before_apply(&conn, &cfg, err).await;
@@ -339,11 +333,81 @@ async fn garbage_expected_hash_fails_closed() {
     let garbage = ManifestHash::from_hex("deadbeef");
 
     let engine = MigrationEngine::new();
-    let plan = engine.plan(&set, &guard_cfg(&cfg));
     let err = engine
-        .apply_verified(&plan, Some(&garbage), Approval::None, &conn, &cfg, "app_test")
+        .apply_verified(&set, &guard_cfg(&cfg), Some(&garbage), Approval::None, &conn, &cfg, "app_test")
         .await
         .expect_err("a garbage expected hash must fail closed");
     assert_refused_before_apply(&conn, &cfg, err).await;
+    teardown(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// M1 — the manifest is verified over the RAW supplied set, BEFORE plan()/guard
+// filtering. A guard denial must NOT shrink the verified set into a spurious
+// membership mismatch; the manifest matches the stamp and the denial is surfaced
+// by the SEPARATE denial gate.
+// ---------------------------------------------------------------------------
+
+/// A guard-DENIED migration (COPY … TO PROGRAM = shell RCE) with a valid,
+/// self-consistent checksum, so it is a legitimate MEMBER of the stamped set.
+fn denied_migration(cfg: &ExecutorConfig) -> Migration {
+    let up = format!("COPY \"{}\".\"orders\" TO PROGRAM 'sh -c id'", cfg.project_schema);
+    let flags = zeroship_migrate::MigrationFlags::default();
+    let checksum = zeroship_migrate::Checksum::of(&zeroship_migrate::ChecksumInput {
+        up: &up,
+        down: None,
+        flags: &flags,
+        owner_app: "app_test",
+        depends_on: &[],
+        supersedes: &[],
+        preconditions: &[],
+    });
+    Migration {
+        version: zeroship_migrate::MigrationId::generate(),
+        name: "exfiltrate".into(),
+        up,
+        down: None,
+        checksum,
+        flags,
+        owner_app: "app_test".into(),
+        depends_on: Vec::new(),
+        supersedes: Vec::new(),
+        preconditions: Vec::new(),
+    }
+}
+
+#[compio::test]
+async fn guard_denied_member_matches_manifest_and_is_refused_by_the_denial_gate() {
+    // M1: the verified set is the RAW supplied set, so a guard-denied migration is
+    // STILL part of the manifest (matches the stamp) — there is NO spurious
+    // manifest-membership mismatch from the denial shrinking the set. The denial is
+    // surfaced by the separate, correct denial gate (EngineError::Denied), not by
+    // the manifest gate.
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+
+    // The reviewed bundle: one legitimate additive migration that the control
+    // plane stamped ALONGSIDE a (guard-denied) migration. The stamp is over BOTH.
+    let mut set = additive_set(&cfg);
+    // Mint the denied member with a version that sorts FIRST so it is not dropped
+    // by ordering; membership is what matters here.
+    set.push(denied_migration(&cfg));
+    let expected = compute_manifest(&set);
+
+    let engine = MigrationEngine::new();
+    let err = engine
+        .apply_verified(&set, &guard_cfg(&cfg), Some(&expected), Approval::None, &conn, &cfg, "app_test")
+        .await
+        .expect_err("a guard-denied member must be refused");
+    // The refusal is a DENIAL (the separate gate), NOT a manifest mismatch: the
+    // raw set matched the stamp; verifying post-plan `items` would instead have
+    // shrunk the set (dropping the denied migration) and false-mismatched.
+    assert!(
+        matches!(err, EngineError::Denied(_)),
+        "expected EngineError::Denied (manifest matched the raw set; the denial is the separate gate), got {err:?}"
+    );
+    // Nothing applied: a denied plan applies nothing.
+    assert!(!table_exists(&conn, &cfg.project_schema, "orders").await);
     teardown(&conn, &cfg).await;
 }

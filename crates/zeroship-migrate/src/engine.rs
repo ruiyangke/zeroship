@@ -396,46 +396,63 @@ impl MigrationEngine {
     /// of *the bundle* against *an independently-held expectation*. See
     /// [`crate::manifest`].
     ///
-    /// # What set is verified
+    /// # What set is verified — the RAW supplied set, before any filtering (M1)
     ///
-    /// The manifest is verified over the plan's `items` **in input order** — the
-    /// migrations that will actually be applied, in the order the control plane
-    /// stamped at review time. On the trusted happy path the plan has no denials,
-    /// so `items` is exactly the authored set; a reorder / content-edit /
-    /// insertion / removal of that set changes the recomputed hash and is refused
-    /// here, before the gate / lock / any DDL. (A guard *denial* is an orthogonal
-    /// failure surfaced by [`apply`](Self::apply) as [`EngineError::Denied`].)
+    /// The manifest is verified over the RAW `migrations` slice the caller
+    /// supplied — the exact input membership/content the control plane stamped at
+    /// review time — **before** [`plan`](Self::plan) runs the guard. This is
+    /// deliberate: verifying the post-`plan` `items` would let a guard *denial*
+    /// (or any future `plan()`-time filtering) silently SHRINK the verified set, so
+    /// the integrity check would pass over a strict subset of the stamped bundle. By
+    /// verifying input membership independently of guard filtering, a removed or
+    /// inserted migration is always caught against the stamp.
+    ///
+    /// A guard-denied migration is still PART of the verified set (so the manifest
+    /// matches the stamp), and is then refused by the *separate, correct* denial
+    /// gate inside [`apply`](Self::apply) ([`EngineError::Denied`]) — a denial and a
+    /// manifest mismatch are orthogonal failures, surfaced as orthogonal errors.
     ///
     /// # Errors
-    /// - [`EngineError::Manifest`] — the plan's set did not match `expected`
+    /// - [`EngineError::Manifest`] — the raw supplied set did not match `expected`
     ///   (only possible when `expected` is `Some`). Refused before the
-    ///   gate/lock/DDL; nothing applied.
+    ///   plan/gate/lock/DDL; nothing applied.
     /// - [`EngineError::Denied`] / [`EngineError::ApprovalRequired`] /
     ///   [`EngineError::Apply`] — the same gate + executor errors as
     ///   [`apply`](Self::apply), after a successful (or skipped) manifest check.
+    // M1: takes the RAW supplied set + the guard config (to plan internally) so
+    // verification happens over the input membership BEFORE plan()/guard filtering.
+    // Eight distinct, irreducible inputs (raw set, guard cfg, expected hash,
+    // approval, conn, exec cfg, actor) — each is load-bearing; bundling them into a
+    // struct would only obscure the trusted-deploy call shape.
+    #[allow(clippy::too_many_arguments)]
     pub async fn apply_verified(
         &self,
-        plan: &MigrationPlan,
+        migrations: &[Migration],
+        guard_cfg: &GuardConfig,
         expected: Option<&ManifestHash>,
         approval: Approval,
         conn: &Client,
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
     ) -> Result<ApplyOutcome, EngineError> {
-        // Pre-apply manifest gate (v3 Plan F): recompute over the plan's items, in
-        // input order, and refuse a mismatch BEFORE the gate / lock / any DDL. The
-        // manifest covers EVERY item's (version, checksum) and their order, so a
-        // reorder / edit / insertion / removal is caught here — before the
-        // executor takes the advisory lock.
+        // Pre-apply manifest gate (v3 Plan F, M1): recompute over the RAW supplied
+        // set — the input membership/content the control plane stamped — BEFORE
+        // plan()/guard filtering and before the gate / lock / any DDL. Verifying
+        // the raw input (not the post-plan `items`) means a guard denial or any
+        // future plan-time filtering cannot silently shrink the verified set. The
+        // manifest covers every migration's (version, checksum) folded in canonical
+        // executed order, so a reorder / edit / insertion / removal is caught here.
         if let Some(expected) = expected {
-            let supplied: Vec<Migration> =
-                plan.items.iter().map(|p| p.migration.clone()).collect();
-            verify_manifest(&supplied, expected)?;
+            verify_manifest(migrations, expected)?;
         }
-        // Verified (or unverified by caller choice) ⇒ the normal gated apply, which
-        // re-runs the denial/approval gate and then the executor (guard + role +
-        // advisory lock). The lock is only ever taken AFTER the manifest passes.
-        self.apply(plan, approval, conn, exec_cfg, applied_by).await
+        // Verified (or unverified by caller choice) ⇒ plan (guard lint) then the
+        // normal gated apply, which re-runs the denial/approval gate and then the
+        // executor (guard + role + advisory lock). A guard-denied migration was
+        // still part of the verified set above; the denial is surfaced HERE by the
+        // gate (EngineError::Denied), independent of the manifest check. The lock is
+        // only ever taken AFTER the manifest passes.
+        let plan = self.plan(migrations, guard_cfg);
+        self.apply(&plan, approval, conn, exec_cfg, applied_by).await
     }
 
     /// Dry-run a migration batch against a throwaway **shadow DATABASE** clone
