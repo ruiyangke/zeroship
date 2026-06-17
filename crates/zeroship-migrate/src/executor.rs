@@ -203,6 +203,21 @@ pub enum ApplyError {
         /// The version both squashes supersede.
         shared: String,
     },
+    /// A pending migration carried a precondition (v3 Plan D) with
+    /// [`OnUnmet::Halt`](crate::precondition::OnUnmet::Halt) that was UNMET (it
+    /// evaluated false), or a precondition that could not be evaluated at all (a
+    /// guard-denied / malformed `SqlBoolean`, an invalid identifier). Fail-closed:
+    /// the whole apply is aborted before this migration's `up` runs, and NOTHING
+    /// is applied for this migration (and the batch stops). Preconditions are
+    /// evaluated read-only, under the advisory lock, immediately before the `up`.
+    #[error("migration {version} precondition not met / not evaluable: {which}")]
+    PreconditionFailed {
+        /// The migration whose precondition failed.
+        version: String,
+        /// Which precondition failed and why (the unmet assertion, or the
+        /// evaluation error — e.g. a guard denial or invalid identifier).
+        which: String,
+    },
     /// Applying a migration's `up` SQL failed (after the guard passed). The
     /// transaction (txn path) was rolled back; nothing was journaled.
     #[error("migration {version} failed to apply: {source}")]
@@ -657,10 +672,70 @@ async fn apply_locked(
         recovered: Vec::new(),
     };
 
-    // SECOND PASS — execute. All static checks have already passed.
-    for m in pending {
+    // SECOND PASS — execute (precondition gate + apply). All static checks have
+    // already passed.
+    execute_pending(conn, cfg, &pending, &started, applied_by, &mut outcome).await?;
+
+    Ok(outcome)
+}
+
+/// The execute pass (design §2.3 step 6): for each pending migration, evaluate
+/// its preconditions (v3 Plan D) read-only under the advisory lock, then apply
+/// the txn / non-txn path. Splits out of [`apply_locked`] so each stays focused.
+///
+/// Precondition outcomes:
+/// - all met => apply normally;
+/// - an `OnUnmet::Skip` check unmet => skip this migration (not applied, not
+///   journaled — stays pending); a SKIPPED migration's dependents are also
+///   skipped this batch (their `up`'s object was never created);
+/// - an `OnUnmet::Halt` check unmet, or ANY inevaluable check => fail-closed via
+///   [`ApplyError::PreconditionFailed`] (the `?` propagates, aborting the batch
+///   with nothing applied for this migration).
+///
+/// # Errors
+/// Propagates [`ApplyError::PreconditionFailed`] (Halt/inevaluable) and any
+/// apply-path error ([`ApplyError::MigrationFailed`], journal/db errors).
+async fn execute_pending(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    pending: &[&Migration],
+    started: &HashMap<&str, &AppliedEntry>,
+    applied_by: &str,
+    outcome: &mut ApplyOutcome,
+) -> Result<(), ApplyError> {
+    // Versions SKIPPED this run because an `OnUnmet::Skip` precondition was unmet
+    // (v3 Plan D). A skipped migration is NOT applied and NOT journaled — it stays
+    // pending for the next deploy. Its dependents must also not run this batch: a
+    // dependent's depended-on object does not exist (the dep did not run), so we
+    // transitively skip any pending migration whose `depends_on` includes a
+    // skipped version. `pending` is in topological order, so a dependent is always
+    // visited after the dep it would skip on.
+    let mut skipped_this_run: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+    for &m in pending {
         let version = m.version.as_str();
         let had_inflight = started.contains_key(version);
+
+        // v3 Plan D: a dependent of a Skip'd (still-pending) migration cannot run
+        // this batch — the object its `up` needs was never created. Transitively
+        // skip it (and record it so ITS dependents skip too).
+        let dep_skipped = m
+            .depends_on
+            .iter()
+            .any(|d| skipped_this_run.contains(d.as_str()));
+        // Evaluate preconditions (read-only) BEFORE the `up`, under the advisory
+        // lock so the checked state is stable. Skipped-by-dependency short-circuits
+        // evaluation (we already know this won't run).
+        let skip = dep_skipped
+            || matches!(
+                evaluate_preconditions(conn, cfg, m).await?,
+                PreconditionVerdict::Skip
+            );
+        if skip {
+            skipped_this_run.insert(version);
+            outcome.skipped.push(version.to_string());
+            continue;
+        }
 
         // Plan 9 B (fresh-DB squash): a squash whose `up` RUNS this batch records its
         // supersession edges so future pending computations know `S` satisfies
@@ -688,7 +763,74 @@ async fn apply_locked(
         outcome.applied.push(version.to_string());
     }
 
-    Ok(outcome)
+    Ok(())
+}
+
+/// The verdict of evaluating a migration's preconditions (v3 Plan D).
+enum PreconditionVerdict {
+    /// Every precondition held — apply the migration normally.
+    AllMet,
+    /// An `OnUnmet::Skip` precondition was unmet — skip this migration this run
+    /// (leave it pending, do not journal). The batch continues.
+    Skip,
+}
+
+/// Evaluate a migration's preconditions (v3 Plan D), in declaration order, BEFORE
+/// its `up` runs. All evaluation is read-only (parameterized catalog reads +
+/// guarded single read-only `SELECT` under the migrator role).
+///
+/// Returns:
+/// - [`PreconditionVerdict::AllMet`] — every precondition held; apply.
+/// - [`PreconditionVerdict::Skip`] — an `OnUnmet::Skip` check was unmet; skip.
+///
+/// # Errors
+/// - [`ApplyError::PreconditionFailed`] — an `OnUnmet::Halt` check was UNMET (the
+///   assertion evaluated false), or ANY check could not be evaluated (a
+///   guard-denied / malformed `SqlBoolean`, an invalid identifier). Fail-closed:
+///   an inevaluable precondition is treated as a hard failure regardless of its
+///   `on_unmet`, so a precondition that cannot even be checked never silently
+///   waves a migration through. The caller aborts the whole apply, applying
+///   nothing for this migration.
+///
+/// `Halt` is evaluated first-failure-wins: the first unmet/inevaluable Halt check
+/// stops evaluation and aborts. A `Skip` verdict is returned only when no Halt
+/// check failed and at least one `Skip` check is unmet.
+async fn evaluate_preconditions(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    m: &Migration,
+) -> Result<PreconditionVerdict, ApplyError> {
+    use crate::precondition::OnUnmet;
+    let mut verdict = PreconditionVerdict::AllMet;
+    for pc in &m.preconditions {
+        // An evaluation ERROR (guard denial, invalid identifier, malformed
+        // SqlBoolean, DB error) is ALWAYS fatal — fail-closed, regardless of
+        // on_unmet. A precondition that cannot be checked must never wave the
+        // migration through.
+        let met = crate::precondition::evaluate(conn, cfg, &pc.check)
+            .await
+            .map_err(|e| ApplyError::PreconditionFailed {
+                version: m.version.as_str().to_string(),
+                which: format!("{:?} could not be evaluated: {e}", pc.check),
+            })?;
+        if met {
+            continue;
+        }
+        match pc.on_unmet {
+            OnUnmet::Halt => {
+                return Err(ApplyError::PreconditionFailed {
+                    version: m.version.as_str().to_string(),
+                    which: format!("{:?} is unmet (OnUnmet::Halt)", pc.check),
+                });
+            }
+            OnUnmet::Skip => {
+                // Record that we will skip, but keep scanning: a LATER Halt check
+                // that is also unmet must still fail-close (Halt dominates Skip).
+                verdict = PreconditionVerdict::Skip;
+            }
+        }
+    }
+    Ok(verdict)
 }
 
 /// The EXPAND/CONTRACT gate (Plan 8 v1.2). A `phase: Contract` online migration
@@ -2216,11 +2358,12 @@ mod order_tests {
             name: "n".into(),
             up: up.clone(),
             down: None,
-            checksum: Checksum::of(&up, None),
+            checksum: Checksum::of(&up, None, &[]),
             flags: MigrationFlags::default(),
             owner_app: "app_test".into(),
             depends_on,
             supersedes: Vec::new(),
+            preconditions: Vec::new(),
         }
     }
 
