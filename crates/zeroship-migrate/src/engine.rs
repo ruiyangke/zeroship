@@ -180,6 +180,17 @@ impl MigrationEngine {
     /// Without a matching hint a drop+add stays two independent ops — the differ
     /// NEVER infers a rename heuristically. An empty slice ⇒ pure P0–P2 behaviour.
     ///
+    /// # A declarative rename is an online, multi-deploy op (C1)
+    ///
+    /// A hinted rename is NOT folded into the linted plain plan: a rename's
+    /// [`ExpandContractPlan`](crate::expand_contract::ExpandContractPlan) carries a
+    /// [`BackfillSpec`](crate::backfill::BackfillSpec) that must run the REAL
+    /// pre-existing-row mirror (see [`run_expand`](Self::run_expand)). Flattening
+    /// it through the plain `plan` → `apply` path would discard the backfill and
+    /// the contract `DROP COLUMN <from>` would then destroy un-mirrored rows. So
+    /// the result keeps the plain migrations and the renames SEPARATE; drive the
+    /// whole thing through [`apply_declarative`](Self::apply_declarative).
+    ///
     /// # Errors
     /// [`DeclarativeError`](crate::declarative::DeclarativeError) if the diff
     /// hits an unsupported op, an unmatched/type-mismatched rename hint, or an
@@ -193,9 +204,88 @@ impl MigrationEngine {
         author: &crate::declarative::DeclarativeAuthor,
         hints: &[crate::declarative::RenameHint],
         cfg: &GuardConfig,
-    ) -> Result<MigrationPlan, crate::declarative::DeclarativeError> {
-        let migrations = author.diff(desired, live, hints)?;
-        Ok(self.plan(&migrations, cfg))
+    ) -> Result<DeclarativeDeployPlan, crate::declarative::DeclarativeError> {
+        let diff = author.diff(desired, live, hints)?;
+        let plain = self.plan(&diff.migrations, cfg);
+        Ok(DeclarativeDeployPlan {
+            plain,
+            renames: diff.renames,
+        })
+    }
+
+    /// Apply a declarative deploy plan as the **online, multi-deploy** operation
+    /// it is (C1 — never flatten a rename).
+    ///
+    /// In one call (deploy N) it:
+    /// 1. applies the **plain** migrations through the existing gated
+    ///    [`apply`](Self::apply) (denial / approval gate + the executor's own
+    ///    guard + least-privilege role); then
+    /// 2. for each rename, drives the **expand** through
+    ///    [`run_expand`](Self::run_expand) — which applies E1 (ADD COLUMN) + E2
+    ///    (dual-write trigger), runs the REAL [`run_backfill`] mirroring every
+    ///    pre-existing `<from>` value into `<to>`, and journals E3 **only after**
+    ///    the backfill succeeds (Plan-8 data-integrity ordering); and
+    /// 3. collects every rename's **contract** (DROP TRIGGER C1 + DROP COLUMN
+    ///    `<from>` C2) into [`DeclarativeDeployOutcome::pending_contract`] —
+    ///    the DEFERRED set to apply in a SUBSEQUENT deploy, AFTER the app's code
+    ///    has switched from `<from>` to `<to>`.
+    ///
+    /// The contract is deliberately NOT applied here: the executor's
+    /// expand/contract gate refuses a contract while its own expand is still
+    /// pending in the same batch, and — more importantly — dropping `<from>`
+    /// before old code stops reading it breaks the rolling fleet. Surfacing the
+    /// contract as `pending_contract` makes the multi-deploy partition explicit.
+    ///
+    /// # Deploy sequence
+    /// ```text
+    /// deploy N    : apply_declarative(plan)  →  plain + EXPAND (backfill runs);
+    ///               returns pending_contract.  Code still uses <from>; <to> is
+    ///               populated + dual-written.
+    /// (code switch): a later app deploy reads/writes <to> only.
+    /// deploy N+1  : engine.apply(plan_of(pending_contract), Approved, …)  →
+    ///               DROP TRIGGER + DROP COLUMN <from>.  Zero data loss: every
+    ///               row's value already lives in <to>.
+    /// ```
+    ///
+    /// `approval` must be [`Approval::Approved`] when the plain plan is gated OR
+    /// any rename is present (the expand's backfill mutates data). The
+    /// `pending_contract` set is itself gated (`requires_approval`, and C2 is
+    /// `destructive`), so applying it later also needs approval.
+    ///
+    /// # Errors
+    /// - [`DeclarativeApplyError::Plain`] — the gated plain `apply` failed
+    ///   (denial, missing approval, or an executor failure). No expand ran.
+    /// - [`DeclarativeApplyError::Expand`] — a rename's expand/backfill failed.
+    ///   The plain migrations + any earlier renames are already applied; the
+    ///   backfill is resumable on a re-run.
+    pub async fn apply_declarative(
+        &self,
+        plan: &DeclarativeDeployPlan,
+        approval: Approval,
+        conn: &Client,
+        exec_cfg: &ExecutorConfig,
+        applied_by: &str,
+    ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
+        // 1. The plain additive / destructive set, through the existing gate.
+        let mut applied = self.apply(&plan.plain, approval, conn, exec_cfg, applied_by).await?;
+
+        // 2. Each rename's EXPAND, through run_expand (real backfill; E3 journaled
+        //    after). 3. Collect the contract as the deferred set.
+        let mut pending_contract: Vec<Migration> = Vec::new();
+        for rename in &plan.renames {
+            let outcome = self
+                .run_expand(rename, approval, conn, exec_cfg, applied_by)
+                .await?;
+            applied.applied.extend(outcome.applied);
+            applied.skipped.extend(outcome.skipped);
+            applied.recovered.extend(outcome.recovered);
+            pending_contract.extend(rename.contract.iter().cloned());
+        }
+
+        Ok(DeclarativeDeployOutcome {
+            applied,
+            pending_contract,
+        })
     }
 
     /// Apply a plan through the gate (design §1.6).
@@ -351,6 +441,53 @@ impl MigrationEngine {
         outcome.recovered.extend(e3_outcome.recovered);
         Ok(outcome)
     }
+}
+
+/// The structured result of [`MigrationEngine::plan_declarative`].
+///
+/// It holds the linted **plain** plan plus the online **renames**, kept SEPARATE
+/// (C1: a rename is a multi-deploy op and must not be flattened into the plain
+/// set).
+#[derive(Debug, Clone)]
+pub struct DeclarativeDeployPlan {
+    /// The plain additive / destructive migrations, already linted by the guard
+    /// (denial / destructive / approval summary), ready for the gated
+    /// [`apply`](MigrationEngine::apply).
+    pub plain: MigrationPlan,
+    /// The online renames, each a full
+    /// [`ExpandContractPlan`](crate::expand_contract::ExpandContractPlan)
+    /// (expand migs + `BackfillSpec` + contract migs). Driven through
+    /// [`run_expand`](MigrationEngine::run_expand), NOT the plain `apply`.
+    pub renames: Vec<crate::expand_contract::ExpandContractPlan>,
+}
+
+/// The result of
+/// [`MigrationEngine::apply_declarative`](MigrationEngine::apply_declarative).
+#[derive(Debug, Clone)]
+pub struct DeclarativeDeployOutcome {
+    /// The combined apply outcome for the plain set + every rename's EXPAND
+    /// (E1/E2 + the journaled E3 marker, after the real backfill).
+    pub applied: ApplyOutcome,
+    /// The DEFERRED contract migrations (per rename: DROP TRIGGER C1 + DROP
+    /// COLUMN `<from>` C2), to be applied in a SUBSEQUENT deploy via the normal
+    /// gated [`apply`](MigrationEngine::apply) AFTER app code switches to `<to>`.
+    /// Empty when the deploy had no renames. These are gated
+    /// (`requires_approval`; C2 is `destructive`).
+    pub pending_contract: Vec<Migration>,
+}
+
+/// A failure from
+/// [`MigrationEngine::apply_declarative`](MigrationEngine::apply_declarative).
+#[derive(Debug, thiserror::Error)]
+pub enum DeclarativeApplyError {
+    /// Applying the gated plain set failed (guard denial, missing approval, or an
+    /// executor failure). No rename expand ran.
+    #[error(transparent)]
+    Plain(#[from] EngineError),
+    /// A rename's expand / backfill failed. Earlier work (the plain set + any
+    /// prior rename's expand) is already applied; the backfill is resumable.
+    #[error(transparent)]
+    Expand(#[from] OnlineError),
 }
 
 /// A failure from [`MigrationEngine::run_expand`].

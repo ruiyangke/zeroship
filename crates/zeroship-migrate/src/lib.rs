@@ -91,11 +91,11 @@ pub use author::{
 pub use classify::{classify, DdlKind, ParseError, StatementClass};
 pub use declarative::{
     desired_snapshot, dsl_to_pg_data_type, CollectionDescriptor, DeclarativeAuthor,
-    DeclarativeError, FieldDescriptor, IndexDescriptor, RenameHint,
+    DeclarativeError, DeclarativePlan, FieldDescriptor, IndexDescriptor, RenameHint,
 };
 pub use engine::{
-    EngineError, MigrationEngine, MigrationPlan, OnlineError, PlannedMigration,
-    RollbackEngineError,
+    DeclarativeApplyError, DeclarativeDeployOutcome, DeclarativeDeployPlan, EngineError,
+    MigrationEngine, MigrationPlan, OnlineError, PlannedMigration, RollbackEngineError,
 };
 pub use expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,

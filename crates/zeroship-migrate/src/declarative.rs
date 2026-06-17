@@ -42,7 +42,9 @@ use serde::Deserialize;
 use crate::drift::{
     ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot,
 };
-use crate::expand_contract::{ExpandContractAuthor, ExpandContractError, OnlineIntent};
+use crate::expand_contract::{
+    ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
+};
 use crate::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 
 /// Quote a Postgres identifier (double embedded quotes, wrap in `"`). Mirrors
@@ -501,6 +503,72 @@ pub enum DeclarativeError {
 }
 
 // ---------------------------------------------------------------------------
+// The structured diff result.
+// ---------------------------------------------------------------------------
+
+/// The **structured** result of [`DeclarativeAuthor::diff`].
+///
+/// It carries the plain (additive / destructive) migrations PLUS the online
+/// renames, each kept as its full [`ExpandContractPlan`] and NOT flattened into
+/// the plain set.
+///
+/// # Why a declarative rename must NOT be flattened (C1 — data loss)
+///
+/// A column rename is an **online, multi-deploy** operation, not a single
+/// statement. Its [`ExpandContractPlan`] is more than a list of `Migration`s: it
+/// also carries the [`BackfillSpec`](crate::backfill::BackfillSpec) that mirrors
+/// **pre-existing** rows from `<from>` into `<to>`. E3's `up` is only a `SELECT 1`
+/// marker — the actual data copy is [`run_backfill`](crate::backfill::run_backfill),
+/// driven exclusively by [`run_expand`](crate::engine::MigrationEngine::run_expand).
+///
+/// If the rename were flattened into the plain migration set (`out.extend(plan.all())`)
+/// and pushed through `plan` → `executor::apply`, the backfill would NEVER run:
+/// E3's marker journals as "done" without the rows ever being copied, and the
+/// contract `DROP COLUMN <from>` then destroys the originals → **data loss**.
+/// (A flat batch is also dead-on-arrival: the executor's expand/contract gate
+/// refuses the contract while its own expand is still pending.)
+///
+/// So the differ keeps renames structured. The caller drives them through
+/// [`MigrationEngine::apply_declarative`](crate::engine::MigrationEngine::apply_declarative),
+/// which runs the REAL backfill and surfaces the contract as a DEFERRED set for a
+/// later deploy.
+#[derive(Debug, Clone, Default)]
+pub struct DeclarativePlan {
+    /// The plain additive / destructive migrations (CREATE TABLE, ADD/DROP
+    /// COLUMN, indexes, FKs, type / nullability changes). A rename's `<from>` is
+    /// EXCLUDED from the destructive drop pass (its drop is the deferred contract)
+    /// and its `<to>` is EXCLUDED from the additive add pass (the expand adds it).
+    pub migrations: Vec<Migration>,
+    /// The online renames, each as a full [`ExpandContractPlan`] (expand migs +
+    /// `BackfillSpec` + contract migs). NEVER flattened into `migrations`.
+    pub renames: Vec<ExpandContractPlan>,
+}
+
+impl DeclarativePlan {
+    /// True if the plan reconciles nothing — no plain migrations AND no renames.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.migrations.is_empty() && self.renames.is_empty()
+    }
+
+    /// All migrations the plan would ultimately apply, flattened (plain set +
+    /// every rename's expand-then-contract migrations) — for **inspection /
+    /// preview only** (lint, counting, SQL-shape assertions). This is NOT an
+    /// apply order: a rename's expand and contract belong to DIFFERENT deploys,
+    /// and the backfill between them is not a `Migration`. Use
+    /// [`apply_declarative`](crate::engine::MigrationEngine::apply_declarative)
+    /// to apply.
+    #[must_use]
+    pub fn all_migrations(&self) -> Vec<Migration> {
+        let mut all = self.migrations.clone();
+        for r in &self.renames {
+            all.extend(r.all());
+        }
+        all
+    }
+}
+
+// ---------------------------------------------------------------------------
 // P1/P2 — the declarative differ.
 // ---------------------------------------------------------------------------
 
@@ -622,7 +690,7 @@ impl DeclarativeAuthor {
         desired: &SchemaSnapshot,
         live: &SchemaSnapshot,
         hints: &[RenameHint],
-    ) -> Result<Vec<Migration>, DeclarativeError> {
+    ) -> Result<DeclarativePlan, DeclarativeError> {
         // Author-boundary validation: every desired table/column/index name and
         // every column data_type must be safe BEFORE we render any SQL.
         Self::validate_desired(desired)?;
@@ -636,6 +704,11 @@ impl DeclarativeAuthor {
         let resolved = Self::resolve_rename_hints(desired, live, hints)?;
 
         let mut out: Vec<Migration> = Vec::new();
+        // The online renames, carried as their full ExpandContractPlan (expand
+        // migs + BackfillSpec + contract migs) — NOT flattened into `out` (C1).
+        // Flattening would discard the BackfillSpec, so the pre-existing-row
+        // mirror never runs and the contract DROP COLUMN <from> destroys data.
+        let mut renames: Vec<ExpandContractPlan> = Vec::new();
 
         // --- New tables (in desired, not in live), in FK-dependency order. ---
         let new_tables: Vec<&String> = desired
@@ -743,9 +816,14 @@ impl DeclarativeAuthor {
             let renamed_to: std::collections::BTreeSet<&str> =
                 table_renames.iter().map(|r| r.to.as_str()).collect();
 
-            // Emit the expand-contract rename sequences (E1..E3, C1, C2). They
-            // carry their own online/gated flags; the destructive contract DROP is
-            // gated exactly like a bare drop would be.
+            // Author the expand-contract rename sequences (E1..E3, C1, C2) and
+            // carry them STRUCTURED — do NOT flatten into `out` (C1: that would
+            // discard the BackfillSpec, so the real pre-existing-row mirror never
+            // runs and the contract DROP destroys data). The caller drives each
+            // expand through `run_expand` (which runs the real backfill) and
+            // defers the contract to a subsequent deploy. The `from`/`to` columns
+            // are excluded from the plain drop/add passes below so they are not
+            // double-handled.
             let ec = ExpandContractAuthor::new(&self.project_schema, &self.owner_app);
             for r in &table_renames {
                 let plan = ec.author(&OnlineIntent::RenameColumn {
@@ -754,7 +832,7 @@ impl DeclarativeAuthor {
                     to: r.to.clone(),
                     ty: ddl_type(&r.ty).to_string(),
                 })?;
-                out.extend(plan.all());
+                renames.push(plan);
             }
 
             // ADD COLUMN: in desired, not in live (skip a rename's `to` column —
@@ -875,9 +953,15 @@ impl DeclarativeAuthor {
         }
 
         // Total order by UUIDv7 version (stable; the executor topo-sorts on
-        // depends_on within it).
+        // depends_on within it). Only the PLAIN migrations are ordered here; each
+        // rename keeps its own internal expand→contract ordering and is applied
+        // through the dedicated multi-deploy path, not interleaved with the plain
+        // set.
         out.sort_by(|a, b| a.version.cmp(&b.version));
-        Ok(out)
+        Ok(DeclarativePlan {
+            migrations: out,
+            renames,
+        })
     }
 
     /// Validate every desired table/column/index name + column `data_type` at the
