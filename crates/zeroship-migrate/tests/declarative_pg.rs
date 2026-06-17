@@ -3196,3 +3196,93 @@ async fn add_column_with_immutable_default_is_additive_not_destructive() {
 
     teardown(&conn, &cfg).await;
 }
+
+// ---------------------------------------------------------------------------
+// Phase-1 parity #5 — system-field id-fold + idPrefix validation.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn re_declaring_id_with_prefix_folds_into_the_system_pk_no_second_column() {
+    // #5: a `{ type: "id", idPrefix }` field is a PREFIX declaration for the
+    // system `id` PK, NOT a second column. It must FOLD — the table has exactly
+    // ONE `id` column (the system TEXT PRIMARY KEY) and round-trips clean. RED
+    // pre-fix: the field loop pushed a SECOND `id` column (duplicate column +
+    // bogus PK), which fails to apply / phantom-drifts.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let desc = CollectionDescriptor {
+        name: "posts".into(),
+        owner_app: "app_test".into(),
+        fields: vec![
+            FieldDescriptor { name: "id".into(), ty: "id".into(), id_prefix: Some("post".into()), ..Default::default() },
+            FieldDescriptor { name: "title".into(), ty: "string".into(), ..Default::default() },
+        ],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("id-fold");
+    // Exactly ONE `id` column (the system PK), not two.
+    let id_cols = desired.snapshot.tables["posts"].columns.iter().filter(|c| c.name == "id").count();
+    assert_eq!(id_cols, 1, "id must fold into the single system PK column, not duplicate");
+    let id_col = desired.snapshot.tables["posts"].columns.iter().find(|c| c.name == "id").unwrap();
+    assert_eq!(id_col.data_type, "text", "the system id is TEXT");
+    assert!(!id_col.nullable, "the system id is NOT NULL (PK)");
+
+    apply_and_assert_clean_roundtrip(&engine, &author, &cfg, &conn, &desired).await;
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn reserved_id_prefix_usr_is_rejected() {
+    // #5: the platform-reserved `usr` prefix is rejected (it would mint ids
+    // colliding with platform user ids).
+    let cfg = cfg_for(&token());
+    let desc = CollectionDescriptor {
+        name: "t".into(),
+        owner_app: "app_test".into(),
+        fields: vec![FieldDescriptor { name: "id".into(), ty: "id".into(), id_prefix: Some("usr".into()), ..Default::default() }],
+        indexes: vec![],
+    };
+    let err = desired_snapshot(&cfg.project_schema, &[desc]).unwrap_err();
+    assert!(
+        matches!(err, DeclarativeError::Invalid(ref m) if m.contains("reserved")),
+        "got {err:?}"
+    );
+}
+
+#[compio::test]
+async fn malformed_id_prefix_is_rejected() {
+    // #5: an idPrefix not matching ^[a-z][a-z0-9_]*$ is rejected at the boundary.
+    let cfg = cfg_for(&token());
+    for bad in ["Post", "1post", "po-st", "post!"] {
+        let desc = CollectionDescriptor {
+            name: "t".into(),
+            owner_app: "app_test".into(),
+            fields: vec![FieldDescriptor { name: "id".into(), ty: "id".into(), id_prefix: Some(bad.into()), ..Default::default() }],
+            indexes: vec![],
+        };
+        let err = desired_snapshot(&cfg.project_schema, &[desc]).unwrap_err();
+        assert!(matches!(err, DeclarativeError::Invalid(_)), "prefix {bad:?} must be rejected, got {err:?}");
+    }
+}
+
+#[compio::test]
+async fn field_named_id_with_non_id_type_is_rejected() {
+    // #5: a field NAMED `id` but typed something other than `id` is rejected —
+    // `id` is reserved for the platform PK, never a creator-typed column.
+    let cfg = cfg_for(&token());
+    let desc = CollectionDescriptor {
+        name: "t".into(),
+        owner_app: "app_test".into(),
+        fields: vec![FieldDescriptor { name: "id".into(), ty: "number".into(), ..Default::default() }],
+        indexes: vec![],
+    };
+    let err = desired_snapshot(&cfg.project_schema, &[desc]).unwrap_err();
+    assert!(matches!(err, DeclarativeError::Invalid(_)), "got {err:?}");
+}

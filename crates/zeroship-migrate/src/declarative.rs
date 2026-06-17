@@ -124,6 +124,13 @@ pub struct FieldDescriptor {
     /// `query.rs:2200`.
     #[serde(rename = "enum", default)]
     pub enum_values: Option<Vec<serde_json::Value>>,
+    /// For a `{ type: "id", idPrefix }` field (#5), the declared typed-id prefix
+    /// (`idPrefix` on the wire `FieldDef`). A re-declaration of the system `id` PK
+    /// — it FOLDS into the existing `id TEXT PRIMARY KEY` (NOT a second column),
+    /// and the prefix is validated (mirrors plugin-db `query.rs:648-653` +
+    /// `validate_id_prefix`).
+    #[serde(rename = "idPrefix", default)]
+    pub id_prefix: Option<String>,
 }
 
 /// One declared index of a collection (the `_indexes` array entry).
@@ -573,6 +580,27 @@ pub fn desired_snapshot(
         });
 
         for f in &d.fields {
+            // #5 id-fold: `id: t.id("prefix")` is a PREFIX DECLARATION for the
+            // system `id` PK column already injected by `system_field_columns`,
+            // NOT a second column. FOLD it: validate the declared prefix (defense
+            // in depth — mirrors plugin-db `query.rs:648-653` + `validate_id_prefix`)
+            // and SKIP it, so we neither duplicate the `id` column nor emit a
+            // bogus second PK. A field NAMED `id` with any OTHER type is rejected
+            // by the field-name fence below (an `id` column may only be the
+            // system PK).
+            if f.name == "id" {
+                if f.ty == "id" {
+                    if let Some(prefix) = &f.id_prefix {
+                        validate_id_prefix(prefix)?;
+                    }
+                    continue;
+                }
+                return Err(DeclarativeError::Invalid(format!(
+                    "field 'id' is reserved for the platform system primary key; a \
+                     re-declaration must be `t.id(prefix?)` (type 'id'), not '{}'",
+                    f.ty
+                )));
+            }
             // #3 literal: the column's primitive type is derived from the
             // `literalValue` (text/numeric/boolean), NOT a bare-token lookup —
             // mirrors plugin-db's `def_to_pg_type` literal arm. A `literal` field
@@ -745,6 +773,36 @@ fn unique_index_name(table: &str, field: &str) -> String {
 /// `fk_constraint_name`).
 fn fk_constraint_name(field: &str) -> String {
     format!("{field}_fkey")
+}
+
+/// Typed-id prefixes reserved for the platform (#5). A creator-declared
+/// `t.id("usr")` would mint ids colliding with platform user ids
+/// (`crates/core/src/typed_id.rs`), so it is rejected — mirrors plugin-db's
+/// `RESERVED_ID_PREFIXES` (`query.rs:432`) and the SDK fence.
+const RESERVED_ID_PREFIXES: &[&str] = &["usr"];
+
+/// Validate a creator-declared typed-id prefix (`t.id("blog")`, #5).
+///
+/// Defense-in-depth mirror of plugin-db's `validate_id_prefix`
+/// (`query.rs:447`): the SDK throws at build time, but a hand-built wire payload
+/// skips the SDK, so the engine re-validates at the author boundary. Rules:
+/// `^[a-z][a-z0-9_]*$`, and not a [`RESERVED_ID_PREFIXES`] entry.
+fn validate_id_prefix(prefix: &str) -> Result<(), DeclarativeError> {
+    let valid = prefix.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+        && prefix
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !valid {
+        return Err(DeclarativeError::Invalid(format!(
+            "t.id(prefix): prefix must match ^[a-z][a-z0-9_]*$ (got '{prefix}')"
+        )));
+    }
+    if RESERVED_ID_PREFIXES.contains(&prefix) {
+        return Err(DeclarativeError::Invalid(format!(
+            "t.id(prefix): '{prefix}' is reserved for platform ids; choose a different prefix"
+        )));
+    }
+    Ok(())
 }
 
 /// Normalise a DSL FK action token to the SQL keyword Postgres reports.
