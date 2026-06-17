@@ -201,7 +201,7 @@ impl DeterministicAuthor {
 
     /// Build a [`Migration`] from already-rendered `up`/`down` SQL + flags.
     fn make(&self, name: &str, up: String, down: Option<String>, flags: MigrationFlags) -> Migration {
-        let checksum = Checksum::of(&up, down.as_deref());
+        let checksum = Checksum::of(&up, down.as_deref(), &[]);
         Migration {
             version: MigrationId::generate(),
             name: name.to_string(),
@@ -212,6 +212,7 @@ impl DeterministicAuthor {
             owner_app: self.owner_app.clone(),
             depends_on: Vec::new(),
             supersedes: Vec::new(),
+            preconditions: Vec::new(),
         }
     }
 }
@@ -390,7 +391,7 @@ impl RawSqlAuthor {
                 ..MigrationFlags::default()
             },
         };
-        let checksum = Checksum::of(up, down);
+        let checksum = Checksum::of(up, down, &[]);
         Ok(Migration {
             version: MigrationId::generate(),
             name: name.to_string(),
@@ -401,6 +402,7 @@ impl RawSqlAuthor {
             owner_app: self.owner_app.clone(),
             depends_on: Vec::new(),
             supersedes: Vec::new(),
+            preconditions: Vec::new(),
         })
     }
 }
@@ -451,7 +453,7 @@ mod tests {
             Some("DROP TABLE \"proj_acme\".\"orders\"")
         );
         // Checksum matches the emitted SQL.
-        assert_eq!(m.checksum, Checksum::of(&m.up, m.down.as_deref()));
+        assert_eq!(m.checksum, Checksum::of(&m.up, m.down.as_deref(), &[]));
     }
 
     #[test]
@@ -601,7 +603,7 @@ mod tests {
         assert!(!m.flags.destructive);
         assert!(!m.flags.requires_approval);
         assert!(m.flags.transactional);
-        assert_eq!(m.checksum, Checksum::of(&m.up, None));
+        assert_eq!(m.checksum, Checksum::of(&m.up, None, &[]));
     }
 
     #[test]

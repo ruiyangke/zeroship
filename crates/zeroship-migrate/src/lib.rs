@@ -72,6 +72,7 @@ pub mod executor;
 pub mod guard;
 pub mod journal;
 pub mod migration;
+pub mod precondition;
 pub mod role;
 pub mod shadow;
 pub mod squash;
@@ -124,6 +125,10 @@ pub use squash::{squash, SquashError, SquashOutcome};
 pub use status::{history, status, MigrationStatus, StatusError};
 pub use migration::{
     Checksum, IdError, Migration, MigrationFlags, MigrationId, OnlinePhase, MIGRATION_PREFIX,
+};
+pub use precondition::{
+    evaluate as evaluate_precondition, CmpOp, OnUnmet, Precondition, PreconditionCheck,
+    PreconditionError,
 };
 pub use role::{deprovision_migrator, migrator_role_name, provision_migrator, RoleError};
 pub use shadow::{

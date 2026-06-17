@@ -915,7 +915,7 @@ impl DeclarativeAuthor {
         flags: MigrationFlags,
         depends_on: Vec<MigrationId>,
     ) -> Migration {
-        let checksum = Checksum::of(&up, down.as_deref());
+        let checksum = Checksum::of(&up, down.as_deref(), &[]);
         Migration {
             version: MigrationId::generate(),
             name: name.to_string(),
@@ -926,6 +926,7 @@ impl DeclarativeAuthor {
             owner_app: self.owner_app.clone(),
             depends_on,
             supersedes: Vec::new(),
+            preconditions: Vec::new(),
         }
     }
 
@@ -2047,11 +2048,12 @@ mod advisory_seam_tests {
             name: "t".into(),
             up: up.to_string(),
             down: None,
-            checksum: Checksum::of(up, None),
+            checksum: Checksum::of(up, None, &[]),
             flags: MigrationFlags::default(),
             owner_app: "app_acme".into(),
             depends_on: Vec::new(),
             supersedes: Vec::new(),
+            preconditions: Vec::new(),
         }
     }
 

@@ -8,6 +8,8 @@
 use sha2::{Digest, Sha256};
 use zeroship_core::typed_id;
 
+use crate::precondition::PreconditionCheck;
+
 /// Typed-id prefix for migration versions (`mig_<base62 uuidv7>`).
 ///
 /// Three chars to match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape every
@@ -161,19 +163,28 @@ impl Default for MigrationFlags {
     }
 }
 
-/// Tamper-evident checksum over a migration's `up` (and optional `down`) SQL.
+/// Tamper-evident checksum over a migration's `up`, optional `down`, and its
+/// **preconditions**.
 ///
 /// Hex-encoded SHA-256. A mismatch on an already-applied migration is a hard
 /// error (design §1.5 / §2.3 drift check). The input is **length-prefixed** so
 /// `down: Some("")` and `down: None` produce *different* checksums (an empty
 /// reversible down is not the same migration as an irreversible one).
+///
+/// Preconditions are folded into the checksum because they are part of the
+/// migration's identity (v3 Plan D): two migrations with the same SQL but
+/// different gating conditions are NOT the same migration — changing a
+/// precondition on an already-applied migration is drift, exactly like changing
+/// its SQL. Each precondition is serialized to a canonical JSON form and
+/// length-prefixed, so the precondition list contributes deterministically and
+/// no concatenation collision is possible.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Checksum(String);
 
 impl Checksum {
-    /// Compute the checksum of `(up, down)`.
+    /// Compute the checksum of `(up, down, preconditions)`.
     #[must_use]
-    pub fn of(up: &str, down: Option<&str>) -> Self {
+    pub fn of(up: &str, down: Option<&str>, preconditions: &[PreconditionCheck]) -> Self {
         let mut hasher = Sha256::new();
         // Length-prefix every field with a fixed-width big-endian u64 so no
         // concatenation collision is possible (e.g. up="ab",down="c" vs
@@ -190,6 +201,21 @@ impl Checksum {
                 // Irreversibility sentinel: a length no real string can take.
                 hasher.update(u64::MAX.to_be_bytes());
             }
+        }
+        // Preconditions: count, then each canonical-JSON-serialized + length
+        // -prefixed. An empty list (the common case) folds in a 0 count and
+        // contributes nothing else, so it leaves existing checksums of
+        // precondition-free migrations stable in shape — except that the count
+        // word still changes the hash vs the old two-arg form (intended: the
+        // checksum's domain changed, and pre-launch there are no persisted
+        // checksums to preserve).
+        hasher.update((preconditions.len() as u64).to_be_bytes());
+        for pc in preconditions {
+            // serde_json over the value types is deterministic for these enums
+            // (no maps), so the canonical bytes are stable across runs.
+            let json = serde_json::to_string(pc).unwrap_or_default();
+            hasher.update((json.len() as u64).to_be_bytes());
+            hasher.update(json.as_bytes());
         }
         Self(hex::encode(hasher.finalize()))
     }
@@ -235,6 +261,18 @@ pub struct Migration {
     /// the squash is recorded WITHOUT running `S.up` (see [`crate::squash`]).
     #[serde(default)]
     pub supersedes: Vec<MigrationId>,
+    /// Optional **preconditions** (v3 Plan D): assertions evaluated against the
+    /// live DB BEFORE this migration's `up` runs, gating whether it applies.
+    /// Empty (the default) = unconditional apply. Each [`PreconditionCheck`]
+    /// carries an assertion ([`Precondition`](crate::precondition::Precondition))
+    /// and an unmet policy ([`OnUnmet`](crate::precondition::OnUnmet)): `Halt`
+    /// (fail-closed — abort the apply, nothing applied) or `Skip` (leave this
+    /// migration pending, re-evaluate next deploy). Folded into [`checksum`] so a
+    /// precondition change is drift, exactly like an SQL change.
+    ///
+    /// [`checksum`]: Migration::checksum
+    #[serde(default)]
+    pub preconditions: Vec<PreconditionCheck>,
 }
 
 #[cfg(test)]
@@ -283,22 +321,50 @@ mod tests {
 
     #[test]
     fn checksum_is_deterministic_and_sensitive() {
-        let base = Checksum::of("CREATE TABLE t()", Some("DROP TABLE t"));
+        use crate::precondition::{Precondition, PreconditionCheck};
+        let base = Checksum::of("CREATE TABLE t()", Some("DROP TABLE t"), &[]);
         // Deterministic.
-        assert_eq!(base, Checksum::of("CREATE TABLE t()", Some("DROP TABLE t")));
+        assert_eq!(base, Checksum::of("CREATE TABLE t()", Some("DROP TABLE t"), &[]));
         // Sensitive to `up`.
-        assert_ne!(base, Checksum::of("CREATE TABLE u()", Some("DROP TABLE t")));
+        assert_ne!(base, Checksum::of("CREATE TABLE u()", Some("DROP TABLE t"), &[]));
         // Sensitive to `down`.
-        assert_ne!(base, Checksum::of("CREATE TABLE t()", Some("DROP TABLE u")));
+        assert_ne!(base, Checksum::of("CREATE TABLE t()", Some("DROP TABLE u"), &[]));
         // `Some("")` differs from `None` (empty down != irreversible).
         assert_ne!(
-            Checksum::of("CREATE TABLE t()", Some("")),
-            Checksum::of("CREATE TABLE t()", None)
+            Checksum::of("CREATE TABLE t()", Some(""), &[]),
+            Checksum::of("CREATE TABLE t()", None, &[])
         );
         // And no concatenation collision: up="ab",down="c" != up="a",down="bc".
         assert_ne!(
-            Checksum::of("ab", Some("c")),
-            Checksum::of("a", Some("bc"))
+            Checksum::of("ab", Some("c"), &[]),
+            Checksum::of("a", Some("bc"), &[])
+        );
+        // Sensitive to PRECONDITIONS: same SQL, different gating condition =>
+        // different checksum (preconditions are part of the migration identity).
+        let pre = [PreconditionCheck::halt(Precondition::TableExists {
+            table: "users".to_string(),
+        })];
+        assert_ne!(base, Checksum::of("CREATE TABLE t()", Some("DROP TABLE t"), &pre));
+        // Deterministic with preconditions.
+        assert_eq!(
+            Checksum::of("CREATE TABLE t()", Some("DROP TABLE t"), &pre),
+            Checksum::of("CREATE TABLE t()", Some("DROP TABLE t"), &pre)
+        );
+        // A DIFFERENT precondition => a different checksum.
+        let pre2 = [PreconditionCheck::halt(Precondition::TableNotExists {
+            table: "users".to_string(),
+        })];
+        assert_ne!(
+            Checksum::of("CREATE TABLE t()", Some("DROP TABLE t"), &pre),
+            Checksum::of("CREATE TABLE t()", Some("DROP TABLE t"), &pre2)
+        );
+        // A different unmet policy on the SAME check => a different checksum.
+        let pre_skip = [PreconditionCheck::skip(Precondition::TableExists {
+            table: "users".to_string(),
+        })];
+        assert_ne!(
+            Checksum::of("CREATE TABLE t()", Some("DROP TABLE t"), &pre),
+            Checksum::of("CREATE TABLE t()", Some("DROP TABLE t"), &pre_skip)
         );
         // Hex sha256 = 64 chars.
         assert_eq!(base.as_str().len(), 64);

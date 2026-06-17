@@ -74,11 +74,12 @@ fn mig(version: MigrationId, name: &str, up: &str) -> Migration {
         name: name.to_string(),
         up: up.to_string(),
         down: None,
-        checksum: Checksum::of(up, None),
+        checksum: Checksum::of(up, None, &[]),
         flags: MigrationFlags::default(),
         owner_app: "app_test".to_string(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
+        preconditions: Vec::new(),
     }
 }
 
@@ -229,11 +230,12 @@ async fn checksum_drift_reads_latest_completed_checksum_across_reapply() {
         name: "t1".into(),
         up: up_a.clone(),
         down: Some(down_a.clone()),
-        checksum: Checksum::of(&up_a, Some(&down_a)),
+        checksum: Checksum::of(&up_a, Some(&down_a), &[]),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
+        preconditions: Vec::new(),
     };
     let cs_a = mig_a.checksum.as_str().to_string();
 
@@ -245,11 +247,12 @@ async fn checksum_drift_reads_latest_completed_checksum_across_reapply() {
         name: "t1".into(),
         up: up_b.clone(),
         down: Some(down_b.clone()),
-        checksum: Checksum::of(&up_b, Some(&down_b)),
+        checksum: Checksum::of(&up_b, Some(&down_b), &[]),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
+        preconditions: Vec::new(),
     };
     let cs_b = mig_b.checksum.as_str().to_string();
     assert_ne!(cs_a, cs_b, "upA and upB must have distinct checksums");
