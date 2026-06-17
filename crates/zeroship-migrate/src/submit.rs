@@ -586,6 +586,27 @@ async fn submit_locked(
         applied_by,
     )
     .await?;
+    // LOW-2 — the shadow's teardown signal (the H2 immediate-sweep hint) is a
+    // SEPARATE operational signal from `report.ok` (a migration's correctness is
+    // independent of teardown hygiene). Previously discarded; now surfaced. A failed
+    // teardown means a shadow DB and/or a cluster-global role may have leaked.
+    //
+    // We surface it as a `warn` rather than reaping here directly: an immediate
+    // `sweep_leaked_shadows(prefix, ZERO)` would match `<prefix>%` and could DROP a
+    // CONCURRENT sibling submission's still-in-use shadow (in prod the prefix is
+    // shared across a project's submissions). The age-gated reap is the control
+    // plane's job (the periodic sweep, or an operator-driven one with a safe
+    // `older_than`); the adapter's responsibility is to make the leak observable.
+    // This does not change the submission verdict (read from `report.ok` below).
+    if !report.teardown_ok {
+        tracing::warn!(
+            project = %cfg.project_id,
+            shadow_prefix = %shadow_cfg.db_name_prefix,
+            error = report.teardown_error.as_deref().unwrap_or("unknown"),
+            "zeroship-migrate: shadow DB/role teardown failed during submit — a shadow may \
+             have leaked; the periodic sweep_leaked_shadows will reap it (LOW-2/H2)"
+        );
+    }
     if !report.ok {
         // Surface the offending migration's error from the per-migration report.
         let error = report
