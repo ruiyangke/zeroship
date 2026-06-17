@@ -1387,6 +1387,96 @@ async fn non_owner_using_a_foreign_table_unchanged_is_a_noop_not_refused() {
     teardown(&conn, &cfg).await;
 }
 
+// ---------------------------------------------------------------------------
+// P4 Feature 3 — cross-app FK ordering.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn cross_app_fk_to_a_union_table_orders_and_applies_clean() {
+    // P4 cross-app FK: app_a owns `authors`; app_b declares
+    // `books(author_id REFERENCES authors)`. With authors already live, app_b's
+    // deploy creates books with the FK pointing at a_app's table — the deferred-FK
+    // + depends_on (P1) machinery orders it and it applies clean.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let engine = MigrationEngine::new();
+
+    // app_a creates authors (deploy 1).
+    let authors = || CollectionDescriptor {
+        name: "authors".into(),
+        owner_app: "app_a".into(),
+        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let union_v1 = desired_snapshot(&cfg.project_schema, &[authors()]).expect("union v1");
+    apply_plan(&engine, &union_v1, &SchemaSnapshot::default(), &author_app(&cfg, "app_a"), &cfg, &conn, Approval::None)
+        .await
+        .expect("app_a creates authors");
+
+    // app_b declares books with a cross-app FK → authors (owned by app_a, live).
+    let books = CollectionDescriptor {
+        name: "books".into(),
+        owner_app: "app_b".into(),
+        fields: vec![
+            FieldDescriptor { name: "title".into(), ty: "string".into(), required: false, unique: false, references: None },
+            FieldDescriptor { name: "author".into(), ty: "ref".into(), required: false, unique: false, references: Some("authors".into()) },
+        ],
+        indexes: vec![],
+    };
+    let union_v2 = desired_snapshot(&cfg.project_schema, &[authors(), books]).expect("union v2");
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+
+    // app_b's deploy: authors is live+unchanged (no op, no owner violation), books
+    // is new with a cross-app FK. Plan + apply must succeed.
+    let plan = engine
+        .plan_declarative(&union_v2, &live, &author_app(&cfg, "app_b"), &[], &guard_cfg(&cfg))
+        .expect("cross-app FK to a union/live table plans clean");
+    engine.apply(&plan.plain, Approval::None, &conn, &cfg, "app_b").await.expect("apply books with cross-app FK");
+
+    // The whole union re-diffs clean (FK constraint materialised, byte-equal).
+    let live2 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
+    let drift = diff_snapshots(&union_v2.snapshot, &live2);
+    assert!(drift.missing_objects.is_empty(), "missing after cross-app FK: {:?}", drift.missing_objects);
+    let fk_present = live2.tables["books"].constraints.iter().any(|c| c.kind == "FOREIGN KEY");
+    assert!(fk_present, "books must carry the cross-app FK to authors");
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn cross_app_fk_to_a_table_no_app_declares_is_a_clear_error() {
+    // P4 cross-app FK: a `ref` whose target table is declared by NO member app and
+    // is not live is a CLEAR error (CrossAppFkTargetMissing), surfaced before any
+    // SQL renders — not a bad-SQL failure at apply.
+    let cfg = cfg_for(&token());
+    let books = CollectionDescriptor {
+        name: "books".into(),
+        owner_app: "app_b".into(),
+        fields: vec![FieldDescriptor {
+            name: "author".into(),
+            ty: "ref".into(),
+            required: false,
+            unique: false,
+            references: Some("ghosts".into()), // no app declares `ghosts`
+        }],
+        indexes: vec![],
+    };
+    let union = desired_snapshot(&cfg.project_schema, &[books]).expect("union builds");
+    let live = SchemaSnapshot::default();
+    let err = author_app(&cfg, "app_b").diff(&union, &live, &[]).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DeclarativeError::CrossAppFkTargetMissing { ref table, ref target }
+                if table == "books" && target == "ghosts"
+        ),
+        "got {err:?}"
+    );
+}
+
 
 #[compio::test]
 async fn malicious_ref_target_is_rejected_at_author_boundary() {
