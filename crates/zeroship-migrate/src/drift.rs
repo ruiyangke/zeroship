@@ -177,6 +177,13 @@ pub struct IndexSnapshot {
     pub name: String,
     /// `true` if it enforces uniqueness.
     pub unique: bool,
+    /// The KEY columns the index covers, in index order (the leading
+    /// `indnkeyatts` attributes — INCLUDE columns and expression keys are
+    /// excluded). Introspected from `pg_index.indkey` joined to `pg_attribute`
+    /// (see [`snapshot_schema`]). This is the column set a `CREATE INDEX … (…)`
+    /// must emit verbatim; recovering it from the index NAME is unsound, so the
+    /// snapshot carries it explicitly.
+    pub columns: Vec<String>,
 }
 
 /// One constraint of a table, as introspected from
@@ -234,8 +241,8 @@ pub struct AlteredObject {
     /// The object, qualified within the table: a column as `column id`, an index
     /// as `index users_email_idx`, a constraint as `constraint users_age_chk`.
     pub object: String,
-    /// The attribute that diverged: `data_type`, `nullable`, `unique`, `kind`, or
-    /// `definition`.
+    /// The attribute that diverged: `data_type`, `nullable`, `unique`, `columns`,
+    /// `kind`, or `definition`.
     pub field: String,
     /// The expected snapshot's value for `field`.
     pub expected: String,
@@ -343,10 +350,22 @@ pub async fn snapshot_schema(
     }
 
     // Indexes via pg_catalog (schema BOUND as a text comparison on the namespace
-    // name). `indisunique` distinguishes unique indexes.
+    // name). `indisunique` distinguishes unique indexes. The KEY columns (the
+    // leading `indnkeyatts` entries of `indkey`) are recovered IN ORDER by
+    // `unnest(indkey) WITH ORDINALITY` joined to `pg_attribute`, so a composite
+    // / custom-named index carries its real column list (recovering columns from
+    // the index NAME is unsound — 1a). Expression keys (`attnum = 0`) and any
+    // INCLUDE columns (ordinal beyond `indnkeyatts`) are excluded.
     let idx_rows = conn
         .query(
-            "SELECT c.relname AS table_name, ic.relname AS index_name, x.indisunique \
+            "SELECT c.relname AS table_name, ic.relname AS index_name, x.indisunique, \
+                    ( \
+                      SELECT array_agg(att.attname ORDER BY k.ord) \
+                      FROM unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) \
+                      JOIN pg_attribute att \
+                        ON att.attrelid = x.indrelid AND att.attnum = k.attnum \
+                      WHERE k.ord <= x.indnkeyatts AND k.attnum <> 0 \
+                    ) AS columns \
              FROM pg_index x \
              JOIN pg_class c ON c.oid = x.indrelid \
              JOIN pg_class ic ON ic.oid = x.indexrelid \
@@ -359,9 +378,13 @@ pub async fn snapshot_schema(
     for r in &idx_rows {
         let table: String = r.get("table_name");
         if let Some(t) = tables.get_mut(&table) {
+            // `array_agg` over an empty/all-expression key set is SQL NULL → an
+            // empty column list (a wholly-expression index has no plain columns).
+            let columns: Vec<String> = r.try_get("columns").unwrap_or_default();
             t.indexes.push(IndexSnapshot {
                 name: r.get("index_name"),
                 unique: r.get("indisunique"),
+                columns,
             });
         }
     }
@@ -425,9 +448,10 @@ pub async fn snapshot_schema(
 /// as `"users constraint users_pkey"`. Output vectors are sorted + deterministic.
 ///
 /// Same-name objects present on BOTH sides are compared ATTRIBUTE-BY-ATTRIBUTE
-/// (#1): columns by `data_type` + `nullable`, indexes by `unique`, constraints by
-/// `kind` + `definition`. Any divergence becomes an [`AlteredObject`] — closing
-/// the out-of-band-`ALTER` blind spot that pure name diffing left open.
+/// (#1): columns by `data_type` + `nullable`, indexes by `unique` + `columns`,
+/// constraints by `kind` + `definition`. Any divergence becomes an
+/// [`AlteredObject`] — closing the out-of-band-`ALTER` blind spot that pure name
+/// diffing left open.
 #[must_use]
 pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> StructuralDrift {
     let mut missing = Vec::new();
@@ -534,17 +558,17 @@ fn diff_attrs(
         }
     }
 
-    // Indexes: unique.
+    // Indexes: unique + columns. A same-name index whose covered columns changed
+    // out-of-band (REINDEX over a different column set, or a name reused for a
+    // different shape) is surfaced by the `columns` compare — the name-only diff
+    // cannot see it (1a).
     let act_idx: BTreeMap<&str, &IndexSnapshot> =
         act_t.indexes.iter().map(|i| (i.name.as_str(), i)).collect();
     for ei in &exp_t.indexes {
         if let Some(ai) = act_idx.get(ei.name.as_str()) {
-            push(
-                &format!("index {}", ei.name),
-                "unique",
-                &ei.unique.to_string(),
-                &ai.unique.to_string(),
-            );
+            let obj = format!("index {}", ei.name);
+            push(&obj, "unique", &ei.unique.to_string(), &ai.unique.to_string());
+            push(&obj, "columns", &ei.columns.join(","), &ai.columns.join(","));
         }
     }
 
