@@ -565,3 +565,115 @@ async fn repeatable_cross_schema_up_is_guard_denied() {
 
     drop_schemas(&conn, &cfg).await;
 }
+
+// ---------------------------------------------------------------------------
+// GROUP 2 — malformed-combination pre-flight rejections (fail-closed)
+// ---------------------------------------------------------------------------
+
+/// #4a — a `repeatable=true` migration that ALSO carries `supersedes` is malformed
+/// (a repeatable cannot be a squash). It must be rejected up-front, before the
+/// partition silently drops its supersedes into the repeatable phase. Nothing runs.
+#[compio::test]
+async fn repeatable_with_supersedes_is_rejected() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    let schema = &cfg.project_schema;
+
+    let collapsed = MigrationId::generate();
+    let mut bad = repeatable(
+        MigrationId::generate(),
+        "v_view",
+        &format!("CREATE OR REPLACE VIEW \"{schema}\".v AS SELECT 1 AS n"),
+    );
+    bad.supersedes = vec![collapsed];
+
+    let err = apply(&conn, &cfg, std::slice::from_ref(&bad), Approval::None, "actor")
+        .await
+        .expect_err("a repeatable with supersedes must be rejected");
+    assert!(
+        matches!(err, ApplyError::RepeatableCannotSquash { ref version } if version == bad.version.as_str()),
+        "expected `RepeatableCannotSquash`, got {err:?}"
+    );
+
+    // Nothing journaled — the rejection precedes any execution.
+    let applied = zeroship_migrate::journal::applied(&conn, &cfg)
+        .await
+        .unwrap_or_default();
+    assert!(applied.is_empty(), "a rejected malformed set journals nothing");
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+/// #3d — a VERSIONED (once-only) migration whose `depends_on` names a REPEATABLE in
+/// the SAME set is malformed: a once-only migration must not depend on a repeatable
+/// (a repeatable runs AFTER all versioned, so the dependency can never be satisfied
+/// in order). Reject with a DEDICATED, accurate error — NOT the misleading
+/// `MissingDependency` the partition would otherwise produce.
+#[compio::test]
+async fn versioned_depends_on_repeatable_is_dedicated_error() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    let schema = &cfg.project_schema;
+
+    let rep_v = MigrationId::generate();
+    let rep = repeatable(
+        rep_v.clone(),
+        "v_view",
+        &format!("CREATE OR REPLACE VIEW \"{schema}\".v AS SELECT 1 AS n"),
+    );
+    let once_v = MigrationId::generate();
+    let mut once = versioned(
+        once_v.clone(),
+        "create_t",
+        &format!("CREATE TABLE \"{schema}\".t (id int)"),
+    );
+    once.depends_on = vec![rep_v.clone()];
+
+    let err = apply(&conn, &cfg, &[rep.clone(), once.clone()], Approval::None, "actor")
+        .await
+        .expect_err("a versioned migration depending on a repeatable must be rejected");
+    assert!(
+        matches!(
+            err,
+            ApplyError::OnceOnlyDependsOnRepeatable { ref version, ref dependency }
+                if version == once_v.as_str() && dependency == rep_v.as_str()
+        ),
+        "expected the dedicated `OnceOnlyDependsOnRepeatable`, NOT MissingDependency, got {err:?}"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+/// #4c — a `repeatable=true` migration with a `down` violates the invariant that a
+/// repeatable is replace-style (no true reverse). Reject up-front, fail-closed.
+#[compio::test]
+async fn repeatable_with_down_is_rejected() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    let schema = &cfg.project_schema;
+
+    let up = format!("CREATE OR REPLACE VIEW \"{schema}\".v AS SELECT 1 AS n");
+    let down = format!("DROP VIEW \"{schema}\".v");
+    let mut bad = repeatable(MigrationId::generate(), "v_view", &up);
+    bad.down = Some(down.clone());
+    bad.checksum = Checksum::of(&up, Some(&down), &bad.preconditions);
+
+    let err = apply(&conn, &cfg, std::slice::from_ref(&bad), Approval::None, "actor")
+        .await
+        .expect_err("a repeatable with a down must be rejected");
+    assert!(
+        matches!(err, ApplyError::RepeatableHasDown { ref version } if version == bad.version.as_str()),
+        "expected `RepeatableHasDown`, got {err:?}"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
