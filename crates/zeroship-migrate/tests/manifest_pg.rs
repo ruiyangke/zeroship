@@ -452,6 +452,7 @@ fn plain_declarative_plan(
             required: false,
             unique: false,
             references: None,
+            ..Default::default()
         }],
         indexes: vec![],
     };
@@ -582,6 +583,7 @@ async fn rename_declarative_plan(
             required: false,
             unique: false,
             references: None,
+            ..Default::default()
         }],
         indexes: vec![],
     };
@@ -603,6 +605,7 @@ async fn rename_declarative_plan(
             required: false,
             unique: false,
             references: None,
+            ..Default::default()
         }],
         indexes: vec![],
     };

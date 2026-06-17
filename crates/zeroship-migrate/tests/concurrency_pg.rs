@@ -176,6 +176,7 @@ async fn declarative_deploy_holds_project_lock_across_all_sub_batches() {
             required: false,
             unique: false,
             references: None,
+            ..Default::default()
         }],
         indexes: vec![],
     };
@@ -227,6 +228,7 @@ async fn declarative_deploy_holds_project_lock_across_all_sub_batches() {
             required: false,
             unique: false,
             references: None,
+            ..Default::default()
         }],
         indexes: vec![],
     };
