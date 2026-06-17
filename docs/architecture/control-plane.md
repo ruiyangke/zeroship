@@ -81,8 +81,8 @@ apps(
 )
 ```
 
-The schema is Liquibase-owned (`db/changelog/`, changeset
-`0004_control.sql`); the registry consumes these tables but does not create
+The schema is owned by zeroship-migrate (`db/migrations/`,
+`V0004__control.sql`); the registry consumes these tables but does not create
 them.
 
 ## Route and version feeds

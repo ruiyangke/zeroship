@@ -131,7 +131,7 @@ at their defaults.
 1. **Postgres up + reachable.** Both processes share one database; verify
    `psql "$AUTH_DB_URL" -c 'select 1'` succeeds from inside the pod.
    Hydra connects as the **least-privileged `oauth_hydra` role** (provisioned
-   by Liquibase changeset 0027 — its own `oauth_hydra` schema + search_path, NO
+   by zeroship-migrate `V0027` — its own `oauth_hydra` schema + search_path, NO
    superuser / BYPASSRLS), NOT the shared `$AUTH_DB_URL` superuser. Inject its
    DSN as a secret reference (password from your secret manager, never
    committed):
