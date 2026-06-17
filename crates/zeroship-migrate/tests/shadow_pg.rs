@@ -25,10 +25,10 @@ use futures::FutureExt;
 use zeroship_migrate::guard::GuardConfig;
 use zeroship_migrate::migration::Checksum;
 use zeroship_migrate::{
-    dry_run, dry_run_declarative, migrator_role_name, sweep_leaked_shadows,
-    CollectionDescriptor, DeclarativeAuthor, DeclarativeDeployPlan, DryRunError, ExecutorConfig,
-    FieldDescriptor, Migration, MigrationEngine, MigrationFlags, MigrationId, RenameHint,
-    SchemaSnapshot, ShadowConfig, desired_snapshot,
+    deprovision_migrator, dry_run, dry_run_declarative, migrator_role_name, provision_migrator,
+    snapshot_schema, sweep_leaked_shadows, Approval, CollectionDescriptor, DeclarativeAuthor,
+    DeclarativeDeployPlan, DryRunError, ExecutorConfig, FieldDescriptor, Migration, MigrationEngine,
+    MigrationFlags, MigrationId, RenameHint, SchemaSnapshot, ShadowConfig, desired_snapshot,
 };
 
 const DEFAULT_DSN: &str =
@@ -842,4 +842,139 @@ async fn dry_run_declarative_rename_validates_final_state_no_false_drift() {
         report.ok,
         "a correct declarative rename dry-run must be ok: {report:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// H4 (correctness) — an INCREMENTAL declarative dry-run is faithful: the shadow
+// is SEEDED with the live project structure before the plan applies, so a plan
+// that targets a PRIOR-deploy table dry-runs ok (not a false negative).
+// ---------------------------------------------------------------------------
+
+/// H4 regression. Deploy 1 creates `contacts(phone)` on the REAL project DB.
+/// Deploy 2 is an INCREMENTAL declarative plan that ADDs a column `email` to the
+/// existing `contacts` table — its `ALTER TABLE "contacts" ADD COLUMN …` targets
+/// a table the plan itself does NOT create (it lives only in the live schema).
+///
+/// Pre-fix the shadow started EMPTY, so the ADD COLUMN hit `relation "contacts"
+/// does not exist` → the dry-run reported ok=false / `missing_objects:["contacts"]`
+/// for a plan the real apply runs cleanly (RED — a false negative that would
+/// block a valid deploy). With the seed fix `dry_run_declarative` reconstructs
+/// the live `contacts` table in the shadow FIRST, so the incremental ADD COLUMN
+/// applies and the dry-run is ok with clean resulting drift (GREEN).
+#[compio::test]
+async fn dry_run_declarative_incremental_add_column_on_prior_table_is_ok() {
+    let admin = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+
+    // --- Stand up the LIVE project schema + migrator role, then DEPLOY 1:
+    //     create `contacts(phone)` on the real project DB. ---
+    admin
+        .batch_execute(&format!(
+            "CREATE SCHEMA IF NOT EXISTS \"{}\"",
+            cfg.project_schema
+        ))
+        .await
+        .expect("create live project schema");
+    provision_migrator(&admin, &cfg)
+        .await
+        .expect("provision live migrator role");
+
+    let engine = MigrationEngine::new();
+    let author = DeclarativeAuthor::new(cfg.project_schema.clone(), "app_test");
+
+    let contacts_phone = descriptor("contacts", vec![field("phone", "string", false)]);
+    let d1 = desired_snapshot(&cfg.project_schema, std::slice::from_ref(&contacts_phone))
+        .expect("deploy-1 desired");
+    let plan1 = engine
+        .plan_declarative(
+            &d1,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &author,
+            &[],
+            &guard_cfg(&cfg),
+        )
+        .expect("plan deploy 1");
+    engine
+        .apply(&plan1.plain, Approval::None, &admin, &cfg, "app_test")
+        .await
+        .expect("apply deploy 1 on live");
+
+    // --- DEPLOY 2 (INCREMENTAL): desire `contacts(phone, email)`. The plan vs the
+    //     live snapshot is a single ADD COLUMN `email` on the EXISTING table — it
+    //     does NOT re-create `contacts`. ---
+    let contacts_phone_email = descriptor(
+        "contacts",
+        vec![field("phone", "string", false), field("email", "string", false)],
+    );
+    let d2 = desired_snapshot(&cfg.project_schema, &[contacts_phone_email]).expect("deploy-2 desired");
+    let live = snapshot_schema(&admin, &cfg.project_schema)
+        .await
+        .expect("snapshot live after deploy 1");
+    assert!(
+        live.tables.contains_key("contacts"),
+        "deploy 1 must have created `contacts` in the live schema"
+    );
+
+    let plan2 = engine
+        .plan_declarative(
+            &d2,
+            &live,
+            &HashMap::new(),
+            &author,
+            &[],
+            &guard_cfg(&cfg),
+        )
+        .expect("plan deploy 2 (incremental)");
+    assert!(
+        plan2.renames.is_empty() && !plan2.plain.items.is_empty(),
+        "deploy 2 is a plain incremental ADD COLUMN: {plan2:?}"
+    );
+
+    // --- The incremental dry-run: seeds the live `contacts`, then applies the
+    //     ADD COLUMN — ok with clean resulting drift. ---
+    let report = dry_run_declarative(&admin, &plan2, &d2, &cfg, &shadow_cfg(), "app_test")
+        .await
+        .expect("dry_run_declarative incremental harness");
+
+    let drift = report
+        .resulting_drift
+        .as_ref()
+        .expect("declarative dry-run carries resulting_drift");
+    assert!(
+        drift.is_clean(),
+        "the incremental ADD COLUMN must realise the desired schema on the SEEDED \
+         shadow (clean drift, not a `relation does not exist` false negative): {drift:?}"
+    );
+    assert!(
+        report.ok,
+        "an incremental declarative dry-run against a prior-deploy table must be ok \
+         (H4: the shadow is seeded with the live structure first): {report:?}"
+    );
+
+    // The seed never touched prod beyond the seeded deploy-1 state: `email` is NOT
+    // present on the LIVE table (the dry-run only added it inside the throwaway
+    // shadow). This guards the never-touches-prod invariant for the seed path.
+    let live_after = snapshot_schema(&admin, &cfg.project_schema)
+        .await
+        .expect("snapshot live after dry-run");
+    let contacts = live_after.tables.get("contacts").expect("contacts still live");
+    assert!(
+        contacts.columns.iter().any(|c| c.name == "phone"),
+        "live `contacts.phone` survives"
+    );
+    assert!(
+        !contacts.columns.iter().any(|c| c.name == "email"),
+        "the dry-run must NOT have added `email` to the LIVE table (shadow-only)"
+    );
+
+    // Teardown the live schema + migrator role this test created.
+    let _ = deprovision_migrator(&admin, &cfg).await;
+    let _ = admin
+        .batch_execute(&format!(
+            "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
+            cfg.project_schema, cfg.meta_schema
+        ))
+        .await;
 }
