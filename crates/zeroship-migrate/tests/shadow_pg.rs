@@ -349,10 +349,7 @@ async fn dry_run_concurrently_index_runs_in_shadow() {
 // ---------------------------------------------------------------------------
 
 fn guard_cfg(cfg: &ExecutorConfig) -> GuardConfig {
-    GuardConfig {
-        project_schema: cfg.project_schema.clone(),
-        extension_allowlist: Vec::new(),
-    }
+    GuardConfig::confined(cfg.project_schema.clone())
 }
 
 fn descriptor(name: &str, fields: Vec<FieldDescriptor>) -> CollectionDescriptor {

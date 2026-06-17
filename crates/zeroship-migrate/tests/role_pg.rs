@@ -537,10 +537,7 @@ async fn backstop_runtime_constructed_cross_schema_is_denied_at_execution() {
 
     // 1. CONFIRM line 1 (the guard) does NOT statically deny this — it is a
     //    documented residual (runtime-constructed SQL the parser can't catch).
-    let guard = SqlGuard::new(GuardConfig {
-        project_schema: cfg.project_schema.clone(),
-        extension_allowlist: Vec::new(),
-    });
+    let guard = SqlGuard::new(GuardConfig::confined(cfg.project_schema.clone()));
     guard.check(payload).expect(
         "the guard (line 1) must NOT statically deny runtime-constructed cross-schema SQL — \
          this is the documented residual line 2 backstops",

@@ -472,10 +472,7 @@ fn non_concurrent_index_suggestion_notes_own_nontransactional_migration() {
 // ---------------------------------------------------------------------------
 
 fn guard_cfg() -> GuardConfig {
-    GuardConfig {
-        project_schema: "proj_acme".into(),
-        extension_allowlist: Vec::new(),
-    }
+    GuardConfig::confined("proj_acme")
 }
 
 #[test]

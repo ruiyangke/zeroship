@@ -16,10 +16,10 @@ use zeroship_migrate::guard::{flags_for, GuardConfig, GuardError, SqlGuard};
 /// A guard whose project schema is `project_acme` and which allowlists only
 /// `pgcrypto` + `uuid-ossp` extensions — a realistic per-project config.
 fn guard() -> SqlGuard {
-    SqlGuard::new(GuardConfig {
-        project_schema: "project_acme".to_string(),
-        extension_allowlist: vec!["pgcrypto".to_string(), "uuid-ossp".to_string()],
-    })
+    SqlGuard::new(
+        GuardConfig::confined("project_acme")
+            .with_extension_allowlist(vec!["pgcrypto".to_string(), "uuid-ossp".to_string()]),
+    )
 }
 
 /// Assert the SQL is denied (either `Denied` or `CrossSchema`).
@@ -1786,10 +1786,7 @@ fn crate_root_reexports_compose_an_end_to_end_check() {
     assert_eq!(classes[0].kind, DdlKind::CreateTable);
 
     // A guard + report + flags_for, all via root paths.
-    let g = SqlGuard::new(GuardConfig {
-        project_schema: "project_x".to_string(),
-        extension_allowlist: vec![],
-    });
+    let g = SqlGuard::new(GuardConfig::confined("project_x"));
     let up = "CREATE TABLE project_x.t(id int primary key); DROP TABLE project_x.old;";
     let report = g.check(up).expect("safe migration passes");
     assert!(report.destructive, "the DROP makes the migration destructive");
@@ -1952,4 +1949,63 @@ fn table_and_schema_to_xml_own_passes() {
 fn xpath_over_xml_value_passes() {
     // No over-denial: xpath operates on an xml value, not a SQL/relation arg.
     assert_ok("SELECT xpath('/x', xmlcol) FROM project_acme.t");
+}
+
+// ===========================================================================
+// T2 / T2b — Confined-unchanged regression (design §6.4, H3).
+//
+// The WHOLE existing fixture set above already re-runs under
+// `GuardConfig::confined(...)` (the `guard()` helper was converted to it), so a
+// green file IS the byte-identical proof for the statement-kind + body gates.
+// These add the read sites the round-1 proof omitted — func-def-target (site 2)
+// and literal-schema-ref (site 3) under `SchemaScope::Single` — plus T2b: the
+// privileged constructs Platform now allows are STILL denied under Confined.
+// ===========================================================================
+
+#[test]
+fn t2_func_def_target_under_single_is_cross_schema() {
+    // site 2 (check_func_def_target): a CREATE/ALTER FUNCTION defining into a
+    // schema other than the single project schema is CrossSchema.
+    assert_cross_schema(
+        "CREATE FUNCTION public.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$",
+    );
+    assert_cross_schema("ALTER FUNCTION control.f() IMMUTABLE");
+    // own-schema definition is fine.
+    assert_ok("CREATE FUNCTION project_acme.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$");
+}
+
+#[test]
+fn t2_literal_schema_refs_under_single_is_cross_schema() {
+    // site 3 (check_literal_schema_refs): a schema named inside a reg* cast /
+    // name-resolving builtin literal is held to the single-schema policy.
+    assert_cross_schema("SELECT 'control.t'::regclass");
+    assert_cross_schema("SELECT nextval('control.s')");
+    assert_cross_schema("SELECT setval('control.billing_seq', 0)");
+    assert_cross_schema("SELECT to_regclass('control.users')");
+    // own-schema literal ref is fine.
+    assert_ok("SELECT nextval('project_acme.s')");
+}
+
+#[test]
+fn t2b_privileged_constructs_still_denied_under_confined() {
+    // Everything the Platform profile flips MUST stay denied for a creator.
+    assert_denied("CREATE ROLE evil");
+    assert_denied("ALTER ROLE evil SET search_path = control");
+    assert_denied("DROP ROLE evil");
+    assert_denied("GRANT ALL ON SCHEMA project_acme TO evil");
+    assert_denied("REVOKE ALL ON SCHEMA project_acme FROM evil");
+    assert_denied("CREATE SCHEMA sneaky");
+    assert_denied("CREATE POLICY p ON project_acme.t USING (true)");
+    assert_denied("ALTER TABLE project_acme.t ENABLE ROW LEVEL SECURITY");
+    assert_denied("ALTER TABLE project_acme.t FORCE ROW LEVEL SECURITY");
+    assert_denied("DROP OWNED BY evil");
+    // cross-schema to the platform schemas stays denied.
+    assert_cross_schema("CREATE TABLE oauth_hydra.t(id int)");
+    // a 0025-style bootstrap DO block is denied under Confined.
+    assert_denied(
+        "DO $bootstrap$ BEGIN \
+         EXECUTE 'CREATE ROLE zeroship_app NOLOGIN'; \
+         EXECUTE 'ALTER ROLE zeroship_app SET search_path = zeroship, public'; \
+         END $bootstrap$;",
+    );
 }
