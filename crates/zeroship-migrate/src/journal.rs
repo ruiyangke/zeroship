@@ -56,6 +56,58 @@ impl Phase {
     }
 }
 
+/// How a `completed` event was RECORDED (the journaled `kind` column).
+///
+/// This is the migration's recorded IDENTITY-class, not anything the caller
+/// supplies at apply time. The tamper guard (v3 Plan E re-critic) decides the
+/// repeatable drift exemption on THIS journaled value — never on the
+/// attacker-suppliable `flags.repeatable` — so a once-only migration cannot be
+/// reclassified into a repeatable (or vice-versa) by flipping the flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournaledKind {
+    /// An ordinary once-only migration whose `up` ran (`kind='apply'`).
+    Apply,
+    /// An adoption baseline: the `up` was recorded NOT run (`kind='baseline'`).
+    Baseline,
+    /// A squash supersession (`kind='squash'`).
+    Squash,
+    /// A repeatable migration's re-apply (`kind='repeatable'`, v3 Plan E). The
+    /// only kind whose changed checksum is a legitimate re-run signal.
+    Repeatable,
+}
+
+impl JournaledKind {
+    /// The wire string stored in the `kind` column.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Apply => "apply",
+            Self::Baseline => "baseline",
+            Self::Squash => "squash",
+            Self::Repeatable => "repeatable",
+        }
+    }
+
+    /// Parse a kind from its wire string.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "apply" => Some(Self::Apply),
+            "baseline" => Some(Self::Baseline),
+            "squash" => Some(Self::Squash),
+            "repeatable" => Some(Self::Repeatable),
+            _ => None,
+        }
+    }
+
+    /// True if this journaled kind is a REPEATABLE re-apply — the only kind whose
+    /// changed checksum is a legitimate re-run rather than tamper.
+    #[must_use]
+    pub const fn is_repeatable(self) -> bool {
+        matches!(self, Self::Repeatable)
+    }
+}
+
 /// One journal entry (completed) or inflight marker (started), as read back for
 /// the drift check + pending computation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +119,11 @@ pub struct AppliedEntry {
     pub checksum: String,
     /// The phase the entry is in.
     pub phase: Phase,
+    /// The journaled `kind` of the LATEST `completed` event for this version
+    /// (`None` for a lone `started` inflight marker, which has no completed kind).
+    /// The drift/tamper guard anchors the repeatable exemption on THIS value, not
+    /// on the supplied `flags.repeatable` (v3 Plan E re-critic).
+    pub kind: Option<JournaledKind>,
 }
 
 /// Error from a journal operation.
@@ -78,6 +135,11 @@ pub enum JournalError {
     /// A journal row carried an unrecognized `phase` value.
     #[error("unrecognized journal phase '{0}'")]
     BadPhase(String),
+    /// A `completed` journal row carried an unrecognized `kind` value — a
+    /// corrupted / tampered row (the CHECK constraint forbids it on write, so
+    /// seeing one means out-of-band mutation).
+    #[error("unrecognized journal kind '{0}'")]
+    BadKind(String),
 }
 
 /// Quote a SQL identifier by doubling embedded quotes and wrapping in
@@ -128,10 +190,16 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
     //    The `kind` column (Plan 9) distinguishes how the `completed` event was
     //    recorded, for auditing: an ordinary `apply` (the `up` actually ran), a
     //    `baseline` (the schema already existed; the `up` was recorded NOT run —
-    //    adoption path), or a `squash` (a supersession; the squash's `up` was
+    //    adoption path), a `squash` (a supersession; the squash's `up` was
     //    recorded NOT run because `[v1..vN]` were already applied — see
-    //    [`record_baseline`] / [`crate::squash`]). It does NOT alter the
-    //    append-only model — it is just a fact stamped on each immutable event row.
+    //    [`record_baseline`] / [`crate::squash`]), or a `repeatable` (v3 Plan E —
+    //    a re-applied repeatable's `up` ran, but the version's IDENTITY is a
+    //    repeatable, not a once-only). The `repeatable` kind is LOAD-BEARING for the
+    //    tamper guard: the drift exemption anchors on the JOURNALED kind, not the
+    //    attacker-suppliable `flags.repeatable`, so flipping an applied once-only to
+    //    `repeatable=true` is a kind mismatch ⇒ tamper, not a re-run. It does NOT
+    //    alter the append-only model — it is just a fact stamped on each immutable
+    //    event row.
     conn.batch_execute(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations (
             event_seq   BIGINT PRIMARY KEY DEFAULT nextval('{meta}.schema_migrations_event_seq'),
@@ -144,7 +212,7 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
             phase       TEXT NOT NULL CHECK (phase IN ('started','completed')),
             outcome     TEXT NOT NULL,
             kind        TEXT NOT NULL DEFAULT 'apply'
-                          CHECK (kind IN ('apply','baseline','squash'))
+                          CHECK (kind IN ('apply','baseline','squash','repeatable'))
         )"
     ))
     .await?;
@@ -283,34 +351,42 @@ pub async fn applied(
     // stream, take the LATEST per version with DISTINCT ON, and keep only the
     // versions whose latest event is `completed` (net-applied). Then UNION the
     // lone `started` inflight markers for versions that are NOT net-completed.
+    // `event_kind` distinguishes the source table (completed vs rolled_back) for
+    // the net-state decision; `mig_kind` carries the journaled `kind` column of a
+    // `completed` row (NULL for a rolled_back event, which has no kind) and rides
+    // through to the net-applied entry so the drift/tamper guard can read it.
     let rows = conn
         .query(
             &format!(
                 "WITH events AS (
-                     SELECT version, checksum, event_seq, 'completed' AS kind
+                     SELECT version, checksum, event_seq,
+                            'completed' AS event_kind, kind AS mig_kind
                        FROM {meta}.schema_migrations
                      UNION ALL
-                     SELECT version, checksum, event_seq, 'rolled_back' AS kind
+                     SELECT version, checksum, event_seq,
+                            'rolled_back' AS event_kind, NULL AS mig_kind
                        FROM {meta}.schema_migrations_rolled_back
                  ),
                  latest AS (
-                     SELECT DISTINCT ON (version) version, checksum, kind
+                     SELECT DISTINCT ON (version) version, checksum, event_kind, mig_kind
                        FROM events
                       ORDER BY version, event_seq DESC
                  ),
                  net_completed AS (
-                     SELECT version, checksum FROM latest WHERE kind = 'completed'
+                     SELECT version, checksum, mig_kind
+                       FROM latest WHERE event_kind = 'completed'
                  ),
                  union_all AS (
-                     SELECT version, checksum, 'completed' AS phase FROM net_completed
+                     SELECT version, checksum, mig_kind, 'completed' AS phase
+                       FROM net_completed
                      UNION ALL
-                     SELECT version, checksum, 'started' AS phase
+                     SELECT version, checksum, NULL AS mig_kind, 'started' AS phase
                        FROM {meta}.schema_migrations_inflight i
                       WHERE NOT EXISTS (
                           SELECT 1 FROM net_completed n WHERE n.version = i.version
                       )
                  )
-                 SELECT version, checksum, phase FROM union_all
+                 SELECT version, checksum, mig_kind, phase FROM union_all
                  ORDER BY version COLLATE \"C\""
             ),
             &[],
@@ -322,10 +398,19 @@ pub async fn applied(
         let checksum: String = row.get("checksum");
         let phase_s: String = row.get("phase");
         let phase = Phase::parse(&phase_s).ok_or(JournalError::BadPhase(phase_s))?;
+        // The journaled kind of the latest completed event. A `started` marker
+        // carries NULL; a completed row whose kind is unrecognized is a tampered /
+        // corrupt journal row — surface it rather than silently treating it as a
+        // benign apply.
+        let kind = match row.try_get::<_, Option<String>>("mig_kind") {
+            Ok(Some(s)) => Some(JournaledKind::parse(&s).ok_or(JournalError::BadKind(s))?),
+            _ => None,
+        };
         out.push(AppliedEntry {
             version,
             checksum,
             phase,
+            kind,
         });
     }
     Ok(out)
@@ -737,6 +822,15 @@ pub async fn superseded_versions(
 /// behind an unrelated event.) The drift/pending machinery still uses [`applied`]
 /// for versioned migrations; this is the repeatable-specific lens.
 ///
+/// **Kind-aware (v3 Plan E re-critic #2).** Only events whose journaled
+/// `kind='repeatable'` are consulted — the re-run oracle must never read a
+/// once-only `kind='apply'` (or baseline/squash) row's checksum as a repeatable's
+/// "prior" value. Combined with the [`applied`]-driven kind-mismatch abort in the
+/// drift check, this keeps the repeatable re-run path strictly about genuine
+/// repeatable history: a version that was applied once-only (and would only reach
+/// this lookup via the tamper flip, which the drift check already aborts) has no
+/// `repeatable`-kind event, so it is absent from the map — never silently re-run.
+///
 /// # Errors
 /// [`JournalError::Db`] on query failure.
 pub async fn latest_completed_checksums(
@@ -749,6 +843,7 @@ pub async fn latest_completed_checksums(
             &format!(
                 "SELECT DISTINCT ON (version) version, checksum
                    FROM {meta}.schema_migrations
+                  WHERE kind = 'repeatable'
                   ORDER BY version, event_seq DESC"
             ),
             &[],
