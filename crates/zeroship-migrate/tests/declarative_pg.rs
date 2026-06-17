@@ -736,9 +736,10 @@ async fn fk_ordering_referencing_table_after_target_applies_clean() {
 }
 
 #[compio::test]
-async fn type_change_is_unsupported_in_v1_not_silently_skipped() {
-    // A same-name column whose type changed is an explicit UnsupportedInV1,
-    // never a silent no-op (and never an auto type-change).
+async fn type_change_emits_a_gated_alter_not_an_error_and_never_auto_applies() {
+    // P3 Feature 2: a same-name column whose type changed is NO LONGER
+    // UnsupportedInV1 — it emits a GATED `ALTER COLUMN … TYPE …` (destructive +
+    // requires_approval; no auto type-change). It is never a silent no-op.
     let cfg = cfg_for(&token());
     let author = author_for(&cfg);
 
@@ -759,8 +760,12 @@ async fn type_change_is_unsupported_in_v1_not_silently_skipped() {
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
 
-    let err = author.diff(&desired, &live, &[]).unwrap_err();
-    assert!(matches!(err, DeclarativeError::UnsupportedInV1(_)), "got {err:?}");
+    let migs = author.diff(&desired, &live, &[]).expect("type change now diffs to a gated ALTER");
+    let alter = migs.iter().find(|m| m.up.contains("ALTER COLUMN") && m.up.contains("TYPE"))
+        .expect("a gated ALTER COLUMN TYPE migration");
+    assert!(alter.flags.destructive, "type change is destructive (lossy/rewrite)");
+    assert!(alter.flags.requires_approval, "type change is gated — no auto type-change");
+    assert!(alter.up.contains("\"attr\""), "alters the attr column: {}", alter.up);
 }
 
 #[compio::test]
@@ -1514,4 +1519,184 @@ async fn rename_hint_with_a_type_mismatch_is_an_error() {
     let hint = vec![RenameHint { table: "users".into(), from: "score".into(), to: "rating".into() }];
     let err = author.diff(&desired, &live, &hint).unwrap_err();
     assert!(matches!(err, DeclarativeError::RenameHintTypeMismatch { .. }), "got {err:?}");
+}
+
+// ---------------------------------------------------------------------------
+// P3 Feature 2 — type + nullability changes (gated type / SET NOT NULL, ungated
+// DROP NOT NULL).
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn type_change_is_gated_refused_without_approval_applied_with_then_re_diffs_clean() {
+    // P3 Feature 2: a column type change (string/text → number/double precision)
+    // emits a GATED ALTER COLUMN TYPE. It is refused without approval (nothing
+    // applied), applied with Approval::Approved, then re-diffs clean + idempotent.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    // Create `metrics` with a `score` text column (empty table → the cast applies
+    // cleanly regardless of data).
+    let v1 = CollectionDescriptor {
+        name: "metrics".into(),
+        fields: vec![FieldDescriptor { name: "score".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
+    apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("create metrics");
+
+    // Desire `score` as a number (double precision) — a gated type change.
+    let v2 = CollectionDescriptor {
+        name: "metrics".into(),
+        fields: vec![FieldDescriptor { name: "score".into(), ty: "number".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+    let plan = engine
+        .plan_declarative(&d2, &live, &author, &[], &guard_cfg(&cfg))
+        .expect("plan type change");
+    assert!(plan.destructive, "a type change must be destructive");
+    assert!(plan.requires_approval, "a type change must require approval");
+
+    // Refused without approval; the column type is UNCHANGED (text).
+    let err = engine.apply(&plan, Approval::None, &conn, &cfg, "app_test").await.unwrap_err();
+    assert!(matches!(err, EngineError::ApprovalRequired), "got {err:?}");
+    let live_after = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
+    let attr = live_after.tables["metrics"].columns.iter().find(|c| c.name == "score").expect("score col");
+    assert_eq!(attr.data_type, "text", "type must be unchanged after a refused type change");
+
+    // Approved → applied; the type is now double precision, re-diff clean.
+    engine.apply(&plan, Approval::Approved, &conn, &cfg, "app_test").await.expect("approved type change");
+    let live_final = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap3");
+    let attr2 = live_final.tables["metrics"].columns.iter().find(|c| c.name == "score").expect("score col");
+    assert_eq!(attr2.data_type, "double precision", "type changed after approval");
+    assert!(diff_snapshots(&d2, &live_final).is_clean(), "re-diff clean after approved type change");
+    // Idempotent: re-diffing the same desired against the converged live is empty.
+    let migs = author.diff(&d2, &live_final, &[]).expect("re-diff after type change");
+    assert!(migs.is_empty(), "type change must be idempotent, got {} migs", migs.len());
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn set_not_null_is_gated_drop_not_null_is_ungated_and_both_re_diff_clean() {
+    // P3 Feature 2: tightening required false→true (SET NOT NULL) is lock-heavy +
+    // can fail on existing NULLs → GATED; relaxing true→false (DROP NOT NULL) is
+    // safe → UNGATED. Both converge to a clean re-diff.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    // Create `accounts` with a NULLABLE `email` (required:false).
+    let v1 = CollectionDescriptor {
+        name: "accounts".into(),
+        fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
+    apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("create accounts");
+
+    // --- SET NOT NULL (required false→true): GATED. ---
+    let v2 = CollectionDescriptor {
+        name: "accounts".into(),
+        fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: true, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+    let plan = engine
+        .plan_declarative(&d2, &live, &author, &[], &guard_cfg(&cfg))
+        .expect("plan set not null");
+    // SET NOT NULL is gated (requires_approval) but NOT destructive (no data lost).
+    assert!(plan.requires_approval, "SET NOT NULL must require approval");
+    assert!(!plan.destructive, "SET NOT NULL is not data loss");
+
+    // Refused without approval; the column is still nullable.
+    let err = engine.apply(&plan, Approval::None, &conn, &cfg, "app_test").await.unwrap_err();
+    assert!(matches!(err, EngineError::ApprovalRequired), "got {err:?}");
+    let live_after = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
+    assert!(live_after.tables["accounts"].columns.iter().find(|c| c.name == "email").unwrap().nullable,
+        "email must stay nullable after a refused SET NOT NULL");
+
+    // Approved → applied; column NOT NULL now, re-diff clean.
+    engine.apply(&plan, Approval::Approved, &conn, &cfg, "app_test").await.expect("approved set not null");
+    let live_nn = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap3");
+    assert!(!live_nn.tables["accounts"].columns.iter().find(|c| c.name == "email").unwrap().nullable,
+        "email must be NOT NULL after approval");
+    assert!(diff_snapshots(&d2, &live_nn).is_clean(), "re-diff clean after SET NOT NULL");
+    assert!(author.diff(&d2, &live_nn, &[]).expect("re-diff").is_empty(), "SET NOT NULL idempotent");
+
+    // --- DROP NOT NULL (required true→false): UNGATED, applies without approval. ---
+    let live3 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap4");
+    let plan3 = engine
+        .plan_declarative(&d1, &live3, &author, &[], &guard_cfg(&cfg))
+        .expect("plan drop not null");
+    assert!(!plan3.requires_approval, "DROP NOT NULL must NOT require approval");
+    assert!(!plan3.destructive, "DROP NOT NULL is not data loss");
+    engine.apply(&plan3, Approval::None, &conn, &cfg, "app_test").await.expect("ungated drop not null applies");
+    let live_dn = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap5");
+    assert!(live_dn.tables["accounts"].columns.iter().find(|c| c.name == "email").unwrap().nullable,
+        "email must be nullable again after the ungated DROP NOT NULL");
+    assert!(diff_snapshots(&d1, &live_dn).is_clean(), "re-diff clean after DROP NOT NULL");
+    assert!(author.diff(&d1, &live_dn, &[]).expect("re-diff").is_empty(), "DROP NOT NULL idempotent");
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn unapplied_gated_type_change_keeps_re_diffing_nonempty_documented_semantics() {
+    // P3 Feature 2 idempotency semantics: a GATED-but-UNAPPLIED type change leaves
+    // the plan non-empty until it is approved + applied. This is correct (and
+    // documents the data-integrity note): the diff reflects DESIRED-vs-LIVE, so an
+    // un-applied change re-diffs to the same gated migration every time — it is
+    // NEVER silently dropped, NEVER auto-applied. The plan converges to empty only
+    // AFTER an approved apply makes live match desired.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let v1 = CollectionDescriptor {
+        name: "gauge".into(),
+        fields: vec![FieldDescriptor { name: "v".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
+    apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("create gauge");
+
+    let v2 = CollectionDescriptor {
+        name: "gauge".into(),
+        fields: vec![FieldDescriptor { name: "v".into(), ty: "number".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
+
+    // Re-diff TWICE without applying: each time yields the SAME non-empty gated
+    // type change (never silently dropped, never auto-applied).
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+    let migs1 = author.diff(&d2, &live, &[]).expect("diff 1");
+    let migs2 = author.diff(&d2, &live, &[]).expect("diff 2");
+    assert_eq!(migs1.len(), 1, "exactly one gated type change");
+    assert_eq!(migs2.len(), 1, "still one — un-applied change is not dropped");
+    assert!(migs1[0].flags.requires_approval && migs1[0].flags.destructive, "stays gated");
+
+    teardown(&conn, &cfg).await;
 }

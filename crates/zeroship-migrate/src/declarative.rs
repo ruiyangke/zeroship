@@ -766,20 +766,20 @@ impl DeclarativeAuthor {
                 match live_cols.get(c.name.as_str()) {
                     None => out.push(self.render_add_column(table, c)),
                     Some(lc) => {
-                        // Same-name column: a type/nullability change is an
-                        // ALTER — UnsupportedInV1 (explicit, never silent).
-                        // (Feature 2 replaces this with gated/ungated ALTERs.)
+                        // Same-name column whose attributes changed (P3):
+                        // - type change → GATED ALTER COLUMN TYPE (no auto change);
+                        // - SET NOT NULL (false→true) → GATED (lock-heavy, can
+                        //   fail on existing NULLs);
+                        // - DROP NOT NULL (true→false) → ungated additive.
                         if lc.data_type != c.data_type {
-                            return Err(DeclarativeError::UnsupportedInV1(format!(
-                                "column {table}.{} type change {} → {}",
-                                c.name, lc.data_type, c.data_type
-                            )));
+                            out.push(self.render_alter_column_type(table, c));
                         }
                         if lc.nullable != c.nullable {
-                            return Err(DeclarativeError::UnsupportedInV1(format!(
-                                "column {table}.{} nullability change {} → {}",
-                                c.name, lc.nullable, c.nullable
-                            )));
+                            out.push(self.render_alter_column_nullability(
+                                table,
+                                &c.name,
+                                c.nullable,
+                            ));
                         }
                     }
                 }
@@ -1063,6 +1063,93 @@ impl DeclarativeAuthor {
             up,
             Some(down),
             MigrationFlags::default(),
+            Vec::new(),
+        )
+    }
+
+    /// Render a GATED `ALTER TABLE … ALTER COLUMN … TYPE …` (P3 type change).
+    ///
+    /// A type change is `destructive` + `requires_approval` in v1 — there is NO
+    /// auto type-change. It can rewrite the whole table under `ACCESS EXCLUSIVE`
+    /// and can be lossy (e.g. `text` → `integer` fails / truncates), so it flows
+    /// through the gate exactly like a drop. The `USING <col>::<type>` cast is
+    /// emitted so a compatible widening (e.g. `integer` → `double precision`)
+    /// applies without a manual cast; an incompatible change still fails loudly at
+    /// apply (never silently). Type spelling goes through [`validate_type`] (via
+    /// `validate_desired`) + the guard.
+    ///
+    /// `down` is `None`: a type change is treated as irreversible (the reverse
+    /// cast may not round-trip — `double precision` → `integer` loses the
+    /// fraction), so there is no structural down. A re-diff after applying it is
+    /// clean because live then matches desired.
+    fn render_alter_column_type(&self, table: &str, c: &ColumnSnapshot) -> Migration {
+        let ty = ddl_type(&c.data_type);
+        let up = format!(
+            "ALTER TABLE {} ALTER COLUMN {} TYPE {} USING {}::{}",
+            self.qualified(table),
+            quote_ident(&c.name),
+            ty,
+            quote_ident(&c.name),
+            ty,
+        );
+        self.make(
+            &format!("alter_column_type_{table}_{}", c.name),
+            up,
+            None,
+            destructive_flags(),
+            Vec::new(),
+        )
+    }
+
+    /// Render an `ALTER TABLE … ALTER COLUMN … {SET|DROP} NOT NULL` (P3
+    /// nullability change).
+    ///
+    /// - **`DROP NOT NULL`** (`nullable` true — relaxing required true→false) is
+    ///   SAFE: it only removes a constraint, never rewrites data, so it is ungated
+    ///   (default flags) and applies like an additive op. `down` re-tightens.
+    /// - **`SET NOT NULL`** (`nullable` false — tightening required false→true) is
+    ///   lock-heavy (full scan under `ACCESS EXCLUSIVE`) and FAILS if any existing
+    ///   row is NULL, so it is GATED (`destructive` is false — no data is lost —
+    ///   but `requires_approval` is true; a later analyzer-lint plan will suggest
+    ///   the `CHECK … NOT VALID` → `VALIDATE` online path). `down` relaxes it.
+    fn render_alter_column_nullability(
+        &self,
+        table: &str,
+        col: &str,
+        nullable: bool,
+    ) -> Migration {
+        let (verb, reverse, flags) = if nullable {
+            // DROP NOT NULL — safe, ungated; down re-adds NOT NULL.
+            ("DROP NOT NULL", "SET NOT NULL", MigrationFlags::default())
+        } else {
+            // SET NOT NULL — gated (lock-heavy, can fail on existing NULLs). Not
+            // "destructive" (no data is lost) but requires_approval. down relaxes it.
+            (
+                "SET NOT NULL",
+                "DROP NOT NULL",
+                MigrationFlags {
+                    requires_approval: true,
+                    ..MigrationFlags::default()
+                },
+            )
+        };
+        let up = format!(
+            "ALTER TABLE {} ALTER COLUMN {} {}",
+            self.qualified(table),
+            quote_ident(col),
+            verb
+        );
+        let down = format!(
+            "ALTER TABLE {} ALTER COLUMN {} {}",
+            self.qualified(table),
+            quote_ident(col),
+            reverse
+        );
+        self.make(
+            &format!("alter_column_null_{table}_{col}"),
+            up,
+            Some(down),
+            flags,
             Vec::new(),
         )
     }
