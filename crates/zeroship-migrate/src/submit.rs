@@ -53,6 +53,17 @@
 //! journal apply. (Name is intentionally not part of the key: a re-submit that
 //! only renames the human label is the same applied unit.)
 //!
+//! ## The dedup key is NET-applied — resubmit-after-rollback RE-APPLIES (MED-3)
+//!
+//! The dedup is over the journal's **net-applied** checksums — a checksum whose
+//! LATEST journal event is `completed` (see
+//! [`journal::applied`](crate::journal::applied)). A migration that was applied and
+//! then ROLLED BACK is no longer net-applied, so resubmitting the IDENTICAL script
+//! after a rollback **RE-APPLIES** it (it is NOT a [`SubmissionOutcome::NoOp`]).
+//! This is intended: the rolled-back unit is gone from the live schema and the
+//! operator is explicitly asking for it back. The dedup answers "is this exact
+//! apply-relevant unit CURRENTLY live?", not "was it EVER applied?".
+//!
 //! ## Concurrency: dedup→apply is one locked critical section (HIGH-1)
 //!
 //! The dedup read and the apply MUST be serialized as ONE critical section under
@@ -173,8 +184,12 @@ pub enum SubmissionOutcome {
         /// The shadow apply error (the offending migration + reason).
         error: String,
     },
-    /// This exact migration (same checksum) is already net-applied in the journal —
-    /// an idempotent re-submit. No second journal apply happened.
+    /// This exact migration (same checksum) is already **net-applied** in the
+    /// journal — an idempotent re-submit. No second journal apply happened.
+    ///
+    /// The key is NET-applied (latest event `completed`), not ever-applied: an
+    /// identical resubmit AFTER a rollback re-applies (it is NOT a NoOp) — see the
+    /// module docs (MED-3).
     NoOp {
         /// The minted version (informational; the already-applied row keeps its
         /// own original version).
