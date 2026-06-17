@@ -105,11 +105,12 @@ fn mig(version: MigrationId, name: &str, up: &str) -> Migration {
         name: name.to_string(),
         up: up.to_string(),
         down: None,
-        checksum: Checksum::of(up, None),
+        checksum: Checksum::of(up, None, &[]),
         flags: MigrationFlags::default(),
         owner_app: "app_test".to_string(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
+        preconditions: Vec::new(),
     }
 }
 

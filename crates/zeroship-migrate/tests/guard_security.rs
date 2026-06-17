@@ -1805,11 +1805,12 @@ fn crate_root_reexports_compose_an_end_to_end_check() {
         name: "create_t".to_string(),
         up: up.to_string(),
         down: Some("DROP TABLE project_x.t".to_string()),
-        checksum: Checksum::of(up, Some("DROP TABLE project_x.t")),
+        checksum: Checksum::of(up, Some("DROP TABLE project_x.t"), &[]),
         flags: MigrationFlags::default(),
         owner_app: "app_0000000000000000000000".to_string(),
         depends_on: vec![],
         supersedes: Vec::new(),
+        preconditions: Vec::new(),
     };
     assert!(m.version.as_str().starts_with("mig_"));
     assert_eq!(m.checksum.as_str().len(), 64);

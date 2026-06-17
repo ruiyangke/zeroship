@@ -100,7 +100,7 @@ fn create_table_mig(
         name: format!("create_{table}"),
         up: up.clone(),
         down: Some(down.clone()),
-        checksum: Checksum::of(&up, Some(&down)),
+        checksum: Checksum::of(&up, Some(&down), &[]),
         flags: MigrationFlags {
             destructive: false,
             ..MigrationFlags::default()
@@ -108,6 +108,7 @@ fn create_table_mig(
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
+        preconditions: Vec::new(),
     }
 }
 
@@ -341,11 +342,12 @@ async fn rollback_refuses_irreversible_without_force_then_skips_with_force() {
         name: "irreversible_t2".into(),
         up: up2.clone(),
         down: None,
-        checksum: Checksum::of(&up2, None),
+        checksum: Checksum::of(&up2, None, &[]),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
+        preconditions: Vec::new(),
     };
     let m3 = create_table_mig(v3, &cfg, "t3");
     let set = [m1.clone(), m2.clone(), m3.clone()];
@@ -417,11 +419,12 @@ async fn force_skip_irreversible_refuses_when_a_dependency_is_rolled_back_beneat
             name: "create_orders".into(),
             up: up.clone(),
             down: Some(down.clone()),
-            checksum: Checksum::of(&up, Some(&down)),
+            checksum: Checksum::of(&up, Some(&down), &[]),
             flags: MigrationFlags::default(),
             owner_app: "app_test".into(),
             depends_on: Vec::new(),
             supersedes: Vec::new(),
+            preconditions: Vec::new(),
         }
     };
     // v2: audit with FK to orders, IRREVERSIBLE, depends_on v1.
@@ -435,11 +438,12 @@ async fn force_skip_irreversible_refuses_when_a_dependency_is_rolled_back_beneat
             name: "irreversible_audit".into(),
             up: up.clone(),
             down: None,
-            checksum: Checksum::of(&up, None),
+            checksum: Checksum::of(&up, None, &[]),
             flags: MigrationFlags::default(),
             owner_app: "app_test".into(),
             depends_on: vec![v1.clone()],
             supersedes: Vec::new(),
+            preconditions: Vec::new(),
         }
     };
     let set = [m1.clone(), m2.clone()];
@@ -481,11 +485,12 @@ async fn force_requires_both_force_and_backup_acknowledged() {
         name: "irreversible".into(),
         up: up.clone(),
         down: None,
-        checksum: Checksum::of(&up, None),
+        checksum: Checksum::of(&up, None, &[]),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
+        preconditions: Vec::new(),
     };
     apply(&conn, &cfg, std::slice::from_ref(&m1), Approval::None, "actor").await.expect("seed");
 
@@ -534,11 +539,12 @@ async fn rollback_runs_downs_in_reverse_topological_order_of_depends_on() {
         name: "create_parent".into(),
         up: b_up.clone(),
         down: Some(b_down.clone()),
-        checksum: Checksum::of(&b_up, Some(&b_down)),
+        checksum: Checksum::of(&b_up, Some(&b_down), &[]),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
+        preconditions: Vec::new(),
     };
     // A: child with a REAL FK to parent; depends_on B.
     let a_up = format!(
@@ -551,11 +557,12 @@ async fn rollback_runs_downs_in_reverse_topological_order_of_depends_on() {
         name: "create_child".into(),
         up: a_up.clone(),
         down: Some(a_down.clone()),
-        checksum: Checksum::of(&a_up, Some(&a_down)),
+        checksum: Checksum::of(&a_up, Some(&a_down), &[]),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: vec![vb.clone()],
         supersedes: Vec::new(),
+        preconditions: Vec::new(),
     };
 
     // Supply A first (lower version) to prove ordering is by depends_on, not slice
@@ -651,11 +658,12 @@ async fn rollback_to_version_refuses_when_a_kept_migration_depends_on_a_rolled_b
         name: "create_parent".into(),
         up: b_up.clone(),
         down: Some(b_down.clone()),
-        checksum: Checksum::of(&b_up, Some(&b_down)),
+        checksum: Checksum::of(&b_up, Some(&b_down), &[]),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
+        preconditions: Vec::new(),
     };
     // A: child with a REAL FK to parent; depends_on B (LOWER version — KEPT by the
     // ToVersion(va) threshold since va is NOT > va).
@@ -669,11 +677,12 @@ async fn rollback_to_version_refuses_when_a_kept_migration_depends_on_a_rolled_b
         name: "create_child".into(),
         up: a_up.clone(),
         down: Some(a_down.clone()),
-        checksum: Checksum::of(&a_up, Some(&a_down)),
+        checksum: Checksum::of(&a_up, Some(&a_down), &[]),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: vec![vb.clone()],
         supersedes: Vec::new(),
+        preconditions: Vec::new(),
     };
 
     let set = [m_a.clone(), m_b.clone()];
@@ -751,11 +760,12 @@ async fn rollback_all_diamond_unwinds_in_reverse_topological_order() {
         name: name.into(),
         up: up.clone(),
         down: Some(down.clone()),
-        checksum: Checksum::of(&up, Some(&down)),
+        checksum: Checksum::of(&up, Some(&down), &[]),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: deps,
         supersedes: Vec::new(),
+        preconditions: Vec::new(),
     };
 
     let m_a = mk(
@@ -856,11 +866,12 @@ async fn rollback_all_multiroot_forest_unwinds_cleanly() {
         name: name.into(),
         up: up.clone(),
         down: Some(down.clone()),
-        checksum: Checksum::of(&up, Some(&down)),
+        checksum: Checksum::of(&up, Some(&down), &[]),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: deps,
         supersedes: Vec::new(),
+        preconditions: Vec::new(),
     };
 
     let m_p1 = mk(
@@ -946,11 +957,12 @@ async fn dangerous_down_is_guard_denied_and_nothing_rolled_back() {
         name: "rce_down".into(),
         up: up.clone(),
         down: Some(down.clone()),
-        checksum: Checksum::of(&up, Some(&down)),
+        checksum: Checksum::of(&up, Some(&down), &[]),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
+        preconditions: Vec::new(),
     };
     apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor").await.expect("seed (up is benign)");
     assert!(table_exists(&conn, &cfg.project_schema, "t").await);
@@ -993,11 +1005,12 @@ async fn cross_schema_down_is_permission_denied_by_the_migrator_role() {
         name: "xschema_down".into(),
         up: up.clone(),
         down: Some(down.clone()),
-        checksum: Checksum::of(&up, Some(&down)),
+        checksum: Checksum::of(&up, Some(&down), &[]),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
+        preconditions: Vec::new(),
     };
     apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor").await.expect("seed");
 
@@ -1089,11 +1102,12 @@ async fn non_transactional_down_is_refused_up_front_and_nothing_rolled_back() {
         name: "non_txn_down".into(),
         up: up.clone(),
         down: Some(down.clone()),
-        checksum: Checksum::of(&up, Some(&down)),
+        checksum: Checksum::of(&up, Some(&down), &[]),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
+        preconditions: Vec::new(),
     };
     apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
         .await
