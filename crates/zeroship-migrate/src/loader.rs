@@ -129,6 +129,27 @@ pub enum LoaderError {
         /// The OS error message.
         message: String,
     },
+    /// A directory mixes the **Flyway** (`V<NNNN>__…`) and **dbmate**
+    /// (`<14-digit>_…`) filename shapes. A migration directory is one format or
+    /// the other — auto-detected per file by filename shape — and a mixed
+    /// directory is ambiguous (the two formats parse bodies differently:
+    /// Flyway pairs `.down.sql` siblings, dbmate splits `-- migrate:up`/`down`
+    /// sections), so it is a hard error rather than a silent guess.
+    #[error("mixed migration formats in one directory: Flyway file '{flyway}' and dbmate file '{dbmate}' (a directory must be all-Flyway or all-dbmate)")]
+    MixedFormats {
+        /// An example Flyway-shaped filename seen.
+        flyway: String,
+        /// An example dbmate-shaped filename seen.
+        dbmate: String,
+    },
+    /// A dbmate file (`<14-digit>_<desc>.sql`) had no `-- migrate:up` section
+    /// marker. The `up` body is required (dbmate parity); a file without it is
+    /// not a runnable migration.
+    #[error("dbmate file '{name}' has no '-- migrate:up' section")]
+    MissingUpSection {
+        /// The offending dbmate filename.
+        name: String,
+    },
 }
 
 /// Derive a deterministic, ORDER-PRESERVING [`MigrationId`] from a numeric file
@@ -289,6 +310,190 @@ fn is_valid_description(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
+// =============================================================================
+// dbmate-native format (Track A, Phase A2)
+// =============================================================================
+//
+// dbmate's on-disk format is ONE timestamped file per migration carrying both
+// directions via section markers:
+//
+// ```text
+// db/migrations/20240617123000_create_users.sql
+// -- migrate:up
+// CREATE TABLE users (id bigserial primary key, ...);
+//
+// -- migrate:down
+// DROP TABLE users;
+// ```
+//
+// - Filename grammar: `<version>_<description>.sql` where `<version>` is a
+//   14-digit `YYYYMMDDHHMMSS` timestamp. (dbmate accepts other digit widths in
+//   the wild; zeroship STANDARDIZES on the 14-digit stamp the `new` helper mints,
+//   so the loader recognizes exactly 14 digits as the dbmate shape — every other
+//   leading-digit width is not a dbmate file. This keeps auto-detect crisp and the
+//   `V<NNNN>__` Flyway shape unambiguous.)
+// - `-- migrate:up` (required) then optional `-- migrate:down`. A file with no
+//   `-- migrate:up` is a hard `LoaderError::MissingUpSection`.
+// - Per-section option `-- migrate:up transaction:false` → the non-transactional
+//   path (reconciled with the classify-derived flag in `flags_for_file_opts`).
+//
+// The 14-digit timestamp (~2.0e13 for 2026) is < `VERSION_CEILING` (2^48 ≈
+// 2.8e14), so `migration_id_for_version(timestamp)` is REUSED for the version id
+// and orders timestamps correctly. A timestamp ≥ `VERSION_CEILING` is rejected as
+// `VersionOutOfRange`, identically to the Flyway path.
+
+/// The exact digit-width of a dbmate `<version>` timestamp the loader recognizes
+/// (`YYYYMMDDHHMMSS`). Standardized to keep auto-detect unambiguous.
+const DBMATE_VERSION_DIGITS: usize = 14;
+
+/// A parsed dbmate filename: `<14-digit version>_<description>.sql`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DbmateName {
+    /// The numeric timestamp version (`YYYYMMDDHHMMSS`).
+    version: u64,
+    /// The description (`[A-Za-z0-9_]+`).
+    description: String,
+}
+
+/// The two section bodies of a dbmate file, plus the parsed `up` option.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DbmateSections {
+    /// The `-- migrate:up` body (required; trimmed).
+    up: String,
+    /// The `-- migrate:down` body, or `None` if the file has no down section
+    /// (trimmed).
+    down: Option<String>,
+    /// `true` iff the `-- migrate:up` marker carried `transaction:false`.
+    up_non_transactional: bool,
+}
+
+/// Parse a dbmate filename `<14-digit version>_<description>.sql`. Returns `None`
+/// for any name that is not the dbmate shape (the caller decides whether that is a
+/// hard error or a different format).
+fn parse_dbmate_filename(name: &str) -> Option<DbmateName> {
+    let stem = name.strip_suffix(".sql")?;
+    // The version is the LEADING run of ascii digits, ended by the first `_`.
+    let digit_end = stem.find(|c: char| !c.is_ascii_digit()).unwrap_or(stem.len());
+    // Standardize on EXACTLY 14 digits (YYYYMMDDHHMMSS) so the dbmate shape is
+    // unambiguous vs. Flyway's `V<NNNN>__`.
+    if digit_end != DBMATE_VERSION_DIGITS {
+        return None;
+    }
+    let (digits, rest) = stem.split_at(digit_end);
+    let description = rest.strip_prefix('_')?;
+    if !is_valid_description(description) {
+        return None;
+    }
+    let version: u64 = digits.parse().ok()?;
+    Some(DbmateName {
+        version,
+        description: description.to_string(),
+    })
+}
+
+/// True if a filename has the dbmate shape (`<14-digit>_<desc>.sql`).
+fn is_dbmate_filename(name: &str) -> bool {
+    parse_dbmate_filename(name).is_some()
+}
+
+/// True if a filename has the Flyway shape (`V<NNNN>__…` / `R__…`).
+fn is_flyway_filename(name: &str) -> bool {
+    parse_filename(name).is_some()
+}
+
+/// Split a dbmate file body on its `-- migrate:up` / `-- migrate:down` section
+/// markers. `up` is REQUIRED; `down` is optional. Section bodies are trimmed. The
+/// `-- migrate:up` marker may carry a `transaction:false` option.
+///
+/// # Errors
+/// [`LoaderError::MissingUpSection`] if there is no `-- migrate:up` marker.
+fn parse_dbmate_sections(name: &str, body: &str) -> Result<DbmateSections, LoaderError> {
+    // Marker lines: a line whose TRIMMED form begins with `-- migrate:`. We split
+    // the file into (marker, body) regions. `up`/`down` are the only directions
+    // dbmate defines; an unknown direction is ignored (its body folds into the
+    // previous section), but `up` must be present.
+    #[derive(PartialEq)]
+    enum Sec {
+        None,
+        Up,
+        Down,
+        Other,
+    }
+    let mut current = Sec::None;
+    let mut up: Option<String> = None;
+    let mut down: Option<String> = None;
+    let mut up_non_transactional = false;
+    let mut up_buf = String::new();
+    let mut down_buf = String::new();
+
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("-- migrate:") {
+            // The direction is the first whitespace-delimited token; the rest are
+            // options (`transaction:false`).
+            let mut parts = rest.split_whitespace();
+            let direction = parts.next().unwrap_or("");
+            match direction {
+                "up" => {
+                    current = Sec::Up;
+                    up = Some(String::new());
+                    up_non_transactional = parts.any(|opt| opt == "transaction:false");
+                }
+                "down" => {
+                    current = Sec::Down;
+                    down = Some(String::new());
+                }
+                _ => current = Sec::Other,
+            }
+            continue;
+        }
+        match current {
+            Sec::Up => {
+                up_buf.push_str(line);
+                up_buf.push('\n');
+            }
+            Sec::Down => {
+                down_buf.push_str(line);
+                down_buf.push('\n');
+            }
+            Sec::None | Sec::Other => {}
+        }
+    }
+
+    if up.is_none() {
+        return Err(LoaderError::MissingUpSection {
+            name: name.to_string(),
+        });
+    }
+
+    Ok(DbmateSections {
+        up: up_buf.trim().to_string(),
+        // `down` present only if a `-- migrate:down` marker appeared. An empty
+        // down body trims to `Some("")`-equivalent → we keep `None` for an
+        // absent marker and the trimmed string otherwise.
+        down: down.map(|_| down_buf.trim().to_string()),
+        up_non_transactional,
+    })
+}
+
+/// The skeleton `new`-command output: the dbmate filename + the empty section
+/// scaffold (`-- migrate:up\n\n\n-- migrate:down\n`).
+///
+/// PURE + deterministic: the caller (the A3 CLI `new` command) supplies the
+/// 14-digit timestamp string (formatted from `SystemTime`), so this function does
+/// NO I/O and NO clock read — it is fully unit-testable with a fixed stamp.
+///
+/// `timestamp` must be the 14-digit `YYYYMMDDHHMMSS` stamp and `name` the
+/// description (`[A-Za-z0-9_]+` by convention; the function does not validate it —
+/// the CLI normalizes the user's input before calling). Returns
+/// `(filename, contents)`.
+#[must_use]
+pub fn new_dbmate_migration(timestamp: &str, name: &str) -> (String, String) {
+    let filename = format!("{timestamp}_{name}.sql");
+    let contents = "-- migrate:up\n\n\n-- migrate:down\n".to_string();
+    (filename, contents)
+}
+
 /// Build the [`MigrationFlags`] for a file's `up` SQL, **trust-independently**.
 ///
 /// Mirrors [`submit_migration`](crate::submit::submit_migration)'s server-side
@@ -301,6 +506,24 @@ fn is_valid_description(s: &str) -> bool {
 /// (§5), not the loader's. `flags_for` reads ONLY statement kinds, so this derives
 /// the identical flags the engine's later Platform guard would.
 fn flags_for_file(name: &str, up: &str, repeatable: bool) -> Result<MigrationFlags, LoaderError> {
+    flags_for_file_opts(name, up, repeatable, false)
+}
+
+/// As [`flags_for_file`], but honoring a dbmate `-- migrate:up transaction:false`
+/// option (`force_non_transactional`).
+///
+/// Flags are still **classify-derived** (a `CREATE INDEX CONCURRENTLY` auto-routes
+/// to the non-transactional path with no option needed). The dbmate option is a
+/// one-way override: if the file declares `transaction:false`, the migration runs
+/// on the non-transactional two-phase path regardless of what `classify` derived;
+/// otherwise the classify-derived `transactional` flag stands (the option never
+/// *forces* a non-transactional migration back into a transaction).
+fn flags_for_file_opts(
+    name: &str,
+    up: &str,
+    repeatable: bool,
+    force_non_transactional: bool,
+) -> Result<MigrationFlags, LoaderError> {
     let classes = classify(up).map_err(|source| LoaderError::Parse {
         name: name.to_string(),
         source,
@@ -314,6 +537,9 @@ fn flags_for_file(name: &str, up: &str, repeatable: bool) -> Result<MigrationFla
     let derived = flags_for(&report);
     Ok(MigrationFlags {
         repeatable,
+        // dbmate `transaction:false` honored as a one-way override → always the
+        // non-transactional path; otherwise keep the classify-derived flag.
+        transactional: derived.transactional && !force_non_transactional,
         ..derived
     })
 }
@@ -440,9 +666,142 @@ fn classify_filenames(paths: &[PathBuf]) -> Result<Classified, LoaderError> {
     })
 }
 
+/// The migration-file format a directory is authored in (auto-detected by
+/// filename shape).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirFormat {
+    /// `V<NNNN>__<desc>.sql` (+ `.down.sql`, `R__`) — the platform port.
+    Flyway,
+    /// `<14-digit>_<desc>.sql` with `-- migrate:up`/`down` sections — the public
+    /// dbmate-like CLI.
+    Dbmate,
+}
+
+/// Auto-detect a directory's format by classifying each filename's SHAPE
+/// (`V<NNNN>__…` ⇒ Flyway; `<14-digit>_…` ⇒ dbmate). An empty directory defaults
+/// to Flyway (the choice is moot — there are no files to parse). A directory that
+/// mixes both shapes is ambiguous and a hard [`LoaderError::MixedFormats`]; a file
+/// matching NEITHER shape is left for the chosen format's parser to reject as an
+/// [`LoaderError::UnrecognizedFile`] (so an all-dbmate dir with one stray
+/// `garbage.sql` still errors precisely, not as a format-mix).
+fn detect_format(paths: &[PathBuf]) -> Result<DirFormat, LoaderError> {
+    let mut flyway: Option<String> = None;
+    let mut dbmate: Option<String> = None;
+    for path in paths {
+        let name = file_name_of(path);
+        // dbmate is checked first: a 14-digit `<ts>_<desc>.sql` can never match the
+        // `V…`/`R__` Flyway grammar (no `V`/`R` prefix), so the two predicates are
+        // disjoint and order is immaterial — but recording both lets us name a
+        // concrete example file of each shape in the MixedFormats error.
+        if is_dbmate_filename(&name) {
+            dbmate.get_or_insert(name);
+        } else if is_flyway_filename(&name) {
+            flyway.get_or_insert(name);
+        }
+        // A name matching neither shape is NOT a format signal — defer to the
+        // chosen parser, which raises UnrecognizedFile.
+    }
+    match (flyway, dbmate) {
+        (Some(f), Some(d)) => Err(LoaderError::MixedFormats {
+            flyway: f,
+            dbmate: d,
+        }),
+        (_, Some(_)) => Ok(DirFormat::Dbmate),
+        // No dbmate files seen ⇒ Flyway (incl. the empty-dir case: moot).
+        (_, None) => Ok(DirFormat::Flyway),
+    }
+}
+
 /// Load an explicit, ordered list of file paths (the directory-independent core
 /// of [`load_dir`], factored out so tests can drive it with a fixed file set).
+/// Routes to the Flyway or dbmate builder by the auto-detected directory format.
 fn load_files(paths: &[PathBuf]) -> Result<Vec<Migration>, LoaderError> {
+    match detect_format(paths)? {
+        DirFormat::Flyway => load_flyway_files(paths),
+        DirFormat::Dbmate => load_dbmate_files(paths),
+    }
+}
+
+/// Build the `Migration` set for a **dbmate** directory: one timestamped file per
+/// migration, both directions via `-- migrate:up`/`down` sections. Ordered by the
+/// numeric timestamp version ascending. dbmate has no repeatable concept, so every
+/// file is a versioned migration. Mirrors [`load_flyway_files`]'s `Migration`
+/// construction (server-derived flags, `PLATFORM_OWNER_APP`, checksum over the
+/// whole unit).
+fn load_dbmate_files(paths: &[PathBuf]) -> Result<Vec<Migration>, LoaderError> {
+    // First pass: parse filenames, range-check + duplicate-check versions.
+    let mut parsed: Vec<(u64, String, PathBuf)> = Vec::new();
+    for path in paths {
+        let name = file_name_of(path);
+        let Some(DbmateName {
+            version,
+            description,
+        }) = parse_dbmate_filename(&name)
+        else {
+            // In a dbmate-detected dir, any non-dbmate-shaped FILE is a stray.
+            return Err(LoaderError::UnrecognizedFile { name });
+        };
+        if version >= VERSION_CEILING {
+            return Err(LoaderError::VersionOutOfRange {
+                version,
+                ceiling: VERSION_CEILING,
+            });
+        }
+        parsed.push((version, description, path.clone()));
+    }
+
+    parsed.sort_by_key(|(v, _, _)| *v);
+    for window in parsed.windows(2) {
+        if window[0].0 == window[1].0 {
+            return Err(LoaderError::DuplicateVersion {
+                version: window[0].0,
+                first: file_name_of(&window[0].2),
+                second: file_name_of(&window[1].2),
+            });
+        }
+    }
+
+    // Second pass: read bodies, split sections, build each Migration.
+    let mut migrations: Vec<Migration> = Vec::with_capacity(parsed.len());
+    for (version, description, path) in &parsed {
+        let name = file_name_of(path);
+        let raw = read_body(path)?;
+        let sections = parse_dbmate_sections(&name, &raw)?;
+        let flags = flags_for_file_opts(
+            &name,
+            &sections.up,
+            false,
+            sections.up_non_transactional,
+        )?;
+        let checksum = Checksum::of(&ChecksumInput {
+            up: &sections.up,
+            down: sections.down.as_deref(),
+            flags: &flags,
+            owner_app: PLATFORM_OWNER_APP,
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        });
+        migrations.push(Migration {
+            version: migration_id_for_version(*version),
+            name: description.clone(),
+            up: sections.up,
+            down: sections.down,
+            checksum,
+            flags,
+            owner_app: PLATFORM_OWNER_APP.to_string(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+        });
+    }
+
+    Ok(migrations)
+}
+
+/// Build the `Migration` set for a **Flyway** directory (the original
+/// `load_files` body — the platform port path, unchanged).
+fn load_flyway_files(paths: &[PathBuf]) -> Result<Vec<Migration>, LoaderError> {
     let Classified {
         ups,
         downs,
@@ -801,6 +1160,290 @@ mod tests {
     fn empty_dir_loads_to_empty_vec() {
         let dir = tempdir();
         assert!(load_dir(&dir).unwrap().is_empty());
+    }
+
+    // ----- dbmate-native format (Phase A2) -----
+
+    #[test]
+    fn parse_dbmate_filename_accepts_14_digit_timestamp() {
+        assert_eq!(
+            parse_dbmate_filename("20240617123000_create_users.sql"),
+            Some(DbmateName {
+                version: 20_240_617_123_000,
+                description: "create_users".to_string()
+            })
+        );
+        // A different valid stamp orders correctly numerically (see ordering test).
+        assert_eq!(
+            parse_dbmate_filename("20240101000000_init.sql"),
+            Some(DbmateName {
+                version: 20_240_101_000_000,
+                description: "init".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn parse_dbmate_filename_rejects_non_dbmate_shapes() {
+        // Flyway shape is NOT dbmate.
+        assert_eq!(parse_dbmate_filename("V0001__x.sql"), None);
+        // Too few digits (not a 14-digit stamp).
+        assert_eq!(parse_dbmate_filename("123_x.sql"), None);
+        // Too many digits.
+        assert_eq!(parse_dbmate_filename("202406171230001_x.sql"), None);
+        // No underscore after the version.
+        assert_eq!(parse_dbmate_filename("20240617123000.sql"), None);
+        // Empty description.
+        assert_eq!(parse_dbmate_filename("20240617123000_.sql"), None);
+        // Bad description char.
+        assert_eq!(parse_dbmate_filename("20240617123000_has-dash.sql"), None);
+        // Wrong extension.
+        assert_eq!(parse_dbmate_filename("20240617123000_x.txt"), None);
+    }
+
+    #[test]
+    fn parse_dbmate_sections_extracts_up_and_down() {
+        let body = "-- migrate:up\nCREATE TABLE users (id bigserial primary key);\n\n-- migrate:down\nDROP TABLE users;\n";
+        let secs = parse_dbmate_sections("20240617123000_create_users.sql", body).unwrap();
+        assert_eq!(secs.up, "CREATE TABLE users (id bigserial primary key);");
+        assert_eq!(secs.down.as_deref(), Some("DROP TABLE users;"));
+        assert!(!secs.up_non_transactional);
+    }
+
+    #[test]
+    fn parse_dbmate_sections_up_only_yields_no_down() {
+        let body = "-- migrate:up\nCREATE TABLE t (id int);\n";
+        let secs = parse_dbmate_sections("20240101000000_t.sql", body).unwrap();
+        assert_eq!(secs.up, "CREATE TABLE t (id int);");
+        assert_eq!(secs.down, None, "no -- migrate:down marker => down is None");
+    }
+
+    #[test]
+    fn parse_dbmate_sections_missing_up_is_hard_error() {
+        // Only a down section, no up.
+        let body = "-- migrate:down\nDROP TABLE t;\n";
+        let err = parse_dbmate_sections("20240101000000_t.sql", body).unwrap_err();
+        assert!(
+            matches!(err, LoaderError::MissingUpSection { ref name } if name == "20240101000000_t.sql"),
+            "got {err:?}"
+        );
+        // A file with no markers at all is equally missing its up.
+        let err2 = parse_dbmate_sections("20240101000000_t.sql", "CREATE TABLE t ();").unwrap_err();
+        assert!(matches!(err2, LoaderError::MissingUpSection { .. }), "got {err2:?}");
+    }
+
+    #[test]
+    fn parse_dbmate_sections_honors_transaction_false() {
+        let body = "-- migrate:up transaction:false\nCREATE INDEX i ON t (a);\n\n-- migrate:down\nDROP INDEX i;\n";
+        let secs = parse_dbmate_sections("20240101000000_idx.sql", body).unwrap();
+        assert!(
+            secs.up_non_transactional,
+            "the transaction:false option on -- migrate:up must be parsed"
+        );
+        assert_eq!(secs.up, "CREATE INDEX i ON t (a);");
+    }
+
+    #[test]
+    fn load_dir_dbmate_orders_by_timestamp_version() {
+        let dir = tempdir();
+        // Out of filesystem-lexical / insertion order to prove version ordering.
+        write_file(&dir, "20240617123000_add_index.sql", "-- migrate:up\nCREATE INDEX i ON t (a);\n-- migrate:down\nDROP INDEX i;\n");
+        write_file(&dir, "20240101000000_create.sql", "-- migrate:up\nCREATE TABLE t (id int);\n-- migrate:down\nDROP TABLE t;\n");
+        write_file(&dir, "20240301000000_add_col.sql", "-- migrate:up\nALTER TABLE t ADD COLUMN a int;\n");
+
+        let migs = load_dir(&dir).expect("dbmate dir loads");
+        assert_eq!(migs.len(), 3);
+        // Ordered by numeric timestamp: 20240101 < 20240301 < 20240617.
+        assert_eq!(migs[0].name, "create");
+        assert_eq!(migs[1].name, "add_col");
+        assert_eq!(migs[2].name, "add_index");
+        assert!(migs[0].version < migs[1].version);
+        assert!(migs[1].version < migs[2].version);
+        // Section bodies wired through.
+        assert_eq!(migs[0].up, "CREATE TABLE t (id int);");
+        assert_eq!(migs[0].down.as_deref(), Some("DROP TABLE t;"));
+        assert_eq!(migs[1].down, None, "up-only file has no down");
+        // Version id reuses the canonical version→id mapping.
+        assert_eq!(migs[0].version, migration_id_for_version(20_240_101_000_000));
+        // owner_app + checksum invariants identical to the Flyway path.
+        for m in &migs {
+            assert_eq!(m.owner_app, PLATFORM_OWNER_APP);
+            assert!(m.depends_on.is_empty());
+            assert_eq!(m.checksum, Checksum::of(&ChecksumInput::from_migration(m)));
+            assert!(!m.flags.repeatable, "dbmate has no repeatable concept");
+        }
+    }
+
+    #[test]
+    fn load_dir_dbmate_drop_table_is_destructive() {
+        let dir = tempdir();
+        write_file(&dir, "20240101000000_drop_it.sql", "-- migrate:up\nDROP TABLE legacy;\n");
+        let migs = load_dir(&dir).unwrap();
+        assert!(migs[0].flags.destructive, "DROP TABLE up must be destructive");
+        assert!(migs[0].flags.requires_approval, "destructive => requires approval");
+    }
+
+    #[test]
+    fn load_dir_dbmate_transaction_false_routes_non_transactional() {
+        let dir = tempdir();
+        // A plain (transactional-by-classify) statement, but the file declares
+        // transaction:false — the override must force the non-transactional path.
+        write_file(
+            &dir,
+            "20240101000000_seed.sql",
+            "-- migrate:up transaction:false\nINSERT INTO t (id) VALUES (1);\n",
+        );
+        let migs = load_dir(&dir).unwrap();
+        assert!(
+            !migs[0].flags.transactional,
+            "transaction:false must honor the non-transactional path even when classify would allow a txn"
+        );
+    }
+
+    #[test]
+    fn load_dir_dbmate_missing_up_is_hard_error() {
+        let dir = tempdir();
+        write_file(&dir, "20240101000000_bad.sql", "-- migrate:down\nDROP TABLE t;\n");
+        let err = load_dir(&dir).unwrap_err();
+        assert!(matches!(err, LoaderError::MissingUpSection { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn load_dir_dbmate_far_future_stamp_in_range_loads() {
+        // Every 14-digit YYYYMMDDHHMMSS stamp (max ≈ 1.0e14) is below
+        // VERSION_CEILING (2^48 ≈ 2.81e14), so a real dbmate stamp is always in
+        // range and loads cleanly via the canonical version→id mapping — even a
+        // far-future stamp (no VersionOutOfRange). The dbmate builder still carries
+        // the same `>= VERSION_CEILING` guard as the Flyway path as defense in
+        // depth, identical to `migration_id_for_version`'s debug-assert contract.
+        let dir = tempdir();
+        write_file(&dir, "20991231235959_far_future.sql", "-- migrate:up\nCREATE TABLE t (id int);\n");
+        let migs = load_dir(&dir).unwrap();
+        assert_eq!(migs.len(), 1);
+        assert_eq!(migs[0].version, migration_id_for_version(20_991_231_235_959));
+    }
+
+    #[test]
+    fn load_dir_dbmate_duplicate_version_is_hard_error() {
+        let dir = tempdir();
+        write_file(&dir, "20240101000000_one.sql", "-- migrate:up\nCREATE TABLE a ();\n");
+        write_file(&dir, "20240101000000_two.sql", "-- migrate:up\nCREATE TABLE b ();\n");
+        let err = load_dir(&dir).unwrap_err();
+        assert!(
+            matches!(err, LoaderError::DuplicateVersion { version: 20_240_101_000_000, .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn load_dir_dbmate_stray_file_is_unrecognized() {
+        let dir = tempdir();
+        write_file(&dir, "20240101000000_ok.sql", "-- migrate:up\nCREATE TABLE t ();\n");
+        write_file(&dir, "20240102000000_also.sql", "-- migrate:up\nCREATE TABLE u ();\n");
+        // A bare non-dbmate, non-Flyway file in a dbmate-detected dir.
+        write_file(&dir, "notes.txt", "hello");
+        let err = load_dir(&dir).unwrap_err();
+        assert!(
+            matches!(err, LoaderError::UnrecognizedFile { ref name } if name == "notes.txt"),
+            "got {err:?}"
+        );
+    }
+
+    // ----- format auto-detection + coexistence -----
+
+    #[test]
+    fn detect_format_distinguishes_flyway_and_dbmate() {
+        assert_eq!(
+            detect_format(&[PathBuf::from("V0001__x.sql")]).unwrap(),
+            DirFormat::Flyway
+        );
+        assert_eq!(
+            detect_format(&[PathBuf::from("R__view.sql")]).unwrap(),
+            DirFormat::Flyway
+        );
+        assert_eq!(
+            detect_format(&[PathBuf::from("20240101000000_x.sql")]).unwrap(),
+            DirFormat::Dbmate
+        );
+        // Empty dir defaults to Flyway (moot — no files to parse).
+        assert_eq!(detect_format(&[]).unwrap(), DirFormat::Flyway);
+        // A stray non-conforming file is not a format signal (defers to parser).
+        assert_eq!(
+            detect_format(&[PathBuf::from("20240101000000_x.sql"), PathBuf::from("README.md")]).unwrap(),
+            DirFormat::Dbmate
+        );
+    }
+
+    #[test]
+    fn mixed_format_directory_is_hard_error() {
+        let dir = tempdir();
+        write_file(&dir, "V0001__flyway.sql", "CREATE TABLE t ();");
+        write_file(&dir, "20240101000000_dbmate.sql", "-- migrate:up\nCREATE TABLE u ();\n");
+        let err = load_dir(&dir).unwrap_err();
+        assert!(matches!(err, LoaderError::MixedFormats { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn auto_detect_does_not_misclassify_either_shape() {
+        // A V0001 file is Flyway, never dbmate (it has no 14-digit prefix).
+        assert!(!is_dbmate_filename("V0001__extensions.sql"));
+        assert!(is_flyway_filename("V0001__extensions.sql"));
+        // A 14-digit timestamped file is dbmate, never Flyway (no V/R prefix).
+        assert!(is_dbmate_filename("20240617123000_create_users.sql"));
+        assert!(!is_flyway_filename("20240617123000_create_users.sql"));
+    }
+
+    // ----- the `new` helper (Phase A2; A3 CLI consumes it) -----
+
+    #[test]
+    fn new_dbmate_migration_is_deterministic() {
+        let (filename, contents) = new_dbmate_migration("20240617123000", "create_users");
+        assert_eq!(filename, "20240617123000_create_users.sql");
+        assert_eq!(contents, "-- migrate:up\n\n\n-- migrate:down\n");
+        // Deterministic: same inputs => identical output.
+        assert_eq!(
+            new_dbmate_migration("20240617123000", "create_users"),
+            (filename, contents)
+        );
+    }
+
+    #[test]
+    fn new_dbmate_migration_output_round_trips_through_the_loader() {
+        // The skeleton the `new` helper emits must itself be a loadable dbmate file
+        // (its filename parses + its body has a -- migrate:up section). The empty up
+        // body classifies to an empty statement set (no error).
+        let (filename, contents) = new_dbmate_migration("20240101000000", "scaffold");
+        assert!(parse_dbmate_filename(&filename).is_some(), "emitted filename parses");
+        let secs = parse_dbmate_sections(&filename, &contents).expect("emitted body has an up section");
+        assert_eq!(secs.up, "", "the scaffold up body is empty");
+        assert_eq!(secs.down.as_deref(), Some(""), "the scaffold down marker is present but empty");
+    }
+
+    #[test]
+    fn flyway_db_migrations_still_load_as_56_ordered() {
+        // Coexistence regression: the EXISTING platform port (`db/migrations/`,
+        // the `V<NNNN>__…` Flyway set) must auto-detect as Flyway and load
+        // IDENTICALLY after the dbmate path was added — 56 versioned migrations,
+        // strictly ascending. This is the pure (no-PG) peer of the PG-gated
+        // `tests/platform_port_pg.rs`, guaranteeing the dbmate work did not perturb
+        // the platform loader.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../db/migrations");
+        if !dir.is_dir() {
+            // The repo always ships db/migrations; skip only if a stripped checkout
+            // somehow lacks it (never in CI).
+            eprintln!("skipping: {} not present", dir.display());
+            return;
+        }
+        let migs = load_dir(&dir).expect("the platform Flyway port still loads");
+        assert_eq!(migs.len(), 56, "all 56 ported V<NNNN>__ files load (0045 is a gap)");
+        // Auto-detect chose Flyway, not dbmate: none is repeatable here and the
+        // versions are strictly ascending (the Flyway numeric ordering).
+        for w in migs.windows(2) {
+            assert!(w[0].version < w[1].version, "Flyway versions strictly ascending");
+        }
+        for m in &migs {
+            assert_eq!(m.owner_app, PLATFORM_OWNER_APP);
+        }
     }
 
     // ----- test fixtures -----
