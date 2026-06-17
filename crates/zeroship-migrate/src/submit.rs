@@ -681,3 +681,246 @@ async fn log_noop_name_mismatch(
         }
     }
 }
+
+// ===========================================================================
+// In-crate live-PG regression: the submit-path two-guard coupling (LOW-1).
+//
+// These MUST live in-crate (not in `tests/submit_pg.rs`): the only way to mint a
+// Platform `ExecutorConfig` is `ExecutorConfig::platform(&cap, …)` with a
+// `PlatformCapability` token, and BOTH that ctor and `PlatformCapability::for_test`
+// are `pub(crate)` — unreachable from an integration test (a separate crate). So
+// the hostile-caller scenario (a buggy/hostile caller hands `submit_migration` a
+// PLATFORM `ExecutorConfig`) can only be constructed from inside the crate.
+//
+// What this pins: `submit_migration` forces a CONFINED planner guard
+// (`GuardConfig::confined(cfg.project_schema)` at the top of the fn), independent
+// of `cfg.trust`. The apply path (`engine.apply` → `executor::apply`) re-derives
+// its own guard from `ExecutorConfig::guard_config()` (i.e. from `cfg.trust`). The
+// submission path's safety against a privileged op therefore rests on TWO
+// independent stages: (a) the external boundary (control/builder cannot build a
+// Platform `ExecutorConfig` — pinned by the T8 trybuild + T11 unit), AND (b) this
+// forced-Confined planner gate denying privileged SQL BEFORE the apply ever runs.
+// If a hostile/buggy caller smuggles a Platform `ExecutorConfig` in, stage (b)
+// must STILL deny a privileged `up` — proving the two stages can't silently drift
+// to "both Platform" and that `submit`'s forced `confined()` is load-bearing.
+// ===========================================================================
+#[cfg(test)]
+// These are `#[compio::test]` futures driven on compio's single-threaded
+// io_uring runtime (the whole stack is `!Send` by design — zero tokio), so
+// `future_not_send` does not apply to a test harness that never crosses threads.
+#[allow(clippy::future_not_send)]
+mod low1_two_guard_coupling_pg {
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    use compio_postgres::Client;
+
+    use crate::approval::Approval;
+    use crate::db::ExecutorConfig;
+    use crate::guard::platform_runner::PlatformCapability;
+    use crate::journal::ensure_journal;
+    use crate::role::{deprovision_migrator, migrator_role_name, provision_migrator};
+    use crate::shadow::ShadowConfig;
+    use crate::submit::{submit_migration, Submission, SubmissionOutcome};
+
+    const DEFAULT_DSN: &str =
+        "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_migrate_test";
+
+    fn dsn() -> String {
+        std::env::var("MIGRATE_TEST_DB").unwrap_or_else(|_| DEFAULT_DSN.to_string())
+    }
+
+    async fn pg() -> Client {
+        crate::db::connect(&dsn()).await.expect("connect :5440")
+    }
+
+    fn token() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("{pid}_{nanos}_{n}")
+    }
+
+    /// Mint a **Platform** `ExecutorConfig` over a unique schema/meta — the exact
+    /// shape a hostile/buggy caller would have to forge to weaken the submit path.
+    /// Uses the `#[cfg(test)]` `for_test` token seam (the only non-`platform_runner`
+    /// path to a token; unreachable from an integration test).
+    fn platform_cfg(tok: &str) -> ExecutorConfig {
+        let cap = PlatformCapability::for_test();
+        let schema = format!("proj_{tok}");
+        let mut c = ExecutorConfig::platform(
+            &cap,
+            format!("prj_{tok}"),
+            schema.clone(),
+            // A platform-style allowlist; `public` is on it so an unqualified
+            // privileged op would resolve if the guard let it through.
+            vec![schema, "public".to_string()],
+            Vec::new(),
+        );
+        c.meta_schema = format!("meta_{tok}");
+        c.statement_timeout = Duration::from_secs(30);
+        c.lock_timeout = Duration::from_secs(10);
+        let role = migrator_role_name(&c.project_id).unwrap();
+        c.with_migrator_role(role)
+    }
+
+    fn shadow_cfg(tok: &str) -> ShadowConfig {
+        let prefix: String = format!("zsmig_low1_{}_", tok.replace('_', ""))
+            .chars()
+            .take(40)
+            .collect();
+        ShadowConfig {
+            admin_dsn: dsn(),
+            db_name_prefix: prefix,
+        }
+    }
+
+    async fn setup(conn: &Client, cfg: &ExecutorConfig) {
+        conn.batch_execute(&format!(
+            "CREATE SCHEMA IF NOT EXISTS \"{}\"",
+            cfg.project_schema
+        ))
+        .await
+        .expect("create project schema");
+        ensure_journal(conn, cfg).await.expect("ensure journal");
+        provision_migrator(conn, cfg)
+            .await
+            .expect("provision migrator role");
+    }
+
+    async fn teardown(conn: &Client, cfg: &ExecutorConfig) {
+        let _ = deprovision_migrator(conn, cfg).await;
+        let _ = conn
+            .batch_execute(&format!(
+                "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
+                cfg.project_schema, cfg.meta_schema
+            ))
+            .await;
+    }
+
+    async fn role_exists(conn: &Client, role: &str) -> bool {
+        let rows = conn
+            .query("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&role])
+            .await
+            .expect("query role");
+        !rows.is_empty()
+    }
+
+    fn no_owners() -> HashMap<String, String> {
+        HashMap::new()
+    }
+
+    fn submission(name: &str, up: &str) -> Submission {
+        Submission {
+            name: name.to_string(),
+            up: up.to_string(),
+            down: None,
+            depends_on: Vec::new(),
+            repeatable: false,
+            timeout_ms: None,
+            owner_app: "app_test".to_string(),
+        }
+    }
+
+    /// LOW-1 — a privileged `CREATE ROLE evil` submitted with a **Platform**
+    /// `ExecutorConfig` (the hostile/buggy caller scenario) is STILL `Denied` by
+    /// `submit_migration`'s forced-Confined planner gate — NOT applied. Proves the
+    /// two guard stages cannot drift to both-Platform: `submit` hard-wires
+    /// `GuardConfig::confined(project_schema)` regardless of `cfg.trust`, so even a
+    /// Platform `ExecutorConfig` (whose own `guard_config()` would ADMIT role
+    /// management) cannot relax the submission gate. `Approval::Approved` is passed
+    /// so the gate can never be the thing stopping it — only the guard can.
+    #[compio::test]
+    async fn platform_executor_config_does_not_relax_submit_create_role_still_denied() {
+        let conn = pg().await;
+        let admin = pg().await;
+        let tok = token();
+        let cfg = platform_cfg(&tok);
+        let scfg = shadow_cfg(&tok);
+        setup(&conn, &cfg).await;
+
+        // Sanity: the config IS Platform — its own executor-path guard would ADMIT
+        // role management. If this were Confined the test would be vacuous.
+        assert_eq!(
+            cfg.guard_config().trust(),
+            crate::guard::TrustProfile::Platform,
+            "the config under test must be Platform for the coupling proof to be meaningful"
+        );
+
+        let evil_role = format!("evil_{tok}");
+        let outcome = submit_migration(
+            &conn,
+            &admin,
+            &cfg,
+            &scfg,
+            submission("escalate", &format!("CREATE ROLE \"{evil_role}\" SUPERUSER")),
+            &no_owners(),
+            Approval::Approved,
+            "app_test",
+        )
+        .await
+        .expect("submit (no infra fault)");
+
+        match &outcome {
+            SubmissionOutcome::Denied { .. } => {}
+            other => panic!(
+                "a privileged CREATE ROLE must be Denied by submit's forced-Confined planner \
+                 guard even with a Platform ExecutorConfig — got {other:?}. If this APPLIED, the \
+                 submit-path two-guard coupling is BROKEN (submit's confined() is not load-bearing)."
+            ),
+        }
+        // And it really did nothing: no role was created on the real cluster.
+        assert!(
+            !role_exists(&conn, &evil_role).await,
+            "the denied CREATE ROLE must NOT have created a role on the real cluster"
+        );
+
+        teardown(&conn, &cfg).await;
+    }
+
+    /// LOW-1 (cross-schema arm) — the same coupling for a cross-schema write. A
+    /// Platform config's `guard_config()` permits the whole `[project, public]`
+    /// allowlist, so a `CREATE TABLE control.x` to a NON-allowlisted platform
+    /// schema would be admitted under Platform — but `submit`'s forced-Confined
+    /// gate (single-schema scope = the project schema only) still `Denied`s it.
+    #[compio::test]
+    async fn platform_executor_config_does_not_relax_submit_cross_schema_still_denied() {
+        let conn = pg().await;
+        let admin = pg().await;
+        let tok = token();
+        let cfg = platform_cfg(&tok);
+        let scfg = shadow_cfg(&tok);
+        setup(&conn, &cfg).await;
+
+        let outcome = submit_migration(
+            &conn,
+            &admin,
+            &cfg,
+            &scfg,
+            submission(
+                "xschema",
+                "CREATE TABLE control.stolen (id bigint PRIMARY KEY)",
+            ),
+            &no_owners(),
+            Approval::Approved,
+            "app_test",
+        )
+        .await
+        .expect("submit (no infra fault)");
+
+        match &outcome {
+            SubmissionOutcome::Denied { .. } => {}
+            other => panic!(
+                "a cross-schema CREATE TABLE control.x must be Denied by submit's forced-Confined \
+                 single-schema gate even with a Platform ExecutorConfig — got {other:?}"
+            ),
+        }
+
+        teardown(&conn, &cfg).await;
+    }
+}
