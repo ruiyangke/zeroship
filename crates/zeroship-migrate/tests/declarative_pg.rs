@@ -461,6 +461,61 @@ async fn full_shape_round_trips_to_zero_drift_the_canonical_idempotency_oracle()
 }
 
 #[compio::test]
+async fn changed_fk_target_is_unsupported_in_v1_not_silently_skipped() {
+    // 5-fk: a same-name FK whose referenced target changed is an in-place
+    // constraint redefinition — explicit UnsupportedInV1, never a silent no-op
+    // (the old differ never compared FK bodies on existing tables, so a re-pointed
+    // FK emitted 0 migrations and left the wrong constraint in place). With the FK
+    // definition spelling now matching live exactly (1b), this compare is real,
+    // not phantom-drift noise.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    // Two possible targets + a referencing table whose FK points at `alpha`.
+    let alpha = CollectionDescriptor { name: "alpha".into(), fields: vec![], indexes: vec![] };
+    let beta = CollectionDescriptor { name: "beta".into(), fields: vec![], indexes: vec![] };
+    let child_v1 = CollectionDescriptor {
+        name: "child".into(),
+        fields: vec![FieldDescriptor {
+            name: "parent".into(),
+            ty: "ref".into(),
+            required: false,
+            unique: false,
+            references: Some("alpha".into()),
+        }],
+        indexes: vec![],
+    };
+    let d1 = desired_snapshot(&cfg.project_schema, &[alpha.clone(), beta.clone(), child_v1]);
+    apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("create alpha/beta/child");
+
+    // Now re-point `child.parent` at `beta` — SAME constraint name (parent_fkey),
+    // different REFERENCES target.
+    let child_v2 = CollectionDescriptor {
+        name: "child".into(),
+        fields: vec![FieldDescriptor {
+            name: "parent".into(),
+            ty: "ref".into(),
+            required: false,
+            unique: false,
+            references: Some("beta".into()),
+        }],
+        indexes: vec![],
+    };
+    let d2 = desired_snapshot(&cfg.project_schema, &[alpha, beta, child_v2]);
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+    let err = author.diff(&d2, &live).unwrap_err();
+    assert!(matches!(err, DeclarativeError::UnsupportedInV1(_)), "got {err:?}");
+
+    teardown(&conn, &cfg).await;
+}
+#[compio::test]
 async fn additive_diff_is_idempotent_second_plan_is_empty() {
     let tok = token();
     let cfg = cfg_with_role(&tok);
