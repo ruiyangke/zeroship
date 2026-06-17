@@ -119,7 +119,14 @@ pub use executor::{
     apply, rollback, ApplyError, ApplyOutcome, RollbackError, RollbackOptions, RollbackOutcome,
     RollbackRequest, RollbackTarget,
 };
-pub use guard::{flags_for, GuardConfig, GuardError, GuardReport, SqlGuard};
+pub use guard::{
+    flags_for, GuardConfig, GuardError, GuardReport, SchemaScope, SqlGuard, TrustProfile,
+};
+// `PlatformCapability` the TYPE is re-exported crate-wide so the `platform(...)`
+// constructors can name it in their signatures; its `new()` mint stays private
+// to `guard::platform_runner` (design §4.1 / §5).
+#[allow(unused_imports)]
+pub(crate) use guard::PlatformCapability;
 pub use journal::{
     applied, applied_count, ensure_journal, history as journal_history,
     latest_completed_checksums, net_rolled_back, record_baseline, record_completed,
