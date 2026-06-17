@@ -137,6 +137,18 @@ pub async fn check_checksum_drift(
         }
         match by_version.get(entry.version.as_str()) {
             Some(m) => {
+                // v3 Plan E — DRIFT EXEMPTION for repeatables. A repeatable
+                // migration's identity is stable but its checksum changes by
+                // DESIGN (a changed `CREATE OR REPLACE …` re-runs each deploy). A
+                // checksum mismatch on a repeatable is therefore NOT tamper/drift —
+                // it is the re-run signal. So a repeatable NEVER contributes a
+                // ChecksumDrift here (the repeatable phase handles its re-apply).
+                // A once-only (`repeatable == false`) migration's changed checksum
+                // STILL aborts — this exemption is scoped strictly to repeatables
+                // and does not weaken the once-only tamper guard at all.
+                if m.flags.repeatable {
+                    continue;
+                }
                 if entry.checksum != m.checksum.as_str() {
                     report.checksum_drift.push(ChecksumDrift {
                         version: entry.version.clone(),

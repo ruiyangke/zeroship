@@ -840,6 +840,9 @@ pub fn flags_for(report: &GuardReport) -> MigrationFlags {
         // A guard-derived flag set is for one-shot SQL; the online expand/contract
         // phase is set by the ExpandContractAuthor, never inferred from SQL.
         phase: None,
+        // Repeatable is an authoring-time facet (a stable-identity, replace-style
+        // R__ migration), not derivable from a single SQL blob — defaults off.
+        repeatable: false,
     }
 }
 

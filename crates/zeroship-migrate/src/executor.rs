@@ -541,6 +541,28 @@ async fn apply_locked(
 ) -> Result<ApplyOutcome, ApplyError> {
     journal::ensure_journal(conn, cfg).await?;
 
+    // v3 Plan E — partition the supplied set into VERSIONED (run-once) and
+    // REPEATABLE migrations. The entire versioned pipeline below (drift/tamper
+    // abort, expand-contract gate, squash gates, pending ordering, execute) sees
+    // ONLY the versioned migrations: a repeatable has a stable identity and a
+    // changed-checksum-means-re-run rule, so it must NEVER participate in the
+    // once-only drift abort, the orphan check, or the squash/expand machinery.
+    // Repeatables are applied AFTER all versioned pending migrations, in their own
+    // phase (`apply_repeatables`) with their own re-run-on-change rule.
+    // The FULL set is retained as `all_migrations` for the drift check, which must
+    // SEE the repeatables (so it recognizes their journaled versions and EXEMPTS
+    // them — see `check_checksum_drift` — rather than flagging them as orphans).
+    let all_migrations = migrations;
+    let (versioned, repeatables): (Vec<&Migration>, Vec<&Migration>) =
+        migrations.iter().partition(|m| !m.flags.repeatable);
+    // Owned slice of the versioned originals so the existing versioned pipeline
+    // (which takes `&[Migration]`) is unchanged: the squash / expand-contract /
+    // pending machinery sees ONLY versioned migrations. The partition is by
+    // reference, so we re-collect the (small) versioned set here. Migrations are
+    // cheap value types (a few Strings).
+    let versioned_owned: Vec<Migration> = versioned.iter().map(|m| (*m).clone()).collect();
+    let migrations: &[Migration] = &versioned_owned;
+
     // Index the journal by version for the drift check + pending computation.
     let journal_rows: Vec<AppliedEntry> = journal::applied(conn, cfg).await?;
     let mut completed: HashMap<&str, &AppliedEntry> = HashMap::new();
@@ -562,7 +584,10 @@ async fn apply_locked(
     // the full report (used read-only by the status/drift API), and apply aborts
     // on the FIRST checksum mismatch it surfaces. One implementation, two callers:
     // the report and the abort-on-drift gate cannot diverge.
-    let drift_report = crate::drift::check_checksum_drift(conn, cfg, migrations)
+    // Pass the FULL set (`all_migrations`): the drift check exempts repeatables
+    // (their changed checksum is the re-run signal, not tamper) and must recognize
+    // their journaled versions so they are NOT reported as orphans.
+    let drift_report = crate::drift::check_checksum_drift(conn, cfg, all_migrations)
         .await
         .map_err(|e| match e {
             crate::drift::DriftError::Db(db) => ApplyError::Db(db),
@@ -676,6 +701,13 @@ async fn apply_locked(
     // already passed.
     execute_pending(conn, cfg, &pending, &started, applied_by, &mut outcome).await?;
 
+    // v3 Plan E — REPEATABLE PHASE. Runs AFTER every versioned pending migration
+    // has applied (the versioned schema the repeatables' views/functions reference
+    // is now present). Each repeatable re-applies iff its checksum differs from the
+    // latest journaled `completed` checksum for its identity (or it was never
+    // applied); an unchanged checksum is skipped.
+    apply_repeatables(conn, cfg, &repeatables, applied_by, &mut outcome).await?;
+
     Ok(outcome)
 }
 
@@ -764,6 +796,173 @@ async fn execute_pending(
     }
 
     Ok(())
+}
+
+/// The REPEATABLE PHASE (v3 Plan E — Flyway `R__` / Liquibase `runOnChange`).
+///
+/// Runs AFTER every versioned pending migration has applied (so the schema the
+/// repeatables' views/functions/triggers reference exists). For each repeatable,
+/// in dependency order ([`order_repeatables`]):
+///
+/// 1. read the LATEST journaled `completed` checksum for its identity (its stable
+///    `version`); if it equals the migration's current checksum ⇒ **SKIP** (no
+///    change since the last apply) — appended to `outcome.skipped`;
+/// 2. otherwise (never applied, OR checksum DIFFERS) ⇒ **RE-APPLY**: run the SQL
+///    guard over `up` (cross-schema / RCE / priv-esc denials — a repeatable's `up`
+///    is held to the SAME security bar as a versioned one), evaluate its
+///    preconditions (v3 Plan D) read-only under the lock, then run `up` under the
+///    least-privilege migrator role inside a transaction and append a NEW
+///    `completed` event carrying the new checksum (via [`apply_transactional`]).
+///
+/// A repeatable is ALWAYS transactional (replace-style `CREATE OR REPLACE …`,
+/// `down: None`), so it never takes the non-txn two-phase path. Its `supersedes`
+/// is always empty, so the `completed` event is stamped the ordinary `kind='apply'`.
+///
+/// The destructive/approval gate is enforced uniformly at the top of [`apply`]
+/// over the FULL set, so a (rare) destructive repeatable without approval is
+/// already refused before the lock — this phase does not need to re-check it.
+///
+/// # Errors
+/// - [`ApplyError::Guard`] — a repeatable's `up` was denied by the SQL guard.
+/// - [`ApplyError::MissingDependency`] / [`ApplyError::DependencyCycle`] — the
+///   repeatables' `depends_on` edges are unsatisfiable.
+/// - [`ApplyError::PreconditionFailed`] — a repeatable's precondition was unmet
+///   (Halt) or inevaluable.
+/// - [`ApplyError::MigrationFailed`] / journal / db errors from the apply itself.
+async fn apply_repeatables(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    repeatables: &[&Migration],
+    applied_by: &str,
+    outcome: &mut ApplyOutcome,
+) -> Result<(), ApplyError> {
+    if repeatables.is_empty() {
+        return Ok(());
+    }
+
+    // The latest journaled `completed` checksum per identity — the re-run oracle.
+    let latest = journal::latest_completed_checksums(conn, cfg).await?;
+
+    // Order repeatables among themselves by `depends_on` topo (version-tiebroken),
+    // honoring deps on versioned migrations as pre-satisfied (they already ran).
+    let ordered = order_repeatables(repeatables)?;
+
+    let guard = SqlGuard::new(GuardConfig {
+        project_schema: cfg.project_schema.clone(),
+        extension_allowlist: Vec::new(),
+    });
+
+    // FIRST PASS — guard EVERY repeatable's `up` before any execution, mirroring
+    // the versioned all-up-front static gate: a denial applies NOTHING.
+    for m in &ordered {
+        guard.check(&m.up).map_err(|source| ApplyError::Guard {
+            version: m.version.as_str().to_string(),
+            source,
+        })?;
+    }
+
+    // SECOND PASS — re-apply each changed repeatable; skip the unchanged ones.
+    for &m in &ordered {
+        let version = m.version.as_str();
+        let current = m.checksum.as_str();
+        // Re-run rule: never applied OR checksum DIFFERS ⇒ re-apply; MATCHES ⇒ skip.
+        let unchanged = latest.get(version).is_some_and(|prev| prev == current);
+        if unchanged {
+            outcome.skipped.push(version.to_string());
+            continue;
+        }
+
+        // Preconditions (v3 Plan D): a repeatable may gate its re-apply too. An
+        // unmet Skip leaves it unchanged this deploy (re-evaluated next time); an
+        // unmet/inevaluable Halt fails closed.
+        if matches!(
+            evaluate_preconditions(conn, cfg, m).await?,
+            PreconditionVerdict::Skip
+        ) {
+            outcome.skipped.push(version.to_string());
+            continue;
+        }
+
+        // Replace-style: always transactional, never superseding. `apply_transactional`
+        // runs `up` under the migrator role and appends a fresh `completed` event with
+        // the NEW checksum — exactly the re-apply record the next deploy compares against.
+        apply_transactional(conn, cfg, m, applied_by, &[]).await?;
+        outcome.applied.push(version.to_string());
+    }
+
+    Ok(())
+}
+
+/// Topologically order the repeatables among THEMSELVES (v3 Plan E), honoring
+/// `depends_on` edges between repeatables, version-tiebroken for determinism.
+///
+/// A repeatable's `depends_on` may name a VERSIONED migration (e.g. a view depends
+/// on a table); that dependency is pre-satisfied — the versioned phase already ran
+/// — so it imposes no ordering here and is simply NOT treated as an edge among the
+/// repeatables (it is also not required to be in the repeatable set). Only an edge
+/// to ANOTHER REPEATABLE in this set constrains order. With no inter-repeatable
+/// edges this degrades to pure version order.
+///
+/// # Errors
+/// - [`ApplyError::DependencyCycle`] — the inter-repeatable edges form a cycle.
+fn order_repeatables<'a>(
+    repeatables: &[&'a Migration],
+) -> Result<Vec<&'a Migration>, ApplyError> {
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+    let rep_versions: BTreeSet<&str> =
+        repeatables.iter().map(|m| m.version.as_str()).collect();
+    let by_version: HashMap<&str, &Migration> =
+        repeatables.iter().map(|m| (m.version.as_str(), *m)).collect();
+
+    // in-degree over the repeatable subgraph; adj[dep] = repeatables after `dep`.
+    let mut indeg: BTreeMap<&str, usize> =
+        repeatables.iter().map(|m| (m.version.as_str(), 0usize)).collect();
+    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    for m in repeatables {
+        for dep in &m.depends_on {
+            let dep_v = dep.as_str();
+            // Only edges to ANOTHER repeatable in this set constrain order; a dep
+            // on a versioned migration is pre-satisfied (it already ran) and a dep
+            // outside the set entirely imposes no repeatable ordering.
+            if rep_versions.contains(dep_v) {
+                adj.entry(dep_v).or_default().push(m.version.as_str());
+                *indeg.get_mut(m.version.as_str()).expect("repeatable node") += 1;
+            }
+        }
+    }
+
+    // Kahn with a version-ordered ready set — deterministic, version-tiebroken.
+    let mut ready: BTreeSet<&str> = indeg
+        .iter()
+        .filter(|(_, &d)| d == 0)
+        .map(|(&v, _)| v)
+        .collect();
+    let mut ordered: Vec<&Migration> = Vec::with_capacity(repeatables.len());
+    while let Some(&v) = ready.iter().next() {
+        ready.remove(v);
+        ordered.push(by_version[v]);
+        if let Some(succs) = adj.get(v) {
+            for &s in succs {
+                let e = indeg.get_mut(s).expect("successor node");
+                *e -= 1;
+                if *e == 0 {
+                    ready.insert(s);
+                }
+            }
+        }
+    }
+
+    if ordered.len() != repeatables.len() {
+        let mut cyclic: Vec<&str> = indeg
+            .iter()
+            .filter(|(_, &d)| d > 0)
+            .map(|(&v, _)| v)
+            .collect();
+        cyclic.sort_unstable();
+        return Err(ApplyError::DependencyCycle(cyclic.join(", ")));
+    }
+    Ok(ordered)
 }
 
 /// The verdict of evaluating a migration's preconditions (v3 Plan D).

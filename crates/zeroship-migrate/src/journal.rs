@@ -714,6 +714,52 @@ pub async fn superseded_versions(
     Ok(rows.iter().map(|r| r.get::<_, String>("v")).collect())
 }
 
+/// Read the **latest `completed` checksum per version** from the journal of
+/// record (v3 Plan E — repeatables).
+///
+/// A repeatable migration ([`MigrationFlags::repeatable`](crate::migration::MigrationFlags::repeatable))
+/// has a STABLE identity (its `version`/name never changes across edits) and is
+/// re-applied whenever its definition checksum changes. Each re-apply appends a
+/// fresh `completed` event for the same version (append-only), so a repeatable
+/// accrues several `completed` rows over its lifetime. To decide whether to
+/// re-run, the executor compares the migration's current checksum against the
+/// **most recent** `completed` event's checksum for that identity.
+///
+/// Returns a map `version → latest completed checksum`, taking the latest by the
+/// shared monotonic `event_seq` (which never ties, even within one transaction).
+/// Versions with no `completed` row are absent from the map (never applied).
+///
+/// Unlike [`applied`], this reads ONLY `schema_migrations` (the completed-event
+/// table) and is INDIFFERENT to rollback: a repeatable carries `down: None` and
+/// is never rolled back, so its latest event is always its newest `completed`
+/// one. (Reading `…_rolled_back` here would be meaningless — there are no
+/// repeatable rollbacks — and would risk masking the latest completed checksum
+/// behind an unrelated event.) The drift/pending machinery still uses [`applied`]
+/// for versioned migrations; this is the repeatable-specific lens.
+///
+/// # Errors
+/// [`JournalError::Db`] on query failure.
+pub async fn latest_completed_checksums(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+) -> Result<std::collections::HashMap<String, String>, JournalError> {
+    let meta = quote_ident(&cfg.meta_schema);
+    let rows = conn
+        .query(
+            &format!(
+                "SELECT DISTINCT ON (version) version, checksum
+                   FROM {meta}.schema_migrations
+                  ORDER BY version, event_seq DESC"
+            ),
+            &[],
+        )
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|r| (r.get::<_, String>("version"), r.get::<_, String>("checksum")))
+        .collect())
+}
+
 /// The fields of a baseline/squash `completed` event recorded WITHOUT running its
 /// `up` (Plan 9), bundled so [`record_baseline`] takes one descriptor.
 #[derive(Debug, Clone, Copy)]
