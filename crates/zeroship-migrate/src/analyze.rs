@@ -152,6 +152,98 @@ pub fn analyze_migration(migration: &Migration) -> Vec<Advisory> {
     analyze(&migration.up)
 }
 
+/// Every column that gains a **covering index** anywhere in `sql`.
+///
+/// Sources: a leading index column from a `CREATE INDEX`, an inline `PRIMARY
+/// KEY`/`UNIQUE` (on `CREATE TABLE` or `ALTER TABLE … ADD COLUMN`), an `ALTER
+/// TABLE … ADD CONSTRAINT PRIMARY KEY/UNIQUE`, or an `ALTER TABLE … ADD INDEX`
+/// subcommand.
+///
+/// This is the **plan-aware** seam (review finding #8): the per-statement
+/// [`analyze`] only sees one statement and so suppresses `FK_WITHOUT_INDEX` only
+/// for an index in the SAME statement. A [`crate::declarative::DeclarativePlan`]
+/// aggregates this across *every* migration (plus the desired snapshot) so an FK
+/// whose covering index is created in a SEPARATE migration of the same plan is no
+/// longer flagged. [`analyze`] itself is unchanged — it has no plan view.
+#[must_use]
+pub fn indexed_columns(sql: &str) -> Vec<String> {
+    let Ok(parsed) = pg_query::parse(sql) else {
+        return Vec::new();
+    };
+    let mut cols = Vec::new();
+    for raw_stmt in &parsed.protobuf.stmts {
+        if let Some(node) = raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref()) {
+            collect_indexed_columns_in_node(node, &mut cols);
+        }
+    }
+    cols
+}
+
+/// The FK **referencing** column(s) that an FK in `sql` wants a supporting index on.
+///
+/// These are the `FK_WITHOUT_INDEX` subjects. Used by the plan seam to recompute
+/// suppression against the plan-wide [`indexed_columns`] set.
+#[must_use]
+pub fn fk_columns_needing_index(sql: &str) -> Vec<String> {
+    let Ok(parsed) = pg_query::parse(sql) else {
+        return Vec::new();
+    };
+    let mut cols = Vec::new();
+    for raw_stmt in &parsed.protobuf.stmts {
+        let Some(NodeEnum::AlterTableStmt(at)) =
+            raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref())
+        else {
+            continue;
+        };
+        for cmd in &at.cmds {
+            let Some(NodeEnum::AlterTableCmd(c)) = cmd.node.as_ref() else {
+                continue;
+            };
+            if c.subtype != AlterTableType::AtAddConstraint as i32 {
+                continue;
+            }
+            if let Some(NodeEnum::Constraint(con)) = c.def.as_ref().and_then(|d| d.node.as_ref()) {
+                if con.contype == ConstrType::ConstrForeign as i32 {
+                    cols.extend(fk_referencing_columns(con));
+                }
+            }
+        }
+    }
+    cols
+}
+
+/// Collect covering-index columns from a single top-level node (CREATE INDEX,
+/// CREATE TABLE inline / table-level PK·UNIQUE, ALTER TABLE inline / ADD
+/// CONSTRAINT / ADD INDEX). The plan-aware index-coverage counterpart to
+/// [`analyze_node`].
+fn collect_indexed_columns_in_node(node: &NodeEnum, cols: &mut Vec<String>) {
+    match node {
+        NodeEnum::IndexStmt(idx) => cols.extend(index_key_columns(idx)),
+        NodeEnum::AlterTableStmt(at) => cols.extend(collect_indexed_columns_in_alter(at)),
+        NodeEnum::CreateStmt(create) => {
+            for elt in &create.table_elts {
+                match elt.node.as_ref() {
+                    // An inline PRIMARY KEY/UNIQUE on a column definition.
+                    Some(NodeEnum::ColumnDef(col)) => {
+                        if inline_index_constraint_kind(col).is_some() {
+                            cols.push(col.colname.clone());
+                        }
+                    }
+                    // A table-level PRIMARY KEY/UNIQUE constraint (keys list).
+                    Some(NodeEnum::Constraint(con))
+                        if con.contype == ConstrType::ConstrUnique as i32
+                            || con.contype == ConstrType::ConstrPrimary as i32 =>
+                    {
+                        cols.extend(string_list(&con.keys));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Run every analyzer over a single **top-level** statement node.
 ///
 /// This is TOP-LEVEL-only by design: unlike [`crate::guard`] (which walks

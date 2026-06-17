@@ -823,13 +823,44 @@ impl DeclarativePlan {
     /// These are **advisory only** — they never deny or gate the plan. A
     /// migration with no advisories is omitted. Order matches
     /// [`all_migrations`](Self::all_migrations).
+    /// Plan-aware (review finding #8): a `FK_WITHOUT_INDEX` Notice is suppressed
+    /// when the **same plan** creates a covering index for the FK's referencing
+    /// column(s) — even in a SEPARATE migration. The per-statement
+    /// [`analyze`](crate::analyze::analyze) only sees one statement, so it
+    /// suppresses only same-statement indexes; here we aggregate every migration's
+    /// covering-index columns ([`indexed_columns`](crate::analyze::indexed_columns))
+    /// and drop the FK Notice for any column the plan indexes. All other advisories
+    /// pass through unchanged.
     #[must_use]
     pub fn advisories(&self) -> Vec<(Migration, Vec<crate::analyze::Advisory>)> {
-        self.all_migrations()
-            .into_iter()
+        let all = self.all_migrations();
+
+        // Plan-wide set of columns that gain a covering index ANYWHERE in the plan
+        // (any migration). Case-insensitive membership mirrors the per-statement
+        // FK-index match.
+        let mut plan_indexed: Vec<String> = Vec::new();
+        for m in &all {
+            plan_indexed.extend(crate::analyze::indexed_columns(&m.up));
+        }
+
+        all.into_iter()
             .filter_map(|m| {
-                let a = crate::analyze::analyze_migration(&m);
-                (!a.is_empty()).then_some((m, a))
+                let mut advs = crate::analyze::analyze_migration(&m);
+
+                // If a migration carries a FK_WITHOUT_INDEX Notice, recompute it
+                // against the plan-wide index set: suppress it only when EVERY FK
+                // referencing column it covers is indexed somewhere in the plan.
+                let fk_cols = crate::analyze::fk_columns_needing_index(&m.up);
+                if !fk_cols.is_empty() {
+                    let all_covered = fk_cols.iter().all(|col| {
+                        plan_indexed.iter().any(|i| i.eq_ignore_ascii_case(col))
+                    });
+                    if all_covered {
+                        advs.retain(|a| a.rule != crate::analyze::rule::FK_WITHOUT_INDEX);
+                    }
+                }
+
+                (!advs.is_empty()).then_some((m, advs))
             })
             .collect()
     }
@@ -2060,5 +2091,55 @@ mod advisory_seam_tests {
             renames: Vec::new(),
         };
         assert!(plan.advisories().is_empty());
+    }
+
+    // ---- review finding #8: plan-aware FK_WITHOUT_INDEX suppression ----
+
+    #[test]
+    fn fk_without_index_suppressed_when_a_separate_migration_indexes_it() {
+        // The FK is in one migration; its covering index is in ANOTHER migration of
+        // the SAME plan. The per-statement analyzer would flag it (no index in the
+        // same statement) — the plan seam must suppress it.
+        let plan = DeclarativePlan {
+            migrations: vec![
+                plain(
+                    "ALTER TABLE \"proj_acme\".\"orders\" ADD CONSTRAINT fk_user \
+                     FOREIGN KEY (user_id) REFERENCES \"proj_acme\".\"users\"(id) NOT VALID",
+                ),
+                plain("CREATE INDEX idx_orders_user ON \"proj_acme\".\"orders\"(user_id)"),
+            ],
+            renames: Vec::new(),
+        };
+        let all: Vec<_> = plan
+            .advisories()
+            .into_iter()
+            .flat_map(|(_, a)| a)
+            .collect();
+        assert!(
+            !all.iter().any(|a| a.rule == rule::FK_WITHOUT_INDEX),
+            "a covering index in a separate migration of the same plan must suppress \
+             FK_WITHOUT_INDEX, got: {all:?}"
+        );
+    }
+
+    #[test]
+    fn fk_without_index_still_fires_when_no_migration_indexes_it() {
+        // No covering index anywhere in the plan → the Notice still fires.
+        let plan = DeclarativePlan {
+            migrations: vec![plain(
+                "ALTER TABLE \"proj_acme\".\"orders\" ADD CONSTRAINT fk_user \
+                 FOREIGN KEY (user_id) REFERENCES \"proj_acme\".\"users\"(id) NOT VALID",
+            )],
+            renames: Vec::new(),
+        };
+        let all: Vec<_> = plan
+            .advisories()
+            .into_iter()
+            .flat_map(|(_, a)| a)
+            .collect();
+        assert!(
+            all.iter().any(|a| a.rule == rule::FK_WITHOUT_INDEX),
+            "an FK with no covering index anywhere in the plan must still emit a Notice"
+        );
     }
 }
