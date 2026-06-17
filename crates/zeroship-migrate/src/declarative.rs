@@ -108,6 +108,21 @@ pub struct IndexDescriptor {
 pub struct CollectionDescriptor {
     /// The collection (table) name.
     pub name: String,
+    /// The **declaring** app (`app_…`) — the app whose `export default { schema }`
+    /// declared this table. Per the project-umbrella model (design §4) a project
+    /// db schema is the UNION of all member apps' descriptors, and the declaring
+    /// app **owns** that table's migrations: only the owner may CREATE/ALTER/DROP
+    /// it (enforced in [`DeclarativeAuthor::diff`] via the deploying-app context);
+    /// a non-declaring app may USE the table's rows freely.
+    ///
+    /// Ownership is NOT spoofable across apps: an app can only set `owner_app` to
+    /// itself in its OWN descriptor set, and a conflicting claim (two apps
+    /// declaring the same table with DIFFERENT shapes) is a hard
+    /// [`DeclarativeError::ConflictingDeclaration`]. An IDENTICAL re-declaration is
+    /// idempotent (design §4) and, to keep the union order-independent, the
+    /// retained owner is the lexicographically-smallest declaring app among the
+    /// identical declarers (see [`desired_snapshot`]).
+    pub owner_app: String,
     /// The declared fields (columns), excluding platform system fields (those
     /// are injected by [`desired_snapshot`], matching the SDK's behaviour).
     #[serde(default)]
@@ -238,6 +253,39 @@ fn system_field_columns() -> Vec<ColumnSnapshot> {
 }
 
 // ---------------------------------------------------------------------------
+// P4 — the UNION desired schema + per-table ownership.
+// ---------------------------------------------------------------------------
+
+/// The **desired** project schema (the UNION over every member app's declared
+/// collections) PLUS the per-table ownership map (design §4).
+///
+/// A project = one db = one project schema, and that schema is the UNION of all
+/// member apps' `export default { schema }` declarations. [`desired_snapshot`]
+/// builds this: identical re-declarations of a table by two apps merge to one
+/// table (idempotent); a conflicting re-declaration is a hard
+/// [`DeclarativeError::ConflictingDeclaration`].
+///
+/// `ownership` records, for each table in `snapshot`, the app that **owns** its
+/// migrations. [`DeclarativeAuthor::diff`] enforces that only the owning app may
+/// emit a structural change (CREATE/ALTER/DROP) to a table — a non-owner may USE
+/// it but not migrate it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DesiredSchema {
+    /// The union of all member apps' declared tables, as the diffable snapshot.
+    pub snapshot: SchemaSnapshot,
+    /// `table name → owning app`. Exactly the keys of `snapshot.tables`.
+    pub ownership: BTreeMap<String, String>,
+}
+
+impl DesiredSchema {
+    /// The owning app for `table`, if it is in the union.
+    #[must_use]
+    pub fn owner_of(&self, table: &str) -> Option<&str> {
+        self.ownership.get(table).map(String::as_str)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // P0 — desired_snapshot compiler.
 // ---------------------------------------------------------------------------
 
@@ -272,17 +320,36 @@ fn system_field_columns() -> Vec<ColumnSnapshot> {
 /// [`DeclarativeAuthor::diff`] (defense in depth) and the guard is the second
 /// line.
 ///
+/// # Multi-app UNION + per-table ownership (P4, design §4)
+///
+/// `descriptors` is the concatenation of EVERY member app's declared
+/// collections (each descriptor carries its declaring [`CollectionDescriptor::owner_app`]).
+/// The result is the UNION over all apps:
+/// - A table declared by exactly one app → owned by that app.
+/// - A table declared by two apps with the **same shape** (identical columns,
+///   indexes, constraints, and types) → merged to one table; ownership is the
+///   **lexicographically-smallest** declaring app (so the union is identical
+///   regardless of descriptor order — conflict-detection and ownership are both
+///   order-independent). This is the design's "identical re-declaration is
+///   idempotent".
+/// - A table declared by two apps with **different** shapes →
+///   [`DeclarativeError::ConflictingDeclaration`] (one owner per table; a
+///   conflicting claim is a deploy error, never a silent merge).
+///
 /// # Errors
 /// - [`DeclarativeError::UnsupportedType`] — a field used a type token outside
 ///   the twelve supported (or an out-of-scope `vector`/`geoPoint`/`encrypted`).
-/// - [`DeclarativeError::DuplicateTable`] — two descriptors share a table name.
+/// - [`DeclarativeError::ConflictingDeclaration`] — two apps declare the same
+///   table with different shapes.
 /// - [`DeclarativeError::Invalid`] — a `ref` field's target table is not a safe
 ///   bare identifier.
 pub fn desired_snapshot(
     project_schema: &str,
     descriptors: &[CollectionDescriptor],
-) -> Result<SchemaSnapshot, DeclarativeError> {
-    let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
+) -> Result<DesiredSchema, DeclarativeError> {
+    // table name → (snapshot, owning app). The owner is the smallest declaring
+    // app among identical declarers, so it is order-independent.
+    let mut tables: BTreeMap<String, (TableSnapshot, String)> = BTreeMap::new();
 
     for d in descriptors {
         let mut columns = system_field_columns();
@@ -373,17 +440,55 @@ pub fn desired_snapshot(
         indexes.sort_by(|a, b| a.name.cmp(&b.name));
         constraints.sort_by(|a, b| a.name.cmp(&b.name));
 
-        // #6: refuse a duplicate table name rather than silently merging
-        // (last-writer-wins would clobber the first descriptor's columns with
-        // no error). Until P4 (union/ownership) lands, two descriptors naming
-        // the same table is an author error.
-        if tables.contains_key(&d.name) {
-            return Err(DeclarativeError::DuplicateTable { table: d.name.clone() });
+        let this = TableSnapshot { columns, indexes, constraints };
+        match tables.get_mut(&d.name) {
+            None => {
+                tables.insert(d.name.clone(), (this, d.owner_app.clone()));
+            }
+            Some((existing, owner)) => {
+                // P4 union (design §4): a second declaration of the same table is
+                // OK iff it is IDENTICAL in shape (idempotent re-declaration). A
+                // different shape is a CONFLICT — one owner per table; never a
+                // silent last-writer-wins merge (#6's blanket DuplicateTable is
+                // refined here to identical-OK / conflicting-error).
+                if *existing != this {
+                    // Order the two app names so the error is deterministic
+                    // regardless of which descriptor was seen first.
+                    let (app_a, app_b) = order_pair(owner, &d.owner_app);
+                    return Err(DeclarativeError::ConflictingDeclaration {
+                        table: d.name.clone(),
+                        app_a,
+                        app_b,
+                    });
+                }
+                // Identical shape: idempotent. Keep the lexicographically-smallest
+                // declaring app as the owner so the union is order-independent.
+                if d.owner_app < *owner {
+                    owner.clone_from(&d.owner_app);
+                }
+            }
         }
-        tables.insert(d.name.clone(), TableSnapshot { columns, indexes, constraints });
     }
 
-    Ok(SchemaSnapshot { tables })
+    let ownership: BTreeMap<String, String> = tables
+        .iter()
+        .map(|(t, (_, owner))| (t.clone(), owner.clone()))
+        .collect();
+    let snapshot = SchemaSnapshot {
+        tables: tables.into_iter().map(|(t, (s, _))| (t, s)).collect(),
+    };
+    Ok(DesiredSchema { snapshot, ownership })
+}
+
+/// Order two app identifiers deterministically (smallest first) so a
+/// [`DeclarativeError::ConflictingDeclaration`] reports the same `(app_a, app_b)`
+/// regardless of descriptor order.
+fn order_pair(a: &str, b: &str) -> (String, String) {
+    if a <= b {
+        (a.to_string(), b.to_string())
+    } else {
+        (b.to_string(), a.to_string())
+    }
 }
 
 /// True if `index_name` is the implicit index a PRIMARY KEY materialises
@@ -445,13 +550,57 @@ pub enum DeclarativeError {
         /// The unrecognised / out-of-scope DSL type token.
         ty: String,
     },
-    /// Two descriptors declared the same table name. Until P4 (union/ownership)
-    /// lands, [`desired_snapshot`] refuses to silently merge them (last-writer-wins
-    /// would clobber the first descriptor's columns with no error). (#6)
-    #[error("duplicate table name across descriptors: '{table}'")]
-    DuplicateTable {
-        /// The table name declared by more than one descriptor.
+    /// Two apps declared the same table with DIFFERENT shapes (P4, design §4).
+    /// One table has exactly one owner; an identical re-declaration is idempotent
+    /// (merged) but a conflicting one is a hard deploy error — never a silent
+    /// last-writer-wins merge (this refines #6's blanket `DuplicateTable`). The
+    /// `(app_a, app_b)` pair is reported smallest-first so the error is
+    /// deterministic regardless of descriptor order.
+    #[error(
+        "conflicting declaration of table '{table}': apps '{app_a}' and '{app_b}' \
+         declare it with different shapes (a table has exactly one owner; identical \
+         re-declaration is idempotent, a conflicting one is a deploy error)"
+    )]
+    ConflictingDeclaration {
+        /// The table declared with conflicting shapes.
         table: String,
+        /// One declaring app (the lexicographically-smaller of the pair).
+        app_a: String,
+        /// The other declaring app (the lexicographically-larger of the pair).
+        app_b: String,
+    },
+    /// The deploying app tried to make a structural change (CREATE/ALTER/DROP) to
+    /// a table it does NOT own (P4 ownership enforcement, design §4). The
+    /// declaring app owns a table's migrations; a non-owner may USE the table's
+    /// rows freely but may NOT migrate its structure. (An IDENTICAL re-declaration
+    /// by a non-owner produces no diff op and never trips this — only an actual
+    /// structural change to a non-owned table is refused.)
+    #[error(
+        "app '{deploying_app}' may not migrate table '{table}' (owned by \
+         '{owner}'): a non-owner may use a table but not alter its structure"
+    )]
+    NotTableOwner {
+        /// The table the deploying app tried to change.
+        table: String,
+        /// The app that owns the table's migrations.
+        owner: String,
+        /// The app attempting the structural change.
+        deploying_app: String,
+    },
+    /// A `ref` field declared a cross-app FK whose **target table is not in the
+    /// union schema** (P4 cross-app FK, design §4). A cross-app FK may reference a
+    /// table owned by another app, but that table must exist in the project's
+    /// union (declared by SOME member app); an FK to a table no app declares is a
+    /// clear error surfaced here rather than failing as bad SQL at apply.
+    #[error(
+        "table '{table}' declares a foreign key to '{target}', which no app in the \
+         project declares (a cross-app FK target must exist in the union schema)"
+    )]
+    CrossAppFkTargetMissing {
+        /// The table declaring the dangling FK.
+        table: String,
+        /// The FK target table that is absent from the union.
+        target: String,
     },
     /// A [`RenameHint`] (P3) did not match an actual drop+add pair: the `from`
     /// column is not present in live as a dropped column, OR the `to` column is
@@ -634,12 +783,18 @@ impl DeclarativePlan {
 pub struct DeclarativeAuthor {
     /// The project schema every emitted statement is qualified into.
     project_schema: String,
-    /// The declaring app (`app_…`) recorded on each migration.
+    /// The **deploying** app (`app_…`) — the app whose deploy is driving this
+    /// diff. It is stamped on every emitted [`Migration`] (`owner_app`) AND it is
+    /// the ownership-enforcement subject (P4, design §4): [`Self::diff`] refuses a
+    /// structural change to any union table whose owner ≠ this app.
     owner_app: String,
 }
 
 impl DeclarativeAuthor {
-    /// Construct a declarative author bound to a project schema + owner app.
+    /// Construct a declarative author bound to a project schema + the **deploying**
+    /// app. In the multi-app model the deploying app is the ownership-enforcement
+    /// subject: [`Self::diff`] refuses a structural change to a table owned by a
+    /// different app (design §4).
     #[must_use]
     pub fn new(project_schema: impl Into<String>, owner_app: impl Into<String>) -> Self {
         Self {
@@ -723,6 +878,10 @@ impl DeclarativeAuthor {
     /// # Errors
     /// - [`DeclarativeError::Invalid`] — a descriptor name/type failed the
     ///   author-boundary validation (nothing generated).
+    /// - [`DeclarativeError::NotTableOwner`] — a structural change to a union
+    ///   table whose owner ≠ the deploying app (P4 ownership enforcement).
+    /// - [`DeclarativeError::CrossAppFkTargetMissing`] — an FK whose target table
+    ///   is declared by no member app and is not live (P4 cross-app FK).
     /// - [`DeclarativeError::RenameHintUnmatched`] — a hint named a pair that is
     ///   not an actual drop+add.
     /// - [`DeclarativeError::RenameHintTypeMismatch`] — a hint matched a pair
@@ -738,13 +897,26 @@ impl DeclarativeAuthor {
     )]
     pub fn diff(
         &self,
-        desired: &SchemaSnapshot,
+        desired: &DesiredSchema,
         live: &SchemaSnapshot,
         hints: &[RenameHint],
     ) -> Result<DeclarativePlan, DeclarativeError> {
+        // The ownership map travels alongside the union; the diff itself operates
+        // on the union SNAPSHOT, so bind it locally and keep the rest of the pass
+        // unchanged. Ownership is consulted (a) for cross-app FK target validation
+        // and (b) for the post-pass ownership-enforcement check (P4).
+        let ownership = &desired.ownership;
+        let desired = &desired.snapshot;
+
         // Author-boundary validation: every desired table/column/index name and
         // every column data_type must be safe BEFORE we render any SQL.
         Self::validate_desired(desired)?;
+
+        // P4 cross-app FK: every FK target must exist in the UNION (it may be a
+        // table owned by another app, but it must be declared by SOME member app)
+        // or already live. A dangling target is a clear error, not bad SQL at
+        // apply. Checked before any SQL is rendered.
+        Self::validate_cross_app_fk_targets(desired, live)?;
 
         // Resolve + validate the rename hints up-front: every hint MUST match an
         // actual drop+add pair (from live-only, to desired-only, types equal) on
@@ -997,11 +1169,25 @@ impl DeclarativeAuthor {
         }
 
         // --- DROP TABLE (P2): in live, not in desired → destructive, gated. ---
+        // In the UNION model `desired` is the FULL project schema (every member
+        // app's tables), so a live table that is absent from the union is one NO
+        // app declares — it is dropped here as before. (A table still owned by a
+        // member app stays in the union and is never reached.)
         for table in live.tables.keys() {
             if !desired.tables.contains_key(table) {
                 out.push(self.render_drop_table(table));
             }
         }
+
+        // P4 ownership enforcement (design §4): a structural change to a table
+        // whose owner ≠ the deploying app is REFUSED. The diff is computed over
+        // the FULL union, so a non-owner's deploy that merely USES a table emits
+        // NO op for it (the table's union shape == live ⇒ no structural delta) and
+        // is fine; only an actual structural CHANGE to a non-owned table is
+        // refused. Driven from the structural delta (snapshot diff), not migration
+        // names, so it covers CREATE/ALTER/DROP (incl. cross-app FK ALTER and the
+        // rename expand/contract) uniformly and deterministically.
+        Self::enforce_ownership(&self.owner_app, desired, live, ownership)?;
 
         // Total order by UUIDv7 version (stable; the executor topo-sorts on
         // depends_on within it). Only the PLAIN migrations are ordered here; each
@@ -1013,6 +1199,82 @@ impl DeclarativeAuthor {
             migrations: out,
             renames,
         })
+    }
+
+    /// P4 ownership enforcement (design §4): refuse a structural change to any
+    /// union table the deploying app (`deploying_app`) does not own.
+    ///
+    /// A table is **structurally changed** by this diff iff:
+    /// - it is in the union but not live (CREATE TABLE), OR
+    /// - it is in both but its union [`TableSnapshot`] ≠ its live one (ALTER —
+    ///   add/drop column, type/nullability, index, FK, rename expand/contract).
+    ///
+    /// For each such union table, if `ownership[table] != deploying_app` ⇒
+    /// [`DeclarativeError::NotTableOwner`]. A table whose union shape EQUALS live
+    /// has no structural delta — a non-owner merely USING it produces no op and is
+    /// never refused (the "identical re-declaration by a non-owner is a no-op"
+    /// rule falls straight out of snapshot equality).
+    ///
+    /// A live-only table absent from the union (only a DROP TABLE reaches it) has
+    /// no union owner; declarative ownership cannot be enforced against a table no
+    /// member app declares (design §4 says such tables persist / are re-claimable,
+    /// a policy the caller — not this differ — owns), so it is left to the existing
+    /// drop path.
+    fn enforce_ownership(
+        deploying_app: &str,
+        desired: &SchemaSnapshot,
+        live: &SchemaSnapshot,
+        ownership: &BTreeMap<String, String>,
+    ) -> Result<(), DeclarativeError> {
+        for (table, dt) in &desired.tables {
+            // `None` ⇒ CREATE TABLE; `Some(lt)` ⇒ any ALTER iff the union shape
+            // differs from live (columns/indexes/fks/rename).
+            let changed = live.tables.get(table).is_none_or(|lt| lt != dt);
+            if !changed {
+                continue;
+            }
+            // `ownership` keys are exactly `desired.tables` keys, so this is always
+            // present for a union table.
+            if let Some(owner) = ownership.get(table) {
+                if owner != deploying_app {
+                    return Err(DeclarativeError::NotTableOwner {
+                        table: table.clone(),
+                        owner: owner.clone(),
+                        deploying_app: deploying_app.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate every FK target across the UNION (P4 cross-app FK, design §4): the
+    /// target table must be declared by SOME member app (present in `desired`, the
+    /// union) OR already exist live. A target no app declares is a clear
+    /// [`DeclarativeError::CrossAppFkTargetMissing`] — surfaced before any SQL is
+    /// rendered, never left to fail as bad SQL at apply.
+    fn validate_cross_app_fk_targets(
+        desired: &SchemaSnapshot,
+        live: &SchemaSnapshot,
+    ) -> Result<(), DeclarativeError> {
+        for (table, t) in &desired.tables {
+            for c in &t.constraints {
+                if c.kind != "FOREIGN KEY" {
+                    continue;
+                }
+                if let Some(target) = fk_target_table(&c.definition) {
+                    if !desired.tables.contains_key(&target)
+                        && !live.tables.contains_key(&target)
+                    {
+                        return Err(DeclarativeError::CrossAppFkTargetMissing {
+                            table: table.clone(),
+                            target,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Validate every desired table/column/index name + column `data_type` at the

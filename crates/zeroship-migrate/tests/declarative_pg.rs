@@ -11,7 +11,8 @@ use compio_postgres::Client;
 use zeroship_migrate::{
     apply as executor_apply, desired_snapshot, diff_snapshots, migrator_role_name,
     provision_migrator, role::deprovision_migrator, snapshot_schema, Approval, CollectionDescriptor,
-    DeclarativeAuthor, DeclarativeError, EngineError, ExecutorConfig, FieldDescriptor, GuardConfig,
+    DeclarativeAuthor, DeclarativeError, DesiredSchema, EngineError, ExecutorConfig, FieldDescriptor,
+    GuardConfig,
     IndexDescriptor, Migration, MigrationEngine, OnlinePhase, RenameHint, SchemaSnapshot,
 };
 
@@ -101,7 +102,7 @@ async fn setup(conn: &Client, cfg: &ExecutorConfig) {
 /// apply it.
 async fn apply_plan(
     engine: &MigrationEngine,
-    desired: &SchemaSnapshot,
+    desired: &DesiredSchema,
     live: &SchemaSnapshot,
     author: &DeclarativeAuthor,
     cfg: &ExecutorConfig,
@@ -162,6 +163,7 @@ async fn assert_type_fidelity(dsl_type: &str, ddl_type: &str, required: bool) {
     // The matching descriptor: one declared field `attr` of `dsl_type`.
     let desc = CollectionDescriptor {
         name: "widgets".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor {
             name: "attr".into(),
             ty: dsl_type.into(),
@@ -175,7 +177,7 @@ async fn assert_type_fidelity(dsl_type: &str, ddl_type: &str, required: bool) {
 
     // The columns must round-trip with ZERO drift. (We compare columns only;
     // the live snapshot's PK constraint definition is compared loosely below.)
-    let drift = diff_snapshots(&desired, &live);
+    let drift = diff_snapshots(&desired.snapshot, &live);
     // The declared column must be present + same type/nullability on both sides
     // (no altered_objects on `widgets.attr`).
     let attr_altered: Vec<_> = drift
@@ -296,6 +298,7 @@ async fn type_fidelity_whole_table_round_trips_to_zero_drift() {
 
     let desc = CollectionDescriptor {
         name: "profiles".into(),
+        owner_app: "app_test".into(),
         fields: vec![
             FieldDescriptor { name: "handle".into(), ty: "string".into(), required: true, unique: false, references: None },
             FieldDescriptor { name: "score".into(), ty: "number".into(), required: false, unique: false, references: None },
@@ -306,7 +309,7 @@ async fn type_fidelity_whole_table_round_trips_to_zero_drift() {
         indexes: vec![],
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
-    let drift = diff_snapshots(&desired, &live);
+    let drift = diff_snapshots(&desired.snapshot, &live);
 
     // No column drift at all. (The PK constraint definition may differ in
     // spelling — pg_get_constraintdef renders `PRIMARY KEY (id)`; our desired
@@ -348,6 +351,7 @@ async fn additive_create_table_with_column_and_index_applies_to_zero_drift() {
 
     let desc = CollectionDescriptor {
         name: "tasks".into(),
+        owner_app: "app_test".into(),
         fields: vec![
             FieldDescriptor { name: "title".into(), ty: "string".into(), required: true, unique: false, references: None },
             FieldDescriptor { name: "slug".into(), ty: "string".into(), required: false, unique: true, references: None },
@@ -366,7 +370,7 @@ async fn additive_create_table_with_column_and_index_applies_to_zero_drift() {
     let live2 = snapshot_schema(&conn, &cfg.project_schema)
         .await
         .expect("re-snapshot");
-    let drift = diff_snapshots(&desired, &live2);
+    let drift = diff_snapshots(&desired.snapshot, &live2);
     assert!(
         drift.is_clean(),
         "expected zero drift after apply, got: missing={:?} unexpected={:?} altered={:?}",
@@ -401,6 +405,7 @@ async fn full_shape_round_trips_to_zero_drift_the_canonical_idempotency_oracle()
 
     let authors_tbl = CollectionDescriptor {
         name: "authors".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor {
             name: "email".into(),
             ty: "string".into(),
@@ -412,6 +417,7 @@ async fn full_shape_round_trips_to_zero_drift_the_canonical_idempotency_oracle()
     };
     let posts_tbl = CollectionDescriptor {
         name: "posts".into(),
+        owner_app: "app_test".into(),
         fields: vec![
             FieldDescriptor {
                 name: "author".into(),
@@ -443,7 +449,7 @@ async fn full_shape_round_trips_to_zero_drift_the_canonical_idempotency_oracle()
     let live2 = snapshot_schema(&conn, &cfg.project_schema)
         .await
         .expect("re-snapshot");
-    let drift = diff_snapshots(&desired, &live2);
+    let drift = diff_snapshots(&desired.snapshot, &live2);
     assert!(
         drift.is_clean(),
         "FULL re-diff must be clean: missing={:?} unexpected={:?} altered={:?}",
@@ -481,10 +487,11 @@ async fn changed_fk_target_is_unsupported_in_v1_not_silently_skipped() {
     let engine = MigrationEngine::new();
 
     // Two possible targets + a referencing table whose FK points at `alpha`.
-    let alpha = CollectionDescriptor { name: "alpha".into(), fields: vec![], indexes: vec![] };
-    let beta = CollectionDescriptor { name: "beta".into(), fields: vec![], indexes: vec![] };
+    let alpha = CollectionDescriptor { name: "alpha".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![] };
+    let beta = CollectionDescriptor { name: "beta".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![] };
     let child_v1 = CollectionDescriptor {
         name: "child".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor {
             name: "parent".into(),
             ty: "ref".into(),
@@ -503,6 +510,7 @@ async fn changed_fk_target_is_unsupported_in_v1_not_silently_skipped() {
     // different REFERENCES target.
     let child_v2 = CollectionDescriptor {
         name: "child".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor {
             name: "parent".into(),
             ty: "ref".into(),
@@ -540,6 +548,7 @@ async fn long_table_and_field_unique_index_name_is_capped_and_re_diffs_clean() {
     let long_field = "an_equally_long_field_name_here"; // 31 → natural 48+1+31+4 = 84
     let desc = CollectionDescriptor {
         name: long_table.into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor {
             name: long_field.into(),
             ty: "string".into(),
@@ -553,7 +562,7 @@ async fn long_table_and_field_unique_index_name_is_capped_and_re_diffs_clean() {
 
     // The generated unique-index name is ≤63 bytes (and deterministic across two
     // builds of the same desired snapshot).
-    let idx = desired.tables[long_table]
+    let idx = desired.snapshot.tables[long_table]
         .indexes
         .iter()
         .find(|i| i.unique && i.name != format!("{long_table}_pkey"))
@@ -571,7 +580,7 @@ async fn long_table_and_field_unique_index_name_is_capped_and_re_diffs_clean() {
         "long-name index churned (re-diff not empty): {:?}",
         migs.iter().map(|m| &m.name).collect::<Vec<_>>()
     );
-    assert!(diff_snapshots(&desired, &live2).is_clean(), "full re-diff clean");
+    assert!(diff_snapshots(&desired.snapshot, &live2).is_clean(), "full re-diff clean");
 
     teardown(&conn, &cfg).await;
 }
@@ -593,6 +602,7 @@ async fn index_uniqueness_flip_on_same_name_is_unsupported_in_v1_not_silent() {
     // Create a table with a NON-unique named index over `level`.
     let v1 = CollectionDescriptor {
         name: "logs".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![IndexDescriptor { name: "logs_level_idx".into(), columns: vec!["level".into()], unique: false }],
     };
@@ -604,6 +614,7 @@ async fn index_uniqueness_flip_on_same_name_is_unsupported_in_v1_not_silent() {
     // Desire the SAME-name index but UNIQUE now.
     let v2 = CollectionDescriptor {
         name: "logs".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![IndexDescriptor { name: "logs_level_idx".into(), columns: vec!["level".into()], unique: true }],
     };
@@ -627,6 +638,7 @@ async fn additive_diff_is_idempotent_second_plan_is_empty() {
 
     let desc = CollectionDescriptor {
         name: "notes".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
@@ -664,6 +676,7 @@ async fn additive_add_column_to_existing_table_applies_clean() {
     // First create the table with one field.
     let v1 = CollectionDescriptor {
         name: "items".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
@@ -675,6 +688,7 @@ async fn additive_add_column_to_existing_table_applies_clean() {
     // Now desire an ADDED nullable column.
     let v2 = CollectionDescriptor {
         name: "items".into(),
+        owner_app: "app_test".into(),
         fields: vec![
             FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None },
             FieldDescriptor { name: "qty".into(), ty: "number".into(), required: false, unique: false, references: None },
@@ -688,7 +702,7 @@ async fn additive_add_column_to_existing_table_applies_clean() {
         .expect("add column");
 
     let live2 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
-    assert!(diff_snapshots(&d2, &live2).is_clean(), "add-column did not converge");
+    assert!(diff_snapshots(&d2.snapshot, &live2).is_clean(), "add-column did not converge");
 
     teardown(&conn, &cfg).await;
 }
@@ -709,6 +723,7 @@ async fn fk_ordering_referencing_table_after_target_applies_clean() {
     // not declaration order.
     let b = CollectionDescriptor {
         name: "orders".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor {
             name: "customer".into(),
             ty: "ref".into(),
@@ -720,6 +735,7 @@ async fn fk_ordering_referencing_table_after_target_applies_clean() {
     };
     let a = CollectionDescriptor {
         name: "customers".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
@@ -730,7 +746,7 @@ async fn fk_ordering_referencing_table_after_target_applies_clean() {
 
     let live2 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
     // Both tables exist with the FK constraint; columns clean.
-    let drift = diff_snapshots(&desired, &live2);
+    let drift = diff_snapshots(&desired.snapshot, &live2);
     let col_drift: Vec<_> = drift.altered_objects.iter().filter(|x| x.object.starts_with("column ")).collect();
     assert!(col_drift.is_empty(), "column drift after FK batch: {col_drift:?}");
     assert!(drift.missing_objects.is_empty(), "missing after FK batch: {:?}", drift.missing_objects);
@@ -749,6 +765,7 @@ async fn type_change_emits_a_gated_alter_not_an_error_and_never_auto_applies() {
     let live = {
         let desc = CollectionDescriptor {
             name: "widgets".into(),
+            owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "attr".into(), ty: "string".into(), required: false, unique: false, references: None }],
             indexes: vec![],
         };
@@ -757,13 +774,14 @@ async fn type_change_emits_a_gated_alter_not_an_error_and_never_auto_applies() {
     let desired = {
         let desc = CollectionDescriptor {
             name: "widgets".into(),
+            owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "attr".into(), ty: "number".into(), required: false, unique: false, references: None }],
             indexes: vec![],
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
 
-    let migs = author.diff(&desired, &live, &[]).expect("type change now diffs to a gated ALTER").migrations;
+    let migs = author.diff(&desired, &live.snapshot, &[]).expect("type change now diffs to a gated ALTER").migrations;
     let alter = migs.iter().find(|m| m.up.contains("ALTER COLUMN") && m.up.contains("TYPE"))
         .expect("a gated ALTER COLUMN TYPE migration");
     assert!(alter.flags.destructive, "type change is destructive (lossy/rewrite)");
@@ -777,6 +795,7 @@ async fn malicious_table_name_is_rejected_at_author_boundary() {
     let author = author_for(&cfg);
     let desc = CollectionDescriptor {
         name: "users\"; DROP SCHEMA control CASCADE; --".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
@@ -791,6 +810,7 @@ async fn malicious_column_name_is_rejected_at_author_boundary() {
     let author = author_for(&cfg);
     let desc = CollectionDescriptor {
         name: "widgets".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor {
             name: "evil\") ; DROP TABLE control.users; --".into(),
             ty: "string".into(),
@@ -818,6 +838,7 @@ async fn every_generated_migration_passes_through_the_guard_no_bypass() {
     let desired = {
         let desc = CollectionDescriptor {
             name: "events".into(),
+            owner_app: "app_test".into(),
             fields: vec![
                 FieldDescriptor { name: "kind".into(), ty: "string".into(), required: true, unique: true, references: None },
                 FieldDescriptor { name: "payload".into(), ty: "json".into(), required: false, unique: false, references: None },
@@ -854,6 +875,7 @@ async fn drop_table_is_gated_and_not_auto_applied() {
     // Create a table.
     let v1 = CollectionDescriptor {
         name: "legacy".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
@@ -863,7 +885,7 @@ async fn drop_table_is_gated_and_not_auto_applied() {
         .expect("create legacy");
 
     // Now desire it GONE (empty desired).
-    let empty = SchemaSnapshot::default();
+    let empty = DesiredSchema::default();
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
     let plan = engine
         .plan_declarative(&empty, &live, &author, &[], &guard_cfg(&cfg))
@@ -896,7 +918,7 @@ async fn drop_table_is_gated_and_not_auto_applied() {
         "table must be gone after an approved drop"
     );
     assert!(
-        diff_snapshots(&empty, &live_final).is_clean(),
+        diff_snapshots(&empty.snapshot, &live_final).is_clean(),
         "re-diff after approved drop must be clean"
     );
 
@@ -915,6 +937,7 @@ async fn drop_column_is_destructive_and_gated() {
 
     let v1 = CollectionDescriptor {
         name: "people".into(),
+        owner_app: "app_test".into(),
         fields: vec![
             FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None },
             FieldDescriptor { name: "nickname".into(), ty: "string".into(), required: false, unique: false, references: None },
@@ -929,6 +952,7 @@ async fn drop_column_is_destructive_and_gated() {
     // Drop `nickname`.
     let v2 = CollectionDescriptor {
         name: "people".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
@@ -956,7 +980,7 @@ async fn drop_column_is_destructive_and_gated() {
         !live_final.tables["people"].columns.iter().any(|c| c.name == "nickname"),
         "nickname must be gone after an approved drop"
     );
-    assert!(diff_snapshots(&d2, &live_final).is_clean(), "re-diff clean after approved drop");
+    assert!(diff_snapshots(&d2.snapshot, &live_final).is_clean(), "re-diff clean after approved drop");
 
     teardown(&conn, &cfg).await;
 }
@@ -978,6 +1002,7 @@ async fn drop_index_is_not_data_loss_so_it_is_not_gated() {
     // Create a table with a named index.
     let v1 = CollectionDescriptor {
         name: "logs".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![IndexDescriptor { name: "logs_level_idx".into(), columns: vec!["level".into()], unique: false }],
     };
@@ -989,6 +1014,7 @@ async fn drop_index_is_not_data_loss_so_it_is_not_gated() {
     // Desire the index GONE.
     let v2 = CollectionDescriptor {
         name: "logs".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
@@ -1007,7 +1033,7 @@ async fn drop_index_is_not_data_loss_so_it_is_not_gated() {
         !live_after.tables["logs"].indexes.iter().any(|i| i.name == "logs_level_idx"),
         "index must be gone after the ungated drop"
     );
-    assert!(diff_snapshots(&d2, &live_after).is_clean(), "re-diff clean after drop index");
+    assert!(diff_snapshots(&d2.snapshot, &live_after).is_clean(), "re-diff clean after drop index");
 
     teardown(&conn, &cfg).await;
 }
@@ -1023,6 +1049,7 @@ async fn malicious_type_in_descriptor_is_rejected_not_silently_mapped_to_text() 
 
     let desc = CollectionDescriptor {
         name: "safe".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor {
             name: "f".into(),
             ty: "text; DROP TABLE control.users; --".into(),
@@ -1047,6 +1074,7 @@ async fn out_of_scope_vector_type_is_rejected_not_silently_text() {
     let cfg = cfg_for(&token());
     let desc = CollectionDescriptor {
         name: "embeddings".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor {
             name: "vec".into(),
             ty: "vector".into(),
@@ -1070,6 +1098,7 @@ async fn typo_type_token_is_rejected_not_silently_text() {
     let cfg = cfg_for(&token());
     let desc = CollectionDescriptor {
         name: "t".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor {
             name: "n".into(),
             ty: "bigint".into(),
@@ -1115,27 +1144,107 @@ async fn all_twelve_supported_types_still_map() {
 }
 
 #[compio::test]
-async fn duplicate_table_name_across_descriptors_is_rejected_not_silently_merged() {
-    // #6: two descriptors naming the same table must error (DuplicateTable),
-    // never silently merge (last-writer-wins clobbers the first descriptor's
-    // columns with no error). The first declares `a`, the second declares `b`;
-    // a silent merge would drop column `a` with no signal.
+async fn conflicting_declaration_across_apps_is_rejected_not_silently_merged() {
+    // P4 (refines #6): two apps declaring the SAME table with DIFFERENT shapes is
+    // a conflict — never a silent last-writer-wins merge that would drop one app's
+    // column with no signal. app_a declares `a`; app_b declares `b`.
     let cfg = cfg_for(&token());
     let first = CollectionDescriptor {
         name: "dup".into(),
+        owner_app: "app_a".into(),
         fields: vec![FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
     let second = CollectionDescriptor {
         name: "dup".into(),
+        owner_app: "app_b".into(),
         fields: vec![FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
     let err = desired_snapshot(&cfg.project_schema, &[first, second]).unwrap_err();
     assert!(
-        matches!(err, DeclarativeError::DuplicateTable { ref table } if table == "dup"),
+        matches!(
+            err,
+            DeclarativeError::ConflictingDeclaration { ref table, ref app_a, ref app_b }
+                if table == "dup" && app_a == "app_a" && app_b == "app_b"
+        ),
         "got {err:?}"
     );
+}
+
+#[compio::test]
+async fn conflict_app_pair_is_deterministic_regardless_of_descriptor_order() {
+    // P4 determinism: the ConflictingDeclaration (app_a, app_b) pair is reported
+    // smallest-first REGARDLESS of which descriptor came first. A critic could
+    // otherwise see a different error per input order; lock order-independence.
+    let cfg = cfg_for(&token());
+    let mk = |app: &str, field: &str| CollectionDescriptor {
+        name: "dup".into(),
+        owner_app: app.into(),
+        fields: vec![FieldDescriptor { name: field.into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    // Order A: app_z first, then app_a.
+    let err_a = desired_snapshot(&cfg.project_schema, &[mk("app_z", "z"), mk("app_a", "a")]).unwrap_err();
+    // Order B: app_a first, then app_z.
+    let err_b = desired_snapshot(&cfg.project_schema, &[mk("app_a", "a"), mk("app_z", "z")]).unwrap_err();
+    for err in [&err_a, &err_b] {
+        assert!(
+            matches!(
+                err,
+                DeclarativeError::ConflictingDeclaration { table, app_a, app_b }
+                    if table == "dup" && app_a == "app_a" && app_b == "app_z"
+            ),
+            "conflict must report (app_a, app_z) regardless of order, got {err:?}"
+        );
+    }
+}
+
+#[compio::test]
+async fn identical_redeclaration_by_two_apps_is_idempotent_one_table_no_error() {
+    // P4 union (design §4): two apps declaring the SAME table with the SAME shape
+    // is IDEMPOTENT — it merges to ONE table in the union, no error. Ownership is
+    // the lexicographically-smallest declaring app (order-independent).
+    let cfg = cfg_for(&token());
+    let mk = |app: &str| CollectionDescriptor {
+        name: "shared".into(),
+        owner_app: app.into(),
+        fields: vec![
+            FieldDescriptor { name: "title".into(), ty: "string".into(), required: true, unique: false, references: None },
+            FieldDescriptor { name: "count".into(), ty: "number".into(), required: false, unique: false, references: None },
+        ],
+        indexes: vec![IndexDescriptor { name: "shared_title_idx".into(), columns: vec!["title".into()], unique: false }],
+    };
+    // app_b declared first, app_a second — identical shape.
+    let d = desired_snapshot(&cfg.project_schema, &[mk("app_b"), mk("app_a")])
+        .expect("identical re-declaration is idempotent, not an error");
+    // Exactly ONE table in the union (merged, not duplicated).
+    assert_eq!(d.snapshot.tables.len(), 1, "identical re-decl must merge to one table");
+    assert!(d.snapshot.tables.contains_key("shared"));
+    // Owner is the smallest declaring app, regardless of descriptor order.
+    assert_eq!(d.owner_of("shared"), Some("app_a"), "owner is the smallest declaring app");
+
+    // And the reverse order yields the SAME union + owner (determinism).
+    let d_rev = desired_snapshot(&cfg.project_schema, &[mk("app_a"), mk("app_b")])
+        .expect("idempotent");
+    assert_eq!(d.snapshot, d_rev.snapshot, "union is order-independent");
+    assert_eq!(d.ownership, d_rev.ownership, "ownership is order-independent");
+}
+
+#[compio::test]
+async fn single_app_declaration_owns_its_table() {
+    // P4: the existing single-app path is unchanged — one descriptor → one table,
+    // owned by its declaring app.
+    let cfg = cfg_for(&token());
+    let desc = CollectionDescriptor {
+        name: "widgets".into(),
+        owner_app: "app_solo".into(),
+        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let d = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
+    assert_eq!(d.snapshot.tables.len(), 1);
+    assert_eq!(d.owner_of("widgets"), Some("app_solo"));
 }
 
 
@@ -1148,6 +1257,7 @@ async fn malicious_ref_target_is_rejected_at_author_boundary() {
     for bad in ["control.users", "x\"; DROP TABLE control.users; --", ";", ""] {
         let desc = CollectionDescriptor {
             name: "child".into(),
+            owner_app: "app_test".into(),
             fields: vec![FieldDescriptor {
                 name: "parent".into(),
                 ty: "ref".into(),
@@ -1183,6 +1293,7 @@ async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
     // Create a table carrying BOTH a plain named index and a unique named index.
     let v1 = CollectionDescriptor {
         name: "members".into(),
+        owner_app: "app_test".into(),
         fields: vec![
             FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None },
             FieldDescriptor { name: "tier".into(), ty: "string".into(), required: false, unique: false, references: None },
@@ -1200,6 +1311,7 @@ async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
     // --- Drop the UNIQUE index: must be gated. ---
     let v2 = CollectionDescriptor {
         name: "members".into(),
+        owner_app: "app_test".into(),
         fields: vec![
             FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None },
             FieldDescriptor { name: "tier".into(), ty: "string".into(), required: false, unique: false, references: None },
@@ -1233,11 +1345,12 @@ async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
         !live_final.tables["members"].indexes.iter().any(|i| i.name == "members_email_uq"),
         "unique index must be gone after an approved drop"
     );
-    assert!(diff_snapshots(&d2, &live_final).is_clean(), "re-diff clean after approved unique-index drop");
+    assert!(diff_snapshots(&d2.snapshot, &live_final).is_clean(), "re-diff clean after approved unique-index drop");
 
     // --- Now drop the PLAIN index: must stay UNGATED. ---
     let v3 = CollectionDescriptor {
         name: "members".into(),
+        owner_app: "app_test".into(),
         fields: vec![
             FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None },
             FieldDescriptor { name: "tier".into(), ty: "string".into(), required: false, unique: false, references: None },
@@ -1284,6 +1397,7 @@ async fn rename_hint_routes_drop_add_through_expand_contract_not_drop_add() {
     // the dual-write trigger DDL works under SET ROLE).
     let v1 = CollectionDescriptor {
         name: "users".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
@@ -1306,6 +1420,7 @@ async fn rename_hint_routes_drop_add_through_expand_contract_not_drop_add() {
     // Desire `email_address` instead of `email`.
     let v2 = CollectionDescriptor {
         name: "users".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
@@ -1439,6 +1554,7 @@ async fn declarative_rename_preserves_preexisting_rows_through_expand_then_contr
     // dual-write trigger DDL works under SET ROLE).
     let v1 = CollectionDescriptor {
         name: "users".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
@@ -1462,6 +1578,7 @@ async fn declarative_rename_preserves_preexisting_rows_through_expand_then_contr
     // Desire `email_address` instead of `email`, WITH a matching rename hint.
     let v2 = CollectionDescriptor {
         name: "users".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
@@ -1577,7 +1694,7 @@ async fn declarative_rename_preserves_preexisting_rows_through_expand_then_contr
     );
 
     // The deploy converged: re-diffing desired vs live is clean.
-    assert!(diff_snapshots(&d2, &after).is_clean(), "re-diff clean after rename completes");
+    assert!(diff_snapshots(&d2.snapshot, &after).is_clean(), "re-diff clean after rename completes");
 
     teardown(&conn, &cfg).await;
 }
@@ -1602,6 +1719,7 @@ async fn flattening_a_rename_into_the_plain_plan_loses_data_or_is_gate_blocked()
 
     let v1 = CollectionDescriptor {
         name: "users".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
@@ -1620,6 +1738,7 @@ async fn flattening_a_rename_into_the_plain_plan_loses_data_or_is_gate_blocked()
 
     let v2 = CollectionDescriptor {
         name: "users".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
@@ -1692,6 +1811,7 @@ async fn without_a_hint_the_same_desired_is_two_independent_ops_not_a_rename() {
     let live = {
         let desc = CollectionDescriptor {
             name: "users".into(),
+            owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
             indexes: vec![],
         };
@@ -1700,6 +1820,7 @@ async fn without_a_hint_the_same_desired_is_two_independent_ops_not_a_rename() {
     let desired = {
         let desc = CollectionDescriptor {
             name: "users".into(),
+            owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None }],
             indexes: vec![],
         };
@@ -1708,7 +1829,7 @@ async fn without_a_hint_the_same_desired_is_two_independent_ops_not_a_rename() {
 
     // No hints → two independent ops, NO rename (the structured `.renames` is
     // empty; everything is in the plain `.migrations`).
-    let diff = author.diff(&desired, &live, &[]).expect("diff without hint");
+    let diff = author.diff(&desired, &live.snapshot, &[]).expect("diff without hint");
     assert!(diff.renames.is_empty(), "no hint must produce NO structured rename");
     let migs = diff.migrations;
     assert!(
@@ -1737,6 +1858,7 @@ async fn rename_hint_naming_a_nonexistent_column_is_an_error() {
     let live = {
         let desc = CollectionDescriptor {
             name: "users".into(),
+            owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
             indexes: vec![],
         };
@@ -1745,6 +1867,7 @@ async fn rename_hint_naming_a_nonexistent_column_is_an_error() {
     let desired = {
         let desc = CollectionDescriptor {
             name: "users".into(),
+            owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None }],
             indexes: vec![],
         };
@@ -1753,25 +1876,26 @@ async fn rename_hint_naming_a_nonexistent_column_is_an_error() {
 
     // `from` names a column that does not exist in live → unmatched.
     let bad_from = vec![RenameHint { table: "users".into(), from: "nope".into(), to: "email_address".into() }];
-    let err = author.diff(&desired, &live, &bad_from).unwrap_err();
+    let err = author.diff(&desired, &live.snapshot, &bad_from).unwrap_err();
     assert!(matches!(err, DeclarativeError::RenameHintUnmatched { .. }), "got {err:?}");
 
     // `to` names a column that does not exist in desired → unmatched.
     let bad_to = vec![RenameHint { table: "users".into(), from: "email".into(), to: "ghost".into() }];
-    let err2 = author.diff(&desired, &live, &bad_to).unwrap_err();
+    let err2 = author.diff(&desired, &live.snapshot, &bad_to).unwrap_err();
     assert!(matches!(err2, DeclarativeError::RenameHintUnmatched { .. }), "got {err2:?}");
 
     // A hint on a table that is identical on both sides (no drop+add) → unmatched.
     let same = {
         let desc = CollectionDescriptor {
             name: "users".into(),
+            owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
             indexes: vec![],
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let hint = vec![RenameHint { table: "users".into(), from: "email".into(), to: "email_address".into() }];
-    let err3 = author.diff(&same, &live, &hint).unwrap_err();
+    let err3 = author.diff(&same, &live.snapshot, &hint).unwrap_err();
     assert!(matches!(err3, DeclarativeError::RenameHintUnmatched { .. }), "got {err3:?}");
 }
 
@@ -1786,6 +1910,7 @@ async fn rename_hint_with_a_type_mismatch_is_an_error() {
     let live = {
         let desc = CollectionDescriptor {
             name: "users".into(),
+            owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "score".into(), ty: "string".into(), required: false, unique: false, references: None }],
             indexes: vec![],
         };
@@ -1794,6 +1919,7 @@ async fn rename_hint_with_a_type_mismatch_is_an_error() {
     let desired = {
         let desc = CollectionDescriptor {
             name: "users".into(),
+            owner_app: "app_test".into(),
             // renamed AND retyped (string → number).
             fields: vec![FieldDescriptor { name: "rating".into(), ty: "number".into(), required: false, unique: false, references: None }],
             indexes: vec![],
@@ -1801,7 +1927,7 @@ async fn rename_hint_with_a_type_mismatch_is_an_error() {
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let hint = vec![RenameHint { table: "users".into(), from: "score".into(), to: "rating".into() }];
-    let err = author.diff(&desired, &live, &hint).unwrap_err();
+    let err = author.diff(&desired, &live.snapshot, &hint).unwrap_err();
     assert!(matches!(err, DeclarativeError::RenameHintTypeMismatch { .. }), "got {err:?}");
 }
 
@@ -1825,6 +1951,7 @@ async fn two_hints_sharing_a_to_are_rejected_as_duplicate() {
     let live = {
         let desc = CollectionDescriptor {
             name: "users".into(),
+            owner_app: "app_test".into(),
             fields: vec![
                 FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None },
                 FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None },
@@ -1836,6 +1963,7 @@ async fn two_hints_sharing_a_to_are_rejected_as_duplicate() {
     let desired = {
         let desc = CollectionDescriptor {
             name: "users".into(),
+            owner_app: "app_test".into(),
             // Both old columns map onto a single new column `c`.
             fields: vec![FieldDescriptor { name: "c".into(), ty: "string".into(), required: false, unique: false, references: None }],
             indexes: vec![],
@@ -1846,7 +1974,7 @@ async fn two_hints_sharing_a_to_are_rejected_as_duplicate() {
         RenameHint { table: "users".into(), from: "a".into(), to: "c".into() },
         RenameHint { table: "users".into(), from: "b".into(), to: "c".into() },
     ];
-    let err = author.diff(&desired, &live, &hints).unwrap_err();
+    let err = author.diff(&desired, &live.snapshot, &hints).unwrap_err();
     assert!(
         matches!(err, DeclarativeError::DuplicateRenameHint { side: "to", .. }),
         "got {err:?}"
@@ -1864,6 +1992,7 @@ async fn two_hints_sharing_a_from_are_rejected_as_duplicate() {
     let live = {
         let desc = CollectionDescriptor {
             name: "users".into(),
+            owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None }],
             indexes: vec![],
         };
@@ -1872,6 +2001,7 @@ async fn two_hints_sharing_a_from_are_rejected_as_duplicate() {
     let desired = {
         let desc = CollectionDescriptor {
             name: "users".into(),
+            owner_app: "app_test".into(),
             fields: vec![
                 FieldDescriptor { name: "c".into(), ty: "string".into(), required: false, unique: false, references: None },
                 FieldDescriptor { name: "d".into(), ty: "string".into(), required: false, unique: false, references: None },
@@ -1884,7 +2014,7 @@ async fn two_hints_sharing_a_from_are_rejected_as_duplicate() {
         RenameHint { table: "users".into(), from: "a".into(), to: "c".into() },
         RenameHint { table: "users".into(), from: "a".into(), to: "d".into() },
     ];
-    let err = author.diff(&desired, &live, &hints).unwrap_err();
+    let err = author.diff(&desired, &live.snapshot, &hints).unwrap_err();
     assert!(
         matches!(err, DeclarativeError::DuplicateRenameHint { side: "from", .. }),
         "got {err:?}"
@@ -1902,6 +2032,7 @@ async fn a_rename_chain_is_rejected_explicitly_not_incidentally() {
     let live = {
         let desc = CollectionDescriptor {
             name: "users".into(),
+            owner_app: "app_test".into(),
             fields: vec![
                 FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None },
                 FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None },
@@ -1913,6 +2044,7 @@ async fn a_rename_chain_is_rejected_explicitly_not_incidentally() {
     let desired = {
         let desc = CollectionDescriptor {
             name: "users".into(),
+            owner_app: "app_test".into(),
             fields: vec![
                 FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None },
                 FieldDescriptor { name: "c".into(), ty: "string".into(), required: false, unique: false, references: None },
@@ -1925,7 +2057,7 @@ async fn a_rename_chain_is_rejected_explicitly_not_incidentally() {
         RenameHint { table: "users".into(), from: "a".into(), to: "b".into() },
         RenameHint { table: "users".into(), from: "b".into(), to: "c".into() },
     ];
-    let err = author.diff(&desired, &live, &hints).unwrap_err();
+    let err = author.diff(&desired, &live.snapshot, &hints).unwrap_err();
     assert!(
         matches!(err, DeclarativeError::RenameHintChained { ref column, .. } if column == "b"),
         "got {err:?}"
@@ -1942,6 +2074,7 @@ async fn a_noop_rename_hint_from_equals_to_is_a_precise_error() {
     let live = {
         let desc = CollectionDescriptor {
             name: "users".into(),
+            owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
             indexes: vec![],
         };
@@ -1950,7 +2083,7 @@ async fn a_noop_rename_hint_from_equals_to_is_a_precise_error() {
     // Same shape on both sides; the only "change" is the no-op hint.
     let desired = live.clone();
     let hints = vec![RenameHint { table: "users".into(), from: "email".into(), to: "email".into() }];
-    let err = author.diff(&desired, &live, &hints).unwrap_err();
+    let err = author.diff(&desired, &live.snapshot, &hints).unwrap_err();
     assert!(
         matches!(err, DeclarativeError::RenameHintNoop { ref column, .. } if column == "email"),
         "got {err:?}"
@@ -1970,6 +2103,7 @@ async fn a_hint_on_a_created_table_is_unmatched() {
     let desired = {
         let desc = CollectionDescriptor {
             name: "posts".into(),
+            owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None }],
             indexes: vec![],
         };
@@ -1991,14 +2125,15 @@ async fn a_hint_on_a_dropped_table_is_unmatched() {
     let live = {
         let desc = CollectionDescriptor {
             name: "posts".into(),
+            owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None }],
             indexes: vec![],
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
-    let desired = SchemaSnapshot::default();
+    let desired = DesiredSchema::default();
     let hints = vec![RenameHint { table: "posts".into(), from: "body".into(), to: "renamed".into() }];
-    let err = author.diff(&desired, &live, &hints).unwrap_err();
+    let err = author.diff(&desired, &live.snapshot, &hints).unwrap_err();
     assert!(matches!(err, DeclarativeError::RenameHintUnmatched { .. }), "got {err:?}");
 }
 
@@ -2024,6 +2159,7 @@ async fn type_change_is_gated_refused_without_approval_applied_with_then_re_diff
     // cleanly regardless of data).
     let v1 = CollectionDescriptor {
         name: "metrics".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "score".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
@@ -2035,6 +2171,7 @@ async fn type_change_is_gated_refused_without_approval_applied_with_then_re_diff
     // Desire `score` as a number (double precision) — a gated type change.
     let v2 = CollectionDescriptor {
         name: "metrics".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "score".into(), ty: "number".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
@@ -2058,7 +2195,7 @@ async fn type_change_is_gated_refused_without_approval_applied_with_then_re_diff
     let live_final = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap3");
     let attr2 = live_final.tables["metrics"].columns.iter().find(|c| c.name == "score").expect("score col");
     assert_eq!(attr2.data_type, "double precision", "type changed after approval");
-    assert!(diff_snapshots(&d2, &live_final).is_clean(), "re-diff clean after approved type change");
+    assert!(diff_snapshots(&d2.snapshot, &live_final).is_clean(), "re-diff clean after approved type change");
     // Idempotent: re-diffing the same desired against the converged live is empty.
     let migs = author.diff(&d2, &live_final, &[]).expect("re-diff after type change").migrations;
     assert!(migs.is_empty(), "type change must be idempotent, got {} migs", migs.len());
@@ -2082,6 +2219,7 @@ async fn set_not_null_is_gated_drop_not_null_is_ungated_and_both_re_diff_clean()
     // Create `accounts` with a NULLABLE `email` (required:false).
     let v1 = CollectionDescriptor {
         name: "accounts".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
@@ -2093,6 +2231,7 @@ async fn set_not_null_is_gated_drop_not_null_is_ungated_and_both_re_diff_clean()
     // --- SET NOT NULL (required false→true): GATED. ---
     let v2 = CollectionDescriptor {
         name: "accounts".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: true, unique: false, references: None }],
         indexes: vec![],
     };
@@ -2117,7 +2256,7 @@ async fn set_not_null_is_gated_drop_not_null_is_ungated_and_both_re_diff_clean()
     let live_nn = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap3");
     assert!(!live_nn.tables["accounts"].columns.iter().find(|c| c.name == "email").unwrap().nullable,
         "email must be NOT NULL after approval");
-    assert!(diff_snapshots(&d2, &live_nn).is_clean(), "re-diff clean after SET NOT NULL");
+    assert!(diff_snapshots(&d2.snapshot, &live_nn).is_clean(), "re-diff clean after SET NOT NULL");
     assert!(author.diff(&d2, &live_nn, &[]).expect("re-diff").is_empty(), "SET NOT NULL idempotent");
 
     // --- DROP NOT NULL (required true→false): UNGATED, applies without approval. ---
@@ -2131,7 +2270,7 @@ async fn set_not_null_is_gated_drop_not_null_is_ungated_and_both_re_diff_clean()
     let live_dn = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap5");
     assert!(live_dn.tables["accounts"].columns.iter().find(|c| c.name == "email").unwrap().nullable,
         "email must be nullable again after the ungated DROP NOT NULL");
-    assert!(diff_snapshots(&d1, &live_dn).is_clean(), "re-diff clean after DROP NOT NULL");
+    assert!(diff_snapshots(&d1.snapshot, &live_dn).is_clean(), "re-diff clean after DROP NOT NULL");
     assert!(author.diff(&d1, &live_dn, &[]).expect("re-diff").is_empty(), "DROP NOT NULL idempotent");
 
     teardown(&conn, &cfg).await;
@@ -2155,6 +2294,7 @@ async fn unapplied_gated_type_change_keeps_re_diffing_nonempty_documented_semant
 
     let v1 = CollectionDescriptor {
         name: "gauge".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "v".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
@@ -2165,6 +2305,7 @@ async fn unapplied_gated_type_change_keeps_re_diffing_nonempty_documented_semant
 
     let v2 = CollectionDescriptor {
         name: "gauge".into(),
+        owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "v".into(), ty: "number".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };

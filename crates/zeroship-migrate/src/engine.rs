@@ -199,7 +199,7 @@ impl MigrationEngine {
     /// like any other.
     pub fn plan_declarative(
         &self,
-        desired: &crate::drift::SchemaSnapshot,
+        desired: &crate::declarative::DesiredSchema,
         live: &crate::drift::SchemaSnapshot,
         author: &crate::declarative::DeclarativeAuthor,
         hints: &[crate::declarative::RenameHint],
