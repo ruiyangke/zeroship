@@ -741,10 +741,7 @@ async fn security_guard_denies_malicious_trigger_variants() {
     drop_schemas(&conn, &cfg).await;
     ensure_project_schema(&conn, &cfg).await;
 
-    let gcfg = GuardConfig {
-        project_schema: cfg.project_schema.clone(),
-        extension_allowlist: Vec::new(),
-    };
+    let gcfg = GuardConfig::confined(cfg.project_schema.clone());
     let guard = SqlGuard::new(gcfg.clone());
     let raw = RawSqlAuthor::new(&cfg.project_schema, "app_acme");
 

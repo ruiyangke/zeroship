@@ -82,10 +82,7 @@ fn cfg_with_role(tok: &str) -> ExecutorConfig {
 }
 
 fn guard_cfg(cfg: &ExecutorConfig) -> GuardConfig {
-    GuardConfig {
-        project_schema: cfg.project_schema.clone(),
-        extension_allowlist: Vec::new(),
-    }
+    GuardConfig::confined(cfg.project_schema.clone())
 }
 
 fn author_for(cfg: &ExecutorConfig) -> DeclarativeAuthor {

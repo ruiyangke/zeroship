@@ -67,10 +67,7 @@ fn cfg_for(tok: &str) -> ExecutorConfig {
 }
 
 fn guard_cfg(cfg: &ExecutorConfig) -> GuardConfig {
-    GuardConfig {
-        project_schema: cfg.project_schema.clone(),
-        extension_allowlist: Vec::new(),
-    }
+    GuardConfig::confined(cfg.project_schema.clone())
 }
 
 async fn ensure_project_schema(conn: &Client, cfg: &ExecutorConfig) {
