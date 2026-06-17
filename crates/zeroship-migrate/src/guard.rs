@@ -609,6 +609,15 @@ impl SqlGuard {
             | NodeEnum::CreateRangeStmt(_)
             | NodeEnum::AlterEnumStmt(_)
             | NodeEnum::AlterTypeStmt(_)
+            // CREATE DOMAIN / ALTER DOMAIN — a domain is a constrained base
+            // type (`CREATE DOMAIN d AS text CHECK (…)`); altering one is
+            // `ADD`/`DROP CONSTRAINT`/`SET`. No privilege, RCE, or host reach —
+            // ordinary schema DDL, safe under BOTH profiles, same class as
+            // CREATE ENUM / CREATE TYPE above. The domain's CREATION TARGET
+            // schema (`domainname`) and its base-type schema (`type_name`) are
+            // still confined by `check_cross_schema` for the Confined profile.
+            | NodeEnum::CreateDomainStmt(_)
+            | NodeEnum::AlterDomainStmt(_)
             | NodeEnum::CreateSeqStmt(_)
             | NodeEnum::AlterSeqStmt(_)
             | NodeEnum::SelectStmt(_)
@@ -1911,6 +1920,15 @@ fn walk_schema_names(v: &Value, visit: &mut dyn FnMut(&str, SchemaSlot) -> bool)
             // whose schema lives under `names`, handled above — a non-array
             // `type_name` yields no parts here, so this is target-only.)
             if let Some(schema) = qualified_list_schema(map.get("type_name")) {
+                if visit(&schema, SchemaSlot::CreationTarget) {
+                    return true;
+                }
+            }
+            // `CreateDomainStmt.domainname` — the schema-qualified creation
+            // target of `CREATE DOMAIN <schema>.<name> AS …`. Same confinement
+            // class as the type-creation `type_name` target above: a Confined
+            // migrator may not plant a domain into a foreign/system schema.
+            if let Some(schema) = qualified_list_schema(map.get("domainname")) {
                 if visit(&schema, SchemaSlot::CreationTarget) {
                     return true;
                 }

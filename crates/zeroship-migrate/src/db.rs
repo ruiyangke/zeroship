@@ -157,6 +157,34 @@ impl ExecutorConfig {
         self
     }
 
+    /// The `search_path` clause value pinned for every apply (a comma-joined,
+    /// double-quoted schema list).
+    ///
+    /// - **Confined** ⇒ the project schema **only** (byte-identical to the old
+    ///   hardcoded single-schema pin; the meta schema stays OFF the path so an
+    ///   unqualified `up` name can never resolve to the journal — C1).
+    /// - **Platform** ⇒ the full configured schema allowlist (e.g.
+    ///   `"zeroship", "oauth_hydra", "public"`). The platform changelog relies on
+    ///   this: V0001's `CREATE EXTENSION citext` is deliberately unqualified and
+    ///   must resolve a creation target (`public`) — and at that point the
+    ///   `zeroship` schema does not yet exist, so a `zeroship`-only path would
+    ///   error `3F000 no schema has been selected to create in`. Cross-schema
+    ///   resolution between `zeroship`/`oauth_hydra`/`public` also needs them all
+    ///   on the path. This mirrors the Liquibase deployment, where the `postgres`
+    ///   principal runs with `search_path = zeroship, public`.
+    pub(crate) fn search_path_clause(&self) -> String {
+        let quote = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+        match self.trust {
+            crate::guard::TrustProfile::Platform if !self.platform_schemas.is_empty() => self
+                .platform_schemas
+                .iter()
+                .map(|s| quote(s))
+                .collect::<Vec<_>>()
+                .join(", "),
+            _ => quote(&self.project_schema),
+        }
+    }
+
     /// `statement_timeout` in whole milliseconds (the unit `SET` takes).
     #[must_use]
     pub fn statement_timeout_ms(&self) -> u64 {
