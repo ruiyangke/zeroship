@@ -347,9 +347,12 @@ pub fn desired_snapshot(
     project_schema: &str,
     descriptors: &[CollectionDescriptor],
 ) -> Result<DesiredSchema, DeclarativeError> {
-    // table name → (snapshot, owning app). The owner is the smallest declaring
-    // app among identical declarers, so it is order-independent.
-    let mut tables: BTreeMap<String, (TableSnapshot, String)> = BTreeMap::new();
+    // First pass: accumulate EVERY declaration per table as (owner_app, shape),
+    // independent of order. Conflict detection + ownership are then derived from
+    // the FULL declarer set in a deterministic second pass — so with 3+ declarers
+    // the reported conflict does not depend on which identical twin happened to
+    // hold the slot first (1b).
+    let mut declarations: BTreeMap<String, Vec<(String, TableSnapshot)>> = BTreeMap::new();
 
     for d in descriptors {
         let mut columns = system_field_columns();
@@ -441,63 +444,51 @@ pub fn desired_snapshot(
         constraints.sort_by(|a, b| a.name.cmp(&b.name));
 
         let this = TableSnapshot { columns, indexes, constraints };
-        match tables.get_mut(&d.name) {
-            None => {
-                tables.insert(d.name.clone(), (this, d.owner_app.clone()));
-            }
-            Some((existing, owner)) => {
-                // P4 union (design §4): a second declaration of the same table is
-                // OK iff it is IDENTICAL in shape (idempotent re-declaration). A
-                // different shape is a CONFLICT — one owner per table; never a
-                // silent last-writer-wins merge (#6's blanket DuplicateTable is
-                // refined here to identical-OK / conflicting-error).
-                if *existing != this {
-                    // Order the two app names so the error is deterministic
-                    // regardless of which descriptor was seen first.
-                    let (app_a, app_b) = order_pair(owner, &d.owner_app);
-                    return Err(DeclarativeError::ConflictingDeclaration {
-                        table: d.name.clone(),
-                        app_a,
-                        app_b,
-                    });
-                }
-                // Identical shape: idempotent. Keep the lexicographically-smallest
-                // declaring app as the owner so the union is order-independent
-                // (the critic checks: same union + same ownership regardless of
-                // descriptor order). This tiebreak is NOT an ownership-spoof vector:
-                // `owner_app` is the server-stamped id of the app whose deploy
-                // produced the descriptor — the caller (control plane) concatenates
-                // each app's descriptors stamped with that app's OWN id, so an app
-                // cannot inject a descriptor bearing another app's id. And because
-                // the two declarations are byte-identical, the migrations either
-                // owner would author are identical too, so the tiebreak is
-                // behaviourally inert beyond which app the enforcement check names.
-                if d.owner_app < *owner {
-                    owner.clone_from(&d.owner_app);
-                }
-            }
+        declarations
+            .entry(d.name.clone())
+            .or_default()
+            .push((d.owner_app.clone(), this));
+    }
+
+    // Second pass: for each table, detect conflicts over the FULL declarer set and
+    // pick the owner — both order-independent (1b).
+    let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
+    let mut ownership: BTreeMap<String, String> = BTreeMap::new();
+    for (table, decls) in declarations {
+        // A conflict iff ANY two declarers disagree in shape. Detect it over the
+        // whole set (not the order-dependent first mismatch), and if it conflicts
+        // report EVERY declaring app, sorted+deduped — the same result for any
+        // permutation of the same descriptors.
+        let first_shape = &decls[0].1;
+        if decls.iter().any(|(_, shape)| shape != first_shape) {
+            let mut apps: Vec<String> = decls.into_iter().map(|(app, _)| app).collect();
+            apps.sort();
+            apps.dedup();
+            return Err(DeclarativeError::ConflictingDeclaration { table, apps });
         }
+        // All declarations are byte-identical (idempotent). The owner is the
+        // lexicographically-smallest declaring app so the union is order-independent
+        // (same owner for any permutation). This tiebreak is NOT an ownership-spoof
+        // vector: `owner_app` is the server-stamped id of the app whose deploy
+        // produced the descriptor — the caller (control plane) concatenates each
+        // app's descriptors stamped with that app's OWN id, so an app cannot inject
+        // a descriptor bearing another app's id. And because the declarations are
+        // byte-identical, the migrations either owner would author are identical
+        // too, so the tiebreak is behaviourally inert beyond which app the
+        // enforcement check names.
+        let owner = decls
+            .iter()
+            .map(|(app, _)| app)
+            .min()
+            .expect("each table has ≥1 declaration")
+            .clone();
+        let (_, shape) = decls.into_iter().next().expect("≥1 declaration");
+        ownership.insert(table.clone(), owner);
+        tables.insert(table, shape);
     }
 
-    let ownership: BTreeMap<String, String> = tables
-        .iter()
-        .map(|(t, (_, owner))| (t.clone(), owner.clone()))
-        .collect();
-    let snapshot = SchemaSnapshot {
-        tables: tables.into_iter().map(|(t, (s, _))| (t, s)).collect(),
-    };
+    let snapshot = SchemaSnapshot { tables };
     Ok(DesiredSchema { snapshot, ownership })
-}
-
-/// Order two app identifiers deterministically (smallest first) so a
-/// [`DeclarativeError::ConflictingDeclaration`] reports the same `(app_a, app_b)`
-/// regardless of descriptor order.
-fn order_pair(a: &str, b: &str) -> (String, String) {
-    if a <= b {
-        (a.to_string(), b.to_string())
-    } else {
-        (b.to_string(), a.to_string())
-    }
 }
 
 /// True if `index_name` is the implicit index a PRIMARY KEY materialises
@@ -559,24 +550,29 @@ pub enum DeclarativeError {
         /// The unrecognised / out-of-scope DSL type token.
         ty: String,
     },
-    /// Two apps declared the same table with DIFFERENT shapes (P4, design §4).
-    /// One table has exactly one owner; an identical re-declaration is idempotent
-    /// (merged) but a conflicting one is a hard deploy error — never a silent
-    /// last-writer-wins merge (this refines #6's blanket `DuplicateTable`). The
-    /// `(app_a, app_b)` pair is reported smallest-first so the error is
-    /// deterministic regardless of descriptor order.
+    /// Two or more apps declared the same table with DIFFERENT shapes (P4, design
+    /// §4). One table has exactly one owner; an identical re-declaration is
+    /// idempotent (merged) but a conflicting one is a hard deploy error — never a
+    /// silent last-writer-wins merge (this refines #6's blanket `DuplicateTable`).
+    ///
+    /// `apps` carries EVERY app that declared this table (sorted, deduplicated),
+    /// not just the first-detected pair. This makes the report **deterministic
+    /// regardless of descriptor order** even with 3+ declarers: the merge no
+    /// longer reports `order_pair(slot_owner, latecomer)` on the first mismatch
+    /// (whose `slot_owner` flapped with input order when two identical twins
+    /// raced for the slot — 1b). The full sorted declarer set is the same for
+    /// every permutation of the same descriptors.
     #[error(
-        "conflicting declaration of table '{table}': apps '{app_a}' and '{app_b}' \
-         declare it with different shapes (a table has exactly one owner; identical \
-         re-declaration is idempotent, a conflicting one is a deploy error)"
+        "conflicting declaration of table '{table}': apps {apps:?} declare it with \
+         differing shapes (a table has exactly one owner; identical re-declaration \
+         is idempotent, a conflicting one is a deploy error)"
     )]
     ConflictingDeclaration {
         /// The table declared with conflicting shapes.
         table: String,
-        /// One declaring app (the lexicographically-smaller of the pair).
-        app_a: String,
-        /// The other declaring app (the lexicographically-larger of the pair).
-        app_b: String,
+        /// EVERY app that declared this table, sorted ascending and deduplicated.
+        /// Order-independent: the same set for any permutation of the descriptors.
+        apps: Vec<String>,
     },
     /// The deploying app tried to make a structural change (CREATE/ALTER/DROP) to
     /// a table it does NOT own (P4 ownership enforcement, design §4). The
