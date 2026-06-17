@@ -654,3 +654,275 @@ async fn l6_repeatable_versioned_interleaved_across_deploys_and_tamper_anchor() 
 
     teardown(&conn, &cfg).await;
 }
+
+// ===========================================================================
+// L-7 — preconditions across deploys (Skip→pending→apply) + Halt
+//   (probes H6 expand+precondition).
+//
+// A migration with OnUnmet::Skip on an unmet precondition on deploy 1 → skipped,
+// stays pending, dependents transitively skipped → seed the condition → deploy 2
+// applies it. A Halt precondition unmet → fail-closed PreconditionFailed, nothing
+// applied. H6 probe: an EXPAND migration (the online rename's E-phase) carrying an
+// unmet Skip precondition → drive run_expand and observe what the contract gate
+// then sees.
+// ===========================================================================
+
+/// A migration with the given preconditions + a correct checksum.
+fn mig_pre(
+    version: MigrationId,
+    name: &str,
+    up: &str,
+    schema: &str,
+    pre: Vec<PreconditionCheck>,
+) -> Migration {
+    let mut m = mig(version, name, up, schema);
+    m.preconditions = pre;
+    m.recompute_checksum();
+    m
+}
+
+#[compio::test]
+async fn l7_preconditions_across_deploys_skip_pending_apply_and_halt() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let engine = MigrationEngine::new();
+    let schema = cfg.project_schema.clone();
+
+    // --- SKIP across deploys + transitive dependent skip. ---
+    // parent is gated on `dep` (Skip), which does not exist yet. child depends_on
+    // parent. Deploy 1: parent skipped, child (dep unmet) does NOT run. Deploy 2:
+    // seed `dep` → both apply in order.
+    let parent_v = MigrationId::generate();
+    let parent = mig_pre(
+        parent_v.clone(),
+        "parent",
+        "CREATE TABLE \"{s}\".parent (id int primary key)",
+        &schema,
+        vec![PreconditionCheck::skip(Precondition::TableExists { table: "dep".into() })],
+    );
+    let child_v = MigrationId::generate();
+    let mut child = mig(
+        child_v.clone(),
+        "child",
+        "CREATE TABLE \"{s}\".child (id int, parent_id int references \"{s}\".parent(id))",
+        &schema,
+    );
+    child.depends_on = vec![parent_v.clone()];
+    child.recompute_checksum();
+
+    let set = vec![parent.clone(), child.clone()];
+
+    // Deploy 1: parent skipped; child (dependent of a not-yet-applied parent) does
+    // not run. The apply SUCCEEDS (a skip is not an error), nothing journaled.
+    let plan = engine.plan(&set, &guard_cfg(&cfg));
+    let out1 = engine
+        .apply(&plan, Approval::None, &conn, &cfg, "app_acme")
+        .await
+        .expect("deploy 1 succeeds (skip is not an error)");
+    assert!(out1.applied.is_empty(), "neither parent (skipped) nor child runs");
+    assert!(out1.skipped.contains(&parent_v.as_str().to_string()), "parent is skipped");
+    assert!(!table_exists(&conn, &schema, "parent").await);
+    assert!(!table_exists(&conn, &schema, "child").await);
+    // Both still pending.
+    let st = status(&conn, &cfg, &set).await.expect("status after deploy 1");
+    let pending: std::collections::HashSet<&str> =
+        st.pending.iter().map(MigrationId::as_str).collect();
+    assert!(
+        pending.contains(parent_v.as_str()) && pending.contains(child_v.as_str()),
+        "both parent and child stay pending after the skip; pending={pending:?}"
+    );
+
+    // Deploy 2: seed `dep` → the precondition is met → parent then child apply.
+    conn.batch_execute(&format!("CREATE TABLE \"{schema}\".dep (id int)"))
+        .await
+        .expect("seed dep");
+    let plan = engine.plan(&set, &guard_cfg(&cfg));
+    let out2 = engine
+        .apply(&plan, Approval::None, &conn, &cfg, "app_acme")
+        .await
+        .expect("deploy 2 applies the now-unblocked set");
+    assert_eq!(
+        out2.applied,
+        vec![parent_v.as_str().to_string(), child_v.as_str().to_string()],
+        "parent then child apply once the precondition is met"
+    );
+    assert!(table_exists(&conn, &schema, "parent").await);
+    assert!(table_exists(&conn, &schema, "child").await);
+
+    // --- HALT (default) unmet → fail-closed PreconditionFailed, nothing applied. ---
+    let halt_v = MigrationId::generate();
+    let halt_mig = mig_pre(
+        halt_v.clone(),
+        "halt_gated",
+        "CREATE TABLE \"{s}\".halt_t (id int)",
+        &schema,
+        vec![PreconditionCheck::halt(Precondition::TableExists {
+            table: "absent_dep".into(),
+        })],
+    );
+    let plan = engine.plan(std::slice::from_ref(&halt_mig), &guard_cfg(&cfg));
+    let err = engine
+        .apply(&plan, Approval::None, &conn, &cfg, "app_acme")
+        .await
+        .expect_err("an unmet Halt precondition must fail closed");
+    assert!(
+        matches!(err, EngineError::Apply(ApplyError::PreconditionFailed { ref version, .. }) if version == halt_v.as_str()),
+        "expected PreconditionFailed on the halt migration, got {err:?}"
+    );
+    assert!(!table_exists(&conn, &schema, "halt_t").await, "the halted migration applies nothing");
+    assert!(
+        !applied_versions(&conn, &cfg).await.contains(&halt_v.as_str().to_string()),
+        "the halted migration journals nothing"
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
+/// H6 probe — an EXPAND migration carrying an unmet Skip precondition.
+///
+/// The online rename's E2 (dual-write trigger) is the version the contract gate
+/// keys on (`contract.depends_on = [trigger_version]`). We attach an UNMET Skip
+/// precondition to E2 and drive `run_expand`. The faithful question: does the
+/// expand get partially applied (E1 + the backfill marker E3 land while E2 is
+/// skipped), and does a later contract deploy refuse with `ExpandNotApplied`?
+///
+/// VERDICT (H6): the system fails CLOSED — SOUND. With the Skip precondition on
+/// E2: E1 (additive, no precondition) applies; E2 is precondition-skipped (not
+/// net-applied); E3 (the backfill marker, `depends_on` E2) then fails its
+/// dependency check, so `run_expand` returns `Err(Apply(MissingDependency{E3→E2}))`
+/// and the expand never "completes". A later contract deploy keyed on E2 is then
+/// refused with `ExpandNotApplied`. No data loss: the old column survives, the
+/// contract's DROP COLUMN never runs.
+///
+/// MISLEADING-MESSAGE NOTE (quality, not a correctness bug): neither surfaced
+/// error mentions the precondition that is the REAL root cause. `run_expand`
+/// reports `MissingDependency` (E3 needs E2) and the contract gate reports
+/// `ExpandNotApplied` (E2 not net-applied) — both technically true, but an
+/// operator reading them would not learn that E2 was SKIPPED by an unmet
+/// precondition. A clearer surfacing (e.g. "expand E2 was skipped by an unmet
+/// precondition") would aid diagnosis. The behavior is correct; the diagnostics
+/// could be friendlier.
+#[compio::test]
+async fn l7_h6_expand_with_unmet_skip_precondition_blocks_later_contract() {
+    use zeroship_migrate::{ExpandContractAuthor, OnlineIntent};
+
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let engine = MigrationEngine::new();
+    let schema = cfg.project_schema.clone();
+
+    // Seed a real `users(email text)` table the rename operates on, migrator-owned.
+    let seed = mig(
+        MigrationId::generate(),
+        "create_users",
+        "CREATE TABLE \"{s}\".users (id bigint primary key, email text)",
+        &schema,
+    );
+    let plan_seed = engine.plan(std::slice::from_ref(&seed), &guard_cfg(&cfg));
+    engine
+        .apply(&plan_seed, Approval::None, &conn, &cfg, "app_acme")
+        .await
+        .expect("seed users");
+    give_table_to_migrator(&conn, &cfg, "users").await;
+
+    // Author the online rename email → email_address.
+    let mut plan = ExpandContractAuthor::new(&schema, "app_acme")
+        .author(&OnlineIntent::RenameColumn {
+            table: "users".into(),
+            from: "email".into(),
+            to: "email_address".into(),
+            ty: "text".into(),
+        })
+        .expect("author rename");
+
+    // Attach an UNMET Skip precondition to E2 (the dual-write trigger — the version
+    // the contract gate keys on): require a table `go_signal` that does NOT exist.
+    // Re-checksum E2 so the migration is internally consistent (the precondition
+    // folds into the checksum).
+    let trigger_version = plan.trigger_version.clone();
+    {
+        let e2 = &mut plan.expand[1];
+        assert_eq!(e2.version, trigger_version, "expand[1] is the trigger (E2)");
+        e2.preconditions = vec![PreconditionCheck {
+            check: Precondition::TableExists { table: "go_signal".into() },
+            on_unmet: OnUnmet::Skip,
+        }];
+        e2.recompute_checksum();
+    }
+
+    let e1_version = plan.expand[0].version.as_str().to_string();
+    let e3_version = plan.expand[2].version.as_str().to_string();
+
+    // Drive the EXPAND. run_expand applies E1+E2 (E2 is precondition-skipped),
+    // runs the backfill, then journals E3. We capture whether it errors or returns.
+    let expand_res = engine
+        .run_expand(&plan, Approval::Approved, &conn, &cfg, "app_acme")
+        .await;
+
+    // Whatever run_expand returns, the SOUND invariant is: E2 (the trigger) is NOT
+    // net-applied (it was precondition-skipped), so a later contract deploy keyed
+    // on E2 MUST be refused. Drive the contract as a SEPARATE deploy and assert the
+    // gate refuses it with ExpandNotApplied naming E2.
+    let applied_now = applied_versions(&conn, &cfg).await;
+    let e2_applied = applied_now.contains(&trigger_version.as_str().to_string());
+    assert!(
+        !e2_applied,
+        "E2 (the trigger) carried an UNMET Skip precondition, so it must NOT be \
+         net-applied; run_expand returned {expand_res:?}"
+    );
+    // Document the actual half-state run_expand leaves (the H6 verdict rests on
+    // this): E1 (ADD COLUMN, no precondition) applies; E2 is skipped; E3 (the
+    // backfill marker) — note whether the orchestrator journaled it despite E2
+    // being skipped. The gate keys on E2, so even a journaled E3 does not let the
+    // contract through; the column-level coexistence is preserved (email survives).
+    let e1_applied = applied_now.contains(&e1_version);
+    let e3_applied = applied_now.contains(&e3_version);
+    eprintln!(
+        "H6 half-state after run_expand({expand_res:?}): E1_applied={e1_applied} \
+         E2_applied={e2_applied} E3_applied={e3_applied}"
+    );
+    // E1 has no precondition, so it applies; the new column exists (additive, safe).
+    assert!(e1_applied, "E1 (ADD COLUMN, no precondition) applies");
+    assert!(!e3_applied, "E3 (backfill marker) does NOT complete — its dep E2 was skipped");
+    assert!(
+        column_exists(&conn, &schema, "users", "email_address").await,
+        "E1's additive column exists (harmless: nullable, no contract yet)"
+    );
+    // run_expand fails closed: the skipped E2 leaves E3's dependency unsatisfied,
+    // so the orchestrator errors (MissingDependency E3→E2) rather than journaling a
+    // bogus "expand complete". The error names the dependency, NOT the precondition
+    // that is the real cause — the misleading-message note above.
+    assert!(
+        matches!(
+            expand_res,
+            Err(zeroship_migrate::OnlineError::Apply(ApplyError::MissingDependency { ref version, ref missing }))
+                if version == &e3_version && missing == trigger_version.as_str()
+        ),
+        "run_expand must fail closed with E3's dependency on the skipped E2 unmet, got {expand_res:?}"
+    );
+
+    let contract_err = zeroship_migrate::apply(&conn, &cfg, &plan.contract, Approval::Approved, "app_acme")
+        .await
+        .expect_err("the contract must be refused while its expand (E2) is not net-applied");
+    assert!(
+        matches!(
+            contract_err,
+            ApplyError::ExpandNotApplied { ref expand, .. } if expand == trigger_version.as_str()
+        ),
+        "expected ExpandNotApplied naming E2 (the precondition-skipped trigger), got {contract_err:?}"
+    );
+
+    // The old column survives (the contract's DROP COLUMN never ran).
+    assert!(
+        column_exists(&conn, &schema, "users", "email").await,
+        "the contract must not have dropped the old column"
+    );
+
+    teardown(&conn, &cfg).await;
+}
