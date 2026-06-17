@@ -71,6 +71,7 @@ pub mod expand_contract;
 pub mod executor;
 pub mod guard;
 pub mod journal;
+pub mod loader;
 pub mod manifest;
 pub mod migration;
 pub mod precondition;
@@ -132,6 +133,9 @@ pub use journal::{
     latest_completed_checksums, net_rolled_back, record_baseline, record_completed,
     record_rolled_back, record_started, superseded_versions, AppliedEntry, HistoryEvent,
     HistoryKind, JournalError, JournaledKind, Phase, RolledBackEntry,
+};
+pub use loader::{
+    load_dir, migration_id_for_version, LoaderError, PLATFORM_OWNER_APP,
 };
 pub use squash::{squash, SquashError, SquashOutcome};
 pub use status::{history, status, MigrationStatus, StatusError};
