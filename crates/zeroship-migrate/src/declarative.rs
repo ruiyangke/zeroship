@@ -590,8 +590,28 @@ impl DeclarativeAuthor {
                 if is_pk_index(table, &idx.name) {
                     continue; // implicit; created by the PRIMARY KEY clause
                 }
-                if !live_idx.contains_key(idx.name.as_str()) {
-                    out.push(self.render_create_index(table, idx, Vec::new()));
+                match live_idx.get(idx.name.as_str()) {
+                    None => out.push(self.render_create_index(table, idx, Vec::new())),
+                    Some(li) => {
+                        // Same-name index on both sides: a flipped `unique` flag or
+                        // a changed column set is an in-place redefinition
+                        // (DROP+CREATE), deferred to a later phase. Surface it
+                        // EXPLICITLY (5-idx) — never silently skip (the old loop
+                        // only checked name presence, so a uniqueness flip emitted
+                        // 0 migrations and left the wrong index in place).
+                        if li.unique != idx.unique {
+                            return Err(DeclarativeError::UnsupportedInV1(format!(
+                                "index {}.{} uniqueness change {} → {}",
+                                table, idx.name, li.unique, idx.unique
+                            )));
+                        }
+                        if li.columns != idx.columns {
+                            return Err(DeclarativeError::UnsupportedInV1(format!(
+                                "index {}.{} column change {:?} → {:?}",
+                                table, idx.name, li.columns, idx.columns
+                            )));
+                        }
+                    }
                 }
             }
             for idx in &lt.indexes {

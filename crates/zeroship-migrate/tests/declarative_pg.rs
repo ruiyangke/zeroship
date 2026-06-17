@@ -573,6 +573,45 @@ async fn long_table_and_field_unique_index_name_is_capped_and_re_diffs_clean() {
 }
 
 #[compio::test]
+async fn index_uniqueness_flip_on_same_name_is_unsupported_in_v1_not_silent() {
+    // 5-idx: a same-name index whose `unique` flag flipped is an in-place
+    // redefinition (DROP+CREATE) — explicit UnsupportedInV1, never silent (the old
+    // loop only checked name presence, so a uniqueness flip emitted 0 migrations
+    // and left the wrong index in place).
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    // Create a table with a NON-unique named index over `level`.
+    let v1 = CollectionDescriptor {
+        name: "logs".into(),
+        fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![IndexDescriptor { name: "logs_level_idx".into(), columns: vec!["level".into()], unique: false }],
+    };
+    let d1 = desired_snapshot(&cfg.project_schema, &[v1]);
+    apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("create logs");
+
+    // Desire the SAME-name index but UNIQUE now.
+    let v2 = CollectionDescriptor {
+        name: "logs".into(),
+        fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![IndexDescriptor { name: "logs_level_idx".into(), columns: vec!["level".into()], unique: true }],
+    };
+    let d2 = desired_snapshot(&cfg.project_schema, &[v2]);
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+    let err = author.diff(&d2, &live).unwrap_err();
+    assert!(matches!(err, DeclarativeError::UnsupportedInV1(_)), "got {err:?}");
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
 async fn additive_diff_is_idempotent_second_plan_is_empty() {
     let tok = token();
     let cfg = cfg_with_role(&tok);
