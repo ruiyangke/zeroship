@@ -90,6 +90,12 @@ fn author_for(cfg: &ExecutorConfig) -> DeclarativeAuthor {
     DeclarativeAuthor::new(cfg.project_schema.clone(), "app_test")
 }
 
+/// A declarative author whose **deploying** app is `app` (the P4 ownership
+/// subject). Used by the multi-app ownership-enforcement tests.
+fn author_app(cfg: &ExecutorConfig, app: &str) -> DeclarativeAuthor {
+    DeclarativeAuthor::new(cfg.project_schema.clone(), app)
+}
+
 /// Stand up the project schema + provision the migrator role.
 async fn setup(conn: &Client, cfg: &ExecutorConfig) {
     ensure_project_schema(conn, cfg).await;
@@ -1245,6 +1251,140 @@ async fn single_app_declaration_owns_its_table() {
     let d = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
     assert_eq!(d.snapshot.tables.len(), 1);
     assert_eq!(d.owner_of("widgets"), Some("app_solo"));
+}
+
+// ---------------------------------------------------------------------------
+// P4 Feature 2 — ownership enforcement on a deploy.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn non_owner_deploy_changing_only_own_tables_is_fine() {
+    // P4 ownership: app_b's deploy that adds/changes ONLY a b-owned table is
+    // allowed, even though the union also carries an a-owned table. The diff is
+    // over the full union, so a_table is in `desired`; because it equals live
+    // (a_table already exists, unchanged) it produces NO op and the owner check
+    // never fires for it.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let engine = MigrationEngine::new();
+
+    // a_app creates its table (deploy 1, as a_app).
+    let a_tbl = || CollectionDescriptor {
+        name: "a_table".into(),
+        owner_app: "app_a".into(),
+        fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let union_v1 = desired_snapshot(&cfg.project_schema, &[a_tbl()]).expect("union v1");
+    apply_plan(&engine, &union_v1, &SchemaSnapshot::default(), &author_app(&cfg, "app_a"), &cfg, &conn, Approval::None)
+        .await
+        .expect("a_app creates a_table");
+
+    // Now b_app deploys: the union is { a_table (a_app), b_table (b_app) }. Diffed
+    // against live (which has a_table), only b_table is new.
+    let b_tbl = CollectionDescriptor {
+        name: "b_table".into(),
+        owner_app: "app_b".into(),
+        fields: vec![FieldDescriptor { name: "y".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let union_v2 = desired_snapshot(&cfg.project_schema, &[a_tbl(), b_tbl]).expect("union v2");
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+
+    // app_b is the deploying app. The diff must succeed (only b_table changes) and
+    // touch a_table with NO op.
+    let plan = engine
+        .plan_declarative(&union_v2, &live, &author_app(&cfg, "app_b"), &[], &guard_cfg(&cfg))
+        .expect("app_b deploy adding only its own table is allowed");
+    assert!(
+        plan.plain.items.iter().all(|m| m.migration.up.contains("b_table")),
+        "every op must target b_table, got {:?}",
+        plan.plain.items.iter().map(|m| &m.migration.name).collect::<Vec<_>>()
+    );
+    engine.apply(&plan.plain, Approval::None, &conn, &cfg, "app_b").await.expect("apply b_table");
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn non_owner_deploy_altering_a_foreign_owned_table_is_refused() {
+    // P4 ownership: a deploy whose union/desired would STRUCTURALLY change a table
+    // owned by another app is refused with NotTableOwner. Here the union has an
+    // a-owned `authors` table that is not yet live; app_b's deploy would CREATE it
+    // → refused (a non-owner may use a table but not migrate it).
+    let cfg = cfg_for(&token());
+
+    let authors = CollectionDescriptor {
+        name: "authors".into(),
+        owner_app: "app_a".into(),
+        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let union = desired_snapshot(&cfg.project_schema, &[authors]).expect("union");
+    // Live is empty → the union would CREATE authors, a structural change.
+    let live = SchemaSnapshot::default();
+
+    // Deploying as app_b (a non-owner of authors) → refused.
+    let err = author_app(&cfg, "app_b")
+        .diff(&union, &live, &[])
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DeclarativeError::NotTableOwner { ref table, ref owner, ref deploying_app }
+                if table == "authors" && owner == "app_a" && deploying_app == "app_b"
+        ),
+        "got {err:?}"
+    );
+
+    // Deploying as app_a (the owner) → fine.
+    let migs = author_app(&cfg, "app_a")
+        .diff(&union, &live, &[])
+        .expect("the owner may create its own table")
+        .migrations;
+    assert!(migs.iter().any(|m| m.up.contains("authors")), "owner's diff creates authors");
+}
+
+#[compio::test]
+async fn non_owner_using_a_foreign_table_unchanged_is_a_noop_not_refused() {
+    // P4 ownership: a non-owner that merely USES an a-owned table (the table in the
+    // union EQUALS live, no structural delta) produces NO op and is NOT refused —
+    // the owner check only fires on an actual structural CHANGE. This is the
+    // "identical re-declaration by a non-owner is a no-op" guarantee.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let engine = MigrationEngine::new();
+
+    // a_app creates `authors`.
+    let authors = || CollectionDescriptor {
+        name: "authors".into(),
+        owner_app: "app_a".into(),
+        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let union_v1 = desired_snapshot(&cfg.project_schema, &[authors()]).expect("union v1");
+    apply_plan(&engine, &union_v1, &SchemaSnapshot::default(), &author_app(&cfg, "app_a"), &cfg, &conn, Approval::None)
+        .await
+        .expect("a_app creates authors");
+
+    // b_app re-declares the SAME authors shape (it uses the table) — identical, so
+    // the union owner stays app_a (smallest). Deploy as app_b: authors == live ⇒
+    // no op ⇒ no NotTableOwner.
+    let union_v2 = desired_snapshot(&cfg.project_schema, &[authors()]).expect("union v2");
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+    let plan = author_app(&cfg, "app_b")
+        .diff(&union_v2, &live, &[])
+        .expect("a non-owner merely using an unchanged foreign table is a no-op");
+    assert!(plan.is_empty(), "no structural change ⇒ empty plan, got {:?}",
+        plan.migrations.iter().map(|m| &m.name).collect::<Vec<_>>());
+
+    teardown(&conn, &cfg).await;
 }
 
 
