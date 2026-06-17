@@ -1074,3 +1074,150 @@ async fn l8_destructive_analyzer_advisory_dry_run_gate_apply() {
 
     teardown(&conn, &cfg).await;
 }
+
+// ===========================================================================
+// L-9 — manifest tamper rejected before apply (#36 set-level).
+//
+// compute_manifest over a trusted set → apply_verified rejects EACH tamper:
+// (a) a depends_on edit that reorders execution, (b) a content edit, (c) an
+// inserted migration, (d) a removed migration, (e) a supersedes/repeatable/
+// requires_approval flag flip → EACH → EngineError::Manifest, the lock is never
+// taken, the journal is untouched. A pure cosmetic slice-reorder of an additive
+// set PASSES (M2 invariant) and applies. Asserts the manifest covers the full
+// apply-relevant shape (Plan-F C1) + rejects before any side effect.
+// ===========================================================================
+
+/// True if the meta (journal) schema exists at all — proof apply_verified did NOT
+/// take the lock / bootstrap the journal on a manifest-rejected call.
+async fn meta_schema_exists(conn: &Client, cfg: &ExecutorConfig) -> bool {
+    let rows = conn
+        .query(
+            "SELECT 1 FROM information_schema.schemata WHERE schema_name = $1",
+            &[&cfg.meta_schema],
+        )
+        .await
+        .expect("meta_schema_exists");
+    !rows.is_empty()
+}
+
+#[compio::test]
+async fn l9_manifest_tamper_rejected_before_any_side_effect() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let engine = MigrationEngine::new();
+    let schema = cfg.project_schema.clone();
+
+    // A trusted additive set of two independent tables (a sorts before b).
+    let a = mig(
+        MigrationId::generate(),
+        "create_a",
+        "CREATE TABLE \"{s}\".a (id bigint primary key)",
+        &schema,
+    );
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let b = mig(
+        MigrationId::generate(),
+        "create_b",
+        "CREATE TABLE \"{s}\".b (id bigint primary key)",
+        &schema,
+    );
+    assert!(a.version.as_str() < b.version.as_str());
+    let trusted = vec![a.clone(), b.clone()];
+    let expected: ManifestHash = compute_manifest(&trusted);
+
+    // --- (a) depends_on edit that REORDERS execution: make a depend on b → the
+    //     canonical executed order flips to [b, a] AND a's checksum changes (C1). ---
+    let mut a_dep = a.clone();
+    a_dep.depends_on = vec![b.version.clone()];
+    a_dep.recompute_checksum();
+    let tamper_a = vec![a_dep, b.clone()];
+    let err = engine
+        .apply_verified(&tamper_a, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &conn, &cfg, "app_acme")
+        .await
+        .expect_err("(a) a depends_on reorder must be rejected");
+    assert!(matches!(err, EngineError::Manifest(_)), "(a) got {err:?}");
+    assert!(!meta_schema_exists(&conn, &cfg).await, "(a) lock/journal never taken");
+    assert!(!table_exists(&conn, &schema, "a").await && !table_exists(&conn, &schema, "b").await, "(a) nothing applied");
+
+    // --- (b) content edit (a's up changed, same version). ---
+    let b_edit = with_up(a.clone(), "CREATE TABLE \"{s}\".a (id bigint primary key, extra text)", &schema);
+    let tamper_b = vec![b_edit, b.clone()];
+    let err = engine
+        .apply_verified(&tamper_b, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &conn, &cfg, "app_acme")
+        .await
+        .expect_err("(b) a content edit must be rejected");
+    assert!(matches!(err, EngineError::Manifest(_)), "(b) got {err:?}");
+    assert!(!meta_schema_exists(&conn, &cfg).await, "(b) lock/journal never taken");
+
+    // --- (c) inserted migration. ---
+    let inserted = mig(MigrationId::generate(), "evil_insert", "CREATE TABLE \"{s}\".c (id int)", &schema);
+    let tamper_c = vec![a.clone(), b.clone(), inserted];
+    let err = engine
+        .apply_verified(&tamper_c, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &conn, &cfg, "app_acme")
+        .await
+        .expect_err("(c) an inserted migration must be rejected");
+    assert!(matches!(err, EngineError::Manifest(_)), "(c) got {err:?}");
+    assert!(!meta_schema_exists(&conn, &cfg).await, "(c) lock/journal never taken");
+
+    // --- (d) removed migration. ---
+    let tamper_d = vec![a.clone()];
+    let err = engine
+        .apply_verified(&tamper_d, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &conn, &cfg, "app_acme")
+        .await
+        .expect_err("(d) a removed migration must be rejected");
+    assert!(matches!(err, EngineError::Manifest(_)), "(d) got {err:?}");
+    assert!(!meta_schema_exists(&conn, &cfg).await, "(d) lock/journal never taken");
+
+    // --- (e) a flag flip (requires_approval) — the per-migration checksum folds
+    //     flags, so flipping requires_approval changes a's checksum ⇒ the manifest.
+    let mut a_flip = a.clone();
+    a_flip.flags.requires_approval = true;
+    a_flip.recompute_checksum();
+    let tamper_e = vec![a_flip, b.clone()];
+    let err = engine
+        .apply_verified(&tamper_e, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &conn, &cfg, "app_acme")
+        .await
+        .expect_err("(e) a flag flip must be rejected");
+    assert!(matches!(err, EngineError::Manifest(_)), "(e) got {err:?}");
+    assert!(!meta_schema_exists(&conn, &cfg).await, "(e) lock/journal never taken");
+
+    // --- (e') a supersedes flip (also folded by the per-migration checksum). ---
+    let mut a_sup = a.clone();
+    a_sup.supersedes = vec![MigrationId::generate()];
+    a_sup.recompute_checksum();
+    let tamper_e2 = vec![a_sup, b.clone()];
+    let err = engine
+        .apply_verified(&tamper_e2, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &conn, &cfg, "app_acme")
+        .await
+        .expect_err("(e') a supersedes flip must be rejected");
+    assert!(matches!(err, EngineError::Manifest(_)), "(e') got {err:?}");
+
+    // --- (e'') a repeatable flip (folded by the per-migration checksum). ---
+    let mut a_rep = a.clone();
+    a_rep.flags.repeatable = true;
+    a_rep.recompute_checksum();
+    let tamper_e3 = vec![a_rep, b.clone()];
+    let err = engine
+        .apply_verified(&tamper_e3, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &conn, &cfg, "app_acme")
+        .await
+        .expect_err("(e'') a repeatable flip must be rejected");
+    assert!(matches!(err, EngineError::Manifest(_)), "(e'') got {err:?}");
+    assert!(!meta_schema_exists(&conn, &cfg).await, "no tamper ever bootstrapped the journal");
+
+    // --- INVARIANT: a pure cosmetic slice-reorder of the trusted additive set
+    //     (no depends_on, same content) VERIFIES OK and APPLIES. The manifest is
+    //     over the canonical EXECUTED order, identical for both slice orders. ---
+    let reordered = vec![b.clone(), a.clone()];
+    let out = engine
+        .apply_verified(&reordered, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &conn, &cfg, "app_acme")
+        .await
+        .expect("a cosmetic slice-reorder of an additive set must verify OK and apply (M2)");
+    // Both tables applied (canonical executed order is [a, b] regardless of slice).
+    assert_eq!(out.applied, vec![a.version.as_str().to_string(), b.version.as_str().to_string()]);
+    assert!(table_exists(&conn, &schema, "a").await && table_exists(&conn, &schema, "b").await);
+
+    teardown(&conn, &cfg).await;
+}
