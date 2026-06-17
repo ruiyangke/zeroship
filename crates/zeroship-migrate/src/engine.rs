@@ -857,6 +857,25 @@ impl DeclarativeDeployPlan {
     /// call, so the manifest is only stable for one instance — see
     /// [`apply_declarative_verified`](MigrationEngine::apply_declarative_verified)'s
     /// determinism caveat).
+    ///
+    /// # Carrying the plan across the stamp → apply boundary
+    ///
+    /// Because the manifest is only valid for one generated [`DeclarativeDeployPlan`]
+    /// instance, the control plane must hold THAT instance (not re-generate) between
+    /// computing the stamp here and calling
+    /// [`apply_declarative_verified`](MigrationEngine::apply_declarative_verified).
+    /// If the stamp and apply happen in the SAME process / request the plan is held
+    /// in memory and no serialization is needed. If they are split across a
+    /// boundary, the plan must be carried as-is; note that
+    /// [`DeclarativeDeployPlan`] is deliberately NOT `serde`-serializable today
+    /// (its [`GuardReport`]/[`BackfillSpec`](crate::backfill::BackfillSpec) members
+    /// are not, and deriving it would
+    /// cascade invasively) — so a split-boundary control plane either keeps the
+    /// generated plan in a server-side store keyed by an opaque token, or
+    /// (post-launch, if a wire shape is needed) the derive is added deliberately
+    /// in one patch across the member types. The manifest hash itself
+    /// ([`ManifestHash`]) IS `serde`-serializable and is the only value that must
+    /// cross the trust boundary out-of-band.
     #[must_use]
     pub fn manifest(&self) -> ManifestHash {
         compute_manifest(&self.effective_set())
