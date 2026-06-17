@@ -43,6 +43,38 @@ use crate::guard::{GuardConfig, GuardError, SqlGuard};
 use crate::journal::{self, AppliedEntry, JournalError, Phase};
 use crate::migration::{Migration, MigrationId};
 
+/// Whether an apply sub-batch must acquire/release the project advisory lock
+/// itself, or whether an OUTER caller already holds it for the whole operation
+/// (H10).
+///
+/// A standalone [`apply`] (engine `apply` / `apply_verified` / the versioned
+/// path) uses [`LockMode::Acquire`]: it takes the project advisory lock at the
+/// start and releases it on every exit path, serializing the whole apply against
+/// concurrent deploys for the same project.
+///
+/// A **declarative** deploy is several sub-batches — the plain set plus one
+/// expand per rename — that must be serialized **as a whole** (design §2.3:
+/// "serialize all migration activity"). The outer
+/// [`apply_declarative`](crate::engine::MigrationEngine::apply_declarative)
+/// therefore acquires the lock ONCE up front and passes [`LockMode::AlreadyHeld`]
+/// into every inner sub-batch so they SKIP the per-batch acquire/release — the
+/// lock is acquired exactly once and released exactly once for the entire
+/// declarative deploy, never freed between sub-batches (where a second deploy
+/// could otherwise interleave).
+///
+/// `AlreadyHeld` gates ONLY the advisory-lock acquire/release. The per-sub-batch
+/// session hygiene (GUC snapshot/restore, unconditional `RESET ROLE`) still runs
+/// every sub-batch regardless of lock mode — those are session-leak guards (H2 /
+/// L1), independent of who owns the lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockMode {
+    /// This call owns the lock: acquire at the start, release on every exit.
+    Acquire,
+    /// An outer caller already holds the project advisory lock for the whole
+    /// operation — skip the per-batch acquire and release.
+    AlreadyHeld,
+}
+
 /// What [`apply`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplyOutcome {
@@ -530,6 +562,33 @@ pub async fn apply(
     approval: Approval,
     applied_by: &str,
 ) -> Result<ApplyOutcome, ApplyError> {
+    // Standalone callers own the lock: acquire it here, release it on exit.
+    apply_with_lock(conn, cfg, migrations, approval, applied_by, LockMode::Acquire).await
+}
+
+/// [`apply`] with an explicit [`LockMode`] (H10).
+///
+/// Identical to [`apply`] except the caller chooses whether this sub-batch takes
+/// the project advisory lock itself ([`LockMode::Acquire`], the standalone case)
+/// or whether an OUTER operation already holds it ([`LockMode::AlreadyHeld`], the
+/// declarative-deploy sub-batches driven by
+/// [`apply_declarative`](crate::engine::MigrationEngine::apply_declarative)).
+///
+/// `AlreadyHeld` skips ONLY the per-batch acquire/release; the per-batch session
+/// hygiene (GUC snapshot/restore + unconditional `RESET ROLE`) still runs, so an
+/// inner sub-batch never leaks its `search_path` / timeouts / role onto the
+/// session even though the lock is owned outside it.
+///
+/// # Errors
+/// Same as [`apply`].
+pub async fn apply_with_lock(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+    approval: Approval,
+    applied_by: &str,
+    lock_mode: LockMode,
+) -> Result<ApplyOutcome, ApplyError> {
     // Defense-in-depth approval gate (design §1.6) — refuse a destructive batch
     // without explicit approval BEFORE doing anything (not even the lock). The
     // engine has its own gate; this is the independent executor-layer check so a
@@ -539,10 +598,19 @@ pub async fn apply(
     {
         return Err(ApplyError::ApprovalRequired);
     }
-    acquire_project_lock(conn, &cfg.project_id).await?;
+    // H10: acquire the project advisory lock only when WE own it. Under
+    // `AlreadyHeld` the outer `apply_declarative` already holds it for the whole
+    // declarative deploy — re-acquiring here (and releasing below) would FREE the
+    // lock between sub-batches (PG advisory locks are session-re-entrant, so a
+    // nested unlock would pop one level), letting a concurrent deploy interleave.
+    if lock_mode == LockMode::Acquire {
+        acquire_project_lock(conn, &cfg.project_id).await?;
+    }
     // Capture the session GUCs we will override so we can restore them on exit
     // — the executor's search_path / statement_timeout / lock_timeout must NOT
-    // leak onto the (pooled / long-lived) connection after apply (H2).
+    // leak onto the (pooled / long-lived) connection after apply (H2). This runs
+    // regardless of lock mode: every sub-batch is responsible for its own session
+    // hygiene even when the lock is owned outside it.
     let snapshot = snapshot_session(conn).await;
     let result = apply_locked(conn, cfg, migrations, applied_by).await;
     // L1: RESET ROLE UNCONDITIONALLY — regardless of whether `snapshot_session`
@@ -563,7 +631,12 @@ pub async fn apply(
             tracing::warn!(error = %e, "zeroship-migrate: failed to restore session GUCs after apply");
         }
     }
-    // Always release the lock, even on error. Surface the original error.
+    // Release the lock only when WE acquired it. Under `AlreadyHeld` the outer
+    // `apply_declarative` releases it once, after every sub-batch. Always release
+    // on the `Acquire` path, even on error. Surface the original error first.
+    if lock_mode == LockMode::AlreadyHeld {
+        return result;
+    }
     let unlock = release_project_lock(conn, &cfg.project_id).await;
     // Surface the apply error first if there was one; otherwise surface any
     // unlock failure. (The lock auto-releases on session end regardless.)
@@ -571,6 +644,38 @@ pub async fn apply(
         Ok(o) => unlock.map(|()| o),
         Err(e) => Err(e),
     }
+}
+
+/// Acquire the project advisory lock for an outer multi-sub-batch operation (H10).
+///
+/// Used by [`apply_declarative`](crate::engine::MigrationEngine::apply_declarative)
+/// so it can hold the lock across the plain set + every rename's expand, passing
+/// [`LockMode::AlreadyHeld`] into each sub-batch. The key is `hashtext(project_id)`
+/// — exactly the key the per-batch [`apply`]/[`rollback`] paths use — so the outer
+/// hold serializes against ANY concurrent deploy/rollback for the same project.
+///
+/// # Errors
+/// [`ApplyError::Db`] if the `SELECT pg_advisory_lock(...)` fails.
+pub async fn acquire_project_lock_outer(
+    conn: &Client,
+    project_id: &str,
+) -> Result<(), ApplyError> {
+    acquire_project_lock(conn, project_id).await
+}
+
+/// Release the project advisory lock taken by [`acquire_project_lock_outer`] (H10).
+///
+/// The companion to it; the outer caller MUST call this exactly once on every exit
+/// path (success/error) so the lock is held exactly once and released exactly once
+/// for the whole declarative deploy.
+///
+/// # Errors
+/// [`ApplyError::Db`] if the `SELECT pg_advisory_unlock(...)` fails.
+pub async fn release_project_lock_outer(
+    conn: &Client,
+    project_id: &str,
+) -> Result<(), ApplyError> {
+    release_project_lock(conn, project_id).await
 }
 
 /// Pre-flight over the FULL supplied set (v3 Plan E re-critic): reject malformed
