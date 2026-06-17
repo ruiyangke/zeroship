@@ -47,17 +47,20 @@
 //! - **`CREATEDB` is required on the admin role.** Document + provide a clear
 //!   error.
 
+use compio::runtime::JoinHandle;
 use compio_postgres::Client;
+use futures::FutureExt;
+use std::panic::AssertUnwindSafe;
 
 use crate::analyze::Advisory;
 use crate::approval::Approval;
-use crate::db::{connect, ConnectError, ExecutorConfig};
+use crate::db::{connect_with_handle, ConnectError, ExecutorConfig};
 use crate::drift::{diff_snapshots, snapshot_schema, DriftError, StructuralDrift};
 use crate::engine::{DeclarativeDeployPlan, MigrationEngine};
 use crate::executor::{self, ApplyError};
 use crate::guard::{GuardConfig, SqlGuard};
 use crate::migration::Migration;
-use crate::role::{provision_migrator, RoleError};
+use crate::role::{deprovision_migrator, migrator_role_name, provision_migrator, RoleError};
 
 /// Where + how to provision a throwaway shadow database.
 #[derive(Debug, Clone)]
@@ -104,6 +107,17 @@ pub struct DryRunReport {
     /// Operational advisories (lock-heavy ops, destructive shapes, missing FK
     /// indexes, …) per migration version. Advisory-only; never gates `ok`.
     pub advisories: Vec<(String, Vec<Advisory>)>,
+    /// Whether the shadow DB + role teardown fully succeeded. `true` on the
+    /// clean path. `false` means a `DROP DATABASE` / `DROP ROLE` failed and a
+    /// shadow DB and/or cluster-global role may have leaked — the control plane
+    /// should trigger an immediate [`sweep_leaked_shadows`] rather than wait for
+    /// the periodic sweep (H2 fix). Note: `teardown_ok` does NOT feed `ok` (a
+    /// migration's correctness is independent of teardown hygiene); it is a
+    /// separate operational signal.
+    pub teardown_ok: bool,
+    /// The teardown failure message when `teardown_ok == false` (the
+    /// `DROP DATABASE` and/or `DROP ROLE` error). `None` on the clean path.
+    pub teardown_error: Option<String>,
 }
 
 /// A failure of the dry-run *harness itself*.
@@ -209,15 +223,66 @@ fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
+thread_local! {
+    /// The C1 panic-injection seam. A regression test arms it (per-thread, so
+    /// parallel sibling tests are unaffected) via [`arm_panic_after_provision`] to
+    /// force a REAL unwind through the body→teardown path and prove [`dry_run`]'s
+    /// teardown survives a panic. Never armed in production (dead by default).
+    static PANIC_AFTER_PROVISION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Arm/disarm the C1 panic-injection seam on the CURRENT thread (test-only hook).
+///
+/// `#[doc(hidden)]`: not part of the stable API — it exists solely so the C1
+/// regression test can drive a panic in the crash-before-teardown window. The
+/// seam is a thread-local (parallelism-safe) and defaults to off, so a normal
+/// dry-run never triggers it.
+#[doc(hidden)]
+pub fn arm_panic_after_provision(on: bool) {
+    PANIC_AFTER_PROVISION.with(|f| f.set(on));
+}
+
+/// True when the C1 panic seam is armed on the current thread.
+fn panic_seam_armed() -> bool {
+    PANIC_AFTER_PROVISION.with(std::cell::Cell::get)
+}
+
+/// Derive the shadow's own [`ExecutorConfig`] from the real `cfg` + the shadow
+/// DB name — used so the shadow provisions (and applies under) a UNIQUELY-NAMED
+/// migrator role that NEVER collides with, nor touches, the real project's
+/// cluster-global role (H1 fix).
+///
+/// Only two fields change versus the real `cfg`:
+/// - `project_id` → the shadow DB name (already unique + sanitized). Both
+///   [`provision_migrator`] and [`executor::apply`] derive the role name from
+///   `project_id` (via [`migrator_role_name`]), and the advisory-lock key is
+///   `hashtext(project_id)` — so a shadow-unique `project_id` yields a
+///   shadow-unique role AND a shadow-unique lock (no contention with the real
+///   project's apply lock).
+/// - `migrator_role` → `migrator_role_name(shadow project_id)`, so the
+///   executor's `SET ROLE` targets the same role `provision_migrator` created.
+///
+/// `project_schema` / `meta_schema` are UNCHANGED — the migration SQL hard-codes
+/// `project_schema`, so the shadow must carry the identical name (the whole
+/// reason Plan C clones a DATABASE, not a schema).
+fn shadow_executor_cfg(cfg: &ExecutorConfig, shadow_db: &str) -> Result<ExecutorConfig, RoleError> {
+    let mut shadow_cfg = cfg.clone();
+    shadow_cfg.project_id = shadow_db.to_string();
+    shadow_cfg.migrator_role = Some(migrator_role_name(shadow_db)?);
+    Ok(shadow_cfg)
+}
+
 /// Dry-run a migration batch against a throwaway shadow DATABASE clone (Mode A —
 /// full replay), **without touching the real project database**.
 ///
 /// `admin_conn` is an open admin session (its role needs `CREATEDB`); it issues
 /// only `CREATE DATABASE` / `DROP DATABASE`. `shadow_cfg.admin_dsn` is the DSN
 /// for the SECOND session opened against the new shadow DB (same connection
-/// params, `dbname` swapped). `cfg` is the project's [`ExecutorConfig`] —
-/// reused VERBATIM (same `project_schema`, same `meta_schema`, same migrator
-/// role) so the shadow apply is byte-faithful to the real one.
+/// params, `dbname` swapped). `cfg` is the project's [`ExecutorConfig`] — reused
+/// for the byte-faithful fields (same `project_schema`, same `meta_schema`) so the
+/// shadow apply runs the EXACT migration bytes; only the migrator role is swapped
+/// for a shadow-UNIQUE one ([`shadow_executor_cfg`]) so the dry-run never touches
+/// the real project's cluster-global role (H1).
 ///
 /// Returns a [`DryRunReport`]: per-migration outcomes + advisories. The shadow
 /// DB is dropped on EVERY path (success, migration failure, harness error,
@@ -241,6 +306,8 @@ pub async fn dry_run(
     applied_by: &str,
 ) -> Result<DryRunReport, DryRunError> {
     let shadow_db = fresh_shadow_name(&shadow_cfg.db_name_prefix);
+    // The shadow's own confined role (H1): unique, never the real project's.
+    let shadow_exec_cfg = shadow_executor_cfg(cfg, &shadow_db)?;
 
     // CREATE DATABASE — the paired half. From here, EVERY exit path must DROP it.
     admin_conn
@@ -248,12 +315,23 @@ pub async fn dry_run(
         .await
         .map_err(DryRunError::Admin)?;
 
-    // Run the body; capture its result WITHOUT early-returning, so teardown runs
-    // unconditionally (mirrors executor::apply's unlock-on-every-path).
-    let result = dry_run_body(migrations, cfg, shadow_cfg, &shadow_db, applied_by, None).await;
+    // Run the body inside catch_unwind so a PANIC in the apply path (e.g. an
+    // executor invariant trip on an untrusted plan graph) STILL reaches teardown
+    // (C1 fix) — without catch_unwind the unwind would skip the drop and leak the
+    // shadow DB + role. `AssertUnwindSafe` mirrors the crate's panic_util seam:
+    // the catch is for teardown safety, not shared-state recovery.
+    let caught = AssertUnwindSafe(dry_run_body(
+        migrations,
+        &shadow_exec_cfg,
+        shadow_cfg,
+        &shadow_db,
+        applied_by,
+        None,
+    ))
+    .catch_unwind()
+    .await;
 
-    teardown_shadow(admin_conn, &shadow_db).await;
-    result
+    finish_dry_run(admin_conn, &shadow_db, &shadow_exec_cfg, caught).await
 }
 
 /// Dry-run a DECLARATIVE deploy plan against a shadow DATABASE, then validate the
@@ -284,30 +362,75 @@ pub async fn dry_run_declarative(
     applied_by: &str,
 ) -> Result<DryRunReport, DryRunError> {
     let shadow_db = fresh_shadow_name(&shadow_cfg.db_name_prefix);
+    let shadow_exec_cfg = shadow_executor_cfg(cfg, &shadow_db)?;
 
     admin_conn
         .batch_execute(&format!("CREATE DATABASE {}", quote_ident(&shadow_db)))
         .await
         .map_err(DryRunError::Admin)?;
 
-    let result = dry_run_declarative_body(
-        plan, desired, cfg, shadow_cfg, &shadow_db, applied_by,
-    )
+    // catch_unwind so a panic in the declarative apply path still tears down the
+    // shadow DB + role (C1 fix).
+    let caught = AssertUnwindSafe(dry_run_declarative_body(
+        plan,
+        desired,
+        &shadow_exec_cfg,
+        shadow_cfg,
+        &shadow_db,
+        applied_by,
+    ))
+    .catch_unwind()
     .await;
 
-    teardown_shadow(admin_conn, &shadow_db).await;
-    result
+    finish_dry_run(admin_conn, &shadow_db, &shadow_exec_cfg, caught).await
+}
+
+/// Tear down the shadow (DB + role) and reconcile with the body's outcome.
+///
+/// The single funnel both dry-run entry points pass through after the body —
+/// whether the body returned normally OR panicked. Teardown runs on EVERY path
+/// (C1 invariant). On a body panic the teardown still runs, then the panic is
+/// re-raised with [`std::panic::resume_unwind`] so the original failure is never
+/// silently swallowed — the contract is "always tear down", not "swallow the
+/// panic".
+///
+/// `teardown_ok` / `teardown_error` from the teardown are stamped onto a
+/// successful report (H2 fix) so the control plane can trigger an immediate
+/// sweep on a leaked clone instead of waiting for the periodic sweeper.
+async fn finish_dry_run(
+    admin_conn: &Client,
+    shadow_db: &str,
+    shadow_exec_cfg: &ExecutorConfig,
+    caught: std::thread::Result<Result<DryRunReport, DryRunError>>,
+) -> Result<DryRunReport, DryRunError> {
+    let teardown = teardown_shadow(admin_conn, shadow_db, shadow_exec_cfg).await;
+    match caught {
+        Ok(Ok(mut report)) => {
+            // Surface teardown hygiene in the report (H2).
+            report.teardown_ok = teardown.is_ok();
+            report.teardown_error = teardown.err();
+            Ok(report)
+        }
+        // The body returned a harness error — teardown already ran; propagate it.
+        Ok(Err(e)) => Err(e),
+        // The body PANICKED — teardown already ran; re-raise so nothing is lost.
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
 }
 
 /// Open the shadow session + provision the schema/role, shared by both bodies.
-/// Returns the connected shadow [`Client`].
+/// Returns the connected shadow [`Client`] AND its run-loop [`JoinHandle`] (so
+/// the body can deterministically close the session before the FORCE drop; H2).
+///
+/// `cfg` here is the SHADOW [`ExecutorConfig`] (its `project_id` is the shadow DB
+/// name, so [`provision_migrator`] creates a shadow-unique role; H1).
 async fn open_and_provision_shadow(
     cfg: &ExecutorConfig,
     shadow_cfg: &ShadowConfig,
     shadow_db: &str,
-) -> Result<Client, DryRunError> {
+) -> Result<(Client, JoinHandle<()>), DryRunError> {
     let dsn = shadow_dsn(&shadow_cfg.admin_dsn, shadow_db);
-    let shadow = connect(&dsn).await?;
+    let (shadow, run_loop) = connect_with_handle(&dsn).await?;
     // Same project_schema name as the real DB (Plan C decision) — the migration
     // SQL hard-codes it, so the shadow must carry the identical name.
     shadow
@@ -318,9 +441,10 @@ async fn open_and_provision_shadow(
         .await
         .map_err(DryRunError::Admin)?;
     // Provision the confined migrator role on the shadow, exactly as the real DB
-    // has one — so the apply runs under the SAME least-privilege confinement.
+    // has one — so the apply runs under the SAME least-privilege confinement. The
+    // role name is shadow-unique (derived from `cfg.project_id` == shadow DB).
     provision_migrator(&shadow, cfg).await?;
-    Ok(shadow)
+    Ok((shadow, run_loop))
 }
 
 /// The plain dry-run body. `desired` (when `Some`) drives the resulting-drift
@@ -333,7 +457,20 @@ async fn dry_run_body(
     applied_by: &str,
     desired: Option<&crate::declarative::DesiredSchema>,
 ) -> Result<DryRunReport, DryRunError> {
-    let shadow = open_and_provision_shadow(cfg, shadow_cfg, shadow_db).await?;
+    let (shadow, run_loop) = open_and_provision_shadow(cfg, shadow_cfg, shadow_db).await?;
+
+    // C1 test seam: force a panic in the exact crash-before-teardown window —
+    // AFTER the shadow DB + role exist — to prove teardown is panic-safe (the
+    // catch_unwind in `dry_run` reaches teardown anyway, then re-raises the
+    // panic). Armed ONLY by the C1 regression test (a per-thread cell); a normal
+    // run never sets it, so production is unaffected.
+    if panic_seam_armed() {
+        // Keep the session/run-loop alive across the panic so teardown (not this
+        // body) is what tears them down — exactly the production unwind path.
+        std::mem::forget(shadow);
+        std::mem::forget(run_loop);
+        panic!("test-injected panic after shadow provision");
+    }
 
     // UP-FRONT guard pass — gather advisories per migration (lock-heavy /
     // destructive / missing-FK-index shapes), and pre-compute the advisory set for
@@ -392,15 +529,19 @@ async fn dry_run_body(
         None
     };
 
-    // Drop the shadow client BEFORE the caller drops the database (force-drop
-    // tolerates a lingering session, but releasing first is cleaner).
-    drop(shadow);
+    // Deterministically close the shadow session BEFORE the caller's FORCE drop
+    // (H2): drop the client, then cancel its run-loop so the backend is gone and
+    // DROP DATABASE has nothing to fight.
+    close_shadow_session(shadow, run_loop).await;
 
     Ok(DryRunReport {
         ok,
         per_migration,
         resulting_drift,
         advisories,
+        // Stamped by finish_dry_run after teardown actually runs.
+        teardown_ok: true,
+        teardown_error: None,
     })
 }
 
@@ -415,7 +556,7 @@ async fn dry_run_declarative_body(
     shadow_db: &str,
     applied_by: &str,
 ) -> Result<DryRunReport, DryRunError> {
-    let shadow = open_and_provision_shadow(cfg, shadow_cfg, shadow_db).await?;
+    let (shadow, run_loop) = open_and_provision_shadow(cfg, shadow_cfg, shadow_db).await?;
 
     // Advisories from the plain plan's linted items (already guard-checked).
     let mut advisories: Vec<(String, Vec<Advisory>)> = Vec::new();
@@ -432,7 +573,12 @@ async fn dry_run_declarative_body(
 
     // Drive the SAME path the real declarative deploy uses (plain gated apply +
     // each rename's expand/backfill). Approval::Approved is SHADOW-only.
-    match engine
+    //
+    // The deploy-N apply applies only the EXPAND for each rename; the CONTRACT
+    // (DROP TRIGGER + DROP COLUMN `<from>`) is DEFERRED to deploy N+1 and returned
+    // as `pending_contract`. If we snapshot here, `<from>` is still present, so a
+    // CORRECT rename would false-positive on drift (`desired` lacks `<from>`).
+    let pending_contract = match engine
         .apply_declarative(plan, Approval::Approved, &shadow, cfg, applied_by)
         .await
     {
@@ -444,6 +590,7 @@ async fn dry_run_declarative_body(
                     error: None,
                 });
             }
+            outcome.pending_contract
         }
         Err(e) => {
             ok = false;
@@ -452,24 +599,79 @@ async fn dry_run_declarative_body(
                 applied_ok: false,
                 error: Some(e.to_string()),
             });
+            Vec::new()
+        }
+    };
+
+    // #5d: in the shadow (a throwaway, so we can simulate BOTH deploys) apply the
+    // DEFERRED contract too — simulating deploy N+1, which the real fleet runs
+    // AFTER app code switches to `<to>`. The cross-deploy gate is satisfied here
+    // because the expand's E3 is already journaled in the shadow (apply_declarative
+    // journaled it above). Now the shadow reflects the FINAL post-contract state:
+    // `<from>` is dropped, so diffing against `desired` (which lacks `<from>`)
+    // validates the rename's true end state instead of false-positiving on the
+    // mid-rename intermediate.
+    if ok && !pending_contract.is_empty() {
+        let guard_cfg = GuardConfig {
+            project_schema: cfg.project_schema.clone(),
+            extension_allowlist: Vec::new(),
+        };
+        let contract_plan = engine.plan(&pending_contract, &guard_cfg);
+        match engine
+            .apply(&contract_plan, Approval::Approved, &shadow, cfg, applied_by)
+            .await
+        {
+            Ok(outcome) => {
+                for v in &outcome.applied {
+                    per_migration.push(MigrationResult {
+                        version: v.clone(),
+                        applied_ok: true,
+                        error: None,
+                    });
+                }
+            }
+            Err(e) => {
+                ok = false;
+                per_migration.push(MigrationResult {
+                    version: "<deferred-contract>".to_string(),
+                    applied_ok: false,
+                    error: Some(e.to_string()),
+                });
+            }
         }
     }
 
-    // Resulting-drift: did the plan realise the DESIRED schema?
+    // Resulting-drift: did the plan (expand + deferred contract) realise the
+    // DESIRED schema?
     let shadow_snap = snapshot_schema(&shadow, &cfg.project_schema).await?;
     let drift = diff_snapshots(&desired.snapshot, &shadow_snap);
     if !drift.is_clean() {
         ok = false;
     }
 
-    drop(shadow);
+    // H2: deterministically close the shadow session before the FORCE drop.
+    close_shadow_session(shadow, run_loop).await;
 
     Ok(DryRunReport {
         ok,
         per_migration,
         resulting_drift: Some(drift),
         advisories,
+        teardown_ok: true,
+        teardown_error: None,
     })
+}
+
+/// Deterministically close a shadow session before a `DROP DATABASE … FORCE`
+/// (H2): drop the client (releasing its protocol handle), then `cancel().await`
+/// the run-loop task so the backend connection is fully gone. Without this the
+/// detached run-loop could still hold a registered backend when FORCE runs — a
+/// race the FORCE has to fight; closing first removes that contention.
+async fn close_shadow_session(shadow: Client, run_loop: JoinHandle<()>) {
+    drop(shadow);
+    // `cancel` resolves once the task is finished/aborted; the client is already
+    // dropped so the run-loop will observe the closed half and wind down.
+    let _ = run_loop.cancel().await;
 }
 
 /// Translate an [`ApplyError`] into per-migration results: the named offending
@@ -518,19 +720,54 @@ fn record_apply_error(
     });
 }
 
-/// Drop the shadow database unconditionally (the paired teardown half). Uses
-/// `WITH (FORCE)` so a lingering session does not block the drop, and `IF EXISTS`
-/// so a not-yet-created / already-dropped shadow is a no-op. Best-effort: a drop
-/// failure is logged, never propagated (the original result must surface).
-async fn teardown_shadow(admin_conn: &Client, shadow_db: &str) {
-    let sql = format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", quote_ident(shadow_db));
-    if let Err(e) = admin_conn.batch_execute(&sql).await {
+/// Tear down the shadow unconditionally (the paired teardown half): DROP the
+/// DATABASE, then DROP the shadow-unique migrator ROLE.
+///
+/// `DROP DATABASE` uses `WITH (FORCE)` so a lingering session does not block it,
+/// and `IF EXISTS` so a not-yet-created / already-dropped shadow is a no-op. The
+/// ROLE is cluster-global — it SURVIVES `DROP DATABASE` — so it must be dropped
+/// explicitly (H1): drop it AFTER the database, since `DROP DATABASE` removes the
+/// objects the role owned in the shadow, leaving `DROP ROLE`/[`deprovision_migrator`]
+/// nothing to reassign.
+///
+/// Returns `Ok(())` on full teardown, or `Err(message)` describing the FIRST
+/// failure (H2): the message is surfaced in [`DryRunReport::teardown_error`] so
+/// the control plane can trigger an immediate sweep. A failure is also logged.
+/// Best-effort across BOTH steps: a DB-drop failure does not skip the role drop.
+async fn teardown_shadow(
+    admin_conn: &Client,
+    shadow_db: &str,
+    shadow_exec_cfg: &ExecutorConfig,
+) -> Result<(), String> {
+    let mut first_err: Option<String> = None;
+
+    // 1. Drop the shadow database (FORCE + IF EXISTS).
+    let drop_db = format!(
+        "DROP DATABASE IF EXISTS {} WITH (FORCE)",
+        quote_ident(shadow_db)
+    );
+    if let Err(e) = admin_conn.batch_execute(&drop_db).await {
         tracing::warn!(
             error = %e,
             shadow = %shadow_db,
             "zeroship-migrate: failed to drop shadow database (will be reaped by sweep_leaked_shadows)"
         );
+        first_err.get_or_insert_with(|| format!("drop shadow database: {e}"));
     }
+
+    // 2. Drop the cluster-global shadow migrator role (survives DROP DATABASE).
+    //    Runs after the DB drop so the role owns nothing left to reassign.
+    if let Err(e) = deprovision_migrator(admin_conn, shadow_exec_cfg).await {
+        tracing::warn!(
+            error = %e,
+            shadow = %shadow_db,
+            role = ?shadow_exec_cfg.migrator_role,
+            "zeroship-migrate: failed to drop shadow migrator role (cluster-global leak)"
+        );
+        first_err.get_or_insert_with(|| format!("drop shadow role: {e}"));
+    }
+
+    first_err.map_or(Ok(()), Err)
 }
 
 /// Drop crash-leaked shadow databases — clones whose owning dry-run process died
@@ -586,11 +823,19 @@ pub async fn sweep_leaked_shadows(
                 "DROP DATABASE IF EXISTS {} WITH (FORCE)",
                 quote_ident(&name)
             );
-            admin_conn
-                .batch_execute(&sql)
-                .await
-                .map_err(DryRunError::Admin)?;
-            dropped += 1;
+            // Continue-on-error (H2c): one undroppable clone (e.g. a session the
+            // FORCE can't evict in time) must NOT abort reaping the rest. Log it
+            // and move on; the next sweep retries it.
+            match admin_conn.batch_execute(&sql).await {
+                Ok(()) => dropped += 1,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        shadow = %name,
+                        "zeroship-migrate: sweep failed to drop a leaked shadow database (continuing)"
+                    );
+                }
+            }
         }
     }
     Ok(dropped)

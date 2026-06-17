@@ -21,13 +21,14 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use compio_postgres::Client;
+use futures::FutureExt;
 use zeroship_migrate::guard::GuardConfig;
 use zeroship_migrate::migration::Checksum;
 use zeroship_migrate::{
-    deprovision_migrator, dry_run, dry_run_declarative, migrator_role_name, sweep_leaked_shadows,
-    CollectionDescriptor, DeclarativeAuthor, DryRunError, ExecutorConfig, FieldDescriptor,
-    Migration, MigrationEngine, MigrationFlags, MigrationId, SchemaSnapshot, ShadowConfig,
-    desired_snapshot,
+    dry_run, dry_run_declarative, migrator_role_name, sweep_leaked_shadows,
+    CollectionDescriptor, DeclarativeAuthor, DeclarativeDeployPlan, DryRunError, ExecutorConfig,
+    FieldDescriptor, Migration, MigrationEngine, MigrationFlags, MigrationId, RenameHint,
+    SchemaSnapshot, ShadowConfig, desired_snapshot,
 };
 
 const DEFAULT_DSN: &str =
@@ -132,10 +133,24 @@ async fn shadow_db_count(conn: &Client, prefix: &str) -> i64 {
     i64::try_from(rows.len()).unwrap()
 }
 
-/// Drop the cluster-global migrator role this test provisioned on the shadow, so
-/// it does not leak across the run (the role survives the shadow DB's drop).
-async fn cleanup_role(conn: &Client, cfg: &ExecutorConfig) {
-    let _ = deprovision_migrator(conn, cfg).await;
+/// Count cluster-global roles whose name matches `<prefix>%` (used to prove the
+/// shadow's migrator role does not leak past teardown; H1).
+async fn role_count(conn: &Client, prefix: &str) -> i64 {
+    let like = format!("{prefix}%");
+    let rows = conn
+        .query("SELECT rolname FROM pg_roles WHERE rolname LIKE $1", &[&like])
+        .await
+        .expect("count roles");
+    i64::try_from(rows.len()).unwrap()
+}
+
+/// True iff a cluster-global role with this exact name exists.
+async fn role_exists(conn: &Client, role: &str) -> bool {
+    !conn
+        .query("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&role])
+        .await
+        .expect("query role existence")
+        .is_empty()
 }
 
 // ---------------------------------------------------------------------------
@@ -174,8 +189,6 @@ async fn dry_run_good_additive_set_is_ok() {
     assert_eq!(report.per_migration.len(), 2);
     assert!(report.per_migration.iter().all(|r| r.applied_ok));
     assert!(report.resulting_drift.is_none(), "plain dry_run has no drift");
-
-    cleanup_role(&admin, &cfg).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -232,8 +245,6 @@ async fn dry_run_broken_migration_fails_and_never_touches_prod() {
         !schema_exists(&admin, &cfg.meta_schema).await,
         "dry_run must NOT create the real meta schema in the admin DB"
     );
-
-    cleanup_role(&admin, &cfg).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -261,7 +272,6 @@ async fn dry_run_tears_down_shadow_on_ok_and_error_paths() {
     let _ = dry_run(&admin, &[good], &cfg_ok, &scfg, "actor")
         .await
         .expect("ok dry_run");
-    cleanup_role(&admin, &cfg_ok).await;
 
     // ERROR path.
     let tok_err = token();
@@ -277,7 +287,6 @@ async fn dry_run_tears_down_shadow_on_ok_and_error_paths() {
     let _ = dry_run(&admin, &[bad], &cfg_err, &scfg, "actor")
         .await
         .expect("err dry_run harness still returns Ok(report)");
-    cleanup_role(&admin, &cfg_err).await;
 
     // No shadow database from EITHER path remains (scoped to this test's prefix).
     assert_eq!(
@@ -323,8 +332,6 @@ async fn dry_run_concurrently_index_runs_in_shadow() {
         .expect("dry_run harness");
     assert!(report.ok, "CONCURRENTLY index must dry-run ok: {report:?}");
     assert!(report.per_migration.iter().all(|r| r.applied_ok));
-
-    cleanup_role(&admin, &cfg).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -404,8 +411,6 @@ async fn dry_run_declarative_clean_diff_is_ok_with_clean_drift() {
         "the generated plan must realise the desired schema (clean drift): {drift:?}"
     );
     assert!(report.ok, "clean declarative diff must be ok: {report:?}");
-
-    cleanup_role(&admin, &cfg).await;
 }
 
 /// Phase 2 test 2: a plan that does NOT realise the schema we validate against
@@ -469,8 +474,6 @@ async fn dry_run_declarative_wrong_result_has_nonempty_drift_and_not_ok() {
 
     // Even on the not-ok path the shadow DB is gone (scoped to this test's prefix).
     assert_eq!(shadow_db_count(&admin, &prefix).await, 0);
-
-    cleanup_role(&admin, &cfg).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -478,13 +481,16 @@ async fn dry_run_declarative_wrong_result_has_nonempty_drift_and_not_ok() {
 // ---------------------------------------------------------------------------
 
 /// Phase 3 test 1: inject a HARNESS failure AFTER `CREATE DATABASE` but before
-/// apply completes, and assert the shadow DB is STILL dropped.
+/// apply completes, and assert the shadow DB (+ role) is STILL dropped.
 ///
-/// The injection: an EMPTY `project_id` makes the in-body `provision_migrator`
-/// fail with `BadRoleName` (the role name derives from project_id), which lands
-/// AFTER the shadow DB was created and the schema set up — exactly the
-/// crash-before-teardown window. We use a UNIQUELY-prefixed shadow DB so we can
-/// prove no `<unique_prefix>%` database survives.
+/// The injection: an EMPTY `project_schema` makes the in-body `CREATE SCHEMA ""`
+/// fail (zero-length delimited identifier), which lands AFTER `CREATE DATABASE` +
+/// the shadow connect — exactly the crash-before-teardown window. (Pre-H1 this
+/// test injected via an empty `project_id`/`BadRoleName`; H1 now derives the
+/// shadow's role from the shadow DB name, so the role name is always valid — the
+/// injection moved to the schema-creation step, which is still after
+/// `CREATE DATABASE`.) We use a UNIQUELY-prefixed shadow DB so we can prove no
+/// `<unique_prefix>%` database survives.
 #[compio::test]
 async fn dry_run_drops_shadow_when_provision_fails_after_create() {
     let admin = pg().await;
@@ -492,20 +498,18 @@ async fn dry_run_drops_shadow_when_provision_fails_after_create() {
     let unique = format!("zsmig_fail_{}_", token().replace('_', ""));
     let unique_prefix: String = unique.chars().take(40).collect();
 
-    // project_schema is valid (CREATE SCHEMA succeeds) but project_id is EMPTY,
-    // so provision_migrator fails AFTER CREATE DATABASE + CREATE SCHEMA.
+    // project_id is valid (the shadow derives its own role from the DB name), but
+    // project_schema is EMPTY → `CREATE SCHEMA ""` fails AFTER CREATE DATABASE +
+    // shadow connect.
     let tok = token();
-    let mut cfg = ExecutorConfig::new(String::new(), format!("proj_{tok}"));
+    let mut cfg = ExecutorConfig::new(format!("prj_{tok}"), String::new());
     cfg.meta_schema = format!("meta_{tok}");
     cfg.migrator_role = Some("migrator_unused".to_string());
 
     let m = mig(
         MigrationId::generate(),
         "create",
-        &format!(
-            "CREATE TABLE \"{}\".\"t\" (id bigint PRIMARY KEY)",
-            cfg.project_schema
-        ),
+        "CREATE TABLE \"t\" (id bigint PRIMARY KEY)",
     );
     let shadow_cfg = ShadowConfig {
         admin_dsn: dsn(),
@@ -514,10 +518,10 @@ async fn dry_run_drops_shadow_when_provision_fails_after_create() {
 
     let result = dry_run(&admin, &[m], &cfg, &shadow_cfg, "actor").await;
 
-    // The harness surfaced the provisioning failure as an Err...
+    // The harness surfaced the post-CREATE-DATABASE failure as an Err...
     assert!(
-        matches!(result, Err(DryRunError::Provision(_))),
-        "empty project_id must fail provisioning: {result:?}"
+        matches!(result, Err(DryRunError::Admin(_))),
+        "empty project_schema must fail CREATE SCHEMA after CREATE DATABASE: {result:?}"
     );
     // ...AND the shadow DB created before the failure is STILL dropped.
     assert_eq!(
@@ -570,4 +574,262 @@ async fn sweep_leaked_shadows_drops_stale_and_keeps_fresh() {
             .batch_execute(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))
             .await;
     }
+}
+
+/// H2(c): the sweeper is continue-on-error — it does NOT early-abort. With THREE
+/// stale clones it reaps ALL of them in ONE call (returning a count of 3), proving
+/// the loop continues across targets rather than `?`-bailing after the first.
+/// (A genuinely-undroppable DB is hard to stage deterministically; this asserts
+/// the loop's continue-and-count contract, which is the behavior H2(c) added.)
+#[compio::test]
+async fn sweep_leaked_shadows_continues_across_multiple_targets() {
+    let admin = pg().await;
+    let prefix = format!("zsmig_multi_{}_", token().replace('_', ""));
+    let prefix: String = prefix.chars().take(36).collect();
+
+    // Three STALE clones (all ~1970, so all qualify for an "older than 1h" sweep).
+    let old_hex = format!("{:x}", 1_000_000_000u128);
+    let stale: Vec<String> = (0..3).map(|i| format!("{prefix}1_{old_hex}_{i}")).collect();
+    for name in &stale {
+        admin
+            .batch_execute(&format!("CREATE DATABASE \"{name}\""))
+            .await
+            .unwrap_or_else(|e| panic!("create {name}: {e}"));
+    }
+
+    let dropped = sweep_leaked_shadows(&admin, &prefix, Duration::from_secs(3600))
+        .await
+        .expect("sweep");
+    assert_eq!(dropped, 3, "the sweep reaps ALL stale clones, not just the first");
+    assert_eq!(
+        shadow_db_count(&admin, &prefix).await,
+        0,
+        "no stale clone survives a continue-on-error sweep"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// C1 (CRITICAL) — teardown is panic-safe: a panic in the dry-run body STILL
+// drops the shadow DB (+ role), and the panic still propagates.
+// ---------------------------------------------------------------------------
+
+/// C1 regression. Arm the in-body panic seam (`arm_panic_after_provision`), run a
+/// dry-run, and prove BOTH halves of the "always tear down" contract under a
+/// panic: (a) the panic PROPAGATES (`catch_unwind` re-raises it), and (b) the
+/// shadow DB created before the panic is STILL dropped — and the shadow role too.
+///
+/// Pre-fix (no `catch_unwind` around the body) this LEAKS the shadow DB: the
+/// unwind skips `teardown_shadow`. The assertion that no `<prefix>%` DB remains
+/// is RED.
+#[compio::test]
+async fn dry_run_teardown_survives_a_body_panic() {
+    let admin = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    // A unique prefix so we observe ONLY this test's shadow DB.
+    let unique = format!("zsmig_panic_{}_", token().replace('_', ""));
+    let unique_prefix: String = unique.chars().take(40).collect();
+    let scfg = ShadowConfig {
+        admin_dsn: dsn(),
+        db_name_prefix: unique_prefix.clone(),
+    };
+
+    let m = mig(
+        MigrationId::generate(),
+        "create",
+        &format!(
+            "CREATE TABLE \"{}\".\"t\" (id bigint PRIMARY KEY)",
+            cfg.project_schema
+        ),
+    );
+
+    // Arm the seam (per-thread, so parallel sibling tests are unaffected), run the
+    // dry-run under catch_unwind at the TEST boundary, then disarm. The body panics
+    // AFTER the shadow DB + role are provisioned — exactly the crash-before-teardown
+    // window. We catch the unwind on the FUTURE (the same combinator the production
+    // fix uses) so the test observes propagation without aborting.
+    zeroship_migrate::arm_panic_after_provision(true);
+    let caught = std::panic::AssertUnwindSafe(dry_run(&admin, &[m], &cfg, &scfg, "actor"))
+        .catch_unwind()
+        .await;
+    zeroship_migrate::arm_panic_after_provision(false);
+
+    // (a) The panic PROPAGATED — the body's panic was re-raised, not swallowed.
+    assert!(
+        caught.is_err(),
+        "the injected body panic must propagate out of dry_run (resume_unwind)"
+    );
+
+    // (b) The shadow DB created before the panic was STILL dropped (teardown ran
+    // on the unwind path). RED pre-fix (the unwind skipped teardown).
+    assert_eq!(
+        shadow_db_count(&admin, &unique_prefix).await,
+        0,
+        "teardown must drop the shadow DB even when the body PANICS"
+    );
+    // And the shadow's cluster-global role was dropped too (scoped to THIS test's
+    // unique prefix so it never races a sibling's role).
+    let shadow_role_prefix = format!("migrator_{unique_prefix}");
+    assert_eq!(
+        role_count(&admin, &shadow_role_prefix).await,
+        0,
+        "teardown must drop the shadow migrator role even when the body PANICS"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// H1 (HIGH) — the shadow provisions a UNIQUELY-NAMED migrator role that is torn
+// down, and never the real project's role.
+// ---------------------------------------------------------------------------
+
+/// H1 regression. A dry-run must NOT leave any `migrator_*` role behind, and must
+/// NEVER provision the REAL project's role (`migrator_<project_id>`). Pre-fix the
+/// shadow called `provision_migrator` with the real `cfg` (creating
+/// `migrator_<project_id>`, cluster-global, surviving DROP DATABASE) and never
+/// dropped it — RED here without the test-harness `cleanup_role` crutch.
+#[compio::test]
+async fn dry_run_provisions_unique_shadow_role_and_drops_it() {
+    let admin = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    // The REAL project role that pre-fix would have leaked.
+    let real_role = migrator_role_name(&cfg.project_id).expect("real role name");
+
+    // A UNIQUE shadow prefix so the role-leak count is scoped to THIS test (the
+    // global `migrator_%` count races with parallel sibling dry-runs).
+    let unique = format!("zsmig_h1_{}_", token().replace('_', ""));
+    let unique_prefix: String = unique.chars().take(40).collect();
+    let scfg = ShadowConfig {
+        admin_dsn: dsn(),
+        db_name_prefix: unique_prefix.clone(),
+    };
+    // The shadow's role is `migrator_<shadow_db>`, and the shadow DB starts with
+    // `unique_prefix` — so its role starts with `migrator_<unique_prefix>`.
+    let shadow_role_prefix = format!("migrator_{unique_prefix}");
+
+    let m = mig(
+        MigrationId::generate(),
+        "create",
+        &format!(
+            "CREATE TABLE \"{}\".\"t\" (id bigint PRIMARY KEY)",
+            cfg.project_schema
+        ),
+    );
+    let report = dry_run(&admin, &[m], &cfg, &scfg, "actor")
+        .await
+        .expect("dry_run harness");
+    assert!(report.ok, "additive dry-run ok: {report:?}");
+    // Teardown reported clean (H2 signal).
+    assert!(report.teardown_ok, "teardown_ok must be true: {report:?}");
+    assert!(report.teardown_error.is_none());
+
+    // The REAL project's role was NEVER created (the shadow used its own).
+    assert!(
+        !role_exists(&admin, &real_role).await,
+        "dry_run must NOT provision the real project's role {real_role}"
+    );
+    // No shadow role survives teardown (RED pre-fix: the role outlived DROP
+    // DATABASE and was never dropped). Scoped to this test's unique prefix.
+    assert_eq!(
+        role_count(&admin, &shadow_role_prefix).await,
+        0,
+        "the shadow's migrator role must be dropped on teardown (H1)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #5d (correctness) — a declarative RENAME dry-run validates the FINAL
+// post-contract state and does NOT false-positive on drift.
+// ---------------------------------------------------------------------------
+
+/// #5d regression. A declarative rename's plan applies only the EXPAND on deploy
+/// N (the `<from>` column stays; the contract is DEFERRED). If the dry-run
+/// snapshots right after the expand, `<from>` is still present and a CORRECT
+/// rename false-positives on drift (`desired` lacks `<from>`).
+///
+/// We construct a self-contained plan that simulates BOTH deploys in the shadow:
+/// the plain set creates `users(email)`, and the rename's expand-contract turns
+/// `email` → `email_address`. With the #5d fix, `dry_run_declarative` also applies
+/// the DEFERRED contract in the shadow, so `email` is dropped and the final state
+/// equals `desired` (`users(email_address)`) → CLEAN drift + ok.
+///
+/// Pre-fix (contract not applied) the shadow keeps BOTH `email` and
+/// `email_address`, so diffing against `desired` flags `email` as unexpected →
+/// non-clean drift + ok=false. RED.
+#[compio::test]
+async fn dry_run_declarative_rename_validates_final_state_no_false_drift() {
+    let admin = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    let engine = MigrationEngine::new();
+    let author = DeclarativeAuthor::new(cfg.project_schema.clone(), "app_test");
+
+    let users_email = descriptor("users", vec![field("email", "string", false)]);
+    let users_email_addr = descriptor("users", vec![field("email_address", "string", false)]);
+
+    // The "live" intermediate the rename diffs against: users(email).
+    let live_email = desired_snapshot(&cfg.project_schema, std::slice::from_ref(&users_email))
+        .expect("live snapshot")
+        .snapshot;
+    // The DESIRED end state: users(email_address).
+    let desired = desired_snapshot(&cfg.project_schema, &[users_email_addr]).expect("desired");
+
+    // Plain part: create users(email) from empty (so the shadow has the table +
+    // <from> column the rename's expand operates on — simulating deploy 0).
+    let create_diff = author
+        .diff(
+            &desired_snapshot(&cfg.project_schema, &[users_email]).expect("create desired"),
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+        )
+        .expect("create-users diff");
+    assert!(
+        create_diff.renames.is_empty() && !create_diff.migrations.is_empty(),
+        "the create part is a plain CREATE TABLE: {create_diff:?}"
+    );
+    let plain = engine.plan(&create_diff.migrations, &guard_cfg(&cfg));
+
+    // Rename part: users(email_address) vs live users(email), with a hint →
+    // structured expand-contract (the <from> drop is the DEFERRED contract).
+    let hints = vec![RenameHint {
+        table: "users".into(),
+        from: "email".into(),
+        to: "email_address".into(),
+    }];
+    let rename_diff = author
+        .diff(&desired, &live_email, &HashMap::new(), &hints)
+        .expect("rename diff");
+    assert_eq!(rename_diff.renames.len(), 1, "exactly one structured rename");
+    assert!(
+        rename_diff.migrations.is_empty(),
+        "a pure rename produces no plain migrations: {rename_diff:?}"
+    );
+
+    // Combine into ONE declarative deploy plan: create + rename, applied in the
+    // same throwaway shadow (both deploys simulated).
+    let plan = DeclarativeDeployPlan {
+        plain,
+        renames: rename_diff.renames,
+    };
+
+    let report = dry_run_declarative(&admin, &plan, &desired, &cfg, &shadow_cfg(), "actor")
+        .await
+        .expect("dry_run_declarative harness");
+
+    let drift = report
+        .resulting_drift
+        .as_ref()
+        .expect("declarative dry-run carries resulting_drift");
+    // The CRUX (#5d): <from> (`email`) must NOT show as unexpected — the deferred
+    // contract dropped it in the shadow, so the final state equals desired.
+    assert!(
+        drift.is_clean(),
+        "a correct rename must NOT false-positive on drift after the deferred \
+         contract is applied; got: {drift:?}"
+    );
+    assert!(
+        report.ok,
+        "a correct declarative rename dry-run must be ok: {report:?}"
+    );
 }
