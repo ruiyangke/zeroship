@@ -515,6 +515,63 @@ async fn changed_fk_target_is_unsupported_in_v1_not_silently_skipped() {
 
     teardown(&conn, &cfg).await;
 }
+
+#[compio::test]
+async fn long_table_and_field_unique_index_name_is_capped_and_re_diffs_clean() {
+    // 1c: a unique index name `<table>_<field>_key` over a long table+field would
+    // overflow Postgres's 63-byte limit and be truncated server-side, so the
+    // desired (full) name would never match the live (truncated) name → CREATE/
+    // DROP churn on every re-diff. The name must be hash-capped ≤63 bytes,
+    // deterministic, and re-diff to ZERO.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    // A table + field whose `<table>_<field>_key` natural name is > 63 bytes.
+    let long_table = "a_very_long_collection_name_for_overflow_testing"; // 48
+    let long_field = "an_equally_long_field_name_here"; // 31 → natural 48+1+31+4 = 84
+    let desc = CollectionDescriptor {
+        name: long_table.into(),
+        fields: vec![FieldDescriptor {
+            name: long_field.into(),
+            ty: "string".into(),
+            required: false,
+            unique: true,
+            references: None,
+        }],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]);
+
+    // The generated unique-index name is ≤63 bytes (and deterministic across two
+    // builds of the same desired snapshot).
+    let idx = desired.tables[long_table]
+        .indexes
+        .iter()
+        .find(|i| i.unique && i.name != format!("{long_table}_pkey"))
+        .expect("a per-field unique index exists");
+    assert!(idx.name.len() <= 63, "index name {} bytes (>63)", idx.name.len());
+
+    // Apply and re-diff to zero — no churn (the capped name round-trips to live).
+    apply_plan(&engine, &desired, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("apply long-name table");
+    let live2 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+    let migs = author.diff(&desired, &live2).expect("re-diff");
+    assert!(
+        migs.is_empty(),
+        "long-name index churned (re-diff not empty): {:?}",
+        migs.iter().map(|m| &m.name).collect::<Vec<_>>()
+    );
+    assert!(diff_snapshots(&desired, &live2).is_clean(), "full re-diff clean");
+
+    teardown(&conn, &cfg).await;
+}
+
 #[compio::test]
 async fn additive_diff_is_idempotent_second_plan_is_empty() {
     let tok = token();

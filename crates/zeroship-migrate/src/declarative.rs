@@ -315,9 +315,12 @@ fn is_pk_index(table: &str, index_name: &str) -> bool {
 
 /// Deterministic name for a per-field unique index (`<table>_<field>_key`,
 /// matching the Postgres convention so the desired snapshot round-trips to the
-/// live one a `CREATE UNIQUE INDEX` of this name produces).
+/// live one a `CREATE UNIQUE INDEX` of this name produces). Capped to ≤63 bytes
+/// via [`crate::author::cap_ident_name`] (1c) — an un-capped name would be
+/// truncated server-side on CREATE, so the desired (full) name would never match
+/// the live (truncated) name and a re-diff would churn DROP+CREATE forever.
 fn unique_index_name(table: &str, field: &str) -> String {
-    format!("{table}_{field}_key")
+    crate::author::cap_ident_name(&format!("{table}_{field}_key"))
 }
 
 /// Deterministic FK constraint name (`<field>_fkey`, mirroring plugin-db's
