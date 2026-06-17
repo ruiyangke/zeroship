@@ -498,27 +498,6 @@ async fn fk_ordering_referencing_table_after_target_applies_clean() {
 }
 
 #[compio::test]
-async fn p1_drop_is_unsupported_not_silently_skipped() {
-    // P1 does not generate drops: a live-only table is surfaced as
-    // UnsupportedInV1, never silently dropped (or skipped). P2 reclassifies it
-    // as a gated destructive op.
-    let cfg = cfg_for(&token());
-    let author = author_for(&cfg);
-
-    // Live has a table; desired is empty.
-    let live = {
-        let desc = CollectionDescriptor {
-            name: "legacy".into(),
-            fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None }],
-            indexes: vec![],
-        };
-        desired_snapshot(&[desc])
-    };
-    let err = author.diff(&SchemaSnapshot::default(), &live).unwrap_err();
-    assert!(matches!(err, DeclarativeError::UnsupportedInV1(_)), "got {err:?}");
-}
-
-#[compio::test]
 async fn type_change_is_unsupported_in_v1_not_silently_skipped() {
     // A same-name column whose type changed is an explicit UnsupportedInV1,
     // never a silent no-op (and never an auto type-change).
@@ -610,4 +589,216 @@ async fn every_generated_migration_passes_through_the_guard_no_bypass() {
         migs.len(),
         "every generated migration must flow through the guard as a planned item"
     );
+}
+
+// ---------------------------------------------------------------------------
+// P2 — destructive classification (GATED). NEVER auto-applied.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn drop_table_is_gated_and_not_auto_applied() {
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    // Create a table.
+    let v1 = CollectionDescriptor {
+        name: "legacy".into(),
+        fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let d1 = desired_snapshot(&[v1]);
+    apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("create legacy");
+
+    // Now desire it GONE (empty desired).
+    let empty = SchemaSnapshot::default();
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+    let plan = engine
+        .plan_declarative(&empty, &live, &author, &guard_cfg(&cfg))
+        .expect("plan drop");
+    assert!(plan.destructive, "a DROP TABLE diff must be destructive");
+    assert!(plan.requires_approval, "a DROP TABLE diff must require approval");
+
+    // Apply WITHOUT approval → ApprovalRequired, nothing applied.
+    let err = engine
+        .apply(&plan, Approval::None, &conn, &cfg, "app_test")
+        .await
+        .expect_err("drop without approval must be refused");
+    assert!(matches!(err, EngineError::ApprovalRequired), "got {err:?}");
+
+    // The table is STILL present (nothing applied).
+    let live_after = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
+    assert!(
+        live_after.tables.contains_key("legacy"),
+        "table must still exist after a refused drop"
+    );
+
+    // Now apply WITH approval → the drop lands, re-diff clean.
+    engine
+        .apply(&plan, Approval::Approved, &conn, &cfg, "app_test")
+        .await
+        .expect("approved drop applies");
+    let live_final = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap3");
+    assert!(
+        !live_final.tables.contains_key("legacy"),
+        "table must be gone after an approved drop"
+    );
+    assert!(
+        diff_snapshots(&empty, &live_final).is_clean(),
+        "re-diff after approved drop must be clean"
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn drop_column_is_destructive_and_gated() {
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let v1 = CollectionDescriptor {
+        name: "people".into(),
+        fields: vec![
+            FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None },
+            FieldDescriptor { name: "nickname".into(), ty: "string".into(), required: false, unique: false, references: None },
+        ],
+        indexes: vec![],
+    };
+    let d1 = desired_snapshot(&[v1]);
+    apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("create people");
+
+    // Drop `nickname`.
+    let v2 = CollectionDescriptor {
+        name: "people".into(),
+        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let d2 = desired_snapshot(&[v2]);
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+    let plan = engine
+        .plan_declarative(&d2, &live, &author, &guard_cfg(&cfg))
+        .expect("plan drop column");
+    assert!(plan.destructive, "drop column must be destructive");
+    assert!(plan.requires_approval, "drop column must be gated");
+
+    // Refused without approval; column still present.
+    let err = engine.apply(&plan, Approval::None, &conn, &cfg, "app_test").await.unwrap_err();
+    assert!(matches!(err, EngineError::ApprovalRequired), "got {err:?}");
+    let live_after = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
+    assert!(
+        live_after.tables["people"].columns.iter().any(|c| c.name == "nickname"),
+        "nickname must survive a refused drop"
+    );
+
+    // Approved → applied, re-diff clean.
+    engine.apply(&plan, Approval::Approved, &conn, &cfg, "app_test").await.expect("approved drop");
+    let live_final = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap3");
+    assert!(
+        !live_final.tables["people"].columns.iter().any(|c| c.name == "nickname"),
+        "nickname must be gone after an approved drop"
+    );
+    assert!(diff_snapshots(&d2, &live_final).is_clean(), "re-diff clean after approved drop");
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn drop_index_is_not_data_loss_so_it_is_not_gated() {
+    // Dropping an index is REVERSIBLE (recreate it), not data loss — the guard
+    // correctly does not mark it destructive, so the declarative path applies it
+    // ungated (like an additive op). This documents that the differ honours the
+    // security core's data-loss judgement rather than over-gating.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    // Create a table with a named index.
+    let v1 = CollectionDescriptor {
+        name: "logs".into(),
+        fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![IndexDescriptor { name: "logs_level_idx".into(), columns: vec!["level".into()], unique: false }],
+    };
+    let d1 = desired_snapshot(&[v1]);
+    apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("create logs");
+
+    // Desire the index GONE.
+    let v2 = CollectionDescriptor {
+        name: "logs".into(),
+        fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let d2 = desired_snapshot(&[v2]);
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+    let plan = engine
+        .plan_declarative(&d2, &live, &author, &guard_cfg(&cfg))
+        .expect("plan drop index");
+    assert!(!plan.destructive, "DROP INDEX is not data loss");
+    assert!(!plan.requires_approval, "DROP INDEX must not require approval");
+
+    // Applies WITHOUT approval; the index is gone, re-diff clean.
+    engine.apply(&plan, Approval::None, &conn, &cfg, "app_test").await.expect("apply drop index");
+    let live_after = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
+    assert!(
+        !live_after.tables["logs"].indexes.iter().any(|i| i.name == "logs_level_idx"),
+        "index must be gone after the ungated drop"
+    );
+    assert!(diff_snapshots(&d2, &live_after).is_clean(), "re-diff clean after drop index");
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn malicious_type_in_descriptor_never_reaches_db_unguarded() {
+    // A malicious DSL type string maps to `text` (the conservative fallback) and
+    // can never inject DDL: the desired column's data_type is a fixed mapping
+    // output, validated by validate_type at the author boundary, and the
+    // generated SQL still passes through the guard. Build a descriptor whose
+    // type is a SQL-injection attempt and assert it produces a guard-safe,
+    // denial-free plan (no bypass) AND the emitted type is the safe fallback.
+    let cfg = cfg_for(&token());
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let desc = CollectionDescriptor {
+        name: "safe".into(),
+        fields: vec![FieldDescriptor {
+            name: "f".into(),
+            ty: "text; DROP TABLE control.users; --".into(),
+            required: false,
+            unique: false,
+            references: None,
+        }],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&[desc]);
+    // The malicious type maps to the `text` fallback — no injection in the
+    // desired snapshot at all.
+    assert_eq!(desired.tables["safe"].columns.iter().find(|c| c.name == "f").unwrap().data_type, "text");
+
+    let migs = author.diff(&desired, &SchemaSnapshot::default()).expect("diff");
+    let plan = engine.plan(&migs, &guard_cfg(&cfg));
+    assert!(plan.denied.is_empty(), "generated SQL must be guard-safe: {:?}", plan.denied);
+    // And the rendered CREATE TABLE contains the safe `text` type, not the payload.
+    let create = migs.iter().find(|m| m.name == "create_table_safe").unwrap();
+    assert!(create.up.contains("\"f\" text"), "up = {}", create.up);
+    assert!(!create.up.contains("DROP TABLE control"), "payload leaked into SQL: {}", create.up);
 }

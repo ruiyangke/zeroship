@@ -6,7 +6,8 @@
 //! (`{ _meta, _indexes, <field>: { type, required, unique, default, ref } }`). This
 //! module turns that declared schema into a deterministic [`SchemaSnapshot`]
 //! ([`desired_snapshot`], P0) and then **diffs** it against the live snapshot to
-//! generate migrations ([`DeclarativeAuthor::diff`], P1/P2).
+//! generate migrations ([`DeclarativeAuthor::diff`], P1 additive + P2
+//! destructive-gated).
 //!
 //! The differ is a new **author**, not a new executor: every [`Migration`] it
 //! produces still flows through the unchanged
@@ -315,9 +316,10 @@ pub enum DeclarativeError {
     /// `validate_type`). Nothing is generated.
     #[error("invalid descriptor: {0}")]
     Invalid(String),
-    /// The diff requires an op P1 does not generate: a destructive DROP (a
-    /// live-only table/column/index — classified + gated in P2) or an ALTER
-    /// COLUMN TYPE / RENAME (P3). Surfaced explicitly — never silently skipped.
+    /// The diff requires an op v1 does not generate: an ALTER COLUMN TYPE or a
+    /// RENAME (deferred to P3 — there is deliberately NO auto type-change).
+    /// Surfaced explicitly — never silently skipped. (Destructive DROPs are
+    /// handled in P2 as gated migrations, not this error.)
     #[error("unsupported in v1 (deferred to a later phase): {0}")]
     UnsupportedInV1(String),
 }
@@ -390,12 +392,18 @@ impl DeclarativeAuthor {
     /// - **ADD COLUMN** — a column in desired, absent in a live table;
     /// - **CREATE INDEX** — an index in desired, absent in a live table.
     ///
-    /// A live-only object (a would-be **DROP TABLE / DROP COLUMN / DROP INDEX**)
-    /// is destructive; P1 does not generate drops — they are classified (gated)
-    /// in P2. Until then they are surfaced as
-    /// [`DeclarativeError::UnsupportedInV1`] — explicit, never a silent skip.
+    /// P2 (destructive, gated) handles a live-only object (absent in desired):
+    /// - **DROP TABLE / DROP COLUMN** — DATA LOSS: the classifier/guard marks
+    ///   these destructive, so the existing engine gate refuses them without
+    ///   [`Approval::Approved`](crate::Approval). NEVER auto-applied.
+    /// - **DROP INDEX** — NOT data loss (reversible by recreating the index), so
+    ///   the guard does not mark it destructive and it flows through ungated, the
+    ///   same as an additive op. (The gate is guard-driven; the differ does not
+    ///   override the security core's data-loss judgement.)
+    ///
     /// A same-name column whose **type or nullability** differs (an ALTER) is
-    /// likewise `UnsupportedInV1` (deferred to P3).
+    /// [`DeclarativeError::UnsupportedInV1`] — explicit, never silent (deferred
+    /// to P3; no auto type-change).
     ///
     /// Ordering: CREATE TABLE precede their own indexes; FK-target tables are
     /// created before referencing tables (deferred FK breaks cycles); the
@@ -409,8 +417,8 @@ impl DeclarativeAuthor {
     #[allow(
         clippy::too_many_lines,
         reason = "the diff is one cohesive pass — new tables (FK-ordered), \
-                  deferred FKs, then per-table column/index reconciliation — that \
-                  reads more clearly as a single function than split across \
+                  deferred FKs, then per-table column/index add + gated drops — \
+                  that reads more clearly as a single function than split across \
                   helpers that would each need the shared created_version map"
     )]
     pub fn diff(
@@ -541,15 +549,10 @@ impl DeclarativeAuthor {
                 }
             }
 
-            // DROP COLUMN: a live-only column is a destructive drop. P1 does
-            // not generate drops — they are classified (gated) in P2. Surface it
-            // explicitly so it is never a SILENT skip.
+            // DROP COLUMN (P2): in live, not in desired → destructive, gated.
             for c in &lt.columns {
                 if !desired_cols.contains_key(c.name.as_str()) {
-                    return Err(DeclarativeError::UnsupportedInV1(format!(
-                        "column {table}.{} would be dropped (destructive — classified in P2)",
-                        c.name
-                    )));
+                    out.push(self.render_drop_column(table, &c.name));
                 }
             }
 
@@ -571,21 +574,15 @@ impl DeclarativeAuthor {
                     continue; // never drop the PK's implicit index
                 }
                 if !desired_idx.contains_key(idx.name.as_str()) {
-                    return Err(DeclarativeError::UnsupportedInV1(format!(
-                        "index {} would be dropped (destructive — classified in P2)",
-                        idx.name
-                    )));
+                    out.push(self.render_drop_index(idx));
                 }
             }
         }
 
-        // DROP TABLE: a live-only table is a destructive drop — classified
-        // (gated) in P2, surfaced explicitly here (never a silent skip).
+        // --- DROP TABLE (P2): in live, not in desired → destructive, gated. ---
         for table in live.tables.keys() {
             if !desired.tables.contains_key(table) {
-                return Err(DeclarativeError::UnsupportedInV1(format!(
-                    "table {table} would be dropped (destructive — classified in P2)"
-                )));
+                out.push(self.render_drop_table(table));
             }
         }
 
@@ -743,6 +740,62 @@ impl DeclarativeAuthor {
         )
     }
 
+    /// Render a destructive (gated) `DROP TABLE` — `destructive = true,
+    /// requires_approval = true` so the gate refuses it without approval.
+    fn render_drop_table(&self, table: &str) -> Migration {
+        let up = format!("DROP TABLE {}", self.qualified(table));
+        self.make(
+            &format!("drop_table_{table}"),
+            up,
+            None,
+            destructive_flags(),
+            Vec::new(),
+        )
+    }
+
+    /// Render a destructive (gated) `DROP COLUMN`.
+    fn render_drop_column(&self, table: &str, col: &str) -> Migration {
+        let up = format!(
+            "ALTER TABLE {} DROP COLUMN {}",
+            self.qualified(table),
+            quote_ident(col)
+        );
+        self.make(
+            &format!("drop_column_{table}_{col}"),
+            up,
+            None,
+            destructive_flags(),
+            Vec::new(),
+        )
+    }
+
+    /// Render a `DROP INDEX`. Unlike DROP TABLE / DROP COLUMN, dropping an index
+    /// is **not data loss** — it is fully reversible by recreating the index — so
+    /// the classifier/guard does NOT mark it destructive and the engine gate does
+    /// not require approval for it. The migration carries default
+    /// (non-destructive) flags accordingly; `down` recreates nothing because the
+    /// declarative re-diff would re-add the index from the desired snapshot.
+    fn render_drop_index(&self, idx: &IndexSnapshot) -> Migration {
+        let up = format!("DROP INDEX {}", self.qualified(&idx.name));
+        self.make(
+            &format!("drop_index_{}", idx.name),
+            up,
+            None,
+            MigrationFlags::default(),
+            Vec::new(),
+        )
+    }
+}
+
+/// Flags for a destructive, gated drop: `destructive` + `requires_approval` so
+/// the existing engine gate refuses it without [`crate::Approval::Approved`].
+/// The drop is NEVER auto-applied.
+fn destructive_flags() -> MigrationFlags {
+    MigrationFlags {
+        destructive: true,
+        requires_approval: true,
+        ..MigrationFlags::default()
+    }
 }
 
 /// Map an `information_schema` data-type spelling back to the DDL spelling for
