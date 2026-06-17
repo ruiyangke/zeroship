@@ -52,12 +52,28 @@
 //! is already net-applied it returns [`SubmissionOutcome::NoOp`] WITHOUT a second
 //! journal apply. (Name is intentionally not part of the key: a re-submit that
 //! only renames the human label is the same applied unit.)
+//!
+//! ## Concurrency: dedup→apply is one locked critical section (HIGH-1)
+//!
+//! The dedup read and the apply MUST be serialized as ONE critical section under
+//! the project advisory lock. The dedup key is the checksum, but the executor's
+//! pending computation dedups by VERSION — and a fresh [`MigrationId`] is minted
+//! every call. So if the dedup read ran unlocked, two concurrent identical
+//! submissions would mint different versions, both pass the unlocked dedup, and
+//! both apply (a double-apply of a non-idempotent `up`). [`submit_migration`]
+//! therefore acquires the project advisory lock (the H10 `acquire_project_lock_outer`
+//! mechanism) BEFORE the dedup read and holds it across the apply — driving the
+//! inner [`MigrationEngine::apply_with_lock`] with [`LockMode::AlreadyHeld`] so the
+//! executor does not re-acquire it — and releases it on every exit path. The
+//! second submission blocks until the first has applied + journaled, then its
+//! dedup read sees the net-applied checksum and returns [`SubmissionOutcome::NoOp`].
 
 use compio_postgres::Client;
 
 use crate::approval::Approval;
 use crate::db::ExecutorConfig;
 use crate::engine::{EngineError, MigrationEngine};
+use crate::executor::{self, LockMode};
 use crate::guard::{flags_for, GuardConfig, GuardError, SqlGuard};
 use crate::journal::{self, JournalError};
 use crate::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
@@ -289,15 +305,83 @@ pub async fn submit_migration(
     // ---- 3. LINT (advisories carried through; never gate) ----
     let advisories = crate::analyze::analyze(&submission.up);
 
+    // ---- CRITICAL SECTION: acquire the project advisory lock for dedup→apply ----
+    //
+    // HIGH-1 — the dedup read and the apply MUST be serialized as one critical
+    // section. A fresh `MigrationId` is minted every call, so two concurrent
+    // identical submissions would mint different versions; the executor's pending
+    // computation dedups by VERSION (not checksum), so both would pass an unlocked
+    // checksum dedup and both apply (double-apply of a non-idempotent `up`).
+    //
+    // Fix: take the project advisory lock HERE — before the dedup read — and hold
+    // it across dry-run → gate → apply, driving the inner apply with
+    // `LockMode::AlreadyHeld` so `engine.apply_with_lock` does NOT re-acquire /
+    // re-release it. The second submission blocks on this lock until the first has
+    // applied + journaled, then its dedup read sees the now-net-applied checksum
+    // and returns `NoOp`. The lock is released on EVERY exit path below
+    // (NoOp / DryRunFailed / ApprovalRequired / Applied / error) — mirroring
+    // `engine::apply_declarative`'s release-on-every-path discipline.
+    executor::acquire_project_lock_outer(conn, &cfg.project_id)
+        .await
+        .map_err(EngineError::from)?;
+
+    let outcome = submit_locked(
+        conn,
+        admin_conn,
+        cfg,
+        shadow_cfg,
+        &guard_cfg,
+        &migration,
+        &checksum,
+        version,
+        advisories,
+        approval,
+        applied_by,
+    )
+    .await;
+
+    // Release on EVERY path (success/outcome/error). Surface the inner result
+    // first; a release failure is only logged (the lock auto-releases on session
+    // end regardless). Mirrors `apply_declarative`'s H10 discipline.
+    if let Err(e) = executor::release_project_lock_outer(conn, &cfg.project_id).await {
+        tracing::warn!(
+            error = %e,
+            project = %cfg.project_id,
+            "zeroship-migrate: failed to release project lock after submit (HIGH-1)"
+        );
+    }
+
+    outcome
+}
+
+/// The body of [`submit_migration`] run while the project advisory lock is held
+/// (HIGH-1): dedup read → dry-run → gate → apply. The lock serializes the whole
+/// section so two concurrent identical submissions can never both apply. Driving
+/// the inner apply with [`LockMode::AlreadyHeld`] keeps the executor from
+/// re-acquiring the lock the caller already owns.
+#[allow(clippy::too_many_arguments)]
+async fn submit_locked(
+    conn: &Client,
+    admin_conn: &Client,
+    cfg: &ExecutorConfig,
+    shadow_cfg: &ShadowConfig,
+    guard_cfg: &GuardConfig,
+    migration: &Migration,
+    checksum: &Checksum,
+    version: MigrationId,
+    advisories: Vec<crate::analyze::Advisory>,
+    approval: Approval,
+    applied_by: &str,
+) -> Result<SubmissionOutcome, SubmitError> {
     // ---- idempotency: dedup by CHECKSUM against the journal's net-applied set ----
     // A fresh version is minted each call, so the checksum (which folds the whole
     // apply-relevant unit and excludes version/name) is the stable dedup key. If
     // this exact unit is already net-applied, short-circuit to NoOp BEFORE the
-    // dry-run/gate/apply — a re-submit is a no-op, not a duplicate apply.
+    // dry-run/gate/apply — a re-submit is a no-op, not a duplicate apply. The read
+    // runs under the held lock, so a concurrent identical submission that already
+    // applied is visible here (HIGH-1).
     let applied = journal::applied(conn, cfg).await?;
-    let already_applied = applied
-        .iter()
-        .any(|e| e.checksum == checksum.as_str());
+    let already_applied = applied.iter().any(|e| e.checksum == checksum.as_str());
     if already_applied {
         return Ok(SubmissionOutcome::NoOp { version });
     }
@@ -306,9 +390,14 @@ pub async fn submit_migration(
     // Seeds the shadow from the CURRENT LIVE structure then applies THIS migration
     // on the shadow. The real DB is never touched. A migration FAILING here is a
     // DryRunFailed outcome (not a SubmitError); only a harness fault is an error.
-    let report =
-        dry_run_incremental(admin_conn, std::slice::from_ref(&migration), cfg, shadow_cfg, applied_by)
-            .await?;
+    let report = dry_run_incremental(
+        admin_conn,
+        std::slice::from_ref(migration),
+        cfg,
+        shadow_cfg,
+        applied_by,
+    )
+    .await?;
     if !report.ok {
         // Surface the offending migration's error from the per-migration report.
         let error = report
@@ -335,10 +424,12 @@ pub async fn submit_migration(
     // The engine re-plans (guard) + gates + delegates to executor::apply, which
     // independently re-runs the guard and runs the DDL under the least-privilege
     // migrator role + journal (defense in depth). We forward the approval decision.
+    // `LockMode::AlreadyHeld`: we already hold the project advisory lock (HIGH-1),
+    // so the executor must NOT re-acquire/re-release it.
     let engine = MigrationEngine::new();
-    let plan = engine.plan(std::slice::from_ref(&migration), &guard_cfg);
+    let plan = engine.plan(std::slice::from_ref(migration), guard_cfg);
     engine
-        .apply(&plan, approval, conn, cfg, applied_by)
+        .apply_with_lock(&plan, approval, conn, cfg, applied_by, LockMode::AlreadyHeld)
         .await?;
 
     Ok(SubmissionOutcome::Applied {

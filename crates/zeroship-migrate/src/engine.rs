@@ -478,6 +478,32 @@ impl MigrationEngine {
             .await
     }
 
+    /// [`apply`](Self::apply) with an explicit [`LockMode`] (H10 mechanism).
+    ///
+    /// Public peer of [`apply`](Self::apply) for an OUTER caller that already
+    /// holds the project advisory lock on `conn` (e.g. the submission adapter,
+    /// which acquires the lock around dedup-read → apply to close the
+    /// concurrent-double-apply window, HIGH-1). Such a caller passes
+    /// [`LockMode::AlreadyHeld`] so the executor does NOT re-acquire / re-release
+    /// the lock it does not own; the outer caller is responsible for releasing it
+    /// on every exit path. The denial / approval gate runs identically in both
+    /// modes.
+    ///
+    /// # Errors
+    /// Same as [`apply`](Self::apply).
+    pub async fn apply_with_lock(
+        &self,
+        plan: &MigrationPlan,
+        approval: Approval,
+        conn: &Client,
+        exec_cfg: &ExecutorConfig,
+        applied_by: &str,
+        lock_mode: LockMode,
+    ) -> Result<ApplyOutcome, EngineError> {
+        self.apply_inner(plan, approval, conn, exec_cfg, applied_by, lock_mode)
+            .await
+    }
+
     /// [`apply`](Self::apply) with an explicit [`LockMode`] (H10).
     ///
     /// `LockMode::Acquire` is the standalone path (the executor takes the project

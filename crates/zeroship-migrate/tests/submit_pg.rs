@@ -647,3 +647,110 @@ async fn idempotent_resubmit_is_a_noop() {
 
     teardown(&conn, &cfg).await;
 }
+
+/// HIGH-1 — two CONCURRENT identical submissions of a NON-idempotent `up` race
+/// the dedup→apply critical section. Exactly ONE must `Applied` and the other
+/// `NoOp`; the `up` must run EXACTLY ONCE (one table, one journal completed row).
+///
+/// # Why this is RED pre-fix and GREEN post-fix
+///
+/// PRE-FIX: the checksum dedup read ran with NO lock held; the project advisory
+/// lock was taken only later inside `executor::apply`, which dedups PENDING by
+/// VERSION (each call mints a fresh `MigrationId`). So both submissions passed the
+/// unlocked dedup and both reached apply. The `CREATE TABLE` has no
+/// `IF NOT EXISTS`, so the second apply fails on the real DB (table already
+/// exists) — surfaced as a `SubmitError` (apply failure) or a duplicate journal
+/// row. Either way this test fails.
+///
+/// POST-FIX: the adapter holds the project advisory lock across dedup→apply. The
+/// second submission blocks until the first has applied + journaled, then its
+/// dedup read sees the now-net-applied checksum and returns `NoOp`. Exactly one
+/// `Applied`, one `NoOp`, one table, one journal row.
+///
+/// Both submissions run on SEPARATE sessions (separate `conn`s) so the
+/// session-scoped advisory lock genuinely contends across backends.
+#[compio::test]
+async fn concurrent_identical_submissions_apply_exactly_once() {
+    let conn1 = pg().await;
+    let admin1 = pg().await;
+    let conn2 = pg().await;
+    let admin2 = pg().await;
+    let observer = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    let (shadow_cfg1, _p1) = unique_shadow_cfg();
+    let (shadow_cfg2, _p2) = unique_shadow_cfg();
+    setup(&conn1, &cfg).await;
+
+    // A NON-idempotent `up`: a bare CREATE TABLE (no IF NOT EXISTS). A double-apply
+    // fails the second time (relation already exists).
+    let up = format!(
+        "CREATE TABLE \"{}\".ledger (id bigint PRIMARY KEY, amount int)",
+        cfg.project_schema
+    );
+
+    // Spawn submission #1 on its own session.
+    let cfg_a = cfg.clone();
+    let up_a = up.clone();
+    let task1 = compio::runtime::spawn(async move {
+        submit_migration(
+            &conn1,
+            &admin1,
+            &cfg_a,
+            &shadow_cfg1,
+            submission("create_ledger", &up_a),
+            Approval::None,
+            "app_test",
+        )
+        .await
+    });
+
+    // Run submission #2 concurrently on a second session.
+    let r2 = submit_migration(
+        &conn2,
+        &admin2,
+        &cfg,
+        &shadow_cfg2,
+        submission("create_ledger", &up),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("submit #2 (no infrastructure fault)");
+
+    let r1 = task1
+        .await
+        .expect("submit #1 task join")
+        .expect("submit #1 (no infrastructure fault)");
+
+    // Exactly one Applied, exactly one NoOp — in EITHER order.
+    let applied = [&r1, &r2]
+        .iter()
+        .filter(|o| matches!(o, SubmissionOutcome::Applied { .. }))
+        .count();
+    let noop = [&r1, &r2]
+        .iter()
+        .filter(|o| matches!(o, SubmissionOutcome::NoOp { .. }))
+        .count();
+    assert_eq!(
+        applied, 1,
+        "exactly one concurrent submission must Apply, got r1={r1:?} r2={r2:?}"
+    );
+    assert_eq!(
+        noop, 1,
+        "the other concurrent submission must NoOp, got r1={r1:?} r2={r2:?}"
+    );
+
+    // The `up` ran EXACTLY ONCE: one table, one completed journal row.
+    assert!(
+        table_exists(&observer, &cfg.project_schema, "ledger").await,
+        "the ledger table must exist after the single apply"
+    );
+    assert_eq!(
+        journal_completed_count(&observer, &cfg).await,
+        1,
+        "exactly one journal completed row — no double apply"
+    );
+
+    teardown(&observer, &cfg).await;
+}
