@@ -1104,3 +1104,28 @@ async fn all_twelve_supported_types_still_map() {
         );
     }
 }
+
+#[compio::test]
+async fn duplicate_table_name_across_descriptors_is_rejected_not_silently_merged() {
+    // #6: two descriptors naming the same table must error (DuplicateTable),
+    // never silently merge (last-writer-wins clobbers the first descriptor's
+    // columns with no error). The first declares `a`, the second declares `b`;
+    // a silent merge would drop column `a` with no signal.
+    let cfg = cfg_for(&token());
+    let first = CollectionDescriptor {
+        name: "dup".into(),
+        fields: vec![FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let second = CollectionDescriptor {
+        name: "dup".into(),
+        fields: vec![FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let err = desired_snapshot(&cfg.project_schema, &[first, second]).unwrap_err();
+    assert!(
+        matches!(err, DeclarativeError::DuplicateTable { ref table } if table == "dup"),
+        "got {err:?}"
+    );
+}
+
