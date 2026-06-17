@@ -28,7 +28,7 @@ use compio_postgres::Client;
 pub use crate::approval::Approval;
 use crate::db::ExecutorConfig;
 use crate::executor::{
-    self, ApplyError, ApplyOutcome, RollbackError, RollbackOutcome, RollbackRequest,
+    self, ApplyError, ApplyOutcome, LockMode, RollbackError, RollbackOutcome, RollbackRequest,
 };
 use crate::guard::{GuardConfig, GuardError, GuardReport, SqlGuard};
 use crate::manifest::{verify_manifest, ManifestError, ManifestHash};
@@ -290,15 +290,74 @@ impl MigrationEngine {
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
-        // 1. The plain additive / destructive set, through the existing gate.
-        let mut applied = self.apply(&plan.plain, approval, conn, exec_cfg, applied_by).await?;
+        // H10 — hold the project advisory lock for the WHOLE declarative deploy.
+        //
+        // A declarative deploy is several sub-batches: the plain set plus one
+        // expand per rename, each of which (left to itself) would acquire AND
+        // RELEASE the project advisory lock. Releasing between sub-batches frees
+        // the lock, letting a concurrent deploy for the SAME project interleave
+        // its own sub-batch — so a multi-rename deploy would NOT be serialized as
+        // a whole, violating design §2.3 ("serialize ALL migration activity").
+        //
+        // Fix: acquire the lock ONCE here, drive every inner sub-batch with
+        // `LockMode::AlreadyHeld` (skip their acquire/release), and release ONCE
+        // on EVERY exit path below (success/error/early-return) — mirroring
+        // `executor::apply`'s release-on-every-path discipline. The lock is taken
+        // exactly once and freed exactly once per declarative deploy; it is never
+        // free between sub-batches.
+        //
+        // We acquire the lock BEFORE the gate's denial/approval check is performed
+        // inside `apply_inner`; that check still runs (with `AlreadyHeld`) and can
+        // return early — every such early return runs through `release_or_warn`
+        // below, so the lock is never held forever on a gate rejection.
+        executor::acquire_project_lock_outer(conn, &exec_cfg.project_id)
+            .await
+            .map_err(EngineError::from)?;
+
+        let result = self
+            .apply_declarative_locked(plan, approval, conn, exec_cfg, applied_by)
+            .await;
+
+        // Release on EVERY path. Surface the deploy error first; a release failure
+        // is logged (the lock auto-releases on session end regardless).
+        if let Err(e) =
+            executor::release_project_lock_outer(conn, &exec_cfg.project_id).await
+        {
+            tracing::warn!(
+                error = %e,
+                project = %exec_cfg.project_id,
+                "zeroship-migrate: failed to release project lock after apply_declarative (H10)"
+            );
+        }
+
+        result
+    }
+
+    /// The body of [`apply_declarative`](Self::apply_declarative), run while the
+    /// outer project advisory lock is held (H10). Each inner sub-batch is driven
+    /// with [`LockMode::AlreadyHeld`] so it does NOT re-acquire / re-release the
+    /// lock — the lock is owned by `apply_declarative` for the whole deploy.
+    async fn apply_declarative_locked(
+        &self,
+        plan: &DeclarativeDeployPlan,
+        approval: Approval,
+        conn: &Client,
+        exec_cfg: &ExecutorConfig,
+        applied_by: &str,
+    ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
+        // 1. The plain additive / destructive set, through the existing gate
+        //    (denial / approval), but with the lock already held outside it.
+        let mut applied = self
+            .apply_inner(&plan.plain, approval, conn, exec_cfg, applied_by, LockMode::AlreadyHeld)
+            .await?;
 
         // 2. Each rename's EXPAND, through run_expand (real backfill; E3 journaled
-        //    after). 3. Collect the contract as the deferred set.
+        //    after) — also with the lock already held. 3. Collect the contract as
+        //    the deferred set.
         let mut pending_contract: Vec<Migration> = Vec::new();
         for rename in &plan.renames {
             let outcome = self
-                .run_expand(rename, approval, conn, exec_cfg, applied_by)
+                .run_expand_with_lock(rename, approval, conn, exec_cfg, applied_by, LockMode::AlreadyHeld)
                 .await?;
             applied.applied.extend(outcome.applied);
             applied.skipped.extend(outcome.skipped);
@@ -339,6 +398,30 @@ impl MigrationEngine {
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
     ) -> Result<ApplyOutcome, EngineError> {
+        // Standalone caller: the executor acquires + releases the project lock.
+        self.apply_inner(plan, approval, conn, exec_cfg, applied_by, LockMode::Acquire)
+            .await
+    }
+
+    /// [`apply`](Self::apply) with an explicit [`LockMode`] (H10).
+    ///
+    /// `LockMode::Acquire` is the standalone path (the executor takes the project
+    /// advisory lock per batch). `LockMode::AlreadyHeld` is the declarative path:
+    /// [`apply_declarative`](Self::apply_declarative) holds the lock for the whole
+    /// deploy, so the inner plain-set apply must NOT re-acquire/re-release it.
+    ///
+    /// The denial / approval gate runs identically in both modes — an early gate
+    /// rejection under `AlreadyHeld` returns without touching the lock (the outer
+    /// `apply_declarative` still releases it), so the lock is never leaked.
+    async fn apply_inner(
+        &self,
+        plan: &MigrationPlan,
+        approval: Approval,
+        conn: &Client,
+        exec_cfg: &ExecutorConfig,
+        applied_by: &str,
+        lock_mode: LockMode,
+    ) -> Result<ApplyOutcome, EngineError> {
         // Gate 1: a denied plan can never be applied.
         if !plan.denied.is_empty() {
             return Err(EngineError::Denied(plan.denied.clone()));
@@ -355,7 +438,9 @@ impl MigrationEngine {
         // Forward the approval decision: the executor re-runs its OWN destructive
         // gate (defense in depth — design §1.6), so the gate here is additional,
         // not a replacement.
-        let outcome = executor::apply(conn, exec_cfg, &migrations, approval, applied_by).await?;
+        let outcome =
+            executor::apply_with_lock(conn, exec_cfg, &migrations, approval, applied_by, lock_mode)
+                .await?;
         Ok(outcome)
     }
 
@@ -582,6 +667,35 @@ impl MigrationEngine {
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
     ) -> Result<ApplyOutcome, OnlineError> {
+        // Standalone caller: each E1+E2 / E3 apply takes the project lock itself.
+        self.run_expand_with_lock(plan, approval, conn, exec_cfg, applied_by, LockMode::Acquire)
+            .await
+    }
+
+    /// [`run_expand`](Self::run_expand) with an explicit [`LockMode`] (H10).
+    ///
+    /// `LockMode::Acquire` is the standalone path (each inner E1+E2 / E3 apply
+    /// takes + releases the project lock). `LockMode::AlreadyHeld` is the
+    /// declarative path: [`apply_declarative`](Self::apply_declarative) holds the
+    /// project advisory lock for the whole deploy, so each inner apply here must
+    /// NOT re-acquire/re-release it.
+    ///
+    /// The backfill ([`run_backfill`](crate::backfill::run_backfill)) is
+    /// unaffected by the mode: it uses a per-batch **transaction-scoped**
+    /// `pg_advisory_xact_lock`, which is re-entrant within the session that
+    /// already holds the session-scoped project lock (it succeeds immediately and
+    /// auto-releases at each batch COMMIT), while a SECOND connection still blocks
+    /// on the held session lock. So the whole-deploy serialization is preserved
+    /// through the backfill too, without ever freeing the project lock.
+    async fn run_expand_with_lock(
+        &self,
+        plan: &crate::expand_contract::ExpandContractPlan,
+        approval: Approval,
+        conn: &Client,
+        exec_cfg: &ExecutorConfig,
+        applied_by: &str,
+        lock_mode: LockMode,
+    ) -> Result<ApplyOutcome, OnlineError> {
         if approval != Approval::Approved {
             return Err(OnlineError::Approval);
         }
@@ -596,13 +710,15 @@ impl MigrationEngine {
             });
         };
         // 1. Apply E1 + E2 — trigger live before any backfill row is touched.
-        let mut outcome = executor::apply(conn, exec_cfg, head, approval, applied_by).await?;
+        let mut outcome =
+            executor::apply_with_lock(conn, exec_cfg, head, approval, applied_by, lock_mode).await?;
         // 2. Run the real backfill (mirrors pre-existing rows).
         crate::backfill::run_backfill(conn, exec_cfg, &plan.backfill, approval, applied_by).await?;
         // 3. Journal E3 (the backfill marker) — records the backfill complete, so
         //    the gate now sees the expand fully applied and the contract may land.
         let e3_outcome =
-            executor::apply(conn, exec_cfg, std::slice::from_ref(e3), approval, applied_by).await?;
+            executor::apply_with_lock(conn, exec_cfg, std::slice::from_ref(e3), approval, applied_by, lock_mode)
+                .await?;
         outcome.applied.extend(e3_outcome.applied);
         outcome.recovered.extend(e3_outcome.recovered);
         Ok(outcome)
