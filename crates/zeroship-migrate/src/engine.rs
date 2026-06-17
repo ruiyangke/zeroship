@@ -31,6 +31,7 @@ use crate::executor::{
     self, ApplyError, ApplyOutcome, RollbackError, RollbackOutcome, RollbackRequest,
 };
 use crate::guard::{GuardConfig, GuardError, GuardReport, SqlGuard};
+use crate::manifest::{verify_manifest, ManifestError, ManifestHash};
 use crate::migration::Migration;
 
 /// One linted migration in a [`MigrationPlan`].
@@ -90,6 +91,14 @@ pub enum EngineError {
     /// executor's own re-run of the guard denied a migration — defense in depth).
     #[error(transparent)]
     Apply(#[from] ApplyError),
+    /// The supplied migration set did not match the expected integrity manifest
+    /// (v3 Plan F) — the bundle was reordered / edited / inserted-into / removed-
+    /// from relative to the trusted [`ManifestHash`] stamped at build/review time.
+    /// Refused by [`MigrationEngine::apply_verified`] **before** the advisory lock
+    /// or any DDL: NOTHING was applied. Carries the
+    /// [`ManifestError`](crate::manifest::ManifestError) diagnostic.
+    #[error(transparent)]
+    Manifest(#[from] ManifestError),
 }
 
 /// A failure from [`MigrationEngine::rollback`].
@@ -348,6 +357,85 @@ impl MigrationEngine {
         // not a replacement.
         let outcome = executor::apply(conn, exec_cfg, &migrations, approval, applied_by).await?;
         Ok(outcome)
+    }
+
+    /// Apply a migration set, **verifying its set-level integrity manifest first**
+    /// (v3 Plan F — the pre-apply gate).
+    ///
+    /// This is the trusted-deploy entry point. Before ANY apply work — before the
+    /// guard/approval gate, before [`executor::apply`](crate::executor::apply)
+    /// acquires the project advisory lock, before a single statement of DDL runs —
+    /// it recomputes the integrity manifest over the SUPPLIED `migrations` (in the
+    /// given order) and compares it to `expected`:
+    ///
+    /// - `Some(expected)` ⇒ **verify-then-apply.** A mismatch (the bundle was
+    ///   reordered / content-edited / inserted-into / removed-from relative to the
+    ///   trusted manifest) returns [`EngineError::Manifest`] and applies NOTHING —
+    ///   no lock taken, no journal touched, no DDL run. A match falls through to
+    ///   the normal gated [`apply`](Self::apply).
+    /// - `None` ⇒ **apply unverified.** For internal callers that have no manifest
+    ///   to check against (e.g. a freshly-authored in-process set that never left
+    ///   the trust boundary). Identical to calling [`apply`](Self::apply) directly.
+    ///
+    /// # Order matters: verify BEFORE the lock
+    ///
+    /// The verification runs in THIS method, before `apply` (and therefore before
+    /// `executor::apply`'s `pg_advisory_lock`). A tampered set is rejected without
+    /// ever contending for the lock or opening a transaction — the gate cannot be
+    /// raced past, and a refusal leaves the database and journal completely
+    /// untouched.
+    ///
+    /// # Trust model — caller contract
+    ///
+    /// `expected` MUST be supplied by a **trusted** source: the control plane,
+    /// which stamps the [`ManifestHash`] at build / review time and holds it
+    /// out-of-band. It MUST NOT be read from the same bundle `migrations` arrived
+    /// in — an attacker who can edit the migrations can equally edit a hash
+    /// shipped alongside them, and the check would then verify a tampered set
+    /// against its own tampered hash (vacuously passing). The manifest is a check
+    /// of *the bundle* against *an independently-held expectation*. See
+    /// [`crate::manifest`].
+    ///
+    /// # What set is verified
+    ///
+    /// The manifest is verified over the plan's `items` **in input order** — the
+    /// migrations that will actually be applied, in the order the control plane
+    /// stamped at review time. On the trusted happy path the plan has no denials,
+    /// so `items` is exactly the authored set; a reorder / content-edit /
+    /// insertion / removal of that set changes the recomputed hash and is refused
+    /// here, before the gate / lock / any DDL. (A guard *denial* is an orthogonal
+    /// failure surfaced by [`apply`](Self::apply) as [`EngineError::Denied`].)
+    ///
+    /// # Errors
+    /// - [`EngineError::Manifest`] — the plan's set did not match `expected`
+    ///   (only possible when `expected` is `Some`). Refused before the
+    ///   gate/lock/DDL; nothing applied.
+    /// - [`EngineError::Denied`] / [`EngineError::ApprovalRequired`] /
+    ///   [`EngineError::Apply`] — the same gate + executor errors as
+    ///   [`apply`](Self::apply), after a successful (or skipped) manifest check.
+    pub async fn apply_verified(
+        &self,
+        plan: &MigrationPlan,
+        expected: Option<&ManifestHash>,
+        approval: Approval,
+        conn: &Client,
+        exec_cfg: &ExecutorConfig,
+        applied_by: &str,
+    ) -> Result<ApplyOutcome, EngineError> {
+        // Pre-apply manifest gate (v3 Plan F): recompute over the plan's items, in
+        // input order, and refuse a mismatch BEFORE the gate / lock / any DDL. The
+        // manifest covers EVERY item's (version, checksum) and their order, so a
+        // reorder / edit / insertion / removal is caught here — before the
+        // executor takes the advisory lock.
+        if let Some(expected) = expected {
+            let supplied: Vec<Migration> =
+                plan.items.iter().map(|p| p.migration.clone()).collect();
+            verify_manifest(&supplied, expected)?;
+        }
+        // Verified (or unverified by caller choice) ⇒ the normal gated apply, which
+        // re-runs the denial/approval gate and then the executor (guard + role +
+        // advisory lock). The lock is only ever taken AFTER the manifest passes.
+        self.apply(plan, approval, conn, exec_cfg, applied_by).await
     }
 
     /// Dry-run a migration batch against a throwaway **shadow DATABASE** clone
