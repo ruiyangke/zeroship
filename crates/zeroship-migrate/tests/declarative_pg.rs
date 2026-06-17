@@ -9,10 +9,10 @@
 
 use compio_postgres::Client;
 use zeroship_migrate::{
-    desired_snapshot, diff_snapshots, migrator_role_name, provision_migrator,
-    role::deprovision_migrator, snapshot_schema, Approval, CollectionDescriptor, DeclarativeAuthor,
-    DeclarativeError, EngineError, ExecutorConfig, FieldDescriptor, GuardConfig, IndexDescriptor,
-    MigrationEngine, SchemaSnapshot,
+    apply as executor_apply, desired_snapshot, diff_snapshots, migrator_role_name,
+    provision_migrator, role::deprovision_migrator, snapshot_schema, Approval, CollectionDescriptor,
+    DeclarativeAuthor, DeclarativeError, EngineError, ExecutorConfig, FieldDescriptor, GuardConfig,
+    IndexDescriptor, Migration, MigrationEngine, OnlinePhase, RenameHint, SchemaSnapshot,
 };
 
 const DEFAULT_DSN: &str =
@@ -97,7 +97,8 @@ async fn setup(conn: &Client, cfg: &ExecutorConfig) {
         .expect("provision migrator role");
 }
 
-/// Plan the desired-vs-live diff through `plan_declarative` and apply it.
+/// Plan the desired-vs-live diff through `plan_declarative` (no rename hints) and
+/// apply it.
 async fn apply_plan(
     engine: &MigrationEngine,
     desired: &SchemaSnapshot,
@@ -108,7 +109,7 @@ async fn apply_plan(
     approval: Approval,
 ) -> Result<(), EngineError> {
     let plan = engine
-        .plan_declarative(desired, live, author, &guard_cfg(cfg))
+        .plan_declarative(desired, live, author, &[], &guard_cfg(cfg))
         .expect("plan_declarative");
     engine.apply(&plan, approval, conn, cfg, "app_test").await?;
     Ok(())
@@ -449,7 +450,7 @@ async fn full_shape_round_trips_to_zero_drift_the_canonical_idempotency_oracle()
     );
 
     // And the differ itself re-diffs to ZERO migrations (true idempotency).
-    let migs = author.diff(&desired, &live2).expect("re-diff");
+    let migs = author.diff(&desired, &live2, &[]).expect("re-diff");
     assert!(
         migs.is_empty(),
         "re-diff must be empty, got {} migration(s): {:?}",
@@ -510,7 +511,7 @@ async fn changed_fk_target_is_unsupported_in_v1_not_silently_skipped() {
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[alpha, beta, child_v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
-    let err = author.diff(&d2, &live).unwrap_err();
+    let err = author.diff(&d2, &live, &[]).unwrap_err();
     assert!(matches!(err, DeclarativeError::UnsupportedInV1(_)), "got {err:?}");
 
     teardown(&conn, &cfg).await;
@@ -561,7 +562,7 @@ async fn long_table_and_field_unique_index_name_is_capped_and_re_diffs_clean() {
         .await
         .expect("apply long-name table");
     let live2 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
-    let migs = author.diff(&desired, &live2).expect("re-diff");
+    let migs = author.diff(&desired, &live2, &[]).expect("re-diff");
     assert!(
         migs.is_empty(),
         "long-name index churned (re-diff not empty): {:?}",
@@ -605,7 +606,7 @@ async fn index_uniqueness_flip_on_same_name_is_unsupported_in_v1_not_silent() {
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
-    let err = author.diff(&d2, &live).unwrap_err();
+    let err = author.diff(&d2, &live, &[]).unwrap_err();
     assert!(matches!(err, DeclarativeError::UnsupportedInV1(_)), "got {err:?}");
 
     teardown(&conn, &cfg).await;
@@ -637,7 +638,7 @@ async fn additive_diff_is_idempotent_second_plan_is_empty() {
     let live2 = snapshot_schema(&conn, &cfg.project_schema)
         .await
         .expect("re-snapshot");
-    let migs = author.diff(&desired, &live2).expect("second diff");
+    let migs = author.diff(&desired, &live2, &[]).expect("second diff");
     assert!(
         migs.is_empty(),
         "second diff should be empty (idempotent), got {} migration(s)",
@@ -758,7 +759,7 @@ async fn type_change_is_unsupported_in_v1_not_silently_skipped() {
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
 
-    let err = author.diff(&desired, &live).unwrap_err();
+    let err = author.diff(&desired, &live, &[]).unwrap_err();
     assert!(matches!(err, DeclarativeError::UnsupportedInV1(_)), "got {err:?}");
 }
 
@@ -772,7 +773,7 @@ async fn malicious_table_name_is_rejected_at_author_boundary() {
         indexes: vec![],
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
-    let err = author.diff(&desired, &SchemaSnapshot::default()).unwrap_err();
+    let err = author.diff(&desired, &SchemaSnapshot::default(), &[]).unwrap_err();
     assert!(matches!(err, DeclarativeError::Invalid(_)), "got {err:?}");
 }
 
@@ -792,7 +793,7 @@ async fn malicious_column_name_is_rejected_at_author_boundary() {
         indexes: vec![],
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
-    let err = author.diff(&desired, &SchemaSnapshot::default()).unwrap_err();
+    let err = author.diff(&desired, &SchemaSnapshot::default(), &[]).unwrap_err();
     assert!(matches!(err, DeclarativeError::Invalid(_)), "got {err:?}");
 }
 
@@ -817,7 +818,7 @@ async fn every_generated_migration_passes_through_the_guard_no_bypass() {
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
-    let migs = author.diff(&desired, &SchemaSnapshot::default()).expect("diff");
+    let migs = author.diff(&desired, &SchemaSnapshot::default(), &[]).expect("diff");
     assert!(!migs.is_empty(), "diff should generate migrations");
     let plan = engine.plan(&migs, &guard_cfg(&cfg));
     assert!(plan.denied.is_empty(), "generated SQL must not be denied: {:?}", plan.denied);
@@ -857,7 +858,7 @@ async fn drop_table_is_gated_and_not_auto_applied() {
     let empty = SchemaSnapshot::default();
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
     let plan = engine
-        .plan_declarative(&empty, &live, &author, &guard_cfg(&cfg))
+        .plan_declarative(&empty, &live, &author, &[], &guard_cfg(&cfg))
         .expect("plan drop");
     assert!(plan.destructive, "a DROP TABLE diff must be destructive");
     assert!(plan.requires_approval, "a DROP TABLE diff must require approval");
@@ -926,7 +927,7 @@ async fn drop_column_is_destructive_and_gated() {
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
     let plan = engine
-        .plan_declarative(&d2, &live, &author, &guard_cfg(&cfg))
+        .plan_declarative(&d2, &live, &author, &[], &guard_cfg(&cfg))
         .expect("plan drop column");
     assert!(plan.destructive, "drop column must be destructive");
     assert!(plan.requires_approval, "drop column must be gated");
@@ -986,7 +987,7 @@ async fn drop_index_is_not_data_loss_so_it_is_not_gated() {
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
     let plan = engine
-        .plan_declarative(&d2, &live, &author, &guard_cfg(&cfg))
+        .plan_declarative(&d2, &live, &author, &[], &guard_cfg(&cfg))
         .expect("plan drop index");
     assert!(!plan.destructive, "DROP INDEX is not data loss");
     assert!(!plan.requires_approval, "DROP INDEX must not require approval");
@@ -1203,7 +1204,7 @@ async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
     let plan = engine
-        .plan_declarative(&d2, &live, &author, &guard_cfg(&cfg))
+        .plan_declarative(&d2, &live, &author, &[], &guard_cfg(&cfg))
         .expect("plan drop unique index");
     assert!(plan.destructive, "DROP of a UNIQUE index must be destructive");
     assert!(plan.requires_approval, "DROP of a UNIQUE index must require approval");
@@ -1238,7 +1239,7 @@ async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
     let d3 = desired_snapshot(&cfg.project_schema, &[v3]).expect("desired_snapshot");
     let live3 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap4");
     let plan3 = engine
-        .plan_declarative(&d3, &live3, &author, &guard_cfg(&cfg))
+        .plan_declarative(&d3, &live3, &author, &[], &guard_cfg(&cfg))
         .expect("plan drop plain index");
     assert!(!plan3.destructive, "DROP of a PLAIN index must NOT be destructive");
     assert!(!plan3.requires_approval, "DROP of a PLAIN index must NOT require approval");
@@ -1250,4 +1251,267 @@ async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
     );
 
     teardown(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// P3 Feature 1 — rename via explicit hints → expand-contract (NEVER heuristic).
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn rename_hint_routes_drop_add_through_expand_contract_not_drop_add() {
+    // P3 Feature 1: a desired schema that renames `email` → `email_address`, WITH
+    // a matching RenameHint, must emit the zero-downtime EXPAND-CONTRACT sequence
+    // (online E1/E2/E3 + gated C1/C2) — NOT a bare gated-drop + additive-add. The
+    // expand structural steps apply, the dual-write trigger mirrors writes, and
+    // the pre-existing row's data is PRESERVED (never dropped).
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    // Create `users` with an `email` column (table owned by the migrator role, so
+    // the dual-write trigger DDL works under SET ROLE).
+    let v1 = CollectionDescriptor {
+        name: "users".into(),
+        fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
+    apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("create users");
+
+    // Seed a pre-existing row whose `email` value MUST survive the rename. The
+    // platform system fields are NOT NULL (no DB-side default — the SDK runtime
+    // fills them), so the test supplies them explicitly.
+    let schema = &cfg.project_schema;
+    conn.batch_execute(&format!(
+        "INSERT INTO \"{schema}\".\"users\" (id, created_at, updated_at, version, email) \
+         VALUES ('usr_1', NOW(), NOW(), 1, 'keep@x.test')"
+    ))
+    .await
+    .expect("seed row");
+
+    // Desire `email_address` instead of `email`.
+    let v2 = CollectionDescriptor {
+        name: "users".into(),
+        fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+
+    let hints = vec![RenameHint {
+        table: "users".into(),
+        from: "email".into(),
+        to: "email_address".into(),
+    }];
+
+    // The diff WITH the hint emits the expand-contract sequence, NOT drop+add.
+    let migs = author.diff(&d2, &live, &hints).expect("diff with rename hint");
+    // No bare DROP COLUMN email / ADD COLUMN email_address as INDEPENDENT ops:
+    // the only column-drop is the gated CONTRACT C2 (online, requires_approval),
+    // and the only column-add is the EXPAND E1 (online). Assert by flags + names.
+    let online: Vec<&Migration> = migs.iter().filter(|m| m.flags.online).collect();
+    assert!(
+        online.len() == 5,
+        "rename must emit the 5-step expand-contract sequence, got {} online of {}: {:?}",
+        online.len(),
+        migs.len(),
+        migs.iter().map(|m| (&m.name, m.flags.online)).collect::<Vec<_>>()
+    );
+    // Every column-touching migration is online (no bare drop/add).
+    for m in &migs {
+        if m.up.contains("DROP COLUMN") || m.up.contains("ADD COLUMN") {
+            assert!(m.flags.online, "a bare (non-online) DROP/ADD COLUMN leaked: {}", m.name);
+        }
+    }
+    // Expand has E1(add)/E2(trigger)/E3(backfill); contract has C1/C2 (gated).
+    let expand: Vec<&Migration> = migs.iter().filter(|m| m.flags.phase == Some(OnlinePhase::Expand)).collect();
+    let contract: Vec<&Migration> = migs.iter().filter(|m| m.flags.phase == Some(OnlinePhase::Contract)).collect();
+    assert_eq!(expand.len(), 3, "E1/E2/E3");
+    assert_eq!(contract.len(), 2, "C1/C2");
+    assert!(contract.iter().all(|m| m.flags.requires_approval), "contract steps gated");
+    assert!(contract.iter().any(|m| m.flags.destructive), "contract DROP COLUMN destructive");
+    // E1 adds the NEW column (nullable, transactional); not destructive/gated.
+    let e1 = expand.iter().find(|m| m.up.contains("ADD COLUMN")).expect("E1 add column");
+    assert!(e1.up.contains("\"email_address\""), "E1 adds email_address: {}", e1.up);
+    assert!(!e1.flags.destructive && !e1.flags.requires_approval, "E1 is additive-safe");
+
+    // Apply ONLY the EXPAND structural steps (E1 add-column + E2 dual-write
+    // trigger) through the real executor (guard + migrator role). E3 is the no-op
+    // backfill marker; the real backfill is run_expand's job — here we prove the
+    // trigger mirrors + the pre-existing data is preserved.
+    let structural: Vec<Migration> = expand
+        .iter()
+        .filter(|m| !m.up.contains("backfill marker"))
+        .map(|m| (*m).clone())
+        .collect();
+    executor_apply(&conn, &cfg, &structural, Approval::Approved, "app_test")
+        .await
+        .expect("apply expand structural (E1+E2)");
+
+    // The pre-existing row's data is PRESERVED: `email` still holds its value
+    // (the rename ADDED a column, it did not drop the old one yet).
+    let row = conn
+        .query_one(
+            &format!("SELECT email, email_address FROM \"{schema}\".\"users\" WHERE id='usr_1'"),
+            &[],
+        )
+        .await
+        .expect("read seeded row");
+    let email: Option<String> = row.get("email");
+    assert_eq!(email.as_deref(), Some("keep@x.test"), "pre-existing email preserved");
+
+    // The dual-write trigger mirrors a NEW write through BOTH columns: writing the
+    // OLD name fills the NEW name (coexistence model).
+    conn.batch_execute(&format!(
+        "INSERT INTO \"{schema}\".\"users\" (id, created_at, updated_at, version, email) \
+         VALUES ('usr_2', NOW(), NOW(), 1, 'dual@x.test')"
+    ))
+    .await
+    .expect("insert via old column");
+    let row2 = conn
+        .query_one(
+            &format!("SELECT email, email_address FROM \"{schema}\".\"users\" WHERE id='usr_2'"),
+            &[],
+        )
+        .await
+        .expect("read dual-written row");
+    let e2_old: Option<String> = row2.get("email");
+    let e2_new: Option<String> = row2.get("email_address");
+    assert_eq!(e2_old.as_deref(), Some("dual@x.test"), "old column written");
+    assert_eq!(
+        e2_new.as_deref(),
+        Some("dual@x.test"),
+        "dual-write trigger mirrored old → new (data preserved through rename)"
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn without_a_hint_the_same_desired_is_two_independent_ops_not_a_rename() {
+    // P3 Feature 1 (the no-heuristic guarantee): the EXACT desired/live pair that
+    // a hint would turn into a rename, WITHOUT the hint, stays two INDEPENDENT ops
+    // — a gated DROP of `email` + an additive ADD of `email_address`. The differ
+    // must NEVER infer a rename from a drop+add pair (that risks silent data
+    // loss). No online/expand-contract migration is emitted.
+    let cfg = cfg_for(&token());
+    let author = author_for(&cfg);
+
+    let live = {
+        let desc = CollectionDescriptor {
+            name: "users".into(),
+            fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            indexes: vec![],
+        };
+        desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
+    };
+    let desired = {
+        let desc = CollectionDescriptor {
+            name: "users".into(),
+            fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            indexes: vec![],
+        };
+        desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
+    };
+
+    // No hints → two independent ops, NO rename.
+    let migs = author.diff(&desired, &live, &[]).expect("diff without hint");
+    assert!(
+        migs.iter().all(|m| !m.flags.online),
+        "no hint must NOT produce any online/expand-contract migration: {:?}",
+        migs.iter().map(|m| (&m.name, m.flags.online)).collect::<Vec<_>>()
+    );
+    // Exactly: a gated DROP COLUMN email + an additive ADD COLUMN email_address.
+    let drop = migs.iter().find(|m| m.up.contains("DROP COLUMN") && m.up.contains("\"email\""))
+        .expect("a bare DROP COLUMN email");
+    assert!(drop.flags.destructive && drop.flags.requires_approval, "DROP COLUMN is gated");
+    let add = migs.iter().find(|m| m.up.contains("ADD COLUMN") && m.up.contains("\"email_address\""))
+        .expect("a bare ADD COLUMN email_address");
+    assert!(!add.flags.destructive && !add.flags.requires_approval, "ADD COLUMN is additive");
+}
+
+#[compio::test]
+async fn rename_hint_naming_a_nonexistent_column_is_an_error() {
+    // P3 Feature 1: a hint that does NOT match an actual drop+add pair is a hard
+    // error (RenameHintUnmatched) — never silently ignored (a swallowed hint would
+    // fall back to an unintended gated-drop + additive-add, losing the column's
+    // data).
+    let cfg = cfg_for(&token());
+    let author = author_for(&cfg);
+
+    let live = {
+        let desc = CollectionDescriptor {
+            name: "users".into(),
+            fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            indexes: vec![],
+        };
+        desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
+    };
+    let desired = {
+        let desc = CollectionDescriptor {
+            name: "users".into(),
+            fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            indexes: vec![],
+        };
+        desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
+    };
+
+    // `from` names a column that does not exist in live → unmatched.
+    let bad_from = vec![RenameHint { table: "users".into(), from: "nope".into(), to: "email_address".into() }];
+    let err = author.diff(&desired, &live, &bad_from).unwrap_err();
+    assert!(matches!(err, DeclarativeError::RenameHintUnmatched { .. }), "got {err:?}");
+
+    // `to` names a column that does not exist in desired → unmatched.
+    let bad_to = vec![RenameHint { table: "users".into(), from: "email".into(), to: "ghost".into() }];
+    let err2 = author.diff(&desired, &live, &bad_to).unwrap_err();
+    assert!(matches!(err2, DeclarativeError::RenameHintUnmatched { .. }), "got {err2:?}");
+
+    // A hint on a table that is identical on both sides (no drop+add) → unmatched.
+    let same = {
+        let desc = CollectionDescriptor {
+            name: "users".into(),
+            fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            indexes: vec![],
+        };
+        desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
+    };
+    let hint = vec![RenameHint { table: "users".into(), from: "email".into(), to: "email_address".into() }];
+    let err3 = author.diff(&same, &live, &hint).unwrap_err();
+    assert!(matches!(err3, DeclarativeError::RenameHintUnmatched { .. }), "got {err3:?}");
+}
+
+#[compio::test]
+async fn rename_hint_with_a_type_mismatch_is_an_error() {
+    // P3 Feature 1: a hint that matches a drop+add pair whose TYPES differ is
+    // refused (RenameHintTypeMismatch) — a pure online rename requires type
+    // identity; rename + type change is two separate intents.
+    let cfg = cfg_for(&token());
+    let author = author_for(&cfg);
+
+    let live = {
+        let desc = CollectionDescriptor {
+            name: "users".into(),
+            fields: vec![FieldDescriptor { name: "score".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            indexes: vec![],
+        };
+        desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
+    };
+    let desired = {
+        let desc = CollectionDescriptor {
+            name: "users".into(),
+            // renamed AND retyped (string → number).
+            fields: vec![FieldDescriptor { name: "rating".into(), ty: "number".into(), required: false, unique: false, references: None }],
+            indexes: vec![],
+        };
+        desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
+    };
+    let hint = vec![RenameHint { table: "users".into(), from: "score".into(), to: "rating".into() }];
+    let err = author.diff(&desired, &live, &hint).unwrap_err();
+    assert!(matches!(err, DeclarativeError::RenameHintTypeMismatch { .. }), "got {err:?}");
 }

@@ -42,6 +42,7 @@ use serde::Deserialize;
 use crate::drift::{
     ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot,
 };
+use crate::expand_contract::{ExpandContractAuthor, ExpandContractError, OnlineIntent};
 use crate::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 
 /// Quote a Postgres identifier (double embedded quotes, wrap in `"`). Mirrors
@@ -112,6 +113,54 @@ pub struct CollectionDescriptor {
     /// The declared named indexes (`_indexes`).
     #[serde(default)]
     pub indexes: Vec<IndexDescriptor>,
+}
+
+// ---------------------------------------------------------------------------
+// P3 — rename hints (the OPT-IN, never-heuristic rename surface).
+// ---------------------------------------------------------------------------
+
+/// An **explicit** column-rename hint.
+///
+/// "On `table`, the column called `from` (present in live) is the column called
+/// `to` (present in desired) — they are the same column under a new name, NOT a
+/// drop+add."
+///
+/// Renames are **opt-in by hint ONLY** — the differ NEVER infers a rename from a
+/// drop+add pair heuristically (that risks silent data loss: a coincidental
+/// "drop col X, add col Y" on the same table is two independent intents, and
+/// treating it as a rename would carry X's data into Y against the creator's
+/// will, or — worse — a misclassified rename could drop the wrong column). A
+/// hint is the creator's signed statement of intent; without one, a drop+add
+/// stays two independent ops (a gated DROP + an additive ADD).
+///
+/// When a hint matches an actual drop+add pair (and the types are compatible),
+/// the differ routes that pair through the zero-downtime expand-contract path
+/// ([`ExpandContractAuthor::RenameColumn`](crate::expand_contract)) instead of
+/// emitting drop+add — the column's data is preserved by the dual-write +
+/// backfill sequence, and the destructive `DROP COLUMN <from>` is gated.
+///
+/// The DSL `renamedFrom` surface that produces these hints is a separate SDK
+/// follow-up; this struct is the engine-side input contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameHint {
+    /// The table the rename happens on.
+    pub table: String,
+    /// The existing (live) column name being renamed away from.
+    pub from: String,
+    /// The new (desired) column name being renamed to.
+    pub to: String,
+}
+
+/// A [`RenameHint`] that has been **verified** against the desired/live snapshots
+/// (matched an actual drop+add pair with identical types). The diff routes each
+/// one through the expand-contract rename sequence. `ty` is the shared
+/// `information_schema` data-type spelling of the two matched columns.
+#[derive(Debug, Clone)]
+struct ResolvedRename {
+    table: String,
+    from: String,
+    to: String,
+    ty: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -370,10 +419,12 @@ pub enum DeclarativeError {
     /// `validate_type`). Nothing is generated.
     #[error("invalid descriptor: {0}")]
     Invalid(String),
-    /// The diff requires an op v1 does not generate: an ALTER COLUMN TYPE or a
-    /// RENAME (deferred to P3 — there is deliberately NO auto type-change).
-    /// Surfaced explicitly — never silently skipped. (Destructive DROPs are
-    /// handled in P2 as gated migrations, not this error.)
+    /// The diff requires an op v1 does not generate: an in-place INDEX or
+    /// FOREIGN KEY redefinition (a flipped `unique` flag, a changed column set, a
+    /// re-pointed FK target — each a DROP+CREATE deferred to a later phase).
+    /// Surfaced explicitly — never silently skipped. (Type/nullability changes are
+    /// handled in P3 as gated/ungated ALTERs; destructive DROPs are P2 gated
+    /// migrations — neither uses this error.)
     #[error("unsupported in v1 (deferred to a later phase): {0}")]
     UnsupportedInV1(String),
     /// A declared field used a DSL type token the v1 differ does not map. This
@@ -400,6 +451,53 @@ pub enum DeclarativeError {
         /// The table name declared by more than one descriptor.
         table: String,
     },
+    /// A [`RenameHint`] (P3) did not match an actual drop+add pair: the `from`
+    /// column is not present in live as a dropped column, OR the `to` column is
+    /// not present in desired as an added column, on the named table. The hint is
+    /// the creator's signed statement of intent, so an un-matchable hint is a hard
+    /// error — never silently ignored (a silently-dropped hint would fall back to
+    /// an unintended gated-drop + additive-add, losing the column's data).
+    #[error(
+        "rename hint {table}.{from} → {to} does not match a drop+add pair \
+         (from must be a live-only column and to a desired-only column on {table})"
+    )]
+    RenameHintUnmatched {
+        /// The table the hint named.
+        table: String,
+        /// The `from` column the hint named (expected: live-only).
+        from: String,
+        /// The `to` column the hint named (expected: desired-only).
+        to: String,
+    },
+    /// A [`RenameHint`] (P3) matched a drop+add pair whose **types differ**: the
+    /// live `from` column and the desired `to` column do not share a `data_type`.
+    /// A pure online rename (expand-contract dual-write) requires type identity —
+    /// a simultaneous rename + type change is two distinct intents and is refused
+    /// rather than silently mirrored across incompatible types (which the
+    /// dual-write `NEW.<to> := NEW.<from>` assignment could corrupt or reject).
+    #[error(
+        "rename hint {table}.{from} → {to} matched, but the types differ \
+         ({from_type} → {to_type}); a rename requires type identity (rename + \
+         type change is two separate intents)"
+    )]
+    RenameHintTypeMismatch {
+        /// The table the hint named.
+        table: String,
+        /// The `from` column.
+        from: String,
+        /// The `to` column.
+        to: String,
+        /// The live `from` column's data type.
+        from_type: String,
+        /// The desired `to` column's data type.
+        to_type: String,
+    },
+    /// Authoring the expand-contract rename sequence for a matched [`RenameHint`]
+    /// failed (e.g. an identifier that passed the declarative author boundary was
+    /// rejected by the stricter expand-contract author boundary). Surfaced rather
+    /// than swallowed.
+    #[error("failed to author rename expand-contract sequence: {0}")]
+    Rename(#[from] ExpandContractError),
 }
 
 // ---------------------------------------------------------------------------
@@ -480,9 +578,23 @@ impl DeclarativeAuthor {
     ///   data-integrity guarantee (#4), so it is classified `destructive +
     ///   requires_approval` (gated, like DROP COLUMN) — see [`render_drop_index`].
     ///
-    /// A same-name column whose **type or nullability** differs (an ALTER) is
-    /// [`DeclarativeError::UnsupportedInV1`] — explicit, never silent (deferred
-    /// to P3; no auto type-change).
+    /// P3 (rename, opt-in) routes a **hinted** drop+add pair through the
+    /// zero-downtime expand-contract sequence
+    /// ([`ExpandContractAuthor::RenameColumn`](crate::expand_contract)) instead of
+    /// emitting an independent drop + add. A rename is emitted ONLY when a
+    /// [`RenameHint`] explicitly names the `(table, from→to)` pair AND `from` is a
+    /// live-only column AND `to` is a desired-only column AND their types match.
+    /// Without a matching hint, a drop+add stays two independent ops — the differ
+    /// NEVER infers a rename heuristically (that risks silent data loss).
+    ///
+    /// P3 (type / nullability) handles a same-name column whose attributes
+    /// changed (these were `UnsupportedInV1` before P3):
+    /// - **type change** → a GATED `ALTER COLUMN … TYPE …` (`destructive` +
+    ///   `requires_approval`; no auto type-change in v1);
+    /// - **`DROP NOT NULL`** (required true→false) → an ungated additive
+    ///   `ALTER COLUMN DROP NOT NULL` (relaxing a constraint is safe);
+    /// - **`SET NOT NULL`** (required false→true) → a GATED `ALTER COLUMN SET NOT
+    ///   NULL` (lock-heavy + can fail on existing NULLs).
     ///
     /// Ordering: CREATE TABLE precede their own indexes; FK-target tables are
     /// created before referencing tables (deferred FK breaks cycles); the
@@ -492,7 +604,12 @@ impl DeclarativeAuthor {
     /// # Errors
     /// - [`DeclarativeError::Invalid`] — a descriptor name/type failed the
     ///   author-boundary validation (nothing generated).
-    /// - [`DeclarativeError::UnsupportedInV1`] — a type/nullability change.
+    /// - [`DeclarativeError::RenameHintUnmatched`] — a hint named a pair that is
+    ///   not an actual drop+add.
+    /// - [`DeclarativeError::RenameHintTypeMismatch`] — a hint matched a pair
+    ///   whose types differ.
+    /// - [`DeclarativeError::UnsupportedInV1`] — an index/FK in-place
+    ///   redefinition (still deferred).
     #[allow(
         clippy::too_many_lines,
         reason = "the diff is one cohesive pass — new tables (FK-ordered), \
@@ -504,10 +621,19 @@ impl DeclarativeAuthor {
         &self,
         desired: &SchemaSnapshot,
         live: &SchemaSnapshot,
+        hints: &[RenameHint],
     ) -> Result<Vec<Migration>, DeclarativeError> {
         // Author-boundary validation: every desired table/column/index name and
         // every column data_type must be safe BEFORE we render any SQL.
         Self::validate_desired(desired)?;
+
+        // Resolve + validate the rename hints up-front: every hint MUST match an
+        // actual drop+add pair (from live-only, to desired-only, types equal) on
+        // its table. An un-matchable / type-mismatched hint is a hard error (the
+        // hint is the creator's signed intent — never silently ignored). Returns
+        // the per-table set of (from,to,type) renames the column diff will route
+        // through expand-contract instead of emitting drop+add.
+        let resolved = Self::resolve_rename_hints(desired, live, hints)?;
 
         let mut out: Vec<Migration> = Vec::new();
 
@@ -605,13 +731,44 @@ impl DeclarativeAuthor {
             let desired_cols: BTreeMap<&str, &ColumnSnapshot> =
                 dt.columns.iter().map(|c| (c.name.as_str(), c)).collect();
 
-            // ADD COLUMN: in desired, not in live.
+            // P3 rename (opt-in): the resolved renames for THIS table. A hinted
+            // `from`→`to` is routed through the expand-contract sequence below and
+            // its `from`/`to` columns are EXCLUDED from the plain drop/add diff so
+            // they are not double-handled (drop the renamed-away column / add the
+            // renamed-to column).
+            let table_renames: Vec<&ResolvedRename> =
+                resolved.iter().filter(|r| &r.table == table).collect();
+            let renamed_from: std::collections::BTreeSet<&str> =
+                table_renames.iter().map(|r| r.from.as_str()).collect();
+            let renamed_to: std::collections::BTreeSet<&str> =
+                table_renames.iter().map(|r| r.to.as_str()).collect();
+
+            // Emit the expand-contract rename sequences (E1..E3, C1, C2). They
+            // carry their own online/gated flags; the destructive contract DROP is
+            // gated exactly like a bare drop would be.
+            let ec = ExpandContractAuthor::new(&self.project_schema, &self.owner_app);
+            for r in &table_renames {
+                let plan = ec.author(&OnlineIntent::RenameColumn {
+                    table: table.clone(),
+                    from: r.from.clone(),
+                    to: r.to.clone(),
+                    ty: ddl_type(&r.ty).to_string(),
+                })?;
+                out.extend(plan.all());
+            }
+
+            // ADD COLUMN: in desired, not in live (skip a rename's `to` column —
+            // it is created by the rename's E1 ADD COLUMN, not a plain add).
             for c in &dt.columns {
+                if renamed_to.contains(c.name.as_str()) {
+                    continue;
+                }
                 match live_cols.get(c.name.as_str()) {
                     None => out.push(self.render_add_column(table, c)),
                     Some(lc) => {
                         // Same-name column: a type/nullability change is an
                         // ALTER — UnsupportedInV1 (explicit, never silent).
+                        // (Feature 2 replaces this with gated/ungated ALTERs.)
                         if lc.data_type != c.data_type {
                             return Err(DeclarativeError::UnsupportedInV1(format!(
                                 "column {table}.{} type change {} → {}",
@@ -628,8 +785,13 @@ impl DeclarativeAuthor {
                 }
             }
 
-            // DROP COLUMN (P2): in live, not in desired → destructive, gated.
+            // DROP COLUMN (P2): in live, not in desired → destructive, gated
+            // (skip a rename's `from` column — it is dropped by the rename's gated
+            // contract C2, not a plain drop).
             for c in &lt.columns {
+                if renamed_from.contains(c.name.as_str()) {
+                    continue;
+                }
                 if !desired_cols.contains_key(c.name.as_str()) {
                     out.push(self.render_drop_column(table, &c.name));
                 }
@@ -735,6 +897,81 @@ impl DeclarativeAuthor {
             }
         }
         Ok(())
+    }
+
+    /// Resolve + validate the [`RenameHint`]s against the desired/live snapshots.
+    ///
+    /// Each hint MUST match an actual drop+add pair: `from` present in the live
+    /// table and ABSENT in desired (a column being dropped), `to` present in
+    /// desired and ABSENT in live (a column being added), on the named table —
+    /// and the two columns' `data_type`s MUST be equal. Any hint that fails is a
+    /// hard error ([`DeclarativeError::RenameHintUnmatched`] /
+    /// [`DeclarativeError::RenameHintTypeMismatch`]). The hint is the creator's
+    /// signed statement of intent; silently dropping a hint would fall back to an
+    /// unintended drop+add and lose the column's data.
+    ///
+    /// This is the ONLY place a rename is recognised — there is NO heuristic
+    /// drop+add⇒rename inference anywhere in the differ.
+    fn resolve_rename_hints(
+        desired: &SchemaSnapshot,
+        live: &SchemaSnapshot,
+        hints: &[RenameHint],
+    ) -> Result<Vec<ResolvedRename>, DeclarativeError> {
+        let mut resolved = Vec::with_capacity(hints.len());
+        for h in hints {
+            // The named table must exist on BOTH sides (a rename is in-place on an
+            // existing table). If it is missing on either side the hint cannot be
+            // a drop+add pair → unmatched.
+            let (Some(lt), Some(dt)) =
+                (live.tables.get(&h.table), desired.tables.get(&h.table))
+            else {
+                return Err(DeclarativeError::RenameHintUnmatched {
+                    table: h.table.clone(),
+                    from: h.from.clone(),
+                    to: h.to.clone(),
+                });
+            };
+            let live_from = lt.columns.iter().find(|c| c.name == h.from);
+            let desired_from = dt.columns.iter().any(|c| c.name == h.from);
+            let desired_to = dt.columns.iter().find(|c| c.name == h.to);
+            let live_to = lt.columns.iter().any(|c| c.name == h.to);
+
+            // `from` must be live-only (present in live, absent in desired); `to`
+            // must be desired-only (present in desired, absent in live). Anything
+            // else is not a drop+add pair.
+            let (Some(lf), Some(dtc)) = (live_from, desired_to) else {
+                return Err(DeclarativeError::RenameHintUnmatched {
+                    table: h.table.clone(),
+                    from: h.from.clone(),
+                    to: h.to.clone(),
+                });
+            };
+            if desired_from || live_to {
+                return Err(DeclarativeError::RenameHintUnmatched {
+                    table: h.table.clone(),
+                    from: h.from.clone(),
+                    to: h.to.clone(),
+                });
+            }
+            // Types must be identical — a pure online rename mirrors values across
+            // the two columns and cannot also change the type.
+            if lf.data_type != dtc.data_type {
+                return Err(DeclarativeError::RenameHintTypeMismatch {
+                    table: h.table.clone(),
+                    from: h.from.clone(),
+                    to: h.to.clone(),
+                    from_type: lf.data_type.clone(),
+                    to_type: dtc.data_type.clone(),
+                });
+            }
+            resolved.push(ResolvedRename {
+                table: h.table.clone(),
+                from: h.from.clone(),
+                to: h.to.clone(),
+                ty: lf.data_type.clone(),
+            });
+        }
+        Ok(resolved)
     }
 
     /// Render `CREATE TABLE <schema>.<table> (<cols…>, <pk>, <inline fks…>)`.
