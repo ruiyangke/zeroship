@@ -20,6 +20,12 @@
 //! connecting role with `CREATEROLE`. Each test runs in its OWN meta + project
 //! schema + project id (unique token) for isolation.
 
+// The migration `up` SQL in this file uses a `{s}` placeholder substituted with
+// the project schema by the `mig`/`with_up` helpers (`.replace("{s}", schema)`),
+// so the `{s}` in those string literals is a deliberate template token, not a
+// stray format argument.
+#![allow(clippy::literal_string_with_formatting_args)]
+
 use std::collections::HashMap;
 
 use compio_postgres::Client;
@@ -1087,8 +1093,8 @@ async fn l8_destructive_analyzer_advisory_dry_run_gate_apply() {
 // apply-relevant shape (Plan-F C1) + rejects before any side effect.
 // ===========================================================================
 
-/// True if the meta (journal) schema exists at all — proof apply_verified did NOT
-/// take the lock / bootstrap the journal on a manifest-rejected call.
+/// True if the meta (journal) schema exists at all — proof `apply_verified` did
+/// NOT take the lock / bootstrap the journal on a manifest-rejected call.
 async fn meta_schema_exists(conn: &Client, cfg: &ExecutorConfig) -> bool {
     let rows = conn
         .query(
