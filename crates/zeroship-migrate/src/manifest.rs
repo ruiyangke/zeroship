@@ -319,7 +319,7 @@ mod tests {
         let a = mig("a", "CREATE TABLE a()", None);
         let b = mig("b", "CREATE TABLE b()", None);
         let one = vec![a.clone()];
-        let two = vec![a.clone(), b.clone()];
+        let two = vec![a.clone(), b];
         // Insertion (add b) ⇒ different.
         assert_ne!(compute_manifest(&one), compute_manifest(&two));
         // Removal (drop b from the two-set back to one) ⇒ different (symmetric).
