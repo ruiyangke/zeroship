@@ -178,6 +178,7 @@ async fn assert_type_fidelity(dsl_type: &str, ddl_type: &str, required: bool) {
             required,
             unique: false,
             references: None,
+            ..Default::default()
         }],
         indexes: vec![],
     };
@@ -308,11 +309,11 @@ async fn type_fidelity_whole_table_round_trips_to_zero_drift() {
         name: "profiles".into(),
         owner_app: "app_test".into(),
         fields: vec![
-            FieldDescriptor { name: "handle".into(), ty: "string".into(), required: true, unique: false, references: None },
-            FieldDescriptor { name: "score".into(), ty: "number".into(), required: false, unique: false, references: None },
-            FieldDescriptor { name: "active".into(), ty: "boolean".into(), required: true, unique: false, references: None },
-            FieldDescriptor { name: "prefs".into(), ty: "json".into(), required: false, unique: false, references: None },
-            FieldDescriptor { name: "joined".into(), ty: "date".into(), required: false, unique: false, references: None },
+            FieldDescriptor { name: "handle".into(), ty: "string".into(), required: true, unique: false, references: None, ..Default::default() },
+            FieldDescriptor { name: "score".into(), ty: "number".into(), required: false, unique: false, references: None, ..Default::default() },
+            FieldDescriptor { name: "active".into(), ty: "boolean".into(), required: true, unique: false, references: None, ..Default::default() },
+            FieldDescriptor { name: "prefs".into(), ty: "json".into(), required: false, unique: false, references: None, ..Default::default() },
+            FieldDescriptor { name: "joined".into(), ty: "date".into(), required: false, unique: false, references: None, ..Default::default() },
         ],
         indexes: vec![],
     };
@@ -361,9 +362,9 @@ async fn additive_create_table_with_column_and_index_applies_to_zero_drift() {
         name: "tasks".into(),
         owner_app: "app_test".into(),
         fields: vec![
-            FieldDescriptor { name: "title".into(), ty: "string".into(), required: true, unique: false, references: None },
-            FieldDescriptor { name: "slug".into(), ty: "string".into(), required: false, unique: true, references: None },
-            FieldDescriptor { name: "done".into(), ty: "boolean".into(), required: false, unique: false, references: None },
+            FieldDescriptor { name: "title".into(), ty: "string".into(), required: true, unique: false, references: None, ..Default::default() },
+            FieldDescriptor { name: "slug".into(), ty: "string".into(), required: false, unique: true, references: None, ..Default::default() },
+            FieldDescriptor { name: "done".into(), ty: "boolean".into(), required: false, unique: false, references: None, ..Default::default() },
         ],
         indexes: vec![IndexDescriptor { name: "tasks_title_idx".into(), columns: vec!["title".into()], unique: false }],
     };
@@ -420,6 +421,7 @@ async fn full_shape_round_trips_to_zero_drift_the_canonical_idempotency_oracle()
             required: false,
             unique: true, // per-field unique index (1c)
             references: None,
+            ..Default::default()
         }],
         indexes: vec![],
     };
@@ -433,9 +435,10 @@ async fn full_shape_round_trips_to_zero_drift_the_canonical_idempotency_oracle()
                 required: false,
                 unique: false,
                 references: Some("authors".into()), // FK (1b)
+                ..Default::default()
             },
-            FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None },
-            FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None },
+            FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
+            FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
         ],
         indexes: vec![
             // Composite index over (a, b) whose name encodes neither column set
@@ -506,6 +509,7 @@ async fn changed_fk_target_is_unsupported_in_v1_not_silently_skipped() {
             required: false,
             unique: false,
             references: Some("alpha".into()),
+            ..Default::default()
         }],
         indexes: vec![],
     };
@@ -525,6 +529,7 @@ async fn changed_fk_target_is_unsupported_in_v1_not_silently_skipped() {
             required: false,
             unique: false,
             references: Some("beta".into()),
+            ..Default::default()
         }],
         indexes: vec![],
     };
@@ -563,6 +568,7 @@ async fn long_table_and_field_unique_index_name_is_capped_and_re_diffs_clean() {
             required: false,
             unique: true,
             references: None,
+            ..Default::default()
         }],
         indexes: vec![],
     };
@@ -611,7 +617,7 @@ async fn index_uniqueness_flip_on_same_name_is_unsupported_in_v1_not_silent() {
     let v1 = CollectionDescriptor {
         name: "logs".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![IndexDescriptor { name: "logs_level_idx".into(), columns: vec!["level".into()], unique: false }],
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
@@ -623,7 +629,7 @@ async fn index_uniqueness_flip_on_same_name_is_unsupported_in_v1_not_silent() {
     let v2 = CollectionDescriptor {
         name: "logs".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![IndexDescriptor { name: "logs_level_idx".into(), columns: vec!["level".into()], unique: true }],
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
@@ -647,7 +653,7 @@ async fn additive_diff_is_idempotent_second_plan_is_empty() {
     let desc = CollectionDescriptor {
         name: "notes".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
@@ -685,7 +691,7 @@ async fn additive_add_column_to_existing_table_applies_clean() {
     let v1 = CollectionDescriptor {
         name: "items".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
@@ -698,8 +704,8 @@ async fn additive_add_column_to_existing_table_applies_clean() {
         name: "items".into(),
         owner_app: "app_test".into(),
         fields: vec![
-            FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None },
-            FieldDescriptor { name: "qty".into(), ty: "number".into(), required: false, unique: false, references: None },
+            FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
+            FieldDescriptor { name: "qty".into(), ty: "number".into(), required: false, unique: false, references: None, ..Default::default() },
         ],
         indexes: vec![],
     };
@@ -738,13 +744,14 @@ async fn fk_ordering_referencing_table_after_target_applies_clean() {
             required: false,
             unique: false,
             references: Some("customers".into()),
+            ..Default::default()
         }],
         indexes: vec![],
     };
     let a = CollectionDescriptor {
         name: "customers".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let desired = desired_snapshot(&cfg.project_schema, &[b, a]).expect("desired_snapshot");
@@ -774,7 +781,7 @@ async fn type_change_emits_a_gated_alter_not_an_error_and_never_auto_applies() {
         let desc = CollectionDescriptor {
             name: "widgets".into(),
             owner_app: "app_test".into(),
-            fields: vec![FieldDescriptor { name: "attr".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            fields: vec![FieldDescriptor { name: "attr".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
@@ -783,7 +790,7 @@ async fn type_change_emits_a_gated_alter_not_an_error_and_never_auto_applies() {
         let desc = CollectionDescriptor {
             name: "widgets".into(),
             owner_app: "app_test".into(),
-            fields: vec![FieldDescriptor { name: "attr".into(), ty: "number".into(), required: false, unique: false, references: None }],
+            fields: vec![FieldDescriptor { name: "attr".into(), ty: "number".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
@@ -804,7 +811,7 @@ async fn malicious_table_name_is_rejected_at_author_boundary() {
     let desc = CollectionDescriptor {
         name: "users\"; DROP SCHEMA control CASCADE; --".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
@@ -825,6 +832,7 @@ async fn malicious_column_name_is_rejected_at_author_boundary() {
             required: false,
             unique: false,
             references: None,
+            ..Default::default()
         }],
         indexes: vec![],
     };
@@ -848,8 +856,8 @@ async fn every_generated_migration_passes_through_the_guard_no_bypass() {
             name: "events".into(),
             owner_app: "app_test".into(),
             fields: vec![
-                FieldDescriptor { name: "kind".into(), ty: "string".into(), required: true, unique: true, references: None },
-                FieldDescriptor { name: "payload".into(), ty: "json".into(), required: false, unique: false, references: None },
+                FieldDescriptor { name: "kind".into(), ty: "string".into(), required: true, unique: true, references: None, ..Default::default() },
+                FieldDescriptor { name: "payload".into(), ty: "json".into(), required: false, unique: false, references: None, ..Default::default() },
             ],
             indexes: vec![IndexDescriptor { name: "events_kind_idx".into(), columns: vec!["kind".into()], unique: false }],
         };
@@ -884,7 +892,7 @@ async fn drop_table_is_gated_and_not_auto_applied() {
     let v1 = CollectionDescriptor {
         name: "legacy".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
@@ -951,8 +959,8 @@ async fn drop_column_is_destructive_and_gated() {
         name: "people".into(),
         owner_app: "app_test".into(),
         fields: vec![
-            FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None },
-            FieldDescriptor { name: "nickname".into(), ty: "string".into(), required: false, unique: false, references: None },
+            FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
+            FieldDescriptor { name: "nickname".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
         ],
         indexes: vec![],
     };
@@ -965,7 +973,7 @@ async fn drop_column_is_destructive_and_gated() {
     let v2 = CollectionDescriptor {
         name: "people".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
@@ -1015,7 +1023,7 @@ async fn drop_index_is_not_data_loss_so_it_is_not_gated() {
     let v1 = CollectionDescriptor {
         name: "logs".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![IndexDescriptor { name: "logs_level_idx".into(), columns: vec!["level".into()], unique: false }],
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
@@ -1027,7 +1035,7 @@ async fn drop_index_is_not_data_loss_so_it_is_not_gated() {
     let v2 = CollectionDescriptor {
         name: "logs".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
@@ -1068,6 +1076,7 @@ async fn malicious_type_in_descriptor_is_rejected_not_silently_mapped_to_text() 
             required: false,
             unique: false,
             references: None,
+            ..Default::default()
         }],
         indexes: vec![],
     };
@@ -1093,6 +1102,7 @@ async fn out_of_scope_vector_type_is_rejected_not_silently_text() {
             required: false,
             unique: false,
             references: None,
+            ..Default::default()
         }],
         indexes: vec![],
     };
@@ -1117,6 +1127,7 @@ async fn typo_type_token_is_rejected_not_silently_text() {
             required: false,
             unique: false,
             references: None,
+            ..Default::default()
         }],
         indexes: vec![],
     };
@@ -1164,13 +1175,13 @@ async fn conflicting_declaration_across_apps_is_rejected_not_silently_merged() {
     let first = CollectionDescriptor {
         name: "dup".into(),
         owner_app: "app_a".into(),
-        fields: vec![FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let second = CollectionDescriptor {
         name: "dup".into(),
         owner_app: "app_b".into(),
-        fields: vec![FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let err = desired_snapshot(&cfg.project_schema, &[first, second]).unwrap_err();
@@ -1193,7 +1204,7 @@ async fn conflict_app_pair_is_deterministic_regardless_of_descriptor_order() {
     let mk = |app: &str, field: &str| CollectionDescriptor {
         name: "dup".into(),
         owner_app: app.into(),
-        fields: vec![FieldDescriptor { name: field.into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: field.into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     // Order A: app_z first, then app_a.
@@ -1225,7 +1236,7 @@ async fn conflict_with_three_declarers_reports_deterministic_set_across_permutat
     let mk = |app: &str, field: &str| CollectionDescriptor {
         name: "tbl".into(),
         owner_app: app.into(),
-        fields: vec![FieldDescriptor { name: field.into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: field.into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let a = || mk("app_a", "x");
@@ -1263,8 +1274,8 @@ async fn identical_redeclaration_by_two_apps_is_idempotent_one_table_no_error() 
         name: "shared".into(),
         owner_app: app.into(),
         fields: vec![
-            FieldDescriptor { name: "title".into(), ty: "string".into(), required: true, unique: false, references: None },
-            FieldDescriptor { name: "count".into(), ty: "number".into(), required: false, unique: false, references: None },
+            FieldDescriptor { name: "title".into(), ty: "string".into(), required: true, unique: false, references: None, ..Default::default() },
+            FieldDescriptor { name: "count".into(), ty: "number".into(), required: false, unique: false, references: None, ..Default::default() },
         ],
         indexes: vec![IndexDescriptor { name: "shared_title_idx".into(), columns: vec!["title".into()], unique: false }],
     };
@@ -1292,7 +1303,7 @@ async fn single_app_declaration_owns_its_table() {
     let desc = CollectionDescriptor {
         name: "widgets".into(),
         owner_app: "app_solo".into(),
-        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let d = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
@@ -1322,7 +1333,7 @@ async fn non_owner_deploy_changing_only_own_tables_is_fine() {
     let a_tbl = || CollectionDescriptor {
         name: "a_table".into(),
         owner_app: "app_a".into(),
-        fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let union_v1 = desired_snapshot(&cfg.project_schema, &[a_tbl()]).expect("union v1");
@@ -1335,7 +1346,7 @@ async fn non_owner_deploy_changing_only_own_tables_is_fine() {
     let b_tbl = CollectionDescriptor {
         name: "b_table".into(),
         owner_app: "app_b".into(),
-        fields: vec![FieldDescriptor { name: "y".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "y".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let union_v2 = desired_snapshot(&cfg.project_schema, &[a_tbl(), b_tbl]).expect("union v2");
@@ -1367,7 +1378,7 @@ async fn non_owner_deploy_altering_a_foreign_owned_table_is_refused() {
     let authors = CollectionDescriptor {
         name: "authors".into(),
         owner_app: "app_a".into(),
-        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let union = desired_snapshot(&cfg.project_schema, &[authors]).expect("union");
@@ -1412,7 +1423,7 @@ async fn non_owner_using_a_foreign_table_unchanged_is_a_noop_not_refused() {
     let authors = || CollectionDescriptor {
         name: "authors".into(),
         owner_app: "app_a".into(),
-        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let union_v1 = desired_snapshot(&cfg.project_schema, &[authors()]).expect("union v1");
@@ -1453,7 +1464,7 @@ async fn partial_union_deploy_refuses_to_drop_a_foreign_owned_live_table() {
     let a_tbl = CollectionDescriptor {
         name: "a_table".into(),
         owner_app: "app_a".into(),
-        fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let live = desired_snapshot(&cfg.project_schema, &[a_tbl]).expect("live snapshot").snapshot;
@@ -1462,7 +1473,7 @@ async fn partial_union_deploy_refuses_to_drop_a_foreign_owned_live_table() {
     let b_tbl = CollectionDescriptor {
         name: "b_table".into(),
         owner_app: "app_b".into(),
-        fields: vec![FieldDescriptor { name: "y".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "y".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let partial = desired_snapshot(&cfg.project_schema, &[b_tbl]).expect("partial union");
@@ -1493,7 +1504,7 @@ async fn owner_dropping_its_own_table_is_allowed_when_live_ownership_confirms_it
     let posts = CollectionDescriptor {
         name: "posts".into(),
         owner_app: "app_a".into(),
-        fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let live = desired_snapshot(&cfg.project_schema, &[posts]).expect("live").snapshot;
@@ -1529,7 +1540,7 @@ async fn dropping_a_live_table_with_unknown_ownership_fails_closed() {
     let orphan = CollectionDescriptor {
         name: "orphan".into(),
         owner_app: "app_a".into(),
-        fields: vec![FieldDescriptor { name: "v".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "v".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let live = desired_snapshot(&cfg.project_schema, &[orphan]).expect("live").snapshot;
@@ -1567,7 +1578,7 @@ async fn cross_app_fk_to_a_union_table_orders_and_applies_clean() {
     let authors = || CollectionDescriptor {
         name: "authors".into(),
         owner_app: "app_a".into(),
-        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let union_v1 = desired_snapshot(&cfg.project_schema, &[authors()]).expect("union v1");
@@ -1580,8 +1591,8 @@ async fn cross_app_fk_to_a_union_table_orders_and_applies_clean() {
         name: "books".into(),
         owner_app: "app_b".into(),
         fields: vec![
-            FieldDescriptor { name: "title".into(), ty: "string".into(), required: false, unique: false, references: None },
-            FieldDescriptor { name: "author".into(), ty: "ref".into(), required: false, unique: false, references: Some("authors".into()) },
+            FieldDescriptor { name: "title".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
+            FieldDescriptor { name: "author".into(), ty: "ref".into(), required: false, unique: false, references: Some("authors".into()), ..Default::default() },
         ],
         indexes: vec![],
     };
@@ -1620,6 +1631,7 @@ async fn cross_app_fk_to_a_table_no_app_declares_is_a_clear_error() {
             required: false,
             unique: false,
             references: Some("ghosts".into()), // no app declares `ghosts`
+            ..Default::default()
         }],
         indexes: vec![],
     };
@@ -1653,13 +1665,21 @@ async fn malicious_ref_target_is_rejected_at_author_boundary() {
                 required: false,
                 unique: false,
                 references: Some(bad.into()),
+                ..Default::default()
             }],
             indexes: vec![],
         };
         let err = desired_snapshot(&cfg.project_schema, &[desc]).unwrap_err();
+        // Fail-closed either way: a dot-qualified target trips the cross-app FK
+        // guard (#2, the more specific rejection — it crosses a schema boundary),
+        // a non-dotted malformed target trips the bare-ident validation. Both are
+        // rejected at the author boundary before any SQL renders.
         assert!(
-            matches!(err, DeclarativeError::Invalid(_)),
-            "ref target {bad:?} must be rejected as invalid, got {err:?}"
+            matches!(
+                err,
+                DeclarativeError::Invalid(_) | DeclarativeError::CrossAppFkForbidden { .. }
+            ),
+            "ref target {bad:?} must be rejected at the author boundary, got {err:?}"
         );
     }
 }
@@ -1684,8 +1704,8 @@ async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
         name: "members".into(),
         owner_app: "app_test".into(),
         fields: vec![
-            FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None },
-            FieldDescriptor { name: "tier".into(), ty: "string".into(), required: false, unique: false, references: None },
+            FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
+            FieldDescriptor { name: "tier".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
         ],
         indexes: vec![
             IndexDescriptor { name: "members_email_uq".into(), columns: vec!["email".into()], unique: true },
@@ -1702,8 +1722,8 @@ async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
         name: "members".into(),
         owner_app: "app_test".into(),
         fields: vec![
-            FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None },
-            FieldDescriptor { name: "tier".into(), ty: "string".into(), required: false, unique: false, references: None },
+            FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
+            FieldDescriptor { name: "tier".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
         ],
         indexes: vec![
             // unique index dropped; plain index kept.
@@ -1741,8 +1761,8 @@ async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
         name: "members".into(),
         owner_app: "app_test".into(),
         fields: vec![
-            FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None },
-            FieldDescriptor { name: "tier".into(), ty: "string".into(), required: false, unique: false, references: None },
+            FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
+            FieldDescriptor { name: "tier".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
         ],
         indexes: vec![],
     };
@@ -1787,7 +1807,7 @@ async fn rename_hint_routes_drop_add_through_expand_contract_not_drop_add() {
     let v1 = CollectionDescriptor {
         name: "users".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
@@ -1810,7 +1830,7 @@ async fn rename_hint_routes_drop_add_through_expand_contract_not_drop_add() {
     let v2 = CollectionDescriptor {
         name: "users".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
@@ -1944,7 +1964,7 @@ async fn declarative_rename_preserves_preexisting_rows_through_expand_then_contr
     let v1 = CollectionDescriptor {
         name: "users".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
@@ -1968,7 +1988,7 @@ async fn declarative_rename_preserves_preexisting_rows_through_expand_then_contr
     let v2 = CollectionDescriptor {
         name: "users".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
@@ -2109,7 +2129,7 @@ async fn flattening_a_rename_into_the_plain_plan_loses_data_or_is_gate_blocked()
     let v1 = CollectionDescriptor {
         name: "users".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
@@ -2128,7 +2148,7 @@ async fn flattening_a_rename_into_the_plain_plan_loses_data_or_is_gate_blocked()
     let v2 = CollectionDescriptor {
         name: "users".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
@@ -2201,7 +2221,7 @@ async fn without_a_hint_the_same_desired_is_two_independent_ops_not_a_rename() {
         let desc = CollectionDescriptor {
             name: "users".into(),
             owner_app: "app_test".into(),
-            fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
@@ -2210,7 +2230,7 @@ async fn without_a_hint_the_same_desired_is_two_independent_ops_not_a_rename() {
         let desc = CollectionDescriptor {
             name: "users".into(),
             owner_app: "app_test".into(),
-            fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
@@ -2248,7 +2268,7 @@ async fn rename_hint_naming_a_nonexistent_column_is_an_error() {
         let desc = CollectionDescriptor {
             name: "users".into(),
             owner_app: "app_test".into(),
-            fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
@@ -2257,7 +2277,7 @@ async fn rename_hint_naming_a_nonexistent_column_is_an_error() {
         let desc = CollectionDescriptor {
             name: "users".into(),
             owner_app: "app_test".into(),
-            fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
@@ -2278,7 +2298,7 @@ async fn rename_hint_naming_a_nonexistent_column_is_an_error() {
         let desc = CollectionDescriptor {
             name: "users".into(),
             owner_app: "app_test".into(),
-            fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
@@ -2300,7 +2320,7 @@ async fn rename_hint_with_a_type_mismatch_is_an_error() {
         let desc = CollectionDescriptor {
             name: "users".into(),
             owner_app: "app_test".into(),
-            fields: vec![FieldDescriptor { name: "score".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            fields: vec![FieldDescriptor { name: "score".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
@@ -2310,7 +2330,7 @@ async fn rename_hint_with_a_type_mismatch_is_an_error() {
             name: "users".into(),
             owner_app: "app_test".into(),
             // renamed AND retyped (string → number).
-            fields: vec![FieldDescriptor { name: "rating".into(), ty: "number".into(), required: false, unique: false, references: None }],
+            fields: vec![FieldDescriptor { name: "rating".into(), ty: "number".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
@@ -2342,8 +2362,8 @@ async fn two_hints_sharing_a_to_are_rejected_as_duplicate() {
             name: "users".into(),
             owner_app: "app_test".into(),
             fields: vec![
-                FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None },
-                FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None },
+                FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
+                FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
             ],
             indexes: vec![],
         };
@@ -2354,7 +2374,7 @@ async fn two_hints_sharing_a_to_are_rejected_as_duplicate() {
             name: "users".into(),
             owner_app: "app_test".into(),
             // Both old columns map onto a single new column `c`.
-            fields: vec![FieldDescriptor { name: "c".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            fields: vec![FieldDescriptor { name: "c".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
@@ -2382,7 +2402,7 @@ async fn two_hints_sharing_a_from_are_rejected_as_duplicate() {
         let desc = CollectionDescriptor {
             name: "users".into(),
             owner_app: "app_test".into(),
-            fields: vec![FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            fields: vec![FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
@@ -2392,8 +2412,8 @@ async fn two_hints_sharing_a_from_are_rejected_as_duplicate() {
             name: "users".into(),
             owner_app: "app_test".into(),
             fields: vec![
-                FieldDescriptor { name: "c".into(), ty: "string".into(), required: false, unique: false, references: None },
-                FieldDescriptor { name: "d".into(), ty: "string".into(), required: false, unique: false, references: None },
+                FieldDescriptor { name: "c".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
+                FieldDescriptor { name: "d".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
             ],
             indexes: vec![],
         };
@@ -2423,8 +2443,8 @@ async fn a_rename_chain_is_rejected_explicitly_not_incidentally() {
             name: "users".into(),
             owner_app: "app_test".into(),
             fields: vec![
-                FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None },
-                FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None },
+                FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
+                FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
             ],
             indexes: vec![],
         };
@@ -2435,8 +2455,8 @@ async fn a_rename_chain_is_rejected_explicitly_not_incidentally() {
             name: "users".into(),
             owner_app: "app_test".into(),
             fields: vec![
-                FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None },
-                FieldDescriptor { name: "c".into(), ty: "string".into(), required: false, unique: false, references: None },
+                FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
+                FieldDescriptor { name: "c".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
             ],
             indexes: vec![],
         };
@@ -2464,7 +2484,7 @@ async fn a_noop_rename_hint_from_equals_to_is_a_precise_error() {
         let desc = CollectionDescriptor {
             name: "users".into(),
             owner_app: "app_test".into(),
-            fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
@@ -2493,7 +2513,7 @@ async fn a_hint_on_a_created_table_is_unmatched() {
         let desc = CollectionDescriptor {
             name: "posts".into(),
             owner_app: "app_test".into(),
-            fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
@@ -2515,7 +2535,7 @@ async fn a_hint_on_a_dropped_table_is_unmatched() {
         let desc = CollectionDescriptor {
             name: "posts".into(),
             owner_app: "app_test".into(),
-            fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
@@ -2549,7 +2569,7 @@ async fn type_change_is_gated_refused_without_approval_applied_with_then_re_diff
     let v1 = CollectionDescriptor {
         name: "metrics".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "score".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "score".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
@@ -2561,7 +2581,7 @@ async fn type_change_is_gated_refused_without_approval_applied_with_then_re_diff
     let v2 = CollectionDescriptor {
         name: "metrics".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "score".into(), ty: "number".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "score".into(), ty: "number".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
@@ -2609,7 +2629,7 @@ async fn set_not_null_is_gated_drop_not_null_is_ungated_and_both_re_diff_clean()
     let v1 = CollectionDescriptor {
         name: "accounts".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
@@ -2621,7 +2641,7 @@ async fn set_not_null_is_gated_drop_not_null_is_ungated_and_both_re_diff_clean()
     let v2 = CollectionDescriptor {
         name: "accounts".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: true, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: true, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
@@ -2684,7 +2704,7 @@ async fn unapplied_gated_type_change_keeps_re_diffing_nonempty_documented_semant
     let v1 = CollectionDescriptor {
         name: "gauge".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "v".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "v".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
@@ -2695,7 +2715,7 @@ async fn unapplied_gated_type_change_keeps_re_diffing_nonempty_documented_semant
     let v2 = CollectionDescriptor {
         name: "gauge".into(),
         owner_app: "app_test".into(),
-        fields: vec![FieldDescriptor { name: "v".into(), ty: "number".into(), required: false, unique: false, references: None }],
+        fields: vec![FieldDescriptor { name: "v".into(), ty: "number".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
@@ -2708,6 +2728,220 @@ async fn unapplied_gated_type_change_keeps_re_diffing_nonempty_documented_semant
     assert_eq!(migs1.len(), 1, "exactly one gated type change");
     assert_eq!(migs2.len(), 1, "still one — un-applied change is not dropped");
     assert!(migs1[0].flags.requires_approval && migs1[0].flags.destructive, "stays gated");
+
+    teardown(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// Phase-1 parity #1 — FK on-delete / on-update / deferrable round-trip.
+// ---------------------------------------------------------------------------
+
+/// A `ref` field carrying an explicit FK policy.
+fn ref_field(
+    name: &str,
+    target: &str,
+    on_delete: Option<&str>,
+    on_update: Option<&str>,
+    deferrable: Option<bool>,
+) -> FieldDescriptor {
+    FieldDescriptor {
+        name: name.into(),
+        ty: "ref".into(),
+        references: Some(target.into()),
+        on_delete: on_delete.map(str::to_string),
+        on_update: on_update.map(str::to_string),
+        deferrable,
+        ..Default::default()
+    }
+}
+
+/// Apply a desired schema from empty, then assert the FULL re-diff is clean AND
+/// the differ re-diffs to ZERO migrations — the lossless round-trip oracle.
+async fn apply_and_assert_clean_roundtrip(
+    engine: &MigrationEngine,
+    author: &DeclarativeAuthor,
+    cfg: &ExecutorConfig,
+    conn: &Client,
+    desired: &DesiredSchema,
+) {
+    apply_plan(engine, desired, &SchemaSnapshot::default(), author, cfg, conn, Approval::None)
+        .await
+        .expect("apply plan");
+    let live2 = snapshot_schema(conn, &cfg.project_schema).await.expect("re-snapshot");
+    let drift = diff_snapshots(&desired.snapshot, &live2);
+    assert!(
+        drift.is_clean(),
+        "re-diff after apply must be clean: missing={:?} unexpected={:?} altered={:?}",
+        drift.missing_objects,
+        drift.unexpected_objects,
+        drift.altered_objects
+    );
+    let migs = author.diff(desired, &live2, &HashMap::new(), &[]).expect("re-diff").migrations;
+    assert!(
+        migs.is_empty(),
+        "re-diff must be EMPTY (lossless round-trip), got: {:?}",
+        migs.iter().map(|m| &m.name).collect::<Vec<_>>()
+    );
+}
+
+#[compio::test]
+async fn fk_with_cascade_policy_round_trips_clean() {
+    // #1: a CASCADE/CASCADE deferrable FK must apply and re-diff to ZERO. RED
+    // pre-fix: the engine emitted a bare FK (no policy), so the live constraint
+    // carried ON UPDATE/ON DELETE CASCADE that the desired snapshot lacked → a
+    // phantom DROP+ADD on every re-diff (the verify-gate-bricking bug).
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let parent = CollectionDescriptor { name: "parent".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![] };
+    let child = CollectionDescriptor {
+        name: "child".into(),
+        owner_app: "app_test".into(),
+        fields: vec![ref_field("p", "parent", Some("cascade"), Some("cascade"), Some(true))],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&cfg.project_schema, &[parent, child]).expect("desired_snapshot");
+    apply_and_assert_clean_roundtrip(&engine, &author, &cfg, &conn, &desired).await;
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn fk_with_set_null_policy_round_trips_clean() {
+    // #1: ON DELETE SET NULL (deferrable) round-trips clean.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let parent = CollectionDescriptor { name: "parent".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![] };
+    let child = CollectionDescriptor {
+        name: "child".into(),
+        owner_app: "app_test".into(),
+        // SET NULL on delete; default (restrict) on update; deferrable default true.
+        fields: vec![ref_field("p", "parent", Some("set null"), None, None)],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&cfg.project_schema, &[parent, child]).expect("desired_snapshot");
+    apply_and_assert_clean_roundtrip(&engine, &author, &cfg, &conn, &desired).await;
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn fk_sdk_default_restrict_deferrable_round_trips_clean() {
+    // #1: the SDK default for a bare t.ref() is restrict/restrict/deferrable=true.
+    // A `references` with no explicit policy must round-trip clean (the most
+    // common shape). RED pre-fix: the engine emitted a bare FK (no DEFERRABLE),
+    // so live's DEFERRABLE INITIALLY DEFERRED phantom-drifted forever.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let parent = CollectionDescriptor { name: "authors".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![] };
+    let child = CollectionDescriptor {
+        name: "posts".into(),
+        owner_app: "app_test".into(),
+        // Bare references: every policy defaulted (restrict/restrict/deferrable).
+        fields: vec![FieldDescriptor {
+            name: "author".into(),
+            ty: "ref".into(),
+            references: Some("authors".into()),
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&cfg.project_schema, &[parent, child]).expect("desired_snapshot");
+    apply_and_assert_clean_roundtrip(&engine, &author, &cfg, &conn, &desired).await;
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn fk_no_action_non_deferrable_round_trips_clean() {
+    // #1: an explicit NO ACTION / NO ACTION, deferrable=false FK renders with NO
+    // policy clauses at all in pg_get_constraintdef — the desired snapshot must
+    // omit them too, else phantom drift.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let parent = CollectionDescriptor { name: "parent".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![] };
+    let child = CollectionDescriptor {
+        name: "child".into(),
+        owner_app: "app_test".into(),
+        fields: vec![ref_field("p", "parent", Some("no action"), Some("no action"), Some(false))],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&cfg.project_schema, &[parent, child]).expect("desired_snapshot");
+    apply_and_assert_clean_roundtrip(&engine, &author, &cfg, &conn, &desired).await;
+
+    teardown(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// Phase-1 parity #2 — cross-app FK rejection at the author boundary.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn cross_app_ref_target_is_rejected_fail_closed() {
+    // #2: a `ref` to `<otherApp>.<table>` is a cross-app/cross-schema FK —
+    // forbidden fail-closed (mirrors plugin-db's cross_app_fk.rs). Rejected at
+    // the author boundary BEFORE any SQL is rendered.
+    let cfg = cfg_for(&token());
+    let desc = CollectionDescriptor {
+        name: "posts".into(),
+        owner_app: "app_test".into(),
+        fields: vec![ref_field("author", "other_app.users", None, None, None)],
+        indexes: vec![],
+    };
+    let err = desired_snapshot(&cfg.project_schema, &[desc]).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DeclarativeError::CrossAppFkForbidden { ref table, ref target, ref other_app }
+                if table == "posts" && target == "other_app.users" && other_app == "other_app"
+        ),
+        "got {err:?}"
+    );
+}
+
+#[compio::test]
+async fn own_schema_bare_ref_target_is_allowed() {
+    // #2 (counterpart): a bare same-project reference is allowed and applies clean.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let users = CollectionDescriptor { name: "users".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![] };
+    let posts = CollectionDescriptor {
+        name: "posts".into(),
+        owner_app: "app_test".into(),
+        fields: vec![ref_field("author", "users", None, None, None)],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&cfg.project_schema, &[users, posts]).expect("bare ref allowed");
+    apply_and_assert_clean_roundtrip(&engine, &author, &cfg, &conn, &desired).await;
 
     teardown(&conn, &cfg).await;
 }

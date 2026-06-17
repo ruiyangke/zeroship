@@ -63,7 +63,7 @@ fn quote_ident(ident: &str) -> String {
 ///
 /// Untrusted: `name` and `ty` are validated at the author boundary before any
 /// SQL is emitted (see [`DeclarativeAuthor::diff`]).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct FieldDescriptor {
     /// The field (column) name.
     pub name: String,
@@ -84,6 +84,20 @@ pub struct FieldDescriptor {
     /// for non-`ref` fields.
     #[serde(rename = "ref", default)]
     pub references: Option<String>,
+    /// `ref` ON DELETE policy (`restrict` | `cascade` | `set null` | `no action`).
+    /// `None` ⇒ the SDK default `restrict` (`onDelete` on the wire `FieldDef`).
+    /// Mirrors plugin-db's `normalize_fk_action`: anything unrecognised folds to
+    /// `RESTRICT`.
+    #[serde(rename = "onDelete", default)]
+    pub on_delete: Option<String>,
+    /// `ref` ON UPDATE policy. `None` ⇒ the SDK default `restrict` (`onUpdate`).
+    #[serde(rename = "onUpdate", default)]
+    pub on_update: Option<String>,
+    /// Whether the FK is emitted `DEFERRABLE INITIALLY DEFERRED`. `None` ⇒ the SDK
+    /// default `true` (`deferrable` on the wire `FieldDef`). Mirrors plugin-db's
+    /// `build_fk_clause`, which defaults `deferrable` to `true`.
+    #[serde(default)]
+    pub deferrable: Option<bool>,
 }
 
 /// One declared index of a collection (the `_indexes` array entry).
@@ -412,6 +426,12 @@ pub fn desired_snapshot(
             // A `ref` field declares a FOREIGN KEY constraint.
             if f.ty == "ref" {
                 if let Some(target) = &f.references {
+                    // #2 cross-app: a `<otherApp>.<table>` schema-qualified
+                    // target is REJECTED here, fail-closed (mirrors
+                    // `crates/plugin-db/src/cross_app_fk.rs`): every FK must stay
+                    // inside the project schema. Surfaced as a dedicated, clearer
+                    // error for that shape before the generic bare-ident check.
+                    reject_cross_app_ref(&d.name, target)?;
                     // #3-ref: the FK target table is interpolated into
                     // `REFERENCES <schema>.<target>(id)`; validate it as a bare
                     // identifier at the author boundary (mirroring how table /
@@ -422,17 +442,22 @@ pub fn desired_snapshot(
                     constraints.push(ConstraintSnapshot {
                         name: fk_constraint_name(&f.name),
                         kind: "FOREIGN KEY".into(),
-                        // EXACT `pg_get_constraintdef` spelling (1b): the target
-                        // is schema-qualified and there is NO space before `(id)`.
-                        // The generated FK carries no ON DELETE / ON UPDATE /
-                        // DEFERRABLE clause, and `pg_get_constraintdef` renders
-                        // none for a bare FK, so this body is byte-identical to
-                        // live — no phantom drift, and the differ can compare FK
-                        // bodies on existing tables (a changed target is caught,
-                        // not silently skipped).
-                        definition: format!(
-                            "FOREIGN KEY ({}) REFERENCES {}.{}(id)",
-                            f.name, project_schema, target
+                        // EXACT `pg_get_constraintdef` spelling (#1): the target
+                        // is schema-qualified, NO space before `(id)`, the policy
+                        // clauses render `ON UPDATE <b>` THEN `ON DELETE <a>` (pg's
+                        // canonical order, the reverse of the DDL), a `NO ACTION`
+                        // action is OMITTED, and a deferrable FK ends with
+                        // ` DEFERRABLE INITIALLY DEFERRED`. Built to match live
+                        // byte-for-byte so a policy FK re-diffs clean — and the
+                        // differ can compare FK bodies on existing tables (a
+                        // changed target/policy is caught, not silently skipped).
+                        definition: fk_definition_pg(
+                            &f.name,
+                            project_schema,
+                            target,
+                            f.on_delete.as_deref(),
+                            f.on_update.as_deref(),
+                            f.deferrable.unwrap_or(true),
                         ),
                     });
                 }
@@ -528,6 +553,87 @@ fn unique_index_name(table: &str, field: &str) -> String {
 /// `fk_constraint_name`).
 fn fk_constraint_name(field: &str) -> String {
     format!("{field}_fkey")
+}
+
+/// Normalise a DSL FK action token to the SQL keyword Postgres reports.
+///
+/// Mirrors plugin-db's `normalize_fk_action` (`query.rs:1036`): the SDK
+/// `FkAction` tokens (`cascade` / `set null` / `set_null` / `no action` /
+/// `no_action`) plus anything unrecognised fold to `RESTRICT` (fail-safe). The
+/// SDK default (a bare `t.ref()`) is `restrict`.
+fn normalize_fk_action(s: Option<&str>) -> &'static str {
+    match s.unwrap_or("restrict").to_ascii_lowercase().as_str() {
+        "cascade" => "CASCADE",
+        "set null" | "set_null" => "SET NULL",
+        "no action" | "no_action" => "NO ACTION",
+        _ => "RESTRICT",
+    }
+}
+
+/// Build a FOREIGN KEY definition body in the EXACT spelling
+/// `pg_get_constraintdef(oid)` renders, so the desired snapshot round-trips to
+/// the live introspected constraint (#1).
+///
+/// Empirically (probed against PG 17), `pg_get_constraintdef` renders a FK as:
+///
+/// ```text
+/// FOREIGN KEY (<col>) REFERENCES <schema>.<target>(id)[ ON UPDATE <u>][ ON DELETE <d>][ DEFERRABLE INITIALLY DEFERRED]
+/// ```
+///
+/// with two normalisations the DDL spelling does NOT have:
+/// - **`ON UPDATE` precedes `ON DELETE`** (the reverse of plugin-db's emitted
+///   DDL, which writes `ON DELETE <d> ON UPDATE <u>`); and
+/// - a **`NO ACTION`** action clause is **OMITTED entirely** (it is the catalog
+///   default — `confdeltype`/`confupdtype` = `'a'`), so a FK with both actions
+///   `NO ACTION` renders with no action clauses at all.
+///
+/// `RESTRICT`, `CASCADE`, and `SET NULL` are rendered explicitly. The actions
+/// pass through [`normalize_fk_action`] first (matching plugin-db's
+/// emit-time normalisation), so the same DSL tokens land on the same keywords.
+fn fk_definition_pg(
+    field: &str,
+    project_schema: &str,
+    target: &str,
+    on_delete: Option<&str>,
+    on_update: Option<&str>,
+    deferrable: bool,
+) -> String {
+    use std::fmt::Write as _;
+    let mut def = format!("FOREIGN KEY ({field}) REFERENCES {project_schema}.{target}(id)");
+    let on_update = normalize_fk_action(on_update);
+    let on_delete = normalize_fk_action(on_delete);
+    // pg renders ON UPDATE before ON DELETE, and omits a NO ACTION clause.
+    if on_update != "NO ACTION" {
+        let _ = write!(def, " ON UPDATE {on_update}");
+    }
+    if on_delete != "NO ACTION" {
+        let _ = write!(def, " ON DELETE {on_delete}");
+    }
+    if deferrable {
+        def.push_str(" DEFERRABLE INITIALLY DEFERRED");
+    }
+    def
+}
+
+/// Reject a `ref` whose target is schema-qualified with a `<otherApp>.` prefix —
+/// a cross-app FK (#2), forbidden fail-closed (mirrors
+/// `crates/plugin-db/src/cross_app_fk.rs`: every FK stays inside one app's
+/// namespace). A bare collection name is a same-project ref and is allowed.
+///
+/// The engine's project-umbrella model puts every member app's tables in ONE
+/// project schema, so a legitimate cross-*app* (same-project) FK is just a bare
+/// reference to another app's table in the union — the qualified `<app>.<table>`
+/// form is exactly the disallowed cross-schema escape. (`validate_ident` would
+/// also reject the `.`, but this gives the precise, actionable error.)
+fn reject_cross_app_ref(table: &str, target: &str) -> Result<(), DeclarativeError> {
+    if let Some((prefix, _)) = target.split_once('.') {
+        return Err(DeclarativeError::CrossAppFkForbidden {
+            table: table.to_string(),
+            target: target.to_string(),
+            other_app: prefix.to_string(),
+        });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -742,6 +848,26 @@ pub enum DeclarativeError {
     /// than swallowed.
     #[error("failed to author rename expand-contract sequence: {0}")]
     Rename(#[from] ExpandContractError),
+    /// A `ref` field's target was a schema-qualified `<otherApp>.<table>` — a
+    /// CROSS-APP foreign key, forbidden fail-closed (#2, mirrors
+    /// `crates/plugin-db/src/cross_app_fk.rs`). Every FK must stay inside the
+    /// project schema; a reference to another member app's table is the BARE
+    /// collection name (the union puts every app's tables in one schema), never a
+    /// dot-qualified one. Caught at the author/plan boundary BEFORE any SQL is
+    /// rendered, so a cross-schema escape can never reach DDL.
+    #[error(
+        "table '{table}' declares a cross-app foreign key to '{target}' (app \
+         '{other_app}'): a foreign key may not cross an app/schema boundary — \
+         reference a table in this project by its bare name"
+    )]
+    CrossAppFkForbidden {
+        /// The table declaring the forbidden cross-app FK.
+        table: String,
+        /// The schema-qualified `<otherApp>.<table>` target.
+        target: String,
+        /// The `<otherApp>` schema prefix that crossed the boundary.
+        other_app: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1631,16 +1757,25 @@ impl DeclarativeAuthor {
         )
     }
 
-    /// Render a `CONSTRAINT … FOREIGN KEY (…) REFERENCES <schema>.<tgt> (id)`
-    /// clause for inline CREATE TABLE use.
+    /// Render a `CONSTRAINT … FOREIGN KEY (…) REFERENCES <schema>.<tgt> (id)
+    /// [<policy>]` clause for inline CREATE TABLE / ALTER ADD CONSTRAINT use.
+    ///
+    /// The ON UPDATE / ON DELETE / DEFERRABLE policy tail is carried in the
+    /// constraint `definition` (built by [`fk_definition_pg`] in the canonical
+    /// `pg_get_constraintdef` spelling). Postgres accepts that same clause order
+    /// as DDL, so the tail is appended verbatim — the applied constraint then
+    /// introspects back to the identical definition, and the FK round-trips clean
+    /// (#1). A bare FK (no policy tail) emits nothing extra.
     fn fk_clause(&self, fk: &ConstraintSnapshot) -> String {
         let col = fk_local_column(&fk.definition).unwrap_or_default();
         let target = fk_target_table(&fk.definition).unwrap_or_default();
+        let policy = fk_policy_tail(&fk.definition);
         format!(
-            "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} (id)",
+            "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} (id){}",
             quote_ident(&fk.name),
             quote_ident(&col),
             self.qualified(&target),
+            policy,
         )
     }
 
@@ -2028,6 +2163,28 @@ fn fk_target_table(definition: &str) -> Option<String> {
     } else {
         Some(target.to_string())
     }
+}
+
+/// Extract the policy tail (everything AFTER `REFERENCES <schema>.<target>(id)`)
+/// from a FK definition built by [`fk_definition_pg`] — i.e. the
+/// ` ON UPDATE …`/` ON DELETE …`/` DEFERRABLE INITIALLY DEFERRED` clauses, with
+/// a leading space, or an empty string for a bare FK.
+///
+/// The definition is the canonical `pg_get_constraintdef` body, where the target
+/// is always followed by `(id)` (the PK column, no space before the paren). We
+/// split on the FIRST `(id)` after `REFERENCES` and return the remainder. The
+/// emitted DDL appends this verbatim; Postgres accepts the same clause order, so
+/// the re-introspected constraint body is byte-identical and re-diffs clean (#1).
+fn fk_policy_tail(definition: &str) -> String {
+    let Some(after_ref) = definition.split_once("REFERENCES") else {
+        return String::new();
+    };
+    // Find the `(id)` that closes the target reference and take what follows.
+    after_ref
+        .1
+        .find("(id)")
+        .map(|i| after_ref.1[i + "(id)".len()..].to_string())
+        .unwrap_or_default()
 }
 
 /// Extract the local column from an FK definition `FOREIGN KEY (<col>) …`.

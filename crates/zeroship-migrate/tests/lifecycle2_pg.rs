@@ -1244,6 +1244,7 @@ fn field(name: &str, ty: &str) -> FieldDescriptor {
         required: false,
         unique: false,
         references: None,
+        ..Default::default()
     }
 }
 
@@ -1254,6 +1255,7 @@ fn fk_field(name: &str, target: &str) -> FieldDescriptor {
         required: false,
         unique: false,
         references: Some(target.into()),
+        ..Default::default()
     }
 }
 

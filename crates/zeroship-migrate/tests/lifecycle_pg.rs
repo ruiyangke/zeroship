@@ -199,6 +199,7 @@ fn one_field_collection(tbl: &str, field: &str, app: &str) -> CollectionDescript
             required: false,
             unique: false,
             references: None,
+            ..Default::default()
         }],
         indexes: vec![],
     }

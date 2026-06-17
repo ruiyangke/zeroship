@@ -368,6 +368,7 @@ fn field(name: &str, ty: &str, required: bool) -> FieldDescriptor {
         required,
         unique: false,
         references: None,
+        ..Default::default()
     }
 }
 
