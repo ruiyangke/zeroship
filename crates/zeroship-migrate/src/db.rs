@@ -131,11 +131,9 @@ impl ExecutorConfig {
     /// into Platform. `schemas` is the cross-schema allowlist; `extensions` is
     /// the `CREATE EXTENSION` allowlist.
     ///
-    /// Phase 1 has no CLI; the platform-runner / CLI (Phase 3) is the real
-    /// caller (hence `dead_code` in a non-test build until that caller lands).
-    /// The token is the in-crate enforcement primitive.
+    /// The real caller is the operator-side `guard::platform_runner` (the CLI,
+    /// Phase 3); the token is the in-crate enforcement primitive.
     #[must_use]
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn platform(
         cap: &crate::guard::PlatformCapability,
         project_id: impl Into<String>,

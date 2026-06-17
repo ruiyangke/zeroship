@@ -32,6 +32,21 @@ compio = { workspace = true }
 # combinator crate, not a runtime.
 futures = { workspace = true }
 tracing = { workspace = true }
+# CLI arg parsing for the `zeroship-migrate` bin (Phase 3, design §9). clap is
+# SYNC — zero tokio — so it does not violate the zero-tokio invariant; the
+# `env` feature backs the `--database-url` / `DATABASE_URL` env fallback.
+clap = { workspace = true }
+
+# ---------------------------------------------------------------------------
+# The operator-side CLI binary (Phase 3, design §9). compio (NOT tokio): the
+# bin's `#[compio::main]` drives the same compio-native `connect`/executor the
+# library uses. `main` is a THIN arg-parser that delegates to the
+# `guard::platform_runner::run_*` functions — the ONLY place the
+# `PlatformCapability` token is minted (the §5 trust invariant).
+# ---------------------------------------------------------------------------
+[[bin]]
+name = "zeroship-migrate"
+path = "src/bin/zeroship-migrate.rs"
 
 [dev-dependencies]
 # Executor tests hit a REAL Postgres (faithful-e2e); the compio test macro

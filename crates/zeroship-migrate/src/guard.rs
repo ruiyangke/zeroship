@@ -103,43 +103,15 @@ impl SchemaScope {
 /// `submit`/`engine`/`executor`/… cannot mint a token, so they cannot mint
 /// Platform. The TYPE is re-exported crate-wide (so `platform()` can name it in
 /// its signature); the constructor is NOT.
-pub(crate) mod platform_runner {
-    /// A zero-sized Platform capability token. Its `new()` is `pub(super)`, so
-    /// only this submodule can mint it (the CLI / compose `migrate` entrypoint
-    /// — Phase 3 — will live here and be the only real caller).
-    ///
-    /// `Clone` is sound: it is a ZST and cloning does not widen authority — you
-    /// can only clone a token you *already hold*, and you can only hold one by
-    /// minting it here. It rides on a Platform-built [`super::GuardConfig`] /
-    /// [`crate::db::ExecutorConfig`] so the executor's internal guard builds can
-    /// re-derive a Platform `GuardConfig` without a fresh out-of-band mint.
-    #[derive(Debug, Clone)]
-    pub struct PlatformCapability(());
-
-    impl PlatformCapability {
-        /// The single mint site, private to this submodule.
-        ///
-        /// Phase 1 has no CLI yet; this is exercised by the in-crate T11 test
-        /// seam below and will be called by the CLI `migrate`/`status`/
-        /// `validate`/`rollback` entrypoints in Phase 3 (hence `dead_code` in a
-        /// non-test build until that caller lands).
-        #[cfg_attr(not(test), allow(dead_code))]
-        pub(super) fn new() -> Self {
-            PlatformCapability(())
-        }
-
-        /// **Test-only `pub(crate)` seam (Phase 1).** Lets in-crate tests
-        /// exercise the Platform profile before the CLI exists. This is the
-        /// ONLY way any module other than `platform_runner` can obtain a token,
-        /// and it is `#[cfg(test)]`-gated so it does not exist in a release
-        /// build — the production mint site stays the `pub(super)` `new` above.
-        #[cfg(test)]
-        #[must_use]
-        pub(crate) fn for_test() -> Self {
-            Self::new()
-        }
-    }
-}
+// PUBLIC module so the `zeroship-migrate` bin (a SEPARATE compilation target,
+// thus outside `pub(crate)` visibility) can call the `run_*` operator runners.
+// The token mint stays confined regardless: `PlatformCapability::new()` is
+// `pub(super)` (visible only within `guard`), so neither the bin, an external
+// crate, nor an in-crate creator-path module (`submit`/`engine`) can MINT a
+// token — they can only invoke the operator runner, which mints internally.
+// The `PlatformCapability` TYPE is re-exported only `pub(crate)` (below), so it
+// stays un-nameable externally (T8 doctest snippet 3).
+pub mod platform_runner;
 
 pub(crate) use platform_runner::PlatformCapability;
 
