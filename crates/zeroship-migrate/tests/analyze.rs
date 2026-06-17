@@ -344,6 +344,56 @@ fn add_constraint_bare_primary_key_fires() {
 }
 
 // ---------------------------------------------------------------------------
+// GROUP 2 (review) — new statement arms: TRUNCATE, STORED generated columns,
+// and the lock-heavy maintenance ops (CLUSTER / VACUUM FULL / REINDEX).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn truncate_fires_as_warning_data_loss() {
+    let a = first("TRUNCATE orders", rule::TRUNCATE_DATA_LOSS)
+        .expect("TRUNCATE must warn");
+    assert_eq!(a.severity, Severity::Warning);
+    assert!(a.message.to_lowercase().contains("data loss") || a.message.to_lowercase().contains("all rows"));
+}
+
+#[test]
+fn add_column_generated_stored_fires_table_rewrite() {
+    let a = first(
+        "ALTER TABLE t ADD COLUMN g int GENERATED ALWAYS AS (x+1) STORED",
+        rule::TABLE_REWRITE,
+    )
+    .expect("STORED generated ADD COLUMN must warn rewrite");
+    assert!(a.message.to_lowercase().contains("rewrite"));
+}
+
+#[test]
+fn cluster_fires_lock_heavy() {
+    assert!(fires("CLUSTER orders USING idx_orders", rule::LOCK_HEAVY_MAINTENANCE));
+}
+
+#[test]
+fn vacuum_full_fires_lock_heavy() {
+    assert!(fires("VACUUM FULL orders", rule::LOCK_HEAVY_MAINTENANCE));
+}
+
+#[test]
+fn plain_vacuum_does_not_fire() {
+    assert!(!fires("VACUUM orders", rule::LOCK_HEAVY_MAINTENANCE));
+}
+
+#[test]
+fn reindex_non_concurrent_fires_with_concurrently_suggestion() {
+    let a = first("REINDEX TABLE orders", rule::LOCK_HEAVY_MAINTENANCE)
+        .expect("non-concurrent REINDEX must warn");
+    assert!(a.suggestion.unwrap().to_lowercase().contains("concurrently"));
+}
+
+#[test]
+fn reindex_concurrently_does_not_fire() {
+    assert!(!fires("REINDEX TABLE CONCURRENTLY orders", rule::LOCK_HEAVY_MAINTENANCE));
+}
+
+// ---------------------------------------------------------------------------
 // GROUP 3 — perf advisories (Notice)
 // ---------------------------------------------------------------------------
 

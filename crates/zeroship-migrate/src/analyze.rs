@@ -113,6 +113,13 @@ pub mod rule {
     pub const TABLE_REWRITE: &str = "TABLE_REWRITE";
     /// An FK referencing column with no supporting index in the same migration.
     pub const FK_WITHOUT_INDEX: &str = "FK_WITHOUT_INDEX";
+    /// `TRUNCATE` — deletes all rows; irreversible and not MVCC-rolled-back the
+    /// way a `DELETE` is (it resets storage; under some setups it cannot be
+    /// rolled back cleanly).
+    pub const TRUNCATE_DATA_LOSS: &str = "TRUNCATE_DATA_LOSS";
+    /// A lock-heavy maintenance op — `CLUSTER`, `VACUUM FULL`, or a non-concurrent
+    /// `REINDEX` — that takes an ACCESS EXCLUSIVE / heavy lock for its duration.
+    pub const LOCK_HEAVY_MAINTENANCE: &str = "LOCK_HEAVY_MAINTENANCE";
 }
 
 /// Run every analyzer over `sql` and return the advisories (in source order,
@@ -145,7 +152,17 @@ pub fn analyze_migration(migration: &Migration) -> Vec<Advisory> {
     analyze(&migration.up)
 }
 
-/// Run every analyzer over a single top-level statement node.
+/// Run every analyzer over a single **top-level** statement node.
+///
+/// This is TOP-LEVEL-only by design: unlike [`crate::guard`] (which walks
+/// `DO`-block / function bodies to enforce the security deny-list), the analyzers
+/// do NOT recurse into nested statement bodies. Advisories are non-security
+/// enrichment, so a footgun buried inside a `DO $$ … $$` block is simply not
+/// flagged — it is not a security hole (the guard + role still cover the
+/// dangerous surface). `CreateStmt` (`CREATE TABLE`) is intentionally NOT
+/// dispatched: its inline `PRIMARY KEY`/`UNIQUE`/`NOT NULL` constraints apply to
+/// a brand-new empty table and would otherwise false-positive the
+/// populated-table lock/scan advisories.
 fn analyze_node(node: &NodeEnum, out: &mut Vec<Advisory>) {
     match node {
         // ---- CREATE INDEX (non-concurrent) ----
@@ -156,6 +173,12 @@ fn analyze_node(node: &NodeEnum, out: &mut Vec<Advisory>) {
         NodeEnum::RenameStmt(r) => analyze_rename_stmt(r, out),
         // ---- ALTER TABLE: the bulk of the operational analyzers ----
         NodeEnum::AlterTableStmt(at) => analyze_alter_table(at, out),
+        // ---- TRUNCATE: irreversible deletion of every row ----
+        NodeEnum::TruncateStmt(_) => analyze_truncate(out),
+        // ---- CLUSTER / VACUUM FULL / REINDEX: lock-heavy maintenance ----
+        NodeEnum::ClusterStmt(_) => analyze_cluster(out),
+        NodeEnum::VacuumStmt(v) => analyze_vacuum(v, out),
+        NodeEnum::ReindexStmt(r) => analyze_reindex(r, out),
         _ => {}
     }
 }
@@ -177,6 +200,73 @@ fn analyze_create_index(idx: &protobuf::IndexStmt, out: &mut Vec<Advisory>) {
         "use CREATE INDEX CONCURRENTLY on a populated table (it cannot run inside a \
          transaction, so author it as a non-transactional migration)",
     ));
+}
+
+/// `TRUNCATE_DATA_LOSS` — `TRUNCATE` removes every row at once; it is
+/// irreversible and (unlike a `DELETE`) resets the table's storage.
+fn analyze_truncate(out: &mut Vec<Advisory>) {
+    out.push(Advisory::warning(
+        rule::TRUNCATE_DATA_LOSS,
+        "TRUNCATE deletes all rows in the target table(s) — irreversible data loss \
+         (it resets storage, and under some setups cannot be cleanly rolled back)"
+            .to_string(),
+        "if you need to keep the data, copy it out first; a TRUNCATE always requires \
+         explicit approval (it is destructive)",
+    ));
+}
+
+/// `LOCK_HEAVY_MAINTENANCE` — `CLUSTER` rewrites the table under an ACCESS
+/// EXCLUSIVE lock for its whole duration.
+fn analyze_cluster(out: &mut Vec<Advisory>) {
+    out.push(Advisory::warning(
+        rule::LOCK_HEAVY_MAINTENANCE,
+        "CLUSTER rewrites the table under an ACCESS EXCLUSIVE lock for the entire \
+         operation, blocking all reads and writes"
+            .to_string(),
+        "run it in a maintenance window, or use pg_repack for an online rewrite",
+    ));
+}
+
+/// `LOCK_HEAVY_MAINTENANCE` — `VACUUM FULL` (the `full` option) rewrites the
+/// table under an ACCESS EXCLUSIVE lock. A plain `VACUUM` does NOT and is silent.
+fn analyze_vacuum(v: &protobuf::VacuumStmt, out: &mut Vec<Advisory>) {
+    if !def_elem_present(&v.options, "full") {
+        return;
+    }
+    out.push(Advisory::warning(
+        rule::LOCK_HEAVY_MAINTENANCE,
+        "VACUUM FULL rewrites the table under an ACCESS EXCLUSIVE lock for the entire \
+         operation, blocking all reads and writes"
+            .to_string(),
+        "use plain VACUUM (no FULL) for routine bloat, or pg_repack for an online \
+         space reclaim",
+    ));
+}
+
+/// `LOCK_HEAVY_MAINTENANCE` — a non-concurrent `REINDEX` holds a lock that blocks
+/// writes (and, for some forms, reads) while it rebuilds. `REINDEX … CONCURRENTLY`
+/// (the `concurrently` param) is the safe form and is silent.
+fn analyze_reindex(r: &protobuf::ReindexStmt, out: &mut Vec<Advisory>) {
+    if def_elem_present(&r.params, "concurrently") {
+        return;
+    }
+    out.push(Advisory::warning(
+        rule::LOCK_HEAVY_MAINTENANCE,
+        "REINDEX (non-concurrent) holds a lock that blocks writes while it rebuilds \
+         the index"
+            .to_string(),
+        "use REINDEX … CONCURRENTLY (it cannot run inside a transaction, so author it \
+         as its own non-transactional migration)",
+    ));
+}
+
+/// Is a `DefElem` with `defname == name` present in a `DefElem` option list?
+/// (`VACUUM FULL` ⇒ a `full` option; `REINDEX … CONCURRENTLY` ⇒ a `concurrently`
+/// param — both arrive as `DefElem`s rather than struct flags.)
+fn def_elem_present(opts: &[protobuf::Node], name: &str) -> bool {
+    opts.iter().any(|n| {
+        matches!(n.node.as_ref(), Some(NodeEnum::DefElem(d)) if d.defname.eq_ignore_ascii_case(name))
+    })
 }
 
 /// `DESTRUCTIVE_DROP` — `DROP TABLE`/`VIEW`/`SEQUENCE`/… via the `DropStmt`
@@ -570,9 +660,19 @@ enum DefaultKind {
 }
 
 /// Classify a column's DEFAULT clause.
+///
+/// A `GENERATED ALWAYS AS (…) STORED` column (`ConstrGenerated`) is materialised
+/// for every existing row, so adding one rewrites the table under an ACCESS
+/// EXCLUSIVE lock — classified as [`DefaultKind::Volatile`] so it surfaces a
+/// `TABLE_REWRITE` advisory.
 fn column_default_kind(col: &protobuf::ColumnDef) -> DefaultKind {
     for con in &col.constraints {
         if let Some(NodeEnum::Constraint(c)) = con.node.as_ref() {
+            if c.contype == ConstrType::ConstrGenerated as i32 {
+                // A STORED generated column is computed for every row on ADD →
+                // full table rewrite.
+                return DefaultKind::Volatile;
+            }
             if c.contype == ConstrType::ConstrDefault as i32 {
                 return match c.raw_expr.as_ref().and_then(|e| e.node.as_ref()) {
                     Some(expr) if expr_contains_func_call(expr) => DefaultKind::Volatile,
