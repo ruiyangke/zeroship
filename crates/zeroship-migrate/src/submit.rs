@@ -687,7 +687,7 @@ async fn log_noop_name_mismatch(
 //
 // These MUST live in-crate (not in `tests/submit_pg.rs`): the only way to mint a
 // Platform `ExecutorConfig` is `ExecutorConfig::platform(&cap, …)` with a
-// `PlatformCapability` token, and BOTH that ctor and `PlatformCapability::for_test`
+// `OperatorCapability` token, and BOTH that ctor and `OperatorCapability::for_test`
 // are `pub(crate)` — unreachable from an integration test (a separate crate). So
 // the hostile-caller scenario (a buggy/hostile caller hands `submit_migration` a
 // PLATFORM `ExecutorConfig`) can only be constructed from inside the crate.
@@ -717,7 +717,7 @@ mod low1_two_guard_coupling_pg {
 
     use crate::approval::Approval;
     use crate::db::ExecutorConfig;
-    use crate::guard::platform_runner::PlatformCapability;
+    use crate::guard::platform_runner::OperatorCapability;
     use crate::journal::ensure_journal;
     use crate::role::{deprovision_migrator, migrator_role_name, provision_migrator};
     use crate::shadow::ShadowConfig;
@@ -751,7 +751,7 @@ mod low1_two_guard_coupling_pg {
     /// Uses the `#[cfg(test)]` `for_test` token seam (the only non-`platform_runner`
     /// path to a token; unreachable from an integration test).
     fn platform_cfg(tok: &str) -> ExecutorConfig {
-        let cap = PlatformCapability::for_test();
+        let cap = OperatorCapability::for_test();
         let schema = format!("proj_{tok}");
         let mut c = ExecutorConfig::platform(
             &cap,
@@ -922,5 +922,102 @@ mod low1_two_guard_coupling_pg {
         }
 
         teardown(&conn, &cfg).await;
+    }
+
+    // =======================================================================
+    // Track A — the Trusted profile cannot weaken `submit_migration` either.
+    //
+    // Same coupling proof as the Platform arms above, but with a TRUSTED
+    // `ExecutorConfig` (whose own `guard_config()` skips the deny-list ENTIRELY).
+    // `submit_migration` STILL forces `GuardConfig::confined(project_schema)` for
+    // the planner gate, so a privileged `up` is `Denied` regardless of `cfg.trust`.
+    // If submit's forced-Confined gate ever drifted to honour `cfg.trust`, this
+    // would APPLY the role and go RED. (The Trusted ctor is `pub(crate)` + the
+    // token is `pub(crate)`, so this hostile config is only constructible
+    // in-crate — an external crate can never even name it; pinned by T8.)
+    // =======================================================================
+
+    /// Mint a **Trusted** `ExecutorConfig` over a unique schema/meta — the hostile
+    /// shape a buggy/hostile caller would forge to try to weaken the submit path.
+    fn trusted_cfg(tok: &str) -> ExecutorConfig {
+        let cap = OperatorCapability::for_test();
+        let schema = format!("proj_{tok}");
+        let mut c =
+            ExecutorConfig::trusted(&cap, format!("prj_{tok}"), schema.clone());
+        c.meta_schema = format!("meta_{tok}");
+        c.statement_timeout = Duration::from_secs(30);
+        c.lock_timeout = Duration::from_secs(10);
+        c
+    }
+
+    /// `submit_cannot_reach_trusted` — a privileged `CREATE ROLE evil` submitted
+    /// with a **Trusted** `ExecutorConfig` is STILL `Denied` by
+    /// `submit_migration`'s forced-Confined planner gate — NOT applied. Proves the
+    /// submission ingress can never be flipped Trusted: `submit` hard-wires
+    /// `GuardConfig::confined(project_schema)` independent of `cfg.trust`, so even a
+    /// Trusted config (whose own `guard_config()` would skip the deny-list) cannot
+    /// relax the submission gate. `Approval::Approved` is passed so only the guard
+    /// can be the thing stopping it.
+    #[compio::test]
+    async fn submit_cannot_reach_trusted() {
+        let conn = pg().await;
+        let admin = pg().await;
+        let tok = token();
+        let cfg = trusted_cfg(&tok);
+        let scfg = shadow_cfg(&tok);
+
+        // Project schema + journal only (NO migrator role: Trusted runs as the
+        // connecting role, so `provision_migrator` is not part of this path).
+        conn.batch_execute(&format!(
+            "CREATE SCHEMA IF NOT EXISTS \"{}\"",
+            cfg.project_schema
+        ))
+        .await
+        .expect("create project schema");
+        ensure_journal(&conn, &cfg).await.expect("ensure journal");
+
+        // Sanity: the config IS Trusted — its own executor-path guard would SKIP
+        // the deny-list. If this were Confined the test would be vacuous.
+        assert_eq!(
+            cfg.guard_config().trust(),
+            crate::guard::TrustProfile::Trusted,
+            "the config under test must be Trusted for the coupling proof to be meaningful"
+        );
+
+        let evil_role = format!("evil_trusted_{tok}");
+        let outcome = submit_migration(
+            &conn,
+            &admin,
+            &cfg,
+            &scfg,
+            submission("escalate", &format!("CREATE ROLE \"{evil_role}\" SUPERUSER")),
+            &no_owners(),
+            Approval::Approved,
+            "app_test",
+        )
+        .await
+        .expect("submit (no infra fault)");
+
+        match &outcome {
+            SubmissionOutcome::Denied { .. } => {}
+            other => panic!(
+                "a privileged CREATE ROLE must be Denied by submit's forced-Confined planner \
+                 guard even with a Trusted ExecutorConfig — got {other:?}. If this APPLIED, \
+                 submit's forced confined() is NOT load-bearing and the Trusted profile leaked \
+                 into the creator submission ingress."
+            ),
+        }
+        assert!(
+            !role_exists(&conn, &evil_role).await,
+            "the denied CREATE ROLE must NOT have created a role on the real cluster"
+        );
+
+        // Teardown (no migrator role to deprovision).
+        let _ = conn
+            .batch_execute(&format!(
+                "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
+                cfg.project_schema, cfg.meta_schema
+            ))
+            .await;
     }
 }

@@ -30,7 +30,7 @@
 //! - Two files sharing a numeric `V<NNNN>` (even with different descriptions) is a
 //!   hard [`LoaderError::DuplicateVersion`].
 //!
-//! # Why the loader does NOT need the Platform `PlatformCapability` token
+//! # Why the loader does NOT need the operator `OperatorCapability` token
 //!
 //! Trust is decided at the OPERATOR CALL SITE (§5), never by the loader. The
 //! loader's job is purely to produce a `Vec<Migration>`; the CLI (Phase 3) supplies

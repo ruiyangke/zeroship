@@ -336,35 +336,54 @@ fn panic_seam_armed() -> bool {
 /// the shadow must carry the identical name (the whole reason Plan C clones a
 /// DATABASE, not a schema).
 fn shadow_executor_cfg(cfg: &ExecutorConfig, shadow_db: &str) -> Result<ExecutorConfig, RoleError> {
-    if cfg.trust == crate::guard::TrustProfile::Platform {
-        // Platform source: mirror the operator-side admin-connection apply (§8).
-        // Mint a token via the CONFINED `platform_runner` seam (the shadow harness
-        // is operator-side, like the CLI runners). NO migrator role / SET ROLE, and
-        // the SAME schema + extension allowlist as the source so the widened guard
-        // and `search_path` are identical to the real Platform apply.
-        let cap = crate::guard::platform_runner::mint_shadow_platform_capability();
-        let mut sc = ExecutorConfig::platform(
-            &cap,
-            shadow_db.to_string(),
-            cfg.project_schema.clone(),
-            cfg.platform_schemas.clone(),
-            cfg.platform_exts.clone(),
-        );
-        // Carry the byte-faithful fields the `platform` ctor does not take.
-        sc.meta_schema.clone_from(&cfg.meta_schema);
-        sc.statement_timeout = cfg.statement_timeout;
-        sc.lock_timeout = cfg.lock_timeout;
-        // Platform applies as the admin connection — NO SET ROLE (§8).
-        sc.migrator_role = None;
-        Ok(sc)
-    } else {
-        // Confined source: UNCHANGED — a shadow-UNIQUE least-privilege migrator
-        // role (H1), provisioned + `SET ROLE`'d so the creator confinement stays
-        // faithful on the shadow too.
-        let mut sc = cfg.clone();
-        sc.project_id = shadow_db.to_string();
-        sc.migrator_role = Some(migrator_role_name(shadow_db)?);
-        Ok(sc)
+    match cfg.trust {
+        crate::guard::TrustProfile::Platform => {
+            // Platform source: mirror the operator-side admin-connection apply (§8).
+            // Mint a token via the CONFINED `platform_runner` seam (the shadow harness
+            // is operator-side, like the CLI runners). NO migrator role / SET ROLE, and
+            // the SAME schema + extension allowlist as the source so the widened guard
+            // and `search_path` are identical to the real Platform apply.
+            let cap = crate::guard::platform_runner::mint_shadow_platform_capability();
+            let mut sc = ExecutorConfig::platform(
+                &cap,
+                shadow_db.to_string(),
+                cfg.project_schema.clone(),
+                cfg.platform_schemas.clone(),
+                cfg.platform_exts.clone(),
+            );
+            // Carry the byte-faithful fields the `platform` ctor does not take.
+            sc.meta_schema.clone_from(&cfg.meta_schema);
+            sc.statement_timeout = cfg.statement_timeout;
+            sc.lock_timeout = cfg.lock_timeout;
+            // Platform applies as the admin connection — NO SET ROLE (§8).
+            sc.migrator_role = None;
+            Ok(sc)
+        }
+        crate::guard::TrustProfile::Trusted => {
+            // Trusted source (public dbmate-like posture): mirror the
+            // connecting-role apply faithfully so the dry-run does NOT re-deny SQL
+            // the real Trusted apply allows. Same operator token mint seam, NO
+            // migrator role / SET ROLE (Trusted runs as the connecting role). The
+            // shadow's own `guard_config()` returns the Trusted guard, so its
+            // deny-list is OFF — identical to the real apply.
+            let cap = crate::guard::platform_runner::mint_shadow_platform_capability();
+            let mut sc =
+                ExecutorConfig::trusted(&cap, shadow_db.to_string(), cfg.project_schema.clone());
+            sc.meta_schema.clone_from(&cfg.meta_schema);
+            sc.statement_timeout = cfg.statement_timeout;
+            sc.lock_timeout = cfg.lock_timeout;
+            sc.migrator_role = None;
+            Ok(sc)
+        }
+        _ => {
+            // Confined source: UNCHANGED — a shadow-UNIQUE least-privilege migrator
+            // role (H1), provisioned + `SET ROLE`'d so the creator confinement stays
+            // faithful on the shadow too.
+            let mut sc = cfg.clone();
+            sc.project_id = shadow_db.to_string();
+            sc.migrator_role = Some(migrator_role_name(shadow_db)?);
+            Ok(sc)
+        }
     }
 }
 

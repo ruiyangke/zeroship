@@ -2970,3 +2970,253 @@ mod order_tests {
         assert_eq!(vs, vec![pend.as_str()], "only the pending one is ordered");
     }
 }
+
+// ===========================================================================
+// Track A — the Trusted profile applies arbitrary SQL on a REAL Postgres.
+//
+// These MUST be in-crate: `ExecutorConfig::trusted` + `OperatorCapability::for_test`
+// are `pub(crate)` (the external boundary is pinned by `tests/trybuild_*`, T8), so
+// an integration test (a separate crate) could not even construct a Trusted config.
+//
+// They run the FULL `executor::apply` path under a Trusted `ExecutorConfig` and
+// prove (a) SQL the Confined guard hard-denies APPLIES, and (b) a destructive op
+// still carries the approval flag (so the CLI `--yes` gate holds).
+// ===========================================================================
+#[cfg(test)]
+#[allow(clippy::future_not_send)] // compio single-thread runtime; the stack is !Send by design.
+mod trusted_apply_pg {
+    use super::*;
+    use crate::guard::OperatorCapability;
+    use crate::journal;
+    use crate::loader::migration_id_for_version;
+    use crate::migration::{Checksum, ChecksumInput, MigrationFlags};
+
+    const DEFAULT_DSN: &str =
+        "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_migrate_test";
+
+    fn dsn() -> String {
+        std::env::var("MIGRATE_TEST_DB").unwrap_or_else(|_| DEFAULT_DSN.to_string())
+    }
+
+    async fn pg() -> Client {
+        crate::db::connect(&dsn()).await.expect("connect :5440")
+    }
+
+    fn token() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("{pid}_{nanos}_{n}")
+    }
+
+    /// A Trusted `ExecutorConfig` over a unique project/meta schema. Minted via
+    /// the `for_test` operator-token seam (the only in-crate path; un-nameable
+    /// externally). Trusted runs as the connecting (admin) role: NO migrator role.
+    fn trusted_cfg(tok: &str) -> ExecutorConfig {
+        let cap = OperatorCapability::for_test();
+        let mut c = ExecutorConfig::trusted(&cap, format!("prj_{tok}"), format!("proj_{tok}"));
+        c.meta_schema = format!("meta_{tok}");
+        c.statement_timeout = std::time::Duration::from_secs(30);
+        c.lock_timeout = std::time::Duration::from_secs(10);
+        c
+    }
+
+    fn mig(version: u64, name: &str, up: &str, destructive: bool) -> Migration {
+        let flags = MigrationFlags {
+            destructive,
+            requires_approval: destructive,
+            ..MigrationFlags::default()
+        };
+        let mut m = Migration {
+            version: migration_id_for_version(version),
+            name: name.to_string(),
+            up: up.to_string(),
+            down: None,
+            checksum: Checksum::of(&ChecksumInput {
+                up: "",
+                down: None,
+                flags: &MigrationFlags::default(),
+                owner_app: "",
+                depends_on: &[],
+                supersedes: &[],
+                preconditions: &[],
+            }),
+            flags,
+            owner_app: "operator".to_string(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+        };
+        m.recompute_checksum();
+        m
+    }
+
+    async fn role_exists(conn: &Client, role: &str) -> bool {
+        !conn
+            .query("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&role])
+            .await
+            .expect("query role")
+            .is_empty()
+    }
+
+    async fn table_exists(conn: &Client, schema: &str, table: &str) -> bool {
+        !conn
+            .query(
+                "SELECT 1 FROM information_schema.tables WHERE table_schema=$1 AND table_name=$2",
+                &[&schema, &table],
+            )
+            .await
+            .expect("query table")
+            .is_empty()
+    }
+
+    /// `trusted_applies_sql_the_confined_guard_denies` — under a Trusted
+    /// `ExecutorConfig`, statements the Confined guard HARD-DENIES apply cleanly on
+    /// a real cluster: a `CREATE ROLE` (privilege management) AND a cross-schema
+    /// `CREATE TABLE <other_schema>.t` (a schema OUTSIDE the project schema). Both
+    /// applying proves the deny-list AND the cross-schema confinement are OFF under
+    /// Trusted. (We deliberately do NOT use `COPY … PROGRAM` — CREATE ROLE +
+    /// cross-schema DDL prove guard-off without running a shell.)
+    #[compio::test]
+    async fn trusted_applies_sql_the_confined_guard_denies() {
+        let conn = pg().await;
+        let tok = token();
+        let cfg = trusted_cfg(&tok);
+        let role = format!("zsmig_trusted_{tok}");
+        let other_schema = format!("other_{tok}");
+
+        // Project schema + journal. NO migrator role (Trusted = connecting role).
+        conn.batch_execute(&format!(
+            "CREATE SCHEMA IF NOT EXISTS \"{}\"",
+            cfg.project_schema
+        ))
+        .await
+        .expect("create project schema");
+        journal::ensure_journal(&conn, &cfg).await.expect("journal");
+
+        // Sanity: a Confined guard hard-denies BOTH of these (so the apply proof
+        // is meaningful), but the Trusted guard the executor uses does not.
+        let confined = SqlGuard::new(crate::guard::GuardConfig::confined(&cfg.project_schema));
+        assert!(
+            confined.check(&format!("CREATE ROLE \"{role}\" NOLOGIN")).is_err(),
+            "precondition: Confined denies CREATE ROLE"
+        );
+        assert!(
+            confined
+                .check(&format!("CREATE TABLE \"{other_schema}\".t (id int)"))
+                .is_err(),
+            "precondition: Confined denies cross-schema CREATE TABLE"
+        );
+
+        // The Trusted migration: create the cross-schema home, a privileged ROLE,
+        // and a table in the OTHER schema — all guard-denied under Confined.
+        let up = format!(
+            "CREATE SCHEMA \"{other_schema}\"; \
+             CREATE ROLE \"{role}\" NOLOGIN; \
+             CREATE TABLE \"{other_schema}\".t (id int primary key);"
+        );
+        let migs = vec![mig(1, "trusted_arbitrary", &up, false)];
+
+        let outcome = apply(&conn, &cfg, &migs, Approval::Approved, "trusted-test").await;
+        assert!(
+            outcome.is_ok(),
+            "Trusted apply of guard-denied SQL must succeed; got {outcome:?}"
+        );
+
+        // It really applied: the role exists, and the cross-schema table exists.
+        assert!(role_exists(&conn, &role).await, "the CREATE ROLE applied");
+        assert!(
+            table_exists(&conn, &other_schema, "t").await,
+            "the cross-schema CREATE TABLE applied"
+        );
+
+        // ---- teardown: drop the cluster-global role + both schemas ----
+        let _ = conn
+            .batch_execute(&format!(
+                "DROP SCHEMA IF EXISTS \"{}\" CASCADE; \
+                 DROP SCHEMA IF EXISTS \"{}\" CASCADE; \
+                 DROP SCHEMA IF EXISTS \"{}\" CASCADE; \
+                 DROP ROLE IF EXISTS \"{}\";",
+                other_schema, cfg.project_schema, cfg.meta_schema, role
+            ))
+            .await;
+        assert!(
+            !role_exists(&conn, &role).await,
+            "teardown removed the test role (no leak)"
+        );
+    }
+
+    /// `trusted_still_derives_destructive_flag` — a `DROP TABLE` under a Trusted
+    /// apply still has its destructive/requires_approval flags set (classify is
+    /// trust-independent). Here we assert the guard report the executor derives is
+    /// destructive, AND that the apply is REFUSED without approval (the engine's
+    /// `Approval` re-check is the in-executor mirror of the CLI `--yes` gate).
+    #[compio::test]
+    async fn trusted_still_derives_destructive_flag() {
+        let conn = pg().await;
+        let tok = token();
+        let cfg = trusted_cfg(&tok);
+
+        conn.batch_execute(&format!(
+            "CREATE SCHEMA IF NOT EXISTS \"{}\"",
+            cfg.project_schema
+        ))
+        .await
+        .expect("create project schema");
+        journal::ensure_journal(&conn, &cfg).await.expect("journal");
+
+        // The Trusted guard report for a DROP TABLE is destructive even though the
+        // deny-list is skipped (classify runs regardless of trust).
+        let guard = SqlGuard::new(cfg.guard_config());
+        let report = guard
+            .check(&format!("DROP TABLE \"{}\".gone", cfg.project_schema))
+            .expect("Trusted does not deny a DROP TABLE");
+        assert!(report.destructive, "DROP TABLE is destructive under Trusted");
+        assert!(
+            crate::guard::flags_for(&report).requires_approval,
+            "destructive ⇒ requires_approval (CLI --yes) under Trusted"
+        );
+
+        // And the in-executor Approval mirror refuses a destructive apply WITHOUT
+        // approval: the table is created first (non-destructive), then a DROP is
+        // refused under `Approval::None`.
+        let create = vec![mig(
+            1,
+            "create",
+            &format!("CREATE TABLE \"{}\".gone (id int)", cfg.project_schema),
+            false,
+        )];
+        apply(&conn, &cfg, &create, Approval::Approved, "trusted-test")
+            .await
+            .expect("create applies");
+
+        let drop = vec![mig(
+            2,
+            "drop",
+            &format!("DROP TABLE \"{}\".gone", cfg.project_schema),
+            true,
+        )];
+        let refused = apply(&conn, &cfg, &drop, Approval::None, "trusted-test").await;
+        assert!(
+            matches!(refused, Err(ApplyError::ApprovalRequired)),
+            "a destructive Trusted apply must be REFUSED without approval; got {refused:?}"
+        );
+        // The table is still there — the destructive op did not run.
+        assert!(
+            table_exists(&conn, &cfg.project_schema, "gone").await,
+            "the refused DROP did not run"
+        );
+
+        let _ = conn
+            .batch_execute(&format!(
+                "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
+                cfg.project_schema, cfg.meta_schema
+            ))
+            .await;
+    }
+}

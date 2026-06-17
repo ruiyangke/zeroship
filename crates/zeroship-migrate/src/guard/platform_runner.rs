@@ -1,10 +1,10 @@
-//! The OPERATOR-SIDE runner — the single place a [`PlatformCapability`] is minted
+//! The OPERATOR-SIDE runner — the single place a [`OperatorCapability`] is minted
 //! (design §5 / §9, Phase 3).
 //!
 //! This module backs the `zeroship-migrate` CLI binary (`src/bin/zeroship-migrate.rs`).
 //! The bin's `main` is a THIN arg-parser; it delegates to the `run_*` functions
-//! here. Those functions mint the [`PlatformCapability`] token INTERNALLY (via the
-//! `pub(super)`-private [`PlatformCapability::new`]) and build the Platform
+//! here. Those functions mint the [`OperatorCapability`] token INTERNALLY (via the
+//! `pub(super)`-private [`OperatorCapability::new`]) and build the Platform
 //! [`GuardConfig`](super::GuardConfig) / [`ExecutorConfig`](crate::db::ExecutorConfig).
 //!
 //! THE SECURITY-CRITICAL INVARIANT (design §5): the token mint is confined to this
@@ -35,9 +35,9 @@ use crate::Approval;
 /// [`crate::db::ExecutorConfig`] so the executor's internal guard builds can
 /// re-derive a Platform `GuardConfig` without a fresh out-of-band mint.
 #[derive(Debug, Clone)]
-pub(crate) struct PlatformCapability(());
+pub(crate) struct OperatorCapability(());
 
-impl PlatformCapability {
+impl OperatorCapability {
     /// The single production mint site, private to the `guard` module
     /// (`pub(super)`). The CLI `run_*` functions below are its only callers; the
     /// creator path (`submit`/`engine`) cannot reach it.
@@ -56,21 +56,23 @@ impl PlatformCapability {
     }
 }
 
-/// Mint a [`PlatformCapability`] for the OPERATOR-SIDE shadow dry-run harness
+/// Mint a [`OperatorCapability`] for the OPERATOR-SIDE shadow dry-run harness
 /// ([`crate::shadow`]).
 ///
 /// The shadow harness must mirror the SOURCE config's trust profile so a
-/// privileged Platform set dry-runs faithfully: for a Platform source it builds
-/// the shadow's own Platform [`ExecutorConfig`] (admin connection, NO migrator
-/// `SET ROLE`, §8), which requires a token. The token mint stays CONFINED to the
-/// `guard` module — `PlatformCapability::new()` remains `pub(super)`; this is a
+/// privileged set dry-runs faithfully: for a Platform source it builds the
+/// shadow's own Platform [`ExecutorConfig`] (admin connection, NO migrator
+/// `SET ROLE`, §8); for a Trusted source (the public dbmate-like posture) it
+/// builds the shadow's own Trusted config (connecting-role apply, deny-list
+/// OFF) — both require an operator token. The token mint stays CONFINED to the
+/// `guard` module — `OperatorCapability::new()` remains `pub(super)`; this is a
 /// single named `pub(crate)` seam the harness (also operator-side, like the CLI
 /// runners) calls, rather than widening `new()` itself. The shadow is a throwaway
-/// DB and the deny-list guard still runs on the shadow SQL, so this is NOT a
-/// privilege escalation — it reproduces the real Platform apply on a clone.
+/// DB the operator owns, so reproducing the source's profile on it is NOT a
+/// privilege escalation — it reproduces the real apply on a clone.
 #[must_use]
-pub(crate) const fn mint_shadow_platform_capability() -> PlatformCapability {
-    PlatformCapability::new()
+pub(crate) const fn mint_shadow_platform_capability() -> OperatorCapability {
+    OperatorCapability::new()
 }
 
 /// The trust profile the runner builds its configs under (design §9 `--profile`).
@@ -231,13 +233,13 @@ pub fn destructive_gate_decision(
     })
 }
 
-/// Build the [`ExecutorConfig`] for a run, minting the [`PlatformCapability`]
+/// Build the [`ExecutorConfig`] for a run, minting the [`OperatorCapability`]
 /// internally when `profile == Platform`. THIS is the confined token mint.
 fn build_exec_cfg(cfg: &RunConfig) -> ExecutorConfig {
     let mut exec = match cfg.profile {
         RunProfile::Platform => {
             // The single token mint (design §5). No other module can reach `new()`.
-            let cap = PlatformCapability::new();
+            let cap = OperatorCapability::new();
             ExecutorConfig::platform(
                 &cap,
                 cfg.project_id.clone(),
@@ -261,7 +263,7 @@ fn build_exec_cfg(cfg: &RunConfig) -> ExecutorConfig {
 fn build_guard_cfg(cfg: &RunConfig) -> super::GuardConfig {
     match cfg.profile {
         RunProfile::Platform => {
-            let cap = PlatformCapability::new();
+            let cap = OperatorCapability::new();
             super::GuardConfig::platform(&cap, cfg.schemas.clone(), cfg.extensions.clone())
         }
         RunProfile::Confined => super::GuardConfig::confined(cfg.project_schema.clone()),
