@@ -116,10 +116,10 @@ pub use executor::{
 };
 pub use guard::{flags_for, GuardConfig, GuardError, GuardReport, SqlGuard};
 pub use journal::{
-    applied, applied_count, ensure_journal, history as journal_history, net_rolled_back,
-    record_baseline, record_completed, record_rolled_back, record_started,
-    superseded_versions, AppliedEntry, HistoryEvent, HistoryKind, JournalError, Phase,
-    RolledBackEntry,
+    applied, applied_count, ensure_journal, history as journal_history,
+    latest_completed_checksums, net_rolled_back, record_baseline, record_completed,
+    record_rolled_back, record_started, superseded_versions, AppliedEntry, HistoryEvent,
+    HistoryKind, JournalError, Phase, RolledBackEntry,
 };
 pub use squash::{squash, SquashError, SquashOutcome};
 pub use status::{history, status, MigrationStatus, StatusError};

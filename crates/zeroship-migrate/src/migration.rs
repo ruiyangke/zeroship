@@ -148,6 +148,26 @@ pub struct MigrationFlags {
     /// sequence. Read by the engine's expand/contract gate (Plan 8 v1.2). Kept
     /// optional + separate from the four bools so they remain orthogonal facets.
     pub phase: Option<OnlinePhase>,
+    /// **Repeatable** (v3 Plan E — Flyway `R__` / Liquibase `runOnChange`).
+    /// Default `false` = an ordinary, run-once versioned migration. `true` marks
+    /// a *replace-style* migration whose identity is its stable `version`/name
+    /// (it is NEVER re-versioned per edit), and which **re-applies whenever its
+    /// definition checksum changes** instead of running exactly once. Used for
+    /// objects edited over time — views, functions, triggers — whose `up` is a
+    /// `CREATE OR REPLACE …` re-run each deploy it changed.
+    ///
+    /// Semantics the executor enforces:
+    /// - repeatables run AFTER all versioned pending migrations, ordered among
+    ///   themselves by `depends_on` topo (else version order);
+    /// - per repeatable, the engine reads the LATEST journaled `completed`
+    ///   checksum for its identity: never-applied OR checksum-DIFFERS ⇒ re-apply
+    ///   `up` + append a new `completed` event; checksum-MATCHES ⇒ SKIP;
+    /// - a repeatable's *changed* checksum is **exempt** from the once-only
+    ///   checksum-drift tamper-abort (a changed checksum means re-run, not abort);
+    ///   a once-only migration's changed checksum STILL aborts.
+    ///
+    /// A repeatable's `down` is always `None` (replace-style; no true reverse).
+    pub repeatable: bool,
 }
 
 impl Default for MigrationFlags {
@@ -159,6 +179,7 @@ impl Default for MigrationFlags {
             requires_approval: false,
             timeout_ms: None,
             phase: None,
+            repeatable: false,
         }
     }
 }
@@ -391,5 +412,6 @@ mod tests {
         assert!(!f.online);
         assert!(!f.requires_approval);
         assert_eq!(f.phase, None);
+        assert!(!f.repeatable);
     }
 }
