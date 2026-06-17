@@ -1,0 +1,1 @@
+DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'zeroship_control') THEN EXECUTE 'REVOKE UPDATE ON zeroship.platform_admin_roles FROM zeroship_control'; EXECUTE 'REVOKE UPDATE ON zeroship.platform_policies FROM zeroship_control'; END IF; END $$;

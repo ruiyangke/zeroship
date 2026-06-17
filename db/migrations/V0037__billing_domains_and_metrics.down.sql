@@ -1,0 +1,10 @@
+DO $rb$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN EXECUTE 'REVOKE ALL ON zeroship.billing_metrics FROM zeroship_control'; END IF; END $rb$;
+DELETE FROM zeroship.billing_metrics;
+DROP INDEX IF EXISTS zeroship.billing_metrics_owner_app_idx;
+ALTER TABLE zeroship.billing_metrics DROP COLUMN owner_app;
+DROP TABLE zeroship.billing_metrics;
+DROP DOMAIN IF EXISTS zeroship.invoice_status;
+DROP DOMAIN IF EXISTS zeroship.metric_kind;
+DROP DOMAIN IF EXISTS zeroship.account_state;
+DROP DOMAIN IF EXISTS zeroship.spend_state;
+DROP DOMAIN IF EXISTS zeroship.billing_period;
