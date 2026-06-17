@@ -428,6 +428,46 @@ fn non_fk_constraint_does_not_fire_fk_without_index() {
 }
 
 // ---------------------------------------------------------------------------
+// GROUP 3 (review) — #6 USING INDEX false-positive + #7 CONCURRENTLY message.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn add_constraint_unique_using_index_is_clean() {
+    // Attaching a pre-built index is the SAFE path the advisory itself recommends
+    // (metadata-only) — it must NOT fire CONSTRAINT_NOT_VALIDATED.
+    assert!(
+        !fires(
+            "ALTER TABLE t ADD CONSTRAINT uq UNIQUE USING INDEX uq_idx",
+            rule::CONSTRAINT_NOT_VALIDATED
+        ),
+        "USING INDEX (pre-built index) is the safe metadata-only path"
+    );
+}
+
+#[test]
+fn add_constraint_plain_unique_still_fires() {
+    // The plain UNIQUE (no USING INDEX) still fires — guards against over-suppression.
+    assert!(fires(
+        "ALTER TABLE t ADD CONSTRAINT uq UNIQUE (email)",
+        rule::CONSTRAINT_NOT_VALIDATED
+    ));
+}
+
+#[test]
+fn non_concurrent_index_suggestion_notes_own_nontransactional_migration() {
+    // CONCURRENTLY can't run inside a txn block, so it must be its OWN migration —
+    // the suggestion must say so (it is unactionable inside a multi-statement txn).
+    let a = first("CREATE INDEX idx_users_name ON users(name)", rule::NON_CONCURRENT_INDEX)
+        .expect("plain CREATE INDEX must warn");
+    let s = a.suggestion.unwrap().to_lowercase();
+    assert!(s.contains("concurrently"));
+    assert!(
+        s.contains("own") && s.contains("transaction"),
+        "suggestion must note authoring CONCURRENTLY as its own non-transactional migration, got: {s}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // advisory-only invariant — analyzers NEVER deny or gate
 // ---------------------------------------------------------------------------
 

@@ -197,8 +197,9 @@ fn analyze_create_index(idx: &protobuf::IndexStmt, out: &mut Vec<Advisory>) {
             "CREATE INDEX on '{rel}' is not CONCURRENTLY: it takes a SHARE lock and \
              blocks writes for the entire build"
         ),
-        "use CREATE INDEX CONCURRENTLY on a populated table (it cannot run inside a \
-         transaction, so author it as a non-transactional migration)",
+        "use CREATE INDEX CONCURRENTLY on a populated table — but it cannot run inside \
+         a transaction block, so it cannot share a transaction with other DDL: author \
+         it as its OWN non-transactional migration",
     ));
 }
 
