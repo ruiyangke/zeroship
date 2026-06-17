@@ -270,6 +270,80 @@ fn table_rewrite_does_not_fire_on_constant_default() {
 }
 
 // ---------------------------------------------------------------------------
+// GROUP 1 (review) — inline PRIMARY KEY / UNIQUE on ADD COLUMN, and the
+// ADD CONSTRAINT PRIMARY KEY form. Previously these emitted ZERO advisories.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn add_column_inline_primary_key_fires_not_null_and_lock() {
+    // PRIMARY KEY implies NOT NULL with no default → fails on a non-empty table,
+    // AND builds a unique index under ACCESS EXCLUSIVE → a lock advisory.
+    let sql = "ALTER TABLE t ADD COLUMN x int PRIMARY KEY";
+    assert!(
+        fires(sql, rule::ADD_NOT_NULL_NO_DEFAULT),
+        "inline PRIMARY KEY implies NOT NULL with no default"
+    );
+    assert!(
+        fires(sql, rule::CONSTRAINT_NOT_VALIDATED),
+        "inline PRIMARY KEY builds a unique index under ACCESS EXCLUSIVE"
+    );
+}
+
+#[test]
+fn add_column_inline_unique_not_null_fires_lock() {
+    // UNIQUE builds a validating index under ACCESS EXCLUSIVE → a lock advisory.
+    // (NOT NULL with no default is also a footgun, but UNIQUE is the new arm.)
+    let sql = "ALTER TABLE t ADD COLUMN x int UNIQUE NOT NULL";
+    assert!(
+        fires(sql, rule::CONSTRAINT_NOT_VALIDATED),
+        "inline UNIQUE builds a validating index under ACCESS EXCLUSIVE"
+    );
+    assert!(
+        fires(sql, rule::ADD_NOT_NULL_NO_DEFAULT),
+        "explicit NOT NULL with no default still fires"
+    );
+}
+
+#[test]
+fn add_column_bigserial_primary_key_fires() {
+    // bigserial gets an implicit sequence default, so it is NOT a NOT_NULL_NO_DEFAULT,
+    // but PRIMARY KEY still builds a unique index under ACCESS EXCLUSIVE.
+    let sql = "ALTER TABLE t ADD COLUMN id bigserial PRIMARY KEY";
+    assert!(
+        fires(sql, rule::CONSTRAINT_NOT_VALIDATED),
+        "bigserial PRIMARY KEY still builds a unique index under lock"
+    );
+}
+
+#[test]
+fn add_column_plain_nullable_int_stays_clean() {
+    // A plain nullable column with no constraints emits nothing.
+    let sql = "ALTER TABLE t ADD COLUMN x int";
+    assert!(adv(sql).is_empty(), "plain nullable ADD COLUMN must be clean, got: {:?}", adv(sql));
+}
+
+#[test]
+fn add_constraint_primary_key_fires() {
+    // ALTER TABLE … ADD CONSTRAINT pk PRIMARY KEY (id) builds a validating unique
+    // index under ACCESS EXCLUSIVE — previously fell through with zero advisories.
+    let a = first(
+        "ALTER TABLE t ADD CONSTRAINT pk PRIMARY KEY (id)",
+        rule::CONSTRAINT_NOT_VALIDATED,
+    )
+    .expect("ADD CONSTRAINT PRIMARY KEY must warn");
+    let s = a.suggestion.unwrap().to_lowercase();
+    assert!(s.contains("concurrently") && s.contains("using index"));
+}
+
+#[test]
+fn add_constraint_bare_primary_key_fires() {
+    assert!(fires(
+        "ALTER TABLE t ADD PRIMARY KEY (id)",
+        rule::CONSTRAINT_NOT_VALIDATED
+    ));
+}
+
+// ---------------------------------------------------------------------------
 // GROUP 3 — perf advisories (Notice)
 // ---------------------------------------------------------------------------
 

@@ -255,12 +255,31 @@ fn analyze_alter_table(at: &protobuf::AlterTableStmt, out: &mut Vec<Advisory>) {
     }
 }
 
-/// `ADD COLUMN` analyzers: `ADD_NOT_NULL_NO_DEFAULT` (NOT NULL, no default) and
-/// `TABLE_REWRITE` (NOT NULL + volatile default ⇒ ACCESS EXCLUSIVE rewrite).
+/// `ADD COLUMN` analyzers: `ADD_NOT_NULL_NO_DEFAULT` (NOT NULL — incl. inline
+/// PRIMARY KEY — with no default), `TABLE_REWRITE` (volatile default or a STORED
+/// generated expression ⇒ ACCESS EXCLUSIVE rewrite), and the lock advisory for an
+/// inline `PRIMARY KEY`/`UNIQUE` (each builds an index under ACCESS EXCLUSIVE).
 fn analyze_add_column(c: &protobuf::AlterTableCmd, out: &mut Vec<Advisory>) {
     let Some(NodeEnum::ColumnDef(col)) = c.def.as_ref().and_then(|d| d.node.as_ref()) else {
         return;
     };
+
+    // An inline PRIMARY KEY / UNIQUE builds a (unique) index under ACCESS
+    // EXCLUSIVE on a populated table — the same footgun as ADD CONSTRAINT
+    // UNIQUE. Emit the lock advisory and point at the CONCURRENTLY-index path.
+    if let Some(kind) = inline_index_constraint_kind(col) {
+        out.push(Advisory::warning(
+            rule::CONSTRAINT_NOT_VALIDATED,
+            format!(
+                "ADD COLUMN '{}' {kind} builds a validating index under an ACCESS \
+                 EXCLUSIVE lock (and fails on any duplicate)",
+                col.colname
+            ),
+            "add the column first, then CREATE UNIQUE INDEX CONCURRENTLY and ADD \
+             CONSTRAINT … USING INDEX (avoids the long exclusive lock)",
+        ));
+    }
+
     let not_null = column_is_not_null(col);
     let default = column_default_kind(col);
 
@@ -379,12 +398,15 @@ fn analyze_add_constraint(
     let contype = con.contype;
     let is_fk = contype == ConstrType::ConstrForeign as i32;
     let is_unique = contype == ConstrType::ConstrUnique as i32;
+    let is_primary = contype == ConstrType::ConstrPrimary as i32;
     let is_check = contype == ConstrType::ConstrCheck as i32;
 
     // CONSTRAINT_NOT_VALIDATED: FK and CHECK support `NOT VALID` (skip_validation
     // true ⇒ NOT VALID specified). UNIQUE/PRIMARY do NOT support NOT VALID — they
     // always build a validating index under lock — so we still advise the
-    // CONCURRENTLY-index path for those.
+    // CONCURRENTLY-index path for those. Attaching a pre-built index
+    // (`USING INDEX`, `con.indexname` set) is the SAFE path we recommend, so we
+    // skip the advisory there (false-positive fix).
     if (is_fk || is_check) && !con.skip_validation {
         out.push(Advisory::warning(
             rule::CONSTRAINT_NOT_VALIDATED,
@@ -396,15 +418,16 @@ fn analyze_add_constraint(
             "add it NOT VALID first (fast, no full scan), then VALIDATE CONSTRAINT \
              separately (takes only a SHARE UPDATE EXCLUSIVE lock)",
         ));
-    } else if is_unique {
+    } else if (is_unique || is_primary) && con.indexname.is_empty() {
+        let kind = if is_primary { "PRIMARY KEY" } else { "UNIQUE" };
         out.push(Advisory::warning(
             rule::CONSTRAINT_NOT_VALIDATED,
             format!(
-                "ADD CONSTRAINT '{}' UNIQUE builds a validating index under an ACCESS \
+                "ADD CONSTRAINT '{}' {kind} builds a validating index under an ACCESS \
                  EXCLUSIVE lock and fails on any duplicate",
                 constraint_label(con)
             ),
-            "CREATE UNIQUE INDEX CONCURRENTLY, then ADD CONSTRAINT … UNIQUE USING INDEX \
+            "CREATE UNIQUE INDEX CONCURRENTLY, then ADD CONSTRAINT … USING INDEX \
              (avoids the long exclusive lock)",
         ));
     }
@@ -503,15 +526,33 @@ fn constraint_label(con: &protobuf::Constraint) -> String {
     }
 }
 
-/// Whether a `ColumnDef` carries a NOT NULL (`is_not_null` flag or an explicit
-/// NOT NULL constraint node).
+/// If a `ColumnDef` carries an inline `PRIMARY KEY` or `UNIQUE`, the human label
+/// of that constraint (each builds an index under ACCESS EXCLUSIVE on a populated
+/// table). Returns `None` for a column with no inline index-building constraint.
+fn inline_index_constraint_kind(col: &protobuf::ColumnDef) -> Option<&'static str> {
+    col.constraints.iter().find_map(|con| match con.node.as_ref() {
+        Some(NodeEnum::Constraint(c)) if c.contype == ConstrType::ConstrPrimary as i32 => {
+            Some("PRIMARY KEY")
+        }
+        Some(NodeEnum::Constraint(c)) if c.contype == ConstrType::ConstrUnique as i32 => {
+            Some("UNIQUE")
+        }
+        _ => None,
+    })
+}
+
+/// Whether a `ColumnDef` carries a NOT NULL: the `is_not_null` flag, an explicit
+/// NOT NULL constraint node, or an inline `PRIMARY KEY` (which implies NOT NULL —
+/// so `ADD COLUMN x int PRIMARY KEY` on a non-empty table fails exactly like an
+/// explicit NOT NULL with no default).
 fn column_is_not_null(col: &protobuf::ColumnDef) -> bool {
     if col.is_not_null {
         return true;
     }
     col.constraints.iter().any(|con| {
         matches!(con.node.as_ref(), Some(NodeEnum::Constraint(c))
-            if c.contype == ConstrType::ConstrNotnull as i32)
+            if c.contype == ConstrType::ConstrNotnull as i32
+                || c.contype == ConstrType::ConstrPrimary as i32)
     })
 }
 
