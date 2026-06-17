@@ -74,24 +74,35 @@ services:
       retries: 10
 
   # Platform schema migrations (control/auth/platform schemas). One-shot, like
-  # hydra-migrate: runs `liquibase update` against the shared DB then exits 0.
-  # control/auth gate on its successful completion, so they only ever boot
-  # against a fully-migrated schema. Hydra owns its own schema separately
-  # (hydra-migrate). Hand-authored changesets live in db/changelog/.
+  # hydra-migrate: runs the `zeroship-migrate` binary against the shared DB then
+  # exits 0. control/auth gate on its successful completion, so they only ever
+  # boot against a fully-migrated schema. Hydra owns its own schema separately
+  # (hydra-migrate). Hand-authored Flyway-style migrations live in db/migrations/.
+  #
+  # Runs the SAME `zeroship-platform:dev` image the native services use (the
+  # Dockerfile builds + installs the `zeroship-migrate` bin), under the
+  # PLATFORM trust profile (the widened guard for the zeroship/oauth_hydra/public
+  # schemas — design 2026-06-17-platform-migrations-flyway-mode). The `migrate`
+  # subcommand applies all pending files once. `--yes` is required because the
+  # ported platform set contains reviewed in-place schema evolutions (DROP
+  # CONSTRAINT/COLUMN, etc.) the engine flags DESTRUCTIVE; passing it here is the
+  # operator's standing, in-repo confirmation that the committed migrations are
+  # the intended apply (the same role Liquibase's verbatim `update` played).
   migrate:
-    image: liquibase/liquibase:4.31
+    build: .
+    image: zeroship-platform:dev
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
-      - ./db/changelog:/liquibase/changelog:ro
+      - ./db/migrations:/db/migrations:ro
     command:
-      - --url=jdbc:postgresql://postgres:5432/zeroship
-      - --username=postgres
-      - --password=zeroship
-      - --changelog-file=changelog/db.changelog-master.yaml
-      - --liquibase-schema-name=public
-      - update
+      - zeroship-migrate
+      - migrate
+      - --dir=/db/migrations
+      - --database-url=postgres://postgres:zeroship@postgres:5432/zeroship
+      - --profile=platform
+      - --yes
     restart: on-failure
 
   control:
@@ -394,8 +405,8 @@ services:
       hydra-migrate:
         condition: service_completed_successfully
     environment:
-      # Connect as the dedicated oauth_hydra role (provisioned by the Liquibase
-      # `migrate` service, changeset 0027): its default search_path is
+      # Connect as the dedicated oauth_hydra role (provisioned by the
+      # `migrate` service, V0027): its default search_path is
       # `oauth_hydra, public`, so Hydra reads/writes its own `oauth_hydra`
       # schema, isolated from the platform `zeroship` schema.
       DSN: postgres://oauth_hydra:zeroship@postgres:5432/zeroship?sslmode=disable
@@ -415,7 +426,7 @@ services:
 
   # One-shot migrator. Runs hydra's own schema migrations into its DEDICATED
   # `oauth_hydra` schema (provisioned — schema + least-priv `oauth_hydra` role +
-  # search_path — by the Liquibase `migrate` service, changeset 0027). Hydra
+  # search_path — by the `migrate` service, V0027). Hydra
   # connects AS that role, so its hydra_* tables land in oauth_hydra, isolated
   # from the platform `zeroship` schema. Gated on `migrate` so the schema/role
   # exist first (also fixes the prior race where this could run before the
@@ -459,7 +470,7 @@ services:
       #   - SANDBOX_DATABASE_URL_AUDIT  → sandbox_audit (INSERT-only events)
       #   - SANDBOX_DATABASE_URL_GDPR   → sandbox_gdpr  (scoped DELETE)
       # The sandbox tables live in the shared `zeroship` schema, owned by the
-      # Liquibase `migrate` service; the sandbox only verifies connectivity at
+      # `migrate` service (zeroship-migrate); the sandbox only verifies connectivity at
       # boot. Setting SANDBOX_DATABASE_URL flips pg integration ON.
       SANDBOX_DATABASE_URL: postgres://sandbox_app:sandbox_app@postgres:5432/zeroship
       SANDBOX_DATABASE_URL_AUDIT: postgres://sandbox_audit:sandbox_audit@postgres:5432/zeroship

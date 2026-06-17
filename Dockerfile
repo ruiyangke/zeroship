@@ -1,8 +1,9 @@
 # syntax=docker/dockerfile:1
 #
-# zeroship platform image — builds all SIX binaries:
+# zeroship platform image — builds all SEVEN binaries:
 #   zeroship-control, zeroship-gate, zeroship-worker, zeroship-auth,
-#   zeroship-sandbox, zeroship (CLI).
+#   zeroship-sandbox, zeroship (CLI), zeroship-migrate (DB migration runner —
+#   the compose `migrate` service runs it under the Platform trust profile).
 #
 # Two-stage native build with a Node pre-stage:
 #   1. `sdks` (node:22) runs `pnpm build` to emit the bootstrap dist files
@@ -12,8 +13,8 @@
 #      so they MUST exist before cargo touches zeroship-runtime.
 #   2. `builder` (rust) copies crates/, the freshly-built sdks/, and the
 #      policies/ tree (crates/authz/build.rs parses ../../policies/*.cedar
-#      at build time) and compiles all six binaries.
-#   3. final (ubuntu) ships the six binaries + docker CLI for the sandbox.
+#      at build time) and compiles all seven binaries.
+#   3. final (ubuntu) ships the seven binaries + docker CLI for the sandbox.
 
 # ---------------------------------------------------------------------------
 # Stage 1 — build the SDK dist (bootstrap runtime-entry + dispatcher).
@@ -46,7 +47,7 @@ RUN pnpm --filter zeroship-builder build \
  && test -f apps/zeroship-builder/dist/app.zship
 
 # ---------------------------------------------------------------------------
-# Stage 2 — native (Rust) build of all six binaries.
+# Stage 2 — native (Rust) build of all seven binaries.
 # ---------------------------------------------------------------------------
 FROM rust:latest AS builder
 WORKDIR /build
@@ -74,7 +75,8 @@ RUN cargo build --release \
     -p zeroship-worker \
     -p zeroship-auth \
     -p zeroship-sandbox \
-    -p zeroship
+    -p zeroship \
+    -p zeroship-migrate
 
 # ---------------------------------------------------------------------------
 # Stage 3 — runtime image.
@@ -91,6 +93,8 @@ COPY --from=builder /build/target/release/zeroship-worker /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-auth /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-sandbox /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship /usr/local/bin/
+# The DB migration runner the compose `migrate` service invokes.
+COPY --from=builder /build/target/release/zeroship-migrate /usr/local/bin/
 # The prebuilt console .zship (built in the `sdks` node stage). Control's
 # `--bootstrap-console --console-zship /opt/zeroship/console/app.zship` ingests
 # it at boot to seed the gateway-fronted console app.

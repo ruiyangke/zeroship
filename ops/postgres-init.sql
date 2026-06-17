@@ -4,7 +4,7 @@
 -- The whole platform shares ONE database with a single `zeroship` schema for
 -- all system tables (Hydra's own hydra_* tables live in a separate
 -- `oauth_hydra` schema — Hydra connects as the dedicated `oauth_hydra` role,
--- provisioned in changeset 0027). Most queries are fully qualified
+-- provisioned in migration V0027). Most queries are fully qualified
 -- (`zeroship.apps`), but a few reference objects UNQUALIFIED (e.g.
 -- `crates/control/src/admin_handlers.rs` `UPDATE apps …`), so every connection
 -- needs `zeroship` on its search_path. Postgres's default role search_path
@@ -12,13 +12,13 @@
 -- `relation "apps" does not exist`.
 --
 -- Setting the role default here (it's allowed to list a schema that doesn't
--- exist yet — it's created by the Liquibase migration on first boot) gives
--- every connection the right resolution order.
+-- exist yet — it's created by the zeroship-migrate platform migration on first
+-- boot) gives every connection the right resolution order.
 --
 -- This covers `postgres` only — the role the `migrate` service and `hydra`
 -- (and the worker's plugin-db PROVISIONING connection) connect as. The
 -- per-service login roles (zeroship_{auth,control,gateway}; sandbox_{app,
 -- audit,gdpr}) get their OWN `ALTER ROLE … SET search_path = zeroship, public`
--- inside changesets 0025/0026, since those roles do not exist yet at
--- initdb time (Liquibase creates them on first boot).
+-- inside migrations V0025/V0026, since those roles do not exist yet at
+-- initdb time (zeroship-migrate creates them on first boot).
 ALTER ROLE postgres SET search_path = zeroship, public;
