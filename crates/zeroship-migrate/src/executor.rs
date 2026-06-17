@@ -2698,13 +2698,23 @@ mod order_tests {
 
     fn m(version: MigrationId, depends_on: Vec<MigrationId>) -> Migration {
         let up = format!("CREATE TABLE t_{}()", version.as_str());
+        let flags = MigrationFlags::default();
+        let checksum = Checksum::of(&crate::migration::ChecksumInput {
+            up: &up,
+            down: None,
+            flags: &flags,
+            owner_app: "app_test",
+            depends_on: &depends_on,
+            supersedes: &[],
+            preconditions: &[],
+        });
         Migration {
             version,
             name: "n".into(),
-            up: up.clone(),
+            up,
             down: None,
-            checksum: Checksum::of(&up, None, &[]),
-            flags: MigrationFlags::default(),
+            checksum,
+            flags,
             owner_app: "app_test".into(),
             depends_on,
             supersedes: Vec::new(),

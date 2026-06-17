@@ -259,10 +259,10 @@ async fn contract_with_empty_depends_on_is_refused_fail_closed() {
 
     let schema = &cfg.project_schema;
     let up = format!("ALTER TABLE \"{schema}\".\"users\" DROP COLUMN email");
-    let malformed = Migration {
+    let malformed = { let mut __mig = Migration {
         version: MigrationId::generate(),
         name: "contract_no_deps".into(),
-        checksum: Checksum::of(&up, None, &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
         up,
         down: None,
         flags: MigrationFlags {
@@ -276,7 +276,7 @@ async fn contract_with_empty_depends_on_is_refused_fail_closed() {
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
-    };
+    }; __mig.recompute_checksum(); __mig };
 
     let err = apply(
         &conn,

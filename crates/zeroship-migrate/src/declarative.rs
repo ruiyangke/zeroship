@@ -915,7 +915,15 @@ impl DeclarativeAuthor {
         flags: MigrationFlags,
         depends_on: Vec<MigrationId>,
     ) -> Migration {
-        let checksum = Checksum::of(&up, down.as_deref(), &[]);
+        let checksum = Checksum::of(&crate::migration::ChecksumInput {
+            up: &up,
+            down: down.as_deref(),
+            flags: &flags,
+            owner_app: &self.owner_app,
+            depends_on: &depends_on,
+            supersedes: &[],
+            preconditions: &[],
+        });
         Migration {
             version: MigrationId::generate(),
             name: name.to_string(),
@@ -2043,13 +2051,23 @@ mod advisory_seam_tests {
     /// Build a minimal plain migration carrying `up` SQL (advisory analysis only
     /// reads `up`; the other fields are inert for this seam).
     fn plain(up: &str) -> Migration {
+        let flags = MigrationFlags::default();
+        let checksum = Checksum::of(&crate::migration::ChecksumInput {
+            up,
+            down: None,
+            flags: &flags,
+            owner_app: "app_acme",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        });
         Migration {
             version: MigrationId::generate(),
             name: "t".into(),
             up: up.to_string(),
             down: None,
-            checksum: Checksum::of(up, None, &[]),
-            flags: MigrationFlags::default(),
+            checksum,
+            flags,
             owner_app: "app_acme".into(),
             depends_on: Vec::new(),
             supersedes: Vec::new(),

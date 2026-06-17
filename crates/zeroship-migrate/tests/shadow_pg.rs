@@ -105,7 +105,15 @@ fn mig(version: MigrationId, name: &str, up: &str) -> Migration {
         name: name.to_string(),
         up: up.to_string(),
         down: None,
-        checksum: Checksum::of(up, None, &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput {
+            up,
+            down: None,
+            flags: &MigrationFlags::default(),
+            owner_app: "app_test",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        }),
         flags: MigrationFlags::default(),
         owner_app: "app_test".to_string(),
         depends_on: Vec::new(),
@@ -326,6 +334,7 @@ async fn dry_run_concurrently_index_runs_in_shadow() {
         ),
     );
     idx.flags.transactional = false; // non-txn two-phase path
+    idx.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&idx));
     let set = vec![create, idx];
 
     let report = dry_run(&admin, &set, &cfg, &shadow_cfg(), "actor")

@@ -82,7 +82,15 @@ fn mig(version: MigrationId, name: &str, up: &str) -> Migration {
         name: name.to_string(),
         up: up.to_string(),
         down: None,
-        checksum: Checksum::of(up, None, &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput {
+            up,
+            down: None,
+            flags: &MigrationFlags::default(),
+            owner_app: "app_test",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        }),
         flags: MigrationFlags::default(),
         owner_app: "app_test".to_string(),
         depends_on: Vec::new(),
@@ -95,6 +103,7 @@ fn mig(version: MigrationId, name: &str, up: &str) -> Migration {
 fn mig_nontxn(version: MigrationId, name: &str, up: &str) -> Migration {
     let mut m = mig(version, name, up);
     m.flags.transactional = false;
+    m.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&m));
     m
 }
 
@@ -408,7 +417,7 @@ async fn apply_aborts_on_checksum_drift() {
         "CREATE TABLE \"{}\".things (id bigint primary key, extra text)",
         cfg.project_schema
     );
-    tampered.checksum = Checksum::of(&tampered.up, None, &[]);
+    tampered.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&tampered));
 
     let err = apply(&conn, &cfg, std::slice::from_ref(&tampered), Approval::None, "actor")
         .await
@@ -746,6 +755,7 @@ async fn apply_honors_depends_on_over_version_order() {
         ),
     );
     m_earlier.depends_on = vec![later.clone()];
+    m_earlier.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&m_earlier));
     let m_later = mig(
         later.clone(),
         "create_parent",
@@ -782,7 +792,9 @@ async fn apply_rejects_dependency_cycle() {
     let mut ma = mig(a.clone(), "a", &format!("CREATE TABLE \"{}\".ta ()", cfg.project_schema));
     let mut mb = mig(b.clone(), "b", &format!("CREATE TABLE \"{}\".tb ()", cfg.project_schema));
     ma.depends_on = vec![b.clone()];
+    ma.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&ma));
     mb.depends_on = vec![a.clone()];
+    mb.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&mb));
 
     let err = apply(&conn, &cfg, &[ma, mb], Approval::None, "actor").await.unwrap_err();
     assert!(matches!(err, ApplyError::DependencyCycle(_)), "got {err:?}");
@@ -1158,7 +1170,7 @@ async fn h3_per_migration_timeout_override_lets_long_migration_complete() {
     // This migration sleeps 1s but raises its own ceiling to 5s.
     let mut slow = mig(MigrationId::generate(), "slow_ok", "SELECT pg_sleep(1)");
     slow.flags.timeout_ms = Some(5_000);
-    slow.checksum = Checksum::of(&slow.up, slow.down.as_deref(), &[]);
+    slow.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&slow));
 
     let out = apply(&conn, &cfg, std::slice::from_ref(&slow), Approval::None, "actor")
         .await
@@ -1191,8 +1203,9 @@ async fn h3_per_migration_timeout_override_lets_long_migration_complete() {
 fn mig_destructive(version: MigrationId, name: &str, up: &str, down: &str) -> Migration {
     let mut m = mig(version, name, up);
     m.down = Some(down.to_string());
-    m.checksum = Checksum::of(up, Some(down), &[]);
+    m.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&m));
     m.flags.destructive = true;
+    m.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&m));
     m
 }
 

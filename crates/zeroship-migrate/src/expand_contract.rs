@@ -489,7 +489,15 @@ impl ExpandContractAuthor {
         flags: MigrationFlags,
         depends_on: Vec<MigrationId>,
     ) -> Migration {
-        let checksum = Checksum::of(&up, down.as_deref(), &[]);
+        let checksum = Checksum::of(&crate::migration::ChecksumInput {
+            up: &up,
+            down: down.as_deref(),
+            flags: &flags,
+            owner_app: &self.owner_app,
+            depends_on: &depends_on,
+            supersedes: &[],
+            preconditions: &[],
+        });
         Migration {
             version: MigrationId::generate(),
             name: name.to_string(),
@@ -756,20 +764,35 @@ mod tests {
 
     #[test]
     fn expand_sql_is_byte_stable_across_reauthoring() {
-        // Re-authoring the same intent yields identical Expand SQL + checksums
-        // (the version differs — it is a fresh UUIDv7 — but the SQL/checksum are
-        // deterministic functions of the intent). Mirrors author.rs index-name
-        // determinism.
+        // Re-authoring the same intent yields identical Expand/Contract SQL (the
+        // SQL is a deterministic function of the intent). Mirrors author.rs
+        // index-name determinism.
+        //
+        // NOTE (v3 Plan F C1): the per-migration CHECKSUM is NOT stable across
+        // re-authoring for steps that carry `depends_on`, because the checksum now
+        // folds `depends_on` — and each authoring run mints FRESH UUIDv7 versions,
+        // so a step that depends on its freshly-generated sibling depends on a
+        // different version each run. That is correct: `depends_on` is
+        // apply-relevant (it determines order), so a different dependency edge is a
+        // different unit. We therefore assert SQL byte-stability here, and assert
+        // checksum determinism only for the leading dependency-free step, whose
+        // checksum input is fully intent-determined.
         let p1 = author().author(&rename()).expect("author 1");
         let p2 = author().author(&rename()).expect("author 2");
         for (a, b) in p1.expand.iter().zip(&p2.expand) {
             assert_eq!(a.up, b.up, "expand up SQL must be byte-stable: {}", a.name);
             assert_eq!(a.down, b.down, "expand down SQL must be byte-stable");
-            assert_eq!(a.checksum, b.checksum, "expand checksum must be stable");
+            // The checksum is stable iff this step carries no `depends_on` (no
+            // run-specific sibling version folded in).
+            if a.depends_on.is_empty() && b.depends_on.is_empty() {
+                assert_eq!(a.checksum, b.checksum, "dependency-free expand checksum must be stable: {}", a.name);
+            }
         }
         for (a, b) in p1.contract.iter().zip(&p2.contract) {
             assert_eq!(a.up, b.up, "contract up SQL must be byte-stable: {}", a.name);
-            assert_eq!(a.checksum, b.checksum, "contract checksum must be stable");
+            if a.depends_on.is_empty() && b.depends_on.is_empty() {
+                assert_eq!(a.checksum, b.checksum, "dependency-free contract checksum must be stable: {}", a.name);
+            }
         }
         assert_eq!(p1.backfill.backfill_id(), p2.backfill.backfill_id());
     }

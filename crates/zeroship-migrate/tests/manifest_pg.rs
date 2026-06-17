@@ -307,7 +307,7 @@ async fn content_edited_migration_is_refused_before_apply() {
         cfg.project_schema
     );
     edited.checksum =
-        zeroship_migrate::Checksum::of(&edited.up, edited.down.as_deref(), &edited.preconditions);
+        zeroship_migrate::Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&edited));
     let tampered = vec![edited, set[1].clone()];
 
     let engine = MigrationEngine::new();

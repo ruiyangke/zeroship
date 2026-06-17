@@ -75,7 +75,15 @@ fn versioned(version: MigrationId, name: &str, up: &str) -> Migration {
         name: name.to_string(),
         up: up.to_string(),
         down: None,
-        checksum: Checksum::of(up, None, &[]),
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput {
+            up,
+            down: None,
+            flags: &MigrationFlags::default(),
+            owner_app: "app_test",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        }),
         flags: MigrationFlags::default(),
         owner_app: "app_test".to_string(),
         depends_on: Vec::new(),
@@ -88,6 +96,7 @@ fn versioned(version: MigrationId, name: &str, up: &str) -> Migration {
 fn repeatable(version: MigrationId, name: &str, up: &str) -> Migration {
     let mut m = versioned(version, name, up);
     m.flags.repeatable = true;
+    m.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&m));
     m
 }
 
@@ -95,7 +104,7 @@ fn repeatable(version: MigrationId, name: &str, up: &str) -> Migration {
 /// from the new definition; here we recompute it the same way `versioned` does).
 fn with_up(mut m: Migration, up: &str) -> Migration {
     m.up = up.to_string();
-    m.checksum = Checksum::of(up, m.down.as_deref(), &m.preconditions);
+    m.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&m));
     m
 }
 
@@ -415,6 +424,7 @@ async fn flip_to_repeatable_on_an_applied_once_only_is_tamper_not_a_rerun() {
         &format!("CREATE TABLE \"{schema}\".secret (id bigint); DROP TABLE \"{schema}\".secret"),
     );
     x_csb.flags.repeatable = true;
+    x_csb.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&x_csb));
     assert_ne!(x_csa.checksum, x_csb.checksum, "the attack mutates the up");
 
     let err = apply(&conn, &cfg, std::slice::from_ref(&x_csb), Approval::None, "actor")
@@ -466,6 +476,7 @@ async fn flip_repeatable_to_once_only_is_tamper_not_a_rerun() {
         &format!("CREATE OR REPLACE VIEW \"{schema}\".v AS SELECT 2 AS n"),
     );
     r2.flags.repeatable = false;
+    r2.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&r2));
     assert_ne!(r1.checksum, r2.checksum);
 
     let err = apply(&conn, &cfg, std::slice::from_ref(&r2), Approval::None, "actor")
@@ -512,6 +523,7 @@ async fn repeatables_ordered_by_depends_on() {
         &format!("CREATE OR REPLACE VIEW \"{schema}\".b AS SELECT n FROM \"{schema}\".a"),
     );
     b.depends_on = vec![a_v.clone()];
+    b.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&b));
 
     // Supply b BEFORE a in the slice — ordering must come from depends_on, not input.
     let out = apply(&conn, &cfg, &[b.clone(), a.clone()], Approval::None, "actor")
@@ -634,6 +646,7 @@ async fn versioned_depends_on_repeatable_is_dedicated_error() {
         &format!("CREATE TABLE \"{schema}\".t (id int)"),
     );
     once.depends_on = vec![rep_v.clone()];
+    once.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&once));
 
     let err = apply(&conn, &cfg, &[rep.clone(), once.clone()], Approval::None, "actor")
         .await
@@ -665,7 +678,7 @@ async fn repeatable_with_down_is_rejected() {
     let down = format!("DROP VIEW \"{schema}\".v");
     let mut bad = repeatable(MigrationId::generate(), "v_view", &up);
     bad.down = Some(down.clone());
-    bad.checksum = Checksum::of(&up, Some(&down), &bad.preconditions);
+    bad.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&bad));
 
     let err = apply(&conn, &cfg, std::slice::from_ref(&bad), Approval::None, "actor")
         .await

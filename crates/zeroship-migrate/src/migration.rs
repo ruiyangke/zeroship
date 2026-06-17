@@ -184,68 +184,151 @@ impl Default for MigrationFlags {
     }
 }
 
-/// Tamper-evident checksum over a migration's `up`, optional `down`, and its
-/// **preconditions**.
+/// The **apply-relevant** fields of a migration, borrowed, as the input to
+/// [`Checksum::of`] (v3 Plan F C1).
+///
+/// The per-migration checksum must cover the WHOLE unit the executor uses to
+/// **order / partition / supersede / gate** a migration — not just its SQL
+/// content. If only `(up, down, preconditions)` were hashed, a tampered bundle
+/// could flip `depends_on` (reorder execution), inject `supersedes` (skip a
+/// migration), flip `repeatable` (re-phase), clear `requires_approval` (un-gate),
+/// or change `timeout_ms` — and still verify CLEAN against the integrity manifest
+/// (which folds the per-migration checksum) AND escape the per-migration drift
+/// check (which compares this checksum). So the checksum folds every field that
+/// changes the effective applied set or its order.
+///
+/// `version` and `name` are deliberately EXCLUDED: the version is the migration's
+/// IDENTITY (the journal key the checksum is compared *under*, not part of the
+/// content it certifies), and `name` is a human label with no apply effect.
+#[derive(Debug, Clone)]
+pub struct ChecksumInput<'a> {
+    /// The forward SQL.
+    pub up: &'a str,
+    /// The reverse SQL, or `None` = explicitly irreversible.
+    pub down: Option<&'a str>,
+    /// Apply-time flags (`transactional` / `destructive` / `online` /
+    /// `requires_approval` / `timeout_ms` / `phase` / `repeatable`) — all fold in.
+    pub flags: &'a MigrationFlags,
+    /// The declaring app (per-table ownership).
+    pub owner_app: &'a str,
+    /// Cross-slice ordering dependencies.
+    pub depends_on: &'a [MigrationId],
+    /// Versions this migration supersedes (squash).
+    pub supersedes: &'a [MigrationId],
+    /// Preconditions (v3 Plan D).
+    pub preconditions: &'a [PreconditionCheck],
+}
+
+impl<'a> ChecksumInput<'a> {
+    /// Build the checksum input from an assembled [`Migration`]'s apply-relevant
+    /// fields (everything but `version` / `name` / the `checksum` itself). Used
+    /// where a `Migration` already exists (re-derive its checksum, drift checks).
+    #[must_use]
+    pub fn from_migration(m: &'a Migration) -> Self {
+        Self {
+            up: &m.up,
+            down: m.down.as_deref(),
+            flags: &m.flags,
+            owner_app: &m.owner_app,
+            depends_on: &m.depends_on,
+            supersedes: &m.supersedes,
+            preconditions: &m.preconditions,
+        }
+    }
+}
+
+/// Tamper-evident checksum over a migration's WHOLE apply-relevant unit (v3 Plan
+/// F C1): `up`, optional `down`, `preconditions`, **`flags`**, **`depends_on`**,
+/// **`supersedes`**, and **`owner_app`**.
 ///
 /// Hex-encoded SHA-256. A mismatch on an already-applied migration is a hard
-/// error (design §1.5 / §2.3 drift check). The input is **length-prefixed** so
+/// error (design §1.5 / §2.3 drift check). Every field is **length-prefixed** so
 /// `down: Some("")` and `down: None` produce *different* checksums (an empty
-/// reversible down is not the same migration as an irreversible one).
+/// reversible down is not the same migration as an irreversible one), and so no
+/// concatenation collision across field boundaries is possible.
 ///
-/// Preconditions are folded into the checksum because they are part of the
+/// # Why these fields and not just the SQL
+///
+/// The executor orders by `depends_on`, partitions by `flags.repeatable`,
+/// supersedes by `supersedes`, gates by `flags.requires_approval` /
+/// `flags.destructive` / `flags.phase`, and times out by `flags.timeout_ms`.
+/// Folding them all in means a tampered bundle that flips any of them changes
+/// this checksum — so the set-level integrity manifest (which folds this
+/// checksum) refuses it, and the per-migration drift check (which compares this
+/// checksum on already-applied versions) flags it. Preconditions are part of the
 /// migration's identity (v3 Plan D): two migrations with the same SQL but
-/// different gating conditions are NOT the same migration — changing a
-/// precondition on an already-applied migration is drift, exactly like changing
-/// its SQL. Each precondition is serialized to a canonical JSON form and
-/// length-prefixed, so the precondition list contributes deterministically and
-/// no concatenation collision is possible.
+/// different gating conditions are NOT the same migration.
+///
+/// # Canonical serialization
+///
+/// `flags` and each `precondition` are serialized to canonical JSON
+/// (`serde_json`, deterministic for these plain enums/structs — no maps) and
+/// length-prefixed. `depends_on` and `supersedes` are folded as ORDERED lists of
+/// length-prefixed version strings, IN THE GIVEN ORDER — order is semantically
+/// meaningful (a dependency list `[a, b]` is the same constraint as `[b, a]`, but
+/// the manifest's canonical-executed-order fold (M2) makes any reorder of the
+/// effective execution visible regardless; we keep `depends_on`/`supersedes`
+/// order-as-given here so the per-migration checksum is a faithful byte image of
+/// the stored vectors and a SET change is always caught). `owner_app` is folded
+/// length-prefixed.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Checksum(String);
 
 impl Checksum {
-    /// Compute the checksum of `(up, down, preconditions)`.
+    /// Compute the checksum over a migration's whole apply-relevant unit.
     ///
     /// # Panics
-    /// Panics only if a [`PreconditionCheck`] fails to JSON-serialize — which is
-    /// infallible for these plain enums/strings (no maps, no non-string keys), so
-    /// in practice it never panics. We `.expect` rather than swallow a failure to
-    /// a default, because a silent empty serialization would collide two distinct
-    /// preconditions into the same security checksum.
+    /// Panics only if [`MigrationFlags`] or a [`PreconditionCheck`] fails to
+    /// JSON-serialize — infallible for these plain structs/enums (no maps, no
+    /// non-string keys), so in practice it never panics. We `.expect` rather than
+    /// swallow a failure to a default, because a silent empty serialization would
+    /// collide two distinct inputs into the same security checksum.
     #[must_use]
-    pub fn of(up: &str, down: Option<&str>, preconditions: &[PreconditionCheck]) -> Self {
+    pub fn of(input: &ChecksumInput<'_>) -> Self {
         let mut hasher = Sha256::new();
-        // Length-prefix every field with a fixed-width big-endian u64 so no
+        // up — length-prefixed with a fixed-width big-endian u64 so no
         // concatenation collision is possible (e.g. up="ab",down="c" vs
-        // up="a",down="bc"), and so `down: None` (sentinel 0xFFFF…) is
-        // distinct from `down: Some("")` (length 0).
-        hasher.update((up.len() as u64).to_be_bytes());
-        hasher.update(up.as_bytes());
-        match down {
+        // up="a",down="bc").
+        hasher.update((input.up.len() as u64).to_be_bytes());
+        hasher.update(input.up.as_bytes());
+        // down — `down: None` (sentinel u64::MAX) is distinct from
+        // `down: Some("")` (length 0).
+        match input.down {
             Some(d) => {
                 hasher.update((d.len() as u64).to_be_bytes());
                 hasher.update(d.as_bytes());
             }
             None => {
-                // Irreversibility sentinel: a length no real string can take.
                 hasher.update(u64::MAX.to_be_bytes());
             }
         }
-        // Preconditions: count, then each canonical-JSON-serialized + length
-        // -prefixed. An empty list (the common case) folds in a 0 count and
-        // contributes nothing else, so it leaves existing checksums of
-        // precondition-free migrations stable in shape — except that the count
-        // word still changes the hash vs the old two-arg form (intended: the
-        // checksum's domain changed, and pre-launch there are no persisted
-        // checksums to preserve).
-        hasher.update((preconditions.len() as u64).to_be_bytes());
-        for pc in preconditions {
-            // serde_json over the value types is deterministic for these enums
-            // (no maps), so the canonical bytes are stable across runs.
+        // flags — canonical JSON, length-prefixed. Covers transactional /
+        // destructive / online / requires_approval / timeout_ms / phase /
+        // repeatable in one deterministic image, so any flip changes the hash.
+        let flags_json = serde_json::to_string(input.flags)
+            .expect("MigrationFlags is infallibly serializable");
+        hasher.update((flags_json.len() as u64).to_be_bytes());
+        hasher.update(flags_json.as_bytes());
+        // owner_app — length-prefixed.
+        hasher.update((input.owner_app.len() as u64).to_be_bytes());
+        hasher.update(input.owner_app.as_bytes());
+        // depends_on — ordered list: count, then each version string
+        // length-prefixed in the GIVEN order (a reorder or set change shifts the
+        // hash). Domain-separated from supersedes by being folded first with its
+        // own count word, so a dep `[a]` + supersedes `[]` can never collide with
+        // a dep `[]` + supersedes `[a]`.
+        fold_version_list(&mut hasher, input.depends_on);
+        // supersedes — same ordered-list discipline.
+        fold_version_list(&mut hasher, input.supersedes);
+        // preconditions: count, then each canonical-JSON-serialized +
+        // length-prefixed. An empty list folds a 0 count and contributes nothing
+        // else.
+        hasher.update((input.preconditions.len() as u64).to_be_bytes());
+        for pc in input.preconditions {
             // `.expect` (not `.unwrap_or_default()`): a PreconditionCheck is
-            // infallibly serializable (plain enums/strings, no maps/non-string
-            // keys), so serialization cannot fail; if it ever did, an empty
-            // string would silently collide two DISTINCT preconditions into the
-            // SAME checksum (a tamper-evidence hole). Fail loud instead.
+            // infallibly serializable; if it ever did fail, an empty string would
+            // silently collide two DISTINCT preconditions into the SAME checksum
+            // (a tamper-evidence hole). Fail loud instead.
             let json = serde_json::to_string(pc)
                 .expect("PreconditionCheck is infallibly serializable");
             hasher.update((json.len() as u64).to_be_bytes());
@@ -258,6 +341,19 @@ impl Checksum {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Fold an ORDERED list of migration-id version strings into `hasher`: a
+/// fixed-width big-endian u64 count, then each version string length-prefixed in
+/// the GIVEN order. The count word means an empty list is distinct from a
+/// one-element list and no two adjacent lists can run together.
+fn fold_version_list(hasher: &mut Sha256, versions: &[MigrationId]) {
+    hasher.update((versions.len() as u64).to_be_bytes());
+    for v in versions {
+        let s = v.as_str();
+        hasher.update((s.len() as u64).to_be_bytes());
+        hasher.update(s.as_bytes());
     }
 }
 
@@ -309,6 +405,21 @@ pub struct Migration {
     pub preconditions: Vec<PreconditionCheck>,
 }
 
+impl Migration {
+    /// Recompute and store this migration's [`checksum`](Migration::checksum)
+    /// from its CURRENT apply-relevant fields (`up` / `down` / `flags` /
+    /// `owner_app` / `depends_on` / `supersedes` / `preconditions`).
+    ///
+    /// Use after editing any of those fields on an in-memory migration so the
+    /// stored checksum stays a faithful image of the unit (otherwise the
+    /// set-level manifest and the per-migration drift check would correctly see a
+    /// changed unit). The authoring/declarative generators set the checksum at
+    /// construction; this is the re-derive seam.
+    pub fn recompute_checksum(&mut self) {
+        self.checksum = Checksum::of(&ChecksumInput::from_migration(self));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,55 +464,152 @@ mod tests {
         assert!(b > a, "Ord must match time order");
     }
 
+    /// A content-only checksum input (default flags, no deps/supersedes,
+    /// `owner_app` `app_test`) — the common shape the older 3-arg `Checksum::of`
+    /// covered. Field-specific tests below override one field at a time.
+    fn input<'a>(
+        up: &'a str,
+        down: Option<&'a str>,
+        flags: &'a MigrationFlags,
+        owner_app: &'a str,
+        depends_on: &'a [MigrationId],
+        supersedes: &'a [MigrationId],
+        preconditions: &'a [PreconditionCheck],
+    ) -> ChecksumInput<'a> {
+        ChecksumInput {
+            up,
+            down,
+            flags,
+            owner_app,
+            depends_on,
+            supersedes,
+            preconditions,
+        }
+    }
+
     #[test]
     fn checksum_is_deterministic_and_sensitive() {
         use crate::precondition::{Precondition, PreconditionCheck};
-        let base = Checksum::of("CREATE TABLE t()", Some("DROP TABLE t"), &[]);
+        let f = MigrationFlags::default();
+        let base = Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &[]));
         // Deterministic.
-        assert_eq!(base, Checksum::of("CREATE TABLE t()", Some("DROP TABLE t"), &[]));
+        assert_eq!(base, Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &[])));
         // Sensitive to `up`.
-        assert_ne!(base, Checksum::of("CREATE TABLE u()", Some("DROP TABLE t"), &[]));
+        assert_ne!(base, Checksum::of(&input("CREATE TABLE u()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &[])));
         // Sensitive to `down`.
-        assert_ne!(base, Checksum::of("CREATE TABLE t()", Some("DROP TABLE u"), &[]));
+        assert_ne!(base, Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE u"), &f, "app_test", &[], &[], &[])));
         // `Some("")` differs from `None` (empty down != irreversible).
         assert_ne!(
-            Checksum::of("CREATE TABLE t()", Some(""), &[]),
-            Checksum::of("CREATE TABLE t()", None, &[])
+            Checksum::of(&input("CREATE TABLE t()", Some(""), &f, "app_test", &[], &[], &[])),
+            Checksum::of(&input("CREATE TABLE t()", None, &f, "app_test", &[], &[], &[]))
         );
         // And no concatenation collision: up="ab",down="c" != up="a",down="bc".
         assert_ne!(
-            Checksum::of("ab", Some("c"), &[]),
-            Checksum::of("a", Some("bc"), &[])
+            Checksum::of(&input("ab", Some("c"), &f, "app_test", &[], &[], &[])),
+            Checksum::of(&input("a", Some("bc"), &f, "app_test", &[], &[], &[]))
         );
         // Sensitive to PRECONDITIONS: same SQL, different gating condition =>
         // different checksum (preconditions are part of the migration identity).
         let pre = [PreconditionCheck::halt(Precondition::TableExists {
             table: "users".to_string(),
         })];
-        assert_ne!(base, Checksum::of("CREATE TABLE t()", Some("DROP TABLE t"), &pre));
+        assert_ne!(base, Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &pre)));
         // Deterministic with preconditions.
         assert_eq!(
-            Checksum::of("CREATE TABLE t()", Some("DROP TABLE t"), &pre),
-            Checksum::of("CREATE TABLE t()", Some("DROP TABLE t"), &pre)
+            Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &pre)),
+            Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &pre))
         );
         // A DIFFERENT precondition => a different checksum.
         let pre2 = [PreconditionCheck::halt(Precondition::TableNotExists {
             table: "users".to_string(),
         })];
         assert_ne!(
-            Checksum::of("CREATE TABLE t()", Some("DROP TABLE t"), &pre),
-            Checksum::of("CREATE TABLE t()", Some("DROP TABLE t"), &pre2)
+            Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &pre)),
+            Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &pre2))
         );
         // A different unmet policy on the SAME check => a different checksum.
         let pre_skip = [PreconditionCheck::skip(Precondition::TableExists {
             table: "users".to_string(),
         })];
         assert_ne!(
-            Checksum::of("CREATE TABLE t()", Some("DROP TABLE t"), &pre),
-            Checksum::of("CREATE TABLE t()", Some("DROP TABLE t"), &pre_skip)
+            Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &pre)),
+            Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &pre_skip))
         );
         // Hex sha256 = 64 chars.
         assert_eq!(base.as_str().len(), 64);
+    }
+
+    /// C1 (v3 Plan F): the per-migration checksum covers the WHOLE apply-relevant
+    /// unit, so a tampered `flags` / `depends_on` / `supersedes` / `owner_app`
+    /// changes the checksum (and therefore the integrity manifest + the drift
+    /// check). RED before the `Checksum::of` widening (those fields were unhashed).
+    #[test]
+    fn checksum_covers_flags_deps_supersedes_owner() {
+        let up = "CREATE TABLE t()";
+        let owner = "app_alpha";
+        let base_flags = MigrationFlags::default();
+        let base = Checksum::of(&input(up, None, &base_flags, owner, &[], &[], &[]));
+
+        // --- flags: each apply-relevant field flips the checksum ---
+        // repeatable flip (re-phase: repeatables run after versioned migrations).
+        let f_rep = MigrationFlags { repeatable: true, ..MigrationFlags::default() };
+        assert_ne!(base, Checksum::of(&input(up, None, &f_rep, owner, &[], &[], &[])), "repeatable flip must change the checksum");
+        // requires_approval clear (un-gate). Default is false; set true here so
+        // "clearing" it (back to default) differs from the gated form.
+        let f_appr = MigrationFlags { requires_approval: true, ..MigrationFlags::default() };
+        assert_ne!(base, Checksum::of(&input(up, None, &f_appr, owner, &[], &[], &[])), "requires_approval change must change the checksum");
+        // timeout_ms change.
+        let f_to = MigrationFlags { timeout_ms: Some(60_000), ..MigrationFlags::default() };
+        assert_ne!(base, Checksum::of(&input(up, None, &f_to, owner, &[], &[], &[])), "timeout_ms change must change the checksum");
+        // destructive flip.
+        let f_destr = MigrationFlags { destructive: true, ..MigrationFlags::default() };
+        assert_ne!(base, Checksum::of(&input(up, None, &f_destr, owner, &[], &[], &[])), "destructive flip must change the checksum");
+        // online + phase.
+        let f_phase = MigrationFlags { online: true, phase: Some(OnlinePhase::Contract), ..MigrationFlags::default() };
+        assert_ne!(base, Checksum::of(&input(up, None, &f_phase, owner, &[], &[], &[])), "phase change must change the checksum");
+
+        // --- depends_on: an inserted dependency edge flips the checksum ---
+        let deps = [MigrationId::generate()];
+        assert_ne!(base, Checksum::of(&input(up, None, &base_flags, owner, &deps, &[], &[])), "depends_on edit must change the checksum");
+
+        // --- supersedes: an injected supersession flips the checksum ---
+        let sup = MigrationId::generate();
+        let sups = [sup];
+        assert_ne!(base, Checksum::of(&input(up, None, &base_flags, owner, &[], &sups, &[])), "supersedes injection must change the checksum");
+
+        // --- owner_app: a re-owned migration flips the checksum ---
+        assert_ne!(base, Checksum::of(&input(up, None, &base_flags, "app_beta", &[], &[], &[])), "owner_app change must change the checksum");
+
+        // depends_on and supersedes are domain-separated: dep=[x],sup=[] !=
+        // dep=[],sup=[x] (no cross-list concatenation collision).
+        let x = MigrationId::generate();
+        let xs = [x];
+        assert_ne!(
+            Checksum::of(&input(up, None, &base_flags, owner, &xs, &[], &[])),
+            Checksum::of(&input(up, None, &base_flags, owner, &[], &xs, &[])),
+            "depends_on and supersedes must be domain-separated"
+        );
+    }
+
+    /// `ChecksumInput::from_migration` re-derives exactly the stored checksum.
+    #[test]
+    fn from_migration_redrives_checksum() {
+        let f = MigrationFlags { destructive: true, ..MigrationFlags::default() };
+        let up = "CREATE TABLE t()";
+        let expected = Checksum::of(&input(up, Some("DROP TABLE t"), &f, "app_z", &[], &[], &[]));
+        let m = Migration {
+            version: MigrationId::generate(),
+            name: "t".to_string(),
+            up: up.to_string(),
+            down: Some("DROP TABLE t".to_string()),
+            checksum: expected.clone(),
+            flags: f,
+            owner_app: "app_z".to_string(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+        };
+        assert_eq!(Checksum::of(&ChecksumInput::from_migration(&m)), expected);
     }
 
     #[test]
