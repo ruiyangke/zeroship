@@ -24,9 +24,10 @@ use compio_postgres::Client;
 use zeroship_migrate::guard::GuardConfig;
 use zeroship_migrate::migration::Checksum;
 use zeroship_migrate::{
-    deprovision_migrator, dry_run, dry_run_declarative, migrator_role_name, CollectionDescriptor,
-    DeclarativeAuthor, ExecutorConfig, FieldDescriptor, Migration, MigrationEngine,
-    MigrationFlags, MigrationId, SchemaSnapshot, ShadowConfig, desired_snapshot,
+    deprovision_migrator, dry_run, dry_run_declarative, migrator_role_name, sweep_leaked_shadows,
+    CollectionDescriptor, DeclarativeAuthor, DryRunError, ExecutorConfig, FieldDescriptor,
+    Migration, MigrationEngine, MigrationFlags, MigrationId, SchemaSnapshot, ShadowConfig,
+    desired_snapshot,
 };
 
 const DEFAULT_DSN: &str =
@@ -450,4 +451,103 @@ async fn dry_run_declarative_wrong_result_has_nonempty_drift_and_not_ok() {
     assert_eq!(shadow_db_count(&admin, "zsmig_shadow_").await, 0);
 
     cleanup_role(&admin, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — teardown-on-FAILURE hardening + leaked-shadow sweeper.
+// ---------------------------------------------------------------------------
+
+/// Phase 3 test 1: inject a HARNESS failure AFTER `CREATE DATABASE` but before
+/// apply completes, and assert the shadow DB is STILL dropped.
+///
+/// The injection: an EMPTY `project_id` makes the in-body `provision_migrator`
+/// fail with `BadRoleName` (the role name derives from project_id), which lands
+/// AFTER the shadow DB was created and the schema set up — exactly the
+/// crash-before-teardown window. We use a UNIQUELY-prefixed shadow DB so we can
+/// prove no `<unique_prefix>%` database survives.
+#[compio::test]
+async fn dry_run_drops_shadow_when_provision_fails_after_create() {
+    let admin = pg().await;
+    // A unique prefix so we observe ONLY this test's shadow DB.
+    let unique = format!("zsmig_fail_{}_", token().replace('_', ""));
+    let unique_prefix: String = unique.chars().take(40).collect();
+
+    // project_schema is valid (CREATE SCHEMA succeeds) but project_id is EMPTY,
+    // so provision_migrator fails AFTER CREATE DATABASE + CREATE SCHEMA.
+    let tok = token();
+    let mut cfg = ExecutorConfig::new(String::new(), format!("proj_{tok}"));
+    cfg.meta_schema = format!("meta_{tok}");
+    cfg.migrator_role = Some("migrator_unused".to_string());
+
+    let m = mig(
+        MigrationId::generate(),
+        "create",
+        &format!(
+            "CREATE TABLE \"{}\".\"t\" (id bigint PRIMARY KEY)",
+            cfg.project_schema
+        ),
+    );
+    let shadow_cfg = ShadowConfig {
+        admin_dsn: dsn(),
+        db_name_prefix: unique_prefix.clone(),
+    };
+
+    let result = dry_run(&admin, &[m], &cfg, &shadow_cfg, "actor").await;
+
+    // The harness surfaced the provisioning failure as an Err...
+    assert!(
+        matches!(result, Err(DryRunError::Provision(_))),
+        "empty project_id must fail provisioning: {result:?}"
+    );
+    // ...AND the shadow DB created before the failure is STILL dropped.
+    assert_eq!(
+        shadow_db_count(&admin, &unique_prefix).await,
+        0,
+        "teardown must drop the shadow DB even when the body fails after CREATE DATABASE"
+    );
+}
+
+/// Phase 3 test 2: `sweep_leaked_shadows` drops a STALE crash-leaked clone and
+/// leaves a FRESH one (and a non-matching DB) untouched.
+#[compio::test]
+async fn sweep_leaked_shadows_drops_stale_and_keeps_fresh() {
+    let admin = pg().await;
+    let prefix = format!("zsmig_sweep_{}_", token().replace('_', ""));
+    let prefix: String = prefix.chars().take(38).collect();
+
+    // A STALE clone: name carries an OLD embedded nanos timestamp (1s past epoch),
+    // matching fresh_shadow_name's `<prefix><pid>_<nanos_hex>_<n>` shape.
+    let old_nanos_hex = format!("{:x}", 1_000_000_000u128); // ~1970, definitely stale
+    let stale = format!("{prefix}1_{old_nanos_hex}_0");
+    // A FRESH clone: a recent embedded timestamp (now).
+    let now_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let fresh = format!("{prefix}1_{now_nanos:x}_1");
+    // A non-matching DB sharing the prefix but NOT the timestamp shape — never reaped.
+    let unparseable = format!("{prefix}plain");
+
+    for name in [&stale, &fresh, &unparseable] {
+        admin
+            .batch_execute(&format!("CREATE DATABASE \"{name}\""))
+            .await
+            .unwrap_or_else(|e| panic!("create {name}: {e}"));
+    }
+
+    // Sweep anything older than 1 hour: only the ~1970 stale clone qualifies.
+    let dropped = sweep_leaked_shadows(&admin, &prefix, Duration::from_secs(3600))
+        .await
+        .expect("sweep");
+    assert_eq!(dropped, 1, "exactly the one stale clone is dropped");
+
+    let remaining = shadow_db_count(&admin, &prefix).await;
+    assert_eq!(remaining, 2, "the fresh + the unparseable DBs survive");
+
+    // Cleanup the two survivors.
+    for name in [&fresh, &unparseable] {
+        let _ = admin
+            .batch_execute(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))
+            .await;
+    }
 }
