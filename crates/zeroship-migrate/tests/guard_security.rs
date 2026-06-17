@@ -1030,7 +1030,7 @@ fn mixed_migration_with_a_drop_is_flagged_but_passes() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 5 — lint warnings + flags_for mapping
+// Task 5 — operational advisories + flags_for mapping
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1039,10 +1039,10 @@ fn add_not_null_volatile_default_warns_lock() {
     // an ACCESS EXCLUSIVE lock — lint must warn (not deny).
     let r = assert_ok("ALTER TABLE products ADD COLUMN created_at timestamptz NOT NULL DEFAULT now()");
     assert!(
-        r.warnings.iter().any(|w| w.to_lowercase().contains("lock")
-            || w.to_lowercase().contains("rewrite")),
-        "expected a lock/rewrite warning, got: {:?}",
-        r.warnings
+        r.advisories.iter().any(|a| a.message.to_lowercase().contains("lock")
+            || a.message.to_lowercase().contains("rewrite")),
+        "expected a lock/rewrite advisory, got: {:?}",
+        r.advisories
     );
 }
 
@@ -1051,9 +1051,9 @@ fn add_not_null_constant_default_does_not_warn() {
     // A constant default is the PG11+ metadata-only fast path — no warning.
     let r = assert_ok("ALTER TABLE products ADD COLUMN active boolean NOT NULL DEFAULT true");
     assert!(
-        !r.warnings.iter().any(|w| w.to_lowercase().contains("lock")),
+        !r.advisories.iter().any(|a| a.message.to_lowercase().contains("lock")),
         "constant default must not warn, got: {:?}",
-        r.warnings
+        r.advisories
     );
 }
 
@@ -1063,9 +1063,12 @@ fn non_concurrent_create_index_warns() {
     // CONCURRENTLY.
     let r = assert_ok("CREATE INDEX idx_name ON products(name)");
     assert!(
-        r.warnings.iter().any(|w| w.to_lowercase().contains("concurrently")),
+        r.advisories.iter().any(|a| {
+            let s = a.suggestion.as_deref().unwrap_or("").to_lowercase();
+            a.message.to_lowercase().contains("concurrently") || s.contains("concurrently")
+        }),
         "expected a CONCURRENTLY suggestion, got: {:?}",
-        r.warnings
+        r.advisories
     );
 }
 
@@ -1073,9 +1076,11 @@ fn non_concurrent_create_index_warns() {
 fn concurrent_create_index_does_not_warn_concurrently() {
     let r = assert_ok("CREATE INDEX CONCURRENTLY idx_name ON products(name)");
     assert!(
-        !r.warnings.iter().any(|w| w.to_lowercase().contains("concurrently")),
-        "CONCURRENTLY index must not get a CONCURRENTLY warning, got: {:?}",
-        r.warnings
+        !r.advisories
+            .iter()
+            .any(|a| a.rule == zeroship_migrate::analyze::rule::NON_CONCURRENT_INDEX),
+        "CONCURRENTLY index must not get a NON_CONCURRENT_INDEX advisory, got: {:?}",
+        r.advisories
     );
 }
 

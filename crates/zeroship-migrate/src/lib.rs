@@ -57,6 +57,7 @@
 //! so it is plain synchronous logic — no tokio/compio — and exhaustively
 //! unit-testable without a database (`tests/guard_security.rs`).
 
+pub mod analyze;
 pub mod approval;
 pub mod author;
 pub mod backfill;
@@ -79,6 +80,7 @@ pub mod status;
 // Public API surface — re-exports (later plans depend on these names).
 // ---------------------------------------------------------------------------
 
+pub use analyze::{analyze, analyze_migration, Advisory, Severity};
 pub use approval::Approval;
 pub use baseline::{baseline, BaselineError, BaselineOutcome};
 pub use backfill::{

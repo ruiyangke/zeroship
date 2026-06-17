@@ -385,7 +385,7 @@ async fn executor_reruns_guard_even_on_a_hand_built_clean_plan() {
             report: GuardReport {
                 classes: Vec::new(),
                 destructive: false,
-                warnings: Vec::new(),
+                advisories: Vec::new(),
             },
         }],
         destructive: false,

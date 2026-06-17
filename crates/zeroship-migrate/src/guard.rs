@@ -23,10 +23,10 @@ pub mod denylist;
 
 use pg_query::protobuf::node::Node as NodeEnum;
 use pg_query::protobuf::{self, ObjectType};
-use pg_query::NodeRef;
 
 use pg_query::protobuf::AlterTableType;
 
+use crate::analyze::Advisory;
 use crate::classify::{classify, ParseError, StatementClass};
 use crate::migration::MigrationFlags;
 use denylist::rule;
@@ -76,8 +76,13 @@ pub struct GuardReport {
     pub classes: Vec<StatementClass>,
     /// True if *any* statement is destructive (data loss). The gate decides.
     pub destructive: bool,
-    /// Non-fatal advisories (lock-heavy ops, etc. — filled in Task 5).
-    pub warnings: Vec<String>,
+    /// Operational [`Advisory`](crate::analyze::Advisory)s — lock-heavy ops,
+    /// destructive/backward-incompatible shapes, missing FK indexes, etc.
+    /// **Advisory-only:** these never deny or gate (the deny-list +
+    /// least-privilege role own security; the engine gate owns data-loss
+    /// approval). They enrich the report so the AI/creator sees the operational
+    /// footgun and the safer alternative. See [`crate::analyze`].
+    pub advisories: Vec<Advisory>,
 }
 
 /// The SQL security guard.
@@ -120,19 +125,17 @@ impl SqlGuard {
             self.check_node(node, &json, &raw)?;
         }
 
-        // Collect non-fatal lint advisories (lock-heavy ops, etc.).
-        let mut warnings = Vec::new();
-        for raw_stmt in &parsed.protobuf.stmts {
-            if let Some(node) = raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref()) {
-                lint_warnings(node, &mut warnings);
-            }
-        }
+        // Collect operational advisories (lock-heavy / destructive / rename /
+        // missing-FK-index shapes). These are ADVISORY ONLY — see
+        // `crate::analyze`; they never deny or gate. We reuse the single parse
+        // already done above by re-running the analyzer engine over the SQL.
+        let advisories = crate::analyze::analyze(sql);
 
         let destructive = classes.iter().any(|c| c.destructive);
         Ok(GuardReport {
             classes,
             destructive,
-            warnings,
+            advisories,
         })
     }
 
@@ -838,78 +841,6 @@ pub fn flags_for(report: &GuardReport) -> MigrationFlags {
         // phase is set by the ExpandContractAuthor, never inferred from SQL.
         phase: None,
     }
-}
-
-/// Append non-fatal lint advisories for lock-heavy / rewrite-forcing ops.
-fn lint_warnings(node: &NodeEnum, warnings: &mut Vec<String>) {
-    match node {
-        // Plain CREATE INDEX (not CONCURRENTLY) holds a SHARE lock blocking
-        // writes for the whole build — suggest CONCURRENTLY.
-        NodeEnum::IndexStmt(idx) if !idx.concurrent => {
-            warnings.push(format!(
-                "CREATE INDEX on '{}' is not CONCURRENTLY: it blocks writes for the build; \
-                 prefer CREATE INDEX CONCURRENTLY on a populated table",
-                idx.relation.as_ref().map_or("?", |r| r.relname.as_str())
-            ));
-        }
-        // ADD COLUMN … NOT NULL DEFAULT <volatile> forces a full table rewrite
-        // under ACCESS EXCLUSIVE — warn. A constant default is the metadata-only
-        // fast path (PG11+) and is not flagged.
-        NodeEnum::AlterTableStmt(at) => {
-            for cmd in &at.cmds {
-                if let Some(NodeEnum::AlterTableCmd(c)) = cmd.node.as_ref() {
-                    if c.subtype == AlterTableType::AtAddColumn as i32 {
-                        if let Some(NodeEnum::ColumnDef(col)) =
-                            c.def.as_ref().and_then(|d| d.node.as_ref())
-                        {
-                            if column_is_not_null_with_volatile_default(col) {
-                                warnings.push(format!(
-                                    "ADD COLUMN '{}' NOT NULL with a volatile DEFAULT forces a full \
-                                     table rewrite under an ACCESS EXCLUSIVE lock; backfill in a \
-                                     separate step or use a constant default",
-                                    col.colname
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-/// True if a column def has BOTH a NOT NULL constraint and a *volatile*
-/// DEFAULT expression (a function call — `now()`, `gen_random_uuid()`,
-/// `random()`, etc.). A literal/constant default is the fast path and returns
-/// false.
-fn column_is_not_null_with_volatile_default(col: &protobuf::ColumnDef) -> bool {
-    use pg_query::protobuf::ConstrType;
-    let mut not_null = col.is_not_null;
-    let mut volatile_default = false;
-    for con in &col.constraints {
-        if let Some(NodeEnum::Constraint(c)) = con.node.as_ref() {
-            if c.contype == ConstrType::ConstrNotnull as i32 {
-                not_null = true;
-            }
-            if c.contype == ConstrType::ConstrDefault as i32 {
-                // A DEFAULT whose expression contains a function call is treated
-                // as volatile (conservative: we cannot prove stability without
-                // catalog lookup). A bare const (A_Const) is the fast path.
-                if let Some(expr) = c.raw_expr.as_ref().and_then(|e| e.node.as_ref()) {
-                    volatile_default = expr_contains_func_call(expr);
-                }
-            }
-        }
-    }
-    not_null && volatile_default
-}
-
-/// Does an expression tree contain any function call? (volatility heuristic)
-fn expr_contains_func_call(expr: &NodeEnum) -> bool {
-    expr.nodes()
-        .iter()
-        .any(|(n, _, _, _)| matches!(n, NodeRef::FuncCall(_)))
 }
 
 // ---------------------------------------------------------------------------

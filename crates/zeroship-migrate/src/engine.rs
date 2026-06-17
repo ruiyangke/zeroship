@@ -38,7 +38,8 @@ use crate::migration::Migration;
 pub struct PlannedMigration {
     /// The migration itself (clone of the input).
     pub migration: Migration,
-    /// Its passing guard report (classes + destructive flag + lint warnings).
+    /// Its passing guard report (classes + destructive flag + operational
+    /// [`Advisory`](crate::analyze::Advisory)s).
     pub report: GuardReport,
 }
 
