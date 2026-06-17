@@ -78,6 +78,7 @@ pub mod role;
 pub mod shadow;
 pub mod squash;
 pub mod status;
+pub mod submit;
 
 // ---------------------------------------------------------------------------
 // Public API surface — re-exports (later plans depend on these names).
@@ -124,6 +125,9 @@ pub use journal::{
 };
 pub use squash::{squash, SquashError, SquashOutcome};
 pub use status::{history, status, MigrationStatus, StatusError};
+pub use submit::{
+    submit_migration, Submission, SubmissionOutcome, SubmitError,
+};
 pub use manifest::{
     compute_manifest, verify_manifest, ManifestError, ManifestHash, MismatchKind,
 };
@@ -137,8 +141,8 @@ pub use precondition::{
 };
 pub use role::{deprovision_migrator, migrator_role_name, provision_migrator, RoleError};
 pub use shadow::{
-    dry_run, dry_run_declarative, sweep_leaked_shadows, DryRunError, DryRunReport, MigrationResult,
-    ShadowConfig,
+    dry_run, dry_run_declarative, dry_run_incremental, sweep_leaked_shadows, DryRunError,
+    DryRunReport, MigrationResult, ShadowConfig,
 };
 #[doc(hidden)]
 pub use shadow::arm_panic_after_provision;

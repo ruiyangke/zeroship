@@ -447,6 +447,145 @@ pub async fn dry_run_declarative(
     finish_dry_run(admin_conn, &shadow_db, &shadow_exec_cfg, caught).await
 }
 
+/// Dry-run an arbitrary migration set against a shadow DATABASE **seeded from the
+/// current LIVE project structure** (the H4 live-seed reuse), without touching the
+/// real project DB.
+///
+/// This is the faithful primitive for an **INCREMENTAL** submission: the supplied
+/// `migrations` are a delta vs the live schema (an `ALTER TABLE … ADD COLUMN` on a
+/// table created in a prior deploy, a `DROP TABLE` of an existing table, …).
+/// Against an EMPTY shadow such a delta would false-negative with `relation … does
+/// not exist`; so before applying it we reconstruct the live structure in the
+/// fresh shadow via [`seed_shadow_from_live`] (the exact mechanism
+/// [`dry_run_declarative`] uses) and only then run the UNMODIFIED
+/// [`apply`](crate::executor::apply) path over `migrations`.
+///
+/// It is the generic peer of [`dry_run`] (which assumes the set is the WHOLE
+/// schema / a from-scratch deploy) and the non-declarative peer of
+/// [`dry_run_declarative`] (which validates a generated declarative plan against a
+/// desired snapshot). Use it when you have an ad-hoc migration set to validate
+/// against the live structure — e.g. the [`crate::submit`] adapter.
+///
+/// `Approval::Approved` is used for the shadow apply ONLY (a dry-run must preview a
+/// destructive set), constructed inside this function and never returned — it can
+/// never leak to a real apply. The shadow DB + role are torn down on EVERY path.
+///
+/// # Fidelity scope
+/// Inherits [`seed_shadow_from_live`]'s known limitation: the seed reconstructs
+/// tables/columns/types/nullability/indexes/constraints, NOT
+/// triggers/functions/sequences/DEFAULTs/row data. A set that depends on a
+/// prior-deploy trigger/function/sequence/data can therefore false-negative.
+///
+/// # Errors
+/// [`DryRunError`] on a harness failure (CREATE/DROP DATABASE, shadow connect,
+/// provisioning, the live snapshot, or the live-seed). A *migration* failing is
+/// NOT an error — it is reported in the [`DryRunReport`] with `ok == false`.
+pub async fn dry_run_incremental(
+    admin_conn: &Client,
+    migrations: &[Migration],
+    cfg: &ExecutorConfig,
+    shadow_cfg: &ShadowConfig,
+    applied_by: &str,
+) -> Result<DryRunReport, DryRunError> {
+    let shadow_db = fresh_shadow_name(&shadow_cfg.db_name_prefix);
+    let shadow_exec_cfg = shadow_executor_cfg(cfg, &shadow_db)?;
+
+    // Snapshot the CURRENT LIVE project schema, read-only, on the admin connection
+    // (its dbname IS the project DB), BEFORE any shadow is created — the seed
+    // source for the faithful incremental dry-run. `snapshot_schema` is read-only
+    // (information_schema / pg_catalog of the REAL project schema), never mutates
+    // prod, never touches the migrator role.
+    let live = snapshot_schema(admin_conn, &cfg.project_schema).await?;
+
+    admin_conn
+        .batch_execute(&format!("CREATE DATABASE {}", quote_ident(&shadow_db)))
+        .await
+        .map_err(DryRunError::Admin)?;
+
+    // catch_unwind so a panic in the apply path still tears down the shadow (C1).
+    let caught = AssertUnwindSafe(dry_run_incremental_body(
+        migrations,
+        &live,
+        &shadow_exec_cfg,
+        shadow_cfg,
+        &shadow_db,
+        applied_by,
+    ))
+    .catch_unwind()
+    .await;
+
+    finish_dry_run(admin_conn, &shadow_db, &shadow_exec_cfg, caught).await
+}
+
+/// The body of [`dry_run_incremental`]: open + provision the shadow, SEED it from
+/// the live snapshot, then run the UNMODIFIED apply path over `migrations`.
+async fn dry_run_incremental_body(
+    migrations: &[Migration],
+    live: &SchemaSnapshot,
+    cfg: &ExecutorConfig,
+    shadow_cfg: &ShadowConfig,
+    shadow_db: &str,
+    applied_by: &str,
+) -> Result<DryRunReport, DryRunError> {
+    let (shadow, run_loop) = open_and_provision_shadow(cfg, shadow_cfg, shadow_db).await?;
+
+    // SEED the shadow to match the current LIVE structure before the incremental
+    // apply (the H4 fix, reused). An empty live schema is a no-op (from-scratch
+    // path unchanged).
+    if let Err(e) = seed_shadow_from_live(&shadow, cfg, live, applied_by).await {
+        close_shadow_session(shadow, run_loop).await;
+        return Err(DryRunError::Seed(e));
+    }
+
+    // Up-front guard pass — gather advisories per migration (advisory-only; the
+    // executor::apply below re-runs the guard as the real gate).
+    let guard = SqlGuard::new(GuardConfig {
+        project_schema: cfg.project_schema.clone(),
+        extension_allowlist: Vec::new(),
+    });
+    let mut advisories: Vec<(String, Vec<Advisory>)> = Vec::new();
+    for m in migrations {
+        let version = m.version.as_str().to_string();
+        match guard.check(&m.up) {
+            Ok(report) => advisories.push((version, report.advisories)),
+            Err(_) => advisories.push((version, crate::analyze::analyze(&m.up))),
+        }
+    }
+
+    // Run the UNMODIFIED apply path over the seeded shadow. `Approval::Approved` is
+    // shadow-only (a dry-run must preview a destructive set).
+    let outcome = executor::apply(&shadow, cfg, migrations, Approval::Approved, applied_by).await;
+
+    let mut per_migration: Vec<MigrationResult> = Vec::new();
+    let mut ok = true;
+    match outcome {
+        Ok(o) => {
+            for v in &o.applied {
+                per_migration.push(MigrationResult {
+                    version: v.clone(),
+                    applied_ok: true,
+                    error: None,
+                });
+            }
+        }
+        Err(e) => {
+            ok = false;
+            record_apply_error(&e, migrations, &mut per_migration);
+        }
+    }
+
+    close_shadow_session(shadow, run_loop).await;
+
+    Ok(DryRunReport {
+        ok,
+        per_migration,
+        resulting_drift: None,
+        advisories,
+        teardown_ok: true,
+        teardown_error: None,
+    })
+}
+
 /// Tear down the shadow (DB + role) and reconcile with the body's outcome.
 ///
 /// The single funnel both dry-run entry points pass through after the body —
