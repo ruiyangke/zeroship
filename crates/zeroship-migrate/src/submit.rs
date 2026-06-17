@@ -64,6 +64,19 @@
 //! operator is explicitly asking for it back. The dedup answers "is this exact
 //! apply-relevant unit CURRENTLY live?", not "was it EVER applied?".
 //!
+//! ## Checksum-collision NoOp masking (MED-4)
+//!
+//! `name` is excluded from the checksum, so two genuinely DIFFERENT submissions
+//! that fold to the same apply-relevant unit (identical
+//! `up`/`down`/`flags`/`owner_app`/`depends_on`/`supersedes`/`preconditions`,
+//! differing only in `name`) COLLIDE: the second correctly
+//! [`SubmissionOutcome::NoOp`]s (the live unit IS identical), but that NoOp may be
+//! MASKING a different operator intent. The adapter emits a `tracing::debug` line
+//! on exactly that case — a NoOp whose journaled migration name ≠ the submission's
+//! name — so the masking is observable in the logs. It does NOT change the
+//! (correct) NoOp behavior; identity-folding two same-bodied units is the right
+//! call, the log just surfaces the rare accidental collision.
+//!
 //! ## Concurrency: dedup→apply is one locked critical section (HIGH-1)
 //!
 //! The dedup read and the apply MUST be serialized as ONE critical section under
@@ -118,7 +131,10 @@ use crate::shadow::{dry_run_incremental, DryRunError, ShadowConfig};
 #[derive(Debug, Clone)]
 pub struct Submission {
     /// Human-readable migration name (a label only; no apply effect, NOT part of
-    /// the dedup checksum).
+    /// the dedup checksum). Because it is excluded from the checksum, two
+    /// submissions with identical bodies but different names COLLIDE — the second
+    /// NoOps; the adapter logs a `debug` line on a name mismatch so an accidental
+    /// collision is observable (MED-4, see the module docs).
     pub name: String,
     /// The forward SQL to apply.
     pub up: String,
@@ -189,7 +205,10 @@ pub enum SubmissionOutcome {
     ///
     /// The key is NET-applied (latest event `completed`), not ever-applied: an
     /// identical resubmit AFTER a rollback re-applies (it is NOT a NoOp) — see the
-    /// module docs (MED-3).
+    /// module docs (MED-3). A NoOp can also fire on a checksum COLLISION (two
+    /// different submissions that fold to the same apply-relevant unit, differing
+    /// only in `name`); the adapter logs a `debug` line when the journaled name
+    /// differs, surfacing the potential masking (MED-4).
     NoOp {
         /// The minted version (informational; the already-applied row keeps its
         /// own original version).
@@ -546,6 +565,12 @@ async fn submit_locked(
     let applied = journal::applied(conn, cfg).await?;
     let already_applied = applied.iter().any(|e| e.checksum == checksum.as_str());
     if already_applied {
+        // MED-4 — surface accidental checksum-collision MASKING: the NoOp is
+        // correct (the live apply-relevant unit IS identical), but if the journaled
+        // migration's NAME differs from this submission's, the collision may be
+        // masking a genuinely different operator intent. Emit a debug line so it is
+        // observable; the (correct) NoOp behavior is unchanged.
+        log_noop_name_mismatch(conn, cfg, checksum.as_str(), &migration.name).await;
         return Ok(SubmissionOutcome::NoOp { version });
     }
 
@@ -599,4 +624,42 @@ async fn submit_locked(
         version,
         advisories,
     })
+}
+
+/// MED-4 helper — log a `debug` line when a `NoOp`-firing checksum's journaled
+/// migration NAME differs from the resubmitted one, surfacing accidental
+/// checksum-collision masking (two genuinely different submissions that fold to the
+/// same apply-relevant unit). Best-effort: a lookup failure is swallowed (the NoOp
+/// itself is correct regardless).
+async fn log_noop_name_mismatch(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    checksum: &str,
+    submitted_name: &str,
+) {
+    let meta = &cfg.meta_schema;
+    // The latest completed journal row for this checksum carries the name the unit
+    // was first applied under. `meta_schema` is a server-controlled identifier (not
+    // submitter input); the checksum is bound as a parameter.
+    let sql = format!(
+        "SELECT name FROM \"{meta}\".schema_migrations \
+         WHERE checksum = $1 AND phase = 'completed' \
+         ORDER BY event_seq DESC LIMIT 1"
+    );
+    if let Ok(rows) = conn.query(&sql, &[&checksum]).await {
+        if let Some(row) = rows.first() {
+            let journaled_name: String = row.get("name");
+            if journaled_name != submitted_name {
+                tracing::debug!(
+                    project = %cfg.project_id,
+                    checksum,
+                    journaled_name = %journaled_name,
+                    submitted_name = %submitted_name,
+                    "zeroship-migrate: submit NoOp fired on a checksum whose journaled \
+                     migration name differs from the submission — possible checksum-collision \
+                     masking of a different intent (MED-4)"
+                );
+            }
+        }
+    }
 }
