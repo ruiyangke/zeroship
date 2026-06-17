@@ -2945,3 +2945,254 @@ async fn own_schema_bare_ref_target_is_allowed() {
 
     teardown(&conn, &cfg).await;
 }
+
+// ---------------------------------------------------------------------------
+// Phase-1 parity #3 — literal type + CHECK round-trip.
+// ---------------------------------------------------------------------------
+
+/// Assert a desired schema applies clean AND the differ re-diffs to ZERO
+/// migrations, AND `diff_snapshots` shows no missing/unexpected and no NON-CHECK
+/// altered objects. A CHECK constraint's pg_get_constraintdef-normalised BODY is
+/// not byte-compared (PG rewrites it; plugin-db never re-diffs a CHECK), so a
+/// `constraint <name>` `definition` altered_object is the only tolerated drift —
+/// the constraint's PRESENCE (name + kind) round-trips, which is what matters.
+async fn assert_clean_modulo_check_bodies(
+    engine: &MigrationEngine,
+    author: &DeclarativeAuthor,
+    cfg: &ExecutorConfig,
+    conn: &Client,
+    desired: &DesiredSchema,
+) {
+    apply_plan(engine, desired, &SchemaSnapshot::default(), author, cfg, conn, Approval::None)
+        .await
+        .expect("apply plan");
+    let live2 = snapshot_schema(conn, &cfg.project_schema).await.expect("re-snapshot");
+
+    // The differ re-diffs to ZERO migrations (it never re-diffs CHECK bodies).
+    let migs = author.diff(desired, &live2, &HashMap::new(), &[]).expect("re-diff").migrations;
+    assert!(
+        migs.is_empty(),
+        "re-diff must be EMPTY (lossless round-trip), got: {:?}",
+        migs.iter().map(|m| &m.name).collect::<Vec<_>>()
+    );
+
+    let drift = diff_snapshots(&desired.snapshot, &live2);
+    assert!(drift.missing_objects.is_empty(), "missing: {:?}", drift.missing_objects);
+    assert!(drift.unexpected_objects.is_empty(), "unexpected: {:?}", drift.unexpected_objects);
+    // Only CHECK-constraint `definition` divergence is tolerated (PG normalises
+    // the body); nothing else may have altered.
+    let non_check: Vec<_> = drift
+        .altered_objects
+        .iter()
+        .filter(|a| !(a.object.starts_with("constraint ") && a.field == "definition"))
+        .collect();
+    assert!(non_check.is_empty(), "non-CHECK-body drift: {non_check:?}");
+    // The CHECK constraints must EXIST live (name + kind round-tripped).
+    let live_checks: Vec<&str> = live2
+        .tables
+        .values()
+        .flat_map(|t| t.constraints.iter())
+        .filter(|c| c.kind == "CHECK")
+        .map(|c| c.name.as_str())
+        .collect();
+    let want_checks: Vec<&str> = desired
+        .snapshot
+        .tables
+        .values()
+        .flat_map(|t| t.constraints.iter())
+        .filter(|c| c.kind == "CHECK")
+        .map(|c| c.name.as_str())
+        .collect();
+    for w in &want_checks {
+        assert!(live_checks.contains(w), "CHECK {w} must exist live, got {live_checks:?}");
+    }
+}
+
+#[compio::test]
+async fn literal_field_maps_and_check_pins_value_round_trips() {
+    // #3: a `literal` field maps to its primitive (text here) + a
+    // CHECK (col = value). RED pre-fix: `literal` was UnsupportedType (rejected),
+    // so no such column could be modelled at all.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let desc = CollectionDescriptor {
+        name: "events".into(),
+        owner_app: "app_test".into(),
+        fields: vec![
+            FieldDescriptor {
+                name: "kind".into(),
+                ty: "literal".into(),
+                literal_value: Some(serde_json::json!("login")),
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "count".into(),
+                ty: "literal".into(),
+                literal_value: Some(serde_json::json!(7)),
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "flag".into(),
+                ty: "literal".into(),
+                literal_value: Some(serde_json::json!(true)),
+                ..Default::default()
+            },
+        ],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("literal maps");
+    // Type fidelity: kind→text, count→numeric, flag→boolean.
+    let cols = &desired.snapshot.tables["events"].columns;
+    assert_eq!(cols.iter().find(|c| c.name == "kind").unwrap().data_type, "text");
+    assert_eq!(cols.iter().find(|c| c.name == "count").unwrap().data_type, "numeric");
+    assert_eq!(cols.iter().find(|c| c.name == "flag").unwrap().data_type, "boolean");
+
+    assert_clean_modulo_check_bodies(&engine, &author, &cfg, &conn, &desired).await;
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn bare_literal_with_no_value_is_rejected_not_silently_text() {
+    // #3: a `literal` field carrying NO value is malformed — rejected as
+    // UnsupportedType, never silently a `text` column.
+    let cfg = cfg_for(&token());
+    let desc = CollectionDescriptor {
+        name: "t".into(),
+        owner_app: "app_test".into(),
+        fields: vec![FieldDescriptor { name: "x".into(), ty: "literal".into(), ..Default::default() }],
+        indexes: vec![],
+    };
+    let err = desired_snapshot(&cfg.project_schema, &[desc]).unwrap_err();
+    assert!(
+        matches!(err, DeclarativeError::UnsupportedType { ref ty } if ty == "literal"),
+        "got {err:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase-1 parity #4 — enum / min-max / default (CHECK & DEFAULT) round-trip.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn column_with_default_and_enum_check_round_trips() {
+    // #4: a column with a DEFAULT + an enum CHECK applies and re-diffs to ZERO.
+    // The DEFAULT is emission-only (not drift-tracked, so it round-trips
+    // vacuously — matching plugin-db, which never re-diffs defaults); the enum
+    // CHECK round-trips at the name+kind level.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let desc = CollectionDescriptor {
+        name: "tickets".into(),
+        owner_app: "app_test".into(),
+        fields: vec![
+            FieldDescriptor {
+                name: "status".into(),
+                ty: "string".into(),
+                default: Some(serde_json::json!("open")),
+                enum_values: Some(vec![
+                    serde_json::json!("open"),
+                    serde_json::json!("closed"),
+                    serde_json::json!("pending"),
+                ]),
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "priority".into(),
+                ty: "number".into(),
+                min: Some(1.0),
+                max: Some(5.0),
+                ..Default::default()
+            },
+        ],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired");
+    // The DEFAULT is carried on the column (emission metadata).
+    let status = desired.snapshot.tables["tickets"].columns.iter().find(|c| c.name == "status").unwrap();
+    assert_eq!(status.default.as_deref(), Some("'open'"));
+    // Two CHECKs: the status enum + the priority range.
+    let checks: Vec<&str> = desired.snapshot.tables["tickets"]
+        .constraints
+        .iter()
+        .filter(|c| c.kind == "CHECK")
+        .map(|c| c.definition.as_str())
+        .collect();
+    assert!(checks.iter().any(|d| d.contains("IN (")), "enum CHECK present: {checks:?}");
+    assert!(checks.iter().any(|d| d.contains(">= 1") && d.contains("<= 5")), "range CHECK present: {checks:?}");
+
+    assert_clean_modulo_check_bodies(&engine, &author, &cfg, &conn, &desired).await;
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn add_column_with_immutable_default_is_additive_not_destructive() {
+    // #4 volatile-default trap: ADD COLUMN with an IMMUTABLE literal default takes
+    // PG's metadata-only fast path — it must be classified ADDITIVE (not
+    // destructive/gated), since the engine never emits a volatile default
+    // (plugin-db diff.rs:15-26). Add a defaulted column to an existing table and
+    // assert the plan is ungated and applies clean.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let v1 = CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: "app_test".into(),
+        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), ..Default::default() }],
+        indexes: vec![],
+    };
+    let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("d1");
+    apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("create accounts");
+
+    // Add a NOT NULL column WITH a literal default (the only way a NOT NULL
+    // add-to-populated is safe — the default backfills existing rows on the fast
+    // path).
+    let v2 = CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: "app_test".into(),
+        fields: vec![
+            FieldDescriptor { name: "name".into(), ty: "string".into(), ..Default::default() },
+            FieldDescriptor {
+                name: "tier".into(),
+                ty: "string".into(),
+                required: true,
+                default: Some(serde_json::json!("free")),
+                ..Default::default()
+            },
+        ],
+        indexes: vec![],
+    };
+    let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("d2");
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+    let plan = engine
+        .plan_declarative(&d2, &live, &HashMap::new(), &author, &[], &guard_cfg(&cfg))
+        .expect("plan add defaulted column");
+    assert!(!plan.plain.destructive, "ADD COLUMN with immutable default is additive, not destructive");
+    assert!(!plan.plain.requires_approval, "must not be gated");
+    // Applies ungated; re-diff clean (modulo nothing — no CHECK here).
+    engine.apply(&plan.plain, Approval::None, &conn, &cfg, "app_test").await.expect("apply add defaulted col");
+    let live2 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
+    assert!(diff_snapshots(&d2.snapshot, &live2).is_clean(), "add defaulted column converged");
+
+    teardown(&conn, &cfg).await;
+}

@@ -63,7 +63,10 @@ fn quote_ident(ident: &str) -> String {
 ///
 /// Untrusted: `name` and `ty` are validated at the author boundary before any
 /// SQL is emitted (see [`DeclarativeAuthor::diff`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+// NOTE: `PartialEq` but NOT `Eq` — `min`/`max` are `f64` (no total order /
+// `Eq`). Descriptor equality is only used in tests; the differ compares
+// SNAPSHOTS, not descriptors.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct FieldDescriptor {
     /// The field (column) name.
     pub name: String,
@@ -98,6 +101,29 @@ pub struct FieldDescriptor {
     /// `build_fk_clause`, which defaults `deferrable` to `true`.
     #[serde(default)]
     pub deferrable: Option<bool>,
+    /// For a `literal` field (#3), the single accepted value (`literalValue` on the
+    /// wire `FieldDef`). Drives both the column's primitive type
+    /// (text/numeric/boolean — see [`literal_pg_data_type`]) and a
+    /// `CHECK (<col> = <value>)` constraint (mirrors plugin-db's
+    /// `query.rs:2091/2185`).
+    #[serde(rename = "literalValue", default)]
+    pub literal_value: Option<serde_json::Value>,
+    /// Column `DEFAULT` value (#4, `default` on the wire `FieldDef`). Emitted in the
+    /// column declaration per plugin-db's `def_to_constraints` (`query.rs:2125`).
+    #[serde(default)]
+    pub default: Option<serde_json::Value>,
+    /// Minimum (numeric `min`, #4) — emits a `CHECK (<col> >= <min>)` (or combined
+    /// with `max`). Mirrors plugin-db `query.rs:2167`.
+    #[serde(default)]
+    pub min: Option<f64>,
+    /// Maximum (numeric `max`, #4) — emits a `CHECK (<col> <= <max>)`.
+    #[serde(default)]
+    pub max: Option<f64>,
+    /// Enum membership (#4, `enum` on the wire `FieldDef`) — emits a
+    /// `CHECK (<col> IN (…))`. String or numeric values, mirroring plugin-db
+    /// `query.rs:2200`.
+    #[serde(rename = "enum", default)]
+    pub enum_values: Option<Vec<serde_json::Value>>,
 }
 
 /// One declared index of a collection (the `_indexes` array entry).
@@ -118,7 +144,9 @@ pub struct IndexDescriptor {
 /// `{ _meta, _indexes:[…], <field>:{…} }`. The `_meta` slot is opaque metadata
 /// the migrate crate does not consume (it carries soft-delete / versioning flags
 /// the SDK already expanded into concrete fields before this point).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+// `PartialEq` but NOT `Eq`: contains `Vec<FieldDescriptor>`, whose `f64`
+// min/max are not `Eq`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct CollectionDescriptor {
     /// The collection (table) name.
     pub name: String,
@@ -235,12 +263,148 @@ pub fn dsl_to_pg_data_type(dsl_type: &str) -> Result<&'static str, DeclarativeEr
         "json" | "object" | "array" | "union" => "jsonb",
         // t.bytes() → BYTEA.
         "bytes" => "bytea",
+        // `literal` maps via `literal_pg_data_type` (its primitive depends on the
+        // `literalValue`), so it never reaches this by-token map — `desired_snapshot`
+        // special-cases it. Listing it here as an error keeps a stray bare
+        // `literal` (no value) from silently degrading to `text`.
         // No silent fallback: an unrecognised or out-of-scope type is an error,
         // not a `text` column (#2).
         other => {
             return Err(DeclarativeError::UnsupportedType { ty: other.to_string() });
         }
     })
+}
+
+/// Map a `t.literal(value)` field (#3) to the `information_schema` data type
+/// Postgres reports for the column plugin-db would emit for it.
+///
+/// Mirrors plugin-db's `def_to_pg_type` literal arm (`query.rs:2091`): a numeric
+/// literal → `NUMERIC` (`information_schema`: `numeric`), a boolean → `BOOLEAN`,
+/// everything else (a string) → `TEXT`. The literal is also CHECK-pinned to its
+/// value (see [`literal_check_expr`]).
+fn literal_pg_data_type(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Number(_) => "numeric",
+        serde_json::Value::Bool(_) => "boolean",
+        _ => "text",
+    }
+}
+
+/// Single-quote a SQL string literal (double embedded quotes). Mirrors
+/// plugin-db's `'{}'` formatting in `def_to_constraints` (`s.replace('\'', "''")`).
+fn sql_str(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// Render a JSON scalar as a SQL literal for a CHECK / IN clause: a string is
+/// single-quoted, a number is its canonical form, a boolean is `true`/`false`.
+/// `None` for a non-scalar (null/array/object) — those never reach a literal/enum
+/// CHECK in plugin-db.
+fn json_scalar_sql(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(sql_str(s)),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// The CHECK constraint(s) a field declares (#3 literal-pin, #4 min/max + enum),
+/// each as a [`ConstraintSnapshot`] whose `definition` is the emitted DDL CHECK
+/// clause (used by `render_create_table` to inline it).
+///
+/// Mirrors plugin-db's `def_to_constraints_for_dialect` (`query.rs:2167-2218`):
+/// - a numeric field with `min`/`max` → `CHECK (<col> >= min [AND <col> <= max])`
+///   (or `CHECK (<col> <= max)` for max-only);
+/// - a `literal` field → `CHECK (<col> = <value>)`;
+/// - an `enum` → `CHECK (<col> IN (v1, v2, …))`.
+///
+/// The constraint NAME is deterministic (`<table>_<field>_<kind>_chk`) so it
+/// round-trips by name. The differ does NOT re-diff CHECK bodies (only FOREIGN
+/// KEY bodies — `pg_get_constraintdef` heavily normalises a CHECK predicate, so a
+/// byte round-trip of the body is not attempted; the constraint's PRESENCE and
+/// enforcement are what round-trip cleanly, matching plugin-db, which never
+/// re-diffs a CHECK).
+fn field_check_constraints(table: &str, f: &FieldDescriptor) -> Vec<ConstraintSnapshot> {
+    let mut out = Vec::new();
+    let col = quote_ident(&f.name);
+
+    // #4 min/max (numeric only — matches plugin-db's `type == "number"` gate).
+    if f.ty == "number" {
+        let expr = match (f.min, f.max) {
+            (Some(min), Some(max)) => Some(format!("CHECK ({col} >= {min} AND {col} <= {max})")),
+            (Some(min), None) => Some(format!("CHECK ({col} >= {min})")),
+            (None, Some(max)) => Some(format!("CHECK ({col} <= {max})")),
+            (None, None) => None,
+        };
+        if let Some(def) = expr {
+            out.push(ConstraintSnapshot {
+                name: check_constraint_name(table, &f.name, "range"),
+                kind: "CHECK".into(),
+                definition: def,
+            });
+        }
+    }
+
+    // #3 literal-pin.
+    if f.ty == "literal" {
+        if let Some(rendered) = f.literal_value.as_ref().and_then(json_scalar_sql) {
+            out.push(ConstraintSnapshot {
+                name: check_constraint_name(table, &f.name, "lit"),
+                kind: "CHECK".into(),
+                definition: format!("CHECK ({col} = {rendered})"),
+            });
+        }
+    }
+
+    // #4 enum membership.
+    if let Some(values) = &f.enum_values {
+        let rendered: Vec<String> = values.iter().filter_map(json_scalar_sql).collect();
+        if !rendered.is_empty() {
+            out.push(ConstraintSnapshot {
+                name: check_constraint_name(table, &f.name, "enum"),
+                kind: "CHECK".into(),
+                definition: format!("CHECK ({col} IN ({}))", rendered.join(", ")),
+            });
+        }
+    }
+
+    out
+}
+
+/// Deterministic CHECK constraint name, capped ≤63 bytes (same NAMEDATALEN
+/// budget as the index/FK names). `kind` distinguishes `lit` / `range` / `enum`
+/// so a field carrying several CHECKs gets distinct, stable names.
+fn check_constraint_name(table: &str, field: &str, kind: &str) -> String {
+    crate::author::cap_ident_name(&format!("{table}_{field}_{kind}_chk"))
+}
+
+/// The `DEFAULT` clause expression a field emits at CREATE / ADD COLUMN (#4),
+/// or `None` for no default.
+///
+/// Mirrors plugin-db's `def_to_constraints_for_dialect` default arm
+/// (`query.rs:2125-2165`): an explicit `default` renders per the field's
+/// primitive type (string single-quoted, number/boolean bare, json/object →
+/// `'{}'::jsonb`, array → `'[]'::jsonb`); AND, even with NO explicit default,
+/// json/object default to `'{}'::jsonb` and array to `'[]'::jsonb` (plugin-db's
+/// "default defaults"). Emission-only — not drift-compared.
+fn field_default_expr(f: &FieldDescriptor) -> Option<String> {
+    if let Some(default) = &f.default {
+        return match f.ty.as_str() {
+            "string" => default.as_str().map(sql_str),
+            "number" => default.as_f64().map(|n| n.to_string()),
+            "boolean" => default.as_bool().map(|b| b.to_string()),
+            "json" | "object" => Some("'{}'::jsonb".into()),
+            "array" => Some("'[]'::jsonb".into()),
+            _ => None,
+        };
+    }
+    // "Default defaults" for the JSON-backed types (matches plugin-db's else arm).
+    match f.ty.as_str() {
+        "json" | "object" => Some("'{}'::jsonb".into()),
+        "array" => Some("'[]'::jsonb".into()),
+        _ => None,
+    }
 }
 
 /// The seven platform-managed system fields, in canonical order, as
@@ -256,13 +420,13 @@ pub fn dsl_to_pg_data_type(dsl_type: &str) -> Result<&'static str, DeclarativeEr
 fn system_field_columns() -> Vec<ColumnSnapshot> {
     let ts = "timestamp with time zone";
     vec![
-        ColumnSnapshot { name: "id".into(), data_type: "text".into(), nullable: false },
-        ColumnSnapshot { name: "created_at".into(), data_type: ts.into(), nullable: false },
-        ColumnSnapshot { name: "updated_at".into(), data_type: ts.into(), nullable: false },
-        ColumnSnapshot { name: "created_by".into(), data_type: "text".into(), nullable: true },
-        ColumnSnapshot { name: "updated_by".into(), data_type: "text".into(), nullable: true },
-        ColumnSnapshot { name: "version".into(), data_type: "integer".into(), nullable: false },
-        ColumnSnapshot { name: "deleted_at".into(), data_type: ts.into(), nullable: true },
+        ColumnSnapshot { name: "id".into(), data_type: "text".into(), nullable: false, default: None },
+        ColumnSnapshot { name: "created_at".into(), data_type: ts.into(), nullable: false, default: None },
+        ColumnSnapshot { name: "updated_at".into(), data_type: ts.into(), nullable: false, default: None },
+        ColumnSnapshot { name: "created_by".into(), data_type: "text".into(), nullable: true, default: None },
+        ColumnSnapshot { name: "updated_by".into(), data_type: "text".into(), nullable: true, default: None },
+        ColumnSnapshot { name: "version".into(), data_type: "integer".into(), nullable: false, default: None },
+        ColumnSnapshot { name: "deleted_at".into(), data_type: ts.into(), nullable: true, default: None },
     ]
 }
 
@@ -409,11 +573,39 @@ pub fn desired_snapshot(
         });
 
         for f in &d.fields {
+            // #3 literal: the column's primitive type is derived from the
+            // `literalValue` (text/numeric/boolean), NOT a bare-token lookup —
+            // mirrors plugin-db's `def_to_pg_type` literal arm. A `literal` field
+            // with NO value is malformed (UnsupportedType, never silently `text`).
+            let data_type = if f.ty == "literal" {
+                match &f.literal_value {
+                    Some(v) => literal_pg_data_type(v).to_string(),
+                    None => {
+                        return Err(DeclarativeError::UnsupportedType { ty: "literal".into() });
+                    }
+                }
+            } else {
+                dsl_to_pg_data_type(&f.ty)?.to_string()
+            };
             columns.push(ColumnSnapshot {
                 name: f.name.clone(),
-                data_type: dsl_to_pg_data_type(&f.ty)?.to_string(),
+                data_type,
                 nullable: !f.required,
+                // #4: the DEFAULT clause expression (emission-only; not
+                // drift-compared). plugin-db also auto-defaults json/object → '{}'
+                // and array → '[]' even with no explicit `default`.
+                default: field_default_expr(f),
             });
+            // CHECK constraints (#3 literal-pin, #4 min/max + enum). These are
+            // INLINED at CREATE TABLE (like plugin-db's `def_to_constraints`); the
+            // declarative differ does not re-diff CHECK bodies (only FOREIGN KEY
+            // bodies), so a CHECK round-trips at the name+kind level — its
+            // pg_get_constraintdef-normalised body is not byte-compared (see the
+            // round-trip tests). The `definition` carries the emitted DDL clause so
+            // `render_create_table` can inline it.
+            for chk in field_check_constraints(&d.name, f) {
+                constraints.push(chk);
+            }
             // A `unique: true` field becomes a unique index (A1 rule). The
             // name mirrors plugin-db's deterministic per-field index name.
             if f.unique {
@@ -1739,16 +1931,31 @@ impl DeclarativeAuthor {
             let null = if c.nullable { "" } else { " NOT NULL" };
             // `id` carries the inline PRIMARY KEY.
             let pk = if c.name == "id" { " PRIMARY KEY" } else { "" };
+            // #4: emit the DEFAULT clause (emission-only metadata).
+            let default = c
+                .default
+                .as_deref()
+                .map(|d| format!(" DEFAULT {d}"))
+                .unwrap_or_default();
             parts.push(format!(
-                "{} {}{}{}",
+                "{} {}{}{}{}",
                 quote_ident(&c.name),
                 ddl_type(&c.data_type),
                 pk,
-                null
+                null,
+                default,
             ));
         }
         for fk in inline_fks {
             parts.push(self.fk_clause(fk));
+        }
+        // #3/#4: inline CHECK constraints (literal-pin, min/max, enum) as
+        // table-level `CONSTRAINT <name> CHECK (...)` clauses. The definition is
+        // the emitted DDL clause built by `field_check_constraints`.
+        for c in &t.constraints {
+            if c.kind == "CHECK" {
+                parts.push(format!("CONSTRAINT {} {}", quote_ident(&c.name), c.definition));
+            }
         }
         format!(
             "CREATE TABLE {} ({})",
@@ -1806,14 +2013,28 @@ impl DeclarativeAuthor {
     }
 
     /// Render an `ALTER TABLE … ADD COLUMN …` (additive).
+    ///
+    /// #4 volatile-default trap: a column DEFAULT is emitted here. The engine only
+    /// ever emits IMMUTABLE literal defaults (string/number/boolean literals,
+    /// `'{}'::jsonb`, `'[]'::jsonb` — never `NOW()` / `gen_random_uuid()`), so
+    /// `ADD COLUMN … DEFAULT <literal>` takes Postgres' metadata-only fast path
+    /// (no table rewrite) and stays a safe ADDITIVE op — matching plugin-db's
+    /// `diff.rs:15-26` reasoning (it never emits a volatile default either). The
+    /// classifier therefore correctly classifies it additive, not destructive.
     fn render_add_column(&self, table: &str, c: &ColumnSnapshot) -> Migration {
         let null = if c.nullable { "" } else { " NOT NULL" };
+        let default = c
+            .default
+            .as_deref()
+            .map(|d| format!(" DEFAULT {d}"))
+            .unwrap_or_default();
         let up = format!(
-            "ALTER TABLE {} ADD COLUMN {} {}{}",
+            "ALTER TABLE {} ADD COLUMN {} {}{}{}",
             self.qualified(table),
             quote_ident(&c.name),
             ddl_type(&c.data_type),
-            null
+            null,
+            default,
         );
         let down = format!(
             "ALTER TABLE {} DROP COLUMN {}",

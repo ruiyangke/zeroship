@@ -202,7 +202,21 @@ pub async fn check_checksum_drift(
 // ---------------------------------------------------------------------------
 
 /// One column of a table, as introspected from `information_schema.columns`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `default` is **DDL-emission metadata, not a drift-comparable attribute**: it
+/// carries the column `DEFAULT` clause the declarative author wants emitted at
+/// CREATE / ADD COLUMN time (#4). It is deliberately EXCLUDED from `PartialEq` /
+/// `Eq` / `Hash` (see the manual impls below) because Postgres normalises a
+/// stored default (`'{}'` → `'{}'::jsonb`, `NOW()` → `now()`, …) so a byte
+/// compare of the authored default against the introspected one would
+/// phantom-drift, AND plugin-db itself never re-diffs column defaults (a default
+/// is set once at create time). Tracking it in equality would make the differ
+/// emit a phantom op and break the lossless round-trip oracle.
+///
+/// Introspection (`snapshot_schema`) leaves it `None`; only `desired_snapshot`
+/// populates it (for emission). All drift comparison is on `data_type` +
+/// `nullable` only (see `diff_attrs`).
+#[derive(Debug, Clone)]
 pub struct ColumnSnapshot {
     /// Column name.
     pub name: String,
@@ -211,6 +225,31 @@ pub struct ColumnSnapshot {
     pub data_type: String,
     /// `true` if the column is nullable.
     pub nullable: bool,
+    /// The `DEFAULT` clause expression to emit at CREATE / ADD COLUMN (#4), e.g.
+    /// `'active'` or `'{}'::jsonb`. Emission-only; NOT drift-compared (see the
+    /// type-level note). `None` ⇒ no default emitted; always `None` from
+    /// introspection.
+    pub default: Option<String>,
+}
+
+// `default` is intentionally excluded from equality + hashing — it is
+// DDL-emission metadata, not a drift attribute (see the type doc). Comparing it
+// would phantom-drift against Postgres' normalised stored default and break the
+// round-trip oracle.
+impl PartialEq for ColumnSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.data_type == other.data_type
+            && self.nullable == other.nullable
+    }
+}
+impl Eq for ColumnSnapshot {}
+impl std::hash::Hash for ColumnSnapshot {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.data_type.hash(state);
+        self.nullable.hash(state);
+    }
 }
 
 /// One index of a table, as introspected from `pg_catalog`.
@@ -388,6 +427,9 @@ pub async fn snapshot_schema(
                 name: r.get("column_name"),
                 data_type: r.get("data_type"),
                 nullable: nullable.eq_ignore_ascii_case("YES"),
+                // Introspection never carries a default — it is emission-only
+                // metadata (see the `ColumnSnapshot` type doc).
+                default: None,
             });
         }
     }
