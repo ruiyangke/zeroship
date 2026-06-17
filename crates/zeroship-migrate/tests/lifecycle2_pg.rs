@@ -436,3 +436,221 @@ async fn l5_h5_squash_partial_overlap_over_baseline_is_refused() {
 
     teardown(&conn, &cfg).await;
 }
+
+// ===========================================================================
+// L-6 — repeatable + versioned interleaved across deploys + tamper anchor
+//   (#46/#53).
+//
+// Deploy 1: a versioned table + a repeatable CREATE OR REPLACE VIEW (depends_on
+// the table) → the view applies AFTER the versioned. Deploy 2: the unchanged view
+// is SKIPPED, a versioned ADD COLUMN applies. Deploy 3: the CHANGED view is
+// RE-APPLIED (new completed event, kind='repeatable'). Then the flip-flag tamper:
+// supply the once-only ADD COLUMN as repeatable=true → ChecksumDrift abort.
+// status/history reflect the repeatable re-events. Composes the partition + the
+// re-run oracle + the kind-anchor.
+// ===========================================================================
+
+/// A REPEATABLE migration (stable identity, re-applies on checksum change).
+fn repeatable(version: MigrationId, name: &str, up: &str, schema: &str) -> Migration {
+    let mut m = mig(version, name, up, schema);
+    m.flags.repeatable = true;
+    m.recompute_checksum();
+    m
+}
+
+/// Re-checksum a migration after editing its `up`.
+fn with_up(mut m: Migration, up: &str, schema: &str) -> Migration {
+    m.up = up.replace("{s}", schema);
+    m.recompute_checksum();
+    m
+}
+
+#[compio::test]
+async fn l6_repeatable_versioned_interleaved_across_deploys_and_tamper_anchor() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let engine = MigrationEngine::new();
+    let schema = cfg.project_schema.clone();
+
+    // --- DEPLOY 1: a versioned table `widgets(n int)` + a repeatable view over it
+    //     (depends_on the table). The view's CREATE references the table, so a
+    //     wrong order (view before table) would fail — proving the partition puts
+    //     repeatables AFTER versioned. ---
+    let table_v = MigrationId::generate();
+    let table = mig(
+        table_v.clone(),
+        "create_widgets",
+        "CREATE TABLE \"{s}\".widgets (n int); INSERT INTO \"{s}\".widgets VALUES (1)",
+        &schema,
+    );
+    let view_v = MigrationId::generate();
+    let mut view1 = repeatable(
+        view_v.clone(),
+        "v_widgets",
+        "CREATE OR REPLACE VIEW \"{s}\".v AS SELECT n FROM \"{s}\".widgets",
+        &schema,
+    );
+    view1.depends_on = vec![table_v.clone()];
+    view1.recompute_checksum();
+
+    // Supply the repeatable FIRST in the slice to prove ordering is by phase +
+    // depends_on, not input order.
+    let plan1 = engine.plan(&[view1.clone(), table.clone()], &guard_cfg(&cfg));
+    let out1 = engine
+        .apply(&plan1, Approval::None, &conn, &cfg, "app_acme")
+        .await
+        .expect("deploy 1");
+    assert_eq!(
+        out1.applied,
+        vec![table_v.as_str().to_string(), view_v.as_str().to_string()],
+        "the versioned table applies BEFORE the repeatable view"
+    );
+    // The view reads the seeded row.
+    let n: i32 = conn
+        .query_one(&format!("SELECT n FROM \"{schema}\".v"), &[])
+        .await
+        .expect("read view")
+        .get(0);
+    assert_eq!(n, 1, "the view returns the seeded row");
+    assert_eq!(
+        journaled_kind(&conn, &cfg, view_v.as_str()).await.as_deref(),
+        Some("repeatable"),
+        "the view is journaled kind='repeatable'"
+    );
+    assert_eq!(completed_events(&conn, &cfg, view_v.as_str()).await, 1);
+
+    // --- DEPLOY 2: the UNCHANGED view is SKIPPED; a NEW versioned ADD COLUMN
+    //     applies. ---
+    let addcol_v = MigrationId::generate();
+    let addcol = mig(
+        addcol_v.clone(),
+        "add_widgets_label",
+        "ALTER TABLE \"{s}\".widgets ADD COLUMN label text",
+        &schema,
+    );
+    // Supply the full known set: table (applied) + view (unchanged) + addcol (new).
+    let set2 = vec![table.clone(), view1.clone(), addcol.clone()];
+    let plan2 = engine.plan(&set2, &guard_cfg(&cfg));
+    let out2 = engine
+        .apply(&plan2, Approval::None, &conn, &cfg, "app_acme")
+        .await
+        .expect("deploy 2");
+    assert_eq!(
+        out2.applied,
+        vec![addcol_v.as_str().to_string()],
+        "only the new versioned ADD COLUMN applies in deploy 2"
+    );
+    assert!(
+        out2.skipped.contains(&view_v.as_str().to_string()),
+        "the unchanged repeatable view is SKIPPED in deploy 2; skipped={:?}",
+        out2.skipped
+    );
+    assert!(column_exists(&conn, &schema, "widgets", "label").await, "ADD COLUMN landed");
+    // The view still has exactly one completed event (a skip appends nothing).
+    assert_eq!(
+        completed_events(&conn, &cfg, view_v.as_str()).await,
+        1,
+        "a skipped repeatable does not append a completed event"
+    );
+
+    // --- DEPLOY 3: the CHANGED view (new definition) RE-APPLIES — a new completed
+    //     event stamped kind='repeatable'. ---
+    let view2 = with_up(
+        view1.clone(),
+        "CREATE OR REPLACE VIEW \"{s}\".v AS SELECT n + 100 AS n FROM \"{s}\".widgets",
+        &schema,
+    );
+    assert_ne!(view1.checksum, view2.checksum, "the edit changes the checksum");
+    let set3 = vec![table.clone(), view2.clone(), addcol.clone()];
+    let plan3 = engine.plan(&set3, &guard_cfg(&cfg));
+    let out3 = engine
+        .apply(&plan3, Approval::None, &conn, &cfg, "app_acme")
+        .await
+        .expect("deploy 3");
+    assert_eq!(
+        out3.applied,
+        vec![view_v.as_str().to_string()],
+        "only the changed repeatable re-applies in deploy 3"
+    );
+    let n: i32 = conn
+        .query_one(&format!("SELECT n FROM \"{schema}\".v"), &[])
+        .await
+        .expect("read view")
+        .get(0);
+    assert_eq!(n, 101, "the view now returns the NEW definition's value");
+    // The re-run anchor: a SECOND completed event for the repeatable, still
+    // kind='repeatable'.
+    assert_eq!(
+        completed_events(&conn, &cfg, view_v.as_str()).await,
+        2,
+        "the re-applied repeatable accrues a second completed event (append-only)"
+    );
+    assert_eq!(
+        journaled_kind(&conn, &cfg, view_v.as_str()).await.as_deref(),
+        Some("repeatable"),
+        "the re-event is still kind='repeatable' (the kind anchor holds across re-runs)"
+    );
+
+    // --- status / history reflect the re-events. ---
+    let st = status(&conn, &cfg, &set3).await.expect("status");
+    let applied: std::collections::HashSet<&str> =
+        st.applied.iter().map(|e| e.version.as_str()).collect();
+    for v in [table_v.as_str(), view_v.as_str(), addcol_v.as_str()] {
+        assert!(applied.contains(v), "{v} must be net-applied; applied={applied:?}");
+    }
+    assert!(st.pending.is_empty(), "nothing pending after deploy 3: {:?}", st.pending);
+
+    // history shows TWO completed events for the repeatable view (deploy 1 + 3),
+    // in monotonic event order, plus the versioned applies.
+    let hist = history(&conn, &cfg).await.expect("history");
+    let view_completed = hist
+        .iter()
+        .filter(|e| e.version == view_v.as_str() && e.kind == HistoryKind::Completed)
+        .count();
+    assert_eq!(view_completed, 2, "history records the view's apply + re-apply");
+    let seqs: Vec<i64> = hist.iter().map(|e| e.event_seq).collect();
+    let mut sorted = seqs.clone();
+    sorted.sort_unstable();
+    assert_eq!(seqs, sorted, "history is in monotonic event order");
+
+    // --- TAMPER ANCHOR: supply the once-only ADD COLUMN as repeatable=true with a
+    //     MUTATED up. The journal stamped addcol kind='apply' (once-only). Flipping
+    //     it to repeatable is a KIND MISMATCH → ChecksumDrift abort, NOT a silent
+    //     re-run. The drift exemption anchors on the JOURNALED kind, never the
+    //     supplied flag. ---
+    let mut tampered = with_up(
+        addcol.clone(),
+        "ALTER TABLE \"{s}\".widgets DROP COLUMN label",
+        &schema,
+    );
+    tampered.flags.repeatable = true;
+    tampered.recompute_checksum();
+    assert_ne!(addcol.checksum, tampered.checksum, "the attack mutates the up");
+
+    // Apply through the executor directly (the drift guard lives there) with the
+    // full known set so the tampered version is the only delta.
+    let set4 = vec![table.clone(), view2.clone(), tampered.clone()];
+    let err = zeroship_migrate::apply(&conn, &cfg, &set4, Approval::None, "attacker")
+        .await
+        .expect_err("flipping an applied once-only to repeatable must ABORT as tamper");
+    assert!(
+        matches!(err, ApplyError::ChecksumDrift { ref version, .. } if version == addcol_v.as_str()),
+        "expected ChecksumDrift on the flipped version, got {err:?}"
+    );
+    // The mutated DROP COLUMN never ran (the column survives) and no second
+    // completed event was appended.
+    assert!(
+        column_exists(&conn, &schema, "widgets", "label").await,
+        "the tamper's DROP COLUMN must NOT have run"
+    );
+    assert_eq!(
+        completed_events(&conn, &cfg, addcol_v.as_str()).await,
+        1,
+        "the tamper attempt appends no completed event"
+    );
+
+    teardown(&conn, &cfg).await;
+}
