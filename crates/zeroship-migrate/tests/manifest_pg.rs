@@ -214,24 +214,32 @@ async fn assert_refused_before_apply(conn: &Client, cfg: &ExecutorConfig, err: E
 }
 
 #[compio::test]
-async fn reordered_set_is_refused_before_apply() {
+async fn cosmetic_slice_reorder_verifies_and_applies(/* M2 */) {
+    // M2: the manifest is folded over the CANONICAL EXECUTED order, so a pure
+    // SLICE reorder of an ADDITIVE set (no depends_on) is INVARIANT — the executor
+    // re-sorts by version regardless, so the bundle arriving in a different slice
+    // order than the control plane stamped must NOT false-mismatch. End-to-end:
+    // the reordered slice verifies against the stamped hash and applies normally.
     let conn = pg().await;
     let cfg = cfg_for(&token());
     setup(&conn, &cfg).await;
 
     let set = additive_set(&cfg);
+    // The control plane stamps the manifest over the authored slice order.
     let expected = compute_manifest(&set);
-    // Attacker reorders the SAME two migrations (each migration's own checksum is
-    // unchanged — only the set order differs).
-    let tampered = vec![set[1].clone(), set[0].clone()];
+    // The bundle arrives with the two migrations in a different slice order. They
+    // carry no depends_on, so the canonical executed order (version order) is
+    // identical — same hash.
+    let reordered = vec![set[1].clone(), set[0].clone()];
 
     let engine = MigrationEngine::new();
-    let plan = engine.plan(&tampered, &guard_cfg(&cfg));
-    let err = engine
+    let plan = engine.plan(&reordered, &guard_cfg(&cfg));
+    let outcome = engine
         .apply_verified(&plan, Some(&expected), Approval::None, &conn, &cfg, "app_test")
         .await
-        .expect_err("a reordered set must be refused");
-    assert_refused_before_apply(&conn, &cfg, err).await;
+        .expect("a cosmetic slice reorder must verify against the stamped manifest (M2)");
+    assert_eq!(outcome.applied.len(), 2, "both migrations applied");
+    assert!(table_exists(&conn, &cfg.project_schema, "orders").await);
     teardown(&conn, &cfg).await;
 }
 
