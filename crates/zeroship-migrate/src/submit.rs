@@ -416,10 +416,7 @@ pub async fn submit_migration(
     approval: Approval,
     applied_by: &str,
 ) -> Result<SubmissionOutcome, SubmitError> {
-    let guard_cfg = GuardConfig {
-        project_schema: cfg.project_schema.clone(),
-        extension_allowlist: Vec::new(),
-    };
+    let guard_cfg = GuardConfig::confined(cfg.project_schema.clone());
     let guard = SqlGuard::new(guard_cfg.clone());
 
     // ---- 2. GUARD (run FIRST so flag-derivation is over a passing report) ----

@@ -162,10 +162,7 @@ pub async fn squash(
 
     // GUARD (defense in depth) — BEFORE the lock, no DB needed. `S.up` is held to
     // the same deny-list as any up, even though it is recorded-not-run here.
-    let guard = SqlGuard::new(GuardConfig {
-        project_schema: cfg.project_schema.clone(),
-        extension_allowlist: Vec::new(),
-    });
+    let guard = SqlGuard::new(GuardConfig::confined(cfg.project_schema.clone()));
     guard
         .check(&squash_migration.up)
         .map_err(|source| SquashError::Guard {

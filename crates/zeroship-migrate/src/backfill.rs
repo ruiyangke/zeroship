@@ -744,10 +744,7 @@ pub async fn run_backfill_bounded(
     // Gate 3b — GUARD the ASSEMBLED statement (both window shapes: with and without
     // the cursor parameter), so the engine predicate + authored transform + filter
     // are validated as one unit before any batch runs. A denial aborts everything.
-    let guard = SqlGuard::new(GuardConfig {
-        project_schema: cfg.project_schema.clone(),
-        extension_allowlist: Vec::new(),
-    });
+    let guard = SqlGuard::new(GuardConfig::confined(cfg.project_schema.clone()));
     for have_cursor in [false, true] {
         let sql = build_batch_sql(cfg, spec, &cursor_type, have_cursor);
         guard

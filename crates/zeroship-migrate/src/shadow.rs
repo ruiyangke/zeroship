@@ -539,10 +539,7 @@ async fn dry_run_incremental_body(
 
     // Up-front guard pass — gather advisories per migration (advisory-only; the
     // executor::apply below re-runs the guard as the real gate).
-    let guard = SqlGuard::new(GuardConfig {
-        project_schema: cfg.project_schema.clone(),
-        extension_allowlist: Vec::new(),
-    });
+    let guard = SqlGuard::new(GuardConfig::confined(cfg.project_schema.clone()));
     let mut advisories: Vec<(String, Vec<Advisory>)> = Vec::new();
     for m in migrations {
         let version = m.version.as_str().to_string();
@@ -737,10 +734,7 @@ async fn seed_shadow_from_live(
     if diff.migrations.is_empty() {
         return Ok(());
     }
-    let guard_cfg = GuardConfig {
-        project_schema: cfg.project_schema.clone(),
-        extension_allowlist: Vec::new(),
-    };
+    let guard_cfg = GuardConfig::confined(cfg.project_schema.clone());
     let engine = MigrationEngine::new();
     let plan = engine.plan(&diff.migrations, &guard_cfg);
     engine
@@ -780,10 +774,7 @@ async fn dry_run_body(
     // produce). The executor::apply call below re-runs the guard as the real gate,
     // so a denial is surfaced per-migration from its error — this pass only
     // enriches the report with advisories, never gates.
-    let guard = SqlGuard::new(GuardConfig {
-        project_schema: cfg.project_schema.clone(),
-        extension_allowlist: Vec::new(),
-    });
+    let guard = SqlGuard::new(GuardConfig::confined(cfg.project_schema.clone()));
     let mut per_migration: Vec<MigrationResult> = Vec::new();
     let mut advisories: Vec<(String, Vec<Advisory>)> = Vec::new();
     for m in migrations {
@@ -933,10 +924,7 @@ async fn dry_run_declarative_body(
     // validates the rename's true end state instead of false-positiving on the
     // mid-rename intermediate.
     if ok && !pending_contract.is_empty() {
-        let guard_cfg = GuardConfig {
-            project_schema: cfg.project_schema.clone(),
-            extension_allowlist: Vec::new(),
-        };
+        let guard_cfg = GuardConfig::confined(cfg.project_schema.clone());
         let contract_plan = engine.plan(&pending_contract, &guard_cfg);
         match engine
             .apply(&contract_plan, Approval::Approved, &shadow, cfg, applied_by)
