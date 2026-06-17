@@ -39,7 +39,7 @@ use pg_query::protobuf::node::Node as NodeEnum;
 
 use crate::approval::Approval;
 use crate::db::ExecutorConfig;
-use crate::guard::{GuardConfig, GuardError, SqlGuard};
+use crate::guard::{GuardError, SqlGuard};
 use crate::journal::{self, AppliedEntry, JournalError, Phase};
 use crate::migration::{Migration, MigrationId};
 
@@ -887,10 +887,7 @@ async fn apply_locked(
     // (topological, version-tiebroken & stable), else pure UUIDv7 version order.
     let pending: Vec<&Migration> = order_pending(migrations, &completed, &superseded)?;
 
-    let guard = SqlGuard::new(GuardConfig {
-        project_schema: cfg.project_schema.clone(),
-        extension_allowlist: Vec::new(),
-    });
+    let guard = SqlGuard::new(cfg.guard_config());
 
     // FIRST PASS — static validation over EVERY pending migration BEFORE any
     // execution (H1). The guard runs per-migration inside the apply loop in the
@@ -1080,10 +1077,7 @@ async fn apply_repeatables(
     // honoring deps on versioned migrations as pre-satisfied (they already ran).
     let ordered = order_repeatables(repeatables)?;
 
-    let guard = SqlGuard::new(GuardConfig {
-        project_schema: cfg.project_schema.clone(),
-        extension_allowlist: Vec::new(),
-    });
+    let guard = SqlGuard::new(cfg.guard_config());
 
     // FIRST PASS — guard EVERY repeatable's `up` before any execution, mirroring
     // the versioned all-up-front static gate: a denial applies NOTHING.
@@ -2555,10 +2549,7 @@ fn build_rollback_plan<'a>(
     // 2. The `down` SQL passes the guard (down is SQL too — same defenses).
     // (MissingFromSet + checksum already verified above.)
     let force_ok = opts.force && opts.backup_acknowledged;
-    let guard = SqlGuard::new(GuardConfig {
-        project_schema: cfg.project_schema.clone(),
-        extension_allowlist: Vec::new(),
-    });
+    let guard = SqlGuard::new(cfg.guard_config());
     let mut plan: Vec<RollbackStep> = Vec::with_capacity(ordered.len());
     for m in ordered {
         let v = m.version.as_str();

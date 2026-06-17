@@ -47,6 +47,28 @@ pub struct ExecutorConfig {
     /// model is not provisioned. In the platform this is always `Some`,
     /// matching a role created by [`crate::role::provision_migrator`].
     pub migrator_role: Option<String>,
+    /// PRIVATE (`pub(crate)`). The trust posture every executor-path guard build
+    /// derives from (design §4.1 / §5). `Confined` for the creator path (set by
+    /// [`ExecutorConfig::new`]); `Platform` ONLY via [`ExecutorConfig::platform`]
+    /// (requires a [`PlatformCapability`] token). Not `pub`, so the control plane
+    /// — outside this crate — can neither name `Platform` (it is
+    /// `#[non_exhaustive]`) nor reach the constructor: it cannot flip the
+    /// executor into Platform.
+    pub(crate) trust: crate::guard::TrustProfile,
+    /// PRIVATE (`pub(crate)`). The schema allowlist a Platform guard permits
+    /// references to (e.g. `zeroship` / `oauth_hydra` / `public`). Empty for
+    /// Confined (the `project_schema` is the sole permitted schema there).
+    pub(crate) platform_schemas: Vec<String>,
+    /// PRIVATE (`pub(crate)`). The `CREATE EXTENSION` allowlist a Platform guard
+    /// permits (e.g. `citext` / `uuid-ossp`). Empty for Confined.
+    pub(crate) platform_exts: Vec<String>,
+    /// PRIVATE (`pub(crate)`). The Platform capability token, present ONLY on a
+    /// config built via [`ExecutorConfig::platform`]. It rides here so the
+    /// executor-path guard builds ([`ExecutorConfig::guard_config`]) can mint a
+    /// Platform [`GuardConfig`](crate::guard::GuardConfig) without a fresh
+    /// out-of-band mint — the holder already proved Platform legitimacy when it
+    /// constructed this config. `None` for every Confined config.
+    pub(crate) platform_cap: Option<crate::guard::PlatformCapability>,
 }
 
 impl ExecutorConfig {
@@ -69,7 +91,64 @@ impl ExecutorConfig {
             // Defaults to no SET ROLE; the platform sets this to the provisioned
             // `migrator_<project>` role. Tests opt in explicitly.
             migrator_role: None,
+            // Confined by default — the creator path. `Platform` is reachable
+            // ONLY via `ExecutorConfig::platform` (token-gated, §4.1).
+            trust: crate::guard::TrustProfile::Confined,
+            platform_schemas: Vec::new(),
+            platform_exts: Vec::new(),
+            platform_cap: None,
         }
+    }
+
+    /// Build the [`GuardConfig`](crate::guard::GuardConfig) every executor-path
+    /// guard site uses (the two static first-passes + rollback + the
+    /// precondition evaluator — design §4.1, §6.4 sites 7 & 8).
+    ///
+    /// `Confined` ⇒ `GuardConfig::confined(self.project_schema)` (byte-identical
+    /// to the old hardcoded `GuardConfig { project_schema, ext: [] }`).
+    /// `Platform` ⇒ `GuardConfig::platform(&cap, self.platform_schemas,
+    /// self.platform_exts)`, re-using the token that rides on this config — so
+    /// the Platform plan is not re-denied by the executor's own guard.
+    #[must_use]
+    pub(crate) fn guard_config(&self) -> crate::guard::GuardConfig {
+        match (self.trust, self.platform_cap.as_ref()) {
+            (crate::guard::TrustProfile::Platform, Some(cap)) => crate::guard::GuardConfig::platform(
+                cap,
+                self.platform_schemas.clone(),
+                self.platform_exts.clone(),
+            ),
+            // Confined, or a (never-constructed) Platform-without-token: fail
+            // closed to Confined.
+            _ => crate::guard::GuardConfig::confined(self.project_schema.clone()),
+        }
+    }
+
+    /// Build a **Platform** executor config (design §4.1 / §5). REQUIRES a
+    /// [`PlatformCapability`](crate::guard::PlatformCapability) token, mintable
+    /// only inside `guard::platform_runner`, so neither the control plane
+    /// (external; cannot name `Platform` nor mint the token) nor any in-crate
+    /// module (`submit`/`engine`; cannot mint the token) can flip the executor
+    /// into Platform. `schemas` is the cross-schema allowlist; `extensions` is
+    /// the `CREATE EXTENSION` allowlist.
+    ///
+    /// Phase 1 has no CLI; the platform-runner / CLI (Phase 3) is the real
+    /// caller (hence `dead_code` in a non-test build until that caller lands).
+    /// The token is the in-crate enforcement primitive.
+    #[must_use]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn platform(
+        cap: &crate::guard::PlatformCapability,
+        project_id: impl Into<String>,
+        project_schema: impl Into<String>,
+        schemas: Vec<String>,
+        extensions: Vec<String>,
+    ) -> Self {
+        let mut cfg = Self::new(project_id, project_schema);
+        cfg.trust = crate::guard::TrustProfile::Platform;
+        cfg.platform_schemas = schemas;
+        cfg.platform_exts = extensions;
+        cfg.platform_cap = Some(cap.clone());
+        cfg
     }
 
     /// Set the least-privilege [`migrator_role`](Self::migrator_role) the apply

@@ -380,10 +380,10 @@ impl RawSqlAuthor {
     /// [`AuthorError::Guard`] if `up` is unparseable (the guard cannot classify
     /// it). A *denial* is deferred to [`plan`](crate::engine::MigrationEngine::plan).
     pub fn wrap(&self, name: &str, up: &str, down: Option<&str>) -> Result<Migration, AuthorError> {
-        let guard = SqlGuard::new(GuardConfig {
-            project_schema: self.project_schema.clone(),
-            extension_allowlist: self.extension_allowlist.clone(),
-        });
+        let guard = SqlGuard::new(
+            GuardConfig::confined(self.project_schema.clone())
+                .with_extension_allowlist(self.extension_allowlist.clone()),
+        );
         // Derive flags from a guard pass when it succeeds; on a *denial* keep
         // conservative defaults but err only if UNPARSEABLE (a denial is the
         // engine plan's to surface, not authoring's). A denied-but-parseable

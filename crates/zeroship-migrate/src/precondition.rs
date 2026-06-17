@@ -53,7 +53,7 @@ use pg_query::protobuf::node::Node as NodeEnum;
 use serde_json::Value;
 
 use crate::db::ExecutorConfig;
-use crate::guard::{GuardConfig, GuardError, SqlGuard};
+use crate::guard::{GuardError, SqlGuard};
 
 /// Sequence-mutating and lock-acquiring builtins a read-only precondition may
 /// NEVER call. `nextval`/`setval` mutate a sequence (NOT blocked by `READ
@@ -549,10 +549,12 @@ async fn evaluate_sql_boolean(
     // 1. Line-1 guard: the SAME deny-list + cross-schema confinement the `up`
     //    gets. A precondition reaching `control.*` / a file/network func / a
     //    dangerous construct is denied here, before anything runs.
-    let guard = SqlGuard::new(GuardConfig {
-        project_schema: cfg.project_schema.clone(),
-        extension_allowlist: Vec::new(),
-    });
+    // §4.1/HIGH-2: trust-aware. Confined ⇒ `confined(project_schema)`;
+    // Platform ⇒ the operator allowlist (so a future platform precondition
+    // referencing `oauth_hydra.*` is not wrongly Denied). Latent for the 56-file
+    // port (the loader sets `preconditions = []`), but threaded so it is correct
+    // the day a platform precondition is written.
+    let guard = SqlGuard::new(cfg.guard_config());
     guard.check(sql)?;
 
     // 2. Shape gate (THE pre-execution line): a single SELECT with no DML

@@ -960,10 +960,7 @@ mod tests {
     use crate::author::{AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor};
 
     fn guard_cfg() -> GuardConfig {
-        GuardConfig {
-            project_schema: "proj_acme".into(),
-            extension_allowlist: Vec::new(),
-        }
+        GuardConfig::confined("proj_acme")
     }
 
     fn det() -> DeterministicAuthor {

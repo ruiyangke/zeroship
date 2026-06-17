@@ -121,10 +121,7 @@ pub async fn baseline(
 ) -> Result<BaselineOutcome, BaselineError> {
     // GUARD (defense in depth) — BEFORE the lock, no DB needed. A baseline that
     // carries a denied/cross-schema construct is refused even though it never runs.
-    let guard = SqlGuard::new(GuardConfig {
-        project_schema: cfg.project_schema.clone(),
-        extension_allowlist: Vec::new(),
-    });
+    let guard = SqlGuard::new(GuardConfig::confined(cfg.project_schema.clone()));
     guard
         .check(&baseline_migration.up)
         .map_err(|source| BaselineError::Guard {
