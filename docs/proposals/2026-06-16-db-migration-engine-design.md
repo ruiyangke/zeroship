@@ -1,7 +1,7 @@
 # DB Migration Engine — Design
 
 Status: **proposal** (pre-implementation; security-first). Date: 2026-06-16.
-Scope: zeroship's **own versioned migration engine** for **creator project databases**, under the new `project`-umbrella model (one project = one shared db serving multiple apps). The platform's *own* db (`control`/`auth`/`billing`) stays on Liquibase — see §1.7.
+Scope: zeroship's **own versioned migration engine** for **creator project databases**, under the new `project`-umbrella model (one project = one shared db serving multiple apps). The platform's *own* db (`control`/`auth`/`billing`) **also runs on `zeroship-migrate`** under the **Platform** trust profile — see §1.7 (this reverses the original "stays on Liquibase" rule; the reversal is specified in `docs/proposals/2026-06-17-platform-migrations-flyway-mode-design.md`).
 
 > Authoring note (per `feedback_proposal_workflow`): this draft is **uncommitted** until the implementing PR; written here for review.
 
@@ -51,7 +51,7 @@ Treat every migration as untrusted input; confine by **DB privilege** *and* veri
 - **Apply** (gated): destructive/flagged ops require explicit confirmation. **AI output is never auto-applied for destructive ops.**
 
 ### 1.7 Total isolation from the platform db
-The creator-migration engine's roles have **zero** access to `control`/`auth`/`billing`. The platform's own db therefore stays on **Liquibase** (engineer-authored, separate trust domain). Unifying them would hand the creator-migration path a route toward platform schemas — security-first says **do not unify**.
+The creator-migration engine's roles have **zero** access to `control`/`auth`/`billing`. The platform's own db **also runs on `zeroship-migrate`**, but under the **Platform** trust profile — engineer-authored SQL, applied via the operator-side CLI / compose `migrate` service, with a widened-but-RCE-backstopped guard. Trust separation is the **call-site invariant, not tool separation**: the Platform profile is constructible *only* at the operator call site (gated by a crate-private `PlatformCapability` token), and the creator submission ingress is hard-wired to Confined with no API path to Platform — so unifying the *engine* does **not** hand the creator-migration path a route toward platform schemas. The original conclusion here ("stays on Liquibase") conflated trust-domain separation (preserved) with tool separation (dropped); Liquibase's physical separation is replaced by a typed, statically-enforced in-engine invariant. See `docs/proposals/2026-06-17-platform-migrations-flyway-mode-design.md` §3 + §5 for the full reversal rationale and security analysis.
 
 ---
 

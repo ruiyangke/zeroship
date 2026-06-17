@@ -324,17 +324,19 @@ divergences from the mock") for what this e2e catches that the in-test mock cann
 
 ## Database migrations
 
-The shared Postgres `zeroship` schema is owned by Liquibase.
-The one-shot `migrate` service runs `liquibase update` (changesets in
-`db/changelog/`) after Postgres is healthy and before control/auth start — they
-`depends_on` it with `service_completed_successfully`, so they only ever boot
-against a fully-migrated schema. Hydra migrates its own schema separately
+The shared Postgres `zeroship` schema is owned by `zeroship-migrate` (the
+platform's own migration engine, run under its Platform trust profile).
+The one-shot `migrate` service runs `zeroship-migrate migrate --dir
+/db/migrations --profile platform` (Flyway-style files in `db/migrations/`)
+after Postgres is healthy and before control/auth start — they `depends_on` it
+with `service_completed_successfully`, so they only ever boot against a
+fully-migrated schema. Hydra migrates its own schema separately
 (`hydra-migrate`). See [Database migrations](db-migrations.md) for the layout,
 `ops/db-migrate.sh`, and how to add a migration.
 
 ## Related docs
 
-- [Database migrations](db-migrations.md) — Liquibase changesets, the `migrate` service, `ops/db-migrate.sh`.
+- [Database migrations](db-migrations.md) — zeroship-migrate Flyway-style migrations, the `migrate` service, `ops/db-migrate.sh`.
 - [Local dev setup](../runbooks/local-dev.md) — the same platform stack run as three bare `cargo`-built binaries instead of containers.
 - [Nomad + Cloud Hypervisor sandbox](../runbooks/sandbox-nomad-ch.md) — operating the bare-metal VM sandbox backend.
 - [Distributed architecture](../architecture/distributed.md) — what the `control`/`gateway`/`worker` services are and how they coordinate.
