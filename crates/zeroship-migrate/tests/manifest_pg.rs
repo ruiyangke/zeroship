@@ -13,11 +13,15 @@
 //! `MIGRATE_TEST_DB` to override the DSN. Each test uses uniquely-suffixed
 //! schemas + project id (→ a unique role), so tests are isolated + re-runnable.
 
+use std::collections::HashMap;
+
 use compio_postgres::Client;
 use zeroship_migrate::{
     author::{AuthorRequest, Column, DeterministicAuthor, MigrationAuthor},
-    compute_manifest, migrator_role_name, provision_migrator, role::deprovision_migrator, Approval,
-    EngineError, ExecutorConfig, GuardConfig, ManifestHash, Migration, MigrationEngine,
+    compute_manifest, desired_snapshot, migrator_role_name, provision_migrator,
+    role::deprovision_migrator, snapshot_schema, Approval, CollectionDescriptor,
+    DeclarativeApplyError, DeclarativeAuthor, EngineError, ExecutorConfig, FieldDescriptor,
+    GuardConfig, ManifestHash, Migration, MigrationEngine, RenameHint, SchemaSnapshot,
 };
 
 const DEFAULT_DSN: &str =
@@ -409,5 +413,296 @@ async fn guard_denied_member_matches_manifest_and_is_refused_by_the_denial_gate(
     );
     // Nothing applied: a denied plan applies nothing.
     assert!(!table_exists(&conn, &cfg.project_schema, "orders").await);
+    teardown(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// H1 — the DECLARATIVE deploy path also has a set-level integrity gate.
+//
+// `apply_verified` gated the VERSIONED (hand-shipped) path. The declarative
+// (AI-driven) path — `plan_declarative` → `apply_declarative` — had guard +
+// least-priv role + denial/approval gate but NO manifest gate: between the
+// control plane STAMPING the generated `DeclarativeDeployPlan` and APPLYING
+// that same plan, a reorder / insert / remove / content-flip of its effective
+// migration set was undetected. `apply_declarative_verified` closes that gap:
+// it computes the manifest over the plan's FULL EFFECTIVE set (plain migrations
+// PLUS, per rename, its expand AND contract migrations) and verifies it == the
+// stamped hash BEFORE the outer advisory lock or any DDL. The stamp side uses
+// the SAME `DeclarativeDeployPlan::manifest()` helper, so stamp + verify cannot
+// diverge.
+//
+// Determinism caveat: declarative versions are freshly minted per
+// `plan_declarative` call, so a stamp is only valid for ONE generated plan
+// INSTANCE — the control plane must generate ONCE, then stamp + apply THAT
+// plan. These tests honour that (one `plan_declarative`, then `.manifest()` it).
+// ---------------------------------------------------------------------------
+
+fn decl_author(cfg: &ExecutorConfig) -> DeclarativeAuthor {
+    DeclarativeAuthor::new(cfg.project_schema.clone(), "app_test")
+}
+
+/// A plain (no-rename) additive declarative deploy plan: create one table.
+async fn plain_declarative_plan(
+    engine: &MigrationEngine,
+    cfg: &ExecutorConfig,
+) -> zeroship_migrate::DeclarativeDeployPlan {
+    let desc = CollectionDescriptor {
+        name: "ledger".into(),
+        owner_app: "app_test".into(),
+        fields: vec![FieldDescriptor {
+            name: "amount".into(),
+            ty: "number".into(),
+            required: false,
+            unique: false,
+            references: None,
+        }],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
+    engine
+        .plan_declarative(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &decl_author(cfg),
+            &[],
+            &guard_cfg(cfg),
+        )
+        .expect("plan_declarative")
+}
+
+#[compio::test]
+async fn declarative_verified_correct_manifest_applies_normally() {
+    // Generate ONCE, stamp via the SAME helper the verify side uses, then apply
+    // that plan verified — it applies normally (drift clean).
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+
+    let engine = MigrationEngine::new();
+    let plan = plain_declarative_plan(&engine, &cfg).await;
+    // The control plane stamps the manifest over the generated plan's effective
+    // set using the SAME single implementation the verify side calls.
+    let expected = plan.manifest();
+
+    let outcome = engine
+        .apply_declarative_verified(&plan, &expected, Approval::None, &conn, &cfg, "app_test")
+        .await
+        .expect("a matching declarative manifest must apply the plan");
+    assert!(!outcome.applied.applied.is_empty(), "the plain set applied");
+    assert!(table_exists(&conn, &cfg.project_schema, "ledger").await);
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn declarative_verified_tampered_plain_set_is_refused_before_apply() {
+    // Tamper the plan's effective set AFTER the stamp: drop a plain migration
+    // (membership shrink). Verifying the tampered plan against the ORIGINAL stamp
+    // refuses — EngineError::Manifest — applying NOTHING (no table, no journal).
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+
+    let engine = MigrationEngine::new();
+    let plan = plain_declarative_plan(&engine, &cfg).await;
+    let expected = plan.manifest();
+    assert!(!plan.plain.items.is_empty(), "plain set is non-empty");
+
+    // Tamper: remove the last plain migration from the plan.
+    let mut tampered = plan.clone();
+    tampered.plain.items.pop();
+
+    let err = engine
+        .apply_declarative_verified(&tampered, &expected, Approval::None, &conn, &cfg, "app_test")
+        .await
+        .expect_err("a tampered (shrunk) plain set must be refused");
+    assert!(
+        matches!(err, DeclarativeApplyError::Plain(EngineError::Manifest(_))),
+        "expected a manifest mismatch, got {err:?}"
+    );
+    // Nothing applied, and the journal table itself was never created (refused
+    // BEFORE the outer lock / ensure_journal / any DDL).
+    assert!(!table_exists(&conn, &cfg.project_schema, "ledger").await);
+    assert!(
+        !journal_table_exists(&conn, &cfg).await,
+        "the journal table must NOT exist — refused BEFORE the lock / any DDL"
+    );
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn declarative_verified_content_flipped_plain_migration_is_refused() {
+    // Tamper: flip a field the Plan-F per-migration checksum covers (the `up`
+    // text, recomputing the checksum to mirror a self-consistent tampered plan).
+    // The manifest folds the per-migration checksum, so this is caught.
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+
+    let engine = MigrationEngine::new();
+    let plan = plain_declarative_plan(&engine, &cfg).await;
+    let expected = plan.manifest();
+
+    let mut tampered = plan.clone();
+    let item = &mut tampered.plain.items[0];
+    item.migration.up = format!(
+        "CREATE TABLE \"{}\".\"smuggled\" (id bigint)",
+        cfg.project_schema
+    );
+    item.migration.checksum = zeroship_migrate::Checksum::of(
+        &zeroship_migrate::ChecksumInput::from_migration(&item.migration),
+    );
+
+    let err = engine
+        .apply_declarative_verified(&tampered, &expected, Approval::None, &conn, &cfg, "app_test")
+        .await
+        .expect_err("a content-flipped plain migration must be refused");
+    assert!(
+        matches!(err, DeclarativeApplyError::Plain(EngineError::Manifest(_))),
+        "expected a manifest mismatch, got {err:?}"
+    );
+    assert!(!table_exists(&conn, &cfg.project_schema, "ledger").await);
+    assert!(!table_exists(&conn, &cfg.project_schema, "smuggled").await);
+    assert!(!journal_table_exists(&conn, &cfg).await);
+    teardown(&conn, &cfg).await;
+}
+
+/// Build a rename-bearing declarative plan: create `users(email)`, then desire
+/// `users(email_address)` with a matching rename hint — the rename is carried
+/// STRUCTURED in `plan.renames` (expand + contract), the plain set is empty.
+async fn rename_declarative_plan(
+    engine: &MigrationEngine,
+    cfg: &ExecutorConfig,
+    conn: &Client,
+) -> zeroship_migrate::DeclarativeDeployPlan {
+    let author = decl_author(cfg);
+    let v1 = CollectionDescriptor {
+        name: "users".into(),
+        owner_app: "app_test".into(),
+        fields: vec![FieldDescriptor {
+            name: "email".into(),
+            ty: "string".into(),
+            required: false,
+            unique: false,
+            references: None,
+        }],
+        indexes: vec![],
+    };
+    let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
+    let create = engine
+        .plan_declarative(&d1, &SchemaSnapshot::default(), &HashMap::new(), &author, &[], &guard_cfg(cfg))
+        .expect("plan create");
+    engine
+        .apply(&create.plain, Approval::None, conn, cfg, "app_test")
+        .await
+        .expect("create users");
+
+    let v2 = CollectionDescriptor {
+        name: "users".into(),
+        owner_app: "app_test".into(),
+        fields: vec![FieldDescriptor {
+            name: "email_address".into(),
+            ty: "string".into(),
+            required: false,
+            unique: false,
+            references: None,
+        }],
+        indexes: vec![],
+    };
+    let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
+    let live = snapshot_schema(conn, &cfg.project_schema).await.expect("snap");
+    let hints = vec![RenameHint {
+        table: "users".into(),
+        from: "email".into(),
+        to: "email_address".into(),
+    }];
+    let plan = engine
+        .plan_declarative(&d2, &live, &HashMap::new(), &author, &hints, &guard_cfg(cfg))
+        .expect("plan rename");
+    assert_eq!(plan.renames.len(), 1, "one structured rename");
+    plan
+}
+
+#[compio::test]
+async fn declarative_verified_rename_manifest_covers_expand_and_contract() {
+    // The effective set the manifest covers must include each rename's expand AND
+    // its DEFERRED contract migrations. A correct stamp applies the rename's
+    // EXPAND normally and surfaces the deferred contract.
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+
+    let engine = MigrationEngine::new();
+    let plan = rename_declarative_plan(&engine, &cfg, &conn).await;
+    let expected = plan.manifest();
+
+    let outcome = engine
+        .apply_declarative_verified(&plan, &expected, Approval::Approved, &conn, &cfg, "app_test")
+        .await
+        .expect("a matching rename-bearing manifest must apply the expand");
+    assert_eq!(outcome.pending_contract.len(), 2, "contract C1+C2 deferred");
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn declarative_verified_tampered_rename_expand_is_refused_before_apply() {
+    // Tamper a RENAME's EXPAND migration (flip its `up`) AFTER the stamp. Because
+    // the effective set the manifest covers includes the rename's expand AND
+    // contract, this is caught — refused before any DDL, applying nothing.
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+
+    let engine = MigrationEngine::new();
+    let plan = rename_declarative_plan(&engine, &cfg, &conn).await;
+    let expected = plan.manifest();
+
+    let mut tampered = plan.clone();
+    // Flip the first expand migration's `up` (recompute its checksum so the
+    // tampered plan is self-consistent — the manifest still differs).
+    let exp = &mut tampered.renames[0].expand[0];
+    exp.up = format!("{}\n-- tampered", exp.up);
+    exp.checksum =
+        zeroship_migrate::Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(exp));
+
+    let err = engine
+        .apply_declarative_verified(&tampered, &expected, Approval::Approved, &conn, &cfg, "app_test")
+        .await
+        .expect_err("a tampered rename expand must be refused");
+    assert!(
+        matches!(err, DeclarativeApplyError::Plain(EngineError::Manifest(_))),
+        "expected a manifest mismatch over the rename's effective set, got {err:?}"
+    );
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn declarative_verified_tampered_rename_contract_is_refused_before_apply() {
+    // The DEFERRED contract is part of the stamped effective set too. Tampering a
+    // contract migration (the part that will only be applied in deploy N+1) is
+    // caught at deploy N's verify — the stamp covers the WHOLE generated plan,
+    // including the deferred drop.
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+
+    let engine = MigrationEngine::new();
+    let plan = rename_declarative_plan(&engine, &cfg, &conn).await;
+    let expected = plan.manifest();
+
+    let mut tampered = plan.clone();
+    let con = &mut tampered.renames[0].contract[0];
+    con.up = format!("{}\n-- tampered contract", con.up);
+    con.checksum =
+        zeroship_migrate::Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(con));
+
+    let err = engine
+        .apply_declarative_verified(&tampered, &expected, Approval::Approved, &conn, &cfg, "app_test")
+        .await
+        .expect_err("a tampered DEFERRED contract must be refused at deploy N");
+    assert!(
+        matches!(err, DeclarativeApplyError::Plain(EngineError::Manifest(_))),
+        "the stamp must cover the deferred contract, got {err:?}"
+    );
     teardown(&conn, &cfg).await;
 }
