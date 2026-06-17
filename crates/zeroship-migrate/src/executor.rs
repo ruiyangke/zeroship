@@ -552,6 +552,13 @@ async fn apply_locked(
     // The FULL set is retained as `all_migrations` for the drift check, which must
     // SEE the repeatables (so it recognizes their journaled versions and EXEMPTS
     // them — see `check_checksum_drift` — rather than flagging them as orphans).
+    //
+    // The partition routes by the SUPPLIED `flags.repeatable`, but a version whose
+    // supplied flag DISAGREES with its journaled kind (the flip-flag tamper class)
+    // is aborted by the kind-mismatch arm of `check_checksum_drift` BELOW — which
+    // runs before any re-run — so a mis-routed (flipped) version can never reach the
+    // repeatable re-apply phase. The drift check is the single fail-closed gate; the
+    // partition does not need to (and must not) silently re-route by the flag.
     let all_migrations = migrations;
     let (versioned, repeatables): (Vec<&Migration>, Vec<&Migration>) =
         migrations.iter().partition(|m| !m.flags.repeatable);
@@ -778,9 +785,13 @@ async fn execute_pending(
         // net-applied with edges missing, re-entering `v1..vN` into pending and
         // re-running them on top of `S`'s schema (double-apply).
         let sups: Vec<&str> = m.supersedes.iter().map(MigrationId::as_str).collect();
+        // Versioned once-only path: `'squash'` for a fresh-path squash (non-empty
+        // supersedes), else the ordinary `'apply'`. Never `'repeatable'` here — a
+        // repeatable never reaches the versioned pipeline (it is partitioned out).
+        let kind = if sups.is_empty() { "apply" } else { "squash" };
 
         if m.flags.transactional {
-            apply_transactional(conn, cfg, m, applied_by, &sups).await?;
+            apply_transactional(conn, cfg, m, applied_by, &sups, kind).await?;
         } else {
             // Mandatory timeouts + pinned search_path on the session (the non-txn
             // path has no transaction to SET LOCAL within). Restored on exit by
@@ -886,7 +897,11 @@ async fn apply_repeatables(
         // Replace-style: always transactional, never superseding. `apply_transactional`
         // runs `up` under the migrator role and appends a fresh `completed` event with
         // the NEW checksum — exactly the re-apply record the next deploy compares against.
-        apply_transactional(conn, cfg, m, applied_by, &[]).await?;
+        // Stamped `kind='repeatable'` (v3 Plan E re-critic): the journaled kind is the
+        // tamper anchor, so the drift exemption can distinguish a genuine repeatable
+        // re-run from a flipped once-only, and `latest_completed_checksums` reads only
+        // `kind='repeatable'` rows for the re-run oracle.
+        apply_transactional(conn, cfg, m, applied_by, &[], "repeatable").await?;
         outcome.applied.push(version.to_string());
     }
 
@@ -1465,12 +1480,20 @@ fn order_rollback<'a>(
 /// Transactional apply (design §2.3): `BEGIN; <up>; INSERT journal; COMMIT`.
 /// DDL + journal are atomic — a failure rolls back leaving no partial DDL and
 /// no journal row.
+///
+/// `kind` is the journaled `kind` to stamp on the `completed` event: `'apply'` for
+/// an ordinary once-only migration, `'squash'` for a fresh-path squash (non-empty
+/// `supersedes`), or `'repeatable'` for a re-applied repeatable (v3 Plan E). The
+/// caller passes it explicitly — the journaled kind is the tamper anchor, so it is
+/// never inferred from anything the migration set supplies at apply time. A debug
+/// assertion ties `'squash'` ⇔ non-empty `supersedes`.
 async fn apply_transactional(
     conn: &Client,
     cfg: &ExecutorConfig,
     m: &Migration,
     applied_by: &str,
     supersedes: &[&str],
+    kind: &str,
 ) -> Result<(), ApplyError> {
     let started = Instant::now();
     // `transaction()` needs `&mut Client`; the apply flow owns the connection,
@@ -1530,11 +1553,17 @@ async fn apply_transactional(
 
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
 
-    // Journal the completed row in the SAME transaction, as the admin. A fresh-path
-    // squash (it has a non-empty `supersedes`) is stamped `kind='squash'` so its
-    // supersession edges are honored by `journal::superseded_versions` (#4 filters on
-    // `kind='squash'`); an ordinary migration keeps the default `kind='apply'`.
-    let kind = if supersedes.is_empty() { "apply" } else { "squash" };
+    // Journal the completed row in the SAME transaction, as the admin. The `kind`
+    // is passed by the caller (the journaled kind is the tamper anchor — never
+    // inferred from the supplied set): `'apply'` for an ordinary migration,
+    // `'squash'` for a fresh-path squash (non-empty `supersedes`, so its
+    // supersession edges are honored by `journal::superseded_versions` — #4 filters
+    // on `kind='squash'`), `'repeatable'` for a re-applied repeatable (v3 Plan E).
+    debug_assert_eq!(
+        kind == "squash",
+        !supersedes.is_empty(),
+        "kind='squash' iff supersedes is non-empty"
+    );
     let meta = format!("\"{}\"", cfg.meta_schema.replace('"', "\"\""));
     if let Err(e) = conn
         .execute(
@@ -2652,6 +2681,7 @@ mod order_tests {
             version: done.as_str().to_string(),
             checksum: String::new(),
             phase: Phase::Completed,
+            kind: Some(journal::JournaledKind::Apply),
         };
         let mut completed: HashMap<&str, &AppliedEntry> = HashMap::new();
         completed.insert(done.as_str(), &entry);

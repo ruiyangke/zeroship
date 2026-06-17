@@ -119,7 +119,7 @@ pub use journal::{
     applied, applied_count, ensure_journal, history as journal_history,
     latest_completed_checksums, net_rolled_back, record_baseline, record_completed,
     record_rolled_back, record_started, superseded_versions, AppliedEntry, HistoryEvent,
-    HistoryKind, JournalError, Phase, RolledBackEntry,
+    HistoryKind, JournalError, JournaledKind, Phase, RolledBackEntry,
 };
 pub use squash::{squash, SquashError, SquashOutcome};
 pub use status::{history, status, MigrationStatus, StatusError};

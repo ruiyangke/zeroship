@@ -376,6 +376,116 @@ async fn repeatable_changed_checksum_reruns_but_once_only_still_aborts() {
     drop_schemas(&conn, &cfg).await;
 }
 
+/// CRITICAL tamper bypass (v3 Plan E re-critic): a once-only migration applied as
+/// `kind='apply'` cannot be turned into a repeatable by an attacker simply flipping
+/// `flags.repeatable=true` and mutating `up`. The drift exemption must anchor on the
+/// JOURNALED kind, not the attacker-supplied flag. Journaled `kind='apply'` +
+/// supplied `repeatable=true` is a KIND MISMATCH ⇒ tamper ⇒ `ChecksumDrift` abort,
+/// NOT a silent re-run of the mutated `up`.
+#[compio::test]
+async fn flip_to_repeatable_on_an_applied_once_only_is_tamper_not_a_rerun() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    let schema = &cfg.project_schema;
+
+    // Deploy 1 — X applied ONCE-ONLY (kind='apply', checksum csA).
+    let x_v = MigrationId::generate();
+    let x_csa = versioned(
+        x_v.clone(),
+        "create_secret",
+        &format!("CREATE TABLE \"{schema}\".secret (id int)"),
+    );
+    apply(&conn, &cfg, std::slice::from_ref(&x_csa), Approval::None, "actor")
+        .await
+        .expect("deploy 1: once-only apply");
+    assert_eq!(
+        completed_events(&conn, &cfg, x_v.as_str()).await,
+        1,
+        "one completed event after the once-only apply"
+    );
+
+    // Deploy 2 — ATTACK: re-ship X with the SAME version, flags.repeatable=true,
+    // and a MUTATED `up` (csB). The supplied flag claims "repeatable", but the
+    // journal stamped this version 'apply' (once-only). Kind mismatch ⇒ TAMPER.
+    let mut x_csb = with_up(
+        x_csa.clone(),
+        &format!("CREATE TABLE \"{schema}\".secret (id bigint); DROP TABLE \"{schema}\".secret"),
+    );
+    x_csb.flags.repeatable = true;
+    assert_ne!(x_csa.checksum, x_csb.checksum, "the attack mutates the up");
+
+    let err = apply(&conn, &cfg, std::slice::from_ref(&x_csb), Approval::None, "actor")
+        .await
+        .expect_err("flipping an applied once-only to repeatable must ABORT as tamper");
+    assert!(
+        matches!(err, ApplyError::ChecksumDrift { ref version, .. } if version == x_v.as_str()),
+        "expected `ChecksumDrift` on the flipped version, got {err:?}"
+    );
+
+    // The mutated up NEVER ran (no second completed event, table unchanged).
+    assert_eq!(
+        completed_events(&conn, &cfg, x_v.as_str()).await,
+        1,
+        "the tamper attempt must not append a second completed event"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+/// The REVERSE re-classification is also tamper: a genuinely-repeatable version
+/// (journaled `kind='repeatable'`) re-supplied as a once-only (`repeatable=false`)
+/// with a changed checksum must ABORT, not silently re-route through the once-only
+/// drift path. Journaled `kind='repeatable'` + supplied `repeatable=false` is a
+/// kind mismatch ⇒ `ChecksumDrift`.
+#[compio::test]
+async fn flip_repeatable_to_once_only_is_tamper_not_a_rerun() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    let schema = &cfg.project_schema;
+
+    // Deploy 1 — a genuine repeatable view (journaled kind='repeatable').
+    let r_v = MigrationId::generate();
+    let r1 = repeatable(
+        r_v.clone(),
+        "v_view",
+        &format!("CREATE OR REPLACE VIEW \"{schema}\".v AS SELECT 1 AS n"),
+    );
+    apply(&conn, &cfg, std::slice::from_ref(&r1), Approval::None, "actor")
+        .await
+        .expect("deploy 1: genuine repeatable");
+
+    // Deploy 2 — re-supply the SAME version as a once-only with a changed up.
+    let mut r2 = with_up(
+        r1.clone(),
+        &format!("CREATE OR REPLACE VIEW \"{schema}\".v AS SELECT 2 AS n"),
+    );
+    r2.flags.repeatable = false;
+    assert_ne!(r1.checksum, r2.checksum);
+
+    let err = apply(&conn, &cfg, std::slice::from_ref(&r2), Approval::None, "actor")
+        .await
+        .expect_err("re-classifying a repeatable to once-only must ABORT as tamper");
+    assert!(
+        matches!(err, ApplyError::ChecksumDrift { ref version, .. } if version == r_v.as_str()),
+        "expected `ChecksumDrift` on the re-classified version, got {err:?}"
+    );
+
+    // The view keeps its deploy-1 definition (the abort ran nothing).
+    assert_eq!(
+        scalar_int(&conn, &format!("SELECT n FROM \"{schema}\".v")).await,
+        1,
+        "the abort must leave the original repeatable definition intact"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
 /// Repeatables are ordered among themselves by `depends_on` (topo), regardless of
 /// input order: `b` depends on `a`, so `a` re-applies before `b` even when `b` is
 /// supplied first. `b`'s view reads `a`'s view, so a wrong order would fail.

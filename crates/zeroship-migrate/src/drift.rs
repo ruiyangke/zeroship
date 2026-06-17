@@ -137,18 +137,49 @@ pub async fn check_checksum_drift(
         }
         match by_version.get(entry.version.as_str()) {
             Some(m) => {
-                // v3 Plan E — DRIFT EXEMPTION for repeatables. A repeatable
-                // migration's identity is stable but its checksum changes by
-                // DESIGN (a changed `CREATE OR REPLACE …` re-runs each deploy). A
-                // checksum mismatch on a repeatable is therefore NOT tamper/drift —
-                // it is the re-run signal. So a repeatable NEVER contributes a
-                // ChecksumDrift here (the repeatable phase handles its re-apply).
-                // A once-only (`repeatable == false`) migration's changed checksum
-                // STILL aborts — this exemption is scoped strictly to repeatables
-                // and does not weaken the once-only tamper guard at all.
-                if m.flags.repeatable {
+                // v3 Plan E (re-critic) — DRIFT EXEMPTION anchored on the JOURNALED
+                // kind, NEVER on the attacker-suppliable `m.flags.repeatable`.
+                //
+                // A repeatable migration's checksum changes by DESIGN (a changed
+                // `CREATE OR REPLACE …` re-runs each deploy), so a checksum mismatch
+                // on a GENUINE repeatable is the re-run signal, not tamper. But the
+                // ONLY trustworthy evidence that a version IS a repeatable is what the
+                // journal recorded when it last applied (`kind='repeatable'`) — the
+                // supplied flag is forgeable. So the exemption requires BOTH the
+                // journaled kind AND the supplied flag to agree on "repeatable":
+                //
+                //  - journaled `repeatable` AND supplied `repeatable=true` ⇒ EXEMPT
+                //    (the repeatable phase handles its re-apply);
+                //  - journaled once-only (apply/baseline/squash) but supplied
+                //    `repeatable=true` ⇒ KIND MISMATCH = TAMPER (the flip-flag attack:
+                //    turning an applied once-only into a repeatable to slip a mutated
+                //    `up` past the once-only abort) ⇒ ChecksumDrift / abort;
+                //  - journaled `repeatable` but supplied `repeatable=false` ⇒ reverse
+                //    re-classification (also a kind mismatch) ⇒ ChecksumDrift / abort;
+                //  - journaled once-only AND supplied once-only ⇒ the ordinary
+                //    once-only tamper guard (changed checksum still aborts).
+                let journaled_repeatable =
+                    entry.kind.is_some_and(crate::journal::JournaledKind::is_repeatable);
+                let supplied_repeatable = m.flags.repeatable;
+                if journaled_repeatable && supplied_repeatable {
+                    // Legit repeatable re-run signal — exempt from the tamper abort.
                     continue;
                 }
+                if journaled_repeatable != supplied_repeatable {
+                    // Kind mismatch: the supplied repeatability disagrees with the
+                    // journaled identity-class. This is tamper (the flip-flag bypass
+                    // or its reverse) — abort with ChecksumDrift regardless of whether
+                    // the checksums happen to match, because the RE-CLASSIFICATION
+                    // itself is the attack. Reuse ChecksumDrift so `apply` aborts on
+                    // the shared gate; recorded vs expected carry the two checksums.
+                    report.checksum_drift.push(ChecksumDrift {
+                        version: entry.version.clone(),
+                        recorded: entry.checksum.clone(),
+                        expected: m.checksum.as_str().to_string(),
+                    });
+                    continue;
+                }
+                // Both once-only: the ordinary tamper guard.
                 if entry.checksum != m.checksum.as_str() {
                     report.checksum_drift.push(ChecksumDrift {
                         version: entry.version.clone(),
