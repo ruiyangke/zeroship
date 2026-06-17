@@ -7,6 +7,8 @@
 //!
 //! Requires `zeroship_migrate_test` on :5440.
 
+use std::collections::HashMap;
+
 use compio_postgres::Client;
 use zeroship_migrate::{
     apply as executor_apply, desired_snapshot, diff_snapshots, migrator_role_name,
@@ -105,7 +107,10 @@ async fn setup(conn: &Client, cfg: &ExecutorConfig) {
 }
 
 /// Plan the desired-vs-live diff through `plan_declarative` (no rename hints) and
-/// apply it.
+/// apply it. This helper drives only ADDITIVE flows (create-table / add-column /
+/// add-index), where live ⊆ desired so NO `DROP TABLE` is ever emitted — hence
+/// an empty `live_ownership` map is correct (the fail-closed drop guard is never
+/// consulted). Drop flows call `plan_declarative` directly with an explicit map.
 async fn apply_plan(
     engine: &MigrationEngine,
     desired: &DesiredSchema,
@@ -116,7 +121,7 @@ async fn apply_plan(
     approval: Approval,
 ) -> Result<(), EngineError> {
     let plan = engine
-        .plan_declarative(desired, live, author, &[], &guard_cfg(cfg))
+        .plan_declarative(desired, live, &HashMap::new(), author, &[], &guard_cfg(cfg))
         .expect("plan_declarative");
     // This helper drives only NO-rename diffs (it passes `&[]` hints), so the
     // plain plan is the whole deploy; apply it through the gate directly.
@@ -465,7 +470,7 @@ async fn full_shape_round_trips_to_zero_drift_the_canonical_idempotency_oracle()
     );
 
     // And the differ itself re-diffs to ZERO migrations (true idempotency).
-    let migs = author.diff(&desired, &live2, &[]).expect("re-diff").migrations;
+    let migs = author.diff(&desired, &live2, &HashMap::new(), &[]).expect("re-diff").migrations;
     assert!(
         migs.is_empty(),
         "re-diff must be empty, got {} migration(s): {:?}",
@@ -528,7 +533,7 @@ async fn changed_fk_target_is_unsupported_in_v1_not_silently_skipped() {
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[alpha, beta, child_v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
-    let err = author.diff(&d2, &live, &[]).unwrap_err();
+    let err = author.diff(&d2, &live, &HashMap::new(), &[]).unwrap_err();
     assert!(matches!(err, DeclarativeError::UnsupportedInV1(_)), "got {err:?}");
 
     teardown(&conn, &cfg).await;
@@ -580,7 +585,7 @@ async fn long_table_and_field_unique_index_name_is_capped_and_re_diffs_clean() {
         .await
         .expect("apply long-name table");
     let live2 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
-    let migs = author.diff(&desired, &live2, &[]).expect("re-diff").migrations;
+    let migs = author.diff(&desired, &live2, &HashMap::new(), &[]).expect("re-diff").migrations;
     assert!(
         migs.is_empty(),
         "long-name index churned (re-diff not empty): {:?}",
@@ -626,7 +631,7 @@ async fn index_uniqueness_flip_on_same_name_is_unsupported_in_v1_not_silent() {
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
-    let err = author.diff(&d2, &live, &[]).unwrap_err();
+    let err = author.diff(&d2, &live, &HashMap::new(), &[]).unwrap_err();
     assert!(matches!(err, DeclarativeError::UnsupportedInV1(_)), "got {err:?}");
 
     teardown(&conn, &cfg).await;
@@ -659,7 +664,7 @@ async fn additive_diff_is_idempotent_second_plan_is_empty() {
     let live2 = snapshot_schema(&conn, &cfg.project_schema)
         .await
         .expect("re-snapshot");
-    let migs = author.diff(&desired, &live2, &[]).expect("second diff").migrations;
+    let migs = author.diff(&desired, &live2, &HashMap::new(), &[]).expect("second diff").migrations;
     assert!(
         migs.is_empty(),
         "second diff should be empty (idempotent), got {} migration(s)",
@@ -787,7 +792,7 @@ async fn type_change_emits_a_gated_alter_not_an_error_and_never_auto_applies() {
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
 
-    let migs = author.diff(&desired, &live.snapshot, &[]).expect("type change now diffs to a gated ALTER").migrations;
+    let migs = author.diff(&desired, &live.snapshot, &HashMap::new(), &[]).expect("type change now diffs to a gated ALTER").migrations;
     let alter = migs.iter().find(|m| m.up.contains("ALTER COLUMN") && m.up.contains("TYPE"))
         .expect("a gated ALTER COLUMN TYPE migration");
     assert!(alter.flags.destructive, "type change is destructive (lossy/rewrite)");
@@ -806,7 +811,7 @@ async fn malicious_table_name_is_rejected_at_author_boundary() {
         indexes: vec![],
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
-    let err = author.diff(&desired, &SchemaSnapshot::default(), &[]).unwrap_err();
+    let err = author.diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[]).unwrap_err();
     assert!(matches!(err, DeclarativeError::Invalid(_)), "got {err:?}");
 }
 
@@ -827,7 +832,7 @@ async fn malicious_column_name_is_rejected_at_author_boundary() {
         indexes: vec![],
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
-    let err = author.diff(&desired, &SchemaSnapshot::default(), &[]).unwrap_err();
+    let err = author.diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[]).unwrap_err();
     assert!(matches!(err, DeclarativeError::Invalid(_)), "got {err:?}");
 }
 
@@ -853,7 +858,7 @@ async fn every_generated_migration_passes_through_the_guard_no_bypass() {
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
-    let migs = author.diff(&desired, &SchemaSnapshot::default(), &[]).expect("diff").migrations;
+    let migs = author.diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[]).expect("diff").migrations;
     assert!(!migs.is_empty(), "diff should generate migrations");
     let plan = engine.plan(&migs, &guard_cfg(&cfg));
     assert!(plan.denied.is_empty(), "generated SQL must not be denied: {:?}", plan.denied);
@@ -890,11 +895,15 @@ async fn drop_table_is_gated_and_not_auto_applied() {
         .await
         .expect("create legacy");
 
-    // Now desire it GONE (empty desired).
+    // Now desire it GONE (empty desired). The owner (app_test) is dropping its
+    // OWN table, so supply live_ownership{legacy: app_test} — the fail-closed drop
+    // guard allows an owner to drop its own table (2b).
     let empty = DesiredSchema::default();
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+    let live_ownership: HashMap<String, String> =
+        std::iter::once(("legacy".to_string(), "app_test".to_string())).collect();
     let plan = engine
-        .plan_declarative(&empty, &live, &author, &[], &guard_cfg(&cfg))
+        .plan_declarative(&empty, &live, &live_ownership, &author, &[], &guard_cfg(&cfg))
         .expect("plan drop");
     assert!(plan.plain.destructive, "a DROP TABLE diff must be destructive");
     assert!(plan.plain.requires_approval, "a DROP TABLE diff must require approval");
@@ -965,7 +974,7 @@ async fn drop_column_is_destructive_and_gated() {
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
     let plan = engine
-        .plan_declarative(&d2, &live, &author, &[], &guard_cfg(&cfg))
+        .plan_declarative(&d2, &live, &HashMap::new(), &author, &[], &guard_cfg(&cfg))
         .expect("plan drop column");
     assert!(plan.plain.destructive, "drop column must be destructive");
     assert!(plan.plain.requires_approval, "drop column must be gated");
@@ -1027,7 +1036,7 @@ async fn drop_index_is_not_data_loss_so_it_is_not_gated() {
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
     let plan = engine
-        .plan_declarative(&d2, &live, &author, &[], &guard_cfg(&cfg))
+        .plan_declarative(&d2, &live, &HashMap::new(), &author, &[], &guard_cfg(&cfg))
         .expect("plan drop index");
     assert!(!plan.plain.destructive, "DROP INDEX is not data loss");
     assert!(!plan.plain.requires_approval, "DROP INDEX must not require approval");
@@ -1338,7 +1347,7 @@ async fn non_owner_deploy_changing_only_own_tables_is_fine() {
     // app_b is the deploying app. The diff must succeed (only b_table changes) and
     // touch a_table with NO op.
     let plan = engine
-        .plan_declarative(&union_v2, &live, &author_app(&cfg, "app_b"), &[], &guard_cfg(&cfg))
+        .plan_declarative(&union_v2, &live, &HashMap::new(), &author_app(&cfg, "app_b"), &[], &guard_cfg(&cfg))
         .expect("app_b deploy adding only its own table is allowed");
     assert!(
         plan.plain.items.iter().all(|m| m.migration.up.contains("b_table")),
@@ -1370,7 +1379,7 @@ async fn non_owner_deploy_altering_a_foreign_owned_table_is_refused() {
 
     // Deploying as app_b (a non-owner of authors) → refused.
     let err = author_app(&cfg, "app_b")
-        .diff(&union, &live, &[])
+        .diff(&union, &live, &HashMap::new(), &[])
         .unwrap_err();
     assert!(
         matches!(
@@ -1383,7 +1392,7 @@ async fn non_owner_deploy_altering_a_foreign_owned_table_is_refused() {
 
     // Deploying as app_a (the owner) → fine.
     let migs = author_app(&cfg, "app_a")
-        .diff(&union, &live, &[])
+        .diff(&union, &live, &HashMap::new(), &[])
         .expect("the owner may create its own table")
         .migrations;
     assert!(migs.iter().any(|m| m.up.contains("authors")), "owner's diff creates authors");
@@ -1420,12 +1429,124 @@ async fn non_owner_using_a_foreign_table_unchanged_is_a_noop_not_refused() {
     let union_v2 = desired_snapshot(&cfg.project_schema, &[authors()]).expect("union v2");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
     let plan = author_app(&cfg, "app_b")
-        .diff(&union_v2, &live, &[])
+        .diff(&union_v2, &live, &HashMap::new(), &[])
         .expect("a non-owner merely using an unchanged foreign table is a no-op");
     assert!(plan.is_empty(), "no structural change ⇒ empty plan, got {:?}",
         plan.migrations.iter().map(|m| &m.name).collect::<Vec<_>>());
 
     teardown(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// P4 Feature 2b — fail-closed drop ownership (a partial union must not
+// mass-drop other tenants' tables).
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn partial_union_deploy_refuses_to_drop_a_foreign_owned_live_table() {
+    // 2b (THE priority): if the caller passes only ONE app's descriptors (a PARTIAL
+    // union) while live carries another app's table, the foreign table looks
+    // "absent from desired" → the OLD code emitted a gated DROP of it, authored by
+    // the deploying app. That is cross-tenant data loss bounded only by the
+    // destructive-approval gate. The differ must now REFUSE the drop fail-closed:
+    // live_ownership says `a_table` is owned by app_a, the deploying app is app_b →
+    // NotTableOwner, and NO foreign DROP is emitted.
+    let cfg = cfg_for(&token());
+    // Live: a single a-owned table.
+    let a_tbl = CollectionDescriptor {
+        name: "a_table".into(),
+        owner_app: "app_a".into(),
+        fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let live = desired_snapshot(&cfg.project_schema, &[a_tbl]).expect("live snapshot").snapshot;
+
+    // app_b deploys a PARTIAL union: only its OWN table (omitting a_table).
+    let b_tbl = CollectionDescriptor {
+        name: "b_table".into(),
+        owner_app: "app_b".into(),
+        fields: vec![FieldDescriptor { name: "y".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let partial = desired_snapshot(&cfg.project_schema, &[b_tbl]).expect("partial union");
+    // The caller's live_ownership: a_table is a_app's. (b_table is not live yet.)
+    let live_ownership: HashMap<String, String> =
+        std::iter::once(("a_table".to_string(), "app_a".to_string())).collect();
+
+    let err = author_app(&cfg, "app_b")
+        .diff(&partial, &live, &live_ownership, &[])
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DeclarativeError::NotTableOwner { ref table, ref owner, ref deploying_app }
+                if table == "a_table" && owner == "app_a" && deploying_app == "app_b"
+        ),
+        "a partial-union deploy must REFUSE dropping a foreign table, not author a gated DROP; got {err:?}"
+    );
+}
+
+#[compio::test]
+async fn owner_dropping_its_own_table_is_allowed_when_live_ownership_confirms_it() {
+    // 2b: the owner legitimately removing its OWN table is still allowed — the
+    // fail-closed guard only refuses drops it cannot confirm belong to the
+    // deploying app. live_ownership{posts: app_a} + deploying_app=app_a ⇒ the gated
+    // DROP is authored (not refused).
+    let cfg = cfg_for(&token());
+    let posts = CollectionDescriptor {
+        name: "posts".into(),
+        owner_app: "app_a".into(),
+        fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let live = desired_snapshot(&cfg.project_schema, &[posts]).expect("live").snapshot;
+    // app_a now declares nothing → it removes its own posts table.
+    let empty = DesiredSchema::default();
+    let live_ownership: HashMap<String, String> =
+        std::iter::once(("posts".to_string(), "app_a".to_string())).collect();
+
+    let plan = author_app(&cfg, "app_a")
+        .diff(&empty, &live, &live_ownership, &[])
+        .expect("the owner may drop its own table");
+    assert!(
+        plan.migrations.iter().any(|m| m.up.contains("DROP TABLE") && m.up.contains("posts")),
+        "owner's diff must author the gated DROP TABLE posts, got {:?}",
+        plan.migrations.iter().map(|m| &m.name).collect::<Vec<_>>()
+    );
+    // And the drop is the gated/destructive kind.
+    assert!(
+        plan.migrations.iter().any(|m| m.flags.destructive && m.flags.requires_approval),
+        "the owner's own-table drop is still gated"
+    );
+}
+
+#[compio::test]
+async fn dropping_a_live_table_with_unknown_ownership_fails_closed() {
+    // 2b fail-closed default: if live_ownership has NO entry for a live table being
+    // dropped, the differ must REFUSE (DropOfUnownedTable) — it will not author a
+    // destructive drop of a table whose ownership it cannot confirm belongs to the
+    // deploying app. (Even though the descriptor was stamped app_a and the deployer
+    // is app_a, the AUTHORITATIVE ownership signal is live_ownership, not the
+    // omitted descriptor — and here it is silent.)
+    let cfg = cfg_for(&token());
+    let orphan = CollectionDescriptor {
+        name: "orphan".into(),
+        owner_app: "app_a".into(),
+        fields: vec![FieldDescriptor { name: "v".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let live = desired_snapshot(&cfg.project_schema, &[orphan]).expect("live").snapshot;
+    let empty = DesiredSchema::default();
+    // Empty live_ownership → ownership of `orphan` is UNKNOWN to the diff.
+    let unknown: HashMap<String, String> = HashMap::new();
+
+    let err = author_app(&cfg, "app_a")
+        .diff(&empty, &live, &unknown, &[])
+        .unwrap_err();
+    assert!(
+        matches!(err, DeclarativeError::DropOfUnownedTable { ref table } if table == "orphan"),
+        "a drop of an ownership-unknown live table must fail closed; got {err:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1473,7 +1594,7 @@ async fn cross_app_fk_to_a_union_table_orders_and_applies_clean() {
     // app_b's deploy: authors is live+unchanged (no op, no owner violation), books
     // is new with a cross-app FK. Plan + apply must succeed.
     let plan = engine
-        .plan_declarative(&union_v2, &live, &author_app(&cfg, "app_b"), &[], &guard_cfg(&cfg))
+        .plan_declarative(&union_v2, &live, &HashMap::new(), &author_app(&cfg, "app_b"), &[], &guard_cfg(&cfg))
         .expect("cross-app FK to a union/live table plans clean");
     engine.apply(&plan.plain, Approval::None, &conn, &cfg, "app_b").await.expect("apply books with cross-app FK");
 
@@ -1507,7 +1628,7 @@ async fn cross_app_fk_to_a_table_no_app_declares_is_a_clear_error() {
     };
     let union = desired_snapshot(&cfg.project_schema, &[books]).expect("union builds");
     let live = SchemaSnapshot::default();
-    let err = author_app(&cfg, "app_b").diff(&union, &live, &[]).unwrap_err();
+    let err = author_app(&cfg, "app_b").diff(&union, &live, &HashMap::new(), &[]).unwrap_err();
     assert!(
         matches!(
             err,
@@ -1595,7 +1716,7 @@ async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
     let plan = engine
-        .plan_declarative(&d2, &live, &author, &[], &guard_cfg(&cfg))
+        .plan_declarative(&d2, &live, &HashMap::new(), &author, &[], &guard_cfg(&cfg))
         .expect("plan drop unique index");
     assert!(plan.plain.destructive, "DROP of a UNIQUE index must be destructive");
     assert!(plan.plain.requires_approval, "DROP of a UNIQUE index must require approval");
@@ -1631,7 +1752,7 @@ async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
     let d3 = desired_snapshot(&cfg.project_schema, &[v3]).expect("desired_snapshot");
     let live3 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap4");
     let plan3 = engine
-        .plan_declarative(&d3, &live3, &author, &[], &guard_cfg(&cfg))
+        .plan_declarative(&d3, &live3, &HashMap::new(), &author, &[], &guard_cfg(&cfg))
         .expect("plan drop plain index");
     assert!(!plan3.plain.destructive, "DROP of a PLAIN index must NOT be destructive");
     assert!(!plan3.plain.requires_approval, "DROP of a PLAIN index must NOT require approval");
@@ -1710,7 +1831,7 @@ async fn rename_hint_routes_drop_add_through_expand_contract_not_drop_add() {
     // `all_migrations()` flattens it back out for SHAPE inspection only — this is
     // NOT the apply path (the real apply is `apply_declarative` → `run_expand`,
     // exercised by the zero-data-loss e2e below).
-    let diff = author.diff(&d2, &live, &hints).expect("diff with rename hint");
+    let diff = author.diff(&d2, &live, &HashMap::new(), &hints).expect("diff with rename hint");
     assert_eq!(diff.renames.len(), 1, "exactly one structured rename");
     assert!(
         diff.migrations.is_empty(),
@@ -1864,7 +1985,7 @@ async fn declarative_rename_preserves_preexisting_rows_through_expand_then_contr
     // Plan the declarative deploy: the rename is carried STRUCTURED (in
     // `.renames`), the plain set is empty (pure rename).
     let plan = engine
-        .plan_declarative(&d2, &live, &author, &hints, &guard_cfg(&cfg))
+        .plan_declarative(&d2, &live, &HashMap::new(), &author, &hints, &guard_cfg(&cfg))
         .expect("plan_declarative");
     assert_eq!(plan.renames.len(), 1, "one structured rename");
     assert!(plan.plain.items.is_empty(), "a pure rename has no plain migrations");
@@ -2023,7 +2144,7 @@ async fn flattening_a_rename_into_the_plain_plan_loses_data_or_is_gate_blocked()
 
     // Reconstruct the OLD flatten: `all_migrations()` is exactly the flat
     // `out.extend(plan.all())` the buggy `diff` produced (E1,E2,E3,C1,C2 inlined).
-    let diff = author.diff(&d2, &live, &hints).expect("diff");
+    let diff = author.diff(&d2, &live, &HashMap::new(), &hints).expect("diff");
     let flat = diff.all_migrations();
     let flat_plan = engine.plan(&flat, &guard_cfg(&cfg));
 
@@ -2100,7 +2221,7 @@ async fn without_a_hint_the_same_desired_is_two_independent_ops_not_a_rename() {
 
     // No hints → two independent ops, NO rename (the structured `.renames` is
     // empty; everything is in the plain `.migrations`).
-    let diff = author.diff(&desired, &live.snapshot, &[]).expect("diff without hint");
+    let diff = author.diff(&desired, &live.snapshot, &HashMap::new(), &[]).expect("diff without hint");
     assert!(diff.renames.is_empty(), "no hint must produce NO structured rename");
     let migs = diff.migrations;
     assert!(
@@ -2147,12 +2268,12 @@ async fn rename_hint_naming_a_nonexistent_column_is_an_error() {
 
     // `from` names a column that does not exist in live → unmatched.
     let bad_from = vec![RenameHint { table: "users".into(), from: "nope".into(), to: "email_address".into() }];
-    let err = author.diff(&desired, &live.snapshot, &bad_from).unwrap_err();
+    let err = author.diff(&desired, &live.snapshot, &HashMap::new(), &bad_from).unwrap_err();
     assert!(matches!(err, DeclarativeError::RenameHintUnmatched { .. }), "got {err:?}");
 
     // `to` names a column that does not exist in desired → unmatched.
     let bad_to = vec![RenameHint { table: "users".into(), from: "email".into(), to: "ghost".into() }];
-    let err2 = author.diff(&desired, &live.snapshot, &bad_to).unwrap_err();
+    let err2 = author.diff(&desired, &live.snapshot, &HashMap::new(), &bad_to).unwrap_err();
     assert!(matches!(err2, DeclarativeError::RenameHintUnmatched { .. }), "got {err2:?}");
 
     // A hint on a table that is identical on both sides (no drop+add) → unmatched.
@@ -2166,7 +2287,7 @@ async fn rename_hint_naming_a_nonexistent_column_is_an_error() {
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let hint = vec![RenameHint { table: "users".into(), from: "email".into(), to: "email_address".into() }];
-    let err3 = author.diff(&same, &live.snapshot, &hint).unwrap_err();
+    let err3 = author.diff(&same, &live.snapshot, &HashMap::new(), &hint).unwrap_err();
     assert!(matches!(err3, DeclarativeError::RenameHintUnmatched { .. }), "got {err3:?}");
 }
 
@@ -2198,7 +2319,7 @@ async fn rename_hint_with_a_type_mismatch_is_an_error() {
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let hint = vec![RenameHint { table: "users".into(), from: "score".into(), to: "rating".into() }];
-    let err = author.diff(&desired, &live.snapshot, &hint).unwrap_err();
+    let err = author.diff(&desired, &live.snapshot, &HashMap::new(), &hint).unwrap_err();
     assert!(matches!(err, DeclarativeError::RenameHintTypeMismatch { .. }), "got {err:?}");
 }
 
@@ -2245,7 +2366,7 @@ async fn two_hints_sharing_a_to_are_rejected_as_duplicate() {
         RenameHint { table: "users".into(), from: "a".into(), to: "c".into() },
         RenameHint { table: "users".into(), from: "b".into(), to: "c".into() },
     ];
-    let err = author.diff(&desired, &live.snapshot, &hints).unwrap_err();
+    let err = author.diff(&desired, &live.snapshot, &HashMap::new(), &hints).unwrap_err();
     assert!(
         matches!(err, DeclarativeError::DuplicateRenameHint { side: "to", .. }),
         "got {err:?}"
@@ -2285,7 +2406,7 @@ async fn two_hints_sharing_a_from_are_rejected_as_duplicate() {
         RenameHint { table: "users".into(), from: "a".into(), to: "c".into() },
         RenameHint { table: "users".into(), from: "a".into(), to: "d".into() },
     ];
-    let err = author.diff(&desired, &live.snapshot, &hints).unwrap_err();
+    let err = author.diff(&desired, &live.snapshot, &HashMap::new(), &hints).unwrap_err();
     assert!(
         matches!(err, DeclarativeError::DuplicateRenameHint { side: "from", .. }),
         "got {err:?}"
@@ -2328,7 +2449,7 @@ async fn a_rename_chain_is_rejected_explicitly_not_incidentally() {
         RenameHint { table: "users".into(), from: "a".into(), to: "b".into() },
         RenameHint { table: "users".into(), from: "b".into(), to: "c".into() },
     ];
-    let err = author.diff(&desired, &live.snapshot, &hints).unwrap_err();
+    let err = author.diff(&desired, &live.snapshot, &HashMap::new(), &hints).unwrap_err();
     assert!(
         matches!(err, DeclarativeError::RenameHintChained { ref column, .. } if column == "b"),
         "got {err:?}"
@@ -2354,7 +2475,7 @@ async fn a_noop_rename_hint_from_equals_to_is_a_precise_error() {
     // Same shape on both sides; the only "change" is the no-op hint.
     let desired = live.clone();
     let hints = vec![RenameHint { table: "users".into(), from: "email".into(), to: "email".into() }];
-    let err = author.diff(&desired, &live.snapshot, &hints).unwrap_err();
+    let err = author.diff(&desired, &live.snapshot, &HashMap::new(), &hints).unwrap_err();
     assert!(
         matches!(err, DeclarativeError::RenameHintNoop { ref column, .. } if column == "email"),
         "got {err:?}"
@@ -2381,7 +2502,7 @@ async fn a_hint_on_a_created_table_is_unmatched() {
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let hints = vec![RenameHint { table: "posts".into(), from: "old".into(), to: "body".into() }];
-    let err = author.diff(&desired, &live, &hints).unwrap_err();
+    let err = author.diff(&desired, &live, &HashMap::new(), &hints).unwrap_err();
     assert!(matches!(err, DeclarativeError::RenameHintUnmatched { .. }), "got {err:?}");
 }
 
@@ -2404,7 +2525,7 @@ async fn a_hint_on_a_dropped_table_is_unmatched() {
     };
     let desired = DesiredSchema::default();
     let hints = vec![RenameHint { table: "posts".into(), from: "body".into(), to: "renamed".into() }];
-    let err = author.diff(&desired, &live.snapshot, &hints).unwrap_err();
+    let err = author.diff(&desired, &live.snapshot, &HashMap::new(), &hints).unwrap_err();
     assert!(matches!(err, DeclarativeError::RenameHintUnmatched { .. }), "got {err:?}");
 }
 
@@ -2449,7 +2570,7 @@ async fn type_change_is_gated_refused_without_approval_applied_with_then_re_diff
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
     let plan = engine
-        .plan_declarative(&d2, &live, &author, &[], &guard_cfg(&cfg))
+        .plan_declarative(&d2, &live, &HashMap::new(), &author, &[], &guard_cfg(&cfg))
         .expect("plan type change");
     assert!(plan.plain.destructive, "a type change must be destructive");
     assert!(plan.plain.requires_approval, "a type change must require approval");
@@ -2468,7 +2589,7 @@ async fn type_change_is_gated_refused_without_approval_applied_with_then_re_diff
     assert_eq!(attr2.data_type, "double precision", "type changed after approval");
     assert!(diff_snapshots(&d2.snapshot, &live_final).is_clean(), "re-diff clean after approved type change");
     // Idempotent: re-diffing the same desired against the converged live is empty.
-    let migs = author.diff(&d2, &live_final, &[]).expect("re-diff after type change").migrations;
+    let migs = author.diff(&d2, &live_final, &HashMap::new(), &[]).expect("re-diff after type change").migrations;
     assert!(migs.is_empty(), "type change must be idempotent, got {} migs", migs.len());
 
     teardown(&conn, &cfg).await;
@@ -2509,7 +2630,7 @@ async fn set_not_null_is_gated_drop_not_null_is_ungated_and_both_re_diff_clean()
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
     let plan = engine
-        .plan_declarative(&d2, &live, &author, &[], &guard_cfg(&cfg))
+        .plan_declarative(&d2, &live, &HashMap::new(), &author, &[], &guard_cfg(&cfg))
         .expect("plan set not null");
     // SET NOT NULL is gated (requires_approval) but NOT destructive (no data lost).
     assert!(plan.plain.requires_approval, "SET NOT NULL must require approval");
@@ -2528,12 +2649,12 @@ async fn set_not_null_is_gated_drop_not_null_is_ungated_and_both_re_diff_clean()
     assert!(!live_nn.tables["accounts"].columns.iter().find(|c| c.name == "email").unwrap().nullable,
         "email must be NOT NULL after approval");
     assert!(diff_snapshots(&d2.snapshot, &live_nn).is_clean(), "re-diff clean after SET NOT NULL");
-    assert!(author.diff(&d2, &live_nn, &[]).expect("re-diff").is_empty(), "SET NOT NULL idempotent");
+    assert!(author.diff(&d2, &live_nn, &HashMap::new(), &[]).expect("re-diff").is_empty(), "SET NOT NULL idempotent");
 
     // --- DROP NOT NULL (required true→false): UNGATED, applies without approval. ---
     let live3 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap4");
     let plan3 = engine
-        .plan_declarative(&d1, &live3, &author, &[], &guard_cfg(&cfg))
+        .plan_declarative(&d1, &live3, &HashMap::new(), &author, &[], &guard_cfg(&cfg))
         .expect("plan drop not null");
     assert!(!plan3.plain.requires_approval, "DROP NOT NULL must NOT require approval");
     assert!(!plan3.plain.destructive, "DROP NOT NULL is not data loss");
@@ -2542,7 +2663,7 @@ async fn set_not_null_is_gated_drop_not_null_is_ungated_and_both_re_diff_clean()
     assert!(live_dn.tables["accounts"].columns.iter().find(|c| c.name == "email").unwrap().nullable,
         "email must be nullable again after the ungated DROP NOT NULL");
     assert!(diff_snapshots(&d1.snapshot, &live_dn).is_clean(), "re-diff clean after DROP NOT NULL");
-    assert!(author.diff(&d1, &live_dn, &[]).expect("re-diff").is_empty(), "DROP NOT NULL idempotent");
+    assert!(author.diff(&d1, &live_dn, &HashMap::new(), &[]).expect("re-diff").is_empty(), "DROP NOT NULL idempotent");
 
     teardown(&conn, &cfg).await;
 }
@@ -2585,8 +2706,8 @@ async fn unapplied_gated_type_change_keeps_re_diffing_nonempty_documented_semant
     // Re-diff TWICE without applying: each time yields the SAME non-empty gated
     // type change (never silently dropped, never auto-applied).
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
-    let migs1 = author.diff(&d2, &live, &[]).expect("diff 1").migrations;
-    let migs2 = author.diff(&d2, &live, &[]).expect("diff 2").migrations;
+    let migs1 = author.diff(&d2, &live, &HashMap::new(), &[]).expect("diff 1").migrations;
+    let migs2 = author.diff(&d2, &live, &HashMap::new(), &[]).expect("diff 2").migrations;
     assert_eq!(migs1.len(), 1, "exactly one gated type change");
     assert_eq!(migs2.len(), 1, "still one — un-applied change is not dropped");
     assert!(migs1[0].flags.requires_approval && migs1[0].flags.destructive, "stays gated");
