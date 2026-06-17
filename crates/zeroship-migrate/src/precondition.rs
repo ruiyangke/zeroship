@@ -167,9 +167,16 @@ pub enum Precondition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum OnUnmet {
     /// Abort the whole apply (fail-closed): return [`PreconditionFailed`] and
-    /// apply NOTHING for this migration or the rest of the batch. The default —
-    /// an unmet precondition usually means the world is not as the migration
-    /// assumes, and silently skipping could leave the schema inconsistent.
+    /// apply NOTHING for THIS migration. The default — an unmet precondition
+    /// usually means the world is not as the migration assumes, and silently
+    /// skipping could leave the schema inconsistent.
+    ///
+    /// **Scope of "halt":** this stops the batch going FORWARD — no
+    /// later-in-order migration is applied after the failing one. It does NOT
+    /// undo migrations already committed earlier in the same batch: each
+    /// migration commits independently (per-migration commit), so the migrations
+    /// that succeeded before the halt stay applied. Halt is fail-forward-stop,
+    /// not a batch-wide rollback.
     ///
     /// [`PreconditionFailed`]: crate::executor::ApplyError::PreconditionFailed
     #[default]
@@ -180,6 +187,16 @@ pub enum OnUnmet {
     /// idempotent-deploy primitive. A skipped migration's dependents do not run
     /// this batch either (a dependent of a not-yet-applied migration is blocked
     /// by the dependency ordering — see [`crate::executor::order_pending`]).
+    ///
+    /// **Skip relies on COMPLETE `depends_on`.** The transitive-skip above only
+    /// follows DECLARED dependencies: a later migration that actually depends on
+    /// the skipped one but does NOT declare it in `depends_on` is NOT held back —
+    /// it will still run, against a schema the skipped migration was supposed to
+    /// shape first, and will either fail or (worse) succeed against a stale
+    /// shape. This makes `Skip` MORE dangerous than [`OnUnmet::Halt`] when deps
+    /// are incomplete: `Halt` aborts the batch forward loudly, whereas `Skip`
+    /// silently no-ops the gated migration and lets an undeclared dependent
+    /// proceed. Authors choosing `Skip` MUST declare every real dependency.
     Skip,
 }
 
