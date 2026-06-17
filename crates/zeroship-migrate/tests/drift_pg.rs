@@ -312,8 +312,9 @@ async fn snapshot_introspects_tables_columns_indexes_constraints() {
 
     let sch = &cfg.project_schema;
     conn.batch_execute(&format!(
-        "CREATE TABLE \"{sch}\".\"users\" (id int PRIMARY KEY, email text NOT NULL);
+        "CREATE TABLE \"{sch}\".\"users\" (id int PRIMARY KEY, email text NOT NULL, a text, b text);
          CREATE UNIQUE INDEX users_email_idx ON \"{sch}\".\"users\" (email);
+         CREATE INDEX users_a_b_idx ON \"{sch}\".\"users\" (a, b);
          CREATE TABLE \"{sch}\".\"orders\" (id int PRIMARY KEY);"
     ))
     .await
@@ -328,16 +329,39 @@ async fn snapshot_introspects_tables_columns_indexes_constraints() {
 
     let users = &snap.tables["users"];
     let cols: Vec<&str> = users.columns.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(cols, vec!["email", "id"], "columns name-ordered");
+    assert_eq!(cols, vec!["a", "b", "email", "id"], "columns name-ordered");
     // email is NOT NULL.
     let email = users.columns.iter().find(|c| c.name == "email").unwrap();
     assert!(!email.nullable);
-    // The unique index is captured.
-    assert!(
-        users.indexes.iter().any(|i| i.name == "users_email_idx" && i.unique),
-        "indexes: {:?}",
-        users.indexes
+    // The unique index is captured WITH its single key column (1a: columns are
+    // introspected from pg_index, not recovered from the name).
+    let email_idx = users
+        .indexes
+        .iter()
+        .find(|i| i.name == "users_email_idx")
+        .unwrap_or_else(|| panic!("indexes: {:?}", users.indexes));
+    assert!(email_idx.unique);
+    assert_eq!(email_idx.columns, vec!["email".to_string()], "single key col");
+    // The COMPOSITE index carries BOTH key columns IN ORDER — the case the old
+    // name-heuristic could never recover (`users_a_b_idx` → `a_b`).
+    let ab_idx = users
+        .indexes
+        .iter()
+        .find(|i| i.name == "users_a_b_idx")
+        .unwrap_or_else(|| panic!("indexes: {:?}", users.indexes));
+    assert!(!ab_idx.unique);
+    assert_eq!(
+        ab_idx.columns,
+        vec!["a".to_string(), "b".to_string()],
+        "composite index key columns in order"
     );
+    // The PK's implicit index carries its key column too.
+    let pk_idx = users
+        .indexes
+        .iter()
+        .find(|i| i.name == "users_pkey")
+        .unwrap_or_else(|| panic!("indexes: {:?}", users.indexes));
+    assert_eq!(pk_idx.columns, vec!["id".to_string()], "pk index key col");
     // The primary-key constraint is captured.
     assert!(
         users.constraints.iter().any(|c| c.kind == "PRIMARY KEY"),
@@ -514,7 +538,7 @@ async fn diff_of_identical_snapshots_is_clean() {
     assert!(drift.is_clean(), "{drift:?}");
 
     // sanity: types referenced so unused-import lints don't fire on a thin test
-    let _ = IndexSnapshot { name: "x".into(), unique: false };
+    let _ = IndexSnapshot { name: "x".into(), unique: false, columns: vec!["c".into()] };
     let _ = ConstraintSnapshot {
         name: "x".into(),
         kind: "CHECK".into(),
@@ -649,6 +673,9 @@ async fn diff_reports_altered_index_uniqueness() {
             indexes: vec![IndexSnapshot {
                 name: "users_email_idx".into(),
                 unique: true,
+                // Same column set as live (email) — so the ONLY altered field is
+                // `unique`, keeping this test's single-altered assertion exact.
+                columns: vec!["email".into()],
             }],
             constraints: Vec::new(),
         },

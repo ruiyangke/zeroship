@@ -204,11 +204,18 @@ fn system_field_columns() -> Vec<ColumnSnapshot> {
 /// byte-equal snapshot (zero drift) — that equality is the P0 type-fidelity
 /// proof.
 ///
+/// `project_schema` is the schema every table lives in; it is needed because a
+/// FOREIGN KEY's `pg_get_constraintdef` body is **schema-qualified**
+/// (`FOREIGN KEY (col) REFERENCES <schema>.target(id)`), so the desired-side FK
+/// definition must carry the same qualification to match live exactly — otherwise
+/// every FK shows permanent phantom drift (1b). It is NOT used for any non-FK
+/// part of the snapshot.
+///
 /// **Pure.** No I/O, no DDL, no validation side effects. Name/type validation
 /// happens at the *author* boundary ([`DeclarativeAuthor::diff`]); this compiler
 /// is a pure projection so it can be reused for drift comparison too.
 #[must_use]
-pub fn desired_snapshot(descriptors: &[CollectionDescriptor]) -> SchemaSnapshot {
+pub fn desired_snapshot(project_schema: &str, descriptors: &[CollectionDescriptor]) -> SchemaSnapshot {
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
 
     for d in descriptors {
@@ -232,6 +239,11 @@ pub fn desired_snapshot(descriptors: &[CollectionDescriptor]) -> SchemaSnapshot 
         indexes.push(IndexSnapshot {
             name: format!("{}_pkey", d.name),
             unique: true,
+            // The PK's implicit index covers `id` (live `pg_index` reports the
+            // same key column). The differ never emits DDL for it (see
+            // `is_pk_index`), but the snapshot must carry the column list so the
+            // attribute-aware diff stays clean against live.
+            columns: vec!["id".into()],
         });
 
         for f in &d.fields {
@@ -246,6 +258,7 @@ pub fn desired_snapshot(descriptors: &[CollectionDescriptor]) -> SchemaSnapshot 
                 indexes.push(IndexSnapshot {
                     name: unique_index_name(&d.name, &f.name),
                     unique: true,
+                    columns: vec![f.name.clone()],
                 });
             }
             // A `ref` field declares a FOREIGN KEY constraint.
@@ -254,12 +267,17 @@ pub fn desired_snapshot(descriptors: &[CollectionDescriptor]) -> SchemaSnapshot 
                     constraints.push(ConstraintSnapshot {
                         name: fk_constraint_name(&f.name),
                         kind: "FOREIGN KEY".into(),
-                        // pg_get_constraintdef spelling; the desired-side
-                        // definition is informational (drift compares it only
-                        // when the live side populates it).
+                        // EXACT `pg_get_constraintdef` spelling (1b): the target
+                        // is schema-qualified and there is NO space before `(id)`.
+                        // The generated FK carries no ON DELETE / ON UPDATE /
+                        // DEFERRABLE clause, and `pg_get_constraintdef` renders
+                        // none for a bare FK, so this body is byte-identical to
+                        // live — no phantom drift, and the differ can compare FK
+                        // bodies on existing tables (a changed target is caught,
+                        // not silently skipped).
                         definition: format!(
-                            "FOREIGN KEY ({}) REFERENCES {} (id)",
-                            f.name, target
+                            "FOREIGN KEY ({}) REFERENCES {}.{}(id)",
+                            f.name, project_schema, target
                         ),
                     });
                 }
@@ -267,9 +285,13 @@ pub fn desired_snapshot(descriptors: &[CollectionDescriptor]) -> SchemaSnapshot 
         }
 
         for idx in &d.indexes {
+            // Carry the declared columns through VERBATIM (1a) — recovering them
+            // from the index name was unsound for composite / custom-named
+            // indexes. `render_create_index` emits this list directly.
             indexes.push(IndexSnapshot {
                 name: idx.name.clone(),
                 unique: idx.unique,
+                columns: idx.columns.clone(),
             });
         }
 
@@ -711,16 +733,13 @@ impl DeclarativeAuthor {
         idx: &IndexSnapshot,
         depends_on: Vec<MigrationId>,
     ) -> Migration {
-        // The snapshot carries only the index name + uniqueness, not its
-        // columns; we recover the covered column from the conventional
-        // `<table>_<col>_key` / `<table>_<col>_idx` name when possible, else
-        // fall back to indexing on a column equal to the name's tail. For the
-        // declarative path the desired indexes are either per-field unique
-        // (name `<table>_<field>_key`) or SDK-named; we derive the column set
-        // from the descriptor at compile time instead — see note.
+        // The snapshot carries the index's covered columns VERBATIM (1a), so we
+        // emit them directly — no name-based reconstruction (which broke for
+        // composite / custom-named indexes, recovering `a_b` from `events_a_b_idx`
+        // and producing `column "a_b" does not exist`).
         let unique = if idx.unique { "UNIQUE " } else { "" };
-        let cols = index_columns_from_name(table, &idx.name);
-        let col_list = cols
+        let col_list = idx
+            .columns
             .iter()
             .map(|c| quote_ident(c))
             .collect::<Vec<_>>()
@@ -917,15 +936,24 @@ fn topo_order_new_tables<'a>(
 }
 
 /// Extract the referenced (target) table from an FK definition of the form
-/// `FOREIGN KEY (<col>) REFERENCES <table> (id)`. Handles the desired-side
-/// spelling [`desired_snapshot`] emits.
+/// `FOREIGN KEY (<col>) REFERENCES <schema>.<table>(id)` (the schema-qualified
+/// `pg_get_constraintdef` spelling [`desired_snapshot`] now emits, matching live).
+/// Returns the BARE table name (schema stripped) so it matches `SchemaSnapshot`
+/// table keys.
 fn fk_target_table(definition: &str) -> Option<String> {
     let after = definition.split("REFERENCES").nth(1)?.trim_start();
-    // The target is the token up to the first '(' or whitespace.
+    // The target token is up to the first '(' or whitespace (e.g. `prj.authors`).
     let end = after
         .find(|c: char| c == '(' || c.is_whitespace())
         .unwrap_or(after.len());
-    let target = after[..end].trim().trim_matches('"');
+    let qualified = after[..end].trim();
+    // Strip a `<schema>.` prefix to get the bare table. The table part may be
+    // quoted (`"My Table"`) even when the schema is not; handle a quoted tail.
+    let bare = match qualified.rsplit_once('.') {
+        Some((_schema, table)) => table,
+        None => qualified,
+    };
+    let target = bare.trim().trim_matches('"');
     if target.is_empty() {
         None
     } else {
@@ -945,24 +973,3 @@ fn fk_local_column(definition: &str) -> Option<String> {
     }
 }
 
-/// Recover the covered columns of a declarative index from its conventional
-/// name. Per-field unique indexes are named `<table>_<field>_key`; SDK named
-/// indexes carry an explicit name. We strip the `<table>_` prefix and a trailing
-/// `_key` / `_idx` to recover the single covered column. Multi-column SDK indexes
-/// are not name-recoverable, so this is a best-effort that the declarative
-/// compiler's unique-index path (single-column) always satisfies; the
-/// `tests/declarative_pg.rs` round-trip is the proof.
-fn index_columns_from_name(table: &str, index_name: &str) -> Vec<String> {
-    let stripped = index_name
-        .strip_prefix(&format!("{table}_"))
-        .unwrap_or(index_name);
-    let core = stripped
-        .strip_suffix("_key")
-        .or_else(|| stripped.strip_suffix("_idx"))
-        .unwrap_or(stripped);
-    if core.is_empty() {
-        vec![index_name.to_string()]
-    } else {
-        vec![core.to_string()]
-    }
-}

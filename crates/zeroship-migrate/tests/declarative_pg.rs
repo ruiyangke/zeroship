@@ -167,7 +167,7 @@ async fn assert_type_fidelity(dsl_type: &str, ddl_type: &str, required: bool) {
         }],
         indexes: vec![],
     };
-    let desired = desired_snapshot(&[desc]);
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]);
 
     // The columns must round-trip with ZERO drift. (We compare columns only;
     // the live snapshot's PK constraint definition is compared loosely below.)
@@ -301,7 +301,7 @@ async fn type_fidelity_whole_table_round_trips_to_zero_drift() {
         ],
         indexes: vec![],
     };
-    let desired = desired_snapshot(&[desc]);
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]);
     let drift = diff_snapshots(&desired, &live);
 
     // No column drift at all. (The PK constraint definition may differ in
@@ -351,7 +351,7 @@ async fn additive_create_table_with_column_and_index_applies_to_zero_drift() {
         ],
         indexes: vec![IndexDescriptor { name: "tasks_title_idx".into(), columns: vec!["title".into()], unique: false }],
     };
-    let desired = desired_snapshot(&[desc]);
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]);
     let empty = SchemaSnapshot::default();
 
     apply_plan(&engine, &desired, &empty, &author, &cfg, &conn, Approval::None)
@@ -375,6 +375,92 @@ async fn additive_create_table_with_column_and_index_applies_to_zero_drift() {
 }
 
 #[compio::test]
+async fn full_shape_round_trips_to_zero_drift_the_canonical_idempotency_oracle() {
+    // THE canonical idempotency oracle (strengthened): generate + apply a batch
+    // covering EVERY shape that broke the weak (column-filtered) oracle —
+    //   * an FK to another table (1b: FK definition spelling),
+    //   * a multi-column index (1a: composite columns dropped from the snapshot),
+    //   * a custom-named index whose name does NOT encode its columns (1a),
+    //   * a per-field unique index (1c: name cap + columns),
+    // then assert the FULL diff is clean (NOT column-filtered) AND the differ
+    // re-diffs to an EMPTY migration set. This must hold across the whole shape:
+    // columns + indexes + constraints. Pre-fix this fails two ways — the
+    // composite/custom indexes emit `column "a_b" does not exist` (42703) at
+    // apply, and (had apply succeeded) every FK shows permanent phantom drift.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let authors_tbl = CollectionDescriptor {
+        name: "authors".into(),
+        fields: vec![FieldDescriptor {
+            name: "email".into(),
+            ty: "string".into(),
+            required: false,
+            unique: true, // per-field unique index (1c)
+            references: None,
+        }],
+        indexes: vec![],
+    };
+    let posts_tbl = CollectionDescriptor {
+        name: "posts".into(),
+        fields: vec![
+            FieldDescriptor {
+                name: "author".into(),
+                ty: "ref".into(),
+                required: false,
+                unique: false,
+                references: Some("authors".into()), // FK (1b)
+            },
+            FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None },
+            FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None },
+        ],
+        indexes: vec![
+            // Composite index over (a, b) whose name encodes neither column set
+            // recoverably (1a): `posts_a_b_idx` → broken heuristic recovers `a_b`.
+            IndexDescriptor { name: "posts_a_b_idx".into(), columns: vec!["a".into(), "b".into()], unique: false },
+            // Custom-named index whose name has NO relation to its column (1a).
+            IndexDescriptor { name: "weird_custom_name".into(), columns: vec!["a".into()], unique: true },
+        ],
+    };
+    let desired = desired_snapshot(&cfg.project_schema, &[posts_tbl, authors_tbl]);
+    let empty = SchemaSnapshot::default();
+
+    apply_plan(&engine, &desired, &empty, &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("apply full-shape plan (composite + custom + unique idx + FK)");
+
+    // Re-snapshot the live schema. The FULL diff must be clean — no column,
+    // index, OR constraint drift (this is what the weak oracle missed).
+    let live2 = snapshot_schema(&conn, &cfg.project_schema)
+        .await
+        .expect("re-snapshot");
+    let drift = diff_snapshots(&desired, &live2);
+    assert!(
+        drift.is_clean(),
+        "FULL re-diff must be clean: missing={:?} unexpected={:?} altered={:?}",
+        drift.missing_objects,
+        drift.unexpected_objects,
+        drift.altered_objects
+    );
+
+    // And the differ itself re-diffs to ZERO migrations (true idempotency).
+    let migs = author.diff(&desired, &live2).expect("re-diff");
+    assert!(
+        migs.is_empty(),
+        "re-diff must be empty, got {} migration(s): {:?}",
+        migs.len(),
+        migs.iter().map(|m| &m.name).collect::<Vec<_>>()
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
 async fn additive_diff_is_idempotent_second_plan_is_empty() {
     let tok = token();
     let cfg = cfg_with_role(&tok);
@@ -389,7 +475,7 @@ async fn additive_diff_is_idempotent_second_plan_is_empty() {
         fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
-    let desired = desired_snapshot(&[desc]);
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]);
     let empty = SchemaSnapshot::default();
 
     apply_plan(&engine, &desired, &empty, &author, &cfg, &conn, Approval::None)
@@ -426,7 +512,7 @@ async fn additive_add_column_to_existing_table_applies_clean() {
         fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
-    let d1 = desired_snapshot(&[v1]);
+    let d1 = desired_snapshot(&cfg.project_schema, &[v1]);
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
         .await
         .expect("create items");
@@ -440,7 +526,7 @@ async fn additive_add_column_to_existing_table_applies_clean() {
         ],
         indexes: vec![],
     };
-    let d2 = desired_snapshot(&[v2]);
+    let d2 = desired_snapshot(&cfg.project_schema, &[v2]);
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
     apply_plan(&engine, &d2, &live, &author, &cfg, &conn, Approval::None)
         .await
@@ -482,7 +568,7 @@ async fn fk_ordering_referencing_table_after_target_applies_clean() {
         fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
-    let desired = desired_snapshot(&[b, a]);
+    let desired = desired_snapshot(&cfg.project_schema, &[b, a]);
     apply_plan(&engine, &desired, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
         .await
         .expect("apply FK batch");
@@ -510,7 +596,7 @@ async fn type_change_is_unsupported_in_v1_not_silently_skipped() {
             fields: vec![FieldDescriptor { name: "attr".into(), ty: "string".into(), required: false, unique: false, references: None }],
             indexes: vec![],
         };
-        desired_snapshot(&[desc])
+        desired_snapshot(&cfg.project_schema, &[desc])
     };
     let desired = {
         let desc = CollectionDescriptor {
@@ -518,7 +604,7 @@ async fn type_change_is_unsupported_in_v1_not_silently_skipped() {
             fields: vec![FieldDescriptor { name: "attr".into(), ty: "number".into(), required: false, unique: false, references: None }],
             indexes: vec![],
         };
-        desired_snapshot(&[desc])
+        desired_snapshot(&cfg.project_schema, &[desc])
     };
 
     let err = author.diff(&desired, &live).unwrap_err();
@@ -534,7 +620,7 @@ async fn malicious_table_name_is_rejected_at_author_boundary() {
         fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
-    let desired = desired_snapshot(&[desc]);
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]);
     let err = author.diff(&desired, &SchemaSnapshot::default()).unwrap_err();
     assert!(matches!(err, DeclarativeError::Invalid(_)), "got {err:?}");
 }
@@ -554,7 +640,7 @@ async fn malicious_column_name_is_rejected_at_author_boundary() {
         }],
         indexes: vec![],
     };
-    let desired = desired_snapshot(&[desc]);
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]);
     let err = author.diff(&desired, &SchemaSnapshot::default()).unwrap_err();
     assert!(matches!(err, DeclarativeError::Invalid(_)), "got {err:?}");
 }
@@ -578,7 +664,7 @@ async fn every_generated_migration_passes_through_the_guard_no_bypass() {
             ],
             indexes: vec![IndexDescriptor { name: "events_kind_idx".into(), columns: vec!["kind".into()], unique: false }],
         };
-        desired_snapshot(&[desc])
+        desired_snapshot(&cfg.project_schema, &[desc])
     };
     let migs = author.diff(&desired, &SchemaSnapshot::default()).expect("diff");
     assert!(!migs.is_empty(), "diff should generate migrations");
@@ -611,7 +697,7 @@ async fn drop_table_is_gated_and_not_auto_applied() {
         fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
-    let d1 = desired_snapshot(&[v1]);
+    let d1 = desired_snapshot(&cfg.project_schema, &[v1]);
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
         .await
         .expect("create legacy");
@@ -675,7 +761,7 @@ async fn drop_column_is_destructive_and_gated() {
         ],
         indexes: vec![],
     };
-    let d1 = desired_snapshot(&[v1]);
+    let d1 = desired_snapshot(&cfg.project_schema, &[v1]);
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
         .await
         .expect("create people");
@@ -686,7 +772,7 @@ async fn drop_column_is_destructive_and_gated() {
         fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
-    let d2 = desired_snapshot(&[v2]);
+    let d2 = desired_snapshot(&cfg.project_schema, &[v2]);
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
     let plan = engine
         .plan_declarative(&d2, &live, &author, &guard_cfg(&cfg))
@@ -735,7 +821,7 @@ async fn drop_index_is_not_data_loss_so_it_is_not_gated() {
         fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![IndexDescriptor { name: "logs_level_idx".into(), columns: vec!["level".into()], unique: false }],
     };
-    let d1 = desired_snapshot(&[v1]);
+    let d1 = desired_snapshot(&cfg.project_schema, &[v1]);
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
         .await
         .expect("create logs");
@@ -746,7 +832,7 @@ async fn drop_index_is_not_data_loss_so_it_is_not_gated() {
         fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None }],
         indexes: vec![],
     };
-    let d2 = desired_snapshot(&[v2]);
+    let d2 = desired_snapshot(&cfg.project_schema, &[v2]);
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
     let plan = engine
         .plan_declarative(&d2, &live, &author, &guard_cfg(&cfg))
@@ -789,7 +875,7 @@ async fn malicious_type_in_descriptor_never_reaches_db_unguarded() {
         }],
         indexes: vec![],
     };
-    let desired = desired_snapshot(&[desc]);
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]);
     // The malicious type maps to the `text` fallback — no injection in the
     // desired snapshot at all.
     assert_eq!(desired.tables["safe"].columns.iter().find(|c| c.name == "f").unwrap().data_type, "text");
