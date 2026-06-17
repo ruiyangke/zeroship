@@ -94,7 +94,10 @@ pub use backfill::{
 pub use author::{
     AuthorError, AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor,
 };
-pub use classify::{classify, DdlKind, ParseError, StatementClass};
+pub use classify::{
+    classify, relations_touched, DdlKind, OwnershipNeed, ParseError, StatementClass,
+    TouchedRelation,
+};
 pub use declarative::{
     desired_snapshot, dsl_to_pg_data_type, CollectionDescriptor, DeclarativeAuthor,
     DeclarativeError, DeclarativePlan, DesiredSchema, FieldDescriptor, IndexDescriptor, RenameHint,

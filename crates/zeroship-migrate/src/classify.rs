@@ -320,3 +320,175 @@ fn node_variant_name(node: &NodeEnum) -> String {
         .unwrap_or("Unknown")
         .to_string()
 }
+
+// ---------------------------------------------------------------------------
+// Ownership-relevant relation extraction (HIGH-2)
+// ---------------------------------------------------------------------------
+
+/// Whether a statement **establishes** ownership of the relation it targets (a
+/// `CREATE TABLE` — the deploying app becomes the owner) or **requires** existing
+/// ownership of it (an `ALTER`/`DROP`/`RENAME`/DML — a non-owner may not touch it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnershipNeed {
+    /// `CREATE TABLE` — establishes ownership for the deploying app.
+    Establishes,
+    /// `ALTER` / `RENAME` / DML (INSERT/UPDATE/DELETE/TRUNCATE) / `CREATE INDEX` —
+    /// requires the deploying app to already own the target relation.
+    RequiresOwnership,
+    /// `DROP TABLE` — requires ownership; a target of UNKNOWN ownership fails
+    /// closed (distinct so the caller can raise `DropOfUnownedTable`, mirroring the
+    /// declarative differ).
+    RequiresOwnershipForDrop,
+}
+
+/// One ownership-relevant relation a statement touches: the BARE relation name
+/// (schema qualifier stripped — ownership maps are keyed by table name, as in the
+/// declarative differ) and the [`OwnershipNeed`] the statement places on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TouchedRelation {
+    /// The bare relation name (no schema qualifier).
+    pub relation: String,
+    /// What the statement needs of this relation's ownership.
+    pub need: OwnershipNeed,
+}
+
+/// Extract the ownership-relevant target relations of every statement in `sql`,
+/// in source order, for the submit-path ownership enforcement (HIGH-2 — the
+/// adapter peer of the declarative differ's `enforce_ownership`).
+///
+/// The submit path takes a raw `up` script, so — unlike the declarative differ,
+/// which diffs structured snapshots — it must read the targets back out of the
+/// parse tree. This is the SAME real-Postgres parse the guard uses (`pg_query`),
+/// so it cannot be bypassed by exotic syntax a hand-rolled parser would misread.
+///
+/// # Shapes covered (the ownership check is enforced on these)
+/// - `CREATE TABLE t` ⇒ [`OwnershipNeed::Establishes`] for `t`.
+/// - `ALTER TABLE t …` ⇒ [`OwnershipNeed::RequiresOwnership`].
+/// - `DROP TABLE t` ⇒ [`OwnershipNeed::RequiresOwnershipForDrop`] (per table).
+/// - `RENAME TABLE`/`RENAME COLUMN` (a `RenameStmt` whose `relation` is set) ⇒
+///   [`OwnershipNeed::RequiresOwnership`].
+/// - `INSERT`/`UPDATE`/`DELETE` into a relation, and `TRUNCATE t [, …]` ⇒
+///   [`OwnershipNeed::RequiresOwnership`] (per target relation).
+/// - `CREATE INDEX … ON t` ⇒ [`OwnershipNeed::RequiresOwnership`] of `t`.
+///
+/// # Shapes intentionally NOT producing an ownership target (PUNTED)
+/// These touch no project table or are confinement-checked elsewhere, so they
+/// yield NO [`TouchedRelation`] (the caller does not gate them on ownership):
+/// - relation-less DDL: `CREATE EXTENSION`/`FUNCTION`/`TRIGGER`, `CREATE SCHEMA`,
+///   `COMMENT`, enum `ALTER TYPE … ADD VALUE`, etc. (the guard's deny-list +
+///   cross-schema confinement own these).
+/// - `SELECT` (read-only — no ownership write semantics).
+/// - `MERGE` (not modelled as `DdlKind::Dml` target here — punted; a MERGE that
+///   writes a foreign table is NOT caught by this pass and falls to the line-2
+///   least-privilege `migrator` role; noted, not silently narrowed).
+/// - DROP of a non-table object (index/view/sequence/…): the table-ownership map
+///   keys on tables, so a non-table DROP yields no target (guard + role govern it).
+/// - relations named only via a string literal passed to a name-resolving builtin
+///   (`to_regclass('other.t')`, `nextval`): invisible to the structural walk
+///   (the guard's literal-schema checks cover cross-schema; cross-app ownership
+///   inside the SAME schema via a literal is punted to the role).
+///
+/// # Errors
+/// [`ParseError::Syntax`] if `libpg_query` cannot parse the input (deny-by-default
+/// upstream — the guard already rejects unparseable SQL before this is reached).
+pub fn relations_touched(sql: &str) -> Result<Vec<TouchedRelation>, ParseError> {
+    let parsed = pg_query::parse(sql).map_err(|e| ParseError::Syntax(e.to_string()))?;
+    let mut out = Vec::new();
+    for raw_stmt in &parsed.protobuf.stmts {
+        let Some(node) = raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref()) else {
+            continue;
+        };
+        collect_touched(node, &mut out);
+    }
+    Ok(out)
+}
+
+/// Push the ownership-relevant target(s) of one top-level statement node.
+fn collect_touched(node: &NodeEnum, out: &mut Vec<TouchedRelation>) {
+    match node {
+        NodeEnum::CreateStmt(c) => {
+            if let Some(rel) = c.relation.as_ref() {
+                push_touched(out, &rel.relname, OwnershipNeed::Establishes);
+            }
+        }
+        NodeEnum::AlterTableStmt(at) => {
+            if let Some(rel) = at.relation.as_ref() {
+                push_touched(out, &rel.relname, OwnershipNeed::RequiresOwnership);
+            }
+        }
+        NodeEnum::RenameStmt(r) => {
+            if let Some(rel) = r.relation.as_ref() {
+                push_touched(out, &rel.relname, OwnershipNeed::RequiresOwnership);
+            }
+        }
+        NodeEnum::IndexStmt(idx) => {
+            if let Some(rel) = idx.relation.as_ref() {
+                push_touched(out, &rel.relname, OwnershipNeed::RequiresOwnership);
+            }
+        }
+        NodeEnum::InsertStmt(i) => {
+            if let Some(rel) = i.relation.as_ref() {
+                push_touched(out, &rel.relname, OwnershipNeed::RequiresOwnership);
+            }
+        }
+        NodeEnum::UpdateStmt(u) => {
+            if let Some(rel) = u.relation.as_ref() {
+                push_touched(out, &rel.relname, OwnershipNeed::RequiresOwnership);
+            }
+        }
+        NodeEnum::DeleteStmt(d) => {
+            if let Some(rel) = d.relation.as_ref() {
+                push_touched(out, &rel.relname, OwnershipNeed::RequiresOwnership);
+            }
+        }
+        NodeEnum::TruncateStmt(t) => {
+            for relnode in &t.relations {
+                if let Some(NodeEnum::RangeVar(rel)) = relnode.node.as_ref() {
+                    push_touched(out, &rel.relname, OwnershipNeed::RequiresOwnership);
+                }
+            }
+        }
+        NodeEnum::DropStmt(d) => {
+            // Only DROP TABLE keys the table-ownership map. The object is a List
+            // of String nodes [schema?, table]; the LAST element is the relname.
+            if d.remove_type == ObjectType::ObjectTable as i32 {
+                for obj in &d.objects {
+                    if let Some(NodeEnum::List(list)) = obj.node.as_ref() {
+                        if let Some(last) = list
+                            .items
+                            .iter()
+                            .filter_map(|i| string_value(i.node.as_ref()))
+                            .next_back()
+                        {
+                            push_touched(out, &last, OwnershipNeed::RequiresOwnershipForDrop);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Push a `(relation, need)` if the relname is non-empty, deduping on relname so a
+/// multi-statement script touching one table repeatedly yields one entry (keeping
+/// the STRONGEST need: a drop/alter is not weakened by a later establishes).
+fn push_touched(out: &mut Vec<TouchedRelation>, relname: &str, need: OwnershipNeed) {
+    if relname.is_empty() {
+        return;
+    }
+    if let Some(existing) = out.iter_mut().find(|t| t.relation == relname) {
+        // Keep the strongest need: a RequiresOwnership* never downgrades to
+        // Establishes (a CREATE then ALTER of the same table in one script still
+        // establishes; but an ALTER of a foreign table is never excused by a
+        // sibling CREATE of a DIFFERENT-but-same-named relation — same name folds).
+        if existing.need == OwnershipNeed::Establishes && need != OwnershipNeed::Establishes {
+            existing.need = need;
+        }
+        return;
+    }
+    out.push(TouchedRelation {
+        relation: relname.to_string(),
+        need,
+    });
+}

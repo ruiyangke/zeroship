@@ -67,11 +67,30 @@
 //! executor does not re-acquire it — and releases it on every exit path. The
 //! second submission blocks until the first has applied + journaled, then its
 //! dedup read sees the net-applied checksum and returns [`SubmissionOutcome::NoOp`].
+//!
+//! # Ownership: `owner_app` is UNTRUSTED (HIGH-2 / LOW-3)
+//!
+//! `submission.owner_app` is folded into the checksum but is NOT an authorization
+//! anchor. Ownership is enforced against a caller-supplied `ownership` map (bare
+//! table name → owning app), the same shape and semantics the declarative differ's
+//! `live_ownership` uses. After the guard and before the dry-run/apply, the adapter
+//! mirrors `declarative::enforce_ownership`: an `ALTER`/`DROP`/`RENAME` or DML
+//! against a relation the map attributes to a DIFFERENT app — or, for a `DROP`, one
+//! whose owner the map cannot confirm — is REFUSED
+//! ([`SubmissionOutcome::OwnershipDenied`], carrying the reused
+//! [`DeclarativeError::NotTableOwner`] / [`DeclarativeError::DropOfUnownedTable`]);
+//! a `CREATE TABLE` establishes ownership for `owner_app`. `owner_app` is COMPARED
+//! against the trusted map, never trusted as the principal, and the `applied_by`
+//! actor is recorded independently of it (LOW-3).
+
+use std::collections::HashMap;
 
 use compio_postgres::Client;
 
 use crate::approval::Approval;
+use crate::classify::{relations_touched, OwnershipNeed};
 use crate::db::ExecutorConfig;
+use crate::declarative::DeclarativeError;
 use crate::engine::{EngineError, MigrationEngine};
 use crate::executor::{self, LockMode};
 use crate::guard::{flags_for, GuardConfig, GuardError, SqlGuard};
@@ -93,6 +112,13 @@ pub struct Submission {
     /// The forward SQL to apply.
     pub up: String,
     /// The reverse SQL, or `None` for an explicitly irreversible migration.
+    ///
+    /// The `down` is guard-checked here (a malicious/broken reverse cannot slip
+    /// in) but is NOT folded into the apply-time approval gate even when it is
+    /// destructive (LOW-1): `down` runs only on a SEPARATELY-gated rollback
+    /// (`executor::rollback` / the engine rollback path), which makes its own
+    /// approval decision at rollback time. Gating the forward apply on the
+    /// destructiveness of a reverse that may never run would be the wrong axis.
     pub down: Option<String>,
     /// Cross-slice ordering dependencies (already-known migration versions).
     pub depends_on: Vec<MigrationId>,
@@ -154,6 +180,19 @@ pub enum SubmissionOutcome {
         /// own original version).
         version: MigrationId,
     },
+    /// The `up` tried to `ALTER`/`DROP`/`RENAME` or write (`INSERT`/`UPDATE`/
+    /// `DELETE`/`TRUNCATE`) a relation the deploying app does NOT own (HIGH-2).
+    /// Ownership is enforced against a caller-supplied ownership map — NOT the
+    /// submitter-supplied `owner_app`, which is untrusted. NOTHING was applied; the
+    /// real DB + journal are untouched. The carried [`DeclarativeError`] is the
+    /// REUSED [`DeclarativeError::NotTableOwner`] (a foreign-owned relation) or
+    /// [`DeclarativeError::DropOfUnownedTable`] (a `DROP` of a relation whose
+    /// ownership the map cannot confirm — fail-closed, mirroring the differ).
+    OwnershipDenied {
+        /// The reused declarative ownership error (`NotTableOwner` /
+        /// `DropOfUnownedTable`).
+        error: DeclarativeError,
+    },
 }
 
 /// A failure of the submission adapter itself (infrastructure, not a verdict).
@@ -198,14 +237,99 @@ impl MigrationEngine {
         cfg: &ExecutorConfig,
         shadow_cfg: &ShadowConfig,
         submission: Submission,
+        ownership: &HashMap<String, String>,
         approval: Approval,
         applied_by: &str,
     ) -> Result<SubmissionOutcome, SubmitError> {
         submit_migration(
-            conn, admin_conn, cfg, shadow_cfg, submission, approval, applied_by,
+            conn, admin_conn, cfg, shadow_cfg, submission, ownership, approval, applied_by,
         )
         .await
     }
+}
+
+/// Fail-closed ownership enforcement for the submit path (HIGH-2) — the adapter
+/// peer of [`declarative::enforce_ownership`](crate::declarative).
+///
+/// For each ownership-relevant relation the `up` touches (extracted from the SAME
+/// real-Postgres parse the guard uses, via
+/// [`relations_touched`](crate::classify::relations_touched)):
+///
+/// - [`OwnershipNeed::Establishes`] (`CREATE TABLE`) — always allowed; the
+///   deploying app (`owner_app`) becomes the owner. (The map is the journaled
+///   ownership ledger; a CREATE of an already-owned name is caught downstream as a
+///   dry-run / apply failure, not here.)
+/// - [`OwnershipNeed::RequiresOwnership`] (`ALTER`/`RENAME`/DML/`CREATE INDEX`) —
+///   allowed ONLY if `ownership[relation] == owner_app`. A DIFFERENT owner ⇒
+///   [`DeclarativeError::NotTableOwner`]. An UNKNOWN owner (no map entry) also
+///   fails closed as [`DeclarativeError::NotTableOwner`] (the deploying app cannot
+///   prove it owns the relation — it is treated as foreign, never auto-claimed by
+///   a non-CREATE).
+/// - [`OwnershipNeed::RequiresOwnershipForDrop`] (`DROP TABLE`) — a DIFFERENT
+///   owner ⇒ [`DeclarativeError::NotTableOwner`]; an UNKNOWN owner ⇒
+///   [`DeclarativeError::DropOfUnownedTable`] (mirrors the differ's fail-closed
+///   drop check, which refuses a destructive drop it cannot attribute).
+///
+/// Returns `Some(err)` on the FIRST refusal (nothing else runs), `None` if every
+/// touched relation is owned by `owner_app` (or only established).
+///
+/// `owner_app` is the submitter-supplied declaring app — used here only as the
+/// value to COMPARE against the trusted map, never as the authorization principal
+/// (a submitter cannot grant itself ownership by claiming `owner_app`).
+fn enforce_ownership(
+    up: &str,
+    owner_app: &str,
+    ownership: &HashMap<String, String>,
+) -> Option<DeclarativeError> {
+    // The guard already validated parseability before this is reached; on the
+    // (unreachable) parse failure, fail closed — refuse rather than skip the check.
+    let touched = match relations_touched(up) {
+        Ok(t) => t,
+        Err(_) => {
+            return Some(DeclarativeError::DropOfUnownedTable {
+                table: "<unparseable>".to_string(),
+            })
+        }
+    };
+    for t in touched {
+        match t.need {
+            OwnershipNeed::Establishes => {}
+            OwnershipNeed::RequiresOwnership => match ownership.get(&t.relation) {
+                Some(owner) if owner == owner_app => {}
+                Some(owner) => {
+                    return Some(DeclarativeError::NotTableOwner {
+                        table: t.relation,
+                        owner: owner.clone(),
+                        deploying_app: owner_app.to_string(),
+                    });
+                }
+                None => {
+                    // Unknown ownership for a non-CREATE structural/DML touch —
+                    // fail closed: the deploying app has not proven it owns this
+                    // relation, so treat it as foreign (never auto-claim).
+                    return Some(DeclarativeError::NotTableOwner {
+                        table: t.relation,
+                        owner: "<unknown>".to_string(),
+                        deploying_app: owner_app.to_string(),
+                    });
+                }
+            },
+            OwnershipNeed::RequiresOwnershipForDrop => match ownership.get(&t.relation) {
+                Some(owner) if owner == owner_app => {}
+                Some(owner) => {
+                    return Some(DeclarativeError::NotTableOwner {
+                        table: t.relation,
+                        owner: owner.clone(),
+                        deploying_app: owner_app.to_string(),
+                    });
+                }
+                None => {
+                    return Some(DeclarativeError::DropOfUnownedTable { table: t.relation });
+                }
+            },
+        }
+    }
+    None
 }
 
 /// Render a [`GuardError`] into the `(rule, statement)` pair of
@@ -229,12 +353,24 @@ fn denial(e: &GuardError) -> (String, String) {
 /// `submission`'s destructiveness is SERVER-DERIVED — see [`Submission`].
 ///
 /// Returns a [`SubmissionOutcome`] for every NON-infrastructure result (applied /
-/// approval-required / denied / dry-run-failed / no-op); a [`SubmitError`] only on
-/// an adapter-infrastructure fault.
+/// approval-required / denied / dry-run-failed / no-op / ownership-denied); a
+/// [`SubmitError`] only on an adapter-infrastructure fault.
+///
+/// # Ownership (HIGH-2)
+///
+/// `ownership` maps a BARE relation name → the owning app (`app_…`), exactly the
+/// shape the declarative differ's `live_ownership` uses. The adapter enforces it
+/// the same way `declarative::enforce_ownership` does: an `ALTER`/`DROP`/`RENAME`
+/// or DML against a relation the map attributes to a DIFFERENT app — or, for a
+/// `DROP`, one whose owner the map cannot confirm — is REFUSED
+/// ([`SubmissionOutcome::OwnershipDenied`]); a `CREATE TABLE` establishes
+/// ownership for `submission.owner_app`. The submitter-supplied `owner_app` is
+/// **UNTRUSTED**: it is checked against the map, never trusted as the
+/// authorization principal.
 ///
 /// # Errors
-/// [`SubmitError`] — see its variants. A guard denial, a dry-run failure, or a
-/// gate (approval) refusal are OUTCOMES, not errors.
+/// [`SubmitError`] — see its variants. A guard denial, an ownership refusal, a
+/// dry-run failure, or a gate (approval) refusal are OUTCOMES, not errors.
 #[allow(clippy::too_many_arguments)]
 pub async fn submit_migration(
     conn: &Client,
@@ -242,6 +378,7 @@ pub async fn submit_migration(
     cfg: &ExecutorConfig,
     shadow_cfg: &ShadowConfig,
     submission: Submission,
+    ownership: &HashMap<String, String>,
     approval: Approval,
     applied_by: &str,
 ) -> Result<SubmissionOutcome, SubmitError> {
@@ -267,6 +404,17 @@ pub async fn submit_migration(
             let (rule, statement) = denial(&e);
             return Ok(SubmissionOutcome::Denied { rule, statement });
         }
+    }
+
+    // ---- 2b. OWNERSHIP (HIGH-2): fail-closed on a foreign-owned relation ----
+    // Mirror `declarative::enforce_ownership`: a non-owner may USE a table's rows
+    // but may NOT ALTER/DROP/RENAME its structure or write to it. The submitter's
+    // `owner_app` is UNTRUSTED — ownership is decided by the caller-supplied map.
+    // Runs AFTER the guard (so the SQL is parseable + confined) and BEFORE the
+    // dry-run/apply (nothing runs on a refusal). The check is pure-parse — no DB —
+    // so it sits outside the project advisory lock.
+    if let Some(error) = enforce_ownership(&submission.up, &submission.owner_app, ownership) {
+        return Ok(SubmissionOutcome::OwnershipDenied { error });
     }
 
     // ---- 1. INGEST → Migration (flags SERVER-DERIVED from the guard report) ----

@@ -191,6 +191,44 @@ fn submission(name: &str, up: &str) -> Submission {
     }
 }
 
+/// An ownership map (bare table name → owning app) asserting `app_test` owns each
+/// of `tables` — what the journaled ownership ledger would carry after `app_test`
+/// CREATEd them. A `CREATE TABLE` establishes ownership and needs no entry; an
+/// `ALTER`/`DROP`/DML on an existing table must find its owner here (HIGH-2).
+fn owns(tables: &[&str]) -> std::collections::HashMap<String, String> {
+    tables
+        .iter()
+        .map(|t| ((*t).to_string(), "app_test".to_string()))
+        .collect()
+}
+
+/// The empty ownership map — for a submission that only CREATEs (establishes) or
+/// is refused before the ownership check (a guard denial).
+fn no_owners() -> std::collections::HashMap<String, String> {
+    std::collections::HashMap::new()
+}
+
+/// A submission declaring a custom `owner_app` (HIGH-2 cross-app tests).
+fn submission_as(name: &str, up: &str, owner_app: &str) -> Submission {
+    Submission {
+        name: name.to_string(),
+        up: up.to_string(),
+        down: None,
+        depends_on: Vec::new(),
+        repeatable: false,
+        timeout_ms: None,
+        owner_app: owner_app.to_string(),
+    }
+}
+
+/// An ownership map attributing each `table` to `owner`.
+fn owned_by(owner: &str, tables: &[&str]) -> std::collections::HashMap<String, String> {
+    tables
+        .iter()
+        .map(|t| ((*t).to_string(), owner.to_string()))
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 
 /// A benign CREATE TABLE submission ⇒ Applied; the table exists on the real DB.
@@ -211,7 +249,7 @@ async fn benign_create_table_submission_applies_for_real() {
         ),
     );
     let outcome = submit_migration(
-        &conn, &admin, &cfg, &shadow_cfg, sub, Approval::None, "app_test",
+        &conn, &admin, &cfg, &shadow_cfg, sub, &no_owners(), Approval::None, "app_test",
     )
     .await
     .expect("submit");
@@ -257,6 +295,7 @@ async fn drop_table_is_server_gated_then_applies_with_approval() {
             "create_legacy",
             &format!("CREATE TABLE \"{}\".legacy (id bigint)", cfg.project_schema),
         ),
+        &no_owners(),
         Approval::None,
         "app_test",
     )
@@ -276,6 +315,7 @@ async fn drop_table_is_server_gated_then_applies_with_approval() {
         &cfg,
         &shadow_cfg,
         drop.clone(),
+        &owns(&["legacy"]),
         Approval::None,
         "app_test",
     )
@@ -299,6 +339,7 @@ async fn drop_table_is_server_gated_then_applies_with_approval() {
         &cfg,
         &shadow_cfg,
         drop,
+        &owns(&["legacy"]),
         Approval::Approved,
         "app_test",
     )
@@ -340,6 +381,7 @@ async fn truncate_and_drop_column_are_always_gated() {
                 cfg.project_schema
             ),
         ),
+        &no_owners(),
         Approval::None,
         "app_test",
     )
@@ -356,6 +398,7 @@ async fn truncate_and_drop_column_are_always_gated() {
             "trunc",
             &format!("TRUNCATE TABLE \"{}\".widgets", cfg.project_schema),
         ),
+        &owns(&["widgets"]),
         Approval::None,
         "app_test",
     )
@@ -379,6 +422,7 @@ async fn truncate_and_drop_column_are_always_gated() {
                 cfg.project_schema
             ),
         ),
+        &owns(&["widgets"]),
         Approval::None,
         "app_test",
     )
@@ -421,6 +465,7 @@ async fn cross_schema_up_is_denied_and_runs_nothing() {
                 cfg.project_schema
             ),
         ),
+        &no_owners(),
         Approval::Approved,
         "app_test",
     )
@@ -443,6 +488,7 @@ async fn cross_schema_up_is_denied_and_runs_nothing() {
                 cfg.project_schema
             ),
         ),
+        &no_owners(),
         Approval::Approved,
         "app_test",
     )
@@ -487,7 +533,9 @@ async fn broken_sql_is_caught_on_the_shadow_and_leaves_prod_untouched() {
     let before = journal_completed_count(&conn, &cfg).await;
 
     // The `missing` table does not exist anywhere — guard-clean, but it fails to
-    // APPLY on the live-seeded shadow.
+    // APPLY on the live-seeded shadow. `app_test` is recorded as its owner so the
+    // HIGH-2 ownership check passes and the dry-run is what catches the broken SQL
+    // (the point of this test).
     let outcome = submit_migration(
         &conn,
         &admin,
@@ -500,6 +548,7 @@ async fn broken_sql_is_caught_on_the_shadow_and_leaves_prod_untouched() {
                 cfg.project_schema
             ),
         ),
+        &owns(&["missing"]),
         Approval::Approved,
         "app_test",
     )
@@ -553,6 +602,7 @@ async fn non_concurrent_index_applies_with_an_advisory() {
                 cfg.project_schema
             ),
         ),
+        &no_owners(),
         Approval::None,
         "app_test",
     )
@@ -571,6 +621,7 @@ async fn non_concurrent_index_applies_with_an_advisory() {
                 cfg.project_schema
             ),
         ),
+        &owns(&["items"]),
         Approval::None,
         "app_test",
     )
@@ -614,6 +665,7 @@ async fn idempotent_resubmit_is_a_noop() {
         &cfg,
         &shadow_cfg,
         submission("create_accounts", &up),
+        &no_owners(),
         Approval::None,
         "app_test",
     )
@@ -630,6 +682,7 @@ async fn idempotent_resubmit_is_a_noop() {
         &cfg,
         &shadow_cfg,
         submission("create_accounts", &up),
+        &no_owners(),
         Approval::None,
         "app_test",
     )
@@ -699,6 +752,7 @@ async fn concurrent_identical_submissions_apply_exactly_once() {
             &cfg_a,
             &shadow_cfg1,
             submission("create_ledger", &up_a),
+            &no_owners(),
             Approval::None,
             "app_test",
         )
@@ -712,6 +766,7 @@ async fn concurrent_identical_submissions_apply_exactly_once() {
         &cfg,
         &shadow_cfg2,
         submission("create_ledger", &up),
+        &no_owners(),
         Approval::None,
         "app_test",
     )
@@ -753,4 +808,164 @@ async fn concurrent_identical_submissions_apply_exactly_once() {
     );
 
     teardown(&observer, &cfg).await;
+}
+
+/// HIGH-2 — `owner_app` is UNTRUSTED. `app_B` may NOT ALTER/DROP/INSERT a table
+/// owned by `app_A` (per the ownership map), even though it CLAIMS
+/// `owner_app: "app_B"`. The refusal applies NOTHING (real DB + journal
+/// untouched). A CREATE of a NEW table by `app_B` IS allowed (establishes
+/// ownership). FAILS pre-fix (no ownership check existed on the submit path — the
+/// foreign ALTER/DROP/INSERT would have applied).
+#[compio::test]
+async fn cross_app_alter_drop_dml_is_refused_create_is_allowed() {
+    let conn = pg().await;
+    let admin = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    let (shadow_cfg, _sprefix) = unique_shadow_cfg();
+    setup(&conn, &cfg).await;
+
+    // app_A creates and owns `vault`.
+    let created = submit_migration(
+        &conn,
+        &admin,
+        &cfg,
+        &shadow_cfg,
+        submission_as(
+            "create_vault",
+            &format!(
+                "CREATE TABLE \"{}\".vault (id bigint PRIMARY KEY, secret text)",
+                cfg.project_schema
+            ),
+            "app_A",
+        ),
+        &no_owners(),
+        Approval::None,
+        "app_A",
+    )
+    .await
+    .expect("app_A create vault");
+    assert!(matches!(created, SubmissionOutcome::Applied { .. }));
+    assert!(table_exists(&conn, &cfg.project_schema, "vault").await);
+    let baseline = journal_completed_count(&conn, &cfg).await;
+
+    let map = owned_by("app_A", &["vault"]);
+
+    // app_B (claiming owner_app="app_B") tries to ALTER app_A's vault ⇒ refused.
+    let alter = submit_migration(
+        &conn,
+        &admin,
+        &cfg,
+        &shadow_cfg,
+        submission_as(
+            "b_alter",
+            &format!(
+                "ALTER TABLE \"{}\".vault ADD COLUMN backdoor text",
+                cfg.project_schema
+            ),
+            "app_B",
+        ),
+        &map,
+        Approval::Approved,
+        "app_B",
+    )
+    .await
+    .expect("submit b_alter");
+    assert!(
+        matches!(alter, SubmissionOutcome::OwnershipDenied { .. }),
+        "a non-owner ALTER must be OwnershipDenied, got {alter:?}"
+    );
+    assert!(
+        !column_exists(&conn, &cfg.project_schema, "vault", "backdoor").await,
+        "the refused ALTER must NOT have added the column"
+    );
+
+    // app_B tries to DROP app_A's vault ⇒ refused.
+    let drop = submit_migration(
+        &conn,
+        &admin,
+        &cfg,
+        &shadow_cfg,
+        submission_as(
+            "b_drop",
+            &format!("DROP TABLE \"{}\".vault", cfg.project_schema),
+            "app_B",
+        ),
+        &map,
+        Approval::Approved,
+        "app_B",
+    )
+    .await
+    .expect("submit b_drop");
+    assert!(
+        matches!(drop, SubmissionOutcome::OwnershipDenied { .. }),
+        "a non-owner DROP must be OwnershipDenied, got {drop:?}"
+    );
+    assert!(
+        table_exists(&conn, &cfg.project_schema, "vault").await,
+        "the refused DROP must NOT have dropped the table"
+    );
+
+    // app_B tries to INSERT into app_A's vault ⇒ refused.
+    let insert = submit_migration(
+        &conn,
+        &admin,
+        &cfg,
+        &shadow_cfg,
+        submission_as(
+            "b_insert",
+            &format!(
+                "INSERT INTO \"{}\".vault (id, secret) VALUES (1, 'stolen')",
+                cfg.project_schema
+            ),
+            "app_B",
+        ),
+        &map,
+        Approval::Approved,
+        "app_B",
+    )
+    .await
+    .expect("submit b_insert");
+    assert!(
+        matches!(insert, SubmissionOutcome::OwnershipDenied { .. }),
+        "a non-owner INSERT must be OwnershipDenied, got {insert:?}"
+    );
+
+    // NOTHING applied by any of the three refusals — journal untouched.
+    assert_eq!(
+        journal_completed_count(&conn, &cfg).await,
+        baseline,
+        "no refused cross-app submission may journal anything"
+    );
+
+    // app_B CREATEs its OWN new table ⇒ allowed (establishes ownership).
+    let own_create = submit_migration(
+        &conn,
+        &admin,
+        &cfg,
+        &shadow_cfg,
+        submission_as(
+            "b_create",
+            &format!(
+                "CREATE TABLE \"{}\".b_widgets (id bigint PRIMARY KEY)",
+                cfg.project_schema
+            ),
+            "app_B",
+        ),
+        &map,
+        Approval::None,
+        "app_B",
+    )
+    .await
+    .expect("submit b_create");
+    assert!(
+        matches!(own_create, SubmissionOutcome::Applied { .. }),
+        "app_B creating its OWN new table must be Applied, got {own_create:?}"
+    );
+    assert!(
+        table_exists(&conn, &cfg.project_schema, "b_widgets").await,
+        "app_B's own CREATE must have applied"
+    );
+
+    teardown(&conn, &cfg).await;
 }
