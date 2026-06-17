@@ -1271,7 +1271,7 @@ pub(crate) fn order_pending<'a>(
     completed: &HashMap<&str, &AppliedEntry>,
     satisfied: &std::collections::HashSet<&str>,
 ) -> Result<Vec<&'a Migration>, ApplyError> {
-    use std::collections::{BTreeMap, HashSet};
+    use std::collections::HashSet;
 
     // The pending set, indexed by version, plus the set of all known versions
     // (pending ∪ completed) for dependency-existence checks.
@@ -1289,54 +1289,76 @@ pub(crate) fn order_pending<'a>(
                 && !satisfied.contains(m.version.as_str())
         })
         .collect();
-    let pending_versions: HashSet<&str> =
-        pending.iter().map(|m| m.version.as_str()).collect();
-    let known: HashSet<&str> = pending_versions
-        .iter()
+    // Dependency edges to versions already satisfied by the journal/squash are
+    // pre-met: they must RESOLVE to a real version (set or journal) but impose no
+    // ordering on the batch. The shared Kahn core orders the PENDING subgraph;
+    // pre-met deps are supplied as `pre_satisfied`.
+    let pre_satisfied: HashSet<&str> = completed
+        .keys()
         .copied()
-        .chain(completed.keys().copied())
         .chain(satisfied.iter().copied())
         .collect();
+    topo_order_version_tiebroken(&pending, &pre_satisfied)
+}
 
-    // Validate every dependency resolves to a real version (set or journal), and
-    // build the in-degree + adjacency over the PENDING subgraph only (an edge from
-    // an already-completed dep imposes no ordering on the batch).
-    //
-    // `adj[dep]` = pending migrations that must run AFTER `dep`.
-    // `indeg[m]` = number of *pending* deps `m` is still waiting on.
+/// The SHARED canonical ordering core (M2): a deterministic, **version-tiebroken
+/// topological sort** of `nodes` over their `depends_on` edges. Both the apply
+/// path ([`order_pending`]) and the integrity manifest ([`canonical_set_order`],
+/// folded by [`crate::manifest::compute_manifest`]) order through this one
+/// implementation, so the order the manifest blesses can NEVER diverge from the
+/// order the executor runs.
+///
+/// `pre_satisfied` is the set of versions that resolve a dependency WITHOUT being
+/// in `nodes` (already net-applied / superseded in the journal). An edge to such a
+/// version is pre-met (no ordering constraint) but must still resolve; an edge to
+/// a version in neither `nodes` nor `pre_satisfied` is a dangling dependency.
+///
+/// Kahn with a version-ordered (`BTreeSet`) ready set: among nodes with no
+/// remaining unmet dep, the lowest `UUIDv7` version emits first. With no edges this
+/// degrades to pure ascending version order.
+///
+/// # Errors
+/// - [`ApplyError::MissingDependency`] — an edge names a version absent from both
+///   `nodes` and `pre_satisfied`.
+/// - [`ApplyError::DependencyCycle`] — the edges among `nodes` form a cycle.
+fn topo_order_version_tiebroken<'a>(
+    nodes: &[&'a Migration],
+    pre_satisfied: &std::collections::HashSet<&str>,
+) -> Result<Vec<&'a Migration>, ApplyError> {
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+    let node_versions: HashSet<&str> = nodes.iter().map(|m| m.version.as_str()).collect();
+
+    // adj[dep] = nodes that must run AFTER `dep`; indeg[m] = unmet in-set deps.
     let mut indeg: BTreeMap<&str, usize> =
-        pending.iter().map(|m| (m.version.as_str(), 0usize)).collect();
+        nodes.iter().map(|m| (m.version.as_str(), 0usize)).collect();
     let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
-    for m in &pending {
+    for m in nodes {
         for dep in &m.depends_on {
             let dep_v = dep.as_str();
-            if !known.contains(dep_v) {
+            if !node_versions.contains(dep_v) && !pre_satisfied.contains(dep_v) {
                 return Err(ApplyError::MissingDependency {
                     version: m.version.as_str().to_string(),
                     missing: dep_v.to_string(),
                 });
             }
-            // Only deps that are themselves PENDING constrain batch order; a dep
-            // already in the journal is pre-satisfied.
-            if pending_versions.contains(dep_v) {
+            // Only edges to another in-set node constrain order; a pre-satisfied
+            // dep imposes none.
+            if node_versions.contains(dep_v) {
                 adj.entry(dep_v).or_default().push(m.version.as_str());
-                *indeg.get_mut(m.version.as_str()).expect("pending node") += 1;
+                *indeg.get_mut(m.version.as_str()).expect("node") += 1;
             }
         }
     }
 
-    // Kahn's algorithm with a version-ordered ready set (BTreeSet keys are sorted),
-    // so the topo order is deterministic and version-tiebroken: among migrations
-    // with no remaining unmet dep, the lowest version emits first. This degrades to
-    // pure version order when no `depends_on` edges exist.
     let by_version: HashMap<&str, &Migration> =
-        pending.iter().map(|m| (m.version.as_str(), *m)).collect();
-    let mut ready: std::collections::BTreeSet<&str> = indeg
+        nodes.iter().map(|m| (m.version.as_str(), *m)).collect();
+    let mut ready: BTreeSet<&str> = indeg
         .iter()
         .filter(|(_, &d)| d == 0)
         .map(|(&v, _)| v)
         .collect();
-    let mut ordered: Vec<&Migration> = Vec::with_capacity(pending.len());
+    let mut ordered: Vec<&Migration> = Vec::with_capacity(nodes.len());
     while let Some(&v) = ready.iter().next() {
         ready.remove(v);
         ordered.push(by_version[v]);
@@ -1351,8 +1373,7 @@ pub(crate) fn order_pending<'a>(
         }
     }
 
-    if ordered.len() != pending.len() {
-        // The leftover nodes (still indeg > 0) are exactly the cycle members.
+    if ordered.len() != nodes.len() {
         let mut cyclic: Vec<&str> = indeg
             .iter()
             .filter(|(_, &d)| d > 0)
@@ -1362,6 +1383,40 @@ pub(crate) fn order_pending<'a>(
         return Err(ApplyError::DependencyCycle(cyclic.join(", ")));
     }
     Ok(ordered)
+}
+
+/// The CANONICAL EXECUTED ORDER of a FULL supplied set (M2), used by
+/// [`crate::manifest::compute_manifest`] to fold the manifest over the order the
+/// executor will actually run — NOT the cosmetic slice order.
+///
+/// This is [`topo_order_version_tiebroken`] over the WHOLE set with NO journal
+/// context (the control plane stamps the manifest before any apply, over the raw
+/// authored set), so it is exactly the order [`order_pending`] produces for an
+/// all-pending set. Two consequences the manifest relies on:
+///
+/// - a pure **slice reorder** of an additive set (no `depends_on`) sorts back to
+///   the SAME version order ⇒ the SAME manifest (no false mismatch);
+/// - a `depends_on` change that REORDERS execution sorts differently ⇒ a DIFFERENT
+///   manifest (also independently caught by C1's checksum fold).
+///
+/// On an unorderable set (a `depends_on` cycle, or a dangling dependency that
+/// names a version outside the set) there is no executed order — such a set never
+/// applies (the executor refuses it at [`order_pending`]). For the manifest we
+/// fall back to a DETERMINISTIC ascending-version order so the hash is still a
+/// stable function of the set (identical when the control plane stamps and when
+/// the engine verifies); the real cycle/dangling error surfaces at apply, not as a
+/// manifest mismatch. The manifest's job is integrity of the SET, not graph
+/// validation.
+#[must_use]
+pub(crate) fn canonical_set_order(migrations: &[Migration]) -> Vec<&Migration> {
+    let nodes: Vec<&Migration> = migrations.iter().collect();
+    let empty = std::collections::HashSet::new();
+    topo_order_version_tiebroken(&nodes, &empty).unwrap_or_else(|_| {
+        // Unorderable (cycle / dangling dep): deterministic version-sorted fallback.
+        let mut v: Vec<&Migration> = migrations.iter().collect();
+        v.sort_by(|a, b| a.version.as_str().cmp(b.version.as_str()));
+        v
+    })
 }
 
 /// Compute the set of versions made redundant by a SUPERSESSION (Plan 9 squash),
