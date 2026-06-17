@@ -30,7 +30,7 @@ use zeroship_migrate::{
     snapshot_schema, squash, status, Approval, Checksum, ChecksumInput, CollectionDescriptor,
     DeclarativeError, EngineError, ExecutorConfig, FieldDescriptor, GuardConfig, HistoryKind,
     ManifestHash, Migration, MigrationEngine, MigrationFlags, MigrationId, OnUnmet, Precondition,
-    PreconditionCheck, RenameHint, SchemaSnapshot, Severity, ShadowConfig, SquashError,
+    PreconditionCheck, SchemaSnapshot, Severity, ShadowConfig, SquashError,
 };
 
 const DEFAULT_DSN: &str =
@@ -1218,6 +1218,175 @@ async fn l9_manifest_tamper_rejected_before_any_side_effect() {
     // Both tables applied (canonical executed order is [a, b] regardless of slice).
     assert_eq!(out.applied, vec![a.version.as_str().to_string(), b.version.as_str().to_string()]);
     assert!(table_exists(&conn, &schema, "a").await && table_exists(&conn, &schema, "b").await);
+
+    teardown(&conn, &cfg).await;
+}
+
+// ===========================================================================
+// L-10 — multi-app union lifecycle (#19/#20/#21/#23/#24).
+//
+// App A declares `products`, deploys → App B declares `orders`(FK→products) +
+// uses `products`, deploys (the union grows; B's deploy emits only `orders`,
+// products is a no-op) → B re-declares `products` with a DIFFERENT shape →
+// ConflictingDeclaration → B deploys a union OMITTING A's `products` while it is
+// live + A-owned → NotTableOwner / DropOfUnownedTable fail-closed (A's table
+// persists). Asserts union growth + per-table ownership + fail-closed drop across
+// real deploys.
+// ===========================================================================
+
+fn field(name: &str, ty: &str) -> FieldDescriptor {
+    FieldDescriptor {
+        name: name.into(),
+        ty: ty.into(),
+        required: false,
+        unique: false,
+        references: None,
+    }
+}
+
+fn fk_field(name: &str, target: &str) -> FieldDescriptor {
+    FieldDescriptor {
+        name: name.into(),
+        ty: "ref".into(),
+        required: false,
+        unique: false,
+        references: Some(target.into()),
+    }
+}
+
+fn collection(name: &str, owner: &str, fields: Vec<FieldDescriptor>) -> CollectionDescriptor {
+    CollectionDescriptor {
+        name: name.into(),
+        owner_app: owner.into(),
+        fields,
+        indexes: vec![],
+    }
+}
+
+#[compio::test]
+async fn l10_multi_app_union_ownership_and_fail_closed_drop_lifecycle() {
+    use zeroship_migrate::DeclarativeAuthor;
+
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let engine = MigrationEngine::new();
+    let schema = cfg.project_schema.clone();
+    let author_a = DeclarativeAuthor::new(schema.clone(), "app_a");
+    let author_b = DeclarativeAuthor::new(schema.clone(), "app_b");
+
+    // --- DEPLOY 1 (app_a): declare `products`. The union is { products(app_a) }. ---
+    let products = || collection("products", "app_a", vec![field("name", "string")]);
+    let union_v1 = desired_snapshot(&schema, &[products()]).expect("union v1");
+    let plan1 = engine
+        .plan_declarative(&union_v1, &SchemaSnapshot::default(), &HashMap::new(), &author_a, &[], &guard_cfg(&cfg))
+        .expect("app_a plans products");
+    engine
+        .apply(&plan1.plain, Approval::None, &conn, &cfg, "app_a")
+        .await
+        .expect("app_a deploys products");
+    assert!(table_exists(&conn, &schema, "products").await, "products is live");
+
+    // --- DEPLOY 2 (app_b): declare `orders`(FK→products) + USE products (re-declare
+    //     the IDENTICAL products shape). The union grows to
+    //     { products(app_a), orders(app_b) }; B's deploy emits ONLY `orders`
+    //     (products == live ⇒ no op, no owner violation). ---
+    let orders = collection(
+        "orders",
+        "app_b",
+        vec![field("qty", "number"), fk_field("product", "products")],
+    );
+    let union_v2 = desired_snapshot(&schema, &[products(), orders]).expect("union v2");
+    let live = snapshot_schema(&conn, &schema).await.expect("snap after deploy 1");
+    let plan2 = engine
+        .plan_declarative(&union_v2, &live, &HashMap::new(), &author_b, &[], &guard_cfg(&cfg))
+        .expect("app_b plans orders (products is a no-op)");
+    // Every emitted op targets `orders` only — products is untouched (no-op).
+    assert!(
+        plan2.plain.items.iter().all(|m| m.migration.up.contains("orders")),
+        "app_b's deploy must emit ONLY orders ops; got {:?}",
+        plan2.plain.items.iter().map(|m| &m.migration.name).collect::<Vec<_>>()
+    );
+    engine
+        .apply(&plan2.plain, Approval::None, &conn, &cfg, "app_b")
+        .await
+        .expect("app_b deploys orders with a cross-app FK to products");
+    assert!(table_exists(&conn, &schema, "orders").await, "orders is live");
+    // The cross-app FK materialised (orders → products).
+    let live2 = snapshot_schema(&conn, &schema).await.expect("snap after deploy 2");
+    assert!(
+        live2.tables["orders"].constraints.iter().any(|c| c.kind == "FOREIGN KEY"),
+        "orders must carry the cross-app FK to products"
+    );
+    // The whole union re-diffs clean.
+    let drift = diff_snapshots(&union_v2.snapshot, &live2);
+    assert!(drift.missing_objects.is_empty(), "union drift after deploy 2: {:?}", drift.missing_objects);
+
+    // --- CONFLICT: app_b re-declares `products` with a DIFFERENT shape (an extra
+    //     field) → ConflictingDeclaration (one table, one owner; a conflicting
+    //     re-declaration is a hard deploy error, never a silent last-writer merge). ---
+    let products_b_shape = collection("products", "app_b", vec![field("name", "string"), field("sku", "string")]);
+    let conflicting_union = desired_snapshot(&schema, &[products_b_shape]).expect("conflicting union builds");
+    // The conflict is detected at diff time (two apps, differing shapes for the
+    // same table). We supply BOTH declarers so the union merge sees the conflict.
+    let conflict_union = desired_snapshot(
+        &schema,
+        &[products(), collection("products", "app_b", vec![field("name", "string"), field("sku", "string")])],
+    );
+    match conflict_union {
+        Ok(_) => panic!("desired_snapshot must reject two differing declarations of the same table"),
+        Err(DeclarativeError::ConflictingDeclaration { ref table, ref apps }) => {
+            assert_eq!(table, "products");
+            assert!(
+                apps.contains(&"app_a".to_string()) && apps.contains(&"app_b".to_string()),
+                "the conflict must name both declarers (sorted, deduped); got {apps:?}"
+            );
+        }
+        Err(other) => panic!("expected ConflictingDeclaration, got {other:?}"),
+    }
+    // (A single-declarer conflicting shape still builds a snapshot; the union-level
+    // conflict only fires when two apps declare the same table differently.)
+    let _ = conflicting_union;
+
+    // --- FAIL-CLOSED DROP: app_b deploys a PARTIAL union OMITTING A's products
+    //     while products is live + A-owned. With live_ownership{products: app_a},
+    //     the differ refuses to drop it under app_b's authority → NotTableOwner. ---
+    let live_now = snapshot_schema(&conn, &schema).await.expect("snap before partial deploy");
+    let partial = desired_snapshot(&schema, &[collection("orders", "app_b", vec![field("qty", "number"), fk_field("product", "products")])])
+        .expect("partial union (only app_b's orders)");
+    let ownership: HashMap<String, String> = [
+        ("products".to_string(), "app_a".to_string()),
+        ("orders".to_string(), "app_b".to_string()),
+    ]
+    .into_iter()
+    .collect();
+    let err = engine
+        .plan_declarative(&partial, &live_now, &ownership, &author_b, &[], &guard_cfg(&cfg))
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DeclarativeError::NotTableOwner { ref table, ref owner, ref deploying_app }
+                if table == "products" && owner == "app_a" && deploying_app == "app_b"
+        ),
+        "a partial-union deploy omitting a foreign-owned live table must fail closed (NotTableOwner); got {err:?}"
+    );
+
+    // --- FAIL-CLOSED DROP (unknown ownership): the same partial deploy with NO
+    //     ownership entry for products fails closed with DropOfUnownedTable. ---
+    let err = engine
+        .plan_declarative(&partial, &live_now, &HashMap::new(), &author_b, &[], &guard_cfg(&cfg))
+        .unwrap_err();
+    assert!(
+        matches!(err, DeclarativeError::DropOfUnownedTable { ref table } if table == "products"),
+        "a drop of an ownership-unknown live table must fail closed (DropOfUnownedTable); got {err:?}"
+    );
+
+    // A's table persists through every refused deploy (no foreign drop ran).
+    assert!(table_exists(&conn, &schema, "products").await, "app_a's products survives the fail-closed refusals");
+    assert!(table_exists(&conn, &schema, "orders").await);
 
     teardown(&conn, &cfg).await;
 }
