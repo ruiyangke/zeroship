@@ -1806,6 +1806,203 @@ async fn rename_hint_with_a_type_mismatch_is_an_error() {
 }
 
 // ---------------------------------------------------------------------------
+// P3 Feature 1 — cross-hint rename-hint validation (H1/H2/M1/M2).
+//
+// `resolve_rename_hints` validates each hint independently (from live-only, to
+// desired-only, type identity). These tests lock the CROSS-hint guards: no
+// duplicate from/to per table (H1), no rename chains (H2), no no-op from==to
+// (M1), and the (already-correct) CREATE'd/DROP'd-table rejection (M2).
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn two_hints_sharing_a_to_are_rejected_as_duplicate() {
+    // H1: `[a→c, b→c]` — two hints targeting the SAME new column `c`. Resolved
+    // independently they'd both emit `ADD COLUMN c` (the second fails
+    // `already exists`). The cross-hint pass rejects it as a duplicate `to`.
+    let cfg = cfg_for(&token());
+    let author = author_for(&cfg);
+
+    let live = {
+        let desc = CollectionDescriptor {
+            name: "users".into(),
+            fields: vec![
+                FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None },
+                FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None },
+            ],
+            indexes: vec![],
+        };
+        desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
+    };
+    let desired = {
+        let desc = CollectionDescriptor {
+            name: "users".into(),
+            // Both old columns map onto a single new column `c`.
+            fields: vec![FieldDescriptor { name: "c".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            indexes: vec![],
+        };
+        desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
+    };
+    let hints = vec![
+        RenameHint { table: "users".into(), from: "a".into(), to: "c".into() },
+        RenameHint { table: "users".into(), from: "b".into(), to: "c".into() },
+    ];
+    let err = author.diff(&desired, &live, &hints).unwrap_err();
+    assert!(
+        matches!(err, DeclarativeError::DuplicateRenameHint { side: "to", .. }),
+        "got {err:?}"
+    );
+}
+
+#[compio::test]
+async fn two_hints_sharing_a_from_are_rejected_as_duplicate() {
+    // H1: `[a→c, a→d]` — two hints renaming the SAME old column `a`. Resolved
+    // independently they'd both drop `a` (double `DROP COLUMN a`). The cross-hint
+    // pass rejects it as a duplicate `from`.
+    let cfg = cfg_for(&token());
+    let author = author_for(&cfg);
+
+    let live = {
+        let desc = CollectionDescriptor {
+            name: "users".into(),
+            fields: vec![FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            indexes: vec![],
+        };
+        desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
+    };
+    let desired = {
+        let desc = CollectionDescriptor {
+            name: "users".into(),
+            fields: vec![
+                FieldDescriptor { name: "c".into(), ty: "string".into(), required: false, unique: false, references: None },
+                FieldDescriptor { name: "d".into(), ty: "string".into(), required: false, unique: false, references: None },
+            ],
+            indexes: vec![],
+        };
+        desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
+    };
+    let hints = vec![
+        RenameHint { table: "users".into(), from: "a".into(), to: "c".into() },
+        RenameHint { table: "users".into(), from: "a".into(), to: "d".into() },
+    ];
+    let err = author.diff(&desired, &live, &hints).unwrap_err();
+    assert!(
+        matches!(err, DeclarativeError::DuplicateRenameHint { side: "from", .. }),
+        "got {err:?}"
+    );
+}
+
+#[compio::test]
+async fn a_rename_chain_is_rejected_explicitly_not_incidentally() {
+    // H2: `[a→b, b→c]` — `b` is both the target of one hint and the source of
+    // another. This is a CHAIN; reject it with the explicit RenameHintChained
+    // error (NOT an incidental RenameHintUnmatched).
+    let cfg = cfg_for(&token());
+    let author = author_for(&cfg);
+
+    let live = {
+        let desc = CollectionDescriptor {
+            name: "users".into(),
+            fields: vec![
+                FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None },
+                FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None },
+            ],
+            indexes: vec![],
+        };
+        desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
+    };
+    let desired = {
+        let desc = CollectionDescriptor {
+            name: "users".into(),
+            fields: vec![
+                FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None },
+                FieldDescriptor { name: "c".into(), ty: "string".into(), required: false, unique: false, references: None },
+            ],
+            indexes: vec![],
+        };
+        desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
+    };
+    let hints = vec![
+        RenameHint { table: "users".into(), from: "a".into(), to: "b".into() },
+        RenameHint { table: "users".into(), from: "b".into(), to: "c".into() },
+    ];
+    let err = author.diff(&desired, &live, &hints).unwrap_err();
+    assert!(
+        matches!(err, DeclarativeError::RenameHintChained { ref column, .. } if column == "b"),
+        "got {err:?}"
+    );
+}
+
+#[compio::test]
+async fn a_noop_rename_hint_from_equals_to_is_a_precise_error() {
+    // M1: `from == to` is a no-op rename. It must produce the PRECISE
+    // RenameHintNoop error, not the misleading RenameHintUnmatched.
+    let cfg = cfg_for(&token());
+    let author = author_for(&cfg);
+
+    let live = {
+        let desc = CollectionDescriptor {
+            name: "users".into(),
+            fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            indexes: vec![],
+        };
+        desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
+    };
+    // Same shape on both sides; the only "change" is the no-op hint.
+    let desired = live.clone();
+    let hints = vec![RenameHint { table: "users".into(), from: "email".into(), to: "email".into() }];
+    let err = author.diff(&desired, &live, &hints).unwrap_err();
+    assert!(
+        matches!(err, DeclarativeError::RenameHintNoop { ref column, .. } if column == "email"),
+        "got {err:?}"
+    );
+}
+
+#[compio::test]
+async fn a_hint_on_a_created_table_is_unmatched() {
+    // M2: a hint on a table absent from LIVE (being CREATE'd) cannot be a rename
+    // (a rename is in-place on an existing table) → RenameHintUnmatched. Locks the
+    // already-correct `live.tables.get` guard.
+    let cfg = cfg_for(&token());
+    let author = author_for(&cfg);
+
+    // Live has NO `posts` table; desired CREATEs it.
+    let live = SchemaSnapshot::default();
+    let desired = {
+        let desc = CollectionDescriptor {
+            name: "posts".into(),
+            fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            indexes: vec![],
+        };
+        desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
+    };
+    let hints = vec![RenameHint { table: "posts".into(), from: "old".into(), to: "body".into() }];
+    let err = author.diff(&desired, &live, &hints).unwrap_err();
+    assert!(matches!(err, DeclarativeError::RenameHintUnmatched { .. }), "got {err:?}");
+}
+
+#[compio::test]
+async fn a_hint_on_a_dropped_table_is_unmatched() {
+    // M2: a hint on a table absent from DESIRED (being DROP'd) cannot be a rename
+    // → RenameHintUnmatched. Locks the already-correct `desired.tables.get` guard.
+    let cfg = cfg_for(&token());
+    let author = author_for(&cfg);
+
+    // Live has `posts`; desired DROPs it (empty desired).
+    let live = {
+        let desc = CollectionDescriptor {
+            name: "posts".into(),
+            fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            indexes: vec![],
+        };
+        desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
+    };
+    let desired = SchemaSnapshot::default();
+    let hints = vec![RenameHint { table: "posts".into(), from: "body".into(), to: "renamed".into() }];
+    let err = author.diff(&desired, &live, &hints).unwrap_err();
+    assert!(matches!(err, DeclarativeError::RenameHintUnmatched { .. }), "got {err:?}");
+}
+
+// ---------------------------------------------------------------------------
 // P3 Feature 2 — type + nullability changes (gated type / SET NOT NULL, ungated
 // DROP NOT NULL).
 // ---------------------------------------------------------------------------
