@@ -1347,6 +1347,42 @@ fn sequence_owned_by_foreign_schema_column_is_cross_schema() {
     assert_cross_schema("CREATE SEQUENCE project_acme.s OWNED BY control.t.c");
 }
 
+// ---------------------------------------------------------------------------
+// CREATE DOMAIN / ALTER DOMAIN — plain schema DDL (constrained base type),
+// safe under BOTH profiles (Phase-4 port gap: the billing changesets 0037/
+// 0046/0048/0049/0052/0053/0054/0056 define + alter domains). Still
+// target-schema-confined for Confined, and CREATE OPERATOR (also a privileged
+// DefineStmt-family construct) stays denied.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn create_domain_into_own_schema_is_allowed() {
+    // A constrained TEXT/DATE domain in the project's own schema is fine.
+    assert_ok(
+        "CREATE DOMAIN project_acme.billing_period AS date CHECK (EXTRACT(DAY FROM VALUE) = 1)",
+    );
+    assert_ok(
+        "CREATE DOMAIN project_acme.kind AS text CHECK (VALUE IN ('charge','refund'))",
+    );
+}
+
+#[test]
+fn alter_domain_constraint_in_own_schema_is_allowed() {
+    // ALTER DOMAIN … DROP/ADD CONSTRAINT (0054's refund_status widening pattern).
+    assert_ok("ALTER DOMAIN project_acme.refund_status DROP CONSTRAINT refund_status_check");
+    assert_ok(
+        "ALTER DOMAIN project_acme.refund_status \
+         ADD CONSTRAINT refund_status_check CHECK (VALUE IN ('pending','issued','failed'))",
+    );
+}
+
+#[test]
+fn create_domain_into_foreign_schema_is_cross_schema() {
+    // The domain's CREATION TARGET schema is confined just like a type target:
+    // a Confined migrator may not plant a domain into a foreign/system schema.
+    assert_cross_schema("CREATE DOMAIN control.evil AS text");
+}
+
 #[test]
 fn sequence_owned_by_own_table_passes() {
     // 2-part `table.column` (no schema) and 3-part own-schema both fine.

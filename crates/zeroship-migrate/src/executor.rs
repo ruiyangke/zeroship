@@ -412,10 +412,10 @@ fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
 /// transaction as the `up`.
 fn set_local_session_sql(cfg: &ExecutorConfig, m: &Migration) -> String {
     format!(
-        "SET LOCAL search_path TO \"{}\"; \
+        "SET LOCAL search_path TO {}; \
          SET LOCAL statement_timeout = {}; \
          SET LOCAL lock_timeout = {};",
-        cfg.project_schema.replace('"', "\"\""),
+        cfg.search_path_clause(),
         effective_timeout_ms(cfg, m),
         cfg.lock_timeout_ms(),
     )
@@ -447,8 +447,8 @@ async fn configure_session_non_txn(
     m: &Migration,
 ) -> Result<(), ApplyError> {
     let stmt = format!(
-        "SET search_path TO \"{}\"; SET statement_timeout = {}; SET lock_timeout = {};",
-        cfg.project_schema.replace('"', "\"\""),
+        "SET search_path TO {}; SET statement_timeout = {}; SET lock_timeout = {};",
+        cfg.search_path_clause(),
         effective_timeout_ms(cfg, m),
         cfg.lock_timeout_ms(),
     );
