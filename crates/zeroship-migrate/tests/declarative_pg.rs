@@ -1171,8 +1171,8 @@ async fn conflicting_declaration_across_apps_is_rejected_not_silently_merged() {
     assert!(
         matches!(
             err,
-            DeclarativeError::ConflictingDeclaration { ref table, ref app_a, ref app_b }
-                if table == "dup" && app_a == "app_a" && app_b == "app_b"
+            DeclarativeError::ConflictingDeclaration { ref table, ref apps }
+                if table == "dup" && apps == &["app_a".to_string(), "app_b".to_string()]
         ),
         "got {err:?}"
     );
@@ -1180,9 +1180,9 @@ async fn conflicting_declaration_across_apps_is_rejected_not_silently_merged() {
 
 #[compio::test]
 async fn conflict_app_pair_is_deterministic_regardless_of_descriptor_order() {
-    // P4 determinism: the ConflictingDeclaration (app_a, app_b) pair is reported
-    // smallest-first REGARDLESS of which descriptor came first. A critic could
-    // otherwise see a different error per input order; lock order-independence.
+    // P4 determinism: the ConflictingDeclaration `apps` set is reported sorted
+    // REGARDLESS of which descriptor came first. A critic could otherwise see a
+    // different error per input order; lock order-independence.
     let cfg = cfg_for(&token());
     let mk = |app: &str, field: &str| CollectionDescriptor {
         name: "dup".into(),
@@ -1198,11 +1198,52 @@ async fn conflict_app_pair_is_deterministic_regardless_of_descriptor_order() {
         assert!(
             matches!(
                 err,
-                DeclarativeError::ConflictingDeclaration { table, app_a, app_b }
-                    if table == "dup" && app_a == "app_a" && app_b == "app_z"
+                DeclarativeError::ConflictingDeclaration { table, apps }
+                    if table == "dup" && apps == &["app_a".to_string(), "app_z".to_string()]
             ),
-            "conflict must report (app_a, app_z) regardless of order, got {err:?}"
+            "conflict must report sorted [app_a, app_z] regardless of order, got {err:?}"
         );
+    }
+}
+
+#[compio::test]
+async fn conflict_with_three_declarers_reports_deterministic_set_across_permutations() {
+    // 1b: with 3 apps declaring the same table — two IDENTICAL (A,B share shapeX)
+    // and one DIFFERENT (C shapeY) — the reported conflict must be IDENTICAL across
+    // every descriptor permutation. The old code reported `order_pair(slot_owner,
+    // latecomer)` on the first mismatch, so the pair flapped with which identical
+    // twin (A or B) held the slot when C arrived. Now the full sorted declarer set
+    // is reported, which is order-invariant.
+    let cfg = cfg_for(&token());
+    // A and B are byte-identical (shapeX: field `x`); C differs (shapeY: field `y`).
+    let mk = |app: &str, field: &str| CollectionDescriptor {
+        name: "tbl".into(),
+        owner_app: app.into(),
+        fields: vec![FieldDescriptor { name: field.into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let a = || mk("app_a", "x");
+    let b = || mk("app_b", "x"); // identical shape to A
+    let c = || mk("app_c", "y"); // different shape
+
+    let permutations: [[CollectionDescriptor; 3]; 3] = [
+        [a(), b(), c()],
+        [b(), c(), a()],
+        [c(), a(), b()],
+    ];
+    let expected = vec!["app_a".to_string(), "app_b".to_string(), "app_c".to_string()];
+    for perm in permutations {
+        let err = desired_snapshot(&cfg.project_schema, &perm).unwrap_err();
+        match err {
+            DeclarativeError::ConflictingDeclaration { table, apps } => {
+                assert_eq!(table, "tbl", "table name");
+                assert_eq!(
+                    apps, expected,
+                    "the conflict must report the SAME sorted declarer set for every permutation"
+                );
+            }
+            other => panic!("expected ConflictingDeclaration, got {other:?}"),
+        }
     }
 }
 
