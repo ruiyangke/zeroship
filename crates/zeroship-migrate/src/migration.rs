@@ -183,6 +183,13 @@ pub struct Checksum(String);
 
 impl Checksum {
     /// Compute the checksum of `(up, down, preconditions)`.
+    ///
+    /// # Panics
+    /// Panics only if a [`PreconditionCheck`] fails to JSON-serialize — which is
+    /// infallible for these plain enums/strings (no maps, no non-string keys), so
+    /// in practice it never panics. We `.expect` rather than swallow a failure to
+    /// a default, because a silent empty serialization would collide two distinct
+    /// preconditions into the same security checksum.
     #[must_use]
     pub fn of(up: &str, down: Option<&str>, preconditions: &[PreconditionCheck]) -> Self {
         let mut hasher = Sha256::new();
@@ -213,7 +220,13 @@ impl Checksum {
         for pc in preconditions {
             // serde_json over the value types is deterministic for these enums
             // (no maps), so the canonical bytes are stable across runs.
-            let json = serde_json::to_string(pc).unwrap_or_default();
+            // `.expect` (not `.unwrap_or_default()`): a PreconditionCheck is
+            // infallibly serializable (plain enums/strings, no maps/non-string
+            // keys), so serialization cannot fail; if it ever did, an empty
+            // string would silently collide two DISTINCT preconditions into the
+            // SAME checksum (a tamper-evidence hole). Fail loud instead.
+            let json = serde_json::to_string(pc)
+                .expect("PreconditionCheck is infallibly serializable");
             hasher.update((json.len() as u64).to_be_bytes());
             hasher.update(json.as_bytes());
         }
