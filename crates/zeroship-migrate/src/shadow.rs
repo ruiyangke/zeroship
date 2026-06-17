@@ -300,28 +300,72 @@ fn panic_seam_armed() -> bool {
 }
 
 /// Derive the shadow's own [`ExecutorConfig`] from the real `cfg` + the shadow
-/// DB name — used so the shadow provisions (and applies under) a UNIQUELY-NAMED
-/// migrator role that NEVER collides with, nor touches, the real project's
-/// cluster-global role (H1 fix).
+/// DB name — so the shadow apply mirrors the SOURCE config's TRUST PROFILE
+/// faithfully (the role model the real apply uses), against a throwaway DB whose
+/// `project_id` is unique.
 ///
-/// Only two fields change versus the real `cfg`:
-/// - `project_id` → the shadow DB name (already unique + sanitized). Both
-///   [`provision_migrator`] and [`executor::apply`] derive the role name from
-///   `project_id` (via [`migrator_role_name`]), and the advisory-lock key is
-///   `hashtext(project_id)` — so a shadow-unique `project_id` yields a
-///   shadow-unique role AND a shadow-unique lock (no contention with the real
-///   project's apply lock).
-/// - `migrator_role` → `migrator_role_name(shadow project_id)`, so the
-///   executor's `SET ROLE` targets the same role `provision_migrator` created.
+/// # Why mirror the trust profile (the faithfulness fix)
 ///
-/// `project_schema` / `meta_schema` are UNCHANGED — the migration SQL hard-codes
-/// `project_schema`, so the shadow must carry the identical name (the whole
-/// reason Plan C clones a DATABASE, not a schema).
+/// The REAL apply runs under a profile-specific role model (design §1.3 / §8):
+/// - **Confined** (creator path) applies under a least-privilege NOSUPERUSER
+///   `migrator` role via `SET ROLE`.
+/// - **Platform** (operator path) applies as the ADMIN connection with NO
+///   `SET ROLE`, because privileged platform DDL (`CREATE ROLE` / `GRANT` /
+///   `CREATE SCHEMA` / `CREATE EXTENSION`) is exactly what a NOSUPERUSER role
+///   CANNOT do.
+///
+/// If the shadow always provisioned + applied under a NOSUPERUSER migrator role,
+/// a privileged Platform set would FAIL on the shadow (`dry_run.ok == false`) —
+/// a FALSE NEGATIVE for the migrations the Platform profile exists to handle. So
+/// the shadow derives its role model from `cfg.trust`:
+///
+/// - **Platform source** ⇒ a shadow Platform [`ExecutorConfig`]
+///   ([`ExecutorConfig::platform`], same schema + extension allowlist) with
+///   `migrator_role = None` — the apply runs as the shadow's admin connection,
+///   exactly as the real Platform apply does (§8). The deny-list guard still runs
+///   on the shadow SQL; the shadow is a throwaway DB; so this is NOT escalation.
+/// - **Confined source** ⇒ UNCHANGED: a shadow-UNIQUE NOSUPERUSER migrator role
+///   (`migrator_role_name(shadow project_id)`) provisioned + `SET ROLE`'d, so the
+///   creator confinement stays faithful on the shadow too (H1).
+///
+/// In BOTH cases `project_id` → the shadow DB name (unique + sanitized): the
+/// advisory-lock key is `hashtext(project_id)` and the migrator role name (when
+/// any) derives from it, so the shadow never contends with, nor touches, the real
+/// project's apply lock or cluster-global role. `project_schema` / `meta_schema`
+/// / timeouts are UNCHANGED — the migration SQL hard-codes `project_schema`, so
+/// the shadow must carry the identical name (the whole reason Plan C clones a
+/// DATABASE, not a schema).
 fn shadow_executor_cfg(cfg: &ExecutorConfig, shadow_db: &str) -> Result<ExecutorConfig, RoleError> {
-    let mut shadow_cfg = cfg.clone();
-    shadow_cfg.project_id = shadow_db.to_string();
-    shadow_cfg.migrator_role = Some(migrator_role_name(shadow_db)?);
-    Ok(shadow_cfg)
+    if cfg.trust == crate::guard::TrustProfile::Platform {
+        // Platform source: mirror the operator-side admin-connection apply (§8).
+        // Mint a token via the CONFINED `platform_runner` seam (the shadow harness
+        // is operator-side, like the CLI runners). NO migrator role / SET ROLE, and
+        // the SAME schema + extension allowlist as the source so the widened guard
+        // and `search_path` are identical to the real Platform apply.
+        let cap = crate::guard::platform_runner::mint_shadow_platform_capability();
+        let mut sc = ExecutorConfig::platform(
+            &cap,
+            shadow_db.to_string(),
+            cfg.project_schema.clone(),
+            cfg.platform_schemas.clone(),
+            cfg.platform_exts.clone(),
+        );
+        // Carry the byte-faithful fields the `platform` ctor does not take.
+        sc.meta_schema.clone_from(&cfg.meta_schema);
+        sc.statement_timeout = cfg.statement_timeout;
+        sc.lock_timeout = cfg.lock_timeout;
+        // Platform applies as the admin connection — NO SET ROLE (§8).
+        sc.migrator_role = None;
+        Ok(sc)
+    } else {
+        // Confined source: UNCHANGED — a shadow-UNIQUE least-privilege migrator
+        // role (H1), provisioned + `SET ROLE`'d so the creator confinement stays
+        // faithful on the shadow too.
+        let mut sc = cfg.clone();
+        sc.project_id = shadow_db.to_string();
+        sc.migrator_role = Some(migrator_role_name(shadow_db)?);
+        Ok(sc)
+    }
 }
 
 /// Dry-run a migration batch against a throwaway shadow DATABASE clone (Mode A —
@@ -538,8 +582,10 @@ async fn dry_run_incremental_body(
     }
 
     // Up-front guard pass — gather advisories per migration (advisory-only; the
-    // executor::apply below re-runs the guard as the real gate).
-    let guard = SqlGuard::new(GuardConfig::confined(cfg.project_schema.clone()));
+    // executor::apply below re-runs the guard as the real gate). Build the guard
+    // from the SHADOW cfg's profile (`cfg.guard_config()`) so a Platform set is
+    // linted under the widened guard, not the Confined deny-list (faithfulness).
+    let guard = SqlGuard::new(cfg.guard_config());
     let mut advisories: Vec<(String, Vec<Advisory>)> = Vec::new();
     for m in migrations {
         let version = m.version.as_str().to_string();
@@ -638,10 +684,18 @@ async fn open_and_provision_shadow(
         ))
         .await
         .map_err(DryRunError::Admin)?;
-    // Provision the confined migrator role on the shadow, exactly as the real DB
-    // has one — so the apply runs under the SAME least-privilege confinement. The
-    // role name is shadow-unique (derived from `cfg.project_id` == shadow DB).
-    provision_migrator(&shadow, cfg).await?;
+    // Provision the confined migrator role on the shadow ONLY for a Confined
+    // dry-run — exactly as the real creator DB has one, so the apply runs under the
+    // SAME least-privilege confinement (role name shadow-unique, derived from
+    // `cfg.project_id` == shadow DB). A PLATFORM dry-run mirrors the real Platform
+    // apply (§8): it runs as the admin connection with NO migrator role, so there
+    // is no role to provision (privileged platform DDL needs admin, not a
+    // NOSUPERUSER role). The branch is keyed on `migrator_role` (set by
+    // [`shadow_executor_cfg`] from the source's trust profile), so the role-skip is
+    // strictly Platform-only — a Confined dry-run ALWAYS provisions + SET ROLEs.
+    if cfg.migrator_role.is_some() {
+        provision_migrator(&shadow, cfg).await?;
+    }
     Ok((shadow, run_loop))
 }
 
@@ -774,7 +828,10 @@ async fn dry_run_body(
     // produce). The executor::apply call below re-runs the guard as the real gate,
     // so a denial is surfaced per-migration from its error — this pass only
     // enriches the report with advisories, never gates.
-    let guard = SqlGuard::new(GuardConfig::confined(cfg.project_schema.clone()));
+    // Build the advisory guard from the SHADOW cfg's profile (`cfg.guard_config()`)
+    // so a Platform set is linted under the widened guard, not the Confined
+    // deny-list — the executor::apply below re-runs the same guard as the real gate.
+    let guard = SqlGuard::new(cfg.guard_config());
     let mut per_migration: Vec<MigrationResult> = Vec::new();
     let mut advisories: Vec<(String, Vec<Advisory>)> = Vec::new();
     for m in migrations {
@@ -1065,15 +1122,20 @@ async fn teardown_shadow(
     }
 
     // 2. Drop the cluster-global shadow migrator role (survives DROP DATABASE).
-    //    Runs after the DB drop so the role owns nothing left to reassign.
-    if let Err(e) = deprovision_migrator(admin_conn, shadow_exec_cfg).await {
-        tracing::warn!(
-            error = %e,
-            shadow = %shadow_db,
-            role = ?shadow_exec_cfg.migrator_role,
-            "zeroship-migrate: failed to drop shadow migrator role (cluster-global leak)"
-        );
-        first_err.get_or_insert_with(|| format!("drop shadow role: {e}"));
+    //    Runs after the DB drop so the role owns nothing left to reassign. ONLY a
+    //    Confined dry-run provisioned a role (Platform runs as admin, no role; §8),
+    //    so skip the drop when none was provisioned — keyed on `migrator_role` so
+    //    no cluster-global role can leak from a Platform shadow (there is none).
+    if shadow_exec_cfg.migrator_role.is_some() {
+        if let Err(e) = deprovision_migrator(admin_conn, shadow_exec_cfg).await {
+            tracing::warn!(
+                error = %e,
+                shadow = %shadow_db,
+                role = ?shadow_exec_cfg.migrator_role,
+                "zeroship-migrate: failed to drop shadow migrator role (cluster-global leak)"
+            );
+            first_err.get_or_insert_with(|| format!("drop shadow role: {e}"));
+        }
     }
 
     first_err.map_or(Ok(()), Err)
