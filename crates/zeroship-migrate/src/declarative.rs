@@ -224,6 +224,7 @@ fn system_field_columns() -> Vec<ColumnSnapshot> {
 /// # Errors
 /// - [`DeclarativeError::UnsupportedType`] — a field used a type token outside
 ///   the twelve supported (or an out-of-scope `vector`/`geoPoint`/`encrypted`).
+/// - [`DeclarativeError::DuplicateTable`] — two descriptors share a table name.
 pub fn desired_snapshot(
     project_schema: &str,
     descriptors: &[CollectionDescriptor],
@@ -312,6 +313,13 @@ pub fn desired_snapshot(
         indexes.sort_by(|a, b| a.name.cmp(&b.name));
         constraints.sort_by(|a, b| a.name.cmp(&b.name));
 
+        // #6: refuse a duplicate table name rather than silently merging
+        // (last-writer-wins would clobber the first descriptor's columns with
+        // no error). Until P4 (union/ownership) lands, two descriptors naming
+        // the same table is an author error.
+        if tables.contains_key(&d.name) {
+            return Err(DeclarativeError::DuplicateTable { table: d.name.clone() });
+        }
         tables.insert(d.name.clone(), TableSnapshot { columns, indexes, constraints });
     }
 
@@ -374,6 +382,14 @@ pub enum DeclarativeError {
     UnsupportedType {
         /// The unrecognised / out-of-scope DSL type token.
         ty: String,
+    },
+    /// Two descriptors declared the same table name. Until P4 (union/ownership)
+    /// lands, [`desired_snapshot`] refuses to silently merge them (last-writer-wins
+    /// would clobber the first descriptor's columns with no error). (#6)
+    #[error("duplicate table name across descriptors: '{table}'")]
+    DuplicateTable {
+        /// The table name declared by more than one descriptor.
+        table: String,
     },
 }
 
