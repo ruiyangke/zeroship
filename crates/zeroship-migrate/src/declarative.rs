@@ -35,7 +35,7 @@
 //! [`desired_snapshot`]-round-trips-to-live test (`tests/declarative_pg.rs`) is
 //! the guard against the two copies drifting apart.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Deserialize;
 
@@ -320,10 +320,22 @@ impl DesiredSchema {
 /// [`DeclarativeAuthor::diff`] (defense in depth) and the guard is the second
 /// line.
 ///
+/// # Caller contract
+///
+/// `descriptors` MUST be the **COMPLETE project union** — the concatenation of
+/// EVERY member app's declared collections, NOT just the deploying app's. The
+/// resulting [`DesiredSchema`] is what [`DeclarativeAuthor::diff`] /
+/// [`plan_declarative`](crate::engine::MigrationEngine::plan_declarative) diff
+/// against live; a live table absent from this union is read as "no app declares
+/// it" and becomes a `DROP TABLE` candidate. A PARTIAL union (one app's
+/// descriptors only) would therefore mark every OTHER app's live table for
+/// drop — which the differ now refuses fail-closed via its `live_ownership`
+/// guard (2b), but the caller must still pass the full union so legitimate
+/// tables are not needlessly refused.
+///
 /// # Multi-app UNION + per-table ownership (P4, design §4)
 ///
-/// `descriptors` is the concatenation of EVERY member app's declared
-/// collections (each descriptor carries its declaring [`CollectionDescriptor::owner_app`]).
+/// Each descriptor carries its declaring [`CollectionDescriptor::owner_app`].
 /// The result is the UNION over all apps:
 /// - A table declared by exactly one app → owned by that app.
 /// - A table declared by two apps with the **same shape** (identical columns,
@@ -454,13 +466,20 @@ pub fn desired_snapshot(
     // pick the owner — both order-independent (1b).
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
     let mut ownership: BTreeMap<String, String> = BTreeMap::new();
-    for (table, decls) in declarations {
+    for (table, mut decls) in declarations {
         // A conflict iff ANY two declarers disagree in shape. Detect it over the
-        // whole set (not the order-dependent first mismatch), and if it conflicts
-        // report EVERY declaring app, sorted+deduped — the same result for any
-        // permutation of the same descriptors.
-        let first_shape = &decls[0].1;
-        if decls.iter().any(|(_, shape)| shape != first_shape) {
+        // whole set (not the order-dependent first mismatch). Computed against the
+        // first declaration's shape; the borrow ends before `decls` is consumed.
+        // (Each table has ≥1 declaration — it only enters `declarations` via a
+        // push — so `first()` is always Some; an empty set is skipped without a
+        // panicking unwrap.)
+        let conflict = match decls.first() {
+            None => continue,
+            Some((_, first_shape)) => decls.iter().any(|(_, shape)| shape != first_shape),
+        };
+        if conflict {
+            // Report EVERY declaring app, sorted+deduped — the same result for any
+            // permutation of the same descriptors.
             let mut apps: Vec<String> = decls.into_iter().map(|(app, _)| app).collect();
             apps.sort();
             apps.dedup();
@@ -476,13 +495,10 @@ pub fn desired_snapshot(
         // byte-identical, the migrations either owner would author are identical
         // too, so the tiebreak is behaviourally inert beyond which app the
         // enforcement check names.
-        let owner = decls
-            .iter()
-            .map(|(app, _)| app)
-            .min()
-            .expect("each table has ≥1 declaration")
-            .clone();
-        let (_, shape) = decls.into_iter().next().expect("≥1 declaration");
+        let owner = decls.iter().map(|(app, _)| app.clone()).min().unwrap_or_default();
+        // Take the first declaration's shape (all are identical); `swap_remove(0)`
+        // avoids a panicking index and any extra clone.
+        let (_, shape) = decls.swap_remove(0);
         ownership.insert(table.clone(), owner);
         tables.insert(table, shape);
     }
@@ -591,6 +607,27 @@ pub enum DeclarativeError {
         owner: String,
         /// The app attempting the structural change.
         deploying_app: String,
+    },
+    /// The diff would emit a `DROP TABLE` for a live table absent from the union,
+    /// but the differ **cannot confirm** the deploying app owns it: the caller's
+    /// `live_ownership` map carries NO entry for that live table (2b). Rather than
+    /// author a destructive drop of a table whose ownership it cannot verify, the
+    /// differ **fails closed** — refusing the drop. This is the defence against a
+    /// PARTIAL-union deploy (a caller that passed only one app's descriptors, so
+    /// every OTHER app's live table looks "absent from desired"): the omitted
+    /// tenants' tables are refused, never mass-dropped under the deploying app's
+    /// authority. The fix is to supply the COMPLETE project union AND a
+    /// `live_ownership` entry for every live table (see the `plan_declarative`
+    /// caller contract).
+    #[error(
+        "refusing to drop live table '{table}': its ownership is unknown to this \
+         diff (no live_ownership entry). The differ fails closed rather than author \
+         a destructive drop it cannot confirm belongs to the deploying app — pass \
+         the complete project union plus a live_ownership entry for every live table"
+    )]
+    DropOfUnownedTable {
+        /// The live table whose ownership the caller did not supply.
+        table: String,
     },
     /// A `ref` field declared a cross-app FK whose **target table is not in the
     /// union schema** (P4 cross-app FK, design §4). A cross-app FK may reference a
@@ -880,11 +917,31 @@ impl DeclarativeAuthor {
     /// per-version `UUIDv7` gives a stable total order, and `depends_on` records
     /// cross-table deps for the executor's topo sort.
     ///
+    /// # Caller contract (READ THIS — a partial union is dangerous)
+    ///
+    /// `desired` MUST be the **COMPLETE project union** — every member app's
+    /// descriptors, not just the deploying app's. A live table absent from the
+    /// union is read as "no app declares it" and becomes a `DROP TABLE` candidate.
+    ///
+    /// `live_ownership` MUST carry an entry (`live table name → owning app`) for
+    /// **every live table**, supplied by the caller from the journal / route
+    /// registry. It is the differ's fail-closed guard for the drop pass (2b): a
+    /// `DROP TABLE` is authored ONLY when `live_ownership` confirms the deploying
+    /// app owns that table. A live table being dropped whose owner is
+    /// *another* app ⇒ [`DeclarativeError::NotTableOwner`]; a live table being
+    /// dropped whose owner is *unknown* (no `live_ownership` entry) ⇒
+    /// [`DeclarativeError::DropOfUnownedTable`]. So a PARTIAL-union deploy fails
+    /// closed (refused) instead of mass-dropping the omitted tenants' tables.
+    ///
     /// # Errors
     /// - [`DeclarativeError::Invalid`] — a descriptor name/type failed the
     ///   author-boundary validation (nothing generated).
     /// - [`DeclarativeError::NotTableOwner`] — a structural change to a union
-    ///   table whose owner ≠ the deploying app (P4 ownership enforcement).
+    ///   table whose owner ≠ the deploying app, OR a `DROP TABLE` of a live table
+    ///   owned by another app (P4 ownership enforcement).
+    /// - [`DeclarativeError::DropOfUnownedTable`] — a `DROP TABLE` of a live table
+    ///   whose ownership the caller did not supply in `live_ownership` (fail-closed
+    ///   — defends against a partial-union deploy, 2b).
     /// - [`DeclarativeError::CrossAppFkTargetMissing`] — an FK whose target table
     ///   is declared by no member app and is not live (P4 cross-app FK).
     /// - [`DeclarativeError::RenameHintUnmatched`] — a hint named a pair that is
@@ -904,6 +961,7 @@ impl DeclarativeAuthor {
         &self,
         desired: &DesiredSchema,
         live: &SchemaSnapshot,
+        live_ownership: &HashMap<String, String>,
         hints: &[RenameHint],
     ) -> Result<DeclarativePlan, DeclarativeError> {
         // The ownership map travels alongside the union; the diff itself operates
@@ -1176,11 +1234,41 @@ impl DeclarativeAuthor {
         // --- DROP TABLE (P2): in live, not in desired → destructive, gated. ---
         // In the UNION model `desired` is the FULL project schema (every member
         // app's tables), so a live table that is absent from the union is one NO
-        // app declares — it is dropped here as before. (A table still owned by a
-        // member app stays in the union and is never reached.)
+        // app declares — a DROP TABLE candidate. (A table still owned by a member
+        // app stays in the union and is never reached.)
+        //
+        // FAIL-CLOSED ownership check (2b): the differ must NOT trust the caller
+        // to have passed the complete union. A partial-union deploy (only ONE
+        // app's descriptors) would make every OTHER app's live table look absent
+        // from desired → a destructive foreign DROP authored under the deploying
+        // app's authority. So for EVERY drop candidate, confirm ownership against
+        // the caller-supplied `live_ownership` BEFORE authoring the drop:
+        //   - owner present AND == deploying_app → allowed (owner removed its own
+        //     table); author the gated drop.
+        //   - owner present AND != deploying_app → NotTableOwner (a non-owner may
+        //     not drop a foreign table).
+        //   - owner UNKNOWN (no entry) → DropOfUnownedTable (refuse: the differ
+        //     will not author a destructive drop it cannot confirm).
         for table in live.tables.keys() {
-            if !desired.tables.contains_key(table) {
-                out.push(self.render_drop_table(table));
+            if desired.tables.contains_key(table) {
+                continue;
+            }
+            match live_ownership.get(table) {
+                Some(owner) if owner == &self.owner_app => {
+                    out.push(self.render_drop_table(table));
+                }
+                Some(owner) => {
+                    return Err(DeclarativeError::NotTableOwner {
+                        table: table.clone(),
+                        owner: owner.clone(),
+                        deploying_app: self.owner_app.clone(),
+                    });
+                }
+                None => {
+                    return Err(DeclarativeError::DropOfUnownedTable {
+                        table: table.clone(),
+                    });
+                }
             }
         }
 
@@ -1221,10 +1309,11 @@ impl DeclarativeAuthor {
     /// rule falls straight out of snapshot equality).
     ///
     /// A live-only table absent from the union (only a DROP TABLE reaches it) has
-    /// no union owner; declarative ownership cannot be enforced against a table no
-    /// member app declares (design §4 says such tables persist / are re-claimable,
-    /// a policy the caller — not this differ — owns), so it is left to the existing
-    /// drop path.
+    /// no UNION owner, so this pass does not cover it — its destructive drop is
+    /// instead gated by the dedicated fail-closed drop-ownership check in
+    /// [`Self::diff`], which consults the caller-supplied `live_ownership` map
+    /// (a drop is authored only when the deploying app is the confirmed owner; an
+    /// unknown owner fails closed — 2b).
     fn enforce_ownership(
         deploying_app: &str,
         desired: &SchemaSnapshot,
@@ -1258,6 +1347,13 @@ impl DeclarativeAuthor {
     /// union) OR already exist live. A target no app declares is a clear
     /// [`DeclarativeError::CrossAppFkTargetMissing`] — surfaced before any SQL is
     /// rendered, never left to fail as bad SQL at apply.
+    ///
+    /// Note (3c, out of differ scope): whether the OWNER of a cross-app FK target
+    /// has CONSENTED to another app pointing an inbound FK at its table is a
+    /// control-plane policy concern, not the differ's. The differ only confirms
+    /// the target EXISTS in the union; inbound-FK consent (and its revocation) is
+    /// the control plane's job to enforce, the same layer that assembles the union
+    /// and the `live_ownership` map.
     fn validate_cross_app_fk_targets(
         desired: &SchemaSnapshot,
         live: &SchemaSnapshot,

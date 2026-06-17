@@ -191,21 +191,35 @@ impl MigrationEngine {
     /// the result keeps the plain migrations and the renames SEPARATE; drive the
     /// whole thing through [`apply_declarative`](Self::apply_declarative).
     ///
+    /// # Caller contract
+    ///
+    /// `desired` MUST be the **COMPLETE project union** (every member app's
+    /// descriptors), and `live_ownership` MUST carry an entry (`live table name →
+    /// owning app`) for **every live table**, supplied from the journal / route
+    /// registry. These are the differ's fail-closed guard against a PARTIAL-union
+    /// deploy mass-dropping other tenants' tables (2b): a `DROP TABLE` is authored
+    /// only when `live_ownership` confirms the deploying app owns that table; an
+    /// other-owned or ownership-unknown live table being dropped fails closed
+    /// (refused) rather than authoring a destructive foreign drop. See
+    /// [`DeclarativeAuthor::diff`](crate::declarative::DeclarativeAuthor::diff).
+    ///
     /// # Errors
     /// [`DeclarativeError`](crate::declarative::DeclarativeError) if the diff
-    /// hits an unsupported op, an unmatched/type-mismatched rename hint, or an
-    /// invalid descriptor name/type at the author boundary. A guard *denial* on
-    /// generated SQL is NOT an error here — it lands in [`MigrationPlan::denied`]
-    /// like any other.
+    /// hits an unsupported op, an unmatched/type-mismatched rename hint, an
+    /// invalid descriptor name/type at the author boundary, or a refused drop
+    /// (`NotTableOwner` / `DropOfUnownedTable` — fail-closed drop ownership). A
+    /// guard *denial* on generated SQL is NOT an error here — it lands in
+    /// [`MigrationPlan::denied`] like any other.
     pub fn plan_declarative(
         &self,
         desired: &crate::declarative::DesiredSchema,
         live: &crate::drift::SchemaSnapshot,
+        live_ownership: &std::collections::HashMap<String, String>,
         author: &crate::declarative::DeclarativeAuthor,
         hints: &[crate::declarative::RenameHint],
         cfg: &GuardConfig,
     ) -> Result<DeclarativeDeployPlan, crate::declarative::DeclarativeError> {
-        let diff = author.diff(desired, live, hints)?;
+        let diff = author.diff(desired, live, live_ownership, hints)?;
         let plain = self.plan(&diff.migrations, cfg);
         Ok(DeclarativeDeployPlan {
             plain,
