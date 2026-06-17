@@ -690,3 +690,117 @@ async fn repeatable_with_down_is_rejected() {
 
     drop_schemas(&conn, &cfg).await;
 }
+
+// ---------------------------------------------------------------------------
+// COMMIT 3 — LOADER repeatable identity is STABLE across reloads (regression)
+// ---------------------------------------------------------------------------
+
+/// A repeatable loaded from disk via `load_dir` must keep a STABLE identity across
+/// SEPARATE loads, so an unchanged `R__` file is SKIPPED on redeploy — not
+/// re-applied. RED before the deterministic `repeatable_id_for_name` fix: the
+/// loader minted a fresh random `MigrationId` per load, so the version-keyed
+/// re-run oracle never matched the prior journaled row and the repeatable
+/// re-applied on EVERY load (accruing a phantom journal event each time).
+#[compio::test]
+async fn loaded_repeatable_is_stable_across_reloads() {
+    use zeroship_migrate::loader::load_dir;
+
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    let schema = cfg.project_schema.clone();
+
+    let dir = loader_tempdir();
+    let v1 = format!("CREATE OR REPLACE VIEW \"{schema}\".v AS SELECT 1 AS n");
+    write_loader_file(&dir, "R__a_view.sql", &v1);
+
+    // Load 1 (fresh) + apply: the repeatable applies once.
+    let migs1 = load_dir(&dir).expect("load 1");
+    let rep_id = migs1
+        .iter()
+        .find(|m| m.name == "a_view")
+        .expect("loaded repeatable present")
+        .version
+        .as_str()
+        .to_string();
+    let out1 = apply(&conn, &cfg, &migs1, Approval::None, "actor")
+        .await
+        .expect("apply load 1");
+    assert!(out1.applied.contains(&rep_id), "first load applies the repeatable");
+    assert_eq!(completed_events(&conn, &cfg, &rep_id).await, 1);
+
+    // Load 2 (a SEPARATE fresh load), file UNCHANGED ⇒ the derived id must be
+    // IDENTICAL ⇒ the re-run oracle SKIPS it (no second journal event).
+    let migs2 = load_dir(&dir).expect("load 2");
+    let rep_id2 = migs2
+        .iter()
+        .find(|m| m.name == "a_view")
+        .unwrap()
+        .version
+        .as_str()
+        .to_string();
+    assert_eq!(
+        rep_id, rep_id2,
+        "the loader must derive a STABLE repeatable id across separate loads"
+    );
+    let out2 = apply(&conn, &cfg, &migs2, Approval::None, "actor")
+        .await
+        .expect("apply load 2");
+    assert!(
+        out2.applied.is_empty(),
+        "an unchanged reloaded repeatable must NOT re-apply, got {:?}",
+        out2.applied
+    );
+    assert!(
+        out2.skipped.contains(&rep_id),
+        "an unchanged reloaded repeatable must be reported skipped"
+    );
+    assert_eq!(
+        completed_events(&conn, &cfg, &rep_id).await,
+        1,
+        "no phantom second journal event on an unchanged reload"
+    );
+
+    // Change the file body ⇒ same id, new checksum ⇒ RE-APPLIES.
+    let v2 = format!("CREATE OR REPLACE VIEW \"{schema}\".v AS SELECT 2 AS n");
+    write_loader_file(&dir, "R__a_view.sql", &v2);
+    let migs3 = load_dir(&dir).expect("load 3");
+    let out3 = apply(&conn, &cfg, &migs3, Approval::None, "actor")
+        .await
+        .expect("apply load 3");
+    assert!(out3.applied.contains(&rep_id), "a changed repeatable must re-apply");
+    assert_eq!(
+        completed_events(&conn, &cfg, &rep_id).await,
+        2,
+        "a re-apply adds exactly one completed event"
+    );
+    assert_eq!(
+        scalar_int(&conn, &format!("SELECT n FROM \"{schema}\".v")).await,
+        2,
+        "the changed view definition is live"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A throwaway temp directory for the loader test, unique per call.
+fn loader_tempdir() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("zsmig_loader_pg_{pid}_{nanos}_{n}"));
+    std::fs::create_dir_all(&dir).expect("create loader temp dir");
+    dir
+}
+
+fn write_loader_file(dir: &std::path::Path, name: &str, body: &str) {
+    std::fs::write(dir.join(name), body).expect("write loader fixture");
+}

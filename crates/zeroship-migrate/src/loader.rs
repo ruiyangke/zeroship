@@ -51,6 +51,7 @@
 
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
 use zeroship_core::typed_id;
 
 use crate::analyze::analyze;
@@ -184,6 +185,47 @@ pub fn migration_id_for_version(version: u64) -> MigrationId {
     let uuid = uuid::Uuid::from_bytes(bytes);
     MigrationId::parse(&format!("mig_{}", typed_id::uuid_to_base62(&uuid)))
         .expect("derived id is a valid mig_ typed id")
+}
+
+/// Derive a deterministic, STABLE [`MigrationId`] for a REPEATABLE (`R__<desc>`)
+/// migration from its description name.
+///
+/// **CANONICAL: this is the ONLY id mapping for repeatables.** A repeatable carries
+/// no version, but its identity MUST be stable across loads: the re-run oracle
+/// ([`apply_repeatables`](crate::executor)) keys its re-run-on-change decision on
+/// the journal `version` column (`SELECT … WHERE kind='repeatable'`,
+/// `journal::latest_completed_checksums`). A freshly-random id per load (the bug
+/// this fixes) would make an UNCHANGED `R__` file re-apply on EVERY deploy
+/// (defeating Flyway `R__` / Liquibase `runOnChange`) and accrue a phantom journal
+/// row each load. Deriving the id deterministically from the name makes the same
+/// `R__foo.sql` map to the same id every load, so the version-keyed oracle skips it
+/// when unchanged and re-applies only on a checksum change.
+///
+/// # Layout — collision-free vs versioned ids
+///
+/// [`migration_id_for_version`] puts the numeric version in the HIGH 48 bits and
+/// leaves the LOW 80 bits ZERO. This derivation sets the high 48 bits to a fixed
+/// `0xFFFF_FFFF_FFFF` **marker** (no real file version reaches `2^48`) and fills the
+/// low 80 bits with the first 10 bytes of `SHA-256(name)`. So a repeatable id can
+/// NEVER equal a versioned id (the high 48 bits differ — marker vs a small version)
+/// and two distinct names collide only on an 80-bit SHA-256 prefix collision
+/// (negligible). Deterministic (same name ⇒ same id); no OS/random/time. Ordering
+/// among repeatables is by description + `depends_on` in their own apply phase
+/// (they are partitioned out of the versioned set), so this id's `Ord` position
+/// (which, with the `0xFF…` marker, sorts after every versioned id — fittingly) is
+/// irrelevant to apply order.
+#[must_use]
+pub fn repeatable_id_for_name(name: &str) -> MigrationId {
+    let digest = Sha256::digest(name.as_bytes());
+    let mut bytes = [0u8; 16];
+    // High 48 bits = a fixed marker no real version reaches ⇒ never collides with a
+    // versioned id (whose high 48 bits hold a small numeric version).
+    bytes[0..6].copy_from_slice(&[0xFFu8; 6]);
+    // Low 80 bits = the name hash ⇒ stable per name, distinct across names.
+    bytes[6..16].copy_from_slice(&digest[0..10]);
+    let uuid = uuid::Uuid::from_bytes(bytes);
+    MigrationId::parse(&format!("mig_{}", typed_id::uuid_to_base62(&uuid)))
+        .expect("derived repeatable id is a valid mig_ typed id")
 }
 
 /// One parsed filename, before bodies are read.
@@ -458,10 +500,13 @@ fn load_files(paths: &[PathBuf]) -> Result<Vec<Migration>, LoaderError> {
         });
         migrations.push(Migration {
             // A repeatable carries no version: its identity is its stable
-            // name/checksum (migration.rs:154-157). Mint a fresh id for the
-            // journal key; ordering among repeatables is by `depends_on` then this
-            // id, and they always sort after the versioned set above.
-            version: MigrationId::generate(),
+            // name/checksum (migration.rs:154-157). Derive a DETERMINISTIC id from
+            // the name so the SAME R__ file maps to the SAME id every load — the
+            // re-run oracle (apply_repeatables) keys on the journal `version`, so a
+            // random-per-load id would re-apply an unchanged repeatable every deploy
+            // and accrue a phantom journal row. Ordering among repeatables is by
+            // description/`depends_on` in their own phase, so this id's Ord is moot.
+            version: repeatable_id_for_name(description),
             name: description.clone(),
             up,
             down: None,
@@ -639,6 +684,44 @@ mod tests {
                 assert_ne!(ids[i], ids[j], "ids {i} and {j} collided");
             }
         }
+    }
+
+    #[test]
+    fn repeatable_id_is_stable_distinct_and_clear_of_versioned() {
+        // Deterministic: same name ⇒ same id.
+        assert_eq!(
+            repeatable_id_for_name("a_view"),
+            repeatable_id_for_name("a_view")
+        );
+        // Distinct names ⇒ distinct ids.
+        assert_ne!(
+            repeatable_id_for_name("a_view"),
+            repeatable_id_for_name("b_view")
+        );
+        // Valid typed id.
+        let id = repeatable_id_for_name("a_view");
+        assert!(id.as_str().starts_with("mig_"));
+        MigrationId::parse(id.as_str()).expect("repeatable id parses");
+        // NEVER collides with a versioned id (high-48 marker vs a small version).
+        for v in [0u64, 1, 2, 10, 57, 100, 10_000, (1u64 << 48) - 1] {
+            assert_ne!(
+                repeatable_id_for_name("a_view"),
+                migration_id_for_version(v),
+                "repeatable id must not collide with versioned id v={v}"
+            );
+        }
+    }
+
+    #[test]
+    fn loaded_repeatable_id_is_deterministic_across_loads() {
+        let dir = tempdir();
+        write_file(&dir, "R__a_view.sql", "CREATE OR REPLACE VIEW v AS SELECT 1;");
+        let first = load_dir(&dir).unwrap();
+        let second = load_dir(&dir).unwrap();
+        // The same R__ file must get the SAME version id on a fresh reload — this is
+        // what makes the version-keyed re-run oracle skip an unchanged repeatable.
+        assert_eq!(first[0].version, second[0].version, "repeatable id must be stable across loads");
+        assert_eq!(first[0].version, repeatable_id_for_name("a_view"));
     }
 
     // ----- the loaded Vec<Migration> -----
