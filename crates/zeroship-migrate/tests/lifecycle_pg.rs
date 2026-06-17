@@ -599,7 +599,12 @@ async fn p0_1_h8_second_rename_failure_does_not_lose_first_renames_contract() {
 // claims), or replay the live snapshot's CREATE statements into the fresh shadow
 // schema — so an incremental plan dry-runs against the same starting state the
 // real deploy sees. With that, this test goes GREEN unchanged.
-#[ignore = "RED: confirms H4 — dry_run_declarative shadow is an EMPTY schema, never a clone of the live project DB, so it cannot faithfully predict an INCREMENTAL deploy (rename E1 fails 'relation does not exist'); fix pending"]
+// GREEN (H4 fixed): `dry_run_declarative` now SEEDS the shadow with the current
+// live project structure (snapshot → reconstruct-via-differ; see
+// `shadow::seed_shadow_from_live`) BEFORE applying the incremental plan, so the
+// shadow starts from the same state the real deploy sees. An incremental rename
+// whose expand targets a prior-deploy table now applies cleanly on the shadow,
+// and the dry-run's `ok` matches the real drift-clean outcome.
 #[compio::test]
 async fn p0_2_dry_run_declarative_predicts_real_apply() {
     let conn = pg().await;

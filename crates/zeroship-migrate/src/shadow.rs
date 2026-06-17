@@ -35,6 +35,30 @@
 //!    unconditional drop, mirroring [`executor::apply`]'s unlock-on-every-path
 //!    and `baseline.rs`'s teardown discipline.
 //!
+//! # Flow ([`dry_run_declarative`], Mode B — snapshot-seed then incremental plan)
+//!
+//! Mode A's full-replay faithfulness holds only when the supplied set is the
+//! WHOLE schema (a from-scratch deploy). A DECLARATIVE deploy is usually
+//! INCREMENTAL: the plan is the delta vs the live schema (e.g. a rename whose
+//! expand `ALTER TABLE "contacts" ADD COLUMN …` targets a table created in a
+//! PRIOR deploy). Against the empty shadow that delta would fail with
+//! `relation "contacts" does not exist` — a FALSE NEGATIVE (H4). So
+//! [`dry_run_declarative`] adds one step before the plan applies:
+//!
+//! - **Seed the shadow with the CURRENT LIVE project structure**
+//!   ([`seed_shadow_from_live`]): snapshot the live project schema read-only
+//!   ([`snapshot_schema`]), reconstruct it in the empty shadow by REUSING the
+//!   declarative differ (diff `desired = live-snapshot` vs `live = empty` ⇒ the
+//!   CREATE statements), and apply those under the shadow migrator role + guard.
+//!   The shadow then starts from the same state the real deploy sees, so the
+//!   incremental plan applies cleanly and the dry-run is faithful.
+//!
+//! The seed reconstructs **tables/columns/types/nullability/indexes/constraints**
+//! — enough to validate an incremental STRUCTURAL diff. It does NOT reconstruct
+//! triggers/functions/sequences/DEFAULTs/data (a known limitation, see
+//! [`seed_shadow_from_live`]). `CREATE DATABASE … TEMPLATE live` is rejected
+//! (TEMPLATE needs no active connections to the live DB — Plan C design).
+//!
 //! # The load-bearing invariants
 //!
 //! - **`Approval::Approved` is for the SHADOW apply ONLY.** A dry-run must
@@ -52,11 +76,14 @@ use compio_postgres::Client;
 use futures::FutureExt;
 use std::panic::AssertUnwindSafe;
 
+use std::collections::{BTreeMap, HashMap};
+
 use crate::analyze::Advisory;
 use crate::approval::Approval;
 use crate::db::{connect_with_handle, ConnectError, ExecutorConfig};
-use crate::drift::{diff_snapshots, snapshot_schema, DriftError, StructuralDrift};
-use crate::engine::{DeclarativeDeployPlan, MigrationEngine};
+use crate::declarative::{DeclarativeAuthor, DesiredSchema};
+use crate::drift::{diff_snapshots, snapshot_schema, DriftError, SchemaSnapshot, StructuralDrift};
+use crate::engine::{DeclarativeDeployPlan, EngineError, MigrationEngine};
 use crate::executor::{self, ApplyError};
 use crate::guard::{GuardConfig, SqlGuard};
 use crate::migration::Migration;
@@ -140,6 +167,31 @@ pub enum DryRunError {
     /// Introspecting the resulting shadow schema (declarative drift) failed.
     #[error("snapshot shadow schema: {0}")]
     Drift(#[from] DriftError),
+    /// Seeding the shadow with the current LIVE project schema failed — either
+    /// authoring the reconstruction migrations from the live snapshot
+    /// ([`SeedError::Author`]) or applying them on the shadow
+    /// ([`SeedError::Apply`]). A faithful INCREMENTAL declarative dry-run requires
+    /// the shadow to START from the live structure (so a plan targeting a
+    /// prior-deploy table applies cleanly), so a seed failure is a harness fault,
+    /// not a migration failure — it surfaces here rather than in the report.
+    #[error("seed shadow from live schema: {0}")]
+    Seed(#[source] SeedError),
+}
+
+/// A failure to reconstruct the LIVE project structure inside the fresh shadow
+/// (the "Mode B snapshot-seed", required for a faithful incremental dry-run).
+#[derive(Debug, thiserror::Error)]
+pub enum SeedError {
+    /// The declarative author could not turn the live snapshot into the
+    /// reconstruction migrations (e.g. a live object name the author boundary
+    /// rejects). In practice this should not happen for a snapshot the platform
+    /// itself materialised, but it is surfaced rather than swallowed.
+    #[error("author seed migrations from live snapshot: {0}")]
+    Author(#[from] crate::declarative::DeclarativeError),
+    /// Applying the reconstruction migrations on the shadow failed (under the
+    /// shadow migrator role / guard, like any migration).
+    #[error("apply seed migrations on shadow: {0}")]
+    Apply(#[from] EngineError),
 }
 
 /// Build the shadow DSN from the admin DSN by swapping the database name.
@@ -364,6 +416,15 @@ pub async fn dry_run_declarative(
     let shadow_db = fresh_shadow_name(&shadow_cfg.db_name_prefix);
     let shadow_exec_cfg = shadow_executor_cfg(cfg, &shadow_db)?;
 
+    // Snapshot the CURRENT LIVE project schema, read-only, on the admin
+    // connection (its dbname IS the project DB), BEFORE any shadow is created.
+    // This is the seed source for the faithful INCREMENTAL dry-run (H4): the
+    // shadow must START from the live structure so a plan whose expand targets a
+    // prior-deploy table applies cleanly. `snapshot_schema` is read-only and
+    // hits only `information_schema`/`pg_catalog` of the REAL project schema — it
+    // never mutates prod and never touches the migrator role.
+    let live = snapshot_schema(admin_conn, &cfg.project_schema).await?;
+
     admin_conn
         .batch_execute(&format!("CREATE DATABASE {}", quote_ident(&shadow_db)))
         .await
@@ -374,6 +435,7 @@ pub async fn dry_run_declarative(
     let caught = AssertUnwindSafe(dry_run_declarative_body(
         plan,
         desired,
+        &live,
         &shadow_exec_cfg,
         shadow_cfg,
         &shadow_db,
@@ -445,6 +507,107 @@ async fn open_and_provision_shadow(
     // role name is shadow-unique (derived from `cfg.project_id` == shadow DB).
     provision_migrator(&shadow, cfg).await?;
     Ok((shadow, run_loop))
+}
+
+/// Seed the fresh shadow's project schema to MATCH the current LIVE project
+/// structure — the "Mode B snapshot-seed" required for a faithful INCREMENTAL
+/// declarative dry-run (H4).
+///
+/// # Mechanism (snapshot → reconstruct-via-differ)
+///
+/// The live structure is captured up-front by
+/// [`snapshot_schema`](crate::drift::snapshot_schema) (read-only, on the admin
+/// connection — never the migrator role) and handed in as `live`. Here we turn
+/// that snapshot back into CREATE statements by REUSING the declarative differ:
+/// we diff `desired = live-snapshot` against `live = EMPTY`, which yields exactly
+/// the CREATE TABLE / CREATE INDEX / ADD CONSTRAINT migrations that rebuild the
+/// live structure on the empty shadow. We then apply them through the SAME gated
+/// [`apply`](crate::engine::MigrationEngine::apply) path any migration uses — so
+/// the seed runs under the shadow's least-privilege migrator role + the guard,
+/// under `Approval::Approved` (shadow-only, the seed is pure additive CREATEs).
+///
+/// Ownership: every reconstructed table is attributed to `applied_by` (and the
+/// caller-supplied `live_ownership` map is left empty: every table is "new" on
+/// the empty shadow, so only [`enforce_ownership`](crate::declarative) on the
+/// union side runs, and it passes because we own them all). This is sound for the
+/// shadow because it is a THROWAWAY — ownership there has no security meaning; the
+/// real ownership/cross-app gates already ran when the caller built `plan`.
+///
+/// # Fidelity scope (KNOWN LIMITATION)
+///
+/// `snapshot_schema` captures **tables, columns, types, nullability, indexes,
+/// and constraints (PK/FK/UNIQUE/CHECK bodies)** — sufficient to validate an
+/// incremental STRUCTURAL diff (the dry-run's job). It does NOT reconstruct
+/// **triggers, functions, sequences, column DEFAULTs, or row DATA**. So a
+/// contract that, say, DROPs a prior-deploy dual-write TRIGGER could false-
+/// negative on the shadow (the trigger never existed there to drop). A fuller
+/// clone (e.g. `pg_dump --schema-only` replayed into the shadow) is the future
+/// option; `CREATE DATABASE … TEMPLATE live` is rejected because TEMPLATE
+/// requires NO active connections to the live DB (Plan C design).
+///
+/// # An empty live schema is a no-op
+///
+/// When the live schema has no tables (a from-scratch first deploy) the differ
+/// emits nothing and this returns `Ok(())` immediately — the from-scratch path is
+/// unchanged, so it cannot ever wrongly fail a valid dry-run.
+///
+/// # Errors
+/// [`SeedError`] if authoring the reconstruction migrations from the live
+/// snapshot fails ([`SeedError::Author`]) or applying them on the shadow fails
+/// ([`SeedError::Apply`]).
+async fn seed_shadow_from_live(
+    shadow: &Client,
+    cfg: &ExecutorConfig,
+    live: &SchemaSnapshot,
+    applied_by: &str,
+) -> Result<(), SeedError> {
+    // Nothing live ⇒ nothing to seed (the from-scratch full-schema deploy path is
+    // unchanged: no seed migrations, no apply).
+    if live.tables.is_empty() {
+        return Ok(());
+    }
+
+    // Reconstruct the live structure as a DESIRED schema owned (on the shadow) by
+    // the deploying actor — so the differ's ownership enforcement passes (the
+    // shadow is a throwaway; ownership has no security meaning there).
+    let ownership: BTreeMap<String, String> = live
+        .tables
+        .keys()
+        .map(|t| (t.clone(), applied_by.to_string()))
+        .collect();
+    let desired_live = DesiredSchema {
+        snapshot: live.clone(),
+        ownership,
+    };
+
+    // Diff desired = live-snapshot vs live = EMPTY ⇒ the CREATE statements that
+    // rebuild the live structure. `live_ownership` is empty: every table is "new"
+    // on the empty shadow (no DROP candidates), so the fail-closed drop-ownership
+    // guard is never reached. No rename hints — the seed is pure reconstruction.
+    let author = DeclarativeAuthor::new(cfg.project_schema.clone(), applied_by);
+    let diff = author.diff(
+        &desired_live,
+        &SchemaSnapshot::default(),
+        &HashMap::new(),
+        &[],
+    )?;
+
+    // The reconstruction is pure additive CREATEs (no renames, no drops); apply
+    // it on the shadow through the SAME gated path as any migration (guard + the
+    // shadow's least-privilege migrator role). Approval::Approved is shadow-only.
+    if diff.migrations.is_empty() {
+        return Ok(());
+    }
+    let guard_cfg = GuardConfig {
+        project_schema: cfg.project_schema.clone(),
+        extension_allowlist: Vec::new(),
+    };
+    let engine = MigrationEngine::new();
+    let plan = engine.plan(&diff.migrations, &guard_cfg);
+    engine
+        .apply(&plan, Approval::Approved, shadow, cfg, applied_by)
+        .await?;
+    Ok(())
 }
 
 /// The plain dry-run body. `desired` (when `Some`) drives the resulting-drift
@@ -551,12 +714,31 @@ async fn dry_run_body(
 async fn dry_run_declarative_body(
     plan: &DeclarativeDeployPlan,
     desired: &crate::declarative::DesiredSchema,
+    live: &SchemaSnapshot,
     cfg: &ExecutorConfig,
     shadow_cfg: &ShadowConfig,
     shadow_db: &str,
     applied_by: &str,
 ) -> Result<DryRunReport, DryRunError> {
     let (shadow, run_loop) = open_and_provision_shadow(cfg, shadow_cfg, shadow_db).await?;
+
+    // H4 — SEED the shadow to match the CURRENT LIVE project structure BEFORE
+    // applying the incremental plan. Without this the shadow is an EMPTY schema,
+    // so an INCREMENTAL declarative plan (e.g. a rename whose expand
+    // `ALTER TABLE "contacts" ADD COLUMN …` targets a table created in a PRIOR
+    // deploy) fails with `relation "contacts" does not exist` — a FALSE NEGATIVE
+    // for a plan the real apply runs cleanly. Reconstructing the live structure
+    // first makes the dry-run faithful for the COMMON incremental case (not only
+    // a from-scratch full-schema deploy). See [`seed_shadow_from_live`] for the
+    // mechanism + fidelity scope.
+    if let Err(e) = seed_shadow_from_live(&shadow, cfg, live, applied_by).await {
+        // A seed failure is a HARNESS fault (the reconstruction itself failed),
+        // not a migration failure — close the session deterministically so the
+        // caller's FORCE drop has nothing to fight, then surface it as a
+        // DryRunError (teardown still runs via finish_dry_run).
+        close_shadow_session(shadow, run_loop).await;
+        return Err(DryRunError::Seed(e));
+    }
 
     // Advisories from the plain plan's linted items (already guard-checked).
     let mut advisories: Vec<(String, Vec<Advisory>)> = Vec::new();
