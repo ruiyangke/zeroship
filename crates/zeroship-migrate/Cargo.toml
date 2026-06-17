@@ -18,6 +18,10 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 zeroship-core = { workspace = true }
+# The canonical version→id derivation (loader §6.2) builds a UUIDv7-SHAPED id
+# (numeric version in the high 48 bits) and base62-encodes it via
+# `zeroship_core::typed_id::uuid_to_base62`, which takes a `&uuid::Uuid`.
+uuid = { workspace = true }
 # The Postgres executor (journal + apply flow) talks to PG over the bespoke
 # compio-native driver — ZERO tokio, per the platform invariant. Runs
 # out-of-band at deploy (not the request hot path), async on compio.
