@@ -225,6 +225,8 @@ fn system_field_columns() -> Vec<ColumnSnapshot> {
 /// - [`DeclarativeError::UnsupportedType`] — a field used a type token outside
 ///   the twelve supported (or an out-of-scope `vector`/`geoPoint`/`encrypted`).
 /// - [`DeclarativeError::DuplicateTable`] — two descriptors share a table name.
+/// - [`DeclarativeError::Invalid`] — a `ref` field's target table is not a safe
+///   bare identifier.
 pub fn desired_snapshot(
     project_schema: &str,
     descriptors: &[CollectionDescriptor],
@@ -277,6 +279,13 @@ pub fn desired_snapshot(
             // A `ref` field declares a FOREIGN KEY constraint.
             if f.ty == "ref" {
                 if let Some(target) = &f.references {
+                    // #3-ref: the FK target table is interpolated into
+                    // `REFERENCES <schema>.<target>(id)`; validate it as a bare
+                    // identifier at the author boundary (mirroring how table /
+                    // column names are checked) so a malformed / injecting ref
+                    // target (`control.users`, `x"; DROP …`, `;`) is rejected
+                    // up-front rather than relying on downstream quoting alone.
+                    validate_ident("ref target", target)?;
                     constraints.push(ConstraintSnapshot {
                         name: fk_constraint_name(&f.name),
                         kind: "FOREIGN KEY".into(),

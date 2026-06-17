@@ -1129,3 +1129,30 @@ async fn duplicate_table_name_across_descriptors_is_rejected_not_silently_merged
     );
 }
 
+
+#[compio::test]
+async fn malicious_ref_target_is_rejected_at_author_boundary() {
+    // #3-ref: a `ref` field's target table is interpolated into the FK's
+    // REFERENCES clause. A schema-qualified or injecting target must be rejected
+    // as an invalid identifier up-front, before any SQL renders.
+    let cfg = cfg_for(&token());
+    for bad in ["control.users", "x\"; DROP TABLE control.users; --", ";", ""] {
+        let desc = CollectionDescriptor {
+            name: "child".into(),
+            fields: vec![FieldDescriptor {
+                name: "parent".into(),
+                ty: "ref".into(),
+                required: false,
+                unique: false,
+                references: Some(bad.into()),
+            }],
+            indexes: vec![],
+        };
+        let err = desired_snapshot(&cfg.project_schema, &[desc]).unwrap_err();
+        assert!(
+            matches!(err, DeclarativeError::Invalid(_)),
+            "ref target {bad:?} must be rejected as invalid, got {err:?}"
+        );
+    }
+}
+
