@@ -9,8 +9,10 @@
 
 use compio_postgres::Client;
 use zeroship_migrate::{
-    desired_snapshot, diff_snapshots, snapshot_schema, CollectionDescriptor, ExecutorConfig,
-    FieldDescriptor,
+    desired_snapshot, diff_snapshots, migrator_role_name, provision_migrator,
+    role::deprovision_migrator, snapshot_schema, Approval, CollectionDescriptor, DeclarativeAuthor,
+    DeclarativeError, EngineError, ExecutorConfig, FieldDescriptor, GuardConfig, IndexDescriptor,
+    MigrationEngine, SchemaSnapshot,
 };
 
 const DEFAULT_DSN: &str =
@@ -65,6 +67,51 @@ async fn teardown(conn: &Client, cfg: &ExecutorConfig) {
             cfg.project_schema, cfg.meta_schema
         ))
         .await;
+    // Harmless when no role was provisioned (P0 tests).
+    let _ = deprovision_migrator(conn, cfg).await;
+}
+
+/// A config with a matching least-privilege migrator role (the P1/P2 apply path).
+fn cfg_with_role(tok: &str) -> ExecutorConfig {
+    let c = cfg_for(tok);
+    let role = migrator_role_name(&c.project_id).unwrap();
+    c.with_migrator_role(role)
+}
+
+fn guard_cfg(cfg: &ExecutorConfig) -> GuardConfig {
+    GuardConfig {
+        project_schema: cfg.project_schema.clone(),
+        extension_allowlist: Vec::new(),
+    }
+}
+
+fn author_for(cfg: &ExecutorConfig) -> DeclarativeAuthor {
+    DeclarativeAuthor::new(cfg.project_schema.clone(), "app_test")
+}
+
+/// Stand up the project schema + provision the migrator role.
+async fn setup(conn: &Client, cfg: &ExecutorConfig) {
+    ensure_project_schema(conn, cfg).await;
+    provision_migrator(conn, cfg)
+        .await
+        .expect("provision migrator role");
+}
+
+/// Plan the desired-vs-live diff through `plan_declarative` and apply it.
+async fn apply_plan(
+    engine: &MigrationEngine,
+    desired: &SchemaSnapshot,
+    live: &SchemaSnapshot,
+    author: &DeclarativeAuthor,
+    cfg: &ExecutorConfig,
+    conn: &Client,
+    approval: Approval,
+) -> Result<(), EngineError> {
+    let plan = engine
+        .plan_declarative(desired, live, author, &guard_cfg(cfg))
+        .expect("plan_declarative");
+    engine.apply(&plan, approval, conn, cfg, "app_test").await?;
+    Ok(())
 }
 
 /// The seven system-field column declarations every collection table gets,
@@ -279,4 +326,288 @@ async fn type_fidelity_whole_table_round_trips_to_zero_drift() {
     );
 
     teardown(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// P1 — additive differ: apply-then-re-diff-to-zero is the oracle.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn additive_create_table_with_column_and_index_applies_to_zero_drift() {
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let desc = CollectionDescriptor {
+        name: "tasks".into(),
+        fields: vec![
+            FieldDescriptor { name: "title".into(), ty: "string".into(), required: true, unique: false, references: None },
+            FieldDescriptor { name: "slug".into(), ty: "string".into(), required: false, unique: true, references: None },
+            FieldDescriptor { name: "done".into(), ty: "boolean".into(), required: false, unique: false, references: None },
+        ],
+        indexes: vec![IndexDescriptor { name: "tasks_title_idx".into(), columns: vec!["title".into()], unique: false }],
+    };
+    let desired = desired_snapshot(&[desc]);
+    let empty = SchemaSnapshot::default();
+
+    apply_plan(&engine, &desired, &empty, &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("apply additive plan");
+
+    // Re-snapshot: the live schema now equals desired (zero drift).
+    let live2 = snapshot_schema(&conn, &cfg.project_schema)
+        .await
+        .expect("re-snapshot");
+    let drift = diff_snapshots(&desired, &live2);
+    assert!(
+        drift.is_clean(),
+        "expected zero drift after apply, got: missing={:?} unexpected={:?} altered={:?}",
+        drift.missing_objects,
+        drift.unexpected_objects,
+        drift.altered_objects
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn additive_diff_is_idempotent_second_plan_is_empty() {
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let desc = CollectionDescriptor {
+        name: "notes".into(),
+        fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&[desc]);
+    let empty = SchemaSnapshot::default();
+
+    apply_plan(&engine, &desired, &empty, &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("first apply");
+
+    // Second diff against the now-current live yields an EMPTY migration set.
+    let live2 = snapshot_schema(&conn, &cfg.project_schema)
+        .await
+        .expect("re-snapshot");
+    let migs = author.diff(&desired, &live2).expect("second diff");
+    assert!(
+        migs.is_empty(),
+        "second diff should be empty (idempotent), got {} migration(s)",
+        migs.len()
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn additive_add_column_to_existing_table_applies_clean() {
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    // First create the table with one field.
+    let v1 = CollectionDescriptor {
+        name: "items".into(),
+        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let d1 = desired_snapshot(&[v1]);
+    apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("create items");
+
+    // Now desire an ADDED nullable column.
+    let v2 = CollectionDescriptor {
+        name: "items".into(),
+        fields: vec![
+            FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None },
+            FieldDescriptor { name: "qty".into(), ty: "number".into(), required: false, unique: false, references: None },
+        ],
+        indexes: vec![],
+    };
+    let d2 = desired_snapshot(&[v2]);
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+    apply_plan(&engine, &d2, &live, &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("add column");
+
+    let live2 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
+    assert!(diff_snapshots(&d2, &live2).is_clean(), "add-column did not converge");
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn fk_ordering_referencing_table_after_target_applies_clean() {
+    // B references A: A must be created before B (or the FK deferred). Either
+    // way the batch applies clean and re-diffs to zero.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    // Declare B before A in the descriptor list to prove ordering is by FK dep,
+    // not declaration order.
+    let b = CollectionDescriptor {
+        name: "orders".into(),
+        fields: vec![FieldDescriptor {
+            name: "customer".into(),
+            ty: "ref".into(),
+            required: false,
+            unique: false,
+            references: Some("customers".into()),
+        }],
+        indexes: vec![],
+    };
+    let a = CollectionDescriptor {
+        name: "customers".into(),
+        fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&[b, a]);
+    apply_plan(&engine, &desired, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("apply FK batch");
+
+    let live2 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+    // Both tables exist with the FK constraint; columns clean.
+    let drift = diff_snapshots(&desired, &live2);
+    let col_drift: Vec<_> = drift.altered_objects.iter().filter(|x| x.object.starts_with("column ")).collect();
+    assert!(col_drift.is_empty(), "column drift after FK batch: {col_drift:?}");
+    assert!(drift.missing_objects.is_empty(), "missing after FK batch: {:?}", drift.missing_objects);
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn p1_drop_is_unsupported_not_silently_skipped() {
+    // P1 does not generate drops: a live-only table is surfaced as
+    // UnsupportedInV1, never silently dropped (or skipped). P2 reclassifies it
+    // as a gated destructive op.
+    let cfg = cfg_for(&token());
+    let author = author_for(&cfg);
+
+    // Live has a table; desired is empty.
+    let live = {
+        let desc = CollectionDescriptor {
+            name: "legacy".into(),
+            fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            indexes: vec![],
+        };
+        desired_snapshot(&[desc])
+    };
+    let err = author.diff(&SchemaSnapshot::default(), &live).unwrap_err();
+    assert!(matches!(err, DeclarativeError::UnsupportedInV1(_)), "got {err:?}");
+}
+
+#[compio::test]
+async fn type_change_is_unsupported_in_v1_not_silently_skipped() {
+    // A same-name column whose type changed is an explicit UnsupportedInV1,
+    // never a silent no-op (and never an auto type-change).
+    let cfg = cfg_for(&token());
+    let author = author_for(&cfg);
+
+    let live = {
+        let desc = CollectionDescriptor {
+            name: "widgets".into(),
+            fields: vec![FieldDescriptor { name: "attr".into(), ty: "string".into(), required: false, unique: false, references: None }],
+            indexes: vec![],
+        };
+        desired_snapshot(&[desc])
+    };
+    let desired = {
+        let desc = CollectionDescriptor {
+            name: "widgets".into(),
+            fields: vec![FieldDescriptor { name: "attr".into(), ty: "number".into(), required: false, unique: false, references: None }],
+            indexes: vec![],
+        };
+        desired_snapshot(&[desc])
+    };
+
+    let err = author.diff(&desired, &live).unwrap_err();
+    assert!(matches!(err, DeclarativeError::UnsupportedInV1(_)), "got {err:?}");
+}
+
+#[compio::test]
+async fn malicious_table_name_is_rejected_at_author_boundary() {
+    let cfg = cfg_for(&token());
+    let author = author_for(&cfg);
+    let desc = CollectionDescriptor {
+        name: "users\"; DROP SCHEMA control CASCADE; --".into(),
+        fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&[desc]);
+    let err = author.diff(&desired, &SchemaSnapshot::default()).unwrap_err();
+    assert!(matches!(err, DeclarativeError::Invalid(_)), "got {err:?}");
+}
+
+#[compio::test]
+async fn malicious_column_name_is_rejected_at_author_boundary() {
+    let cfg = cfg_for(&token());
+    let author = author_for(&cfg);
+    let desc = CollectionDescriptor {
+        name: "widgets".into(),
+        fields: vec![FieldDescriptor {
+            name: "evil\") ; DROP TABLE control.users; --".into(),
+            ty: "string".into(),
+            required: false,
+            unique: false,
+            references: None,
+        }],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&[desc]);
+    let err = author.diff(&desired, &SchemaSnapshot::default()).unwrap_err();
+    assert!(matches!(err, DeclarativeError::Invalid(_)), "got {err:?}");
+}
+
+#[compio::test]
+async fn every_generated_migration_passes_through_the_guard_no_bypass() {
+    // The declarative path emits SQL that goes through plan()'s SqlGuard. Build
+    // a normal additive desired/live pair, plan it, and assert the plan has NO
+    // denials (the generated SQL is guard-safe) AND every migration is a planned
+    // item — i.e. it flowed through the guard, not around it.
+    let cfg = cfg_for(&token());
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let desired = {
+        let desc = CollectionDescriptor {
+            name: "events".into(),
+            fields: vec![
+                FieldDescriptor { name: "kind".into(), ty: "string".into(), required: true, unique: true, references: None },
+                FieldDescriptor { name: "payload".into(), ty: "json".into(), required: false, unique: false, references: None },
+            ],
+            indexes: vec![IndexDescriptor { name: "events_kind_idx".into(), columns: vec!["kind".into()], unique: false }],
+        };
+        desired_snapshot(&[desc])
+    };
+    let migs = author.diff(&desired, &SchemaSnapshot::default()).expect("diff");
+    assert!(!migs.is_empty(), "diff should generate migrations");
+    let plan = engine.plan(&migs, &guard_cfg(&cfg));
+    assert!(plan.denied.is_empty(), "generated SQL must not be denied: {:?}", plan.denied);
+    assert_eq!(
+        plan.items.len(),
+        migs.len(),
+        "every generated migration must flow through the guard as a planned item"
+    );
 }
