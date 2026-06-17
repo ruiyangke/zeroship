@@ -810,6 +810,64 @@ async fn concurrent_identical_submissions_apply_exactly_once() {
     teardown(&observer, &cfg).await;
 }
 
+/// MED-2 — `ALTER COLUMN … SET NOT NULL` is gated (`ApprovalRequired`) regardless
+/// of the dry-run: the row-less shadow has no data, so it can never reproduce the
+/// populated-column abort / the ACCESS EXCLUSIVE validating-scan lock. FAILS
+/// pre-fix (alter_table_kind didn't recognize AtSetNotNull → Other → auto-applied).
+#[compio::test]
+async fn set_not_null_is_gated() {
+    let conn = pg().await;
+    let admin = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    let (shadow_cfg, _sprefix) = unique_shadow_cfg();
+    setup(&conn, &cfg).await;
+
+    submit_migration(
+        &conn,
+        &admin,
+        &cfg,
+        &shadow_cfg,
+        submission(
+            "create_notes",
+            &format!(
+                "CREATE TABLE \"{}\".notes (id bigint, body text)",
+                cfg.project_schema
+            ),
+        ),
+        &no_owners(),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("create notes");
+
+    let set_nn = submit_migration(
+        &conn,
+        &admin,
+        &cfg,
+        &shadow_cfg,
+        submission(
+            "body_not_null",
+            &format!(
+                "ALTER TABLE \"{}\".notes ALTER COLUMN body SET NOT NULL",
+                cfg.project_schema
+            ),
+        ),
+        &owns(&["notes"]),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("submit set not null");
+    assert!(
+        matches!(set_nn, SubmissionOutcome::ApprovalRequired { .. }),
+        "SET NOT NULL must be gated regardless of the (clean) dry-run, got {set_nn:?}"
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
 /// MED-1 — a `RENAME COLUMN` is gated (it is backward-incompatible, app-breaking):
 /// with `Approval::None` ⇒ `ApprovalRequired` (NOT auto-applied); with `Approved`
 /// ⇒ `Applied`. FAILS pre-fix (flags_for ignored RenameStmt, so it auto-applied).

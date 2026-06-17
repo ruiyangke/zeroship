@@ -830,6 +830,10 @@ fn foreign_schema_in_body(body: &str, project_schema: &str) -> Option<String> {
 ///   expand-contract rename path does NOT emit a bare `RenameStmt` — it emits
 ///   ADD COLUMN + trigger + backfill + DROP via `ExpandContractAuthor` — so this
 ///   gate is scoped to a literal `RENAME` in a submitted `up`.)
+/// - an `ALTER COLUMN … SET NOT NULL` ⇒ `requires_approval` (MED-2): it takes an
+///   ACCESS EXCLUSIVE lock + a full-table validating scan and ABORTS if any
+///   existing row is NULL — and the row-less shadow CANNOT catch that abort/lock,
+///   so it is gated regardless of the (necessarily clean) dry-run.
 ///
 /// `online` is an authoring-time facet (expand-contract sequencing), not
 /// derivable from a single SQL blob, so it stays at its default here.
@@ -842,11 +846,18 @@ pub fn flags_for(report: &GuardReport) -> MigrationFlags {
         .classes
         .iter()
         .any(|c| matches!(c.kind, DdlKind::RenameColumn | DdlKind::RenameTable));
+    // MED-2 — SET NOT NULL is gated regardless of the dry-run: the row-less shadow
+    // has no data, so it can never reproduce the populated-column abort / the
+    // ACCESS EXCLUSIVE validating-scan lock a SET NOT NULL takes on a real table.
+    let has_set_not_null = report
+        .classes
+        .iter()
+        .any(|c| matches!(c.kind, DdlKind::SetNotNull));
     MigrationFlags {
         transactional: !non_transactional,
         destructive: report.destructive,
         online: false,
-        requires_approval: report.destructive || has_rename,
+        requires_approval: report.destructive || has_rename || has_set_not_null,
         // No per-migration timeout derivable from a single SQL blob; the author
         // sets it explicitly when a long backfill/index needs a higher ceiling.
         timeout_ms: None,

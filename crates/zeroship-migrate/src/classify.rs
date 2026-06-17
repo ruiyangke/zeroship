@@ -26,6 +26,10 @@ pub enum DdlKind {
     AddColumn,
     DropColumn,
     AlterColumnType,
+    /// `ALTER COLUMN … SET NOT NULL` — gated (a full-table validating scan +
+    /// ACCESS EXCLUSIVE lock, and it ABORTS if any existing row is NULL; the
+    /// row-less shadow cannot catch that). See `crate::guard::flags_for`.
+    SetNotNull,
     RenameColumn,
     RenameTable,
     CreateIndex,
@@ -191,6 +195,8 @@ fn alter_table_kind(at: &protobuf::AlterTableStmt) -> DdlKind {
                 return DdlKind::DropColumn;
             } else if st == AlterTableType::AtAlterColumnType as i32 {
                 return DdlKind::AlterColumnType;
+            } else if st == AlterTableType::AtSetNotNull as i32 {
+                return DdlKind::SetNotNull;
             } else if st == AlterTableType::AtAddConstraint as i32 {
                 return DdlKind::AddConstraint;
             } else if st == AlterTableType::AtDropConstraint as i32 {
