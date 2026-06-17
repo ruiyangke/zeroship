@@ -599,6 +599,33 @@ impl DeclarativeAuthor {
                     out.push(self.render_drop_index(idx));
                 }
             }
+
+            // FK constraints on an existing table (5-fk): a same-name FK whose
+            // BODY changed (e.g. the referenced target was re-pointed) is an
+            // in-place constraint redefinition (DROP+ADD), deferred to a later
+            // phase. Compare bodies and surface the divergence EXPLICITLY — the
+            // old differ never looked at constraints here, so a changed FK target
+            // was silently skipped (the FK definition spelling now matches live,
+            // so this compare is meaningful, not phantom-drift noise).
+            let live_fk: BTreeMap<&str, &ConstraintSnapshot> = lt
+                .constraints
+                .iter()
+                .filter(|c| c.kind == "FOREIGN KEY")
+                .map(|c| (c.name.as_str(), c))
+                .collect();
+            for c in &dt.constraints {
+                if c.kind != "FOREIGN KEY" {
+                    continue;
+                }
+                if let Some(lc) = live_fk.get(c.name.as_str()) {
+                    if lc.definition != c.definition {
+                        return Err(DeclarativeError::UnsupportedInV1(format!(
+                            "foreign key {}.{} definition change {:?} → {:?}",
+                            table, c.name, lc.definition, c.definition
+                        )));
+                    }
+                }
+            }
         }
 
         // --- DROP TABLE (P2): in live, not in desired → destructive, gated. ---
