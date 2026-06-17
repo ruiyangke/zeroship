@@ -808,6 +808,31 @@ impl DeclarativePlan {
         }
         all
     }
+
+    /// The operational [`Advisory`](crate::analyze::Advisory)s for every
+    /// generated migration in the plan, paired with the migration they apply to.
+    ///
+    /// This is the differ's advisory seam (v3 Plan B): it runs
+    /// [`analyze_migration`](crate::analyze::analyze_migration) over each
+    /// generated migration (the plain set + every rename's expand/contract
+    /// migrations) so a plan/preview UI can show the operational footgun and the
+    /// safer alternative next to the migration that triggers it — e.g. a gated
+    /// `DROP COLUMN` (contract) surfaces the expand-contract suggestion, a
+    /// generated `SET NOT NULL` surfaces the `NOT VALID` → `VALIDATE` path.
+    ///
+    /// These are **advisory only** — they never deny or gate the plan. A
+    /// migration with no advisories is omitted. Order matches
+    /// [`all_migrations`](Self::all_migrations).
+    #[must_use]
+    pub fn advisories(&self) -> Vec<(Migration, Vec<crate::analyze::Advisory>)> {
+        self.all_migrations()
+            .into_iter()
+            .filter_map(|m| {
+                let a = crate::analyze::analyze_migration(&m);
+                (!a.is_empty()).then_some((m, a))
+            })
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1977,3 +2002,63 @@ fn fk_local_column(definition: &str) -> Option<String> {
     }
 }
 
+
+#[cfg(test)]
+mod advisory_seam_tests {
+    use super::*;
+    use crate::analyze::rule;
+
+    /// Build a minimal plain migration carrying `up` SQL (advisory analysis only
+    /// reads `up`; the other fields are inert for this seam).
+    fn plain(up: &str) -> Migration {
+        Migration {
+            version: MigrationId::generate(),
+            name: "t".into(),
+            up: up.to_string(),
+            down: None,
+            checksum: Checksum::of(up, None),
+            flags: MigrationFlags::default(),
+            owner_app: "app_acme".into(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn plan_advisories_surface_operational_footguns_per_migration() {
+        // A plan with one footgun-bearing migration (a gated DROP) and one benign
+        // additive migration: the seam attaches the advisory to the drop only.
+        let plan = DeclarativePlan {
+            migrations: vec![
+                plain("CREATE TABLE \"proj_acme\".\"orders\"(id bigint primary key)"),
+                plain("DROP TABLE \"proj_acme\".\"legacy\""),
+            ],
+            renames: Vec::new(),
+        };
+        let advisories = plan.advisories();
+        // Only the drop produced an advisory entry (the additive create is silent).
+        assert_eq!(advisories.len(), 1, "only the drop should carry advisories");
+        let (mig, advs) = &advisories[0];
+        assert!(mig.up.contains("DROP TABLE"));
+        assert!(advs.iter().any(|a| a.rule == rule::DESTRUCTIVE_DROP));
+        // The suggestion points at the safer path.
+        let a = advs.iter().find(|a| a.rule == rule::DESTRUCTIVE_DROP).unwrap();
+        assert!(a
+            .suggestion
+            .as_deref()
+            .unwrap()
+            .to_lowercase()
+            .contains("expand-contract"));
+    }
+
+    #[test]
+    fn an_all_additive_plan_has_no_advisories() {
+        let plan = DeclarativePlan {
+            migrations: vec![plain(
+                "CREATE TABLE \"proj_acme\".\"orders\"(id bigint primary key, note text)",
+            )],
+            renames: Vec::new(),
+        };
+        assert!(plan.advisories().is_empty());
+    }
+}
