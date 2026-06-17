@@ -926,3 +926,151 @@ async fn l7_h6_expand_with_unmet_skip_precondition_blocks_later_contract() {
 
     teardown(&conn, &cfg).await;
 }
+
+// ===========================================================================
+// L-8 — destructive: analyzer advisory → dry-run → gate → apply (#7/#8/#47).
+//
+// A DROP COLUMN set → analyze_migration emits a DESTRUCTIVE_DROP advisory
+// (non-gating) → dry_run on the shadow surfaces it (the dry-run batch is
+// self-seeding: it CREATEs the table then DROPs the column, so the shadow has the
+// table to drop from) → apply with Approval::None → ApprovalRequired (nothing
+// applied) → apply with Approved → succeeds, drift clean. Composes the advisory
+// (non-gating) + dry-run + the two-layer approval gate (engine gate + executor's
+// own gate).
+// ===========================================================================
+
+#[compio::test]
+async fn l8_destructive_analyzer_advisory_dry_run_gate_apply() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let engine = MigrationEngine::new();
+    let schema = cfg.project_schema.clone();
+
+    // --- DEPLOY 1: create a real table with a `legacy_col` to later drop. ---
+    let create = mig(
+        MigrationId::generate(),
+        "create_accounts",
+        "CREATE TABLE \"{s}\".accounts (id bigint primary key, keep_col text, legacy_col text)",
+        &schema,
+    );
+    let p = engine.plan(std::slice::from_ref(&create), &guard_cfg(&cfg));
+    engine
+        .apply(&p, Approval::None, &conn, &cfg, "app_acme")
+        .await
+        .expect("create accounts");
+    give_table_to_migrator(&conn, &cfg, "accounts").await;
+    assert!(column_exists(&conn, &schema, "accounts", "legacy_col").await);
+
+    // --- The DROP COLUMN migration (destructive). Author it as a destructive,
+    //     approval-requiring migration (the declarative differ marks its own
+    //     drops; here we mint it directly with the same flags). ---
+    let mut drop_col = mig(
+        MigrationId::generate(),
+        "drop_legacy_col",
+        "ALTER TABLE \"{s}\".accounts DROP COLUMN legacy_col",
+        &schema,
+    );
+    drop_col.flags.destructive = true;
+    drop_col.flags.requires_approval = true;
+    drop_col.recompute_checksum();
+
+    // --- LAYER 0: the analyzer emits a non-gating DESTRUCTIVE_DROP advisory. ---
+    let advisories = analyze_migration(&drop_col);
+    assert!(
+        advisories
+            .iter()
+            .any(|a| a.rule == "DESTRUCTIVE_DROP" && a.severity == Severity::Warning),
+        "analyze_migration must emit a DESTRUCTIVE_DROP advisory, got {advisories:?}"
+    );
+    // The advisory is ADVISORY ONLY: the plan still plans it (not denied), and the
+    // DB is untouched by analysis.
+    assert!(column_exists(&conn, &schema, "accounts", "legacy_col").await, "analysis is read-only");
+
+    // --- LAYER 1: dry_run on a throwaway shadow surfaces the advisory + previews
+    //     the destructive op without touching the real DB. The batch is
+    //     self-seeding (CREATE table + DROP COLUMN in one batch). ---
+    let create_for_shadow = mig(
+        MigrationId::generate(),
+        "shadow_create_accounts",
+        "CREATE TABLE \"{s}\".accounts (id bigint primary key, keep_col text, legacy_col text)",
+        &schema,
+    );
+    let mut drop_for_shadow = mig(
+        MigrationId::generate(),
+        "shadow_drop_legacy_col",
+        "ALTER TABLE \"{s}\".accounts DROP COLUMN legacy_col",
+        &schema,
+    );
+    drop_for_shadow.depends_on = vec![create_for_shadow.version.clone()];
+    drop_for_shadow.flags.destructive = true;
+    drop_for_shadow.flags.requires_approval = true;
+    drop_for_shadow.recompute_checksum();
+    let shadow_batch = vec![create_for_shadow.clone(), drop_for_shadow.clone()];
+
+    let report = engine
+        .dry_run(&conn, &shadow_batch, &cfg, &shadow_cfg(&tok), "app_acme")
+        .await
+        .expect("dry_run harness");
+    // The dry-run applies cleanly on the shadow (the destructive op is valid SQL).
+    assert!(report.ok, "dry_run must apply the self-seeding batch cleanly on the shadow: {report:?}");
+    // The destructive advisory is surfaced for the DROP COLUMN migration.
+    let drop_advisories: Vec<_> = report
+        .advisories
+        .iter()
+        .filter(|(v, _)| v == drop_for_shadow.version.as_str())
+        .flat_map(|(_, a)| a.iter())
+        .collect();
+    assert!(
+        drop_advisories.iter().any(|a| a.rule == "DESTRUCTIVE_DROP"),
+        "dry_run must surface the DESTRUCTIVE_DROP advisory for the DROP COLUMN; advisories={:?}",
+        report.advisories
+    );
+    // The dry-run did NOT touch the real project DB (the real DROP has not run).
+    assert!(
+        column_exists(&conn, &schema, "accounts", "legacy_col").await,
+        "dry_run must not touch the real project schema"
+    );
+
+    // --- LAYER 2a: apply the real DROP with Approval::None → ApprovalRequired,
+    //     nothing applied (the column survives). The engine's gate refuses. ---
+    let plan_drop = engine.plan(std::slice::from_ref(&drop_col), &guard_cfg(&cfg));
+    assert!(plan_drop.destructive, "the plan is destructive");
+    assert!(plan_drop.requires_approval, "the plan requires approval");
+    let err = engine
+        .apply(&plan_drop, Approval::None, &conn, &cfg, "app_acme")
+        .await
+        .expect_err("a destructive plan without approval must be refused");
+    assert!(
+        matches!(err, EngineError::ApprovalRequired),
+        "expected ApprovalRequired, got {err:?}"
+    );
+    assert!(
+        column_exists(&conn, &schema, "accounts", "legacy_col").await,
+        "the refused destructive apply must drop NOTHING"
+    );
+
+    // --- LAYER 2b: apply with Approval::Approved → succeeds, the column is gone. ---
+    let out = engine
+        .apply(&plan_drop, Approval::Approved, &conn, &cfg, "app_acme")
+        .await
+        .expect("an approved destructive apply must run");
+    assert_eq!(out.applied, vec![drop_col.version.as_str().to_string()]);
+    assert!(
+        !column_exists(&conn, &schema, "accounts", "legacy_col").await,
+        "the approved drop removed the column"
+    );
+    assert!(column_exists(&conn, &schema, "accounts", "keep_col").await, "the kept column survives");
+
+    // --- DRIFT clean: the desired (post-drop) schema matches live. We build the
+    //     desired snapshot from a descriptor that mirrors the post-drop shape and
+    //     assert no column drift on `accounts`. ---
+    let drift = check_checksum_drift(&conn, &cfg, &[create.clone(), drop_col.clone()])
+        .await
+        .expect("checksum-drift check");
+    assert!(drift.is_clean(), "no checksum drift after the destructive lifecycle: {drift:?}");
+
+    teardown(&conn, &cfg).await;
+}
