@@ -343,7 +343,7 @@ fn shadow_executor_cfg(cfg: &ExecutorConfig, shadow_db: &str) -> Result<Executor
             // is operator-side, like the CLI runners). NO migrator role / SET ROLE, and
             // the SAME schema + extension allowlist as the source so the widened guard
             // and `search_path` are identical to the real Platform apply.
-            let cap = crate::guard::platform_runner::mint_shadow_platform_capability();
+            let cap = crate::guard::platform_runner::mint_shadow_operator_capability();
             let mut sc = ExecutorConfig::platform(
                 &cap,
                 shadow_db.to_string(),
@@ -366,7 +366,7 @@ fn shadow_executor_cfg(cfg: &ExecutorConfig, shadow_db: &str) -> Result<Executor
             // migrator role / SET ROLE (Trusted runs as the connecting role). The
             // shadow's own `guard_config()` returns the Trusted guard, so its
             // deny-list is OFF — identical to the real apply.
-            let cap = crate::guard::platform_runner::mint_shadow_platform_capability();
+            let cap = crate::guard::platform_runner::mint_shadow_operator_capability();
             let mut sc =
                 ExecutorConfig::trusted(&cap, shadow_db.to_string(), cfg.project_schema.clone());
             sc.meta_schema.clone_from(&cfg.meta_schema);
@@ -807,6 +807,9 @@ async fn seed_shadow_from_live(
     if diff.migrations.is_empty() {
         return Ok(());
     }
+    // Declarative is Confined-only by construction (no operator token reaches the
+    // declarative path), so the hard-wired confined planner here can't drift into
+    // a privileged profile.
     let guard_cfg = GuardConfig::confined(cfg.project_schema.clone());
     let engine = MigrationEngine::new();
     let plan = engine.plan(&diff.migrations, &guard_cfg);
@@ -1000,6 +1003,9 @@ async fn dry_run_declarative_body(
     // validates the rename's true end state instead of false-positiving on the
     // mid-rename intermediate.
     if ok && !pending_contract.is_empty() {
+        // Declarative is Confined-only by construction (no operator token reaches
+        // the declarative path), so the hard-wired confined planner here can't
+        // drift into a privileged profile.
         let guard_cfg = GuardConfig::confined(cfg.project_schema.clone());
         let contract_plan = engine.plan(&pending_contract, &guard_cfg);
         match engine

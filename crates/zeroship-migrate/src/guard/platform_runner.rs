@@ -71,7 +71,7 @@ impl OperatorCapability {
 /// DB the operator owns, so reproducing the source's profile on it is NOT a
 /// privilege escalation — it reproduces the real apply on a clone.
 #[must_use]
-pub(crate) const fn mint_shadow_platform_capability() -> OperatorCapability {
+pub(crate) const fn mint_shadow_operator_capability() -> OperatorCapability {
     OperatorCapability::new()
 }
 
@@ -86,6 +86,12 @@ pub enum RunProfile {
     Platform,
     /// Untrusted-equivalent: the full deny-list, single-schema.
     Confined,
+    /// The public dbmate-like posture (Track A): the operator owns the DB, so the
+    /// deny-list is OFF and there is no schema confinement. The DEFAULT of the
+    /// public `zeroship-migrate` CLI. Reachable ONLY through the CLI's
+    /// `--profile trusted` flag (the single new Trusted surface) — the control
+    /// plane uses `submit_migration` (Confined) and never reaches this binary.
+    Trusted,
 }
 
 /// The operator-supplied inputs for a runner invocation (parsed from the CLI args,
@@ -186,6 +192,14 @@ pub enum RunError {
         /// Their operational advisories (so the operator sees what would be lost).
         advisories: Vec<Advisory>,
     },
+    /// `wait` exceeded its timeout without the DB accepting a connection.
+    #[error("wait: database not reachable within {secs}s (last error: {last_error})")]
+    WaitTimeout {
+        /// The timeout budget that elapsed, in seconds.
+        secs: u64,
+        /// The most recent connection/probe error seen before timing out.
+        last_error: String,
+    },
 }
 
 /// The H1 destructive-gate decision (design §9, pure + unit-testable).
@@ -248,6 +262,12 @@ fn build_exec_cfg(cfg: &RunConfig) -> ExecutorConfig {
                 cfg.extensions.clone(),
             )
         }
+        RunProfile::Trusted => {
+            // The single token mint (design §5), shared with Platform. No other
+            // module can reach `new()`.
+            let cap = OperatorCapability::new();
+            ExecutorConfig::trusted(&cap, cfg.project_id.clone(), cfg.project_schema.clone())
+        }
         RunProfile::Confined => ExecutorConfig::new(cfg.project_id.clone(), cfg.project_schema.clone()),
     };
     exec.meta_schema.clone_from(&cfg.meta_schema);
@@ -265,6 +285,10 @@ fn build_guard_cfg(cfg: &RunConfig) -> super::GuardConfig {
         RunProfile::Platform => {
             let cap = OperatorCapability::new();
             super::GuardConfig::platform(&cap, cfg.schemas.clone(), cfg.extensions.clone())
+        }
+        RunProfile::Trusted => {
+            let cap = OperatorCapability::new();
+            super::GuardConfig::trusted(&cap)
         }
         RunProfile::Confined => super::GuardConfig::confined(cfg.project_schema.clone()),
     }
@@ -404,6 +428,91 @@ pub async fn run_rollback(
         )
         .await?;
     Ok(RunReport::Rollback(outcome))
+}
+
+/// `down` — roll back the SINGLE most-recently-applied migration (dbmate `down`
+/// semantics: one step), GATED on `--yes` (rollback is always destructive).
+///
+/// This is the dbmate-parity peer of [`run_rollback`]: where `rollback` takes a
+/// `--to`/`--steps` target, `down` is hard-wired to `Steps(1)` — undo exactly the
+/// last applied migration.
+///
+/// # Errors
+/// [`RunError`] on load / connect / a missing `--yes` / the executor's rollback.
+pub async fn run_down(cfg: &RunConfig) -> Result<RunReport, RunError> {
+    // `down` is one-step rollback; delegate to the shared rollback path with a
+    // `Steps(1)` target so the --yes gate + executor re-checks are identical.
+    run_rollback(cfg, None, Some(1)).await
+}
+
+/// `--lint` — return the per-migration operational advisories for the loaded set,
+/// WITHOUT touching the DB. Non-blocking: advisories never deny (they are
+/// [`analyze`](crate::analyze::analyze) heads-ups, the value-add for the
+/// generic/Trusted mode where the deny-list is off).
+///
+/// Plans under the run's profile (so the guard report carries the advisories) and
+/// extracts `(version, advisories)`. Pure with respect to the database — it never
+/// connects; the CLI calls it after a `migrate`/`validate` to print the footguns.
+///
+/// # Errors
+/// [`RunError`] only on a load/parse failure of the migration directory.
+pub fn lint_advisories(cfg: &RunConfig) -> Result<Vec<(String, Vec<Advisory>)>, RunError> {
+    let migrations = load_dir(&cfg.dir)?;
+    let guard_cfg = build_guard_cfg(cfg);
+    let engine = MigrationEngine::new();
+    let plan = engine.plan(&migrations, &guard_cfg);
+    Ok(plan
+        .items
+        .iter()
+        .map(|p| {
+            (
+                p.migration.version.as_str().to_string(),
+                p.report.advisories.clone(),
+            )
+        })
+        .collect())
+}
+
+/// `wait` — poll the DSN until the database accepts a connection (a successful
+/// `SELECT 1`), or time out (dbmate `wait`).
+///
+/// Retries [`connect`] + a trivial `SELECT 1` on a short interval until the DB is
+/// reachable or `timeout` elapses. Returns `Ok(())` as soon as the DB answers;
+/// the bin exits 0. On timeout it returns [`RunError::WaitTimeout`] and the bin
+/// exits non-zero.
+///
+/// # Errors
+/// [`RunError::WaitTimeout`] if the DB is not reachable within `timeout`.
+pub async fn run_wait(
+    database_url: &str,
+    timeout: Duration,
+    interval: Duration,
+) -> Result<(), RunError> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let last_err = match probe_once(database_url).await {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+        if std::time::Instant::now() >= deadline {
+            return Err(RunError::WaitTimeout {
+                secs: timeout.as_secs(),
+                last_error: last_err,
+            });
+        }
+        // Short async sleep on the compio timer (zero tokio) before retrying.
+        compio::time::sleep(interval).await;
+    }
+}
+
+/// One `wait` probe: connect + `SELECT 1`. Returns `Ok(())` if the DB answered,
+/// or a stringified error to surface as the last failure on timeout.
+async fn probe_once(database_url: &str) -> Result<(), String> {
+    let conn = connect(database_url).await.map_err(|e| e.to_string())?;
+    conn.query("SELECT 1", &[])
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// Convenience for the bin: the conventional Platform schema allowlist default.
