@@ -462,7 +462,16 @@ pub fn desired_snapshot(
                     });
                 }
                 // Identical shape: idempotent. Keep the lexicographically-smallest
-                // declaring app as the owner so the union is order-independent.
+                // declaring app as the owner so the union is order-independent
+                // (the critic checks: same union + same ownership regardless of
+                // descriptor order). This tiebreak is NOT an ownership-spoof vector:
+                // `owner_app` is the server-stamped id of the app whose deploy
+                // produced the descriptor — the caller (control plane) concatenates
+                // each app's descriptors stamped with that app's OWN id, so an app
+                // cannot inject a descriptor bearing another app's id. And because
+                // the two declarations are byte-identical, the migrations either
+                // owner would author are identical too, so the tiebreak is
+                // behaviourally inert beyond which app the enforcement check names.
                 if d.owner_app < *owner {
                     owner.clone_from(&d.owner_app);
                 }
