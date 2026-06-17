@@ -174,19 +174,27 @@ impl MigrationEngine {
     /// output (no bypass). A destructive drop in the diff makes the plan
     /// `requires_approval`, exactly as a hand-authored drop would.
     ///
+    /// `hints` are the OPT-IN [`RenameHint`](crate::declarative::RenameHint)s
+    /// (P3): each routes a hinted drop+add pair through the zero-downtime
+    /// expand-contract rename sequence instead of an independent drop + add.
+    /// Without a matching hint a drop+add stays two independent ops — the differ
+    /// NEVER infers a rename heuristically. An empty slice ⇒ pure P0–P2 behaviour.
+    ///
     /// # Errors
     /// [`DeclarativeError`](crate::declarative::DeclarativeError) if the diff
-    /// hits an unsupported (type/nullability change) op or an invalid descriptor
-    /// name/type at the author boundary. A guard *denial* on generated SQL is
-    /// NOT an error here — it lands in [`MigrationPlan::denied`] like any other.
+    /// hits an unsupported op, an unmatched/type-mismatched rename hint, or an
+    /// invalid descriptor name/type at the author boundary. A guard *denial* on
+    /// generated SQL is NOT an error here — it lands in [`MigrationPlan::denied`]
+    /// like any other.
     pub fn plan_declarative(
         &self,
         desired: &crate::drift::SchemaSnapshot,
         live: &crate::drift::SchemaSnapshot,
         author: &crate::declarative::DeclarativeAuthor,
+        hints: &[crate::declarative::RenameHint],
         cfg: &GuardConfig,
     ) -> Result<MigrationPlan, crate::declarative::DeclarativeError> {
-        let migrations = author.diff(desired, live)?;
+        let migrations = author.diff(desired, live, hints)?;
         Ok(self.plan(&migrations, cfg))
     }
 
