@@ -5,8 +5,9 @@
 # Single source of truth for the full local stack the gateway-level E2E
 # harnesses need:
 #
-#   stack_up        ephemeral Postgres (docker) + the FULL Liquibase changelog
-#                   from db/changelog (0001→latest) applied from scratch, then
+#   stack_up        ephemeral Postgres (docker) + the FULL platform migration
+#                   set from db/migrations (V0001→latest) applied from scratch
+#                   via the `zeroship-migrate` bin (Platform profile), then
 #                   control + worker + gateway booted with --dev-insecure and
 #                   health-polled. Non-blocking: binaries run in the background;
 #                   the function returns once all three are health-green.
@@ -61,7 +62,7 @@ _stk_jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{t
 # --- preflight: required binaries + tooling ---------------------------------
 stack_preflight() {
   local b
-  for b in zeroship zeroship-control zeroship-gate zeroship-worker; do
+  for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrate; do
     [ -x "$E2E_BIN/$b" ] || { _stk_bad "missing $E2E_BIN/$b — run: cargo build --release"; return 2; }
   done
   [ -f "$E2E_JOSE_JS" ] || { _stk_bad "missing jose at $E2E_JOSE_JS"; return 2; }
@@ -100,15 +101,14 @@ stack_up() {
       && _stk_ok "applied ops/postgres-init.sql" || _stk_bad "postgres-init.sql failed"
   fi
 
-  local mig_log="$WORK/liquibase.log"
-  if docker run --rm --network host -v "$E2E_ROOT/db/changelog:/liquibase/changelog" \
-      liquibase/liquibase:4.31 \
-      --url="jdbc:postgresql://localhost:$PG_PORT/zeroship" \
-      --username=postgres --password=zeroship \
-      --changelog-file=changelog/db.changelog-master.yaml update > "$mig_log" 2>&1; then
-    _stk_ok "Liquibase changelog applied cleanly from scratch"
+  local mig_log="$WORK/migrate.log"
+  if "$E2E_BIN/zeroship-migrate" migrate \
+      --dir "$E2E_ROOT/db/migrations" \
+      --database-url "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
+      --profile platform --yes > "$mig_log" 2>&1; then
+    _stk_ok "platform migrations applied cleanly from scratch (zeroship-migrate)"
   else
-    _stk_bad "Liquibase migration FAILED (see $mig_log)"; tail -20 "$mig_log"; return 1
+    _stk_bad "zeroship-migrate FAILED (see $mig_log)"; tail -20 "$mig_log"; return 1
   fi
 
   # --- signing key + free the ports ----------------------------------------

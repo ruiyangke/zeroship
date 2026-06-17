@@ -123,7 +123,7 @@ if ! "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -tAc "SELECT 1" 
   echo "  ⚠ SKIP: Postgres :$PGPORT unreachable."; exit 0
 fi
 if [ -f "$ROOT/ops/db-migrate.sh" ] && ! command -v docker >/dev/null 2>&1; then
-  echo "  ⚠ SKIP: docker required for the Liquibase migrate step."; exit 0
+  echo "  ⚠ SKIP: docker required step."; exit 0
 fi
 
 SAPI="https://api.stripe.com/v1"
@@ -267,7 +267,7 @@ wait_for_db() {
 
 # ===========================================================================
 echo ""
-echo "=== Stage 1: dedicated DB ($DB) + Liquibase + control booted at REAL Stripe ==="
+echo "=== Stage 1: dedicated DB ($DB) + zeroship-migrate + control booted at REAL Stripe ==="
 # ===========================================================================
 "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "could not (re)create $DB"; exit 1; }
 SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB' AND pid<>pg_backend_pid();
@@ -277,11 +277,11 @@ ALTER DATABASE $DB SET search_path = zeroship, public;
 SQL
 pass "(re)created dedicated DB $DB on :$PGPORT (real zeroship + zeroship_billing_test untouched)"
 
-MIG_LOG="$WORK/liquibase.log"
-if ZEROSHIP_DB_JDBC="jdbc:postgresql://$PGHOST:$PGPORT/$DB" "$ROOT/ops/db-migrate.sh" update > "$MIG_LOG" 2>&1; then
-  pass "Liquibase changelog applied (incl. 0044 creator_fee_policy + creator_accounts Connect flags)"
+MIG_LOG="$WORK/migrate.log"
+if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/ops/db-migrate.sh" migrate --yes > "$MIG_LOG" 2>&1; then
+  pass "zeroship-migrate platform set applied (incl. 0044 creator_fee_policy + creator_accounts Connect flags)"
 else
-  fail "Liquibase migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
+  fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
 fi
 
 DBURL="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB"

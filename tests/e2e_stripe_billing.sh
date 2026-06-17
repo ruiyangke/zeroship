@@ -31,7 +31,7 @@
 #   * Real zeroship-control binary, pointed at REAL https://api.stripe.com with
 #     the operator's Stripe TEST secret key.
 #   * Real ephemeral-but-dedicated zeroship Postgres DB `zeroship_stripe_e2e` on
-#     the :5440 server + the full Liquibase changelog.
+#     the :5440 server + the full zeroship-migrate platform set.
 #   * Real Stripe objects (cus_/in_/ii_/pi_/ch_/re_/du_), created over the wire.
 #   * The REAL webhook signature path: events are constructed from the REAL
 #     fetched Stripe objects and HMAC-SHA256-signed with the secret the control
@@ -98,7 +98,7 @@ if ! "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -tAc "SELECT 1" 
   echo "  ⚠ SKIP: Postgres :$PGPORT unreachable."; exit 0
 fi
 if [ -f "$ROOT/ops/db-migrate.sh" ] && ! command -v docker >/dev/null 2>&1; then
-  echo "  ⚠ SKIP: docker required for the Liquibase migrate step."; exit 0
+  echo "  ⚠ SKIP: docker required step."; exit 0
 fi
 
 SK="$STRIPE_TEST_SECRET_KEY"
@@ -133,7 +133,7 @@ lsof -ti :"$CONTROL_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 
 # ===========================================================================
 echo ""
-echo "=== Stage 1: dedicated DB ($DB) + Liquibase + control booted at REAL Stripe ==="
+echo "=== Stage 1: dedicated DB ($DB) + zeroship-migrate + control booted at REAL Stripe ==="
 # ===========================================================================
 # (Re)create the dedicated DB clean so the run is deterministic.
 "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "could not (re)create $DB"; exit 1; }
@@ -144,11 +144,11 @@ ALTER DATABASE $DB SET search_path = zeroship, public;
 SQL
 pass "(re)created dedicated DB $DB on :$PGPORT (real zeroship + zeroship_billing_test untouched)"
 
-MIG_LOG="$WORK/liquibase.log"
-if ZEROSHIP_DB_JDBC="jdbc:postgresql://$PGHOST:$PGPORT/$DB" "$ROOT/ops/db-migrate.sh" update > "$MIG_LOG" 2>&1; then
-  pass "Liquibase changelog applied to $DB (incl. 0042 invoicing, 0049 refunds, 0053 disputes)"
+MIG_LOG="$WORK/migrate.log"
+if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/ops/db-migrate.sh" migrate --yes > "$MIG_LOG" 2>&1; then
+  pass "zeroship-migrate platform set applied to $DB (incl. 0042 invoicing, 0049 refunds, 0053 disputes)"
 else
-  fail "Liquibase migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
+  fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
 fi
 
 DBURL="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB"

@@ -4,7 +4,7 @@
 # browser-level Playwright E2E and deploy the three render examples.
 #
 # Sources the shared bring-up library (tests/lib/e2e_stack.sh), then:
-#   • stack_up        — ephemeral PG + Liquibase + control/worker/gateway
+#   • stack_up        — ephemeral PG + zeroship-migrate + control/worker/gateway
 #   • mint_admin_pat  — offline platform-admin PAT
 #   • deploy_zship    — csr-todo / ssr-blog / ssg-docs (slugs ...-bx, disjoint
 #                       from the curl harness's ...-e2e apps)

@@ -19,7 +19,7 @@
 # /dispatch path directly, which is unauthenticated on loopback).
 #
 # Bring-up mirrors e2e_app_primitives.sh exactly: ephemeral PG :5444 + the full
-# Liquibase changelog + control/worker/gateway with --dev-insecure + an
+# zeroship-migrate platform set + control/worker/gateway with --dev-insecure + an
 # OFFLINE-minted admin PAT + create-app + deploy + Host-header addressing.
 #
 # Usage:
@@ -55,7 +55,7 @@ pass()  { PASS=$((PASS+1));  echo "  ✓ $1"; }
 fail()  { FAIL=$((FAIL+1));  echo "  ✗ $1"; }
 known() { KNOWN=$((KNOWN+1)); echo "  ⚠ $1"; if [ "$STRICT" = "1" ]; then FAIL=$((FAIL+1)); fi; }
 
-# Shared bring-up: ephemeral PG + Liquibase + control/worker/gateway + PAT mint +
+# Shared bring-up: ephemeral PG + zeroship-migrate + control/worker/gateway + PAT mint +
 # deploy. Single source of truth in tests/lib/e2e_stack.sh — the same library the
 # browser-level E2E (tests/e2e_browser/) sources. It emits ✓/✗ via the pass()/fail()
 # defined above. (Stages 1–3 + deploy_app below are now thin wrappers over it.)
@@ -84,7 +84,7 @@ command -v zstd >/dev/null || { echo "zstd required"; exit 2; }
 echo ""
 echo "=== Stage 1+2: ephemeral Postgres + migrations + boot stack (--dev-insecure) ==="
 # Shared bring-up (tests/lib/e2e_stack.sh): ephemeral PG on :$PG_PORT + the FULL
-# Liquibase changelog from scratch + control/worker/gateway --dev-insecure,
+# zeroship-migrate platform set from scratch + control/worker/gateway --dev-insecure,
 # health-polled. Exports WORK / PIDFILE / DBURL. Emits its own ✓/✗ via pass()/fail().
 stack_up || { fail "stack bring-up failed"; exit 1; }
 

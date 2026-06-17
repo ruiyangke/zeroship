@@ -129,10 +129,9 @@ if [ -z "${SKIP_DB_RECREATE:-}" ]; then
   run_psql -d postgres -v ON_ERROR_STOP=1 \
     -c "DROP DATABASE IF EXISTS ${TEST_DB} WITH (FORCE);" \
     -c "CREATE DATABASE ${TEST_DB};"
-  echo "==> Migrating ${TEST_DB} (Liquibase)"
-  ZEROSHIP_DB_JDBC="jdbc:postgresql://${PG_HOST}:${PG_PORT}/${TEST_DB}" \
-  ZEROSHIP_DB_USER="$PG_USER" ZEROSHIP_DB_PASS="$PG_PASS" \
-    ops/db-migrate.sh update >/dev/null
+  echo "==> Migrating ${TEST_DB} (zeroship-migrate)"
+  ZEROSHIP_MIGRATE_DSN="postgres://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${TEST_DB}" \
+    ops/db-migrate.sh migrate >/dev/null
   echo "==> Migration complete"
 else
   echo "==> SKIP_DB_RECREATE set; reusing ${TEST_DB}"

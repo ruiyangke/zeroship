@@ -24,14 +24,14 @@
 #     event_summaries readback), the meter provisioned by THIS harness.
 #   * REAL zeroship StripeProvider/StripeClient (cyper) → https://api.stripe.com.
 #   * REAL dedicated zeroship Postgres (zeroship_stripe_meters_e2e on :5440) +
-#     the full Liquibase changelog (the cron reads/writes usage_aggregates +
+#     the full zeroship-migrate platform set (the cron reads/writes usage_aggregates +
 #     metering_exports).
 #
 # DO NO HARM: dedicated DB `zeroship_stripe_meters_e2e` on :5440 — NEVER the real
 # `zeroship` DB, nor zeroship_billing_test / zeroship_metering_load /
 # zeroship_invoice_demo / zeroship_stripe_e2e. Self-managed DB (re)create + drop
 # on exit. Skips CLEANLY (exit 0) when prereqs are absent (no PG :5440, no psql,
-# no docker for Liquibase, no keys, no control binary).
+# no docker for the migrate step, no keys, no control binary).
 #
 # Usage:
 #   source /home/ruiyang/.config/zeroship-stripe-test.env   # sets the TEST keys
@@ -81,7 +81,7 @@ command -v curl  >/dev/null 2>&1 || { echo "  ⚠ SKIP: curl required."; exit 0;
 command -v node  >/dev/null 2>&1 || { echo "  ⚠ SKIP: node required (JSON extraction)."; exit 0; }
 command -v cargo >/dev/null 2>&1 || { echo "  ⚠ SKIP: cargo required."; exit 0; }
 if [ -f "$ROOT/ops/db-migrate.sh" ] && ! command -v docker >/dev/null 2>&1; then
-  echo "  ⚠ SKIP: docker required for the Liquibase migrate step."; exit 0
+  echo "  ⚠ SKIP: docker required step."; exit 0
 fi
 
 export PGPASSWORD="$PGPW"
@@ -178,7 +178,7 @@ AGG="$(echo "$METER_JSON" | jget default_aggregation.formula)"
 
 # ===========================================================================
 echo ""
-echo "=== Stage 2: dedicated zeroship DB ($DB on :$PGPORT) + Liquibase ==="
+echo "=== Stage 2: dedicated zeroship DB ($DB on :$PGPORT) + zeroship-migrate ==="
 # ===========================================================================
 "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "could not (re)create $DB"; exit 1; }
 SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB' AND pid<>pg_backend_pid();
@@ -188,11 +188,11 @@ ALTER DATABASE $DB SET search_path = zeroship, public;
 SQL
 pass "(re)created dedicated DB $DB on :$PGPORT (NOT the real zeroship DB / billing_test / others)"
 
-MIG_LOG="$WORK/liquibase.log"
-if ZEROSHIP_DB_JDBC="jdbc:postgresql://$PGHOST:$PGPORT/$DB" "$ROOT/ops/db-migrate.sh" update > "$MIG_LOG" 2>&1; then
-  pass "Liquibase changelog applied cleanly (incl. 0043 metering_exports)"
+MIG_LOG="$WORK/migrate.log"
+if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/ops/db-migrate.sh" migrate --yes > "$MIG_LOG" 2>&1; then
+  pass "zeroship-migrate platform set applied cleanly (incl. 0043 metering_exports)"
 else
-  fail "Liquibase migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
+  fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
 fi
 
 DBURL="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB"

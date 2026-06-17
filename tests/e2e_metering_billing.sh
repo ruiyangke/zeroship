@@ -18,7 +18,7 @@
 #
 # FAITHFUL by construction — NO stubbing of the components under test:
 #   * Real zeroship-control / zeroship-worker / zeroship-gate binaries.
-#   * Real ephemeral Postgres (docker) + the full Liquibase changelog.
+#   * Real ephemeral Postgres (docker) + the full zeroship-migrate platform set.
 #   * A real deployed app (examples/metering-probe .zship) hit through the
 #     gateway with real HTTP traffic.
 #   * A real (local) Stripe endpoint: the STANDALONE `zeroship-mock-stripe`
@@ -74,7 +74,7 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
 fi
 
 # --- preflight: binaries + tooling + built example -------------------------
-for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-mock-stripe; do
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-mock-stripe zeroship-migrate; do
   [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run: cargo build --release"; exit 2; }
 done
 command -v node    >/dev/null 2>&1 || { echo "node required"; exit 2; }
@@ -132,7 +132,7 @@ done
 
 # ===========================================================================
 echo ""
-echo "=== Stage 1: ephemeral Postgres + Liquibase + plan seed + mock-Stripe + stack ==="
+echo "=== Stage 1: ephemeral Postgres + zeroship-migrate + plan seed + mock-Stripe + stack ==="
 # ===========================================================================
 
 docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
@@ -146,15 +146,14 @@ docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 \
 [ -f "$ROOT/ops/postgres-init.sql" ] && psql_exec < "$ROOT/ops/postgres-init.sql" >/dev/null 2>&1 \
   && pass "applied ops/postgres-init.sql" || true
 
-MIG_LOG="$WORK/liquibase.log"
-if docker run --rm --network host -v "$ROOT/db/changelog:/liquibase/changelog" \
-    liquibase/liquibase:4.31 \
-    --url="jdbc:postgresql://localhost:$PG_PORT/zeroship" \
-    --username=postgres --password=zeroship \
-    --changelog-file=changelog/db.changelog-master.yaml update > "$MIG_LOG" 2>&1; then
-  pass "Liquibase changelog applied cleanly from scratch"
+MIG_LOG="$WORK/migrate.log"
+if "$BIN/zeroship-migrate" migrate \
+    --dir "$ROOT/db/migrations" \
+    --database-url "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
+    --profile platform --yes > "$MIG_LOG" 2>&1; then
+  pass "platform migrations applied cleanly from scratch (zeroship-migrate)"
 else
-  fail "Liquibase migration FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
+  fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
 fi
 
 # Seed the metering-test plan (compute-unit pricing, Refactor B scalar schema).

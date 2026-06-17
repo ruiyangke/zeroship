@@ -23,7 +23,7 @@
 #   sign_zeroship_user_header_at / verify_zeroship_user_header_for_request_at.)
 #
 # What this does, end to end, against a CLEAN ephemeral stack:
-#   1. Ephemeral Postgres + ops/postgres-init.sql + the FULL Liquibase changelog
+#   1. Ephemeral Postgres + ops/postgres-init.sql + the full zeroship-migrate platform set
 #      (control needs a DB for app CRUD + deploy).
 #   2. Throwaway Redis (auth-notes scopes notes in env.kv → Redis backend).
 #   3. control + worker + gateway with `--dev-insecure`; worker gets `--kv-url`.
@@ -147,7 +147,7 @@ echo "  zeroship E2E — env.auth over the edge (G3/ISS-54)"
 echo "============================================"
 
 # --- preflight -------------------------------------------------------------
-for b in zeroship zeroship-control zeroship-gate zeroship-worker; do
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrate; do
   [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run: cargo build --release"; exit 2; }
 done
 AUTH_ZSHIP="$ROOT/examples/auth-notes/dist/app.zship"
@@ -183,15 +183,14 @@ if [ -f "$ROOT/ops/postgres-init.sql" ]; then
     && pass "applied ops/postgres-init.sql" || fail "postgres-init.sql failed"
 fi
 
-MIG_LOG="$WORK/liquibase.log"
-if docker run --rm --network host -v "$ROOT/db/changelog:/liquibase/changelog" \
-    liquibase/liquibase:4.31 \
-    --url="jdbc:postgresql://localhost:$PG_PORT/zeroship" \
-    --username=postgres --password=zeroship \
-    --changelog-file=changelog/db.changelog-master.yaml update > "$MIG_LOG" 2>&1; then
-  pass "Liquibase changelog applied cleanly from scratch"
+MIG_LOG="$WORK/migrate.log"
+if "$BIN/zeroship-migrate" migrate \
+    --dir "$ROOT/db/migrations" \
+    --database-url "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
+    --profile platform --yes > "$MIG_LOG" 2>&1; then
+  pass "platform migrations applied cleanly from scratch (zeroship-migrate)"
 else
-  fail "Liquibase migration FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
+  fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
 fi
 
 # ---------------------------------------------------------------------------
