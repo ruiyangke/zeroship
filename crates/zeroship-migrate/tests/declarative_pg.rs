@@ -111,7 +111,10 @@ async fn apply_plan(
     let plan = engine
         .plan_declarative(desired, live, author, &[], &guard_cfg(cfg))
         .expect("plan_declarative");
-    engine.apply(&plan, approval, conn, cfg, "app_test").await?;
+    // This helper drives only NO-rename diffs (it passes `&[]` hints), so the
+    // plain plan is the whole deploy; apply it through the gate directly.
+    debug_assert!(plan.renames.is_empty(), "apply_plan is for hint-free diffs");
+    engine.apply(&plan.plain, approval, conn, cfg, "app_test").await?;
     Ok(())
 }
 
@@ -450,7 +453,7 @@ async fn full_shape_round_trips_to_zero_drift_the_canonical_idempotency_oracle()
     );
 
     // And the differ itself re-diffs to ZERO migrations (true idempotency).
-    let migs = author.diff(&desired, &live2, &[]).expect("re-diff");
+    let migs = author.diff(&desired, &live2, &[]).expect("re-diff").migrations;
     assert!(
         migs.is_empty(),
         "re-diff must be empty, got {} migration(s): {:?}",
@@ -562,7 +565,7 @@ async fn long_table_and_field_unique_index_name_is_capped_and_re_diffs_clean() {
         .await
         .expect("apply long-name table");
     let live2 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
-    let migs = author.diff(&desired, &live2, &[]).expect("re-diff");
+    let migs = author.diff(&desired, &live2, &[]).expect("re-diff").migrations;
     assert!(
         migs.is_empty(),
         "long-name index churned (re-diff not empty): {:?}",
@@ -638,7 +641,7 @@ async fn additive_diff_is_idempotent_second_plan_is_empty() {
     let live2 = snapshot_schema(&conn, &cfg.project_schema)
         .await
         .expect("re-snapshot");
-    let migs = author.diff(&desired, &live2, &[]).expect("second diff");
+    let migs = author.diff(&desired, &live2, &[]).expect("second diff").migrations;
     assert!(
         migs.is_empty(),
         "second diff should be empty (idempotent), got {} migration(s)",
@@ -760,7 +763,7 @@ async fn type_change_emits_a_gated_alter_not_an_error_and_never_auto_applies() {
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
 
-    let migs = author.diff(&desired, &live, &[]).expect("type change now diffs to a gated ALTER");
+    let migs = author.diff(&desired, &live, &[]).expect("type change now diffs to a gated ALTER").migrations;
     let alter = migs.iter().find(|m| m.up.contains("ALTER COLUMN") && m.up.contains("TYPE"))
         .expect("a gated ALTER COLUMN TYPE migration");
     assert!(alter.flags.destructive, "type change is destructive (lossy/rewrite)");
@@ -823,7 +826,7 @@ async fn every_generated_migration_passes_through_the_guard_no_bypass() {
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
-    let migs = author.diff(&desired, &SchemaSnapshot::default(), &[]).expect("diff");
+    let migs = author.diff(&desired, &SchemaSnapshot::default(), &[]).expect("diff").migrations;
     assert!(!migs.is_empty(), "diff should generate migrations");
     let plan = engine.plan(&migs, &guard_cfg(&cfg));
     assert!(plan.denied.is_empty(), "generated SQL must not be denied: {:?}", plan.denied);
@@ -865,12 +868,12 @@ async fn drop_table_is_gated_and_not_auto_applied() {
     let plan = engine
         .plan_declarative(&empty, &live, &author, &[], &guard_cfg(&cfg))
         .expect("plan drop");
-    assert!(plan.destructive, "a DROP TABLE diff must be destructive");
-    assert!(plan.requires_approval, "a DROP TABLE diff must require approval");
+    assert!(plan.plain.destructive, "a DROP TABLE diff must be destructive");
+    assert!(plan.plain.requires_approval, "a DROP TABLE diff must require approval");
 
     // Apply WITHOUT approval → ApprovalRequired, nothing applied.
     let err = engine
-        .apply(&plan, Approval::None, &conn, &cfg, "app_test")
+        .apply(&plan.plain, Approval::None, &conn, &cfg, "app_test")
         .await
         .expect_err("drop without approval must be refused");
     assert!(matches!(err, EngineError::ApprovalRequired), "got {err:?}");
@@ -884,7 +887,7 @@ async fn drop_table_is_gated_and_not_auto_applied() {
 
     // Now apply WITH approval → the drop lands, re-diff clean.
     engine
-        .apply(&plan, Approval::Approved, &conn, &cfg, "app_test")
+        .apply(&plan.plain, Approval::Approved, &conn, &cfg, "app_test")
         .await
         .expect("approved drop applies");
     let live_final = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap3");
@@ -934,11 +937,11 @@ async fn drop_column_is_destructive_and_gated() {
     let plan = engine
         .plan_declarative(&d2, &live, &author, &[], &guard_cfg(&cfg))
         .expect("plan drop column");
-    assert!(plan.destructive, "drop column must be destructive");
-    assert!(plan.requires_approval, "drop column must be gated");
+    assert!(plan.plain.destructive, "drop column must be destructive");
+    assert!(plan.plain.requires_approval, "drop column must be gated");
 
     // Refused without approval; column still present.
-    let err = engine.apply(&plan, Approval::None, &conn, &cfg, "app_test").await.unwrap_err();
+    let err = engine.apply(&plan.plain, Approval::None, &conn, &cfg, "app_test").await.unwrap_err();
     assert!(matches!(err, EngineError::ApprovalRequired), "got {err:?}");
     let live_after = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
     assert!(
@@ -947,7 +950,7 @@ async fn drop_column_is_destructive_and_gated() {
     );
 
     // Approved → applied, re-diff clean.
-    engine.apply(&plan, Approval::Approved, &conn, &cfg, "app_test").await.expect("approved drop");
+    engine.apply(&plan.plain, Approval::Approved, &conn, &cfg, "app_test").await.expect("approved drop");
     let live_final = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap3");
     assert!(
         !live_final.tables["people"].columns.iter().any(|c| c.name == "nickname"),
@@ -994,11 +997,11 @@ async fn drop_index_is_not_data_loss_so_it_is_not_gated() {
     let plan = engine
         .plan_declarative(&d2, &live, &author, &[], &guard_cfg(&cfg))
         .expect("plan drop index");
-    assert!(!plan.destructive, "DROP INDEX is not data loss");
-    assert!(!plan.requires_approval, "DROP INDEX must not require approval");
+    assert!(!plan.plain.destructive, "DROP INDEX is not data loss");
+    assert!(!plan.plain.requires_approval, "DROP INDEX must not require approval");
 
     // Applies WITHOUT approval; the index is gone, re-diff clean.
-    engine.apply(&plan, Approval::None, &conn, &cfg, "app_test").await.expect("apply drop index");
+    engine.apply(&plan.plain, Approval::None, &conn, &cfg, "app_test").await.expect("apply drop index");
     let live_after = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
     assert!(
         !live_after.tables["logs"].indexes.iter().any(|i| i.name == "logs_level_idx"),
@@ -1211,11 +1214,11 @@ async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
     let plan = engine
         .plan_declarative(&d2, &live, &author, &[], &guard_cfg(&cfg))
         .expect("plan drop unique index");
-    assert!(plan.destructive, "DROP of a UNIQUE index must be destructive");
-    assert!(plan.requires_approval, "DROP of a UNIQUE index must require approval");
+    assert!(plan.plain.destructive, "DROP of a UNIQUE index must be destructive");
+    assert!(plan.plain.requires_approval, "DROP of a UNIQUE index must require approval");
 
     // Refused without approval; the unique index still present.
-    let err = engine.apply(&plan, Approval::None, &conn, &cfg, "app_test").await.unwrap_err();
+    let err = engine.apply(&plan.plain, Approval::None, &conn, &cfg, "app_test").await.unwrap_err();
     assert!(matches!(err, EngineError::ApprovalRequired), "got {err:?}");
     let live_after = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
     assert!(
@@ -1224,7 +1227,7 @@ async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
     );
 
     // Approved → applied, the unique index is gone, re-diff clean.
-    engine.apply(&plan, Approval::Approved, &conn, &cfg, "app_test").await.expect("approved drop");
+    engine.apply(&plan.plain, Approval::Approved, &conn, &cfg, "app_test").await.expect("approved drop");
     let live_final = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap3");
     assert!(
         !live_final.tables["members"].indexes.iter().any(|i| i.name == "members_email_uq"),
@@ -1246,9 +1249,9 @@ async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
     let plan3 = engine
         .plan_declarative(&d3, &live3, &author, &[], &guard_cfg(&cfg))
         .expect("plan drop plain index");
-    assert!(!plan3.destructive, "DROP of a PLAIN index must NOT be destructive");
-    assert!(!plan3.requires_approval, "DROP of a PLAIN index must NOT require approval");
-    engine.apply(&plan3, Approval::None, &conn, &cfg, "app_test").await.expect("ungated plain drop applies");
+    assert!(!plan3.plain.destructive, "DROP of a PLAIN index must NOT be destructive");
+    assert!(!plan3.plain.requires_approval, "DROP of a PLAIN index must NOT require approval");
+    engine.apply(&plan3.plain, Approval::None, &conn, &cfg, "app_test").await.expect("ungated plain drop applies");
     let live5 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap5");
     assert!(
         !live5.tables["members"].indexes.iter().any(|i| i.name == "members_tier_idx"),
@@ -1315,8 +1318,20 @@ async fn rename_hint_routes_drop_add_through_expand_contract_not_drop_add() {
         to: "email_address".into(),
     }];
 
-    // The diff WITH the hint emits the expand-contract sequence, NOT drop+add.
-    let migs = author.diff(&d2, &live, &hints).expect("diff with rename hint");
+    // The diff WITH the hint carries the rename STRUCTURED (in `.renames`, NOT
+    // flattened into the plain `.migrations`) — C1. A pure rename produces zero
+    // plain migrations (its from/to are excluded from the plain drop/add passes).
+    // `all_migrations()` flattens it back out for SHAPE inspection only — this is
+    // NOT the apply path (the real apply is `apply_declarative` → `run_expand`,
+    // exercised by the zero-data-loss e2e below).
+    let diff = author.diff(&d2, &live, &hints).expect("diff with rename hint");
+    assert_eq!(diff.renames.len(), 1, "exactly one structured rename");
+    assert!(
+        diff.migrations.is_empty(),
+        "a pure rename produces NO plain migrations: {:?}",
+        diff.migrations.iter().map(|m| &m.name).collect::<Vec<_>>()
+    );
+    let migs = diff.all_migrations();
     // No bare DROP COLUMN email / ADD COLUMN email_address as INDEPENDENT ops:
     // the only column-drop is the gated CONTRACT C2 (online, requires_approval),
     // and the only column-add is the EXPAND E1 (online). Assert by flags + names.
@@ -1399,6 +1414,272 @@ async fn rename_hint_routes_drop_add_through_expand_contract_not_drop_add() {
 }
 
 #[compio::test]
+async fn declarative_rename_preserves_preexisting_rows_through_expand_then_contract() {
+    // C1 (CRITICAL — data loss) regression. A declarative rename `<from>`→`<to>`
+    // is an ONLINE, multi-deploy op: the pre-existing-row mirror is the REAL
+    // backfill (run via `run_expand`), NOT E3's `SELECT 1` marker. The bug was
+    // that `diff` flattened the rename's ExpandContractPlan and DISCARDED the
+    // BackfillSpec, so the plain `plan`→`apply` path never copied pre-existing
+    // rows, then the contract `DROP COLUMN <from>` destroyed them.
+    //
+    // This test drives the rename through `apply_declarative` (deploy N: plain +
+    // EXPAND with the real backfill) and then applies the deferred contract
+    // (deploy N+1) — and asserts EVERY pre-existing row's value lands in `<to>`
+    // and survives the drop of `<from>`. ZERO data loss.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+    let schema = &cfg.project_schema;
+
+    // Create `users` with an `email` column (owned by the migrator role so the
+    // dual-write trigger DDL works under SET ROLE).
+    let v1 = CollectionDescriptor {
+        name: "users".into(),
+        fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
+    apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("create users");
+
+    // Seed THREE pre-existing rows whose `email` value MUST survive the rename
+    // (these are exactly the rows the backfill — not the dual-write trigger — is
+    // responsible for: they predate the trigger).
+    for (id, email) in [("usr_1", "a@x.test"), ("usr_2", "b@x.test"), ("usr_3", "c@x.test")] {
+        conn.batch_execute(&format!(
+            "INSERT INTO \"{schema}\".\"users\" (id, created_at, updated_at, version, email) \
+             VALUES ('{id}', NOW(), NOW(), 1, '{email}')"
+        ))
+        .await
+        .expect("seed pre-existing row");
+    }
+
+    // Desire `email_address` instead of `email`, WITH a matching rename hint.
+    let v2 = CollectionDescriptor {
+        name: "users".into(),
+        fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+    let hints = vec![RenameHint {
+        table: "users".into(),
+        from: "email".into(),
+        to: "email_address".into(),
+    }];
+
+    // Plan the declarative deploy: the rename is carried STRUCTURED (in
+    // `.renames`), the plain set is empty (pure rename).
+    let plan = engine
+        .plan_declarative(&d2, &live, &author, &hints, &guard_cfg(&cfg))
+        .expect("plan_declarative");
+    assert_eq!(plan.renames.len(), 1, "one structured rename");
+    assert!(plan.plain.items.is_empty(), "a pure rename has no plain migrations");
+
+    // === Deploy N: apply_declarative drives the EXPAND through run_expand, which
+    // runs the REAL backfill. Approval is required (the backfill mutates data). ===
+    let outcome = engine
+        .apply_declarative(&plan, Approval::Approved, &conn, &cfg, "app_test")
+        .await
+        .expect("apply_declarative (expand + real backfill)");
+
+    // The contract is DEFERRED, not applied this deploy (multi-deploy partition).
+    assert_eq!(outcome.pending_contract.len(), 2, "contract C1+C2 deferred");
+    assert!(
+        outcome.pending_contract.iter().all(|m| m.flags.requires_approval),
+        "deferred contract steps are gated"
+    );
+    assert!(
+        outcome.pending_contract.iter().any(|m| m.flags.destructive),
+        "the deferred DROP COLUMN is destructive"
+    );
+
+    // After the EXPAND: `<from>` is STILL present and EVERY pre-existing row's
+    // value has been mirrored into `<to>` by the real backfill — the whole point.
+    let rows = conn
+        .query(
+            &format!("SELECT id, email, email_address FROM \"{schema}\".\"users\" ORDER BY id"),
+            &[],
+        )
+        .await
+        .expect("read rows after expand");
+    assert_eq!(rows.len(), 3, "all three pre-existing rows present");
+    for row in &rows {
+        let id: String = row.get("id");
+        let from: Option<String> = row.get("email");
+        let to: Option<String> = row.get("email_address");
+        assert!(from.is_some(), "{id}: <from> still present after expand");
+        assert_eq!(
+            to, from,
+            "{id}: backfill mirrored pre-existing <from> into <to> (the C1 bug: this was NULL)"
+        );
+    }
+
+    // The dual-write trigger mirrors a NEW write both ways (coexistence model):
+    // write via the OLD name, read it back on BOTH columns.
+    conn.batch_execute(&format!(
+        "INSERT INTO \"{schema}\".\"users\" (id, created_at, updated_at, version, email) \
+         VALUES ('usr_4', NOW(), NOW(), 1, 'd@x.test')"
+    ))
+    .await
+    .expect("insert via old column during transition");
+    let r4 = conn
+        .query_one(
+            &format!("SELECT email, email_address FROM \"{schema}\".\"users\" WHERE id='usr_4'"),
+            &[],
+        )
+        .await
+        .expect("read dual-written row");
+    let r4_from: Option<String> = r4.get("email");
+    let r4_to: Option<String> = r4.get("email_address");
+    assert_eq!(r4_from.as_deref(), Some("d@x.test"), "old column written");
+    assert_eq!(r4_to.as_deref(), Some("d@x.test"), "dual-write mirrored old → new");
+
+    // === Deploy N+1: app code has switched to `<to>`; apply the DEFERRED contract
+    // (DROP TRIGGER C1 + DROP COLUMN <from> C2) via the normal gated apply. ===
+    let contract_plan = engine.plan(&outcome.pending_contract, &guard_cfg(&cfg));
+    engine
+        .apply(&contract_plan, Approval::Approved, &conn, &cfg, "app_test")
+        .await
+        .expect("apply deferred contract (drop trigger + drop <from>)");
+
+    // `<from>` is GONE; `<to>` retains ALL original data — ZERO loss.
+    let after = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap final");
+    let cols = &after.tables["users"].columns;
+    assert!(!cols.iter().any(|c| c.name == "email"), "<from> dropped by the contract");
+    assert!(cols.iter().any(|c| c.name == "email_address"), "<to> remains");
+
+    let final_rows = conn
+        .query(
+            &format!("SELECT id, email_address FROM \"{schema}\".\"users\" ORDER BY id"),
+            &[],
+        )
+        .await
+        .expect("read final rows");
+    let got: Vec<(String, Option<String>)> = final_rows
+        .iter()
+        .map(|r| (r.get::<_, String>("id"), r.get::<_, Option<String>>("email_address")))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("usr_1".into(), Some("a@x.test".into())),
+            ("usr_2".into(), Some("b@x.test".into())),
+            ("usr_3".into(), Some("c@x.test".into())),
+            ("usr_4".into(), Some("d@x.test".into())),
+        ],
+        "every row's data survived rename expand→contract in <to> (ZERO data loss)"
+    );
+
+    // The deploy converged: re-diffing desired vs live is clean.
+    assert!(diff_snapshots(&d2, &after).is_clean(), "re-diff clean after rename completes");
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn flattening_a_rename_into_the_plain_plan_loses_data_or_is_gate_blocked() {
+    // C1 RED witness: the OLD behaviour — flatten the rename's ExpandContractPlan
+    // into the plain set and push it through `plan`→`apply` (discarding the
+    // BackfillSpec) — is BROKEN. This reproduces what the bug did. It asserts the
+    // flat path either (a) is refused by the executor's expand/contract gate
+    // (contract pending alongside its own expand), or (b) "succeeds" but DESTROYS
+    // the pre-existing row's data (the backfill never ran). Either outcome proves
+    // the flat path must NOT be the apply path — `apply_declarative` is.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+    let schema = &cfg.project_schema;
+
+    let v1 = CollectionDescriptor {
+        name: "users".into(),
+        fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
+    apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("create users");
+
+    // A pre-existing row whose data the flat path is supposed to (but cannot) keep.
+    conn.batch_execute(&format!(
+        "INSERT INTO \"{schema}\".\"users\" (id, created_at, updated_at, version, email) \
+         VALUES ('usr_1', NOW(), NOW(), 1, 'keep@x.test')"
+    ))
+    .await
+    .expect("seed row");
+
+    let v2 = CollectionDescriptor {
+        name: "users".into(),
+        fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None }],
+        indexes: vec![],
+    };
+    let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+    let hints = vec![RenameHint {
+        table: "users".into(),
+        from: "email".into(),
+        to: "email_address".into(),
+    }];
+
+    // Reconstruct the OLD flatten: `all_migrations()` is exactly the flat
+    // `out.extend(plan.all())` the buggy `diff` produced (E1,E2,E3,C1,C2 inlined).
+    let diff = author.diff(&d2, &live, &hints).expect("diff");
+    let flat = diff.all_migrations();
+    let flat_plan = engine.plan(&flat, &guard_cfg(&cfg));
+
+    // Push the flat batch through the gated apply with FULL approval (the kindest
+    // case for the old path). It must NOT cleanly preserve the row's data.
+    let result = engine.apply(&flat_plan, Approval::Approved, &conn, &cfg, "app_test").await;
+
+    if result.is_err() {
+        // (a) The executor's expand/contract gate refuses the contract while its
+        // own expand is still pending in the same batch → dead-on-arrival, nothing
+        // applied; the pre-existing row is untouched.
+        let row = conn
+            .query_one(
+                &format!("SELECT email FROM \"{schema}\".\"users\" WHERE id='usr_1'"),
+                &[],
+            )
+            .await
+            .expect("row still readable (nothing applied)");
+        let email: Option<String> = row.get("email");
+        assert_eq!(email.as_deref(), Some("keep@x.test"), "gate-blocked: nothing applied");
+    } else {
+        // (b) It "applied" — then the pre-existing row's data is GONE: <from> was
+        // dropped by C2 and the backfill never copied the value to <to> (the
+        // marker E3 ran as a no-op SELECT). THIS is the data loss the C1 fix
+        // closes by NOT flattening.
+        let after = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap final");
+        let cols = &after.tables["users"].columns;
+        assert!(!cols.iter().any(|c| c.name == "email"), "flat path dropped <from>");
+        let row = conn
+            .query_one(
+                &format!("SELECT email_address FROM \"{schema}\".\"users\" WHERE id='usr_1'"),
+                &[],
+            )
+            .await
+            .expect("read row");
+        let to: Option<String> = row.get("email_address");
+        assert_eq!(
+            to, None,
+            "flat path LOST the pre-existing value (backfill never ran) — proves the C1 bug"
+        );
+    }
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
 async fn without_a_hint_the_same_desired_is_two_independent_ops_not_a_rename() {
     // P3 Feature 1 (the no-heuristic guarantee): the EXACT desired/live pair that
     // a hint would turn into a rename, WITHOUT the hint, stays two INDEPENDENT ops
@@ -1425,8 +1706,11 @@ async fn without_a_hint_the_same_desired_is_two_independent_ops_not_a_rename() {
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
 
-    // No hints → two independent ops, NO rename.
-    let migs = author.diff(&desired, &live, &[]).expect("diff without hint");
+    // No hints → two independent ops, NO rename (the structured `.renames` is
+    // empty; everything is in the plain `.migrations`).
+    let diff = author.diff(&desired, &live, &[]).expect("diff without hint");
+    assert!(diff.renames.is_empty(), "no hint must produce NO structured rename");
+    let migs = diff.migrations;
     assert!(
         migs.iter().all(|m| !m.flags.online),
         "no hint must NOT produce any online/expand-contract migration: {:?}",
@@ -1562,24 +1846,24 @@ async fn type_change_is_gated_refused_without_approval_applied_with_then_re_diff
     let plan = engine
         .plan_declarative(&d2, &live, &author, &[], &guard_cfg(&cfg))
         .expect("plan type change");
-    assert!(plan.destructive, "a type change must be destructive");
-    assert!(plan.requires_approval, "a type change must require approval");
+    assert!(plan.plain.destructive, "a type change must be destructive");
+    assert!(plan.plain.requires_approval, "a type change must require approval");
 
     // Refused without approval; the column type is UNCHANGED (text).
-    let err = engine.apply(&plan, Approval::None, &conn, &cfg, "app_test").await.unwrap_err();
+    let err = engine.apply(&plan.plain, Approval::None, &conn, &cfg, "app_test").await.unwrap_err();
     assert!(matches!(err, EngineError::ApprovalRequired), "got {err:?}");
     let live_after = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
     let attr = live_after.tables["metrics"].columns.iter().find(|c| c.name == "score").expect("score col");
     assert_eq!(attr.data_type, "text", "type must be unchanged after a refused type change");
 
     // Approved → applied; the type is now double precision, re-diff clean.
-    engine.apply(&plan, Approval::Approved, &conn, &cfg, "app_test").await.expect("approved type change");
+    engine.apply(&plan.plain, Approval::Approved, &conn, &cfg, "app_test").await.expect("approved type change");
     let live_final = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap3");
     let attr2 = live_final.tables["metrics"].columns.iter().find(|c| c.name == "score").expect("score col");
     assert_eq!(attr2.data_type, "double precision", "type changed after approval");
     assert!(diff_snapshots(&d2, &live_final).is_clean(), "re-diff clean after approved type change");
     // Idempotent: re-diffing the same desired against the converged live is empty.
-    let migs = author.diff(&d2, &live_final, &[]).expect("re-diff after type change");
+    let migs = author.diff(&d2, &live_final, &[]).expect("re-diff after type change").migrations;
     assert!(migs.is_empty(), "type change must be idempotent, got {} migs", migs.len());
 
     teardown(&conn, &cfg).await;
@@ -1621,18 +1905,18 @@ async fn set_not_null_is_gated_drop_not_null_is_ungated_and_both_re_diff_clean()
         .plan_declarative(&d2, &live, &author, &[], &guard_cfg(&cfg))
         .expect("plan set not null");
     // SET NOT NULL is gated (requires_approval) but NOT destructive (no data lost).
-    assert!(plan.requires_approval, "SET NOT NULL must require approval");
-    assert!(!plan.destructive, "SET NOT NULL is not data loss");
+    assert!(plan.plain.requires_approval, "SET NOT NULL must require approval");
+    assert!(!plan.plain.destructive, "SET NOT NULL is not data loss");
 
     // Refused without approval; the column is still nullable.
-    let err = engine.apply(&plan, Approval::None, &conn, &cfg, "app_test").await.unwrap_err();
+    let err = engine.apply(&plan.plain, Approval::None, &conn, &cfg, "app_test").await.unwrap_err();
     assert!(matches!(err, EngineError::ApprovalRequired), "got {err:?}");
     let live_after = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
     assert!(live_after.tables["accounts"].columns.iter().find(|c| c.name == "email").unwrap().nullable,
         "email must stay nullable after a refused SET NOT NULL");
 
     // Approved → applied; column NOT NULL now, re-diff clean.
-    engine.apply(&plan, Approval::Approved, &conn, &cfg, "app_test").await.expect("approved set not null");
+    engine.apply(&plan.plain, Approval::Approved, &conn, &cfg, "app_test").await.expect("approved set not null");
     let live_nn = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap3");
     assert!(!live_nn.tables["accounts"].columns.iter().find(|c| c.name == "email").unwrap().nullable,
         "email must be NOT NULL after approval");
@@ -1644,9 +1928,9 @@ async fn set_not_null_is_gated_drop_not_null_is_ungated_and_both_re_diff_clean()
     let plan3 = engine
         .plan_declarative(&d1, &live3, &author, &[], &guard_cfg(&cfg))
         .expect("plan drop not null");
-    assert!(!plan3.requires_approval, "DROP NOT NULL must NOT require approval");
-    assert!(!plan3.destructive, "DROP NOT NULL is not data loss");
-    engine.apply(&plan3, Approval::None, &conn, &cfg, "app_test").await.expect("ungated drop not null applies");
+    assert!(!plan3.plain.requires_approval, "DROP NOT NULL must NOT require approval");
+    assert!(!plan3.plain.destructive, "DROP NOT NULL is not data loss");
+    engine.apply(&plan3.plain, Approval::None, &conn, &cfg, "app_test").await.expect("ungated drop not null applies");
     let live_dn = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap5");
     assert!(live_dn.tables["accounts"].columns.iter().find(|c| c.name == "email").unwrap().nullable,
         "email must be nullable again after the ungated DROP NOT NULL");
@@ -1692,8 +1976,8 @@ async fn unapplied_gated_type_change_keeps_re_diffing_nonempty_documented_semant
     // Re-diff TWICE without applying: each time yields the SAME non-empty gated
     // type change (never silently dropped, never auto-applied).
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
-    let migs1 = author.diff(&d2, &live, &[]).expect("diff 1");
-    let migs2 = author.diff(&d2, &live, &[]).expect("diff 2");
+    let migs1 = author.diff(&d2, &live, &[]).expect("diff 1").migrations;
+    let migs2 = author.diff(&d2, &live, &[]).expect("diff 2").migrations;
     assert_eq!(migs1.len(), 1, "exactly one gated type change");
     assert_eq!(migs2.len(), 1, "still one — un-applied change is not dropped");
     assert!(migs1[0].flags.requires_approval && migs1[0].flags.destructive, "stays gated");
