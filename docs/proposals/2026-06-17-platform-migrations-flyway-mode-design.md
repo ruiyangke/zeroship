@@ -203,6 +203,8 @@ Platform plan is not re-denied by the executor's static first-pass (§4.1).
 | Privileged-kind set (role / grant / schema / RLS / policy) — **the exact list is §4.1** | **DENY** | **ALLOW iff Platform** (§4.1 flip table) |
 | Cross-schema references | DENY (`:395–403`) | **ALLOW** (within the schema allowlist only) |
 | `CREATE EXTENSION` | allowlist-gated, default empty | allowlist incl. `citext`, `uuid-ossp` |
+| `CREATE DOMAIN` / `ALTER DOMAIN` (constrained base type — same class as CREATE ENUM/TYPE) | **ALLOW** (kept, both profiles — `guard.rs:619-620`) | **ALLOW** (kept; CHECK/DEFAULT still walked, `domainname` still confined under Confined — Phase 4, §4.1) |
+| `search_path` pinned to | `project_schema` only | the full schema allowlist (`zeroship`,`oauth_hydra`,`public`) — `search_path_clause()`, Phase 4/§4.1 |
 | `COPY … PROGRAM` (shell RCE) | DENY (`:213`) | **DENY** (kept) |
 | `COPY … <file>` (filesystem) | DENY (`:216`) | **DENY** (kept) |
 | Untrusted PLs (`plpythonu`/`plperlu`/`c`/`plv8`) | DENY (`:258–261`) | **DENY** (kept) |
@@ -248,12 +250,26 @@ platform schema migration any more than a creator one.
 Two boundaries, two different strengths of guarantee:
 
 - **The EXTERNAL boundary (control / builder / any other crate — the real
-  threat) is closed BY CONSTRUCTION.** `trust`/`schemas`/`extension_allowlist`
-  are private and `TrustProfile` is `#[non_exhaustive]`, so an external crate can
-  neither write a `GuardConfig { trust: Platform, .. }` literal nor *name*
-  `TrustProfile::Platform` at all — not in a literal, a match, or as an argument.
-  This is the claim that replaces Liquibase's physical separation and it is
-  statically, compiler-enforced true. The §12 T8 trybuild test pins it.
+  threat) is closed BY CONSTRUCTION.** The lock is: `GuardConfig`'s
+  `trust`/`schemas`/`extension_allowlist` fields are **private**; the only
+  `Platform`-producing ctor (`GuardConfig::platform` / `ExecutorConfig::platform`)
+  is `pub(crate)`; and it requires a `pub(crate)` `PlatformCapability` token an
+  external crate cannot name or mint. So an external crate can neither write a
+  `GuardConfig { trust: Platform, .. }` literal nor reach any `pub` API that
+  accepts a Platform config — there is no way to build one.
+
+  > **Correction (was overclaimed in earlier rounds).** `#[non_exhaustive]` does
+  > **NOT** make `TrustProfile::Platform` un-nameable. A fieldless variant CAN
+  > still be *named* by an external crate (`let _ = TrustProfile::Platform;`);
+  > `#[non_exhaustive]` only forbids *exhaustive matching* (an external `match`
+  > must add a wildcard arm) and *fielded-literal construction* of future
+  > variants. Naming `Platform` externally is **harmless** precisely because no
+  > `pub` API accepts a Platform `GuardConfig`/`ExecutorConfig` and the fields are
+  > private — so `#[non_exhaustive]` is a **secondary** defense (keeps the variant
+  > set evolvable; forces external matches to carry a wildcard), not the primary
+  > external lock. The primary lock is private fields + `pub(crate)` `platform()`
+  > ctor + `pub(crate)` token. The §12 T8 trybuild test pins the real boundary
+  > (private-field literal rejected; the token type un-nameable).
 - **The IN-CRATE story was convention, NOT "by construction" — round 3 closes it
   with a capability token.** All engine modules (`submit`, `engine`, `executor`,
   `shadow`, …) share one crate, so `pub(crate) fn platform()` does *not* stop
@@ -269,15 +285,18 @@ Two boundaries, two different strengths of guarantee:
 
 ```rust
 /// The trust posture of a guard. Set at the OPERATOR CALL SITE, never derived
-/// from SQL content. NON-publicly-constructible for `Platform`.
+/// from SQL content.
 ///
-/// `#[non_exhaustive]` forbids an external crate from naming ANY variant in a
-/// struct/enum literal or exhaustive match — so even `Confined` can only be
-/// obtained via a constructor, and `Platform` cannot be written down at all
-/// outside this crate (the EXTERNAL boundary, closed by construction). Within
-/// the crate, `Platform` is produced ONLY inside `GuardConfig::platform(...)`,
-/// which now REQUIRES a `PlatformCapability` token (below) — so in-crate code
-/// (`submit`/`engine`) cannot mint it either without holding the token (§5).
+/// The EXTERNAL boundary is closed by **private `GuardConfig` fields + the
+/// `pub(crate)` `platform()` ctor + the `pub(crate)` `PlatformCapability`
+/// token** — naming `TrustProfile::Platform` externally is harmless (no `pub`
+/// API accepts a Platform config). `#[non_exhaustive]` is a SECONDARY defense:
+/// it does NOT make the fieldless `Platform` un-nameable; it only forbids an
+/// external *exhaustive match* (must add a wildcard) and *fielded-literal*
+/// construction of future variants. Within the crate, `Platform` is produced
+/// ONLY inside `GuardConfig::platform(...)`, which REQUIRES a
+/// `PlatformCapability` token (below) — so in-crate code (`submit`/`engine`)
+/// cannot mint it either without holding the token (§5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TrustProfile {
@@ -341,8 +360,10 @@ impl GuardConfig {
     /// `platform_runner`), so neither an external crate (cannot name `Platform`
     /// nor construct the token) NOR an in-crate module (cannot construct the
     /// token) can produce a Platform guard outside the operator runner. The
-    /// `_cap` arg is the in-crate enforcement; `#[non_exhaustive]` is the external
-    /// enforcement. This is the single place `TrustProfile::Platform` is named.
+    /// `_cap` arg is the in-crate enforcement; the PRIVATE fields + this
+    /// `pub(crate)` ctor + the `pub(crate)` token are the external lock
+    /// (`#[non_exhaustive]` is a secondary defense, NOT the un-nameability
+    /// claim). This is the single place `TrustProfile::Platform` is named.
     pub(crate) fn platform(
         _cap: &PlatformCapability,
         schemas: Vec<String>,
@@ -423,6 +444,34 @@ made every rollback fail; they are the second half of the spec.
 | `CREATE EXTENSION <ext>` | `CreateExtensionStmt` | allowlist-gated, default empty | allowlist = `[citext, uuid-ossp]` (FORBIDDEN_EXTENSIONS still override — §13 R4, L3) | ✓ | — | 0001 `citext`, 0027:48 `uuid-ossp` |
 | `DROP EXTENSION <ext>` | `DropStmt` `remove_type == ObjectExtension` | DENY (excluded) | ALLOW | — | ✓ (down only) | 0027:49 `DROP EXTENSION IF EXISTS "uuid-ossp"` |
 | `DROP OWNED BY <role>` | `DropOwnedStmt` | DENY (deny-by-default `:373`) | ALLOW | — | ✓ (down only) | 0025:241 rollback DO-block |
+| `CREATE DOMAIN …` / `ALTER DOMAIN …` | `CreateDomainStmt` / `AlterDomainStmt` | **ALLOW (both profiles)** | **ALLOW (both profiles)** | ✓ | ✓ | (not a flip — see note) |
+
+<!-- Phase 4 (admitted constructs the round-3 table missed). -->
+> **Note on `CREATE DOMAIN` / `ALTER DOMAIN` (Phase 4 — NOT a flip).** Unlike the
+> rows above (which DENY under Confined and ALLOW only under Platform), a domain is
+> a **constrained base type** (`CREATE DOMAIN d AS text CHECK (…)`; `ALTER DOMAIN`
+> is `ADD`/`DROP CONSTRAINT`/`SET`) — ordinary schema DDL in the **same class as
+> `CREATE ENUM` / `CREATE TYPE`**, with no privilege, RCE, or host reach. So it is
+> admitted in **BOTH** profiles (`guard.rs` lists `CreateDomainStmt` /
+> `AlterDomainStmt` among the unconditionally-safe kinds, ~`guard.rs:619-620`).
+> Phase 4 had to add these because the round-3 flip table omitted them entirely (a
+> domain in any platform changeset would otherwise have hit deny-by-default). The
+> domain's CHECK/DEFAULT expressions are still walked by the kind-independent
+> dangerous-function / cross-schema walks (so a `pg_read_file()` in a CHECK is
+> still denied), and the domain's creation-target schema (`domainname`) and
+> base-type schema (`type_name`) are still confined for the Confined profile.
+> Pinned by `create_domain_with_dangerous_check_is_still_denied`.
+
+> **Note on the Platform `search_path` (Phase 4).** Under Platform the executor's
+> `ExecutorConfig::search_path_clause()` pins the **full configured schema
+> allowlist** (e.g. `"zeroship", "oauth_hydra", "public"`), whereas Confined pins
+> the **`project_schema` only**. This is load-bearing for the port: V0001's
+> deliberately-unqualified `CREATE EXTENSION citext` must resolve a creation target
+> in `public` (the `zeroship` schema does not exist yet at that point — a
+> `zeroship`-only path would error `3F000 no schema has been selected to create
+> in`), and cross-schema resolution between `zeroship`/`oauth_hydra`/`public` needs
+> them all on the path. This mirrors the Liquibase deployment, where the `postgres`
+> principal ran with `search_path = zeroship, public` (`db.rs:175-186`).
 
 <!-- Round 3 (MINOR-3): clarify the GRANT row's objtype column is descriptive
      (what 0025/0027 happen to grant ON), NOT a per-objtype gate to implement. -->
@@ -640,10 +689,16 @@ mechanisms, and the doc is now precise about which is "by construction" where
 (HIGH-1):
 
 - **EXTERNAL boundary (control / builder / any other crate — the real threat):
-  closed BY CONSTRUCTION, no caveat.** `TrustProfile` is `#[non_exhaustive]` and
-  the fields are private, so an external crate cannot name `Platform` nor write a
-  `GuardConfig{…}` literal — full stop. This is the claim the re-critic confirmed
-  airtight; it is left untouched and is enforced by §12 T8 (trybuild).
+  closed BY CONSTRUCTION.** The lock is **private `GuardConfig` fields + the
+  `pub(crate)` `platform()` ctor + the `pub(crate)` `PlatformCapability` token**:
+  an external crate cannot write a `GuardConfig{…}` literal (private fields) and
+  cannot reach any `pub` API that accepts a Platform config. **Caveat on
+  `#[non_exhaustive]` (was overclaimed):** it does NOT make `Platform`
+  un-nameable — a fieldless variant CAN be named externally; it only forbids
+  external exhaustive matching + fielded-literal construction. So
+  `#[non_exhaustive]` is a *secondary* defense, not the external lock; naming
+  `Platform` externally is harmless because nothing `pub` accepts it. Enforced by
+  §12 T8 (trybuild: the private-field literal and the un-nameable token type).
 - **IN-CRATE boundary (`submit`/`engine`/`executor`/… all share the crate): round
   2 OVERSTATED this as "by construction."** `pub(crate) fn platform()` does NOT
   stop a sibling in-crate module from calling it — same-crate visibility makes it
@@ -657,17 +712,20 @@ mechanisms, and the doc is now precise about which is "by construction" where
 The corrected enforcement, point by point:
 
 1. **Platform is a granted capability, not a settable field — externally
-   un-nameable, in-crate un-mintable.** `GuardConfig`'s
+   un-buildable, in-crate un-mintable.** `GuardConfig`'s
    `trust` / `schemas` / `extension_allowlist` fields are **private** (§4.1), so a
    struct literal `GuardConfig { … }` does not compile outside the module — the
    only ways to get a `GuardConfig` are `confined()` (always `Confined`) and
-   `platform(&cap, …)`. Externally, `TrustProfile` is `#[non_exhaustive]`, so an
-   external crate **cannot name `TrustProfile::Platform`** at all — not in a
-   literal, a match, or as a function argument. In-crate, `platform()` **requires a
-   `PlatformCapability`** whose only constructor is `pub(super)`-private to
-   `platform_runner`, so no other in-crate module can call `platform()` either. Two
-   tests pin this: §12 T8 (trybuild) for the external boundary, §12 T11 (in-crate
-   unit) asserting only `platform_runner` can construct the capability.
+   `platform(&cap, …)` (`pub(crate)`, token-gated). An external crate CAN still
+   *name* the fieldless `TrustProfile::Platform` (it is `#[non_exhaustive]`, which
+   only forbids external exhaustive matching + fielded-literal construction — NOT
+   naming), but that is harmless: there is no `pub` API that accepts a Platform
+   config, and the private fields mean it cannot construct one. In-crate,
+   `platform()` **requires a `PlatformCapability`** whose only constructor is
+   `pub(super)`-private to `platform_runner`, so no other in-crate module can call
+   `platform()` either. Two tests pin this: §12 T8 (trybuild) for the external
+   boundary (private-field literal rejected; token type un-nameable), §12 T11
+   (in-crate unit) asserting only `platform_runner` can construct the capability.
 
 2. **`GuardConfig::platform(&cap, …)` is `pub(crate)`, takes the token, and the
    token mint + the constructor call both live in `platform_runner`** (the code that
@@ -677,25 +735,38 @@ The corrected enforcement, point by point:
    `PlatformCapability::new`). `platform_runner` is the single site where both a
    `PlatformCapability` and a `TrustProfile::Platform` are ever produced.
 
-3. **`submit_migration` builds its OWN Confined config and cannot be handed a
-   Platform one.** Today (`submit.rs:419–420`) it constructs a struct literal:
+3. **`submit_migration` builds its OWN Confined planner guard regardless of the
+   `ExecutorConfig` it is handed.** As shipped (`submit.rs:419`) it constructs:
    ```rust
-   let guard_cfg = GuardConfig { project_schema: cfg.project_schema.clone(),
-                                 extension_allowlist: Vec::new() };
+   let guard_cfg = GuardConfig::confined(cfg.project_schema.clone());
    ```
-   Under this design that literal **stops compiling** (private fields) and is
-   replaced by `GuardConfig::confined(cfg.project_schema.clone())` — a constructor
-   that needs no token and can only produce `trust: Confined`. `submit_migration`
-   has no `PlatformCapability` in scope and no way to mint one (the constructor is
-   private to `platform_runner`), so even if it *wanted* to call `platform()` it
-   could not. `Submission` (the client-facing input struct, `submit.rs:88–108`)
-   carries **no profile / trust / schema field**, exactly as it carries no
-   `destructive`/`requires_approval` field today (and for the same reason — those
-   are server judgements). There is no parameter, env var, or `Submission` field a
-   client can set to widen the guard. The engine-internal literals
-   (`executor.rs:890` / `:1083` / `:2558`, `precondition.rs:552`, and the other
-   Confined sites — **14 total**, §4.1) likewise all move to
-   `GuardConfig::confined(...)`.
+   — a constructor that needs no token and can only produce `trust: Confined`,
+   **forced regardless of `cfg.trust`**. `submit_migration` has no
+   `PlatformCapability` in scope and no way to mint one (the constructor is private
+   to `platform_runner`), so even if it *wanted* to call `platform()` it could not.
+   `Submission` (the client-facing input struct) carries **no profile / trust /
+   schema field**, exactly as it carries no `destructive`/`requires_approval` field
+   today (and for the same reason — those are server judgements). There is no
+   parameter, env var, or `Submission` field a client can set to widen the guard.
+   The engine-internal literals (`executor.rs:890` / `:1083` / `:2558`,
+   `precondition.rs:552`, and the other Confined sites — **14 total**, §4.1)
+   likewise all use `GuardConfig::confined(...)`.
+
+   > **The submit-path two-guard coupling (LOW-1, pinned in-crate).** `submit`'s
+   > forced `confined()` planner gate is **load-bearing and independent** of the
+   > apply path's guard, which `executor::apply` re-derives from
+   > `ExecutorConfig::guard_config()` (i.e. from `cfg.trust`). The submission
+   > path's safety against a privileged op thus rests on TWO stages: (a) the
+   > external boundary (control/builder cannot build a Platform `ExecutorConfig` —
+   > point 4 + T8/T11), AND (b) this forced-Confined planner gate denying
+   > privileged SQL *before* apply. A regression test (in-crate, since the only way
+   > to mint a Platform `ExecutorConfig` is the `pub(crate)` token seam) hands
+   > `submit_migration` a hostile **Platform** `ExecutorConfig` and submits a
+   > privileged `up` (`CREATE ROLE … SUPERUSER`, and a cross-schema
+   > `CREATE TABLE control.x`) with `Approval::Approved`; the outcome is
+   > `Denied` — NOT applied — proving the two stages cannot silently drift to
+   > both-Platform. (RED-proven: flipping the planner gate to `cfg.guard_config()`
+   > makes the `CREATE ROLE` case apply.)
 
 4. **`ExecutorConfig`'s trust field is `pub(crate)`, Confined-by-default, and
    `Platform` requires the same token.**
@@ -705,11 +776,14 @@ The corrected enforcement, point by point:
    `pub(crate) ExecutorConfig::platform(&cap, …)` — which, like `GuardConfig::platform`,
    **requires the `PlatformCapability`** and is therefore callable only from
    `platform_runner`. `submit_migration` receives `&ExecutorConfig` from the control
-   plane (outside the crate), which can neither name `Platform` (non-exhaustive
-   enum), nor mint the token (private constructor), nor reach the `pub(crate)`
+   plane (outside the crate), which can neither build a Platform config (private
+   `trust` field), mint the token (private constructor), nor reach the `pub(crate)`
    constructor — so it cannot flip the executor into Platform (nor, via it, the
    precondition guard — HIGH-2) any more than it can flip the planner's
-   `GuardConfig`.
+   `GuardConfig`. (And even if a buggy/hostile in-crate caller DID hand
+   `submit_migration` a Platform `ExecutorConfig`, the submit path forces a
+   **Confined** planner guard regardless of `cfg.trust` — see the two-guard
+   coupling note below — so a privileged `up` is still denied before any apply.)
 
 5. **The Platform schema + extension allowlists are operator-supplied, not
    request-derived.** They are constants baked into the `platform` runner (or
