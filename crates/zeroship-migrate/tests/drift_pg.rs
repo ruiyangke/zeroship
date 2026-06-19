@@ -550,7 +550,7 @@ async fn diff_of_identical_snapshots_is_clean() {
     assert!(drift.is_clean(), "{drift:?}");
 
     // sanity: types referenced so unused-import lints don't fire on a thin test
-    let _ = IndexSnapshot { name: "x".into(), unique: false, columns: vec!["c".into()] };
+    let _ = IndexSnapshot::btree("x", false, vec!["c".into()]);
     let _ = ConstraintSnapshot {
         name: "x".into(),
         kind: "CHECK".into(),
@@ -690,6 +690,11 @@ async fn diff_reports_altered_index_uniqueness() {
                 // Same column set as live (email) — so the ONLY altered field is
                 // `unique`, keeping this test's single-altered assertion exact.
                 columns: vec!["email".into()],
+                // Same access method as live (btree) so `access_method` is NOT a
+                // second altered field; isolates the `unique` flip.
+                access_method: "btree".into(),
+                expression: None,
+                opclass: None,
             }],
             constraints: Vec::new(),
         },
@@ -768,6 +773,179 @@ async fn diff_reports_altered_check_constraint_definition() {
     assert_eq!(a.field, "definition");
     assert_eq!(a.expected, "CHECK ((age > 0))");
     assert!(a.actual.contains("18"), "actual def: {:?}", a.actual);
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// T12 — access-method / expression drift (the index-method blind spot).
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn t12_out_of_band_gin_index_surfaces_as_unexpected() {
+    // (a) An out-of-band GIN index the migration journal never declared must
+    // surface in `unexpected_objects`. Pre-T12 the introspection joined no `pg_am`
+    // and read no expression, so a wholly-expression GIN index round-tripped with
+    // an empty column list and could not be distinguished/modeled at all.
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let sch = &cfg.project_schema;
+    conn.batch_execute(&format!(
+        "CREATE TABLE \"{sch}\".\"docs\" (body text);
+         CREATE INDEX docs_fts_gin ON \"{sch}\".\"docs\"
+             USING gin (to_tsvector('english', body));"
+    ))
+    .await
+    .expect("seed");
+    let actual = snapshot_schema(&conn, sch).await.expect("actual");
+
+    // The GIN index introspects with access_method = gin and a recovered
+    // expression (it has no plain key columns).
+    let live_idx = actual.tables["docs"]
+        .indexes
+        .iter()
+        .find(|i| i.name == "docs_fts_gin")
+        .expect("the GIN index is introspected (pre-T12 it joined no pg_am)");
+    assert_eq!(live_idx.access_method, "gin");
+    assert!(
+        live_idx
+            .expression
+            .as_deref()
+            .is_some_and(|e| e.contains("to_tsvector")),
+        "the expression index must recover its expr: {:?}",
+        live_idx.expression
+    );
+
+    // EXPECTED: the table with NO indexes declared → the GIN index is unexpected.
+    let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
+    tables.insert(
+        "docs".to_string(),
+        TableSnapshot {
+            columns: actual.tables["docs"].columns.clone(),
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+        },
+    );
+    let expected = SchemaSnapshot { tables };
+
+    let drift = diff_snapshots(&expected, &actual);
+    assert!(
+        drift
+            .unexpected_objects
+            .iter()
+            .any(|u| u == "docs index docs_fts_gin"),
+        "the out-of-band GIN index must be unexpected: {drift:?}"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn t12_btree_to_ivfflat_access_method_flip_is_reported() {
+    // (b) A same-name index whose ACCESS METHOD changed (btree → ivfflat — the
+    // vector-ANN flip) must surface as an altered_object with field
+    // `access_method`. Name + columns match, so ONLY the method-aware compare
+    // catches it. We seed a plain btree index live (no pgvector needed) and assert
+    // the expected ivfflat method diverges.
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let sch = &cfg.project_schema;
+    conn.batch_execute(&format!(
+        "CREATE TABLE \"{sch}\".\"items\" (embedding text);
+         CREATE INDEX items_embedding_idx ON \"{sch}\".\"items\" (embedding);"
+    ))
+    .await
+    .expect("seed");
+    let actual = snapshot_schema(&conn, sch).await.expect("actual");
+    assert_eq!(
+        actual.tables["items"].indexes[0].access_method, "btree",
+        "the live index is btree"
+    );
+
+    // EXPECTED: same index name + columns, but access_method = ivfflat (the ANN
+    // shape the desired schema intends).
+    let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
+    tables.insert(
+        "items".to_string(),
+        TableSnapshot {
+            columns: actual.tables["items"].columns.clone(),
+            indexes: vec![IndexSnapshot {
+                name: "items_embedding_idx".into(),
+                unique: false,
+                columns: vec!["embedding".into()],
+                access_method: "ivfflat".into(),
+                expression: None,
+                opclass: Some("vector_cosine_ops".into()),
+            }],
+            constraints: Vec::new(),
+        },
+    );
+    let expected = SchemaSnapshot { tables };
+
+    let drift = diff_snapshots(&expected, &actual);
+    assert!(drift.missing_objects.is_empty(), "{drift:?}");
+    assert!(drift.unexpected_objects.is_empty(), "{drift:?}");
+    let method_alter = drift
+        .altered_objects
+        .iter()
+        .find(|a| a.object == "index items_embedding_idx" && a.field == "access_method")
+        .expect("the btree→ivfflat method flip must be reported");
+    assert_eq!(method_alter.expected, "ivfflat");
+    assert_eq!(method_alter.actual, "btree");
+    // The emission-only `opclass` must NOT itself produce drift noise.
+    assert!(
+        !drift
+            .altered_objects
+            .iter()
+            .any(|a| a.field == "opclass"),
+        "opclass is emission-only, not a drift attribute: {drift:?}"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn t12_fts_expression_index_re_diffs_clean() {
+    // (c) An FTS expression GIN index, snapshotted and diffed against itself, is
+    // CLEAN — the recovered `pg_get_expr` spelling is re-parse-stable, so an
+    // expression index does NOT phantom-drift (pre-T12 it had an empty column list
+    // and no expression, so it both phantom-DROPped and could collide).
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let sch = &cfg.project_schema;
+    conn.batch_execute(&format!(
+        "CREATE TABLE \"{sch}\".\"pages\" (title text, body text);
+         CREATE INDEX pages_fts ON \"{sch}\".\"pages\"
+             USING gin (to_tsvector('english', coalesce(title,'') || ' ' || coalesce(body,'')));"
+    ))
+    .await
+    .expect("seed");
+    let snap = snapshot_schema(&conn, sch).await.expect("snap");
+
+    // The expression index round-trips with its expr captured.
+    let idx = snap.tables["pages"]
+        .indexes
+        .iter()
+        .find(|i| i.name == "pages_fts")
+        .expect("the FTS expression index is introspected");
+    assert_eq!(idx.access_method, "gin");
+    assert!(idx.expression.is_some(), "expr captured: {idx:?}");
+
+    // Self-diff is clean — the expression is not a phantom drift.
+    let drift = diff_snapshots(&snap, &snap);
+    assert!(drift.is_clean(), "expression index phantom-drifted: {drift:?}");
 
     drop_schemas(&conn, &cfg).await;
 }

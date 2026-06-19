@@ -1128,6 +1128,252 @@ async fn vector_type_is_accepted_and_maps_to_vector_column() {
     assert_eq!(col.data_type, "vector(384)", "vector dims carried into the column type");
 }
 
+// ---------------------------------------------------------------------------
+// T12 — vector-ANN + FTS indexes routed through the access-method dimension.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn t12_vector_field_models_ivfflat_ann_index_and_renders_using_ivfflat() {
+    // A `t.vector(dims, { metric })` field must model an ANN index with
+    // `access_method = "ivfflat"` and the metric opclass — and the differ must
+    // render `USING ivfflat ("vec" vector_cosine_ops) WITH (lists = 100)`.
+    // Pre-T12 the differ modeled NO vector index (the ivfflat the data plane
+    // built was unknown to it → phantom-DROP / vector search falls back to a flat
+    // scan). No pgvector extension needed — this asserts the modeled snapshot +
+    // generated DDL only (the real ivfflat apply round-trip is the capstone's job
+    // on the pgvector :5434 instance).
+    let cfg = cfg_for(&token());
+    let author = author_for(&cfg);
+    let desc = CollectionDescriptor {
+        name: "embeddings".into(),
+        owner_app: "app_test".into(),
+        fields: vec![FieldDescriptor {
+            name: "vec".into(),
+            ty: "vector".into(),
+            vector_dims: Some(384),
+            vector_metric: Some("cosine".into()),
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired");
+
+    // (a) the modeled ANN index.
+    let ann = desired.snapshot.tables["embeddings"]
+        .indexes
+        .iter()
+        .find(|i| i.access_method == "ivfflat")
+        .expect("an ivfflat ANN index must be modeled for the vector field");
+    assert_eq!(ann.name, "embeddings_vec_idx", "matches plugin-db index_name");
+    assert_eq!(ann.columns, vec!["vec".to_string()]);
+    assert_eq!(ann.opclass.as_deref(), Some("vector_cosine_ops"));
+
+    // (b) the rendered CREATE INDEX DDL uses ivfflat + opclass + lists param.
+    let plan = author
+        .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .expect("diff");
+    let idx_sql = plan
+        .migrations
+        .iter()
+        .find(|m| m.name == "create_index_embeddings_vec_idx")
+        .map(|m| m.up.clone())
+        .expect("vector index migration");
+    assert!(
+        idx_sql.contains("USING ivfflat (\"vec\" vector_cosine_ops)")
+            && idx_sql.contains("WITH (lists = 100)"),
+        "vector index DDL must be ivfflat with the cosine opclass + lists: {idx_sql}"
+    );
+}
+
+#[compio::test]
+async fn t12_l2_and_inner_product_metrics_pick_the_right_opclass() {
+    let cfg = cfg_for(&token());
+    for (metric, opclass) in [
+        ("l2", "vector_l2_ops"),
+        ("innerProduct", "vector_ip_ops"),
+        ("cosine", "vector_cosine_ops"),
+    ] {
+        let desc = CollectionDescriptor {
+            name: "e".into(),
+            owner_app: "app_test".into(),
+            fields: vec![FieldDescriptor {
+                name: "v".into(),
+                ty: "vector".into(),
+                vector_dims: Some(8),
+                vector_metric: Some(metric.into()),
+                ..Default::default()
+            }],
+            indexes: vec![],
+        };
+        let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired");
+        let ann = desired.snapshot.tables["e"]
+            .indexes
+            .iter()
+            .find(|i| i.access_method == "ivfflat")
+            .expect("ann index");
+        assert_eq!(
+            ann.opclass.as_deref(),
+            Some(opclass),
+            "metric {metric} must map to {opclass}"
+        );
+    }
+}
+
+#[compio::test]
+async fn t12_fts_field_round_trips_to_zero_drift_via_gin_index() {
+    // THE FTS oracle: a `.fts()`-marked text column folds into a `__fts` GENERATED
+    // tsvector column + a `<coll>__fts_idx` GIN index. Apply the generated
+    // migration on REAL Postgres (tsvector + GIN are core — no extension), then
+    // re-snapshot and assert ZERO drift. Pre-T12 the FTS facet was stripped at the
+    // IR boundary → no `__fts` column / no GIN index, and any out-of-band FTS
+    // index phantom-DROPped because the differ could not model `access_method`.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let desc = CollectionDescriptor {
+        name: "articles".into(),
+        owner_app: "app_test".into(),
+        fields: vec![
+            FieldDescriptor {
+                name: "title".into(),
+                ty: "string".into(),
+                required: true,
+                fts: true,
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "body".into(),
+                ty: "string".into(),
+                fts: true,
+                ..Default::default()
+            },
+        ],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired");
+
+    // The generated table DDL must carry the GENERATED `__fts` column and the
+    // create-index DDL must be `USING gin`.
+    let plan = author
+        .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .expect("diff");
+    let create_sql: String = plan
+        .migrations
+        .iter()
+        .find(|m| m.name == "create_table_articles")
+        .map(|m| m.up.clone())
+        .expect("create_table_articles");
+    assert!(
+        create_sql.contains("\"__fts\" tsvector GENERATED ALWAYS AS (to_tsvector("),
+        "the __fts column must be a STORED generated tsvector: {create_sql}"
+    );
+    let idx_sql: String = plan
+        .migrations
+        .iter()
+        .find(|m| m.name == "create_index_articles__fts_idx")
+        .map(|m| m.up.clone())
+        .expect("fts index migration");
+    assert!(
+        idx_sql.contains("USING gin (\"__fts\")"),
+        "the FTS index must be a GIN index over __fts: {idx_sql}"
+    );
+
+    // Apply on real PG, then re-snapshot and assert ZERO drift (the round-trip).
+    apply_plan(&engine, &desired, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("apply FTS plan");
+    let live2 = snapshot_schema(&conn, &cfg.project_schema)
+        .await
+        .expect("re-snapshot");
+    let drift = diff_snapshots(&desired.snapshot, &live2);
+    assert!(
+        drift.is_clean(),
+        "FTS schema must re-diff clean: missing={:?} unexpected={:?} altered={:?}",
+        drift.missing_objects,
+        drift.unexpected_objects,
+        drift.altered_objects
+    );
+
+    // And the live GIN index is really there with the gin access method.
+    let fts_idx = live2.tables["articles"]
+        .indexes
+        .iter()
+        .find(|i| i.name == "articles__fts_idx")
+        .expect("the GIN __fts index exists in live");
+    assert_eq!(fts_idx.access_method, "gin", "the FTS index is a GIN index");
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn t12_fts_added_to_existing_table_applies_in_order_and_re_diffs_clean() {
+    // Adding a `.fts()` field to an EXISTING table must add the `__fts` GENERATED
+    // column AND its GIN index in dependency order (the column migration's
+    // UUIDv7 version precedes the index's, so the engine applies the column
+    // first). Then re-diff to ZERO.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    // v1: a plain table, no FTS.
+    let v1 = CollectionDescriptor {
+        name: "notes".into(),
+        owner_app: "app_test".into(),
+        fields: vec![FieldDescriptor {
+            name: "title".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let desired1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired1");
+    apply_plan(&engine, &desired1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("apply v1");
+    let live1 = snapshot_schema(&conn, &cfg.project_schema).await.expect("live1");
+
+    // v2: mark `title` as fts → __fts column + GIN index appear on the live table.
+    let v2 = CollectionDescriptor {
+        name: "notes".into(),
+        owner_app: "app_test".into(),
+        fields: vec![FieldDescriptor {
+            name: "title".into(),
+            ty: "string".into(),
+            required: true,
+            fts: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let desired2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired2");
+    apply_plan(&engine, &desired2, &live1, &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("apply v2 (add fts to existing table)");
+
+    let live2 = snapshot_schema(&conn, &cfg.project_schema).await.expect("live2");
+    let drift = diff_snapshots(&desired2.snapshot, &live2);
+    assert!(
+        drift.is_clean(),
+        "adding fts to an existing table must re-diff clean: {drift:?}"
+    );
+    assert!(
+        live2.tables["notes"].indexes.iter().any(|i| i.name == "notes__fts_idx" && i.access_method == "gin"),
+        "the GIN __fts index landed on the existing table"
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
 #[compio::test]
 async fn typo_type_token_is_rejected_not_silently_text() {
     // #2: a typo / wrong spelling (`bigint` is a Postgres type, not a DSL token)
