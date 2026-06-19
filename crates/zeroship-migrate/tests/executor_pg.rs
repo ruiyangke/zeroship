@@ -1306,3 +1306,67 @@ async fn executor_rollback_refuses_without_approval() {
 
     drop_schemas(&conn, &cfg).await;
 }
+
+/// REGRESSION (P6): the per-app deploy schema is `"<app_id>"` where `<app_id>`
+/// is a hyphenated UUID (the worker injects `Uuid::to_string()` as APP_ID;
+/// plugin-db's schema = `quote_ident(app_id)`). So the derived meta schema is
+/// `"<uuid>_migrations"` and the immutability-trigger NAME is
+/// `"<uuid>_migrations_schema_migrations_immutable_trg"` — a digit-leading,
+/// hyphen-bearing identifier. Pre-fix `ensure_journal` interpolated that name
+/// UNQUOTED into `CREATE TRIGGER`, failing `42601 trailing junk after numeric
+/// literal`. This drives a full apply under a UUID-shaped project/meta schema;
+/// it failed before the journal quote-ident fix and passes after.
+#[compio::test]
+async fn ensure_journal_and_apply_under_hyphenated_uuid_schema() {
+    let Some(conn) = pg_opt().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    // A real per-app id: a hyphenated UUID, exactly what the platform uses.
+    let app_id = uuid::Uuid::now_v7().to_string();
+    let mut cfg = ExecutorConfig::new(app_id.clone(), app_id.clone());
+    cfg.meta_schema = format!("{app_id}_migrations");
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    // Bootstrapping the journal under the hyphenated meta schema must NOT 42601.
+    ensure_journal(&conn, &cfg)
+        .await
+        .expect("ensure_journal must succeed under a hyphenated UUID meta schema");
+
+    // And a real apply lands the table + journals — the full path works.
+    let m = mig(
+        MigrationId::generate(),
+        "create_hyphen_t",
+        "CREATE TABLE hyphen_t (id int PRIMARY KEY);",
+    );
+    apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "deploy")
+        .await
+        .expect("apply under hyphenated schema");
+    assert!(
+        table_exists(&conn, &cfg.project_schema, "hyphen_t").await,
+        "table created in the hyphenated per-app schema"
+    );
+    assert_eq!(
+        journal::applied_count(&conn, &cfg).await.expect("applied_count"),
+        1,
+        "the migration is journaled in the hyphenated meta schema"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+/// Like [`pg`] but returns `None` when the DB is unreachable (for the skip
+/// path of the regression test above).
+async fn pg_opt() -> Option<Client> {
+    match compio_postgres::connect(&dsn(), compio_postgres::NoTls).await {
+        Ok((client, conn)) => {
+            compio::runtime::spawn(async move {
+                let _ = conn.run().await;
+            })
+            .detach();
+            Some(client)
+        }
+        Err(_) => None,
+    }
+}
