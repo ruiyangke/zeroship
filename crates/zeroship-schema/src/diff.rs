@@ -143,6 +143,37 @@ pub enum ChangeKind {
     /// validate stage refuses it under `strictness == "strict"` and
     /// `strictness == "lenient"`, applies under `strictness == "off"`.
     MaskRemove { collection: String, column: String },
+    /// A column's physical storage type changed on an **existing**
+    /// column — the declared SDK type maps to a different SQL type than
+    /// the live column carries. The motivating (and only currently
+    /// detected) case is the **encryption toggle**: a `t.string()`
+    /// column becoming `t.encrypted(...)` (TEXT → BYTEA) or the reverse
+    /// (BYTEA → TEXT). Both directions require rewriting every stored
+    /// value — encrypt-backfill or decrypt-backfill — because the data
+    /// plane writes `decode($N,'base64')::bytea` into the column the
+    /// moment the schema says "encrypted", which corrupts a column that
+    /// is still TEXT (and vice-versa).
+    ///
+    /// Classified [`ChangeClass::Destructive`]: it is NEVER silently
+    /// auto-applied. The op surfaces the from/to SQL types and the
+    /// encryption-toggle direction so the validate stage refuses it
+    /// (under strict/lenient) and the authoring pipeline can route it to
+    /// a deliberate expand-contract migration (add a new BYTEA column,
+    /// encrypt-backfill, swap, drop the old) following the
+    /// `MaskBackfill`/`MaskRewrite` precedent. The point of this op is
+    /// that the transition is *visible* — it must not vanish as a
+    /// zero-op diff (the `bytes-encrypted-transition-silent-noop`
+    /// finding).
+    RewriteColumnType {
+        collection: String,
+        column: String,
+        from_type: String,
+        to_type: String,
+        /// `Some(true)` when the column is gaining encryption
+        /// (TEXT→BYTEA), `Some(false)` when losing it (BYTEA→TEXT),
+        /// `None` for a non-encryption type rewrite.
+        encryption_toggle: Option<bool>,
+    },
 }
 
 impl ChangeKind {
@@ -160,6 +191,7 @@ impl ChangeKind {
             Self::MaskBackfill { .. } => "mask_backfill",
             Self::MaskRewrite { .. } => "mask_rewrite",
             Self::MaskRemove { .. } => "mask_remove",
+            Self::RewriteColumnType { .. } => "rewrite_column_type",
         }
     }
 }
@@ -1281,6 +1313,94 @@ pub fn compute_diff(
         }
     }
 
+    // ----- type rewrites on existing columns (destructive) -----
+    //
+    // The column-additions branch above is NAME-ONLY: it skips any field
+    // that already exists on the live side, no matter how its declared
+    // type has changed. That silently dropped the
+    // `bytes-encrypted-transition-silent-noop` case — a `t.string()`
+    // column flipped to `t.encrypted(...)` (or back) keeps the same
+    // NAME, so AddColumn never fires and DropColumn never fires, yet the
+    // physical type must change (TEXT ↔ BYTEA). Worse, the data plane
+    // starts writing `decode($N,'base64')::bytea` into a still-TEXT
+    // column the instant the schema says "encrypted" → corruption.
+    //
+    // Detect the transition by comparing the LIVE encryption state
+    // (introspected from the `zsenc:` sentinel into `ColumnInfo.encryption`)
+    // against the DECLARED encryption state (`def.encrypted`). When they
+    // disagree we emit a `RewriteColumnType` op classified Destructive so
+    // the transition is VISIBLE — refused by validation and routed to a
+    // deliberate encrypt/decrypt-backfill expand-contract rather than
+    // vanishing as a zero-op diff.
+    //
+    // We key the detection off the encryption flag (a semantic signal
+    // the introspector already recovers) rather than string-matching
+    // `pg_type`, because `format_type` spellings ("bytea" vs the DDL
+    // "BYTEA", "double precision" vs "DOUBLE PRECISION") would make a raw
+    // type compare brittle. Encryption is the corruption-causing toggle;
+    // other type changes (e.g. number widening) are out of scope for
+    // this op today.
+    if let (Some(live_cols), Some(schema_obj)) = (live_cols, schema.as_object()) {
+        for (field, def) in schema_obj {
+            if crate::query::is_schema_metadata_key(field) {
+                continue;
+            }
+            let Some(live_col) = live_cols.get(field) else {
+                // Column doesn't exist live — handled by the
+                // column-additions branch (AddColumn) above.
+                continue;
+            };
+
+            let declared_encrypted = def.get("encrypted").is_some();
+            let live_encrypted = live_col.encryption.is_some();
+            if declared_encrypted == live_encrypted {
+                // No encryption toggle — nothing for this op to do.
+                // (Non-encryption type rewrites are not detected here.)
+                continue;
+            }
+
+            let to_type = crate::query::def_to_column_type_for_dialect(
+                def,
+                crate::query::SqlDialect::Postgres,
+            );
+            // The live side's spelling as introspected (e.g. "text",
+            // "bytea"). We surface it verbatim so the audit row / authoring
+            // pipeline sees exactly what the catalog reports.
+            let from_type = live_col.pg_type.clone();
+
+            ops.push(DiffOp {
+                collection: collection.to_string(),
+                change_kind: ChangeKind::RewriteColumnType {
+                    collection: collection.to_string(),
+                    column: field.clone(),
+                    from_type: from_type.clone(),
+                    to_type: to_type.clone(),
+                    encryption_toggle: Some(declared_encrypted),
+                },
+                class: ChangeClass::Destructive,
+                // No single in-place ALTER SQL: an encryption toggle is an
+                // expand-contract data rewrite (encrypt/decrypt every
+                // value), driven by the authoring pipeline like the mask
+                // backfill/rewrite ops. The op carries the intent; the
+                // apply layer refuses the in-place shortcut.
+                sql: None,
+                details: serde_json::json!({
+                    "kind": "rewrite_column_type",
+                    "field": field,
+                    "from_type": from_type,
+                    "to_type": to_type,
+                    "encryption_toggle": declared_encrypted,
+                    "reason": if declared_encrypted {
+                        "column gained encryption (TEXT→BYTEA); existing values must be encrypt-backfilled"
+                    } else {
+                        "column lost encryption (BYTEA→TEXT); existing values must be decrypt-backfilled"
+                    },
+                }),
+                field: Some(field.clone()),
+            });
+        }
+    }
+
     // ----- column drops (destructive) -----
     if let Some(live_cols) = live_cols {
         let desired_columns = desired_physical_columns(schema);
@@ -1481,6 +1601,167 @@ mod tests {
         assert_eq!(drops.len(), 1, "ops: {ops:?}");
         assert_eq!(drops[0].class, ChangeClass::Destructive);
         assert_eq!(drops[0].field.as_deref(), Some("legacy_score"));
+    }
+
+    // -----------------------------------------------------------------
+    // Encryption type-transition: TEXT ↔ BYTEA must NOT silently no-op.
+    // Regression for `bytes-encrypted-transition-silent-noop`.
+    // -----------------------------------------------------------------
+
+    /// Build a LiveSchema with one collection holding the given columns.
+    fn live_with_cols(coll: &str, cols: Vec<(&str, ColumnInfo)>) -> LiveSchema {
+        let mut live = LiveSchema::default();
+        let map: std::collections::HashMap<String, ColumnInfo> = cols
+            .into_iter()
+            .map(|(name, info)| (name.to_string(), info))
+            .collect();
+        live.tables.insert(coll.to_string(), map);
+        live
+    }
+
+    fn plaintext_text_col() -> ColumnInfo {
+        ColumnInfo {
+            pg_type: "text".into(),
+            not_null: false,
+            ..Default::default()
+        }
+    }
+
+    fn encrypted_bytea_col() -> ColumnInfo {
+        ColumnInfo {
+            pg_type: "bytea".into(),
+            not_null: false,
+            encryption: Some(EncryptionMeta {
+                mode: crate::descriptors::EncryptionMode::Randomised,
+                key_id: "default".into(),
+                wraps: WrappedType::String,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn string_to_encrypted_transition_emits_rewrite_op() {
+        // Live column is a plaintext TEXT `ssn`; the redeployed schema
+        // declares it `t.encrypted(...)` (BYTEA). The diff MUST surface a
+        // type rewrite — emitting ZERO ops here is the corruption bug,
+        // because the data plane would start writing
+        // `decode($N,'base64')::bytea` into a still-TEXT column.
+        let live = live_with_cols("users", vec![("ssn", plaintext_text_col())]);
+        let declared = json!({
+            "ssn": { "type": "string", "encrypted": { "mode": "randomised", "keyId": "default" } }
+        });
+        let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
+
+        let rewrites: Vec<&DiffOp> = ops
+            .iter()
+            .filter(|o| matches!(o.change_kind, ChangeKind::RewriteColumnType { .. }))
+            .collect();
+        assert_eq!(
+            rewrites.len(),
+            1,
+            "string→encrypted must emit exactly one RewriteColumnType op, got ops={ops:?}"
+        );
+        let op = rewrites[0];
+        assert_eq!(op.class, ChangeClass::Destructive, "op={op:?}");
+        assert_eq!(op.field.as_deref(), Some("ssn"));
+        if let ChangeKind::RewriteColumnType {
+            from_type,
+            to_type,
+            encryption_toggle,
+            ..
+        } = &op.change_kind
+        {
+            assert_eq!(from_type, "text");
+            assert_eq!(to_type, "BYTEA");
+            assert_eq!(*encryption_toggle, Some(true));
+        } else {
+            panic!("expected RewriteColumnType, got {:?}", op.change_kind);
+        }
+        // It must NOT be mistaken for an AddColumn or DropColumn.
+        assert!(
+            !ops.iter().any(|o| matches!(
+                o.change_kind,
+                ChangeKind::AddColumn | ChangeKind::DropColumn
+            )),
+            "encryption toggle must not surface as add/drop: ops={ops:?}"
+        );
+    }
+
+    #[test]
+    fn encrypted_to_string_transition_emits_rewrite_op() {
+        // The reverse: live column is encrypted BYTEA; the schema now
+        // declares plaintext `t.string()` (TEXT). Still a corruption-class
+        // rewrite (every value must be decrypt-backfilled).
+        let live = live_with_cols("users", vec![("ssn", encrypted_bytea_col())]);
+        let declared = json!({ "ssn": { "type": "string" } });
+        let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
+
+        let rewrites: Vec<&DiffOp> = ops
+            .iter()
+            .filter(|o| matches!(o.change_kind, ChangeKind::RewriteColumnType { .. }))
+            .collect();
+        assert_eq!(
+            rewrites.len(),
+            1,
+            "encrypted→string must emit exactly one RewriteColumnType op, got ops={ops:?}"
+        );
+        let op = rewrites[0];
+        assert_eq!(op.class, ChangeClass::Destructive);
+        if let ChangeKind::RewriteColumnType {
+            from_type,
+            to_type,
+            encryption_toggle,
+            ..
+        } = &op.change_kind
+        {
+            assert_eq!(from_type, "bytea");
+            assert_eq!(to_type, "TEXT");
+            assert_eq!(*encryption_toggle, Some(false));
+        } else {
+            panic!("expected RewriteColumnType, got {:?}", op.change_kind);
+        }
+    }
+
+    #[test]
+    fn unchanged_encrypted_column_is_no_op() {
+        // Live encrypted + declared encrypted with the same shape → no
+        // RewriteColumnType op (must not churn on every deploy).
+        let live = live_with_cols("users", vec![("ssn", encrypted_bytea_col())]);
+        let declared = json!({
+            "ssn": { "type": "string", "encrypted": { "mode": "randomised", "keyId": "default" } }
+        });
+        let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
+        assert!(
+            !ops.iter()
+                .any(|o| matches!(o.change_kind, ChangeKind::RewriteColumnType { .. })),
+            "stable encrypted column must not emit a rewrite: ops={ops:?}"
+        );
+    }
+
+    #[test]
+    fn unchanged_plaintext_column_is_no_op() {
+        // Live plaintext + declared plaintext → no rewrite.
+        let live = live_with_cols("users", vec![("name", plaintext_text_col())]);
+        let declared = json!({ "name": { "type": "string" } });
+        let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
+        assert!(
+            !ops.iter()
+                .any(|o| matches!(o.change_kind, ChangeKind::RewriteColumnType { .. })),
+            "stable plaintext column must not emit a rewrite: ops={ops:?}"
+        );
+    }
+
+    #[test]
+    fn rewrite_column_type_as_sql_is_stable() {
+        let op = ChangeKind::RewriteColumnType {
+            collection: "users".into(),
+            column: "ssn".into(),
+            from_type: "text".into(),
+            to_type: "BYTEA".into(),
+            encryption_toggle: Some(true),
+        };
+        assert_eq!(op.as_sql(), "rewrite_column_type");
     }
 
     #[test]

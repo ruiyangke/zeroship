@@ -331,6 +331,19 @@ pub(crate) async fn apply<
                 )
                 .await
             }
+
+            // A `RewriteColumnType` op (e.g. the encryption TEXT↔BYTEA
+            // toggle) is `ChangeClass::Destructive`, so both apply passes
+            // `continue` past it before reaching `run_op` — it is surfaced
+            // to the operator / authoring pipeline, never auto-applied
+            // in-place (an in-place ALTER would corrupt every stored
+            // value). This arm is therefore unreachable in practice; it
+            // returns the same destructive-invariant error so the compiler
+            // enforces exhaustive matching and a stray op that bypasses the
+            // skip filter fails loudly instead of silently no-oping.
+            ChangeKind::RewriteColumnType { .. } => {
+                Err(destructive_invariant_error(op))
+            }
         };
 
         if let Some(id) = audit_id {

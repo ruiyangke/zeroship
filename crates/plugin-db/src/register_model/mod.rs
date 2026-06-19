@@ -453,7 +453,14 @@ async fn apply_sqlite(
             }
             ChangeKind::MaskBackfill { .. }
             | ChangeKind::MaskRewrite { .. }
-            | ChangeKind::MaskRemove { .. } => Err(DbError::backend_unsupported("register_model")),
+            | ChangeKind::MaskRemove { .. }
+            // A column type rewrite (e.g. the encryption TEXT↔BYTEA
+            // toggle) is a destructive data-rewrite the engine drives
+            // via expand-contract; register_model never applies it
+            // in-place (doing so would corrupt every stored value).
+            | ChangeKind::RewriteColumnType { .. } => {
+                Err(DbError::backend_unsupported("register_model"))
+            }
             ChangeKind::DropColumn | ChangeKind::DropIndex => continue,
         };
 
