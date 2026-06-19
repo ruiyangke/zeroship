@@ -279,7 +279,12 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                                 }
                             }
 
-                            if cache::load_app(*local_id, &bytes, info.runtime.clone()) {
+                            if cache::load_app(
+                                *local_id,
+                                &bytes,
+                                info.runtime.clone(),
+                                info.deploy_hash.as_deref(),
+                            ) {
                                 // Record what the fresh isolate was loaded
                                 // against — the reload decision above keys
                                 // off this on the next cycle.
@@ -666,7 +671,7 @@ mod tests {
 
             // Load the app the way the worker does, recording that the
             // isolate was hydrated against env version 1.
-            assert!(crate::cache::load_app(app_id, source, AppRuntimeLimits::default()));
+            assert!(crate::cache::load_app(app_id, source, AppRuntimeLimits::default(), None));
             crate::cache::set_loaded_meta(
                 app_id,
                 crate::cache::LoadedMeta {

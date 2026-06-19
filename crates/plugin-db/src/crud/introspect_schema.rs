@@ -12,12 +12,22 @@
 //! metadata came from `registerModel`'s declared schema (the old source) or from
 //! introspection (the new one).
 //!
-//! Caching: per-isolate, per-`(app, collection)`, keyed on the current
-//! `ZEROSHIP_DEPLOY_ID` (the deploy/schema-version token). A deploy bump
-//! invalidates the entry on next read — mirroring `register_model`'s per-thread
-//! `is_model_registered` fast-path but keyed on the deploy version rather than
-//! mere presence (design §6). A goodie-free collection is cached as a NEGATIVE
-//! result (`None`) so it is not re-introspected each call.
+//! Caching: per-isolate, per-`(app, collection)`, keyed on the app's current
+//! deploy/schema-version token. A deploy bump invalidates the entry on next read
+//! — mirroring `register_model`'s per-thread `is_model_registered` fast-path but
+//! keyed on the deploy version rather than mere presence (design §6). A
+//! goodie-free collection is cached as a NEGATIVE result (`None`) so it is not
+//! re-introspected each call.
+//!
+//! **T6** — the token is the per-`app_id` value the worker injects as
+//! `ZEROSHIP_DEPLOY_ID` (= the app's `deploy_hash`), stamped into the per-isolate
+//! [`crate::context::IsolateDbContext`] when the `Db` wrapper is minted
+//! (`mint_db`). It is read here via [`crate::context::IsolateDbContext::
+//! deploy_token_for`], NOT from the process-global `std::env::var` — that env var
+//! was never set by any worker/runtime/control vector (so the token was pinned at
+//! `"cold_start"` for the isolate's whole life and the deploy-keyed cache never
+//! invalidated), and a process-global would in any case be wrong for a multi-app
+//! worker thread.
 //!
 //! ## Recoverability gap (flagged, not papered over)
 //!
@@ -39,12 +49,6 @@ use serde_json::{json, Map, Value};
 
 use crate::diff::{ColumnInfo, EncryptionMeta, LiveSchema, MaskMeta, WrappedType};
 use crate::error::DbError;
-
-/// The env var the engine/registerModel bump per deploy; the cache invalidation
-/// token. Absent ⇒ `"cold_start"` (matches `register_model` / `mask_backfill`).
-fn deploy_token() -> String {
-    std::env::var("ZEROSHIP_DEPLOY_ID").unwrap_or_else(|_| "cold_start".to_string())
-}
 
 /// Resolve the runtime data-access schema for `(app_id, collection)` from the
 /// LIVE catalog + sentinels, with per-isolate deploy-keyed caching.
@@ -72,7 +76,11 @@ pub(crate) async fn runtime_schema_for(
         return Ok(None);
     }
 
-    let token = deploy_token();
+    // The per-app deploy/schema-version token (the worker-injected
+    // `ZEROSHIP_DEPLOY_ID` = `deploy_hash`, stamped at `mint_db`). A redeploy
+    // re-mints the wrapper with the new hash, so this token changes and the
+    // deploy-keyed cache below invalidates on the next op. See the module note.
+    let token = crate::context::with(|c| c.deploy_token_for(app_id));
 
     // Fast path: per-isolate cache hit under the current deploy token.
     if let Some(cached) =

@@ -615,7 +615,8 @@ mod tests {
             assert!(crate::cache::load_app(
                 app_id,
                 source,
-                AppRuntimeLimits::default()
+                AppRuntimeLimits::default(),
+                None
             ));
 
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
@@ -732,7 +733,8 @@ mod tests {
             assert!(crate::cache::load_app(
                 app_id,
                 source,
-                AppRuntimeLimits::default()
+                AppRuntimeLimits::default(),
+                None
             ));
 
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
@@ -917,7 +919,8 @@ mod tests {
             assert!(crate::cache::load_app(
                 app_id,
                 source,
-                AppRuntimeLimits::default()
+                AppRuntimeLimits::default(),
+                None
             ));
 
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
@@ -1226,7 +1229,12 @@ async fn load_on_demand(
     if let Err(e) = crate::sync::put_env_from_json(envs, *app_id, &env_json, app_version.env_version) {
         return Err(format!("env parse failed: {e}"));
     }
-    if !cache::load_app(*app_id, &bytes, app_version.runtime.clone()) {
+    if !cache::load_app(
+        *app_id,
+        &bytes,
+        app_version.runtime.clone(),
+        app_version.deploy_hash.as_deref(),
+    ) {
         crate::sync::remove_env(envs, app_id);
         return Err("failed to parse bundle".into());
     }

@@ -8696,3 +8696,126 @@ async fn drop_namespace_retries_from_step_3_on_partial_failure() {
 
     c1_cleanup(&pool, app).await;
 }
+
+// ---------------------------------------------------------------------------
+// T6 — the deploy-keyed introspection cache invalidates on a REAL deploy bump.
+//
+// Regression for `deploy-id-never-set-cache-invalidation-inert`: the
+// introspected-schema cache was keyed on `std::env::var("ZEROSHIP_DEPLOY_ID")`,
+// which NOTHING in worker/runtime/control ever set — so the token was pinned at
+// `"cold_start"` for the life of a long-lived worker isolate and the cache NEVER
+// invalidated. After a redeploy ALTERed the schema (e.g. added a masked column),
+// the runtime kept applying the STALE metadata it cached at first-introspection,
+// silently dropping the new column's mask/crypto behaviour.
+//
+// The fix re-keys the cache on the per-app deploy token the worker now injects as
+// `ZEROSHIP_DEPLOY_ID` (= the app's `deploy_hash`), stamped into the per-isolate
+// context at `mint_db` and read via `IsolateDbContext::deploy_token_for`. This
+// test drives the FAITHFUL path: register v1, introspect+cache under token
+// `deploy_1`, ALTER to v2 via the same engine register path, and prove:
+//   (a) WITHOUT bumping the token the cache holds the v1 result (no re-introspect);
+//   (b) bumping the token to `deploy_2` invalidates the entry and re-introspection
+//       surfaces the v2 column's mask metadata.
+//
+// PRE-FIX this test FAILS at assertion (b): the old `deploy_token()` ignored the
+// stamped token entirely (read the never-set env var → always `"cold_start"`), so
+// the bumped token had no effect and the stale v1 schema (no `phone` mask) was
+// returned.
+#[allow(unsafe_code)]
+#[compio::test]
+async fn t6_introspection_cache_invalidates_on_deploy_token_bump() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+    let _env = WithEnv::set("ZEROSHIP_COLUMN_KEY_DEFAULT", &"t".repeat(64));
+
+    let app = "t6_deploy_cache";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+
+    // ===== Deploy 1: a goodie-FREE collection (plain `name`). =====
+    let schema_v1 = json!({
+        "name": {"type": "string", "required": true},
+    });
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
+        std::rc::Rc::clone(&pool),
+        app,
+        "people",
+        &schema_v1,
+        &json!([]),
+        "deploy_1",
+    )
+    .await
+    .unwrap_or_else(|e| panic!("deploy 1 register failed: {e}"));
+
+    // Install the PG backend, mark readiness, and stamp the per-app deploy token
+    // exactly as `mint_db` does from the worker-injected `ZEROSHIP_DEPLOY_ID`.
+    zeroship_plugin_db::set_postgres_pool_for_tests(std::rc::Rc::clone(&pool), &url);
+    zeroship_plugin_db::mark_model_registered_for_tests(app, "people");
+    zeroship_plugin_db::set_deploy_token_for_tests(app, "deploy_1");
+
+    // First introspection under `deploy_1`: collection has no goodies → the
+    // schema carries `name` but no `phone` field (and no mask anywhere). This
+    // result is now cached under the `deploy_1` token.
+    let v1 = zeroship_plugin_db::crud::runtime_schema_for_tests(app, "people")
+        .await
+        .expect("introspect v1")
+        .expect("table exists → Some");
+    assert_eq!(v1["name"]["type"], "string");
+    assert!(
+        v1.get("phone").is_none(),
+        "deploy 1 has no phone column yet, got {v1:?}"
+    );
+
+    // ===== Deploy 2: ALTER to add a MASKED `phone` column (engine path). =====
+    let schema_v2 = json!({
+        "name": {"type": "string", "required": true},
+        "phone": {
+            "type": "string",
+            "mask": {"kind": "last4", "classification": "pci"}
+        },
+    });
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
+        std::rc::Rc::clone(&pool),
+        app,
+        "people",
+        &schema_v2,
+        &json!([]),
+        "deploy_2",
+    )
+    .await
+    .unwrap_or_else(|e| panic!("deploy 2 register (add masked column) failed: {e}"));
+
+    // (a) The catalog NOW has the masked `phone` column, but until the deploy
+    // token is bumped the per-isolate cache must still return the v1 result —
+    // this proves the cache is real (not re-introspecting every call) AND that
+    // the only thing that should invalidate it is a deploy bump.
+    let still_cached = zeroship_plugin_db::crud::runtime_schema_for_tests(app, "people")
+        .await
+        .expect("introspect (still deploy_1 token)")
+        .expect("table exists → Some");
+    assert!(
+        still_cached.get("phone").is_none(),
+        "cache must hold the deploy_1 result until the deploy token bumps, got {still_cached:?}"
+    );
+
+    // (b) Simulate the redeploy: bump the per-app deploy token (a new
+    // `deploy_hash` → new `ZEROSHIP_DEPLOY_ID` injected at the next isolate
+    // load). The cache entry is now stale and must be re-introspected, surfacing
+    // the masked `phone` column's metadata. PRE-FIX this assertion fails — the
+    // token bump was inert because the cache keyed off the never-set env var.
+    zeroship_plugin_db::set_deploy_token_for_tests(app, "deploy_2");
+    let v2 = zeroship_plugin_db::crud::runtime_schema_for_tests(app, "people")
+        .await
+        .expect("introspect v2")
+        .expect("table exists → Some");
+    assert_eq!(
+        v2["phone"]["mask"]["kind"], "last4",
+        "deploy bump must re-introspect and surface the new masked column, got {v2:?}"
+    );
+    assert_eq!(v2["phone"]["mask"]["classification"], "pci");
+
+    let _ = pool
+        .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await;
+}

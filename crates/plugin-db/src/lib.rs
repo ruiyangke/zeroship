@@ -244,6 +244,17 @@ pub fn mark_model_registered_for_tests(app_id: &str, collection: &str) {
     mark_model_registered(app_id, collection);
 }
 
+/// **T6** — stamp the per-`app_id` deploy/schema-version token into the
+/// per-isolate context, the way `mint_db` does from the worker-injected
+/// `ZEROSHIP_DEPLOY_ID`. A faithful e2e that drives the CRUD pipelines directly
+/// uses this to simulate a redeploy (bump the token) and prove the deploy-keyed
+/// introspection cache re-introspects the new schema's metadata.
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+pub fn set_deploy_token_for_tests(app_id: &str, token: &str) {
+    context::with_mut(|c| c.set_deploy_token(app_id, token));
+}
+
 // The synchronous `ensure_pool(scope)` helper that used to live here
 // has been removed — every callback dispatches through
 // `init_pool_async()` + `context::with_mut(...)` directly (or the

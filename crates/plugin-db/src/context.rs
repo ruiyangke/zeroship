@@ -290,14 +290,33 @@ pub struct IsolateDbContext {
     /// applied, decoupled from any in-memory declared schema.
     ///
     /// Keyed by `"{app_id}:{collection}"`; the value is `(deploy_token, schema)`
-    /// where `deploy_token` is the current `ZEROSHIP_DEPLOY_ID` snapshot. A
-    /// stale token (a deploy bumped it) invalidates the entry on next read,
+    /// where `deploy_token` is the app's current deploy/schema-version token
+    /// (the worker-injected `ZEROSHIP_DEPLOY_ID` = `deploy_hash`, read via
+    /// [`Self::deploy_token_for`] — T6). A stale token (a redeploy changed the
+    /// app's `deploy_hash`) invalidates the entry on next read,
     /// mirroring the `is_model_registered` per-thread fast-path but keyed on the
     /// deploy/schema version rather than mere presence. The inner `Option`
     /// distinguishes "introspected, collection absent / has no goodies" (`None`)
     /// from "not yet introspected" (no map entry) so a goodie-free collection is
     /// cached as a negative result rather than re-introspected every call.
     introspected_schemas: HashMap<String, (String, Option<serde_json::Value>)>,
+
+    /// **T6** — per-isolate, per-`app_id` deploy/schema-version token used as the
+    /// invalidation key for [`Self::introspected_schemas`] (and any other
+    /// deploy-keyed runtime cache). Stamped from the worker-injected
+    /// `ZEROSHIP_DEPLOY_ID` env var (the per-app `deploy_hash`) when the `Db`
+    /// wrapper is minted (`mint_db`), so a redeploy that changes the app's
+    /// `deploy_hash` produces a fresh token and forces re-introspection of the
+    /// new schema's crypto/mask/column metadata.
+    ///
+    /// This REPLACES the prior `std::env::var("ZEROSHIP_DEPLOY_ID")` read: that
+    /// env var was process-global, never `set_var`'d by worker/runtime/control,
+    /// and would have been WRONG for a multi-app worker thread even if it were —
+    /// so the token was pinned at `"cold_start"` for the life of the isolate and
+    /// the deploy-keyed cache never invalidated, applying stale metadata to a
+    /// redeployed schema. Keyed by `app_id`; absent ⇒ `"cold_start"` (the cold /
+    /// dev / raw-JS contract, matching the historical default).
+    deploy_tokens: HashMap<String, String>,
 
     /// **P5.5 PR 5** — per-isolate, per-app mask-policy cache. Seeded
     /// on first unmask attempt by reading durable storage (PG admin
@@ -370,6 +389,7 @@ impl IsolateDbContext {
             running_consumers: HashSet::new(),
             schemas: HashMap::new(),
             introspected_schemas: HashMap::new(),
+            deploy_tokens: HashMap::new(),
             mask_policies: HashMap::new(),
             backend: None,
             backend_init_in_progress: false,
@@ -536,7 +556,8 @@ impl IsolateDbContext {
 
     /// **P4 HALF B** — read the cached INTROSPECTED schema for `(app_id,
     /// collection)`, but only if it was cached under the CURRENT
-    /// `deploy_token`. A token mismatch (a deploy bumped `ZEROSHIP_DEPLOY_ID`)
+    /// `deploy_token`. A token mismatch (a redeploy changed the app's
+    /// `deploy_hash` / `ZEROSHIP_DEPLOY_ID`)
     /// returns `None`, forcing the caller to re-introspect — this is the
     /// deploy-bump invalidation. Returns:
     ///   - `Some(Some(schema))` — cached, current, collection has goodies;
@@ -572,6 +593,31 @@ impl IsolateDbContext {
         let key = format!("{app_id}:{collection}");
         self.introspected_schemas
             .insert(key, (deploy_token.to_string(), schema));
+    }
+
+    // ----- DEPLOY_TOKENS (T6) ----------------------------------------
+
+    /// **T6** — stamp the per-`app_id` deploy/schema-version token (the
+    /// worker-injected `ZEROSHIP_DEPLOY_ID` = `deploy_hash`). Called from
+    /// `mint_db` when the `Db` wrapper is built, so the token reflects the
+    /// deploy the isolate is currently serving. Idempotent overwrite — a swap to
+    /// a new deploy re-mints the wrapper and re-stamps, which is exactly what
+    /// invalidates the deploy-keyed introspection cache on the next CRUD op.
+    pub(crate) fn set_deploy_token(&mut self, app_id: &str, token: &str) {
+        self.deploy_tokens
+            .insert(app_id.to_string(), token.to_string());
+    }
+
+    /// **T6** — read the per-`app_id` deploy/schema-version token. Defaults to
+    /// `"cold_start"` when nothing was stamped (dev `zeroship serve`, raw-JS
+    /// deploys, or test harnesses with no worker env injection) — the same cold
+    /// default the prior `std::env::var` read fell back to, so the
+    /// never-redeployed path behaves identically.
+    pub(crate) fn deploy_token_for(&self, app_id: &str) -> String {
+        self.deploy_tokens
+            .get(app_id)
+            .cloned()
+            .unwrap_or_else(|| "cold_start".to_string())
     }
 
     /// **P5.5 PR 7** — enumerate every `(collection, schema)` pair the
