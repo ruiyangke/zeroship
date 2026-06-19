@@ -18,6 +18,16 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 zeroship-core = { workspace = true }
+# Schema-authority P2: the engine ADOPTS the shared schema core for its
+# schema-DESCRIPTION layer (the DSL→SQL type map + the DDL-shape vocabulary +
+# sentinel codec + shape enums), replacing its own v1-SUBSET re-implementation.
+# This is what gives the declarative differ FULL type capability
+# (vector/encrypted/mask/geoPoint/literal) by reuse — the engine builds an SDK
+# `def` from its FieldDescriptor and delegates the type/DDL spelling to this
+# crate. Leaf crate: no v8/runtime/crypto, so the engine's trust domain is
+# unchanged. The engine's LIFECYCLE (journal/guard/executor/rollback/…) and its
+# snapshot-diff/introspection surface stay engine-owned and sit ON TOP of this.
+zeroship-schema = { workspace = true }
 # The canonical version→id derivation (loader §6.2) builds a UUIDv7-SHAPED id
 # (numeric version in the high 48 bits) and base62-encodes it via
 # `zeroship_core::typed_id::uuid_to_base62`, which takes a `&uuid::Uuid`.

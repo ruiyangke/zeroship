@@ -1824,7 +1824,18 @@ fn field_to_column_for_dialect(
     .to_string())
 }
 
-fn def_to_column_type_for_dialect(def: &serde_json::Value, dialect: SqlDialect) -> String {
+/// Map a single SDK field definition (`{ type, encrypted?, vectorDims?, … }`)
+/// to the column SQL TYPE for `dialect`, covering the FULL type surface —
+/// `vector(N)`, `geography(POINT,4326)` (geoPoint), `BYTEA`/`BLOB`
+/// (encrypted), `literal`'s primitive, and the plain B-tree types. This is
+/// the single source of truth the migration engine's declarative differ
+/// adopts (schema-authority P2): the engine builds a `def` from its
+/// `FieldDescriptor` and calls this, so it reaches full capability
+/// (vector/encrypted/geo) by reuse rather than re-implementing — and never
+/// rejects those types again. The returned spelling is DDL (`vector(N)`,
+/// `DOUBLE PRECISION`, `TIMESTAMPTZ`, …); callers that need the
+/// `information_schema.data_type` spelling translate it themselves.
+pub fn def_to_column_type_for_dialect(def: &serde_json::Value, dialect: SqlDialect) -> String {
     if def.get("encrypted").is_some() {
         return match dialect {
             SqlDialect::Postgres => "BYTEA".to_string(),
