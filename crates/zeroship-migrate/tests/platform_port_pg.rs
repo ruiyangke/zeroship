@@ -21,7 +21,9 @@
 use std::path::PathBuf;
 
 use compio_postgres::Client;
-use zeroship_migrate::guard::platform_runner::{run_migrate, run_status, RunConfig, RunProfile, RunReport};
+use zeroship_migrate::guard::platform_runner::{
+    run_migrate, run_rollback, run_status, RunConfig, RunProfile, RunReport,
+};
 
 const DEFAULT_DSN: &str =
     "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_migrate_test";
@@ -231,6 +233,116 @@ async fn ported_changelog_applies_under_platform_and_materializes_the_schema() {
         }
         other => panic!("expected Status report, got {other:?}"),
     }
+
+    // Clean up the journal (leave the schemas; the next run resets them).
+    conn.batch_execute(&format!("DROP SCHEMA IF EXISTS \"{meta}\" CASCADE;"))
+        .await
+        .expect("drop journal schema");
+}
+
+// ---------------------------------------------------------------------------
+// The port ROLLBACK gate (design §10, finding `platform-down-rollback-untested`):
+// the ported `.down.sql` set + the Platform Down/Rollback commands are shipped
+// (`run_down` / `run_rollback`) but no platform test exercised them — the port
+// gate above only applies-forward + asserts an idempotent no-op. Rollback was
+// covered ONLY for the project profile (`rollback_pg.rs`, synthetic in-test
+// migrations), so the platform path that REPLACED Liquibase's `rollback` was
+// untested against the REAL ported `.down.sql` files.
+//
+// This applies the whole ported set, then `run_rollback`'s the SINGLE most-recent
+// platform migration (V0057) via its real `.down.sql` under profile=Platform, and
+// asserts: the object V0057 created is GONE, the journal reflects the rollback
+// (RunReport::Rollback names V0057; status drops to 55 applied with V0057 pending),
+// and the rolled-back migration RE-APPLIES forward cleanly (the down was faithful).
+//
+// V0057 is a self-contained reversible step: its up creates the creator-keyed
+// `zeroship.metering_exports` table (+ a guarded GRANT); its down REVOKEs +
+// `DROP TABLE`s it. So rolling back exactly one step removes `metering_exports`
+// without disturbing the rest of the schema.
+//
+// Drives the REAL `guard::platform_runner::run_rollback` (not a shim, not a spawned
+// process) so the compose `migrate` service's rollback path is guarded by the same
+// engine + guard. Rollback is destructive ⇒ the run uses `yes = true` (the runner's
+// own --yes gate is exercised independently in `cli_platform_pg.rs`).
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn ported_set_rolls_back_the_last_platform_migration_via_its_down_sql() {
+    let conn = pg().await;
+    let meta = format!("portrbmeta_{}", token());
+    reset(&conn, &meta).await;
+
+    // Apply the WHOLE ported set forward first (the precondition for a rollback).
+    let cfg = platform_cfg(&meta, /* yes */ true);
+    match run_migrate(&cfg).await.expect("ported set applies under Platform") {
+        RunReport::Migrate(outcome) => {
+            assert_eq!(outcome.applied.len(), 56, "all 56 ported files applied");
+        }
+        other => panic!("expected Migrate report, got {other:?}"),
+    }
+    // The object V0057's `up` creates must exist before we roll it back.
+    assert!(
+        table_exists(&conn, "zeroship", "metering_exports").await,
+        "V0057 materialized zeroship.metering_exports"
+    );
+
+    // Roll back exactly the most-recently-applied migration (V0057) via its REAL
+    // `.down.sql`. `run_rollback(.., None, Some(1))` is the `down` one-step target.
+    let report = run_rollback(&cfg, None, Some(1))
+        .await
+        .expect("the last platform migration rolls back via its .down.sql");
+    match report {
+        RunReport::Rollback(outcome) => {
+            // V0057 → version 57 → the derived `mig_…` id. Exactly one step undone.
+            let expected = zeroship_migrate::migration_id_for_version(57);
+            assert_eq!(
+                outcome.rolled_back,
+                vec![expected.as_str().to_string()],
+                "exactly V0057 was rolled back, via its real .down.sql"
+            );
+            assert!(
+                outcome.skipped_irreversible.is_empty(),
+                "V0057 is reversible — nothing force-skipped"
+            );
+        }
+        other => panic!("expected Rollback report, got {other:?}"),
+    }
+
+    // The dropped object is GONE on the REAL DB (the `.down.sql` actually ran).
+    assert!(
+        !table_exists(&conn, "zeroship", "metering_exports").await,
+        "rolling back V0057 dropped zeroship.metering_exports"
+    );
+
+    // The journal reflects the rollback: 55 applied, V0057 now pending again.
+    match run_status(&cfg).await.expect("status reads the journal post-rollback") {
+        RunReport::Status(status) => {
+            assert_eq!(
+                status.applied.len(),
+                55,
+                "the journal shows 55 applied after rolling back V0057"
+            );
+            assert_eq!(
+                status.pending.len(),
+                1,
+                "V0057 is the single pending migration after its rollback"
+            );
+        }
+        other => panic!("expected Status report, got {other:?}"),
+    }
+
+    // Roll-forward heals: re-applying re-runs ONLY V0057 (the down was faithful, so
+    // its up re-creates the table). Proves the ported down/up pair round-trips.
+    match run_migrate(&cfg).await.expect("re-apply heals the rolled-back step") {
+        RunReport::Migrate(outcome) => {
+            assert_eq!(outcome.applied.len(), 1, "only V0057 re-applied");
+        }
+        other => panic!("expected Migrate report, got {other:?}"),
+    }
+    assert!(
+        table_exists(&conn, "zeroship", "metering_exports").await,
+        "re-applying V0057 re-created zeroship.metering_exports"
+    );
 
     // Clean up the journal (leave the schemas; the next run resets them).
     conn.batch_execute(&format!("DROP SCHEMA IF EXISTS \"{meta}\" CASCADE;"))
