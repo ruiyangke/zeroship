@@ -52,7 +52,7 @@
 //!   schema(s) (default `public`), via `ALTER ROLE`. The project schema is the
 //!   sole writable resolution target; the extension schema(s) ride at the end
 //!   purely so an unqualified extension TYPE/function the engine emits
-//!   (pgvector's `vector(N)`, PostGIS's `geography(...)`) resolves. The meta
+//!   (pgvector's `vector(N)`, `PostGIS`'s `geography(...)`) resolves. The meta
 //!   schema is off the migrator's path — defense-in-depth so an unqualified name
 //!   in an `up` can never resolve to the journal even if a grant were ever
 //!   reintroduced.

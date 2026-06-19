@@ -756,6 +756,10 @@ impl Pool {
     /// `CREATE TABLE …; COMMENT ON COLUMN … IS 'zsenc:…'` / `'__zsmask:…'`
     /// sentinel batches the schema builder emits (P4 HALF A / P5.5 PR 6).
     /// `Pool::execute` cannot run those (it prepares a single command).
+    ///
+    /// # Errors
+    /// Returns [`Error`] if a connection cannot be acquired or the server
+    /// rejects any statement in the batch.
     pub async fn batch_execute(&self, sql: &str) -> Result<(), Error> {
         let client = self.get().await?;
         client.batch_execute(sql).await
