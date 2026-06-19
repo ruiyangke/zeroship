@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -471,6 +471,14 @@ impl Manifest {
         // deploy tmp dir can never escape that dir. The migration-file
         // GRAMMAR (`V<NNNN>__…`/dbmate) is the loader's job at deploy, not
         // here — this is the wire-format + path-safety guard only.
+        // Cross-entry uniqueness: two entries that share a `name` would
+        // clobber on disk during `reconstruct_migration_files` (a truncating
+        // per-name write), silently dropping one migration's content before
+        // the loader's DuplicateVersion guard ever sees the file. Two entries
+        // that share a `hash` under different names point at the same blob —
+        // a content-addressing inconsistency the producer must not emit.
+        let mut seen_names: BTreeSet<&str> = BTreeSet::new();
+        let mut seen_hashes: BTreeSet<&str> = BTreeSet::new();
         for entry in &self.migrations {
             if !is_sha256_hex(&entry.hash) {
                 return Err(format!(
@@ -484,6 +492,20 @@ impl Manifest {
                     "migrations[].name {name:?} must be a bare filename \
                      (no path separators or '.'/'..' traversal)",
                     name = entry.name
+                ));
+            }
+            if !seen_names.insert(entry.name.as_str()) {
+                return Err(format!(
+                    "migrations[].name {name:?} is duplicated; entry names must be \
+                     unique (a collision would clobber on disk during reconstruction)",
+                    name = entry.name
+                ));
+            }
+            if !seen_hashes.insert(entry.hash.as_str()) {
+                return Err(format!(
+                    "migrations[].hash {hash:?} is duplicated across entries with \
+                     different names; each migration blob must be referenced by one name",
+                    hash = entry.hash
                 ));
             }
         }
@@ -816,5 +838,45 @@ mod migration_validation_tests {
                 "name {bad:?} must be rejected, got {err}"
             );
         }
+    }
+
+    #[test]
+    fn rejects_duplicate_migration_name() {
+        // Two entries with the same `name` would clobber on disk during
+        // reconstruct_migration_files (a truncating per-name write), silently
+        // dropping one migration's content before the loader's DuplicateVersion
+        // guard ever sees the file. validate() must reject the manifest.
+        let mut m = base();
+        m.migrations = vec![
+            MigrationFileEntry {
+                name: "V0001__x.sql".into(),
+                hash: "a".repeat(64),
+            },
+            MigrationFileEntry {
+                name: "V0001__x.sql".into(),
+                hash: "b".repeat(64),
+            },
+        ];
+        let err = m.validate().unwrap_err();
+        assert!(err.contains("duplicated"), "duplicate name must be rejected, got {err}");
+    }
+
+    #[test]
+    fn rejects_duplicate_migration_hash() {
+        // Same blob referenced under two different names is a content-addressing
+        // inconsistency the producer must not emit.
+        let mut m = base();
+        m.migrations = vec![
+            MigrationFileEntry {
+                name: "V0001__x.sql".into(),
+                hash: "a".repeat(64),
+            },
+            MigrationFileEntry {
+                name: "V0002__y.sql".into(),
+                hash: "a".repeat(64),
+            },
+        ];
+        let err = m.validate().unwrap_err();
+        assert!(err.contains("duplicated"), "duplicate hash must be rejected, got {err}");
     }
 }

@@ -764,7 +764,27 @@ async fn reconstruct_migration_files(
             }
         };
         let path = mig_dir.join(&entry.name);
-        if let Err(e) = compio::fs::write(&path, bytes.to_vec()).await.0 {
+        // Defense-in-depth against a duplicate `entry.name` slipping past
+        // Manifest::validate: `create_new` (O_EXCL) refuses to truncate an
+        // existing file, so a name collision fails the deploy loudly instead
+        // of silently clobbering an already-written migration's content.
+        use compio::io::AsyncWriteAtExt;
+        let mut file = match compio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+        {
+            Ok(f) => f,
+            Err(e) => {
+                return Err(infrastructure_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "deploy-migrate open migration file",
+                    format_args!("{e}; path={}", path.display()),
+                ));
+            }
+        };
+        if let Err(e) = file.write_all_at(bytes.to_vec(), 0).await.0 {
             return Err(infrastructure_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "deploy-migrate write migration file",
