@@ -48,12 +48,21 @@
 //!   the **executor as the admin role** — the migrator gets neither `USAGE` on
 //!   the meta schema nor any grant on `schema_migrations` /
 //!   `schema_migrations_inflight`. The journal is unforgeable by deny-by-absence.
-//! - `search_path` pinned to the project schema **only** via `ALTER ROLE` (the
-//!   meta schema is off the migrator's path — defense-in-depth so an unqualified
-//!   name in an `up` can never resolve to the journal even if a grant were ever
-//!   reintroduced).
-//! - **`REVOKE` of `CREATE`/`USAGE` on `public`** so it cannot stage objects in
-//!   the shared `public` schema or resolve unqualified names there.
+//! - `search_path` set to the project schema **first**, then the extension
+//!   schema(s) (default `public`), via `ALTER ROLE`. The project schema is the
+//!   sole writable resolution target; the extension schema(s) ride at the end
+//!   purely so an unqualified extension TYPE/function the engine emits
+//!   (pgvector's `vector(N)`, PostGIS's `geography(...)`) resolves. The meta
+//!   schema is off the migrator's path — defense-in-depth so an unqualified name
+//!   in an `up` can never resolve to the journal even if a grant were ever
+//!   reintroduced.
+//! - **`REVOKE ALL` then `GRANT USAGE` on the extension schema(s) (`public`)**:
+//!   the migrator cannot stage objects there (no `CREATE`) nor reach existing
+//!   tables (no per-object grant), but `USAGE` lets it *resolve* the shared
+//!   extension types. USAGE is resolution-only — it relaxes nothing about
+//!   cross-schema **write** confinement. (Matches plugin-db's runtime, which
+//!   references the same unqualified `vector`/`geography` types with `public`
+//!   reachable on its connection path.)
 //! - **No grant whatsoever** on `control` / `auth` / `billing` / `zeroship` /
 //!   any other project schema. Deny-by-absence: a role only has what it is
 //!   granted, so an unmentioned schema is unreachable. This is the line-2
@@ -173,9 +182,10 @@ pub fn migrator_role_name(project_id: &str) -> Result<String, RoleError> {
 /// Idempotently provision the least-privilege `migrator` role for a project
 /// (design §1.3). Run by an admin/control principal with `CREATEROLE`.
 ///
-/// Establishes the role, makes it own the **project schema**, pins its
-/// `search_path` to the project schema, and revokes `public` and any residual
-/// access to the **meta schema**. After this, the executor can `SET ROLE` to it
+/// Establishes the role, makes it own the **project schema**, sets its
+/// `search_path` to the project schema (writable) plus the extension schema(s)
+/// (`public`, resolution-only via `USAGE`), and revokes write reach on `public`
+/// and any residual access to the **meta schema**. After this, the executor can `SET ROLE` to it
 /// to run migrations under least privilege — but the migrator has **no** access
 /// to the journal (the executor does all journal I/O as admin; C1 fix).
 ///
@@ -276,22 +286,52 @@ pub async fn provision_migrator(admin: &Client, cfg: &ExecutorConfig) -> Result<
     )
     .await?;
 
-    // 6. Pin search_path to the PROJECT schema only. Unqualified names in a
-    //    migration resolve into the project schema; the migrator never sees the
-    //    meta schema, `public`, or `zeroship` on its path — so an unqualified
+    // 6. Pin search_path to the PROJECT schema FIRST, then the extension
+    //    schema(s) (default `public`). The project schema is the sole writable
+    //    resolution target — an unqualified `CREATE TABLE foo` lands there, never
+    //    in an extension schema. The extension schema(s) ride at the END of the
+    //    path purely so an UNQUALIFIED extension TYPE/function the engine emits
+    //    (pgvector's `vector(N)`, PostGIS's `geography(...)`) RESOLVES — matching
+    //    how plugin-db's runtime references the same unqualified types with
+    //    `public` reachable. The meta schema stays OFF the path so an unqualified
     //    `INSERT INTO schema_migrations` in an `up` can never resolve to the
     //    journal (defense-in-depth behind the revoked grant; C1 fix).
+    //
+    //    SECURITY: presence on search_path is RESOLUTION ONLY. Write reach into an
+    //    extension schema needs CREATE (kept REVOKEd in step 7) or per-table
+    //    grants (never given), so this does not relax cross-schema write
+    //    confinement.
+    let mut path_parts = vec![proj_q.clone()];
+    for ext in &cfg.extension_schemas {
+        if ext != &cfg.project_schema {
+            path_parts.push(quote_ident(ext));
+        }
+    }
     exec_retry(
         admin,
-        &format!("ALTER ROLE {role_q} SET search_path = {proj_q}"),
+        &format!(
+            "ALTER ROLE {role_q} SET search_path = {}",
+            path_parts.join(", ")
+        ),
     )
     .await?;
 
-    // 7. REVOKE public-schema reach. Stop the migrator staging objects in the
-    //    shared `public` schema or resolving unqualified names there. (PG 15+
-    //    already revokes CREATE-on-public from PUBLIC, but be explicit + cover
-    //    USAGE so the role is fully confined to its own + meta schema.)
-    exec_retry(admin, &format!("REVOKE ALL ON SCHEMA public FROM {role_q}")).await?;
+    // 7. Confine the extension schema(s) to RESOLUTION-ONLY. REVOKE ALL first so
+    //    the migrator can never stage objects there (no CREATE) — PG 15+ already
+    //    revokes CREATE-on-public from PUBLIC, but be explicit — then GRANT USAGE
+    //    so unqualified extension TYPE/function lookup (the `vector`/`geography`
+    //    types) succeeds. USAGE permits *referencing* objects in the schema; it
+    //    grants NO write/CREATE and NO access to existing tables (those need
+    //    per-object grants the migrator never receives). Net: the migrator can
+    //    resolve `vector(N)` but cannot create or write anything in `public`.
+    for ext in &cfg.extension_schemas {
+        if ext == &cfg.project_schema {
+            continue;
+        }
+        let ext_q = quote_ident(ext);
+        exec_retry(admin, &format!("REVOKE ALL ON SCHEMA {ext_q} FROM {role_q}")).await?;
+        exec_retry(admin, &format!("GRANT USAGE ON SCHEMA {ext_q} TO {role_q}")).await?;
+    }
 
     Ok(())
 }

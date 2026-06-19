@@ -374,6 +374,109 @@ async fn migrator_can_ddl_its_own_schema_and_apply_runs_under_the_role() {
 }
 
 // ===========================================================================
+// FIX 1 — pgvector type resolution under the Confined migrator
+// ===========================================================================
+//
+// The engine emits an UNQUALIFIED `vector(N)` column type (see
+// `zeroship_schema::query::def_to_column_type_for_dialect`). pgvector installs
+// the `vector` type into `public` (the dev/test image, and the platform's
+// `CREATE EXTENSION vector` default). The migrator role's `search_path` must
+// therefore include the extension schema (`public`) so the unqualified type
+// resolves — otherwise the deploy path fails `type "vector" does not exist`.
+//
+// These two tests are a PAIR:
+//   1. a vector-column migration APPLIES cleanly under Confined (the deploy
+//      path) — RED pre-fix (`type "vector" does not exist`), GREEN after.
+//   2. adding `public` to the path is for unqualified TYPE/function resolution
+//      ONLY — the migrator must STILL be unable to CREATE/write objects in
+//      `public` (confinement intact).
+//
+// Requires a Postgres with the `vector` extension installed in `public`
+// (e.g. the `pgvector/pgvector:pg16` throwaway). Point `MIGRATE_TEST_DB` at it.
+
+/// Skip (don't fail) the FIX-1 vector tests when the connected DB has no
+/// `vector` extension — keeps the suite green on the plain :5440 image while
+/// the pgvector throwaway exercises the real path.
+async fn vector_extension_present(conn: &Client) -> bool {
+    conn.query("SELECT 1 FROM pg_extension WHERE extname = 'vector'", &[])
+        .await
+        .map(|rows| !rows.is_empty())
+        .unwrap_or(false)
+}
+
+#[compio::test]
+async fn vector_column_migration_applies_under_confined_migrator() {
+    let conn = pg().await;
+    if !vector_extension_present(&conn).await {
+        eprintln!(
+            "SKIP vector_column_migration_applies_under_confined_migrator: \
+             no `vector` extension on the test DB (use pgvector/pgvector:pg16)"
+        );
+        return;
+    }
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    teardown(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    ensure_journal(&conn, &cfg).await.expect("journal");
+    provision_migrator(&conn, &cfg).await.expect("provision");
+
+    // The engine renders unqualified `vector(N)` — exactly what a creator's
+    // `t.vector(3)` field lowers to. Under the Confined migrator this must
+    // resolve and apply (RED pre-fix: `type "vector" does not exist`).
+    let m = mig(
+        MigrationId::generate(),
+        "create_embeddings",
+        "CREATE TABLE docs (id bigint PRIMARY KEY, embedding vector(3))",
+    );
+    let out = apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
+        .await
+        .expect("vector-column migration applies under the Confined migrator role");
+    assert_eq!(out.applied.len(), 1, "one migration applied");
+    assert!(
+        table_exists(&conn, &cfg.project_schema, "docs").await,
+        "vector-column table created in project schema"
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn migrator_cannot_write_public_even_with_it_on_search_path() {
+    // SECURITY (FIX 1): adding the extension schema (`public`) to the migrator's
+    // search_path is for unqualified TYPE/function resolution ONLY. The migrator
+    // must STILL be unable to CREATE or write objects in `public` — the REVOKE of
+    // CREATE/USAGE-as-write stays intact. This proves the search_path widening did
+    // not open a cross-schema write hole.
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    let role = cfg.migrator_role.clone().unwrap();
+    teardown(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    ensure_journal(&conn, &cfg).await.expect("journal");
+    provision_migrator(&conn, &cfg).await.expect("provision");
+
+    // Unqualified CREATE TABLE: with `public` reachable for resolution it could
+    // in principle resolve a CREATE target there — it must NOT. (The project
+    // schema is first on the path AND is the only writable one, so this lands in
+    // the project schema or is denied; either way `public` must stay clean.)
+    // Explicitly target public → must be denied (no CREATE on public).
+    let e = as_migrator(&conn, &role, "CREATE TABLE public.evil_pub (x int)")
+        .await
+        .expect_err("CREATE TABLE public.evil_pub must be denied");
+    assert_permission_denied(&e, "CREATE TABLE public.evil_pub");
+
+    // And it was never created.
+    assert!(
+        !table_exists(&conn, "public", "evil_pub").await,
+        "the migrator must not have created a table in public"
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
+// ===========================================================================
 // Cross-tenant / control-schema denial (DB-enforced)
 // ===========================================================================
 
