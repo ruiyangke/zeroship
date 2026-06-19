@@ -682,15 +682,24 @@ async fn run_deploy_migrations(
         ));
     }
 
+    // The privileged provisioning DSN (CREATEROLE + CREATE on db) — distinct
+    // from control's least-privilege `zeroship_control` DSN, which CANNOT
+    // `CREATE SCHEMA` / `CREATE ROLE`. Absent ⇒ deploy-migrate infrastructure
+    // is unconfigured; fail BEFORE touching the DB rather than 503 mid-CREATE.
+    let Some(provision_dsn) = state.registry.migrate_dsn() else {
+        let _ = std::fs::remove_dir_all(&mig_dir);
+        return Err(infrastructure_error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "migration_infrastructure",
+            "no provisioning DSN configured (set --provision-db / PROVISION_DATABASE_URL \
+             to a CREATEROLE admin role)",
+        ));
+    };
+
     let write_result = reconstruct_migration_files(&manifest, app_id, state, &mig_dir).await;
     let outcome = match write_result {
         Ok(()) => {
-            crate::deploy_migrate::apply_bundle_migrations(
-                state.registry.migrate_dsn(),
-                app_id,
-                &mig_dir,
-            )
-            .await
+            crate::deploy_migrate::apply_bundle_migrations(provision_dsn, app_id, &mig_dir).await
         }
         Err(resp) => {
             let _ = std::fs::remove_dir_all(&mig_dir);

@@ -100,8 +100,11 @@ fn quote_ident(ident: &str) -> String {
 /// Provision the app's per-app role + schema and apply the bundle's pending
 /// migrations under the **Confined** profile, BEFORE go-live (§8).
 ///
-/// `migrate_dsn` is an admin DSN with `CREATEROLE` + the ability to
-/// `CREATE SCHEMA` (the control-plane DB role). `app_id` is the trusted,
+/// `migrate_dsn` is a PRIVILEGED provisioning DSN with `CREATEROLE` + `CREATE`
+/// on the database — a SEPARATE admin role, **not** the control-plane
+/// `zeroship_control` role (which is BYPASSRLS but has neither privilege; see
+/// V0025). It is wired from `--provision-db` / `PROVISION_DATABASE_URL`.
+/// `app_id` is the trusted,
 /// already-authorized path id; the per-app schema + project id + migrator role
 /// are all derived from it. `migrations_dir` holds the migration files the
 /// deploy handler reconstructed from the bundle's blobs (Flyway `V<NNNN>__…` or

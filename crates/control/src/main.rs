@@ -44,6 +44,23 @@ struct ControlCli {
     )]
     db: String,
 
+    /// Privileged provisioning PostgreSQL DSN for deploy-time migrations.
+    ///
+    /// Deploy-migrate must `CREATE SCHEMA "<app_id>"` + `CREATE ROLE
+    /// migrator_<app_id>`, which requires `CREATEROLE` + `CREATE` on the
+    /// database. The least-privilege `--db` role (`zeroship_control`) carries
+    /// NEITHER privilege (V0025), so a deploy carrying migrations would 503.
+    /// Point this at a SEPARATE admin role (in dev/compose: the `postgres`
+    /// superuser). Empty ⇒ no provisioning DSN; migration-carrying deploys
+    /// then fail with `migration_infrastructure` until it is supplied.
+    #[arg(
+        long = "provision-db",
+        env = "PROVISION_DATABASE_URL",
+        default_value = "",
+        hide_env_values = true
+    )]
+    provision_db: String,
+
     /// Root directory for bundles and content-addressed deploy blobs.
     #[arg(long = "blob-store", env = "BLOB_STORE", default_value = "./bundles")]
     blob_store: String,
@@ -582,6 +599,16 @@ fn main() -> std::io::Result<()> {
         file_secrets.database_url.as_deref(),
         cli.check_config,
     );
+    // The privileged provisioning DSN for deploy-time migrations (CREATEROLE +
+    // CREATE on db). DISTINCT from `db_url` (the least-privilege zeroship_control
+    // role, which has neither privilege). Empty ⇒ deploy-migrate provisioning is
+    // disabled; migration-carrying deploys fail with `migration_infrastructure`.
+    let provision_db_url = zeroship_core::config::obtain_secret(
+        "PROVISION_DATABASE_URL / --provision-db",
+        &cli.provision_db,
+        file_secrets.provision_db_url.as_deref(),
+        cli.check_config,
+    );
     let blob_store_root = cli.blob_store;
     // `s3://…` → remote S3 store (control writes deploys through the SAME
     // store gateway/worker read), bare path → local disk (dev default).
@@ -1019,9 +1046,22 @@ fn main() -> std::io::Result<()> {
         .name("zeroship-control")
         .build(ntex::rt::DefaultRuntime)
         .block_on(async move {
-    let registry = Registry::new(&db_url)
+    let mut registry = Registry::new(&db_url)
         .await
         .expect("failed to connect to database");
+    // Attach the privileged provisioning DSN (CREATEROLE + CREATE on db) used
+    // by deploy-time migrations. Distinct from the least-privilege control DSN
+    // above. Empty ⇒ left unset; migration-carrying deploys fail with
+    // `migration_infrastructure` until an operator supplies it.
+    if !provision_db_url.is_empty() {
+        registry = registry.with_provisioning_dsn(provision_db_url);
+    } else {
+        tracing::warn!(
+            "control: no --provision-db / PROVISION_DATABASE_URL configured; \
+             deploys carrying DB migrations will fail with migration_infrastructure"
+        );
+    }
+    let registry = registry;
 
     // The content-addressed `BlobStore` is the ONLY deploy-artifact store.
     // `.zship` deploys land in `{prefix}/blobs/` + `{prefix}/manifests/`;

@@ -68,4 +68,9 @@ control_key  = "urn:zeroship:env:ZEROSHIP_CONTROL_KEY"
 master_key   = "urn:zeroship:env:ZEROSHIP_MASTER_KEY"
 worker_key   = "urn:zeroship:env:ZEROSHIP_WORKER_KEY"
 database_url = "urn:zeroship:env:ZEROSHIP_DATABASE_URL"
+# Privileged provisioning DSN (control only): the CREATEROLE + CREATE-on-db
+# admin role deploy-time migrations use to create each app's schema + migrator
+# role. SEPARATE from `database_url` (the least-priv zeroship_control role,
+# which has neither privilege). Only the control service sets PROVISION_DATABASE_URL.
+provision_db_url = "urn:zeroship:env:PROVISION_DATABASE_URL"
 auth_db_url  = "urn:zeroship:env:AUTH_DB_URL"

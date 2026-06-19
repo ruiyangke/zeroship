@@ -133,6 +133,12 @@ services:
       # Role-specific DSN + shared secrets, resolved from ops/zeroship.toml's
       # [secrets] `urn:zeroship:env:<VAR>` references (control's least-priv role).
       ZEROSHIP_DATABASE_URL: postgres://zeroship_control:zeroship_control@postgres:5432/zeroship
+      # Privileged provisioning DSN for deploy-time migrations ONLY: control
+      # opens this to CREATE SCHEMA "<app_id>" + CREATE ROLE migrator_<app_id>,
+      # which the least-priv zeroship_control role above CANNOT do (no CREATEROLE /
+      # CREATE-on-db, per V0025). The shipped `migrate` service likewise runs as
+      # the postgres superuser. Without this, every migration-carrying deploy 503s.
+      PROVISION_DATABASE_URL: postgres://postgres:zeroship@postgres:5432/zeroship
       ZEROSHIP_CONTROL_KEY: platform-key
       ZEROSHIP_MASTER_KEY: master-key
       # Dedicated PERMANENT pairwise-salt secret (auth-sdk §6.2). MUST be
