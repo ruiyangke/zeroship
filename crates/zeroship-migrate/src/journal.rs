@@ -287,6 +287,16 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
 
     // 4. Attach the trigger idempotently to BOTH append-only event tables (PG 16
     //    has no CREATE TRIGGER IF NOT EXISTS; guard on pg_trigger).
+    //
+    //    The trigger NAME is derived from `meta_schema`, which — under the
+    //    per-app deploy model — is `"<app_id>_migrations"` where `<app_id>` is a
+    //    hyphenated UUID. So the name carries hyphens and MUST be quoted as an
+    //    identifier in the `CREATE TRIGGER` DDL (`trg_q`), while the
+    //    `pg_trigger.tgname` existence check compares the RAW (unquoted) catalog
+    //    name as a string literal (`trg_lit`). Mixing the two — using the raw
+    //    name as a `CREATE TRIGGER` identifier — fails with `42601 trailing junk
+    //    after numeric literal` the moment the schema starts with digits / holds
+    //    a hyphen.
     for (tbl, trg) in [
         ("schema_migrations", trg_name.clone()),
         (
@@ -298,17 +308,19 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
             format!("{}_schema_migrations_supersedes_immutable_trg", cfg.meta_schema),
         ),
     ] {
+        let trg_lit = trg.replace('\'', "''");
+        let trg_q = quote_ident(&trg);
         conn.batch_execute(&format!(
             "DO $do$ BEGIN
                 IF NOT EXISTS (
                     SELECT 1 FROM pg_trigger t
                     JOIN pg_class c ON c.oid = t.tgrelid
                     JOIN pg_namespace n ON n.oid = c.relnamespace
-                    WHERE t.tgname = '{trg}'
+                    WHERE t.tgname = '{trg_lit}'
                       AND c.relname = '{tbl}'
                       AND n.nspname = '{meta_lit}'
                 ) THEN
-                    EXECUTE 'CREATE TRIGGER {trg}
+                    EXECUTE 'CREATE TRIGGER {trg_q}
                              BEFORE UPDATE OR DELETE ON {meta}.{tbl}
                              FOR EACH ROW EXECUTE FUNCTION {trg_fn}()';
                 END IF;
