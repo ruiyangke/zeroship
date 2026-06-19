@@ -194,8 +194,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .detach();
 
-    // Schema is owned by Liquibase (db/changelog), applied out of band by the
-    // `migrate` step before this service boots — not here.
+    // Schema is owned by zeroship-migrate (db/migrations, applied by the
+    // compose `migrate` service / `ops/db-migrate.sh`) out of band before this
+    // service boots — not here.
 
     // 2. Bootstrap: keys + client reconciliation.
     let admin = HydraAdmin::new(cfg.hydra_admin_url());

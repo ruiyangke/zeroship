@@ -2,8 +2,8 @@
 //!
 //! See `docs/proposals/sandbox-pg-state.md` for the design. This
 //! module owns connection configuration, the [`Database`] handle,
-//! per-role pools, and sandbox DML. Liquibase owns the schema in the
-//! unified `zeroship` schema; controller boot only verifies database
+//! per-role pools, and sandbox DML. zeroship-migrate owns the schema in
+//! the unified `zeroship` schema; controller boot only verifies database
 //! connectivity via [`Database::ping`].
 //!
 //! - [`Database::from_env`] parses env, opens the pool, validates HA
@@ -19,8 +19,8 @@
 //! - No worker queue. The `flume` dep is declared in `Cargo.toml`
 //!   for a future worker-pool follow-up.
 //! - No schema migration. The compose `migrate` service /
-//!   `ops/db-migrate.sh` applies the Liquibase changelog before the
-//!   controller starts.
+//!   `ops/db-migrate.sh` applies the zeroship-migrate migrations
+//!   (`db/migrations`) before the controller starts.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -109,8 +109,8 @@ fn install_pool(
 //
 // The controller no longer carries an embedded migration runner. The
 // unified `zeroship` schema (sandbox tables included) is owned by
-// Liquibase — the compose `migrate` service / `ops/db-migrate.sh`
-// applies `db/changelog/` before the controller starts. Boot only
+// zeroship-migrate — the compose `migrate` service / `ops/db-migrate.sh`
+// applies `db/migrations` before the controller starts. Boot only
 // verifies connectivity ([`Database::ping`]); it assumes the schema
 // already exists.
 
@@ -384,7 +384,8 @@ impl Database {
     /// Used by tests + the integration test suite: build from a bare
     /// DSN, skipping env. Persists no host_id file. The schema is
     /// assumed to already exist (the test fixture applies the
-    /// Liquibase changelog). Visible across the crate boundary for
+    /// zeroship-migrate migrations from `db/migrations`). Visible
+    /// across the crate boundary for
     /// `tests/sandbox_pg_e2e.rs` — production callers use
     /// [`Database::from_env`].
     ///
