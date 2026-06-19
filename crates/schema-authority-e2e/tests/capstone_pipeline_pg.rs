@@ -339,64 +339,31 @@ async fn schema_authority_capstone_end_to_end_on_real_pg() {
     // bundle's migration under the Confined profile, BEFORE go-live.
     // REAL fn: zeroship_control::deploy_migrate::apply_bundle_migrations
     //
-    // === FINDING (a real seam that does NOT cohere — flagged, not papered over).
+    // The engine renders the pgvector column type as UNQUALIFIED `vector(N)`, and
+    // pgvector installs that type into `public`. The Confined migrator's
+    // search_path is `"<app_id>", public` — the per-app schema is the sole
+    // writable resolution target, `public` rides at the end for USAGE-only
+    // resolution of the shared extension type (see `role::provision_migrator` +
+    // `db.rs::search_path_clause`; matches plugin-db's runtime). So the
+    // AS-GENERATED unqualified `vector(N)` migration applies cleanly under
+    // deploy-apply — no qualify-rewrite, no workaround.
     //
-    // The engine renders the pgvector column type as UNQUALIFIED `vector(N)`. But
-    // the Confined executor confines the migrator's search_path to the per-app
-    // schema ONLY (`db.rs::search_path_clause` → just `"<app_id>"`, no `public`).
-    // The pgvector type lives in `public` (where the platform installs the
-    // extension), so an unqualified `vector` does NOT resolve under deploy-apply
-    // — the migration aborts with `type "vector" does not exist`.
-    //
-    // Reproduced directly: applying the generated migration as-is fails. We
-    // assert that failure (so the gap is locked in as a regression-visible fact),
-    // then model the recommended engine fix — emit a SCHEMA-QUALIFIED extension
-    // type — by qualifying `vector(` → `public.vector(` before deploy-apply, so
-    // the rest of the pipeline (and the vector column itself) is still exercised
-    // end-to-end. The real fix belongs in the engine's type renderer (qualify
-    // extension types) or in the executor (append a shared `extensions` schema to
-    // every migrator search_path). See the report.
-    {
-        // Direct reproduction on the as-generated migration, applied to THIS
-        // app's schema (so the guard's confinement matches — the only variable
-        // under test is the unqualified type). The per-migration apply is
-        // transactional, so this failed `up` rolls back: no journal row, no
-        // table — leaving a clean schema for the qualified apply below.
-        let gap = zeroship_control::deploy_migrate::apply_bundle_migrations(
-            &pg_url(),
-            &app_id,
-            &deploy_dir, // still holds the as-generated (unqualified) body here
-        )
-        .await;
-        assert!(
-            gap.is_err()
-                && format!("{:?}", gap.as_ref().err().unwrap()).contains("vector"),
-            "FINDING: unqualified vector(N) must fail under Confined apply (search_path \
-             excludes public); got {gap:?}"
-        );
-        assert_eq!(
-            journaled_count(&conn, &app_id).await,
-            0,
-            "the failed (unqualified) apply rolled back — nothing journaled"
-        );
-        assert!(
-            !table_exists(&conn, &app_id, "users").await,
-            "the failed apply created no table (transactional rollback)"
-        );
-    }
-
-    // Model the recommended fix (qualify the extension type) so the rest of the
-    // pipeline runs end-to-end with the vector column intact.
-    let body_fixed = body.replace("vector(", "public.vector(");
-    std::fs::write(deploy_dir.join(&mig_name), &body_fixed).expect("rewrite qualified migration");
-
+    // (Previously this seam did NOT cohere: search_path pinned the per-app schema
+    // only, so unqualified `vector` failed `type "vector" does not exist`. The
+    // FIX 1 search_path widening — USAGE-only on `public` — closed that gap; the
+    // confinement is unchanged: the migrator still cannot CREATE/write in
+    // `public`, only resolve the extension type there.)
     let apply = zeroship_control::deploy_migrate::apply_bundle_migrations(
         &pg_url(),
         &app_id,
-        &deploy_dir,
+        &deploy_dir, // the as-generated (unqualified `vector(N)`) body
     )
     .await
-    .expect("P6 deploy-apply must succeed (with the qualified-type fix modeled)");
+    .expect(
+        "P6 deploy-apply of the as-generated unqualified vector(N) migration must \
+         succeed under the Confined migrator (public on search_path for USAGE-only \
+         extension-type resolution)",
+    );
     assert_eq!(apply.applied.len(), 1, "the bundle's migration applied once");
     assert!(apply.skipped.is_empty());
 
