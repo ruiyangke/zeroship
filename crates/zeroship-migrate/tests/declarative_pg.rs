@@ -301,6 +301,19 @@ async fn type_fidelity_whole_table_round_trips_to_zero_drift() {
     .await
     .expect("create profiles");
 
+    // The platform auto-indexes deleted_at / updated_at / created_by on every
+    // table (#6); `desired_snapshot` models these three implicit B-tree indexes,
+    // so the hand-built live table must carry them too or they phantom-MISS.
+    // Names mirror plugin-db's `index_name(table, &[col], false)` = `<table>_<col>_idx`.
+    for col in ["deleted_at", "updated_at", "created_by"] {
+        conn.batch_execute(&format!(
+            "CREATE INDEX \"profiles_{col}_idx\" ON \"{schema}\".\"profiles\" (\"{col}\")",
+            schema = cfg.project_schema,
+        ))
+        .await
+        .unwrap_or_else(|e| panic!("create system index profiles_{col}_idx: {e}"));
+    }
+
     let live = snapshot_schema(&conn, &cfg.project_schema)
         .await
         .expect("snapshot");
@@ -3285,4 +3298,53 @@ async fn field_named_id_with_non_id_type_is_rejected() {
     };
     let err = desired_snapshot(&cfg.project_schema, &[desc]).unwrap_err();
     assert!(matches!(err, DeclarativeError::Invalid(_)), "got {err:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Phase-1 parity #6 — three implicit system-field indexes round-trip.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn system_field_indexes_are_modelled_and_a_fresh_table_re_diffs_empty() {
+    // #6: the platform auto-indexes deleted_at / updated_at / created_by on every
+    // table. The desired snapshot must model these three B-tree indexes so a
+    // freshly-created table re-diffs to ZERO (the engine creates them; they exist
+    // live; desired accounts for them). RED pre-fix: desired carried none, so
+    // either the engine never created them (diverging from plugin-db) or — once a
+    // plugin-db-created table is diffed — they'd phantom-DROP.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let desc = CollectionDescriptor {
+        name: "widgets".into(),
+        owner_app: "app_test".into(),
+        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), ..Default::default() }],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired");
+
+    // The three system indexes are modelled in desired.
+    let idx_names: Vec<&str> = desired.snapshot.tables["widgets"].indexes.iter().map(|i| i.name.as_str()).collect();
+    for col in ["deleted_at", "updated_at", "created_by"] {
+        let want = format!("widgets_{col}_idx");
+        assert!(idx_names.contains(&want.as_str()), "system index {want} must be modelled, got {idx_names:?}");
+    }
+
+    // Apply, then both oracles: full diff clean AND differ re-diffs to ZERO.
+    apply_and_assert_clean_roundtrip(&engine, &author, &cfg, &conn, &desired).await;
+
+    // And the three indexes actually exist live.
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+    let live_idx: Vec<&str> = live.tables["widgets"].indexes.iter().map(|i| i.name.as_str()).collect();
+    for col in ["deleted_at", "updated_at", "created_by"] {
+        let want = format!("widgets_{col}_idx");
+        assert!(live_idx.contains(&want.as_str()), "system index {want} must exist live, got {live_idx:?}");
+    }
+
+    teardown(&conn, &cfg).await;
 }
