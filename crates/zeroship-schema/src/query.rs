@@ -832,9 +832,55 @@ pub fn build_create_table_with_fks_for_dialect(
     if matches!(dialect, SqlDialect::Postgres) {
         let comment_stmts = build_mask_sentinel_comments(app_id, collection, schema);
         statements.extend(comment_stmts);
+        // **P4 HALF B** — PG discards the inline `/* zsenc:… */` comment baked
+        // into the column DDL at parse time, so an encrypted column's metadata
+        // would be unrecoverable by `read_live_schema` (the runtime data-access
+        // introspection). Emit a `COMMENT ON COLUMN <col> IS 'zsenc:…'` carrying
+        // the same `zsenc` body so plugin-db recovers mode/keyId/wraps from
+        // `pg_description` at runtime — the parity with how `__zsmask` rides on
+        // the masked sibling's comment. SQLite keeps the inline form.
+        let enc_comment_stmts = build_encryption_sentinel_comments(app_id, collection, schema);
+        statements.extend(enc_comment_stmts);
     }
 
     Ok(statements.join(";\n"))
+}
+
+/// **P4 HALF B** — render the `COMMENT ON COLUMN … 'zsenc:<mode>:<keyId>:<wraps>'`
+/// statements for every `t.encrypted(...)` column in `schema` (PG only). The
+/// comment BODY is built by the shared codec
+/// ([`crate::mask_codec::build_encryption_sentinel`]) so it is byte-identical to
+/// what the migration engine emits (HALF A) and what the runtime parser
+/// ([`crate::mask_codec::parse_encryption_sentinel`], via `read_live_schema`)
+/// expects. Returns the empty vector when no column is encrypted.
+#[must_use]
+pub fn build_encryption_sentinel_comments(
+    app_id: &str,
+    collection: &str,
+    schema: &serde_json::Value,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(obj) = schema.as_object() else {
+        return out;
+    };
+    for (field, def) in obj {
+        if is_schema_metadata_key(field) {
+            continue;
+        }
+        // Reuse the single-source-of-truth body builder — no re-spelling.
+        let Some(body) = encryption_sentinel_body_for_field(def) else {
+            continue;
+        };
+        let escaped = body.replace('\'', "''");
+        out.push(format!(
+            "COMMENT ON COLUMN {}.{}.{} IS '{}'",
+            quote_ident(app_id),
+            quote_ident(collection),
+            quote_ident(field),
+            escaped,
+        ));
+    }
+    out
 }
 
 /// **P7 PR 2** — emit the seven platform-managed system-field column
@@ -1779,15 +1825,27 @@ pub fn build_mask_sentinel_comment_for_field(
 /// preserves it in `sqlite_master.sql`).
 #[must_use]
 pub fn encryption_sentinel_for_field(def: &serde_json::Value) -> Option<String> {
+    encryption_sentinel_body_for_field(def).map(|body| format!("/* {body} */"))
+}
+
+/// **P4** — the bare `zsenc:<mode>:<keyId>:<wraps>` sentinel BODY for a field's
+/// `t.encrypted({...})` declaration (no `/* */` wrapper, no comment statement),
+/// or `None` for a plain column. The SINGLE source of truth for the `zsenc` wire
+/// grammar: [`encryption_sentinel_for_field`] wraps it in `/* */` for the inline
+/// DDL form, and [`build_encryption_sentinel_comments`] wraps it in a
+/// `COMMENT ON COLUMN … '…'` statement for the PG-recoverable form. The runtime
+/// parser is [`crate::mask_codec::parse_encryption_sentinel`].
+#[must_use]
+pub fn encryption_sentinel_body_for_field(def: &serde_json::Value) -> Option<String> {
     let enc = def.get("encrypted").and_then(|v| v.as_object())?;
     let mode = enc.get("mode").and_then(|v| v.as_str()).unwrap_or("randomised");
     // Normalise legacy `"randomized"` (US spelling) to the canonical
-    // `randomised` so the introspector regex (which accepts only the canonical
-    // spelling) round-trips cleanly.
+    // `randomised` so the introspector parser (which accepts both but the
+    // emit side normalises to one) round-trips cleanly.
     let mode_norm = if mode == "randomized" { "randomised" } else { mode };
     let key_id = enc.get("keyId").and_then(|v| v.as_str()).unwrap_or("default");
     let wraps = enc.get("wraps").and_then(|v| v.as_str()).unwrap_or("string");
-    Some(format!("/* zsenc:{mode_norm}:{key_id}:{wraps} */"))
+    Some(format!("zsenc:{mode_norm}:{key_id}:{wraps}"))
 }
 
 /// Convert a field definition to a full column definition for CREATE TABLE.
