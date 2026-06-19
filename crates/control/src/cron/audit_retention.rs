@@ -3,7 +3,7 @@
 //!
 //! Both tables carry a BEFORE DELETE / UPDATE / TRUNCATE tamper trigger
 //! (`app_audit_block_tamper` / `authz_decisions_block_tamper`, defined in
-//! `db/changelog/changesets/0004_control.sql`) that rejects every mutation —
+//! `db/migrations/V0004__control.sql`) that rejects every mutation —
 //! they are append-only. The triggers carve out exactly one sanctioned
 //! deleter: a connection that has flagged itself with
 //! `SET zeroship.audit_retention = 'on'`. This cron is that deleter. It is the

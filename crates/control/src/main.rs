@@ -1094,7 +1094,7 @@ fn main() -> std::io::Result<()> {
 
     // Console seed (R5): make the console deployable + served as a platform-owned
     // regular app. In-process + idempotent + trusted; NEVER an HTTP route.
-    // Runs AFTER migrate (Liquibase, out of band), AFTER the registry / env
+    // Runs AFTER migrate (zeroship-migrate, out of band), AFTER the registry / env
     // store / blob store are up, and BEFORE AppState is constructed (registry +
     // env_store are moved into it below). The console is a pure creator app, so
     // the seed touches only the control schema (apps / oauth / env) — no PAT, no

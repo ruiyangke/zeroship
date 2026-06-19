@@ -117,8 +117,9 @@ async fn open_conn(url: &str) -> Result<Client, compio_postgres::Error> {
 impl Registry {
     /// Connect to validate the database is reachable, then return a `Registry`.
     ///
-    /// The schema is owned by Liquibase (`db/changelog`), applied out of band
-    /// before the service boots (the `migrate` compose step / `ops/db-migrate.sh`).
+    /// The schema is owned by zeroship-migrate (`db/migrations`, platform
+    /// profile), applied out of band before the service boots (the `migrate`
+    /// compose step / `ops/db-migrate.sh`).
     /// `Registry` never creates or alters tables.
     pub async fn new(db_url: &str) -> Result<Self, String> {
         // Fail fast if the database is unreachable; the schema must already

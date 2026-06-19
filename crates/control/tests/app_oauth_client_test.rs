@@ -6,8 +6,9 @@
 //! `RouteEntry.oauth_client_id` / `sector_identifier`.
 //!
 //! REQUIRES the docker-compose stack (Hydra admin + a migrated Postgres):
-//!   - `CONTROL_TEST_DB` or `PG_TEST_URL` — DSN of a Postgres with the
-//!     `db/changelog` migrations applied (incl. 0005_control_app_oauth_clients).
+//!   - `CONTROL_TEST_DB` or `PG_TEST_URL` — DSN of a Postgres migrated by
+//!     `zeroship-migrate migrate --dir db/migrations --profile platform`
+//!     (incl. V0005__control_app_oauth_clients).
 //!   - `HYDRA_ADMIN_URL` — Hydra admin API base (e.g. http://127.0.0.1:4445).
 //! Skips (prints why, returns) when either is absent. The pure
 //! reconciliation/derivation logic is covered by the crate's `app_oauth_client`
