@@ -131,6 +131,34 @@ pub struct FieldDescriptor {
     /// `validate_id_prefix`).
     #[serde(rename = "idPrefix", default)]
     pub id_prefix: Option<String>,
+
+    // -----------------------------------------------------------------------
+    // Schema-authority P2 — the FULL-capability facets, reached by adopting the
+    // shared `zeroship-schema` DDL/type kernel. Before P2 the engine's v1-subset
+    // differ REJECTED these as `UnsupportedType`; now the column TYPE + DDL
+    // (vector index, encrypted BYTEA + sentinel, mask sibling, geoPoint geography
+    // + GiST) are resolved through `zeroship_schema::query`. Each facet mirrors
+    // the SDK `FieldDef` sub-object verbatim so the engine builds the same `def`
+    // JSON the SDK emits and the shared kernel maps it identically.
+    /// `t.vector(dims, …)` — vector dimensionality. `Some(N)` ⇒ the column is
+    /// `vector(N)` (pgvector). Mirrors `vectorDims` on the wire `FieldDef`.
+    #[serde(rename = "vectorDims", default)]
+    pub vector_dims: Option<i64>,
+    /// `t.vector(_, { metric })` — distance metric (`cosine` | `l2` |
+    /// `innerProduct`), drives the ivfflat opclass. Mirrors `vectorMetric`.
+    #[serde(rename = "vectorMetric", default)]
+    pub vector_metric: Option<String>,
+    /// `t.encrypted({ mode, keyId, wraps })` — the encryption sub-object,
+    /// carried VERBATIM. When present the column DDLs to `BYTEA` with the inline
+    /// `/* zsenc:mode:keyId:wraps */` sentinel (the contract plugin-db reads at
+    /// runtime). Mirrors `encrypted` on the wire `FieldDef`.
+    #[serde(default)]
+    pub encrypted: Option<serde_json::Value>,
+    /// `.mask({ kind, classification })` — the mask sub-object, carried
+    /// VERBATIM. When present the table gains a hidden `<col>_masked TEXT` sibling
+    /// + a `COMMENT … __zsmask:…` sentinel. Mirrors `mask` on the wire `FieldDef`.
+    #[serde(default)]
+    pub mask: Option<serde_json::Value>,
 }
 
 /// One declared index of a collection (the `_indexes` array entry).
@@ -254,46 +282,144 @@ struct ResolvedRename {
 /// # Errors
 /// [`DeclarativeError::UnsupportedType`] if `dsl_type` is not one of the twelve
 /// supported tokens.
-pub fn dsl_to_pg_data_type(dsl_type: &str) -> Result<&'static str, DeclarativeError> {
-    Ok(match dsl_type {
-        // string / ref / actor / id all land on `text` (def_to_pg_type;
-        // `ref` is the FK column, `id` is the PK).
-        "string" | "ref" | "actor" | "id" => "text",
-        // t.number() → DOUBLE PRECISION (FLOAT8).
-        "number" => "double precision",
-        "boolean" => "boolean",
-        // t.date() → TIMESTAMPTZ; information_schema spells it long-form.
-        "date" => "timestamp with time zone",
-        // t.calendarDate() → DATE.
-        "calendarDate" => "date",
-        // json / object / array / union → JSONB.
-        "json" | "object" | "array" | "union" => "jsonb",
-        // t.bytes() → BYTEA.
-        "bytes" => "bytea",
-        // `literal` maps via `literal_pg_data_type` (its primitive depends on the
-        // `literalValue`), so it never reaches this by-token map — `desired_snapshot`
-        // special-cases it. Listing it here as an error keeps a stray bare
-        // `literal` (no value) from silently degrading to `text`.
-        // No silent fallback: an unrecognised or out-of-scope type is an error,
-        // not a `text` column (#2).
-        other => {
-            return Err(DeclarativeError::UnsupportedType { ty: other.to_string() });
-        }
-    })
+pub fn dsl_to_pg_data_type(dsl_type: &str) -> Result<String, DeclarativeError> {
+    // Schema-authority P2: delegate to the shared kernel rather than the engine's
+    // old v1-subset table. `actor`/`id` are engine-only spellings of `text` that
+    // the shared SDK map does not name (it has no `actor`/`id` tokens), so fold
+    // them here before handing off. Everything else (incl. the goodies
+    // vector/geoPoint/encrypted — accepted now, no longer `UnsupportedType`)
+    // routes through `field_data_type` with a minimal `def`.
+    let f = FieldDescriptor {
+        name: String::new(),
+        ty: match dsl_type {
+            "actor" | "id" => "string".to_string(),
+            other => other.to_string(),
+        },
+        ..Default::default()
+    };
+    field_data_type(&f)
 }
 
-/// Map a `t.literal(value)` field (#3) to the `information_schema` data type
-/// Postgres reports for the column plugin-db would emit for it.
+/// Build the SDK `FieldDef` JSON (`{ type, encrypted?, vectorDims?, vectorMetric?,
+/// mask?, literalValue? }`) the shared `zeroship-schema` kernel consumes, from the
+/// engine's [`FieldDescriptor`]. This is the bridge that lets the engine reuse the
+/// shared DDL/type map (full capability) without adopting the SDK's untyped JSON
+/// as its public authoring surface: the engine keeps its typed descriptor, the
+/// shared kernel keeps its `Value`-driven builders, and this is the one mapping
+/// point between them.
+fn field_to_sdk_def(f: &FieldDescriptor) -> serde_json::Value {
+    let mut def = serde_json::Map::new();
+    def.insert("type".into(), serde_json::Value::String(f.ty.clone()));
+    if let Some(d) = f.vector_dims {
+        def.insert("vectorDims".into(), serde_json::Value::from(d));
+    }
+    if let Some(m) = &f.vector_metric {
+        def.insert("vectorMetric".into(), serde_json::Value::String(m.clone()));
+    }
+    if let Some(enc) = &f.encrypted {
+        def.insert("encrypted".into(), enc.clone());
+    }
+    if let Some(mask) = &f.mask {
+        def.insert("mask".into(), mask.clone());
+    }
+    if let Some(lit) = &f.literal_value {
+        def.insert("literalValue".into(), lit.clone());
+    }
+    serde_json::Value::Object(def)
+}
+
+/// The hidden `<col>_masked` sibling column a field's `.mask({...})` declaration
+/// requires, or `None` for an unmasked field / `kind: "none"` opt-out. Delegates
+/// to the shared kernel ([`zeroship_schema::query::mask_sibling_column_for_field`])
+/// so the engine and plugin-db agree on exactly which fields get a sibling.
+fn mask_sibling_for_field(f: &FieldDescriptor) -> Option<String> {
+    zeroship_schema::query::mask_sibling_column_for_field(&f.name, &field_to_sdk_def(f))
+}
+
+/// Resolve a field's column data type in the `information_schema.data_type`
+/// spelling the snapshot stores, by routing through the shared kernel's
+/// [`zeroship_schema::query::def_to_column_type_for_dialect`] (the FULL type map,
+/// P2) and translating its DDL spelling to the `information_schema` form.
 ///
-/// Mirrors plugin-db's `def_to_pg_type` literal arm (`query.rs:2091`): a numeric
-/// literal → `NUMERIC` (`information_schema`: `numeric`), a boolean → `BOOLEAN`,
-/// everything else (a string) → `TEXT`. The literal is also CHECK-pinned to its
-/// value (see [`literal_check_expr`]).
-fn literal_pg_data_type(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Number(_) => "numeric",
-        serde_json::Value::Bool(_) => "boolean",
-        _ => "text",
+/// A bare/unknown token still fails closed: the shared map's plain-type fallback
+/// is `TEXT`, so to preserve the engine's #2 "never silently degrade an
+/// unrecognised type to text" guarantee, an UNKNOWN token whose shared mapping is
+/// the `TEXT` fallback (and which is not one of the engine's own text-spelled
+/// tokens) is rejected with [`DeclarativeError::UnsupportedType`].
+fn field_data_type(f: &FieldDescriptor) -> Result<String, DeclarativeError> {
+    use zeroship_schema::query::{def_to_column_type_for_dialect, SqlDialect};
+
+    // A bare `literal` with no value is malformed — the SDK never emits it, and
+    // the shared map would degrade it to TEXT. Keep the engine's explicit error.
+    if f.ty == "literal" && f.literal_value.is_none() {
+        return Err(DeclarativeError::UnsupportedType { ty: "literal".into() });
+    }
+
+    // GAP (flagged): the shared kernel's `def_to_pg_type` has NO `bytes` arm — a
+    // bare `t.bytes()` token degrades to its `_ => TEXT` fallback there (plugin-db
+    // only ever reaches BYTEA via `encrypted`). The engine maps `t.bytes()` to
+    // `BYTEA` as a first-class type, so handle it here directly rather than letting
+    // it wrongly degrade to TEXT (and then be rejected by the fail-closed guard).
+    // When the shared crate grows a `bytes` arm this special-case can be deleted.
+    if f.ty == "bytes" && f.encrypted.is_none() {
+        return Ok("bytea".into());
+    }
+
+    let def = field_to_sdk_def(f);
+    let ddl = def_to_column_type_for_dialect(&def, SqlDialect::Postgres);
+
+    // #2 fail-closed: the shared map returns `TEXT` for any unrecognised type
+    // token. The engine's set of types that LEGITIMATELY land on text is the
+    // closed set below (incl. the `actor`/`id` already folded to `string` by the
+    // caller, and a `literal` whose value is a string). Anything else mapping to
+    // `TEXT` is an unknown/typo'd token (`bigint`, `uuid`, `int4`, `__proto__`, …)
+    // and is rejected rather than silently degraded.
+    if ddl.eq_ignore_ascii_case("text") && !field_text_is_legitimate(f) {
+        return Err(DeclarativeError::UnsupportedType { ty: f.ty.clone() });
+    }
+
+    Ok(ddl_to_information_schema(&ddl))
+}
+
+/// True if a field whose shared mapping is `TEXT` is one the engine accepts as a
+/// genuine text column (vs. an unknown token the shared map degraded). The text
+/// types are `string`/`ref` (and an encrypted column wrapping a string still maps
+/// to BYTEA, so it never reaches here), plus a `literal` whose value is a string.
+fn field_text_is_legitimate(f: &FieldDescriptor) -> bool {
+    match f.ty.as_str() {
+        // `string`/`ref` map to TEXT; `actor`/`id` are engine-only spellings of a
+        // text column (the actor stamp / the typed-id PK) that the shared SDK map
+        // does not name, so they also land on TEXT and are legitimate.
+        "string" | "ref" | "actor" | "id" => true,
+        "literal" => matches!(f.literal_value, Some(serde_json::Value::String(_))),
+        _ => false,
+    }
+}
+
+/// Translate the shared kernel's DDL type spelling (`TEXT`, `DOUBLE PRECISION`,
+/// `TIMESTAMPTZ`, `JSONB`, `BYTEA`, `vector(N)`, `geography(POINT, 4326)`, …) to
+/// the `information_schema.columns.data_type` spelling the snapshot stores, so a
+/// freshly-created table introspects to a byte-equal snapshot (the round-trip
+/// oracle). The twelve base types map to their canonical lowercase
+/// `information_schema` form; the parameterised extension types
+/// (`vector(N)`/`geography(...)`) keep their DDL spelling — `information_schema`
+/// reports `USER-DEFINED` for them, but those types need an extension absent on
+/// the platform's catalog, so they are never introspected/round-tripped today;
+/// the DDL spelling is the stable canonical form the snapshot carries.
+fn ddl_to_information_schema(ddl: &str) -> String {
+    match ddl.to_ascii_uppercase().as_str() {
+        "TEXT" => "text".into(),
+        "DOUBLE PRECISION" => "double precision".into(),
+        "BOOLEAN" => "boolean".into(),
+        "TIMESTAMPTZ" => "timestamp with time zone".into(),
+        "DATE" => "date".into(),
+        "JSONB" => "jsonb".into(),
+        "BYTEA" => "bytea".into(),
+        "NUMERIC" => "numeric".into(),
+        "INTEGER" => "integer".into(),
+        // Parameterised / extension types (vector(N), geography(POINT,4326)) keep
+        // their DDL spelling — see the doc note.
+        _ => ddl.to_string(),
     }
 }
 
@@ -437,6 +563,38 @@ fn system_field_columns() -> Vec<ColumnSnapshot> {
     ]
 }
 
+/// The columns the platform auto-indexes on every table (#6). Mirrors
+/// plugin-db's `build_system_field_indexes` (`query.rs:900`): `deleted_at`
+/// (soft-delete filtering), `updated_at` (cursor-paged reads), `created_by`
+/// (per-actor lookups + audit). `id` is implicitly indexed by the PK; `version`
+/// is deliberately NOT indexed (bumped on every UPDATE — index thrash).
+const SYSTEM_INDEXED_COLS: &[&str] = &["deleted_at", "updated_at", "created_by"];
+
+/// The three implicit B-tree system indexes, as [`IndexSnapshot`]s (#6).
+///
+/// The platform auto-creates these for every table; the live snapshot always
+/// carries them, so the desired snapshot must too — otherwise the differ reads
+/// each as an out-of-band index to DROP (phantom drift). Names match plugin-db's
+/// `index_name(table, &[col], false)` = `<table>_<col>_idx`, NAMEDATALEN-capped.
+fn system_field_indexes(table: &str) -> Vec<IndexSnapshot> {
+    SYSTEM_INDEXED_COLS
+        .iter()
+        .map(|col| IndexSnapshot {
+            name: non_unique_index_name(table, col),
+            unique: false,
+            columns: vec![(*col).to_string()],
+        })
+        .collect()
+}
+
+/// Deterministic name for a non-unique single-column index
+/// (`<table>_<col>_idx`), matching plugin-db's `index_name(table, &[col], false)`
+/// and NAMEDATALEN-capped via [`crate::author::cap_ident_name`] so a long
+/// table+col round-trips to the same (truncated) live name.
+fn non_unique_index_name(table: &str, col: &str) -> String {
+    crate::author::cap_ident_name(&format!("{table}_{col}_idx"))
+}
+
 // ---------------------------------------------------------------------------
 // P4 — the UNION desired schema + per-table ownership.
 // ---------------------------------------------------------------------------
@@ -553,7 +711,10 @@ pub fn desired_snapshot(
 
     for d in descriptors {
         let mut columns = system_field_columns();
-        let mut indexes: Vec<IndexSnapshot> = Vec::new();
+        // #6: the three implicit B-tree system indexes the platform auto-creates
+        // for every table (`deleted_at`, `updated_at`, `created_by`), modelled so
+        // they round-trip — see `system_field_indexes`.
+        let mut indexes: Vec<IndexSnapshot> = system_field_indexes(&d.name);
         let mut constraints: Vec<ConstraintSnapshot> = Vec::new();
 
         // The id PRIMARY KEY (Postgres names a bare `PRIMARY KEY` constraint
@@ -601,20 +762,13 @@ pub fn desired_snapshot(
                     f.ty
                 )));
             }
-            // #3 literal: the column's primitive type is derived from the
-            // `literalValue` (text/numeric/boolean), NOT a bare-token lookup —
-            // mirrors plugin-db's `def_to_pg_type` literal arm. A `literal` field
-            // with NO value is malformed (UnsupportedType, never silently `text`).
-            let data_type = if f.ty == "literal" {
-                match &f.literal_value {
-                    Some(v) => literal_pg_data_type(v).to_string(),
-                    None => {
-                        return Err(DeclarativeError::UnsupportedType { ty: "literal".into() });
-                    }
-                }
-            } else {
-                dsl_to_pg_data_type(&f.ty)?.to_string()
-            };
+            // Schema-authority P2 — the column data type is resolved through the
+            // SHARED kernel (`field_data_type` → `zeroship_schema::query`), so the
+            // FULL type surface is accepted: `literal` (primitive from its value),
+            // `vector(N)`, `geography(POINT,4326)` (geoPoint), and `BYTEA` (an
+            // `encrypted` column). These were `UnsupportedType` in the v1 subset;
+            // they are first-class now. A bare/unknown token still fails closed.
+            let data_type = field_data_type(f)?;
             columns.push(ColumnSnapshot {
                 name: f.name.clone(),
                 data_type,
@@ -624,6 +778,29 @@ pub fn desired_snapshot(
                 // and array → '[]' even with no explicit `default`.
                 default: field_default_expr(f),
             });
+            // A masked field (`.mask({...})`, or auto-mask on `t.encrypted`) gets a
+            // hidden `<col>_masked TEXT` sibling column at CREATE time (resolved by
+            // the SHARED kernel's `mask_sibling_column_for_field`). The sibling is a
+            // real physical column, so the desired snapshot models it or it
+            // phantom-drifts against the live table the engine creates. It round-
+            // trips as a plain nullable TEXT column.
+            //
+            // The `COMMENT … __zsmask:…` sentinel that plugin-db reads at RUNTIME to
+            // drive the mask read-pass is resolved by the shared codec
+            // (`mask_sentinel_for_field`); wiring its emission into the generated
+            // CREATE/ADD DDL belongs to P4 (where plugin-db is the only consumer —
+            // there is no P2 reader). `snapshot_schema` never introspects COMMENTs,
+            // so the sentinel is not a snapshot attribute and the sibling COLUMN —
+            // the part that affects schema shape + drift — round-trips cleanly on
+            // its own.
+            if mask_sibling_for_field(f).is_some() {
+                columns.push(ColumnSnapshot {
+                    name: format!("{}_masked", f.name),
+                    data_type: "text".into(),
+                    nullable: true,
+                    default: None,
+                });
+            }
             // CHECK constraints (#3 literal-pin, #4 min/max + enum). These are
             // INLINED at CREATE TABLE (like plugin-db's `def_to_constraints`); the
             // declarative differ does not re-diff CHECK bodies (only FOREIGN KEY
@@ -775,49 +952,27 @@ fn fk_constraint_name(field: &str) -> String {
     format!("{field}_fkey")
 }
 
-/// Typed-id prefixes reserved for the platform (#5). A creator-declared
-/// `t.id("usr")` would mint ids colliding with platform user ids
-/// (`crates/core/src/typed_id.rs`), so it is rejected — mirrors plugin-db's
-/// `RESERVED_ID_PREFIXES` (`query.rs:432`) and the SDK fence.
-const RESERVED_ID_PREFIXES: &[&str] = &["usr"];
-
 /// Validate a creator-declared typed-id prefix (`t.id("blog")`, #5).
 ///
-/// Defense-in-depth mirror of plugin-db's `validate_id_prefix`
-/// (`query.rs:447`): the SDK throws at build time, but a hand-built wire payload
-/// skips the SDK, so the engine re-validates at the author boundary. Rules:
-/// `^[a-z][a-z0-9_]*$`, and not a [`RESERVED_ID_PREFIXES`] entry.
+/// Schema-authority P2: DELEGATES to the shared kernel's
+/// [`zeroship_schema::query::validate_id_prefix`] (the single source of truth for
+/// the `^[a-z][a-z0-9_]*$` rule + the `RESERVED_ID_PREFIXES` fence — the engine's
+/// own copy of both is deleted). The shared check returns its `QueryError`; this
+/// thin wrapper maps a failure to the engine's [`DeclarativeError::Invalid`] so
+/// the author-boundary error type is unchanged.
 fn validate_id_prefix(prefix: &str) -> Result<(), DeclarativeError> {
-    let valid = prefix.chars().next().is_some_and(|c| c.is_ascii_lowercase())
-        && prefix
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
-    if !valid {
-        return Err(DeclarativeError::Invalid(format!(
-            "t.id(prefix): prefix must match ^[a-z][a-z0-9_]*$ (got '{prefix}')"
-        )));
-    }
-    if RESERVED_ID_PREFIXES.contains(&prefix) {
-        return Err(DeclarativeError::Invalid(format!(
-            "t.id(prefix): '{prefix}' is reserved for platform ids; choose a different prefix"
-        )));
-    }
-    Ok(())
+    zeroship_schema::query::validate_id_prefix(prefix)
+        .map_err(|e| DeclarativeError::Invalid(e.to_string()))
 }
 
 /// Normalise a DSL FK action token to the SQL keyword Postgres reports.
 ///
-/// Mirrors plugin-db's `normalize_fk_action` (`query.rs:1036`): the SDK
-/// `FkAction` tokens (`cascade` / `set null` / `set_null` / `no action` /
-/// `no_action`) plus anything unrecognised fold to `RESTRICT` (fail-safe). The
-/// SDK default (a bare `t.ref()`) is `restrict`.
+/// Schema-authority P2: DELEGATES to the shared kernel's
+/// [`zeroship_schema::query::normalize_fk_action`] (the SDK `FkAction` tokens
+/// fold to `RESTRICT`/`CASCADE`/`SET NULL`/`NO ACTION`; anything unrecognised →
+/// `RESTRICT`, fail-safe). The engine's own copy is deleted.
 fn normalize_fk_action(s: Option<&str>) -> &'static str {
-    match s.unwrap_or("restrict").to_ascii_lowercase().as_str() {
-        "cascade" => "CASCADE",
-        "set null" | "set_null" => "SET NULL",
-        "no action" | "no_action" => "NO ACTION",
-        _ => "RESTRICT",
-    }
+    zeroship_schema::query::normalize_fk_action(s)
 }
 
 /// Build a FOREIGN KEY definition body in the EXACT spelling

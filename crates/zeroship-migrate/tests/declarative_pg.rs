@@ -1101,10 +1101,11 @@ async fn malicious_type_in_descriptor_is_rejected_not_silently_mapped_to_text() 
 }
 
 #[compio::test]
-async fn out_of_scope_vector_type_is_rejected_not_silently_text() {
-    // #2: `vector` is an out-of-v1-scope extension type. It must be rejected
-    // with UnsupportedType, NOT silently materialised as a `text` column (which
-    // would permanently diverge from what plugin-db's runtime materialises).
+async fn vector_type_is_accepted_and_maps_to_vector_column() {
+    // Schema-authority P2: `vector` was REJECTED by the v1 subset differ; now the
+    // engine adopts the shared kernel's FULL type map, so a `t.vector(dims)` field
+    // is ACCEPTED and DDLs to a `vector(N)` column — the capability gained by
+    // reuse. (It is never silently degraded to `text`.)
     let cfg = cfg_for(&token());
     let desc = CollectionDescriptor {
         name: "embeddings".into(),
@@ -1112,18 +1113,19 @@ async fn out_of_scope_vector_type_is_rejected_not_silently_text() {
         fields: vec![FieldDescriptor {
             name: "vec".into(),
             ty: "vector".into(),
-            required: false,
-            unique: false,
-            references: None,
+            vector_dims: Some(384),
+            vector_metric: Some("cosine".into()),
             ..Default::default()
         }],
         indexes: vec![],
     };
-    let err = desired_snapshot(&cfg.project_schema, &[desc]).unwrap_err();
-    assert!(
-        matches!(err, DeclarativeError::UnsupportedType { ref ty } if ty == "vector"),
-        "got {err:?}"
-    );
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("vector accepted");
+    let col = desired.snapshot.tables["embeddings"]
+        .columns
+        .iter()
+        .find(|c| c.name == "vec")
+        .expect("vec column modelled");
+    assert_eq!(col.data_type, "vector(384)", "vector dims carried into the column type");
 }
 
 #[compio::test]
@@ -3345,6 +3347,150 @@ async fn system_field_indexes_are_modelled_and_a_fresh_table_re_diffs_empty() {
         let want = format!("widgets_{col}_idx");
         assert!(live_idx.contains(&want.as_str()), "system index {want} must exist live, got {live_idx:?}");
     }
+
+    teardown(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// Schema-authority P2 — FULL type capability gained by adopting zeroship-schema.
+//
+// The v1-subset differ REJECTED vector / geoPoint / encrypted / mask with
+// UnsupportedType. After P2 the engine's declarative path routes column types
+// through the shared kernel, so these are first-class. These tests prove the
+// gained capability:
+//   - vector / geoPoint are ACCEPTED + correctly DDL'd (their parameterised
+//     types need an extension the platform catalog lacks, so they are not
+//     applied live here — the spec's "at minimum no longer rejects them");
+//   - encrypted (→ BYTEA) and mask (→ <col>_masked sibling) need NO extension,
+//     so they apply to a real PG and round-trip to ZERO drift.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn p2_goodies_are_accepted_not_rejected() {
+    // vector / geoPoint / encrypted / mask each ACCEPT (no UnsupportedType) and
+    // map to the correct column type — the capability the shared kernel provides.
+    let cfg = cfg_for(&token());
+
+    // vector(N).
+    let v = CollectionDescriptor {
+        name: "emb".into(),
+        owner_app: "app_test".into(),
+        fields: vec![FieldDescriptor {
+            name: "vec".into(),
+            ty: "vector".into(),
+            vector_dims: Some(768),
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let dv = desired_snapshot(&cfg.project_schema, &[v]).expect("vector accepted");
+    assert_eq!(
+        dv.snapshot.tables["emb"].columns.iter().find(|c| c.name == "vec").unwrap().data_type,
+        "vector(768)"
+    );
+
+    // geoPoint → geography(POINT, 4326).
+    let g = CollectionDescriptor {
+        name: "places".into(),
+        owner_app: "app_test".into(),
+        fields: vec![FieldDescriptor { name: "loc".into(), ty: "geoPoint".into(), ..Default::default() }],
+        indexes: vec![],
+    };
+    let dg = desired_snapshot(&cfg.project_schema, &[g]).expect("geoPoint accepted");
+    assert_eq!(
+        dg.snapshot.tables["places"].columns.iter().find(|c| c.name == "loc").unwrap().data_type,
+        "geography(POINT, 4326)"
+    );
+
+    // encrypted → bytea.
+    let e = CollectionDescriptor {
+        name: "vault".into(),
+        owner_app: "app_test".into(),
+        fields: vec![FieldDescriptor {
+            name: "ssn".into(),
+            ty: "string".into(),
+            encrypted: Some(serde_json::json!({ "mode": "randomised", "keyId": "default", "wraps": "string" })),
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let de = desired_snapshot(&cfg.project_schema, &[e]).expect("encrypted accepted");
+    assert_eq!(
+        de.snapshot.tables["vault"].columns.iter().find(|c| c.name == "ssn").unwrap().data_type,
+        "bytea"
+    );
+
+    // mask → a <col>_masked sibling column is modelled.
+    let m = CollectionDescriptor {
+        name: "people".into(),
+        owner_app: "app_test".into(),
+        fields: vec![FieldDescriptor {
+            name: "email".into(),
+            ty: "string".into(),
+            mask: Some(serde_json::json!({ "kind": "email", "classification": "pii" })),
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let dm = desired_snapshot(&cfg.project_schema, &[m]).expect("mask accepted");
+    let cols: Vec<&str> = dm.snapshot.tables["people"].columns.iter().map(|c| c.name.as_str()).collect();
+    assert!(cols.contains(&"email"), "parent column present");
+    assert!(cols.contains(&"email_masked"), "mask sibling modelled, got {cols:?}");
+}
+
+#[compio::test]
+async fn p2_encrypted_and_mask_columns_apply_and_round_trip_to_zero_drift() {
+    // The strongest capability proof that needs no extension: a table with an
+    // ENCRYPTED column (→ BYTEA) and a MASKED column (→ <col>_masked TEXT sibling)
+    // applies to a REAL Postgres and re-diffs to ZERO — the engine now DDLs both
+    // goodies correctly via the shared kernel, where before it would have refused
+    // them outright.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let desc = CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: "app_test".into(),
+        fields: vec![
+            FieldDescriptor { name: "label".into(), ty: "string".into(), required: true, ..Default::default() },
+            // encrypted → bytea
+            FieldDescriptor {
+                name: "secret".into(),
+                ty: "string".into(),
+                encrypted: Some(serde_json::json!({ "mode": "randomised", "keyId": "default", "wraps": "string" })),
+                ..Default::default()
+            },
+            // masked → adds an `phone_masked` sibling column
+            FieldDescriptor {
+                name: "phone".into(),
+                ty: "string".into(),
+                mask: Some(serde_json::json!({ "kind": "last4", "classification": "pci" })),
+                ..Default::default()
+            },
+        ],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired");
+
+    // Apply from empty, then assert the round-trip is byte-clean (the sibling
+    // column + the bytea column both round-trip).
+    apply_and_assert_clean_roundtrip(&engine, &author, &cfg, &conn, &desired).await;
+
+    // The live table actually carries the bytea + the masked sibling.
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+    let cols = &live.tables["accounts"].columns;
+    let secret = cols.iter().find(|c| c.name == "secret").expect("secret column");
+    assert_eq!(secret.data_type, "bytea", "encrypted column is BYTEA live");
+    assert!(
+        cols.iter().any(|c| c.name == "phone_masked" && c.data_type == "text"),
+        "masked sibling phone_masked TEXT exists live, got {:?}",
+        cols.iter().map(|c| (c.name.as_str(), c.data_type.as_str())).collect::<Vec<_>>()
+    );
 
     teardown(&conn, &cfg).await;
 }
