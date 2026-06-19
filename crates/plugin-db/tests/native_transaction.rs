@@ -76,6 +76,19 @@ fn require_pg_or_skip() -> Option<String> {
 /// EnvSnapshot so we target "default".
 const APP_SCHEMA: &str = "default";
 
+/// Drop the app schema, then PROVISION the `notes` table the way the engine /
+/// deploy-apply now does (P5 cutover).
+///
+/// **P5 cutover.** Before the cutover these tests relied on the in-handler
+/// `setup` → `registerModel("notes", …)` to CREATE the `notes` table at
+/// runtime. Post-cutover, `registerModel` on the PG dialect issues NO runtime
+/// DDL — `zeroship-migrate` is the sole PG schema authority and creates the
+/// schema at DEPLOY (P6), before the app serves. So the table must already
+/// exist when the handlers run. We stand in for the deploy-time engine apply by
+/// building the schema via `exec_register_model_with_pool` (the same DDL +
+/// sentinel emission the relocated engine produces), then the handlers'
+/// `registerModel` call is a faithful no-op — exactly the production order
+/// (engine-at-deploy, runtime-reads-only).
 fn reset_schema(url: &str) {
     let url = url.to_string();
     compio::runtime::Runtime::new().unwrap().block_on(async move {
@@ -88,6 +101,26 @@ fn reset_schema(url: &str) {
             .execute(&format!("DROP SCHEMA IF EXISTS \"{APP_SCHEMA}\" CASCADE"), &[])
             .await
             .unwrap();
+        drop(client);
+
+        // Engine/deploy stand-in: create the `notes` table (engine is the PG
+        // schema authority post-cutover). The per-isolate context needs the URL
+        // so the pipeline's dedicated-client acquisition resolves it.
+        zeroship_plugin_db::set_db_url_for_tests(&url);
+        let pool = std::rc::Rc::new(compio_postgres::Pool::connect(&url, 2).await.unwrap());
+        let schema = serde_json::json!({
+            "title": { "type": "string", "required": true },
+        });
+        zeroship_plugin_db::register_model::exec_register_model_with_pool(
+            pool,
+            APP_SCHEMA,
+            "notes",
+            &schema,
+            &serde_json::json!([]),
+            "engine_deploy_notes",
+        )
+        .await
+        .expect("engine/deploy stand-in must create the notes table");
     });
 }
 
