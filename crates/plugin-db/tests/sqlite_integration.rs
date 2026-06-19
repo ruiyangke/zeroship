@@ -9358,3 +9358,69 @@ fn nested_savepoint_release_keeps_both_sqlite() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// P5 (b) — the SQLite dev tier is NOT bricked by the cutover. On the PG dialect
+// `registerModel` stops applying DDL (the engine owns the schema at deploy), but
+// the engine has NO SQLite apply path yet, so SQLite `registerModel` is
+// UNCHANGED: it STILL auto-creates the table from the declared schema. This test
+// drives the EXACT production dialect dispatch (`exec_register_model` via the
+// `..._via_dispatch_for_tests` seam) with a SQLite backend installed in the
+// per-isolate context, and asserts the table was created — proving the SQLite
+// arm still runs the runtime auto-migrate (design §9 / §12 P5).
+// ---------------------------------------------------------------------------
+#[test]
+fn p5_sqlite_register_model_still_auto_migrates() {
+    run(async {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let backend = Rc::new(
+            SqliteBackend::new(PathBuf::from(dir.path())).expect("open SqliteBackend"),
+        );
+        let app = "p5_sqlite_unchanged";
+        let collection = "tasks";
+
+        // Install ONLY the SQLite backend handle (no PG url) so the production
+        // dispatch resolves the SQLite arm. `init_pool_async` short-circuits to
+        // Ready when a backend is already present (no PG connect attempted).
+        zeroship_plugin_db::set_sqlite_backend_for_tests(backend.clone());
+
+        let schema = serde_json::json!({
+            "_meta": {"strictness": "lenient"},
+            "title": {"type": "string", "required": true},
+            "done": {"type": "boolean"},
+        });
+
+        // Drive the PRODUCTION dialect dispatch. On SQLite this must AUTO-MIGRATE
+        // (create the table) — unchanged from before the cutover.
+        zeroship_plugin_db::register_model::exec_register_model_via_dispatch_for_tests(
+            app,
+            collection,
+            &schema,
+            &serde_json::json!([]),
+        )
+        .await
+        .expect("SQLite registerModel dispatch must auto-create the table");
+
+        // PROOF: the table now exists in the app's attached sqlite_master.
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT name FROM \"{app}\".sqlite_master \
+                     WHERE type = 'table' AND name = '{collection}'"
+                ),
+                &[],
+            )
+            .await
+            .expect("query sqlite_master");
+        assert_eq!(
+            rows.len(),
+            1,
+            "P5 SQLite: registerModel must still auto-create the declared table; \
+             sqlite_master rows: {rows:?}"
+        );
+    });
+}

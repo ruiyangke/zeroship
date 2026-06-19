@@ -134,24 +134,63 @@ async fn exec_register_model(
 
     let backend = context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("backend_not_initialized", "db: backend not initialized"))?;
-    // P0 PR 5: `BackendHandle` is the enum (no `dyn Backend`). The
-    // PG-only register-model pipeline pulls a `&PostgresBackend` out
-    // of the enum via `as_postgres()` for the duration of the
-    // `run_pipeline` await — async-friendly shape (closure-based
-    // `with_postgres` can't span `.await` ergonomically).
-    //
-    // Post-P0 mop-up (MAJOR-R14-1): map the `None` arm to a typed
-    // `backend_unsupported` `DbError::Configuration` so a future SQLite
-    // arm surfaces a coded SDK-visible error rather than aborting the
-    // spawned compio task via `.expect()` panic.
     let deploy_id =
         std::env::var("ZEROSHIP_DEPLOY_ID").unwrap_or_else(|_| "cold_start".to_string());
 
+    // **P5 — the cutover (dialect-conditional; do NOT brick SQLite dev).** The
+    // schema-authority split (`docs/proposals/2026-06-18-schema-authority-drizzle-
+    // model-design.md` §6/§9/§12 P5) makes `zeroship-migrate` the SOLE PG schema
+    // applier: the engine creates/migrates the per-app PG schema (and provisions
+    // the `migrator_<app_id>` role) at DEPLOY, BEFORE go-live (P6,
+    // `control`'s `deploy_migrate::apply_bundle_migrations`). So on the PG dialect
+    // `registerModel` STOPS being a schema authority — it issues NO runtime DDL
+    // (no `bootstrap` create-schema / `plan` / `validate` / `apply`). This is what
+    // eliminates the two-applier overlap (plugin-db + engine both running DDL
+    // under disjoint advisory-lock namespaces — the prior design's CRITICAL #1).
+    //
+    // What the PG no-DDL path STILL guarantees — the "schema-ready + metadata-
+    // available" contract the P4 introspection cache depends on (design §6):
+    //   * readiness — the dispatch caller (`register_model_dispatch`) marks
+    //     `is_model_registered` on this `Ok(())`, which is the gate
+    //     `crud::introspect_schema::runtime_schema_for` checks before sourcing
+    //     per-collection metadata from LIVE introspection + the engine's sentinels
+    //     (the P4 `runtime_schema_for` path). Introspection itself is lazy +
+    //     deploy-keyed and runs on the first CRUD op, so marking readiness here is
+    //     sufficient — we deliberately do NOT introspect (no catalog reads) at
+    //     register time, matching the old fast/cheap registration boundary.
+    //   * declared-schema cache — the dispatch caller also still calls
+    //     `cache_schema`, so the declared-ONLY hints that introspection cannot
+    //     recover keep working byte-identically: the `t.id(prefix)` typed-id
+    //     `idPrefix` read by `system_fields_pass::prefix_for_collection`, and the
+    //     `schema_for` hints consulted by vector-search / unmask / mask-drift.
+    // Net on PG: the runtime never CREATEs/ALTERs schema; it only reads. If the
+    // engine somehow has not applied the schema at deploy, runtime CRUD errors
+    // normally ("column does not exist") — deploy ordering (§8) guarantees the
+    // schema is present first; we deliberately do NOT re-add a runtime
+    // auto-migrate fallback.
+    //
+    // On the SQLite dialect (dev tier) `registerModel` is UNCHANGED — it STILL
+    // auto-creates/migrates from the declared `default.schema`, because the engine
+    // has NO SQLite apply path yet (design §9 / §10 non-goal; risk R4). This is
+    // the documented split: PG schema is engine-owned at deploy; SQLite dev keeps
+    // the runtime auto-migrate until a future SQLite-engine phase. Consequently
+    // `default.schema` / `installSchema` are now PG-UNUSED for DDL (PG runtime
+    // metadata comes from introspection) but stay SQLite-CONSUMED right here; full
+    // removal from the deploy contract is DEFERRED to that SQLite-engine phase
+    // (design §5 / §12 P5) — do not gut the contract field this phase.
     match (backend.as_postgres(), backend.as_sqlite()) {
-        (Some(pg), _) => run_pipeline(pg, app_id, collection, schema, indexes, &deploy_id).await,
+        // PG: NO runtime DDL — the engine (P6 deploy-apply) is the PG schema
+        // authority. This path no-ops the apply; the dispatch caller stamps
+        // readiness (`mark_model_registered`) + the declared cache (`cache_schema`)
+        // on the returned `Ok(())`, preserving the metadata-readiness contract
+        // above WITHOUT any CREATE/ALTER. `_pg` is bound only to select the arm.
+        (Some(_pg), _) => Ok(()),
+        // SQLite dev tier: UNCHANGED — runtime auto-migrate from `default.schema`.
         (_, Some(sqlite)) => {
             run_sqlite_pipeline(sqlite, app_id, collection, schema, indexes, &deploy_id).await
         }
+        // Unknown / future backend surfaces a typed, SDK-visible error rather than
+        // aborting the spawned compio task via an `.expect()` panic.
         _ => Err(DbError::backend_unsupported("register_model")),
     }
 }
@@ -498,6 +537,23 @@ pub async fn exec_register_model_with_pool(
     let url = context::with(|c| c.db_url()).unwrap_or_default();
     let backend = crate::backend::PostgresBackend::new(pool, url);
     run_pipeline(&backend, app_id, collection, schema, indexes, deploy_id).await
+}
+
+/// **P5 test seam** — drive the PRODUCTION dialect dispatch
+/// ([`exec_register_model`]) without the V8 lifecycle. The backend is read
+/// from the per-isolate context (install it first via
+/// `set_postgres_pool_for_tests` / `set_sqlite_backend_for_tests`), so this
+/// exercises the EXACT PG-no-DDL vs SQLite-auto-migrate branch the cutover
+/// introduces — unlike `exec_register_model_with_pool`, which bypasses the
+/// dispatch and calls `run_pipeline` directly.
+#[cfg(feature = "test-helpers")]
+pub async fn exec_register_model_via_dispatch_for_tests(
+    app_id: &str,
+    collection: &str,
+    schema: &Value,
+    indexes: &Value,
+) -> Result<(), DbError> {
+    exec_register_model(app_id, collection, schema, indexes).await
 }
 
 #[cfg(test)]

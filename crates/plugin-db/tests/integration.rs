@@ -6333,6 +6333,289 @@ async fn p4_round_trip_encrypted_masked_vector_via_introspected_metadata() {
     assert_eq!(out["phone"]["classification"], json!("pci"));
 }
 
+// ---------------------------------------------------------------------------
+// P5 — THE CUTOVER. On the PG dialect, `registerModel` STOPS being a schema
+// authority: it issues NO runtime DDL (the engine creates/migrates the schema
+// at DEPLOY, P6). It only ensures readiness + the declared cache so the P4
+// introspection path keeps working. SQLite dev is UNCHANGED (it still
+// auto-migrates from the declared schema). These three tests are the faithful
+// behaviour-identical + no-runtime-DDL proof:
+//   (c) p5_pg_register_model_issues_no_runtime_ddl — the cutover proof: the PG
+//       dispatch never CREATEs/ALTERs (no table, no schema, no audit row).
+//   (a) p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl — a collection
+//       whose schema was created the way the engine/deploy-apply does (sentinels
+//       and all) → PG registerModel no-ops the apply, yet CRUD + encryption +
+//       mask round-trip via the INTROSPECTED metadata.
+//   (b) p5_sqlite_register_model_still_auto_migrates — SQLite registerModel is
+//       unchanged: it still creates the table from the declared schema.
+// ---------------------------------------------------------------------------
+
+/// Count rows in the per-app audit journal (`__zeroship_migrations`), or `None`
+/// when the table is absent. The OLD PG `registerModel` wrote one audit row per
+/// applied DDL op; the P5 PG path applies nothing, so this stays put across a
+/// dispatch call — a direct, faithful "no DDL was issued" probe.
+async fn audit_row_count(pool: &std::rc::Rc<Pool>, app: &str) -> Option<i64> {
+    let exists = pool
+        .query_text_params(
+            "SELECT to_regclass($1) IS NOT NULL AS present",
+            &[&format!("\"{app}\".\"__zeroship_migrations\"").as_str()],
+        )
+        .await
+        .ok()?;
+    let present: bool = exists.first()?.get("present");
+    if !present {
+        return None;
+    }
+    let rows = pool
+        .query_text_params(
+            &format!("SELECT count(*)::bigint AS n FROM \"{app}\".\"__zeroship_migrations\""),
+            &[],
+        )
+        .await
+        .ok()?;
+    Some(rows.first()?.get::<_, i64>("n"))
+}
+
+/// True iff a `<app>.<table>` relation exists in the catalog.
+async fn pg_table_exists(pool: &std::rc::Rc<Pool>, app: &str, table: &str) -> bool {
+    pool.query_text_params(
+        "SELECT to_regclass($1) IS NOT NULL AS present",
+        &[&format!("\"{app}\".\"{table}\"").as_str()],
+    )
+    .await
+    .ok()
+    .and_then(|r| r.first().map(|row| row.get::<_, bool>("present")))
+    .unwrap_or(false)
+}
+
+/// **P5 (c) — the cutover proof.** On the PG dialect, the production
+/// `registerModel` dispatch issues NO schema DDL. We install a PG backend into
+/// the per-isolate context, call the EXACT production dispatch
+/// (`exec_register_model_via_dispatch_for_tests` → `exec_register_model`'s PG
+/// arm) against a schema whose table does NOT yet exist, and assert that:
+///   * no table was created (the old path would `CREATE TABLE`),
+///   * no per-app schema/audit journal was created (the old `bootstrap` did),
+/// proving the runtime is no longer a PG schema applier. The engine (P6
+/// deploy-apply) is the sole PG authority.
+#[allow(unsafe_code)]
+#[compio::test]
+async fn p5_pg_register_model_issues_no_runtime_ddl() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+
+    let app = "p5_no_ddl";
+    // Clean slate: NO schema, NO table — the engine hasn't run here.
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+
+    // Install the PG backend so the production dispatch resolves the PG arm.
+    zeroship_plugin_db::set_postgres_pool_for_tests(std::rc::Rc::clone(&pool), &url);
+
+    let schema = json!({
+        "title": {"type": "string", "required": true},
+        "secret": {
+            "type": "string",
+            "encrypted": {"mode": "randomised", "keyId": "default", "wraps": "string"}
+        },
+    });
+
+    // Drive the PRODUCTION dialect dispatch. On PG this must NO-OP the apply.
+    zeroship_plugin_db::register_model::exec_register_model_via_dispatch_for_tests(
+        app,
+        "widgets",
+        &schema,
+        &json!([]),
+    )
+    .await
+    .expect("PG registerModel dispatch must succeed (no-op)");
+
+    // PROOF: nothing was created. The OLD path would have CREATE SCHEMA +
+    // CREATE TABLE + the __zeroship_migrations journal + audit rows.
+    assert!(
+        !pg_table_exists(&pool, app, "widgets").await,
+        "P5 PG cutover: registerModel must NOT create the table at runtime"
+    );
+    assert_eq!(
+        audit_row_count(&pool, app).await,
+        None,
+        "P5 PG cutover: registerModel must NOT create the audit journal / write \
+         any DDL audit rows at runtime"
+    );
+
+    // Sanity teardown.
+    let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
+}
+
+/// **P5 (a) — behaviour-identical CRUD with NO runtime DDL.** The engine creates
+/// the schema at deploy (here simulated by a one-shot pipeline build that emits
+/// the same DDL + `zsenc`/`__zsmask` sentinels the relocated engine produces).
+/// Then the production PG dispatch runs and must NOT touch the schema (audit row
+/// count is unchanged), yet encryption + mask CRUD still round-trip end-to-end
+/// driven by the INTROSPECTED metadata (the P4 path) — proving the data plane is
+/// intact while the runtime applied nothing.
+#[allow(unsafe_code)]
+#[compio::test]
+async fn p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+    let _env = WithEnv::set("ZEROSHIP_COLUMN_KEY_DEFAULT", &"e".repeat(64));
+
+    let app = "p5_engine_created";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+
+    let schema = json!({
+        "name": {"type": "string", "required": true},
+        "ssn": {
+            "type": "string",
+            "encrypted": {"mode": "randomised", "keyId": "default", "wraps": "string"}
+        },
+        "phone": {
+            "type": "string",
+            "mask": {"kind": "last4", "classification": "pci"}
+        },
+    });
+
+    // === Simulate the engine/deploy-apply: create the table + sentinels. ===
+    // This is the SAME DDL/sentinel emission the relocated engine uses (P2/P4);
+    // we drive it once via the pipeline to stand in for the deploy-time apply.
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
+        std::rc::Rc::clone(&pool),
+        app,
+        "people",
+        &schema,
+        &json!([]),
+        "engine_deploy_1",
+    )
+    .await
+    .unwrap_or_else(|e| panic!("engine schema build (deploy stand-in) failed: {e}"));
+
+    // Snapshot the audit journal AFTER the engine's apply — the runtime dispatch
+    // below must not add to it.
+    let audit_before = audit_row_count(&pool, app).await;
+    assert!(
+        audit_before.is_some(),
+        "engine stand-in created the journal"
+    );
+
+    // === The runtime: install PG backend, run the PRODUCTION dispatch. ===
+    zeroship_plugin_db::set_postgres_pool_for_tests(std::rc::Rc::clone(&pool), &url);
+    zeroship_plugin_db::register_model::exec_register_model_via_dispatch_for_tests(
+        app,
+        "people",
+        &schema,
+        &json!([]),
+    )
+    .await
+    .expect("PG registerModel dispatch must succeed (no-op apply)");
+
+    // PROOF the runtime issued NO DDL: the audit journal is byte-for-byte the
+    // same count it was after the engine's apply.
+    assert_eq!(
+        audit_row_count(&pool, app).await,
+        audit_before,
+        "P5 PG cutover: the runtime dispatch must add ZERO DDL audit rows"
+    );
+
+    // Readiness contract: mark the model (the dispatch caller does this in prod;
+    // the via-dispatch seam stops at `exec_register_model`, so mirror it here),
+    // exactly like the P4 round-trip test does.
+    zeroship_plugin_db::mark_model_registered_for_tests(app, "people");
+
+    // The introspected runtime schema recovers BOTH goodies from the live catalog
+    // + the engine's sentinels — no declared schema consulted for crypto/mask.
+    let introspected = zeroship_plugin_db::crud::runtime_schema_for_tests(app, "people")
+        .await
+        .expect("introspect")
+        .expect("people has goodies");
+    assert_eq!(introspected["ssn"]["encrypted"]["mode"], "randomised");
+    assert_eq!(introspected["phone"]["mask"]["kind"], "last4");
+
+    // ----- WRITE via the real pipeline (introspected metadata) -----
+    let mut docs = json!([{
+        "id": "psn_p5_1",
+        "name": "Grace",
+        "ssn": "987-65-4321",
+        "phone": "650-555-0199",
+    }]);
+    zeroship_plugin_db::crud::prepare_insert_many_docs_for_write(&mut docs, app, "people", None)
+        .await
+        .expect("write pipeline");
+    let doc = &docs[0];
+    assert!(
+        doc["ssn"].as_str().is_some() && doc["ssn"] != json!("987-65-4321"),
+        "ssn must be ciphertext on write, got {:?}",
+        doc["ssn"]
+    );
+    assert_eq!(doc["__zsenc__ssn"], json!(true), "encrypt marker set");
+    assert_eq!(
+        doc["phone_masked"], json!("***-***-0199"),
+        "mask pass derives the last4 sibling on write, got {:?}",
+        doc["phone_masked"]
+    );
+
+    let ssn_b64 = doc["ssn"].as_str().unwrap().to_string();
+    let phone_masked = doc["phone_masked"].as_str().unwrap().to_string();
+    pool.execute(
+        &format!(
+            "INSERT INTO \"{app}\".\"people\" (id, name, ssn, phone, phone_masked) \
+             VALUES ($1, $2, decode($3, 'base64')::bytea, $4, $5)"
+        ),
+        &[
+            &"psn_p5_1",
+            &"Grace",
+            &ssn_b64.as_str(),
+            &"650-555-0199",
+            &phone_masked.as_str(),
+        ],
+    )
+    .await
+    .unwrap();
+
+    // ----- READ via the real pipeline (introspected metadata) -----
+    let raw = pool
+        .query_text_params(
+            &format!(
+                "SELECT id, name, encode(ssn, 'base64') AS ssn, \
+                 phone_masked AS phone FROM \"{app}\".\"people\" WHERE id = $1"
+            ),
+            &[&"psn_p5_1"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(raw.len(), 1);
+    let row = json!({
+        "id": "psn_p5_1",
+        "name": "Grace",
+        "ssn": raw[0].get::<_, String>("ssn"),
+        "phone": raw[0].get::<_, String>("phone"),
+    });
+    let finalized =
+        zeroship_plugin_db::crud::finalize_rows_on_read_for_tests(app, "people", vec![row])
+            .await
+            .expect("read pipeline");
+    let out = &finalized[0];
+    assert_eq!(
+        out["ssn"], json!("987-65-4321"),
+        "encrypted column decrypts to plaintext on read, got {:?}",
+        out["ssn"]
+    );
+    assert_eq!(out["phone"]["sentinel"], json!("__zsmask__"), "phone wrapped");
+    assert_eq!(out["phone"]["masked"], json!("***-***-0199"));
+    assert_eq!(out["phone"]["classification"], json!("pci"));
+
+    // FINAL proof: still zero runtime DDL after the full CRUD round-trip.
+    assert_eq!(
+        audit_row_count(&pool, app).await,
+        audit_before,
+        "P5 PG cutover: CRUD must not have triggered any runtime DDL"
+    );
+
+    let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
+}
+
 /// **P5 PR 2** — when `ZEROSHIP_COLUMN_KEY_DEFAULT` is unset (no env
 /// var AND the `__zeroship_admin.column_keys` row is missing), the
 /// PG resolver surfaces a typed `column_key_not_configured`
