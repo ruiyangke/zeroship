@@ -258,30 +258,36 @@ struct ResolvedRename {
 }
 
 // ---------------------------------------------------------------------------
-// DSL-type → information_schema.data_type mapping (replicated from plugin-db).
+// DSL-type → information_schema.data_type mapping.
+//
+// Schema-authority P2: the engine's own v1-SUBSET type table was DELETED and the
+// column-type resolution now DELEGATES to the shared `zeroship-schema` kernel
+// (`query::def_to_column_type_for_dialect`). That is what gives the differ FULL
+// capability — `vector(N)` / `geography(POINT,4326)` (geoPoint) / `BYTEA`
+// (encrypted) / `literal`-primitive are now first-class, where the v1 subset
+// rejected them. The #2 fail-closed guarantee is preserved on top of the shared
+// map (an unknown token mapping to the shared `TEXT` fallback is still rejected,
+// never silently degraded).
 // ---------------------------------------------------------------------------
 
-/// Map a DSL type token to the EXACT `information_schema.columns.data_type`
-/// string Postgres reports for the column `plugin-db` would emit for it.
+/// Map a bare DSL type TOKEN to the `information_schema.columns.data_type`
+/// spelling the snapshot stores, by routing through the shared kernel (P2).
 ///
-/// This is the type-fidelity core. The mapping is replicated from
-/// `crates/plugin-db/src/query.rs::def_to_pg_type` + `def_to_column_type_for_dialect`
-/// (see the module-level provenance note) and translated from the DDL spelling
-/// (`TEXT`, `DOUBLE PRECISION`, `TIMESTAMPTZ`, …) to the canonical
-/// `information_schema` spelling (`text`, `double precision`,
-/// `timestamp with time zone`, …) — NOT the DDL alias.
+/// This is the token-only convenience entry (kept as the engine's public surface,
+/// and used by `desired_snapshot` for token-only fields). Fields carrying the
+/// parameterised goodies (`vector(dims)`, `encrypted{…}`, `mask{…}`) need their
+/// whole descriptor, so `desired_snapshot` calls [`field_data_type`] directly;
+/// this wrapper builds a minimal descriptor from the token. `actor`/`id` are
+/// engine-only text spellings the shared SDK map does not name, folded to
+/// `string` here.
 ///
-/// Exactly the twelve in-scope DSL tokens map; anything else (an out-of-scope
-/// extension/parameterised type — `vector`/`geoPoint`/`encrypted` — OR a typo /
-/// wrong spelling — `bigint`/`uuid`/`int4`/`serial`/`__proto__`) is rejected
-/// with [`DeclarativeError::UnsupportedType`] BEFORE any SQL is emitted. There
-/// is deliberately NO `_ => text` fallback: silently degrading an unrecognised
-/// type to `text` (#2) gave the creator a column they never declared and a
-/// permanent divergence from what plugin-db's runtime materialises.
+/// The #2 fail-closed contract is preserved: a typo / out-of-scope token that the
+/// shared map degrades to its `TEXT` fallback is rejected with
+/// [`DeclarativeError::UnsupportedType`] rather than silently materialised as a
+/// `text` column the creator never declared.
 ///
 /// # Errors
-/// [`DeclarativeError::UnsupportedType`] if `dsl_type` is not one of the twelve
-/// supported tokens.
+/// [`DeclarativeError::UnsupportedType`] if `dsl_type` is not a supported token.
 pub fn dsl_to_pg_data_type(dsl_type: &str) -> Result<String, DeclarativeError> {
     // Schema-authority P2: delegate to the shared kernel rather than the engine's
     // old v1-subset table. `actor`/`id` are engine-only spellings of `text` that
