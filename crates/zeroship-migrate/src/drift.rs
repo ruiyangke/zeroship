@@ -484,6 +484,32 @@ impl StructuralDrift {
 ///
 /// # Errors
 /// [`DriftError::Db`] on a catalog query failure.
+/// Normalise `pg_catalog.format_type(...)` output for an extension type back to
+/// the engine's canonical DDL spelling, so a live `USER-DEFINED` column compares
+/// equal to the desired snapshot the author built.
+///
+/// The engine emits (and the desired snapshot stores) `geography(POINT, 4326)`
+/// for a geoPoint and `vector(N)` for a vector. Postgres canonicalises the stored
+/// type, so `format_type` reports `geography(Point,4326)` and `vector(N)`. This
+/// maps PG's canonical form back to the engine's spelling for the two extension
+/// types the engine emits; any other `format_type` output is returned verbatim
+/// (the closest faithful spelling we have for an unknown extension type).
+fn canonical_extension_type(format_type: &str) -> String {
+    let trimmed = format_type.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    // PostGIS geography point: `geography(Point,4326)` → `geography(POINT, 4326)`
+    // (the engine's `field_to_column` / `dsl_to_pg_data_type` spelling). Match on
+    // the lowercased form so we are robust to PG capitalisation changes, and
+    // re-emit the exact engine spelling rather than echoing PG's.
+    if lower == "geography(point,4326)" {
+        return "geography(POINT, 4326)".to_string();
+    }
+    // pgvector: `vector(N)` already matches the engine's spelling byte-for-byte.
+    // Return `format_type`'s output verbatim for vector (and any other extension
+    // type) — it is the precise live spelling.
+    trimmed.to_string()
+}
+
 pub async fn snapshot_schema(
     conn: &Client,
     project_schema: &str,
@@ -509,12 +535,25 @@ pub async fn snapshot_schema(
     }
 
     // Columns (one query for the whole schema; bucket by table).
+    //
+    // `information_schema.columns.data_type` reports `USER-DEFINED` for any
+    // extension / composite type (pgvector's `vector(N)`, PostGIS's
+    // `geography(POINT, 4326)`), which loses the precise spelling the desired
+    // snapshot carries — so those columns would phantom-drift forever. We also
+    // pull `pg_catalog.format_type(atttypid, atttypmod)` (the canonical PG
+    // spelling, e.g. `vector(384)` / `geography(Point,4326)`) and, for a
+    // `USER-DEFINED` column, normalise it back to the engine's DDL spelling
+    // (see [`canonical_extension_type`]). T13.
     let col_rows = conn
         .query(
-            "SELECT table_name, column_name, data_type, is_nullable \
-             FROM information_schema.columns \
-             WHERE table_schema = $1 \
-             ORDER BY table_name, column_name",
+            "SELECT c.table_name, c.column_name, c.data_type, c.is_nullable, \
+                    format_type(a.atttypid, a.atttypmod) AS format_type \
+             FROM information_schema.columns c \
+             JOIN pg_namespace n ON n.nspname = c.table_schema \
+             JOIN pg_class rel ON rel.relname = c.table_name AND rel.relnamespace = n.oid \
+             JOIN pg_attribute a ON a.attrelid = rel.oid AND a.attname = c.column_name \
+             WHERE c.table_schema = $1 AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY c.table_name, c.column_name",
             &[&project_schema],
         )
         .await?;
@@ -522,9 +561,18 @@ pub async fn snapshot_schema(
         let table: String = r.get("table_name");
         if let Some(t) = tables.get_mut(&table) {
             let nullable: String = r.get("is_nullable");
+            let data_type: String = r.get("data_type");
+            // For a `USER-DEFINED` (extension) type, recover the precise spelling
+            // from `format_type` and canonicalise it to the engine's DDL form so
+            // it round-trips against the desired snapshot.
+            let data_type = if data_type.eq_ignore_ascii_case("USER-DEFINED") {
+                canonical_extension_type(&r.get::<_, String>("format_type"))
+            } else {
+                data_type
+            };
             t.columns.push(ColumnSnapshot {
                 name: r.get("column_name"),
-                data_type: r.get("data_type"),
+                data_type,
                 nullable: nullable.eq_ignore_ascii_case("YES"),
                 // Introspection never carries a default or a sentinel — those
                 // are emission-only metadata (see the `ColumnSnapshot` type

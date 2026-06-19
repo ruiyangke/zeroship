@@ -1374,6 +1374,176 @@ async fn t12_fts_added_to_existing_table_applies_in_order_and_re_diffs_clean() {
     teardown(&conn, &cfg).await;
 }
 
+// ---------------------------------------------------------------------------
+// T13 — geoPoint live round-trip (PostGIS-backed).
+//
+// `geoPoint` was only ever asserted at the type-mapping level
+// (`p2_goodies_are_accepted_not_rejected`): the descriptor maps to
+// `geography(POINT, 4326)`. But the runtime data plane
+// (`plugin-db::SpatialIndex::ensure_spatial_index`) builds a `USING GIST`
+// spatial index over that column — and the engine (the sole schema authority)
+// must MODEL that same GiST index in the desired snapshot or the live index
+// phantom-DROPs (and spatial `ST_DWithin` search degrades to a full scan), the
+// SAME class of bug T12 fixed for vector/FTS. This test proves the engine emits
+// the geography column + the `<table>_<col>_idx` GiST index, applies them on a
+// REAL PostGIS Postgres, and re-diffs to ZERO drift.
+//
+// PostGIS is not on the default :5440 image, so this connects to a separate
+// PostGIS-capable instance via `MIGRATE_POSTGIS_DB` and SKIPS (does not fail)
+// when none is reachable / the extension is absent — the same skip discipline
+// the pgvector capstone uses.
+// ---------------------------------------------------------------------------
+
+const DEFAULT_POSTGIS_DSN: &str =
+    "host=localhost port=5435 user=postgres password=zeroship dbname=zeroship_migrate_test";
+
+fn postgis_dsn() -> String {
+    std::env::var("MIGRATE_POSTGIS_DB").unwrap_or_else(|_| DEFAULT_POSTGIS_DSN.to_string())
+}
+
+/// Connect to the PostGIS-capable instance and ensure the `postgis` extension is
+/// present, or `None` (⇒ skip the test) when the instance is unreachable or
+/// PostGIS cannot be installed.
+async fn postgis_pg() -> Option<Client> {
+    let (client, conn) = match compio_postgres::connect(&postgis_dsn(), compio_postgres::NoTls).await
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("SKIP: PostGIS instance unreachable ({e})");
+            return None;
+        }
+    };
+    compio::runtime::spawn(async move {
+        let _ = conn.run().await;
+    })
+    .detach();
+    if client
+        .batch_execute("CREATE EXTENSION IF NOT EXISTS postgis")
+        .await
+        .is_err()
+    {
+        eprintln!("SKIP: PostGIS extension not available on the target instance");
+        return None;
+    }
+    Some(client)
+}
+
+#[compio::test]
+async fn t13_geopoint_field_round_trips_to_zero_drift_via_gist_index() {
+    // THE geoPoint oracle: a `t.geoPoint()` field maps to a `geography(POINT,
+    // 4326)` column AND emits a `<table>_<col>_idx` GiST index (mirroring
+    // plugin-db's runtime `ensure_spatial_index`). Apply the generated migration
+    // on REAL PostGIS, then re-snapshot and assert ZERO drift. Pre-T13 the engine
+    // modeled NO geo index → the runtime-built GiST index phantom-DROPped.
+    let Some(conn) = postgis_pg().await else {
+        return; // skip — no PostGIS
+    };
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let desc = CollectionDescriptor {
+        name: "places".into(),
+        owner_app: "app_test".into(),
+        fields: vec![FieldDescriptor {
+            name: "loc".into(),
+            ty: "geoPoint".into(),
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("geoPoint accepted");
+
+    // (a) the desired snapshot models the geography column…
+    assert_eq!(
+        desired.snapshot.tables["places"]
+            .columns
+            .iter()
+            .find(|c| c.name == "loc")
+            .expect("loc column")
+            .data_type,
+        "geography(POINT, 4326)",
+        "geoPoint maps to a geography(POINT, 4326) column"
+    );
+    // …and a GiST index over it, named like plugin-db's runtime index.
+    let geo_idx = desired.snapshot.tables["places"]
+        .indexes
+        .iter()
+        .find(|i| i.access_method == "gist")
+        .expect("a GiST spatial index must be modeled for the geoPoint field");
+    assert_eq!(geo_idx.name, "places_loc_idx", "GiST index name matches plugin-db");
+    assert_eq!(geo_idx.columns, vec!["loc".to_string()]);
+
+    // (b) the generated CREATE INDEX DDL is `USING gist ("loc")`.
+    let plan = author
+        .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .expect("diff");
+    let idx_sql: String = plan
+        .migrations
+        .iter()
+        .find(|m| m.name == "create_index_places_loc_idx")
+        .map(|m| m.up.clone())
+        .expect("geo index migration");
+    assert!(
+        idx_sql.contains("USING gist (\"loc\")"),
+        "the geo index DDL must be a GiST index over loc: {idx_sql}"
+    );
+
+    // (c) apply on real PostGIS, re-snapshot, assert ZERO drift (the round-trip).
+    apply_plan(&engine, &desired, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("apply geoPoint plan on PostGIS");
+    let live2 = snapshot_schema(&conn, &cfg.project_schema)
+        .await
+        .expect("re-snapshot");
+    let drift = diff_snapshots(&desired.snapshot, &live2);
+    assert!(
+        drift.is_clean(),
+        "geoPoint schema must re-diff clean: missing={:?} unexpected={:?} altered={:?}",
+        drift.missing_objects,
+        drift.unexpected_objects,
+        drift.altered_objects
+    );
+
+    // (d) the live GiST index is really present with the gist access method.
+    let live_idx = live2.tables["places"]
+        .indexes
+        .iter()
+        .find(|i| i.name == "places_loc_idx")
+        .expect("the GiST spatial index exists in live");
+    assert_eq!(live_idx.access_method, "gist", "the geo index is a GiST index");
+
+    // (e) the geography column accepts a real point (PostGIS is functional, not
+    //     just a type alias) and a `ST_DWithin` lookup uses the column.
+    conn.execute(
+        &format!(
+            "INSERT INTO \"{}\".\"places\" (id, loc, created_at, updated_at, version) \
+             VALUES ($1, ST_MakePoint($2, $3)::geography, now(), now(), 1)",
+            cfg.project_schema
+        ),
+        &[&"plc_sf", &(-122.4194f64), &37.7749f64],
+    )
+    .await
+    .expect("insert a geography point");
+    let near = conn
+        .query(
+            &format!(
+                "SELECT id FROM \"{}\".\"places\" \
+                 WHERE ST_DWithin(loc, ST_MakePoint($1, $2)::geography, $3)",
+                cfg.project_schema
+            ),
+            &[&(-122.42f64), &37.77f64, &5000f64],
+        )
+        .await
+        .expect("ST_DWithin spatial query runs against the geography column");
+    assert_eq!(near.len(), 1, "the point is within 5km of the query origin");
+
+    teardown(&conn, &cfg).await;
+}
+
 #[compio::test]
 async fn typo_type_token_is_rejected_not_silently_text() {
     // #2: a typo / wrong spelling (`bigint` is a Postgres type, not a DSL token)
