@@ -6869,6 +6869,7 @@ dependencies = [
  "tracing",
  "uuid",
  "zeroship-core",
+ "zeroship-schema",
 ]
 
 [[package]]
