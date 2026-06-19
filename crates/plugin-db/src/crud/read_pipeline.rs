@@ -59,7 +59,13 @@ pub(crate) async fn apply(
     mut rows: Vec<Value>,
     opts: ApplyOptions<'_>,
 ) -> Result<ApplyResult, DbError> {
-    let schema = crate::context::with(|c| c.schema_for(app_id, collection))
+    // **P4 HALF B** — the runtime data-access metadata (column types, encrypted
+    // mode/keyId/wraps, mask kind/classification) is sourced from LIVE
+    // introspection + the engine's sentinels (design §6), NOT the in-memory
+    // declared schema. `runtime_schema_for` caches per (app, collection, deploy)
+    // so this is an introspection only on a cold/stale cache, not every read.
+    let schema = super::introspect_schema::runtime_schema_for(app_id, collection)
+        .await?
         .map(|schema| scope_schema(schema, &opts.schema_field_scope));
     normalize_rows_on_read(schema.as_ref(), &mut rows)?;
 

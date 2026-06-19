@@ -279,6 +279,26 @@ pub struct IsolateDbContext {
     /// is the raw schema JSON the SDK declared.
     schemas: HashMap<String, serde_json::Value>,
 
+    /// **P4 HALF B** — per-isolate, per-`(app_id, collection)` cache of the
+    /// schema metadata **introspected from the LIVE catalog + sentinels**
+    /// (`zeroship_schema::read_live_schema` + the `zsenc`/`__zsmask` codecs),
+    /// NOT the declared descriptor. This is the runtime data-access metadata
+    /// source the CRUD encryption + mask passes consume per the schema-authority
+    /// split (design §6): plugin-db learns column types (for read coercions),
+    /// which columns are `encrypted` (mode/keyId/wraps) and which are `masked`
+    /// (kind/classification) by reading what the migration engine actually
+    /// applied, decoupled from any in-memory declared schema.
+    ///
+    /// Keyed by `"{app_id}:{collection}"`; the value is `(deploy_token, schema)`
+    /// where `deploy_token` is the current `ZEROSHIP_DEPLOY_ID` snapshot. A
+    /// stale token (a deploy bumped it) invalidates the entry on next read,
+    /// mirroring the `is_model_registered` per-thread fast-path but keyed on the
+    /// deploy/schema version rather than mere presence. The inner `Option`
+    /// distinguishes "introspected, collection absent / has no goodies" (`None`)
+    /// from "not yet introspected" (no map entry) so a goodie-free collection is
+    /// cached as a negative result rather than re-introspected every call.
+    introspected_schemas: HashMap<String, (String, Option<serde_json::Value>)>,
+
     /// **P5.5 PR 5** — per-isolate, per-app mask-policy cache. Seeded
     /// on first unmask attempt by reading durable storage (PG admin
     /// schema or SQLite sidecar file); refreshed write-through by the
@@ -349,6 +369,7 @@ impl IsolateDbContext {
             mig_lock: None,
             running_consumers: HashSet::new(),
             schemas: HashMap::new(),
+            introspected_schemas: HashMap::new(),
             mask_policies: HashMap::new(),
             backend: None,
             backend_init_in_progress: false,
@@ -511,6 +532,46 @@ impl IsolateDbContext {
     ) -> Option<serde_json::Value> {
         let key = format!("{app_id}:{collection}");
         self.schemas.get(&key).cloned()
+    }
+
+    /// **P4 HALF B** — read the cached INTROSPECTED schema for `(app_id,
+    /// collection)`, but only if it was cached under the CURRENT
+    /// `deploy_token`. A token mismatch (a deploy bumped `ZEROSHIP_DEPLOY_ID`)
+    /// returns `None`, forcing the caller to re-introspect — this is the
+    /// deploy-bump invalidation. Returns:
+    ///   - `Some(Some(schema))` — cached, current, collection has goodies;
+    ///   - `Some(None)` — cached, current, collection has NO goodies (negative
+    ///     cache — the caller skips the encrypt/mask passes without
+    ///     re-introspecting);
+    ///   - `None` — not cached or stale → caller must introspect.
+    pub(crate) fn introspected_schema_for(
+        &self,
+        app_id: &str,
+        collection: &str,
+        deploy_token: &str,
+    ) -> Option<Option<serde_json::Value>> {
+        let key = format!("{app_id}:{collection}");
+        match self.introspected_schemas.get(&key) {
+            Some((tok, schema)) if tok == deploy_token => Some(schema.clone()),
+            // Missing OR stale (token changed by a deploy) → re-introspect.
+            _ => None,
+        }
+    }
+
+    /// **P4 HALF B** — cache the result of a live introspection for `(app_id,
+    /// collection)` under `deploy_token`. `schema = None` records a negative
+    /// result (the collection has no encrypted/masked columns — the passes are
+    /// skipped). Overwrites any stale entry from a prior deploy.
+    pub(crate) fn cache_introspected_schema(
+        &mut self,
+        app_id: &str,
+        collection: &str,
+        deploy_token: &str,
+        schema: Option<serde_json::Value>,
+    ) {
+        let key = format!("{app_id}:{collection}");
+        self.introspected_schemas
+            .insert(key, (deploy_token.to_string(), schema));
     }
 
     /// **P5.5 PR 7** — enumerate every `(collection, schema)` pair the

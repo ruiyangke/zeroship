@@ -6174,6 +6174,165 @@ async fn encrypted_deterministic_equality_lookup() {
     assert_eq!(rows.len(), 5, "deterministic equality lookup must match all 5 shared-ssn rows");
 }
 
+/// **P4 ROUND-TRIP e2e** — the proof both halves cohere: a collection with an
+/// `encrypted` + a `masked` + a `vector` field, schema CREATED via the real
+/// `registerModel` (HALF A: it writes the `zsenc`/`__zsmask` sentinels), then
+/// CRUD driven ENTIRELY by the introspection-sourced metadata (HALF B):
+///   - insert through the REAL write pipeline → AEAD-encrypts the encrypted
+///     column and populates the masked sibling (metadata from introspection);
+///   - read raw rows back, finalize through the REAL read pipeline → decrypts
+///     the encrypted column to plaintext and wraps the masked column.
+/// Nothing here consults the declared schema for the crypto/mask decisions —
+/// the seam is `crud::introspect_schema::runtime_schema_for`, exercised faithfully.
+#[allow(unsafe_code)]
+#[compio::test]
+async fn p4_round_trip_encrypted_masked_vector_via_introspected_metadata() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+    let _env = WithEnv::set("ZEROSHIP_COLUMN_KEY_DEFAULT", &"d".repeat(64));
+
+    let app = "p4_round_trip";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+
+    // Schema: encrypted `ssn`, masked `phone`, and a `vector` embedding.
+    let schema = json!({
+        "name": {"type": "string", "required": true},
+        "ssn": {
+            "type": "string",
+            "encrypted": {"mode": "randomised", "keyId": "default", "wraps": "string"}
+        },
+        "phone": {
+            "type": "string",
+            "mask": {"kind": "last4", "classification": "pci"}
+        },
+        "embedding": {"type": "vector", "vectorDims": 3, "vectorMetric": "cosine"},
+    });
+
+    // HALF A path: registerModel creates the table AND writes the sentinels
+    // (zsenc COMMENT on `ssn`, __zsmask COMMENT on `phone_masked`).
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
+        std::rc::Rc::clone(&pool),
+        app,
+        "people",
+        &schema,
+        &serde_json::json!([]),
+        "p4_deploy_1",
+    )
+    .await
+    .unwrap_or_else(|e| panic!("registerModel failed: {e}"));
+
+    // Install the pool into the per-isolate context so HALF B's
+    // `runtime_schema_for` can introspect, and mark the model registered (the
+    // cold-schema gate) — exactly what the production register path does.
+    zeroship_plugin_db::set_postgres_pool_for_tests(std::rc::Rc::clone(&pool), &url);
+    zeroship_plugin_db::mark_model_registered_for_tests(app, "people");
+
+    // Sanity: the introspected runtime schema recovers BOTH goodies — proving
+    // the data-access metadata comes from the live catalog + sentinels.
+    let introspected =
+        zeroship_plugin_db::crud::runtime_schema_for_tests(app, "people")
+            .await
+            .expect("introspect")
+            .expect("people has goodies");
+    assert_eq!(introspected["ssn"]["encrypted"]["mode"], "randomised");
+    assert_eq!(introspected["phone"]["mask"]["kind"], "last4");
+
+    // ----- WRITE (real pipeline, introspected metadata) -----
+    let mut docs = json!([{
+        "id": "psn_round_trip_1",
+        "name": "Ada",
+        "ssn": "123-45-6789",
+        "phone": "415-555-0142",
+        "embedding": [0.1, 0.2, 0.3],
+    }]);
+    zeroship_plugin_db::crud::prepare_insert_many_docs_for_write(&mut docs, app, "people", None)
+        .await
+        .expect("write pipeline");
+
+    // The write pipeline encrypted `ssn` (base64 blob + `__zsenc__ssn` marker)
+    // and derived the masked sibling `phone_masked` from the plaintext.
+    let doc = &docs[0];
+    assert!(
+        doc["ssn"].as_str().is_some() && doc["ssn"] != json!("123-45-6789"),
+        "ssn must be replaced by ciphertext on write, got {:?}",
+        doc["ssn"]
+    );
+    assert_eq!(doc["__zsenc__ssn"], json!(true), "encrypt marker set");
+    assert_eq!(
+        doc["phone_masked"], json!("***-***-0142"),
+        "mask pass must derive the last4 sibling on write, got {:?}",
+        doc["phone_masked"]
+    );
+
+    // Persist it the way the SQL builder would (decode the encrypted blob, store
+    // the masked sibling). We INSERT the encrypted ssn + the masked sibling.
+    let ssn_b64 = doc["ssn"].as_str().unwrap().to_string();
+    let phone_masked = doc["phone_masked"].as_str().unwrap().to_string();
+    // The vector literal is a test-controlled constant — format it inline with a
+    // `::vector` cast (compio-postgres infers a `vector`-typed param from the
+    // bind otherwise, which it cannot encode an `&str` into).
+    pool.execute(
+        &format!(
+            "INSERT INTO \"{app}\".\"people\" (id, name, ssn, phone, phone_masked, embedding) \
+             VALUES ($1, $2, decode($3, 'base64')::bytea, $4, $5, '[0.1,0.2,0.3]'::vector)"
+        ),
+        &[
+            &"psn_round_trip_1",
+            &"Ada",
+            &ssn_b64.as_str(),
+            &"415-555-0142",
+            &phone_masked.as_str(),
+        ],
+    )
+    .await
+    .unwrap();
+
+    // ----- READ (real pipeline, introspected metadata) -----
+    // Fetch the raw row the way the SELECT builder would (encrypted blob as
+    // base64, the masked sibling aliased back to the parent name).
+    let raw = pool
+        .query_text_params(
+            &format!(
+                "SELECT id, name, encode(ssn, 'base64') AS ssn, \
+                 phone_masked AS phone FROM \"{app}\".\"people\" WHERE id = $1"
+            ),
+            &[&"psn_round_trip_1"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(raw.len(), 1);
+    let row = json!({
+        "id": "psn_round_trip_1",
+        "name": "Ada",
+        "ssn": raw[0].get::<_, String>("ssn"),
+        "phone": raw[0].get::<_, String>("phone"),
+    });
+
+    let finalized =
+        zeroship_plugin_db::crud::finalize_rows_on_read_for_tests(app, "people", vec![row])
+            .await
+            .expect("read pipeline");
+    let out = &finalized[0];
+
+    // Encrypted column decrypted back to plaintext (driven by introspected meta).
+    assert_eq!(
+        out["ssn"], json!("123-45-6789"),
+        "encrypted column must decrypt to plaintext on read, got {:?}",
+        out["ssn"]
+    );
+    // Masked column wrapped into the platform MaskedValue sentinel, carrying the
+    // last4-masked string + the introspected classification.
+    assert_eq!(out["phone"]["sentinel"], json!("__zsmask__"), "phone wrapped");
+    assert_eq!(
+        out["phone"]["masked"], json!("***-***-0142"),
+        "masked phone surfaces last4 form, got {:?}",
+        out["phone"]
+    );
+    assert_eq!(out["phone"]["classification"], json!("pci"));
+}
+
 /// **P5 PR 2** — when `ZEROSHIP_COLUMN_KEY_DEFAULT` is unset (no env
 /// var AND the `__zeroship_admin.column_keys` row is missing), the
 /// PG resolver surfaces a typed `column_key_not_configured`

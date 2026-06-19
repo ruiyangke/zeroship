@@ -98,7 +98,10 @@ pub(crate) async fn apply(
         ApplyMode::Update { .. } => validate_update_patch_keys(payload)?,
     }
 
-    let schema = crate::context::with(|c| c.schema_for(app_id, collection));
+    // **P4 HALF B** — the encrypt/mask write transforms are driven by metadata
+    // from LIVE introspection + the engine's sentinels (design §6), not the
+    // in-memory declared schema. Cached per (app, collection, deploy).
+    let schema = super::introspect_schema::runtime_schema_for(app_id, collection).await?;
     let stages = WriteStages::new(schema.as_ref());
 
     match mode {
@@ -302,26 +305,31 @@ pub(crate) async fn resolve_target_row_ids(
         .collect())
 }
 
-pub(crate) fn update_requires_per_row_encryption(
+pub(crate) async fn update_requires_per_row_encryption(
     app_id: &str,
     collection: &str,
     patch: &Value,
-) -> bool {
-    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
-        return false;
+) -> Result<bool, DbError> {
+    // **P4 HALF B** — sourced from introspection (cached), not the declared
+    // schema. A failed introspection propagates rather than silently returning
+    // `false` (which would skip the per-row randomised-encryption path).
+    let Some(schema) = super::introspect_schema::runtime_schema_for(app_id, collection).await?
+    else {
+        return Ok(false);
     };
-    update_touches_randomised_encrypted_field(&schema, patch)
+    Ok(update_touches_randomised_encrypted_field(&schema, patch))
 }
 
-pub(crate) fn upsert_requires_conflict_probe(
+pub(crate) async fn upsert_requires_conflict_probe(
     app_id: &str,
     collection: &str,
     doc: &Value,
-) -> bool {
-    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
-        return false;
+) -> Result<bool, DbError> {
+    let Some(schema) = super::introspect_schema::runtime_schema_for(app_id, collection).await?
+    else {
+        return Ok(false);
     };
-    doc_touches_randomised_encrypted_field(&schema, doc)
+    Ok(doc_touches_randomised_encrypted_field(&schema, doc))
 }
 
 fn update_touches_randomised_encrypted_field(schema: &Value, patch: &Value) -> bool {
@@ -401,7 +409,7 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
     conflict_fields: &Value,
     schema: Option<&Value>,
 ) -> Result<(), DbError> {
-    if !upsert_requires_conflict_probe(app_id, collection, doc) {
+    if !upsert_requires_conflict_probe(app_id, collection, doc).await? {
         return Ok(());
     }
     let Some(schema) = schema else {

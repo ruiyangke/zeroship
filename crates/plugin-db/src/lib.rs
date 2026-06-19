@@ -234,6 +234,16 @@ pub(crate) fn mark_model_registered(app_id: &str, collection: &str) {
     ctx_mut(|c| c.mark_model_registered(app_id, collection));
 }
 
+/// **P4 HALF B test helper** — mark a model registered on the current isolate,
+/// mirroring what `register_model` does at the SDK boundary. The runtime schema
+/// resolver gates on `is_model_registered` (the cold-schema contract), so a
+/// faithful e2e that drives the CRUD pipelines directly must mark the model.
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+pub fn mark_model_registered_for_tests(app_id: &str, collection: &str) {
+    mark_model_registered(app_id, collection);
+}
+
 // The synchronous `ensure_pool(scope)` helper that used to live here
 // has been removed — every callback dispatches through
 // `init_pool_async()` + `context::with_mut(...)` directly (or the
@@ -422,7 +432,17 @@ pub fn set_sqlite_backend_for_tests(backend: Rc<crate::backend::sqlite::SqliteBa
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn cache_schema_for_tests(app_id: &str, collection: &str, schema: serde_json::Value) {
-    ctx_mut(|c| c.cache_schema(app_id, collection, schema));
+    ctx_mut(|c| {
+        c.cache_schema(app_id, collection, schema);
+        // **P4 HALF B** — production `register_model` BOTH caches the declared
+        // schema AND marks the model registered; the runtime schema resolver
+        // (`crud::introspect_schema::runtime_schema_for`) gates on
+        // `is_model_registered` to preserve the cold-schema contract. Mark it
+        // here too so this helper stays a faithful mirror of registration (a
+        // schema cached but not marked registered would never be consulted, an
+        // unfaithful half-state).
+        c.mark_model_registered(app_id, collection);
+    });
 }
 
 /// **P5.5 PR 5 test helper**: clear the per-isolate mask-policy cache
