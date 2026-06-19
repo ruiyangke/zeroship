@@ -88,6 +88,11 @@ const docs = {
   // (tsvector + GIN are core Postgres — no extension needed). Pre-T12 this was
   // stripped at the IR boundary and produced a plain text column with no index.
   body: t.string().fts(),
+  // T13 geoPoint: maps to a PostGIS `geography(POINT, 4326)` column + a
+  // `docs_location_idx` GiST index, emitted DECLARATIVELY by the engine
+  // (mirroring plugin-db's runtime `ensure_spatial_index`). Needs the PostGIS
+  // extension on the capstone instance (alongside pgvector).
+  location: t.geoPoint(),
   // FK to users with cascade delete.
   authorId: t.ref("users", { onDelete: "cascade" }),
 };
@@ -212,6 +217,21 @@ async fn schema_authority_capstone_end_to_end_on_real_pg() {
         .expect("bootstrap __zeroship_admin");
     set_column_key_env();
 
+    // T13 — the capstone's `docs.location` geoPoint needs PostGIS on the same
+    // instance (alongside pgvector). If it cannot be installed (the standing
+    // pgvector image may not bundle PostGIS), SKIP rather than fail: the geoPoint
+    // declarative round-trip has dedicated coverage in
+    // `zeroship-migrate/tests/declarative_pg.rs::t13_geopoint_*`.
+    if conn
+        .batch_execute("CREATE EXTENSION IF NOT EXISTS postgis")
+        .await
+        .is_err()
+    {
+        eprintln!("SKIP: PostGIS not available on the capstone instance (needs pgvector + postgis)");
+        cleanup_app(&conn, &app_id).await;
+        return;
+    }
+
     // -------------------------------------------------------------------
     // SEAM 1 (P3): schema.js → IR → versioned migration file.
     // REAL fn: zeroship_migrate_js::generate_migration
@@ -267,6 +287,17 @@ async fn schema_authority_capstone_end_to_end_on_real_pg() {
     assert!(
         body.contains("USING gin (\"__fts\")"),
         "FTS GIN index over __fts; body:\n{body}"
+    );
+    // T13 geoPoint: a `geography(POINT, 4326)` column + a `docs_location_idx`
+    // GiST index, emitted declaratively by the engine (mirroring plugin-db's
+    // runtime `ensure_spatial_index`). Pre-T13 the engine modeled NO geo index.
+    assert!(
+        body.contains("geography(POINT, 4326)"),
+        "geoPoint column DDL; body:\n{body}"
+    );
+    assert!(
+        body.contains("USING gist (\"location\")"),
+        "geoPoint GiST index over location; body:\n{body}"
     );
     // encrypted ssn → BYTEA + the inline /* zsenc:... */ sentinel (SQLite form)
     // AND a recoverable zsenc COMMENT (the PG form, since PG discards the inline
@@ -517,24 +548,33 @@ async fn schema_authority_capstone_end_to_end_on_real_pg() {
     .await
     .expect("insert users row");
 
-    // (e) the vector column accepts a vector — insert a docs row (FK → users).
+    // (e) the vector column accepts a vector AND (T13) the geography column
+    //     accepts a real point — insert a docs row (FK → users).
     pool.execute(
         &format!(
             "INSERT INTO \"{schema}\".\"docs\" \
-             (id, title, embedding, \"authorId\", created_at, updated_at, version) \
-             VALUES ($1, $2, '[0.1,0.2,0.3]'::vector, $3, now(), now(), 1)"
+             (id, title, embedding, location, \"authorId\", created_at, updated_at, version) \
+             VALUES ($1, $2, '[0.1,0.2,0.3]'::vector, \
+                     ST_MakePoint($4, $5)::geography, $3, now(), now(), 1)"
         ),
-        &[&"doc_p7_1", &"Notes on Babbage", &"usr_p7_ada"],
+        &[
+            &"doc_p7_1",
+            &"Notes on Babbage",
+            &"usr_p7_ada",
+            &(-122.4194f64),
+            &37.7749f64,
+        ],
     )
     .await
-    .expect("insert docs row with a vector + FK to users");
+    .expect("insert docs row with a vector + geography point + FK to users");
     // The FK is real: an orphan authorId is rejected.
     let orphan = pool
         .execute(
             &format!(
                 "INSERT INTO \"{schema}\".\"docs\" \
-                 (id, title, embedding, \"authorId\", created_at, updated_at, version) \
-                 VALUES ($1, $2, '[0.4,0.5,0.6]'::vector, $3, now(), now(), 1)"
+                 (id, title, embedding, location, \"authorId\", created_at, updated_at, version) \
+                 VALUES ($1, $2, '[0.4,0.5,0.6]'::vector, \
+                         ST_MakePoint(0, 0)::geography, $3, now(), now(), 1)"
             ),
             &[&"doc_p7_orphan", &"Orphan", &"usr_nobody"],
         )
@@ -628,6 +668,23 @@ async fn schema_authority_capstone_end_to_end_on_real_pg() {
         "[0.1,0.2,0.3]",
         "the vector column round-trips the inserted vector"
     );
+
+    // T13 — the geography column is functional: a `ST_DWithin` spatial query
+    // (the operator plugin-db's distance search uses) finds the inserted point
+    // within 5km of a nearby origin, proving the engine-emitted
+    // `geography(POINT, 4326)` column + GiST index cohere end-to-end.
+    let near = pool
+        .query_text_params(
+            &format!(
+                "SELECT id FROM \"{schema}\".\"docs\" \
+                 WHERE ST_DWithin(location, ST_MakePoint($1, $2)::geography, $3)"
+            ),
+            &[&"-122.42", &"37.77", &"5000"],
+        )
+        .await
+        .expect("ST_DWithin spatial query on the geography column");
+    assert_eq!(near.len(), 1, "the geoPoint is within 5km of the query origin");
+    assert_eq!(near[0].get::<_, String>("id"), "doc_p7_1");
 
     // FINAL sole-applier proof: after the full CRUD round-trip, the engine's
     // journal is STILL exactly what the deploy-apply left — the data plane

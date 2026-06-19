@@ -475,10 +475,11 @@ fn field_text_is_legitimate(f: &FieldDescriptor) -> bool {
 /// freshly-created table introspects to a byte-equal snapshot (the round-trip
 /// oracle). The twelve base types map to their canonical lowercase
 /// `information_schema` form; the parameterised extension types
-/// (`vector(N)`/`geography(...)`) keep their DDL spelling — `information_schema`
-/// reports `USER-DEFINED` for them, but those types need an extension absent on
-/// the platform's catalog, so they are never introspected/round-tripped today;
-/// the DDL spelling is the stable canonical form the snapshot carries.
+/// (`vector(N)`/`geography(...)`) keep their DDL spelling. `information_schema`
+/// reports `USER-DEFINED` for those, so `snapshot_schema` recovers their precise
+/// spelling from `pg_catalog.format_type` and canonicalises it back to this DDL
+/// form (see [`crate::drift::snapshot_schema`] / `canonical_extension_type`) —
+/// the round-trip is real when the extension is installed (T13 for geoPoint).
 fn ddl_to_information_schema(ddl: &str) -> String {
     match ddl.to_ascii_uppercase().as_str() {
         "TEXT" => "text".into(),
@@ -938,6 +939,17 @@ pub fn desired_snapshot(
                     indexes.push(spec);
                 }
             }
+            // **T13** — a geoPoint field (`t.geoPoint()`) emits a PostGIS GiST
+            // spatial index over its `geography(POINT, 4326)` column. The live
+            // snapshot carries it as `access_method = 'gist'`, so the desired
+            // snapshot must model it identically or the runtime-created GiST index
+            // phantom-drops (and spatial search degrades to a full scan). Mirrors
+            // plugin-db's `SpatialIndex::ensure_spatial_index`.
+            if f.ty == "geoPoint" {
+                if let Some(spec) = geo_index_snapshot(&d.name, f) {
+                    indexes.push(spec);
+                }
+            }
             // A `ref` field declares a FOREIGN KEY constraint.
             if f.ty == "ref" {
                 if let Some(target) = &f.references {
@@ -1128,6 +1140,30 @@ fn vector_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapsh
         access_method: "ivfflat".to_string(),
         expression: None,
         opclass: Some(vector_opclass(f.vector_metric.as_deref()).to_string()),
+    })
+}
+
+/// **T13** — a geoPoint field (`t.geoPoint()`) emits a PostGIS spatial index
+/// (`USING GIST`) over the `geography(POINT, 4326)` column, mirroring plugin-db's
+/// runtime `SpatialIndex::ensure_spatial_index`
+/// (`crates/plugin-db/src/backend/postgres.rs`). The live snapshot carries it as
+/// `access_method = 'gist'`, so the desired snapshot must model it identically or
+/// the runtime-created GiST index phantom-drops (and spatial `ST_DWithin` search
+/// falls back to a full table scan). The index name is the same
+/// `<table>_<col>_idx` `non_unique_index_name` / `zeroship_schema::query::index_name`
+/// produce; no opclass and no storage params (`render_create_index` spells the
+/// bare `USING gist ("col")`).
+fn geo_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapshot> {
+    if f.ty != "geoPoint" {
+        return None;
+    }
+    Some(IndexSnapshot {
+        name: non_unique_index_name(table, &f.name),
+        unique: false,
+        columns: vec![f.name.clone()],
+        access_method: "gist".to_string(),
+        expression: None,
+        opclass: None,
     })
 }
 
