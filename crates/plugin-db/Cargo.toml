@@ -165,5 +165,16 @@ name = "sqlite_integration"
 path = "tests/sqlite_integration.rs"
 required-features = ["test-helpers"]
 
+# Native `Db.transaction(fn)` orchestrator E2E (P9 PR 3). Reaches the
+# `test-helpers`-gated symbols (`set_db_url_for_tests`, the otherwise
+# `pub(crate)` `register_model` module + `exec_register_model_with_pool`),
+# so it must carry the same `required-features` guard as the integration
+# targets above — otherwise bare `cargo test -p zeroship-plugin-db`
+# auto-discovers it and fails to compile (E0425/E0603).
+[[test]]
+name = "native_transaction"
+path = "tests/native_transaction.rs"
+required-features = ["test-helpers"]
+
 [lints]
 workspace = true
