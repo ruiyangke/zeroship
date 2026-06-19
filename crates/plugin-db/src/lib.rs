@@ -53,7 +53,12 @@ use crate::error::DbError;
 // Always pub:
 pub mod broker;
 pub mod error;
-pub mod query;
+// **Schema-authority P1** — the DDL builders + `QueryError` + `SqlDialect` +
+// the system-field / validation helpers were extracted into the leaf crate
+// `zeroship-schema`. plugin-db re-exports the module wholesale so every
+// existing `crate::query::…` reference (and `use crate::query;` then
+// `query::…`) resolves unchanged — behaviour identical, no call-site churn.
+pub use zeroship_schema::query;
 pub mod v8_classes;
 
 // `backend` is crate-private by default; under `test-helpers` it
@@ -88,17 +93,19 @@ pub mod cross_app_fk;
 pub(crate) mod crud;
 #[cfg(feature = "test-helpers")]
 pub mod crud;
-// **P5.5 PR 6** — `diff` is crate-private in release builds; `pub`
-// under `test-helpers` so `tests/sqlite_integration.rs` (and
-// `tests/integration.rs`) can reach `diff::{compute_diff, ChangeKind,
-// ChangeClass, MaskKind, Classification, DiffOp, MaskMeta,
-// LiveSchema, ColumnInfo}` for the mask-transition round-trip tests
-// and the PG-arm end-to-end coverage. Same shape as `crud` /
-// `encryption` above.
+// **Schema-authority P1** — the diff classifier (`compute_diff`,
+// `ChangeKind`, `ChangeClass`, `DiffOp`), the live introspection
+// (`read_live_schema`, `estimate_row_count`), and the schema metadata
+// types (`MaskMeta`, `EncryptionMeta`, `MaskKind`, `Classification`,
+// `WrappedType`, `LiveSchema`, `ColumnInfo`) were extracted into the leaf
+// crate `zeroship-schema`. plugin-db re-exports the module so every
+// `crate::diff::…` reference resolves unchanged. The original `pub(crate)`
+// vs `pub` (under `test-helpers`) visibility is preserved by the cfg gate;
+// the integration suites reach `diff::{…}` only under `test-helpers`.
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) mod diff;
+pub(crate) use zeroship_schema::diff;
 #[cfg(feature = "test-helpers")]
-pub mod diff;
+pub use zeroship_schema::diff;
 pub(crate) mod read_set;
 pub(crate) mod v8_bridge;
 

@@ -28,20 +28,30 @@
 use compio_postgres::Pool;
 use serde_json::Value;
 
-use crate::error::DbError;
+use crate::error::SchemaError;
 
-/// Wrap a `compio_postgres::Error` in [`DbError`] with a context phrase
-/// so operators see *what* the diff layer was doing when the SQL
-/// failed. The SQLSTATE classification still drives the `.code`.
+/// Wrap a `compio_postgres::Error` in [`SchemaError`] with a context
+/// phrase so operators see *what* the introspection layer was doing
+/// when the SQL failed.
 ///
-/// Thin wrapper around the shared variant-walker
-/// [`crate::error::coded_sql`] — stamps the `diff` module prefix onto
-/// the context phrase.
-fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
-    crate::error::coded_sql(&format!("diff: {context}"), e)
+/// This leaf crate cannot name plugin-db's `DbError` (built on
+/// `zeroship_runtime::OpError`), so introspection returns [`SchemaError`]
+/// carrying the context + raw driver error. plugin-db's
+/// `From<SchemaError> for DbError` re-creates the exact
+/// `coded_sql("diff: <context>", e)` shape — re-attaching the `"diff: "`
+/// prefix and preserving the SQLSTATE-derived `.code` from the carried
+/// driver error. Behaviour at the V8 boundary is byte-identical.
+fn coded_sql(context: &str, e: compio_postgres::Error) -> SchemaError {
+    SchemaError::new(context, e)
 }
 
 /// Classification per the proposal A2 three-bucket split.
+///
+/// The `as_audit()` conversion to plugin-db's audit-row enum lives in
+/// plugin-db (`impl From<ChangeClass> for audit::ChangeClass`), not here:
+/// the audit enum is a data-plane lifecycle type and this leaf crate must
+/// not reach into it. Schema-layer code that needs the audit value calls
+/// the conversion at the plugin-db boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeClass {
     /// Add column nullable, add index, relax constraint — auto-apply.
@@ -53,17 +63,6 @@ pub enum ChangeClass {
     /// add NOT NULL to non-empty table, add column with volatile default
     /// — refused; user-approval workflow.
     Destructive,
-}
-
-impl ChangeClass {
-    /// Convert to the audit row enum value.
-    pub fn as_audit(self) -> crate::audit::ChangeClass {
-        match self {
-            Self::Additive => crate::audit::ChangeClass::Additive,
-            Self::Compatible => crate::audit::ChangeClass::Compatible,
-            Self::Destructive => crate::audit::ChangeClass::Destructive,
-        }
-    }
 }
 
 /// A single planned change with the SQL to apply, the classification,
@@ -299,8 +298,8 @@ pub struct EncryptionMeta {
     /// Encryption mode declared by the SDK.
     /// `Randomised` (default, fail-safe) or `Deterministic` (enables
     /// B-tree equality lookups; carries the standard deterministic
-    /// leak). See `crate::backend::EncryptionMode`.
-    pub mode: crate::backend::EncryptionMode,
+    /// leak). See `crate::descriptors::EncryptionMode`.
+    pub mode: crate::descriptors::EncryptionMode,
     /// Key id selecting the per-platform root from
     /// `ZEROSHIP_COLUMN_KEY_<KEYID>` / `__zeroship_admin.column_keys`.
     /// Defaults to `"default"` when the SDK caller omits the field.
@@ -569,7 +568,7 @@ fn desired_physical_columns(schema: &Value) -> std::collections::HashSet<String>
 /// `pg_namespace -> pg_class -> pg_attribute / pg_index` and pulls
 /// `pg_get_expr(adbin, adrelid)` for default expressions along with
 /// `provolatile` for any function the default invokes.
-pub async fn read_live_schema(pool: &Pool, app_id: &str) -> Result<LiveSchema, DbError> {
+pub async fn read_live_schema(pool: &Pool, app_id: &str) -> Result<LiveSchema, SchemaError> {
     let mut out = LiveSchema::default();
     let app_param = app_id.to_string();
     let params: Vec<&str> = vec![app_param.as_str()];
@@ -667,7 +666,7 @@ SELECT c.relname AS table_name,
             continue;
         };
         let (kind, classification) =
-            match crate::crud::mask_backfill::parse_mask_sentinel(&sentinel) {
+            match crate::mask_codec::parse_mask_sentinel(&sentinel) {
                 Ok(p) => p,
                 Err(e) => {
                     // Surface a malformed sentinel as a tracing::warn —
@@ -681,7 +680,7 @@ SELECT c.relname AS table_name,
                         table = %table,
                         sibling = %sibling,
                         sentinel = %sentinel,
-                        error = %e.clone().into_string(),
+                        error = %e,
                         "diff: malformed mask sentinel on PG sibling column; \
                          treating parent column as unmasked"
                     );
@@ -813,7 +812,11 @@ fn decode_fk_action(code: &str) -> &'static str {
 /// estimation when the table is large; the cold-start orchestrator
 /// already holds the advisory lock so an estimate is good enough for the
 /// "empty vs. non-empty" decision.
-pub async fn estimate_row_count(pool: &Pool, app_id: &str, collection: &str) -> Result<i64, DbError> {
+pub async fn estimate_row_count(
+    pool: &Pool,
+    app_id: &str,
+    collection: &str,
+) -> Result<i64, SchemaError> {
     let sql = r#"
 SELECT COALESCE(c.reltuples::bigint, 0) AS rows
   FROM pg_class c
@@ -1140,7 +1143,7 @@ pub fn compute_diff(
                         crate::query::quote_ident(collection),
                         crate::query::quote_ident(&sibling),
                     )];
-                    let sentinel = crate::crud::mask_backfill::build_mask_sentinel(
+                    let sentinel = crate::mask_codec::build_mask_sentinel(
                         new_meta.kind,
                         new_meta.classification,
                     );

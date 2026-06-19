@@ -13,6 +13,16 @@ zeroship-runtime-macros = { workspace = true }
 # (no external crate) — flagged in the PR 3 commit body per the
 # "new Cargo dep" disclosure rule.
 zeroship-core = { workspace = true }
+# **Schema-authority P1** — the schema-description layer (DDL builders,
+# diff classifier, live introspection, sentinel codec, schema-shape
+# descriptor enums) was extracted into the leaf crate `zeroship-schema`.
+# plugin-db's data plane (CRUD / AEAD / mask transforms / register_model)
+# now calls *into* it for any DDL / diff / introspection / codec it needs,
+# and re-exports the moved items from their original module paths
+# (`crate::query`, `crate::diff`, `crate::backend::{VectorMetric,…}`,
+# `crate::crud::mask_backfill::{build,parse}_mask_sentinel`) so existing
+# call sites resolve unchanged. Behaviour is identical (pure refactor).
+zeroship-schema = { workspace = true }
 # Metering infrastructure: exec.rs emits a raw usage metric
 # (db_reads / db_writes / db_rows_written) in the success arm of each
 # query / mutation / count via a MeterHandle. Platform-measured,

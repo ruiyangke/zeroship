@@ -6897,6 +6897,7 @@ dependencies = [
  "zeroship-metering",
  "zeroship-runtime",
  "zeroship-runtime-macros",
+ "zeroship-schema",
 ]
 
 [[package]]
@@ -7039,6 +7040,17 @@ dependencies = [
  "tracing",
  "ureq",
  "uuid",
+ "zeroship-core",
+]
+
+[[package]]
+name = "zeroship-schema"
+version = "0.1.0"
+dependencies = [
+ "compio-postgres",
+ "serde_json",
+ "sha2 0.10.9",
+ "tracing",
  "zeroship-core",
 ]
 

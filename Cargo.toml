@@ -179,6 +179,7 @@ zeroship-bundle = { path = "crates/bundle" }
 compio-postgres = { path = "crates/compio-postgres" }
 compio-redis = { path = "crates/compio-redis" }
 compio-s3 = { path = "crates/compio-s3" }
+zeroship-schema = { path = "crates/zeroship-schema" }
 zeroship-plugin-db = { path = "crates/plugin-db" }
 zeroship-plugin-storage = { path = "crates/plugin-storage" }
 zeroship-plugin-kv = { path = "crates/plugin-kv" }

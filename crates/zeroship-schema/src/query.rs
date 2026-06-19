@@ -109,7 +109,7 @@ impl SqlDialect {
     /// Build the placeholder SQL fragment for an encrypted-column
     /// parameter at position `n` (1-indexed). PG wraps the placeholder
     /// in a `decode(...)::bytea` cast; SQLite emits a bare `$N`.
-    pub(crate) fn encrypted_column_bind_placeholder(self, n: usize) -> String {
+    pub fn encrypted_column_bind_placeholder(self, n: usize) -> String {
         match self {
             Self::Postgres => format!("decode(${n}, 'base64')::bytea"),
             Self::Sqlite => format!("${n}"),
@@ -122,7 +122,7 @@ impl SqlDialect {
     /// [`SqlDialect::encrypted_column_bind_placeholder`]); SQLite
     /// prepends [`SQLITE_ENC_BLOB_PREFIX`] so the session actor can
     /// route the param through a binary bind.
-    pub(crate) fn wrap_encrypted_param(self, b64_value: String) -> String {
+    pub fn wrap_encrypted_param(self, b64_value: String) -> String {
         match self {
             Self::Postgres => b64_value,
             Self::Sqlite => format!("{SQLITE_ENC_BLOB_PREFIX}{b64_value}"),
@@ -141,13 +141,13 @@ impl SqlDialect {
 /// [`SqlDialect::wrap_encrypted_param`] is a no-op on the PG arm.
 pub const SQLITE_ENC_BLOB_PREFIX: &str = "__zsenc_blob__:";
 
-pub(crate) const MAX_QUERY_LIMIT: i64 = 500;
-pub(crate) const MAX_QUERY_OFFSET: i64 = 10_000;
-pub(crate) const MAX_SEARCH_LIMIT: usize = 500;
+pub const MAX_QUERY_LIMIT: i64 = 500;
+pub const MAX_QUERY_OFFSET: i64 = 10_000;
+pub const MAX_SEARCH_LIMIT: usize = 500;
 /// DB-11: max documents in a single `insertMany`. Bounds the multi-row SQL
 /// string + bound-param vector materialized in the worker (and stays well
 /// under Postgres' 65535-bind-param wall). Callers needing more must chunk.
-pub(crate) const MAX_INSERT_MANY_BATCH: usize = 1_000;
+pub const MAX_INSERT_MANY_BATCH: usize = 1_000;
 const MAX_FILTER_NESTING_DEPTH: usize = 16;
 const MAX_FILTER_CLAUSE_COUNT: usize = 128;
 const MAX_MEMBERSHIP_LIST_LEN: usize = 100;
@@ -156,7 +156,7 @@ const MAX_MEMBERSHIP_LIST_LEN: usize = 100;
 /// [`MAX_QUERY_LIMIT`] rather than emitting NO `LIMIT` clause (which would pull
 /// the entire collection into the worker). Callers paginate past one page via
 /// `offset`. Explicit limits are still bounds-checked by `validate_limit_bound`.
-pub(crate) fn effective_query_limit(explicit: Option<i64>) -> i64 {
+pub fn effective_query_limit(explicit: Option<i64>) -> i64 {
     explicit.unwrap_or(MAX_QUERY_LIMIT)
 }
 
@@ -170,7 +170,7 @@ pub(crate) fn effective_query_limit(explicit: Option<i64>) -> i64 {
 ///   system catalogs.
 /// - Must not start with `__zeroship` (case-insensitive) — reserved for the
 ///   platform's own internal tables (e.g. `__zeroship_migrations`).
-pub(crate) fn validate_collection(name: &str) -> Result<(), QueryError> {
+pub fn validate_collection(name: &str) -> Result<(), QueryError> {
     if name.is_empty() {
         return Err(QueryError::InvalidCollection(
             "collection name cannot be empty".to_string(),
@@ -220,7 +220,7 @@ pub(crate) fn validate_collection(name: &str) -> Result<(), QueryError> {
 /// The list is intentionally narrow — only keys the runtime
 /// actually reads. Adding a new metadata key here is a deliberate
 /// platform extension, not a creator-driven decision.
-pub(crate) fn is_schema_metadata_key(key: &str) -> bool {
+pub fn is_schema_metadata_key(key: &str) -> bool {
     matches!(key, "_meta" | "_indexes")
 }
 
@@ -267,7 +267,7 @@ pub(crate) enum ReservedName {
 /// The reservation produces [`QueryError::ReservedSystemFieldName`]
 /// (distinct from [`QueryError::InvalidIdent`]) so the SDK can branch
 /// on a stable code (`reserved_system_field_name`).
-pub(crate) const SYSTEM_FIELD_NAMES: &[&str] = &[
+pub const SYSTEM_FIELD_NAMES: &[&str] = &[
     "id",
     "created_at",
     "updated_at",
@@ -337,7 +337,7 @@ pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
 /// `db.users.find({ id: "..." })` is the canonical query shape and
 /// must keep working. Declaration paths must call
 /// [`validate_field_name_for_declaration`] instead of this function.
-pub(crate) fn validate_field_name(name: &str) -> Result<(), QueryError> {
+pub fn validate_field_name(name: &str) -> Result<(), QueryError> {
     if name.is_empty() {
         return Err(QueryError::InvalidIdent(
             "field name cannot be empty".to_string(),
@@ -411,7 +411,7 @@ pub(crate) fn validate_field_name(name: &str) -> Result<(), QueryError> {
 /// `reserved_system_field_name` code. The message names the offending
 /// field; the hint enumerates all 7 system fields so the creator
 /// knows the full reserved set without consulting docs.
-pub(crate) fn validate_field_name_for_declaration(name: &str) -> Result<(), QueryError> {
+pub fn validate_field_name_for_declaration(name: &str) -> Result<(), QueryError> {
     validate_field_name(name)?;
     if SYSTEM_FIELD_NAMES.contains(&name) {
         return Err(QueryError::ReservedSystemFieldName(format!(
@@ -429,7 +429,7 @@ pub(crate) fn validate_field_name_for_declaration(name: &str) -> Result<(), Quer
 /// ids (`crates/core/src/typed_id.rs`), so the prefix is rejected.
 /// Only `usr` is reserved for now (matches the SDK-side fence in
 /// `sdks/db/src/types.ts`).
-pub(crate) const RESERVED_ID_PREFIXES: &[&str] = &["usr"];
+pub const RESERVED_ID_PREFIXES: &[&str] = &["usr"];
 
 /// **P7** — validate a creator-declared typed-id prefix (`t.id("blog")`).
 ///
@@ -444,7 +444,7 @@ pub(crate) const RESERVED_ID_PREFIXES: &[&str] = &["usr"];
 /// - must not be a [`RESERVED_ID_PREFIXES`] entry → [`QueryError::ReservedSystemFieldName`]
 ///   (reuses the typed `reserved_system_field_name` SDK code; the prefix
 ///   collision is morally a system-field reservation).
-pub(crate) fn validate_id_prefix(prefix: &str) -> Result<(), QueryError> {
+pub fn validate_id_prefix(prefix: &str) -> Result<(), QueryError> {
     let valid = prefix
         .chars()
         .next()
@@ -529,7 +529,7 @@ fn validate_schema(name: &str) -> Result<(), QueryError> {
 
 /// Quote an identifier (table or column name) with double-quotes.
 /// Escapes any embedded double-quotes by doubling them.
-pub(crate) fn quote_ident(name: &str) -> String {
+pub fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
@@ -568,7 +568,7 @@ pub enum FkEmission<'a> {
     Deferred(&'a std::collections::HashSet<String>),
 }
 
-// pub (not pub(crate)): external consumer tests/integration.rs calls this via glob import.
+// pub (not pub): external consumer tests/integration.rs calls this via glob import.
 //
 // **P7 PR 2** — PG-flavoured shim around
 // [`build_create_table_with_fks_for_dialect`]. Every existing call site
@@ -1043,7 +1043,7 @@ fn normalize_fk_action_inner(s: Option<&str>) -> &'static str {
 }
 
 /// Normalise an FK action; used cross-module by the diff engine.
-pub(crate) fn normalize_fk_action(s: Option<&str>) -> &'static str {
+pub fn normalize_fk_action(s: Option<&str>) -> &'static str {
     normalize_fk_action_inner(s)
 }
 
@@ -1153,7 +1153,7 @@ pub struct IndexSpec {
 /// `Spatial` dispatch through the `register_model::apply` Pass 2.
 ///
 /// **Why an enum, not a string**: same rationale as
-/// [`crate::backend::VectorMetric`] — the rustc exhaustiveness check
+/// [`crate::descriptors::VectorMetric`] — the rustc exhaustiveness check
 /// trips every match arm if a future PR adds a fifth kind, rather
 /// than a default branch silently routing the new kind to the B-tree
 /// builder.
@@ -1173,8 +1173,8 @@ pub enum IndexKind {
     Vector {
         /// Declared vector dimensionality (e.g. 768 for `text-embedding-3-small`).
         dims: i32,
-        /// Distance metric — see [`crate::backend::VectorMetric`].
-        metric: crate::backend::VectorMetric,
+        /// Distance metric — see [`crate::descriptors::VectorMetric`].
+        metric: crate::descriptors::VectorMetric,
     },
     /// Full-text index. `language` is the tsvector configuration
     /// (`english`, `simple`, …) on PG; SQLite FTS5 ignores it (its
@@ -1303,9 +1303,9 @@ pub fn build_create_indexes(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("cosine");
             let metric = match metric_str {
-                "l2" => crate::backend::VectorMetric::L2,
-                "innerProduct" | "ip" => crate::backend::VectorMetric::InnerProduct,
-                _ => crate::backend::VectorMetric::Cosine,
+                "l2" => crate::descriptors::VectorMetric::L2,
+                "innerProduct" | "ip" => crate::descriptors::VectorMetric::InnerProduct,
+                _ => crate::descriptors::VectorMetric::Cosine,
             };
             let name = index_name(collection, &[field.as_str()], /* unique = */ false);
             out.push(IndexSpec {
@@ -1648,7 +1648,7 @@ fn short_hash_base32(input: &str) -> String {
 /// shadow a sibling. Called by both `build_create_table_with_fks`
 /// (DDL emission) and `build_insert` / `build_set_clauses` (atomic
 /// dual-write).
-pub(crate) fn mask_sibling_column_for_field(
+pub fn mask_sibling_column_for_field(
     field: &str,
     def: &serde_json::Value,
 ) -> Option<String> {
@@ -1668,8 +1668,8 @@ pub(crate) fn mask_sibling_column_for_field(
 /// Reused by both backend introspectors (PG `COMMENT ON COLUMN` write
 /// + SQLite inline-comment parse on read) — keeps the wire shape
 /// consistent. The parser side lives in
-/// [`crate::crud::mask_backfill::parse_mask_sentinel`].
-pub(crate) fn mask_sentinel_for_field(def: &serde_json::Value) -> Option<String> {
+/// [`crate::mask_codec::parse_mask_sentinel`].
+pub fn mask_sentinel_for_field(def: &serde_json::Value) -> Option<String> {
     let mask_meta = def.get("mask").and_then(|v| v.as_object())?;
     let kind_str = mask_meta.get("kind").and_then(|v| v.as_str()).unwrap_or("full");
     if kind_str == "none" {
@@ -1681,7 +1681,7 @@ pub(crate) fn mask_sentinel_for_field(def: &serde_json::Value) -> Option<String>
         .and_then(|v| v.as_str())
         .unwrap_or("pii");
     let classification = crate::diff::Classification::from_sql(class_str)?;
-    Some(crate::crud::mask_backfill::build_mask_sentinel(
+    Some(crate::mask_codec::build_mask_sentinel(
         kind,
         classification,
     ))
@@ -2244,7 +2244,7 @@ pub fn build_find(
     build_find_with_schema(app_id, collection, filter, limit, offset, order_by, select, None)
 }
 
-pub(crate) fn build_conflict_probe_with_dialect(
+pub fn build_conflict_probe_with_dialect(
     app_id: &str,
     collection: &str,
     filter: &Value,
@@ -2562,7 +2562,7 @@ fn compose_where_with_soft_delete(where_clause: &str, filter_soft_deleted: bool)
 /// for masked columns when `schema_hint` is `Some(_)`. Thin shim around
 /// [`build_masked_aware_select_expr_with_unmask`] for legacy callers
 /// that have no per-query unmask hint to thread through.
-pub(crate) fn build_masked_aware_select_expr(
+pub fn build_masked_aware_select_expr(
     select: Option<&Value>,
     schema_hint: Option<&Value>,
 ) -> Result<String, QueryError> {
@@ -2590,7 +2590,7 @@ pub(crate) fn build_masked_aware_select_expr(
 /// When the schema cache is warm we always expand to the allowlisted
 /// public column set so read paths cannot surface internal physical
 /// columns. Only a cold schema cache falls back to `t.*`.
-pub(crate) fn build_masked_aware_select_expr_for_table_alias(
+pub fn build_masked_aware_select_expr_for_table_alias(
     schema_hint: Option<&Value>,
     table_alias: &str,
 ) -> String {
@@ -2700,7 +2700,7 @@ fn implicit_read_projection_parts(
 /// `.mask({...})` entry on `schema_hint`? Returns `false` when the
 /// schema is missing, the column is absent from it, or the mask is the
 /// explicit opt-out (`kind: "none"`).
-pub(crate) fn column_is_masked(name: &str, schema_hint: Option<&Value>) -> bool {
+pub fn column_is_masked(name: &str, schema_hint: Option<&Value>) -> bool {
     let Some(schema_obj) = schema_hint.and_then(|v| v.as_object()) else {
         return false;
     };
@@ -2726,7 +2726,7 @@ pub(crate) fn column_is_masked(name: &str, schema_hint: Option<&Value>) -> bool 
 /// never lower to the bare plaintext column. Returns a quoted identifier
 /// (the sibling when masked, the field itself otherwise) — NOT aliased,
 /// since the aggregate builder applies its own `AS` where appropriate.
-pub(crate) fn aggregate_read_ident(field: &str, schema_hint: Option<&Value>) -> String {
+pub fn aggregate_read_ident(field: &str, schema_hint: Option<&Value>) -> String {
     if column_is_masked(field, schema_hint) {
         quote_ident(&format!("{field}_masked"))
     } else {
@@ -2897,7 +2897,7 @@ pub fn build_insert_with_dialect(
 /// `crate::crud::encryption_pass::encrypt_row_on_write`. Callers walk
 /// the doc once with this set to know which placeholders need the
 /// `decode($N, 'base64')::bytea` cast.
-pub(crate) fn collect_encrypted_cols(
+pub fn collect_encrypted_cols(
     obj: &serde_json::Map<String, Value>,
 ) -> std::collections::HashSet<&str> {
     let mut out = std::collections::HashSet::new();
@@ -4223,13 +4223,13 @@ pub fn build_distinct_with_soft_delete_with_dialect(
 /// vector and `$2` for `k`; the filter's own placeholders start from
 /// `$3` because [`build_where`] always allocates fresh numbers from
 /// the `params` length.
-pub(crate) fn build_vector_search(
+pub fn build_vector_search(
     app_id: &str,
     collection: &str,
     column: &str,
     query: &[f32],
     k: usize,
-    metric: crate::backend::VectorMetric,
+    metric: crate::descriptors::VectorMetric,
     filter: &Value,
     schema_hint: Option<&Value>,
 ) -> Result<BuiltQuery, QueryError> {
@@ -4242,12 +4242,12 @@ pub(crate) fn build_vector_search(
     let table = quote_ident(collection);
     let col = quote_ident(column);
 
-    // pgvector operator per metric — see `crate::backend::VectorMetric`
+    // pgvector operator per metric — see `crate::descriptors::VectorMetric`
     // doc-comment for the operator/opclass mapping.
     let op = match metric {
-        crate::backend::VectorMetric::Cosine => "<=>",
-        crate::backend::VectorMetric::L2 => "<->",
-        crate::backend::VectorMetric::InnerProduct => "<#>",
+        crate::descriptors::VectorMetric::Cosine => "<=>",
+        crate::descriptors::VectorMetric::L2 => "<->",
+        crate::descriptors::VectorMetric::InnerProduct => "<#>",
     };
 
     // Render the query vector as a pgvector text literal: `[1,2,3,...]`.
@@ -4318,7 +4318,7 @@ pub(crate) fn build_vector_search(
 /// Pulls in the standard `build_where` helper for filter composition —
 /// any operator the rest of the read path supports works inside an FTS
 /// query too (`{lang: "en"}`, `{$and: [...]}`, etc.).
-pub(crate) fn build_fts_search(
+pub fn build_fts_search(
     app_id: &str,
     collection: &str,
     query: &str,
@@ -4374,7 +4374,7 @@ pub(crate) fn build_fts_search(
 ///
 /// **Parameter order**: `$1 = lng`, `$2 = lat` — `ST_MakePoint(x, y)` is
 /// `(lng, lat)` in PostGIS, the inverse of the SDK's `{lat, lng}` shape.
-/// The Rust trait surface ([`crate::backend::GeoPoint`]) keeps the
+/// The Rust trait surface ([`crate::descriptors::GeoPoint`]) keeps the
 /// `{lat, lng}` shape; the swap happens here at the SQL boundary so the
 /// JS/Rust contract stays in `(lat, lng)` order. `$3 = radius_m`,
 /// `$4 = limit`. Filter parameters start at `$5`.
@@ -4382,11 +4382,11 @@ pub(crate) fn build_fts_search(
 /// **Column type**: the indexed column must be
 /// `geography(POINT, 4326)`. The PG DDL emitter ([`field_to_column`])
 /// wires this when the schema field type is `geoPoint`.
-pub(crate) fn build_spatial_near(
+pub fn build_spatial_near(
     app_id: &str,
     collection: &str,
     column: &str,
-    point: crate::backend::GeoPoint,
+    point: crate::descriptors::GeoPoint,
     radius_m: f64,
     filter: &Value,
     limit: Option<usize>,
@@ -4578,17 +4578,17 @@ fn build_having_condition(
 /// Build a WHERE clause from a filter JSON value.
 /// Returns empty string if the filter is null/empty.
 ///
-/// **Visibility (P4 PR 5)**: lifted from `fn` to `pub(crate)` so the
+/// **Visibility (P4 PR 5)**: lifted from `fn` to `pub` so the
 /// SQLite-side `fts.rs` / `spatial.rs` helpers can compose a parametrised
 /// predicate fragment against pre-seeded params (`$1` = MATCH query, `$2`
 /// = LIMIT, etc.) without rebuilding the filter machinery. The body
 /// itself is unchanged — every existing call site keeps its
 /// behaviour byte-for-byte.
-pub(crate) fn build_where(filter: &Value, params: &mut Vec<String>) -> Result<String, QueryError> {
+pub fn build_where(filter: &Value, params: &mut Vec<String>) -> Result<String, QueryError> {
     build_where_with_dialect(filter, params, SqlDialect::Postgres)
 }
 
-pub(crate) fn build_where_with_dialect(
+pub fn build_where_with_dialect(
     filter: &Value,
     params: &mut Vec<String>,
     dialect: SqlDialect,
@@ -5096,7 +5096,7 @@ fn value_to_param_inner(value: &Value) -> String {
 }
 
 /// Convert a JSON value to a Postgres text param; used cross-module (B1 migrations).
-pub(crate) fn value_to_param(value: &Value) -> String {
+pub fn value_to_param(value: &Value) -> String {
     value_to_param_inner(value)
 }
 
@@ -8644,28 +8644,15 @@ mod tests {
         );
     }
 
-    /// The reservation lifts cleanly into the `DbError::ValidationFailed`
-    /// boundary with `code = "reserved_system_field_name"`. Distinct
-    /// from the generic `invalid_identifier` code the `_*` / `__zs_*`
-    /// prefix reservations carry — the SDK can branch on the new code.
-    #[test]
-    fn system_field_reservation_error_carries_correct_code() {
-        let err = validate_field_name_for_declaration("id").unwrap_err();
-        let db_err = crate::error::DbError::from(err);
-        match db_err {
-            crate::error::DbError::ValidationFailed { code, hint, .. } => {
-                assert_eq!(code, "reserved_system_field_name");
-                let hint = hint.expect("reservation hint required for SDK remediation");
-                for name in SYSTEM_FIELD_NAMES {
-                    assert!(
-                        hint.contains(name),
-                        "reservation hint must list all 7 system fields; missing {name:?}"
-                    );
-                }
-            }
-            other => panic!("expected ValidationFailed, got {other:?}"),
-        }
-    }
+    // NOTE: `system_field_reservation_error_carries_correct_code` — which
+    // asserted the `From<QueryError> for DbError` lift carries
+    // `code = "reserved_system_field_name"` — was relocated to plugin-db's
+    // `error.rs` test module as part of the schema-authority extraction.
+    // `DbError` lives in plugin-db (it is built on `zeroship_runtime::OpError`)
+    // and cannot be named from this leaf crate. The validator
+    // (`validate_field_name_for_declaration`) and the `QueryError`
+    // variant it produces are tested here; the *mapping* to `DbError` is
+    // tested where `DbError` lives.
 
     /// `field_to_column` (the DDL builder for one column) must propagate
     /// the system-field reservation. End-to-end check that the
@@ -9939,7 +9926,7 @@ mod tests {
             "embedding",
             &[0.1, 0.2],
             5,
-            crate::backend::VectorMetric::Cosine,
+            crate::descriptors::VectorMetric::Cosine,
             &serde_json::json!({}),
             Some(&schema),
         )
@@ -9995,7 +9982,7 @@ mod tests {
             "app1",
             "users",
             "location",
-            crate::backend::GeoPoint { lat: 37.7, lng: -122.4 },
+            crate::descriptors::GeoPoint { lat: 37.7, lng: -122.4 },
             1000.0,
             &serde_json::json!({}),
             Some(10),
@@ -10170,7 +10157,7 @@ mod tests {
             "embedding",
             &[0.1, 0.2],
             MAX_SEARCH_LIMIT + 1,
-            crate::backend::VectorMetric::Cosine,
+            crate::descriptors::VectorMetric::Cosine,
             &serde_json::json!({}),
             Some(&schema),
         )

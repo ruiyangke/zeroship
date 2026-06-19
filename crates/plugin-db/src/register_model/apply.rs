@@ -91,7 +91,7 @@ pub(crate) async fn apply<
             &crate::audit::AuditRow {
                 collection: op.collection.clone(),
                 phase: crate::audit::Phase::Ddl,
-                change_class: op.class.as_audit(),
+                change_class: crate::audit::ChangeClass::from(op.class),
                 change_kind: op.change_kind.as_sql().to_string(),
                 details: op.details.clone(),
                 ddl_sql: op.sql.clone(),
