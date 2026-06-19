@@ -349,6 +349,23 @@ fn collect_expected_hashes(manifest: &Manifest) -> Result<HashSet<String>, Inges
         out.insert(k.clone());
         out.insert(v.clone());
     }
+    // Migration file blobs (schema-authority §8): each carried migration's
+    // body is content-addressed exactly like a worker module. `validate()`
+    // already enforced the hash format + bare-filename safety; gather the
+    // hashes so step 8 asserts every migration blob was present in the tar.
+    for entry in &manifest.migrations {
+        if !crate::blob::validate_hash_format(&entry.hash) {
+            return Err(IngestError::bad(
+                "invalid manifest",
+                format!(
+                    "migrations[{name}].hash {hash:?} is not lowercase sha256 hex",
+                    name = entry.name,
+                    hash = entry.hash
+                ),
+            ));
+        }
+        out.insert(entry.hash.clone());
+    }
     Ok(out)
 }
 
@@ -463,6 +480,31 @@ mod tests {
         assert!(set.contains(&"a".repeat(64)));
         assert!(set.contains(&"b".repeat(64)));
         assert!(set.contains(&"c".repeat(64)));
+    }
+
+    #[test]
+    fn collect_expected_walks_migration_blobs() {
+        // A manifest carrying two migration files: their blob hashes must be
+        // in the expected set so ingest asserts they were present in the tar.
+        let m1 = "e".repeat(64);
+        let m2 = "f".repeat(64);
+        let m: Manifest = serde_json::from_value(json!({
+            "version": 1,
+            "rules": [],
+            "assets": {},
+            "runtime_assets": {},
+            "asset_version": 0,
+            "sourcemaps": {},
+            "migrations": [
+                { "name": "V0001__create_users.sql", "hash": m1 },
+                { "name": "V0002__add_index.sql", "hash": m2 },
+            ],
+            "metadata": { "built_at": "2026-04-29T00:00:00Z" }
+        }))
+        .unwrap();
+        let set = collect_expected_hashes(&m).unwrap();
+        assert!(set.contains(&"e".repeat(64)), "first migration blob expected");
+        assert!(set.contains(&"f".repeat(64)), "second migration blob expected");
     }
 
     #[test]

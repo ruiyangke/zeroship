@@ -129,6 +129,42 @@ pub struct Manifest {
     /// entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exports: Option<ManifestExports>,
+
+    /// Versioned DB migration files carried by the `.zship`, in **apply
+    /// order** (the order the build/`generate` step emitted them). Each
+    /// entry maps a migration filename (e.g. `V0001__create_users.sql`,
+    /// or a dbmate `<14-digit>_<desc>.sql`) to the sha256 hash of its
+    /// blob, content-addressed exactly like worker modules + assets.
+    ///
+    /// At deploy the control plane reconstructs these files on disk and
+    /// hands them to `zeroship-migrate` (Confined profile, schema
+    /// `"<app_id>"`) BEFORE the go-live commit (schema-authority §8). An
+    /// empty list (the default; `skip_serializing_if`) means the app
+    /// ships no schema — the migrate phase is a no-op.
+    ///
+    /// The *filename* is load-bearing: the migration loader derives each
+    /// migration's version + ordering from it, so it must round-trip
+    /// verbatim. The loader (not this struct) enforces the
+    /// `V<NNNN>__…`/dbmate grammar; `validate()` only enforces the blob
+    /// hash format + a path-safety check (no separators / traversal).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub migrations: Vec<MigrationFileEntry>,
+}
+
+/// One migration file carried by a `.zship` (`manifest.migrations[i]`).
+///
+/// `name` is the migration's on-disk filename (the loader parses its
+/// `V<NNNN>__…`/dbmate grammar + derives ordering from it); `hash` is the
+/// sha256 of the file body's content-addressed blob.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationFileEntry {
+    /// Migration filename, e.g. `V0001__create_users.sql`. A bare filename
+    /// only — no path separators, no `.`/`..` traversal (enforced by
+    /// [`Manifest::validate`]).
+    pub name: String,
+    /// sha256 hash (lowercase, 64 hex chars) of the migration file body's
+    /// blob.
+    pub hash: String,
 }
 
 impl Default for Manifest {
@@ -148,6 +184,7 @@ impl Default for Manifest {
             auth: AuthConfig::default(),
             metadata: ManifestMetadata::default(),
             exports: None,
+            migrations: Vec::new(),
         }
     }
 }
@@ -332,6 +369,7 @@ impl Manifest {
                 built_at: "1970-01-01T00:00:00Z".to_string(),
             },
             exports: None,
+            migrations: Vec::new(),
         }
     }
 
@@ -426,6 +464,28 @@ impl Manifest {
         // dependency this crate deliberately does not.
         for scope in &self.auth.scopes {
             ScopeDef::validate_id_format(&scope.id)?;
+        }
+        // Migration entries: each blob hash must be a 64-char lowercase
+        // sha256, and each `name` must be a bare filename (no path
+        // separators / `.`/`..` traversal) so reconstructing it under a
+        // deploy tmp dir can never escape that dir. The migration-file
+        // GRAMMAR (`V<NNNN>__…`/dbmate) is the loader's job at deploy, not
+        // here — this is the wire-format + path-safety guard only.
+        for entry in &self.migrations {
+            if !is_sha256_hex(&entry.hash) {
+                return Err(format!(
+                    "migrations[{name}].hash {hash:?} is not a lowercase 64-char sha256 hex",
+                    name = entry.name,
+                    hash = entry.hash
+                ));
+            }
+            if !is_safe_migration_name(&entry.name) {
+                return Err(format!(
+                    "migrations[].name {name:?} must be a bare filename \
+                     (no path separators or '.'/'..' traversal)",
+                    name = entry.name
+                ));
+            }
         }
         if !self.resources.is_empty() {
             self.validate_resources()?;
@@ -668,4 +728,93 @@ fn is_supported_variant_encoding(s: &str) -> bool {
 
 fn is_sha256_hex(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+}
+
+/// True if `name` is a safe bare migration filename: non-empty, no path
+/// separators (`/` or `\`), and not a `.`/`..` traversal component. The
+/// control plane reconstructs each migration under a deploy tmp dir using
+/// this name, so rejecting separators + traversal keeps the write confined
+/// to that dir.
+fn is_safe_migration_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains('\0')
+}
+
+#[cfg(test)]
+mod migration_validation_tests {
+    use super::*;
+
+    fn base() -> Manifest {
+        Manifest {
+            metadata: ManifestMetadata {
+                compiler: Some("test".into()),
+                built_at: "2026-04-29T00:00:00Z".into(),
+            },
+            ..Manifest::default()
+        }
+    }
+
+    #[test]
+    fn migrations_default_empty_and_omitted_on_wire() {
+        let m = base();
+        assert!(m.migrations.is_empty());
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(
+            !json.contains("migrations"),
+            "empty migrations must be omitted: {json}"
+        );
+        // Round-trips: a manifest without `migrations` deserializes fine.
+        let back: Manifest = serde_json::from_str(&json).unwrap();
+        assert!(back.migrations.is_empty());
+    }
+
+    #[test]
+    fn valid_migrations_pass_validate_and_round_trip() {
+        let mut m = base();
+        m.migrations = vec![
+            MigrationFileEntry {
+                name: "V0001__create_users.sql".into(),
+                hash: "a".repeat(64),
+            },
+            MigrationFileEntry {
+                name: "20240617123000_add_index.sql".into(),
+                hash: "b".repeat(64),
+            },
+        ];
+        m.validate().expect("valid migrations accepted");
+        let json = serde_json::to_string(&m).unwrap();
+        let back: Manifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.migrations, m.migrations, "migrations round-trip in order");
+    }
+
+    #[test]
+    fn rejects_bad_migration_hash() {
+        let mut m = base();
+        m.migrations = vec![MigrationFileEntry {
+            name: "V0001__x.sql".into(),
+            hash: "NOTAHASH".into(),
+        }];
+        let err = m.validate().unwrap_err();
+        assert!(err.contains("not a lowercase 64-char sha256"), "got {err}");
+    }
+
+    #[test]
+    fn rejects_path_traversal_migration_name() {
+        for bad in ["../escape.sql", "sub/dir.sql", "..", ".", "a\\b.sql", ""] {
+            let mut m = base();
+            m.migrations = vec![MigrationFileEntry {
+                name: bad.into(),
+                hash: "c".repeat(64),
+            }];
+            let err = m.validate().unwrap_err();
+            assert!(
+                err.contains("bare filename"),
+                "name {bad:?} must be rejected, got {err}"
+            );
+        }
+    }
 }
