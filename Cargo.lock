@@ -7076,6 +7076,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-schema-authority-e2e"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "compio",
+ "compio-postgres",
+ "serde_json",
+ "tar",
+ "uuid",
+ "zeroship-bundle",
+ "zeroship-control",
+ "zeroship-migrate",
+ "zeroship-migrate-js",
+ "zeroship-plugin-db",
+ "zstd",
+]
+
+[[package]]
 name = "zeroship-worker"
 version = "0.1.0"
 dependencies = [

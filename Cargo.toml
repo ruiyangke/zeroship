@@ -191,6 +191,9 @@ zeroship-runtime-macros = { path = "crates/runtime-macros" }
 zeroship-auth = { path = "crates/auth" }
 zeroship-authz = { path = "crates/authz" }
 zeroship-mailer = { path = "crates/mailer" }
+# Control plane — declared here only so the P7 capstone e2e crate
+# (`crates/schema-authority-e2e`) can dev-depend on its real deploy-migrate fn.
+zeroship-control = { path = "crates/control" }
 
 # ---------------------------------------------------------------------------
 # Shared lints

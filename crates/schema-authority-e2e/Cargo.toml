@@ -1,0 +1,40 @@
+[package]
+name = "zeroship-schema-authority-e2e"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "P7 capstone — the cross-crate end-to-end test for the schema-authority convergence. Carries NO library code: it is a dev-dep-only test target that chains the REAL component functions of P3 (zeroship-migrate-js eval/generate), P6 (zeroship-bundle pack/ingest + zeroship-control deploy-apply), and P4/P5 (zeroship-plugin-db introspect + CRUD) into one pipeline against real Postgres. This crate sits ABOVE all four — it is the only place that can dev-depend on the whole stack at once (no other crate depends on all of migrate-js + bundle + control + plugin-db, and none depend on this one, so the graph stays acyclic)."
+
+# This crate is intentionally EMPTY of library code — `src/lib.rs` is a doc-only
+# placeholder. All the substance is in `tests/`. The four heavy crates are
+# dev-dependencies so they are only built for the test target, never for a
+# release of anything that depends on this package (nothing does).
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+# P3 — the JS schema front-end: eval `schema.js` (V8 sandbox) → descriptor IR →
+# diff → versioned dbmate migration file.
+zeroship-migrate-js = { workspace = true }
+# P6 — the lean engine (for `migrator_role_name` + load_dir assertions) and the
+# .zship deploy artifact (manifest.migrations[] + content-addressed blob store).
+zeroship-migrate = { workspace = true }
+zeroship-bundle = { workspace = true }
+# P6 — control's deploy-migrate phase: the REAL `apply_bundle_migrations` fn that
+# provisions the per-app schema + migrator role and applies under Confined.
+zeroship-control = { workspace = true }
+# P4/P5 — the data plane: introspection-driven CRUD (encrypt-on-write,
+# decrypt-on-read, mask sibling). `test-helpers` exposes the real pipeline fns.
+zeroship-plugin-db = { workspace = true, features = ["test-helpers"] }
+
+# Drivers + glue used directly by the test.
+compio = { workspace = true }
+compio-postgres = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+tar = { workspace = true }
+zstd = { workspace = true }
+base64 = { workspace = true }
+
+[lints]
+workspace = true

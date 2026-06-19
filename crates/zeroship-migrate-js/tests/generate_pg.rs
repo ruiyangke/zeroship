@@ -100,18 +100,26 @@ async fn generate_emits_versioned_migration_with_goodie_ddl() {
     // `encrypted` facet (asserted in tests/eval_ir.rs); the engine's
     // declarative differ renders the column TYPE as BYTEA here.
     //
-    // NOTE (P2-engine gap, flagged for the pilot — NOT a front-end defect):
-    // the spec §4 contract is `BYTEA + inline /* zsenc:... */` (+ sidecar) and
-    // a `COMMENT ... __zsmask:...` on the mask sibling. The engine's
-    // SNAPSHOT-based declarative CREATE TABLE stores only the column
-    // `data_type` (`bytea`/`text`), so the zsenc/zsmask SENTINELS are not
-    // emitted by `DeclarativeAuthor::diff` today. The full DDL-with-sentinel
-    // builder lives in `zeroship_schema::query` but the differ renders from
-    // the snapshot, not from that builder. Carrying the sentinel through the
-    // snapshot is an engine (P2) follow-up, independent of this JS front-end.
+    // The spec §4 contract — `BYTEA + inline /* zsenc:... */` and a
+    // `COMMENT ... __zsmask:...` on the mask sibling — is satisfied by the
+    // declarative differ as of P4 HALF A (the `DeclarativeAuthor` threads two
+    // emission-only sentinel fields through `desired_snapshot` →
+    // `render_create_table`, built via the SHARED `zeroship_schema` codec). The
+    // sentinels are therefore present in the generated SQL (asserted just below),
+    // not a follow-up gap — earlier revisions of this comment predated that work.
     assert!(
         body.to_lowercase().contains("\"ssn\" bytea"),
         "encrypted column is BYTEA; body:\n{body}"
+    );
+    // The zsenc sentinel is emitted on the encrypted column (P4 HALF A).
+    assert!(
+        body.contains("/* zsenc:") && body.contains("zsenc:deterministic:pii_key:string"),
+        "encrypted column carries the inline zsenc sentinel; body:\n{body}"
+    );
+    // The __zsmask sentinel is emitted on the masked sibling(s) (P4 HALF A).
+    assert!(
+        body.contains("__zsmask:kind="),
+        "masked siblings carry the __zsmask sentinel; body:\n{body}"
     );
 
     // The mask transform's hidden sibling columns ARE materialised
