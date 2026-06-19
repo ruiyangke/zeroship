@@ -83,6 +83,22 @@ async fn exec_mutation(pool: &Pool, bq: zeroship_plugin_db::query::BuiltQuery) -
     rows.iter().map(|r| row_to_json(r)).collect()
 }
 
+/// Stamp a unique text `id` onto a seed insert document. **P7 convergence**:
+/// the platform `id` system field is now `TEXT PRIMARY KEY` with NO DB default
+/// — production stamps a typed id via the system-fields pass before
+/// `build_insert`. Tests that bypass that pass (calling `build_insert` directly)
+/// must supply the `id` themselves, otherwise the row trips the `id` NOT-NULL.
+fn with_seed_id(mut doc: Value) -> Value {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::SeqCst);
+    if let Some(obj) = doc.as_object_mut() {
+        obj.entry("id")
+            .or_insert_with(|| Value::String(format!("seed_{n}")));
+    }
+    doc
+}
+
 /// Simplified row → JSON (just text columns for testing).
 fn row_to_json(row: &compio_postgres::Row) -> Value {
     let mut obj = serde_json::Map::new();
@@ -896,7 +912,13 @@ async fn a1_unique_index_actually_enforces_uniqueness() {
 
     let create_table =
         build_create_table_with_fks(app, collection, &schema, &FkEmission::Inline).unwrap();
-    pool.execute(&create_table, &[]).await.unwrap();
+    // `build_create_table_with_fks` emits MULTI-statement DDL (the CREATE TABLE
+    // plus the system-field index `CREATE INDEX`s, and on PG the
+    // `COMMENT ON COLUMN … '__zsmask:…'` / `'zsenc:…'` sentinels). The
+    // extended/prepared `execute` path rejects that with `42601 cannot insert
+    // multiple commands into a prepared statement`; the simple-query
+    // `batch_execute` is the correct executor for rendered DDL batches.
+    pool.batch_execute(&create_table).await.unwrap();
 
     // Generate and execute the new index DDL.
     let indexes =
@@ -953,11 +975,13 @@ async fn a1_unique_index_actually_enforces_uniqueness() {
     // The silent-bug live repro: insert two rows with the same email and
     // assert the second one fails with SQLSTATE 23505.
     // -----------------------------------------------------------------------
-    let ins1 = build_insert(app, collection, &json!({"email": "a@x.com"})).unwrap();
+    let ins1 = build_insert(app, collection, &with_seed_id(json!({"email": "a@x.com"}))).unwrap();
     let p1: Vec<&str> = ins1.params.iter().map(String::as_str).collect();
     pool.query_text_params(&ins1.sql, &p1).await.unwrap();
 
-    let ins2 = build_insert(app, collection, &json!({"email": "a@x.com"})).unwrap();
+    // Distinct `id` so the second insert is rejected for the DUPLICATE EMAIL
+    // (the unique index under test), not an incidental duplicate PK.
+    let ins2 = build_insert(app, collection, &with_seed_id(json!({"email": "a@x.com"}))).unwrap();
     let p2: Vec<&str> = ins2.params.iter().map(String::as_str).collect();
     let err = pool.query_text_params(&ins2.sql, &p2).await.unwrap_err();
     let code = err.code().map(|c| c.code().to_string()).unwrap_or_default();
@@ -1465,9 +1489,9 @@ async fn a2_not_null_on_non_empty_refused() {
     .unwrap();
 
     // Insert some data so the table is non-empty.
-    let bq = build_insert(app, "people", &json!({"name": "alice"})).unwrap();
+    let bq = build_insert(app, "people", &with_seed_id(json!({"name": "alice"}))).unwrap();
     exec_mutation(&pool, bq).await;
-    let bq = build_insert(app, "people", &json!({"name": "bob"})).unwrap();
+    let bq = build_insert(app, "people", &with_seed_id(json!({"name": "bob"}))).unwrap();
     exec_mutation(&pool, bq).await;
     // ANALYZE to populate reltuples (estimate_row_count reads pg_class.reltuples).
     pool.execute(&format!("ANALYZE \"{app}\".\"people\""), &[])
@@ -1615,7 +1639,7 @@ async fn a2_required_with_default_is_compatible() {
     .unwrap();
 
     // Insert + analyze to make non-empty.
-    let bq = build_insert(app, "things", &json!({"name": "x"})).unwrap();
+    let bq = build_insert(app, "things", &with_seed_id(json!({"name": "x"}))).unwrap();
     exec_mutation(&pool, bq).await;
     pool.execute(&format!("ANALYZE \"{app}\".\"things\""), &[])
         .await
@@ -2834,12 +2858,14 @@ async fn b2_ref_blocks_orphan_insert() {
     b2_setup_users_posts(&pool, app).await;
 
     // Insert into posts with non-existent authorId; must fail with FK violation.
+    // **P7 convergence**: `id` is `TEXT PRIMARY KEY` (no DB default) — supply one
+    // so the row reaches FK validation rather than tripping the id NOT NULL.
     let result = pool
         .query_text_params(
             &format!(
-                "INSERT INTO \"{app}\".\"posts\" (\"title\", \"authorId\") VALUES ($1, $2)"
+                "INSERT INTO \"{app}\".\"posts\" (\"id\", \"title\", \"authorId\") VALUES ($1, $2, $3)"
             ),
-            &["hello", "9999"],
+            &["pst_b2_orphan_1", "hello", "usr_does_not_exist"],
         )
         .await;
     let err = result.expect_err("orphan insert should fail");
@@ -2859,20 +2885,26 @@ async fn b2_ref_on_delete_restrict_blocks_parent_delete() {
     let app = "b2_restrict_delete";
     b2_setup_users_posts(&pool, app).await;
 
-    // Insert one user + one post that references it.
+    // Insert one user + one post that references it. **P7 convergence**: `id`
+    // is now `TEXT PRIMARY KEY` (no DB default — production stamps a typed id via
+    // the system-fields pass), so the seed INSERT must supply it and read it as
+    // text. A `posts` row also needs its own `id`.
+    let user_id = "usr_b2_restrict_1";
     let user_rows = pool
         .query_text_params(
-            &format!("INSERT INTO \"{app}\".\"users\" (\"name\") VALUES ($1) RETURNING id"),
-            &["alice"],
+            &format!(
+                "INSERT INTO \"{app}\".\"users\" (\"id\", \"name\") VALUES ($1, $2) RETURNING id"
+            ),
+            &[user_id, "alice"],
         )
         .await
         .unwrap();
-    let user_id: i32 = user_rows[0].get("id");
+    let user_id: String = user_rows[0].get("id");
     pool.query_text_params(
         &format!(
-            "INSERT INTO \"{app}\".\"posts\" (\"title\", \"authorId\") VALUES ($1, $2)"
+            "INSERT INTO \"{app}\".\"posts\" (\"id\", \"title\", \"authorId\") VALUES ($1, $2, $3)"
         ),
-        &["hello", &user_id.to_string()],
+        &["pst_b2_restrict_1", "hello", &user_id],
     )
     .await
     .unwrap();
@@ -2881,7 +2913,7 @@ async fn b2_ref_on_delete_restrict_blocks_parent_delete() {
     let result = pool
         .query_text_params(
             &format!("DELETE FROM \"{app}\".\"users\" WHERE id = $1"),
-            &[&user_id.to_string()],
+            &[&user_id],
         )
         .await;
     let err = result.expect_err("RESTRICT must block parent delete");
@@ -2917,21 +2949,25 @@ async fn b2_ref_on_delete_cascade_deletes_children() {
     .await
     .unwrap();
 
-    // Insert user + 3 posts that reference it.
+    // Insert user + 3 posts that reference it. **P7 convergence**: `id` is now
+    // `TEXT PRIMARY KEY` (no DB default), so seed inserts must supply text ids.
+    let user_id = "usr_b2_cascade_1";
     let user_rows = pool
         .query_text_params(
-            &format!("INSERT INTO \"{app}\".\"users\" (\"name\") VALUES ($1) RETURNING id"),
-            &["bob"],
+            &format!(
+                "INSERT INTO \"{app}\".\"users\" (\"id\", \"name\") VALUES ($1, $2) RETURNING id"
+            ),
+            &[user_id, "bob"],
         )
         .await
         .unwrap();
-    let user_id: i32 = user_rows[0].get("id");
-    for title in ["a", "b", "c"] {
+    let user_id: String = user_rows[0].get("id");
+    for (i, title) in ["a", "b", "c"].iter().enumerate() {
         pool.query_text_params(
             &format!(
-                "INSERT INTO \"{app}\".\"posts\" (\"title\", \"authorId\") VALUES ($1, $2)"
+                "INSERT INTO \"{app}\".\"posts\" (\"id\", \"title\", \"authorId\") VALUES ($1, $2, $3)"
             ),
-            &[title, &user_id.to_string()],
+            &[&format!("pst_b2_cascade_{i}"), title, &user_id],
         )
         .await
         .unwrap();
@@ -2940,7 +2976,7 @@ async fn b2_ref_on_delete_cascade_deletes_children() {
     // Delete the user — CASCADE should also delete the 3 posts.
     pool.query_text_params(
         &format!("DELETE FROM \"{app}\".\"users\" WHERE id = $1"),
-        &[&user_id.to_string()],
+        &[&user_id],
     )
     .await
     .unwrap();
@@ -3098,33 +3134,43 @@ async fn b2_adding_fk_to_existing_data_validates() {
         std::rc::Rc::clone(&pool), app, "users", &users_schema, &serde_json::json!([]), "v1",)
     .await
     .unwrap();
+    // **P7 convergence**: `id` is now `TEXT PRIMARY KEY`, so the FK target
+    // (`users.id`) is text — `authorId` must be a text-shaped column to later
+    // become a `t.ref("users")`. (Pre-convergence `id` was SERIAL/INTEGER and
+    // this used `number`.)
     let posts_schema_v1 = json!({
         "title": {"type": "string", "required": true},
-        "authorId": {"type": "number"},
+        "authorId": {"type": "string"},
     });
     zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool), app, "posts", &posts_schema_v1, &serde_json::json!([]), "v1",)
     .await
     .unwrap();
 
-    // Insert valid + orphan rows.
+    // Insert valid + orphan rows. Seed inserts must supply a text `id`.
     let urows = pool
         .query_text_params(
-            &format!("INSERT INTO \"{app}\".\"users\" (\"name\") VALUES ($1) RETURNING id"),
-            &["alice"],
+            &format!(
+                "INSERT INTO \"{app}\".\"users\" (\"id\", \"name\") VALUES ($1, $2) RETURNING id"
+            ),
+            &["usr_b2_existing_1", "alice"],
         )
         .await
         .unwrap();
-    let valid_uid: i32 = urows[0].get("id");
+    let valid_uid: String = urows[0].get("id");
     pool.query_text_params(
-        &format!("INSERT INTO \"{app}\".\"posts\" (\"title\", \"authorId\") VALUES ($1, $2)"),
-        &["valid", &valid_uid.to_string()],
+        &format!(
+            "INSERT INTO \"{app}\".\"posts\" (\"id\", \"title\", \"authorId\") VALUES ($1, $2, $3)"
+        ),
+        &["pst_b2_existing_valid", "valid", &valid_uid],
     )
     .await
     .unwrap();
     pool.query_text_params(
-        &format!("INSERT INTO \"{app}\".\"posts\" (\"title\", \"authorId\") VALUES ($1, $2)"),
-        &["orphan", "9999"],
+        &format!(
+            "INSERT INTO \"{app}\".\"posts\" (\"id\", \"title\", \"authorId\") VALUES ($1, $2, $3)"
+        ),
+        &["pst_b2_existing_orphan", "orphan", "usr_does_not_exist"],
     )
     .await
     .unwrap();
