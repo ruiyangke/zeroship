@@ -5293,7 +5293,7 @@ async fn pgvector_extension_missing_reports_typed_error() {
     }
 
     let backend = PostgresBackend::new(pool.clone(), url.clone());
-    let err = VectorIndex::ensure_vector_index(
+    let ensure_err = VectorIndex::ensure_vector_index(
         &backend,
         "vector_missing",
         "any",
@@ -5303,23 +5303,10 @@ async fn pgvector_extension_missing_reports_typed_error() {
     )
     .await
     .expect_err("missing extension must yield a typed error");
-    match err {
-        DbError::Configuration { code, message, hint } => {
-            assert_eq!(code, "vector_extension_missing", "got {message}");
-            assert!(
-                hint.as_deref()
-                    .map(|h| h.contains("CREATE EXTENSION"))
-                    .unwrap_or(false),
-                "hint must mention `CREATE EXTENSION vector;`: {hint:?}"
-            );
-        }
-        other => panic!("expected Configuration {{ vector_extension_missing }}, got {other:?}"),
-    }
 
-    // Also assert vector_search produces the same typed error — the
-    // SDK branches on `e.code === "vector_extension_missing"` from
-    // BOTH entry points.
-    let err = VectorIndex::vector_search(
+    // Also exercise vector_search — the SDK branches on
+    // `e.code === "vector_extension_missing"` from BOTH entry points.
+    let search_err = VectorIndex::vector_search(
         &backend,
         "vector_missing",
         "any",
@@ -5331,7 +5318,31 @@ async fn pgvector_extension_missing_reports_typed_error() {
     )
     .await
     .expect_err("missing extension must yield a typed error on search too");
-    match err {
+
+    // RESTORE the extension BEFORE asserting: this test deliberately drops a
+    // SHARED, cluster-/db-wide object (the `vector` extension lives in
+    // `public`, not in a per-app schema), so leaving it dropped breaks every
+    // vector-dependent test ordered after this one in a single-threaded run
+    // (e.g. `p4_round_trip_encrypted_masked_vector_via_introspected_metadata`,
+    // which `registerModel`s a `vector` column). Restore happens before the
+    // assertions so a failed assertion can never leak the dropped state.
+    pool.execute("CREATE EXTENSION IF NOT EXISTS vector", &[])
+        .await
+        .expect("restore the shared vector extension after the missing-extension probe");
+
+    match ensure_err {
+        DbError::Configuration { code, message, hint } => {
+            assert_eq!(code, "vector_extension_missing", "got {message}");
+            assert!(
+                hint.as_deref()
+                    .map(|h| h.contains("CREATE EXTENSION"))
+                    .unwrap_or(false),
+                "hint must mention `CREATE EXTENSION vector;`: {hint:?}"
+            );
+        }
+        other => panic!("expected Configuration {{ vector_extension_missing }}, got {other:?}"),
+    }
+    match search_err {
         DbError::Configuration { code, .. } => {
             assert_eq!(code, "vector_extension_missing");
         }
@@ -5452,6 +5463,16 @@ async fn fts_search_matches_substring() {
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
         .unwrap();
+    // `fts_search` runs under the per-app role (autocommit §17.5 + DB-1
+    // guards `SET LOCAL ROLE app_<app>_role`), so the role + its admin
+    // template must exist before the search — exactly as every other
+    // role-scoped test provisions via `ensure_per_app_role`.
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
+        .await
+        .unwrap();
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
     pool.execute(
         &format!(
             "CREATE TABLE \"{app}\".\"{coll}\" (\
@@ -5554,6 +5575,14 @@ async fn fts_and_filter_compose() {
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
         .unwrap();
+    // `fts_search` runs under the per-app role (autocommit §17.5 + DB-1
+    // guards `SET LOCAL ROLE app_<app>_role`); provision it first.
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
+        .await
+        .unwrap();
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
     pool.execute(
         &format!(
             "CREATE TABLE \"{app}\".\"{coll}\" (\
@@ -5643,6 +5672,14 @@ async fn fts_trigger_keeps_index_in_sync_after_update() {
         .await
         .unwrap();
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    // `fts_search` runs under the per-app role (autocommit §17.5 + DB-1
+    // guards `SET LOCAL ROLE app_<app>_role`); provision it first.
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
+        .await
+        .unwrap();
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .unwrap();
     pool.execute(
