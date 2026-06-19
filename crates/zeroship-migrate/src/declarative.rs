@@ -334,6 +334,36 @@ fn field_to_sdk_def(f: &FieldDescriptor) -> serde_json::Value {
     serde_json::Value::Object(def)
 }
 
+/// **P4 HALF A** — build the shared [`zeroship_schema::diff::EncryptionMeta`] for
+/// a field's `t.encrypted({...})` declaration, or `None` for a plaintext field.
+/// Used to render the PG `COMMENT ON COLUMN` `zsenc:` sentinel (via the shared
+/// codec's `build_encryption_sentinel`) so the engine's emitted comment is
+/// byte-identical to what plugin-db's runtime parser expects. Defaults mirror
+/// the inline sentinel emitter (`mode = randomised`, `keyId = default`,
+/// `wraps = string`).
+fn encryption_meta_for_field(def: &serde_json::Value) -> Option<zeroship_schema::diff::EncryptionMeta> {
+    use zeroship_schema::descriptors::EncryptionMode;
+    use zeroship_schema::diff::{EncryptionMeta, WrappedType};
+    let enc = def.get("encrypted").and_then(|v| v.as_object())?;
+    let mode_str = enc.get("mode").and_then(|v| v.as_str()).unwrap_or("randomised");
+    let mode = match mode_str {
+        "deterministic" => EncryptionMode::Deterministic,
+        // `randomised` / `randomized` (US) / anything else → fail-safe default.
+        _ => EncryptionMode::Randomised,
+    };
+    let key_id = enc
+        .get("keyId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default")
+        .to_string();
+    let wraps = match enc.get("wraps").and_then(|v| v.as_str()) {
+        Some("number") => WrappedType::Number,
+        Some("bytes") => WrappedType::Bytes,
+        _ => WrappedType::String,
+    };
+    Some(EncryptionMeta { mode, key_id, wraps })
+}
+
 /// The hidden `<col>_masked` sibling column a field's `.mask({...})` declaration
 /// requires, or `None` for an unmasked field / `kind: "none"` opt-out. Delegates
 /// to the shared kernel ([`zeroship_schema::query::mask_sibling_column_for_field`])
@@ -559,13 +589,13 @@ fn field_default_expr(f: &FieldDescriptor) -> Option<String> {
 fn system_field_columns() -> Vec<ColumnSnapshot> {
     let ts = "timestamp with time zone";
     vec![
-        ColumnSnapshot { name: "id".into(), data_type: "text".into(), nullable: false, default: None },
-        ColumnSnapshot { name: "created_at".into(), data_type: ts.into(), nullable: false, default: None },
-        ColumnSnapshot { name: "updated_at".into(), data_type: ts.into(), nullable: false, default: None },
-        ColumnSnapshot { name: "created_by".into(), data_type: "text".into(), nullable: true, default: None },
-        ColumnSnapshot { name: "updated_by".into(), data_type: "text".into(), nullable: true, default: None },
-        ColumnSnapshot { name: "version".into(), data_type: "integer".into(), nullable: false, default: None },
-        ColumnSnapshot { name: "deleted_at".into(), data_type: ts.into(), nullable: true, default: None },
+        ColumnSnapshot { name: "id".into(), data_type: "text".into(), nullable: false, ..Default::default() },
+        ColumnSnapshot { name: "created_at".into(), data_type: ts.into(), nullable: false, ..Default::default() },
+        ColumnSnapshot { name: "updated_at".into(), data_type: ts.into(), nullable: false, ..Default::default() },
+        ColumnSnapshot { name: "created_by".into(), data_type: "text".into(), nullable: true, ..Default::default() },
+        ColumnSnapshot { name: "updated_by".into(), data_type: "text".into(), nullable: true, ..Default::default() },
+        ColumnSnapshot { name: "version".into(), data_type: "integer".into(), nullable: false, ..Default::default() },
+        ColumnSnapshot { name: "deleted_at".into(), data_type: ts.into(), nullable: true, ..Default::default() },
     ]
 }
 
@@ -775,6 +805,29 @@ pub fn desired_snapshot(
             // `encrypted` column). These were `UnsupportedType` in the v1 subset;
             // they are first-class now. A bare/unknown token still fails closed.
             let data_type = field_data_type(f)?;
+            // **P4 HALF A** — the inline `/* zsenc:mode:keyId:wraps */` sentinel
+            // for a `t.encrypted(...)` column (its physical type is `BYTEA`). It
+            // is the schema-shape contract plugin-db reads at RUNTIME to drive the
+            // AEAD pass; built by the SHARED kernel
+            // (`zeroship_schema::query::encryption_sentinel_for_field`) so the
+            // sentinel the engine `generate`s is byte-identical to the one
+            // `registerModel` writes (the single-source-of-truth guard). On PG the
+            // inline comment is parse-discarded — plugin-db's runtime introspector
+            // recovers it from the `__zeroship_meta.encrypted_columns` sidecar
+            // (HALF B); on SQLite it survives in `sqlite_master.sql`. Emission-only
+            // (excluded from snapshot drift equality), like `default`.
+            let sdk_def = field_to_sdk_def(f);
+            // The inline `/* zsenc:… */` (rides after the type — the SQLite
+            // contract, preserved in `sqlite_master.sql`).
+            let encryption_sentinel =
+                zeroship_schema::query::encryption_sentinel_for_field(&sdk_def);
+            // The `COMMENT ON COLUMN` body for the SAME encrypted column — the
+            // PG-recoverable form (PG discards the inline comment). Built from
+            // the shared codec's `build_encryption_sentinel` so the body is
+            // byte-identical to the runtime parser's expectation. Only present
+            // when the field is encrypted.
+            let comment_sentinel = encryption_meta_for_field(&sdk_def)
+                .map(|m| zeroship_schema::mask_codec::build_encryption_sentinel(&m));
             columns.push(ColumnSnapshot {
                 name: f.name.clone(),
                 data_type,
@@ -783,6 +836,8 @@ pub fn desired_snapshot(
                 // drift-compared). plugin-db also auto-defaults json/object → '{}'
                 // and array → '[]' even with no explicit `default`.
                 default: field_default_expr(f),
+                encryption_sentinel,
+                comment_sentinel,
             });
             // A masked field (`.mask({...})`, or auto-mask on `t.encrypted`) gets a
             // hidden `<col>_masked TEXT` sibling column at CREATE time (resolved by
@@ -791,20 +846,27 @@ pub fn desired_snapshot(
             // phantom-drifts against the live table the engine creates. It round-
             // trips as a plain nullable TEXT column.
             //
-            // The `COMMENT … __zsmask:…` sentinel that plugin-db reads at RUNTIME to
-            // drive the mask read-pass is resolved by the shared codec
-            // (`mask_sentinel_for_field`); wiring its emission into the generated
-            // CREATE/ADD DDL belongs to P4 (where plugin-db is the only consumer —
-            // there is no P2 reader). `snapshot_schema` never introspects COMMENTs,
-            // so the sentinel is not a snapshot attribute and the sibling COLUMN —
-            // the part that affects schema shape + drift — round-trips cleanly on
-            // its own.
+            // **P4 HALF A** — the `__zsmask:kind=…,classification=…` sentinel that
+            // plugin-db reads at RUNTIME (via `pg_description`) to drive the mask
+            // read-pass is now EMITTED into the generated DDL: it rides on the
+            // sibling column's `mask_sentinel`, which `render_create_table` /
+            // `render_add_column` turn into a `COMMENT ON COLUMN` statement. Built
+            // by the SHARED codec (`zeroship_schema::query::mask_sentinel_for_field`
+            // → `build_mask_sentinel`) so it is byte-identical to the one
+            // `registerModel` writes. `snapshot_schema` never introspects COMMENTs,
+            // so the sentinel is not a snapshot drift attribute (excluded from
+            // `ColumnSnapshot` equality) — the sibling COLUMN itself round-trips as
+            // a plain nullable TEXT column.
             if mask_sibling_for_field(f).is_some() {
+                let comment_sentinel =
+                    zeroship_schema::query::mask_sentinel_for_field(&field_to_sdk_def(f));
                 columns.push(ColumnSnapshot {
                     name: format!("{}_masked", f.name),
                     data_type: "text".into(),
                     nullable: true,
                     default: None,
+                    encryption_sentinel: None,
+                    comment_sentinel,
                 });
             }
             // CHECK constraints (#3 literal-pin, #4 min/max + enum). These are
@@ -2156,10 +2218,20 @@ impl DeclarativeAuthor {
                 .as_deref()
                 .map(|d| format!(" DEFAULT {d}"))
                 .unwrap_or_default();
+            // **P4 HALF A** — the inline `/* zsenc:… */` sentinel rides between
+            // the type and the constraints, exactly as the shared kernel's
+            // `field_to_column_for_dialect` bakes it, so a `generate`d encrypted
+            // column is byte-identical to a `registerModel`-created one.
+            let enc = c
+                .encryption_sentinel
+                .as_deref()
+                .map(|s| format!(" {s}"))
+                .unwrap_or_default();
             parts.push(format!(
-                "{} {}{}{}{}",
+                "{} {}{}{}{}{}",
                 quote_ident(&c.name),
                 ddl_type(&c.data_type),
+                enc,
                 pk,
                 null,
                 default,
@@ -2176,11 +2248,45 @@ impl DeclarativeAuthor {
                 parts.push(format!("CONSTRAINT {} {}", quote_ident(&c.name), c.definition));
             }
         }
-        format!(
+        let mut up = format!(
             "CREATE TABLE {} ({})",
             self.qualified(table),
             parts.join(", ")
-        )
+        );
+        // **P4 HALF A** — append `COMMENT ON COLUMN … '<sentinel>'` for every
+        // column carrying a comment sentinel (`__zsmask:…` on a masked sibling,
+        // `zsenc:…` on an encrypted column), so the runtime sentinel is part of
+        // the same migration as the table create (an interrupted apply never
+        // leaves a column without its sentinel). The comment body is built by
+        // the shared codecs; we only quote it into the statement here.
+        for c in &t.columns {
+            if let Some(stmt) = self.comment_stmt(table, c) {
+                up.push_str(";\n");
+                up.push_str(&stmt);
+            }
+        }
+        up
+    }
+
+    /// **P4 HALF A** — render the `COMMENT ON COLUMN <schema>.<table>.<col> IS
+    /// '<sentinel>'` statement for a column carrying a `comment_sentinel`
+    /// (`__zsmask:…` for a masked sibling or `zsenc:…` for an encrypted column),
+    /// or `None` for a column without one. The sentinel BODY is built by the
+    /// shared codecs (threaded onto the snapshot in `desired_snapshot`) — never
+    /// re-spelled here; this only wraps it in the schema-qualified
+    /// `COMMENT ON COLUMN` statement with the SQL-literal single-quote escape,
+    /// matching the shared kernel's `build_mask_sentinel_comment_for_field`
+    /// spelling so a `generate`d sentinel is byte-identical to a
+    /// `registerModel`-written one.
+    fn comment_stmt(&self, table: &str, c: &ColumnSnapshot) -> Option<String> {
+        let sentinel = c.comment_sentinel.as_deref()?;
+        let escaped = sentinel.replace('\'', "''");
+        Some(format!(
+            "COMMENT ON COLUMN {}.{} IS '{}'",
+            self.qualified(table),
+            quote_ident(&c.name),
+            escaped,
+        ))
     }
 
     /// Render a `CONSTRAINT … FOREIGN KEY (…) REFERENCES <schema>.<tgt> (id)
@@ -2247,14 +2353,29 @@ impl DeclarativeAuthor {
             .as_deref()
             .map(|d| format!(" DEFAULT {d}"))
             .unwrap_or_default();
-        let up = format!(
-            "ALTER TABLE {} ADD COLUMN {} {}{}{}",
+        // **P4 HALF A** — inline `/* zsenc:… */` for an encrypted column added
+        // after the table exists (e.g. a later-declared `t.encrypted` field).
+        let enc = c
+            .encryption_sentinel
+            .as_deref()
+            .map(|s| format!(" {s}"))
+            .unwrap_or_default();
+        let mut up = format!(
+            "ALTER TABLE {} ADD COLUMN {} {}{}{}{}",
             self.qualified(table),
             quote_ident(&c.name),
             ddl_type(&c.data_type),
+            enc,
             null,
             default,
         );
+        // **P4 HALF A** — a column added via ADD COLUMN carries its comment
+        // sentinel (`__zsmask:…` for a masked sibling, `zsenc:…` for an
+        // encrypted column) in the same migration (atomic with the column).
+        if let Some(stmt) = self.comment_stmt(table, c) {
+            up.push_str(";\n");
+            up.push_str(&stmt);
+        }
         let down = format!(
             "ALTER TABLE {} DROP COLUMN {}",
             self.qualified(table),

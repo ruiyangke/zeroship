@@ -3494,3 +3494,122 @@ async fn p2_encrypted_and_mask_columns_apply_and_round_trip_to_zero_drift() {
 
     teardown(&conn, &cfg).await;
 }
+
+// ---------------------------------------------------------------------------
+// P4 HALF A — goodies-via-sentinels in the GENERATED DDL.
+//
+// The engine's generated migration DDL must carry the schema-shape sentinels
+// the data plane (plugin-db) reads at runtime: an `encrypted` column's BYTEA
+// gets the inline `/* zsenc:… */` sentinel AND a `COMMENT ON COLUMN … 'zsenc:…'`
+// (the PG-recoverable form), and a masked field's `<col>_masked` sibling gets a
+// `COMMENT ON COLUMN … '__zsmask:…'`. The verify-bricking guard: after the
+// generated SQL applies on a REAL Postgres, `read_live_schema` (the SHARED
+// introspector both the engine and plugin-db use) must recover the SAME
+// `EncryptionMeta` / `MaskMeta` the descriptor declared — byte-identical.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn p4_half_a_generated_ddl_carries_sentinels_and_round_trips_through_introspection() {
+    use zeroship_schema::descriptors::EncryptionMode;
+    use zeroship_schema::diff::{
+        read_live_schema, Classification, EncryptionMeta, MaskKind, MaskMeta, WrappedType,
+    };
+
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let desc = CollectionDescriptor {
+        name: "vault".into(),
+        owner_app: "app_test".into(),
+        fields: vec![
+            // encrypted (deterministic, non-default key) → BYTEA + zsenc sentinel.
+            FieldDescriptor {
+                name: "secret".into(),
+                ty: "string".into(),
+                encrypted: Some(serde_json::json!({
+                    "mode": "deterministic", "keyId": "k7", "wraps": "string"
+                })),
+                ..Default::default()
+            },
+            // masked → `phone_masked` sibling + __zsmask sentinel.
+            FieldDescriptor {
+                name: "phone".into(),
+                ty: "string".into(),
+                mask: Some(serde_json::json!({ "kind": "last4", "classification": "pci" })),
+                ..Default::default()
+            },
+        ],
+        indexes: vec![],
+    };
+    let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired");
+
+    // (1) The GENERATED DDL must contain the EXACT sentinels — the contract.
+    let plan = author
+        .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .expect("diff");
+    let create_sql: String = plan
+        .migrations
+        .iter()
+        .find(|m| m.name == "create_table_vault")
+        .map(|m| m.up.clone())
+        .expect("create_table_vault migration");
+
+    // Inline zsenc on the BYTEA column (the SQLite-surviving form).
+    assert!(
+        create_sql.contains("/* zsenc:deterministic:k7:string */"),
+        "generated CREATE TABLE must carry the inline zsenc sentinel: {create_sql}"
+    );
+    // COMMENT ON COLUMN with the zsenc body on the encrypted column (PG-recoverable).
+    assert!(
+        create_sql.contains("\"secret\" IS 'zsenc:deterministic:k7:string'"),
+        "generated DDL must COMMENT the encrypted column with the zsenc body: {create_sql}"
+    );
+    // COMMENT ON COLUMN with the __zsmask body on the masked sibling.
+    assert!(
+        create_sql.contains("\"phone_masked\" IS '__zsmask:kind=last4,classification=pci'"),
+        "generated DDL must COMMENT the masked sibling with the __zsmask body: {create_sql}"
+    );
+
+    // (2) Apply the generated migration on REAL Postgres.
+    apply_plan(&engine, &desired, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("apply generated plan");
+
+    // (3) Introspect via the SHARED `read_live_schema` and assert byte-identical
+    //     recovery of the goodies — the verify-bricking guard.
+    let pool = compio_postgres::Pool::connect(&dsn(), 2)
+        .await
+        .expect("pool for introspection");
+    let live = read_live_schema(&pool, &cfg.project_schema)
+        .await
+        .expect("read_live_schema");
+    let vault = live.tables.get("vault").expect("vault table introspected");
+
+    let secret = vault.get("secret").expect("secret column introspected");
+    assert_eq!(
+        secret.encryption,
+        Some(EncryptionMeta {
+            mode: EncryptionMode::Deterministic,
+            key_id: "k7".into(),
+            wraps: WrappedType::String,
+        }),
+        "EncryptionMeta must round-trip byte-identical through introspection"
+    );
+
+    let phone = vault.get("phone").expect("phone column introspected");
+    assert_eq!(
+        phone.mask,
+        Some(MaskMeta {
+            kind: MaskKind::Last4,
+            classification: Classification::Pci,
+            sibling_column: "phone_masked".into(),
+        }),
+        "MaskMeta must round-trip byte-identical through introspection"
+    );
+
+    teardown(&conn, &cfg).await;
+}

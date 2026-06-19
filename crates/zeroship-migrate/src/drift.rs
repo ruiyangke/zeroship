@@ -216,7 +216,7 @@ pub async fn check_checksum_drift(
 /// Introspection (`snapshot_schema`) leaves it `None`; only `desired_snapshot`
 /// populates it (for emission). All drift comparison is on `data_type` +
 /// `nullable` only (see `diff_attrs`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ColumnSnapshot {
     /// Column name.
     pub name: String,
@@ -230,12 +230,41 @@ pub struct ColumnSnapshot {
     /// type-level note). `None` ⇒ no default emitted; always `None` from
     /// introspection.
     pub default: Option<String>,
+    /// **P4 HALF A** — the inline encryption sentinel to append after this
+    /// column's type in CREATE / ADD COLUMN DDL, e.g.
+    /// `/* zsenc:randomised:default:string */`. Emitted for a `t.encrypted(...)`
+    /// column (its physical type is `BYTEA`); it is the schema-shape contract
+    /// plugin-db reads at runtime to drive the AEAD encrypt/decrypt pass.
+    ///
+    /// Emission-only, exactly like `default`: it is NOT a drift-comparable
+    /// attribute (introspection's `snapshot_schema` leaves it `None`; only
+    /// `desired_snapshot` populates it), so it is EXCLUDED from `PartialEq` /
+    /// `Eq` / `Hash`. The sentinel is built by the shared
+    /// [`zeroship_schema::query`] kernel — never re-spelled here.
+    pub encryption_sentinel: Option<String>,
+    /// **P4 HALF A** — the body of a `COMMENT ON COLUMN` sentinel to attach to
+    /// THIS column in CREATE / ADD COLUMN DDL. Two sentinel families ride here:
+    ///   - `__zsmask:kind=…,classification=…` on a hidden `<col>_masked` sibling
+    ///     (drives the runtime mask read-pass), and
+    ///   - `zsenc:<mode>:<keyId>:<wraps>` on an encrypted column itself — the
+    ///     PG-recoverable form of the `encryption_sentinel`, since PG discards
+    ///     the inline `/* zsenc */` comment at parse time, so plugin-db recovers
+    ///     the encryption metadata from `pg_description` at runtime.
+    ///
+    /// Built by the shared codecs ([`zeroship_schema::mask_codec`]) — never
+    /// re-spelled here. Emission-only — EXCLUDED from `PartialEq` / `Eq` /
+    /// `Hash` (introspection never reads COMMENTs into the snapshot; the
+    /// encrypted/masked COLUMN itself round-trips as a plain column).
+    pub comment_sentinel: Option<String>,
 }
 
-// `default` is intentionally excluded from equality + hashing — it is
-// DDL-emission metadata, not a drift attribute (see the type doc). Comparing it
-// would phantom-drift against Postgres' normalised stored default and break the
-// round-trip oracle.
+// `default` + the two sentinels are intentionally excluded from equality +
+// hashing — they are DDL-emission metadata, not drift attributes (see the type
+// doc). Comparing `default` would phantom-drift against Postgres' normalised
+// stored default; the sentinels are never introspected into the snapshot at all
+// (`snapshot_schema` leaves them `None`), so comparing them would make every
+// freshly-created encrypted/masked table phantom-drift against itself and break
+// the round-trip oracle.
 impl PartialEq for ColumnSnapshot {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
@@ -427,9 +456,11 @@ pub async fn snapshot_schema(
                 name: r.get("column_name"),
                 data_type: r.get("data_type"),
                 nullable: nullable.eq_ignore_ascii_case("YES"),
-                // Introspection never carries a default — it is emission-only
-                // metadata (see the `ColumnSnapshot` type doc).
-                default: None,
+                // Introspection never carries a default or a sentinel — those
+                // are emission-only metadata (see the `ColumnSnapshot` type
+                // doc). The masked-sibling/encrypted COLUMN itself round-trips;
+                // its sentinel is not a snapshot attribute.
+                ..Default::default()
             });
         }
     }

@@ -631,9 +631,39 @@ SELECT c.relname AS table_name,
             .ok()
             .and_then(|s| s.chars().next());
         let pg_comment: Option<String> = row.try_get::<_, String>("pg_comment").ok();
+        // **P4 HALF A** — column comments carry TWO sentinel families:
+        //   - `__zsmask:…` on a `<col>_masked` sibling → deferred to the second
+        //     pass (stamps `MaskMeta` on the PARENT);
+        //   - `zsenc:…` on the encrypted column itself → parsed inline here into
+        //     `EncryptionMeta`. On PG the inline `/* zsenc */` DDL comment is
+        //     parse-discarded, so the engine/registerModel also write a
+        //     `COMMENT ON COLUMN` carrying the `zsenc:` body; this is where the
+        //     data plane (and the diff) recover it.
+        let mut encryption: Option<EncryptionMeta> = None;
         if let Some(comment) = &pg_comment {
             if comment.starts_with("__zsmask:") && column.ends_with("_masked") {
                 sibling_sentinels.insert((table.clone(), column.clone()), comment.clone());
+            } else if comment.starts_with("zsenc:") {
+                match crate::mask_codec::parse_encryption_sentinel(comment) {
+                    Ok(meta) => encryption = Some(meta),
+                    Err(e) => {
+                        // A malformed encryption sentinel is treated like a
+                        // malformed mask sentinel: warn loudly and treat the
+                        // column as unencrypted rather than failing the whole
+                        // introspection. The data plane then fails closed at the
+                        // codec boundary (plaintext expected on a column the
+                        // schema declared encrypted) rather than silently
+                        // decrypting with a guessed mode.
+                        tracing::warn!(
+                            table = %table,
+                            column = %column,
+                            comment = %comment,
+                            error = %e,
+                            "diff: malformed zsenc sentinel on PG column; \
+                             treating column as unencrypted"
+                        );
+                    }
+                }
             }
         }
         out.tables.entry(table).or_default().insert(
@@ -643,8 +673,9 @@ SELECT c.relname AS table_name,
                 not_null,
                 default_expr,
                 default_volatility,
-                // P4 PR 1: new fields default; PR 4/5 populate from
-                // `information_schema` + `pg_indexes` introspection.
+                encryption,
+                // P4 PR 1: remaining fields default; PR 4/5 populate vector/fts/
+                // geo from `information_schema` + `pg_indexes` introspection.
                 ..Default::default()
             },
         );
