@@ -180,6 +180,8 @@ compio-postgres = { path = "crates/compio-postgres" }
 compio-redis = { path = "crates/compio-redis" }
 compio-s3 = { path = "crates/compio-s3" }
 zeroship-schema = { path = "crates/zeroship-schema" }
+zeroship-migrate = { path = "crates/zeroship-migrate" }
+zeroship-migrate-js = { path = "crates/zeroship-migrate-js" }
 zeroship-plugin-db = { path = "crates/plugin-db" }
 zeroship-plugin-storage = { path = "crates/plugin-storage" }
 zeroship-plugin-kv = { path = "crates/plugin-kv" }
