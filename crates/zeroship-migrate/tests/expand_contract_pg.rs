@@ -14,9 +14,10 @@
 use compio_postgres::Client;
 use zeroship_migrate::executor::{ApplyError, RollbackRequest, RollbackTarget};
 use zeroship_migrate::{
-    apply, migrator_role_name, provision_migrator, rollback, role::deprovision_migrator, Approval,
-    Checksum, ExecutorConfig, ExpandContractAuthor, ExpandContractPlan, GuardConfig, Migration,
-    MigrationFlags, MigrationId, MigrationEngine, OnlineIntent, OnlinePhase, RawSqlAuthor, SqlGuard,
+    apply, migrator_role_name, provision_migrator, rollback, role::deprovision_migrator,
+    run_backfill, Approval, BackfillSpec, Checksum, ExecutorConfig, ExpandContractAuthor,
+    ExpandContractPlan, GuardConfig, Migration, MigrationFlags, MigrationId, MigrationEngine,
+    OnlineIntent, OnlinePhase, RawSqlAuthor, SqlGuard,
 };
 
 const DEFAULT_DSN: &str =
@@ -860,4 +861,586 @@ async fn run_expand_without_approval_refuses() {
     assert!(!trigger_exists(&conn, &cfg.project_schema, "users").await);
 
     full_teardown(&conn, &cfg, None).await;
+}
+
+// ===========================================================================
+// Matrix §6 #14 (split column) and #15 (merge columns) — AI-authored (RawSqlAuthor
+// AI-seam) expand-contract sequences whose dual-write trigger fans out to / in
+// from MORE THAN ONE column. The canonical author (`ExpandContractAuthor`) only
+// covers single-column rename; these multi-column shapes are authored as raw SQL
+// (the `RawSqlAuthor` seam an AI author would target), wired with explicit phase
+// flags + `depends_on` so the engine gate, executor, and backfill drive them
+// exactly like the rename. Dual-write correctness is asserted UNDER THE APP ROLE
+// (the INVOKER path), identical to the rename marquees above.
+// ===========================================================================
+
+/// Author a raw `up`/`down` migration via the [`RawSqlAuthor`] AI-seam, then
+/// stamp the online phase + `depends_on` an AI author would emit for a phased
+/// expand-contract step, recomputing the checksum so the stamped flags/deps are
+/// part of the migration's identity (exactly what the deterministic author does
+/// internally via `make`). This is the multi-column analogue of `make`, used for
+/// the split/merge shapes the deterministic author does not (yet) emit.
+fn ai_step(
+    raw: &RawSqlAuthor,
+    name: &str,
+    up: &str,
+    down: Option<&str>,
+    phase: OnlinePhase,
+    destructive: bool,
+    depends_on: Vec<MigrationId>,
+) -> Migration {
+    let mut m = raw.wrap(name, up, down).expect("author multi-column step");
+    m.flags = MigrationFlags {
+        online: true,
+        phase: Some(phase),
+        destructive,
+        // Contract steps are gated + approval-required (they drop trigger/columns);
+        // expand steps are additive. Mirror the deterministic author's flagging.
+        requires_approval: matches!(phase, OnlinePhase::Contract),
+        ..MigrationFlags::default()
+    };
+    m.depends_on = depends_on;
+    m.recompute_checksum();
+    m
+}
+
+/// Seed a `people` table with `id` PK + a single source column `full_name` and a
+/// few rows — the pre-split shape for matrix #14.
+async fn seed_people_split(conn: &Client, schema: &str) {
+    conn.batch_execute(&format!(
+        "CREATE TABLE \"{schema}\".\"people\" (id bigint PRIMARY KEY, full_name text)"
+    ))
+    .await
+    .expect("create people");
+    conn.batch_execute(&format!(
+        "INSERT INTO \"{schema}\".\"people\" (id, full_name) VALUES \
+         (1,'Ada Lovelace'),(2,'Alan Turing'),(3,'Grace Hopper')"
+    ))
+    .await
+    .expect("seed people");
+}
+
+async fn person_split(
+    conn: &Client,
+    schema: &str,
+    id: i64,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let row = conn
+        .query_one(
+            &format!(
+                "SELECT full_name, first_name, last_name FROM \"{schema}\".\"people\" WHERE id=$1"
+            ),
+            &[&id],
+        )
+        .await
+        .expect("person_split");
+    (
+        row.get("full_name"),
+        row.get("first_name"),
+        row.get("last_name"),
+    )
+}
+
+/// MATRIX #14 — SPLIT one column into two, online, via an AI-authored
+/// expand-contract sequence. `people.full_name` → (`first_name`, `last_name`)
+/// where the split rule is "first token / rest". Expand: E1 adds BOTH new
+/// columns; E2 installs a dual-write trigger that derives both new columns from
+/// the source AND re-derives the source from the two parts (so old + new shapes
+/// coexist + stay consistent); E3 backfills the parts from the source. Contract:
+/// C1 drops the trigger/fn, C2 drops the source column. Dual-write correctness is
+/// asserted UNDER THE APP ROLE.
+#[compio::test]
+async fn split_column_expand_contract_dual_write_under_app_role() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    full_teardown(&conn, &cfg, None).await;
+    ensure_project_schema(&conn, &cfg).await;
+    provision_migrator(&conn, &cfg).await.expect("provision");
+    seed_people_split(&conn, &cfg.project_schema).await;
+
+    let schema = cfg.project_schema.clone();
+    // The migrator must own the table it ALTERs / triggers under SET ROLE.
+    conn.batch_execute(&format!(
+        "ALTER TABLE \"{schema}\".\"people\" OWNER TO \"{}\"",
+        cfg.migrator_role.as_ref().unwrap()
+    ))
+    .await
+    .expect("chown people to migrator");
+
+    let raw = RawSqlAuthor::new(schema.clone(), "app_acme");
+
+    // ---- E1: ADD COLUMN first_name + last_name (both nullable, additive) ----
+    let e1 = ai_step(
+        &raw,
+        "expand_split_add_name_parts",
+        &format!(
+            "ALTER TABLE \"{schema}\".\"people\" \
+             ADD COLUMN first_name text, ADD COLUMN last_name text"
+        ),
+        Some(&format!(
+            "ALTER TABLE \"{schema}\".\"people\" \
+             DROP COLUMN first_name, DROP COLUMN last_name"
+        )),
+        OnlinePhase::Expand,
+        false,
+        Vec::new(),
+    );
+
+    // ---- E2: dual-write trigger (SECURITY INVOKER plpgsql) ----
+    //
+    // TOTAL for the SPLIT shape: after it runs the source and the two parts are
+    // ALWAYS consistent, for every INSERT and UPDATE. Precedence by *which side
+    // the app wrote*:
+    //   - INSERT: if only the source is set (parts NULL), derive the parts from it;
+    //     otherwise recompose the source from the parts (new shape wins).
+    //   - UPDATE: if the source changed (and the parts did not), re-derive the
+    //     parts; otherwise (parts changed, or both/neither changed) recompose the
+    //     source from the parts (new shape wins, to-wins).
+    // A BEFORE trigger assigning NEW.* never re-fires → no recursion.
+    let e2_up = format!(
+        "CREATE OR REPLACE FUNCTION \"{schema}\".\"zsdw_people_split_fn\"() \
+         RETURNS trigger AS $zsdw$\n\
+         BEGIN\n\
+         \x20  IF (TG_OP = 'INSERT' \
+                   AND NEW.first_name IS NULL AND NEW.last_name IS NULL \
+                   AND NEW.full_name IS NOT NULL)\n\
+         \x20     OR (TG_OP = 'UPDATE' \
+                   AND NEW.full_name IS DISTINCT FROM OLD.full_name \
+                   AND NEW.first_name IS NOT DISTINCT FROM OLD.first_name \
+                   AND NEW.last_name IS NOT DISTINCT FROM OLD.last_name) THEN\n\
+         \x20    NEW.first_name := split_part(NEW.full_name, ' ', 1);\n\
+         \x20    NEW.last_name  := NULLIF(substring(NEW.full_name from position(' ' in NEW.full_name) + 1), '');\n\
+         \x20  ELSE\n\
+         \x20    NEW.full_name := NULLIF(trim(both ' ' from \
+                 coalesce(NEW.first_name, '') || ' ' || coalesce(NEW.last_name, '')), '');\n\
+         \x20  END IF;\n\
+         \x20  RETURN NEW;\n\
+         END;\n\
+         $zsdw$ LANGUAGE plpgsql;\n\
+         CREATE TRIGGER \"zsdw_people_split_trg\" BEFORE INSERT OR UPDATE \
+         ON \"{schema}\".\"people\" FOR EACH ROW \
+         EXECUTE FUNCTION \"{schema}\".\"zsdw_people_split_fn\"()"
+    );
+    let e2_down = format!(
+        "DROP TRIGGER IF EXISTS \"zsdw_people_split_trg\" ON \"{schema}\".\"people\"; \
+         DROP FUNCTION IF EXISTS \"{schema}\".\"zsdw_people_split_fn\"()"
+    );
+    let e2 = ai_step(
+        &raw,
+        "expand_split_dual_write",
+        &e2_up,
+        Some(&e2_down),
+        OnlinePhase::Expand,
+        false,
+        vec![e1.version.clone()],
+    );
+
+    // Apply E1 + E2 (additive, no approval needed — they are Expand).
+    apply(
+        &conn,
+        &cfg,
+        &[e1.clone(), e2.clone()],
+        Approval::Approved,
+        "tester",
+    )
+    .await
+    .expect("apply split expand E1+E2");
+    assert!(column_exists(&conn, &schema, "people", "first_name").await);
+    assert!(column_exists(&conn, &schema, "people", "last_name").await);
+    assert!(trigger_exists(&conn, &schema, "people").await);
+
+    // ---- E3: backfill the parts from the source for the pre-existing rows ----
+    let backfill = BackfillSpec {
+        table: "people".into(),
+        cursor_column: "id".into(),
+        batch_size: 1000,
+        set_clause: "first_name = split_part(_bf.full_name, ' ', 1), \
+                     last_name = NULLIF(substring(_bf.full_name from position(' ' in _bf.full_name) + 1), '')"
+            .into(),
+        filter: Some("first_name IS NULL AND last_name IS NULL".into()),
+        name: "backfill_people_split".into(),
+    };
+    let out = run_backfill(&conn, &cfg, &backfill, Approval::Approved, "tester")
+        .await
+        .expect("split backfill");
+    assert!(out.complete);
+    assert_eq!(out.rows_updated, 3, "all 3 seed rows split");
+
+    // Pre-existing rows: parts derived from the source.
+    assert_eq!(
+        person_split(&conn, &schema, 1).await,
+        (
+            Some("Ada Lovelace".into()),
+            Some("Ada".into()),
+            Some("Lovelace".into())
+        ),
+        "backfill split full_name into parts"
+    );
+
+    let app_role = make_app_role(&conn, &cfg, &tok).await;
+
+    // (a) INSERT via the SOURCE only → trigger derives BOTH parts.
+    as_app(
+        &conn,
+        &app_role,
+        &format!(
+            "INSERT INTO \"{schema}\".\"people\" (id, full_name) VALUES (10, 'Katherine Johnson')"
+        ),
+    )
+    .await;
+    assert_eq!(
+        person_split(&conn, &schema, 10).await,
+        (
+            Some("Katherine Johnson".into()),
+            Some("Katherine".into()),
+            Some("Johnson".into())
+        ),
+        "insert via source must populate both parts"
+    );
+
+    // (b) INSERT via the NEW parts only → trigger recomposes the source.
+    as_app(
+        &conn,
+        &app_role,
+        &format!(
+            "INSERT INTO \"{schema}\".\"people\" (id, first_name, last_name) \
+             VALUES (11, 'Margaret', 'Hamilton')"
+        ),
+    )
+    .await;
+    assert_eq!(
+        person_split(&conn, &schema, 11).await,
+        (
+            Some("Margaret Hamilton".into()),
+            Some("Margaret".into()),
+            Some("Hamilton".into())
+        ),
+        "insert via parts must recompose the source (parts win)"
+    );
+
+    // (c) UPDATE the SOURCE → both parts re-derive.
+    as_app(
+        &conn,
+        &app_role,
+        &format!("UPDATE \"{schema}\".\"people\" SET full_name='Dorothy Vaughan' WHERE id=10"),
+    )
+    .await;
+    assert_eq!(
+        person_split(&conn, &schema, 10).await,
+        (
+            Some("Dorothy Vaughan".into()),
+            Some("Dorothy".into()),
+            Some("Vaughan".into())
+        ),
+        "update source must re-derive both parts"
+    );
+
+    // (d) UPDATE a NEW part → the source recomposes (parts win).
+    as_app(
+        &conn,
+        &app_role,
+        &format!("UPDATE \"{schema}\".\"people\" SET last_name='Hamilton-Lickly' WHERE id=11"),
+    )
+    .await;
+    assert_eq!(
+        person_split(&conn, &schema, 11).await,
+        (
+            Some("Margaret Hamilton-Lickly".into()),
+            Some("Margaret".into()),
+            Some("Hamilton-Lickly".into())
+        ),
+        "update a part must recompose the source"
+    );
+
+    // ---- CONTRACT: drop the trigger/fn (C1), then the source column (C2) ----
+    let c1 = ai_step(
+        &raw,
+        "contract_split_drop_dual_write",
+        &e2_down,
+        Some(&e2_up),
+        OnlinePhase::Contract,
+        false,
+        vec![e2.version.clone()],
+    );
+    let c2 = ai_step(
+        &raw,
+        "contract_split_drop_source",
+        &format!("ALTER TABLE \"{schema}\".\"people\" DROP COLUMN full_name"),
+        None,
+        OnlinePhase::Contract,
+        true,
+        // C2 depends on E2 (the journaled expand the gate keys on) AND C1 (drop the
+        // trigger reading full_name before dropping the column it reads).
+        vec![e2.version.clone(), c1.version.clone()],
+    );
+    apply(
+        &conn,
+        &cfg,
+        &[c1, c2],
+        Approval::Approved,
+        "tester",
+    )
+    .await
+    .expect("apply split contract");
+
+    // End state: the source is gone, both parts remain + intact, no trigger.
+    assert!(!column_exists(&conn, &schema, "people", "full_name").await);
+    assert!(column_exists(&conn, &schema, "people", "first_name").await);
+    assert!(column_exists(&conn, &schema, "people", "last_name").await);
+    assert!(!trigger_exists(&conn, &schema, "people").await);
+    let parts: (String, String) = {
+        let r = conn
+            .query_one(
+                &format!("SELECT first_name, last_name FROM \"{schema}\".\"people\" WHERE id=1"),
+                &[],
+            )
+            .await
+            .expect("post-contract row");
+        (r.get("first_name"), r.get("last_name"))
+    };
+    assert_eq!(parts, ("Ada".into(), "Lovelace".into()));
+
+    full_teardown(&conn, &cfg, Some(&app_role)).await;
+}
+
+/// Seed a `contacts` table with `id` PK + TWO source columns and a few rows — the
+/// pre-merge shape for matrix #15.
+async fn seed_contacts_merge(conn: &Client, schema: &str) {
+    conn.batch_execute(&format!(
+        "CREATE TABLE \"{schema}\".\"contacts\" \
+         (id bigint PRIMARY KEY, area_code text, local_number text)"
+    ))
+    .await
+    .expect("create contacts");
+    conn.batch_execute(&format!(
+        "INSERT INTO \"{schema}\".\"contacts\" (id, area_code, local_number) VALUES \
+         (1,'415','5551234'),(2,'212','5559876'),(3,NULL,'5550000')"
+    ))
+    .await
+    .expect("seed contacts");
+}
+
+/// MATRIX #15 — MERGE two columns into one, online, via an AI-authored
+/// expand-contract sequence. `contacts.(area_code, local_number)` → `phone` with
+/// a PRECEDENCE / composition rule: `phone = area_code || '-' || local_number`
+/// when an area code exists, else just `local_number`. Expand: E1 adds the single
+/// new column; E2 a dual-write trigger that composes `phone` from the two sources
+/// (and, when the app writes `phone` directly, leaves the sources as-is so the
+/// new shape is authoritative); E3 backfills `phone`. Contract: C1 drops the
+/// trigger/fn, C2 drops BOTH source columns. Asserted UNDER THE APP ROLE.
+#[compio::test]
+async fn merge_columns_expand_contract_dual_write_under_app_role() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    full_teardown(&conn, &cfg, None).await;
+    ensure_project_schema(&conn, &cfg).await;
+    provision_migrator(&conn, &cfg).await.expect("provision");
+    seed_contacts_merge(&conn, &cfg.project_schema).await;
+
+    let schema = cfg.project_schema.clone();
+    conn.batch_execute(&format!(
+        "ALTER TABLE \"{schema}\".\"contacts\" OWNER TO \"{}\"",
+        cfg.migrator_role.as_ref().unwrap()
+    ))
+    .await
+    .expect("chown contacts to migrator");
+
+    let raw = RawSqlAuthor::new(schema.clone(), "app_acme");
+
+    // ---- E1: ADD COLUMN phone (nullable, additive) ----
+    let e1 = ai_step(
+        &raw,
+        "expand_merge_add_phone",
+        &format!("ALTER TABLE \"{schema}\".\"contacts\" ADD COLUMN phone text"),
+        Some(&format!(
+            "ALTER TABLE \"{schema}\".\"contacts\" DROP COLUMN phone"
+        )),
+        OnlinePhase::Expand,
+        false,
+        Vec::new(),
+    );
+
+    // ---- E2: dual-write trigger composing phone from the two sources ----
+    //
+    // The precedence/composition rule: with an area code,
+    // `phone = area_code-local_number`, else just `local_number`. TOTAL — after it
+    // runs phone is ALWAYS consistent with the sources for the write the app made:
+    //   - INSERT: if phone is NULL, compose it from the sources; else phone wins.
+    //   - UPDATE: if a source changed (and phone did not), recompose phone from the
+    //     sources; else (phone changed, or both/neither changed) phone wins (the
+    //     app wrote the new shape directly, the sources are being retired).
+    // A BEFORE trigger assigning NEW.* never re-fires → no recursion.
+    let e2_up = format!(
+        "CREATE OR REPLACE FUNCTION \"{schema}\".\"zsdw_contacts_merge_fn\"() \
+         RETURNS trigger AS $zsdw$\n\
+         BEGIN\n\
+         \x20  IF (TG_OP = 'INSERT' AND NEW.phone IS NULL)\n\
+         \x20     OR (TG_OP = 'UPDATE' \
+                   AND (NEW.area_code IS DISTINCT FROM OLD.area_code \
+                        OR NEW.local_number IS DISTINCT FROM OLD.local_number) \
+                   AND NEW.phone IS NOT DISTINCT FROM OLD.phone) THEN\n\
+         \x20    NEW.phone := CASE\n\
+         \x20      WHEN NEW.area_code IS NOT NULL AND NEW.area_code <> '' \
+                   THEN NEW.area_code || '-' || coalesce(NEW.local_number, '')\n\
+         \x20      ELSE NEW.local_number\n\
+         \x20    END;\n\
+         \x20  END IF;\n\
+         \x20  RETURN NEW;\n\
+         END;\n\
+         $zsdw$ LANGUAGE plpgsql;\n\
+         CREATE TRIGGER \"zsdw_contacts_merge_trg\" BEFORE INSERT OR UPDATE \
+         ON \"{schema}\".\"contacts\" FOR EACH ROW \
+         EXECUTE FUNCTION \"{schema}\".\"zsdw_contacts_merge_fn\"()"
+    );
+    let e2_down = format!(
+        "DROP TRIGGER IF EXISTS \"zsdw_contacts_merge_trg\" ON \"{schema}\".\"contacts\"; \
+         DROP FUNCTION IF EXISTS \"{schema}\".\"zsdw_contacts_merge_fn\"()"
+    );
+    let e2 = ai_step(
+        &raw,
+        "expand_merge_dual_write",
+        &e2_up,
+        Some(&e2_down),
+        OnlinePhase::Expand,
+        false,
+        vec![e1.version.clone()],
+    );
+
+    apply(
+        &conn,
+        &cfg,
+        &[e1.clone(), e2.clone()],
+        Approval::Approved,
+        "tester",
+    )
+    .await
+    .expect("apply merge expand E1+E2");
+    assert!(column_exists(&conn, &schema, "contacts", "phone").await);
+    assert!(trigger_exists(&conn, &schema, "contacts").await);
+
+    // ---- E3: backfill phone from the two sources via the precedence rule ----
+    let backfill = BackfillSpec {
+        table: "contacts".into(),
+        cursor_column: "id".into(),
+        batch_size: 1000,
+        set_clause: "phone = CASE \
+            WHEN _bf.area_code IS NOT NULL AND _bf.area_code <> '' \
+                THEN _bf.area_code || '-' || coalesce(_bf.local_number, '') \
+            ELSE _bf.local_number END"
+            .into(),
+        filter: Some("phone IS NULL".into()),
+        name: "backfill_contacts_merge".into(),
+    };
+    let out = run_backfill(&conn, &cfg, &backfill, Approval::Approved, "tester")
+        .await
+        .expect("merge backfill");
+    assert!(out.complete);
+    assert_eq!(out.rows_updated, 3, "all 3 seed rows merged");
+
+    let phone_of = |id: i64| {
+        let schema = schema.clone();
+        let conn = &conn;
+        async move {
+            conn.query_one(
+                &format!("SELECT phone FROM \"{schema}\".\"contacts\" WHERE id=$1"),
+                &[&id],
+            )
+            .await
+            .expect("phone_of")
+            .get::<_, Option<String>>("phone")
+        }
+    };
+
+    // Pre-existing rows: composed via the precedence rule (and the area-code-less
+    // row uses local_number only).
+    assert_eq!(phone_of(1).await, Some("415-5551234".into()));
+    assert_eq!(phone_of(3).await, Some("5550000".into()), "no area code → local only");
+
+    let app_role = make_app_role(&conn, &cfg, &tok).await;
+
+    // (a) INSERT via the SOURCES only → trigger composes phone (with area code).
+    as_app(
+        &conn,
+        &app_role,
+        &format!(
+            "INSERT INTO \"{schema}\".\"contacts\" (id, area_code, local_number) \
+             VALUES (10, '650', '5552222')"
+        ),
+    )
+    .await;
+    assert_eq!(phone_of(10).await, Some("650-5552222".into()), "compose with area code");
+
+    // (b) INSERT via the SOURCES with NO area code → local-number-only precedence.
+    as_app(
+        &conn,
+        &app_role,
+        &format!(
+            "INSERT INTO \"{schema}\".\"contacts\" (id, local_number) VALUES (11, '5553333')"
+        ),
+    )
+    .await;
+    assert_eq!(phone_of(11).await, Some("5553333".into()), "no area code → local only");
+
+    // (c) INSERT writing the NEW column directly → it wins (sources untouched).
+    as_app(
+        &conn,
+        &app_role,
+        &format!(
+            "INSERT INTO \"{schema}\".\"contacts\" (id, phone) VALUES (12, '999-0000000')"
+        ),
+    )
+    .await;
+    assert_eq!(phone_of(12).await, Some("999-0000000".into()), "phone written directly wins");
+
+    // (d) UPDATE a SOURCE → phone recomposes from the sources.
+    as_app(
+        &conn,
+        &app_role,
+        &format!("UPDATE \"{schema}\".\"contacts\" SET area_code='510' WHERE id=10"),
+    )
+    .await;
+    assert_eq!(phone_of(10).await, Some("510-5552222".into()), "source update recomposes phone");
+
+    // ---- CONTRACT: drop the trigger/fn (C1), then BOTH source columns (C2) ----
+    let c1 = ai_step(
+        &raw,
+        "contract_merge_drop_dual_write",
+        &e2_down,
+        Some(&e2_up),
+        OnlinePhase::Contract,
+        false,
+        vec![e2.version.clone()],
+    );
+    let c2 = ai_step(
+        &raw,
+        "contract_merge_drop_sources",
+        &format!(
+            "ALTER TABLE \"{schema}\".\"contacts\" \
+             DROP COLUMN area_code, DROP COLUMN local_number"
+        ),
+        None,
+        OnlinePhase::Contract,
+        true,
+        vec![e2.version.clone(), c1.version.clone()],
+    );
+    apply(
+        &conn,
+        &cfg,
+        &[c1, c2],
+        Approval::Approved,
+        "tester",
+    )
+    .await
+    .expect("apply merge contract");
+
+    // End state: both sources gone, the merged column remains + intact, no trigger.
+    assert!(!column_exists(&conn, &schema, "contacts", "area_code").await);
+    assert!(!column_exists(&conn, &schema, "contacts", "local_number").await);
+    assert!(column_exists(&conn, &schema, "contacts", "phone").await);
+    assert!(!trigger_exists(&conn, &schema, "contacts").await);
+    assert_eq!(phone_of(1).await, Some("415-5551234".into()));
+
+    full_teardown(&conn, &cfg, Some(&app_role)).await;
 }
