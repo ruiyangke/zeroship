@@ -596,10 +596,27 @@ pub async fn deploy(
                 ),
             }
 
+            // P6 (schema-authority §8): apply the bundle's DB migrations BEFORE
+            // the go-live commit. The `.zship` carries its versioned migration
+            // files (manifest.migrations → content-addressed blobs); we
+            // reconstruct them on disk and hand them to `zeroship-migrate`
+            // (Confined, schema "<app_id>", the per-app migrator role). A
+            // migrate FAILURE returns here and DOES NOT commit go-live — the old
+            // bundle keeps serving its already-migrated schema (§8.3). The app
+            // identity is the trusted path id `uid`, never a request body.
+            //
+            // Half-state contract (§8.4): migrate commits its journal, then
+            // go-live commits. If migrate succeeds but the go-live UPDATE below
+            // fails, the schema is ahead of the live code (additive-forward =
+            // safe); the next deploy's roll-forward reconciles. No verify gate.
+            if let Err(resp) = run_deploy_migrations(&uid, &success.manifest_json, &state).await {
+                return resp;
+            }
+
             // Atomic UPDATE: deploy_hash + manifest_json land together
             // so the gateway never sees half-applied state. Committed AFTER
-            // OAuth provisioning so the route only becomes resolvable once the
-            // client exists.
+            // OAuth provisioning + the migrate phase so the route only becomes
+            // resolvable once the client exists AND the schema is applied.
             match state
                 .registry
                 .set_deploy_with_manifest(&uid, &success.deploy_hash, &success.manifest_json)
@@ -617,6 +634,136 @@ pub async fn deploy(
         }
         Err(e) => ingest_error_to_response(e),
     }
+}
+
+/// P6 migrate phase: reconstruct the bundle's migration files from the blob
+/// store and apply them via `zeroship-migrate` (Confined, schema `"<app_id>"`)
+/// BEFORE the go-live commit (schema-authority §8).
+///
+/// Returns `Ok(())` on success (incl. the no-migrations no-op), or
+/// `Err(HttpResponse)` the deploy handler returns verbatim — in which case the
+/// caller MUST NOT commit go-live. A migrate failure is a 422 (the creator's
+/// migrations are at fault: a denied/destructive/unparseable migration) or a
+/// 503 (infra: connect / provision); both keep the old bundle serving.
+async fn run_deploy_migrations(
+    app_id: &Uuid,
+    manifest_json: &str,
+    state: &AppState,
+) -> Result<(), web::HttpResponse> {
+    // Re-parse the (already-validated) ingested manifest for its migrations.
+    let manifest: zeroship_bundle::Manifest = match serde_json::from_str(manifest_json) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!(app_id = %app_id, error = %e, "control: deploy-migrate manifest reparse failed");
+            return Err(web::HttpResponse::InternalServerError().json(&serde_json::json!({
+                "error": "manifest reparse failed",
+                "detail": e.to_string(),
+            })));
+        }
+    };
+
+    // No migrations ⇒ nothing to do (the app ships no schema). Skip even the
+    // tmp-dir + admin connection.
+    if manifest.migrations.is_empty() {
+        return Ok(());
+    }
+
+    // Reconstruct the migration files under a per-deploy tmp dir. `validate()`
+    // already enforced bare-filename safety (no separators / traversal), so the
+    // join stays confined to `mig_dir`. The dir is removed on every exit path.
+    let mig_dir = state
+        .deploy_tmp_dir
+        .join(format!("zeroship-migrations-{}", Uuid::new_v4().simple()));
+    if let Err(e) = compio::fs::create_dir_all(&mig_dir).await {
+        return Err(infrastructure_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "deploy-migrate tmp dir",
+            format_args!("{e}; path={}", mig_dir.display()),
+        ));
+    }
+
+    let write_result = reconstruct_migration_files(&manifest, app_id, state, &mig_dir).await;
+    let outcome = match write_result {
+        Ok(()) => {
+            crate::deploy_migrate::apply_bundle_migrations(
+                state.registry.migrate_dsn(),
+                app_id,
+                &mig_dir,
+            )
+            .await
+        }
+        Err(resp) => {
+            let _ = std::fs::remove_dir_all(&mig_dir);
+            return Err(resp);
+        }
+    };
+    let _ = std::fs::remove_dir_all(&mig_dir);
+
+    match outcome {
+        Ok(report) => {
+            tracing::info!(
+                app_id = %app_id,
+                applied = report.applied.len(),
+                skipped = report.skipped.len(),
+                "control: deploy-migrate applied"
+            );
+            Ok(())
+        }
+        Err(e) => {
+            use crate::deploy_migrate::DeployMigrateError as DME;
+            // A creator-fault migration (bad grammar / denied / destructive /
+            // checksum drift) is a 422 the creator can act on; an infra fault
+            // (connect / provision) is a 503. Either way: NO go-live.
+            let (status, kind) = match &e {
+                DME::Load(_) | DME::Apply(_) => {
+                    (StatusCode::UNPROCESSABLE_ENTITY, "migration_failed")
+                }
+                DME::Connect(_) | DME::ProvisionSchema(_) | DME::ProvisionRole(_) => {
+                    (StatusCode::SERVICE_UNAVAILABLE, "migration_infrastructure")
+                }
+            };
+            tracing::error!(app_id = %app_id, error = %e, "control: deploy-migrate failed; NOT committing go-live");
+            Err(web::HttpResponse::build(status).json(&serde_json::json!({
+                "error": kind,
+                "detail": e.to_string(),
+            })))
+        }
+    }
+}
+
+/// Stream each carried migration blob out of the blob store and write it to
+/// `mig_dir/<name>`. Returns `Err(HttpResponse)` (a 503/500) if a referenced
+/// blob is missing or a write fails — both abort the deploy before go-live.
+async fn reconstruct_migration_files(
+    manifest: &zeroship_bundle::Manifest,
+    app_id: &Uuid,
+    state: &AppState,
+    mig_dir: &StdPath,
+) -> Result<(), web::HttpResponse> {
+    for entry in &manifest.migrations {
+        let bytes = match state.blob_store.get_blob(&entry.hash).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(
+                    app_id = %app_id, name = %entry.name, hash = %entry.hash, error = %e,
+                    "control: deploy-migrate could not read migration blob"
+                );
+                return Err(web::HttpResponse::ServiceUnavailable().json(&serde_json::json!({
+                    "error": "migration_blob_unavailable",
+                    "detail": format!("migration {} (blob {}): {e}", entry.name, entry.hash),
+                })));
+            }
+        };
+        let path = mig_dir.join(&entry.name);
+        if let Err(e) = compio::fs::write(&path, bytes.to_vec()).await.0 {
+            return Err(infrastructure_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "deploy-migrate write migration file",
+                format_args!("{e}; path={}", path.display()),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Permissive content-type check. We accept the canonical

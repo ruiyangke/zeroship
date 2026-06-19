@@ -139,6 +139,19 @@ impl Registry {
         open_conn(&self.db_url).await.map_err(RegistryError::from)
     }
 
+    /// The admin DSN this registry connects on — the single physical
+    /// `zeroship` database. The P6 deploy-migrate step
+    /// ([`crate::deploy_migrate::apply_bundle_migrations`]) opens its own
+    /// `zeroship-migrate` admin connection on this same DSN to provision the
+    /// per-app schema + `migrator_<app_id>` role and apply the bundle's
+    /// migrations. The control role must therefore carry `CREATEROLE` + the
+    /// ability to `CREATE SCHEMA` (it does — it owns the `zeroship` schema).
+    /// Carries a password, so this is `pub(crate)`; never logged.
+    #[must_use]
+    pub(crate) fn migrate_dsn(&self) -> &str {
+        &self.db_url
+    }
+
     /// Validate that `plan_id` names a real, UNARCHIVED plan in the catalog.
     /// Returns a clean [`RegistryError::InvalidInput`] (not a raw FK violation)
     /// for an unknown or archived plan — the server-side gate that closes the

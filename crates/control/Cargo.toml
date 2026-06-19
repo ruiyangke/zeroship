@@ -37,6 +37,11 @@ zeroship-auth = { workspace = true }
 # the same `email_suppressions` contract auth uses. PR-0 deliberately left control
 # un-wired; this is the wiring.
 zeroship-mailer = { workspace = true }
+# P6 (schema-authority §8): the deploy step provisions the per-app role +
+# schema "<app_id>" and applies the bundle's migrations via the engine
+# (Confined profile) before the go-live commit. `load_dir` + the engine apply
+# path live here.
+zeroship-migrate = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 # `with-chrono-0_4` so PAT issuance / the console seed can map
 # `TIMESTAMPTZ` columns to `chrono::DateTime<Utc>` directly.
