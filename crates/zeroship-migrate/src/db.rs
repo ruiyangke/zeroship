@@ -64,6 +64,24 @@ pub struct ExecutorConfig {
     /// PRIVATE (`pub(crate)`). The `CREATE EXTENSION` allowlist a Platform guard
     /// permits (e.g. `citext` / `uuid-ossp`). Empty for Confined and Trusted.
     pub(crate) platform_exts: Vec<String>,
+    /// The schema(s) that host shared **extension types/functions** the engine
+    /// emits UNQUALIFIED (e.g. pgvector's `vector(N)`, PostGIS's
+    /// `geography(POINT,4326)`). pgvector/PostGIS install into `public` on the
+    /// platform image (and the dev `pgvector/pgvector:pg16`), so this defaults to
+    /// `["public"]`.
+    ///
+    /// These schemas are appended (after the project schema) to the migrator's
+    /// `search_path` so unqualified extension types/functions RESOLVE, and the
+    /// migrator is granted **`USAGE` only** on them (lookup, never CREATE/write).
+    /// This matches plugin-db's RUNTIME, which references the same unqualified
+    /// `vector`/`geography` types with `public` reachable on its connection path.
+    ///
+    /// SECURITY: `USAGE` permits *resolving* objects in the schema; it does NOT
+    /// permit creating objects there (that needs `CREATE`, which stays REVOKEd)
+    /// nor writing existing tables (that needs per-table grants the migrator never
+    /// receives). So the cross-schema **write** confinement is unchanged — these
+    /// schemas are resolution-only.
+    pub extension_schemas: Vec<String>,
     /// PRIVATE (`pub(crate)`). The OPERATOR capability token, present ONLY on a
     /// config built via [`ExecutorConfig::platform`] or [`ExecutorConfig::trusted`].
     /// It rides here so the executor-path guard builds
@@ -99,6 +117,10 @@ impl ExecutorConfig {
             trust: crate::guard::TrustProfile::Confined,
             platform_schemas: Vec::new(),
             platform_exts: Vec::new(),
+            // Extension types/functions (pgvector `vector`, PostGIS `geography`)
+            // live in `public` on the platform/dev image. Resolution-only; the
+            // migrator gets USAGE (not CREATE) on these — see the field doc.
+            extension_schemas: vec!["public".to_string()],
             operator_cap: None,
         }
     }
@@ -232,7 +254,22 @@ impl ExecutorConfig {
                 .map(|s| quote(s))
                 .collect::<Vec<_>>()
                 .join(", "),
-            _ => quote(&self.project_schema),
+            // Confined / Trusted: the project schema is first (the sole writable
+            // resolution target — `CREATE TABLE foo` lands here, not in an
+            // extension schema), followed by the extension schema(s) so an
+            // UNQUALIFIED extension type (`vector(N)`, `geography(...)`) resolves.
+            // The extension schemas carry USAGE only (provisioned in
+            // `role::provision_migrator`), so this is resolution, not write reach.
+            _ => {
+                let mut parts = vec![quote(&self.project_schema)];
+                for ext in &self.extension_schemas {
+                    // Avoid duplicating the project schema if it (oddly) appears.
+                    if ext != &self.project_schema {
+                        parts.push(quote(ext));
+                    }
+                }
+                parts.join(", ")
+            }
         }
     }
 
