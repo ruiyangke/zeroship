@@ -1762,6 +1762,34 @@ pub fn build_mask_sentinel_comment_for_field(
     ))
 }
 
+/// **P4 HALF A** — render the inline `/* zsenc:{mode}:{keyId}:{wraps} */`
+/// encryption sentinel for a field's `t.encrypted({...})` declaration, IFF the
+/// field carries an `encrypted` sub-object. Returns `None` for a plain column.
+///
+/// This is the SINGLE source of truth for the `zsenc` wire shape — both
+/// [`field_to_column_for_dialect`] (the column-DDL emitter that bakes it after
+/// the `BYTEA`/`BLOB` type) and the migration engine's declarative differ (which
+/// appends it to its own snapshot-rendered column) call it, so the sentinel the
+/// engine `generate`s is byte-identical to the one `registerModel` writes. The
+/// parser side lives in `read_live_schema` (PG `pg_attribute` comment regex) /
+/// the SQLite `sqlite_master.sql` regex.
+///
+/// The returned string INCLUDES the surrounding `/* … */` comment delimiters so
+/// it can be embedded verbatim into DDL (PG ignores it at parse time; SQLite
+/// preserves it in `sqlite_master.sql`).
+#[must_use]
+pub fn encryption_sentinel_for_field(def: &serde_json::Value) -> Option<String> {
+    let enc = def.get("encrypted").and_then(|v| v.as_object())?;
+    let mode = enc.get("mode").and_then(|v| v.as_str()).unwrap_or("randomised");
+    // Normalise legacy `"randomized"` (US spelling) to the canonical
+    // `randomised` so the introspector regex (which accepts only the canonical
+    // spelling) round-trips cleanly.
+    let mode_norm = if mode == "randomized" { "randomised" } else { mode };
+    let key_id = enc.get("keyId").and_then(|v| v.as_str()).unwrap_or("default");
+    let wraps = enc.get("wraps").and_then(|v| v.as_str()).unwrap_or("string");
+    Some(format!("/* zsenc:{mode_norm}:{key_id}:{wraps} */"))
+}
+
 /// Convert a field definition to a full column definition for CREATE TABLE.
 ///
 /// Validates the field name via [`validate_field_name_for_declaration`]
@@ -1794,15 +1822,8 @@ fn field_to_column_for_dialect(
     // (Q-P5 deferred). See
     // `docs/proposals/p5-encryption-backup-implementation-plan.md` §5.
     let enc_comment_owned;
-    let enc_comment: &str = if let Some(enc) = def.get("encrypted").and_then(|v| v.as_object()) {
-        let mode = enc.get("mode").and_then(|v| v.as_str()).unwrap_or("randomised");
-        // Normalise legacy `"randomized"` (US spelling) to the canonical
-        // `randomised` so the introspector regex (which accepts only the
-        // canonical spelling) round-trips cleanly.
-        let mode_norm = if mode == "randomized" { "randomised" } else { mode };
-        let key_id = enc.get("keyId").and_then(|v| v.as_str()).unwrap_or("default");
-        let wraps = enc.get("wraps").and_then(|v| v.as_str()).unwrap_or("string");
-        enc_comment_owned = format!(" /* zsenc:{mode_norm}:{key_id}:{wraps} */");
+    let enc_comment: &str = if let Some(body) = encryption_sentinel_for_field(def) {
+        enc_comment_owned = format!(" {body}");
         &enc_comment_owned
     } else {
         ""
