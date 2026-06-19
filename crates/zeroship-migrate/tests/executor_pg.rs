@@ -250,6 +250,55 @@ async fn journal_immutability_trigger_rejects_update_and_delete() {
     drop_schemas(&conn, &cfg).await;
 }
 
+/// Regression (T9, finding `journal-truncate-not-blocked`): a row-level
+/// `BEFORE UPDATE OR DELETE` trigger does NOT fire on `TRUNCATE`, so without a
+/// dedicated statement-level `BEFORE TRUNCATE` trigger, `TRUNCATE` would
+/// silently wipe the append-only journal. Assert TRUNCATE is rejected on ALL
+/// THREE append-only tables (schema_migrations, _rolled_back, _supersedes), and
+/// that the seeded row survives.
+#[compio::test]
+async fn journal_immutability_trigger_rejects_truncate() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_journal(&conn, &cfg).await.expect("bootstrap");
+
+    journal::record_completed(
+        &conn,
+        &cfg,
+        journal::CompletedRecord {
+            version: "mig_trunc",
+            name: "n",
+            checksum: "csum",
+            applied_by: "actor",
+            exec_ms: 5,
+            kind: "apply",
+        },
+    )
+    .await
+    .expect("insert row");
+
+    for tbl in [
+        "schema_migrations",
+        "schema_migrations_rolled_back",
+        "schema_migrations_supersedes",
+    ] {
+        let trunc = conn
+            .batch_execute(&format!("TRUNCATE \"{}\".{tbl}", cfg.meta_schema))
+            .await;
+        assert!(
+            trunc.is_err(),
+            "TRUNCATE of append-only table {tbl} must be rejected by the immutability trigger"
+        );
+    }
+
+    // The seeded journal row survived the (rejected) TRUNCATEs.
+    assert_eq!(journal_count(&conn, &cfg).await, 1);
+
+    drop_schemas(&conn, &cfg).await;
+}
+
 // ---------------------------------------------------------------------------
 // Executor apply tests (§2.3)
 // ---------------------------------------------------------------------------
@@ -1408,12 +1457,14 @@ async fn executor_rollback_refuses_without_approval() {
 /// REGRESSION (P6): the per-app deploy schema is `"<app_id>"` where `<app_id>`
 /// is a hyphenated UUID (the worker injects `Uuid::to_string()` as APP_ID;
 /// plugin-db's schema = `quote_ident(app_id)`). So the derived meta schema is
-/// `"<uuid>_migrations"` and the immutability-trigger NAME is
-/// `"<uuid>_migrations_schema_migrations_immutable_trg"` — a digit-leading,
-/// hyphen-bearing identifier. Pre-fix `ensure_journal` interpolated that name
-/// UNQUOTED into `CREATE TRIGGER`, failing `42601 trailing junk after numeric
-/// literal`. This drives a full apply under a UUID-shaped project/meta schema;
-/// it failed before the journal quote-ident fix and passes after.
+/// `"<uuid>_migrations"` — a digit-leading, hyphen-bearing identifier. The
+/// immutability-trigger function name still embeds the meta_schema, so it must
+/// be quoted as an identifier; pre-fix `ensure_journal` interpolated such a
+/// name UNQUOTED into the DDL, failing `42601 trailing junk after numeric
+/// literal`. (The trigger names themselves are now short table-local constants
+/// — `zs_immutable_trg` / `zs_immutable_truncate_trg` — that fit NAMEDATALEN.)
+/// This drives a full apply under a UUID-shaped project/meta schema; it failed
+/// before the journal quote-ident fix and passes after.
 #[compio::test]
 async fn ensure_journal_and_apply_under_hyphenated_uuid_schema() {
     let Some(conn) = pg_opt().await else {

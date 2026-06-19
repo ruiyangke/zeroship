@@ -160,7 +160,6 @@ fn quote_ident(ident: &str) -> String {
 pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), JournalError> {
     let meta = quote_ident(&cfg.meta_schema);
     let trg_fn = quote_ident(&format!("{}_schema_migrations_immutable", cfg.meta_schema));
-    let trg_name = format!("{}_schema_migrations_immutable_trg", cfg.meta_schema);
     let meta_lit = cfg.meta_schema.replace('\'', "''");
 
     // 1. Meta schema.
@@ -285,48 +284,65 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
     ))
     .await?;
 
-    // 4. Attach the trigger idempotently to BOTH append-only event tables (PG 16
-    //    has no CREATE TRIGGER IF NOT EXISTS; guard on pg_trigger).
+    // 4. Attach the immutability triggers idempotently to ALL THREE append-only
+    //    event tables (PG 16 has no CREATE TRIGGER IF NOT EXISTS; guard on
+    //    pg_trigger).
     //
-    //    The trigger NAME is derived from `meta_schema`, which — under the
-    //    per-app deploy model — is `"<app_id>_migrations"` where `<app_id>` is a
-    //    hyphenated UUID. So the name carries hyphens and MUST be quoted as an
-    //    identifier in the `CREATE TRIGGER` DDL (`trg_q`), while the
-    //    `pg_trigger.tgname` existence check compares the RAW (unquoted) catalog
-    //    name as a string literal (`trg_lit`). Mixing the two — using the raw
-    //    name as a `CREATE TRIGGER` identifier — fails with `42601 trailing junk
-    //    after numeric literal` the moment the schema starts with digits / holds
-    //    a hyphen.
-    for (tbl, trg) in [
-        ("schema_migrations", trg_name.clone()),
-        (
-            "schema_migrations_rolled_back",
-            format!("{}_schema_migrations_rolled_back_immutable_trg", cfg.meta_schema),
-        ),
-        (
-            "schema_migrations_supersedes",
-            format!("{}_schema_migrations_supersedes_immutable_trg", cfg.meta_schema),
-        ),
+    //    TWO triggers per table, both calling the same RAISE function:
+    //      - `BEFORE UPDATE OR DELETE ... FOR EACH ROW` — blocks row mutation.
+    //      - `BEFORE TRUNCATE ... FOR EACH STATEMENT` — blocks TRUNCATE, which
+    //        row-level triggers DO NOT fire on. Without the statement-level
+    //        TRUNCATE trigger, `TRUNCATE {meta}.schema_migrations` would silently
+    //        wipe the append-only journal. (Defense-in-depth: TRUNCATE is only
+    //        reachable on the trusted-admin path — the migrator role has no grant
+    //        on the meta schema — but the journal must be immutable by
+    //        construction, not by least-privilege alone.)
+    //
+    //    Trigger names are SHORT and table-local (`zs_immutable_trg`,
+    //    `zs_immutable_truncate_trg`) — a trigger name only needs to be unique
+    //    per table, not per schema, so it need NOT embed the meta_schema. This is
+    //    deliberate: the meta_schema under the per-app deploy model is
+    //    `"<app_id>_migrations"` (a hyphenated UUID, ~37 chars). Embedding it in
+    //    the trigger name overflows PostgreSQL's 63-byte NAMEDATALEN limit — the
+    //    name is silently truncated, which (a) makes distinct row vs TRUNCATE
+    //    names collide and (b) makes the full-name pg_trigger existence guard
+    //    never match the truncated catalog name (re-bootstrap churn). Short
+    //    fixed names sidestep all of that. They are still quoted as identifiers
+    //    (`trg_q`) for uniformity, and the existence check compares the raw name
+    //    as a string literal (`trg_lit`).
+    for tbl in [
+        "schema_migrations",
+        "schema_migrations_rolled_back",
+        "schema_migrations_supersedes",
     ] {
-        let trg_lit = trg.replace('\'', "''");
-        let trg_q = quote_ident(&trg);
-        conn.batch_execute(&format!(
-            "DO $do$ BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM pg_trigger t
-                    JOIN pg_class c ON c.oid = t.tgrelid
-                    JOIN pg_namespace n ON n.oid = c.relnamespace
-                    WHERE t.tgname = '{trg_lit}'
-                      AND c.relname = '{tbl}'
-                      AND n.nspname = '{meta_lit}'
-                ) THEN
-                    EXECUTE 'CREATE TRIGGER {trg_q}
-                             BEFORE UPDATE OR DELETE ON {meta}.{tbl}
-                             FOR EACH ROW EXECUTE FUNCTION {trg_fn}()';
-                END IF;
-            END $do$"
-        ))
-        .await?;
+        for (trg, level, events) in [
+            ("zs_immutable_trg", "FOR EACH ROW", "UPDATE OR DELETE"),
+            (
+                "zs_immutable_truncate_trg",
+                "FOR EACH STATEMENT",
+                "TRUNCATE",
+            ),
+        ] {
+            let trg_lit = trg.replace('\'', "''");
+            let trg_q = quote_ident(trg);
+            conn.batch_execute(&format!(
+                "DO $do$ BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_trigger t
+                        JOIN pg_class c ON c.oid = t.tgrelid
+                        JOIN pg_namespace n ON n.oid = c.relnamespace
+                        WHERE t.tgname = '{trg_lit}'
+                          AND c.relname = '{tbl}'
+                          AND n.nspname = '{meta_lit}'
+                    ) THEN
+                        EXECUTE 'CREATE TRIGGER {trg_q}
+                                 BEFORE {events} ON {meta}.{tbl}
+                                 {level} EXECUTE FUNCTION {trg_fn}()';
+                    END IF;
+                END $do$"
+            ))
+            .await?;
+        }
     }
 
     Ok(())
