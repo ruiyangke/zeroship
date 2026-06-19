@@ -282,7 +282,15 @@ impl std::hash::Hash for ColumnSnapshot {
 }
 
 /// One index of a table, as introspected from `pg_catalog`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `opclass` is **emission-only** (like `ColumnSnapshot::default` /
+/// `encryption_sentinel`): it is NOT recovered by `snapshot_schema` and NOT a
+/// drift attribute, so it is EXCLUDED from `PartialEq` / `Eq` / `Hash`. It rides
+/// on a desired snapshot so `render_create_index` can spell the per-column
+/// operator class (`vector_cosine_ops`, …) an `ivfflat` ANN index needs; live
+/// introspection cannot recover it cheaply, so comparing it would make every
+/// freshly-built vector index phantom-drift against itself.
+#[derive(Debug, Clone)]
 pub struct IndexSnapshot {
     /// Index name.
     pub name: String,
@@ -295,6 +303,68 @@ pub struct IndexSnapshot {
     /// must emit verbatim; recovering it from the index NAME is unsound, so the
     /// snapshot carries it explicitly.
     pub columns: Vec<String>,
+    /// The index ACCESS METHOD (`pg_am.amname`): `btree` (the default), `gin`
+    /// (FTS over a tsvector), `gist` (spatial / geography), `ivfflat` / `hnsw`
+    /// (pgvector ANN), etc. Recovered from `pg_am` so a method FLIP
+    /// (`btree` → `ivfflat`, the vector-ANN drift) is surfaced by the attribute
+    /// diff instead of being invisible to name-only diffing (#index-method-drift).
+    /// A desired snapshot the author builds stamps the kind it intends to emit;
+    /// `render_create_index` turns a non-`btree` method into `USING <method>`.
+    pub access_method: String,
+    /// The index EXPRESSION / PREDICATE text, when the index is over an
+    /// expression (`pg_index.indexprs`, e.g. an FTS `to_tsvector(...)` index) or
+    /// is partial (`pg_index.indpred`). Recovered via `pg_get_expr` so an
+    /// expression / partial index round-trips (it has no plain `columns`, so
+    /// without this it would phantom-drop) and an out-of-band rewrite of the
+    /// expression is surfaced by the attribute diff. `None` for a plain
+    /// column-list index.
+    pub expression: Option<String>,
+    /// **Emission-only** per-column operator class for an `ivfflat`/`hnsw` ANN
+    /// index (`vector_cosine_ops`, `vector_l2_ops`, `vector_ip_ops`). `None` for
+    /// every plain / GIN / GiST index. NOT a drift attribute — see the type doc;
+    /// `snapshot_schema` always leaves it `None`. The author stamps it on a
+    /// desired vector index so `render_create_index` can emit
+    /// `USING ivfflat ("col" <opclass>)`.
+    pub opclass: Option<String>,
+}
+
+// `opclass` is intentionally excluded from equality + hashing — it is
+// DDL-emission metadata, not a drift attribute (see the type doc). The drift
+// attributes are `name`, `unique`, `columns`, `access_method`, `expression`.
+impl PartialEq for IndexSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.unique == other.unique
+            && self.columns == other.columns
+            && self.access_method == other.access_method
+            && self.expression == other.expression
+    }
+}
+impl Eq for IndexSnapshot {}
+impl std::hash::Hash for IndexSnapshot {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.unique.hash(state);
+        self.columns.hash(state);
+        self.access_method.hash(state);
+        self.expression.hash(state);
+    }
+}
+
+impl IndexSnapshot {
+    /// A plain B-tree index over `columns` (the default kind every column-list
+    /// index built by the author is). `access_method = "btree"`, no expression.
+    #[must_use]
+    pub fn btree(name: impl Into<String>, unique: bool, columns: Vec<String>) -> Self {
+        Self {
+            name: name.into(),
+            unique,
+            columns,
+            access_method: "btree".to_string(),
+            expression: None,
+            opclass: None,
+        }
+    }
 }
 
 /// One constraint of a table, as introspected from
@@ -353,7 +423,7 @@ pub struct AlteredObject {
     /// as `index users_email_idx`, a constraint as `constraint users_age_chk`.
     pub object: String,
     /// The attribute that diverged: `data_type`, `nullable`, `unique`, `columns`,
-    /// `kind`, or `definition`.
+    /// `access_method`, `expression`, `kind`, or `definition`.
     pub field: String,
     /// The expected snapshot's value for `field`.
     pub expected: String,
@@ -472,9 +542,22 @@ pub async fn snapshot_schema(
     // / custom-named index carries its real column list (recovering columns from
     // the index NAME is unsound — 1a). Expression keys (`attnum = 0`) and any
     // INCLUDE columns (ordinal beyond `indnkeyatts`) are excluded.
+    //
+    // The ACCESS METHOD is recovered from `pg_am.amname` (`am.amname`) so a
+    // GIN/GiST/ivfflat/hnsw index round-trips as that kind and a method FLIP is
+    // surfaced (#index-method-drift). The EXPRESSION / PREDICATE text is recovered
+    // via `pg_get_expr(indexprs, indrelid)` / `pg_get_expr(indpred, indrelid)`:
+    // an FTS `to_tsvector(...)` index or a partial index has no plain `indkey`
+    // columns, so without this it would phantom-DROP and be re-created on every
+    // diff (#fts-declarative). `pg_get_expr` renders the canonical, re-parse-stable
+    // spelling, so a desired snapshot the author builds with the SAME spelling
+    // re-diffs to zero.
     let idx_rows = conn
         .query(
             "SELECT c.relname AS table_name, ic.relname AS index_name, x.indisunique, \
+                    am.amname AS access_method, \
+                    pg_get_expr(x.indexprs, x.indrelid) AS index_expr, \
+                    pg_get_expr(x.indpred, x.indrelid) AS index_pred, \
                     ( \
                       SELECT array_agg(att.attname ORDER BY k.ord) \
                       FROM unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) \
@@ -485,6 +568,7 @@ pub async fn snapshot_schema(
              FROM pg_index x \
              JOIN pg_class c ON c.oid = x.indrelid \
              JOIN pg_class ic ON ic.oid = x.indexrelid \
+             JOIN pg_am am ON am.oid = ic.relam \
              JOIN pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = $1 \
              ORDER BY c.relname, ic.relname",
@@ -497,10 +581,27 @@ pub async fn snapshot_schema(
             // `array_agg` over an empty/all-expression key set is SQL NULL → an
             // empty column list (a wholly-expression index has no plain columns).
             let columns: Vec<String> = r.try_get("columns").unwrap_or_default();
+            // Fold the (optional) expression + (optional) partial predicate into
+            // one comparable string. `pg_get_expr` returns NULL for a plain
+            // column index → `None`. When both are present (an expression partial
+            // index) they are joined `<expr> WHERE <pred>` so the round-trip /
+            // drift compare sees the whole shape.
+            let index_expr: Option<String> = r.try_get("index_expr").ok().flatten();
+            let index_pred: Option<String> = r.try_get("index_pred").ok().flatten();
+            let expression = match (index_expr, index_pred) {
+                (Some(e), Some(p)) => Some(format!("{e} WHERE {p}")),
+                (Some(e), None) => Some(e),
+                (None, Some(p)) => Some(format!("WHERE {p}")),
+                (None, None) => None,
+            };
             t.indexes.push(IndexSnapshot {
                 name: r.get("index_name"),
                 unique: r.get("indisunique"),
                 columns,
+                access_method: r.get("access_method"),
+                expression,
+                // Emission-only; never recovered from the catalog.
+                opclass: None,
             });
         }
     }
@@ -685,6 +786,27 @@ fn diff_attrs(
             let obj = format!("index {}", ei.name);
             push(&obj, "unique", &ei.unique.to_string(), &ai.unique.to_string());
             push(&obj, "columns", &ei.columns.join(","), &ai.columns.join(","));
+            // Access-method drift (#index-method-drift): a same-name index whose
+            // `pg_am` kind changed out-of-band — e.g. someone dropped the ANN
+            // ivfflat and re-created a plain btree under the same name, or vice
+            // versa. Name + columns can match while the method silently differs,
+            // so this compare is the only thing that catches a btree→ivfflat
+            // flip. An expected snapshot built without a method (`""`) opts out of
+            // the compare (it never asserts a method it didn't intend to model).
+            if !ei.access_method.is_empty() {
+                push(&obj, "access_method", &ei.access_method, &ai.access_method);
+            }
+            // Expression / partial-predicate drift: an FTS `to_tsvector(...)`
+            // index or a partial index whose expression was rewritten
+            // out-of-band. `None` on the expected side opts out.
+            if let Some(exp_expr) = &ei.expression {
+                push(
+                    &obj,
+                    "expression",
+                    exp_expr,
+                    ai.expression.as_deref().unwrap_or(""),
+                );
+            }
         }
     }
 

@@ -54,6 +54,31 @@ fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
+/// Sentinel prefix on a [`ColumnSnapshot::default`] marking a STORED generated
+/// column (T12: the `__fts` tsvector). When the `default` body starts with this
+/// prefix, the emitter writes `GENERATED ALWAYS AS (<expr>) STORED` instead of a
+/// plain `DEFAULT <expr>` clause. The remainder after the prefix is the
+/// generation expression. Generated-column expressions are emission-only metadata
+/// (excluded from `ColumnSnapshot` equality), so this never participates in drift.
+const GENERATED_PREFIX: &str = "GENERATED:";
+
+/// Render a column's trailing `DEFAULT <expr>` or `GENERATED ALWAYS AS (<expr>)
+/// STORED` clause from its (emission-only) `default` body. Empty string when the
+/// column has no default. A `GENERATED:`-prefixed body becomes the stored
+/// generated-column clause (T12 `__fts`); any other body is a plain default.
+fn default_clause(default: Option<&str>) -> String {
+    match default {
+        Some(d) => {
+            if let Some(expr) = d.strip_prefix(GENERATED_PREFIX) {
+                format!(" GENERATED ALWAYS AS ({expr}) STORED")
+            } else {
+                format!(" DEFAULT {d}")
+            }
+        }
+        None => String::new(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Input contract — the per-collection declared-schema descriptor.
 // ---------------------------------------------------------------------------
@@ -159,6 +184,18 @@ pub struct FieldDescriptor {
     /// + a `COMMENT … __zsmask:…` sentinel. Mirrors `mask` on the wire `FieldDef`.
     #[serde(default)]
     pub mask: Option<serde_json::Value>,
+    /// `t.string().fts(language?)` — `true` ⇒ this text column participates in the
+    /// collection's composite full-text index (T12). Every `.fts()`-marked column
+    /// folds into ONE `__fts` GENERATED tsvector column + a `<coll>__fts_idx` GIN
+    /// index. Mirrors `fts` on the wire `FieldDef`.
+    #[serde(default)]
+    pub fts: bool,
+    /// `t.string().fts(language)` — the tsvector configuration token (`english`,
+    /// `simple`, …). The collection's FTS index uses the first non-empty language
+    /// among its `.fts()` fields, else `english`. Mirrors `ftsLanguage` on the
+    /// wire `FieldDef`.
+    #[serde(rename = "ftsLanguage", default)]
+    pub fts_language: Option<String>,
 }
 
 /// One declared index of a collection (the `_indexes` array entry).
@@ -615,10 +652,12 @@ const SYSTEM_INDEXED_COLS: &[&str] = &["deleted_at", "updated_at", "created_by"]
 fn system_field_indexes(table: &str) -> Vec<IndexSnapshot> {
     SYSTEM_INDEXED_COLS
         .iter()
-        .map(|col| IndexSnapshot {
-            name: non_unique_index_name(table, col),
-            unique: false,
-            columns: vec![(*col).to_string()],
+        .map(|col| {
+            IndexSnapshot::btree(
+                non_unique_index_name(table, col),
+                false,
+                vec![(*col).to_string()],
+            )
         })
         .collect()
 }
@@ -766,15 +805,15 @@ pub fn desired_snapshot(
         // it as an out-of-band index to DROP. It is created by the `PRIMARY KEY`
         // clause, never by a standalone CREATE INDEX, so the differ skips it
         // (see `is_pk_index`).
-        indexes.push(IndexSnapshot {
-            name: format!("{}_pkey", d.name),
-            unique: true,
+        indexes.push(IndexSnapshot::btree(
+            format!("{}_pkey", d.name),
+            true,
             // The PK's implicit index covers `id` (live `pg_index` reports the
             // same key column). The differ never emits DDL for it (see
             // `is_pk_index`), but the snapshot must carry the column list so the
             // attribute-aware diff stays clean against live.
-            columns: vec!["id".into()],
-        });
+            vec!["id".into()],
+        ));
 
         for f in &d.fields {
             // #5 id-fold: `id: t.id("prefix")` is a PREFIX DECLARATION for the
@@ -882,11 +921,22 @@ pub fn desired_snapshot(
             // A `unique: true` field becomes a unique index (A1 rule). The
             // name mirrors plugin-db's deterministic per-field index name.
             if f.unique {
-                indexes.push(IndexSnapshot {
-                    name: unique_index_name(&d.name, &f.name),
-                    unique: true,
-                    columns: vec![f.name.clone()],
-                });
+                indexes.push(IndexSnapshot::btree(
+                    unique_index_name(&d.name, &f.name),
+                    true,
+                    vec![f.name.clone()],
+                ));
+            }
+            // **T12** — a vector field (`t.vector(dims, { metric })`) emits a
+            // pgvector ANN index (`USING ivfflat` with the metric-appropriate
+            // opclass). The live snapshot carries it as `access_method =
+            // 'ivfflat'`, so the desired snapshot must model it identically or it
+            // phantom-drops; routed through the shared `zeroship-schema` kernel so
+            // the opclass + name match plugin-db's runtime form byte-for-byte.
+            if f.ty == "vector" {
+                if let Some(spec) = vector_index_snapshot(&d.name, f) {
+                    indexes.push(spec);
+                }
             }
             // A `ref` field declares a FOREIGN KEY constraint.
             if f.ty == "ref" {
@@ -933,11 +983,26 @@ pub fn desired_snapshot(
             // Carry the declared columns through VERBATIM (1a) — recovering them
             // from the index name was unsound for composite / custom-named
             // indexes. `render_create_index` emits this list directly.
-            indexes.push(IndexSnapshot {
-                name: idx.name.clone(),
-                unique: idx.unique,
-                columns: idx.columns.clone(),
-            });
+            indexes.push(IndexSnapshot::btree(
+                idx.name.clone(),
+                idx.unique,
+                idx.columns.clone(),
+            ));
+        }
+
+        // **T12** — full-text search: every `.fts()`-marked text column on this
+        // collection folds into ONE composite `__fts` GENERATED tsvector column +
+        // a `<coll>__fts_idx` GIN index (Q-P4-B, matching plugin-db's runtime
+        // `__fts` / `<coll>__fts_idx` contract the data plane's `fts_search`
+        // reads). Without this the live FTS objects the runtime built were unknown
+        // to the differ and phantom-dropped; modeling them in `desired` both stops
+        // the drop AND makes the engine the authority that emits them (the
+        // schema-authority cutover intent). The generated-column form is
+        // trigger-free (no `tsvector_update_trigger`), so the whole FTS shape is
+        // pure DDL the engine owns.
+        if let Some((fts_col, fts_idx)) = fts_objects(&d.name, &d.fields) {
+            columns.push(fts_col);
+            indexes.push(fts_idx);
         }
 
         // Deterministic ordering (snapshot_schema sorts everything by name).
@@ -1018,6 +1083,128 @@ fn unique_index_name(table: &str, field: &str) -> String {
 /// `fk_constraint_name`).
 fn fk_constraint_name(field: &str) -> String {
     format!("{field}_fkey")
+}
+
+// ---------------------------------------------------------------------------
+// T12 — vector-ANN + full-text search index modeling.
+//
+// The differ never modeled the access-method dimension, so the live ivfflat
+// (vector) and GIN (FTS) indexes the data plane built were UNKNOWN to it and
+// phantom-DROPped on every diff (and a `btree → ivfflat` method flip was
+// invisible). Modeling them in the DESIRED snapshot both stops the drop AND
+// makes the engine the authority that EMITS them (the schema-authority cutover
+// intent). The PG access-method names (`ivfflat`, `gin`) and the deterministic
+// index/column names match the shared `zeroship-schema` kernel + plugin-db's
+// runtime contract byte-for-byte, so an engine-created object round-trips clean.
+// ---------------------------------------------------------------------------
+
+/// The pgvector opclass for a metric token (mirrors plugin-db's
+/// `ensure_vector_index` mapping). `None` is never returned — an unknown / absent
+/// token folds to the SDK default (`cosine`), matching the shared kernel.
+fn vector_opclass(metric: Option<&str>) -> &'static str {
+    match metric {
+        Some("l2") => "vector_l2_ops",
+        Some("innerProduct") | Some("ip") => "vector_ip_ops",
+        _ => "vector_cosine_ops",
+    }
+}
+
+/// Build the [`IndexSnapshot`] for a `t.vector(...)` field's ANN index, or `None`
+/// if the field is not actually a vector field. The live index introspects as
+/// `access_method = 'ivfflat'` over the single vector column (no `indexprs`, so
+/// `expression` stays `None` and the index round-trips clean). The opclass rides
+/// on the emission-only `opclass` field — excluded from drift equality — so
+/// `render_create_index` can spell `USING ivfflat ("col" <opclass>)`.
+fn vector_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapshot> {
+    if f.ty != "vector" {
+        return None;
+    }
+    Some(IndexSnapshot {
+        // `<table>_<col>_idx`, matching `zeroship_schema::query::index_name`
+        // (= plugin-db `ensure_vector_index`'s name).
+        name: non_unique_index_name(table, &f.name),
+        unique: false,
+        columns: vec![f.name.clone()],
+        access_method: "ivfflat".to_string(),
+        expression: None,
+        opclass: Some(vector_opclass(f.vector_metric.as_deref()).to_string()),
+    })
+}
+
+/// The fixed name of the composite full-text tsvector column + its GIN index,
+/// matching plugin-db's runtime contract (`__fts` column read by `fts_search`,
+/// `<coll>__fts_idx` GIN index).
+fn fts_column_name() -> &'static str {
+    "__fts"
+}
+fn fts_index_name(table: &str) -> String {
+    format!("{table}__fts_idx")
+}
+
+/// The tsvector configuration (language) for a collection's FTS index: the first
+/// non-empty `ftsLanguage` declared on any `.fts()` field, else `english` (the
+/// SDK default). Mirrors `zeroship_schema::query::build_create_indexes`'s
+/// first-non-empty-wins rule.
+fn fts_language(fields: &[FieldDescriptor]) -> String {
+    fields
+        .iter()
+        .filter(|f| f.fts)
+        .find_map(|f| f.fts_language.clone().filter(|l| !l.is_empty()))
+        .unwrap_or_else(|| "english".to_string())
+}
+
+/// Build the generated `__fts` tsvector COLUMN + its GIN index for the
+/// `.fts()`-marked text columns of a collection, or `None` when the collection
+/// has no FTS fields.
+///
+/// The column is `GENERATED ALWAYS AS (to_tsvector('<lang>'::regconfig,
+/// coalesce("c1",''::text) || ' '::text || …)) STORED` — a trigger-free,
+/// fully-declarative form the engine owns end-to-end (plugin-db's runtime form
+/// used a `tsvector_update_trigger`, which is not declarative; the engine, as the
+/// sole schema authority, replaces it). The index is `USING gin("__fts")`. The
+/// `__fts` column name + `<coll>__fts_idx` index name are the contract
+/// `fts_search` reads, so they are preserved.
+fn fts_objects(
+    table: &str,
+    fields: &[FieldDescriptor],
+) -> Option<(ColumnSnapshot, IndexSnapshot)> {
+    let fts_cols: Vec<&FieldDescriptor> = fields.iter().filter(|f| f.fts).collect();
+    if fts_cols.is_empty() {
+        return None;
+    }
+    let language = fts_language(fields);
+    // `coalesce("c1",'') || ' ' || coalesce("c2",'') …` over the source columns,
+    // in declared order. Mirrors plugin-db's `coalesce_concat`.
+    let concat = fts_cols
+        .iter()
+        .map(|f| format!("coalesce({}, ''::text)", quote_ident(&f.name)))
+        .collect::<Vec<_>>()
+        .join(" || ' '::text || ");
+    let generation_expr =
+        format!("to_tsvector('{language}'::regconfig, {concat})");
+    let col = ColumnSnapshot {
+        name: fts_column_name().to_string(),
+        data_type: "tsvector".to_string(),
+        nullable: true,
+        // The GENERATED expression rides on `default` (emission-only metadata —
+        // `render_create_table` / `render_add_column` turn it into the
+        // `GENERATED ALWAYS AS (...) STORED` clause via the `GENERATED:` prefix).
+        // `snapshot_schema` does not introspect generation expressions, so it is
+        // NOT a drift attribute (excluded from `ColumnSnapshot` equality) — the
+        // `__fts` COLUMN itself round-trips as a plain nullable tsvector column.
+        default: Some(format!("{GENERATED_PREFIX}{generation_expr}")),
+        encryption_sentinel: None,
+        comment_sentinel: None,
+    };
+    let idx = IndexSnapshot {
+        name: fts_index_name(table),
+        unique: false,
+        columns: vec![fts_column_name().to_string()],
+        access_method: "gin".to_string(),
+        expression: None,
+        opclass: None,
+    };
+    Some((col, idx))
 }
 
 /// Validate a creator-declared typed-id prefix (`t.id("blog")`, #5).
@@ -2212,12 +2399,9 @@ impl DeclarativeAuthor {
             let null = if c.nullable { "" } else { " NOT NULL" };
             // `id` carries the inline PRIMARY KEY.
             let pk = if c.name == "id" { " PRIMARY KEY" } else { "" };
-            // #4: emit the DEFAULT clause (emission-only metadata).
-            let default = c
-                .default
-                .as_deref()
-                .map(|d| format!(" DEFAULT {d}"))
-                .unwrap_or_default();
+            // #4: emit the DEFAULT clause (emission-only metadata), or a STORED
+            // GENERATED clause for the T12 `__fts` tsvector column.
+            let default = default_clause(c.default.as_deref());
             // **P4 HALF A** — the inline `/* zsenc:… */` sentinel rides between
             // the type and the constraints, exactly as the shared kernel's
             // `field_to_column_for_dialect` bakes it, so a `generate`d encrypted
@@ -2348,11 +2532,8 @@ impl DeclarativeAuthor {
     /// classifier therefore correctly classifies it additive, not destructive.
     fn render_add_column(&self, table: &str, c: &ColumnSnapshot) -> Migration {
         let null = if c.nullable { "" } else { " NOT NULL" };
-        let default = c
-            .default
-            .as_deref()
-            .map(|d| format!(" DEFAULT {d}"))
-            .unwrap_or_default();
+        // DEFAULT clause, or a STORED GENERATED clause for the T12 `__fts` column.
+        let default = default_clause(c.default.as_deref());
         // **P4 HALF A** — inline `/* zsenc:… */` for an encrypted column added
         // after the table exists (e.g. a later-declared `t.encrypted` field).
         let enc = c
@@ -2489,14 +2670,37 @@ impl DeclarativeAuthor {
         // composite / custom-named indexes, recovering `a_b` from `events_a_b_idx`
         // and producing `column "a_b" does not exist`).
         let unique = if idx.unique { "UNIQUE " } else { "" };
+        // **T12** — `USING <method>` for a non-btree index (GIN over the `__fts`
+        // tsvector, ivfflat/hnsw over a vector column). A btree index omits the
+        // clause (PG's default), so existing btree indexes are byte-unchanged.
+        let using = if idx.access_method == "btree" {
+            String::new()
+        } else {
+            format!(" USING {}", idx.access_method)
+        };
+        // Per-column operator class for an ANN index (`"col" vector_cosine_ops`).
+        // The (emission-only) opclass applies to the single ANN column; a plain /
+        // GIN index has `opclass = None` and emits the bare column list.
+        let opclass_suffix = idx
+            .opclass
+            .as_deref()
+            .map(|oc| format!(" {oc}"))
+            .unwrap_or_default();
         let col_list = idx
             .columns
             .iter()
-            .map(|c| quote_ident(c))
+            .map(|c| format!("{}{opclass_suffix}", quote_ident(c)))
             .collect::<Vec<_>>()
             .join(", ");
+        // ivfflat takes a `WITH (lists = N)` storage parameter (matches
+        // plugin-db's runtime `WITH (lists = 100)`); other methods take none.
+        let with_clause = if idx.access_method == "ivfflat" {
+            " WITH (lists = 100)"
+        } else {
+            ""
+        };
         let up = format!(
-            "CREATE {unique}INDEX IF NOT EXISTS {} ON {} ({col_list})",
+            "CREATE {unique}INDEX IF NOT EXISTS {} ON {}{using} ({col_list}){with_clause}",
             quote_ident(&idx.name),
             self.qualified(table),
         );

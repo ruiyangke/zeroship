@@ -74,6 +74,14 @@ function fieldDefToDescriptor(name, def) {
   if (def.encrypted !== undefined) out.encrypted = def.encrypted;
   if (def.mask !== undefined) out.mask = def.mask;
 
+  // T12 full-text search facet — `.fts(language?)` marks a text column for the
+  // collection's composite `__fts` tsvector + GIN index. Carried VERBATIM so the
+  // engine builds the same `__fts` column / `<coll>__fts_idx` index plugin-db's
+  // runtime `fts_search` reads. Previously STRIPPED here, so an FTS field
+  // produced a plain text column with no index.
+  if (def.fts === true) out.fts = true;
+  if (def.ftsLanguage !== undefined) out.ftsLanguage = def.ftsLanguage;
+
   return out;
 }
 

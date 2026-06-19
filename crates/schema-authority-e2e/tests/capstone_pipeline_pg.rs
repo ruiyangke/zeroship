@@ -83,6 +83,11 @@ const docs = {
   // 3-dim cosine vector (small so the test can build the literal trivially;
   // the engine renders vector(N) for any N).
   embedding: t.vector(3, { metric: "cosine" }),
+  // T12 full-text search: `.fts()` folds into a `__fts` GENERATED tsvector
+  // column + a `docs__fts_idx` GIN index, emitted DECLARATIVELY by the engine
+  // (tsvector + GIN are core Postgres — no extension needed). Pre-T12 this was
+  // stripped at the IR boundary and produced a plain text column with no index.
+  body: t.string().fts(),
   // FK to users with cascade delete.
   authorId: t.ref("users", { onDelete: "cascade" }),
 };
@@ -247,6 +252,22 @@ async fn schema_authority_capstone_end_to_end_on_real_pg() {
     );
     // vector(3) DDL.
     assert!(body.contains("vector(3)"), "vector column DDL; body:\n{body}");
+    // T12 vector-ANN index: the engine emits a USING ivfflat index with the
+    // cosine opclass (the data plane's flat-scan fallback is gone).
+    assert!(
+        body.contains("USING ivfflat") && body.contains("vector_cosine_ops"),
+        "vector ANN index DDL (ivfflat + cosine opclass); body:\n{body}"
+    );
+    // T12 FTS: a `__fts` STORED generated tsvector column + a USING gin index,
+    // emitted declaratively by the engine (no trigger, core PG).
+    assert!(
+        body.contains("\"__fts\" tsvector GENERATED ALWAYS AS (to_tsvector("),
+        "FTS __fts generated tsvector column; body:\n{body}"
+    );
+    assert!(
+        body.contains("USING gin (\"__fts\")"),
+        "FTS GIN index over __fts; body:\n{body}"
+    );
     // encrypted ssn → BYTEA + the inline /* zsenc:... */ sentinel (SQLite form)
     // AND a recoverable zsenc COMMENT (the PG form, since PG discards the inline
     // comment at parse time). This is the P4-HALF-A engine emission — see the
