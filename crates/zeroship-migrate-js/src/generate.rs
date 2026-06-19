@@ -151,13 +151,7 @@ pub fn render_dbmate(migrations: &[Migration]) -> String {
     let mut s = String::new();
     s.push_str("-- migrate:up\n");
     for m in migrations {
-        let up = m.up.trim_end();
-        let _ = writeln!(s, "{up}");
-        if !up.ends_with(';') && !up.is_empty() {
-            // Keep statements separable; the engine's own splitter is
-            // forgiving, but a trailing newline-only join reads cleaner.
-        }
-        s.push('\n');
+        write_statement(&mut s, &m.up);
     }
 
     s.push_str("-- migrate:down\n");
@@ -165,9 +159,7 @@ pub fn render_dbmate(migrations: &[Migration]) -> String {
     if all_reversible {
         for m in migrations.iter().rev() {
             if let Some(down) = &m.down {
-                let down = down.trim_end();
-                let _ = writeln!(s, "{down}");
-                s.push('\n');
+                write_statement(&mut s, down);
             }
         }
     } else {
@@ -177,6 +169,23 @@ pub fn render_dbmate(migrations: &[Migration]) -> String {
         );
     }
     s
+}
+
+/// Append one migration's SQL as a semicolon-terminated statement.
+///
+/// Each engine-emitted `Migration.up`/`down` is a SINGLE statement WITHOUT a
+/// trailing `;` (the executor runs it via `batch_execute(&m.up)` as one
+/// statement). A dbmate migration file, however, can hold MANY statements per
+/// section, split on `;` — so we terminate each one. The blank line between
+/// statements is cosmetic; the `;` is what makes the file replayable by any
+/// `;`-splitting applier (dbmate, psql, raw `batch_execute`).
+fn write_statement(s: &mut String, sql: &str) {
+    let sql = sql.trim_end().trim_end_matches(';');
+    if sql.is_empty() {
+        return;
+    }
+    let _ = writeln!(s, "{sql};");
+    s.push('\n');
 }
 
 /// Slugify a migration name for the filename: lowercase, non-alphanumerics →
