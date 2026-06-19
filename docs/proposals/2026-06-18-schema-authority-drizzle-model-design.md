@@ -294,7 +294,19 @@ No more auto-migrate-on-boot. Dev parity:
   runtime auto-migrate + the declared-schema deploy-contract field; the runtime
   no longer migrates. (P1–P4 made it unnecessary.)
 - **P6 — Wire the engine into control deploy** (§8): ship migrations in the
-  `.zship`, provision role/schema + apply at deploy before go-live.
+  `.zship`, provision role/schema + apply at deploy before go-live. **LANDED**
+  (REORDERED before P5 — gutting `registerModel` is only safe once deploy
+  creates the schema). `.zship` carries `manifest.migrations[]`
+  (content-addressed blobs); the control deploy handler reconstructs them and
+  applies via `deploy_migrate::apply_bundle_migrations` (Confined, schema
+  `"<app_id>"`, the `migrator_<app_id>` role) AFTER ingest + BEFORE
+  `set_deploy_with_manifest`; a migrate failure ⇒ no go-live. Shadow dry-run
+  skipped on the deploy apply for v1 (engine guard + role are the in-line
+  safety). Fixed a latent engine bug: `ensure_journal` interpolated the
+  immutability-trigger NAME unquoted, breaking on the hyphenated-UUID per-app
+  schema. **P6b (follow-on):** the build-side `generate` of
+  `manifest.migrations[]` from `schema.ts` lives in the vite-plugin (creator
+  DX); P6 verifies with hand-authored migration bundles.
 - **P7 — e2e:** author `schema.ts` → `generate` → deploy applies → runtime data
   access is typed and encryption/mask/vector work end-to-end on real PG.
 

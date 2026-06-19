@@ -97,16 +97,59 @@ These feeds are polled rather than pushed so the control plane stays stateless w
 ## Deploy ingest
 
 ```text
-1. `api::deploy` accepts only `application/x-zship`.
+1. `api::deploy` accepts only `application/x-zship` (authz: `AppsDeploy` on
+   `Resource::App{id}`, BEFORE any body byte is read).
 2. The request body is streamed to a temp file under `deploy_tmp_dir`.
 3. `zeroship_bundle::ingest(...)`:
    - opens the tar.zst
    - requires `manifest.json` first
    - validates `Manifest.version == 1`
    - streams `blobs/<hash>` through `BlobStore::put_blob_stream`
+     (worker modules, assets, AND the carried DB migration files —
+     `manifest.migrations[]` maps each migration filename → its blob hash)
    - writes `manifests/<app_id>/<deploy_hash>.json`
-4. Control updates `apps.deploy_hash` and `apps.manifest_json`.
+4. Per-app OAuth client reconcile + declared-scope validation.
+5. **Migrate phase (schema-authority §8 / P6).** BEFORE go-live, control
+   reconstructs `manifest.migrations[]` from the blob store into a per-deploy
+   tmp dir and applies them via `zeroship-migrate`
+   (`deploy_migrate::apply_bundle_migrations`):
+   - provision the per-app schema `"<app_id>"` (idempotent `CREATE SCHEMA`) +
+     the least-privilege `migrator_<app_id>` role;
+   - `load_dir` → `engine.plan(Confined)` → `engine.apply(Approval::None)` —
+     the full SQL deny-list + single-schema confinement to `"<app_id>"`, run
+     under the migrator role.
+6. Only on migrate success → control updates `apps.deploy_hash` +
+   `apps.manifest_json` (the go-live commit, `set_deploy_with_manifest`).
 ```
+
+**Identity binding.** The schema + project id + migrator role are all derived
+from the trusted, already-authorized path id (`uid`), never a request body — a
+creator can only ever migrate the schema they were authorized to deploy.
+
+**Ordering / half-state contract (§8.4).** Migrate commits its journal, then
+go-live commits. A migrate FAILURE returns (422 for a creator-fault migration —
+denied / destructive / unparseable / drift; 503 for infra — connect / provision)
+and **does NOT commit go-live**: the old bundle keeps serving its
+already-migrated schema. If migrate succeeds but the go-live UPDATE fails, the
+schema is ahead of the live code (additive-forward = safe); the next deploy's
+roll-forward reconciles. There is no verify gate.
+
+**Destructive migrations** are refused at deploy (`Approval::None`); they go
+through the out-of-band `submit_migration` surface / expand-contract across
+deploys, not a creator's routine deploy.
+
+**Admin DSN / shadow dry-run (v1 decision).** The migrate apply runs over
+control's own admin DSN (`Registry::migrate_dsn()` — the control role carries
+`CREATEROLE` + `CREATE SCHEMA`). The shadow-DB dry-run (which needs a `CREATEDB`
+admin DSN) is **skipped on the deploy apply for v1**: the in-line safety is the
+engine re-running the guard on every `up` + the least-privilege migrator role. A
+future revision MAY add an optional `--admin-db` (CREATEDB) config and run the
+shadow when present.
+
+**Build-side (P6b, follow-on).** Generating `manifest.migrations[]` from a
+creator's `schema.ts` via `zeroship-migrate-js generate` is the vite-plugin's
+creator-DX job and is NOT part of P6; P6 verifies the deploy path with
+hand-authored migration bundles.
 
 The blob-store ingest path is current. The older raw bundle upload path is gone.
 
