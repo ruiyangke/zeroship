@@ -65,8 +65,8 @@ pub struct ExecutorConfig {
     /// permits (e.g. `citext` / `uuid-ossp`). Empty for Confined and Trusted.
     pub(crate) platform_exts: Vec<String>,
     /// The schema(s) that host shared **extension types/functions** the engine
-    /// emits UNQUALIFIED (e.g. pgvector's `vector(N)`, PostGIS's
-    /// `geography(POINT,4326)`). pgvector/PostGIS install into `public` on the
+    /// emits UNQUALIFIED (e.g. pgvector's `vector(N)`, `PostGIS`'s
+    /// `geography(POINT,4326)`). pgvector / `PostGIS` install into `public` on the
     /// platform image (and the dev `pgvector/pgvector:pg16`), so this defaults to
     /// `["public"]`.
     ///
@@ -77,7 +77,7 @@ pub struct ExecutorConfig {
     /// `vector`/`geography` types with `public` reachable on its connection path.
     ///
     /// SECURITY: `USAGE` permits *resolving* objects in the schema; it does NOT
-    /// permit creating objects there (that needs `CREATE`, which stays REVOKEd)
+    /// permit creating objects there (that needs `CREATE`, which stays revoked)
     /// nor writing existing tables (that needs per-table grants the migrator never
     /// receives). So the cross-schema **write** confinement is unchanged — these
     /// schemas are resolution-only.
