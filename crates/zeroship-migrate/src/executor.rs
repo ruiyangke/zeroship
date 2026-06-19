@@ -467,8 +467,25 @@ async fn configure_session_non_txn(
 /// - `ALTER TYPE … ADD VALUE …` MUST be `… ADD VALUE IF NOT EXISTS …`.
 ///
 /// (Other non-txn ops the classifier recognizes — `DROP INDEX CONCURRENTLY`,
-/// `VACUUM` — are themselves naturally re-runnable.) A violation is rejected
-/// with [`ApplyError::NonIdempotentNonTxn`].
+/// `VACUUM` — are themselves naturally re-runnable.)
+///
+/// Bare DML — `INSERT` / `UPDATE` / `DELETE` / `MERGE` / `TRUNCATE` — is
+/// **forbidden** on the non-txn path. The guard admits DML (it is safe data
+/// access), and `transaction:false` will happily route a pure-DML `up` onto the
+/// two-phase path; but recovery re-runs the `up` VERBATIM, and a bare
+/// `INSERT`/`UPDATE`/`DELETE`/`MERGE` is NOT re-runnable — a success-then-crash
+/// (the op committed, the `completed` row did not) double-applies it on recovery.
+/// `TRUNCATE` is technically re-runnable, but it cannot run on the non-txn path
+/// at all (recovery would have to re-run it AFTER the real op, wiping a table the
+/// migration itself may have repopulated), so it is forbidden alongside the rest.
+/// DML belongs in a transactional migration (the default), where a crash rolls
+/// the whole `up` back atomically and re-apply is clean. There is no idempotent
+/// form we can mechanically assert for arbitrary DML, so it is rejected
+/// outright; an author who genuinely needs a non-txn data step must wrap it in an
+/// idempotent guard (e.g. `INSERT … ON CONFLICT DO NOTHING` driven from a DDL op)
+/// rather than a bare statement.
+///
+/// A violation is rejected with [`ApplyError::NonIdempotentNonTxn`].
 fn validate_non_txn_idempotent(m: &Migration) -> Result<(), ApplyError> {
     let parsed = pg_query::parse(&m.up).map_err(|e| ApplyError::NonIdempotentNonTxn {
         version: m.version.as_str().to_string(),
@@ -499,10 +516,40 @@ fn validate_non_txn_idempotent(m: &Migration) -> Result<(), ApplyError> {
                     ),
                 });
             }
+            // Bare DML re-applies on success-then-crash recovery (the up is
+            // re-run verbatim). Forbid it on the non-txn path — DML belongs in a
+            // transactional migration where a crash rolls it back atomically.
+            NodeEnum::InsertStmt(_)
+            | NodeEnum::UpdateStmt(_)
+            | NodeEnum::DeleteStmt(_)
+            | NodeEnum::MergeStmt(_)
+            | NodeEnum::TruncateStmt(_) => {
+                return Err(ApplyError::NonIdempotentNonTxn {
+                    version: m.version.as_str().to_string(),
+                    reason: format!(
+                        "`{}` is data-manipulation (DML), which crash-recovery would re-run \
+                         verbatim and double-apply. Run DML in a transactional migration \
+                         (do not set `transaction:false`).",
+                        dml_keyword(node)
+                    ),
+                });
+            }
             _ => {}
         }
     }
     Ok(())
+}
+
+/// The SQL keyword for a DML node, for the `NonIdempotentNonTxn` reason message.
+const fn dml_keyword(node: &NodeEnum) -> &'static str {
+    match node {
+        NodeEnum::InsertStmt(_) => "INSERT",
+        NodeEnum::UpdateStmt(_) => "UPDATE",
+        NodeEnum::DeleteStmt(_) => "DELETE",
+        NodeEnum::MergeStmt(_) => "MERGE",
+        NodeEnum::TruncateStmt(_) => "TRUNCATE",
+        _ => "DML",
+    }
 }
 
 /// Detect whether a rollback `down` contains a statement that cannot run inside
@@ -2838,6 +2885,96 @@ async fn rollback_one_transactional(
 
     conn.batch_execute("COMMIT").await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod non_txn_idempotency_tests {
+    use super::*;
+    use crate::migration::{Checksum, MigrationFlags, MigrationId};
+
+    /// Build a non-transactional migration whose `up` is `sql`.
+    fn nontxn(sql: &str) -> Migration {
+        let flags = MigrationFlags {
+            transactional: false,
+            ..MigrationFlags::default()
+        };
+        let version = MigrationId::generate();
+        let checksum = Checksum::of(&crate::migration::ChecksumInput {
+            up: sql,
+            down: None,
+            flags: &flags,
+            owner_app: "app_test",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        });
+        Migration {
+            version,
+            name: "n".into(),
+            up: sql.into(),
+            down: None,
+            checksum,
+            flags,
+            owner_app: "app_test".into(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+        }
+    }
+
+    // REGRESSION (nontxn-dml-recovery-double-apply): a bare INSERT/UPDATE/
+    // DELETE/MERGE/TRUNCATE on the non-txn two-phase path would be re-run
+    // VERBATIM by crash recovery and double-apply on a success-then-crash.
+    // Validation must reject every bare-DML non-txn `up`. Pre-fix these passed
+    // (only CONCURRENTLY / ALTER TYPE ADD VALUE were fenced).
+    #[test]
+    fn bare_dml_on_non_txn_path_is_rejected() {
+        for sql in [
+            "INSERT INTO t (id) VALUES (1)",
+            "UPDATE t SET x = 1 WHERE id = 1",
+            "DELETE FROM t WHERE id = 1",
+            "TRUNCATE t",
+            "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DO NOTHING",
+        ] {
+            let m = nontxn(sql);
+            let err = validate_non_txn_idempotent(&m)
+                .expect_err(&format!("bare DML must be rejected on non-txn path: {sql}"));
+            assert!(
+                matches!(err, ApplyError::NonIdempotentNonTxn { .. }),
+                "expected NonIdempotentNonTxn for `{sql}`, got {err:?}"
+            );
+        }
+    }
+
+    // A DML statement mixed in among DDL on the non-txn path is still caught.
+    #[test]
+    fn dml_mixed_with_ddl_on_non_txn_path_is_rejected() {
+        let m = nontxn(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS i ON t (x);\n\
+             INSERT INTO t (id) VALUES (1);",
+        );
+        let err = validate_non_txn_idempotent(&m).expect_err("DML among DDL must be rejected");
+        assert!(matches!(err, ApplyError::NonIdempotentNonTxn { .. }), "got {err:?}");
+    }
+
+    // The legitimate non-txn ops (idempotent CONCURRENTLY / ADD VALUE IF NOT
+    // EXISTS, naturally-rerunnable DROP INDEX CONCURRENTLY / VACUUM) still pass —
+    // the DML fence must not over-reject inherently-non-txn DDL.
+    #[test]
+    fn idempotent_non_txn_ddl_still_passes() {
+        for sql in [
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS i ON t (x)",
+            "DROP INDEX CONCURRENTLY IF EXISTS i",
+            "ALTER TYPE mood ADD VALUE IF NOT EXISTS 'excited'",
+            "VACUUM ANALYZE t",
+        ] {
+            let m = nontxn(sql);
+            assert!(
+                validate_non_txn_idempotent(&m).is_ok(),
+                "idempotent non-txn op must pass: {sql}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

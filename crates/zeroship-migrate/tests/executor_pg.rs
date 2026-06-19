@@ -1017,6 +1017,104 @@ async fn non_txn_create_index_concurrently_without_if_not_exists_is_rejected() {
 }
 
 // ---------------------------------------------------------------------------
+// REGRESSION (nontxn-dml-recovery-double-apply): a bare-DML `up` forced onto the
+// non-txn two-phase path (`transaction:false`) is REJECTED at apply, before any
+// execution. Pre-fix the guard admitted DML, the loader routed it onto the
+// non-txn path, and `recover_non_transactional` re-ran the `up` VERBATIM — so a
+// success-then-crash (op committed, `completed` row did not) DOUBLE-APPLIED the
+// INSERT on recovery. This test proves (a) the up is refused outright, and (b)
+// the double-apply scenario the refusal forecloses: had the engine NOT rejected
+// it, a seeded started-marker recovery would have re-inserted the row.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn nontxn_bare_dml_is_rejected_and_recovery_cannot_double_apply() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    ensure_journal(&conn, &cfg).await.expect("bootstrap");
+
+    conn.batch_execute(&format!(
+        "CREATE TABLE \"{}\".counters (id bigint primary key, n bigint not null)",
+        cfg.project_schema
+    ))
+    .await
+    .expect("seed table");
+
+    // A pure-DML `up` forced non-transactional via `transaction:false`.
+    let m = mig_nontxn(
+        MigrationId::generate(),
+        "seed_counter",
+        &format!(
+            "INSERT INTO \"{}\".counters (id, n) VALUES (1, 1)",
+            cfg.project_schema
+        ),
+    );
+
+    // (a) Apply must REJECT it before any execution — no row inserted, no journal.
+    let err = apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
+        .await
+        .expect_err("bare-DML non-txn up must be rejected, not routed onto the recovery path");
+    assert!(
+        matches!(err, ApplyError::NonIdempotentNonTxn { .. }),
+        "expected NonIdempotentNonTxn, got {err:?}"
+    );
+    let n_rows: i64 = conn
+        .query_one(
+            &format!("SELECT count(*) AS c FROM \"{}\".counters", cfg.project_schema),
+            &[],
+        )
+        .await
+        .expect("count")
+        .get("c");
+    assert_eq!(n_rows, 0, "rejected migration must not insert");
+    assert_eq!(journal_count(&conn, &cfg).await, 0, "no journal row");
+
+    // (b) Demonstrate the double-apply the rejection forecloses. Simulate the
+    // success-then-crash the recovery path handles for legitimate (idempotent)
+    // non-txn ops: the INSERT already ran, a lone `started` marker exists, no
+    // `completed`. The OLD behavior would re-run `<up>` verbatim on recovery and
+    // insert a SECOND row (here a PK violation — the friendlier face of the same
+    // double-apply, which for a non-PK INSERT would silently duplicate). The fix
+    // refuses the migration up front, so this corrupting recovery is unreachable.
+    conn.batch_execute(&format!(
+        "INSERT INTO \"{}\".counters (id, n) VALUES (1, 1)",
+        cfg.project_schema
+    ))
+    .await
+    .expect("simulate the committed (pre-crash) insert");
+    journal::record_started(
+        &conn,
+        &cfg,
+        m.version.as_str(),
+        &m.name,
+        m.checksum.as_str(),
+        "actor",
+    )
+    .await
+    .expect("seed started marker");
+
+    // Re-apply still REJECTS at validation (before touching the started marker),
+    // so the row count stays at exactly one — recovery never re-runs the INSERT.
+    let err2 = apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
+        .await
+        .expect_err("recovery of a bare-DML non-txn up must still be refused, not re-run");
+    assert!(matches!(err2, ApplyError::NonIdempotentNonTxn { .. }), "got {err2:?}");
+    let n_after: i64 = conn
+        .query_one(
+            &format!("SELECT count(*) AS c FROM \"{}\".counters", cfg.project_schema),
+            &[],
+        )
+        .await
+        .expect("count")
+        .get("c");
+    assert_eq!(n_after, 1, "recovery must not double-apply the INSERT");
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
 // H1 — a mid-batch guard denial applies NOTHING (static guard is all-up-front).
 // ---------------------------------------------------------------------------
 #[compio::test]
