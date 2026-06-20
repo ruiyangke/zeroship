@@ -61,6 +61,7 @@ pub mod analyze;
 pub mod approval;
 pub mod author;
 pub mod backend;
+pub mod backend_sqlite;
 pub mod backfill;
 pub mod baseline;
 pub mod classify;
@@ -89,6 +90,7 @@ pub mod submit;
 pub use analyze::{analyze, analyze_migration, Advisory, Severity};
 pub use approval::Approval;
 pub use backend::{MigrationBackend, PostgresBackend, SessionSnapshot};
+pub use backend_sqlite::{SqliteActorError, SqliteBackend};
 pub use baseline::{baseline, BaselineError, BaselineOutcome};
 pub use backfill::{
     backfill_progress, ensure_backfill_progress, list_backfills, run_backfill,
