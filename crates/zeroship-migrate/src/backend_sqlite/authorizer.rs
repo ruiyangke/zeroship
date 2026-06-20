@@ -337,10 +337,13 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
         // -- ALTER TABLE — key on the ACTION'S OWN database_name, NOT the outer one --
         // CRITICAL (P5): `SQLITE_ALTER_TABLE` carries its target database in the
         // action's own `database_name` field; the OUTER `AuthContext.database_name`
-        // (the `zDb` arg) is NOT the database for this action — for an
-        // `ALTER TABLE … DROP/ADD/RENAME COLUMN` SQLite passes the COLUMN name there,
-        // so `targets_main`/`targets_mig` computed from the outer field are BOTH
-        // false and the generic foreign-alias deny would wrongly reject a legitimate
+        // (the `zDb` arg) is NOT the database for this action. For an
+        // `ALTER TABLE … DROP COLUMN` SQLite passes the dropped COLUMN name in the
+        // outer field (RENAME COLUMN and ADD COLUMN pass NULL there); so the outer
+        // field is unreliable for ALTER TABLE either way, and `targets_main`/
+        // `targets_mig` computed from it would be wrong (false on a DROP COLUMN whose
+        // outer field is the column name, false on the NULL of RENAME/ADD) — the
+        // generic foreign-alias deny would then wrongly reject a legitimate
         // `ALTER TABLE main.<t>`. So we branch on the inner `database_name` here,
         // ahead of every generic write arm:
         //   - `_mig`  ⇒ journal immutability: engine-only (CreatorUp denied);
@@ -380,10 +383,16 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
         // schema table on the `main`/`temp` namespace (NEVER `_mig`, which is handled
         // below and stays engine-only). Fail-closed: only the exact schema-table
         // names, only on main/temp, never `_mig`.
+        //
+        // Defense-in-depth: the guard matches the comment's intent EXACTLY —
+        // `targets_main` (the app file: `Some("main")` or `None`) OR the `temp`
+        // namespace — rather than the looser `!targets_mig` (which would also admit
+        // a foreign alias, impossible post-ATTACH-deny but no reason to leave the
+        // door ajar).
         AuthAction::Insert { table_name }
         | AuthAction::Update { table_name, .. }
         | AuthAction::Delete { table_name }
-            if !targets_mig && is_sqlite_schema_table(table_name) =>
+            if (targets_main || db == Some("temp")) && is_sqlite_schema_table(table_name) =>
         {
             Authorization::Allow
         }
@@ -449,17 +458,28 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
         | AuthAction::CreateTempView { .. }
         | AuthAction::CreateTempIndex { .. } => Authorization::Deny,
 
-        // -- Analyze / Reindex denied in CreatorUp (M3) --
-        // ANALYZE writes sqlite_stat* tables into the app db and REINDEX rebuilds
-        // indexes; both mutate the app db in ways that confound later drift
-        // detection. A migration's declared DDL has no business running them — deny
-        // in creator mode. (Engine mode does not issue them either, but the deny is
+        // -- Analyze denied in CreatorUp (M3) --
+        // ANALYZE writes `sqlite_stat*` tables into the app db — net-new tables that
+        // confound later drift detection (the snapshot would see them as out-of-band
+        // objects). A migration's declared DDL has no business running ANALYZE; deny
+        // it in creator mode. (Engine mode does not issue it either, but the deny is
         // scoped to CreatorUp so a future engine maintenance op is not foreclosed.)
-        AuthAction::Analyze { .. } | AuthAction::Reindex { .. }
-            if matches!(current, Mode::CreatorUp) =>
-        {
-            Authorization::Deny
-        }
+        AuthAction::Analyze { .. } if matches!(current, Mode::CreatorUp) => Authorization::Deny,
+
+        // -- Reindex on `main`/`temp` ALLOWED in CreatorUp (PHASE 4) --
+        // `SQLITE_REINDEX` fires NOT ONLY for a standalone `REINDEX` statement but
+        // also INTRINSICALLY as part of a legitimate `CREATE INDEX` (SQLite reindexes
+        // the freshly-created index to populate it). The engine emits the three
+        // platform system-field indexes (`<table>_<col>_idx`) inside the creator
+        // `up`'s CREATE TABLE payload, so the creator phase MUST be able to reindex
+        // them. A REINDEX rebuilds an existing index B-tree: it creates no table,
+        // changes no schema structure, never touches `_mig`, and so does not confound
+        // drift (which compares structure, not index physical layout). Allow it on the
+        // app file (`main`/`temp`) in both modes; a REINDEX targeting `_mig` is still
+        // denied by the journal-immutability arm above (it fires before this).
+        AuthAction::Reindex { .. } if targets_main || db == Some("temp") => Authorization::Allow,
+        // A REINDEX naming any other alias is impossible post-ATTACH-deny; fail closed.
+        AuthAction::Reindex { .. } => Authorization::Deny,
 
         // -- Cross-tenant belt-and-suspenders (§2.5.2) --
         // Any WRITE whose database_name is neither `main` (the app file) nor `_mig`
@@ -797,10 +817,10 @@ mod tests {
         );
     }
 
-    // M3: ANALYZE / REINDEX are denied in CreatorUp (they write sqlite_stat* into the
-    // app db and confound drift detection).
+    // M3: ANALYZE is denied in CreatorUp (it writes net-new sqlite_stat* tables that
+    // confound drift detection).
     #[test]
-    fn analyze_reindex_denied_in_creator() {
+    fn analyze_denied_in_creator() {
         let m = AuthMode::new();
         m.store(Mode::CreatorUp);
         assert_eq!(
@@ -808,10 +828,39 @@ mod tests {
             Authorization::Deny,
             "ANALYZE must be denied in creator mode (M3)"
         );
+    }
+
+    // PHASE 4: REINDEX on `main`/`temp` is ALLOWED in CreatorUp — it fires
+    // intrinsically as part of a legitimate `CREATE INDEX` (which the engine emits
+    // for the platform system-field indexes inside the creator `up`). It rebuilds an
+    // existing index B-tree: no new table, no schema-structure change, never `_mig`.
+    #[test]
+    fn reindex_on_main_allowed_in_creator() {
+        let m = AuthMode::new();
+        m.store(Mode::CreatorUp);
         assert_eq!(
             authorize(&m, &ctx(AuthAction::Reindex { index_name: "ix_users" }, Some(MAIN_DB), None)),
+            Authorization::Allow,
+            "REINDEX on main must be allowed (intrinsic to CREATE INDEX, PHASE 4)"
+        );
+        // None database (main/temp namespace) is also the app file.
+        assert_eq!(
+            authorize(&m, &ctx(AuthAction::Reindex { index_name: "ix_users" }, None, None)),
+            Authorization::Allow,
+            "REINDEX with None db (main) must be allowed"
+        );
+    }
+
+    // A REINDEX targeting the journal alias `_mig` stays denied (journal
+    // immutability) — the `_mig` arm fires before the main/temp allow.
+    #[test]
+    fn reindex_on_mig_denied_in_creator() {
+        let m = AuthMode::new();
+        m.store(Mode::CreatorUp);
+        assert_eq!(
+            authorize(&m, &ctx(AuthAction::Reindex { index_name: "ix" }, Some(MIG_ALIAS), None)),
             Authorization::Deny,
-            "REINDEX must be denied in creator mode (M3)"
+            "REINDEX on _mig must stay denied (journal immutability)"
         );
     }
 }

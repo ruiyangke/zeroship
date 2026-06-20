@@ -375,6 +375,13 @@ fn denial(e: &GuardError) -> (String, String) {
             (format!("cross_schema:{schema}"), statement.clone())
         }
         GuardError::Parse(p) => ("unparseable".to_string(), p.to_string()),
+        // PHASE 4 — the raw-SQL submit path is PG-only; a SQLite Confined guard
+        // refuses raw SQL outright (descriptor-diff-only). If this is ever reached,
+        // surface it as a denial with a stable rule id.
+        GuardError::SqliteRawSqlRejected => (
+            "sqlite_raw_sql_rejected".to_string(),
+            "raw SQL not accepted on the Confined SQLite path".to_string(),
+        ),
     }
 }
 

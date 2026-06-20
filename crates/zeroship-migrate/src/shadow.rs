@@ -787,6 +787,10 @@ async fn seed_shadow_from_live(
     let desired_live = DesiredSchema {
         snapshot: live.clone(),
         ownership,
+        // PHASE 4 — the shadow seed reconstructs from a LIVE snapshot, not from
+        // descriptors, and is a PG-only path; no SDK schemas to carry (the SQLite
+        // leg is never taken here). Empty side-map.
+        sqlite_schemas: BTreeMap::new(),
     };
 
     // Diff desired = live-snapshot vs live = EMPTY ⇒ the CREATE statements that

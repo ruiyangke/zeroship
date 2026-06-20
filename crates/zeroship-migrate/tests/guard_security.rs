@@ -28,6 +28,10 @@ fn assert_denied(sql: &str) {
     match guard().check(sql) {
         Err(GuardError::Denied { .. } | GuardError::CrossSchema { .. }) => {}
         Err(GuardError::Parse(e)) => panic!("expected Denied, got Parse({e:?}) for: {sql}"),
+        // PHASE 4 — the PG `guard()` here is never SQLite, so this is unreachable.
+        Err(GuardError::SqliteRawSqlRejected) => {
+            panic!("PG guard returned SqliteRawSqlRejected for: {sql}")
+        }
         Ok(report) => panic!("expected DENY but PASSED for: {sql}\n  report: {report:?}"),
     }
 }
