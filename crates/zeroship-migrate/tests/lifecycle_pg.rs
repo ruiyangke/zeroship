@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use compio_postgres::Client;
 use zeroship_migrate::executor::{RollbackRequest, RollbackTarget};
 use zeroship_migrate::{
+    PostgresBackend,
     desired_snapshot, diff_snapshots, history, migrator_role_name, provision_migrator,
     role::deprovision_migrator, snapshot_schema, squash, status, Approval, Checksum, ChecksumInput,
     CollectionDescriptor, DeclarativeApplyError, EngineError, ExecutorConfig, FieldDescriptor,
@@ -220,7 +221,7 @@ async fn apply_additive(
         .expect("plan_declarative additive");
     assert!(plan.renames.is_empty(), "additive plan has no renames");
     engine
-        .apply(&plan.plain, Approval::None, conn, cfg, "app_acme")
+        .apply(&plan.plain, Approval::None, &PostgresBackend::new(conn), cfg, "app_acme")
         .await
         .expect("apply additive");
 }
@@ -319,7 +320,7 @@ async fn p0_1_declarative_rename_two_deploy_zero_data_loss() {
     // --- Deploy N: apply_declarative → expand (E1+E2 + REAL backfill + E3),
     //     contract DEFERRED into pending_contract. ---
     let outcome = engine
-        .apply_declarative(&plan, Approval::Approved, &conn, &cfg, "app_acme")
+        .apply_declarative(&plan, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect("apply_declarative deploy N");
     assert!(
@@ -407,7 +408,7 @@ async fn p0_1_declarative_rename_two_deploy_zero_data_loss() {
     // --- Deploy N+1: apply the DEFERRED contract via engine.apply → DROP <from>. ---
     let cplan = contract_plan(&engine, &outcome.pending_contract, &cfg);
     engine
-        .apply(&cplan, Approval::Approved, &conn, &cfg, "app_acme")
+        .apply(&cplan, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect("apply deferred contract deploy N+1");
 
@@ -527,7 +528,7 @@ async fn p0_1_h8_second_rename_failure_does_not_lose_first_renames_contract() {
         .collect();
 
     let err = engine
-        .apply_declarative(&plan, Approval::Approved, &conn, &cfg, "app_acme")
+        .apply_declarative(&plan, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect_err("the second rename's expand must fail");
     assert!(
@@ -555,7 +556,7 @@ async fn p0_1_h8_second_rename_failure_does_not_lose_first_renames_contract() {
     // half-rename residue on alpha.
     let cplan = contract_plan(&engine, &plan.renames[0].contract, &cfg);
     engine
-        .apply(&cplan, Approval::Approved, &conn, &cfg, "app_acme")
+        .apply(&cplan, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect("the first rename's deferred contract is recoverable + appliable");
     assert!(
@@ -643,12 +644,12 @@ async fn p0_2_dry_run_declarative_predicts_real_apply() {
 
     // --- The REAL apply: deploy N + the deferred contract on the project DB. ---
     let outcome = engine
-        .apply_declarative(&plan, Approval::Approved, &conn, &cfg, "app_acme")
+        .apply_declarative(&plan, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect("real apply_declarative");
     let cplan = contract_plan(&engine, &outcome.pending_contract, &cfg);
     engine
-        .apply(&cplan, Approval::Approved, &conn, &cfg, "app_acme")
+        .apply(&cplan, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect("real contract apply");
 
@@ -749,7 +750,7 @@ async fn p0_3_apply_rollback_reapply_squash_status_lifecycle() {
 
     // --- Apply v1..v3. ---
     let plan = engine.plan(&set, &guard_cfg(&cfg));
-    engine.apply(&plan, Approval::None, &conn, &cfg, "app_acme").await.expect("apply v1..v3");
+    engine.apply(&plan, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_acme").await.expect("apply v1..v3");
     for t in ["t1", "t2", "t3"] {
         assert!(table_exists(&conn, &schema, t).await, "{t} exists after apply");
     }
@@ -782,7 +783,7 @@ async fn p0_3_apply_rollback_reapply_squash_status_lifecycle() {
 
     // --- Re-apply v2, v3 (they re-enter pending and re-apply). ---
     engine
-        .apply(&engine.plan(&set, &guard_cfg(&cfg)), Approval::None, &conn, &cfg, "app_acme")
+        .apply(&engine.plan(&set, &guard_cfg(&cfg)), Approval::None, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect("re-apply v2,v3");
     for t in ["t1", "t2", "t3"] {
@@ -940,7 +941,7 @@ async fn p0_4_security_full_stack_guard_dry_run_and_role_backstop() {
     assert!(!plan.is_appliable(), "a denied plan is un-appliable");
 
     let err = engine
-        .apply(&plan, Approval::Approved, &conn, &cfg, "app_acme")
+        .apply(&plan, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect_err("a denied plan must be refused even WITH approval");
     assert!(matches!(err, EngineError::Denied(ref d) if d.len() == 1), "got {err:?}");

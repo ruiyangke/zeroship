@@ -804,16 +804,16 @@ async fn second_deploy_real_type_change_still_detected_against_introspected_live
 }
 
 // ---------------------------------------------------------------------------
-// (C1) `plan_declarative` FAILS CLOSED on a SQLite diff that needs a rebuild — it
-//      never silently drops `diff.rebuilds`. `MigrationEngine` is PG-typed with no
-//      SQLite apply path; the old code built the plan from `diff.migrations` +
-//      `diff.renames` only and IGNORED `diff.rebuilds`, so a rebuild-needing SQLite
-//      declarative deploy reported success while the rebuild no-op'd. The fix returns
-//      a typed `SqliteRebuildRequired`. RED pre-fix (returned an Ok plan, dropping the
-//      rebuild).
+// (P6a) `plan_declarative` now CARRIES a SQLite rebuild into the plan — the fail-close
+//      is gone. `MigrationEngine` is generic over `MigrationBackend`, and
+//      `apply_declarative` drives `plan.rebuilds` through `SqliteBackend::rebuild_one`
+//      under the destructive/approval gate. The old behavior returned a typed
+//      `SqliteRebuildRequired`; P6a replaces that with carrying the rebuild so the
+//      engine can apply it. This pins the new contract: the plan exposes the rebuild
+//      (with its destructive/approval flags) instead of refusing the whole deploy.
 // ---------------------------------------------------------------------------
 #[compio::test]
-async fn plan_declarative_fails_closed_on_sqlite_rebuild() {
+async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {
     // First deploy: a column typed `number`; second deploy re-types it to `string` —
     // a genuine existing-table type change → exactly the diff that yields a rebuild.
     let v1 = CollectionDescriptor {
@@ -833,26 +833,35 @@ async fn plan_declarative_fails_closed_on_sqlite_rebuild() {
     let (live, ownership) = live_from(&[v1]);
     let desired2 = desired_snapshot(PROJECT, &[v2]).expect("v2 desired");
 
-    // Sanity: the underlying diff DOES produce a rebuild (so the guard below is real).
+    // Sanity: the underlying diff DOES produce a rebuild (so the plan below is real).
     let diff = sqlite_author()
         .diff(&desired2, &live, &ownership, &[])
         .expect("diff");
-    assert_eq!(diff.rebuilds.len(), 1, "the diff yields a rebuild to gate");
+    assert_eq!(diff.rebuilds.len(), 1, "the diff yields a rebuild to carry");
 
-    // plan_declarative MUST refuse rather than drop the rebuild silently.
+    // plan_declarative now CARRIES the rebuild (no error) — the fail-close is gone.
     let engine = MigrationEngine::new();
     let cfg = GuardConfig::confined_sqlite(PROJECT);
-    let err = engine
+    let plan = engine
         .plan_declarative(&desired2, &live, &ownership, &sqlite_author(), &[], &cfg)
-        .expect_err("plan_declarative must FAIL CLOSED on a SQLite rebuild, not drop it");
-    match err {
-        DeclarativeError::SqliteRebuildRequired { table, op } => {
-            assert_eq!(table, "accounts");
-            assert!(
-                op.contains("rebuild") && op.contains("P6"),
-                "the error must explain no SQLite apply path is wired yet (P6): {op}"
-            );
-        }
-        other => panic!("expected SqliteRebuildRequired, got {other:?}"),
-    }
+        .expect("plan_declarative now carries SQLite rebuilds, never fails closed");
+    assert_eq!(
+        plan.rebuilds.len(),
+        1,
+        "the plan carries the one rebuild for the engine to drive"
+    );
+    assert_eq!(plan.rebuilds[0].spec.table, "accounts");
+    // The rebuild's journal migration is destructive + approval-gated (a rebuild on a
+    // populated table drops + recreates), so the engine refuses it without approval.
+    assert!(
+        plan.rebuilds[0].migration.flags.destructive
+            && plan.rebuilds[0].migration.flags.requires_approval,
+        "a rebuild is destructive + approval-gated"
+    );
+    // And — H1 — a SQLite declarative plan never carries a PG-shaped online rename:
+    // renames are routed to rebuilds on the SQLite leg.
+    assert!(
+        plan.renames.is_empty(),
+        "SQLite renames are routed to rebuilds, never expand-contract (run_expand)"
+    );
 }

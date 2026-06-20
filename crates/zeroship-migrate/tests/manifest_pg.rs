@@ -17,6 +17,7 @@ use std::collections::HashMap;
 
 use compio_postgres::Client;
 use zeroship_migrate::{
+    PostgresBackend,
     author::{AuthorRequest, Column, DeterministicAuthor, MigrationAuthor},
     compute_manifest, desired_snapshot, migrator_role_name, provision_migrator,
     role::deprovision_migrator, snapshot_schema, Approval, CollectionDescriptor,
@@ -162,7 +163,7 @@ async fn correct_manifest_applies_the_set_normally() {
 
     let engine = MigrationEngine::new();
     let outcome = engine
-        .apply_verified(&set, &guard_cfg(&cfg), Some(&expected), Approval::None, &conn, &cfg, "app_test")
+        .apply_verified(&set, &guard_cfg(&cfg), Some(&expected), Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect("a matching manifest must apply the set");
 
@@ -181,7 +182,7 @@ async fn none_expected_applies_unverified() {
     let set = additive_set(&cfg);
     let engine = MigrationEngine::new();
     let outcome = engine
-        .apply_verified(&set, &guard_cfg(&cfg), None, Approval::None, &conn, &cfg, "app_test")
+        .apply_verified(&set, &guard_cfg(&cfg), None, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect("None expected applies unverified");
     assert_eq!(outcome.applied.len(), 2);
@@ -233,7 +234,7 @@ async fn cosmetic_slice_reorder_verifies_and_applies(/* M2 */) {
 
     let engine = MigrationEngine::new();
     let outcome = engine
-        .apply_verified(&reordered, &guard_cfg(&cfg), Some(&expected), Approval::None, &conn, &cfg, "app_test")
+        .apply_verified(&reordered, &guard_cfg(&cfg), Some(&expected), Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect("a cosmetic slice reorder must verify against the stamped manifest (M2)");
     assert_eq!(outcome.applied.len(), 2, "both migrations applied");
@@ -265,7 +266,7 @@ async fn inserted_migration_is_refused_before_apply() {
 
     let engine = MigrationEngine::new();
     let err = engine
-        .apply_verified(&tampered, &guard_cfg(&cfg), Some(&expected), Approval::None, &conn, &cfg, "app_test")
+        .apply_verified(&tampered, &guard_cfg(&cfg), Some(&expected), Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect_err("an inserted migration must be refused");
     assert_refused_before_apply(&conn, &cfg, err).await;
@@ -287,7 +288,7 @@ async fn removed_migration_is_refused_before_apply() {
 
     let engine = MigrationEngine::new();
     let err = engine
-        .apply_verified(&tampered, &guard_cfg(&cfg), Some(&expected), Approval::None, &conn, &cfg, "app_test")
+        .apply_verified(&tampered, &guard_cfg(&cfg), Some(&expected), Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect_err("a removed migration must be refused");
     assert_refused_before_apply(&conn, &cfg, err).await;
@@ -316,7 +317,7 @@ async fn content_edited_migration_is_refused_before_apply() {
 
     let engine = MigrationEngine::new();
     let err = engine
-        .apply_verified(&tampered, &guard_cfg(&cfg), Some(&expected), Approval::None, &conn, &cfg, "app_test")
+        .apply_verified(&tampered, &guard_cfg(&cfg), Some(&expected), Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect_err("a content-edited migration must be refused");
     assert_refused_before_apply(&conn, &cfg, err).await;
@@ -335,7 +336,7 @@ async fn garbage_expected_hash_fails_closed() {
 
     let engine = MigrationEngine::new();
     let err = engine
-        .apply_verified(&set, &guard_cfg(&cfg), Some(&garbage), Approval::None, &conn, &cfg, "app_test")
+        .apply_verified(&set, &guard_cfg(&cfg), Some(&garbage), Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect_err("a garbage expected hash must fail closed");
     assert_refused_before_apply(&conn, &cfg, err).await;
@@ -398,7 +399,7 @@ async fn guard_denied_member_matches_manifest_and_is_refused_by_the_denial_gate(
 
     let engine = MigrationEngine::new();
     let err = engine
-        .apply_verified(&set, &guard_cfg(&cfg), Some(&expected), Approval::None, &conn, &cfg, "app_test")
+        .apply_verified(&set, &guard_cfg(&cfg), Some(&expected), Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect_err("a guard-denied member must be refused");
     // The refusal is a DENIAL (the separate gate), NOT a manifest mismatch: the
@@ -484,7 +485,7 @@ async fn declarative_verified_correct_manifest_applies_normally() {
     let expected = plan.manifest();
 
     let outcome = engine
-        .apply_declarative_verified(&plan, &expected, Approval::None, &conn, &cfg, "app_test")
+        .apply_declarative_verified(&plan, &expected, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect("a matching declarative manifest must apply the plan");
     assert!(!outcome.applied.applied.is_empty(), "the plain set applied");
@@ -511,7 +512,7 @@ async fn declarative_verified_tampered_plain_set_is_refused_before_apply() {
     tampered.plain.items.pop();
 
     let err = engine
-        .apply_declarative_verified(&tampered, &expected, Approval::None, &conn, &cfg, "app_test")
+        .apply_declarative_verified(&tampered, &expected, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect_err("a tampered (shrunk) plain set must be refused");
     assert!(
@@ -552,7 +553,7 @@ async fn declarative_verified_content_flipped_plain_migration_is_refused() {
     );
 
     let err = engine
-        .apply_declarative_verified(&tampered, &expected, Approval::None, &conn, &cfg, "app_test")
+        .apply_declarative_verified(&tampered, &expected, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect_err("a content-flipped plain migration must be refused");
     assert!(
@@ -592,7 +593,7 @@ async fn rename_declarative_plan(
         .plan_declarative(&d1, &SchemaSnapshot::default(), &HashMap::new(), &author, &[], &guard_cfg(cfg))
         .expect("plan create");
     engine
-        .apply(&create.plain, Approval::None, conn, cfg, "app_test")
+        .apply(&create.plain, Approval::None, &PostgresBackend::new(conn), cfg, "app_test")
         .await
         .expect("create users");
 
@@ -637,7 +638,7 @@ async fn declarative_verified_rename_manifest_covers_expand_and_contract() {
     let expected = plan.manifest();
 
     let outcome = engine
-        .apply_declarative_verified(&plan, &expected, Approval::Approved, &conn, &cfg, "app_test")
+        .apply_declarative_verified(&plan, &expected, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect("a matching rename-bearing manifest must apply the expand");
     assert_eq!(outcome.pending_contract.len(), 2, "contract C1+C2 deferred");
@@ -666,7 +667,7 @@ async fn declarative_verified_tampered_rename_expand_is_refused_before_apply() {
         zeroship_migrate::Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(exp));
 
     let err = engine
-        .apply_declarative_verified(&tampered, &expected, Approval::Approved, &conn, &cfg, "app_test")
+        .apply_declarative_verified(&tampered, &expected, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect_err("a tampered rename expand must be refused");
     assert!(
@@ -697,7 +698,7 @@ async fn declarative_verified_tampered_rename_contract_is_refused_before_apply()
         zeroship_migrate::Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(con));
 
     let err = engine
-        .apply_declarative_verified(&tampered, &expected, Approval::Approved, &conn, &cfg, "app_test")
+        .apply_declarative_verified(&tampered, &expected, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect_err("a tampered DEFERRED contract must be refused at deploy N");
     assert!(

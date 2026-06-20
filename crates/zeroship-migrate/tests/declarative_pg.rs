@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use compio_postgres::Client;
 use zeroship_migrate::{
+    PostgresBackend,
     apply as executor_apply, desired_snapshot, diff_snapshots, migrator_role_name,
     provision_migrator, role::deprovision_migrator, snapshot_schema, Approval, CollectionDescriptor,
     DeclarativeAuthor, DeclarativeError, DesiredSchema, EngineError, ExecutorConfig, FieldDescriptor,
@@ -123,7 +124,7 @@ async fn apply_plan(
     // This helper drives only NO-rename diffs (it passes `&[]` hints), so the
     // plain plan is the whole deploy; apply it through the gate directly.
     debug_assert!(plan.renames.is_empty(), "apply_plan is for hint-free diffs");
-    engine.apply(&plan.plain, approval, conn, cfg, "app_test").await?;
+    engine.apply(&plan.plain, approval, &PostgresBackend::new(conn), cfg, "app_test").await?;
     Ok(())
 }
 
@@ -928,7 +929,7 @@ async fn drop_table_is_gated_and_not_auto_applied() {
 
     // Apply WITHOUT approval → ApprovalRequired, nothing applied.
     let err = engine
-        .apply(&plan.plain, Approval::None, &conn, &cfg, "app_test")
+        .apply(&plan.plain, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect_err("drop without approval must be refused");
     assert!(matches!(err, EngineError::ApprovalRequired), "got {err:?}");
@@ -942,7 +943,7 @@ async fn drop_table_is_gated_and_not_auto_applied() {
 
     // Now apply WITH approval → the drop lands, re-diff clean.
     engine
-        .apply(&plan.plain, Approval::Approved, &conn, &cfg, "app_test")
+        .apply(&plan.plain, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect("approved drop applies");
     let live_final = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap3");
@@ -998,7 +999,7 @@ async fn drop_column_is_destructive_and_gated() {
     assert!(plan.plain.requires_approval, "drop column must be gated");
 
     // Refused without approval; column still present.
-    let err = engine.apply(&plan.plain, Approval::None, &conn, &cfg, "app_test").await.unwrap_err();
+    let err = engine.apply(&plan.plain, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test").await.unwrap_err();
     assert!(matches!(err, EngineError::ApprovalRequired), "got {err:?}");
     let live_after = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
     assert!(
@@ -1007,7 +1008,7 @@ async fn drop_column_is_destructive_and_gated() {
     );
 
     // Approved → applied, re-diff clean.
-    engine.apply(&plan.plain, Approval::Approved, &conn, &cfg, "app_test").await.expect("approved drop");
+    engine.apply(&plan.plain, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_test").await.expect("approved drop");
     let live_final = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap3");
     assert!(
         !live_final.tables["people"].columns.iter().any(|c| c.name == "nickname"),
@@ -1060,7 +1061,7 @@ async fn drop_index_is_not_data_loss_so_it_is_not_gated() {
     assert!(!plan.plain.requires_approval, "DROP INDEX must not require approval");
 
     // Applies WITHOUT approval; the index is gone, re-diff clean.
-    engine.apply(&plan.plain, Approval::None, &conn, &cfg, "app_test").await.expect("apply drop index");
+    engine.apply(&plan.plain, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test").await.expect("apply drop index");
     let live_after = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
     assert!(
         !live_after.tables["logs"].indexes.iter().any(|i| i.name == "logs_level_idx"),
@@ -1793,7 +1794,7 @@ async fn non_owner_deploy_changing_only_own_tables_is_fine() {
         "every op must target b_table, got {:?}",
         plan.plain.items.iter().map(|m| &m.migration.name).collect::<Vec<_>>()
     );
-    engine.apply(&plan.plain, Approval::None, &conn, &cfg, "app_b").await.expect("apply b_table");
+    engine.apply(&plan.plain, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_b").await.expect("apply b_table");
 
     teardown(&conn, &cfg).await;
 }
@@ -2035,7 +2036,7 @@ async fn cross_app_fk_to_a_union_table_orders_and_applies_clean() {
     let plan = engine
         .plan_declarative(&union_v2, &live, &HashMap::new(), &author_app(&cfg, "app_b"), &[], &guard_cfg(&cfg))
         .expect("cross-app FK to a union/live table plans clean");
-    engine.apply(&plan.plain, Approval::None, &conn, &cfg, "app_b").await.expect("apply books with cross-app FK");
+    engine.apply(&plan.plain, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_b").await.expect("apply books with cross-app FK");
 
     // The whole union re-diffs clean (FK constraint materialised, byte-equal).
     let live2 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
@@ -2170,7 +2171,7 @@ async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
     assert!(plan.plain.requires_approval, "DROP of a UNIQUE index must require approval");
 
     // Refused without approval; the unique index still present.
-    let err = engine.apply(&plan.plain, Approval::None, &conn, &cfg, "app_test").await.unwrap_err();
+    let err = engine.apply(&plan.plain, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test").await.unwrap_err();
     assert!(matches!(err, EngineError::ApprovalRequired), "got {err:?}");
     let live_after = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
     assert!(
@@ -2179,7 +2180,7 @@ async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
     );
 
     // Approved → applied, the unique index is gone, re-diff clean.
-    engine.apply(&plan.plain, Approval::Approved, &conn, &cfg, "app_test").await.expect("approved drop");
+    engine.apply(&plan.plain, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_test").await.expect("approved drop");
     let live_final = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap3");
     assert!(
         !live_final.tables["members"].indexes.iter().any(|i| i.name == "members_email_uq"),
@@ -2204,7 +2205,7 @@ async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
         .expect("plan drop plain index");
     assert!(!plan3.plain.destructive, "DROP of a PLAIN index must NOT be destructive");
     assert!(!plan3.plain.requires_approval, "DROP of a PLAIN index must NOT require approval");
-    engine.apply(&plan3.plain, Approval::None, &conn, &cfg, "app_test").await.expect("ungated plain drop applies");
+    engine.apply(&plan3.plain, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test").await.expect("ungated plain drop applies");
     let live5 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap5");
     assert!(
         !live5.tables["members"].indexes.iter().any(|i| i.name == "members_tier_idx"),
@@ -2441,7 +2442,7 @@ async fn declarative_rename_preserves_preexisting_rows_through_expand_then_contr
     // === Deploy N: apply_declarative drives the EXPAND through run_expand, which
     // runs the REAL backfill. Approval is required (the backfill mutates data). ===
     let outcome = engine
-        .apply_declarative(&plan, Approval::Approved, &conn, &cfg, "app_test")
+        .apply_declarative(&plan, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect("apply_declarative (expand + real backfill)");
 
@@ -2501,7 +2502,7 @@ async fn declarative_rename_preserves_preexisting_rows_through_expand_then_contr
     // (DROP TRIGGER C1 + DROP COLUMN <from> C2) via the normal gated apply. ===
     let contract_plan = engine.plan(&outcome.pending_contract, &guard_cfg(&cfg));
     engine
-        .apply(&contract_plan, Approval::Approved, &conn, &cfg, "app_test")
+        .apply(&contract_plan, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect("apply deferred contract (drop trigger + drop <from>)");
 
@@ -2598,7 +2599,7 @@ async fn flattening_a_rename_into_the_plain_plan_loses_data_or_is_gate_blocked()
 
     // Push the flat batch through the gated apply with FULL approval (the kindest
     // case for the old path). It must NOT cleanly preserve the row's data.
-    let result = engine.apply(&flat_plan, Approval::Approved, &conn, &cfg, "app_test").await;
+    let result = engine.apply(&flat_plan, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_test").await;
 
     if result.is_err() {
         // (a) The executor's expand/contract gate refuses the contract while its
@@ -3024,14 +3025,14 @@ async fn type_change_is_gated_refused_without_approval_applied_with_then_re_diff
     assert!(plan.plain.requires_approval, "a type change must require approval");
 
     // Refused without approval; the column type is UNCHANGED (text).
-    let err = engine.apply(&plan.plain, Approval::None, &conn, &cfg, "app_test").await.unwrap_err();
+    let err = engine.apply(&plan.plain, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test").await.unwrap_err();
     assert!(matches!(err, EngineError::ApprovalRequired), "got {err:?}");
     let live_after = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
     let attr = live_after.tables["metrics"].columns.iter().find(|c| c.name == "score").expect("score col");
     assert_eq!(attr.data_type, "text", "type must be unchanged after a refused type change");
 
     // Approved → applied; the type is now double precision, re-diff clean.
-    engine.apply(&plan.plain, Approval::Approved, &conn, &cfg, "app_test").await.expect("approved type change");
+    engine.apply(&plan.plain, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_test").await.expect("approved type change");
     let live_final = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap3");
     let attr2 = live_final.tables["metrics"].columns.iter().find(|c| c.name == "score").expect("score col");
     assert_eq!(attr2.data_type, "double precision", "type changed after approval");
@@ -3085,14 +3086,14 @@ async fn set_not_null_is_gated_drop_not_null_is_ungated_and_both_re_diff_clean()
     assert!(!plan.plain.destructive, "SET NOT NULL is not data loss");
 
     // Refused without approval; the column is still nullable.
-    let err = engine.apply(&plan.plain, Approval::None, &conn, &cfg, "app_test").await.unwrap_err();
+    let err = engine.apply(&plan.plain, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test").await.unwrap_err();
     assert!(matches!(err, EngineError::ApprovalRequired), "got {err:?}");
     let live_after = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
     assert!(live_after.tables["accounts"].columns.iter().find(|c| c.name == "email").unwrap().nullable,
         "email must stay nullable after a refused SET NOT NULL");
 
     // Approved → applied; column NOT NULL now, re-diff clean.
-    engine.apply(&plan.plain, Approval::Approved, &conn, &cfg, "app_test").await.expect("approved set not null");
+    engine.apply(&plan.plain, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_test").await.expect("approved set not null");
     let live_nn = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap3");
     assert!(!live_nn.tables["accounts"].columns.iter().find(|c| c.name == "email").unwrap().nullable,
         "email must be NOT NULL after approval");
@@ -3106,7 +3107,7 @@ async fn set_not_null_is_gated_drop_not_null_is_ungated_and_both_re_diff_clean()
         .expect("plan drop not null");
     assert!(!plan3.plain.requires_approval, "DROP NOT NULL must NOT require approval");
     assert!(!plan3.plain.destructive, "DROP NOT NULL is not data loss");
-    engine.apply(&plan3.plain, Approval::None, &conn, &cfg, "app_test").await.expect("ungated drop not null applies");
+    engine.apply(&plan3.plain, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test").await.expect("ungated drop not null applies");
     let live_dn = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap5");
     assert!(live_dn.tables["accounts"].columns.iter().find(|c| c.name == "email").unwrap().nullable,
         "email must be nullable again after the ungated DROP NOT NULL");
@@ -3621,7 +3622,7 @@ async fn add_column_with_immutable_default_is_additive_not_destructive() {
     assert!(!plan.plain.destructive, "ADD COLUMN with immutable default is additive, not destructive");
     assert!(!plan.plain.requires_approval, "must not be gated");
     // Applies ungated; re-diff clean (modulo nothing — no CHECK here).
-    engine.apply(&plan.plain, Approval::None, &conn, &cfg, "app_test").await.expect("apply add defaulted col");
+    engine.apply(&plan.plain, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test").await.expect("apply add defaulted col");
     let live2 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap2");
     assert!(diff_snapshots(&d2.snapshot, &live2).is_clean(), "add defaulted column converged");
 
