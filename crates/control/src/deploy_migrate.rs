@@ -55,7 +55,7 @@ use std::path::Path;
 use uuid::Uuid;
 use zeroship_migrate::{
     connect, load_dir, provision_migrator, Approval, ConnectError, EngineError, ExecutorConfig,
-    LoaderError, MigrationEngine, RoleError,
+    LoaderError, MigrationEngine, PostgresBackend, RoleError,
 };
 
 /// What a successful deploy-migrate produced (for logging / the deploy log).
@@ -166,8 +166,12 @@ pub async fn apply_bundle_migrations(
     let engine = MigrationEngine::new();
     let guard_cfg = zeroship_migrate::GuardConfig::confined(schema.clone());
     let plan = engine.plan(&migrations, &guard_cfg);
+    // P6a genericized `MigrationEngine::apply` over `MigrationBackend`; the
+    // platform/control deploy path is Postgres, so wrap the connection in the
+    // PG backend (behavior-identical to the pre-seam `&Client` call).
+    let backend = PostgresBackend::new(&conn);
     let outcome = engine
-        .apply(&plan, Approval::None, &conn, &exec_cfg, "deploy")
+        .apply(&plan, Approval::None, &backend, &exec_cfg, "deploy")
         .await?;
 
     Ok(MigrateOutcome {
