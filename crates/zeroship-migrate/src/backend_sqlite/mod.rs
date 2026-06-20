@@ -123,19 +123,26 @@ impl SqliteBackend {
     }
 
     /// Apply ONE 12-step table REBUILD atomically with confinement + journal it
-    /// (§2.4, P3b). The rebuild DDL (CREATE new / copy / drop old / rename / recreate
-    /// indexes/triggers/views) runs under CreatorUp on `main`; the `foreign_keys`
-    /// toggles straddle the transaction in engine-controlled autocommit windows (the
-    /// SQLite in-txn no-op rule), the `foreign_key_check` integrity gate + the
-    /// journal write run under EngineJournal, and the DDL + journal row commit
-    /// atomically. `foreign_keys` is restored to ON in ALL paths.
+    /// (§2.4, P3b). The rebuild DDL (drop-stale-temp / CREATE new / copy / drop old /
+    /// rename / replay verbatim-captured indexes+triggers) runs under CreatorUp on
+    /// `main`; the `foreign_keys` toggles straddle the transaction in engine-
+    /// controlled autocommit windows (the SQLite in-txn no-op rule), the dependent-
+    /// object capture + the UNSCOPED `foreign_key_check` integrity gate + the journal
+    /// write run under EngineJournal, and the DDL + journal row commit atomically.
+    /// `foreign_keys` is restored to ON in ALL paths.
     ///
-    /// This is the EXECUTOR-INTERNAL direct seam — like [`Self::apply_one_additive`]
-    /// it has NO approval gate. A rebuild on a table with data is DESTRUCTIVE; the
-    /// generic executor's destructive/approval gate (`apply_locked`) classifies the
-    /// rebuild migration and demands an `Approval` BEFORE reaching here. Callers
-    /// reaching this method directly (tests + the future executor wiring) have
-    /// already cleared that gate.
+    /// # No approval gate runs before this yet (C1)
+    ///
+    /// This is the EXECUTOR-INTERNAL direct seam, and — unlike a destructive PG
+    /// migration that flows through the generic executor's `apply_locked` gate —
+    /// there is **NO SQLite engine apply path / approval gate wired yet**. The PG-
+    /// typed [`MigrationEngine`](crate::engine::MigrationEngine) drives `apply` over a
+    /// PG `Client`; it has no SQLite executor, and `plan_declarative` FAILS CLOSED
+    /// (`SqliteRebuildRequired`) rather than carry rebuilds through an ungated path.
+    /// A rebuild on a table with data is DESTRUCTIVE (its journal migration carries
+    /// `destructive + requires_approval`), so the gated SQLite apply path is the next
+    /// phase (P6). Until then this seam is reached ONLY directly (tests + the future
+    /// P6 wiring); callers MUST treat it as ungated and gate approval themselves.
     ///
     /// # Errors
     /// [`RebuildError`] on an FK-check abort, a confinement denial / DDL failure (the
