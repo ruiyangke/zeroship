@@ -173,15 +173,16 @@ async fn exec_register_model(
     // schema is present first; we deliberately do NOT re-add a runtime
     // auto-migrate fallback.
     //
-    // On the SQLite dialect (dev tier) `registerModel` is UNCHANGED — it STILL
-    // auto-creates/migrates from the declared `default.schema`, because the engine
-    // has NO SQLite apply path yet (design §9 / §10 non-goal; risk R4). This is
-    // the documented split: PG schema is engine-owned at deploy; SQLite dev keeps
-    // the runtime auto-migrate until a future SQLite-engine phase. Consequently
-    // `default.schema` / `installSchema` are now PG-UNUSED for DDL (PG runtime
-    // metadata comes from introspection) but stay SQLite-CONSUMED right here; full
-    // removal from the deploy contract is DEFERRED to that SQLite-engine phase
-    // (design §5 / §12 P5) — do not gut the contract field this phase.
+    // On the SQLite dialect (dev tier) `registerModel` drives the SAME hardened
+    // zeroship-migrate engine the PG deploy path uses (P6b): it routes through
+    // `sqlite_engine::run_sqlite_via_engine` (journal / versioning / drift /
+    // 12-step rebuild / baseline adoption / dev auto-approve), NOT a bespoke
+    // runtime auto-migrate — the retired `run_sqlite_pipeline` is gone. The split
+    // is now only in WHEN the engine runs: PG schema is engine-owned at DEPLOY;
+    // SQLite dev applies at first-`registerModel` (cold path) on the developer's
+    // own local file. `default.schema` / `installSchema` stay PG-UNUSED for DDL
+    // (PG runtime metadata comes from introspection) but remain SQLite-CONSUMED
+    // right here as the descriptor source the engine diffs against live state.
     match (backend.as_postgres(), backend.as_sqlite()) {
         // PG: NO runtime DDL — the engine (P6 deploy-apply) is the PG schema
         // authority. This path no-ops the apply; the dispatch caller stamps
