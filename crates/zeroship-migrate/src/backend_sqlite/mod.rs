@@ -131,18 +131,17 @@ impl SqliteBackend {
     /// write run under EngineJournal, and the DDL + journal row commit atomically.
     /// `foreign_keys` is restored to ON in ALL paths.
     ///
-    /// # No approval gate runs before this yet (C1)
+    /// # This is the EXECUTOR-INTERNAL direct seam (no approval gate here)
     ///
-    /// This is the EXECUTOR-INTERNAL direct seam, and — unlike a destructive PG
-    /// migration that flows through the generic executor's `apply_locked` gate —
-    /// there is **NO SQLite engine apply path / approval gate wired yet**. The PG-
-    /// typed [`MigrationEngine`](crate::engine::MigrationEngine) drives `apply` over a
-    /// PG `Client`; it has no SQLite executor, and `plan_declarative` FAILS CLOSED
-    /// (`SqliteRebuildRequired`) rather than carry rebuilds through an ungated path.
-    /// A rebuild on a table with data is DESTRUCTIVE (its journal migration carries
-    /// `destructive + requires_approval`), so the gated SQLite apply path is the next
-    /// phase (P6). Until then this seam is reached ONLY directly (tests + the future
-    /// P6 wiring); callers MUST treat it as ungated and gate approval themselves.
+    /// This inherent method runs the rebuild WITHOUT an approval gate — it is the raw
+    /// dialect-coupled drive. As of P6a the GATED production path is the engine's
+    /// generic [`apply_declarative`](crate::engine::MigrationEngine::apply_declarative),
+    /// which classifies the rebuild's `destructive + requires_approval` journal
+    /// migration and refuses an un-approved rebuild BEFORE calling down into
+    /// [`MigrationBackend::rebuild_one`](crate::backend::MigrationBackend::rebuild_one)
+    /// (which forwards here). So a caller reaching THIS inherent method directly
+    /// (tests) has bypassed that gate and MUST gate approval itself; callers going
+    /// through the engine get the gate for free.
     ///
     /// # Errors
     /// [`RebuildError`] on an FK-check abort, a confinement denial / DDL failure (the
@@ -358,11 +357,49 @@ impl MigrationBackend for SqliteBackend {
     async fn evaluate_preconditions(
         &self,
         _cfg: &ExecutorConfig,
-        _m: &Migration,
+        m: &Migration,
     ) -> Result<PreconditionVerdict, ApplyError> {
-        Err(ApplyError::Backend(
-            "sqlite backend: preconditions are a later-phase capability (not built in P2)"
-                .to_string(),
-        ))
+        // Descriptor-generated SQLite migrations carry NO preconditions (the
+        // declarative author never emits them), so the common case is trivially
+        // `AllMet`. Precondition EVALUATION against a live SQLite schema is a later
+        // capability; until then a migration that actually declares a precondition
+        // fails closed rather than silently treating it as met (P6a only needs the
+        // no-precondition path the descriptor diff produces).
+        if m.preconditions.is_empty() {
+            Ok(PreconditionVerdict::AllMet)
+        } else {
+            Err(ApplyError::Backend(
+                "sqlite backend: precondition evaluation is a later-phase capability \
+                 (descriptor migrations carry none)"
+                    .to_string(),
+            ))
+        }
+    }
+
+    // -- declarative-only structured ops (P6a) ------------------------------
+
+    async fn rebuild_one(
+        &self,
+        spec: &SqliteRebuildSpec,
+        m: &Migration,
+        applied_by: &str,
+    ) -> Result<(), ApplyError> {
+        // Drive the built, tested 12-step rebuild engine (the inherent
+        // `SqliteBackend::rebuild_one`). The `RebuildError` is mapped onto the
+        // dialect-neutral `Backend` arm so it flows through the generic engine's
+        // `ApplyError` without leaking a SQLite type. Idempotency is the CALLER's
+        // concern (the engine's net-state gate skips an already-completed rebuild),
+        // exactly like the additive apply seam.
+        rebuild_sql::rebuild_one(&self.actor, spec, m, applied_by)
+            .await
+            .map_err(|e| ApplyError::Backend(e.to_string()))
+    }
+
+    fn expand_conn(&self) -> Option<&compio_postgres::Client> {
+        // SQLite has no online expand-contract drive: a SQLite declarative rename is
+        // routed to a `rebuild_one`, never expand-contract, so `plan.renames` is
+        // EMPTY on the SQLite leg and this `None` is never reached with renames to
+        // drive (design §3.3 / P6a CONDITION ii / H1).
+        None
     }
 }
