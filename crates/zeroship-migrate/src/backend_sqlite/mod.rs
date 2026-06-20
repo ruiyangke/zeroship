@@ -21,6 +21,7 @@ pub mod actor;
 pub mod authorizer;
 mod drift_sql;
 mod journal_sql;
+pub mod rebuild_sql;
 mod rollback_sql;
 
 use std::collections::HashMap;
@@ -35,6 +36,7 @@ use zeroship_schema::query::SqlDialect;
 
 pub use actor::{MigrationActor, SqliteActorError};
 pub use authorizer::Mode;
+pub use rebuild_sql::{RebuildError, SqliteRebuildSpec};
 
 /// The SQLite [`MigrationBackend`]. Holds the dedicated hardened migration actor
 /// for ONE tenant. Construct via [`SqliteBackend::open`].
@@ -118,6 +120,34 @@ impl SqliteBackend {
         applied_by: &str,
     ) -> Result<(), RollbackError> {
         rollback_sql::rollback_one_transactional(&self.actor, m, applied_by).await
+    }
+
+    /// Apply ONE 12-step table REBUILD atomically with confinement + journal it
+    /// (§2.4, P3b). The rebuild DDL (CREATE new / copy / drop old / rename / recreate
+    /// indexes/triggers/views) runs under CreatorUp on `main`; the `foreign_keys`
+    /// toggles straddle the transaction in engine-controlled autocommit windows (the
+    /// SQLite in-txn no-op rule), the `foreign_key_check` integrity gate + the
+    /// journal write run under EngineJournal, and the DDL + journal row commit
+    /// atomically. `foreign_keys` is restored to ON in ALL paths.
+    ///
+    /// This is the EXECUTOR-INTERNAL direct seam — like [`Self::apply_one_additive`]
+    /// it has NO approval gate. A rebuild on a table with data is DESTRUCTIVE; the
+    /// generic executor's destructive/approval gate (`apply_locked`) classifies the
+    /// rebuild migration and demands an `Approval` BEFORE reaching here. Callers
+    /// reaching this method directly (tests + the future executor wiring) have
+    /// already cleared that gate.
+    ///
+    /// # Errors
+    /// [`RebuildError`] on an FK-check abort, a confinement denial / DDL failure (the
+    /// transaction is rolled back, leaving the original table intact and
+    /// `foreign_keys` back ON), or a poisoned connection.
+    pub async fn rebuild_one(
+        &self,
+        spec: &SqliteRebuildSpec,
+        m: &Migration,
+        applied_by: &str,
+    ) -> Result<(), RebuildError> {
+        rebuild_sql::rebuild_one(&self.actor, spec, m, applied_by).await
     }
 
     /// Introspect the LIVE `main` (app file) schema into a dialect-agnostic

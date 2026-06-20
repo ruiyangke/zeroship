@@ -178,13 +178,20 @@ const FUNCTION_ALLOWLIST: &[&str] = &[
 ];
 
 /// The PRAGMAs the engine may issue in `EngineJournal` mode (§2.4 + §2.7).
-/// `foreign_keys` is the rebuild toggle; the rest are READ-ONLY schema
+/// `foreign_keys` is the rebuild toggle and `foreign_key_check` is the rebuild's
+/// orphan-row integrity gate (both §2.4, P3b); the rest are READ-ONLY schema
 /// introspection the drift snapshot needs (they emit rows, mutate nothing).
 /// Fail-closed: anything not listed (incl. `writable_schema`, `journal_mode`) is
 /// denied even in engine mode.
 fn is_engine_allowed_pragma(name: &str) -> bool {
     const ENGINE_PRAGMAS: &[&str] = &[
         "foreign_keys",
+        // P3b — the 12-step rebuild's integrity check. `PRAGMA foreign_key_check`
+        // works INSIDE a transaction (unlike `foreign_keys`, a no-op in a txn) and
+        // reports orphaned rows; a non-empty result aborts the rebuild (§2.4). It is
+        // read-only (emits violation rows, mutates nothing). Engine-only — a creator
+        // never reaches it (PRAGMA is denied outright in CreatorUp).
+        "foreign_key_check",
         "table_info",
         "index_list",
         "index_info",
@@ -585,6 +592,40 @@ mod tests {
             ),
             Authorization::Deny,
             "writable_schema denied even in engine mode"
+        );
+    }
+
+    // P3b (§2.4): `foreign_key_check` — the rebuild's orphan-row integrity gate — is
+    // allowed in EngineJournal, denied in CreatorUp (a creator can never run the
+    // rebuild integrity check; PRAGMA is denied outright in creator mode).
+    #[test]
+    fn foreign_key_check_engine_only() {
+        let m = AuthMode::new();
+        m.store(Mode::CreatorUp);
+        assert_eq!(
+            authorize(
+                &m,
+                &ctx(
+                    AuthAction::Pragma { pragma_name: "foreign_key_check", pragma_value: None },
+                    Some(MAIN_DB),
+                    None
+                )
+            ),
+            Authorization::Deny,
+            "foreign_key_check must be denied in creator mode"
+        );
+        m.store(Mode::EngineJournal);
+        assert_eq!(
+            authorize(
+                &m,
+                &ctx(
+                    AuthAction::Pragma { pragma_name: "foreign_key_check", pragma_value: None },
+                    Some(MAIN_DB),
+                    None
+                )
+            ),
+            Authorization::Allow,
+            "foreign_key_check must be allowed in engine mode (rebuild integrity gate, P3b)"
         );
     }
 
