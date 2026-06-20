@@ -43,6 +43,7 @@ use crate::db::ExecutorConfig;
 use crate::guard::{GuardError, SqlGuard};
 use crate::journal::{self, AppliedEntry, JournalError, Phase};
 use crate::migration::{Migration, MigrationId};
+use zeroship_schema::query::SqlDialect;
 
 /// The Postgres leaf operations the [`PostgresBackend`](crate::backend::PostgresBackend)
 /// drives the [`MigrationBackend`](crate::backend::MigrationBackend) trait
@@ -666,34 +667,40 @@ pub async fn apply_with_lock(
     applied_by: &str,
     lock_mode: LockMode,
 ) -> Result<ApplyOutcome, ApplyError> {
+    // Drive the whole apply through the dialect seam. P1: Postgres is the only
+    // backend; constructing it here keeps `apply`/`apply_with_lock`'s public
+    // `&Client` signature intact while the apply body below is generic over
+    // `MigrationBackend` (no `compio_postgres::Client` reaches `apply_locked`). The
+    // defense-in-depth approval gate now lives in `apply_with_lock_backend` so it
+    // runs IDENTICALLY for both the PG entry here and the generic engine path (P6a) —
+    // a single source of the executor-layer gate.
+    let backend = PostgresBackend::new(conn);
+    apply_with_lock_backend(&backend, cfg, migrations, approval, applied_by, lock_mode).await
+}
+
+/// The lock + session-hygiene shell around [`apply_locked`], generic over the
+/// dialect seam. Both [`apply_with_lock`] (PG) and the generic engine declarative
+/// path construct/forward their backend and call this; the body is byte-identical to
+/// the pre-seam PG flow, now routed through [`MigrationBackend`].
+pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+    approval: Approval,
+    applied_by: &str,
+    lock_mode: LockMode,
+) -> Result<ApplyOutcome, ApplyError> {
     // Defense-in-depth approval gate (design §1.6) — refuse a destructive batch
     // without explicit approval BEFORE doing anything (not even the lock). The
     // engine has its own gate; this is the independent executor-layer check so a
-    // direct caller cannot bypass it.
+    // direct caller cannot bypass it. It is dialect-agnostic (reads only
+    // `flags.destructive`), so it sits in the generic core — running identically for
+    // PG and the engine path (P6a moved it here from `apply_with_lock`).
     if approval != Approval::Approved
         && migrations.iter().any(|m| m.flags.destructive)
     {
         return Err(ApplyError::ApprovalRequired);
     }
-    // Drive the whole apply through the dialect seam. P1: Postgres is the only
-    // backend; constructing it here keeps `apply`/`apply_with_lock`'s public
-    // `&Client` signature intact while the apply body below is generic over
-    // `MigrationBackend` (no `compio_postgres::Client` reaches `apply_locked`).
-    let backend = PostgresBackend::new(conn);
-    apply_with_lock_backend(&backend, cfg, migrations, applied_by, lock_mode).await
-}
-
-/// The lock + session-hygiene shell around [`apply_locked`], generic over the
-/// dialect seam. Both [`apply_with_lock`] (PG) and any future SQLite entry point
-/// construct their backend and call this; the body is byte-identical to the
-/// pre-seam PG flow, now routed through [`MigrationBackend`].
-async fn apply_with_lock_backend<B: MigrationBackend>(
-    backend: &B,
-    cfg: &ExecutorConfig,
-    migrations: &[Migration],
-    applied_by: &str,
-    lock_mode: LockMode,
-) -> Result<ApplyOutcome, ApplyError> {
     // H10: acquire the project advisory lock only when WE own it. Under
     // `AlreadyHeld` the outer `apply_declarative` already holds it for the whole
     // declarative deploy — re-acquiring here (and releasing below) would FREE the
@@ -989,6 +996,16 @@ async fn apply_locked<B: MigrationBackend>(
     // (topological, version-tiebroken & stable), else pure UUIDv7 version order.
     let pending: Vec<&Migration> = order_pending(migrations, &completed, &superseded)?;
 
+    // P6a / design §2.5.3 — the string deny-list guard is a Postgres line-1 vet:
+    // `libpg_query` cannot parse SQLite, so on the SQLite dialect there is NO string
+    // guard (a SQLite `up` fail-closes `SqlGuard::check`). SQLite's line-1 vet is the
+    // descriptor emitter (author boundary) and its line-2 defense is the backend
+    // authorizer applied per statement at execution. So the FIRST-PASS string check
+    // runs ONLY for PG; the SQLite leg relies on the authorizer the confined apply
+    // already enforces. The non-txn idempotency check still runs through the trait
+    // (`validate_non_txn`), which for SQLite rejects `transaction:false` at the
+    // dialect boundary. The PG branch is byte-identical (it always ran the guard).
+    let run_string_guard = backend.dialect() != SqlDialect::Sqlite;
     let guard = SqlGuard::new(cfg.guard_config());
 
     // FIRST PASS — static validation over EVERY pending migration BEFORE any
@@ -1001,11 +1018,14 @@ async fn apply_locked<B: MigrationBackend>(
     // checks are all-or-nothing.)
     for m in &pending {
         let version = m.version.as_str();
-        // GUARD GATE — RCE / priv-esc / cross-tenant / file / network denials.
-        guard.check(&m.up).map_err(|source| ApplyError::Guard {
-            version: version.to_string(),
-            source,
-        })?;
+        // GUARD GATE — RCE / priv-esc / cross-tenant / file / network denials (PG
+        // only; SQLite is vetted by the descriptor emitter + the backend authorizer).
+        if run_string_guard {
+            guard.check(&m.up).map_err(|source| ApplyError::Guard {
+                version: version.to_string(),
+                source,
+            })?;
+        }
         // C1/C2 — a non-transactional `up` must be idempotent (re-runnable by
         // crash recovery). Reject the non-idempotent form with a clear error.
         // Behind the seam: PG parses with `pg_query`; SQLite rejects
