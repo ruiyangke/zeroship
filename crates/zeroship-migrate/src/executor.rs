@@ -2482,6 +2482,24 @@ pub enum RollbackError {
         /// The selected-for-rollback version it depends on.
         dependency: String,
     },
+    /// **SQLite, P5 additive-only.** The migration's `down` requires the 12-step
+    /// table REBUILD to reverse (a column TYPE-change reversal, a constraint
+    /// add/drop, or any `ALTER` SQLite cannot perform natively). P5 implements only
+    /// the ADDITIVE reversals SQLite ≥ 3.35 supports natively — `DROP TABLE` /
+    /// `DROP COLUMN` / `DROP INDEX` / `RENAME`. A rebuild-needing `down` is REFUSED
+    /// here (not half-rebuilt): the rebuild path is P3b. Nothing was rolled back.
+    #[error(
+        "migration {version} has a SQLite `down` requiring the 12-step table rebuild ({reason}); \
+         the rebuild path is P3b (not yet built). P5 reverses only the additive operations SQLite \
+         supports natively (DROP TABLE/COLUMN/INDEX, RENAME). Author a compensating migration, or \
+         wait for the P3b rebuild phase."
+    )]
+    SqliteRebuildRequired {
+        /// The migration whose `down` needs a table rebuild.
+        version: String,
+        /// What specifically requires the rebuild.
+        reason: String,
+    },
 }
 
 /// Roll back applied migrations to a [`RollbackTarget`] (design §5).

@@ -145,6 +145,24 @@ const FUNCTION_ALLOWLIST: &[&str] = &[
     "typeof",
     "hex",
     "quote",
+    // `printf` / `format` are invoked INTERNALLY by SQLite when it rewrites a
+    // table's schema during `ALTER TABLE … ADD COLUMN` (and similar additive DDL)
+    // on 3.51 — the authorizer fires `SQLITE_FUNCTION("printf")` for that internal
+    // call, so denying it breaks a LEGITIMATE additive creator migration. They are
+    // deterministic, sandboxed string-formatting builtins (no extension load, no
+    // tenant escape), safe to allow in both modes. (Exposed by P5's first real
+    // ADD COLUMN exercise; the P2 allowlist predated any ADD COLUMN test.)
+    "printf",
+    "format",
+    // `like` is invoked INTERNALLY by SQLite during `ALTER TABLE … DROP COLUMN`
+    // (and other schema rewrites) to scan trigger/view/CHECK bodies for references
+    // to the altered object — so denying it breaks a LEGITIMATE additive DROP
+    // COLUMN rollback. It is a deterministic, sandboxed pattern builtin (no
+    // extension load, no tenant escape). `glob` is its sibling pattern builtin,
+    // allowed for the same reason. (Both exposed by P5's DROP COLUMN rollback;
+    // the P2 allowlist predated any ALTER-rewrite test.)
+    "like",
+    "glob",
     "unlikely",
     "likelihood",
     "likely",
@@ -158,6 +176,55 @@ const FUNCTION_ALLOWLIST: &[&str] = &[
     "count",
     "exists",
 ];
+
+/// The PRAGMAs the engine may issue in `EngineJournal` mode (§2.4 + §2.7).
+/// `foreign_keys` is the rebuild toggle; the rest are READ-ONLY schema
+/// introspection the drift snapshot needs (they emit rows, mutate nothing).
+/// Fail-closed: anything not listed (incl. `writable_schema`, `journal_mode`) is
+/// denied even in engine mode.
+fn is_engine_allowed_pragma(name: &str) -> bool {
+    const ENGINE_PRAGMAS: &[&str] = &[
+        "foreign_keys",
+        "table_info",
+        "index_list",
+        "index_info",
+        "foreign_key_list",
+    ];
+    ENGINE_PRAGMAS
+        .iter()
+        .any(|p| name.eq_ignore_ascii_case(p))
+}
+
+/// True iff `name` is a SQLite schema table (`sqlite_master` / `sqlite_temp_master`
+/// and their legacy aliases). A write authorizer-event on these during an ALTER is
+/// SQLite's own schema-edit mechanism (a DIRECT SQL write is already blocked by
+/// `DEFENSIVE=ON` before the authorizer runs). Matched by exact name — never a
+/// blanket `sqlite_%` — so a creator table named `sqlite_statx` cannot sneak in.
+fn is_sqlite_schema_table(name: &str) -> bool {
+    name.eq_ignore_ascii_case("sqlite_master")
+        || name.eq_ignore_ascii_case("sqlite_temp_master")
+        || name.eq_ignore_ascii_case("sqlite_schema")
+        || name.eq_ignore_ascii_case("sqlite_temp_schema")
+}
+
+/// The INTERNAL SQLite functions the engine invokes (indirectly) when running an
+/// `ALTER TABLE … DROP/RENAME COLUMN` / `RENAME TABLE` (and similar additive
+/// schema rewrites). SQLite's own ALTER machinery calls these as part of executing
+/// the statement — they are NOT user-callable in any escape-relevant sense (they
+/// operate on the connection's own schema text and are gated behind an ALTER the
+/// authorizer already vets). Denying them breaks LEGITIMATE additive migrations /
+/// rollbacks. Matched by exact name (a fixed, audited set), not a blanket
+/// `sqlite_*` prefix, so an unknown `sqlite_*` function still fails closed.
+fn is_internal_alter_helper(lower: &str) -> bool {
+    const INTERNAL_ALTER_FNS: &[&str] = &[
+        "sqlite_rename_test",
+        "sqlite_rename_column",
+        "sqlite_rename_table",
+        "sqlite_rename_quotefix",
+        "sqlite_drop_column",
+    ];
+    INTERNAL_ALTER_FNS.contains(&lower)
+}
 
 /// True iff `name` (case-insensitive) is on the function allowlist.
 fn function_allowed(name: &str) -> bool {
@@ -204,13 +271,18 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
         AuthAction::Attach { .. } | AuthAction::Detach { .. } => Authorization::Deny,
 
         // PRAGMA: denied in CreatorUp (closes the `writable_schema=ON` forge,
-        // §2.2.1 item 3). In EngineJournal, only the engine's `foreign_keys`
-        // toggle around the 12-step rebuild is allowed (§2.4); everything else
-        // (incl. writable_schema, journal_mode, etc.) is denied.
+        // §2.2.1 item 3). In EngineJournal, a SMALL allowlist is permitted:
+        //   - `foreign_keys` — the engine's toggle around the 12-step rebuild (§2.4);
+        //   - the READ-ONLY schema-introspection pragmas the drift snapshot issues
+        //     (`table_info`/`index_list`/`index_info`/`foreign_key_list`, §2.7).
+        //     These return rows and mutate nothing; they are the SQLite analog of
+        //     the PG drift path's `information_schema`/`pg_catalog` reads. They run
+        //     ONLY under engine mode (engine-private introspection); a creator can
+        //     never reach them (PRAGMA stays denied outright in CreatorUp).
+        // Everything else (writable_schema, journal_mode, …) stays denied in BOTH
+        // modes (fail-closed).
         AuthAction::Pragma { pragma_name, .. } => match current {
-            Mode::EngineJournal if pragma_name.eq_ignore_ascii_case("foreign_keys") => {
-                Authorization::Allow
-            }
+            Mode::EngineJournal if is_engine_allowed_pragma(pragma_name) => Authorization::Allow,
             _ => Authorization::Deny,
         },
 
@@ -234,10 +306,11 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
         AuthAction::Function { function_name } => {
             let lower = function_name.to_ascii_lowercase();
             // Allowed iff on the allowlist, OR (engine mode only) a `vec_*` function
-            // for engine-emitted vector DDL. Everything else (incl. load_extension,
-            // any `vec_*` in creator mode, unknown) is fail-closed denied.
+            // for engine-emitted vector DDL, OR an internal SQLite ALTER-machinery
+            // helper. Everything else (incl. load_extension, any `vec_*` in creator
+            // mode, unknown) is fail-closed denied.
             let engine_vec = matches!(current, Mode::EngineJournal) && lower.starts_with("vec_");
-            if function_allowed(function_name) || engine_vec {
+            if function_allowed(function_name) || engine_vec || is_internal_alter_helper(&lower) {
                 Authorization::Allow
             } else {
                 Authorization::Deny
@@ -261,6 +334,60 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
         },
         AuthAction::Savepoint { .. } => Authorization::Deny,
 
+        // -- ALTER TABLE — key on the ACTION'S OWN database_name, NOT the outer one --
+        // CRITICAL (P5): `SQLITE_ALTER_TABLE` carries its target database in the
+        // action's own `database_name` field; the OUTER `AuthContext.database_name`
+        // (the `zDb` arg) is NOT the database for this action — for an
+        // `ALTER TABLE … DROP/ADD/RENAME COLUMN` SQLite passes the COLUMN name there,
+        // so `targets_main`/`targets_mig` computed from the outer field are BOTH
+        // false and the generic foreign-alias deny would wrongly reject a legitimate
+        // `ALTER TABLE main.<t>`. So we branch on the inner `database_name` here,
+        // ahead of every generic write arm:
+        //   - `_mig`  ⇒ journal immutability: engine-only (CreatorUp denied);
+        //   - `main`  ⇒ a creator/engine table alter: allowed (additive ADD/DROP/
+        //              RENAME COLUMN — the additive rollback + apply path);
+        //   - other   ⇒ foreign alias (impossible post-ATTACH-deny) ⇒ deny.
+        AuthAction::AlterTable { database_name, .. } => {
+            let inner_mig = *database_name == MIG_ALIAS;
+            let inner_main = *database_name == MAIN_DB;
+            if inner_mig {
+                match current {
+                    Mode::EngineJournal => Authorization::Allow,
+                    Mode::CreatorUp => Authorization::Deny,
+                }
+            } else if inner_main {
+                // A table alter on the app file. Allowed in both modes (the creator
+                // `up`/`down` additive ADD/DROP/RENAME COLUMN; the engine's own
+                // rebuild ALTERs in a later phase). Temp objects / analyze etc. are
+                // handled by their own arms; this is strictly ALTER TABLE on main.
+                Authorization::Allow
+            } else {
+                // Foreign alias — impossible once ATTACH/DETACH are denied for life,
+                // but fail-closed anyway.
+                Authorization::Deny
+            }
+        }
+
+        // -- SQLite-internal schema-table writes during a vetted ALTER/DDL --
+        // `ALTER TABLE … DROP/RENAME COLUMN` (and other schema rewrites) make SQLite
+        // INTERNALLY `Update`/`Insert`/`Delete` the schema tables
+        // (`sqlite_master` / `sqlite_temp_master`) to apply the new schema. These
+        // authorizer events are NOT a creator data write — a DIRECT
+        // `UPDATE sqlite_master …` from SQL is already blocked by `DEFENSIVE=ON`
+        // (set at open) BEFORE the authorizer even sees it, so the ONLY way to reach
+        // this event is SQLite's own ALTER machinery executing a statement the
+        // authorizer already vetted. We therefore allow a write to a `sqlite_*master`
+        // schema table on the `main`/`temp` namespace (NEVER `_mig`, which is handled
+        // below and stays engine-only). Fail-closed: only the exact schema-table
+        // names, only on main/temp, never `_mig`.
+        AuthAction::Insert { table_name }
+        | AuthAction::Update { table_name, .. }
+        | AuthAction::Delete { table_name }
+            if !targets_mig && is_sqlite_schema_table(table_name) =>
+        {
+            Authorization::Allow
+        }
+
         // -- Journal immutability on `_mig` (§2.2.1 item 4) --
         // Direct writes / DDL to `_mig` are denied in CreatorUp and allowed only in
         // EngineJournal (and only the journal tables exist there). Match the OUTER
@@ -272,7 +399,6 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
         | AuthAction::DropTrigger { .. }
         | AuthAction::DropIndex { .. }
         | AuthAction::DropView { .. }
-        | AuthAction::AlterTable { .. }
             if targets_mig =>
         {
             match current {
@@ -351,7 +477,6 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
         | AuthAction::DropTrigger { .. }
         | AuthAction::DropIndex { .. }
         | AuthAction::DropView { .. }
-        | AuthAction::AlterTable { .. }
             if !targets_main && !targets_mig =>
         {
             Authorization::Deny
@@ -437,6 +562,55 @@ mod tests {
         );
     }
 
+    // §2.7: the read-only introspection PRAGMAs the drift snapshot uses are allowed
+    // in EngineJournal, denied in CreatorUp; writable_schema stays denied in both.
+    #[test]
+    fn introspection_pragmas_engine_only() {
+        let m = AuthMode::new();
+        for pragma in ["table_info", "index_list", "index_info", "foreign_key_list"] {
+            m.store(Mode::CreatorUp);
+            assert_eq!(
+                authorize(
+                    &m,
+                    &ctx(
+                        AuthAction::Pragma { pragma_name: pragma, pragma_value: Some("users") },
+                        Some(MAIN_DB),
+                        None
+                    )
+                ),
+                Authorization::Deny,
+                "{pragma} must be denied in creator mode"
+            );
+            m.store(Mode::EngineJournal);
+            assert_eq!(
+                authorize(
+                    &m,
+                    &ctx(
+                        AuthAction::Pragma { pragma_name: pragma, pragma_value: Some("users") },
+                        Some(MAIN_DB),
+                        None
+                    )
+                ),
+                Authorization::Allow,
+                "{pragma} must be allowed in engine mode (drift introspection, §2.7)"
+            );
+        }
+        // writable_schema is NOT an introspection pragma — denied even in engine mode.
+        m.store(Mode::EngineJournal);
+        assert_eq!(
+            authorize(
+                &m,
+                &ctx(
+                    AuthAction::Pragma { pragma_name: "writable_schema", pragma_value: Some("1") },
+                    None,
+                    None
+                )
+            ),
+            Authorization::Deny,
+            "writable_schema stays denied in engine mode"
+        );
+    }
+
     #[test]
     fn mig_writes_denied_in_creator_allowed_in_engine() {
         let m = AuthMode::new();
@@ -453,6 +627,56 @@ mod tests {
         m.store(Mode::EngineJournal);
         assert_eq!(
             authorize(&m, &ctx(AuthAction::Insert { table_name: "schema_migrations" }, Some(MIG_ALIAS), None)),
+            Authorization::Allow
+        );
+    }
+
+    // P5: ALTER TABLE keys on the action's OWN database_name, not the outer one.
+    // `ALTER TABLE main.<t>` (additive ADD/DROP/RENAME COLUMN) is allowed even when
+    // the OUTER database_name carries the column name (SQLite's quirk); `_mig` is
+    // engine-only.
+    #[test]
+    fn alter_table_keys_on_inner_database_name() {
+        let m = AuthMode::new();
+        m.store(Mode::CreatorUp);
+        // ADD/DROP COLUMN on main: the OUTER db is the COLUMN name (the quirk we fix),
+        // but the inner database_name is "main" ⇒ allowed.
+        assert_eq!(
+            authorize(
+                &m,
+                &ctx(
+                    AuthAction::AlterTable { database_name: MAIN_DB, table_name: "users" },
+                    Some("nickname"),
+                    None
+                )
+            ),
+            Authorization::Allow,
+            "ALTER TABLE main.users must be allowed regardless of the outer database_name"
+        );
+        // ALTER TABLE on _mig is journal tampering ⇒ denied in creator mode.
+        assert_eq!(
+            authorize(
+                &m,
+                &ctx(
+                    AuthAction::AlterTable { database_name: MIG_ALIAS, table_name: "schema_migrations" },
+                    None,
+                    None
+                )
+            ),
+            Authorization::Deny,
+            "ALTER TABLE on _mig must be denied in creator mode"
+        );
+        // Engine mode may alter _mig (the 12-step rebuild's engine ALTERs, later phase).
+        m.store(Mode::EngineJournal);
+        assert_eq!(
+            authorize(
+                &m,
+                &ctx(
+                    AuthAction::AlterTable { database_name: MIG_ALIAS, table_name: "schema_migrations" },
+                    None,
+                    None
+                )
+            ),
             Authorization::Allow
         );
     }

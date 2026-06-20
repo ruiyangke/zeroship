@@ -407,6 +407,56 @@ async fn confine_detach_denied() {
 }
 
 // ---------------------------------------------------------------------------
+// P5 regression: the authorizer now ALLOWS a write to `sqlite_master` /
+// `sqlite_temp_master` as an action (so SQLite's INTERNAL ALTER machinery can run
+// `ALTER TABLE … DROP COLUMN`). This must NOT open a DIRECT-write hole: a creator
+// `up` issuing `UPDATE main.sqlite_master …` directly is still blocked by
+// DEFENSIVE=ON (set at open, BEFORE the authorizer), so defense-in-depth holds —
+// the only path that reaches the allowed action is SQLite's own ALTER executor.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn confine_direct_sqlite_master_write_still_blocked_by_defensive() {
+    let p = paths("master_write");
+    let be = backend(&p);
+    be.ensure_journal_sqlite().await.expect("bootstrap journal");
+    // Seed a table so there is a schema row to target.
+    be.apply_one_additive(&mig("CREATE TABLE t (id INTEGER PRIMARY KEY);"), "d")
+        .await
+        .expect("seed table");
+    // A direct creator write to sqlite_master — DEFENSIVE blocks it (the authorizer
+    // would ALLOW the action now, but DEFENSIVE rejects the actual write, so this is
+    // an Exec/defensive block, not a silent success).
+    let attack = "UPDATE main.sqlite_master SET sql = 'CREATE TABLE t (id INTEGER, pwned TEXT)' WHERE name = 't';";
+    let m = mig(attack);
+    let err = be
+        .apply_one_additive(&m, "attacker")
+        .await
+        .expect_err("direct sqlite_master write must be blocked");
+    // DEFENSIVE surfaces as an Exec error (not a silent apply); the table's real
+    // schema is untouched.
+    assert!(
+        matches!(err, SqliteActorError::Exec(_) | SqliteActorError::Poisoned(_)),
+        "direct sqlite_master write must be rejected by DEFENSIVE, got: {err}"
+    );
+    // Positive control: with DEFENSIVE off + writable_schema on, a raw connection
+    // CAN edit sqlite_master — proving the hardened block is DEFENSIVE, not an
+    // unrelated error.
+    {
+        let cdir = tempfile::tempdir().expect("control tempdir");
+        let cmain = cdir.path().join("c.sqlite");
+        let conn = rusqlite::Connection::open(&cmain).expect("control open");
+        conn.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY);")
+            .expect("control seed");
+        conn.pragma_update(None, "writable_schema", "ON")
+            .expect("writable_schema on");
+        let res = conn.execute_batch(
+            "UPDATE sqlite_master SET sql = 'CREATE TABLE t (id INTEGER, pwned TEXT)' WHERE name = 't';",
+        );
+        assert!(res.is_ok(), "control: raw sqlite_master edit succeeds: {res:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Version floor (§2.9): the bundled SQLite satisfies the floor the
 // journal-immutability proof needs (authorizer zDb-on-DROP_TABLE semantics +
 // RETURNING + window functions). If the linked lib were below floor, open() would
