@@ -37,6 +37,21 @@ uuid = { workspace = true }
 # out-of-band at deploy (not the request hot path), async on compio.
 compio-postgres = { workspace = true }
 compio = { workspace = true }
+# SQLite migration backend (design 2026-06-19 §2.1.1). The migration connection
+# is a DEDICATED, hardened, CDC-free rusqlite Connection — it does NOT reuse
+# plugin-db's data-plane SqliteSession. `bundled` pins SQLite 3.51.3 (the
+# version floor for DEFENSIVE/TRUSTED_SCHEMA/RETURNING/window-functions and the
+# authorizer `zDb`-on-DROP_TABLE semantics the journal-immutability proof needs,
+# §2.9). No `preupdate_hook`/vec0: the migration conn is CDC-free + extension-
+# free to creator SQL (§2.1.1).
+# `load_extension` is needed for `Connection::load_extension_disable()` — the
+# real API (NOT a DbConfig variant) that disables extension loading at open
+# (§2.1.1). Enabling the feature does NOT load any extension; it just exposes the
+# enable/disable toggle, and we use it only to DISABLE.
+rusqlite = { workspace = true, features = ["bundled", "load_extension"] }
+# The migration actor's single-writer queue (zero-tokio: same spawn-thread +
+# flume shape as plugin-db's SqliteSession, but a second security-scoped actor).
+flume = { workspace = true }
 # `FutureExt::catch_unwind` for panic-safe shadow-DB teardown (C1) — mirrors the
 # runtime crate's panic_util seam. Zero tokio: `futures` is the executor-agnostic
 # combinator crate, not a runtime.
@@ -62,6 +77,10 @@ path = "src/bin/zeroship-migrate.rs"
 # Executor tests hit a REAL Postgres (faithful-e2e); the compio test macro
 # drives the async apply flow on the compio runtime.
 compio = { workspace = true }
+# Per-test temp SQLite files for the confinement/journal/atomic-apply proofs
+# (design §3 P2 gate — every confinement claim proven on a REAL temp-file
+# SQLite, never a shim). Auto-cleaning; workspace-pinned.
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
