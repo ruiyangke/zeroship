@@ -244,9 +244,32 @@ async fn run_apply_txn(
         }
         Err(e) => {
             // Roll back so a denied/failed `up` never leaves a partial journal.
+            //
+            // H1: the previous `let _ = actor.exec("ROLLBACK")` swallowed the result
+            // entirely, which is unsafe on a LONG-LIVED, REUSED connection: if the
+            // rollback leaves a transaction open, the NEXT apply fails with "cannot
+            // start a transaction within a transaction". The ROLLBACK *error* alone
+            // is NOT the wedge signal — a statement that auto-aborts the txn (e.g. an
+            // `OR ROLLBACK` conflict) already closes it, after which an explicit
+            // ROLLBACK spuriously errors with "no transaction is active" while the
+            // connection is perfectly clean. The load-bearing invariant is the
+            // AUTOCOMMIT STATE: after the rollback attempt the connection MUST be back
+            // in autocommit. If it is not, the connection is wedged and the caller
+            // must tear it down + rebuild before reuse — surfaced as `Poisoned` (more
+            // severe than the `up` error, which is moot once the connection is dead).
             actor.set_mode(Mode::EngineJournal).await?;
-            let _ = actor.exec("ROLLBACK").await;
-            Err(e)
+            let rb = actor.exec("ROLLBACK").await; // may spuriously error post auto-abort
+            match actor.is_autocommit().await {
+                Ok(true) => Err(e), // clean: the original up error stands.
+                Ok(false) => Err(SqliteActorError::Poisoned(format!(
+                    "transaction still open after ROLLBACK (rollback result: {rb:?}); \
+                     original up error: {e}"
+                ))),
+                Err(probe) => Err(SqliteActorError::Poisoned(format!(
+                    "could not confirm autocommit after ROLLBACK: {probe}; \
+                     original up error: {e}"
+                ))),
+            }
         }
     }
 }

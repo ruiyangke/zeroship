@@ -45,9 +45,13 @@ use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 /// authorizer match is a trivial string compare.
 pub(crate) const MIG_ALIAS: &str = "_mig";
 
-/// The fixed attach alias of the one tenant app database (§2.5.2). The app id
-/// appears only in the file path, never as a SQL identifier.
-pub(crate) const APP_ALIAS: &str = "app";
+/// The connection's MAIN database name — the tenant app file (§2.5.2). The app
+/// file is opened as `main` (NOT attached under a separate alias), so the
+/// creator-writable target SQLite names is the literal `"main"`. The app id
+/// appears only in the file path, never as a SQL identifier. SQLite also passes
+/// `None` for the main/temp namespace on some actions; both `Some("main")` and
+/// `None` denote the creator-writable database.
+pub(crate) const MAIN_DB: &str = "main";
 
 /// The authorizer mode discriminants stored in the shared [`AuthMode`] atomic.
 const MODE_CREATOR_UP: u8 = 0;
@@ -185,6 +189,12 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
     let current = mode.load();
     let db = ctx.database_name;
     let targets_mig = db == Some(MIG_ALIAS);
+    // The creator-writable database is `main` (the app file). SQLite names it
+    // `Some("main")` on most actions and `None` on the main/temp namespace for a
+    // few; both denote main here. ATTACH/DETACH are denied for life, so no alias
+    // other than `main`/`_mig` can ever exist on this connection — any other
+    // database_name on a write is a foreign alias that must never compile.
+    let targets_main = db == Some(MAIN_DB) || db.is_none();
 
     match &ctx.action {
         // -- Capabilities denied in BOTH modes, for the connection's whole life --
@@ -261,6 +271,7 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
         | AuthAction::DropTable { .. }
         | AuthAction::DropTrigger { .. }
         | AuthAction::DropIndex { .. }
+        | AuthAction::DropView { .. }
         | AuthAction::AlterTable { .. }
             if targets_mig =>
         {
@@ -301,11 +312,34 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
             Authorization::Deny
         }
 
+        // -- Temp objects denied in CreatorUp (M1) --
+        // A creator `up` has no business creating temp tables/triggers/views/indexes
+        // (they can hold cross-statement state, fire on app writes, or shadow journal
+        // names). These were only INCIDENTALLY blocked before via the temp-master
+        // Insert ordering; deny them explicitly BY THE AUTHORIZER. Engine mode never
+        // needs them either, so deny in both modes.
+        AuthAction::CreateTempTable { .. }
+        | AuthAction::CreateTempTrigger { .. }
+        | AuthAction::CreateTempView { .. }
+        | AuthAction::CreateTempIndex { .. } => Authorization::Deny,
+
+        // -- Analyze / Reindex denied in CreatorUp (M3) --
+        // ANALYZE writes sqlite_stat* tables into the app db and REINDEX rebuilds
+        // indexes; both mutate the app db in ways that confound later drift
+        // detection. A migration's declared DDL has no business running them — deny
+        // in creator mode. (Engine mode does not issue them either, but the deny is
+        // scoped to CreatorUp so a future engine maintenance op is not foreclosed.)
+        AuthAction::Analyze { .. } | AuthAction::Reindex { .. }
+            if matches!(current, Mode::CreatorUp) =>
+        {
+            Authorization::Deny
+        }
+
         // -- Cross-tenant belt-and-suspenders (§2.5.2) --
-        // Any WRITE whose database_name is neither `app` nor `_mig` is denied. New
-        // aliases can only appear via ATTACH (already denied), so in practice this
-        // only ever sees `app`/`_mig`/None; the rule is here so a write that somehow
-        // named a foreign alias cannot execute.
+        // Any WRITE whose database_name is neither `main` (the app file) nor `_mig`
+        // is denied. New aliases can only appear via ATTACH (already denied), so in
+        // practice this only ever sees `main`/`_mig`/None; the rule is here so a
+        // write that somehow named a foreign alias cannot execute.
         AuthAction::Insert { .. }
         | AuthAction::Update { .. }
         | AuthAction::Delete { .. }
@@ -318,17 +352,17 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
         | AuthAction::DropIndex { .. }
         | AuthAction::DropView { .. }
         | AuthAction::AlterTable { .. }
-            if db.is_some() && db != Some(APP_ALIAS) && !targets_mig =>
+            if !targets_main && !targets_mig =>
         {
             Authorization::Deny
         }
 
-        // -- Everything else: allowed (creator DDL/DML on `app`, SELECT/READ) --
-        // CreateTable/CreateIndex/CreateTrigger/CreateView/DML on `app` (or None,
-        // which SQLite uses for the connection's main/temp namespace) flow here, as
-        // do SELECT/READ/Recursive/Reindex/Analyze. Reads are not a confinement
-        // concern (cross-tenant reads are already impossible — no foreign alias is
-        // bound). Transaction control is handled above.
+        // -- Everything else: allowed (creator DDL/DML on `main`, SELECT/READ) --
+        // CreateTable/CreateIndex/CreateTrigger/CreateView/DML on `main` (the app
+        // file; database_name `Some("main")` or `None`) flow here, as do
+        // SELECT/READ/Recursive. Reads are not a confinement concern (cross-tenant
+        // reads are already impossible — no foreign alias is bound). Transaction
+        // control, temp creates, and Analyze/Reindex are handled above.
         _ => Authorization::Allow,
     }
 }
@@ -473,7 +507,7 @@ mod tests {
         assert_eq!(
             authorize(
                 &m,
-                &ctx(AuthAction::CreateVtable { table_name: "v", module_name: "vec0" }, Some(APP_ALIAS), None)
+                &ctx(AuthAction::CreateVtable { table_name: "v", module_name: "vec0" }, Some(MAIN_DB), None)
             ),
             Authorization::Deny
         );
@@ -490,13 +524,70 @@ mod tests {
     fn app_ddl_allowed() {
         let m = AuthMode::new();
         m.store(Mode::CreatorUp);
+        // Creator DDL/DML lands in `main` (the app file): SQLite names it
+        // Some("main") on most actions and None on the main namespace for a few.
+        for db in [Some(MAIN_DB), None] {
+            assert_eq!(
+                authorize(&m, &ctx(AuthAction::CreateTable { table_name: "users" }, db, None)),
+                Authorization::Allow,
+                "CREATE TABLE on main (db={db:?}) must be allowed in creator mode"
+            );
+            assert_eq!(
+                authorize(&m, &ctx(AuthAction::Insert { table_name: "users" }, db, None)),
+                Authorization::Allow,
+                "INSERT on main (db={db:?}) must be allowed in creator mode"
+            );
+        }
+    }
+
+    // M1: temp objects are denied BY THE AUTHORIZER (not incidentally), in both modes.
+    #[test]
+    fn temp_objects_denied_by_authorizer() {
+        let m = AuthMode::new();
+        for mode in [Mode::CreatorUp, Mode::EngineJournal] {
+            m.store(mode);
+            for action in [
+                AuthAction::CreateTempTable { table_name: "t" },
+                AuthAction::CreateTempTrigger { trigger_name: "g", table_name: "t" },
+                AuthAction::CreateTempView { view_name: "v" },
+                AuthAction::CreateTempIndex { index_name: "i", table_name: "t" },
+            ] {
+                assert_eq!(
+                    authorize(&m, &ctx(action, None, None)),
+                    Authorization::Deny,
+                    "temp create must be denied by the authorizer (mode={mode:?})"
+                );
+            }
+        }
+    }
+
+    // M2: DROP VIEW "_mig".x is denied (added DropView to the immutability arm).
+    #[test]
+    fn drop_view_on_mig_denied_in_creator() {
+        let m = AuthMode::new();
+        m.store(Mode::CreatorUp);
         assert_eq!(
-            authorize(&m, &ctx(AuthAction::CreateTable { table_name: "users" }, Some(APP_ALIAS), None)),
-            Authorization::Allow
+            authorize(&m, &ctx(AuthAction::DropView { view_name: "some_view" }, Some(MIG_ALIAS), None)),
+            Authorization::Deny,
+            "DROP VIEW on _mig must be denied (M2)"
+        );
+    }
+
+    // M3: ANALYZE / REINDEX are denied in CreatorUp (they write sqlite_stat* into the
+    // app db and confound drift detection).
+    #[test]
+    fn analyze_reindex_denied_in_creator() {
+        let m = AuthMode::new();
+        m.store(Mode::CreatorUp);
+        assert_eq!(
+            authorize(&m, &ctx(AuthAction::Analyze { table_name: "users" }, Some(MAIN_DB), None)),
+            Authorization::Deny,
+            "ANALYZE must be denied in creator mode (M3)"
         );
         assert_eq!(
-            authorize(&m, &ctx(AuthAction::Insert { table_name: "users" }, Some(APP_ALIAS), None)),
-            Authorization::Allow
+            authorize(&m, &ctx(AuthAction::Reindex { index_name: "ix_users" }, Some(MAIN_DB), None)),
+            Authorization::Deny,
+            "REINDEX must be denied in creator mode (M3)"
         );
     }
 }

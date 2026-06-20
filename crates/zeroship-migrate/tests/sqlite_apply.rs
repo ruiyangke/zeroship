@@ -73,7 +73,8 @@ fn cfg() -> ExecutorConfig {
 async fn apply_create_table_then_idempotent_rerun() {
     let p = paths("apply1");
     let be = backend(&p);
-    let m = mig("CREATE TABLE app.users (id INTEGER PRIMARY KEY, email TEXT NOT NULL);");
+    // UNqualified DDL lands in `main` = the app file (C1).
+    let m = mig("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT NOT NULL);");
 
     // First apply: newly applied.
     let applied = be
@@ -82,10 +83,10 @@ async fn apply_create_table_then_idempotent_rerun() {
         .expect("apply create table");
     assert!(applied, "first apply must report newly-applied");
 
-    // The table exists in the app file.
+    // The table exists in the app file (main).
     let rows = be
         .actor()
-        .query("SELECT name FROM app.sqlite_master WHERE type='table' AND name='users'")
+        .query("SELECT name FROM main.sqlite_master WHERE type='table' AND name='users'")
         .await
         .expect("introspect app schema");
     assert_eq!(rows.len(), 1, "users table must exist after apply");
@@ -122,6 +123,74 @@ async fn apply_create_table_then_idempotent_rerun() {
 }
 
 // ---------------------------------------------------------------------------
+// C1 regression: an UNqualified `CREATE TABLE users(...)` lands in main = the
+// app FILE and PERSISTS. We apply on one backend, drop it (closing the file),
+// reopen a SECOND backend on the SAME paths, and prove (1) the table is visible
+// in the persisted app file via a raw connection, (2) the second backend sees it
+// in its own `main`, and (3) re-apply through the second backend is idempotent
+// (the journal also persisted). This is the test whose ABSENCE let the
+// `main = :memory:` bug hide: with an in-memory main the creator DDL went to a
+// throwaway memory db, never the app file, and nothing checked persistence.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn unqualified_ddl_persists_to_app_file_and_reapply_idempotent() {
+    let p = paths("persist");
+    // ONE migration object, reused across both backends (so the version matches and
+    // idempotency can be proven across a reopen).
+    let m = mig("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT NOT NULL);");
+    let v = m.version.as_str().to_string();
+    {
+        let be = backend(&p);
+        let applied = be
+            .apply_one_additive(&m, "deployer")
+            .await
+            .expect("apply create table");
+        assert!(applied, "first apply must report newly-applied");
+        // The journal recorded it as completed.
+        let net = be.applied_sqlite().await.expect("read journal");
+        assert!(
+            net.iter().any(|e| e.version == v && e.phase == Phase::Completed),
+            "version must be journaled completed"
+        );
+        // Drop the backend here so both the app file and journal file are flushed
+        // and free for a fresh open.
+    }
+
+    // (1) The table PERSISTED to the app FILE: open it with a raw, separate
+    // connection (no backend, no attach) and see `users`.
+    {
+        let conn = rusqlite::Connection::open(&p.app).expect("reopen app file raw");
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='users'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("query app file");
+        assert_eq!(exists, 1, "users table must persist in the app FILE (main)");
+    }
+
+    // (2)+(3) A SECOND backend on the SAME paths sees the table in its own `main`,
+    // and re-applying the same migration is an idempotent no-op (the journal also
+    // persisted, so idempotency holds across a reopen).
+    {
+        let be2 = backend(&p);
+        let rows = be2
+            .actor()
+            .query("SELECT name FROM main.sqlite_master WHERE type='table' AND name='users'")
+            .await
+            .expect("introspect reopened app schema");
+        assert_eq!(rows.len(), 1, "reopened backend sees the persisted table");
+
+        let again = be2
+            .apply_one_additive(&m, "deployer")
+            .await
+            .expect("re-apply on reopened backend");
+        assert!(!again, "re-apply across reopen must be an idempotent no-op");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Two migrations get monotonically increasing, comparable event_seq from the
 // SHARED counter (M4) — proving the cross-table total order.
 // ---------------------------------------------------------------------------
@@ -129,8 +198,8 @@ async fn apply_create_table_then_idempotent_rerun() {
 async fn shared_event_seq_is_monotonic() {
     let p = paths("seq");
     let be = backend(&p);
-    let m1 = mig_named("first", "CREATE TABLE app.a (id INTEGER);");
-    let m2 = mig_named("second", "CREATE TABLE app.b (id INTEGER);");
+    let m1 = mig_named("first", "CREATE TABLE a (id INTEGER);");
+    let m2 = mig_named("second", "CREATE TABLE b (id INTEGER);");
     be.apply_one_additive(&m1, "d").await.expect("apply m1");
     be.apply_one_additive(&m2, "d").await.expect("apply m2");
 
@@ -164,7 +233,7 @@ async fn shared_event_seq_is_monotonic() {
 async fn journal_update_delete_denied_confined() {
     let p = paths("immut");
     let be = backend(&p);
-    let m = mig("CREATE TABLE app.t (id INTEGER);");
+    let m = mig("CREATE TABLE t (id INTEGER);");
     be.apply_one_additive(&m, "d").await.expect("apply");
     let v = m.version.as_str();
 
@@ -204,7 +273,7 @@ async fn journal_update_delete_denied_confined() {
 async fn journal_immutability_trigger_backstop() {
     let p = paths("trg");
     let be = backend(&p);
-    let m = mig("CREATE TABLE app.t (id INTEGER);");
+    let m = mig("CREATE TABLE t (id INTEGER);");
     be.apply_one_additive(&m, "d").await.expect("apply");
     drop(be); // close the hardened connection so the file is free.
 
@@ -234,7 +303,7 @@ async fn journal_immutability_trigger_backstop() {
 async fn transaction_false_rejected() {
     let p = paths("nontxn");
     let be = backend(&p);
-    let mut m = mig("CREATE TABLE app.t (id INTEGER);");
+    let mut m = mig("CREATE TABLE t (id INTEGER);");
     m.flags.transactional = false;
     m.checksum = Checksum::of(&ChecksumInput::from_migration(&m));
 
@@ -260,8 +329,8 @@ async fn failed_up_rolls_back_atomically() {
     // SAME table again ⇒ "table ok already exists") ⇒ the whole transaction must
     // roll back, including the first statement's table.
     let m = mig(
-        "CREATE TABLE app.ok (id INTEGER); \
-         CREATE TABLE app.ok (id INTEGER);",
+        "CREATE TABLE ok (id INTEGER); \
+         CREATE TABLE ok (id INTEGER);",
     );
     let res = be.apply_one_additive(&m, "d").await;
     assert!(res.is_err(), "a failing up must error");
@@ -275,10 +344,97 @@ async fn failed_up_rolls_back_atomically() {
     // The `ok` table from the first statement was rolled back too.
     let rows = be
         .actor()
-        .query("SELECT name FROM app.sqlite_master WHERE type='table' AND name='ok'")
+        .query("SELECT name FROM main.sqlite_master WHERE type='table' AND name='ok'")
         .await
         .expect("introspect");
     assert!(rows.is_empty(), "partial DDL must be rolled back atomically");
+}
+
+// ---------------------------------------------------------------------------
+// H1 regression: a failed `up` must NOT wedge the long-lived reused connection.
+// Before the fix, the rollback path was `let _ = actor.exec("ROLLBACK")`, which
+// swallowed any ROLLBACK failure and left BEGIN IMMEDIATE open, so the NEXT apply
+// on the SAME backend failed with "cannot start a transaction within a
+// transaction". Here we force a failing `up`, then run a SECOND, DIFFERENT apply
+// on the SAME backend and assert it SUCCEEDS — proving the connection was cleanly
+// restored to autocommit (no wedge).
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn failed_up_does_not_wedge_next_apply_on_same_backend() {
+    let p = paths("wedge");
+    let be = backend(&p);
+
+    // First: a failing up (duplicate CREATE TABLE in one batch) → must error.
+    let bad = mig(
+        "CREATE TABLE dup (id INTEGER); \
+         CREATE TABLE dup (id INTEGER);",
+    );
+    let res = be.apply_one_additive(&bad, "d").await;
+    assert!(res.is_err(), "the bad up must error");
+
+    // Second: a DIFFERENT, valid migration on the SAME backend must SUCCEED — this
+    // is the wedge proof. A leaked open transaction would make this fail with
+    // "cannot start a transaction within a transaction".
+    let good = mig_named("good_after_bad", "CREATE TABLE good (id INTEGER);");
+    let applied = be
+        .apply_one_additive(&good, "d")
+        .await
+        .expect("second apply must succeed on the same backend (no wedge)");
+    assert!(applied, "second migration newly applied");
+
+    // The good table is present; the bad one is not (its txn rolled back).
+    let rows = be
+        .actor()
+        .query("SELECT name FROM main.sqlite_master WHERE type='table' AND name IN ('good','dup') ORDER BY name")
+        .await
+        .expect("introspect");
+    assert_eq!(rows.len(), 1, "only the good table exists");
+    assert_eq!(rows[0][0].as_deref(), Some("good"));
+
+    // And the connection is cleanly in autocommit (belt-and-suspenders on H1).
+    assert!(
+        be.actor().is_autocommit().await.expect("probe autocommit"),
+        "connection must be back in autocommit after the failed up"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// H1 mechanism: `is_autocommit()` — the load-bearing wedge detector the rollback
+// path now consults — correctly reports an OPEN transaction as NOT autocommit and
+// a clean connection as autocommit. This is the primitive the fix depends on; the
+// pre-fix code swallowed the ROLLBACK result and never consulted it. We drive the
+// actor directly (engine mode allows BEGIN/COMMIT) and prove the transition.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn is_autocommit_detects_open_transaction() {
+    let p = paths("autocommit");
+    let be = backend(&p);
+    be.ensure_journal_sqlite().await.expect("bootstrap journal");
+
+    // Fresh connection: autocommit.
+    assert!(
+        be.actor().is_autocommit().await.expect("probe"),
+        "fresh connection is in autocommit"
+    );
+
+    // Open a transaction under engine mode (which the authorizer allows) — now the
+    // connection is the WEDGED state the H1 fix detects.
+    be.actor()
+        .set_mode(zeroship_migrate::backend_sqlite::Mode::EngineJournal)
+        .await
+        .expect("engine mode");
+    be.actor().exec("BEGIN IMMEDIATE").await.expect("begin");
+    assert!(
+        !be.actor().is_autocommit().await.expect("probe"),
+        "an open transaction must report NOT autocommit (the wedge state)"
+    );
+
+    // Rollback restores autocommit.
+    be.actor().exec("ROLLBACK").await.expect("rollback");
+    assert!(
+        be.actor().is_autocommit().await.expect("probe"),
+        "after ROLLBACK the connection is back in autocommit"
+    );
 }
 
 // ---------------------------------------------------------------------------
