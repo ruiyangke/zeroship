@@ -420,7 +420,7 @@ async fn second_deploy_add_column_is_sqlite_legal_and_applies() {
     // Apply the first deploy through the real backend (greenfield create).
     let p = paths("second_add_col");
     let be = backend(&p);
-    let first = desired_snapshot(PROJECT, &[v1.clone()]).expect("v1 desired");
+    let first = desired_snapshot(PROJECT, std::slice::from_ref(&v1)).expect("v1 desired");
     let first_plan = sqlite_author()
         .diff(&first, &SchemaSnapshot::default(), &HashMap::new(), &[])
         .expect("v1 diff");
@@ -499,7 +499,7 @@ async fn second_deploy_drop_index_actually_drops_on_sqlite() {
 
     let p = paths("second_drop_idx");
     let be = backend(&p);
-    let first = desired_snapshot(PROJECT, &[v1.clone()]).expect("v1 desired");
+    let first = desired_snapshot(PROJECT, std::slice::from_ref(&v1)).expect("v1 desired");
     let first_plan = sqlite_author()
         .diff(&first, &SchemaSnapshot::default(), &HashMap::new(), &[])
         .expect("v1 diff");
@@ -587,6 +587,197 @@ async fn second_deploy_type_change_is_typed_rebuild_error_on_sqlite() {
         other => panic!(
             "expected SqliteRebuildRequired (NOT dangling PG ALTER COLUMN DDL or a \
              silent pass), got: {other:?}"
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FAITHFUL real-introspected-live drift (the dialect-aware data_type fix).
+//
+// The tests above build their LIVE snapshot through `live_from` (= the SAME
+// `desired_snapshot` machinery, PG-spelled `data_type`), which sidesteps the
+// real bug: a second-deploy SQLite diff in production compares the DESIRED
+// snapshot (PG spellings: `bytea` / `double precision` / `timestamp with time
+// zone`) against a LIVE snapshot REAL-introspected from the app file (SQLite
+// declared types: `blob` / `real` / `text`). Pre-fix the raw-spelling compare
+// flagged a spurious `SqliteRebuildRequired` on every encrypted / number /
+// timestamp column even when the schema is UNCHANGED.
+//
+// These tests use the REAL introspected live snapshot (`snapshot_schema_sqlite`)
+// — the faithful path — and assert (a) ZERO spurious drift for an unchanged
+// schema, and (b) a GENUINE type change is STILL caught.
+// ---------------------------------------------------------------------------
+
+/// A descriptor whose columns cross every PG↔SQLite spelling gap: an encrypted
+/// column (`bytea` desired vs `blob` live), a number (`double precision` vs
+/// `real`), and a date/timestamp (`timestamp with time zone` vs `text`).
+fn spelling_gap_desc() -> CollectionDescriptor {
+    CollectionDescriptor {
+        name: "ledger".into(),
+        owner_app: APP.into(),
+        fields: vec![
+            FieldDescriptor {
+                name: "title".into(),
+                ty: "string".into(),
+                required: true,
+                ..Default::default()
+            },
+            // `bytea` (desired) vs `blob` (live SQLite).
+            FieldDescriptor {
+                name: "secret".into(),
+                ty: "bytes".into(),
+                encrypted: Some(serde_json::json!({ "mode": "randomized", "keyId": "k1" })),
+                ..Default::default()
+            },
+            // `double precision` (desired) vs `real` (live SQLite).
+            FieldDescriptor {
+                name: "amount".into(),
+                ty: "number".into(),
+                required: true,
+                ..Default::default()
+            },
+            // `timestamp with time zone` (desired) vs `text` (live SQLite).
+            FieldDescriptor {
+                name: "occurred_at".into(),
+                ty: "date".into(),
+                required: true,
+                ..Default::default()
+            },
+        ],
+        indexes: vec![],
+    }
+}
+
+/// (FIX B) A second deploy of an UNCHANGED schema, diffed against the REAL
+/// SQLite-introspected live snapshot, produces ZERO spurious drift — no
+/// `SqliteRebuildRequired` for the encrypted (`bytea`→`blob`), number
+/// (`double precision`→`real`), or timestamp (`… with time zone`→`text`)
+/// columns whose PG and SQLite spellings differ.
+///
+/// This is RED before the dialect-aware normalisation: the raw-spelling compare
+/// (`lc.data_type != c.data_type`) sees `blob != bytea` (etc.) and returns
+/// `SqliteRebuildRequired`. It is GREEN after `sqlite_canonical_type` folds both
+/// sides to the same affinity token.
+#[compio::test]
+async fn second_deploy_unchanged_real_introspected_live_has_no_spurious_drift() {
+    let desc = spelling_gap_desc();
+
+    // First deploy: CREATE the table through the real hardened backend.
+    let p = paths("real_live_unchanged");
+    let be = backend(&p);
+    let first = desired_snapshot(PROJECT, std::slice::from_ref(&desc)).expect("v1 desired");
+    let first_plan = sqlite_author()
+        .diff(&first, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .expect("v1 diff");
+    for m in &first_plan.all_migrations() {
+        be.apply_one_additive(m, "deployer")
+            .await
+            .unwrap_or_else(|e| panic!("v1 apply {} must succeed: {e:?}", m.name));
+    }
+
+    // The FAITHFUL live snapshot: REAL introspection of the app file (SQLite
+    // declared types `blob`/`real`/`text`), NOT the desired-side PG spellings.
+    let live = be
+        .snapshot_schema_sqlite()
+        .await
+        .expect("real introspected live snapshot");
+    // Sanity: the live snapshot really does carry SQLite-spelled types (proving
+    // this is the faithful path, not the `live_from` shortcut).
+    let ledger = live.tables.get("ledger").expect("ledger in live snapshot");
+    let live_type = |name: &str| {
+        ledger
+            .columns
+            .iter()
+            .find(|c| c.name == name)
+            .map(|c| c.data_type.as_str())
+            .unwrap_or("<missing>")
+    };
+    assert_eq!(live_type("secret"), "blob", "encrypted column introspects as SQLite blob");
+    assert_eq!(live_type("amount"), "real", "number column introspects as SQLite real");
+    assert_eq!(live_type("occurred_at"), "text", "date column introspects as SQLite text");
+
+    // Ownership travels alongside the union (the introspected snapshot has none).
+    let ownership: HashMap<String, String> =
+        first.ownership.iter().map(|(t, a)| (t.clone(), a.clone())).collect();
+
+    // Second deploy: the SAME descriptor — an UNCHANGED schema. Diffing the
+    // PG-spelled desired against the SQLite-spelled REAL live must NOT flag a
+    // type change.
+    let desired2 = desired_snapshot(PROJECT, &[desc]).expect("v2 desired");
+    let plan = sqlite_author()
+        .diff(&desired2, &live, &ownership, &[])
+        .unwrap_or_else(|e| {
+            panic!(
+                "unchanged-schema second deploy against the REAL introspected live \
+                 snapshot must NOT spuriously drift (got {e:?}) — the dialect-aware \
+                 data_type normalisation should fold bytea↔blob / double precision↔real \
+                 / timestamptz↔text"
+            )
+        });
+
+    // No type-change / ALTER-bearing migration may be emitted for an unchanged schema.
+    let spurious: Vec<String> = plan
+        .all_migrations()
+        .iter()
+        .map(|m| m.name.clone())
+        .filter(|n| {
+            n.contains("alter_column") || n.contains("add_column") || n.contains("drop_column")
+        })
+        .collect();
+    assert!(
+        spurious.is_empty(),
+        "an unchanged schema must emit no column ALTER/ADD/DROP migrations: {spurious:?}"
+    );
+}
+
+/// (FIX B, the other half) A GENUINE type change against the REAL introspected
+/// live snapshot is STILL detected — the normalisation must not be so lossy it
+/// swallows a real change. `amount: number` (`real`) re-typed to `string`
+/// (`text`) maps to two DISTINCT canonical tokens, so it still raises
+/// `SqliteRebuildRequired`.
+#[compio::test]
+async fn second_deploy_real_type_change_still_detected_against_introspected_live() {
+    let v1 = spelling_gap_desc();
+
+    let p = paths("real_live_type_change");
+    let be = backend(&p);
+    let first = desired_snapshot(PROJECT, std::slice::from_ref(&v1)).expect("v1 desired");
+    let first_plan = sqlite_author()
+        .diff(&first, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .expect("v1 diff");
+    for m in &first_plan.all_migrations() {
+        be.apply_one_additive(m, "deployer")
+            .await
+            .unwrap_or_else(|e| panic!("v1 apply {} must succeed: {e:?}", m.name));
+    }
+    let live = be
+        .snapshot_schema_sqlite()
+        .await
+        .expect("real introspected live snapshot");
+    let ownership: HashMap<String, String> =
+        first.ownership.iter().map(|(t, a)| (t.clone(), a.clone())).collect();
+
+    // Second deploy: re-type `amount` from number (`real`) to string (`text`) — a
+    // REAL change across affinity classes.
+    let mut v2 = v1.clone();
+    let amount = v2.fields.iter_mut().find(|f| f.name == "amount").unwrap();
+    amount.ty = "string".into();
+
+    let desired2 = desired_snapshot(PROJECT, &[v2]).expect("v2 desired");
+    let err = sqlite_author()
+        .diff(&desired2, &live, &ownership, &[])
+        .expect_err("a real number→string type change must still fail closed (rebuild is P3b)");
+    match err {
+        DeclarativeError::SqliteRebuildRequired { table, op } => {
+            assert_eq!(table, "ledger");
+            assert!(
+                op.contains("alter column amount type"),
+                "the rebuild error must name the changed column: {op}"
+            );
+        }
+        other => panic!(
+            "a genuine SQLite type change must raise SqliteRebuildRequired (the \
+             dialect-aware compare must not swallow a real change), got: {other:?}"
         ),
     }
 }

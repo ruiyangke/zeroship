@@ -181,7 +181,6 @@ async fn introspect_columns(
         let name = cell(r, 1)?;
         let raw_type = r.get(2).and_then(Clone::clone).unwrap_or_default();
         let notnull = r.get(3).and_then(Clone::clone).unwrap_or_default();
-        let nullable = notnull.trim() != "1";
         let pk_ord: i64 = r
             .get(5)
             .and_then(Clone::clone)
@@ -190,6 +189,16 @@ async fn introspect_columns(
         if pk_ord > 0 {
             pk_members.push((pk_ord, name.clone()));
         }
+        // A PRIMARY KEY column is NOT NULL in the engine's model — the desired
+        // snapshot stamps `id TEXT PRIMARY KEY` as `nullable: false`, and Postgres
+        // makes every PK column NOT NULL. But SQLite has a long-standing quirk: a
+        // non-`INTEGER` PRIMARY KEY (e.g. our `id TEXT PRIMARY KEY`) is NOT
+        // implicitly NOT NULL, so `PRAGMA table_info` reports `notnull=0` for it.
+        // Taking that literally would falsely flag a `nullable true → false` drift on
+        // the `id` column of every table on the SQLite leg. Treat a PK member as NOT
+        // NULL so the introspected nullability agrees with the dialect-agnostic model
+        // (and with the PG snapshot).
+        let nullable = notnull.trim() != "1" && pk_ord == 0;
         t.columns.push(ColumnSnapshot {
             name: name.clone(),
             // Normalise the declared type to a lowercase spelling so it is a stable
