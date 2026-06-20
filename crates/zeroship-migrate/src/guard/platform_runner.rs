@@ -17,6 +17,7 @@
 use std::time::Duration;
 
 use crate::analyze::Advisory;
+use crate::backend::PostgresBackend;
 use crate::db::{connect, ConnectError, ExecutorConfig};
 use crate::drift::{check_checksum_drift, ChecksumDriftReport, DriftError};
 use crate::engine::{EngineError, MigrationEngine, MigrationPlan, RollbackEngineError};
@@ -310,7 +311,13 @@ pub async fn run_migrate(cfg: &RunConfig) -> Result<RunReport, RunError> {
     // H1: refuse a destructive plan without --yes; only then forward Approved.
     let approval = destructive_gate_decision(&plan, cfg.yes)?;
     let outcome = engine
-        .apply(&plan, approval, &conn, &exec_cfg, "platform-migrate")
+        .apply(
+            &plan,
+            approval,
+            &PostgresBackend::new(&conn),
+            &exec_cfg,
+            "platform-migrate",
+        )
         .await?;
     Ok(RunReport::Migrate(outcome))
 }

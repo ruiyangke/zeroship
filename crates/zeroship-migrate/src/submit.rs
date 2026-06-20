@@ -112,6 +112,7 @@ use std::collections::HashMap;
 use compio_postgres::Client;
 
 use crate::approval::Approval;
+use crate::backend::PostgresBackend;
 use crate::classify::{relations_touched, OwnershipNeed};
 use crate::db::ExecutorConfig;
 use crate::declarative::DeclarativeError;
@@ -642,7 +643,14 @@ async fn submit_locked(
     let engine = MigrationEngine::new();
     let plan = engine.plan(std::slice::from_ref(migration), guard_cfg);
     engine
-        .apply_with_lock(&plan, approval, conn, cfg, applied_by, LockMode::AlreadyHeld)
+        .apply_with_lock(
+            &plan,
+            approval,
+            &PostgresBackend::new(conn),
+            cfg,
+            applied_by,
+            LockMode::AlreadyHeld,
+        )
         .await?;
 
     Ok(SubmissionOutcome::Applied {
