@@ -475,10 +475,16 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
         // them. A REINDEX rebuilds an existing index B-tree: it creates no table,
         // changes no schema structure, never touches `_mig`, and so does not confound
         // drift (which compares structure, not index physical layout). Allow it on the
-        // app file (`main`/`temp`) in both modes; a REINDEX targeting `_mig` is still
-        // denied by the journal-immutability arm above (it fires before this).
+        // app file (`main`/`temp`) in both modes. NOTE: the journal-immutability arm
+        // above does NOT cover `Reindex` (its match lists Insert|Update|Delete|
+        // DropTable|DropTrigger|DropIndex|DropView only) — so a REINDEX targeting `_mig`
+        // is NOT caught there; it falls through to the catch-all `Deny` at the line
+        // below, which is the load-bearing deny for the `_mig` case.
         AuthAction::Reindex { .. } if targets_main || db == Some("temp") => Authorization::Allow,
-        // A REINDEX naming any other alias is impossible post-ATTACH-deny; fail closed.
+        // LOAD-BEARING DENY (do NOT remove as "redundant"): this catch-all is what
+        // actually denies a `_mig`-targeting REINDEX (the immutability arm above does
+        // not list `Reindex`), and any REINDEX naming a foreign alias — impossible
+        // post-ATTACH-deny, but failed closed here regardless.
         AuthAction::Reindex { .. } => Authorization::Deny,
 
         // -- Cross-tenant belt-and-suspenders (§2.5.2) --
@@ -851,8 +857,11 @@ mod tests {
         );
     }
 
-    // A REINDEX targeting the journal alias `_mig` stays denied (journal
-    // immutability) — the `_mig` arm fires before the main/temp allow.
+    // A REINDEX targeting the journal alias `_mig` stays denied. NOTE: the
+    // journal-immutability arm does NOT list `Reindex`, so it is NOT denied there —
+    // the deny comes from the catch-all `AuthAction::Reindex { .. } => Deny` (the
+    // load-bearing line after the main/temp allow), which the `_mig` case falls
+    // through to because it is neither `main` nor `temp`.
     #[test]
     fn reindex_on_mig_denied_in_creator() {
         let m = AuthMode::new();
@@ -860,7 +869,8 @@ mod tests {
         assert_eq!(
             authorize(&m, &ctx(AuthAction::Reindex { index_name: "ix" }, Some(MIG_ALIAS), None)),
             Authorization::Deny,
-            "REINDEX on _mig must stay denied (journal immutability)"
+            "REINDEX on _mig must stay denied (catch-all Reindex Deny, not the \
+             immutability arm which omits Reindex)"
         );
     }
 }

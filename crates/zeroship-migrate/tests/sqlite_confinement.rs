@@ -457,6 +457,105 @@ async fn confine_direct_sqlite_master_write_still_blocked_by_defensive() {
 }
 
 // ---------------------------------------------------------------------------
+// REINDEX confinement + motivation (PHASE 4, faithful on the REAL hardened
+// backend). Two faithful proofs:
+//
+//   (1) A creator `up` containing a no-arg `REINDEX;` is REJECTED. The no-arg
+//       form reindexes EVERY collation/index across all attached databases,
+//       INCLUDING the journal alias `_mig` — so it reaches the load-bearing
+//       catch-all `AuthAction::Reindex { .. } => Deny` (the `_mig` REINDEX is
+//       NOT caught by the journal-immutability arm, which omits `Reindex`).
+//       This is the confinement half: the creator may not REINDEX `_mig`.
+//
+//   (2) A real `CREATE TABLE` whose emission carries system-field indexes
+//       APPLIES cleanly under CreatorUp. CREATE INDEX fires SQLITE_REINDEX
+//       INTRINSICALLY (SQLite reindexes the fresh index to populate it); before
+//       the PHASE-4 REINDEX-on-main relaxation that intrinsic reindex was denied,
+//       so a system-field-index-bearing CREATE TABLE failed to apply. This is the
+//       regression for the relaxation's MOTIVATION.
+// ---------------------------------------------------------------------------
+
+/// (1) A no-arg `REINDEX;` in a creator `up` is denied (it reaches `_mig`).
+#[compio::test]
+async fn reindex_no_arg_rejected_in_creator_up() {
+    let p = paths("reindex_noarg");
+    let be = backend(&p);
+    be.ensure_journal_sqlite().await.expect("bootstrap journal");
+    // Seed a benign table + index so a no-arg REINDEX has something local to chew
+    // on too (the deny is driven by its reach into `_mig`, not by emptiness).
+    be.apply_one_additive(
+        &mig("CREATE TABLE app_tbl (id INTEGER PRIMARY KEY, handle TEXT);"),
+        "tester",
+    )
+    .await
+    .expect("benign app table applies");
+
+    // The no-arg REINDEX (the form that reaches every attached db incl. `_mig`).
+    let m = mig("REINDEX;");
+    let err = be
+        .apply_one_additive(&m, "attacker")
+        .await
+        .expect_err("a no-arg REINDEX must be rejected (it reaches the _mig journal)");
+    assert!(
+        err.is_authorizer_denied(),
+        "no-arg REINDEX must be an AUTHORIZER deny (reaches _mig → catch-all Deny), got: {err}"
+    );
+    // The journal is uncorrupted: the attacking version never recorded a row.
+    let applied = be.applied_sqlite().await.expect("journal readable");
+    let v = m.version.as_str();
+    assert!(
+        !applied.iter().any(|e| e.version == v),
+        "denied REINDEX must not leave a journal row for {v}"
+    );
+}
+
+/// (2) A real CREATE TABLE that emits system-field indexes APPLIES under
+/// CreatorUp — the regression for the REINDEX-on-main relaxation's motivation.
+/// CREATE INDEX fires SQLITE_REINDEX intrinsically; the relaxation must let that
+/// pass on `main`, or the create fails to apply.
+#[compio::test]
+async fn create_table_with_system_field_indexes_applies_under_creator_up() {
+    let p = paths("sysidx_create");
+    let be = backend(&p);
+    be.ensure_journal_sqlite().await.expect("bootstrap journal");
+
+    // A CREATE TABLE followed by the platform system-field indexes, exactly the
+    // shape the engine emits inside a creator `up`. Each CREATE INDEX fires an
+    // intrinsic SQLITE_REINDEX on `main` — which the PHASE-4 relaxation allows.
+    let up = "CREATE TABLE accounts (\
+                id TEXT PRIMARY KEY, \
+                title TEXT NOT NULL, \
+                created_by TEXT, \
+                updated_at TEXT, \
+                deleted_at TEXT\
+              );\n\
+              CREATE INDEX accounts_deleted_at_idx ON accounts (deleted_at);\n\
+              CREATE INDEX accounts_updated_at_idx ON accounts (updated_at);\n\
+              CREATE INDEX accounts_created_by_idx ON accounts (created_by);";
+    let m = mig(up);
+    let applied = be
+        .apply_one_additive(&m, "deployer")
+        .await
+        .expect("a system-field-index-bearing CREATE TABLE must apply under CreatorUp");
+    assert!(applied, "the create migration must be newly-applied");
+
+    // The table + its three system-field indexes all landed in `main`.
+    let idx_rows = be
+        .actor()
+        .query(
+            "SELECT name FROM main.sqlite_master WHERE type='index' \
+             AND name LIKE 'accounts_%_idx' ORDER BY name",
+        )
+        .await
+        .expect("query system-field indexes");
+    assert_eq!(
+        idx_rows.len(),
+        3,
+        "all three system-field indexes must exist in main: {idx_rows:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Version floor (§2.9): the bundled SQLite satisfies the floor the
 // journal-immutability proof needs (authorizer zDb-on-DROP_TABLE semantics +
 // RETURNING + window functions). If the linked lib were below floor, open() would
