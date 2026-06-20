@@ -550,11 +550,12 @@ async fn second_deploy_drop_index_actually_drops_on_sqlite() {
     );
 }
 
-/// (c) A rebuild-needing existing-table op (ALTER COLUMN TYPE) returns the typed
-/// P3b-deferred error on SQLite — NOT dangling `ALTER COLUMN … TYPE` PG DDL (a
-/// non-existent statement on SQLite) and NOT a silent pass.
+/// (c) P3b — a rebuild-needing existing-table op (ALTER COLUMN TYPE) now GENERATES
+/// a 12-step table rebuild on SQLite (it no longer fails closed). The plan carries
+/// ONE `SqliteRebuild` naming the op; it is NOT dangling `ALTER COLUMN … TYPE` PG
+/// DDL (a non-existent statement on SQLite) and NOT a silent pass.
 #[compio::test]
-async fn second_deploy_type_change_is_typed_rebuild_error_on_sqlite() {
+async fn second_deploy_type_change_generates_rebuild_on_sqlite() {
     // First deploy: accounts(count: number → `double precision`).
     let v1 = CollectionDescriptor {
         name: "accounts".into(),
@@ -573,22 +574,38 @@ async fn second_deploy_type_change_is_typed_rebuild_error_on_sqlite() {
 
     let (live, ownership) = live_from(&[v1]);
     let desired2 = desired_snapshot(PROJECT, &[v2]).expect("v2 desired");
-    let err = sqlite_author()
+    let plan = sqlite_author()
         .diff(&desired2, &live, &ownership, &[])
-        .expect_err("a SQLite existing-table type change must fail closed (rebuild is P3b)");
-    match err {
-        DeclarativeError::SqliteRebuildRequired { table, op } => {
-            assert_eq!(table, "accounts");
-            assert!(
-                op.contains("alter column count type"),
-                "the rebuild error must name the op: {op}"
-            );
-        }
-        other => panic!(
-            "expected SqliteRebuildRequired (NOT dangling PG ALTER COLUMN DDL or a \
-             silent pass), got: {other:?}"
-        ),
-    }
+        .expect("a SQLite existing-table type change now generates a rebuild (P3b)");
+    assert_eq!(plan.rebuilds.len(), 1, "exactly one table rebuild");
+    let rb = &plan.rebuilds[0];
+    assert_eq!(rb.spec.table, "accounts");
+    assert!(
+        rb.spec.reason.contains("alter column count type"),
+        "the rebuild reason must name the op: {}",
+        rb.spec.reason
+    );
+    // The new-table CREATE is re-pointed to the engine temp name (never colliding
+    // with the live table the rebuild drops).
+    assert!(
+        rb.spec
+            .new_table_create
+            .contains("\"accounts__zsrebuild\""),
+        "the new CREATE must target the temp name: {}",
+        rb.spec.new_table_create
+    );
+    assert!(
+        !rb.spec
+            .new_table_create
+            .contains("CREATE TABLE IF NOT EXISTS \"accounts\""),
+        "the new CREATE must NOT target the real name (it would collide on swap): {}",
+        rb.spec.new_table_create
+    );
+    // No PG-shaped ALTER COLUMN DDL leaked into the plain migration set.
+    assert!(
+        plan.migrations.iter().all(|m| !m.up.contains("ALTER COLUMN")),
+        "no dangling PG ALTER COLUMN DDL on the SQLite path"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -728,13 +745,20 @@ async fn second_deploy_unchanged_real_introspected_live_has_no_spurious_drift() 
         spurious.is_empty(),
         "an unchanged schema must emit no column ALTER/ADD/DROP migrations: {spurious:?}"
     );
+    // P3b: an unchanged schema must ALSO emit no spurious table rebuild — the
+    // dialect-aware fold must not flag a phantom type/nullability change.
+    assert!(
+        plan.rebuilds.is_empty(),
+        "an unchanged schema must emit no SQLite rebuild: {:?}",
+        plan.rebuilds.iter().map(|r| &r.spec.reason).collect::<Vec<_>>()
+    );
 }
 
 /// (FIX B, the other half) A GENUINE type change against the REAL introspected
 /// live snapshot is STILL detected — the normalisation must not be so lossy it
 /// swallows a real change. `amount: number` (`real`) re-typed to `string`
-/// (`text`) maps to two DISTINCT canonical tokens, so it still raises
-/// `SqliteRebuildRequired`.
+/// (`text`) maps to two DISTINCT canonical tokens, so it still triggers a rebuild
+/// (P3b: now a generated rebuild, no longer a typed error).
 #[compio::test]
 async fn second_deploy_real_type_change_still_detected_against_introspected_live() {
     let v1 = spelling_gap_desc();
@@ -764,20 +788,16 @@ async fn second_deploy_real_type_change_still_detected_against_introspected_live
     amount.ty = "string".into();
 
     let desired2 = desired_snapshot(PROJECT, &[v2]).expect("v2 desired");
-    let err = sqlite_author()
+    let plan = sqlite_author()
         .diff(&desired2, &live, &ownership, &[])
-        .expect_err("a real number→string type change must still fail closed (rebuild is P3b)");
-    match err {
-        DeclarativeError::SqliteRebuildRequired { table, op } => {
-            assert_eq!(table, "ledger");
-            assert!(
-                op.contains("alter column amount type"),
-                "the rebuild error must name the changed column: {op}"
-            );
-        }
-        other => panic!(
-            "a genuine SQLite type change must raise SqliteRebuildRequired (the \
-             dialect-aware compare must not swallow a real change), got: {other:?}"
-        ),
-    }
+        .expect("a real number→string type change generates a rebuild (P3b)");
+    assert_eq!(plan.rebuilds.len(), 1, "the genuine type change yields one rebuild");
+    let rb = &plan.rebuilds[0];
+    assert_eq!(rb.spec.table, "ledger");
+    assert!(
+        rb.spec.reason.contains("alter column amount type"),
+        "the rebuild reason must name the changed column (the dialect-aware compare \
+         must not swallow a real change): {}",
+        rb.spec.reason
+    );
 }

@@ -90,7 +90,7 @@ pub mod submit;
 pub use analyze::{analyze, analyze_migration, Advisory, Severity};
 pub use approval::Approval;
 pub use backend::{MigrationBackend, PostgresBackend, SessionSnapshot};
-pub use backend_sqlite::{SqliteActorError, SqliteBackend};
+pub use backend_sqlite::{RebuildError, SqliteActorError, SqliteBackend, SqliteRebuildSpec};
 pub use baseline::{baseline, BaselineError, BaselineOutcome};
 pub use backfill::{
     backfill_progress, ensure_backfill_progress, list_backfills, run_backfill,
@@ -106,6 +106,7 @@ pub use classify::{
 pub use declarative::{
     desired_snapshot, dsl_to_pg_data_type, CollectionDescriptor, DeclarativeAuthor,
     DeclarativeError, DeclarativePlan, DesiredSchema, FieldDescriptor, IndexDescriptor, RenameHint,
+    SqliteRebuild,
 };
 pub use engine::{
     DeclarativeApplyError, DeclarativeDeployOutcome, DeclarativeDeployPlan, EngineError,
