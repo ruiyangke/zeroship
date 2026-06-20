@@ -568,6 +568,38 @@ pub enum FkEmission<'a> {
     Deferred(&'a std::collections::HashSet<String>),
 }
 
+/// Controls **how the SQLite arm namespaces** the table / index targets it
+/// emits. This is a SQLite-only concern — it has NO effect on the Postgres
+/// arm, which always qualifies into the project schema (`"<schema>"."<table>"`).
+///
+/// Two different consumers ATTACH the app file under two different aliases, so
+/// the SAME emitter must spell SQLite DDL two ways:
+///
+/// - [`SqliteEmitScope::AttachAlias`] — the **plugin-db runtime** ATTACHes each
+///   app file under its `<app_id>` alias (`ATTACH … AS "<app_id>"`), so its DDL
+///   is `"<app_id>"."<table>"` (table) and `"<app_id>"."<index>" ON "<table>"`
+///   (index). This is the historical behaviour and the default for the
+///   stable [`build_create_table_with_fks_for_dialect`] entry point.
+/// - [`SqliteEmitScope::MainUnqualified`] — the **zeroship-migrate engine**'s
+///   `SqliteBackend` ATTACHes the one app file as `main` (`main` IS the app
+///   file), and its hardened authorizer DENIES any other alias. An unqualified
+///   `CREATE TABLE users(...)` therefore lands in (and persists to) the app
+///   file. A `"<app_id>"`-qualified statement would target a nonexistent alias
+///   and be denied. So the engine MUST emit UNqualified DDL — that is this
+///   variant: no schema qualifier on the table name OR the index name.
+///
+/// The Postgres arm ignores this enum entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqliteEmitScope {
+    /// SQLite DDL is `"<app_id>"`-qualified (the plugin-db ATTACH-alias model).
+    /// The default for the stable dialected entry point.
+    AttachAlias,
+    /// SQLite DDL is UNqualified — `main` IS the app file (the zeroship-migrate
+    /// `SqliteBackend` model). The schema qualifier is dropped on the table
+    /// name and the index name.
+    MainUnqualified,
+}
+
 // pub (not pub): external consumer tests/integration.rs calls this via glob import.
 //
 // **P7 PR 2** — PG-flavoured shim around
@@ -614,10 +646,55 @@ pub fn build_create_table_with_fks_for_dialect(
     fk_emit: &FkEmission<'_>,
     dialect: SqlDialect,
 ) -> Result<String, QueryError> {
+    // The stable entry point keeps the historical plugin-db namespacing: SQLite
+    // DDL is `"<app_id>"`-qualified (the ATTACH-alias model). The zeroship-migrate
+    // engine calls the `_scoped` form with `MainUnqualified` instead.
+    build_create_table_with_fks_for_dialect_scoped(
+        app_id,
+        collection,
+        schema,
+        fk_emit,
+        dialect,
+        SqliteEmitScope::AttachAlias,
+    )
+}
+
+/// Scope-aware variant of [`build_create_table_with_fks_for_dialect`]. Identical
+/// in every respect except that the SQLite arm's table/index namespacing is
+/// chosen by `sqlite_scope` (see [`SqliteEmitScope`]). The Postgres arm is
+/// **byte-identical** regardless of `sqlite_scope` — the scope only flips the
+/// SQLite qualifier.
+///
+/// The migrate engine's Confined SQLite path passes
+/// [`SqliteEmitScope::MainUnqualified`] so the emitted DDL is UNqualified and
+/// lands in `main` (= the app file) under the hardened authorizer (which denies
+/// any non-`main` alias). The plugin-db runtime passes
+/// [`SqliteEmitScope::AttachAlias`] (via the stable entry point) because it
+/// ATTACHes the file under the `<app_id>` alias.
+///
+/// # Errors
+/// Same as [`build_create_table_with_fks_for_dialect`].
+pub fn build_create_table_with_fks_for_dialect_scoped(
+    app_id: &str,
+    collection: &str,
+    schema: &serde_json::Value,
+    fk_emit: &FkEmission<'_>,
+    dialect: SqlDialect,
+    sqlite_scope: SqliteEmitScope,
+) -> Result<String, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
 
-    let table = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
+    // SQLite `MainUnqualified` drops the schema qualifier entirely (`main` is the
+    // app file); every other case keeps the `"<schema>"."<table>"` form. PG always
+    // qualifies. `sqlite_table_unqualified` is true ONLY on the SQLite engine arm.
+    let sqlite_table_unqualified =
+        matches!(dialect, SqlDialect::Sqlite) && sqlite_scope == SqliteEmitScope::MainUnqualified;
+    let table = if sqlite_table_unqualified {
+        quote_ident(collection)
+    } else {
+        format!("{}.{}", quote_ident(app_id), quote_ident(collection))
+    };
 
     let mut columns = build_system_field_columns(dialect);
 
@@ -824,7 +901,8 @@ pub fn build_create_table_with_fks_for_dialect(
     // already builds an implicit unique index). The index for
     // `version` is not emitted (per §5 of the proposal —
     // `version` bumps on every UPDATE and an index would thrash).
-    let system_index_stmts = build_system_field_indexes(app_id, collection, dialect);
+    let system_index_stmts =
+        build_system_field_indexes(app_id, collection, dialect, sqlite_scope);
 
     let mut statements: Vec<String> = vec![create_table];
     statements.extend(system_index_stmts);
@@ -939,6 +1017,7 @@ fn build_system_field_indexes(
     app_id: &str,
     collection: &str,
     dialect: SqlDialect,
+    sqlite_scope: SqliteEmitScope,
 ) -> Vec<String> {
     // The three columns the platform auto-indexes. `id` is implicitly
     // indexed by the PK constraint; `version` is deliberately skipped
@@ -956,6 +1035,20 @@ fn build_system_field_indexes(
                     quote_ident(collection),
                     quote_ident(col),
                 ),
+                // `MainUnqualified` (the migrate engine, `main` IS the app file):
+                // drop the `<app_id>` qualifier from the index name. SQLite places
+                // the schema on the index name, not the table, so the qualifier we
+                // drop is on `<idx_name>`.
+                SqlDialect::Sqlite if sqlite_scope == SqliteEmitScope::MainUnqualified => {
+                    format!(
+                        "CREATE INDEX IF NOT EXISTS {} ON {} ({})",
+                        quote_ident(&idx_name),
+                        quote_ident(collection),
+                        quote_ident(col),
+                    )
+                }
+                // `AttachAlias` (plugin-db runtime): the file is ATTACHed under the
+                // `<app_id>` alias, so the index name is `"<app_id>"."<idx>"`.
                 SqlDialect::Sqlite => format!(
                     "CREATE INDEX IF NOT EXISTS {}.{} ON {} ({})",
                     quote_ident(app_id),
@@ -10589,5 +10682,179 @@ mod tests {
         .unwrap();
         assert!(q.sql.contains("WHERE rowid = (SELECT rowid FROM"));
         assert!(!q.sql.contains("WHERE ctid = (SELECT ctid FROM"));
+    }
+
+    // -----------------------------------------------------------------------
+    // PHASE 4 — `SqliteEmitScope` namespacing (descriptor→DDL for the migrate
+    // engine). The `MainUnqualified` scope drops the `<app_id>` qualifier on
+    // the SQLite arm so the DDL lands in `main` (= the app file). PG and the
+    // `AttachAlias` SQLite default are unchanged (regression guard).
+    // -----------------------------------------------------------------------
+
+    /// A descriptor carrying a masked column, an encrypted column, and an FK —
+    /// the goodies PHASE 4 must round-trip through emit→apply→drift.
+    fn goodies_schema() -> serde_json::Value {
+        json!({
+            "ssn": {
+                "type": "string",
+                "mask": { "kind": "last4", "classification": "pii" }
+            },
+            "secret": {
+                "type": "bytes",
+                "encrypted": { "mode": "randomized", "keyId": "k1" }
+            },
+            "owner": {
+                "type": "ref",
+                "refTarget": "users"
+            }
+        })
+    }
+
+    /// `MainUnqualified` SQLite emits an UNqualified `CREATE TABLE "<coll>"`
+    /// (no `"<app_id>".` prefix) and UNqualified system indexes — so the DDL
+    /// lands in `main` under the migrate engine's hardened authorizer.
+    #[test]
+    fn sqlite_main_unqualified_drops_app_id_qualifier() {
+        let app_id = "app_demo";
+        let sql = build_create_table_with_fks_for_dialect_scoped(
+            app_id,
+            "posts",
+            &json!({ "title": { "type": "string", "required": true } }),
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+            SqliteEmitScope::MainUnqualified,
+        )
+        .expect("build unqualified sqlite ddl");
+
+        // The table is UNqualified.
+        assert!(
+            sql.contains(r#"CREATE TABLE IF NOT EXISTS "posts" ("#),
+            "table must be unqualified, got: {sql}"
+        );
+        // No `"<app_id>".` qualifier anywhere in the payload.
+        assert!(
+            !sql.contains(r#""app_demo"."#),
+            "MainUnqualified must not emit any `\"app_demo\".` qualifier: {sql}"
+        );
+        // The system indexes are unqualified too (no schema on the index name).
+        assert!(
+            sql.contains(r#"CREATE INDEX IF NOT EXISTS "posts_deleted_at_idx" ON "posts""#),
+            "system index must be unqualified, got: {sql}"
+        );
+    }
+
+    /// The stable `AttachAlias` SQLite default is BYTE-UNCHANGED — it keeps the
+    /// `"<app_id>"`-qualified table + index spelling plugin-db's runtime depends
+    /// on (it ATTACHes the file under the `<app_id>` alias).
+    #[test]
+    fn sqlite_attach_alias_keeps_app_id_qualifier() {
+        let app_id = "app_demo";
+        let default_sql = build_create_table_with_fks_for_dialect(
+            app_id,
+            "posts",
+            &json!({ "title": { "type": "string", "required": true } }),
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .expect("build default sqlite ddl");
+        let scoped_sql = build_create_table_with_fks_for_dialect_scoped(
+            app_id,
+            "posts",
+            &json!({ "title": { "type": "string", "required": true } }),
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+            SqliteEmitScope::AttachAlias,
+        )
+        .expect("build attach-alias sqlite ddl");
+
+        // The stable entry point == the explicit `AttachAlias` scope.
+        assert_eq!(
+            default_sql, scoped_sql,
+            "the stable dialected entry point must equal AttachAlias scope"
+        );
+        // It is `<app_id>`-qualified (the plugin-db ATTACH-alias contract).
+        assert!(
+            default_sql.contains(r#"CREATE TABLE IF NOT EXISTS "app_demo"."posts" ("#),
+            "AttachAlias must keep the app_id-qualified table: {default_sql}"
+        );
+        assert!(
+            default_sql.contains(r#"CREATE INDEX IF NOT EXISTS "app_demo"."posts_deleted_at_idx""#),
+            "AttachAlias must keep the app_id-qualified index: {default_sql}"
+        );
+    }
+
+    /// The PG arm is BYTE-IDENTICAL regardless of `sqlite_scope` (the scope only
+    /// flips the SQLite qualifier). This is the PG-regression bar.
+    #[test]
+    fn pg_arm_byte_identical_across_sqlite_scopes() {
+        let app_id = "app_demo";
+        let schema = goodies_schema();
+        let via_stable = build_create_table_with_fks_for_dialect(
+            app_id,
+            "accounts",
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Postgres,
+        )
+        .expect("pg via stable entry");
+        for scope in [SqliteEmitScope::AttachAlias, SqliteEmitScope::MainUnqualified] {
+            let via_scoped = build_create_table_with_fks_for_dialect_scoped(
+                app_id,
+                "accounts",
+                &schema,
+                &FkEmission::Inline,
+                SqlDialect::Postgres,
+                scope,
+            )
+            .expect("pg via scoped entry");
+            assert_eq!(
+                via_stable, via_scoped,
+                "PG arm must be byte-identical regardless of sqlite_scope ({scope:?})"
+            );
+        }
+        // And the PG arm is still `<schema>`-qualified.
+        assert!(via_stable.contains(r#"CREATE TABLE IF NOT EXISTS "app_demo"."accounts" ("#));
+    }
+
+    /// `MainUnqualified` SQLite carries the goodies: the inline `__zsmask:` mask
+    /// sentinel on the `_masked` sibling, the inline `zsenc:` encryption
+    /// sentinel on the BLOB column, and an unqualified FK clause — so all three
+    /// survive into `sqlite_master.sql` for the P5 drift snapshot to recover.
+    #[test]
+    fn sqlite_main_unqualified_carries_mask_enc_and_fk() {
+        let sql = build_create_table_with_fks_for_dialect_scoped(
+            "app_demo",
+            "accounts",
+            &goodies_schema(),
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+            SqliteEmitScope::MainUnqualified,
+        )
+        .expect("build goodies sqlite ddl");
+
+        // Mask sentinel rides inline on the `<col>_masked` sibling column.
+        assert!(
+            sql.contains(r#""ssn_masked" TEXT NOT NULL /* __zsmask:"#),
+            "mask sentinel must ride inline on the sibling: {sql}"
+        );
+        // Encryption: BLOB physical column + inline `zsenc:` sentinel.
+        assert!(
+            sql.contains("BLOB") && sql.contains("/* zsenc:"),
+            "encrypted column must be BLOB with an inline zsenc sentinel: {sql}"
+        );
+        // FK present and UNqualified (SQLite REFERENCES rejects a schema-qualified
+        // parent name).
+        assert!(
+            sql.contains("FOREIGN KEY") && sql.contains(r#"REFERENCES "users" (id)"#),
+            "FK must be present and reference an unqualified parent: {sql}"
+        );
+        // No SQLite-arm `COMMENT ON COLUMN` (PG-only); the inline sentinels are
+        // the SQLite wire.
+        assert!(
+            !sql.contains("COMMENT ON COLUMN"),
+            "SQLite arm must not emit COMMENT ON COLUMN: {sql}"
+        );
+        // Still fully unqualified.
+        assert!(!sql.contains(r#""app_demo"."#), "must stay unqualified: {sql}");
     }
 }

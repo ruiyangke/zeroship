@@ -29,6 +29,7 @@ use pg_query::protobuf::AlterTableType;
 use crate::analyze::Advisory;
 use crate::classify::{classify, DdlKind, ParseError, StatementClass};
 use crate::migration::MigrationFlags;
+use zeroship_schema::query::SqlDialect;
 use denylist::rule;
 use serde_json::Value;
 
@@ -156,6 +157,20 @@ pub struct GuardConfig {
     /// the only way to obtain a non-empty allowlist is `platform()` or the
     /// Confined builder [`GuardConfig::with_extension_allowlist`].
     extension_allowlist: Vec<String>,
+    /// PRIVATE (PHASE 4). The target SQL dialect this guard config is for.
+    ///
+    /// - `Postgres` (the default) — the libpg_query line-1 guard runs
+    ///   ([`SqlGuard::check`] parses + deny-walks the SQL). Every pre-PHASE-4
+    ///   call site keeps this dialect, byte-identical.
+    /// - `Sqlite` — the **descriptor-diff-only** Confined path (design §2.5.3):
+    ///   `libpg_query` cannot parse SQLite, so there is NO line-1 parse guard;
+    ///   the line-2 defense is the `SqliteBackend`'s runtime authorizer. The
+    ///   Confined SQLite path accepts ONLY descriptor-diff-generated DDL — an
+    ///   untrusted RAW SQL string presented to [`SqlGuard::check`] is REFUSED
+    ///   fail-closed (it must come from the descriptor emitter). `Platform` is a
+    ///   PG-only posture → it fail-closes to `Confined` on SQLite
+    ///   ([`GuardConfig::for_dialect`]).
+    dialect: SqlDialect,
 }
 
 impl GuardConfig {
@@ -168,6 +183,54 @@ impl GuardConfig {
             trust: TrustProfile::Confined,
             schemas: SchemaScope::Single(project_schema.into()),
             extension_allowlist: Vec::new(),
+            // Default to the PG line-1 guard — byte-identical to before PHASE 4.
+            dialect: SqlDialect::Postgres,
+        }
+    }
+
+    /// PHASE 4 — the Confined **SQLite** config (design §2.5.3). Like
+    /// [`GuardConfig::confined`] but for the SQLite dialect: there is NO
+    /// libpg_query line-1 guard (it cannot parse SQLite); the line-2 defense is
+    /// the `SqliteBackend`'s runtime authorizer, and authoring is
+    /// descriptor-diff-only. [`SqlGuard::check`] on this config REFUSES an
+    /// untrusted raw SQL string (fail-closed): the only legitimate SQLite DDL
+    /// comes from the descriptor emitter, never a hand-written string. Needs no
+    /// token — Confined is the safe default anyone may construct.
+    #[must_use]
+    pub fn confined_sqlite(project_schema: impl Into<String>) -> Self {
+        Self {
+            trust: TrustProfile::Confined,
+            schemas: SchemaScope::Single(project_schema.into()),
+            extension_allowlist: Vec::new(),
+            dialect: SqlDialect::Sqlite,
+        }
+    }
+
+    /// PHASE 4 — fail-closed dialect selection. Returns the guard config
+    /// appropriate for `dialect`, mapping the requested profile down where SQLite
+    /// has no equivalent:
+    ///
+    /// - `Postgres` → `self` unchanged (every profile is valid on PG).
+    /// - `Sqlite` → **always Confined SQLite**. `Platform` is a PG-only posture
+    ///   (the widened multi-schema allowlist has no SQLite analog — `main` IS the
+    ///   one app file), so a Platform config fail-closes to Confined SQLite; a
+    ///   Confined or Trusted config likewise becomes Confined SQLite (Trusted's
+    ///   relaxed authorizer is a separate `SqliteBackend` concern, not a guard
+    ///   one). This is the design's "Platform → fail-closed Confined on SQLite".
+    #[must_use]
+    pub fn for_dialect(self, dialect: SqlDialect) -> Self {
+        match dialect {
+            SqlDialect::Postgres => self,
+            SqlDialect::Sqlite => {
+                // Preserve the project schema (the single confined schema) where we
+                // have one; otherwise empty. Platform's allowlist is dropped — it
+                // has no SQLite meaning. Fail closed to Confined SQLite.
+                let project_schema = match &self.schemas {
+                    SchemaScope::Single(s) => s.clone(),
+                    SchemaScope::Allowlist(list) => list.first().cloned().unwrap_or_default(),
+                };
+                Self::confined_sqlite(project_schema)
+            }
         }
     }
 
@@ -200,6 +263,9 @@ impl GuardConfig {
             trust: TrustProfile::Platform,
             schemas: SchemaScope::Allowlist(schemas),
             extension_allowlist,
+            // Platform is a PG-only posture (it fail-closes to Confined on SQLite
+            // via `for_dialect`); the config itself is always PG.
+            dialect: SqlDialect::Postgres,
         }
     }
 
@@ -224,7 +290,14 @@ impl GuardConfig {
             // read a stale allowlist.
             schemas: SchemaScope::Allowlist(Vec::new()),
             extension_allowlist: Vec::new(),
+            dialect: SqlDialect::Postgres,
         }
+    }
+
+    /// PHASE 4 — the target SQL dialect this guard config vets.
+    #[must_use]
+    pub(crate) fn dialect(&self) -> SqlDialect {
+        self.dialect
     }
 
     /// The trust posture the guard internals consult.
@@ -235,7 +308,8 @@ impl GuardConfig {
 }
 
 impl Default for GuardConfig {
-    /// Confined, empty single-schema, empty extensions — today's behaviour.
+    /// Confined, empty single-schema, empty extensions, PG dialect — today's
+    /// behaviour.
     fn default() -> Self {
         Self::confined(String::new())
     }
@@ -329,6 +403,19 @@ pub enum GuardError {
     /// The SQL could not be parsed (deny-by-default: it never reaches the DB).
     #[error("parse error: {0}")]
     Parse(#[from] ParseError),
+    /// PHASE 4 — a raw SQL string was presented to [`SqlGuard::check`] on the
+    /// Confined **SQLite** path, which accepts ONLY descriptor-diff-generated DDL
+    /// (design §2.5.3). `libpg_query` cannot vet SQLite, so there is no line-1
+    /// parse guard for raw SQLite SQL; the only safe SQLite DDL comes from the
+    /// engine's descriptor emitter (validated at the author boundary, line-2
+    /// enforced by the `SqliteBackend` authorizer). A hand-written / untrusted
+    /// SQLite SQL string is therefore refused fail-closed.
+    #[error(
+        "raw SQL is not accepted on the Confined SQLite path: SQLite migrations \
+         must be descriptor-diff-generated (libpg_query cannot vet SQLite; the \
+         SqliteBackend authorizer is the line-2 defense)"
+    )]
+    SqliteRawSqlRejected,
 }
 
 /// The result of a passing [`SqlGuard::check`].
@@ -377,6 +464,19 @@ impl SqlGuard {
     /// (malformed SQL has no parse tree to classify), but no `Denied`/`CrossSchema`
     /// can: there is no deny arm on the Trusted path.
     pub fn check(&self, sql: &str) -> Result<GuardReport, GuardError> {
+        // PHASE 4 — the Confined SQLite path is descriptor-diff-only (design
+        // §2.5.3). `libpg_query` (the line-1 guard below) cannot parse SQLite, so a
+        // raw SQLite SQL string presented here has NO trustworthy line-1 vet. We
+        // fail closed: the only legitimate SQLite DDL is produced by the engine's
+        // descriptor emitter (which never routes back through `check` — it is
+        // applied straight through the `SqliteBackend`'s authorizer, the line-2
+        // defense). Reaching `check` with a SQLite config means an untrusted raw
+        // string slipped in — reject it. (Trusted SQLite, if it ever exists, is a
+        // separate operator-gated concern; today no SQLite config is Trusted.)
+        if self.cfg.dialect() == SqlDialect::Sqlite {
+            return Err(GuardError::SqliteRawSqlRejected);
+        }
+
         let classes = classify(sql)?;
 
         // TRUSTED early-return — the public dbmate-like posture (Track A). The

@@ -46,6 +46,7 @@ use crate::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
 };
 use crate::migration::{Checksum, Migration, MigrationFlags, MigrationId};
+use zeroship_schema::query::{SqlDialect, SqliteEmitScope};
 
 /// Quote a Postgres identifier (double embedded quotes, wrap in `"`). Mirrors
 /// [`crate::author`]'s quoting so emitted SQL is injection-safe even past the
@@ -371,6 +372,93 @@ fn field_to_sdk_def(f: &FieldDescriptor) -> serde_json::Value {
     serde_json::Value::Object(def)
 }
 
+/// PHASE 4 — reconstruct the FULL SDK schema `Value` (`{ <field>: { type, … } }`)
+/// the shared `zeroship_schema::query` CREATE-TABLE emitter consumes, from a
+/// [`CollectionDescriptor`]. This is the descriptor→`Value` bridge the **Confined
+/// SQLite** path routes through: the engine keeps its typed descriptor as its
+/// authoring surface and hands the shared emitter exactly the JSON shape the SDK's
+/// `registerModel` would, so a `generate`d SQLite table is byte-for-byte the same
+/// shape (system fields, mask siblings, sentinels, FK clauses) as the runtime's.
+///
+/// Per [`field_to_sdk_def`] for the goodies facets, plus the keys the emitter reads
+/// for plain columns: `required`, FK (`refTarget`/`onDelete`/`onUpdate`/`deferrable`),
+/// `default`, `min`/`max`/`enum` (CHECK constraints), `idPrefix`, and `index`/`unique`
+/// (the emitter ignores `index`/`unique` for CREATE TABLE — indexes are separate —
+/// but they are carried for completeness/fidelity).
+///
+/// NOTE: this is descriptor-diff-generated DDL ONLY — there is NO untrusted raw SQL
+/// string; the descriptor field/type names were validated at the author boundary
+/// (`validate_desired`) before this runs (§2.5.3 trust model).
+fn descriptor_to_sdk_schema(d: &CollectionDescriptor) -> serde_json::Value {
+    let mut schema = serde_json::Map::new();
+    for f in &d.fields {
+        // Start from the goodies bridge (`type`, vector*, encrypted, mask,
+        // literalValue), then layer the remaining SDK keys the emitter reads.
+        let mut def = match field_to_sdk_def(f) {
+            serde_json::Value::Object(m) => m,
+            // `field_to_sdk_def` always returns an object; defensive fallback.
+            _ => serde_json::Map::new(),
+        };
+        if f.required {
+            def.insert("required".into(), serde_json::Value::Bool(true));
+        }
+        if f.unique {
+            def.insert("unique".into(), serde_json::Value::Bool(true));
+        }
+        // FK: the emitter keys on `refTarget` (+ policy), NOT the engine's `ref`.
+        if f.ty == "ref" {
+            if let Some(target) = &f.references {
+                def.insert(
+                    "refTarget".into(),
+                    serde_json::Value::String(target.clone()),
+                );
+            }
+            if let Some(od) = &f.on_delete {
+                def.insert("onDelete".into(), serde_json::Value::String(od.clone()));
+            }
+            if let Some(ou) = &f.on_update {
+                def.insert("onUpdate".into(), serde_json::Value::String(ou.clone()));
+            }
+            if let Some(dfr) = f.deferrable {
+                def.insert("deferrable".into(), serde_json::Value::Bool(dfr));
+            }
+        }
+        if let Some(def_val) = &f.default {
+            def.insert("default".into(), def_val.clone());
+        }
+        if let Some(min) = f.min {
+            if let Some(n) = serde_json::Number::from_f64(min) {
+                def.insert("min".into(), serde_json::Value::Number(n));
+            }
+        }
+        if let Some(max) = f.max {
+            if let Some(n) = serde_json::Number::from_f64(max) {
+                def.insert("max".into(), serde_json::Value::Number(n));
+            }
+        }
+        if let Some(en) = &f.enum_values {
+            def.insert("enum".into(), serde_json::Value::Array(en.clone()));
+        }
+        if let Some(prefix) = &f.id_prefix {
+            def.insert(
+                "idPrefix".into(),
+                serde_json::Value::String(prefix.clone()),
+            );
+        }
+        if f.fts {
+            def.insert("fts".into(), serde_json::Value::Bool(true));
+            if let Some(lang) = &f.fts_language {
+                def.insert(
+                    "ftsLanguage".into(),
+                    serde_json::Value::String(lang.clone()),
+                );
+            }
+        }
+        schema.insert(f.name.clone(), serde_json::Value::Object(def));
+    }
+    serde_json::Value::Object(schema)
+}
+
 /// **P4 HALF A** — build the shared [`zeroship_schema::diff::EncryptionMeta`] for
 /// a field's `t.encrypted({...})` declaration, or `None` for a plaintext field.
 /// Used to render the PG `COMMENT ON COLUMN` `zsenc:` sentinel (via the shared
@@ -688,13 +776,32 @@ fn non_unique_index_name(table: &str, col: &str) -> String {
 /// migrations. [`DeclarativeAuthor::diff`] enforces that only the owning app may
 /// emit a structural change (CREATE/ALTER/DROP) to a table — a non-owner may USE
 /// it but not migrate it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct DesiredSchema {
     /// The union of all member apps' declared tables, as the diffable snapshot.
     pub snapshot: SchemaSnapshot,
     /// `table name → owning app`. Exactly the keys of `snapshot.tables`.
     pub ownership: BTreeMap<String, String>,
+    /// PHASE 4 — `table name → full SDK schema `Value`` (the
+    /// [`descriptor_to_sdk_schema`] reconstruction), kept alongside the snapshot so
+    /// the **Confined SQLite** path can route a new-table CREATE through the shared
+    /// `zeroship_schema::query` emitter (which is `Value`-driven). The keys match
+    /// `snapshot.tables`. The PG path never reads this map (it renders from the
+    /// snapshot), so it is inert on PG. It does NOT participate in drift — drift is
+    /// the snapshot's job — so it is excluded from `PartialEq` (see the manual impl).
+    pub sqlite_schemas: BTreeMap<String, serde_json::Value>,
 }
+
+// The `sqlite_schemas` side-map is a derived emission aid (it is rebuilt from the
+// same descriptors that produce `snapshot`), so two `DesiredSchema`s are equal iff
+// their snapshot + ownership are — matching the pre-PHASE-4 equality semantics so
+// existing tests/asserts that compare `DesiredSchema`s stay valid.
+impl PartialEq for DesiredSchema {
+    fn eq(&self, other: &Self) -> bool {
+        self.snapshot == other.snapshot && self.ownership == other.ownership
+    }
+}
+impl Eq for DesiredSchema {}
 
 impl DesiredSchema {
     /// The owning app for `table`, if it is in the union.
@@ -784,8 +891,20 @@ pub fn desired_snapshot(
     // the reported conflict does not depend on which identical twin happened to
     // hold the slot first (1b).
     let mut declarations: BTreeMap<String, Vec<(String, TableSnapshot)>> = BTreeMap::new();
+    // PHASE 4 — the per-table SDK schema `Value` (the descriptor→`Value` bridge),
+    // carried so the Confined SQLite path can route the new-table CREATE through the
+    // shared emitter. Keyed by table; identical re-declarations overwrite with an
+    // identical value (idempotent, like the snapshot itself).
+    let mut sqlite_schemas: BTreeMap<String, serde_json::Value> = BTreeMap::new();
 
     for d in descriptors {
+        // PHASE 4 — capture the full SDK schema `Value` for this table BEFORE the
+        // snapshot loop consumes the descriptor (the value is what the shared SQLite
+        // emitter consumes; conflicting declarations are caught on the snapshot in
+        // the second pass, so storing per-descriptor here is safe — identical twins
+        // store identical values).
+        sqlite_schemas.insert(d.name.clone(), descriptor_to_sdk_schema(d));
+
         let mut columns = system_field_columns();
         // #6: the three implicit B-tree system indexes the platform auto-creates
         // for every table (`deleted_at`, `updated_at`, `created_by`), modelled so
@@ -1070,8 +1189,17 @@ pub fn desired_snapshot(
         tables.insert(table, shape);
     }
 
+    // PHASE 4 — keep only the SDK schemas for tables that survived conflict
+    // resolution (the keys of `tables`), so the side-map stays exactly aligned with
+    // the snapshot.
+    sqlite_schemas.retain(|table, _| tables.contains_key(table));
+
     let snapshot = SchemaSnapshot { tables };
-    Ok(DesiredSchema { snapshot, ownership })
+    Ok(DesiredSchema {
+        snapshot,
+        ownership,
+        sqlite_schemas,
+    })
 }
 
 /// True if `index_name` is the implicit index a PRIMARY KEY materialises
@@ -1079,6 +1207,16 @@ pub fn desired_snapshot(
 /// standalone CREATE/DROP INDEX, so the differ never emits DDL for it.
 fn is_pk_index(table: &str, index_name: &str) -> bool {
     index_name == format!("{table}_pkey")
+}
+
+/// PHASE 4 — true if `index_name` is one of the three implicit system-field
+/// indexes (`<table>_<col>_idx` for `deleted_at` / `updated_at` / `created_by`).
+/// On the SQLite path these are emitted inline by the shared CREATE-TABLE emitter,
+/// so the declarative differ must NOT also emit them as standalone migrations.
+fn is_system_field_index(table: &str, index_name: &str) -> bool {
+    SYSTEM_INDEXED_COLS
+        .iter()
+        .any(|col| index_name == non_unique_index_name(table, col))
 }
 
 /// Deterministic name for a per-field unique index (`<table>_<field>_key`,
@@ -1564,6 +1702,25 @@ pub enum DeclarativeError {
         /// The `<otherApp>` schema prefix that crossed the boundary.
         other_app: String,
     },
+    /// PHASE 4 — the Confined SQLite path needs an FK inlined at CREATE TABLE
+    /// (SQLite has no `ALTER TABLE … ADD CONSTRAINT FOREIGN KEY`), but the FK's
+    /// target table is neither already live nor created earlier in THIS batch — so
+    /// it cannot be inlined and SQLite cannot add it later without a full table
+    /// rebuild (the 12-step rebuild, P3b — out of PHASE-4 scope). Surfaced as a
+    /// clear typed error rather than emitting an invalid `ALTER ADD CONSTRAINT`
+    /// (which the SQLite authorizer/engine would reject anyway) or silently
+    /// dropping the FK.
+    #[error(
+        "SQLite cannot defer the foreign key on table '{table}' → '{target}': SQLite \
+         has no ALTER TABLE ADD CONSTRAINT, and the target is not live nor created \
+         earlier in this batch (a table rebuild is required — P3b)"
+    )]
+    SqliteDeferredFkUnsupported {
+        /// The table whose FK could not be inlined.
+        table: String,
+        /// The FK's target table (not yet available to inline against).
+        target: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1708,6 +1865,18 @@ pub struct DeclarativeAuthor {
     /// the ownership-enforcement subject (P4, design §4): [`Self::diff`] refuses a
     /// structural change to any union table whose owner ≠ this app.
     owner_app: String,
+    /// The target SQL dialect the emitted `up`/`down` are spelled in (PHASE 4).
+    ///
+    /// - `Postgres` (the default via [`Self::new`]) — the historical PG-only
+    ///   emitter: `self.render_create_table` etc. produce schema-qualified PG DDL.
+    ///   BYTE-IDENTICAL to before this field existed.
+    /// - `Sqlite` (via [`Self::new_for_dialect`]) — the Confined SQLite path
+    ///   (design §2.5.3): the new-table CREATE is ROUTED THROUGH the shared
+    ///   `zeroship_schema::query` emitter with [`SqliteEmitScope::MainUnqualified`],
+    ///   producing UNqualified DDL that lands in `main` (= the app file) under the
+    ///   `SqliteBackend`'s hardened authorizer. No second SQLite emitter is written
+    ///   here — the engine routes to the single shared one.
+    dialect: SqlDialect,
 }
 
 impl DeclarativeAuthor {
@@ -1715,12 +1884,37 @@ impl DeclarativeAuthor {
     /// app. In the multi-app model the deploying app is the ownership-enforcement
     /// subject: [`Self::diff`] refuses a structural change to a table owned by a
     /// different app (design §4).
+    ///
+    /// Defaults to the **Postgres** dialect — byte-identical to before PHASE 4.
+    /// Use [`Self::new_for_dialect`] for the Confined SQLite path.
     #[must_use]
     pub fn new(project_schema: impl Into<String>, owner_app: impl Into<String>) -> Self {
+        Self::new_for_dialect(project_schema, owner_app, SqlDialect::Postgres)
+    }
+
+    /// Construct a declarative author for an explicit target `dialect` (PHASE 4).
+    ///
+    /// `SqlDialect::Sqlite` selects the Confined SQLite path: the new-table CREATE
+    /// `up` is routed through the shared `zeroship_schema::query` emitter
+    /// ([`SqliteEmitScope::MainUnqualified`]) so the DDL is unqualified and lands
+    /// in the app file's `main` namespace. The PG dialect is the original path.
+    #[must_use]
+    pub fn new_for_dialect(
+        project_schema: impl Into<String>,
+        owner_app: impl Into<String>,
+        dialect: SqlDialect,
+    ) -> Self {
         Self {
             project_schema: project_schema.into(),
             owner_app: owner_app.into(),
+            dialect,
         }
+    }
+
+    /// The target SQL dialect this author emits.
+    #[must_use]
+    pub fn dialect(&self) -> SqlDialect {
+        self.dialect
     }
 
     /// Render `<schema>.<object>`, both parts quoted.
@@ -1856,6 +2050,10 @@ impl DeclarativeAuthor {
         // unchanged. Ownership is consulted (a) for cross-app FK target validation
         // and (b) for the post-pass ownership-enforcement check (P4).
         let ownership = &desired.ownership;
+        // PHASE 4 — keep the full `DesiredSchema` reachable for the SQLite leg (it
+        // needs `desired.sqlite_schemas` to route a new-table CREATE through the
+        // shared emitter); the rest of the pass operates on the snapshot as before.
+        let desired_full = desired;
         let desired = &desired.snapshot;
 
         // Author-boundary validation: every desired table/column/index name and
@@ -1899,10 +2097,16 @@ impl DeclarativeAuthor {
         // emitted) → emitted as ALTER TABLE ADD CONSTRAINT after all CREATEs.
         let mut deferred_fks: Vec<(String, ConstraintSnapshot)> = Vec::new();
 
+        // SQLite has no `ALTER TABLE ADD CONSTRAINT` — FKs MUST be inline at CREATE
+        // TABLE, so on SQLite a FK whose target is not yet available is a hard error
+        // (handled per-table below), never a deferred ALTER.
+        let is_sqlite = matches!(self.dialect, SqlDialect::Sqlite);
+
         for table in &order {
             let t = &desired.tables[*table];
             // Inline only the FKs whose target table already exists (live) or
-            // was created earlier in this batch; defer the rest.
+            // was created earlier in this batch; defer the rest (PG only — SQLite
+            // errors instead of deferring).
             let mut inline_fks: Vec<&ConstraintSnapshot> = Vec::new();
             let mut depends_on: Vec<MigrationId> = Vec::new();
             for c in &t.constraints {
@@ -1920,12 +2124,35 @@ impl DeclarativeAuthor {
                         }
                         inline_fks.push(c);
                     }
-                    _ => deferred_fks.push(((*table).clone(), c.clone())),
+                    other => {
+                        if is_sqlite {
+                            // SQLite cannot ADD CONSTRAINT later → fail closed.
+                            return Err(DeclarativeError::SqliteDeferredFkUnsupported {
+                                table: (*table).clone(),
+                                target: other.unwrap_or_default(),
+                            });
+                        }
+                        deferred_fks.push(((*table).clone(), c.clone()));
+                    }
                 }
             }
 
-            let up = self.render_create_table(table, t, &inline_fks);
-            let down = format!("DROP TABLE {}", self.qualified(table));
+            // PHASE 4 — the Confined SQLite path ROUTES the new-table CREATE through
+            // the shared `zeroship_schema::query` emitter (unqualified, `main` = the
+            // app file); the PG path keeps its snapshot-rendered DDL. No second
+            // SQLite emitter exists in this crate.
+            let (up, down) = if is_sqlite {
+                (
+                    self.render_create_table_sqlite(table, desired_full)?,
+                    // SQLite DROP TABLE is unqualified (main IS the app file).
+                    format!("DROP TABLE {}", quote_ident(table)),
+                )
+            } else {
+                (
+                    self.render_create_table(table, t, &inline_fks),
+                    format!("DROP TABLE {}", self.qualified(table)),
+                )
+            };
             let mig = self.make(
                 &format!("create_table_{table}"),
                 up,
@@ -1943,6 +2170,15 @@ impl DeclarativeAuthor {
             out.push(mig);
             for idx in &t.indexes {
                 if is_pk_index(table, &idx.name) {
+                    continue;
+                }
+                // PHASE 4 — on SQLite the shared CREATE-TABLE emitter ALREADY emits
+                // the three implicit system-field indexes (`<table>_<col>_idx` for
+                // deleted_at/updated_at/created_by) inline in the table-create
+                // payload. Skip re-emitting them here to avoid a redundant (though
+                // idempotent) second CREATE INDEX; the remaining user/unique indexes
+                // are emitted unqualified for the `main` app file.
+                if is_sqlite && is_system_field_index(table, &idx.name) {
                     continue;
                 }
                 out.push(self.render_create_index(
@@ -2423,6 +2659,55 @@ impl DeclarativeAuthor {
         Ok(resolved)
     }
 
+    /// PHASE 4 — render the SQLite `CREATE TABLE` `up` for a NEW table by ROUTING
+    /// THROUGH the shared `zeroship_schema::query` emitter with
+    /// [`SqliteEmitScope::MainUnqualified`]. No second SQLite DDL emitter lives in
+    /// this crate: the engine reconstructs the SDK schema `Value`
+    /// ([`descriptor_to_sdk_schema`], stashed on [`DesiredSchema::sqlite_schemas`])
+    /// and hands it to the same builder plugin-db's runtime uses — so the
+    /// `generate`d SQLite table (system fields, mask `_masked` siblings + inline
+    /// `__zsmask:` sentinels, encrypted BLOB columns + inline `zsenc:` sentinels,
+    /// inline FK clauses, the three system-field indexes) is byte-for-byte the same
+    /// shape, and lands UNqualified in `main` (= the app file).
+    ///
+    /// FK emission uses `FkEmission::Inline`: [`Self::diff`] has ALREADY verified
+    /// that every FK on this table targets a table that is live or was created
+    /// earlier in this batch (else it returned
+    /// [`DeclarativeError::SqliteDeferredFkUnsupported`] — SQLite cannot ADD
+    /// CONSTRAINT later). The engine's topo order guarantees an in-batch FK target's
+    /// CREATE precedes this one, so inlining every FK is sound and matches SQLite's
+    /// "FKs must be declared at CREATE TABLE" constraint.
+    ///
+    /// # Errors
+    /// [`DeclarativeError::Invalid`] if the shared emitter rejects the reconstructed
+    /// schema (a validation failure that slipped past the author boundary), or if the
+    /// per-table SDK schema is absent (an engine invariant violation — every table in
+    /// `desired.snapshot` has a `sqlite_schemas` entry by construction).
+    fn render_create_table_sqlite(
+        &self,
+        table: &str,
+        desired: &DesiredSchema,
+    ) -> Result<String, DeclarativeError> {
+        let schema = desired.sqlite_schemas.get(table).ok_or_else(|| {
+            DeclarativeError::Invalid(format!(
+                "internal: no SQLite SDK schema for table '{table}' (engine invariant: \
+                 desired_snapshot must populate sqlite_schemas for every union table)"
+            ))
+        })?;
+        // `app_id` here is the project schema; on the `MainUnqualified` SQLite arm it
+        // is NOT emitted (the qualifier is dropped), but it is still validated by the
+        // shared emitter, so pass the real project schema.
+        zeroship_schema::query::build_create_table_with_fks_for_dialect_scoped(
+            &self.project_schema,
+            table,
+            schema,
+            &zeroship_schema::query::FkEmission::Inline,
+            SqlDialect::Sqlite,
+            SqliteEmitScope::MainUnqualified,
+        )
+        .map_err(|e| DeclarativeError::Invalid(format!("sqlite emit for '{table}': {e}")))
+    }
+
     /// Render `CREATE TABLE <schema>.<table> (<cols…>, <pk>, <inline fks…>)`.
     fn render_create_table(
         &self,
@@ -2735,12 +3020,30 @@ impl DeclarativeAuthor {
         } else {
             ""
         };
-        let up = format!(
-            "CREATE {unique}INDEX IF NOT EXISTS {} ON {}{using} ({col_list}){with_clause}",
-            quote_ident(&idx.name),
-            self.qualified(table),
-        );
-        let down = format!("DROP INDEX IF EXISTS {}", self.qualified(&idx.name));
+        // PHASE 4 — SQLite indexes are UNqualified (`main` = the app file), and
+        // SQLite has no `USING <method>` / `WITH (lists=…)` (those PG access-method
+        // clauses are emitted only on the PG arm; a SQLite B-tree is the only kind
+        // the additive index path emits). The schema qualifier is on neither the
+        // index name nor the table.
+        let (up, down) = if matches!(self.dialect, SqlDialect::Sqlite) {
+            (
+                format!(
+                    "CREATE {unique}INDEX IF NOT EXISTS {} ON {} ({col_list})",
+                    quote_ident(&idx.name),
+                    quote_ident(table),
+                ),
+                format!("DROP INDEX IF EXISTS {}", quote_ident(&idx.name)),
+            )
+        } else {
+            (
+                format!(
+                    "CREATE {unique}INDEX IF NOT EXISTS {} ON {}{using} ({col_list}){with_clause}",
+                    quote_ident(&idx.name),
+                    self.qualified(table),
+                ),
+                format!("DROP INDEX IF EXISTS {}", self.qualified(&idx.name)),
+            )
+        };
         self.make(
             &format!("create_index_{}", idx.name),
             up,
