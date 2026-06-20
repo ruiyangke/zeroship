@@ -39,6 +39,7 @@
 
 use compio_postgres::Client;
 
+use crate::backend_sqlite::SqliteRebuildSpec;
 use crate::db::ExecutorConfig;
 use crate::drift::{DriftError, SchemaSnapshot};
 use crate::executor::{ApplyError, RollbackError};
@@ -197,6 +198,51 @@ pub trait MigrationBackend {
         cfg: &ExecutorConfig,
         m: &Migration,
     ) -> Result<crate::executor::PreconditionVerdict, ApplyError>;
+
+    // -- declarative-only structured ops (P6a) ------------------------------
+
+    /// Apply ONE structured SQLite 12-step table REBUILD atomically with
+    /// confinement + journal it (design §2.4), the dialect-coupled drive behind the
+    /// generic declarative apply path. A rebuild is NOT a plain `up` statement — it
+    /// is an engine-mode structured operation (drop-stale-temp / CREATE new / copy /
+    /// drop old / rename / replay captured dependents) with `foreign_keys` toggles
+    /// straddling the transaction — so it cannot flow through
+    /// [`apply_up_transactional`](Self::apply_up_transactional); the engine drives it
+    /// here, after the destructive/approval gate it already runs for the rebuild's
+    /// `destructive`-flagged journal migration.
+    ///
+    /// Rebuilds exist ONLY on the SQLite dialect: the SQLite differ emits them for
+    /// the existing-table changes SQLite has no native `ALTER` for, and `plan.renames`
+    /// is empty on SQLite so this is reached only with a SQLite-produced spec. The
+    /// Postgres impl rejects it ([`ApplyError::Backend`]): PG never produces a
+    /// `SqliteRebuild` (its differ uses native `ALTER` / expand-contract), so a rebuild
+    /// reaching the PG backend is a routing bug, surfaced as a clear error rather than
+    /// a silent pass.
+    ///
+    /// # Errors
+    /// The dialect-neutral [`ApplyError::Backend`] on a rebuild failure (FK-check
+    /// abort, confinement denial, DDL failure, or a poisoned connection — the SQLite
+    /// transaction is rolled back, leaving the original table intact), or — on the PG
+    /// backend — the unreachable-routing reject.
+    async fn rebuild_one(
+        &self,
+        spec: &SqliteRebuildSpec,
+        m: &Migration,
+        applied_by: &str,
+    ) -> Result<(), ApplyError>;
+
+    /// The Postgres connection for the **not-yet-abstracted** online expand-contract
+    /// rename drive (`run_expand` / `run_backfill`, PG `pg_advisory_xact_lock` +
+    /// paged `UPDATE`; deferred to P6c). Returns `Some` for the Postgres backend,
+    /// `None` for SQLite.
+    ///
+    /// This is the single escape hatch the generic declarative apply path uses to
+    /// reach the PG-shaped `run_expand_with_lock`. It is only ever consulted to drive
+    /// `plan.renames`, which the SQLite differ keeps EMPTY (a SQLite rename is routed
+    /// to a [`rebuild_one`](Self::rebuild_one), never expand-contract) — so the
+    /// `None` arm is never reached with a non-empty rename set, and `run_expand` is
+    /// never called on a SQLite backend (design §3.3 / P6a CONDITION ii / H1).
+    fn expand_conn(&self) -> Option<&Client>;
 }
 
 /// The Postgres [`MigrationBackend`] — P1's first and only impl.
@@ -342,5 +388,26 @@ impl MigrationBackend for PostgresBackend<'_> {
         m: &Migration,
     ) -> Result<crate::executor::PreconditionVerdict, ApplyError> {
         crate::executor::pg::evaluate_preconditions(self.conn, cfg, m).await
+    }
+
+    async fn rebuild_one(
+        &self,
+        spec: &SqliteRebuildSpec,
+        _m: &Migration,
+        _applied_by: &str,
+    ) -> Result<(), ApplyError> {
+        // PG never produces a `SqliteRebuild` (its declarative differ uses native
+        // `ALTER` / expand-contract, not the 12-step rebuild). A rebuild reaching the
+        // Postgres backend is a routing bug — fail closed with a clear error rather
+        // than silently passing.
+        Err(ApplyError::Backend(format!(
+            "postgres backend: SQLite table rebuild requested for '{}' — the PG differ \
+             never produces rebuilds (routing bug)",
+            spec.table
+        )))
+    }
+
+    fn expand_conn(&self) -> Option<&Client> {
+        Some(self.conn)
     }
 }
