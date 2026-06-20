@@ -75,6 +75,12 @@ pub enum DriftError {
     /// A journal read failed.
     #[error(transparent)]
     Journal(#[from] JournalError),
+    /// A **dialect-neutral** backend error (non-Postgres
+    /// [`MigrationBackend`](crate::backend::MigrationBackend) impls). See
+    /// [`crate::executor::ApplyError::Backend`]. The Postgres impl never
+    /// constructs this arm.
+    #[error("drift backend error: {0}")]
+    Backend(String),
 }
 
 /// The result of [`check_checksum_drift`]: the per-version checksum mismatches

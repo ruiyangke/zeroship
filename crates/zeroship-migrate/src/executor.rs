@@ -121,6 +121,26 @@ pub enum ApplyError {
     /// A journal operation failed.
     #[error(transparent)]
     Journal(#[from] JournalError),
+    /// A **dialect-neutral** backend error — used by non-Postgres
+    /// [`MigrationBackend`](crate::backend::MigrationBackend) impls (e.g.
+    /// `SqliteBackend`) that cannot produce a `compio_postgres::Error`. The
+    /// payload is the backend's own error rendered to a string, so the generic
+    /// executor body and callers can surface it without the trait leaking a
+    /// PG-specific error type. The Postgres impl never constructs this arm (it
+    /// keeps using [`ApplyError::Db`]), so its behavior is byte-identical.
+    #[error("backend error: {0}")]
+    Backend(String),
+    /// A migration requested the **non-transactional** path (`transaction:false`)
+    /// on a dialect that has no non-txn DDL to recover (SQLite, design §2.3/L3).
+    /// Rejected at the dialect boundary, before any apply. Postgres never returns
+    /// this — its non-txn path is real.
+    #[error("migration {version} is transaction:false but the {dialect} backend has no non-transactional DDL path (design §2.3/L3)")]
+    NonTxnUnsupportedOnDialect {
+        /// The rejected migration's version.
+        version: String,
+        /// The dialect that lacks a non-txn path (`"sqlite"`).
+        dialect: &'static str,
+    },
     /// The pending batch contains a destructive migration (`flags.destructive`)
     /// but the caller passed [`Approval::None`]. This is the executor's OWN
     /// defense-in-depth approval gate — independent of (and additional to) the
@@ -902,6 +922,7 @@ async fn apply_locked<B: MigrationBackend>(
         .map_err(|e| match e {
             crate::drift::DriftError::Db(db) => ApplyError::Db(db),
             crate::drift::DriftError::Journal(j) => ApplyError::Journal(j),
+            crate::drift::DriftError::Backend(b) => ApplyError::Backend(b),
         })?;
     if let Some(d) = drift_report.checksum_drift.into_iter().next() {
         return Err(ApplyError::ChecksumDrift {
@@ -2318,6 +2339,11 @@ pub enum RollbackError {
     /// A journal operation failed.
     #[error(transparent)]
     Journal(#[from] JournalError),
+    /// A **dialect-neutral** backend error (non-Postgres
+    /// [`MigrationBackend`](crate::backend::MigrationBackend) impls). See
+    /// [`ApplyError::Backend`]. The Postgres impl never constructs this arm.
+    #[error("backend error: {0}")]
+    Backend(String),
     /// Rollback was requested with [`Approval::None`]. A `down` is inherently
     /// destructive (it tears structure down), so rollback ALWAYS requires
     /// [`Approval::Approved`]. This is the executor's OWN defense-in-depth gate,
