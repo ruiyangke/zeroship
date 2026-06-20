@@ -133,6 +133,50 @@ pub fn app_env_from_prefixed_vars(env_vars: &HashMap<String, String>) -> EnvSnap
     }
 }
 
+/// The resolved worker count plus the diagnostics `start_server` needs to log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResolvedWorkers {
+    /// The final isolate count to spawn.
+    num_workers: usize,
+    /// The pre-clamp count (`workers` if non-zero, else `available`).
+    requested: usize,
+    /// `true` iff the SQLite single-isolate clamp narrowed the count to 1.
+    clamped_for_sqlite: bool,
+}
+
+/// Resolve the isolate count, applying the SQLite dev-tier single-isolate clamp
+/// (SQLite-engine wiring design R3.4 fix 1).
+///
+/// `requested == 0` ⇒ `available` (the `available_parallelism()` default a bare
+/// `zeroship serve myapp.js` resolves to); otherwise the explicit count. THEN:
+/// if `database_url` resolves to SQLite, the count is clamped to **1**.
+///
+/// Why: a bare `zeroship serve` with `--workers=0` spins N isolates, each its
+/// own worker thread. The SQLite data-plane backend AND (post-P6b) the hardened
+/// migration backend are per-isolate, so N isolates would open their own
+/// connections on the SAME `zs-<app>.sqlite` and run N concurrent cold-path
+/// migrations with the engine's project-lock a no-op (it assumes single-actor
+/// serialization) — a data-corruption class, not a UX wart. One isolate = one
+/// migration = one writer. Classification routes through the shared
+/// `zeroship_core::db_url::is_sqlite_url` (the runtime can't depend on
+/// plugin-db, which depends on the runtime), so the SQLite DSN grammar has one
+/// source of truth. The Vite dev path already spawns `--workers=1`, so this is
+/// a no-op there and a correctness fix only for the hand-run.
+fn resolve_num_workers(
+    requested: usize,
+    available: usize,
+    database_url: Option<&str>,
+) -> ResolvedWorkers {
+    let requested = if requested == 0 { available } else { requested };
+    let db_is_sqlite = database_url.is_some_and(zeroship_core::db_url::is_sqlite_url);
+    let clamped_for_sqlite = db_is_sqlite && requested != 1;
+    ResolvedWorkers {
+        num_workers: if clamped_for_sqlite { 1 } else { requested },
+        requested,
+        clamped_for_sqlite,
+    }
+}
+
 /// Start the compio HTTP server. This function blocks forever.
 ///
 /// - Single worker: runs on the calling thread.
@@ -140,13 +184,18 @@ pub fn app_env_from_prefixed_vars(env_vars: &HashMap<String, String>) -> EnvSnap
 pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
     init_v8();
 
-    let num_workers = if options.workers == 0 {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
-    } else {
-        options.workers
-    };
+    let available = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let database_url = options.env_vars.get("DATABASE_URL").map(String::as_str);
+    let resolved = resolve_num_workers(options.workers, available, database_url);
+    if resolved.clamped_for_sqlite {
+        tracing::info!(
+            requested_workers = resolved.requested,
+            "SQLite dev backend → single worker (per-file single-writer; engine project-lock is single-actor)"
+        );
+    }
+    let num_workers = resolved.num_workers;
 
     if options.cpu_limit.is_some() || options.wall_timeout.is_some() {
         tracing::info!(
@@ -1945,5 +1994,62 @@ mod stream_idle_tests {
         writer.close();
         let outcome = block_on(wait_for_data_or_idle(&reader, Duration::from_secs(30)));
         assert_eq!(outcome, StreamWait::Ready);
+    }
+}
+
+#[cfg(test)]
+mod worker_count_clamp_tests {
+    //! SQLite-engine wiring design R3.4 fix 1 — the dev SQLite backend forces a
+    //! single isolate so two isolates never run concurrent migrations on the
+    //! same `zs-<app>.sqlite` (the engine's project-lock is a single-actor
+    //! no-op). Drives the pure `resolve_num_workers` helper the real
+    //! `start_server` calls.
+    use super::resolve_num_workers;
+
+    #[test]
+    fn sqlite_dsn_clamps_to_one_isolate_even_with_explicit_workers() {
+        // The documented hand-run hazard: `--workers=8` against a sqlite: DSN.
+        let r = resolve_num_workers(8, 16, Some("sqlite:.zeroship/dev.sqlite"));
+        assert_eq!(r.num_workers, 1, "SQLite must clamp to a single isolate");
+        assert_eq!(r.requested, 8);
+        assert!(r.clamped_for_sqlite);
+    }
+
+    #[test]
+    fn sqlite_dsn_clamps_the_default_parallelism_fanout() {
+        // `--workers=0` → available_parallelism() → N; SQLite still clamps to 1.
+        let r = resolve_num_workers(0, 12, Some("file:./local.db"));
+        assert_eq!(r.num_workers, 1);
+        assert_eq!(r.requested, 12, "the pre-clamp request is the available count");
+        assert!(r.clamped_for_sqlite);
+    }
+
+    #[test]
+    fn bare_path_dsn_is_sqlite_and_clamps() {
+        let r = resolve_num_workers(0, 8, Some("/var/lib/zeroship/dev.sqlite"));
+        assert_eq!(r.num_workers, 1);
+        assert!(r.clamped_for_sqlite);
+    }
+
+    #[test]
+    fn postgres_dsn_is_not_clamped() {
+        let r = resolve_num_workers(0, 8, Some("postgres://localhost/dev"));
+        assert_eq!(r.num_workers, 8, "PG keeps the full isolate fan-out");
+        assert!(!r.clamped_for_sqlite);
+    }
+
+    #[test]
+    fn absent_dsn_is_not_clamped() {
+        let r = resolve_num_workers(0, 4, None);
+        assert_eq!(r.num_workers, 4);
+        assert!(!r.clamped_for_sqlite);
+    }
+
+    #[test]
+    fn sqlite_with_already_single_worker_is_not_reported_as_clamped() {
+        // The Vite dev path already passes --workers=1: a no-op, not a clamp.
+        let r = resolve_num_workers(1, 8, Some("sqlite:dev.sqlite"));
+        assert_eq!(r.num_workers, 1);
+        assert!(!r.clamped_for_sqlite, "1→1 is not a clamp (no surprising log)");
     }
 }

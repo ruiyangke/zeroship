@@ -181,6 +181,18 @@ fn resolve_worker_threads(worker_threads: Option<usize>) -> usize {
     })
 }
 
+/// `true` iff the worker must REFUSE to start with this `DATABASE_URL` (SQLite-
+/// engine wiring design R3.4 fix 2). SQLite is the dev tier only; a multi-
+/// replica worker fed a `sqlite:`/`file:` DSN would run concurrent
+/// cross-process migrations on one file with a no-op project lock — a
+/// data-corruption class. Classification routes through the shared
+/// `zeroship_core::db_url::is_sqlite_url` so the grammar matches plugin-db's
+/// opener exactly. The authority is the worker's identity, not an env flag:
+/// SQLite is refused even if `ZEROSHIP_DEV=1` leaked into a prod worker.
+fn worker_rejects_db_url(db_url: &str) -> bool {
+    zeroship_core::db_url::is_sqlite_url(db_url)
+}
+
 #[allow(missing_debug_implementations)]
 pub struct WorkerConfig {
     pub control_url: String,
@@ -339,6 +351,27 @@ fn main() -> std::io::Result<()> {
             tracing::error!(error = %message, "worker: refusing to start with unsafe WORKER_KEY");
             std::process::exit(1);
         }
+    }
+
+    // SQLite is the DEV TIER ONLY — refuse it on the worker (SQLite-engine
+    // wiring design R3.4 fix 2 / the re-keyed C1 guard). The worker is
+    // multi-replica BY IDENTITY: N replicas fed a `sqlite:`/`file:` DSN would
+    // each open their own SqliteBackend on a (possibly shared-volume) file with
+    // the engine's project-lock a no-op — concurrent cross-process apply with
+    // zero serialization (a data-corruption class). Prod is always
+    // `postgres://`; a SQLite DSN here is always a misconfig. The authority is
+    // the worker's IDENTITY, not an env flag — this refuses SQLite even if
+    // someone exported `ZEROSHIP_DEV=1` into a prod worker. We classify through
+    // the shared `zeroship_core::db_url::is_sqlite_url` (the same grammar
+    // plugin-db's `backend_for_url` opens with). Under `--check-config` an
+    // unresolved secret-reference DSN (e.g. `env:DATABASE_URL`) classifies as a
+    // non-SQLite unknown scheme, so a dry-run never false-positives.
+    if worker_rejects_db_url(&db_url) {
+        tracing::error!(
+            "worker: refusing to start with a SQLite DATABASE_URL — SQLite is the dev tier only \
+             (single-process `zeroship serve`); a multi-replica worker MUST use a postgres:// DSN"
+        );
+        std::process::exit(1);
     }
 
     if cli.check_config {
@@ -606,6 +639,27 @@ mod tests {
     fn worker_threads_default_resolves_to_positive_count() {
         assert!(resolve_worker_threads(None) > 0);
         assert_eq!(resolve_worker_threads(Some(3)), 3);
+    }
+
+    #[test]
+    fn worker_rejects_sqlite_database_url() {
+        // SQLite is the dev tier only — the worker hard-aborts (design R3.4
+        // fix 2). Every SQLite DSN shape the dev tier accepts must be refused.
+        assert!(worker_rejects_db_url("sqlite:.zeroship/dev.sqlite"));
+        assert!(worker_rejects_db_url("sqlite://./data/app.sqlite"));
+        assert!(worker_rejects_db_url("file:./local.db"));
+        assert!(worker_rejects_db_url(":memory:"));
+        assert!(worker_rejects_db_url("/var/lib/zeroship/dev.sqlite"));
+    }
+
+    #[test]
+    fn worker_accepts_postgres_database_url() {
+        // The only valid prod backend.
+        assert!(!worker_rejects_db_url("postgres://localhost/dev"));
+        assert!(!worker_rejects_db_url("postgresql://u:p@host:5432/db"));
+        // An empty / unresolved DSN is NOT rejected here (db_configured is a
+        // separate, softer concern — the worker can boot with auth-only).
+        assert!(!worker_rejects_db_url(""));
     }
 
     #[test]

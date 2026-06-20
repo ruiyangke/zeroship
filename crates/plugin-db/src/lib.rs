@@ -637,6 +637,27 @@ enum BackendUrl {
     Sqlite { path: PathBuf },
 }
 
+/// `true` iff `url` resolves to the SQLite (dev-tier) backend under the SAME
+/// grammar [`backend_for_url`] uses (`sqlite:` / `sqlite://` / `file:` /
+/// `:memory:` / a bare filesystem path). PG (`postgres://`/`postgresql://`)
+/// and an empty / unknown-scheme URL are `false`.
+///
+/// Delegates to [`zeroship_core::db_url::is_sqlite_url`] so the grammar has ONE
+/// source of truth shared with the runtime's single-isolate clamp and the
+/// worker's hard-abort guard (neither can depend on plugin-db, which depends on
+/// the runtime). A debug assertion keeps it in lock-step with `backend_for_url`
+/// — the opener and the classifier can never silently diverge.
+#[must_use]
+pub fn is_sqlite_url(url: &str) -> bool {
+    let v = zeroship_core::db_url::is_sqlite_url(url);
+    debug_assert_eq!(
+        v,
+        matches!(backend_for_url(url), Ok(BackendUrl::Sqlite { .. })),
+        "is_sqlite_url drifted from backend_for_url for {url:?}"
+    );
+    v
+}
+
 fn backend_for_url(url: &str) -> Result<BackendUrl, DbError> {
     let trimmed = url.trim();
     if trimmed.is_empty() {
