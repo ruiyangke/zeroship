@@ -466,6 +466,22 @@ pub fn cache_schema_for_tests(app_id: &str, collection: &str, schema: serde_json
     });
 }
 
+/// **H1 test helper**: drop every cached declared schema for `app_id` (and clear
+/// the model-registered marks for the given collections). Simulates a FRESH
+/// isolate booting against a WARM app file — the per-isolate sibling cache starts
+/// empty even though the file already holds the tables. The H1 warm-multi-
+/// collection drop-suppression path must survive exactly this state.
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+pub fn simulate_fresh_isolate_for_tests(app_id: &str, collections: &[&str]) {
+    ctx_mut(|c| {
+        c.clear_schemas_for_app(app_id);
+        for coll in collections {
+            c.clear_model_registered(app_id, coll);
+        }
+    });
+}
+
 /// **P5.5 PR 5 test helper**: clear the per-isolate mask-policy cache
 /// entry for `app_id`. Used by `tests/sqlite_integration.rs` to
 /// guarantee a clean slate between policy-driven unmask tests — the

@@ -67,6 +67,7 @@ pub fn register_model_dispatch<'s>(
     collection: &str,
     schema: Value,
     indexes: Value,
+    declared_collections: Vec<String>,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
 
@@ -84,7 +85,15 @@ pub fn register_model_dispatch<'s>(
     let collection_owned = collection.to_string();
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match exec_register_model(&app_id_owned, &collection_owned, &schema, &indexes).await {
+        match exec_register_model(
+            &app_id_owned,
+            &collection_owned,
+            &schema,
+            &indexes,
+            &declared_collections,
+        )
+        .await
+        {
             Ok(()) => {
                 crate::mark_model_registered(&app_id_owned, &collection_owned);
                 // **P5 PR 2** — cache the schema so the CRUD encryption
@@ -119,6 +128,7 @@ async fn exec_register_model(
     collection: &str,
     schema: &Value,
     indexes: &Value,
+    declared_collections: &[String],
 ) -> Result<(), DbError> {
     // Lazy pool init
     let has_pool = context::with(|c| c.pool_initialised());
@@ -188,7 +198,15 @@ async fn exec_register_model(
         // inside this awaited body (the ordering barrier, §7b.5). `deploy_id` is
         // read inside it (from ZEROSHIP_DEPLOY_ID) for journal/audit grouping.
         (_, Some(sqlite)) => {
-            sqlite_engine::run_sqlite_via_engine(sqlite, app_id, collection, schema, indexes).await
+            sqlite_engine::run_sqlite_via_engine(
+                sqlite,
+                app_id,
+                collection,
+                schema,
+                indexes,
+                declared_collections,
+            )
+            .await
         }
         // Unknown / future backend surfaces a typed, SDK-visible error rather than
         // aborting the spawned compio task via an `.expect()` panic.
@@ -327,7 +345,12 @@ pub async fn exec_register_model_via_dispatch_for_tests(
     schema: &Value,
     indexes: &Value,
 ) -> Result<(), DbError> {
-    exec_register_model(app_id, collection, schema, indexes).await
+    // No declared-set hint from this seam — pass empty, which makes the dev
+    // SQLite drop pass treat every non-desired live table as a real drop
+    // candidate (the pre-H1 single-collection behaviour). Tests that exercise
+    // the warm multi-collection drop-suppression path call
+    // `run_sqlite_via_engine` directly with an explicit declared set.
+    exec_register_model(app_id, collection, schema, indexes, &[]).await
 }
 
 #[cfg(test)]
@@ -395,6 +418,7 @@ mod tests {
                 collection,
                 &schema_v1,
                 &json!([]),
+                &[collection.to_string()],
             )
             .await
             .expect("engine registers the initial schema");
@@ -430,6 +454,7 @@ mod tests {
                 collection,
                 &schema_v2,
                 &json!([]),
+                &[collection.to_string()],
             )
             .await
             .expect("engine applies the widened schema (ADD COLUMN body)");
@@ -461,5 +486,139 @@ mod tests {
                 second.new_tuple.keys().collect::<Vec<_>>()
             );
         });
+    }
+
+    /// True if `table` exists in the app's ATTACHed SQLite schema (the data-plane
+    /// backend A view). Reads `sqlite_master` in the app's schema namespace.
+    async fn table_exists(backend: &SqliteBackend, app_id: &str, table: &str) -> bool {
+        let sql = format!(
+            r#"SELECT name FROM "{app_id}".sqlite_master WHERE type='table' AND name='{table}'"#
+        );
+        let rows = backend.query_json(&sql, &[]).await.expect("query sqlite_master");
+        !rows.is_empty()
+    }
+
+    /// **H1 regression — warm multi-collection boot must NOT fail closed.**
+    ///
+    /// A warm app file already holds tables `c1` + `c2` (registered by a prior
+    /// isolate). A FRESH isolate then registers them one at a time (the
+    /// install-schema.ts order), `c1` FIRST. When `c1` registers, the sibling
+    /// cache is empty → the per-collection desired union is `{c1}`, but live is
+    /// `{c1,c2}`. Pre-fix, `c2` was a live-only table with no `live_ownership`
+    /// entry → the differ's fail-closed drop pass raised `DropOfUnownedTable` and
+    /// `registerModel` REJECTED — the app broke on every warm boot of any 2+-
+    /// collection schema.
+    ///
+    /// Post-fix: `c2` is in the FULL declared set `[c1, c2]`, so the drop pass
+    /// hides it (not-yet-registered sibling) → NO error, `c2` is NOT dropped, and
+    /// then registering `c2` is a clean no-op. Both tables stay usable.
+    ///
+    /// RED before the fix: the first phase-2 `run_sqlite_via_engine(c1)` returns
+    /// `Err(DropOfUnownedTable)` and the `.expect(...)` panics.
+    #[test]
+    fn sqlite_warm_multi_collection_fresh_isolate_registers_c1_first_no_drop() {
+        run(async {
+            let dir = tempfile::tempdir().expect("create tempdir");
+            let backend = Rc::new(
+                SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend"),
+            );
+            crate::set_sqlite_backend_for_tests(backend.clone());
+            let app_id = "default";
+            let declared = [c("c1"), c("c2")];
+
+            let c1_schema = json!({"title": {"type": "string", "required": true}});
+            let c2_schema = json!({"label": {"type": "string", "required": true}});
+
+            // ---- Prior isolate: register both, warming the file with c1 + c2. ----
+            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c1", &c1_schema, &json!([]), &declared)
+                .await
+                .expect("warm: register c1");
+            crate::cache_schema_for_tests(app_id, "c1", c1_schema.clone());
+            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c2", &c2_schema, &json!([]), &declared)
+                .await
+                .expect("warm: register c2");
+            crate::cache_schema_for_tests(app_id, "c2", c2_schema.clone());
+
+            assert!(table_exists(&backend, app_id, "c1").await, "warm c1 created");
+            assert!(table_exists(&backend, app_id, "c2").await, "warm c2 created");
+
+            // ---- Fresh isolate: empty sibling cache; register c1 FIRST. ----
+            crate::simulate_fresh_isolate_for_tests(app_id, &["c1", "c2"]);
+
+            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c1", &c1_schema, &json!([]), &declared)
+                .await
+                .expect("H1: fresh-isolate register of c1 first must NOT fail closed on the live c2 sibling");
+            crate::cache_schema_for_tests(app_id, "c1", c1_schema.clone());
+
+            // c2 must survive the c1 register (it is declared, just not yet
+            // re-registered on this isolate).
+            assert!(
+                table_exists(&backend, app_id, "c2").await,
+                "H1: c2 must NOT be dropped when c1 registers first on a warm file"
+            );
+
+            // Then c2 re-registers cleanly (no-op against the warm table).
+            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c2", &c2_schema, &json!([]), &declared)
+                .await
+                .expect("H1: re-register c2 must be a clean no-op");
+
+            assert!(table_exists(&backend, app_id, "c1").await, "c1 still usable");
+            assert!(table_exists(&backend, app_id, "c2").await, "c2 still usable");
+        });
+    }
+
+    /// **H1 over-suppression guard — a GENUINELY-removed collection still drops.**
+    ///
+    /// Warm file holds `c1` + `c2`. The app's schema is then edited to declare
+    /// ONLY `c1` (c2 removed). A fresh isolate registers `c1` with the FULL
+    /// declared set `[c1]` (c2 is NOT in it). The drop pass must now author the
+    /// owned drop of `c2` — confirming the H1 fix did not over-suppress real
+    /// removals.
+    ///
+    /// RED before the fix: pre-fix `c2` had no `live_ownership` entry, so this
+    /// path raised `DropOfUnownedTable` instead of dropping (`.expect` panics);
+    /// the assertion that c2 is gone could never be reached.
+    #[test]
+    fn sqlite_genuinely_removed_collection_is_dropped() {
+        run(async {
+            let dir = tempfile::tempdir().expect("create tempdir");
+            let backend = Rc::new(
+                SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend"),
+            );
+            crate::set_sqlite_backend_for_tests(backend.clone());
+            let app_id = "default";
+
+            let c1_schema = json!({"title": {"type": "string", "required": true}});
+            let c2_schema = json!({"label": {"type": "string", "required": true}});
+
+            // Warm the file with both.
+            let both = [c("c1"), c("c2")];
+            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c1", &c1_schema, &json!([]), &both)
+                .await
+                .expect("warm: register c1");
+            crate::cache_schema_for_tests(app_id, "c1", c1_schema.clone());
+            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c2", &c2_schema, &json!([]), &both)
+                .await
+                .expect("warm: register c2");
+            crate::cache_schema_for_tests(app_id, "c2", c2_schema.clone());
+            assert!(table_exists(&backend, app_id, "c2").await, "warm c2 created");
+
+            // Fresh isolate; the new declared schema has ONLY c1 (c2 removed).
+            crate::simulate_fresh_isolate_for_tests(app_id, &["c1", "c2"]);
+            let only_c1 = [c("c1")];
+            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c1", &c1_schema, &json!([]), &only_c1)
+                .await
+                .expect("register c1 with c2 removed from the declared set");
+
+            assert!(table_exists(&backend, app_id, "c1").await, "c1 still present");
+            assert!(
+                !table_exists(&backend, app_id, "c2").await,
+                "H1 guard: a collection genuinely removed from the declared schema MUST be dropped"
+            );
+        });
+    }
+
+    fn c(s: &str) -> String {
+        s.to_string()
     }
 }

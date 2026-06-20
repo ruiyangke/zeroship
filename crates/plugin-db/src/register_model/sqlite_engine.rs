@@ -88,6 +88,7 @@ pub(crate) async fn run_sqlite_via_engine(
     collection: &str,
     schema: &Value,
     indexes: &Value,
+    declared_collections: &[String],
 ) -> Result<(), DbError> {
     // Parse-time policy: cross-app FK rejection runs on BOTH backends (platform
     // policy, not a SQLite limitation) — same as the old pipeline's first step.
@@ -101,23 +102,26 @@ pub(crate) async fn run_sqlite_via_engine(
     let app_path = db_dir.join(format!("zs-{app_id}.sqlite"));
     let journal_path = db_dir.join(format!("zs-{app_id}.migrations.sqlite"));
 
-    // Build the FULL project-union desired set: the current collection PLUS every
+    // Build the desired set for THIS register: the current collection PLUS every
     // sibling already registered on this isolate (parent-first topo order means
     // FK targets are already present). The differ then authors only the additive
     // ops for the new/changed collection; the siblings (desired == live) diff to
-    // nothing, and — crucially — NO live table is absent from `desired`, so the
-    // fail-closed DROP-ownership check never fires on a sibling.
+    // nothing.
+    //
+    // H1 — this union is necessarily PARTIAL on a warm multi-collection file: a
+    // fresh isolate registers collections one-at-a-time (install-schema.ts), so
+    // when the FIRST collection registers the sibling cache is empty and a live
+    // sibling table (already in the file from a prior isolate) is absent from
+    // `desired`. The desired-side `ownership` map (only desired tables) would then
+    // carry NO entry for that live sibling, and the differ's fail-closed drop pass
+    // would raise `DropOfUnownedTable` (availability bug — the app breaks on every
+    // warm boot of any 2+-collection schema).
     let descriptors =
         build_union_descriptors(app_id, collection, schema, indexes, &other_schemas(app_id))?;
 
-    // The desired snapshot + ownership (all tables owned by this dev app).
+    // The desired snapshot.
     let desired = desired_snapshot(app_id, &descriptors)
         .map_err(|e| DbError::internal(format!("sqlite engine: desired_snapshot failed: {e}")))?;
-    let ownership: std::collections::HashMap<String, String> = desired
-        .ownership
-        .iter()
-        .map(|(t, a)| (t.clone(), a.clone()))
-        .collect();
 
     let engine = MigrationEngine::new();
     // SQLite ignores the schema/lock strings (single-actor; journal in `_mig`);
@@ -149,11 +153,47 @@ pub(crate) async fn run_sqlite_via_engine(
         maybe_baseline(&backend_b, app_id, &deploy_id).await?;
 
         // -- Step 3: plan the descriptor diff vs live introspection, then apply. --
-        let live = backend_b.snapshot_schema_sqlite().await.map_err(|e| {
+        let mut live = backend_b.snapshot_schema_sqlite().await.map_err(|e| {
             DbError::internal(format!("sqlite engine: live introspection failed: {e}"))
         })?;
+
+        // H1 — reconcile the PARTIAL per-collection `desired` against `live` so the
+        // diff never (a) fails-closed nor (b) phantom-DROPs a sibling that's merely
+        // not-yet-registered on this isolate. A live table is one of three kinds:
+        //
+        //   * in `desired`   → diffed normally (create / add-column / rebuild).
+        //   * NOT in desired, but its name IS in the FULL declared set
+        //     (`declared_collections`) → a sibling that WILL register later this
+        //     boot; it is NOT removed. Hide it from the diff so it is neither a
+        //     drop candidate nor (it isn't in desired) a create — a pure no-op.
+        //   * NOT in desired AND NOT declared anywhere → genuinely removed from the
+        //     app's schema → a real drop candidate; leave it visible so the engine
+        //     authors the (owned) drop.
+        //
+        // This keeps the drop pass DECLARED-SET-driven (the full union), not driven
+        // by whichever partial per-collection union happens to be in flight — so a
+        // warm 2+-collection boot is clean AND a real removal still drops, without
+        // ever dropping a table merely absent from the current partial union.
+        let declared_set: HashSet<&str> =
+            declared_collections.iter().map(String::as_str).collect();
+        live.tables.retain(|table, _| {
+            desired.snapshot.tables.contains_key(table) || !declared_set.contains(table.as_str())
+        });
+
+        // `live_ownership` MUST carry an entry for EVERY live table the diff can
+        // see (the fail-closed guard refuses to drop a table whose owner it cannot
+        // confirm). On the dev tier ALL tables in the app file belong to the single
+        // dev app, so map every (post-retain) live table → `app_id`. A genuine drop
+        // candidate then resolves to owner == deploying_app and is authored; the
+        // guard never misfires on a sibling because siblings were retained-out.
+        let live_ownership: std::collections::HashMap<String, String> = live
+            .tables
+            .keys()
+            .map(|t| (t.clone(), app_id.to_string()))
+            .collect();
+
         let plan = engine
-            .plan_declarative(&desired, &live, &ownership, &author, &[], &guard_cfg)
+            .plan_declarative(&desired, &live, &live_ownership, &author, &[], &guard_cfg)
             .map_err(|e| DbError::internal(format!("sqlite engine: plan_declarative failed: {e}")))?;
 
         // The set of collections whose column shape changed — for the CDC bridge

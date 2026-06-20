@@ -549,6 +549,17 @@ impl IsolateDbContext {
         self.schemas.insert(key, schema);
     }
 
+    /// Drop every cached declared schema for `app_id`. Test-only seam used to
+    /// simulate a FRESH isolate booting against a WARM app file (the per-isolate
+    /// sibling cache starts empty even though the file already holds tables) —
+    /// the exact condition the H1 warm-multi-collection drop-suppression fix
+    /// must survive.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub(crate) fn clear_schemas_for_app(&mut self, app_id: &str) {
+        let prefix = format!("{app_id}:");
+        self.schemas.retain(|k, _| !k.starts_with(&prefix));
+    }
+
     /// **P5 PR 2** — fetch the cached schema for a `(app_id,
     /// collection)`. Returns `None` when the collection hasn't been
     /// registered on this isolate yet (the CRUD encryption pass
