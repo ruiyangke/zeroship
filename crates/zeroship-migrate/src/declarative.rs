@@ -1721,6 +1721,29 @@ pub enum DeclarativeError {
         /// The FK's target table (not yet available to inline against).
         target: String,
     },
+    /// PHASE 4 — a SECOND-DEPLOY (existing-table) structural change on the Confined
+    /// SQLite path requires the 12-step table REBUILD that SQLite has no native
+    /// `ALTER` for: an `ALTER COLUMN … TYPE`, a nullability TIGHTENING
+    /// (`SET NOT NULL`), an in-place ADD/DROP CONSTRAINT, or a column RENAME routed
+    /// through the (PG-shaped) expand-contract sequence. The rebuild path is P3b
+    /// (NOT built in PHASE 4). Rather than emit dangling PG DDL on the SQLite path
+    /// (`ALTER TABLE "schema"."t" ALTER COLUMN …` — a "no such table" / syntax error,
+    /// or worse a SILENT no-op), the differ FAILS CLOSED here with a typed error.
+    /// The natively-expressible existing-table ops (ADD COLUMN, DROP COLUMN, DROP
+    /// INDEX, ADD INDEX, RENAME table/column, inline FK at create) are emitted
+    /// unqualified and SQLite-legal — only the rebuild-needing ones surface this.
+    #[error(
+        "SQLite cannot perform the existing-table change on '{table}' natively \
+         ({op}): it requires the 12-step table rebuild (P3b, not yet built). The \
+         engine refuses to emit dangling Postgres DDL on the SQLite path. Author a \
+         compensating migration or wait for the P3b rebuild phase."
+    )]
+    SqliteRebuildRequired {
+        /// The existing table the rebuild-needing change targets.
+        table: String,
+        /// The specific operation that needs the rebuild (human-readable).
+        op: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -2225,6 +2248,19 @@ impl DeclarativeAuthor {
             let renamed_to: std::collections::BTreeSet<&str> =
                 table_renames.iter().map(|r| r.to.as_str()).collect();
 
+            // PHASE 4 — the expand-contract rename sequence is PG-shaped (schema-
+            // qualified DDL + an `ALTER COLUMN`-bearing dual-write path SQLite has no
+            // native form for). On the Confined SQLite path a column rename needs the
+            // 12-step table rebuild (P3b), so fail closed with the typed deferred
+            // error rather than author dangling PG DDL.
+            if is_sqlite && !table_renames.is_empty() {
+                let r = &table_renames[0];
+                return Err(DeclarativeError::SqliteRebuildRequired {
+                    table: table.clone(),
+                    op: format!("rename column {} → {}", r.from, r.to),
+                });
+            }
+
             // Author the expand-contract rename sequences (E1..E3, C1, C2) and
             // carry them STRUCTURED — do NOT flatten into `out` (C1: that would
             // discard the BackfillSpec, so the real pre-existing-row mirror never
@@ -2258,6 +2294,34 @@ impl DeclarativeAuthor {
                         // - SET NOT NULL (false→true) → GATED (lock-heavy, can
                         //   fail on existing NULLs);
                         // - DROP NOT NULL (true→false) → ungated additive.
+                        //
+                        // PHASE 4 — SQLite has NO `ALTER COLUMN` at all (its ALTER
+                        // TABLE only does RENAME / ADD COLUMN / DROP COLUMN / RENAME
+                        // COLUMN). BOTH a type change AND ANY nullability change need
+                        // the 12-step table rebuild (P3b). Fail closed with the typed
+                        // deferred error rather than emit dangling PG `ALTER COLUMN`
+                        // DDL on the SQLite path.
+                        if is_sqlite {
+                            if lc.data_type != c.data_type {
+                                return Err(DeclarativeError::SqliteRebuildRequired {
+                                    table: table.clone(),
+                                    op: format!(
+                                        "alter column {} type {} → {}",
+                                        c.name, lc.data_type, c.data_type
+                                    ),
+                                });
+                            }
+                            if lc.nullable != c.nullable {
+                                return Err(DeclarativeError::SqliteRebuildRequired {
+                                    table: table.clone(),
+                                    op: format!(
+                                        "alter column {} nullability {} → {}",
+                                        c.name, lc.nullable, c.nullable
+                                    ),
+                                });
+                            }
+                            continue;
+                        }
                         if lc.data_type != c.data_type {
                             out.push(self.render_alter_column_type(table, c));
                         }
@@ -2852,6 +2916,7 @@ impl DeclarativeAuthor {
     /// `diff.rs:15-26` reasoning (it never emits a volatile default either). The
     /// classifier therefore correctly classifies it additive, not destructive.
     fn render_add_column(&self, table: &str, c: &ColumnSnapshot) -> Migration {
+        let is_sqlite = matches!(self.dialect, SqlDialect::Sqlite);
         let null = if c.nullable { "" } else { " NOT NULL" };
         // DEFAULT clause, or a STORED GENERATED clause for the T12 `__fts` column.
         let default = default_clause(c.default.as_deref());
@@ -2862,25 +2927,58 @@ impl DeclarativeAuthor {
             .as_deref()
             .map(|s| format!(" {s}"))
             .unwrap_or_default();
+        // PHASE 4 — on SQLite the table is `main` (the app file): emit an UNqualified
+        // `ALTER TABLE <t> ADD COLUMN …`. A schema-qualified `"schema"."t"` would
+        // resolve to no table ("no such table"). The PG path keeps `self.qualified`.
+        let table_ref = if is_sqlite {
+            quote_ident(table)
+        } else {
+            self.qualified(table)
+        };
+        // PHASE 4 — on SQLite the mask sentinel rides INLINE in the column clause
+        // (there is NO `COMMENT ON COLUMN` in SQLite — it is a syntax error). SQLite
+        // preserves the inline `/* … */` comment through `ADD COLUMN` in
+        // `sqlite_master.sql` (verified), so the P5 drift recovery
+        // (`recover_inline_sentinel`) round-trips it from the stored CREATE text
+        // exactly like a create-time sentinel. The PG path appends `COMMENT ON COLUMN`
+        // after the statement.
+        //
+        // `comment_sentinel` holds the BARE body (`__zsmask:…` / `zsenc:…`, no
+        // `/* */`); the SQLite inline form needs the `/* */` wrapper. The ENCRYPTED
+        // column case is already covered by `enc` above (`encryption_sentinel` is the
+        // pre-wrapped `/* zsenc:… */` form), so only the MASKED-SIBLING case
+        // (`comment_sentinel` set, `encryption_sentinel` unset) rides here — wrapped.
+        let sqlite_inline_sentinel = if is_sqlite && c.encryption_sentinel.is_none() {
+            c.comment_sentinel
+                .as_deref()
+                .map(|s| format!(" /* {s} */"))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         let mut up = format!(
-            "ALTER TABLE {} ADD COLUMN {} {}{}{}{}",
-            self.qualified(table),
+            "ALTER TABLE {} ADD COLUMN {} {}{}{}{}{}",
+            table_ref,
             quote_ident(&c.name),
             ddl_type(&c.data_type),
             enc,
+            sqlite_inline_sentinel,
             null,
             default,
         );
-        // **P4 HALF A** — a column added via ADD COLUMN carries its comment
+        // **P4 HALF A** (PG only) — a column added via ADD COLUMN carries its comment
         // sentinel (`__zsmask:…` for a masked sibling, `zsenc:…` for an
-        // encrypted column) in the same migration (atomic with the column).
-        if let Some(stmt) = self.comment_stmt(table, c) {
-            up.push_str(";\n");
-            up.push_str(&stmt);
+        // encrypted column) in the same migration (atomic with the column). On SQLite
+        // the sentinel already rode inline above (no `COMMENT ON COLUMN`).
+        if !is_sqlite {
+            if let Some(stmt) = self.comment_stmt(table, c) {
+                up.push_str(";\n");
+                up.push_str(&stmt);
+            }
         }
         let down = format!(
             "ALTER TABLE {} DROP COLUMN {}",
-            self.qualified(table),
+            table_ref,
             quote_ident(&c.name)
         );
         self.make(
@@ -3067,10 +3165,19 @@ impl DeclarativeAuthor {
     }
 
     /// Render a destructive (gated) `DROP COLUMN`.
+    ///
+    /// PHASE 4 — SQLite ≥ 3.35 has native `ALTER TABLE … DROP COLUMN`; emit it
+    /// UNqualified (`main` = the app file). A schema-qualified `"schema"."t"` would
+    /// resolve to no table. The PG path keeps `self.qualified`.
     fn render_drop_column(&self, table: &str, col: &str) -> Migration {
+        let table_ref = if matches!(self.dialect, SqlDialect::Sqlite) {
+            quote_ident(table)
+        } else {
+            self.qualified(table)
+        };
         let up = format!(
             "ALTER TABLE {} DROP COLUMN {}",
-            self.qualified(table),
+            table_ref,
             quote_ident(col)
         );
         self.make(
@@ -3098,7 +3205,16 @@ impl DeclarativeAuthor {
     /// `down` recreates nothing because the declarative re-diff would re-add the
     /// index from the desired snapshot.
     fn render_drop_index(&self, idx: &IndexSnapshot) -> Migration {
-        let up = format!("DROP INDEX {}", self.qualified(&idx.name));
+        // PHASE 4 — on SQLite an index lives UNqualified in `main` (the app file).
+        // A schema-qualified `DROP INDEX "schema"."ix"` does NOT error on SQLite — it
+        // SILENTLY no-ops (the qualified name never resolves), reporting success while
+        // the index survives: silent drift, the dangerous failure mode. Emit the
+        // unqualified `DROP INDEX <name>` so the index is ACTUALLY dropped.
+        let up = if matches!(self.dialect, SqlDialect::Sqlite) {
+            format!("DROP INDEX {}", quote_ident(&idx.name))
+        } else {
+            format!("DROP INDEX {}", self.qualified(&idx.name))
+        };
         let flags = if idx.unique {
             destructive_flags()
         } else {

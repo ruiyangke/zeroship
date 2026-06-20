@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zeroship_migrate::{
     desired_snapshot, CollectionDescriptor, DeclarativeAuthor, DeclarativeError, FieldDescriptor,
-    GuardConfig, GuardError, SchemaSnapshot, SqliteBackend, SqlGuard,
+    GuardConfig, GuardError, IndexDescriptor, SchemaSnapshot, SqliteBackend, SqlGuard,
 };
 use zeroship_schema::query::SqlDialect;
 
@@ -357,4 +357,236 @@ fn platform_fails_closed_to_confined_on_sqlite() {
     assert!(pg
         .check(r#"CREATE TABLE "prj_demo"."t" (id text primary key)"#)
         .is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// FINDING 4 — the EXISTING-TABLE (second-deploy / incremental) declarative path
+// on SQLite. Before the fix, every existing-table render method emitted PG-shaped
+// schema-qualified DDL + PG-only syntax on the SQLite leg (every prior SQLite
+// declarative test used an EMPTY live snapshot, so only the new-table CREATE path
+// was ever exercised). On a real second deploy where a table exists in BOTH live
+// and desired, the differ emitted:
+//   - `ALTER TABLE "prj"."t" ADD COLUMN …` → "no such table" on SQLite;
+//   - `COMMENT ON COLUMN …` → syntax error (no such statement on SQLite);
+//   - `DROP INDEX "prj"."ix"` → SILENTLY no-ops (qualified name never resolves) —
+//     silent drift, the dangerous one;
+//   - `ALTER COLUMN … TYPE` / nullability → no such SQLite statement.
+//
+// These tests build a NON-EMPTY live snapshot (the first deploy, compiled through
+// the same `desired_snapshot` so the data_type spellings match — no spurious type
+// drift) and diff the second deploy against it.
+// ---------------------------------------------------------------------------
+
+/// The live snapshot for a first-deploy descriptor set: compiled through the same
+/// `desired_snapshot` machinery the second deploy uses, so the column `data_type`
+/// spellings match exactly (a manually-built or SQLite-introspected live would use
+/// SQLite type affinities that the desired-side PG spellings would falsely diff
+/// against — a separate, deeper normalisation gap, out of scope for this finding).
+fn live_from(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String, String>) {
+    let d = desired_snapshot(PROJECT, descs).expect("first-deploy desired_snapshot");
+    let ownership: HashMap<String, String> = d
+        .ownership
+        .iter()
+        .map(|(t, a)| (t.clone(), a.clone()))
+        .collect();
+    (d.snapshot, ownership)
+}
+
+/// (a) Second-deploy ADD COLUMN on SQLite emits UNqualified, SQLite-legal DDL AND
+/// APPLIES through the real hardened backend (the table persists, the column is
+/// added). Pre-fix the `up` was `ALTER TABLE "prj_demo"."accounts" ADD COLUMN …`,
+/// which fails "no such table" on SQLite.
+#[compio::test]
+async fn second_deploy_add_column_is_sqlite_legal_and_applies() {
+    // First deploy: accounts(title). Second deploy: accounts(title, note).
+    let v1 = CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "title".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let mut v2 = v1.clone();
+    v2.fields.push(FieldDescriptor {
+        name: "note".into(),
+        ty: "string".into(),
+        ..Default::default()
+    });
+
+    // Apply the first deploy through the real backend (greenfield create).
+    let p = paths("second_add_col");
+    let be = backend(&p);
+    let first = desired_snapshot(PROJECT, &[v1.clone()]).expect("v1 desired");
+    let first_plan = sqlite_author()
+        .diff(&first, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .expect("v1 diff");
+    for m in &first_plan.all_migrations() {
+        be.apply_one_additive(m, "deployer")
+            .await
+            .unwrap_or_else(|e| panic!("v1 apply {} must succeed: {e:?}", m.name));
+    }
+
+    // Second deploy: diff v2 against the v1 live snapshot.
+    let (live, ownership) = live_from(&[v1]);
+    let desired2 = desired_snapshot(PROJECT, &[v2]).expect("v2 desired");
+    let plan = sqlite_author()
+        .diff(&desired2, &live, &ownership, &[])
+        .expect("second-deploy diff must succeed");
+    let add = plan
+        .all_migrations()
+        .into_iter()
+        .find(|m| m.name == "add_column_accounts_note")
+        .expect("ADD COLUMN note migration present");
+
+    // UNqualified + no PG `COMMENT ON COLUMN`.
+    assert!(
+        add.up.contains(r#"ALTER TABLE "accounts" ADD COLUMN "note""#),
+        "ADD COLUMN must be unqualified SQLite-legal DDL: {}",
+        add.up
+    );
+    assert!(
+        !add.up.contains(r#""prj_demo"."#) && !add.up.contains("COMMENT ON COLUMN"),
+        "no schema qualifier and no PG COMMENT ON COLUMN may appear: {}",
+        add.up
+    );
+
+    // APPLIES through the real backend; the column lands.
+    let applied = be
+        .apply_one_additive(&add, "deployer")
+        .await
+        .unwrap_or_else(|e| panic!("second-deploy ADD COLUMN must apply on SQLite: {e:?}"));
+    assert!(applied, "ADD COLUMN must be newly applied");
+    let cols = be
+        .actor()
+        .query("PRAGMA main.table_info(accounts)")
+        .await
+        .expect("table_info");
+    assert!(
+        cols.iter().any(|r| r.get(1).and_then(Clone::clone).as_deref() == Some("note")),
+        "the `note` column must exist after the second-deploy ADD COLUMN: {cols:?}"
+    );
+}
+
+/// (b) A second-deploy DROP INDEX on SQLite ACTUALLY drops the index. Pre-fix the
+/// `up` was `DROP INDEX "prj_demo"."accounts_handle_idx"`, which SILENTLY no-ops on
+/// SQLite (the qualified name never resolves) — reporting success while the index
+/// survives. We assert the index is GONE via PRAGMA (we do NOT trust IF EXISTS).
+#[compio::test]
+async fn second_deploy_drop_index_actually_drops_on_sqlite() {
+    // First deploy: accounts(handle) WITH a user index on handle.
+    let v1 = CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "handle".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![IndexDescriptor {
+            name: "accounts_handle_idx".into(),
+            columns: vec!["handle".into()],
+            unique: false,
+        }],
+    };
+    // Second deploy: the same table WITHOUT the index → DROP INDEX.
+    let mut v2 = v1.clone();
+    v2.indexes.clear();
+
+    let p = paths("second_drop_idx");
+    let be = backend(&p);
+    let first = desired_snapshot(PROJECT, &[v1.clone()]).expect("v1 desired");
+    let first_plan = sqlite_author()
+        .diff(&first, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .expect("v1 diff");
+    for m in &first_plan.all_migrations() {
+        be.apply_one_additive(m, "deployer")
+            .await
+            .unwrap_or_else(|e| panic!("v1 apply {} must succeed: {e:?}", m.name));
+    }
+    // The user index exists after the first deploy.
+    let before = be
+        .actor()
+        .query("SELECT name FROM main.sqlite_master WHERE type='index' AND name='accounts_handle_idx'")
+        .await
+        .expect("query index pre-drop");
+    assert_eq!(before.len(), 1, "the user index must exist before the drop: {before:?}");
+
+    // Second deploy: diff produces a DROP INDEX.
+    let (live, ownership) = live_from(&[v1]);
+    let desired2 = desired_snapshot(PROJECT, &[v2]).expect("v2 desired");
+    let plan = sqlite_author()
+        .diff(&desired2, &live, &ownership, &[])
+        .expect("second-deploy diff must succeed");
+    let drop = plan
+        .all_migrations()
+        .into_iter()
+        .find(|m| m.name == "drop_index_accounts_handle_idx")
+        .expect("DROP INDEX migration present");
+    // UNqualified — the qualified form silently no-ops on SQLite.
+    assert!(
+        drop.up == r#"DROP INDEX "accounts_handle_idx""#,
+        "DROP INDEX must be unqualified SQLite-legal DDL (qualified silently no-ops): {}",
+        drop.up
+    );
+
+    // APPLY it and assert via PRAGMA the index is ACTUALLY gone (not trusting the
+    // statement's success — the pre-fix qualified form "succeeded" too).
+    be.apply_one_additive(&drop, "deployer")
+        .await
+        .unwrap_or_else(|e| panic!("DROP INDEX must apply on SQLite: {e:?}"));
+    let after = be
+        .actor()
+        .query("SELECT name FROM main.sqlite_master WHERE type='index' AND name='accounts_handle_idx'")
+        .await
+        .expect("query index post-drop");
+    assert!(
+        after.is_empty(),
+        "the index MUST be actually dropped, not silently no-opped: {after:?}"
+    );
+}
+
+/// (c) A rebuild-needing existing-table op (ALTER COLUMN TYPE) returns the typed
+/// P3b-deferred error on SQLite — NOT dangling `ALTER COLUMN … TYPE` PG DDL (a
+/// non-existent statement on SQLite) and NOT a silent pass.
+#[compio::test]
+async fn second_deploy_type_change_is_typed_rebuild_error_on_sqlite() {
+    // First deploy: accounts(count: number → `double precision`).
+    let v1 = CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "count".into(),
+            ty: "number".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    // Second deploy: the same column re-typed to `string` (`text`) — a type change.
+    let mut v2 = v1.clone();
+    v2.fields[0].ty = "string".into();
+
+    let (live, ownership) = live_from(&[v1]);
+    let desired2 = desired_snapshot(PROJECT, &[v2]).expect("v2 desired");
+    let err = sqlite_author()
+        .diff(&desired2, &live, &ownership, &[])
+        .expect_err("a SQLite existing-table type change must fail closed (rebuild is P3b)");
+    match err {
+        DeclarativeError::SqliteRebuildRequired { table, op } => {
+            assert_eq!(table, "accounts");
+            assert!(
+                op.contains("alter column count type"),
+                "the rebuild error must name the op: {op}"
+            );
+        }
+        other => panic!(
+            "expected SqliteRebuildRequired (NOT dangling PG ALTER COLUMN DDL or a \
+             silent pass), got: {other:?}"
+        ),
+    }
 }
