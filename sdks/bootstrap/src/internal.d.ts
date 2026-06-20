@@ -150,6 +150,11 @@ interface ZeroshipDbPlatform {
     collection: string,
     schema: ZeroshipDbSchema,
     indexes?: ZeroshipDbNamedIndex[],
+    // H1 — the FULL declared-collection-name set (`Object.keys(schemas)`),
+    // passed on every per-collection call so the dev SQLite drop pass can
+    // tell a not-yet-registered sibling from a genuinely-removed collection.
+    // Inert on PG. Optional for raw/older callers.
+    declared?: readonly string[],
   ): Promise<void>;
 
   /**

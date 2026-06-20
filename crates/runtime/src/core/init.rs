@@ -731,15 +731,47 @@ function _zsIsWsUpgrade(request) {
     return true;
 }
 
-// Resolve the user's default.fetch once at module init. When present, we
-// export it directly as our `default.fetch` — no wrapper, no extra async
-// frame, no extra try/catch. The kernel's `call_fetch_inner` already
-// turns thrown exceptions into `DispatchResult::ErrorValue` with the
-// correct HTTP status (honoring `err.status`), so a JS-side try/catch
-// here would just add cost. This is the single biggest per-fetch win
-// after dropping the URL parse and __bindRequest.
-const USER_FETCH = (user && user.default && typeof user.default.fetch === "function")
+// Schema-readiness gate (ISS-66 / C1). `DB_INIT_JS` (runtime-entry)
+// stashes the async DDL chain on `globalThis.__zsSchemaReady` but does
+// NOT await it (top-level await would leave module eval pending and
+// 404 every dispatch). The RPC dispatcher already awaits it before the
+// first procedure; the WinterCG fetch / fetchFast entries did NOT — so a
+// `default.fetch` handler doing `env.db.users.insert(...)` raced the
+// cold-boot SQLite migration ("no such table" / mid-rebuild read).
+//
+// Gate fetch + fetchFast at REQUEST time (not module-eval time): await
+// the same promise the dispatcher awaits before invoking the user slot.
+// In production (Postgres) `registerModel` is a no-op and the schema is
+// applied at deploy, so `__zsSchemaReady` resolves ~immediately → the
+// await is near-free on the warm path (a settled promise). A REJECTED
+// chain (failed migration) surfaces as a thrown error from the gate, so
+// the fetch fails loud rather than hanging or reading a half-built DB.
+async function __zsAwaitSchemaReady() {
+    const ready = globalThis.__zsSchemaReady;
+    if (ready && typeof ready.then === "function") {
+        // A rejection here throws out of this await — the caller (the
+        // gated fetch/fetchFast shim) propagates it to the kernel, which
+        // maps it to an HTTP error envelope. Do NOT swallow it: a fetch
+        // after a failed schema-apply must surface a clear error.
+        await ready;
+    }
+}
+
+// Resolve the user's default.fetch once at module init. When present we
+// wrap it in a thin async shim that AWAITS `__zsSchemaReady` first, so
+// the user handler never runs against an un-migrated / mid-rebuild DB.
+// The kernel already awaits a returned Promise and turns thrown
+// exceptions into `DispatchResult::ErrorValue` (honoring `err.status`),
+// so the shim adds one settled-promise await on the warm path and
+// correctly propagates a rejected schema chain on the cold path.
+const __USER_FETCH_RAW = (user && user.default && typeof user.default.fetch === "function")
     ? user.default.fetch
+    : null;
+const USER_FETCH = __USER_FETCH_RAW
+    ? async function gatedFetch(request, env, ctx) {
+          await __zsAwaitSchemaReady();
+          return __USER_FETCH_RAW.call(user.default, request, env, ctx);
+      }
     : null;
 
 // Optional zeroship extension: `user.default.fetchFast(method, url, body, env)`.
@@ -751,8 +783,20 @@ const USER_FETCH = (user && user.default && typeof user.default.fetch === "funct
 // Kernel dispatches to this for non-/__zeroship/v1/<id> traffic when the user
 // module exports it. /__zeroship/v1/<id> requests go through `default.rpc`
 // instead — fetchFast and rpc are siblings, not layered.
-const USER_FETCH_FAST = (user && user.default && typeof user.default.fetchFast === "function")
+const __USER_FETCH_FAST_RAW = (user && user.default && typeof user.default.fetchFast === "function")
     ? user.default.fetchFast
+    : null;
+// Same schema-readiness gate as `fetch` (C1). The shim is async, so it
+// returns a Promise; the kernel's fetchFast path already awaits a
+// promise return and re-classifies the resolved value (null → fall
+// through to the slow `default.fetch`, which is itself gated). A
+// rejected `__zsSchemaReady` throws out of the shim → kernel maps it to
+// an error envelope. Near-free on the warm path (settled promise).
+const USER_FETCH_FAST = __USER_FETCH_FAST_RAW
+    ? async function gatedFetchFast(method, url, body, env) {
+          await __zsAwaitSchemaReady();
+          return __USER_FETCH_FAST_RAW(method, url, body, env);
+      }
     : null;
 
 // Standalone RPC entry — the kernel calls this directly when the URL
@@ -835,7 +879,10 @@ async function fallbackFetch(request) {
     // GET / (or any path) → user.index() convention. The export
     // returns HTML (string or Response). Lets RPC-only apps still
     // render a UI without forcing creators to handle URL routing.
+    // Gate on schema readiness (C1) — `user.index()` may read `env.db`,
+    // so it must not run before the cold-boot migration resolves.
     if (request.method === "GET" && typeof user.index === "function") {
+        await __zsAwaitSchemaReady();
         try {
             const url = new URL(request.url);
             if (url.pathname === "/" || url.pathname === "") {

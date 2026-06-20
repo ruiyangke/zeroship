@@ -327,7 +327,17 @@ export function devEntry(options: DevEntryOptions): DevEntry {
     return dispatchRpcAsync(name, input, ctx);
   }
 
-  const userFetchHandler = createFetchHandler(loadNormalized);
+  // Gate the dev fetch fall-through on schema readiness (C1). By the
+  // time `createFetchHandler` calls this, it has already awaited
+  // `loadNormalized()` — which runs `maybeRegisterSchema` and populates
+  // the module-local `schemaReady`. So reading it here observes the
+  // freshly-installed chain (or `undefined` for schema-less apps). A
+  // rejected chain rejects here and the handler surfaces a 500.
+  const userFetchHandler = createFetchHandler(loadNormalized, () =>
+    (schemaReady && typeof schemaReady.then === "function")
+      ? (schemaReady as Promise<unknown>).then(() => undefined)
+      : undefined,
+  );
 
   // Dev-tier auth provider — owns the same-origin `/__zeroship/auth/*` endpoints in
   // self-contained dev (no gateway/Hydra). Reads its config from the spawn env

@@ -77,6 +77,11 @@ export interface DbPlatformHandle {
     collection: string,
     schema: unknown,
     indexes?: unknown,
+    // H1 — the FULL declared-collection-name set (`Object.keys(schemas)`).
+    // The dev SQLite drop pass uses it to distinguish a not-yet-registered
+    // sibling (declared → keep) from a genuinely-removed collection (not
+    // declared → drop). Inert on PG. Optional for older callers.
+    declared?: readonly string[],
   ): Promise<void>;
   setMaskPolicy(policy: Record<string, readonly string[]>): Promise<unknown>;
 }
@@ -1003,8 +1008,15 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       collection: string,
       schema: ZeroshipDbSchema,
       indexes?: ZeroshipDbNamedIndex[],
+      declared?: readonly string[],
     ) => Promise<void>;
   };
+
+  // H1 — the FULL set of collection names this app declares. Passed to EVERY
+  // per-collection `registerModel` so the dev SQLite drop pass can tell a
+  // not-yet-registered sibling (declared) from a genuinely-removed collection
+  // (absent here). Computed once; stable across the topo-ordered chain.
+  const declaredCollectionNames: readonly string[] = Object.keys(schemas);
 
   // **P9 PR 3** — capture the *native* `Db.transaction(callback, opts)`
   // method BEFORE the install loop overwrites `env.db.transaction` with
@@ -1081,6 +1093,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
         name,
         dbSchema,
         wireIndexes,
+        declaredCollectionNames,
       );
     });
     (col as unknown as { _setReady(p: Promise<void> | null): void })._setReady(chain);
