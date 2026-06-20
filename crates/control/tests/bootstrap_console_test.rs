@@ -429,8 +429,13 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
         format!("http://{host}"),
         "sector is the explicit console host origin"
     );
-    // The oauth_clients identity row: public PKCE (skip_consent FALSE, never
-    // skip), and the redirect_uris anchor on the console host.
+    // The oauth_clients identity row: public PKCE, and the redirect_uris anchor
+    // on the console host. The console is the platform's OWN first-party app, so
+    // `bootstrap_console` seeds it with `first_party = true`, which sets
+    // `skip_consent = TRUE` — the narrow spec §5.2 exception (a consent prompt
+    // for the platform's own console is meaningless). Only the console gets this;
+    // every creator-app client is seeded `first_party = false`/`skip_consent =
+    // false`. See crates/control/src/{bootstrap_console,app_oauth_client}.rs.
     let oc = control_pg
         .query(
             "SELECT skip_consent, redirect_uris FROM zeroship.oauth_clients WHERE client_id = $1",
@@ -439,7 +444,10 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
         .await
         .expect("query oauth_clients");
     assert_eq!(oc.len(), 1, "oauth_clients identity row exists");
-    assert!(!oc[0].get::<_, bool>("skip_consent"));
+    assert!(
+        oc[0].get::<_, bool>("skip_consent"),
+        "first-party console client is seeded skip_consent = true (§5.2 exception)"
+    );
     let uris: Vec<String> = oc[0].get("redirect_uris");
     // The popup OAuth flow needs BOTH the popup-callback and the full-page
     // callback registered on the console public client (the `@zeroship/auth`
@@ -454,9 +462,9 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     );
     // The Hydra-side client is a public PKCE client (token_endpoint_auth_method
     // none) — asserted via the mock's recorded body.
-    // (The DB skip_consent=false + the oac_ client_id already pin the shape; the
-    // public-PKCE body is produced by the SAME build_client_body the per-app
-    // unit tests pin.)
+    // (The DB skip_consent=true (first-party console) + the oac_ client_id
+    // already pin the shape; the public-PKCE body is produced by the SAME
+    // build_client_body the per-app unit tests pin.)
 
     // (3) RouteEntry surfaces the OAuth fields (gateway route-sync invariant).
     let routes = registry.get_routes().await.expect("get_routes");
