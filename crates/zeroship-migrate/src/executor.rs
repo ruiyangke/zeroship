@@ -38,10 +38,28 @@ use compio_postgres::Client;
 use pg_query::protobuf::node::Node as NodeEnum;
 
 use crate::approval::Approval;
+use crate::backend::{MigrationBackend, PostgresBackend, SessionSnapshot};
 use crate::db::ExecutorConfig;
 use crate::guard::{GuardError, SqlGuard};
 use crate::journal::{self, AppliedEntry, JournalError, Phase};
 use crate::migration::{Migration, MigrationId};
+
+/// The Postgres leaf operations the [`PostgresBackend`](crate::backend::PostgresBackend)
+/// drives the [`MigrationBackend`](crate::backend::MigrationBackend) trait
+/// through. These are the EXACT pre-seam executor functions — the dialect-coupled
+/// session/lock/txn/up/down/parse/precondition leaves — re-exported under one
+/// path so the backend impl can name them without exposing them crate-wide as
+/// loose free functions. They stay defined inline in this module (so their rich
+/// doc-comments and the surrounding apply/rollback context are unchanged); this
+/// `pub(crate) mod pg` is a thin façade, not a relocation.
+pub(crate) mod pg {
+    pub(crate) use super::{
+        acquire_project_lock, apply_non_transactional, apply_transactional,
+        configure_session_non_txn, evaluate_preconditions, release_project_lock,
+        restore_session, rollback_one_transactional, snapshot_session,
+        validate_non_txn_idempotent,
+    };
+}
 
 /// Whether an apply sub-batch must acquire/release the project advisory lock
 /// itself, or whether an OUTER caller already holds it for the whole operation
@@ -319,7 +337,7 @@ pub enum ApplyError {
 /// since each apply still operates strictly within its own meta + project
 /// schema. Acceptable for v1. Revisit at scale with a 64-bit key
 /// (`pg_advisory_lock(int4, int4)` from a SHA-256 prefix, or two keys).
-async fn acquire_project_lock(conn: &Client, project_id: &str) -> Result<(), ApplyError> {
+pub(crate) async fn acquire_project_lock(conn: &Client, project_id: &str) -> Result<(), ApplyError> {
     conn.execute(
         "SELECT pg_advisory_lock(hashtext($1)::bigint)",
         &[&project_id],
@@ -328,7 +346,7 @@ async fn acquire_project_lock(conn: &Client, project_id: &str) -> Result<(), App
     Ok(())
 }
 
-async fn release_project_lock(conn: &Client, project_id: &str) -> Result<(), ApplyError> {
+pub(crate) async fn release_project_lock(conn: &Client, project_id: &str) -> Result<(), ApplyError> {
     conn.execute(
         "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
         &[&project_id],
@@ -337,18 +355,10 @@ async fn release_project_lock(conn: &Client, project_id: &str) -> Result<(), App
     Ok(())
 }
 
-/// The session GUCs the executor must restore on exit so its settings never
-/// leak onto the pooled/long-lived connection after `apply` returns (H2).
-struct SessionSnapshot {
-    statement_timeout: String,
-    lock_timeout: String,
-    search_path: String,
-}
-
 /// Read the session GUCs we are about to override, so they can be restored when
 /// `apply` finishes. Uses `current_setting(name)` (text form, exactly what `SET`
 /// round-trips).
-async fn snapshot_session(conn: &Client) -> Result<SessionSnapshot, ApplyError> {
+pub(crate) async fn snapshot_session(conn: &Client) -> Result<SessionSnapshot, ApplyError> {
     let row = conn
         .query_one(
             "SELECT current_setting('statement_timeout') AS st, \
@@ -368,7 +378,7 @@ async fn snapshot_session(conn: &Client) -> Result<SessionSnapshot, ApplyError> 
 /// value, false)` so the *value* is a bound literal, not interpolated SQL
 /// (the snapshot strings are server-provided, but we keep the parameterized
 /// path regardless).
-async fn restore_session(conn: &Client, snap: &SessionSnapshot) -> Result<(), ApplyError> {
+pub(crate) async fn restore_session(conn: &Client, snap: &SessionSnapshot) -> Result<(), ApplyError> {
     // RESET ROLE first: belt-and-suspenders behind `apply`'s unconditional
     // `RESET ROLE` (L1). The non-txn path's `SET ROLE` mutates the session, so
     // drop back to the admin role before anything else, ensuring the executor's
@@ -441,7 +451,7 @@ fn set_local_role_sql(cfg: &ExecutorConfig) -> Option<String> {
 /// in [`apply_non_transactional`] (C1 fix). `search_path` is the project schema
 /// **only** — the meta schema is off the migration-time path so an unqualified
 /// name in the `up` can never resolve to the journal.
-async fn configure_session_non_txn(
+pub(crate) async fn configure_session_non_txn(
     conn: &Client,
     cfg: &ExecutorConfig,
     m: &Migration,
@@ -486,7 +496,7 @@ async fn configure_session_non_txn(
 /// rather than a bare statement.
 ///
 /// A violation is rejected with [`ApplyError::NonIdempotentNonTxn`].
-fn validate_non_txn_idempotent(m: &Migration) -> Result<(), ApplyError> {
+pub(crate) fn validate_non_txn_idempotent(m: &Migration) -> Result<(), ApplyError> {
     let parsed = pg_query::parse(&m.up).map_err(|e| ApplyError::NonIdempotentNonTxn {
         version: m.version.as_str().to_string(),
         reason: format!("could not parse `up` SQL: {e}"),
@@ -645,36 +655,53 @@ pub async fn apply_with_lock(
     {
         return Err(ApplyError::ApprovalRequired);
     }
+    // Drive the whole apply through the dialect seam. P1: Postgres is the only
+    // backend; constructing it here keeps `apply`/`apply_with_lock`'s public
+    // `&Client` signature intact while the apply body below is generic over
+    // `MigrationBackend` (no `compio_postgres::Client` reaches `apply_locked`).
+    let backend = PostgresBackend::new(conn);
+    apply_with_lock_backend(&backend, cfg, migrations, applied_by, lock_mode).await
+}
+
+/// The lock + session-hygiene shell around [`apply_locked`], generic over the
+/// dialect seam. Both [`apply_with_lock`] (PG) and any future SQLite entry point
+/// construct their backend and call this; the body is byte-identical to the
+/// pre-seam PG flow, now routed through [`MigrationBackend`].
+async fn apply_with_lock_backend<B: MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+    applied_by: &str,
+    lock_mode: LockMode,
+) -> Result<ApplyOutcome, ApplyError> {
     // H10: acquire the project advisory lock only when WE own it. Under
     // `AlreadyHeld` the outer `apply_declarative` already holds it for the whole
     // declarative deploy — re-acquiring here (and releasing below) would FREE the
     // lock between sub-batches (PG advisory locks are session-re-entrant, so a
     // nested unlock would pop one level), letting a concurrent deploy interleave.
     if lock_mode == LockMode::Acquire {
-        acquire_project_lock(conn, &cfg.project_id).await?;
+        backend.acquire_project_lock(&cfg.project_id).await?;
     }
     // Capture the session GUCs we will override so we can restore them on exit
     // — the executor's search_path / statement_timeout / lock_timeout must NOT
     // leak onto the (pooled / long-lived) connection after apply (H2). This runs
     // regardless of lock mode: every sub-batch is responsible for its own session
     // hygiene even when the lock is owned outside it.
-    let snapshot = snapshot_session(conn).await;
-    let result = apply_locked(conn, cfg, migrations, applied_by).await;
+    let snapshot = backend.snapshot_session().await;
+    let result = apply_locked(backend, cfg, migrations, applied_by).await;
     // L1: RESET ROLE UNCONDITIONALLY — regardless of whether `snapshot_session`
     // succeeded. The non-txn path's `SET ROLE` mutates the session; if the
     // snapshot had failed we would otherwise skip `restore_session` entirely and
     // leak the migrator role onto the pooled/long-lived connection. So drop the
     // role back to admin on EVERY exit path first, then restore the GUCs if we
     // have a snapshot. (Harmless no-op when no `SET ROLE` ran.)
-    if let Err(e) = conn.batch_execute("RESET ROLE").await {
-        tracing::warn!(error = %e, "zeroship-migrate: failed to RESET ROLE after apply (L1)");
-    }
+    backend.reset_role_best_effort().await;
     // Restore the original session settings (best-effort; logged on failure)
     // before releasing the lock. The txn path uses SET LOCAL so only the non-txn
     // path actually mutates the session, but restoring unconditionally is cheap
     // and keeps the guarantee total.
     if let Ok(snap) = &snapshot {
-        if let Err(e) = restore_session(conn, snap).await {
+        if let Err(e) = backend.restore_session(snap).await {
             tracing::warn!(error = %e, "zeroship-migrate: failed to restore session GUCs after apply");
         }
     }
@@ -684,7 +711,7 @@ pub async fn apply_with_lock(
     if lock_mode == LockMode::AlreadyHeld {
         return result;
     }
-    let unlock = release_project_lock(conn, &cfg.project_id).await;
+    let unlock = backend.release_project_lock(&cfg.project_id).await;
     // Surface the apply error first if there was one; otherwise surface any
     // unlock failure. (The lock auto-releases on session end regardless.)
     match result {
@@ -795,13 +822,19 @@ fn check_repeatable_wellformed(migrations: &[Migration]) -> Result<(), ApplyErro
 }
 
 /// The apply body, run while holding the project advisory lock.
-async fn apply_locked(
-    conn: &Client,
+///
+/// Generic over the dialect seam ([`MigrationBackend`]): the orchestration here
+/// — partition, drift/tamper gate, squash/expand gates, `order_pending`, the
+/// FIRST/SECOND pass, the repeatable phase — is dialect-agnostic; every
+/// dialect-coupled leaf (journal reads, the checksum-drift report, the confined
+/// `up`, the non-txn idempotency parse) goes through `backend`.
+async fn apply_locked<B: MigrationBackend>(
+    backend: &B,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
     applied_by: &str,
 ) -> Result<ApplyOutcome, ApplyError> {
-    journal::ensure_journal(conn, cfg).await?;
+    backend.ensure_journal(cfg).await?;
 
     // v3 Plan E (re-critic) — PRE-FLIGHT over the FULL supplied set, before the
     // partition or any apply, rejecting malformed repeatable/versioned combinations
@@ -840,7 +873,7 @@ async fn apply_locked(
     let migrations: &[Migration] = &versioned_owned;
 
     // Index the journal by version for the drift check + pending computation.
-    let journal_rows: Vec<AppliedEntry> = journal::applied(conn, cfg).await?;
+    let journal_rows: Vec<AppliedEntry> = backend.applied(cfg).await?;
     let mut completed: HashMap<&str, &AppliedEntry> = HashMap::new();
     let mut started: HashMap<&str, &AppliedEntry> = HashMap::new();
     for e in &journal_rows {
@@ -863,7 +896,8 @@ async fn apply_locked(
     // Pass the FULL set (`all_migrations`): the drift check exempts repeatables
     // (their changed checksum is the re-run signal, not tamper) and must recognize
     // their journaled versions so they are NOT reported as orphans.
-    let drift_report = crate::drift::check_checksum_drift(conn, cfg, all_migrations)
+    let drift_report = backend
+        .check_checksum_drift(cfg, all_migrations)
         .await
         .map_err(|e| match e {
             crate::drift::DriftError::Db(db) => ApplyError::Db(db),
@@ -901,7 +935,7 @@ async fn apply_locked(
     // `S` itself is never in this set (it runs / is already applied). Computed
     // BEFORE the all-or-none gate so the gate can classify each squash's superseded
     // set against the SAME satisfied set the pending computation uses.
-    let journal_superseded = journal::superseded_versions(conn, cfg).await?;
+    let journal_superseded = backend.superseded_versions(cfg).await?;
     let superseded_owned = compute_superseded(migrations, &journal_superseded);
 
     // SQUASH ALL-OR-NONE GATE (Plan 9 B) — a pending squash may run its `up` only
@@ -953,8 +987,10 @@ async fn apply_locked(
         })?;
         // C1/C2 — a non-transactional `up` must be idempotent (re-runnable by
         // crash recovery). Reject the non-idempotent form with a clear error.
+        // Behind the seam: PG parses with `pg_query`; SQLite rejects
+        // `transaction:false` at the dialect boundary (design §2.3/L3).
         if !m.flags.transactional {
-            validate_non_txn_idempotent(m)?;
+            backend.validate_non_txn(m)?;
         }
     }
 
@@ -972,14 +1008,14 @@ async fn apply_locked(
 
     // SECOND PASS — execute (precondition gate + apply). All static checks have
     // already passed.
-    execute_pending(conn, cfg, &pending, &started, applied_by, &mut outcome).await?;
+    execute_pending(backend, cfg, &pending, &started, applied_by, &mut outcome).await?;
 
     // v3 Plan E — REPEATABLE PHASE. Runs AFTER every versioned pending migration
     // has applied (the versioned schema the repeatables' views/functions reference
     // is now present). Each repeatable re-applies iff its checksum differs from the
     // latest journaled `completed` checksum for its identity (or it was never
     // applied); an unchanged checksum is skipped.
-    apply_repeatables(conn, cfg, &repeatables, applied_by, &mut outcome).await?;
+    apply_repeatables(backend, cfg, &repeatables, applied_by, &mut outcome).await?;
 
     Ok(outcome)
 }
@@ -1000,8 +1036,8 @@ async fn apply_locked(
 /// # Errors
 /// Propagates [`ApplyError::PreconditionFailed`] (Halt/inevaluable) and any
 /// apply-path error ([`ApplyError::MigrationFailed`], journal/db errors).
-async fn execute_pending(
-    conn: &Client,
+async fn execute_pending<B: MigrationBackend>(
+    backend: &B,
     cfg: &ExecutorConfig,
     pending: &[&Migration],
     started: &HashMap<&str, &AppliedEntry>,
@@ -1033,7 +1069,7 @@ async fn execute_pending(
         // evaluation (we already know this won't run).
         let skip = dep_skipped
             || matches!(
-                evaluate_preconditions(conn, cfg, m).await?,
+                backend.evaluate_preconditions(cfg, m).await?,
                 PreconditionVerdict::Skip
             );
         if skip {
@@ -1057,14 +1093,17 @@ async fn execute_pending(
         let kind = if sups.is_empty() { "apply" } else { "squash" };
 
         if m.flags.transactional {
-            apply_transactional(conn, cfg, m, applied_by, &sups, kind).await?;
+            backend
+                .apply_up_transactional(cfg, m, applied_by, &sups, kind)
+                .await?;
         } else {
             // Mandatory timeouts + pinned search_path on the session (the non-txn
             // path has no transaction to SET LOCAL within). Restored on exit by
             // `apply` so nothing leaks (H2). Per-migration timeout applied (H3).
-            configure_session_non_txn(conn, cfg, m).await?;
-            let recovered =
-                apply_non_transactional(conn, cfg, m, applied_by, had_inflight, &sups).await?;
+            backend.configure_session_non_txn(cfg, m).await?;
+            let recovered = backend
+                .apply_up_non_transactional(cfg, m, applied_by, had_inflight, &sups)
+                .await?;
             if recovered {
                 outcome.recovered.push(version.to_string());
             }
@@ -1106,8 +1145,8 @@ async fn execute_pending(
 /// - [`ApplyError::PreconditionFailed`] — a repeatable's precondition was unmet
 ///   (Halt) or inevaluable.
 /// - [`ApplyError::MigrationFailed`] / journal / db errors from the apply itself.
-async fn apply_repeatables(
-    conn: &Client,
+async fn apply_repeatables<B: MigrationBackend>(
+    backend: &B,
     cfg: &ExecutorConfig,
     repeatables: &[&Migration],
     applied_by: &str,
@@ -1118,7 +1157,7 @@ async fn apply_repeatables(
     }
 
     // The latest journaled `completed` checksum per identity — the re-run oracle.
-    let latest = journal::latest_completed_checksums(conn, cfg).await?;
+    let latest = backend.latest_completed_checksums(cfg).await?;
 
     // Order repeatables among themselves by `depends_on` topo (version-tiebroken),
     // honoring deps on versioned migrations as pre-satisfied (they already ran).
@@ -1150,7 +1189,7 @@ async fn apply_repeatables(
         // unmet Skip leaves it unchanged this deploy (re-evaluated next time); an
         // unmet/inevaluable Halt fails closed.
         if matches!(
-            evaluate_preconditions(conn, cfg, m).await?,
+            backend.evaluate_preconditions(cfg, m).await?,
             PreconditionVerdict::Skip
         ) {
             outcome.skipped.push(version.to_string());
@@ -1164,7 +1203,9 @@ async fn apply_repeatables(
         // tamper anchor, so the drift exemption can distinguish a genuine repeatable
         // re-run from a flipped once-only, and `latest_completed_checksums` reads only
         // `kind='repeatable'` rows for the re-run oracle.
-        apply_transactional(conn, cfg, m, applied_by, &[], "repeatable").await?;
+        backend
+            .apply_up_transactional(cfg, m, applied_by, &[], "repeatable")
+            .await?;
         outcome.applied.push(version.to_string());
     }
 
@@ -1244,7 +1285,14 @@ fn order_repeatables<'a>(
 }
 
 /// The verdict of evaluating a migration's preconditions (v3 Plan D).
-enum PreconditionVerdict {
+///
+/// `pub` because it is the return type of
+/// [`MigrationBackend::evaluate_preconditions`](crate::backend::MigrationBackend::evaluate_preconditions)
+/// — the preconditions seam rides through the (public) trait so the generic
+/// apply body never holds a concrete connection. The variants carry no data; a
+/// consumer can only match on the apply/skip decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreconditionVerdict {
     /// Every precondition held — apply the migration normally.
     AllMet,
     /// An `OnUnmet::Skip` precondition was unmet — skip this migration this run
@@ -1272,7 +1320,7 @@ enum PreconditionVerdict {
 /// `Halt` is evaluated first-failure-wins: the first unmet/inevaluable Halt check
 /// stops evaluation and aborts. A `Skip` verdict is returned only when no Halt
 /// check failed and at least one `Skip` check is unmet.
-async fn evaluate_preconditions(
+pub(crate) async fn evaluate_preconditions(
     conn: &Client,
     cfg: &ExecutorConfig,
     m: &Migration,
@@ -1805,7 +1853,7 @@ fn order_rollback<'a>(
 /// caller passes it explicitly — the journaled kind is the tamper anchor, so it is
 /// never inferred from anything the migration set supplies at apply time. A debug
 /// assertion ties `'squash'` ⇔ non-empty `supersedes`.
-async fn apply_transactional(
+pub(crate) async fn apply_transactional(
     conn: &Client,
     cfg: &ExecutorConfig,
     m: &Migration,
@@ -1953,7 +2001,7 @@ async fn insert_supersedes_edges(
 /// marker, plus the idempotent recovery path.
 ///
 /// Returns `true` if this was a recovery (a prior `started` marker existed).
-async fn apply_non_transactional(
+pub(crate) async fn apply_non_transactional(
     conn: &Client,
     cfg: &ExecutorConfig,
     m: &Migration,
@@ -2474,35 +2522,66 @@ pub async fn rollback(
     if approval != Approval::Approved {
         return Err(RollbackError::ApprovalRequired);
     }
-    // Acquire the project advisory lock directly (raw SQL, so the error type is
-    // compio_postgres::Error → RollbackError::Db) — serializes against concurrent
-    // apply/rollback for the same project, exactly like `apply`.
-    conn.execute(
-        "SELECT pg_advisory_lock(hashtext($1)::bigint)",
-        &[&cfg.project_id],
-    )
-    .await?;
-    let snapshot = snapshot_session(conn).await.ok();
-    let result = rollback_locked(conn, cfg, migrations, request, applied_by).await;
+    // Drive rollback through the dialect seam (P1: Postgres only). Keeps the
+    // public `&Client` signature; the body below is generic over
+    // [`MigrationBackend`].
+    let backend = PostgresBackend::new(conn);
+    rollback_with_backend(&backend, cfg, migrations, request, applied_by).await
+}
+
+/// The lock + session-hygiene shell around [`rollback_locked`], generic over the
+/// dialect seam. Byte-identical to the pre-seam PG rollback flow, now routed
+/// through [`MigrationBackend`].
+async fn rollback_with_backend<B: MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+    request: RollbackRequest,
+    applied_by: &str,
+) -> Result<RollbackOutcome, RollbackError> {
+    // Acquire the project advisory lock — serializes against concurrent
+    // apply/rollback for the same project, exactly like `apply`. The seam maps a
+    // lock failure to `ApplyError::Db`; preserve rollback's `RollbackError::Db`
+    // surface by converting.
+    backend
+        .acquire_project_lock(&cfg.project_id)
+        .await
+        .map_err(rollback_err_from_apply)?;
+    let snapshot = backend.snapshot_session().await.ok();
+    let result = rollback_locked(backend, cfg, migrations, request, applied_by).await;
     // Mirror apply's exit discipline: unconditional RESET ROLE, then restore GUCs,
     // then release the lock — so the migrator role / executor GUCs never leak.
-    if let Err(e) = conn.batch_execute("RESET ROLE").await {
-        tracing::warn!(error = %e, "zeroship-migrate: failed to RESET ROLE after rollback (L1)");
-    }
+    backend.reset_role_best_effort().await;
     if let Some(snap) = &snapshot {
-        if let Err(e) = restore_session(conn, snap).await {
+        if let Err(e) = backend.restore_session(snap).await {
             tracing::warn!(error = %e, "zeroship-migrate: failed to restore session GUCs after rollback");
         }
     }
-    let unlock = conn
-        .execute(
-            "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
-            &[&cfg.project_id],
-        )
-        .await;
+    let unlock = backend
+        .release_project_lock(&cfg.project_id)
+        .await
+        .map_err(rollback_err_from_apply);
     match result {
-        Ok(o) => unlock.map(|_| o).map_err(RollbackError::Db),
+        Ok(o) => unlock.map(|()| o),
         Err(e) => Err(e),
+    }
+}
+
+/// Map a seam [`ApplyError`] from the lock primitives back to [`RollbackError`].
+/// The lock methods are shared across apply + rollback and return `ApplyError`;
+/// the pre-seam rollback raised `RollbackError::Db` on a lock failure, so we
+/// re-thread the inner `compio_postgres::Error` to preserve that exact surface.
+fn rollback_err_from_apply(e: ApplyError) -> RollbackError {
+    match e {
+        ApplyError::Db(db) => RollbackError::Db(db),
+        ApplyError::Journal(j) => RollbackError::Journal(j),
+        // The project-lock seam primitives (`acquire`/`release_project_lock`) only
+        // ever fail with `ApplyError::Db` (a `SELECT pg_advisory_(un)lock` driver
+        // error). Any other variant from those calls is structurally impossible;
+        // surface it loudly rather than silently mis-mapping it.
+        other => unreachable!(
+            "project-lock primitives only return ApplyError::Db, got: {other:?}"
+        ),
     }
 }
 
@@ -2755,20 +2834,22 @@ fn first_dependency_in_set(
     None
 }
 
-/// The rollback body, run while holding the project advisory lock.
-async fn rollback_locked(
-    conn: &Client,
+/// The rollback body, run while holding the project advisory lock. Generic over
+/// the dialect seam: selection + reverse-topo ordering + pre-flight are pure; the
+/// journal reads and each confined `down` go through `backend`.
+async fn rollback_locked<B: MigrationBackend>(
+    backend: &B,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
     request: RollbackRequest,
     applied_by: &str,
 ) -> Result<RollbackOutcome, RollbackError> {
     let RollbackRequest { target, options: opts } = request;
-    journal::ensure_journal(conn, cfg).await?;
+    backend.ensure_journal(cfg).await?;
 
     // Net-applied versions (latest event is `completed`), with their recorded
     // checksums, in ascending version order.
-    let journal_rows = journal::applied(conn, cfg).await?;
+    let journal_rows = backend.applied(cfg).await?;
     let mut net_applied: Vec<&AppliedEntry> = journal_rows
         .iter()
         .filter(|e| e.phase == Phase::Completed)
@@ -2797,7 +2878,7 @@ async fn rollback_locked(
                     .push(m.version.as_str().to_string());
             }
             RollbackStep::Down(m) => {
-                rollback_one_transactional(conn, cfg, m, applied_by).await?;
+                backend.rollback_one_transactional(cfg, m, applied_by).await?;
                 outcome.rolled_back.push(m.version.as_str().to_string());
             }
         }
@@ -2812,7 +2893,7 @@ async fn rollback_locked(
 /// crash leaves either both (rolled back + recorded) or neither. The `down` runs
 /// under the migrator role; the journal append runs as admin (the migrator has no
 /// meta grant — C1), exactly mirroring [`apply_transactional`].
-async fn rollback_one_transactional(
+pub(crate) async fn rollback_one_transactional(
     conn: &Client,
     cfg: &ExecutorConfig,
     m: &Migration,

@@ -60,6 +60,7 @@
 pub mod analyze;
 pub mod approval;
 pub mod author;
+pub mod backend;
 pub mod backfill;
 pub mod baseline;
 pub mod classify;
@@ -87,6 +88,7 @@ pub mod submit;
 
 pub use analyze::{analyze, analyze_migration, Advisory, Severity};
 pub use approval::Approval;
+pub use backend::{MigrationBackend, PostgresBackend, SessionSnapshot};
 pub use baseline::{baseline, BaselineError, BaselineOutcome};
 pub use backfill::{
     backfill_progress, ensure_backfill_progress, list_backfills, run_backfill,
@@ -117,8 +119,8 @@ pub use drift::{
     OrphanJournal, SchemaSnapshot, StructuralDrift, TableSnapshot,
 };
 pub use executor::{
-    apply, rollback, ApplyError, ApplyOutcome, RollbackError, RollbackOptions, RollbackOutcome,
-    RollbackRequest, RollbackTarget,
+    apply, rollback, ApplyError, ApplyOutcome, PreconditionVerdict, RollbackError, RollbackOptions,
+    RollbackOutcome, RollbackRequest, RollbackTarget,
 };
 pub use guard::{
     flags_for, GuardConfig, GuardError, GuardReport, SchemaScope, SqlGuard, TrustProfile,
