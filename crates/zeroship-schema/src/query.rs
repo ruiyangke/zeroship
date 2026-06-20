@@ -2241,6 +2241,20 @@ fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         // `t.bigInteger()` exists for callers who need exact 64-bit
         // ints.
         Some("number") => "DOUBLE PRECISION",
+        // M1 — `int`/`integer` are first-class integer tokens (the SQLite arm of
+        // `def_to_column_type_for_dialect` already maps them to `INTEGER`; the dev
+        // `registerModel` JSON declares `{ type: "int" }`). Before this arm the PG
+        // map degraded them to the `_ => TEXT` fallback, so the engine's
+        // dialect-agnostic `desired_snapshot` (which spells types via the PG map)
+        // recorded `integer` while this emitter would have written TEXT — a
+        // permanent drift. Mapping to `INTEGER` here makes the snapshot and the
+        // emitter agree on BOTH dialects. PG stays byte-identical for every
+        // existing column: the SDK's `t.*` surface never emits a bare `int` on PG
+        // (`t.number()` → DOUBLE PRECISION, `t.bigInteger()` → BIGINT), so no
+        // previously-emitted PG column changes type. The PG type *names*
+        // (`bigint`/`int4`/`int8`) are deliberately NOT accepted — they are not DSL
+        // tokens and stay on the TEXT fallback so they remain typo-rejected.
+        Some("int") | Some("integer") => "INTEGER",
         Some("boolean") => "BOOLEAN",
         Some("date") => "TIMESTAMPTZ",
         // D3 — `t.calendarDate()` is a `YYYY-MM-DD` value with no time
