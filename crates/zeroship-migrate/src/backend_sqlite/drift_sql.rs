@@ -45,6 +45,19 @@ use crate::drift::{
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
 
+/// One member column of a composite foreign key, as `PRAGMA foreign_key_list`
+/// reports it: `(seq, from_column, to_column)` — `seq` orders the columns within
+/// the FK, `from`/`to` are the local and referenced column names.
+type ForeignKeyColumn = (i64, String, String);
+
+/// Foreign keys grouped by their `PRAGMA foreign_key_list` `id` (a composite FK
+/// spans several rows sharing one `id`). The value is the referenced table name
+/// plus that FK's ordered member columns. Named to keep
+/// [`introspect_foreign_keys`] free of the `clippy::type_complexity` trip the
+/// inline `BTreeMap<i64, (String, Vec<(i64, String, String)>)>` caused (no
+/// behaviour change).
+type ForeignKeysById = BTreeMap<i64, (String, Vec<ForeignKeyColumn>)>;
+
 /// Map a SQLite actor error onto the dialect-neutral `Backend` arm of [`DriftError`].
 fn drift_err(e: SqliteActorError) -> DriftError {
     DriftError::Backend(e.to_string())
@@ -322,7 +335,7 @@ async fn introspect_foreign_keys(
 
     // Group by FK id (a composite FK spans several rows). Preserve column order by
     // `seq`.
-    let mut by_id: BTreeMap<i64, (String, Vec<(i64, String, String)>)> = BTreeMap::new();
+    let mut by_id: ForeignKeysById = BTreeMap::new();
     for r in &rows {
         // 0=id 1=seq 2=table 3=from 4=to 5=on_update 6=on_delete 7=match
         let id: i64 = r
