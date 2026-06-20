@@ -80,6 +80,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::analyze::Advisory;
 use crate::approval::Approval;
+use crate::backend::PostgresBackend;
 use crate::db::{connect_with_handle, ConnectError, ExecutorConfig};
 use crate::declarative::{DeclarativeAuthor, DesiredSchema};
 use crate::drift::{diff_snapshots, snapshot_schema, DriftError, SchemaSnapshot, StructuralDrift};
@@ -818,7 +819,13 @@ async fn seed_shadow_from_live(
     let engine = MigrationEngine::new();
     let plan = engine.plan(&diff.migrations, &guard_cfg);
     engine
-        .apply(&plan, Approval::Approved, shadow, cfg, applied_by)
+        .apply(
+            &plan,
+            Approval::Approved,
+            &PostgresBackend::new(shadow),
+            cfg,
+            applied_by,
+        )
         .await?;
     Ok(())
 }
@@ -974,7 +981,13 @@ async fn dry_run_declarative_body(
     // as `pending_contract`. If we snapshot here, `<from>` is still present, so a
     // CORRECT rename would false-positive on drift (`desired` lacks `<from>`).
     let pending_contract = match engine
-        .apply_declarative(plan, Approval::Approved, &shadow, cfg, applied_by)
+        .apply_declarative(
+            plan,
+            Approval::Approved,
+            &PostgresBackend::new(&shadow),
+            cfg,
+            applied_by,
+        )
         .await
     {
         Ok(outcome) => {
@@ -1013,7 +1026,13 @@ async fn dry_run_declarative_body(
         let guard_cfg = GuardConfig::confined(cfg.project_schema.clone());
         let contract_plan = engine.plan(&pending_contract, &guard_cfg);
         match engine
-            .apply(&contract_plan, Approval::Approved, &shadow, cfg, applied_by)
+            .apply(
+                &contract_plan,
+                Approval::Approved,
+                &PostgresBackend::new(&shadow),
+                cfg,
+                applied_by,
+            )
             .await
         {
             Ok(outcome) => {

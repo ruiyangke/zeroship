@@ -1868,14 +1868,18 @@ pub struct DeclarativePlan {
 /// flags. The differ produces these for the existing-table ops SQLite cannot ALTER
 /// natively.
 ///
-/// NOTE (C1): there is NO SQLite engine apply path / approval gate yet.
-/// [`plan_declarative`](crate::engine::MigrationEngine::plan_declarative) FAILS
-/// CLOSED (`SqliteRebuildRequired`) when a diff yields rebuilds rather than dropping
-/// them, because the PG-typed [`MigrationEngine`](crate::engine::MigrationEngine)
-/// cannot apply a SQLite rebuild. The only way to apply one today is the direct,
-/// ungated [`SqliteBackend::rebuild_one`](crate::SqliteBackend::rebuild_one) seam
-/// (tests); a caller invoking it MUST gate approval itself (a rebuild on a populated
-/// table is DESTRUCTIVE). Wiring the gated SQLite apply path is the next phase (P6).
+/// NOTE (P6a): the engine now DRIVES these rebuilds.
+/// [`plan_declarative`](crate::engine::MigrationEngine::plan_declarative) CARRIES the
+/// rebuilds into the [`DeclarativeDeployPlan`](crate::engine::DeclarativeDeployPlan),
+/// and the now-generic
+/// [`apply_declarative`](crate::engine::MigrationEngine::apply_declarative) drives
+/// each through
+/// [`MigrationBackend::rebuild_one`](crate::backend::MigrationBackend::rebuild_one)
+/// under the destructive/approval gate (the journal migration is `destructive +
+/// requires_approval`, so an un-approved rebuild is refused before any DDL). The old
+/// `plan_declarative` fail-close (`SqliteRebuildRequired`) is gone. The direct,
+/// executor-internal [`SqliteBackend::rebuild_one`](crate::SqliteBackend::rebuild_one)
+/// seam remains for tests; the engine path is the gated production drive.
 #[derive(Debug, Clone)]
 pub struct SqliteRebuild {
     /// The journal migration: its `version` is the rebuild's identity, its

@@ -26,6 +26,7 @@
 use compio_postgres::Client;
 
 pub use crate::approval::Approval;
+use crate::backend::MigrationBackend;
 use crate::db::ExecutorConfig;
 use crate::executor::{
     self, ApplyError, ApplyOutcome, LockMode, RollbackError, RollbackOutcome, RollbackRequest,
@@ -33,6 +34,7 @@ use crate::executor::{
 use crate::guard::{GuardConfig, GuardError, GuardReport, SqlGuard};
 use crate::manifest::{compute_manifest, verify_manifest, ManifestError, ManifestHash};
 use crate::migration::Migration;
+use zeroship_schema::query::SqlDialect;
 
 /// One linted migration in a [`MigrationPlan`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +139,17 @@ impl MigrationEngine {
     /// if any passing item's report flags data loss.
     #[must_use]
     pub fn plan(&self, migrations: &[Migration], cfg: &GuardConfig) -> MigrationPlan {
+        // P6a / design §2.5.3 — the Confined SQLite path is **descriptor-diff-only**:
+        // `libpg_query` (the line-1 string guard) cannot parse SQLite, so a SQLite
+        // `up` is NEVER routed through `SqlGuard::check` (which fail-closes on any
+        // SQLite string). The SQLite line-1 vet is the descriptor emitter (author
+        // boundary) and the line-2 defense is the backend authorizer the executor
+        // runs at apply. So on the SQLite dialect we lint from the migration's OWN
+        // author flags (destructive / requires_approval) and an EMPTY guard report —
+        // no string check, no denial path. The PG branch below is byte-identical.
+        if cfg.dialect() == SqlDialect::Sqlite {
+            return Self::plan_sqlite_trusted(migrations);
+        }
         let guard = SqlGuard::new(cfg.clone());
         let mut items = Vec::new();
         let mut denied = Vec::new();
@@ -170,6 +183,37 @@ impl MigrationEngine {
             destructive,
             requires_approval,
             denied,
+        }
+    }
+
+    /// The SQLite lint path (design §2.5.3): descriptor-diff-generated DDL is trusted
+    /// by construction (validated at the author boundary, enforced at apply by the
+    /// backend authorizer). `libpg_query` cannot parse SQLite, so there is NO string
+    /// guard and NO denial path here — every migration is a planned item with an
+    /// EMPTY [`GuardReport`], and the plan's destructive / approval flags come purely
+    /// from the migrations' OWN author flags (the SQLite differ stamps a rebuild's
+    /// journal migration `destructive + requires_approval`).
+    fn plan_sqlite_trusted(migrations: &[Migration]) -> MigrationPlan {
+        let mut items = Vec::new();
+        let mut destructive = false;
+        let mut requires_approval = false;
+        for m in migrations {
+            destructive |= m.flags.destructive;
+            requires_approval |= m.flags.destructive || m.flags.requires_approval;
+            items.push(PlannedMigration {
+                migration: m.clone(),
+                report: GuardReport {
+                    classes: Vec::new(),
+                    destructive: m.flags.destructive,
+                    advisories: Vec::new(),
+                },
+            });
+        }
+        MigrationPlan {
+            items,
+            destructive,
+            requires_approval,
+            denied: Vec::new(),
         }
     }
 
@@ -230,33 +274,20 @@ impl MigrationEngine {
         cfg: &GuardConfig,
     ) -> Result<DeclarativeDeployPlan, crate::declarative::DeclarativeError> {
         let diff = author.diff(desired, live, live_ownership, hints)?;
-        // C1 — FAIL CLOSED on SQLite rebuilds. `plan_declarative` builds the plan
-        // from `diff.migrations` + `diff.renames` only; it does NOT carry
-        // `diff.rebuilds` (the SQLite 12-step table rebuilds), and `MigrationEngine`
-        // is PG-typed (it drives `apply` over a PG `Client`). If a SQLite declarative
-        // deploy needs a rebuild and we silently dropped it, the deploy would report
-        // SUCCESS while the rebuild never ran — a silent data-shape no-op. There is
-        // no SQLite engine apply path / approval gate yet (the
-        // `SqliteBackend::rebuild_one` seam is executor-internal and ungated); wiring
-        // it is the next phase (P6). Until then, refuse rather than drop.
-        if !diff.rebuilds.is_empty() {
-            let first = &diff.rebuilds[0];
-            return Err(crate::declarative::DeclarativeError::SqliteRebuildRequired {
-                table: first.spec.table.clone(),
-                op: format!(
-                    "{} SQLite table rebuild(s) required (e.g. '{}': {}); no SQLite engine \
-                     apply path / approval gate is wired yet (P6). Refusing to drop them \
-                     silently",
-                    diff.rebuilds.len(),
-                    first.spec.table,
-                    first.spec.reason,
-                ),
-            });
-        }
+        // P6a — CARRY `diff.rebuilds` into the plan (the fail-close is gone). The
+        // SQLite 12-step table rebuilds are no longer dropped/refused: the generic
+        // [`apply_declarative`](Self::apply_declarative) drives each through
+        // [`MigrationBackend::rebuild_one`](crate::backend::MigrationBackend::rebuild_one)
+        // within the same locked/journaled apply, under the destructive/approval gate
+        // (a rebuild's journal migration carries `destructive + requires_approval`).
+        // `diff.rebuilds` is ALWAYS empty on the PG path (PG uses native `ALTER` /
+        // expand-contract), so the PG `DeclarativeDeployPlan` is byte-identical to
+        // before; only the SQLite leg gains a non-empty `rebuilds`.
         let plain = self.plan(&diff.migrations, cfg);
         Ok(DeclarativeDeployPlan {
             plain,
             renames: diff.renames,
+            rebuilds: diff.rebuilds,
         })
     }
 
@@ -305,11 +336,11 @@ impl MigrationEngine {
     /// - [`DeclarativeApplyError::Expand`] — a rename's expand/backfill failed.
     ///   The plain migrations + any earlier renames are already applied; the
     ///   backfill is resumable on a re-run.
-    pub async fn apply_declarative(
+    pub async fn apply_declarative<B: MigrationBackend>(
         &self,
         plan: &DeclarativeDeployPlan,
         approval: Approval,
-        conn: &Client,
+        backend: &B,
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
@@ -333,19 +364,26 @@ impl MigrationEngine {
         // inside `apply_inner`; that check still runs (with `AlreadyHeld`) and can
         // return early — every such early return runs through `release_or_warn`
         // below, so the lock is never held forever on a gate rejection.
-        executor::acquire_project_lock_outer(conn, &exec_cfg.project_id)
+        //
+        // P6a — the lock is acquired/released through the dialect seam
+        // (`backend.acquire/release_project_lock`) rather than the PG `*_outer`
+        // free-fns. For the PG backend this is byte-identical (`PostgresBackend`
+        // delegates straight to `executor::pg::acquire/release_project_lock`, i.e. the
+        // same `pg_advisory_lock(hashtext(project))`); for SQLite the lock is a no-op
+        // (single-actor serialization is the lock). The single-acquire / single-release
+        // H10 discipline is unchanged.
+        backend
+            .acquire_project_lock(&exec_cfg.project_id)
             .await
             .map_err(EngineError::from)?;
 
         let result = self
-            .apply_declarative_locked(plan, approval, conn, exec_cfg, applied_by)
+            .apply_declarative_locked(plan, approval, backend, exec_cfg, applied_by)
             .await;
 
         // Release on EVERY path. Surface the deploy error first; a release failure
         // is logged (the lock auto-releases on session end regardless).
-        if let Err(e) =
-            executor::release_project_lock_outer(conn, &exec_cfg.project_id).await
-        {
+        if let Err(e) = backend.release_project_lock(&exec_cfg.project_id).await {
             tracing::warn!(
                 error = %e,
                 project = %exec_cfg.project_id,
@@ -410,24 +448,25 @@ impl MigrationEngine {
     ///   same gate + executor + expand errors as
     ///   [`apply_declarative`](Self::apply_declarative), after a successful
     ///   manifest check.
-    pub async fn apply_declarative_verified(
+    pub async fn apply_declarative_verified<B: MigrationBackend>(
         &self,
         plan: &DeclarativeDeployPlan,
         expected: &ManifestHash,
         approval: Approval,
-        conn: &Client,
+        backend: &B,
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
         // Pre-apply manifest gate over the plan's FULL EFFECTIVE set (plain +
-        // every rename's expand + contract), folded in canonical executed order by
-        // the SAME implementation the control plane stamped with. This runs BEFORE
-        // `apply_declarative` (and therefore before the H10 outer advisory lock and
-        // any DDL): a tampered plan is rejected without contending for the lock or
-        // opening a transaction, leaving the database + journal untouched.
+        // every rename's expand + contract + every rebuild's journal migration),
+        // folded in canonical executed order by the SAME implementation the control
+        // plane stamped with. This runs BEFORE `apply_declarative` (and therefore
+        // before the H10 outer advisory lock and any DDL): a tampered plan is rejected
+        // without contending for the lock or opening a transaction, leaving the
+        // database + journal untouched.
         verify_manifest(&plan.effective_set(), expected).map_err(EngineError::from)?;
         // Verified ⇒ the normal gated, lock-wrapped declarative orchestration.
-        self.apply_declarative(plan, approval, conn, exec_cfg, applied_by)
+        self.apply_declarative(plan, approval, backend, exec_cfg, applied_by)
             .await
     }
 
@@ -435,32 +474,99 @@ impl MigrationEngine {
     /// outer project advisory lock is held (H10). Each inner sub-batch is driven
     /// with [`LockMode::AlreadyHeld`] so it does NOT re-acquire / re-release the
     /// lock — the lock is owned by `apply_declarative` for the whole deploy.
-    async fn apply_declarative_locked(
+    async fn apply_declarative_locked<B: MigrationBackend>(
         &self,
         plan: &DeclarativeDeployPlan,
         approval: Approval,
-        conn: &Client,
+        backend: &B,
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
         // 1. The plain additive / destructive set, through the existing gate
         //    (denial / approval), but with the lock already held outside it.
         let mut applied = self
-            .apply_inner(&plan.plain, approval, conn, exec_cfg, applied_by, LockMode::AlreadyHeld)
+            .apply_inner(&plan.plain, approval, backend, exec_cfg, applied_by, LockMode::AlreadyHeld)
             .await?;
 
-        // 2. Each rename's EXPAND, through run_expand (real backfill; E3 journaled
-        //    after) — also with the lock already held. 3. Collect the contract as
+        // 2. P6a — each SQLite 12-step table REBUILD, driven through the dialect seam
+        //    (`backend.rebuild_one`) within the SAME held lock + the journal the
+        //    rebuild writes atomically. The destructive/approval gate is the SAME one
+        //    the plain set passes: a rebuild's journal migration carries `destructive
+        //    + requires_approval`, so an un-approved rebuild is refused HERE (before
+        //    any rebuild runs) — never auto-approved (the dev-relaxed posture is P6b's
+        //    concern). On PG `plan.rebuilds` is empty, so this whole block is a no-op
+        //    and the PG path is byte-identical.
+        if !plan.rebuilds.is_empty() && approval != Approval::Approved {
+            // A rebuild on a populated table is destructive; refuse without approval
+            // exactly like the plain destructive gate (defense in depth at the engine
+            // layer). Nothing ran for the rebuilds.
+            return Err(DeclarativeApplyError::Plain(EngineError::ApprovalRequired));
+        }
+        // The net-applied journal state — to make a re-run a NO-OP: a rebuild whose
+        // version is already `completed` in the journal is skipped (idempotent), the
+        // same net-state gate the versioned executor applies for plain migrations.
+        // `backend.applied` is the dialect-coupled journal read (SQLite `_mig`
+        // window-function net-state). Read once, BEFORE driving any rebuild.
+        let already: std::collections::HashSet<String> = if plan.rebuilds.is_empty() {
+            std::collections::HashSet::new()
+        } else {
+            backend
+                .applied(exec_cfg)
+                .await
+                .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?
+                .into_iter()
+                .filter(|e| matches!(e.phase, crate::journal::Phase::Completed))
+                .map(|e| e.version)
+                .collect()
+        };
+        for rebuild in &plan.rebuilds {
+            let version = rebuild.migration.version.as_str().to_string();
+            if already.contains(&version) {
+                // Already net-applied — idempotent re-run skips it.
+                applied.skipped.push(version);
+                continue;
+            }
+            backend
+                .rebuild_one(&rebuild.spec, &rebuild.migration, applied_by)
+                .await
+                .map_err(EngineError::Apply)?;
+            applied.applied.push(version);
+        }
+
+        // 3. Each rename's EXPAND, through run_expand (real backfill; E3 journaled
+        //    after) — also with the lock already held. 4. Collect the contract as
         //    the deferred set.
+        //
+        // P6a — the online expand-contract drive (`run_expand` / `run_backfill`) is
+        // NOT yet abstracted over the backend seam (deferred P6c); it is PG-shaped
+        // (`pg_advisory_xact_lock` + paged UPDATE). It is reached ONLY for the PG
+        // backend: a SQLite declarative rename is routed to a REBUILD above, never
+        // expand-contract, so `plan.renames` is EMPTY on the SQLite leg. We obtain the
+        // PG connection through `backend.expand_conn()`; it is `Some` for PG and
+        // `None` for SQLite. A non-empty `renames` with a `None` conn would be a SQLite
+        // routing bug (renames must be empty on SQLite) — fail closed rather than
+        // silently drop the renames.
         let mut pending_contract: Vec<Migration> = Vec::new();
-        for rename in &plan.renames {
-            let outcome = self
-                .run_expand_with_lock(rename, approval, conn, exec_cfg, applied_by, LockMode::AlreadyHeld)
-                .await?;
-            applied.applied.extend(outcome.applied);
-            applied.skipped.extend(outcome.skipped);
-            applied.recovered.extend(outcome.recovered);
-            pending_contract.extend(rename.contract.iter().cloned());
+        if !plan.renames.is_empty() {
+            let Some(conn) = backend.expand_conn() else {
+                return Err(DeclarativeApplyError::Plain(EngineError::Apply(
+                    ApplyError::Backend(
+                        "declarative deploy carries online renames but the backend has no \
+                         expand-contract drive (SQLite renames must be routed to a rebuild; \
+                         a non-empty rename set here is a routing bug)"
+                            .to_string(),
+                    ),
+                )));
+            };
+            for rename in &plan.renames {
+                let outcome = self
+                    .run_expand_with_lock(rename, approval, conn, exec_cfg, applied_by, LockMode::AlreadyHeld)
+                    .await?;
+                applied.applied.extend(outcome.applied);
+                applied.skipped.extend(outcome.skipped);
+                applied.recovered.extend(outcome.recovered);
+                pending_contract.extend(rename.contract.iter().cloned());
+            }
         }
 
         Ok(DeclarativeDeployOutcome {
@@ -488,16 +594,16 @@ impl MigrationEngine {
     /// - [`EngineError::ApprovalRequired`] — destructive plan without approval.
     /// - [`EngineError::Apply`] — the executor failed (incl. its own guard
     ///   re-check, checksum drift, or a mid-apply DB error).
-    pub async fn apply(
+    pub async fn apply<B: MigrationBackend>(
         &self,
         plan: &MigrationPlan,
         approval: Approval,
-        conn: &Client,
+        backend: &B,
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
     ) -> Result<ApplyOutcome, EngineError> {
         // Standalone caller: the executor acquires + releases the project lock.
-        self.apply_inner(plan, approval, conn, exec_cfg, applied_by, LockMode::Acquire)
+        self.apply_inner(plan, approval, backend, exec_cfg, applied_by, LockMode::Acquire)
             .await
     }
 
@@ -514,16 +620,16 @@ impl MigrationEngine {
     ///
     /// # Errors
     /// Same as [`apply`](Self::apply).
-    pub async fn apply_with_lock(
+    pub async fn apply_with_lock<B: MigrationBackend>(
         &self,
         plan: &MigrationPlan,
         approval: Approval,
-        conn: &Client,
+        backend: &B,
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
         lock_mode: LockMode,
     ) -> Result<ApplyOutcome, EngineError> {
-        self.apply_inner(plan, approval, conn, exec_cfg, applied_by, lock_mode)
+        self.apply_inner(plan, approval, backend, exec_cfg, applied_by, lock_mode)
             .await
     }
 
@@ -537,11 +643,11 @@ impl MigrationEngine {
     /// The denial / approval gate runs identically in both modes — an early gate
     /// rejection under `AlreadyHeld` returns without touching the lock (the outer
     /// `apply_declarative` still releases it), so the lock is never leaked.
-    async fn apply_inner(
+    async fn apply_inner<B: MigrationBackend>(
         &self,
         plan: &MigrationPlan,
         approval: Approval,
-        conn: &Client,
+        backend: &B,
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
         lock_mode: LockMode,
@@ -562,9 +668,18 @@ impl MigrationEngine {
         // Forward the approval decision: the executor re-runs its OWN destructive
         // gate (defense in depth — design §1.6), so the gate here is additional,
         // not a replacement.
-        let outcome =
-            executor::apply_with_lock(conn, exec_cfg, &migrations, approval, applied_by, lock_mode)
-                .await?;
+        //
+        // P6a — call the dialect-generic `apply_with_lock_backend` (already generic
+        // since P1) with the supplied backend, instead of the PG-`&Client`-typed
+        // `executor::apply_with_lock`. For the PG backend this is byte-identical:
+        // `executor::apply_with_lock` itself just constructs `PostgresBackend::new`
+        // and calls `apply_with_lock_backend`, so going straight through the backend
+        // is the same code path (the guard re-run, least-privilege role, GUC hygiene,
+        // and the H10 lock-mode discipline are all inside `apply_with_lock_backend`).
+        let outcome = executor::apply_with_lock_backend(
+            backend, exec_cfg, &migrations, approval, applied_by, lock_mode,
+        )
+        .await?;
         Ok(outcome)
     }
 
@@ -634,13 +749,13 @@ impl MigrationEngine {
     // approval, conn, exec cfg, actor) — each is load-bearing; bundling them into a
     // struct would only obscure the trusted-deploy call shape.
     #[allow(clippy::too_many_arguments)]
-    pub async fn apply_verified(
+    pub async fn apply_verified<B: MigrationBackend>(
         &self,
         migrations: &[Migration],
         guard_cfg: &GuardConfig,
         expected: Option<&ManifestHash>,
         approval: Approval,
-        conn: &Client,
+        backend: &B,
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
     ) -> Result<ApplyOutcome, EngineError> {
@@ -661,7 +776,7 @@ impl MigrationEngine {
         // gate (EngineError::Denied), independent of the manifest check. The lock is
         // only ever taken AFTER the manifest passes.
         let plan = self.plan(migrations, guard_cfg);
-        self.apply(&plan, approval, conn, exec_cfg, applied_by).await
+        self.apply(&plan, approval, backend, exec_cfg, applied_by).await
     }
 
     /// Dry-run a migration batch against a throwaway **shadow DATABASE** clone
@@ -864,7 +979,21 @@ pub struct DeclarativeDeployPlan {
     /// [`ExpandContractPlan`](crate::expand_contract::ExpandContractPlan)
     /// (expand migs + `BackfillSpec` + contract migs). Driven through
     /// [`run_expand`](MigrationEngine::run_expand), NOT the plain `apply`.
+    ///
+    /// ALWAYS empty on the SQLite dialect: a SQLite declarative rename is routed to a
+    /// [`rebuilds`](Self::rebuilds) entry (an offline rebuild copying `to ← from`),
+    /// never expand-contract — so [`run_expand`](MigrationEngine::run_expand) is never
+    /// reached on a SQLite backend (P6a CONDITION ii / H1).
     pub renames: Vec<crate::expand_contract::ExpandContractPlan>,
+    /// **P6a (SQLite only)** — the existing-table changes SQLite has no native
+    /// `ALTER` for (type / nullability change, column rename, ADD/DROP CONSTRAINT,
+    /// FK redefinition), each a structured 12-step table rebuild
+    /// ([`SqliteRebuild`](crate::declarative::SqliteRebuild)). Driven through
+    /// [`MigrationBackend::rebuild_one`](crate::backend::MigrationBackend::rebuild_one)
+    /// by [`apply_declarative`](MigrationEngine::apply_declarative), under the
+    /// destructive/approval gate (the paired migration is `destructive +
+    /// requires_approval`). ALWAYS empty on the PG dialect.
+    pub rebuilds: Vec<crate::declarative::SqliteRebuild>,
 }
 
 impl DeclarativeDeployPlan {
@@ -890,6 +1019,13 @@ impl DeclarativeDeployPlan {
             self.plain.items.iter().map(|p| p.migration.clone()).collect();
         for rename in &self.renames {
             set.extend(rename.all());
+        }
+        // P6a — each SQLite rebuild's JOURNAL migration (`r.migration`: its version is
+        // the rebuild's identity, its checksum certifies the rebuilt shape, its flags
+        // gate it) is part of the effective executed set, so the integrity manifest
+        // covers it too. Empty on PG (no rebuilds), so the PG manifest is unchanged.
+        for rebuild in &self.rebuilds {
+            set.push(rebuild.migration.clone());
         }
         set
     }
