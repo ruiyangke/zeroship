@@ -742,6 +742,397 @@ async fn aborting_rebuild_leaves_no_wedge_and_fk_on() {
 }
 
 // ---------------------------------------------------------------------------
+// (C2) A creator TRIGGER and a PARTIAL index survive a rebuild. The lossy pre-fix
+//      path rebuilt indexes from the DESIRED IndexSnapshot (dropping the WHERE
+//      clause) and NEVER recreated triggers (DROP TABLE silently destroyed them).
+//      The fix captures every dependent object's `sql` VERBATIM from the live
+//      sqlite_master before the drop and replays it after the rename. Asserts: the
+//      trigger STILL EXISTS and FIRES post-rebuild, and the partial index survives
+//      with its WHERE clause intact. RED pre-fix (trigger gone; index loses WHERE).
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn creator_trigger_and_partial_index_survive_rebuild() {
+    // v1: items(n: number) + a sink table the trigger writes to. v2: n re-typed to
+    // string → a genuine type-change rebuild.
+    let v1 = vec![CollectionDescriptor {
+        name: "items".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "n".into(),
+            ty: "number".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    }];
+    let mut v2 = v1.clone();
+    v2[0].fields[0].ty = "string".into();
+
+    let p = paths("rebuild_trigger_partial");
+    let be = backend(&p);
+    apply_first_deploy(&be, &v1).await;
+
+    // Add — directly, as a creator would in a prior CreatorUp migration — a sink
+    // table, an AFTER INSERT trigger on `items` that writes the sink, and a PARTIAL
+    // index on `items` (a WHERE clause the lossy desired-snapshot recreate dropped).
+    // We do this in one engine-wrapped txn flipping to CreatorUp for the creator DDL.
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor().exec("BEGIN IMMEDIATE").await.expect("begin");
+    be.actor().set_mode(Mode::CreatorUp).await.expect("creator");
+    be.actor()
+        .exec("CREATE TABLE trg_sink (id TEXT PRIMARY KEY, note TEXT)")
+        .await
+        .expect("create sink");
+    be.actor()
+        .exec(
+            "CREATE TRIGGER items_ai AFTER INSERT ON items \
+             BEGIN INSERT INTO trg_sink (id, note) VALUES (NEW.id, 'fired'); END",
+        )
+        .await
+        .expect("create trigger");
+    be.actor()
+        .exec("CREATE INDEX items_partial_idx ON items (n) WHERE n > 10")
+        .await
+        .expect("create partial index");
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor().exec("COMMIT").await.expect("commit");
+
+    // Seed a baseline row (engine mode).
+    be.actor()
+        .exec("INSERT INTO main.items (id, n) VALUES ('i0', 1)")
+        .await
+        .expect("seed");
+
+    // The rebuild (type change number → string).
+    let rb = one_rebuild(&v1, &v2);
+    be.rebuild_one(&rb.spec, &rb.migration, "deployer")
+        .await
+        .expect("rebuild applies");
+
+    // The TRIGGER still exists post-rebuild.
+    let trg = be
+        .actor()
+        .query(
+            "SELECT name FROM main.sqlite_master WHERE type='trigger' AND name='items_ai'",
+        )
+        .await
+        .expect("query trigger");
+    assert_eq!(
+        trg.len(),
+        1,
+        "the creator trigger must survive the rebuild (pre-fix: silently destroyed)"
+    );
+
+    // And it FIRES: insert a fresh row and assert the sink got the side-effect.
+    be.actor()
+        .exec("INSERT INTO main.items (id, n) VALUES ('i1', 5)")
+        .await
+        .expect("insert post-rebuild");
+    let sink = be
+        .actor()
+        .query("SELECT note FROM main.trg_sink WHERE id='i1'")
+        .await
+        .expect("read sink");
+    assert_eq!(
+        sink.first().and_then(|r| r.first()).and_then(|c| c.as_deref()),
+        Some("fired"),
+        "the trigger must FIRE post-rebuild (its side-effect lands in the sink)"
+    );
+
+    // The PARTIAL index survives WITH its WHERE clause. Read the verbatim sql.
+    let idx = be
+        .actor()
+        .query(
+            "SELECT sql FROM main.sqlite_master WHERE type='index' AND name='items_partial_idx'",
+        )
+        .await
+        .expect("query partial index");
+    let idx_sql = idx
+        .first()
+        .and_then(|r| r.first())
+        .and_then(|c| c.clone())
+        .expect("partial index must still exist post-rebuild");
+    assert!(
+        idx_sql.to_ascii_uppercase().contains("WHERE"),
+        "the partial index must survive WITH its WHERE clause (pre-fix: lossy recreate \
+         dropped it); got sql = {idx_sql}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (C2b) A dependent object that genuinely cannot be replayed (it references a column
+//       the new shape DROPS) FAILS CLOSED with the typed DependentReplayFailed error
+//       — never silently lost. The original table + dependent are intact. We use an
+//       INDEX over a column the new shape omits: SQLite validates an index's columns
+//       at CREATE time, so the verbatim replay onto the new (column-less) table errors
+//       → the executor aborts with DependentReplayFailed rather than dropping it.
+//       (A trigger's column refs resolve lazily in SQLite, so an index is the faithful
+//       vehicle for "captured DDL that cannot re-apply".)
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn dependent_referencing_dropped_column_fails_closed() {
+    let p = paths("rebuild_dep_fail");
+    let be = backend(&p);
+
+    // Create t(id, drop_me) + an index over `drop_me`, in one txn.
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor().exec("BEGIN IMMEDIATE").await.expect("begin");
+    be.actor().set_mode(Mode::CreatorUp).await.expect("creator");
+    be.actor()
+        .exec("CREATE TABLE t (id TEXT PRIMARY KEY, drop_me TEXT)")
+        .await
+        .expect("create t");
+    be.actor()
+        .exec("CREATE INDEX t_on_drop_me ON t (drop_me)")
+        .await
+        .expect("create index referencing drop_me");
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor().exec("COMMIT").await.expect("commit");
+
+    // A rebuild whose new shape DROPS `drop_me` (only `id` survives). The captured
+    // index is over `drop_me`, which the new table lacks → verbatim replay must fail.
+    let spec = SqliteRebuildSpec {
+        table: "t".into(),
+        tmp_table: SqliteRebuildSpec::tmp_name("t"),
+        new_table_create: "CREATE TABLE \"t__zsrebuild\" (\"id\" TEXT PRIMARY KEY)".into(),
+        copy_columns: vec![("id".into(), "id".into())],
+        recreate_objects: vec![],
+        reason: "drop column drop_me".into(),
+    };
+    let m = rebuild_migration("t", &spec);
+
+    let err = be
+        .rebuild_one(&spec, &m, "deployer")
+        .await
+        .expect_err("a dependent referencing a dropped column must FAIL CLOSED");
+    match err {
+        RebuildError::DependentReplayFailed {
+            table, kind, object, ..
+        } => {
+            assert_eq!(table, "t");
+            assert_eq!(kind, "index");
+            assert_eq!(object, "t_on_drop_me");
+        }
+        other => panic!("expected DependentReplayFailed, got {other:?}"),
+    }
+
+    // The ORIGINAL table is intact (txn rolled back): `drop_me` is still a column.
+    let info = be
+        .actor()
+        .query("PRAGMA main.table_info(t)")
+        .await
+        .expect("table_info");
+    assert!(
+        info.iter().any(|r| r[1].as_deref() == Some("drop_me")),
+        "the original table must be intact after the fail-closed abort"
+    );
+    // The index is still there.
+    let idx = be
+        .actor()
+        .query("SELECT name FROM main.sqlite_master WHERE type='index' AND name='t_on_drop_me'")
+        .await
+        .expect("query index");
+    assert_eq!(idx.len(), 1, "the dependent index must be intact (never lost)");
+    // foreign_keys back ON.
+    assert!(foreign_keys_on(&be).await, "foreign_keys ON after the fail-closed abort");
+}
+
+// ---------------------------------------------------------------------------
+// (H1) A cross-table FK orphan is caught by the UNSCOPED foreign_key_check. We
+//      rebuild a PARENT table dropping a row a CHILD references. A check scoped to
+//      the parent passes (the orphan is in the CHILD); the unscoped check catches it.
+//      Asserts: typed ForeignKeyViolation abort, both tables intact, FK back ON.
+//      RED pre-fix (the scoped `foreign_key_check(parent)` passed and committed).
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn cross_table_fk_orphan_caught_by_unscoped_check() {
+    let p = paths("rebuild_xtable_fk");
+    let be = backend(&p);
+
+    // parent(id) + child(id, parent_id REFERENCES parent), via plain DDL.
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor().exec("BEGIN IMMEDIATE").await.expect("begin");
+    be.actor().set_mode(Mode::CreatorUp).await.expect("creator");
+    be.actor()
+        .exec("CREATE TABLE parent (id TEXT PRIMARY KEY, label TEXT)")
+        .await
+        .expect("create parent");
+    be.actor()
+        .exec("CREATE TABLE child (id TEXT PRIMARY KEY, parent_id TEXT REFERENCES parent (id))")
+        .await
+        .expect("create child");
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor().exec("COMMIT").await.expect("commit");
+
+    // Seed parent 'pa' and a child referencing it (referentially valid).
+    be.actor()
+        .exec("INSERT INTO main.parent (id, label) VALUES ('pa', 'keep')")
+        .await
+        .expect("seed parent");
+    be.actor()
+        .exec("INSERT INTO main.child (id, parent_id) VALUES ('c1', 'pa')")
+        .await
+        .expect("seed child");
+
+    // Rebuild the PARENT but DROP the 'pa' row (copy only rows where id != 'pa').
+    // This orphans child.c1, whose parent_id='pa' no longer resolves. A
+    // foreign_key_check scoped to `parent` sees no orphan IN parent and passes; only
+    // the UNSCOPED check (which also visits `child`) catches the orphan.
+    let spec = SqliteRebuildSpec {
+        table: "parent".into(),
+        tmp_table: SqliteRebuildSpec::tmp_name("parent"),
+        new_table_create: "CREATE TABLE \"parent__zsrebuild\" (\
+            \"id\" TEXT PRIMARY KEY, \"label\" TEXT)"
+            .into(),
+        // copy_columns empty would copy nothing; we need a filtered copy, so we
+        // instead pre-delete the row out-of-band below and copy straight across.
+        copy_columns: vec![("id".into(), "id".into()), ("label".into(), "label".into())],
+        recreate_objects: vec![],
+        reason: "parent rebuild dropping referenced row".into(),
+    };
+    // Drop the referenced parent row BEFORE the rebuild (engine mode, FK is ON so we
+    // must delete the child-less way: temporarily the child still points at it, so
+    // deleting 'pa' with FK ON would fail; do it under the rebuild's own FK-OFF window
+    // by instead removing it inside the copy). Simplest faithful path: delete 'pa'
+    // with FK enforcement off, mirroring how the rebuild's FK-OFF window would let a
+    // parent row vanish, then let the rebuild copy the (now smaller) parent set.
+    be.actor()
+        .exec("PRAGMA foreign_keys = OFF")
+        .await
+        .expect("fk off");
+    be.actor()
+        .exec("DELETE FROM main.parent WHERE id = 'pa'")
+        .await
+        .expect("drop referenced parent row");
+    be.actor()
+        .exec("PRAGMA foreign_keys = ON")
+        .await
+        .expect("fk on");
+
+    let m = rebuild_migration("parent", &spec);
+    let err = be
+        .rebuild_one(&spec, &m, "deployer")
+        .await
+        .expect_err("the cross-table orphan must abort the rebuild (unscoped FK check)");
+    match err {
+        RebuildError::ForeignKeyViolation { table, violations } => {
+            assert_eq!(table, "parent");
+            assert!(violations >= 1, "at least one orphan, got {violations}");
+        }
+        other => panic!("expected ForeignKeyViolation, got {other:?}"),
+    }
+
+    // Both tables intact (txn rolled back): the child orphan row is still present.
+    let child = be
+        .actor()
+        .query("SELECT parent_id FROM main.child WHERE id='c1'")
+        .await
+        .expect("read child");
+    assert_eq!(
+        child.first().and_then(|r| r.first()).and_then(|c| c.as_deref()),
+        Some("pa"),
+        "the child row is intact after the abort"
+    );
+    let tmp = be
+        .actor()
+        .query("SELECT name FROM main.sqlite_master WHERE type='table' AND name='parent__zsrebuild'")
+        .await
+        .expect("query tmp");
+    assert!(tmp.is_empty(), "the temp table must be rolled back");
+    assert!(foreign_keys_on(&be).await, "foreign_keys ON after the cross-table abort");
+}
+
+// ---------------------------------------------------------------------------
+// (H2) A creator-pre-created `<t>__zsrebuild` temp table does NOT pollute the
+//      rebuild. Pre-fix the shared CREATE's `IF NOT EXISTS` silently REUSED the
+//      stale temp (junk column + junk row), then RENAMEd the pollution into place.
+//      The fix DROPs the stale temp first. Asserts: post-rebuild `t` has the NEW
+//      shape (no junk column) and the junk row is gone. RED pre-fix.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn pre_created_temp_table_does_not_pollute_rebuild() {
+    // v1: gadgets(n: number). v2: n → string (type-change rebuild).
+    let v1 = vec![CollectionDescriptor {
+        name: "gadgets".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "n".into(),
+            ty: "number".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    }];
+    let mut v2 = v1.clone();
+    v2[0].fields[0].ty = "string".into();
+
+    let p = paths("rebuild_temp_collision");
+    let be = backend(&p);
+    apply_first_deploy(&be, &v1).await;
+
+    // Seed a legit row.
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .exec("INSERT INTO main.gadgets (id, n) VALUES ('g1', 1)")
+        .await
+        .expect("seed");
+
+    // A creator pre-creates the engine's temp name with JUNK shape + a JUNK row, as a
+    // prior CreatorUp migration would. (One txn flipping to CreatorUp for the DDL.)
+    let tmp_name = SqliteRebuildSpec::tmp_name("gadgets");
+    assert_eq!(tmp_name, "gadgets__zsrebuild");
+    be.actor().exec("BEGIN IMMEDIATE").await.expect("begin");
+    be.actor().set_mode(Mode::CreatorUp).await.expect("creator");
+    be.actor()
+        .exec("CREATE TABLE \"gadgets__zsrebuild\" (junk TEXT)")
+        .await
+        .expect("pre-create junk temp");
+    be.actor()
+        .exec("INSERT INTO \"gadgets__zsrebuild\" (junk) VALUES ('POLLUTION')")
+        .await
+        .expect("seed junk");
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor().exec("COMMIT").await.expect("commit");
+
+    // The rebuild must NOT reuse the polluted temp.
+    let rb = one_rebuild(&v1, &v2);
+    be.rebuild_one(&rb.spec, &rb.migration, "deployer")
+        .await
+        .expect("rebuild applies cleanly despite the pre-created temp");
+
+    // Post-rebuild `gadgets` has the NEW shape — a `junk` column would prove the
+    // polluted temp was reused.
+    let info = be
+        .actor()
+        .query("PRAGMA main.table_info(gadgets)")
+        .await
+        .expect("table_info");
+    assert!(
+        info.iter().all(|r| r[1].as_deref() != Some("junk")),
+        "the rebuilt table must NOT carry the creator-pre-created junk column \
+         (pre-fix: IF NOT EXISTS reused the polluted temp)"
+    );
+    // And `n` is present with TEXT affinity (the real new shape).
+    let n_type = info
+        .iter()
+        .find(|r| r[1].as_deref() == Some("n"))
+        .and_then(|r| r[2].clone())
+        .expect("n present");
+    assert_eq!(n_type.to_ascii_uppercase(), "TEXT", "n re-typed to TEXT");
+    // The junk row never made it in: the original legit row is the only one.
+    let count = be
+        .actor()
+        .query("SELECT COUNT(*) FROM main.gadgets")
+        .await
+        .expect("count");
+    assert_eq!(
+        count[0][0].as_deref(),
+        Some("1"),
+        "only the legit row survives; the POLLUTION junk row never entered"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Helpers: build a Migration without the declarative author (for direct specs).
 // ---------------------------------------------------------------------------
 
