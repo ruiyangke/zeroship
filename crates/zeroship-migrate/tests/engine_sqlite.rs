@@ -22,7 +22,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zeroship_migrate::journal::Phase;
+use zeroship_migrate::journal::{JournaledKind, Phase};
+use zeroship_migrate::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
 use zeroship_migrate::{
     desired_snapshot, Approval, CollectionDescriptor, DeclarativeAuthor, DeclarativeApplyError,
     EngineError, ExecutorConfig, FieldDescriptor, GuardConfig, IndexDescriptor, MigrationEngine,
@@ -500,5 +501,202 @@ async fn engine_sqlite_rebuild_refused_without_approval() {
     assert!(
         !is_completed(&be, &rebuild_version).await,
         "the rebuild is NOT journaled (it was refused before any DDL)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (5) BASELINE (H3): a SQLite baseline records the live schema as a `'baseline'`
+//     journal entry WITHOUT running its `up`, adopting an existing journal-less
+//     file. First-entry semantics: idempotent for the same version, refuses a
+//     different baseline once one exists. This is the new SQLite `baseline`
+//     (the PG `baseline()` is &Client-typed and had no SQLite peer pre-P6b).
+// ---------------------------------------------------------------------------
+
+/// A baseline migration whose `up` DOCUMENTS the live schema (recorded, not run).
+fn baseline_migration(name: &str, up: &str) -> Migration {
+    let flags = MigrationFlags::default();
+    let owner_app = APP;
+    let mut m = Migration {
+        version: MigrationId::generate(),
+        name: name.to_string(),
+        up: up.to_string(),
+        down: None,
+        checksum: Checksum::of(&ChecksumInput {
+            up,
+            down: None,
+            flags: &flags,
+            owner_app,
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        }),
+        flags,
+        owner_app: owner_app.to_string(),
+        depends_on: vec![],
+        supersedes: vec![],
+        preconditions: vec![],
+    };
+    m.recompute_checksum();
+    m
+}
+
+#[compio::test]
+async fn sqlite_baseline_adopts_a_journal_less_file_then_additive_deploy_works() {
+    let p = paths("baseline_adopt");
+    let be = backend(&p);
+    let engine = MigrationEngine::new();
+    let cfg = exec_cfg();
+
+    // Simulate a file a prior `run_sqlite_pipeline` populated: a real table on
+    // `main`, but an EMPTY `_mig` journal. Create the table directly (engine
+    // mode lets the test write `main`); do NOT journal it.
+    be.ensure_journal_sqlite().await.expect("ensure journal");
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .exec("CREATE TABLE main.widgets (id TEXT PRIMARY KEY, label TEXT)")
+        .await
+        .expect("seed legacy table");
+    be.actor()
+        .exec("INSERT INTO main.widgets (id, label) VALUES ('w1', 'legacy')")
+        .await
+        .expect("seed legacy row");
+    assert!(
+        be.applied_sqlite().await.expect("read journal").is_empty(),
+        "the legacy file has tables but an EMPTY journal (the run_sqlite_pipeline shape)"
+    );
+
+    // Baseline: adopt the live schema. The `up` documents the table; it is NOT run.
+    let base = baseline_migration(
+        "baseline_adopt_widgets",
+        "CREATE TABLE main.widgets (id TEXT PRIMARY KEY, label TEXT)",
+    );
+    let base_version = base.version.as_str().to_string();
+    let outcome = be
+        .baseline_sqlite(&base, "deployer")
+        .await
+        .expect("baseline adopts the live schema");
+    assert!(!outcome.already_present, "first baseline is newly recorded");
+
+    // The baseline is journaled `completed` with kind=baseline, and the live
+    // table + its data are untouched (the `up` never ran a second CREATE).
+    let entries = be.applied_sqlite().await.expect("read journal");
+    let entry = entries
+        .iter()
+        .find(|e| e.version == base_version)
+        .expect("baseline is in the journal");
+    assert_eq!(entry.phase, Phase::Completed);
+    assert_eq!(entry.kind, Some(JournaledKind::Baseline));
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    let count = be
+        .actor()
+        .query("SELECT COUNT(*) FROM main.widgets")
+        .await
+        .expect("count");
+    assert_eq!(count[0][0].as_deref(), Some("1"), "the legacy row survived adoption");
+
+    // Re-baselining the SAME version is an idempotent no-op (a retried boot).
+    let again = be
+        .baseline_sqlite(&base, "deployer")
+        .await
+        .expect("re-baseline same version is idempotent");
+    assert!(again.already_present, "the same baseline is idempotent");
+
+    // An additive deploy ON TOP of the baseline: add a `widgets.qty` column via
+    // the engine. The diff against live yields one ADD COLUMN plain op; it
+    // applies cleanly with NO drift/collision on the adopted table.
+    let v2 = vec![CollectionDescriptor {
+        name: "widgets".into(),
+        owner_app: APP.into(),
+        fields: vec![
+            FieldDescriptor {
+                name: "label".into(),
+                ty: "string".into(),
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "qty".into(),
+                ty: "number".into(),
+                ..Default::default()
+            },
+        ],
+        indexes: vec![],
+    }];
+    let (live, ownership) = live_from(&[CollectionDescriptor {
+        name: "widgets".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "label".into(),
+            ty: "string".into(),
+            ..Default::default()
+        }],
+        indexes: vec![],
+    }]);
+    let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
+    let plan = engine
+        .plan_declarative(&desired2, &live, &ownership, &sqlite_author(), &[], &guard_cfg())
+        .expect("plan additive on top of baseline");
+    engine
+        .apply_declarative(&plan, Approval::None, &be, &cfg, "deployer")
+        .await
+        .expect("additive deploy applies cleanly on the baselined file");
+    assert!(
+        !column_type(&be, "widgets", "qty").await.is_empty(),
+        "the additive column landed on the adopted table (no drift/collision)"
+    );
+    // And the legacy data still survives the additive deploy on the adopted file.
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    let count2 = be
+        .actor()
+        .query("SELECT COUNT(*) FROM main.widgets")
+        .await
+        .expect("count after additive");
+    assert_eq!(count2[0][0].as_deref(), Some("1"), "legacy row survives the additive deploy");
+}
+
+#[compio::test]
+async fn sqlite_baseline_refuses_when_engine_already_manages_the_file() {
+    let p = paths("baseline_refuse");
+    let be = backend(&p);
+    let engine = MigrationEngine::new();
+    let cfg = exec_cfg();
+
+    // Apply a real (non-baseline) deploy through the engine first, so the journal
+    // records a net-applied `apply` migration — the file is now engine-managed.
+    let v1 = vec![CollectionDescriptor {
+        name: "gadgets".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "name".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    }];
+    let desired1 = desired_snapshot(PROJECT, &v1).expect("v1 desired");
+    let plan1 = engine
+        .plan_declarative(
+            &desired1,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &sqlite_author(),
+            &[],
+            &guard_cfg(),
+        )
+        .expect("plan create");
+    engine
+        .apply_declarative(&plan1, Approval::None, &be, &cfg, "deployer")
+        .await
+        .expect("apply create");
+
+    // A baseline on a file the engine already manages is refused (first-entry-only).
+    let base = baseline_migration("late_baseline", "CREATE TABLE main.gadgets (id TEXT)");
+    let err = be
+        .baseline_sqlite(&base, "deployer")
+        .await
+        .expect_err("baseline must refuse an already-managed file");
+    assert!(
+        err.to_string().contains("first-entry") || err.to_string().contains("already"),
+        "expected a first-entry refusal, got: {err}"
     );
 }

@@ -36,6 +36,7 @@ use zeroship_schema::query::SqlDialect;
 
 pub use actor::{MigrationActor, SqliteActorError};
 pub use authorizer::Mode;
+pub use journal_sql::SqliteBaselineOutcome;
 pub use rebuild_sql::{RebuildError, SqliteRebuildSpec};
 
 /// The SQLite [`MigrationBackend`]. Holds the dedicated hardened migration actor
@@ -102,6 +103,28 @@ impl SqliteBackend {
     /// logical shape (§2.2) — window-function net-state over the shared event_seq.
     pub async fn applied_sqlite(&self) -> Result<Vec<AppliedEntry>, SqliteActorError> {
         journal_sql::applied(&self.actor).await
+    }
+
+    /// Adopt the LIVE schema as the project's **baseline** (design §5 / H3) — a
+    /// `kind='baseline'`, `completed` journal event recorded WITHOUT running `m`'s
+    /// `up`. The SQLite peer of [`crate::baseline::baseline`] (which is PG-typed).
+    ///
+    /// First-entry-only: idempotent for the same version
+    /// ([`SqliteBaselineOutcome::already_present`]), refuses if the journal already
+    /// records a different net-applied migration. Used by the dev `registerModel`→
+    /// engine path to adopt an existing journal-less `zs-<app>.sqlite` (a file a
+    /// prior `run_sqlite_pipeline` populated) so the first engine boot neither
+    /// re-creates the tables nor drift-aborts.
+    ///
+    /// # Errors
+    /// [`SqliteActorError`] if the file is already engine-managed (a different
+    /// net-applied migration exists) or on a journal-write failure.
+    pub async fn baseline_sqlite(
+        &self,
+        m: &Migration,
+        applied_by: &str,
+    ) -> Result<SqliteBaselineOutcome, SqliteActorError> {
+        journal_sql::baseline(&self.actor, m, applied_by).await
     }
 
     /// Roll back ONE migration's `down` ADDITIVELY (§2.7, P5) + append a

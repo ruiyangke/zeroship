@@ -191,6 +191,117 @@ pub(crate) async fn apply_one_additive(
     Ok(true)
 }
 
+/// What [`baseline`] did — mirrors the PG [`crate::baseline::BaselineOutcome`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqliteBaselineOutcome {
+    /// The version recorded as the baseline.
+    pub version: String,
+    /// `true` if this was an idempotent re-baseline of the same version (nothing
+    /// new was journaled); `false` if the baseline event was newly recorded.
+    pub already_present: bool,
+}
+
+/// Record `m` as the SQLite project's **baseline** — a `kind='baseline'`,
+/// `completed` journal event WITHOUT running its `up` (the adoption path,
+/// design §5 / H3). This is the SQLite peer of [`crate::baseline::baseline`]
+/// (which is PG-`&Client`-typed); it had no SQLite implementation before P6b.
+///
+/// The motivating case (H3): a dev developer who ran the OLD `run_sqlite_pipeline`
+/// has a `zs-default.sqlite` with user tables but an EMPTY `_mig` journal (the old
+/// path was a stateless diff). The first engine boot against that file must NOT
+/// re-create the tables or drift-abort — so we adopt the live schema by journaling
+/// `m` (an `up` that DOCUMENTS the live shape but is recorded-not-run), after which
+/// the declared diff applies only the *additional* ops on top.
+///
+/// First-entry semantics, mirroring the PG `baseline`:
+/// - idempotent for the SAME version (a retried boot is safe → `already_present`);
+/// - refuses if the journal already records a DIFFERENT net-applied migration
+///   (the engine already manages this file) — fail-closed, nothing journaled.
+///
+/// The whole thing runs atomically inside one `BEGIN IMMEDIATE` under engine
+/// mode (the `up` is NEVER executed, so there is no CreatorUp phase — this is the
+/// key difference from [`apply_one_additive`]).
+pub(crate) async fn baseline(
+    actor: &MigrationActor,
+    m: &Migration,
+    applied_by: &str,
+) -> Result<SqliteBaselineOutcome, SqliteActorError> {
+    ensure_journal(actor).await?;
+
+    let version = m.version.as_str().to_string();
+
+    // First-entry + idempotency check, read once off the net-state. A baseline is
+    // a first-entry operation: refuse if ANY net-applied migration already exists
+    // (unless it is THIS exact version → idempotent).
+    let net_completed: Vec<String> = applied(actor)
+        .await?
+        .into_iter()
+        .filter(|e| e.phase == Phase::Completed)
+        .map(|e| e.version)
+        .collect();
+    if net_completed.iter().any(|v| v == &version) {
+        return Ok(SqliteBaselineOutcome {
+            version,
+            already_present: true,
+        });
+    }
+    if !net_completed.is_empty() {
+        return Err(SqliteActorError::Exec(format!(
+            "cannot baseline: the journal already records {} net-applied migration(s); \
+             baseline is a first-entry operation (a file the engine already manages \
+             cannot be re-baselined)",
+            net_completed.len()
+        )));
+    }
+
+    // First entry: journal the baseline `completed` event WITHOUT running the
+    // `up`. One atomic transaction under engine mode (no CreatorUp phase —
+    // nothing of the creator's runs).
+    actor.set_mode(Mode::EngineJournal).await?;
+    actor.exec("BEGIN IMMEDIATE").await?;
+    let result = async {
+        let seq = alloc_event_seq(actor).await?;
+        let name = sql_lit(&m.name);
+        let checksum = sql_lit(m.checksum.as_str());
+        let applied_by_lit = sql_lit(applied_by);
+        let version_lit = sql_lit(&version);
+        actor
+            .exec(&format!(
+                "INSERT INTO \"_mig\".schema_migrations \
+                 (event_seq, version, name, checksum, applied_by, phase, outcome, kind) \
+                 VALUES ({seq}, {version_lit}, {name}, {checksum}, {applied_by_lit}, \
+                         'completed', 'success', 'baseline')"
+            ))
+            .await?;
+        Ok::<(), SqliteActorError>(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => {
+            actor.exec("COMMIT").await?;
+            Ok(SqliteBaselineOutcome {
+                version,
+                already_present: false,
+            })
+        }
+        Err(e) => {
+            let rb = actor.exec("ROLLBACK").await;
+            match actor.is_autocommit().await {
+                Ok(true) => Err(e),
+                Ok(false) => Err(SqliteActorError::Poisoned(format!(
+                    "transaction still open after ROLLBACK (rollback result: {rb:?}); \
+                     original baseline error: {e}"
+                ))),
+                Err(probe) => Err(SqliteActorError::Poisoned(format!(
+                    "could not confirm autocommit after ROLLBACK: {probe}; \
+                     original baseline error: {e}"
+                ))),
+            }
+        }
+    }
+}
+
 /// The transactional body, factored so a failure path can ROLLBACK cleanly.
 async fn run_apply_txn(
     actor: &MigrationActor,
