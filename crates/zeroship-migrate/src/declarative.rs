@@ -45,6 +45,7 @@ use crate::drift::{
 use crate::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
 };
+use crate::backend_sqlite::SqliteRebuildSpec;
 use crate::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use zeroship_schema::query::{SqlDialect, SqliteEmitScope};
 
@@ -1787,27 +1788,24 @@ pub enum DeclarativeError {
         /// The FK's target table (not yet available to inline against).
         target: String,
     },
-    /// PHASE 4 — a SECOND-DEPLOY (existing-table) structural change on the Confined
-    /// SQLite path requires the 12-step table REBUILD that SQLite has no native
-    /// `ALTER` for: an `ALTER COLUMN … TYPE`, a nullability TIGHTENING
-    /// (`SET NOT NULL`), an in-place ADD/DROP CONSTRAINT, or a column RENAME routed
-    /// through the (PG-shaped) expand-contract sequence. The rebuild path is P3b
-    /// (NOT built in PHASE 4). Rather than emit dangling PG DDL on the SQLite path
-    /// (`ALTER TABLE "schema"."t" ALTER COLUMN …` — a "no such table" / syntax error,
-    /// or worse a SILENT no-op), the differ FAILS CLOSED here with a typed error.
-    /// The natively-expressible existing-table ops (ADD COLUMN, DROP COLUMN, DROP
-    /// INDEX, ADD INDEX, RENAME table/column, inline FK at create) are emitted
-    /// unqualified and SQLite-legal — only the rebuild-needing ones surface this.
+    /// **Reserved fail-closed guard (P3b).** A Confined-SQLite existing-table change
+    /// that the 12-step rebuild genuinely cannot express. As of P3b the rebuild
+    /// DOES handle the previously-deferred ops — a column TYPE change, a nullability
+    /// change (either direction), a column RENAME, an ADD/DROP CONSTRAINT, and an
+    /// in-place FK redefinition — so those now flow through
+    /// [`DeclarativePlan::rebuilds`] instead of surfacing here. This variant remains
+    /// as the fail-closed boundary for any future existing-table op the rebuild
+    /// author cannot yet emit: the engine refuses to emit dangling Postgres DDL on
+    /// the SQLite path, surfacing a clear typed error rather than a silent pass.
     #[error(
         "SQLite cannot perform the existing-table change on '{table}' natively \
-         ({op}): it requires the 12-step table rebuild (P3b, not yet built). The \
-         engine refuses to emit dangling Postgres DDL on the SQLite path. Author a \
-         compensating migration or wait for the P3b rebuild phase."
+         ({op}): it has no rebuild expression. The engine refuses to emit dangling \
+         Postgres DDL on the SQLite path. Author a compensating migration."
     )]
     SqliteRebuildRequired {
         /// The existing table the rebuild-needing change targets.
         table: String,
-        /// The specific operation that needs the rebuild (human-readable).
+        /// The specific operation that has no rebuild expression (human-readable).
         op: String,
     },
 }
@@ -1852,13 +1850,43 @@ pub struct DeclarativePlan {
     /// The online renames, each as a full [`ExpandContractPlan`] (expand migs +
     /// `BackfillSpec` + contract migs). NEVER flattened into `migrations`.
     pub renames: Vec<ExpandContractPlan>,
+    /// **P3b (SQLite only)** — the existing-table changes that SQLite has no native
+    /// `ALTER` for (type change, nullability change, column RENAME's rebuild,
+    /// ADD/DROP CONSTRAINT, in-place FK redefinition). Each is a 12-step table
+    /// rebuild ([`SqliteRebuildSpec`]) paired with its journal [`Migration`]. NOT
+    /// flattened into `migrations`: a rebuild is not a single `up` statement — it is
+    /// a structured engine-mode operation with `foreign_keys` toggles straddling the
+    /// transaction (the SQLite in-txn no-op rule), driven by
+    /// [`SqliteBackend::rebuild_one`](crate::SqliteBackend::rebuild_one). The
+    /// destructive/approval gate keys on the paired migration's flags
+    /// (`destructive + requires_approval`). Always empty on the PG path.
+    pub rebuilds: Vec<SqliteRebuild>,
+}
+
+/// **P3b** — one SQLite 12-step table rebuild: the execution [`SqliteRebuildSpec`]
+/// plus the [`Migration`] that carries its checksum / journal identity / approval
+/// flags. The differ produces these for the existing-table ops SQLite cannot ALTER
+/// natively; the caller (the executor / the direct test seam) gates the migration
+/// (a rebuild on a populated table is DESTRUCTIVE) and then runs
+/// [`SqliteBackend::rebuild_one`](crate::SqliteBackend::rebuild_one) with the spec.
+#[derive(Debug, Clone)]
+pub struct SqliteRebuild {
+    /// The journal migration: its `version` is the rebuild's identity, its
+    /// `checksum` certifies the rebuild, and its flags (`destructive = true,
+    /// requires_approval = true`) route it through the gate. Its `up` carries the
+    /// new-table CREATE for inspection/checksum; the actual apply is structured (the
+    /// `spec`), NOT a plain `up` execution.
+    pub migration: Migration,
+    /// The fully-resolved 12-step rebuild specification the backend executes.
+    pub spec: SqliteRebuildSpec,
 }
 
 impl DeclarativePlan {
-    /// True if the plan reconciles nothing — no plain migrations AND no renames.
+    /// True if the plan reconciles nothing — no plain migrations, no renames, AND
+    /// no SQLite rebuilds.
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.migrations.is_empty() && self.renames.is_empty()
+    pub fn is_empty(&self) -> bool {
+        self.migrations.is_empty() && self.renames.is_empty() && self.rebuilds.is_empty()
     }
 
     /// All migrations the plan would ultimately apply, flattened (plain set +
@@ -1873,6 +1901,12 @@ impl DeclarativePlan {
         let mut all = self.migrations.clone();
         for r in &self.renames {
             all.extend(r.all());
+        }
+        // P3b — a SQLite rebuild's journal migration carries its checksum / identity
+        // for inspection + the gate. Its apply is structured (the spec), not a plain
+        // `up`, but for preview/counting/checksum purposes it is one migration.
+        for rb in &self.rebuilds {
+            all.push(rb.migration.clone());
         }
         all
     }
@@ -2169,6 +2203,11 @@ impl DeclarativeAuthor {
         // Flattening would discard the BackfillSpec, so the pre-existing-row
         // mirror never runs and the contract DROP COLUMN <from> destroys data.
         let mut renames: Vec<ExpandContractPlan> = Vec::new();
+        // P3b — the SQLite existing-table changes that have no native ALTER (type /
+        // nullability change, column rename rebuild, ADD/DROP CONSTRAINT, FK
+        // redefinition). Each is a structured 12-step rebuild, NOT a plain `up` — so
+        // it is carried separately, like `renames`, never flattened into `out`.
+        let mut rebuilds: Vec<SqliteRebuild> = Vec::new();
 
         // --- New tables (in desired, not in live), in FK-dependency order. ---
         let new_tables: Vec<&String> = desired
@@ -2314,17 +2353,40 @@ impl DeclarativeAuthor {
             let renamed_to: std::collections::BTreeSet<&str> =
                 table_renames.iter().map(|r| r.to.as_str()).collect();
 
-            // PHASE 4 — the expand-contract rename sequence is PG-shaped (schema-
-            // qualified DDL + an `ALTER COLUMN`-bearing dual-write path SQLite has no
-            // native form for). On the Confined SQLite path a column rename needs the
-            // 12-step table rebuild (P3b), so fail closed with the typed deferred
-            // error rather than author dangling PG DDL.
-            if is_sqlite && !table_renames.is_empty() {
-                let r = &table_renames[0];
-                return Err(DeclarativeError::SqliteRebuildRequired {
-                    table: table.clone(),
-                    op: format!("rename column {} → {}", r.from, r.to),
-                });
+            // PHASE 3b — on the Confined SQLite path, the existing-table changes that
+            // SQLite has NO native ALTER for — a column TYPE change, a nullability
+            // change (either direction), a column RENAME, an ADD/DROP CONSTRAINT, or
+            // an in-place FK redefinition — are reconciled by the 12-step table
+            // REBUILD (§2.4). A rebuild reconciles the WHOLE table at once (every
+            // changed column + the new constraint/FK set), so we detect it up front,
+            // emit ONE structured `SqliteRebuild`, and `continue` past the PG-shaped
+            // per-op emission below (which has no SQLite form for these). The
+            // natively-expressible existing-table ops (ADD COLUMN, DROP COLUMN, DROP
+            // INDEX, ADD INDEX) still flow through the per-op path when NO rebuild is
+            // needed.
+            if is_sqlite {
+                if let Some(reason) =
+                    self.sqlite_existing_table_needs_rebuild(table, lt, dt, &table_renames)
+                {
+                    let rb = self.build_sqlite_rebuild(
+                        table,
+                        desired_full,
+                        lt,
+                        dt,
+                        &table_renames,
+                        reason,
+                    )?;
+                    rebuilds.push(rb);
+                    continue;
+                }
+                // No rebuild needed: a hinted rename with no other change is still a
+                // rename, which SQLite expresses via `ALTER TABLE … RENAME COLUMN`
+                // (native ≥ 3.25) — but the engine's rename path is the PG-shaped
+                // expand-contract sequence (schema-qualified, dual-write). Routing a
+                // pure SQLite rename through a rebuild keeps it single-sourced and
+                // confinement-clean; `sqlite_existing_table_needs_rebuild` already
+                // returns `Some` whenever there is a rename, so a rename can never
+                // reach the PG expand-contract author below on the SQLite leg.
             }
 
             // Author the expand-contract rename sequences (E1..E3, C1, C2) and
@@ -2361,46 +2423,30 @@ impl DeclarativeAuthor {
                         //   fail on existing NULLs);
                         // - DROP NOT NULL (true→false) → ungated additive.
                         //
-                        // PHASE 4 — SQLite has NO `ALTER COLUMN` at all (its ALTER
+                        // PHASE 3b — SQLite has NO `ALTER COLUMN` at all (its ALTER
                         // TABLE only does RENAME / ADD COLUMN / DROP COLUMN / RENAME
-                        // COLUMN). BOTH a type change AND ANY nullability change need
-                        // the 12-step table rebuild (P3b). Fail closed with the typed
-                        // deferred error rather than emit dangling PG `ALTER COLUMN`
-                        // DDL on the SQLite path.
+                        // COLUMN). A type change or ANY nullability change is now
+                        // reconciled by the 12-step table REBUILD detected up front —
+                        // `sqlite_existing_table_needs_rebuild` returns `Some` for
+                        // exactly these, and the loop `continue`s past this whole
+                        // existing-table body BEFORE reaching here. So on the SQLite
+                        // leg a same-name column with a real type/nullability change is
+                        // UNREACHABLE here; if one is somehow seen, it is a detector
+                        // bug — fail closed with an internal error (NEVER emit dangling
+                        // PG `ALTER COLUMN` DDL, NEVER silently skip). The dialect-aware
+                        // type compare uses the SAME `sqlite_canonical_type` folding
+                        // the detector uses, so the two agree.
                         if is_sqlite {
-                            // DIALECT-AWARE type compare: the LIVE snapshot is REAL
-                            // SQLite introspection (SQLite declared types: `text` /
-                            // `blob` / `real` / `integer` / `numeric`), while the
-                            // DESIRED snapshot carries PG `information_schema`
-                            // spellings (`bytea` / `double precision` / `timestamp
-                            // with time zone` / …). Comparing the raw spellings would
-                            // falsely flag a rebuild on every encrypted (`bytea` vs
-                            // `blob`), number (`double precision` vs `real`), or
-                            // timestamp (`… with time zone` vs `text`) column. Fold
-                            // both sides to the SAME SQLite type-affinity token the
-                            // shared emitter would write, so the compare is
-                            // apples-to-apples; a GENUINE change (e.g. string→number,
-                            // `text`→`real`) maps to two distinct tokens and is still
-                            // caught. (PG leg is untouched — it never reaches here.)
                             if sqlite_canonical_type(&lc.data_type)
                                 != sqlite_canonical_type(&c.data_type)
+                                || lc.nullable != c.nullable
                             {
-                                return Err(DeclarativeError::SqliteRebuildRequired {
-                                    table: table.clone(),
-                                    op: format!(
-                                        "alter column {} type {} → {}",
-                                        c.name, lc.data_type, c.data_type
-                                    ),
-                                });
-                            }
-                            if lc.nullable != c.nullable {
-                                return Err(DeclarativeError::SqliteRebuildRequired {
-                                    table: table.clone(),
-                                    op: format!(
-                                        "alter column {} nullability {} → {}",
-                                        c.name, lc.nullable, c.nullable
-                                    ),
-                                });
+                                return Err(DeclarativeError::Invalid(format!(
+                                    "internal: SQLite column {table}.{} has a type/nullability \
+                                     change that the rebuild detector should have caught (P3b \
+                                     invariant violated)",
+                                    c.name
+                                )));
                             }
                             continue;
                         }
@@ -2560,6 +2606,7 @@ impl DeclarativeAuthor {
         Ok(DeclarativePlan {
             migrations: out,
             renames,
+            rebuilds,
         })
     }
 
@@ -2852,6 +2899,254 @@ impl DeclarativeAuthor {
             SqliteEmitScope::MainUnqualified,
         )
         .map_err(|e| DeclarativeError::Invalid(format!("sqlite emit for '{table}': {e}")))
+    }
+
+    /// **P3b** — does this existing SQLite table need the 12-step table REBUILD to
+    /// reconcile `live` → `desired`? Returns `Some(reason)` for a change SQLite has
+    /// NO native `ALTER` for, `None` if every difference is natively expressible
+    /// (ADD COLUMN / DROP COLUMN / ADD INDEX / DROP INDEX).
+    ///
+    /// The rebuild triggers (design §2.4): a same-name column TYPE change, a
+    /// nullability change (either direction), a hinted column RENAME, a same-name
+    /// index in-place redefinition (uniqueness or column-set change), a same-name FK
+    /// redefinition, and an ADD/DROP of an FK constraint (SQLite has no
+    /// `ALTER TABLE ADD/DROP CONSTRAINT`, so any FK-set change is a rebuild).
+    ///
+    /// **Fail-closed:** the FIRST trigger found returns immediately with a precise
+    /// reason; the per-op emission below never runs for a rebuild-needing table.
+    fn sqlite_existing_table_needs_rebuild(
+        &self,
+        table: &str,
+        lt: &TableSnapshot,
+        dt: &TableSnapshot,
+        table_renames: &[&ResolvedRename],
+    ) -> Option<String> {
+        // (1) A hinted column RENAME — SQLite has `RENAME COLUMN`, but the engine's
+        //     rename path is the PG-shaped expand-contract sequence; on SQLite we
+        //     reconcile a rename via the rebuild (`to ← from` copy mapping), keeping
+        //     it single-sourced + confinement-clean.
+        if let Some(r) = table_renames.first() {
+            return Some(format!("rename column {} → {}", r.from, r.to));
+        }
+
+        let live_cols: BTreeMap<&str, &ColumnSnapshot> =
+            lt.columns.iter().map(|c| (c.name.as_str(), c)).collect();
+
+        // (2)/(3) A same-name column with a TYPE or NULLABILITY change. The
+        //     dialect-aware `sqlite_canonical_type` fold avoids false positives on
+        //     PG-vs-SQLite spelling differences (bytea↔blob, double precision↔real,
+        //     timestamptz↔text); a GENUINE change maps to two distinct tokens.
+        for c in &dt.columns {
+            if let Some(lc) = live_cols.get(c.name.as_str()) {
+                if sqlite_canonical_type(&lc.data_type) != sqlite_canonical_type(&c.data_type) {
+                    return Some(format!(
+                        "alter column {} type {} → {}",
+                        c.name, lc.data_type, c.data_type
+                    ));
+                }
+                if lc.nullable != c.nullable {
+                    return Some(format!(
+                        "alter column {} nullability {} → {}",
+                        c.name, lc.nullable, c.nullable
+                    ));
+                }
+            }
+        }
+
+        // (4) A same-name INDEX whose uniqueness or column set changed — an in-place
+        //     index redefinition (SQLite has no `ALTER INDEX`; a DROP+CREATE inside a
+        //     rebuild is how the new shape's index set lands).
+        let live_idx: BTreeMap<&str, &IndexSnapshot> =
+            lt.indexes.iter().map(|i| (i.name.as_str(), i)).collect();
+        for idx in &dt.indexes {
+            if is_pk_index(table, &idx.name) {
+                continue;
+            }
+            if let Some(li) = live_idx.get(idx.name.as_str()) {
+                if li.unique != idx.unique {
+                    return Some(format!(
+                        "index {}.{} uniqueness change {} → {}",
+                        table, idx.name, li.unique, idx.unique
+                    ));
+                }
+                if li.columns != idx.columns {
+                    return Some(format!(
+                        "index {}.{} column change {:?} → {:?}",
+                        table, idx.name, li.columns, idx.columns
+                    ));
+                }
+            }
+        }
+
+        // (5) A FOREIGN KEY set change — a redefinition (same name, changed body),
+        //     an ADD (desired-only FK), or a DROP (live-only FK). SQLite inlines FKs
+        //     at CREATE TABLE and has no `ALTER TABLE ADD/DROP CONSTRAINT`, so ANY FK
+        //     set difference is a rebuild.
+        let live_fk: BTreeMap<&str, &ConstraintSnapshot> = lt
+            .constraints
+            .iter()
+            .filter(|c| c.kind == "FOREIGN KEY")
+            .map(|c| (c.name.as_str(), c))
+            .collect();
+        let desired_fk: BTreeMap<&str, &ConstraintSnapshot> = dt
+            .constraints
+            .iter()
+            .filter(|c| c.kind == "FOREIGN KEY")
+            .map(|c| (c.name.as_str(), c))
+            .collect();
+        for (name, dc) in &desired_fk {
+            match live_fk.get(name) {
+                None => return Some(format!("add foreign key {table}.{name}")),
+                Some(lc) if lc.definition != dc.definition => {
+                    return Some(format!(
+                        "foreign key {table}.{name} definition change {:?} → {:?}",
+                        lc.definition, dc.definition
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+        for name in live_fk.keys() {
+            if !desired_fk.contains_key(name) {
+                return Some(format!("drop foreign key {table}.{name}"));
+            }
+        }
+
+        None
+    }
+
+    /// **P3b** — build the [`SqliteRebuild`] (spec + journal migration) that
+    /// reconciles `live` → `desired` for one existing table via the 12-step rebuild.
+    ///
+    /// The new-table CREATE comes from the shared Sqlite/MainUnqualified emitter
+    /// (goodie sentinels + FKs), re-pointed to the engine-chosen TEMP name. The copy
+    /// mapping carries every column present in BOTH shapes (a RENAME maps `to ←
+    /// from`); a dropped column is excluded, an added one takes its DEFAULT/NULL. The
+    /// recreate set is the desired table's non-PK, non-system indexes (the
+    /// system-field indexes are emitted inline in the new CREATE by the shared
+    /// emitter, like the create-table path).
+    fn build_sqlite_rebuild(
+        &self,
+        table: &str,
+        desired_full: &DesiredSchema,
+        lt: &TableSnapshot,
+        dt: &TableSnapshot,
+        table_renames: &[&ResolvedRename],
+        reason: String,
+    ) -> Result<SqliteRebuild, DeclarativeError> {
+        // The new table's CREATE (real name), then re-point it to the temp name. The
+        // MainUnqualified emitter output begins `CREATE TABLE IF NOT EXISTS "<table>"`
+        // (the `IF NOT EXISTS` + the quoted identifier); we rewrite ONLY that leading
+        // quoted identifier so the body (columns, sentinels, FKs) is byte-identical to
+        // a fresh create. The quoted table name appears FIRST in the statement (the
+        // column/constraint bodies that follow can only reference it via self-FK as
+        // `REFERENCES "<table>"`, which on the rebuild path is fine to leave pointing
+        // at the FINAL name — the table is renamed back to `<table>` before the FK is
+        // enforced), so a single replacement of the first `"<table>"` occurrence is
+        // exact and safe.
+        let create_real = self.render_create_table_sqlite(table, desired_full)?;
+        let tmp = SqliteRebuildSpec::tmp_name(table);
+        let real_q = quote_ident(table);
+        let tmp_q = quote_ident(&tmp);
+        // The first occurrence of the quoted real table name is the CREATE target.
+        let new_table_create = match create_real.find(&real_q) {
+            Some(pos) => {
+                let mut s = create_real.clone();
+                s.replace_range(pos..pos + real_q.len(), &tmp_q);
+                s
+            }
+            None => {
+                // The emitter shape changed out from under us — fail closed rather
+                // than emit a CREATE under the real name (which would collide with the
+                // table we are about to drop) or a malformed statement.
+                return Err(DeclarativeError::Invalid(format!(
+                    "internal: SQLite rebuild of '{table}' could not re-point the emitted CREATE \
+                     to the temp name (emitter shape mismatch); refusing to emit a colliding CREATE"
+                )));
+            }
+        };
+
+        // The copy mapping: every column present in BOTH the old and new shapes.
+        // - a RENAME's `to` (new) maps to its `from` (old) — data follows the rename;
+        // - a dropped column (live-only) is excluded;
+        // - an added column (desired-only, not a rename `to`) is excluded (DEFAULT/NULL).
+        let live_names: BTreeSet<&str> = lt.columns.iter().map(|c| c.name.as_str()).collect();
+        let rename_to_from: BTreeMap<&str, &str> = table_renames
+            .iter()
+            .map(|r| (r.to.as_str(), r.from.as_str()))
+            .collect();
+        let mut copy_columns: Vec<(String, String)> = Vec::new();
+        for c in &dt.columns {
+            let dest = c.name.as_str();
+            if let Some(src) = rename_to_from.get(dest) {
+                // RENAME: copy from the old column name into the new one (the old
+                // name must be live for the SELECT to resolve).
+                if live_names.contains(src) {
+                    copy_columns.push((dest.to_string(), (*src).to_string()));
+                }
+            } else if live_names.contains(dest) {
+                // A kept column (same name on both sides): copy straight across.
+                copy_columns.push((dest.to_string(), dest.to_string()));
+            }
+            // else: an added column — no source; it takes its DEFAULT/NULL.
+        }
+
+        // The recreate set: the desired table's non-PK, non-system-field indexes,
+        // rendered unqualified for `main` (the shared CREATE already emits the three
+        // implicit system-field indexes inline, so they are NOT recreated here — the
+        // same skip the create-table path uses). Each is replayed AFTER the rename.
+        let mut recreate_objects: Vec<String> = Vec::new();
+        for idx in &dt.indexes {
+            if is_pk_index(table, &idx.name) || is_system_field_index(table, &idx.name) {
+                continue;
+            }
+            recreate_objects.push(Self::render_sqlite_index_ddl(table, idx));
+        }
+
+        let spec = SqliteRebuildSpec {
+            table: table.to_string(),
+            tmp_table: tmp,
+            new_table_create,
+            copy_columns,
+            recreate_objects,
+            reason: reason.clone(),
+        };
+
+        // The journal migration: its `up` carries the new-table CREATE (so the
+        // checksum certifies the rebuilt shape and a preview can inspect it), but the
+        // ACTUAL apply is the structured spec, NOT a plain `up` execution. A rebuild
+        // on a populated table is DESTRUCTIVE (it drops + recreates), so the flags
+        // route it through the destructive/approval gate. `down: None` — the reverse
+        // of a rebuild is itself a rebuild (authored from the prior desired shape),
+        // never a plain statement.
+        let migration = self.make(
+            &format!("sqlite_rebuild_{table}"),
+            spec.new_table_create.clone(),
+            None,
+            destructive_flags(),
+            Vec::new(),
+        );
+
+        Ok(SqliteRebuild { migration, spec })
+    }
+
+    /// Render the UNqualified SQLite `CREATE [UNIQUE] INDEX` DDL for one index on
+    /// `main` (the app file) — the inline form [`render_create_index`]'s SQLite arm
+    /// produces, without the [`Migration`] wrapper. Used to recreate a rebuilt
+    /// table's indexes after the swap (P3b).
+    fn render_sqlite_index_ddl(table: &str, idx: &IndexSnapshot) -> String {
+        let unique = if idx.unique { "UNIQUE " } else { "" };
+        let col_list = idx
+            .columns
+            .iter()
+            .map(|c| quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "CREATE {unique}INDEX IF NOT EXISTS {} ON {} ({col_list})",
+            quote_ident(&idx.name),
+            quote_ident(table),
+        )
     }
 
     /// Render `CREATE TABLE <schema>.<table> (<cols…>, <pk>, <inline fks…>)`.
@@ -3544,6 +3839,7 @@ mod advisory_seam_tests {
                 plain("DROP TABLE \"proj_acme\".\"legacy\""),
             ],
             renames: Vec::new(),
+            rebuilds: Vec::new(),
         };
         let advisories = plan.advisories();
         // Only the drop produced an advisory entry (the additive create is silent).
@@ -3568,6 +3864,7 @@ mod advisory_seam_tests {
                 "CREATE TABLE \"proj_acme\".\"orders\"(id bigint primary key, note text)",
             )],
             renames: Vec::new(),
+            rebuilds: Vec::new(),
         };
         assert!(plan.advisories().is_empty());
     }
@@ -3588,6 +3885,7 @@ mod advisory_seam_tests {
                 plain("CREATE INDEX idx_orders_user ON \"proj_acme\".\"orders\"(user_id)"),
             ],
             renames: Vec::new(),
+            rebuilds: Vec::new(),
         };
         let all: Vec<_> = plan
             .advisories()
@@ -3610,6 +3908,7 @@ mod advisory_seam_tests {
                  FOREIGN KEY (user_id) REFERENCES \"proj_acme\".\"users\"(id) NOT VALID",
             )],
             renames: Vec::new(),
+            rebuilds: Vec::new(),
         };
         let all: Vec<_> = plan
             .advisories()
