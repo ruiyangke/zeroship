@@ -150,7 +150,7 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
 /// Allocate the next `event_seq` from the shared counter (§2.2). ONE statement,
 /// inside the apply transaction, under engine mode: `UPDATE … RETURNING next - 1`
 /// yields the pre-increment value atomically. Returns the allocated `event_seq`.
-async fn alloc_event_seq(actor: &MigrationActor) -> Result<i64, SqliteActorError> {
+pub(crate) async fn alloc_event_seq(actor: &MigrationActor) -> Result<i64, SqliteActorError> {
     let rows = actor
         .query("UPDATE \"_mig\".event_seq SET next = next + 1 WHERE id = 1 RETURNING next - 1")
         .await?;
@@ -277,7 +277,7 @@ async fn run_apply_txn(
 /// Single-quote a SQL string literal (double embedded quotes). The values here are
 /// engine-controlled (migration metadata), but we quote defensively so a name with
 /// an apostrophe can never break the INSERT.
-fn sql_lit(s: &str) -> String {
+pub(crate) fn sql_lit(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 

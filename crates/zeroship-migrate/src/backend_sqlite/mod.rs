@@ -19,7 +19,9 @@
 
 pub mod actor;
 pub mod authorizer;
+mod drift_sql;
 mod journal_sql;
+mod rollback_sql;
 
 use std::collections::HashMap;
 
@@ -98,6 +100,35 @@ impl SqliteBackend {
     /// logical shape (§2.2) — window-function net-state over the shared event_seq.
     pub async fn applied_sqlite(&self) -> Result<Vec<AppliedEntry>, SqliteActorError> {
         journal_sql::applied(&self.actor).await
+    }
+
+    /// Roll back ONE migration's `down` ADDITIVELY (§2.7, P5) + append a
+    /// `_rolled_back` event, atomically. The direct executor-internal seam (no
+    /// approval gate; the generic executor gates approval before reaching here).
+    /// A rebuild-needing `down` is refused with
+    /// [`RollbackError::SqliteRebuildRequired`](crate::executor::RollbackError::SqliteRebuildRequired);
+    /// the rebuild is P3b.
+    ///
+    /// # Errors
+    /// [`RollbackError`] on a rebuild-needing `down`, a confinement denial, a failed
+    /// `down`, or a journal-write/commit failure.
+    pub async fn rollback_one_additive(
+        &self,
+        m: &Migration,
+        applied_by: &str,
+    ) -> Result<(), RollbackError> {
+        rollback_sql::rollback_one_transactional(&self.actor, m, applied_by).await
+    }
+
+    /// Introspect the LIVE `main` (app file) schema into a dialect-agnostic
+    /// [`SchemaSnapshot`] (§2.7) — the drift surface, the same shape the PG path
+    /// returns. Recovers inline `__zsmask:` / `zsenc:` sentinels from
+    /// `sqlite_master.sql`.
+    ///
+    /// # Errors
+    /// [`DriftError`] on a `sqlite_master` / PRAGMA read failure.
+    pub async fn snapshot_schema_sqlite(&self) -> Result<SchemaSnapshot, DriftError> {
+        drift_sql::snapshot_schema(&self.actor).await
     }
 }
 
@@ -203,13 +234,13 @@ impl MigrationBackend for SqliteBackend {
     async fn rollback_one_transactional(
         &self,
         _cfg: &ExecutorConfig,
-        _m: &Migration,
-        _applied_by: &str,
+        m: &Migration,
+        applied_by: &str,
     ) -> Result<(), RollbackError> {
-        // Rollback is P5 (needs the 12-step rebuild for most reversals). Not in P2.
-        Err(RollbackError::Backend(
-            "sqlite backend: rollback is a P5 capability (not built in P2)".to_string(),
-        ))
+        // P5 ADDITIVE rollback (§2.7): reverse the `down` (DROP TABLE/COLUMN/INDEX,
+        // RENAME) transactionally + append a `_rolled_back` event. A rebuild-needing
+        // `down` is refused with `SqliteRebuildRequired` (the rebuild is P3b).
+        rollback_sql::rollback_one_transactional(&self.actor, m, applied_by).await
     }
 
     // -- parse-time validation ----------------------------------------------
@@ -263,23 +294,26 @@ impl MigrationBackend for SqliteBackend {
     async fn check_checksum_drift(
         &self,
         _cfg: &ExecutorConfig,
-        _migrations: &[Migration],
+        migrations: &[Migration],
     ) -> Result<ChecksumDriftReport, DriftError> {
-        // Drift is P5. The comparison logic is dialect-agnostic; only the journal
-        // read underneath differs. Not built in P2.
-        Err(DriftError::Backend(
-            "sqlite backend: checksum-drift is a P5 capability (not built in P2)".to_string(),
-        ))
+        // P5: the comparison is dialect-agnostic (shared `compare_applied_to_set`);
+        // only the journal read underneath is dialect-coupled. Read the net-applied
+        // journal entries (SQLite window-function net-state) and feed the generic
+        // comparison — identical rules to the PG path.
+        let applied = journal_sql::applied(&self.actor)
+            .await
+            .map_err(|e| DriftError::Backend(e.to_string()))?;
+        Ok(crate::drift::compare_applied_to_set(&applied, migrations))
     }
 
     async fn snapshot_schema(
         &self,
         _cfg: &ExecutorConfig,
     ) -> Result<SchemaSnapshot, DriftError> {
-        Err(DriftError::Backend(
-            "sqlite backend: schema snapshot (drift) is a P5 capability (not built in P2)"
-                .to_string(),
-        ))
+        // P5: introspect the LIVE `main` (app file) schema via sqlite_master +
+        // PRAGMAs into the same `SchemaSnapshot` shape the PG path returns, under
+        // engine mode (§2.5.1). Recovers inline mask/encryption sentinels.
+        drift_sql::snapshot_schema(&self.actor).await
     }
 
     // -- preconditions ------------------------------------------------------

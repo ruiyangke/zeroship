@@ -36,7 +36,7 @@ use std::collections::BTreeMap;
 use compio_postgres::Client;
 
 use crate::db::ExecutorConfig;
-use crate::journal::{self, JournalError, Phase};
+use crate::journal::{self, AppliedEntry, JournalError, Phase};
 use crate::migration::Migration;
 
 // ---------------------------------------------------------------------------
@@ -131,11 +131,30 @@ pub async fn check_checksum_drift(
     migrations: &[Migration],
 ) -> Result<ChecksumDriftReport, DriftError> {
     let applied = journal::applied(conn, cfg).await?;
+    Ok(compare_applied_to_set(&applied, migrations))
+}
+
+/// The **dialect-agnostic** core of [`check_checksum_drift`]: compare a set of
+/// net-applied journal entries (already read by the dialect-coupled `applied`)
+/// against the supplied migration set, producing the [`ChecksumDriftReport`].
+///
+/// Extracted so EVERY [`MigrationBackend`](crate::backend::MigrationBackend) impl
+/// shares ONE comparison — the Postgres path and the SQLite path both call this
+/// with their own `applied()` read, so the repeatable-exemption / kind-mismatch /
+/// tamper / orphan rules can never diverge across dialects (design §2.7: the
+/// comparison is dialect-agnostic; only the journal read underneath differs).
+///
+/// Pure: no I/O. See [`check_checksum_drift`] for the per-rule rationale.
+#[must_use]
+pub fn compare_applied_to_set(
+    applied: &[AppliedEntry],
+    migrations: &[Migration],
+) -> ChecksumDriftReport {
     let by_version: BTreeMap<&str, &Migration> =
         migrations.iter().map(|m| (m.version.as_str(), m)).collect();
 
     let mut report = ChecksumDriftReport::default();
-    for entry in &applied {
+    for entry in applied {
         // Only NET-applied (completed) versions can drift / be orphaned; a lone
         // `started` inflight marker is a crash-recovery key, not a settled state.
         if entry.phase != Phase::Completed {
@@ -200,7 +219,7 @@ pub async fn check_checksum_drift(
             }),
         }
     }
-    Ok(report)
+    report
 }
 
 // ---------------------------------------------------------------------------
