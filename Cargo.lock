@@ -6919,6 +6919,7 @@ dependencies = [
  "zeroize",
  "zeroship-core",
  "zeroship-metering",
+ "zeroship-migrate",
  "zeroship-runtime",
  "zeroship-runtime-macros",
  "zeroship-schema",

@@ -30,6 +30,9 @@ use zeroship_plugin_db::backend::{
 use zeroship_plugin_db::broker::{subscribe, ChangeOp, Subscription, SubscriptionMessage};
 use zeroship_plugin_db::error::DbError;
 use zeroship_plugin_db::query::{IndexKind, IndexSpec};
+// **P6b** — the hardened migration backend, used by the engine-path tests to read
+// the versioned `_mig` journal and to seed a journal-less legacy file.
+use zeroship_migrate::SqliteBackend as MigrateBackend;
 
 /// Spin up a fresh `SqliteBackend` rooted at a per-test temp dir.
 ///
@@ -9360,14 +9363,14 @@ fn nested_savepoint_release_keeps_both_sqlite() {
 }
 
 // ---------------------------------------------------------------------------
-// P5 (b) — the SQLite dev tier is NOT bricked by the cutover. On the PG dialect
-// `registerModel` stops applying DDL (the engine owns the schema at deploy), but
-// the engine has NO SQLite apply path yet, so SQLite `registerModel` is
-// UNCHANGED: it STILL auto-creates the table from the declared schema. This test
-// drives the EXACT production dialect dispatch (`exec_register_model` via the
-// `..._via_dispatch_for_tests` seam) with a SQLite backend installed in the
-// per-isolate context, and asserts the table was created — proving the SQLite
-// arm still runs the runtime auto-migrate (design §9 / §12 P5).
+// P6b — the SQLite dev tier auto-migrates through the HARDENED MIGRATION ENGINE.
+// On the PG dialect `registerModel` applies no DDL (the engine owns the schema at
+// deploy); on SQLite (dev) `registerModel` drives `run_sqlite_via_engine` (the
+// retired `run_sqlite_pipeline` is gone). This test drives the EXACT production
+// dialect dispatch (`exec_register_model` via `..._via_dispatch_for_tests`) with
+// a SQLite backend installed in the per-isolate context, and asserts the table
+// is auto-created AND journaled in `zs-<app>.migrations.sqlite` — proving the
+// engine path applies the declared schema end-to-end.
 // ---------------------------------------------------------------------------
 #[test]
 fn p5_sqlite_register_model_still_auto_migrates() {
@@ -9422,5 +9425,267 @@ fn p5_sqlite_register_model_still_auto_migrates() {
             "P5 SQLite: registerModel must still auto-create the declared table; \
              sqlite_master rows: {rows:?}"
         );
+
+        // P6b PROOF: the migration is JOURNALED in zs-<app>.migrations.sqlite (a
+        // real versioned journal the old run_sqlite_pipeline never wrote). The
+        // engine wrote a `completed` row to `_mig.schema_migrations` in the app's
+        // migrations file; verify the file exists and carries a completed row.
+        let mig_path = dir.path().join(format!("zs-{app}.migrations.sqlite"));
+        assert!(
+            mig_path.exists(),
+            "the engine must write a versioned journal at {}",
+            mig_path.display()
+        );
+        let mig = MigrateBackend::open(
+            &dir.path().join(format!("zs-{app}.sqlite")),
+            &mig_path,
+        )
+        .expect("open the migration backend to read the journal");
+        let completed: usize = mig
+            .applied_sqlite()
+            .await
+            .expect("read journal")
+            .iter()
+            .filter(|e| e.phase == zeroship_migrate::journal::Phase::Completed)
+            .count();
+        assert!(
+            completed >= 1,
+            "the engine must journal at least one completed migration; got {completed}"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// P6b BARRIER (critical) — the cold-path first `env.db` touch triggers the
+// migration on the hardened backend B, B is dropped, A re-ATTACHes, and the
+// SUBSEQUENT CRUD on connection A sees the FULLY-MIGRATED schema (no stale
+// schema-cache, no missing table). This proves the single-owner window + the
+// promise-chain barrier: A reads/writes the migrated table correctly because the
+// whole apply ran inside the awaited register dispatch BEFORE any CRUD.
+// ---------------------------------------------------------------------------
+#[test]
+fn p6b_barrier_crud_on_a_sees_the_fully_migrated_schema() {
+    run(async {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let backend = Rc::new(SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend"));
+        let app = "p6b_barrier";
+        let collection = "notes";
+        zeroship_plugin_db::set_sqlite_backend_for_tests(backend.clone());
+
+        let schema = serde_json::json!({
+            "_meta": {"strictness": "lenient"},
+            "body": {"type": "string", "required": true},
+            "pinned": {"type": "boolean"},
+        });
+
+        // Cold path: the migration runs entirely inside this awaited dispatch.
+        zeroship_plugin_db::register_model::exec_register_model_via_dispatch_for_tests(
+            app, collection, &schema, &serde_json::json!([]),
+        )
+        .await
+        .expect("engine registers the schema in the cold path");
+
+        // CRUD on A right after — A must see the migrated table + every declared
+        // column. A write (B dropped, A re-ATTACHed) lands cleanly.
+        backend
+            .pool_exec(
+                &format!(
+                    r#"INSERT INTO "{app}"."{collection}" (id, body, pinned)
+                       VALUES ('note_1', 'hello', 1)"#
+                ),
+                &[],
+            )
+            .await
+            .expect("A must WRITE the fully-migrated table (barrier holds)");
+
+        let client = backend.acquire_dedicated_client().await.expect("client");
+        let rows = client
+            .query(
+                &format!(r#"SELECT body, pinned FROM "{app}"."{collection}" WHERE id = 'note_1'"#),
+                &[],
+            )
+            .await
+            .expect("A must READ the migrated table");
+        assert_eq!(rows.len(), 1, "the row A wrote is readable through the migrated schema");
+        assert_eq!(rows[0][0].as_deref(), Some("hello"), "body column resolves");
+        assert_eq!(rows[0][1].as_deref(), Some("1"), "pinned column resolves");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// P6b DESTRUCTIVE applies in dev — a schema change that DROPS a column ACTUALLY
+// applies on SQLite in dev (auto-approved), data preserved per the 12-step
+// rebuild. Contrast the OLD silent-skip (`apply_sqlite` `continue`d on
+// destructive ops, so a DROP COLUMN was ignored and the dev DB diverged).
+// ---------------------------------------------------------------------------
+#[test]
+fn p6b_destructive_drop_column_actually_applies_in_dev() {
+    run(async {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let backend = Rc::new(SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend"));
+        let app = "p6b_destructive";
+        let collection = "accounts";
+        zeroship_plugin_db::set_sqlite_backend_for_tests(backend.clone());
+
+        // v1: accounts(label, legacy_flag). Register + seed a row.
+        let v1 = serde_json::json!({
+            "_meta": {"strictness": "lenient"},
+            "label": {"type": "string", "required": true},
+            "legacy_flag": {"type": "boolean"},
+        });
+        zeroship_plugin_db::register_model::exec_register_model_via_dispatch_for_tests(
+            app, collection, &v1, &serde_json::json!([]),
+        )
+        .await
+        .expect("register v1");
+        backend
+            .pool_exec(
+                &format!(
+                    r#"INSERT INTO "{app}"."{collection}" (id, label, legacy_flag)
+                       VALUES ('a1', 'keep-me', 1)"#
+                ),
+                &[],
+            )
+            .await
+            .expect("seed v1 row");
+
+        // The schema cache the dispatch stamped lets `cached_schemas_for_app`
+        // round-trip; mark v1 registered is implicit via dispatch. Re-register
+        // the SAME collection with `legacy_flag` REMOVED — a destructive DROP
+        // COLUMN that the engine reconciles via a 12-step rebuild (auto-approved
+        // in dev). Pre-P6b this was SILENTLY SKIPPED.
+        let v2 = serde_json::json!({
+            "_meta": {"strictness": "lenient"},
+            "label": {"type": "string", "required": true},
+        });
+        // The warm-isolate fast path short-circuits a re-register of the same
+        // (app, collection); clear that mark so v2 re-runs the cold path.
+        zeroship_plugin_db::clear_model_registered_for_tests(app, collection);
+        zeroship_plugin_db::register_model::exec_register_model_via_dispatch_for_tests(
+            app, collection, &v2, &serde_json::json!([]),
+        )
+        .await
+        .expect("register v2 (drop legacy_flag) — destructive applies in dev");
+
+        // The column is GONE (destructive op actually applied), and the row's
+        // data is preserved (12-step rebuild copied surviving columns).
+        let client = backend.acquire_dedicated_client().await.expect("client");
+        let cols = client
+            .query(&format!(r#"PRAGMA "{app}".table_info("{collection}")"#), &[])
+            .await
+            .expect("table_info");
+        let col_names: Vec<String> = cols
+            .iter()
+            .filter_map(|r| r.get(1).and_then(|c| c.clone()))
+            .collect();
+        assert!(
+            !col_names.iter().any(|c| c == "legacy_flag"),
+            "the destructive DROP COLUMN must ACTUALLY apply in dev (not silent-skip); cols: {col_names:?}"
+        );
+        assert!(col_names.iter().any(|c| c == "label"), "surviving column kept");
+        let rows = client
+            .query(
+                &format!(r#"SELECT label FROM "{app}"."{collection}" WHERE id = 'a1'"#),
+                &[],
+            )
+            .await
+            .expect("read preserved row");
+        assert_eq!(rows.len(), 1, "the row survived the 12-step rebuild");
+        assert_eq!(rows[0][0].as_deref(), Some("keep-me"), "surviving data preserved");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// P6b BASELINE adoption (H3) — an existing app file with tables but an EMPTY
+// `_mig` journal (the run_sqlite_pipeline legacy shape) is ADOPTED by the engine
+// on first boot: it baselines the live schema (no re-create, no drift abort),
+// then an additive deploy works. We simulate the legacy file by creating the app
+// file + table directly, with NO journal, then drive the dispatch.
+// ---------------------------------------------------------------------------
+#[test]
+fn p6b_baseline_adopts_a_journal_less_legacy_file() {
+    run(async {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let app = "p6b_baseline";
+        let collection = "widgets";
+        let app_path = dir.path().join(format!("zs-{app}.sqlite"));
+        let journal_path = dir.path().join(format!("zs-{app}.migrations.sqlite"));
+
+        // Synthesize the legacy shape (tables present, NO `_mig` journal) FAITHFULLY:
+        // create the table via the engine ONCE (so the table has the exact platform
+        // system-field shape the shared emitter produces — the same shape the old
+        // run_sqlite_pipeline created), seed a row, then DELETE the journal file so
+        // the file looks like a pre-engine run_sqlite_pipeline file (tables, no
+        // journal). A hand-rolled `CREATE TABLE id,label` would be missing the
+        // system fields and is not what the legacy path produced.
+        {
+            let seed_backend =
+                Rc::new(SqliteBackend::new(PathBuf::from(dir.path())).expect("open seed backend"));
+            zeroship_plugin_db::set_sqlite_backend_for_tests(seed_backend.clone());
+            let seed_schema = serde_json::json!({
+                "_meta": {"strictness": "lenient"},
+                "label": {"type": "string"},
+            });
+            zeroship_plugin_db::register_model::exec_register_model_via_dispatch_for_tests(
+                app, collection, &seed_schema, &serde_json::json!([]),
+            )
+            .await
+            .expect("seed: engine creates the legacy table shape");
+            seed_backend
+                .pool_exec(
+                    &format!(
+                        r#"INSERT INTO "{app}"."{collection}" (id, label) VALUES ('w1', 'legacy')"#
+                    ),
+                    &[],
+                )
+                .await
+                .expect("seed legacy row");
+        }
+        // Strip the journal → the file now has the table but NO engine journal (the
+        // legacy run_sqlite_pipeline shape). Clear the per-isolate registered mark
+        // so the next register re-runs the cold path against the journal-less file.
+        std::fs::remove_file(&journal_path).expect("remove journal to simulate legacy file");
+        zeroship_plugin_db::clear_model_registered_for_tests(app, collection);
+        assert!(app_path.exists(), "the legacy app file exists with a table");
+        assert!(!journal_path.exists(), "no engine journal (the legacy run_sqlite_pipeline shape)");
+
+        // Now boot the engine path against the SAME db_dir on a FRESH backend (a new
+        // dev isolate). B opens the same zs-<app>.sqlite; the empty journal + the
+        // live table trigger baseline adoption.
+        let backend = Rc::new(SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend"));
+        zeroship_plugin_db::set_sqlite_backend_for_tests(backend.clone());
+
+        // Declare the SAME `widgets` shape plus an additive `qty` column. The engine
+        // must BASELINE the live table (adopt it) then apply only the ADD COLUMN —
+        // no re-create, no drift abort.
+        let schema = serde_json::json!({
+            "_meta": {"strictness": "lenient"},
+            "label": {"type": "string"},
+            "qty": {"type": "number"},
+        });
+        zeroship_plugin_db::register_model::exec_register_model_via_dispatch_for_tests(
+            app, collection, &schema, &serde_json::json!([]),
+        )
+        .await
+        .expect("engine baselines the legacy file then applies the additive diff");
+
+        // The legacy row survived (the table was adopted, not re-created), and the
+        // additive column landed.
+        let client = backend.acquire_dedicated_client().await.expect("client");
+        let rows = client
+            .query(&format!(r#"SELECT label FROM "{app}"."{collection}" WHERE id = 'w1'"#), &[])
+            .await
+            .expect("read adopted row");
+        assert_eq!(rows.len(), 1, "the legacy row survived adoption (table not re-created)");
+        assert_eq!(rows[0][0].as_deref(), Some("legacy"), "legacy data preserved");
+        let cols = client
+            .query(&format!(r#"PRAGMA "{app}".table_info("{collection}")"#), &[])
+            .await
+            .expect("table_info");
+        let col_names: Vec<String> = cols
+            .iter()
+            .filter_map(|r| r.get(1).and_then(|c| c.clone()))
+            .collect();
+        assert!(col_names.iter().any(|c| c == "qty"), "the additive column landed; cols: {col_names:?}");
     });
 }

@@ -23,6 +23,15 @@ zeroship-core = { workspace = true }
 # `crate::crud::mask_backfill::{build,parse}_mask_sentinel`) so existing
 # call sites resolve unchanged. Behaviour is identical (pure refactor).
 zeroship-schema = { workspace = true }
+# **SQLite-engine wiring P6b** — the dev `registerModel` SQLite arm
+# (`run_sqlite_via_engine`) drives the security-hardened migration engine
+# (journal / versioning / drift / 12-step rebuild / baseline) instead of the
+# retired bespoke `run_sqlite_pipeline`. It constructs the engine's hardened
+# `SqliteBackend` (connection B) on the app file, plans a descriptor diff vs
+# live introspection, and applies through `MigrationEngine::apply_declarative`.
+# zeroship-migrate depends only on core + schema (no runtime/plugin-db), so no
+# dependency cycle.
+zeroship-migrate = { workspace = true }
 # Metering infrastructure: exec.rs emits a raw usage metric
 # (db_reads / db_writes / db_rows_written) in the success arm of each
 # query / mutation / count via a MeterHandle. Platform-measured,

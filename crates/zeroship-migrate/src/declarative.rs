@@ -527,6 +527,21 @@ fn field_data_type(f: &FieldDescriptor) -> Result<String, DeclarativeError> {
         return Ok("bytea".into());
     }
 
+    // GAP (flagged, P6b): the shared `def_to_pg_type` (PG arm) has NO integer-token
+    // arm, so `int`/`integer` degrade to its `_ => TEXT` fallback there and would be
+    // fail-closed-rejected below. But `int`/`integer` ARE legitimate SDK tokens the
+    // dev tier materialises (plugin-db's SQLite map has an explicit integer arm, and
+    // the dev `registerModel` JSON declares `{ type: "int" }`). Map them to a
+    // first-class `integer` snapshot type so the SQLite dev `registerModel`→engine
+    // path accepts an `int` column instead of erroring. We deliberately do NOT
+    // accept the Postgres *type names* `bigint`/`int4`/`int8` here — those are not
+    // DSL tokens and stay fail-closed-rejected as typos (`typo_type_token_is_…`),
+    // preserving the PG path byte-identically. When the shared PG map grows an
+    // integer arm this special-case can be deleted.
+    if matches!(f.ty.as_str(), "int" | "integer") {
+        return Ok("integer".into());
+    }
+
     let def = field_to_sdk_def(f);
     let ddl = def_to_column_type_for_dialect(&def, SqlDialect::Postgres);
 

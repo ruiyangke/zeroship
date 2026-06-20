@@ -524,6 +524,15 @@ impl IsolateDbContext {
         self.registered_models.insert(key);
     }
 
+    /// Clear the registered mark for one model — forces the next `registerModel`
+    /// to re-run the cold path instead of the warm short-circuit. Used by tests
+    /// that re-register the same `(app, collection)` with a CHANGED schema (a real
+    /// dev re-deploy mints a fresh isolate; the test reuses one).
+    pub(crate) fn clear_model_registered(&mut self, app_id: &str, collection: &str) {
+        let key = format!("{app_id}:{collection}");
+        self.registered_models.remove(&key);
+    }
+
     /// **P5 PR 2** — cache the schema declared by `db.registerModel`.
     /// Called after the four-phase DDL pipeline succeeds so the CRUD
     /// encryption pass can find `t.encrypted(...)` columns by name.

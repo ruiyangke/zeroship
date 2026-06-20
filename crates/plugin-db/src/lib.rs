@@ -244,6 +244,16 @@ pub fn mark_model_registered_for_tests(app_id: &str, collection: &str) {
     mark_model_registered(app_id, collection);
 }
 
+/// **P6b test helper** — clear the registered mark so a re-register of the same
+/// `(app, collection)` with a CHANGED schema re-runs the cold path (a real dev
+/// re-deploy mints a fresh isolate; tests reuse one). Used by the destructive-
+/// apply test to drive a v1→v2 schema change through the engine.
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+pub fn clear_model_registered_for_tests(app_id: &str, collection: &str) {
+    ctx_mut(|c| c.clear_model_registered(app_id, collection));
+}
+
 /// **T6** — stamp the per-`app_id` deploy/schema-version token into the
 /// per-isolate context, the way `mint_db` does from the worker-injected
 /// `ZEROSHIP_DEPLOY_ID`. A faithful e2e that drives the CRUD pipelines directly
