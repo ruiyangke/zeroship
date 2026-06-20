@@ -1866,9 +1866,16 @@ pub struct DeclarativePlan {
 /// **P3b** — one SQLite 12-step table rebuild: the execution [`SqliteRebuildSpec`]
 /// plus the [`Migration`] that carries its checksum / journal identity / approval
 /// flags. The differ produces these for the existing-table ops SQLite cannot ALTER
-/// natively; the caller (the executor / the direct test seam) gates the migration
-/// (a rebuild on a populated table is DESTRUCTIVE) and then runs
-/// [`SqliteBackend::rebuild_one`](crate::SqliteBackend::rebuild_one) with the spec.
+/// natively.
+///
+/// NOTE (C1): there is NO SQLite engine apply path / approval gate yet.
+/// [`plan_declarative`](crate::engine::MigrationEngine::plan_declarative) FAILS
+/// CLOSED (`SqliteRebuildRequired`) when a diff yields rebuilds rather than dropping
+/// them, because the PG-typed [`MigrationEngine`](crate::engine::MigrationEngine)
+/// cannot apply a SQLite rebuild. The only way to apply one today is the direct,
+/// ungated [`SqliteBackend::rebuild_one`](crate::SqliteBackend::rebuild_one) seam
+/// (tests); a caller invoking it MUST gate approval itself (a rebuild on a populated
+/// table is DESTRUCTIVE). Wiring the gated SQLite apply path is the next phase (P6).
 #[derive(Debug, Clone)]
 pub struct SqliteRebuild {
     /// The journal migration: its `version` is the rebuild's identity, its
@@ -3091,17 +3098,16 @@ impl DeclarativeAuthor {
             // else: an added column — no source; it takes its DEFAULT/NULL.
         }
 
-        // The recreate set: the desired table's non-PK, non-system-field indexes,
-        // rendered unqualified for `main` (the shared CREATE already emits the three
-        // implicit system-field indexes inline, so they are NOT recreated here — the
-        // same skip the create-table path uses). Each is replayed AFTER the rename.
-        let mut recreate_objects: Vec<String> = Vec::new();
-        for idx in &dt.indexes {
-            if is_pk_index(table, &idx.name) || is_system_field_index(table, &idx.name) {
-                continue;
-            }
-            recreate_objects.push(Self::render_sqlite_index_ddl(table, idx));
-        }
+        // C2 — the recreate set is EMPTY on the declarative path. The executor
+        // ([`SqliteBackend::rebuild_one`]) is the source of truth for the table's own
+        // indexes + triggers: it captures their `sql` TEXT VERBATIM from the live
+        // `sqlite_master` before the `DROP TABLE` and replays it after the rename, so
+        // partial/expression/collation/DESC index attributes AND creator triggers
+        // survive exactly. The previous path rebuilt indexes from the DESIRED
+        // `IndexSnapshot` (lossy — it dropped those attributes) and never touched
+        // triggers (silently destroying them on `DROP TABLE`). `recreate_objects`
+        // remains on the spec as an explicit escape hatch for direct-spec callers.
+        let recreate_objects: Vec<String> = Vec::new();
 
         let spec = SqliteRebuildSpec {
             table: table.to_string(),
@@ -3128,25 +3134,6 @@ impl DeclarativeAuthor {
         );
 
         Ok(SqliteRebuild { migration, spec })
-    }
-
-    /// Render the UNqualified SQLite `CREATE [UNIQUE] INDEX` DDL for one index on
-    /// `main` (the app file) — the inline form [`render_create_index`]'s SQLite arm
-    /// produces, without the [`Migration`] wrapper. Used to recreate a rebuilt
-    /// table's indexes after the swap (P3b).
-    fn render_sqlite_index_ddl(table: &str, idx: &IndexSnapshot) -> String {
-        let unique = if idx.unique { "UNIQUE " } else { "" };
-        let col_list = idx
-            .columns
-            .iter()
-            .map(|c| quote_ident(c))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!(
-            "CREATE {unique}INDEX IF NOT EXISTS {} ON {} ({col_list})",
-            quote_ident(&idx.name),
-            quote_ident(table),
-        )
     }
 
     /// Render `CREATE TABLE <schema>.<table> (<cols…>, <pk>, <inline fks…>)`.

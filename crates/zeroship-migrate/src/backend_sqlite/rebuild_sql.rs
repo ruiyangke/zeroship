@@ -9,7 +9,12 @@
 //! views. The new table's CREATE comes from the shared `zeroship-schema`
 //! Sqlite/MainUnqualified emitter (so it carries the inline mask/enc goodie
 //! sentinels and FKs); the index/trigger/view DDL is captured verbatim from the
-//! LIVE `sqlite_master` before the swap and replayed after.
+//! LIVE `sqlite_master` **at execution time, here in the backend** (this is the
+//! layer holding the connection) BEFORE the `DROP TABLE`, and replayed verbatim
+//! AFTER the rename — so partial/expression/collation/DESC index attributes and
+//! creator triggers survive the rebuild exactly (C2). A dependent object that
+//! genuinely cannot be replayed (it references a now-dropped column) FAILS CLOSED
+//! ([`RebuildError::DependentReplayFailed`]) — it is never silently destroyed.
 //!
 //! # The EXACT statement / mode / PRAGMA sequence (the crux a critic attacks)
 //!
@@ -20,12 +25,16 @@
 //! ```text
 //!  (engine, AUTOCOMMIT, EngineJournal)  PRAGMA foreign_keys = OFF
 //!  (engine, EngineJournal)              BEGIN IMMEDIATE
+//!  (engine, EngineJournal)              <capture verbatim sql FROM sqlite_master
+//!                                        for <t>'s indexes + triggers>   [main, read]
+//!  (engine, EngineJournal)              DROP TABLE IF EXISTS <tmp>      -- H2: clear pollution
 //!  (engine→CreatorUp)                   CREATE TABLE <tmp> (...new shape...)   [main]
 //!                                       INSERT INTO <tmp> (cols) SELECT cols FROM <t>
 //!                                       DROP TABLE <t>
 //!                                       ALTER TABLE <tmp> RENAME TO <t>
-//!                                       <recreate each index / trigger / view> [main]
-//!  (engine, EngineJournal)              PRAGMA foreign_key_check       -- abort on rows
+//!                                       <replay each captured index / trigger
+//!                                        VERBATIM + any explicit recreate_objects> [main]
+//!  (engine, EngineJournal)              PRAGMA foreign_key_check       -- UNSCOPED (H1)
 //!  (engine, EngineJournal)              UPDATE _mig.event_seq ...; INSERT _mig journal
 //!  (engine, EngineJournal)              COMMIT
 //!  (engine, AUTOCOMMIT, EngineJournal)  PRAGMA foreign_keys = ON       -- ALL PATHS
@@ -96,6 +105,28 @@ pub enum RebuildError {
         #[source]
         source: SqliteActorError,
     },
+    /// A dependent object (index / trigger / view) captured verbatim from the live
+    /// `sqlite_master` BEFORE the swap could NOT be replayed after the swap (e.g. it
+    /// references a column the new shape dropped). FAIL CLOSED rather than silently
+    /// lose a creator trigger/view/index: the transaction is rolled back; the
+    /// original table — and every dependent object — is intact (C2).
+    #[error(
+        "sqlite rebuild of '{table}' aborted: the dependent {kind} '{object}' could not be \
+         recreated after the rebuild ({source}); the original table and its dependents are \
+         intact. The object likely references a column the new shape removed — author a \
+         compensating change"
+    )]
+    DependentReplayFailed {
+        /// The table the rebuild targeted.
+        table: String,
+        /// The kind of dependent object (`index` / `trigger` / `view`).
+        kind: String,
+        /// The dependent object's name (from `sqlite_master`).
+        object: String,
+        /// The underlying actor error from the failed replay.
+        #[source]
+        source: SqliteActorError,
+    },
     /// The long-lived migration connection is wedged after a failed rebuild: the
     /// transaction did not cleanly close, OR `foreign_keys` could not be restored to
     /// ON. The connection can no longer be safely reused (it may still have FK
@@ -139,10 +170,16 @@ pub struct SqliteRebuildSpec {
     /// follows the rename. A dropped column is absent (excluded from both lists); an
     /// added column is absent (it takes its DEFAULT/NULL from the new CREATE).
     pub copy_columns: Vec<(String, String)>,
-    /// The table's indexes / triggers / dependent views to recreate AFTER the
-    /// rename, captured verbatim from the live `sqlite_master.sql` (so they carry
-    /// any inline sentinels and exact definitions). Replayed in order under
-    /// CreatorUp on `main`.
+    /// EXTRA dependent DDL to replay AFTER the rename, on top of the verbatim
+    /// objects the executor captures from the live `sqlite_master` itself (C2). The
+    /// executor is the source of truth for the table's OWN indexes/triggers: it
+    /// snapshots their `sql` TEXT verbatim before the `DROP TABLE` and replays it
+    /// after the rename, so partial/expression/collation/DESC index attributes and
+    /// creator triggers are preserved exactly. The differ therefore leaves this
+    /// EMPTY for the table's own objects. It remains as an explicit escape hatch for
+    /// direct-spec callers/tests; each entry is a single CREATE replayed under
+    /// CreatorUp on `main`. A replay failure FAILS CLOSED
+    /// ([`RebuildError::DependentReplayFailed`]) — never silently lost.
     pub recreate_objects: Vec<String>,
     /// A human-readable description of what change drove the rebuild (for the
     /// journal name + diagnostics), e.g. `alter column age type integer → text`.
@@ -281,6 +318,16 @@ async fn run_rebuild_txn(
             // Roll back so a failed/aborted rebuild leaves the ORIGINAL table intact
             // and no partial journal. Same H1 discipline as apply/rollback: the
             // AUTOCOMMIT state — not the ROLLBACK result — is the wedge signal.
+            //
+            // M2 — flip to EngineJournal BEFORE the ROLLBACK. `set_mode` is an
+            // INFALLIBLE atomic store on the actor's `AuthMode` flag (it returns
+            // `Result` only for the queue round-trip; the flip itself cannot fail),
+            // so this never leaves the connection mid-mode. It MUST precede the
+            // ROLLBACK because `ROLLBACK` is a transaction-control statement and the
+            // authorizer gates transaction control to EngineJournal: were we still in
+            // CreatorUp here, the authorizer would DENY the ROLLBACK at prepare, the
+            // transaction would stay open, and the connection would wedge (the
+            // is_autocommit probe below would then correctly flag it Poisoned).
             actor
                 .set_mode(Mode::EngineJournal)
                 .await
@@ -322,9 +369,35 @@ async fn run_rebuild_steps(
     let table_q = quote_ident(&spec.table);
     let tmp_q = quote_ident(&spec.tmp_table);
 
+    // (0) C2 — Capture, VERBATIM, the `sql` TEXT of every dependent object the
+    //     `DROP TABLE <t>` below would destroy: the table's own indexes and its
+    //     triggers, read from the LIVE `main.sqlite_master` BEFORE the drop. This is
+    //     a read of `main`, allowed under EngineJournal (the engine is doing it). We
+    //     capture the EXACT stored DDL so partial/expression/collation/DESC index
+    //     attributes and creator triggers survive — the lossy desired-IndexSnapshot
+    //     recreate is gone (it dropped those attrs and never touched triggers). The
+    //     table name is unchanged after the RENAME, so the captured DDL re-applies
+    //     cleanly. Views are DB-global (not dropped WITH the table) and are left
+    //     untouched; if a view referenced a now-removed column SQLite surfaces that
+    //     at query time, not here.
+    let captured = capture_dependents(actor, &spec.table).await?;
+
     // --- The rebuild DDL runs under CreatorUp (engine-authored, on `main`). ---
     actor
         .set_mode(Mode::CreatorUp)
+        .await
+        .map_err(|e| step_err(table, e))?;
+
+    // (a0) H2 — Drop any stale temp table FIRST. The shared emitter renders the temp
+    //      CREATE as `CREATE TABLE IF NOT EXISTS <tmp>`; a creator who pre-created
+    //      `<t>__zsrebuild` in a prior CreatorUp migration would otherwise have the
+    //      `IF NOT EXISTS` SILENTLY REUSE their polluted table — we'd INSERT…SELECT
+    //      into the stale shape and RENAME the pollution into place. This engine-
+    //      controlled DROP (under CreatorUp, on `main`) clears any such pollution so
+    //      the CREATE below always lands on a clean temp. It is inside the txn, so a
+    //      later abort rolls it back too.
+    actor
+        .exec(&format!("DROP TABLE IF EXISTS {tmp_q}"))
         .await
         .map_err(|e| step_err(table, e))?;
 
@@ -372,9 +445,22 @@ async fn run_rebuild_steps(
         .await
         .map_err(|e| step_err(table, e))?;
 
-    // (e) Recreate the table's indexes / triggers / dependent views (verbatim
-    //     captured DDL). SQLite drops a table's indexes/triggers WITH the table, so
-    //     they must be replayed. Each is a CREATE on `main` — allowed in CreatorUp.
+    // (e) C2 — Replay the VERBATIM captured dependent DDL (the table's own indexes +
+    //     triggers), then any EXTRA explicit `recreate_objects` the spec carries.
+    //     SQLite drops a table's indexes/triggers WITH the table, so they must be
+    //     replayed; the captured `sql` is the EXACT stored definition (full attrs).
+    //     Each is a CREATE on `main` — allowed in CreatorUp. A replay that FAILS
+    //     (e.g. the object references a column the new shape dropped) FAILS CLOSED
+    //     with a typed error so the txn rolls back and the object is never silently
+    //     lost — the original table + all dependents are restored.
+    for obj in &captured {
+        actor.exec(&obj.sql).await.map_err(|e| RebuildError::DependentReplayFailed {
+            table: spec.table.clone(),
+            kind: obj.kind.clone(),
+            object: obj.name.clone(),
+            source: e,
+        })?;
+    }
     for obj in &spec.recreate_objects {
         actor.exec(obj).await.map_err(|e| step_err(table, e))?;
     }
@@ -385,13 +471,16 @@ async fn run_rebuild_steps(
         .await
         .map_err(|e| step_err(table, e))?;
 
-    // (f) PRAGMA foreign_key_check — this WORKS inside a transaction (unlike the
-    //     foreign_keys toggle). Any row it returns is an orphaned FK reference the
-    //     rebuild would commit; abort (typed error) so the txn rolls back and the
-    //     original table is restored. Scope to the rebuilt table so an unrelated
-    //     pre-existing violation elsewhere does not falsely abort this rebuild.
+    // (f) H1 — PRAGMA foreign_key_check, UNSCOPED (no table arg). This WORKS inside a
+    //     transaction (unlike the foreign_keys toggle). A check scoped to <t> only
+    //     catches orphans IN <t>; but a rebuild of a PARENT that drops a referenced
+    //     row orphans rows in a CHILD table — a scoped check passes and commits a
+    //     referentially-broken DB. The engine's steady state is `foreign_keys=ON`, so
+    //     there are NO pre-existing violations on the connection; therefore ANY row an
+    //     unscoped check returns was introduced by THIS rebuild. Any such row aborts
+    //     (typed error) so the txn rolls back and the original tables are restored.
     let violations = actor
-        .query(&format!("PRAGMA main.foreign_key_check({table_q})"))
+        .query("PRAGMA main.foreign_key_check")
         .await
         .map_err(|e| step_err(table, e))?;
     if !violations.is_empty() {
@@ -423,6 +512,65 @@ async fn run_rebuild_steps(
         .map_err(|e| step_err(table, e))?;
 
     Ok(())
+}
+
+/// One dependent object captured VERBATIM from `sqlite_master` before the drop, so
+/// it can be replayed after the rename (C2).
+struct CapturedObject {
+    /// `index` or `trigger` (the `type` column of `sqlite_master`).
+    kind: String,
+    /// The object's name (for the typed fail-closed error).
+    name: String,
+    /// The EXACT stored `sql` DDL — replayed verbatim.
+    sql: String,
+}
+
+/// C2 — Capture the VERBATIM `sql` of every dependent object the `DROP TABLE <table>`
+/// will destroy: the table's own indexes and its triggers, from the live
+/// `main.sqlite_master`, BEFORE the drop.
+///
+/// - Indexes: `type='index' AND tbl_name=<table> AND sql IS NOT NULL`. The
+///   `sql IS NOT NULL` filter SKIPS auto-indexes (the implicit index SQLite creates
+///   for a UNIQUE/PRIMARY KEY constraint has a NULL `sql` — it is re-derived from the
+///   new CREATE, never replayed as DDL).
+/// - Triggers: `type='trigger' AND tbl_name=<table>` (a trigger always has `sql`).
+///
+/// Views are NOT captured here: a view is DB-global and is NOT dropped WITH the
+/// table, so it survives the rebuild untouched (the table name is unchanged after the
+/// rename). Run under EngineJournal — this is an engine read of `main.sqlite_master`.
+async fn capture_dependents(
+    actor: &MigrationActor,
+    table: &str,
+) -> Result<Vec<CapturedObject>, RebuildError> {
+    actor
+        .set_mode(Mode::EngineJournal)
+        .await
+        .map_err(|e| step_err(table, e))?;
+    // The table name is bound via a SQL string literal (engine-controlled identifier,
+    // quoted defensively). We read `type`, `name`, `sql` and ORDER BY rowid so the
+    // replay order is deterministic (the stored creation order).
+    let table_lit = journal_sql::sql_lit(table);
+    let rows = actor
+        .query(&format!(
+            "SELECT type, name, sql FROM main.sqlite_master \
+             WHERE tbl_name = {table_lit} AND type IN ('index', 'trigger') \
+               AND sql IS NOT NULL \
+             ORDER BY rowid"
+        ))
+        .await
+        .map_err(|e| step_err(table, e))?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        // Defensive: each row is (type, name, sql); skip any with a NULL sql (the
+        // WHERE already excludes them, but the materializer hands back Options).
+        let kind = r.first().and_then(|c| c.clone());
+        let name = r.get(1).and_then(|c| c.clone());
+        let sql = r.get(2).and_then(|c| c.clone());
+        if let (Some(kind), Some(name), Some(sql)) = (kind, name, sql) {
+            out.push(CapturedObject { kind, name, sql });
+        }
+    }
+    Ok(out)
 }
 
 /// Wrap an actor error as a [`RebuildError::Step`] for `table`.
