@@ -230,6 +230,29 @@ impl MigrationEngine {
         cfg: &GuardConfig,
     ) -> Result<DeclarativeDeployPlan, crate::declarative::DeclarativeError> {
         let diff = author.diff(desired, live, live_ownership, hints)?;
+        // C1 — FAIL CLOSED on SQLite rebuilds. `plan_declarative` builds the plan
+        // from `diff.migrations` + `diff.renames` only; it does NOT carry
+        // `diff.rebuilds` (the SQLite 12-step table rebuilds), and `MigrationEngine`
+        // is PG-typed (it drives `apply` over a PG `Client`). If a SQLite declarative
+        // deploy needs a rebuild and we silently dropped it, the deploy would report
+        // SUCCESS while the rebuild never ran — a silent data-shape no-op. There is
+        // no SQLite engine apply path / approval gate yet (the
+        // `SqliteBackend::rebuild_one` seam is executor-internal and ungated); wiring
+        // it is the next phase (P6). Until then, refuse rather than drop.
+        if !diff.rebuilds.is_empty() {
+            let first = &diff.rebuilds[0];
+            return Err(crate::declarative::DeclarativeError::SqliteRebuildRequired {
+                table: first.spec.table.clone(),
+                op: format!(
+                    "{} SQLite table rebuild(s) required (e.g. '{}': {}); no SQLite engine \
+                     apply path / approval gate is wired yet (P6). Refusing to drop them \
+                     silently",
+                    diff.rebuilds.len(),
+                    first.spec.table,
+                    first.spec.reason,
+                ),
+            });
+        }
         let plain = self.plan(&diff.migrations, cfg);
         Ok(DeclarativeDeployPlan {
             plain,

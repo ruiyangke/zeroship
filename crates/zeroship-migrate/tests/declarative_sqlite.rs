@@ -14,7 +14,8 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zeroship_migrate::{
     desired_snapshot, CollectionDescriptor, DeclarativeAuthor, DeclarativeError, FieldDescriptor,
-    GuardConfig, GuardError, IndexDescriptor, SchemaSnapshot, SqliteBackend, SqlGuard,
+    GuardConfig, GuardError, IndexDescriptor, MigrationEngine, SchemaSnapshot, SqliteBackend,
+    SqlGuard,
 };
 use zeroship_schema::query::SqlDialect;
 
@@ -800,4 +801,58 @@ async fn second_deploy_real_type_change_still_detected_against_introspected_live
          must not swallow a real change): {}",
         rb.spec.reason
     );
+}
+
+// ---------------------------------------------------------------------------
+// (C1) `plan_declarative` FAILS CLOSED on a SQLite diff that needs a rebuild — it
+//      never silently drops `diff.rebuilds`. `MigrationEngine` is PG-typed with no
+//      SQLite apply path; the old code built the plan from `diff.migrations` +
+//      `diff.renames` only and IGNORED `diff.rebuilds`, so a rebuild-needing SQLite
+//      declarative deploy reported success while the rebuild no-op'd. The fix returns
+//      a typed `SqliteRebuildRequired`. RED pre-fix (returned an Ok plan, dropping the
+//      rebuild).
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn plan_declarative_fails_closed_on_sqlite_rebuild() {
+    // First deploy: a column typed `number`; second deploy re-types it to `string` —
+    // a genuine existing-table type change → exactly the diff that yields a rebuild.
+    let v1 = CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "count".into(),
+            ty: "number".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let mut v2 = v1.clone();
+    v2.fields[0].ty = "string".into();
+
+    let (live, ownership) = live_from(&[v1]);
+    let desired2 = desired_snapshot(PROJECT, &[v2]).expect("v2 desired");
+
+    // Sanity: the underlying diff DOES produce a rebuild (so the guard below is real).
+    let diff = sqlite_author()
+        .diff(&desired2, &live, &ownership, &[])
+        .expect("diff");
+    assert_eq!(diff.rebuilds.len(), 1, "the diff yields a rebuild to gate");
+
+    // plan_declarative MUST refuse rather than drop the rebuild silently.
+    let engine = MigrationEngine::new();
+    let cfg = GuardConfig::confined_sqlite(PROJECT);
+    let err = engine
+        .plan_declarative(&desired2, &live, &ownership, &sqlite_author(), &[], &cfg)
+        .expect_err("plan_declarative must FAIL CLOSED on a SQLite rebuild, not drop it");
+    match err {
+        DeclarativeError::SqliteRebuildRequired { table, op } => {
+            assert_eq!(table, "accounts");
+            assert!(
+                op.contains("rebuild") && op.contains("P6"),
+                "the error must explain no SQLite apply path is wired yet (P6): {op}"
+            );
+        }
+        other => panic!("expected SqliteRebuildRequired, got {other:?}"),
+    }
 }
