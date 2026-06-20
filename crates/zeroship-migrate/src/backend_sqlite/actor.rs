@@ -11,9 +11,8 @@
 //! # Open sequence (§2.5.1, exact order)
 //!
 //! ```text
-//! 0. open the journal file as the MAIN db (so `_mig` writes hit a real file)
-//! 0. ATTACH 'file:<app>.sqlite'  AS app      -- engine, BEFORE the authorizer
-//! 0. ATTACH 'file:<journal>'     AS "_mig"   -- (here: the main db, aliased)
+//! 0. open the APP FILE as the connection's MAIN db (the creator `up` lands here)
+//! 0. ATTACH 'file:<journal>'     AS "_mig"   -- engine, BEFORE the authorizer
 //! 1. PRAGMA foreign_keys = ON                -- engine-set, the only PRAGMA
 //! 2. conn.load_extension_disable()           -- real rusqlite API (not a DbConfig)
 //! 3. set_db_config(DEFENSIVE, true)
@@ -24,17 +23,25 @@
 //! ```
 //!
 //! After step 7, ATTACH/DETACH are denied for life — cross-tenant is closed by
-//! construction (§2.5.2). The `_mig` alias is the journal file; the `app` alias is
-//! the one tenant file. We open the **journal file as the connection's main
-//! database** and additionally ATTACH it as `"_mig"` so journal SQL can name
-//! `"_mig".schema_migrations` uniformly (the authorizer keys on the `_mig` alias).
+//! construction (§2.5.2). The ONLY two databases on this connection are `main`
+//! (the app file) and `_mig` (the journal file), each opened exactly once.
+//!
+//! # Why `main` IS the app file (not `:memory:`, not a double-ATTACH)
+//!
+//! The app file is the connection's **main** database, so an UNqualified creator
+//! `CREATE TABLE users(...)` lands in — and PERSISTS to — the app file. We do NOT
+//! ATTACH the app file a second time: opening the same file as both `main` and an
+//! `app` alias would open it TWICE on one connection, and `BEGIN IMMEDIATE` would
+//! deadlock the two handles against each other on the file's RESERVED lock. With
+//! `main` = the app file there is exactly ONE handle on it, plus ONE on `_mig`, so
+//! a single-connection `BEGIN IMMEDIATE` takes their RESERVED locks cleanly.
 
 use std::path::{Path, PathBuf};
 
 use rusqlite::config::DbConfig;
 use rusqlite::Connection;
 
-use super::authorizer::{make_authorizer, AuthMode, Mode, APP_ALIAS, MIG_ALIAS};
+use super::authorizer::{make_authorizer, AuthMode, Mode, MIG_ALIAS};
 
 /// The version floor the journal-immutability + feature set requires (§2.9):
 /// DEFENSIVE/TRUSTED_SCHEMA (≥3.31/3.26), DQS dbconfig (≥3.29), RETURNING (≥3.35),
@@ -58,6 +65,12 @@ pub enum SqliteActorError {
     /// here too (`SQLITE_AUTH` / "not authorized").
     #[error("sqlite migration statement failed: {0}")]
     Exec(String),
+    /// The long-lived migration connection is wedged: a failed `up` left a
+    /// transaction open (ROLLBACK errored, or the connection is not back in
+    /// autocommit). The connection can no longer be safely reused; the caller must
+    /// tear it down and rebuild before the next apply (H1).
+    #[error("sqlite migration connection poisoned (transaction not cleanly rolled back): {0}")]
+    Poisoned(String),
     /// The actor thread died / the queue disconnected.
     #[error("sqlite migration actor unavailable: {0}")]
     Unavailable(String),
@@ -104,6 +117,11 @@ enum Command {
         mode: Mode,
         reply: flume::Sender<Result<(), SqliteActorError>>,
     },
+    /// Report whether the connection is in autocommit mode (no open transaction).
+    /// Used to detect a wedged connection after a failed `up` + ROLLBACK (H1).
+    IsAutocommit {
+        reply: flume::Sender<bool>,
+    },
     /// Stop the worker (drops the connection, WAL-checkpoints on close).
     Shutdown,
 }
@@ -118,11 +136,10 @@ pub struct MigrationActor {
 impl MigrationActor {
     /// Open the hardened migration connection for one tenant.
     ///
-    /// `journal_path` is opened as the connection's MAIN database and ALSO
-    /// ATTACHed as `"_mig"`. `app_path` is ATTACHed as `"app"`. Both attaches
-    /// happen BEFORE the authorizer is installed (§2.5.1 step 0). The two files are
-    /// constructed by the engine from the authenticated `app_id`, never from
-    /// creator input (§2.5.2).
+    /// `app_path` is opened as the connection's MAIN database (the creator `up`
+    /// lands here and persists). `journal_path` is ATTACHed as `"_mig"`, BEFORE the
+    /// authorizer is installed (§2.5.1 step 0). The two files are constructed by the
+    /// engine from the authenticated `app_id`, never from creator input (§2.5.2).
     ///
     /// # Errors
     /// [`SqliteActorError::Open`] / [`SqliteActorError::UnsupportedVersion`] on a
@@ -167,6 +184,9 @@ impl MigrationActor {
                             // see `HardenedConn`.
                             conn.flip_mode(mode);
                             let _ = reply.send(Ok(()));
+                        }
+                        Command::IsAutocommit { reply } => {
+                            let _ = reply.send(conn.is_autocommit());
                         }
                         Command::Shutdown => break,
                     }
@@ -222,6 +242,15 @@ impl MigrationActor {
         self.send(Command::SetMode { mode, reply }).await?;
         recv(rx).await?
     }
+
+    /// Whether the connection is in autocommit mode (i.e. NO open transaction).
+    /// After a failed `up` + ROLLBACK this MUST be `true`; a `false` means the
+    /// transaction is still open and the long-lived connection is wedged (H1).
+    pub async fn is_autocommit(&self) -> Result<bool, SqliteActorError> {
+        let (reply, rx) = flume::bounded(1);
+        self.send(Command::IsAutocommit { reply }).await?;
+        recv(rx).await
+    }
 }
 
 impl Drop for MigrationActor {
@@ -271,26 +300,27 @@ fn open_hardened(app_path: &Path, journal_path: &Path) -> Result<HardenedConn, S
         });
     }
 
-    // 0. Open an in-memory MAIN database, then ATTACH the two tenant files. The
-    //    main connection is deliberately NOT one of the tenant files: attaching a
-    //    file that is also the main DB would open the SAME file twice on one
-    //    connection, and `BEGIN IMMEDIATE` would deadlock the two handles against
-    //    each other on the file's RESERVED lock. With an empty in-memory main, the
-    //    only on-disk databases are `app` and `_mig`, each opened exactly once, so a
+    // 0. Open the APP FILE as the connection's MAIN database, then ATTACH ONLY the
+    //    journal file as `_mig`. The app file is NOT ATTACHed a second time:
+    //    attaching a file that is also the main DB would open the SAME file twice on
+    //    one connection, and `BEGIN IMMEDIATE` would deadlock the two handles against
+    //    each other on the file's RESERVED lock. With `main` = the app file, the only
+    //    databases are `main` (app) and `_mig`, each opened exactly once, so a
     //    single-connection `BEGIN IMMEDIATE` takes their RESERVED locks cleanly.
-    //    (Temp tables / the main namespace are unused by migration SQL — everything
-    //    is qualified `app.…` / `"_mig".…`.)
-    let conn = Connection::open_in_memory()
-        .map_err(|e| SqliteActorError::Open(format!("open main (in-memory): {e}")))?;
+    //
+    //    Because `main` is the app file, an UNqualified creator `CREATE TABLE
+    //    users(...)` lands in — and PERSISTS to — the app file. NOTE for P4: the
+    //    SQLite migration `up` MUST be emitted UNqualified (no `"<app_id>".table`
+    //    schema prefix) so it targets `main`. The shared emitter currently qualifies
+    //    as `"<app_id>".table` (a PG-schema shape); wiring the SQLite emitter to emit
+    //    unqualified DDL is the P4 emitter-alias reconciliation. The authorizer
+    //    treats `main` (and the bare/None database) as the creator-writable target.
+    let conn = Connection::open(app_path)
+        .map_err(|e| SqliteActorError::Open(format!("open main (app file): {e}")))?;
 
-    // ATTACH the one app file AS app, and the journal AS "_mig" — BEFORE the
-    // authorizer. Paths come from the authenticated app_id, never creator input.
-    // Bind the path as a parameter so the filename is never interpolated into SQL.
-    conn.execute(
-        &format!("ATTACH DATABASE ?1 AS {APP_ALIAS}"),
-        [path_str(app_path)?],
-    )
-    .map_err(|e| SqliteActorError::Open(format!("attach app: {e}")))?;
+    // ATTACH the journal AS "_mig" — BEFORE the authorizer. The path comes from the
+    // authenticated app_id, never creator input. Bind it as a parameter so the
+    // filename is never interpolated into SQL.
     conn.execute(
         &format!("ATTACH DATABASE ?1 AS \"{MIG_ALIAS}\""),
         [path_str(journal_path)?],
@@ -300,13 +330,13 @@ fn open_hardened(app_path: &Path, journal_path: &Path) -> Result<HardenedConn, S
     // 1. Engine-set PRAGMAs, applied at open BEFORE the authorizer (which denies
     //    PRAGMA for the connection's life). `busy_timeout` gives a bounded wait so a
     //    transient internal lock (e.g. between the RETURNING read and the next write
-    //    on the same connection across the two attached files) does not surface as
-    //    an immediate `SQLITE_BUSY`. `foreign_keys=ON` enables FK enforcement (a
+    //    on the same connection across `main` + `_mig`) does not surface as an
+    //    immediate `SQLITE_BUSY`. `foreign_keys=ON` enables FK enforcement (a
     //    per-connection setting SQLite ships OFF). WAL is NOT set here: the
     //    migration connection is the single writer (in-process serialization, §2.3),
     //    and the default rollback journal is simplest for the atomic apply; the
     //    busy_timeout covers the only contention (the connection with itself across
-    //    the two attached files during BEGIN IMMEDIATE).
+    //    `main` + `_mig` during BEGIN IMMEDIATE).
     conn.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;")
         .map_err(|e| SqliteActorError::Open(format!("pragma bootstrap: {e}")))?;
 

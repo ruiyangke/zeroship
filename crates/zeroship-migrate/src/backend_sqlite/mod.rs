@@ -77,6 +77,12 @@ impl SqliteBackend {
     /// a version whose latest event is `completed` is a no-op (returns `false`).
     /// Returns `true` iff the migration was newly applied.
     ///
+    /// M4: this is the EXECUTOR-INTERNAL direct seam — it has NO approval gate. The
+    /// destructive/approval gate lives in the generic executor (`apply_locked`),
+    /// which classifies a migration and demands an `Approval` for destructive ops
+    /// BEFORE it ever calls down into a backend. Callers reaching this method
+    /// directly (the additive-only P2 path + tests) have already cleared that gate.
+    ///
     /// # Errors
     /// [`SqliteActorError`] on confinement denial / DDL failure (the transaction
     /// is rolled back, leaving the journal uncorrupted).
