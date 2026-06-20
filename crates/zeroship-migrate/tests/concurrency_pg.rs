@@ -28,6 +28,7 @@ use std::rc::Rc;
 
 use compio_postgres::Client;
 use zeroship_migrate::{
+    PostgresBackend,
     desired_snapshot, migrator_role_name, provision_migrator, role::deprovision_migrator,
     snapshot_schema, Approval, CollectionDescriptor, DeclarativeAuthor, ExecutorConfig,
     FieldDescriptor, GuardConfig, MigrationEngine, RenameHint, SchemaSnapshot,
@@ -185,7 +186,7 @@ async fn declarative_deploy_holds_project_lock_across_all_sub_batches() {
         .plan_declarative(&d1, &SchemaSnapshot::default(), &HashMap::new(), &author, &[], &guard_cfg(&cfg))
         .expect("plan_declarative create");
     engine
-        .apply(&plan1.plain, Approval::None, &conn, &cfg, "app_test")
+        .apply(&plan1.plain, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect("create users");
 
@@ -267,7 +268,7 @@ async fn declarative_deploy_holds_project_lock_across_all_sub_batches() {
 
     let deploy = compio::runtime::spawn(async move {
         let outcome = engine_task
-            .apply_declarative(&plan, Approval::Approved, &conn, &cfg, "app_test")
+            .apply_declarative(&plan, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_test")
             .await
             .expect("apply_declarative");
         done_for_task.set(true);

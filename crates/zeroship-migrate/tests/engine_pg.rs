@@ -14,6 +14,7 @@
 
 use compio_postgres::Client;
 use zeroship_migrate::{
+    PostgresBackend,
     author::{AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor},
     provision_migrator, role::deprovision_migrator, Approval, EngineError, ExecutorConfig,
     GuardConfig, Migration, MigrationEngine, MigrationId, migrator_role_name,
@@ -159,7 +160,7 @@ async fn denied_plan_errors_and_applies_nothing() {
     assert!(!plan.is_appliable());
 
     let err = engine
-        .apply(&plan, Approval::Approved, &conn, &cfg, "app_test")
+        .apply(&plan, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect_err("denied plan must error even WITH approval");
     assert!(matches!(err, EngineError::Denied(ref d) if d.len() == 1), "got {err:?}");
@@ -186,7 +187,7 @@ async fn destructive_plan_without_approval_errors_and_applies_nothing() {
     let engine = MigrationEngine::new();
     let create_plan = engine.plan(&create, &guard_cfg(&cfg));
     engine
-        .apply(&create_plan, Approval::None, &conn, &cfg, "app_test")
+        .apply(&create_plan, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect("safe additive create applies without approval");
     assert!(table_exists(&conn, &cfg.project_schema, "legacy").await);
@@ -202,7 +203,7 @@ async fn destructive_plan_without_approval_errors_and_applies_nothing() {
     let drop_plan = engine.plan(std::slice::from_ref(&drop), &guard_cfg(&cfg));
     assert!(drop_plan.requires_approval);
     let err = engine
-        .apply(&drop_plan, Approval::None, &conn, &cfg, "app_test")
+        .apply(&drop_plan, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect_err("destructive plan needs approval");
     assert!(matches!(err, EngineError::ApprovalRequired), "got {err:?}");
@@ -213,7 +214,7 @@ async fn destructive_plan_without_approval_errors_and_applies_nothing() {
 
     // With approval, the DROP applies.
     engine
-        .apply(&drop_plan, Approval::Approved, &conn, &cfg, "app_test")
+        .apply(&drop_plan, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect("approved destructive plan applies");
     assert!(
@@ -244,7 +245,7 @@ async fn safe_additive_plan_applies_without_approval() {
     assert!(!plan.requires_approval);
 
     let outcome = engine
-        .apply(&plan, Approval::None, &conn, &cfg, "app_test")
+        .apply(&plan, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect("safe additive applies with no approval");
     assert_eq!(outcome.applied, vec![version.clone()]);
@@ -279,7 +280,7 @@ async fn deterministic_create_table_e2e_under_migrator_role() {
     assert!(plan.is_appliable() && !plan.requires_approval);
 
     engine
-        .apply(&plan, Approval::None, &conn, &cfg, "app_test")
+        .apply(&plan, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect("apply");
 
@@ -316,7 +317,7 @@ async fn raw_sql_complex_up_gated_then_applied_e2e() {
         })
         .unwrap();
     engine
-        .apply(&engine.plan(&base, &guard_cfg(&cfg)), Approval::None, &conn, &cfg, "app_test")
+        .apply(&engine.plan(&base, &guard_cfg(&cfg)), Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect("base table applies");
 
@@ -339,7 +340,7 @@ async fn raw_sql_complex_up_gated_then_applied_e2e() {
     assert!(!plan.requires_approval, "additive expand needs no approval");
 
     engine
-        .apply(&plan, Approval::None, &conn, &cfg, "app_test")
+        .apply(&plan, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect("complex up applies");
 
@@ -392,7 +393,7 @@ async fn executor_reruns_guard_even_on_a_hand_built_clean_plan() {
     };
 
     let err = MigrationEngine::new()
-        .apply(&forged_plan, Approval::None, &conn, &cfg, "app_test")
+        .apply(&forged_plan, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
         .expect_err("executor's own guard must still deny the cross-tenant read");
     // It comes back as an Apply error (the executor's guard gate), NOT a clean apply.

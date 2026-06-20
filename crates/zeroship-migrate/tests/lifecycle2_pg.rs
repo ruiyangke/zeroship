@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use compio_postgres::Client;
 use zeroship_migrate::executor::ApplyError;
 use zeroship_migrate::{
+    PostgresBackend,
     analyze_migration, baseline, check_checksum_drift, compute_manifest, desired_snapshot,
     diff_snapshots, history, migrator_role_name, provision_migrator, role::deprovision_migrator,
     snapshot_schema, squash, status, Approval, Checksum, ChecksumInput, CollectionDescriptor,
@@ -291,7 +292,7 @@ async fn l5_baseline_apply_on_top_then_squash_over_baseline() {
 
     let plan = engine.plan(&set, &guard_cfg(&cfg));
     let apply_out = engine
-        .apply(&plan, Approval::None, &conn, &cfg, "app_acme")
+        .apply(&plan, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect("apply the new set on top of the baseline");
 
@@ -503,7 +504,7 @@ async fn l6_repeatable_versioned_interleaved_across_deploys_and_tamper_anchor() 
     // depends_on, not input order.
     let plan1 = engine.plan(&[view1.clone(), table.clone()], &guard_cfg(&cfg));
     let out1 = engine
-        .apply(&plan1, Approval::None, &conn, &cfg, "app_acme")
+        .apply(&plan1, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect("deploy 1");
     assert_eq!(
@@ -538,7 +539,7 @@ async fn l6_repeatable_versioned_interleaved_across_deploys_and_tamper_anchor() 
     let set2 = vec![table.clone(), view1.clone(), addcol.clone()];
     let plan2 = engine.plan(&set2, &guard_cfg(&cfg));
     let out2 = engine
-        .apply(&plan2, Approval::None, &conn, &cfg, "app_acme")
+        .apply(&plan2, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect("deploy 2");
     assert_eq!(
@@ -570,7 +571,7 @@ async fn l6_repeatable_versioned_interleaved_across_deploys_and_tamper_anchor() 
     let set3 = vec![table.clone(), view2.clone(), addcol.clone()];
     let plan3 = engine.plan(&set3, &guard_cfg(&cfg));
     let out3 = engine
-        .apply(&plan3, Approval::None, &conn, &cfg, "app_acme")
+        .apply(&plan3, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect("deploy 3");
     assert_eq!(
@@ -722,7 +723,7 @@ async fn l7_preconditions_across_deploys_skip_pending_apply_and_halt() {
     // not run. The apply SUCCEEDS (a skip is not an error), nothing journaled.
     let plan = engine.plan(&set, &guard_cfg(&cfg));
     let out1 = engine
-        .apply(&plan, Approval::None, &conn, &cfg, "app_acme")
+        .apply(&plan, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect("deploy 1 succeeds (skip is not an error)");
     assert!(out1.applied.is_empty(), "neither parent (skipped) nor child runs");
@@ -744,7 +745,7 @@ async fn l7_preconditions_across_deploys_skip_pending_apply_and_halt() {
         .expect("seed dep");
     let plan = engine.plan(&set, &guard_cfg(&cfg));
     let out2 = engine
-        .apply(&plan, Approval::None, &conn, &cfg, "app_acme")
+        .apply(&plan, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect("deploy 2 applies the now-unblocked set");
     assert_eq!(
@@ -768,7 +769,7 @@ async fn l7_preconditions_across_deploys_skip_pending_apply_and_halt() {
     );
     let plan = engine.plan(std::slice::from_ref(&halt_mig), &guard_cfg(&cfg));
     let err = engine
-        .apply(&plan, Approval::None, &conn, &cfg, "app_acme")
+        .apply(&plan, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect_err("an unmet Halt precondition must fail closed");
     assert!(
@@ -829,7 +830,7 @@ async fn l7_h6_expand_with_unmet_skip_precondition_blocks_later_contract() {
     );
     let plan_seed = engine.plan(std::slice::from_ref(&seed), &guard_cfg(&cfg));
     engine
-        .apply(&plan_seed, Approval::None, &conn, &cfg, "app_acme")
+        .apply(&plan_seed, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect("seed users");
     give_table_to_migrator(&conn, &cfg, "users").await;
@@ -961,7 +962,7 @@ async fn l8_destructive_analyzer_advisory_dry_run_gate_apply() {
     );
     let p = engine.plan(std::slice::from_ref(&create), &guard_cfg(&cfg));
     engine
-        .apply(&p, Approval::None, &conn, &cfg, "app_acme")
+        .apply(&p, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect("create accounts");
     give_table_to_migrator(&conn, &cfg, "accounts").await;
@@ -1043,7 +1044,7 @@ async fn l8_destructive_analyzer_advisory_dry_run_gate_apply() {
     assert!(plan_drop.destructive, "the plan is destructive");
     assert!(plan_drop.requires_approval, "the plan requires approval");
     let err = engine
-        .apply(&plan_drop, Approval::None, &conn, &cfg, "app_acme")
+        .apply(&plan_drop, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect_err("a destructive plan without approval must be refused");
     assert!(
@@ -1057,7 +1058,7 @@ async fn l8_destructive_analyzer_advisory_dry_run_gate_apply() {
 
     // --- LAYER 2b: apply with Approval::Approved → succeeds, the column is gone. ---
     let out = engine
-        .apply(&plan_drop, Approval::Approved, &conn, &cfg, "app_acme")
+        .apply(&plan_drop, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect("an approved destructive apply must run");
     assert_eq!(out.applied, vec![drop_col.version.as_str().to_string()]);
@@ -1138,7 +1139,7 @@ async fn l9_manifest_tamper_rejected_before_any_side_effect() {
     a_dep.recompute_checksum();
     let tamper_a = vec![a_dep, b.clone()];
     let err = engine
-        .apply_verified(&tamper_a, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &conn, &cfg, "app_acme")
+        .apply_verified(&tamper_a, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect_err("(a) a depends_on reorder must be rejected");
     assert!(matches!(err, EngineError::Manifest(_)), "(a) got {err:?}");
@@ -1149,7 +1150,7 @@ async fn l9_manifest_tamper_rejected_before_any_side_effect() {
     let b_edit = with_up(a.clone(), "CREATE TABLE \"{s}\".a (id bigint primary key, extra text)", &schema);
     let tamper_b = vec![b_edit, b.clone()];
     let err = engine
-        .apply_verified(&tamper_b, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &conn, &cfg, "app_acme")
+        .apply_verified(&tamper_b, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect_err("(b) a content edit must be rejected");
     assert!(matches!(err, EngineError::Manifest(_)), "(b) got {err:?}");
@@ -1159,7 +1160,7 @@ async fn l9_manifest_tamper_rejected_before_any_side_effect() {
     let inserted = mig(MigrationId::generate(), "evil_insert", "CREATE TABLE \"{s}\".c (id int)", &schema);
     let tamper_c = vec![a.clone(), b.clone(), inserted];
     let err = engine
-        .apply_verified(&tamper_c, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &conn, &cfg, "app_acme")
+        .apply_verified(&tamper_c, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect_err("(c) an inserted migration must be rejected");
     assert!(matches!(err, EngineError::Manifest(_)), "(c) got {err:?}");
@@ -1168,7 +1169,7 @@ async fn l9_manifest_tamper_rejected_before_any_side_effect() {
     // --- (d) removed migration. ---
     let tamper_d = vec![a.clone()];
     let err = engine
-        .apply_verified(&tamper_d, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &conn, &cfg, "app_acme")
+        .apply_verified(&tamper_d, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect_err("(d) a removed migration must be rejected");
     assert!(matches!(err, EngineError::Manifest(_)), "(d) got {err:?}");
@@ -1181,7 +1182,7 @@ async fn l9_manifest_tamper_rejected_before_any_side_effect() {
     a_flip.recompute_checksum();
     let tamper_e = vec![a_flip, b.clone()];
     let err = engine
-        .apply_verified(&tamper_e, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &conn, &cfg, "app_acme")
+        .apply_verified(&tamper_e, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect_err("(e) a flag flip must be rejected");
     assert!(matches!(err, EngineError::Manifest(_)), "(e) got {err:?}");
@@ -1193,7 +1194,7 @@ async fn l9_manifest_tamper_rejected_before_any_side_effect() {
     a_sup.recompute_checksum();
     let tamper_e2 = vec![a_sup, b.clone()];
     let err = engine
-        .apply_verified(&tamper_e2, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &conn, &cfg, "app_acme")
+        .apply_verified(&tamper_e2, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect_err("(e') a supersedes flip must be rejected");
     assert!(matches!(err, EngineError::Manifest(_)), "(e') got {err:?}");
@@ -1204,7 +1205,7 @@ async fn l9_manifest_tamper_rejected_before_any_side_effect() {
     a_rep.recompute_checksum();
     let tamper_e3 = vec![a_rep, b.clone()];
     let err = engine
-        .apply_verified(&tamper_e3, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &conn, &cfg, "app_acme")
+        .apply_verified(&tamper_e3, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect_err("(e'') a repeatable flip must be rejected");
     assert!(matches!(err, EngineError::Manifest(_)), "(e'') got {err:?}");
@@ -1215,7 +1216,7 @@ async fn l9_manifest_tamper_rejected_before_any_side_effect() {
     //     over the canonical EXECUTED order, identical for both slice orders. ---
     let reordered = vec![b.clone(), a.clone()];
     let out = engine
-        .apply_verified(&reordered, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &conn, &cfg, "app_acme")
+        .apply_verified(&reordered, &guard_cfg(&cfg), Some(&expected), Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_acme")
         .await
         .expect("a cosmetic slice-reorder of an additive set must verify OK and apply (M2)");
     // Both tables applied (canonical executed order is [a, b] regardless of slice).
@@ -1289,7 +1290,7 @@ async fn l10_multi_app_union_ownership_and_fail_closed_drop_lifecycle() {
         .plan_declarative(&union_v1, &SchemaSnapshot::default(), &HashMap::new(), &author_a, &[], &guard_cfg(&cfg))
         .expect("app_a plans products");
     engine
-        .apply(&plan1.plain, Approval::None, &conn, &cfg, "app_a")
+        .apply(&plan1.plain, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_a")
         .await
         .expect("app_a deploys products");
     assert!(table_exists(&conn, &schema, "products").await, "products is live");
@@ -1315,7 +1316,7 @@ async fn l10_multi_app_union_ownership_and_fail_closed_drop_lifecycle() {
         plan2.plain.items.iter().map(|m| &m.migration.name).collect::<Vec<_>>()
     );
     engine
-        .apply(&plan2.plain, Approval::None, &conn, &cfg, "app_b")
+        .apply(&plan2.plain, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_b")
         .await
         .expect("app_b deploys orders with a cross-app FK to products");
     assert!(table_exists(&conn, &schema, "orders").await, "orders is live");

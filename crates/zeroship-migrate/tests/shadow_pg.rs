@@ -25,6 +25,7 @@ use futures::FutureExt;
 use zeroship_migrate::guard::GuardConfig;
 use zeroship_migrate::migration::Checksum;
 use zeroship_migrate::{
+    PostgresBackend,
     deprovision_migrator, dry_run, dry_run_declarative, migrator_role_name, provision_migrator,
     snapshot_schema, sweep_leaked_shadows, Approval, CollectionDescriptor, DeclarativeAuthor,
     DeclarativeDeployPlan, DryRunError, ExecutorConfig, FieldDescriptor, Migration, MigrationEngine,
@@ -819,6 +820,8 @@ async fn dry_run_declarative_rename_validates_final_state_no_false_drift() {
     let plan = DeclarativeDeployPlan {
         plain,
         renames: rename_diff.renames,
+        // PG path: never produces SQLite rebuilds.
+        rebuilds: Vec::new(),
     };
 
     let report = dry_run_declarative(&admin, &plan, &desired, &cfg, &shadow_cfg(), "actor")
@@ -895,7 +898,7 @@ async fn dry_run_declarative_incremental_add_column_on_prior_table_is_ok() {
         )
         .expect("plan deploy 1");
     engine
-        .apply(&plan1.plain, Approval::None, &admin, &cfg, "app_test")
+        .apply(&plan1.plain, Approval::None, &PostgresBackend::new(&admin), &cfg, "app_test")
         .await
         .expect("apply deploy 1 on live");
 
