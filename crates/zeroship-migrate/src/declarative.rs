@@ -585,6 +585,72 @@ fn ddl_to_information_schema(ddl: &str) -> String {
     }
 }
 
+/// Canonicalise a column `data_type` to the SQLite type-affinity token used to
+/// compare a DESIRED snapshot (PG-spelled, from [`ddl_to_information_schema`])
+/// against a LIVE snapshot REAL-introspected from SQLite
+/// ([`crate::backend_sqlite::drift_sql::snapshot_schema`], which returns the
+/// lowercased SQLite declared type).
+///
+/// # Why this exists
+///
+/// `desired_snapshot` always emits the Postgres `information_schema` spelling for
+/// `data_type` (`text`, `bytea`, `double precision`, `timestamp with time zone`,
+/// …) regardless of dialect — the snapshot model is dialect-agnostic. But a REAL
+/// SQLite introspection reports the SQLite *declared* type the emitter wrote
+/// (`text`, `blob`, `real`, `integer`, `numeric`). Comparing the two raw spellings
+/// on the SQLite leg falsely flags a type change on every column whose PG and
+/// SQLite spellings differ — e.g. an encrypted column (`bytea` desired vs `blob`
+/// live), a number (`double precision` vs `real`), a timestamp (`timestamp with
+/// time zone` vs `text`) — yielding a spurious [`DeclarativeError::SqliteRebuildRequired`].
+///
+/// # Source of truth
+///
+/// The five target tokens are exactly the SQLite column types the shared emitter
+/// ([`zeroship_schema::query::def_to_column_type_for_dialect`] with
+/// `SqlDialect::Sqlite`) produces — `TEXT` / `REAL` / `INTEGER` / `NUMERIC` /
+/// `BLOB` — so emit and compare agree. Each arm below maps a PG `data_type`
+/// spelling (LHS) to the SQLite type the emitter would have written for the SAME
+/// field, AND folds the already-SQLite-spelled live token to the same canonical
+/// form. Parameterised extension types (`vector(N)`, `geography(POINT, 4326)`)
+/// emit `BLOB` on SQLite, so any `vector(`/`geography(` prefix folds to `blob`.
+///
+/// This is applied ONLY on the SQLite comparison leg; the PG leg compares the raw
+/// `information_schema` spellings unchanged (it never calls this), so the PG
+/// type-change detection is untouched — and a REAL SQLite type change (e.g.
+/// `text` → `real`, i.e. string → number) still maps to two DIFFERENT canonical
+/// tokens and IS detected.
+fn sqlite_canonical_type(data_type: &str) -> &'static str {
+    let lower = data_type.trim().to_ascii_lowercase();
+    // Parameterised extension types keep their DDL spelling in the snapshot
+    // (`vector(384)`, `geography(POINT, 4326)`); both emit BLOB on SQLite.
+    if lower.starts_with("vector(")
+        || lower == "vector"
+        || lower.starts_with("geography(")
+        || lower.starts_with("geometry(")
+    {
+        return "blob";
+    }
+    match lower.as_str() {
+        // TEXT affinity: PG `text`/`jsonb`/`timestamp with time zone`/`date`
+        // (date→TIMESTAMPTZ, calendarDate→DATE on PG; both → SQLite TEXT), and the
+        // live SQLite `text` token itself.
+        "text" | "jsonb" | "json" | "timestamp with time zone" | "timestamptz" | "date" => "text",
+        // REAL affinity: PG `double precision` (`t.number()`), and live `real`.
+        "double precision" | "float8" | "real" => "real",
+        // INTEGER affinity: PG `boolean`/`integer` (and `bigint`), and live `integer`.
+        "boolean" | "integer" | "bigint" | "int8" | "int4" | "int" => "integer",
+        // NUMERIC affinity: PG `numeric` (a numeric `t.literal()`), and live `numeric`.
+        "numeric" | "decimal" => "numeric",
+        // BLOB affinity: PG `bytea` (encrypted / `t.bytes()`), and live `blob`.
+        "bytea" | "blob" => "blob",
+        // Unknown / future spelling: fall back to TEXT (SQLite's catch-all affinity,
+        // matching the emitter's `_ => TEXT` arm). An unrecognised pair still
+        // compares equal-to-equal by its own lowercased form first (see the caller),
+        // so this fallback only collapses genuinely unmapped tokens.
+        _ => "text",
+    }
+}
+
 /// Single-quote a SQL string literal (double embedded quotes). Mirrors
 /// plugin-db's `'{}'` formatting in `def_to_constraints` (`s.replace('\'', "''")`).
 fn sql_str(s: &str) -> String {
@@ -2302,7 +2368,23 @@ impl DeclarativeAuthor {
                         // deferred error rather than emit dangling PG `ALTER COLUMN`
                         // DDL on the SQLite path.
                         if is_sqlite {
-                            if lc.data_type != c.data_type {
+                            // DIALECT-AWARE type compare: the LIVE snapshot is REAL
+                            // SQLite introspection (SQLite declared types: `text` /
+                            // `blob` / `real` / `integer` / `numeric`), while the
+                            // DESIRED snapshot carries PG `information_schema`
+                            // spellings (`bytea` / `double precision` / `timestamp
+                            // with time zone` / …). Comparing the raw spellings would
+                            // falsely flag a rebuild on every encrypted (`bytea` vs
+                            // `blob`), number (`double precision` vs `real`), or
+                            // timestamp (`… with time zone` vs `text`) column. Fold
+                            // both sides to the SAME SQLite type-affinity token the
+                            // shared emitter would write, so the compare is
+                            // apples-to-apples; a GENUINE change (e.g. string→number,
+                            // `text`→`real`) maps to two distinct tokens and is still
+                            // caught. (PG leg is untouched — it never reaches here.)
+                            if sqlite_canonical_type(&lc.data_type)
+                                != sqlite_canonical_type(&c.data_type)
+                            {
                                 return Err(DeclarativeError::SqliteRebuildRequired {
                                     table: table.clone(),
                                     op: format!(
