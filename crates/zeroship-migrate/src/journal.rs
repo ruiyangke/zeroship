@@ -132,6 +132,13 @@ pub enum JournalError {
     /// A database error.
     #[error("journal db error: {0}")]
     Db(#[from] compio_postgres::Error),
+    /// A **dialect-neutral** journal backend error — used by non-Postgres
+    /// [`MigrationBackend`](crate::backend::MigrationBackend) impls (e.g.
+    /// `SqliteBackend`) whose journal lives in SQLite, not Postgres, so they
+    /// cannot produce a `compio_postgres::Error`. The payload is the backend's
+    /// own error string. The Postgres journal helpers never construct this arm.
+    #[error("journal backend error: {0}")]
+    Backend(String),
     /// A journal row carried an unrecognized `phase` value.
     #[error("unrecognized journal phase '{0}'")]
     BadPhase(String),
