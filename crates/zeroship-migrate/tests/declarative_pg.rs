@@ -1589,6 +1589,12 @@ async fn all_twelve_supported_types_still_map() {
         ("array", "jsonb"),
         ("union", "jsonb"),
         ("bytes", "bytea"),
+        // M1 — `int`/`integer` are first-class integer tokens (the shared
+        // `def_to_pg_type` grew an `INTEGER` arm). They must map to the
+        // `information_schema` spelling `integer`, NOT degrade to the TEXT
+        // fallback that produced a snapshot↔emitter drift.
+        ("int", "integer"),
+        ("integer", "integer"),
     ] {
         assert_eq!(
             dsl_to_pg_data_type(tok).expect("supported type maps"),
@@ -1596,6 +1602,53 @@ async fn all_twelve_supported_types_still_map() {
             "type {tok}"
         );
     }
+}
+
+#[compio::test]
+async fn m1_int_token_snapshot_and_emitter_agree_no_drift() {
+    // M1 regression. Before the fix the engine's dialect-agnostic snapshot spelled
+    // an `int` field as `integer` (via a now-removed special-case) while the shared
+    // `def_to_pg_type` had NO int arm → the PG emitter wrote TEXT. The snapshot
+    // (`integer`) and a freshly-introspected PG column (`text`) would then NEVER
+    // match → a permanent diff loop.
+    //
+    // Fix: `def_to_pg_type` grew a first-class `INTEGER` arm, so the snapshot type
+    // and the emitter's column type AGREE for `int`/`integer` on PG. Pin both
+    // sides here.
+    use zeroship_migrate::dsl_to_pg_data_type;
+    use zeroship_schema::query::{
+        build_create_table_with_fks_for_dialect, FkEmission, SqlDialect,
+    };
+
+    // 1. Snapshot side: the engine's type spelling for `int` is `integer`.
+    assert_eq!(
+        dsl_to_pg_data_type("int").expect("int maps"),
+        "integer",
+        "engine snapshot must spell int as integer"
+    );
+
+    // 2. Emitter side: the shared PG CREATE TABLE emits an INTEGER column (NOT
+    //    TEXT) for an `int` field — so a fresh introspection reports `integer`,
+    //    matching the snapshot. Pre-fix this contained `"rank" TEXT`.
+    let schema = serde_json::json!({
+        "rank": { "type": "int", "required": true },
+    });
+    let pg_sql = build_create_table_with_fks_for_dialect(
+        "app1",
+        "scores",
+        &schema,
+        &FkEmission::Inline,
+        SqlDialect::Postgres,
+    )
+    .expect("build pg DDL");
+    assert!(
+        pg_sql.contains("\"rank\" INTEGER"),
+        "PG emitter must emit INTEGER for an int column (snapshot↔emitter agreement); got: {pg_sql}"
+    );
+    assert!(
+        !pg_sql.contains("\"rank\" TEXT"),
+        "pre-fix drift: int must NOT degrade to TEXT on PG; got: {pg_sql}"
+    );
 }
 
 #[compio::test]

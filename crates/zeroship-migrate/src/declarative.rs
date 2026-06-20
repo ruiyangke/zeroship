@@ -527,20 +527,14 @@ fn field_data_type(f: &FieldDescriptor) -> Result<String, DeclarativeError> {
         return Ok("bytea".into());
     }
 
-    // GAP (flagged, P6b): the shared `def_to_pg_type` (PG arm) has NO integer-token
-    // arm, so `int`/`integer` degrade to its `_ => TEXT` fallback there and would be
-    // fail-closed-rejected below. But `int`/`integer` ARE legitimate SDK tokens the
-    // dev tier materialises (plugin-db's SQLite map has an explicit integer arm, and
-    // the dev `registerModel` JSON declares `{ type: "int" }`). Map them to a
-    // first-class `integer` snapshot type so the SQLite dev `registerModel`→engine
-    // path accepts an `int` column instead of erroring. We deliberately do NOT
-    // accept the Postgres *type names* `bigint`/`int4`/`int8` here — those are not
-    // DSL tokens and stay fail-closed-rejected as typos (`typo_type_token_is_…`),
-    // preserving the PG path byte-identically. When the shared PG map grows an
-    // integer arm this special-case can be deleted.
-    if matches!(f.ty.as_str(), "int" | "integer") {
-        return Ok("integer".into());
-    }
+    // M1 — `int`/`integer` are now handled by the shared `def_to_pg_type` (it grew
+    // a first-class `INTEGER` arm), so they route through the shared map below like
+    // every other token: `INTEGER` → `ddl_to_information_schema` → `integer`. The
+    // engine no longer needs a special-case (the previous one papered over the
+    // shared PG map's missing int arm and applied to BOTH dialects' snapshots,
+    // which was correct for SQLite but produced a snapshot↔emitter drift on PG).
+    // The PG type *names* `bigint`/`int4`/`int8` remain NON-tokens: the shared map
+    // leaves them on the TEXT fallback, so they stay fail-closed-rejected as typos.
 
     let def = field_to_sdk_def(f);
     let ddl = def_to_column_type_for_dialect(&def, SqlDialect::Postgres);
@@ -3536,8 +3530,20 @@ impl DeclarativeAuthor {
 
     /// Render a destructive (gated) `DROP TABLE` — `destructive = true,
     /// requires_approval = true` so the gate refuses it without approval.
+    /// Render a destructive (gated) `DROP TABLE`.
+    ///
+    /// PHASE 4 / H1 — like `render_drop_column`, the confined SQLite path runs in
+    /// the app file's `main` schema (the per-app file is opened directly, not
+    /// ATTACHed under a `"<app>"` namespace as in PG), so the table is referenced
+    /// UNqualified. A schema-qualified `"default"."c2"` resolves to no table on
+    /// SQLite ("no such table: default.c2"). The PG path keeps `self.qualified`.
     fn render_drop_table(&self, table: &str) -> Migration {
-        let up = format!("DROP TABLE {}", self.qualified(table));
+        let table_ref = if matches!(self.dialect, SqlDialect::Sqlite) {
+            quote_ident(table)
+        } else {
+            self.qualified(table)
+        };
+        let up = format!("DROP TABLE {table_ref}");
         self.make(
             &format!("drop_table_{table}"),
             up,
