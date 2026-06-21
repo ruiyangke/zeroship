@@ -393,6 +393,36 @@ async fn confine_h_cross_tenant_denied() {
 }
 
 // ---------------------------------------------------------------------------
+// (i) M1: a creator `up` READING the journal — `SELECT … FROM "_mig".
+//     schema_migrations` — is denied. A plain top-level read is an
+//     `AuthAction::Read { accessor: None }` on `_mig`; pre-fix it fell through to
+//     the `_ => Allow` catch-all (the trigger-body arm requires `accessor.is_some()`)
+//     so the creator could exfiltrate the immutable journal into an app table. The
+//     M1 backstop arm now DENIES any `_mig`-targeting action in CreatorUp, Read
+//     included. Faithful end-to-end on the REAL hardened backend.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn confine_i_creator_read_of_mig_journal_denied() {
+    let p = paths("read_mig");
+    let be = backend(&p);
+    be.ensure_journal_sqlite().await.expect("bootstrap journal");
+    // A creator `up` that copies the journal into an app table — the SELECT issues a
+    // Read on `"_mig".schema_migrations`, which must be denied at prepare.
+    let attack =
+        "CREATE TABLE stolen AS SELECT * FROM \"_mig\".schema_migrations;";
+    assert_denied_and_journal_clean(&be, attack, DenyKind::Authorizer).await;
+    // Positive control: the SAME read-into-table SUCCEEDS on a raw connection (no
+    // authorizer), proving the hardened deny is the M1 confinement rule and not a
+    // parse / missing-table / CTAS error.
+    assert_attack_succeeds_unhardened(CONTROL_JOURNAL_SETUP, attack);
+    // And the journal is still readable by the engine itself (EngineJournal reads
+    // are unaffected by the creator-mode `_mig` deny).
+    be.applied_sqlite()
+        .await
+        .expect("engine journal reads still work after the denied creator read");
+}
+
+// ---------------------------------------------------------------------------
 // DETACH denied for life too.
 // ---------------------------------------------------------------------------
 #[compio::test]

@@ -81,13 +81,19 @@ impl SqliteActorError {
     /// tests assert a denied attack surfaces as this (not a corruption / silent
     /// pass). rusqlite renders a denied prepare as a `SqliteFailure` with
     /// `ErrorCode::AuthorizationForStatementDenied` and the message "not
-    /// authorized".
+    /// authorized" for STATEMENT-level denials. A denied `Read` (a column read)
+    /// renders differently: the message contains `is prohibited`
+    /// (still `SQLITE_AUTH`, the authorizer's column-read deny path, M1) — so we
+    /// match that wording too, else a legitimate authorizer deny of a creator
+    /// `SELECT FROM "_mig"` would be misclassified as an unrelated error.
     #[must_use]
     pub fn is_authorizer_denied(&self) -> bool {
         match self {
             SqliteActorError::Exec(m) => {
                 let l = m.to_ascii_lowercase();
-                l.contains("not authorized") || l.contains("authorization")
+                l.contains("not authorized")
+                    || l.contains("authorization")
+                    || l.contains("is prohibited")
             }
             _ => false,
         }
