@@ -214,13 +214,9 @@ pub enum RunError {
         /// The most recent connection/probe error seen before timing out.
         last_error: String,
     },
-    /// The DB URL selects an engine this CLI does not support (e.g. `mysql://`).
-    /// An HONEST refusal, not a panic — the engine abstraction is general, but
-    /// only the Postgres + SQLite backends are wired into this binary.
-    #[error(
-        "engine not supported by this CLI (Postgres and SQLite supported; MySQL needs \
-         the SqlDialect::MySql variant + a MySQL backend — see the multi-engine design)"
-    )]
+    /// The DB URL selects a database engine this CLI does not support. An HONEST
+    /// refusal, not a panic — only the Postgres + SQLite backends are supported.
+    #[error("unsupported database engine (only postgres and sqlite are supported)")]
     UnsupportedEngine,
     /// A SQLite backend op (open / hardening / apply / journal) failed.
     #[error("sqlite: {0}")]
@@ -285,8 +281,8 @@ pub enum Engine {
     /// `sqlite:` / `sqlite://` / `file:` / `:memory:` / a bare filesystem path —
     /// the hardened [`SqliteBackend`] on that file. Carries the app-file path.
     Sqlite(PathBuf),
-    /// Any other explicit scheme (`mysql://`, `redis://`, …) — unsupported by this
-    /// binary. The engine abstraction is general; only PG + SQLite are wired here.
+    /// Any other explicit scheme (`redis://`, …) — unsupported by this binary.
+    /// Only Postgres + SQLite are supported.
     Unsupported,
 }
 
@@ -297,7 +293,7 @@ pub enum Engine {
 /// - `postgres://` / `postgresql://` ⇒ [`Engine::Postgres`].
 /// - `sqlite:` / `sqlite://` / `file:` / `:memory:` / a bare path ⇒
 ///   [`Engine::Sqlite`] with the extracted file path.
-/// - an explicit but unrecognised scheme (e.g. `mysql://`) ⇒ [`Engine::Unsupported`].
+/// - an explicit but unrecognised scheme (e.g. `redis://`) ⇒ [`Engine::Unsupported`].
 #[must_use]
 pub fn classify_engine(url: &str) -> Engine {
     let trimmed = url.trim();
@@ -1039,7 +1035,6 @@ mod tests {
         );
 
         // An explicit unknown scheme is the honest unsupported refusal.
-        assert_eq!(classify_engine("mysql://localhost/db"), Engine::Unsupported);
         assert_eq!(classify_engine("redis://localhost:6379"), Engine::Unsupported);
     }
 

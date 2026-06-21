@@ -1355,7 +1355,7 @@ pub fn flags_for(report: &GuardReport) -> MigrationFlags {
 /// [`crate::engine::MigrationEngine::plan`]. Deliberately **does not** carry the
 /// PG-specific `classes: Vec<StatementClass>` (the libpg_query `DdlKind`
 /// vocabulary): that stays *inside* the PG guard ([`SqlGuard`]/[`GuardReport`]),
-/// because a non-PG engine (SQLite descriptor diff, a future MySQL parser) has no
+/// because a non-PG engine (SQLite descriptor diff, a future non-PG parser) has no
 /// `DdlKind` to populate. Keeping the neutral seam free of PG vocabulary (H2) is
 /// what lets a new engine bring its own line-1 without inheriting libpg_query.
 ///
@@ -1387,7 +1387,7 @@ pub struct GuardOutcome {
 ///   lives on [`SqlGuard::check`] itself — if the PG guard is ever mis-handed a
 ///   SQLite-keyed config it returns [`GuardError::SqliteRawSqlRejected`] rather
 ///   than mis-parsing (the existing defensive property).
-/// - A future MySQL engine brings its own parser/allowlist impl.
+/// - A future non-PG engine brings its own parser/allowlist impl.
 ///
 /// `GuardOutcome` / [`GuardError`] are shared + neutral; each engine's parser is
 /// its own concern (design §2.2 / §6 G1).

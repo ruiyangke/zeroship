@@ -48,51 +48,6 @@ use crate::journal::{self, AppliedEntry, JournalError};
 use crate::migration::Migration;
 use zeroship_schema::query::SqlDialect;
 
-/// How a backend can make a migration's DDL and its journal row land
-/// **atomically** (multi-engine abstraction C2, design §2.0 finding C2).
-///
-/// The core apply contract is "the migration's `<up>` and its journal row commit
-/// together, all-or-nothing." A backend whose DDL runs *inside* a transaction
-/// (Postgres, SQLite) satisfies this directly: one `BEGIN … COMMIT` wraps both.
-/// A backend whose DDL **implicit-commits per statement** (MySQL — every `CREATE`
-/// / `ALTER` auto-commits the open transaction) *cannot* wrap the `<up>` and the
-/// journal row in one transaction, so it needs the two-phase inflight-marker
-/// protocol instead.
-///
-/// This enum lets the trait express that difference. The executor consults
-/// [`MigrationBackend::journal_atomicity`] to choose the apply path:
-/// [`Transactional`](Self::Transactional) ⇒ the atomic
-/// `BEGIN; <up>; INSERT journal; COMMIT` path; [`InflightMarker`](Self::InflightMarker)
-/// ⇒ the existing two-phase `started → completed` path (the same mechanism a
-/// per-migration `transaction:false` already routes through today).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JournalAtomicity {
-    /// The backend's DDL runs inside a transaction, so the `<up>` and the journal
-    /// row commit together in ONE `BEGIN … COMMIT` (Postgres, SQLite). This is the
-    /// atomic path; per-migration `transaction:false` migrations still opt
-    /// individually into the two-phase path, but everything else is one txn.
-    Transactional,
-    /// The backend's DDL **auto-commits per statement** (MySQL-class), so no single
-    /// transaction can wrap the `<up>` and the journal row. Every migration on such
-    /// a backend is routed through the two-phase `started → completed` inflight
-    /// recovery: write a `started` marker, run the `<up>`, then write the immutable
-    /// `completed` row and clear the marker; a crash leaves the marker for idempotent
-    /// re-run.
-    ///
-    /// **Scope of what this covers:** the two-phase recovery re-runs the `<up>`
-    /// VERBATIM, which is correct for a SINGLE-statement non-atomic op (the path
-    /// Postgres already uses for `CREATE INDEX CONCURRENTLY` / `ALTER TYPE … ADD
-    /// VALUE`). A MySQL `<up>` with MULTIPLE DDL statements can half-commit on a
-    /// crash (each statement implicit-commits independently), and recovering *that*
-    /// requires per-statement inflight tracking — which is a **gated follow-up**, not
-    /// part of this seam. A backend with multi-statement non-atomic DDL must
-    /// additionally provide per-statement inflight tracking before it can claim
-    /// crash-safe multi-statement migrations; this enum only routes it through the
-    /// existing single-statement two-phase recovery. No backend returns
-    /// `InflightMarker` yet (it is the MySQL-class plug-in point).
-    InflightMarker,
-}
-
 /// The session GUCs / settings the executor must restore on exit so its
 /// per-apply settings never leak onto the pooled/long-lived connection (H2).
 ///
@@ -133,27 +88,6 @@ pub trait MigrationBackend {
     /// descriptor-diff path). The returned [`GuardOutcome`](crate::guard::GuardOutcome)
     /// / [`GuardError`](crate::guard::GuardError) are dialect-neutral.
     fn guard(&self) -> &dyn crate::guard::MigrationGuard;
-
-    /// Whether this backend can commit a migration's DDL and its journal row in
-    /// ONE transaction (multi-engine abstraction C2, design §2.0 finding C2).
-    ///
-    /// [`Transactional`](JournalAtomicity::Transactional) for an engine whose DDL
-    /// is transactional (Postgres, SQLite) — the atomic
-    /// `BEGIN; <up>; INSERT journal; COMMIT` path is used, and only a per-migration
-    /// `transaction:false` opts an individual migration into the two-phase path.
-    /// [`InflightMarker`](JournalAtomicity::InflightMarker) for a MySQL-class engine
-    /// whose DDL auto-commits per statement — then EVERY migration is routed through
-    /// the two-phase `started → completed` recovery (see the variant docs for the
-    /// multi-statement partial-commit caveat, which is a gated follow-up).
-    ///
-    /// Default: [`Transactional`](JournalAtomicity::Transactional). The two shipping
-    /// backends both override to the same value explicitly for self-documentation;
-    /// the default keeps a new backend safe-by-construction (a backend that forgets
-    /// to report `InflightMarker` would simply fail its non-atomic apply loudly,
-    /// never silently corrupt the journal).
-    fn journal_atomicity(&self) -> JournalAtomicity {
-        JournalAtomicity::Transactional
-    }
 
     // -- connection / session I/O -------------------------------------------
 
@@ -375,7 +309,7 @@ pub trait MigrationBackend {
     /// developer can re-create), so a pre-apply shadow dry-run adds little. The
     /// shadow exists to safely preview *untrusted/AI-authored* DDL before it
     /// touches a *durable* schema; neither condition holds on the SQLite dev leg.
-    /// A future untrusted/prod non-PG engine (e.g. MySQL) WOULD provide a
+    /// A future untrusted/prod non-PG engine WOULD provide a
     /// `ShadowDryRun`. So `None` here is honest: a caller that asks for a dry-run
     /// on SQLite gets the explicit `ShadowUnsupported` outcome, never a fake
     /// "dry-run passed".
@@ -474,15 +408,6 @@ impl MigrationBackend for PostgresBackend<'_> {
 
     fn guard(&self) -> &dyn crate::guard::MigrationGuard {
         &self.guard
-    }
-
-    fn journal_atomicity(&self) -> JournalAtomicity {
-        // Postgres DDL is transactional: the `<up>` and its journal row commit
-        // together in one `BEGIN … COMMIT`. Only a per-migration `transaction:false`
-        // (CONCURRENTLY / ALTER TYPE ADD VALUE) individually opts into the two-phase
-        // path. Reporting `Transactional` keeps the existing apply behavior
-        // byte-identical.
-        JournalAtomicity::Transactional
     }
 
     async fn acquire_project_lock(&self, project_id: &str) -> Result<(), ApplyError> {

@@ -12,8 +12,8 @@
 //!   5. `down --yes` — rolls back the one migration.
 //!   6. `migrate` — re-applies.
 //!
-//! Plus: a `mysql://` URL yields the explicit "engine not supported" refusal
-//! (the honest multi-engine boundary), and a missing-`--yes` `down` refuses.
+//! Plus: an unrecognised engine URL yields the explicit "unsupported database
+//! engine" refusal (the honest boundary), and a missing-`--yes` `down` refuses.
 //!
 //! No DB cluster required — SQLite is a local file under a per-test temp dir.
 
@@ -190,14 +190,13 @@ fn cli_dbmate_full_workflow_on_sqlite() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// A `mysql://` URL is the explicit unsupported-engine refusal — the honest
-/// multi-engine boundary. The engine abstraction is general (the trait is proven
-/// general by the MySQL compile-stub), but only PG + SQLite are wired into this
-/// binary, so a MySQL DSN must fail clearly, never panic.
+/// An unrecognised DB engine scheme is the explicit unsupported-engine refusal —
+/// the honest boundary. Only PG + SQLite are supported, so any other DSN scheme
+/// must fail clearly, never panic.
 #[test]
-fn mysql_url_is_an_explicit_unsupported_engine_error() {
+fn unknown_engine_url_is_an_explicit_unsupported_engine_error() {
     let tok = token();
-    let tmp = std::env::temp_dir().join(format!("zsmig_mysql_dir_{tok}"));
+    let tmp = std::env::temp_dir().join(format!("zsmig_unknown_engine_dir_{tok}"));
     std::fs::create_dir_all(&tmp).expect("create temp migration dir");
     let dir_s = tmp.to_str().unwrap().to_string();
 
@@ -206,12 +205,12 @@ fn mysql_url_is_an_explicit_unsupported_engine_error() {
         "--dir",
         &dir_s,
         "--database-url",
-        "mysql://user:pw@localhost:3306/db",
+        "redis://user:pw@localhost:6379/0",
     ]);
-    assert!(!ok, "a mysql:// URL must NOT succeed");
+    assert!(!ok, "an unknown engine URL must NOT succeed");
     assert!(
-        err.contains("engine not supported") && err.contains("MySQL"),
-        "the refusal names the unsupported engine + the MySQL path: {err}"
+        err.contains("unsupported database engine"),
+        "the refusal names the unsupported engine: {err}"
     );
 
     let _ = std::fs::remove_dir_all(&tmp);

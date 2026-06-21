@@ -638,9 +638,8 @@ fn build_dual_write_sql(
 /// **not** take the PG-named [`ExpandContractPlan`] container or a
 /// `compio_postgres::Client`. The Postgres impl ([`PgOnline`]) owns its `Client`
 /// **internally** and lowers the intent to its own PL/pgSQL dual-write DDL; a
-/// future engine that has a native online rename (MySQL `ALGORITHM=INPLACE`)
-/// lowers the *same* intent to its own DDL — which a raw `&Client` could never
-/// have admitted.
+/// future engine that has a native online rename lowers the *same* intent to its
+/// own DDL — which a raw `&Client` could never have admitted.
 #[allow(clippy::module_name_repetitions)]
 pub trait OnlineSchemaChange {
     /// Drive ONE online intent's EXPAND (additive + dual-write + the real
@@ -777,8 +776,8 @@ impl OnlineSchemaChange for PgOnline<'_> {
     > {
         // PG ignores `_intent` and runs the pre-authored, version-stable expand
         // steps verbatim (re-authoring would mint fresh ids and diverge from the
-        // stamped manifest). A future MySQL impl would instead lower `_intent` to
-        // its own `ALGORITHM=INPLACE` DDL.
+        // stamped manifest). A future engine with native online DDL would instead
+        // lower `_intent` to its own online-rename DDL.
         Box::pin(run_expand_pg(
             self.conn, expand, backfill, approval, cfg, applied_by, lock_mode,
         ))
