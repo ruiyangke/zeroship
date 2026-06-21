@@ -352,7 +352,7 @@ async fn l5_baseline_apply_on_top_then_squash_over_baseline() {
     s.supersedes = vec![baseline_mig.version.clone(), new_mig.version.clone()];
     s.recompute_checksum();
 
-    let sq = squash(&conn, &cfg, &s, "operator")
+    let sq = squash(&PostgresBackend::new(&conn), &cfg, &s, "operator")
         .await
         .expect("squash over a prefix that includes the baselined version must record cleanly");
     assert!(
@@ -440,7 +440,7 @@ async fn l5_h5_squash_partial_overlap_over_baseline_is_refused() {
     s.supersedes = vec![baseline_mig.version.clone(), never];
     s.recompute_checksum();
 
-    let err = squash(&conn, &cfg, &s, "operator")
+    let err = squash(&PostgresBackend::new(&conn), &cfg, &s, "operator")
         .await
         .expect_err("a partial-overlap squash (baseline applied, other not) must be refused");
     assert!(

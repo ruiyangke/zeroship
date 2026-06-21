@@ -826,7 +826,7 @@ async fn p0_3_apply_rollback_reapply_squash_status_lifecycle() {
     };
     s.recompute_checksum();
 
-    let sq = squash(&conn, &cfg, &s, "app_acme").await.expect("squash v1..v3");
+    let sq = squash(&PostgresBackend::new(&conn), &cfg, &s, "app_acme").await.expect("squash v1..v3");
     assert!(!sq.already_present, "first squash records the supersession");
     assert_eq!(sq.superseded.len(), 3);
     // The squash did NOT re-run its up (the tables already existed; no error/dup).

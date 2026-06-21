@@ -55,9 +55,8 @@ use crate::migration::{Migration, MigrationId};
 pub(crate) mod pg {
     pub(crate) use super::{
         acquire_project_lock, apply_non_transactional, apply_transactional,
-        configure_session_non_txn, evaluate_preconditions, release_project_lock,
-        restore_session, rollback_one_transactional, snapshot_session,
-        validate_non_txn_idempotent,
+        configure_session_non_txn, release_project_lock, restore_session,
+        rollback_one_transactional, snapshot_session, validate_non_txn_idempotent,
     };
 }
 
@@ -1383,64 +1382,13 @@ pub enum PreconditionVerdict {
     Skip,
 }
 
-/// Evaluate a migration's preconditions (v3 Plan D), in declaration order, BEFORE
-/// its `up` runs. All evaluation is read-only (parameterized catalog reads +
-/// guarded single read-only `SELECT` under the migrator role).
+/// The per-migration precondition verdict loop now lives in
+/// [`crate::precondition::evaluate_all`] — the **Postgres** leaf reached only via
+/// [`MigrationBackend::evaluate_preconditions`](crate::backend::MigrationBackend::evaluate_preconditions)
+/// (multi-engine abstraction C3). The generic apply body calls the backend method
+/// (`backend.evaluate_preconditions(cfg, m)`); it holds no `&Client` and runs no
+/// `pg_query` / `information_schema` query directly.
 ///
-/// Returns:
-/// - [`PreconditionVerdict::AllMet`] — every precondition held; apply.
-/// - [`PreconditionVerdict::Skip`] — an `OnUnmet::Skip` check was unmet; skip.
-///
-/// # Errors
-/// - [`ApplyError::PreconditionFailed`] — an `OnUnmet::Halt` check was UNMET (the
-///   assertion evaluated false), or ANY check could not be evaluated (a
-///   guard-denied / malformed `SqlBoolean`, an invalid identifier). Fail-closed:
-///   an inevaluable precondition is treated as a hard failure regardless of its
-///   `on_unmet`, so a precondition that cannot even be checked never silently
-///   waves a migration through. The caller aborts the whole apply, applying
-///   nothing for this migration.
-///
-/// `Halt` is evaluated first-failure-wins: the first unmet/inevaluable Halt check
-/// stops evaluation and aborts. A `Skip` verdict is returned only when no Halt
-/// check failed and at least one `Skip` check is unmet.
-pub(crate) async fn evaluate_preconditions(
-    conn: &Client,
-    cfg: &ExecutorConfig,
-    m: &Migration,
-) -> Result<PreconditionVerdict, ApplyError> {
-    use crate::precondition::OnUnmet;
-    let mut verdict = PreconditionVerdict::AllMet;
-    for pc in &m.preconditions {
-        // An evaluation ERROR (guard denial, invalid identifier, malformed
-        // SqlBoolean, DB error) is ALWAYS fatal — fail-closed, regardless of
-        // on_unmet. A precondition that cannot be checked must never wave the
-        // migration through.
-        let met = crate::precondition::evaluate(conn, cfg, &pc.check)
-            .await
-            .map_err(|e| ApplyError::PreconditionFailed {
-                version: m.version.as_str().to_string(),
-                which: format!("{:?} could not be evaluated: {e}", pc.check),
-            })?;
-        if met {
-            continue;
-        }
-        match pc.on_unmet {
-            OnUnmet::Halt => {
-                return Err(ApplyError::PreconditionFailed {
-                    version: m.version.as_str().to_string(),
-                    which: format!("{:?} is unmet (OnUnmet::Halt)", pc.check),
-                });
-            }
-            OnUnmet::Skip => {
-                // Record that we will skip, but keep scanning: a LATER Halt check
-                // that is also unmet must still fail-close (Halt dominates Skip).
-                verdict = PreconditionVerdict::Skip;
-            }
-        }
-    }
-    Ok(verdict)
-}
-
 /// The EXPAND/CONTRACT gate (Plan 8 v1.2). A `phase: Contract` online migration
 /// may apply only when every `phase: Expand` migration it `depends_on` is
 /// NET-APPLIED (`completed`) in the journal — the single source of truth.
@@ -3286,6 +3234,15 @@ mod journal_atomicity_seam_tests {
             _: &ExecutorConfig,
             _: &Migration,
         ) -> Result<PreconditionVerdict, ApplyError> {
+            unimplemented!()
+        }
+        async fn record_squash(
+            &self,
+            _: &ExecutorConfig,
+            _: &Migration,
+            _: &str,
+            _: &[&str],
+        ) -> Result<(), ApplyError> {
             unimplemented!()
         }
         async fn rebuild_one(

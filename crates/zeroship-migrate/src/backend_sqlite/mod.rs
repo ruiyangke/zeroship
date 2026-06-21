@@ -393,6 +393,29 @@ impl MigrationBackend for SqliteBackend {
         }
     }
 
+    // -- squash -------------------------------------------------------------
+
+    async fn record_squash(
+        &self,
+        _cfg: &ExecutorConfig,
+        squash_migration: &Migration,
+        _applied_by: &str,
+        _supersedes: &[&str],
+    ) -> Result<(), ApplyError> {
+        // Squash is an OPERATOR-authored supersession over an existing project's PG
+        // migration history. The SQLite dev leg applies only TRUSTED
+        // descriptor-generated migrations (empty `supersedes`/`renames`), and the
+        // declarative author never emits a squash — so a squash reaching the SQLite
+        // backend is a routing bug. Fail closed with a clear error rather than
+        // silently journaling a supersession the dev path never produces (mirrors
+        // `rebuild_one` on the PG backend, and `evaluate_preconditions` here).
+        Err(ApplyError::Backend(format!(
+            "sqlite backend: squash requested for '{}' — the SQLite descriptor author \
+             never produces squashes (routing bug)",
+            squash_migration.version.as_str()
+        )))
+    }
+
     // -- declarative-only structured ops (P6a) ------------------------------
 
     async fn rebuild_one(

@@ -40,20 +40,36 @@
 //!      block advisory locks or sequence mutation — which is exactly why the
 //!      shape gate, not `READ ONLY`, owns that confinement.)
 //!
-//! # Where this is evaluated
+//! # Where this is evaluated — the backend seam (multi-engine abstraction C3)
 //!
 //! [`crate::executor::apply`] evaluates a pending migration's preconditions
 //! **inside the apply flow, under the project advisory lock**, immediately before
 //! the migration's `up` — so the state a precondition checks is stable for the
 //! apply. All evaluation is read-only (catalog reads + a single read-only
 //! `SELECT`); a precondition can never write.
+//!
+//! **This module is the POSTGRES precondition impl.** Both the SQL VALIDATION
+//! ([`validate_single_select`], `pg_query::parse` — "is this a safe single
+//! SELECT?") and the EVALUATION ([`evaluate`], `information_schema` catalog reads +
+//! the `&Client`-bound `SqlBoolean` run) are PG-dialect-specific, so they live
+//! BEHIND the [`MigrationBackend`](crate::backend::MigrationBackend) seam: the
+//! generic apply path calls
+//! [`backend.evaluate_preconditions`](crate::backend::MigrationBackend::evaluate_preconditions),
+//! and only [`PostgresBackend`](crate::backend::PostgresBackend) routes into this
+//! module (via [`evaluate_all`], which folds the per-check verdict loop). The
+//! SQLite backend validates/evaluates in its own dialect (descriptor migrations
+//! carry no preconditions, so it fails closed on a declared one). No `pg_query` /
+//! `information_schema` / `&Client` appears in the generic executor body — it is
+//! all contained here, the PG leaf.
 
 use compio_postgres::Client;
 use pg_query::protobuf::node::Node as NodeEnum;
 use serde_json::Value;
 
 use crate::db::ExecutorConfig;
+use crate::executor::{ApplyError, PreconditionVerdict};
 use crate::guard::{GuardError, SqlGuard};
+use crate::migration::Migration;
 
 /// Sequence-mutating and lock-acquiring builtins a read-only precondition may
 /// NEVER call. `nextval`/`setval` mutate a sequence (NOT blocked by `READ
@@ -333,6 +349,70 @@ pub async fn evaluate(
         }
         Precondition::SqlBoolean { sql } => evaluate_sql_boolean(conn, cfg, sql).await,
     }
+}
+
+/// Evaluate ALL of a migration's preconditions (v3 Plan D), in declaration order,
+/// BEFORE its `up` runs — the **Postgres** precondition path behind
+/// [`PostgresBackend::evaluate_preconditions`](crate::backend::PostgresBackend),
+/// reached only via the backend seam (multi-engine abstraction C3). Folds the
+/// former generic-executor `evaluate_preconditions` loop into the PG leaf, so the
+/// `&Client` + per-check `pg_query`/`information_schema` evaluation never sits in
+/// the dialect-agnostic executor body.
+///
+/// All evaluation is read-only (parameterized catalog reads + a guarded single
+/// read-only `SELECT` under the migrator role).
+///
+/// Returns:
+/// - [`PreconditionVerdict::AllMet`] — every precondition held; apply.
+/// - [`PreconditionVerdict::Skip`] — an `OnUnmet::Skip` check was unmet; skip.
+///
+/// # Errors
+/// - [`ApplyError::PreconditionFailed`] — an `OnUnmet::Halt` check was UNMET (the
+///   assertion evaluated false), or ANY check could not be evaluated (a
+///   guard-denied / malformed `SqlBoolean`, an invalid identifier). Fail-closed:
+///   an inevaluable precondition is treated as a hard failure regardless of its
+///   `on_unmet`, so a precondition that cannot even be checked never silently
+///   waves a migration through. The caller aborts the whole apply, applying
+///   nothing for this migration.
+///
+/// `Halt` is evaluated first-failure-wins: the first unmet/inevaluable Halt check
+/// stops evaluation and aborts. A `Skip` verdict is returned only when no Halt
+/// check failed and at least one `Skip` check is unmet.
+pub(crate) async fn evaluate_all(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    m: &Migration,
+) -> Result<PreconditionVerdict, ApplyError> {
+    let mut verdict = PreconditionVerdict::AllMet;
+    for pc in &m.preconditions {
+        // An evaluation ERROR (guard denial, invalid identifier, malformed
+        // SqlBoolean, DB error) is ALWAYS fatal — fail-closed, regardless of
+        // on_unmet. A precondition that cannot be checked must never wave the
+        // migration through.
+        let met = evaluate(conn, cfg, &pc.check)
+            .await
+            .map_err(|e| ApplyError::PreconditionFailed {
+                version: m.version.as_str().to_string(),
+                which: format!("{:?} could not be evaluated: {e}", pc.check),
+            })?;
+        if met {
+            continue;
+        }
+        match pc.on_unmet {
+            OnUnmet::Halt => {
+                return Err(ApplyError::PreconditionFailed {
+                    version: m.version.as_str().to_string(),
+                    which: format!("{:?} is unmet (OnUnmet::Halt)", pc.check),
+                });
+            }
+            OnUnmet::Skip => {
+                // Record that we will skip, but keep scanning: a LATER Halt check
+                // that is also unmet must still fail-close (Halt dominates Skip).
+                verdict = PreconditionVerdict::Skip;
+            }
+        }
+    }
+    Ok(verdict)
 }
 
 /// `information_schema.tables` lookup: a base table OR a view named `table` in the

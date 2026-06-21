@@ -42,11 +42,11 @@
 
 use std::collections::HashSet;
 
-use compio_postgres::Client;
-
+use crate::backend::MigrationBackend;
 use crate::db::ExecutorConfig;
-use crate::guard::{GuardConfig, GuardError, SqlGuard};
-use crate::journal::{self, JournalError, Phase};
+use crate::executor::ApplyError;
+use crate::guard::{guard_for, GuardConfig, GuardError};
+use crate::journal::{JournalError, Phase};
 use crate::migration::Migration;
 
 /// What [`squash`] did.
@@ -64,10 +64,18 @@ pub struct SquashOutcome {
 /// Error from [`squash`].
 #[derive(Debug, thiserror::Error)]
 pub enum SquashError {
-    /// A database error outside a guarded/journaled step.
-    #[error("db error: {0}")]
-    Db(#[from] compio_postgres::Error),
-    /// A journal operation failed.
+    /// A **dialect-neutral** backend error — the project lock acquire/release or
+    /// the supersession journal write failed behind the
+    /// [`MigrationBackend`](crate::backend::MigrationBackend) seam. The payload is
+    /// the backend's own error rendered to a string (PG `db error: …` / a non-PG
+    /// `backend error: …`), so squash never leaks a `compio_postgres::Error` on its
+    /// public surface. This folds the former dialect-specific `Db(compio_postgres::
+    /// Error)` arm — the PG lock/write path now routes through the backend's
+    /// [`ApplyError`], surfaced here.
+    #[error("backend error: {0}")]
+    Backend(String),
+    /// A journal operation failed (a journal read — `ensure_journal`/`applied` —
+    /// behind the backend seam).
     #[error(transparent)]
     Journal(#[from] JournalError),
     /// The squash's `up` was denied by the guard (RCE / priv-esc / cross-tenant /
@@ -144,9 +152,26 @@ pub enum SquashError {
 /// - [`SquashError::NoSupersedes`] — `S` supersedes nothing.
 /// - [`SquashError::NotAllApplied`] / [`SquashError::PartialOverlap`] — the
 ///   superseded set is not fully net-applied.
-/// - [`SquashError::Db`] / [`SquashError::Journal`] — infrastructure failures.
-pub async fn squash(
-    conn: &Client,
+/// - [`SquashError::Backend`] / [`SquashError::Journal`] — infrastructure failures
+///   behind the [`MigrationBackend`](crate::backend::MigrationBackend) seam (the
+///   project lock, the journal reads, the supersession write).
+///
+/// # The backend seam (multi-engine abstraction C3)
+///
+/// `squash` is generic over [`MigrationBackend`]: the project lock
+/// ([`acquire_project_lock`](MigrationBackend::acquire_project_lock) /
+/// [`release_project_lock`](MigrationBackend::release_project_lock)), the journal
+/// reads ([`ensure_journal`](MigrationBackend::ensure_journal) /
+/// [`applied`](MigrationBackend::applied)), the line-1 guard
+/// ([`guard_for`](crate::guard::guard_for), dialect-selected from the backend),
+/// and the supersession write
+/// ([`record_squash`](MigrationBackend::record_squash)) all route through the
+/// trait. NO `compio_postgres::Client` / `pg_advisory_lock` / `pg_query` appears
+/// here; the PG specifics stay inside [`PostgresBackend`](crate::backend::PostgresBackend).
+/// The PG path is byte-identical: the PG lock SQL, guard, and `record_baseline`
+/// write are the EXACT pre-seam code, now reached through the backend.
+pub async fn squash<B: MigrationBackend>(
+    backend: &B,
     cfg: &ExecutorConfig,
     squash_migration: &Migration,
     applied_by: &str,
@@ -161,8 +186,14 @@ pub async fn squash(
     }
 
     // GUARD (defense in depth) — BEFORE the lock, no DB needed. `S.up` is held to
-    // the same deny-list as any up, even though it is recorded-not-run here.
-    let guard = SqlGuard::new(GuardConfig::confined(cfg.project_schema.clone()));
+    // the same deny-list as any up, even though it is recorded-not-run here. The
+    // dialect-correct line-1 guard is selected from the backend's dialect: PG runs
+    // the libpg_query deny-list (byte-identical to the pre-seam
+    // `SqlGuard::new(confined(project_schema))`); a non-PG engine runs its own
+    // dialect's guard.
+    let guard = guard_for(
+        &GuardConfig::confined(cfg.project_schema.clone()).for_dialect(backend.dialect()),
+    );
     guard
         .check(&squash_migration.up)
         .map_err(|source| SquashError::Guard {
@@ -171,32 +202,41 @@ pub async fn squash(
         })?;
 
     // Privileged: serialize against all migration activity, exactly like apply.
-    conn.execute(
-        "SELECT pg_advisory_lock(hashtext($1)::bigint)",
-        &[&cfg.project_id],
-    )
-    .await?;
-    let result = squash_locked(conn, cfg, squash_migration, applied_by).await;
-    let unlock = conn
-        .execute(
-            "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
-            &[&cfg.project_id],
-        )
-        .await;
+    backend
+        .acquire_project_lock(&cfg.project_id)
+        .await
+        .map_err(apply_to_squash)?;
+    let result = squash_locked(backend, cfg, squash_migration, applied_by).await;
+    let unlock = backend.release_project_lock(&cfg.project_id).await;
     match result {
-        Ok(o) => unlock.map(|_| o).map_err(SquashError::Db),
+        Ok(o) => unlock.map(|_| o).map_err(apply_to_squash),
         Err(e) => Err(e),
     }
 }
 
+/// Map a backend-neutral [`ApplyError`] (the lock / write leaf errors) onto the
+/// squash error surface. A [`ApplyError::Journal`] is preserved as
+/// [`SquashError::Journal`] (the squash-write atomicity contract: the
+/// completed-row + supersession-edge insert is one txn, and a journal failure
+/// there is a `Journal` error — byte-identical to the pre-seam
+/// `journal::record_baseline(...).await?`); every other arm folds to
+/// [`SquashError::Backend`] (the lock acquire/release / a non-PG backend's
+/// internal error), without leaking a `compio_postgres::Error` type.
+fn apply_to_squash(e: ApplyError) -> SquashError {
+    match e {
+        ApplyError::Journal(j) => SquashError::Journal(j),
+        other => SquashError::Backend(other.to_string()),
+    }
+}
+
 /// The squash body, run while holding the project advisory lock.
-async fn squash_locked(
-    conn: &Client,
+async fn squash_locked<B: MigrationBackend>(
+    backend: &B,
     cfg: &ExecutorConfig,
     squash_migration: &Migration,
     applied_by: &str,
 ) -> Result<SquashOutcome, SquashError> {
-    journal::ensure_journal(conn, cfg).await?;
+    backend.ensure_journal(cfg).await?;
 
     let version = squash_migration.version.as_str();
     let supersedes: Vec<&str> = squash_migration
@@ -206,7 +246,7 @@ async fn squash_locked(
         .collect();
 
     // Net-applied state (latest event per version = completed).
-    let applied = journal::applied(conn, cfg).await?;
+    let applied = backend.applied(cfg).await?;
     let net: HashSet<&str> = applied
         .iter()
         .filter(|e| e.phase == Phase::Completed)
@@ -241,20 +281,13 @@ async fn squash_locked(
     }
 
     // ALL applied: journal the squash as a `completed` 'squash' event WITHOUT
-    // running its `up`, plus the supersession edges — ADMIN, append-only.
-    journal::record_baseline(
-        conn,
-        cfg,
-        journal::BaselineRecord {
-            version,
-            name: &squash_migration.name,
-            checksum: squash_migration.checksum.as_str(),
-            applied_by,
-            kind: "squash",
-            supersedes: &supersedes,
-        },
-    )
-    .await?;
+    // running its `up`, plus the supersession edges — ADMIN, append-only. The
+    // dialect-coupled write (PG `record_baseline` row+edges in one `BEGIN … COMMIT`)
+    // lives behind the backend; the `&Client` never crosses this generic body.
+    backend
+        .record_squash(cfg, squash_migration, applied_by, &supersedes)
+        .await
+        .map_err(apply_to_squash)?;
 
     Ok(SquashOutcome {
         version: version.to_string(),
