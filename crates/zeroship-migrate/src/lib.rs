@@ -128,7 +128,8 @@ pub use executor::{
     RollbackOutcome, RollbackRequest, RollbackTarget,
 };
 pub use guard::{
-    flags_for, GuardConfig, GuardError, GuardReport, SchemaScope, SqlGuard, TrustProfile,
+    flags_for, guard_for, GuardConfig, GuardError, GuardOutcome, GuardReport, MigrationGuard,
+    PgGuard, SchemaScope, SqlGuard, SqliteDescriptorGuard, TrustProfile,
 };
 // `OperatorCapability` the TYPE is re-exported crate-wide so the `platform(...)`
 // and `trusted(...)` constructors can name it in their signatures; its `new()`

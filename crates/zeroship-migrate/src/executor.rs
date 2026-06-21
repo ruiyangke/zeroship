@@ -43,7 +43,6 @@ use crate::db::ExecutorConfig;
 use crate::guard::{GuardError, SqlGuard};
 use crate::journal::{self, AppliedEntry, JournalError, Phase};
 use crate::migration::{Migration, MigrationId};
-use zeroship_schema::query::SqlDialect;
 
 /// The Postgres leaf operations the [`PostgresBackend`](crate::backend::PostgresBackend)
 /// drives the [`MigrationBackend`](crate::backend::MigrationBackend) trait
@@ -996,17 +995,22 @@ async fn apply_locked<B: MigrationBackend>(
     // (topological, version-tiebroken & stable), else pure UUIDv7 version order.
     let pending: Vec<&Migration> = order_pending(migrations, &completed, &superseded)?;
 
-    // P6a / design §2.5.3 — the string deny-list guard is a Postgres line-1 vet:
-    // `libpg_query` cannot parse SQLite, so on the SQLite dialect there is NO string
-    // guard (a SQLite `up` fail-closes `SqlGuard::check`). SQLite's line-1 vet is the
-    // descriptor emitter (author boundary) and its line-2 defense is the backend
-    // authorizer applied per statement at execution. So the FIRST-PASS string check
-    // runs ONLY for PG; the SQLite leg relies on the authorizer the confined apply
-    // already enforces. The non-txn idempotency check still runs through the trait
-    // (`validate_non_txn`), which for SQLite rejects `transaction:false` at the
-    // dialect boundary. The PG branch is byte-identical (it always ran the guard).
-    let run_string_guard = backend.dialect() != SqlDialect::Sqlite;
-    let guard = SqlGuard::new(cfg.guard_config());
+    // Multi-engine P0 (design 2026-06-21 §2.2 L3) — run the **per-engine** line-1
+    // guard through the [`MigrationGuard`] seam, NOT an `if dialect == Sqlite`
+    // branch. The guard is selected for `cfg`'s dialect (which equals
+    // `backend.dialect()`) via [`guard_for`], so it carries the apply's project +
+    // trust profile from `cfg.guard_config()` (the trust profile lives on
+    // `ExecutorConfig`, not the backend, hence `guard_for(cfg.guard_config())`
+    // rather than `backend.guard()` here — same seam, config-correct):
+    //   - Postgres → `PgGuard` (libpg_query deny-list) — byte-identical to the
+    //     pre-seam `SqlGuard::new(cfg.guard_config())`;
+    //   - SQLite → `SqliteDescriptorGuard` — the trusted descriptor-diff path
+    //     (`check` returns the empty clean outcome: `libpg_query` cannot vet SQLite,
+    //     the line-1 vet is the descriptor emitter at the author boundary and the
+    //     line-2 defense is the backend authorizer applied per statement at apply).
+    // The non-txn idempotency check still runs through the trait (`validate_non_txn`),
+    // which for SQLite rejects `transaction:false` at the dialect boundary.
+    let guard = crate::guard::guard_for(&cfg.guard_config());
 
     // FIRST PASS — static validation over EVERY pending migration BEFORE any
     // execution (H1). The guard runs per-migration inside the apply loop in the
@@ -1018,14 +1022,13 @@ async fn apply_locked<B: MigrationBackend>(
     // checks are all-or-nothing.)
     for m in &pending {
         let version = m.version.as_str();
-        // GUARD GATE — RCE / priv-esc / cross-tenant / file / network denials (PG
-        // only; SQLite is vetted by the descriptor emitter + the backend authorizer).
-        if run_string_guard {
-            guard.check(&m.up).map_err(|source| ApplyError::Guard {
-                version: version.to_string(),
-                source,
-            })?;
-        }
+        // GUARD GATE — line-1 per engine: PG denies RCE / priv-esc / cross-tenant /
+        // file / network; SQLite trusts the descriptor-diff DDL (vetted by the
+        // descriptor emitter + the backend authorizer).
+        guard.check(&m.up).map_err(|source| ApplyError::Guard {
+            version: version.to_string(),
+            source,
+        })?;
         // C1/C2 — a non-transactional `up` must be idempotent (re-runnable by
         // crash recovery). Reject the non-idempotent form with a clear error.
         // Behind the seam: PG parses with `pg_query`; SQLite rejects
