@@ -90,10 +90,8 @@ pub mod submit;
 pub use analyze::{analyze, analyze_migration, Advisory, Severity};
 pub use approval::Approval;
 pub use backend::{MigrationBackend, PostgresBackend, SessionSnapshot};
-pub use backend_sqlite::{
-    RebuildError, SqliteActorError, SqliteBackend, SqliteBaselineOutcome, SqliteRebuildSpec,
-};
-pub use baseline::{baseline, BaselineError, BaselineOutcome};
+pub use backend_sqlite::{RebuildError, SqliteActorError, SqliteBackend, SqliteRebuildSpec};
+pub use baseline::{BaselineError, BaselineOutcome};
 pub use backfill::{
     backfill_progress, ensure_backfill_progress, list_backfills, run_backfill,
     run_backfill_bounded, BackfillError, BackfillOutcome, BackfillProgress, BackfillSpec,

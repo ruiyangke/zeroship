@@ -95,10 +95,27 @@ pub enum BaselineError {
         /// The baseline version already recorded.
         existing: String,
     },
+    /// A dialect-neutral backend failure from a NON-Postgres
+    /// [`MigrationBackend::baseline_one`](crate::backend::MigrationBackend::baseline_one)
+    /// impl (e.g. the SQLite actor). The Postgres impl never produces this arm —
+    /// its errors flow through the typed [`Db`](Self::Db)/[`Journal`](Self::Journal)/
+    /// guard/first-entry arms above; only an engine whose internals are not
+    /// `compio_postgres`-typed maps its own error string into here, mirroring
+    /// [`ApplyError::Backend`](crate::executor::ApplyError::Backend).
+    #[error("baseline backend error: {0}")]
+    Backend(String),
 }
 
 /// Record `baseline_migration` as the project's baseline (design §5, scenario 31)
 /// — a `completed` journal event WITHOUT running its `up`.
+///
+/// This is the **Postgres impl behind**
+/// [`MigrationBackend::baseline_one`](crate::backend::MigrationBackend::baseline_one)
+/// (multi-engine abstraction L5): it is `pub(crate)`, reached only through
+/// [`PostgresBackend::baseline_one`](crate::backend::PostgresBackend), which keeps the
+/// `&Client`/`pg_advisory_lock` confined to the PG backend. There is no longer a
+/// top-level PG-`&Client`-typed `baseline` on the public surface; callers go through
+/// `backend.baseline_one(…)`.
 ///
 /// Idempotent for the same baseline version (a retried deploy is safe); refuses a
 /// *different* baseline once one exists, and refuses entirely if the engine
@@ -113,7 +130,7 @@ pub enum BaselineError {
 ///   migrations (not a first-entry DB).
 /// - [`BaselineError::ConflictingBaseline`] — a different baseline already exists.
 /// - [`BaselineError::Db`] / [`BaselineError::Journal`] — infrastructure failures.
-pub async fn baseline(
+pub(crate) async fn baseline(
     conn: &Client,
     cfg: &ExecutorConfig,
     baseline_migration: &Migration,

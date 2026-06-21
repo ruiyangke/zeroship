@@ -191,20 +191,13 @@ pub(crate) async fn apply_one_additive(
     Ok(true)
 }
 
-/// What [`baseline`] did — mirrors the PG [`crate::baseline::BaselineOutcome`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SqliteBaselineOutcome {
-    /// The version recorded as the baseline.
-    pub version: String,
-    /// `true` if this was an idempotent re-baseline of the same version (nothing
-    /// new was journaled); `false` if the baseline event was newly recorded.
-    pub already_present: bool,
-}
-
 /// Record `m` as the SQLite project's **baseline** — a `kind='baseline'`,
 /// `completed` journal event WITHOUT running its `up` (the adoption path,
-/// design §5 / H3). This is the SQLite peer of [`crate::baseline::baseline`]
-/// (which is PG-`&Client`-typed); it had no SQLite implementation before P6b.
+/// design §5 / H3). This is the SQLite arm behind the single neutral
+/// [`MigrationBackend::baseline_one`](crate::backend::MigrationBackend::baseline_one)
+/// (multi-engine abstraction L5); it returns the dialect-neutral
+/// [`BaselineOutcome`](crate::baseline::BaselineOutcome), the same shape the PG arm
+/// returns, so no SQLite-specific outcome type crosses the trait.
 ///
 /// The motivating case (H3): a dev developer who ran the OLD `run_sqlite_pipeline`
 /// has a `zs-default.sqlite` with user tables but an EMPTY `_mig` journal (the old
@@ -225,7 +218,7 @@ pub(crate) async fn baseline(
     actor: &MigrationActor,
     m: &Migration,
     applied_by: &str,
-) -> Result<SqliteBaselineOutcome, SqliteActorError> {
+) -> Result<crate::baseline::BaselineOutcome, SqliteActorError> {
     ensure_journal(actor).await?;
 
     let version = m.version.as_str().to_string();
@@ -240,7 +233,7 @@ pub(crate) async fn baseline(
         .map(|e| e.version)
         .collect();
     if net_completed.iter().any(|v| v == &version) {
-        return Ok(SqliteBaselineOutcome {
+        return Ok(crate::baseline::BaselineOutcome {
             version,
             already_present: true,
         });
@@ -280,7 +273,7 @@ pub(crate) async fn baseline(
     match result {
         Ok(()) => {
             actor.exec("COMMIT").await?;
-            Ok(SqliteBaselineOutcome {
+            Ok(crate::baseline::BaselineOutcome {
                 version,
                 already_present: false,
             })

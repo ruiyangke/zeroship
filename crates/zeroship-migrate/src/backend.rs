@@ -40,6 +40,7 @@
 use compio_postgres::Client;
 
 use crate::backend_sqlite::SqliteRebuildSpec;
+use crate::baseline::{BaselineError, BaselineOutcome};
 use crate::db::ExecutorConfig;
 use crate::drift::{DriftError, SchemaSnapshot};
 use crate::executor::{ApplyError, RollbackError};
@@ -258,6 +259,40 @@ pub trait MigrationBackend {
     /// with no online capability MUST receive an empty `renames` (asserted at the
     /// call site — a non-empty rename set with `online() == None` is a routing bug).
     fn online(&self) -> Option<&dyn crate::expand_contract::OnlineSchemaChange>;
+
+    // -- baseline / adoption ------------------------------------------------
+
+    /// Adopt the LIVE schema as the project's **baseline** (design §5 / H3,
+    /// multi-engine abstraction L5) — a `kind='baseline'`, `completed` journal
+    /// event recorded WITHOUT running `m`'s `up`. The single neutral baseline entry
+    /// point that folds the two former dialect-specific baseline functions
+    /// (`baseline(&Client, …)` and `SqliteBackend::baseline_sqlite`) behind ONE
+    /// trait method, so no PG-`&Client`-typed baseline remains on the abstraction
+    /// surface.
+    ///
+    /// First-entry-only: idempotent for the SAME version
+    /// ([`BaselineOutcome::already_present`]); refuses if the journal already
+    /// records a DIFFERENT net-applied migration (the engine already manages this
+    /// DB) — fail-closed, nothing journaled. The Postgres impl additionally runs the
+    /// baseline `up` through the guard (defense in depth) and serializes under the
+    /// project advisory lock; the SQLite impl serializes structurally on its single
+    /// migration actor.
+    ///
+    /// # Errors
+    /// - [`BaselineError::Guard`] — the baseline SQL was denied (PG; held to the same
+    ///   deny-list as any `up`).
+    /// - [`BaselineError::AlreadyManaged`] / [`BaselineError::ConflictingBaseline`] —
+    ///   not a first-entry DB.
+    /// - [`BaselineError::Db`] / [`BaselineError::Journal`] — PG infrastructure
+    ///   failures.
+    /// - [`BaselineError::Backend`] — a non-PG (e.g. SQLite) backend's internal
+    ///   failure, mapped onto the dialect-neutral arm.
+    async fn baseline_one(
+        &self,
+        cfg: &ExecutorConfig,
+        m: &Migration,
+        applied_by: &str,
+    ) -> Result<BaselineOutcome, BaselineError>;
 }
 
 /// The Postgres [`MigrationBackend`] — P1's first and only impl.
@@ -454,5 +489,18 @@ impl MigrationBackend for PostgresBackend<'_> {
 
     fn online(&self) -> Option<&dyn crate::expand_contract::OnlineSchemaChange> {
         Some(&self.online)
+    }
+
+    async fn baseline_one(
+        &self,
+        cfg: &ExecutorConfig,
+        m: &Migration,
+        applied_by: &str,
+    ) -> Result<BaselineOutcome, BaselineError> {
+        // Delegate verbatim to the existing PG baseline body (guard → advisory lock →
+        // first-entry/idempotency → `kind='baseline'` journal write). The `&Client`
+        // and `pg_advisory_lock` stay private to this backend; the neutral
+        // `BaselineOutcome`/`BaselineError` are what cross the trait surface.
+        crate::baseline::baseline(self.conn, cfg, m, applied_by).await
     }
 }

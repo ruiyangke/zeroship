@@ -582,7 +582,7 @@ async fn sqlite_baseline_adopts_a_journal_less_file_then_additive_deploy_works()
     );
     let base_version = base.version.as_str().to_string();
     let outcome = be
-        .baseline_sqlite(&base, "deployer")
+        .baseline_one(&cfg, &base, "deployer")
         .await
         .expect("baseline adopts the live schema");
     assert!(!outcome.already_present, "first baseline is newly recorded");
@@ -606,7 +606,7 @@ async fn sqlite_baseline_adopts_a_journal_less_file_then_additive_deploy_works()
 
     // Re-baselining the SAME version is an idempotent no-op (a retried boot).
     let again = be
-        .baseline_sqlite(&base, "deployer")
+        .baseline_one(&cfg, &base, "deployer")
         .await
         .expect("re-baseline same version is idempotent");
     assert!(again.already_present, "the same baseline is idempotent");
@@ -702,7 +702,7 @@ async fn sqlite_baseline_refuses_when_engine_already_manages_the_file() {
     // A baseline on a file the engine already manages is refused (first-entry-only).
     let base = baseline_migration("late_baseline", "CREATE TABLE main.gadgets (id TEXT)");
     let err = be
-        .baseline_sqlite(&base, "deployer")
+        .baseline_one(&cfg, &base, "deployer")
         .await
         .expect_err("baseline must refuse an already-managed file");
     assert!(

@@ -10,11 +10,11 @@
 use std::time::Duration;
 
 use compio_postgres::Client;
-use zeroship_migrate::baseline::BaselineError;
+use zeroship_migrate::baseline::{BaselineError, BaselineOutcome};
 use zeroship_migrate::migration::Checksum;
 use zeroship_migrate::{
-    apply, baseline, ensure_journal, journal, Approval, ExecutorConfig, Migration, MigrationFlags,
-    MigrationId,
+    apply, ensure_journal, journal, Approval, ExecutorConfig, Migration, MigrationBackend,
+    MigrationFlags, MigrationId, PostgresBackend,
 };
 
 const DEFAULT_DSN: &str =
@@ -71,6 +71,22 @@ async fn drop_schemas(conn: &Client, cfg: &ExecutorConfig) {
             cfg.project_schema, cfg.meta_schema
         ))
         .await;
+}
+
+/// Baseline through the neutral [`MigrationBackend::baseline_one`] seam (multi-engine
+/// abstraction L5): the PG-`&Client`-typed free `baseline()` is no longer on the
+/// public surface — it is the `pub(crate)` body behind `PostgresBackend::baseline_one`,
+/// which keeps the `&Client`/`pg_advisory_lock` confined to the backend. This wraps
+/// the test's raw connection in a `PostgresBackend` and drives that one method.
+async fn baseline(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    m: &Migration,
+    applied_by: &str,
+) -> Result<BaselineOutcome, BaselineError> {
+    PostgresBackend::new(conn)
+        .baseline_one(cfg, m, applied_by)
+        .await
 }
 
 fn mig(version: MigrationId, name: &str, up: &str) -> Migration {

@@ -63,6 +63,7 @@ use zeroship_migrate::{
     desired_snapshot, Approval, Checksum, ChecksumInput, DeclarativeApplyError, DeclarativeAuthor,
     ExecutorConfig, GuardConfig, Migration, MigrationEngine, MigrationFlags, MigrationId,
 };
+use zeroship_migrate::backend::MigrationBackend;
 use zeroship_migrate::backend_sqlite::SqliteBackend as MigrateBackend;
 use zeroship_schema::query::SqlDialect;
 
@@ -150,7 +151,7 @@ pub(crate) async fn run_sqlite_via_engine(
             .ensure_journal_sqlite()
             .await
             .map_err(|e| DbError::internal(format!("sqlite engine: ensure journal: {e}")))?;
-        maybe_baseline(&backend_b, app_id, &deploy_id).await?;
+        maybe_baseline(&backend_b, &exec_cfg, app_id, &deploy_id).await?;
 
         // -- Step 3: plan the descriptor diff vs live introspection, then apply. --
         let mut live = backend_b.snapshot_schema_sqlite().await.map_err(|e| {
@@ -260,6 +261,7 @@ fn other_schemas(app_id: &str) -> Vec<(String, Value)> {
 /// schema rather than drift-aborting. A fresh file (no tables) skips baseline.
 async fn maybe_baseline(
     backend_b: &MigrateBackend,
+    exec_cfg: &ExecutorConfig,
     app_id: &str,
     deploy_id: &str,
 ) -> Result<(), DbError> {
@@ -310,7 +312,7 @@ async fn maybe_baseline(
     };
     m.recompute_checksum();
     backend_b
-        .baseline_sqlite(&m, deploy_id)
+        .baseline_one(exec_cfg, &m, deploy_id)
         .await
         .map_err(|e| DbError::internal(format!("sqlite engine: baseline adopt failed: {e}")))?;
     Ok(())
