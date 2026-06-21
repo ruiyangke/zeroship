@@ -109,6 +109,64 @@ pub async fn status(
     snapshot
 }
 
+/// Backend-generic [`status`]: compute the [`MigrationStatus`] over ANY
+/// [`MigrationBackend`](crate::backend::MigrationBackend), reading net journal
+/// state through the trait (`ensure_journal` + `applied` + `superseded_versions`)
+/// rather than a PG `&Client`. This is the multi-engine peer of [`status`] — the
+/// public CLI's SQLite leg routes here, where the PG leg keeps the
+/// `REPEATABLE READ READ ONLY` snapshot path above (the SQLite actor serializes
+/// structurally, so a single net-state read is already a consistent view).
+///
+/// `applied` / `pending` / `current_version` are derived with the SAME rules and
+/// the SAME [`order_pending`] the executor uses, so status never disagrees with
+/// what apply would do. `rolled_back` is left empty for backends that expose no
+/// net-rolled-back reader on the neutral trait (SQLite): a rolled-back version is
+/// already absent from `applied` net-state, so it correctly re-enters `pending`.
+///
+/// # Errors
+/// - [`StatusError::Journal`] on a journal bootstrap/read failure.
+/// - [`StatusError::Ordering`] if the set's `depends_on` is unsatisfiable/cyclic
+///   (the same fault apply would surface).
+pub async fn status_via_backend<B: crate::backend::MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+) -> Result<MigrationStatus, StatusError> {
+    backend.ensure_journal(cfg).await?;
+
+    let entries = backend.applied(cfg).await?;
+    let applied: Vec<AppliedEntry> = entries
+        .iter()
+        .filter(|e| e.phase == Phase::Completed)
+        .cloned()
+        .collect();
+
+    let current_version = applied
+        .iter()
+        .filter_map(|e| MigrationId::parse(&e.version).ok())
+        .max();
+
+    let completed: HashMap<&str, &AppliedEntry> =
+        applied.iter().map(|e| (e.version.as_str(), e)).collect();
+    let journal_superseded = backend.superseded_versions(cfg).await?;
+    let superseded_owned = crate::executor::compute_superseded(migrations, &journal_superseded);
+    let superseded: std::collections::HashSet<&str> =
+        superseded_owned.iter().map(String::as_str).collect();
+    let ordered =
+        order_pending(migrations, &completed, &superseded).map_err(StatusError::Ordering)?;
+    let pending: Vec<MigrationId> = ordered.iter().map(|m| m.version.clone()).collect();
+
+    Ok(MigrationStatus {
+        current_version,
+        applied,
+        pending,
+        // The neutral trait exposes no net-rolled-back reader; a rolled-back
+        // version is already dropped from `applied` net-state (it reappears in
+        // `pending`), so an empty list here is honest, not lossy.
+        rolled_back: Vec::new(),
+    })
+}
+
 /// The body of [`status`]'s consistent-snapshot read: both journal reads + the
 /// derived fields, run inside the caller's open `REPEATABLE READ READ ONLY` txn.
 async fn read_status_snapshot(

@@ -14,16 +14,21 @@
 //! (`#[non_exhaustive]` + private `GuardConfig` fields). So a Platform guard is a
 //! *capability you are granted by holding a token you can only mint here*.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::analyze::Advisory;
-use crate::backend::PostgresBackend;
+use crate::backend::{MigrationBackend, PostgresBackend};
+use crate::backend_sqlite::SqliteBackend;
 use crate::db::{connect, ConnectError, ExecutorConfig};
 use crate::drift::{check_checksum_drift, ChecksumDriftReport, DriftError};
 use crate::engine::{EngineError, MigrationEngine, MigrationPlan, RollbackEngineError};
-use crate::executor::{ApplyOutcome, RollbackOutcome, RollbackRequest, RollbackTarget};
+use crate::executor::{
+    ApplyOutcome, RollbackError, RollbackOutcome, RollbackRequest, RollbackTarget,
+};
 use crate::loader::{load_dir, migration_id_for_version, LoaderError};
-use crate::status::{status, MigrationStatus, StatusError};
+use crate::migration::MigrationId;
+use crate::status::{status, status_via_backend, MigrationStatus, StatusError};
 use crate::Approval;
 
 /// A zero-sized Platform capability token. Its `new()` is `pub(super)`, so only
@@ -170,15 +175,23 @@ pub enum RunError {
     /// A status / journal read failed.
     #[error("status: {0}")]
     Status(#[from] StatusError),
+    /// A journal bootstrap/read failed directly (the SQLite leg drives the
+    /// backend's journal methods, which surface [`JournalError`]).
+    #[error("journal: {0}")]
+    Journal(#[from] crate::journal::JournalError),
     /// A drift query failed.
     #[error("drift: {0}")]
     Drift(#[from] DriftError),
     /// The shadow dry-run harness failed.
     #[error("dry-run: {0}")]
     DryRun(#[from] crate::shadow::DryRunError),
-    /// Rollback failed.
+    /// Rollback failed (the PG engine-driven rollback path).
     #[error("rollback: {0}")]
     Rollback(#[from] RollbackEngineError),
+    /// A per-migration rollback failed (the SQLite leg drives
+    /// [`MigrationBackend::rollback_one_transactional`] directly).
+    #[error("rollback: {0}")]
+    RollbackOne(#[from] RollbackError),
     /// The plan is destructive but `--yes` / `--allow-destructive` was not given.
     /// The H1 gate refuses BEFORE any DDL (design §9). Carries the offending
     /// versions + their advisories for the operator to review (run `validate`).
@@ -201,6 +214,21 @@ pub enum RunError {
         /// The most recent connection/probe error seen before timing out.
         last_error: String,
     },
+    /// The DB URL selects an engine this CLI does not support (e.g. `mysql://`).
+    /// An HONEST refusal, not a panic — the engine abstraction is general, but
+    /// only the Postgres + SQLite backends are wired into this binary.
+    #[error(
+        "engine not supported by this CLI (Postgres and SQLite supported; MySQL needs \
+         the SqlDialect::MySql variant + a MySQL backend — see the multi-engine design)"
+    )]
+    UnsupportedEngine,
+    /// A SQLite backend op (open / hardening / apply / journal) failed.
+    #[error("sqlite: {0}")]
+    Sqlite(String),
+    /// A command is not supported on the SQLite leg of this CLI (`dump` =
+    /// `pg_dump`, PG-only). An explicit, honest refusal — never a fake success.
+    #[error("{0} is not supported on SQLite via this CLI (Postgres-only)")]
+    UnsupportedOnSqlite(&'static str),
 }
 
 /// The H1 destructive-gate decision (design §9, pure + unit-testable).
@@ -246,6 +274,122 @@ pub fn destructive_gate_decision(
         versions,
         advisories,
     })
+}
+
+/// The DB engine the CLI dispatches to, selected by the `--database-url` shape
+/// (multi-engine abstraction P7 — the public CLI is now multi-engine).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Engine {
+    /// `postgres://` / `postgresql://` — the existing PG path (byte-identical).
+    Postgres,
+    /// `sqlite:` / `sqlite://` / `file:` / `:memory:` / a bare filesystem path —
+    /// the hardened [`SqliteBackend`] on that file. Carries the app-file path.
+    Sqlite(PathBuf),
+    /// Any other explicit scheme (`mysql://`, `redis://`, …) — unsupported by this
+    /// binary. The engine abstraction is general; only PG + SQLite are wired here.
+    Unsupported,
+}
+
+/// Classify a `--database-url` into the [`Engine`] this CLI dispatches to, using
+/// the SAME single-source grammar as `zeroship_core::db_url::is_sqlite_url` /
+/// plugin-db's `backend_for_url` (no drift between the opener and the CLI).
+///
+/// - `postgres://` / `postgresql://` ⇒ [`Engine::Postgres`].
+/// - `sqlite:` / `sqlite://` / `file:` / `:memory:` / a bare path ⇒
+///   [`Engine::Sqlite`] with the extracted file path.
+/// - an explicit but unrecognised scheme (e.g. `mysql://`) ⇒ [`Engine::Unsupported`].
+#[must_use]
+pub fn classify_engine(url: &str) -> Engine {
+    let trimmed = url.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("postgres://") || lower.starts_with("postgresql://") {
+        return Engine::Postgres;
+    }
+    // libpq **keyword/value** DSN (`host=… port=… dbname=…`) — the form the
+    // existing PG callers (compose/ops, the `cli_platform_pg` suite) pass. The
+    // `postgres://`-only `is_sqlite_url` would mis-read this as a bare filesystem
+    // path (SQLite), so classify it as Postgres FIRST — this is what keeps the PG
+    // path byte-identical for keyword DSNs.
+    if is_libpq_keyword_dsn(trimmed) {
+        return Engine::Postgres;
+    }
+    // The shared classifier: a bare path is SQLite; an unknown scheme is not.
+    if zeroship_core::db_url::is_sqlite_url(trimmed) {
+        return Engine::Sqlite(sqlite_file_path(trimmed));
+    }
+    Engine::Unsupported
+}
+
+/// `true` iff `dsn` is a libpq **keyword/value** connection string — at least one
+/// whitespace-separated `key=value` token whose key is a known PG connection
+/// parameter (`host`, `hostaddr`, `port`, `dbname`, `user`, `password`,
+/// `sslmode`, …). This is the non-URI DSN form `compio_postgres::connect` accepts
+/// and the existing PG CLI callers use; a SQLite DSN / bare path never looks like
+/// this (a Unix path has no `key=value` PG-parameter token).
+fn is_libpq_keyword_dsn(dsn: &str) -> bool {
+    const PG_KEYS: &[&str] = &[
+        "host",
+        "hostaddr",
+        "port",
+        "dbname",
+        "user",
+        "password",
+        "sslmode",
+        "connect_timeout",
+        "application_name",
+        "options",
+        "passfile",
+        "service",
+        "target_session_attrs",
+    ];
+    dsn.split_whitespace().any(|tok| {
+        tok.split_once('=')
+            .is_some_and(|(k, _)| PG_KEYS.contains(&k.to_ascii_lowercase().as_str()))
+    })
+}
+
+/// Extract the SQLite app-file path from a SQLite DSN, mirroring plugin-db's
+/// `backend_for_url` exactly (`sqlite://host/db` folds the authority into the
+/// path; `sqlite:` / `file:` strip the scheme; `:memory:` and a bare path pass
+/// through verbatim). Only called for URLs `is_sqlite_url` already accepted.
+fn sqlite_file_path(url: &str) -> PathBuf {
+    let trimmed = url.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower == ":memory:" {
+        return PathBuf::from(":memory:");
+    }
+    if lower.starts_with("sqlite://") {
+        return PathBuf::from(&trimmed["sqlite://".len()..]);
+    }
+    if lower.starts_with("sqlite:") {
+        return PathBuf::from(&trimmed["sqlite:".len()..]);
+    }
+    if lower.starts_with("file:") {
+        return PathBuf::from(&trimmed["file:".len()..]);
+    }
+    // A bare filesystem path.
+    PathBuf::from(trimmed)
+}
+
+/// The journal-file path for a SQLite app file: a sibling `<file>.migrations`
+/// suffix (the dbmate-style separate `_mig` journal database, design §2.5.2 —
+/// engine-constructed, never creator input). For `:memory:` the journal is the
+/// matching `:memory:` (a throwaway-by-nature dev DB).
+fn sqlite_journal_path(app: &Path) -> PathBuf {
+    if app.as_os_str() == ":memory:" {
+        return PathBuf::from(":memory:");
+    }
+    let mut s = app.to_path_buf().into_os_string();
+    s.push(".migrations");
+    PathBuf::from(s)
+}
+
+/// Open the hardened [`SqliteBackend`] for the CLI's SQLite leg, from the app-file
+/// path extracted off the `--database-url`. The journal lives in a sibling
+/// `<file>.migrations` file (§2.5.2).
+fn open_sqlite_backend(app: &Path) -> Result<SqliteBackend, RunError> {
+    let journal = sqlite_journal_path(app);
+    SqliteBackend::open(app, &journal).map_err(|e| RunError::Sqlite(e.to_string()))
 }
 
 /// Build the [`ExecutorConfig`] for a run, minting the [`OperatorCapability`]
@@ -295,13 +439,58 @@ fn build_guard_cfg(cfg: &RunConfig) -> super::GuardConfig {
     }
 }
 
-/// `migrate` — load the dir, plan under the profile, honour the H1 destructive
-/// gate, apply PENDING (design §9). Runs once and returns (the compose `migrate`
-/// replacement).
+/// The SQLite [`ExecutorConfig`] for the CLI's SQLite leg. SQLite ignores the PG
+/// schema/role machinery (the single migration actor serializes structurally, the
+/// `_mig` journal lives in the attached file), so a plain
+/// [`ExecutorConfig::new`](ExecutorConfig::new) keyed on the project id/schema is
+/// all the engine needs to thread. The CLI's `--profile` is effectively
+/// Trusted/Confined for an operator-owned local file; the SQLite authorizer (line-2)
+/// is intrinsic to [`SqliteBackend`] regardless of profile.
+fn sqlite_exec_cfg(cfg: &RunConfig) -> ExecutorConfig {
+    ExecutorConfig::new(cfg.project_id.clone(), cfg.project_schema.clone())
+}
+
+/// The SQLite planner [`GuardConfig`]. The line-1 vet on SQLite is the descriptor
+/// guard (a clean outcome for trusted descriptor/dbmate DDL — `libpg_query` cannot
+/// vet SQLite); the real confinement is the backend authorizer at apply (line-2).
+fn sqlite_guard_cfg(cfg: &RunConfig) -> super::GuardConfig {
+    super::GuardConfig::confined_sqlite(cfg.project_schema.clone())
+}
+
+/// `migrate` — dispatch by the `--database-url` engine, then load the dir, plan,
+/// honour the H1 destructive gate, and apply PENDING (design §9). Postgres runs
+/// the existing byte-identical path; SQLite runs the same generic engine through
+/// a hardened [`SqliteBackend`]; an unsupported URL is an honest refusal.
 ///
 /// # Errors
-/// [`RunError`] on load / connect / a destructive-without-`--yes` refusal / apply.
+/// [`RunError`] on an unsupported engine / load / connect / a
+/// destructive-without-`--yes` refusal / apply.
 pub async fn run_migrate(cfg: &RunConfig) -> Result<RunReport, RunError> {
+    match classify_engine(&cfg.database_url) {
+        Engine::Postgres => run_migrate_pg(cfg).await,
+        Engine::Sqlite(app) => run_migrate_sqlite(cfg, &app).await,
+        Engine::Unsupported => Err(RunError::UnsupportedEngine),
+    }
+}
+
+/// The SQLite leg of `migrate`: plan with the SQLite guard, gate destructive, then
+/// apply through the hardened [`SqliteBackend`] via the SAME generic engine path.
+async fn run_migrate_sqlite(cfg: &RunConfig, app: &Path) -> Result<RunReport, RunError> {
+    let migrations = load_dir(&cfg.dir)?;
+    let backend = open_sqlite_backend(app)?;
+    let exec_cfg = sqlite_exec_cfg(cfg);
+    let guard_cfg = sqlite_guard_cfg(cfg);
+    let engine = MigrationEngine::new();
+    let plan = engine.plan(&migrations, &guard_cfg);
+    let approval = destructive_gate_decision(&plan, cfg.yes)?;
+    let outcome = engine
+        .apply(&plan, approval, &backend, &exec_cfg, "platform-migrate")
+        .await?;
+    Ok(RunReport::Migrate(outcome))
+}
+
+/// The Postgres leg of `migrate` — the existing path, byte-identical.
+async fn run_migrate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
     let migrations = load_dir(&cfg.dir)?;
     let conn = connect(&cfg.database_url).await?;
     let exec_cfg = build_exec_cfg(cfg);
@@ -323,15 +512,27 @@ pub async fn run_migrate(cfg: &RunConfig) -> Result<RunReport, RunError> {
 }
 
 /// `status` — read the journal, print applied vs pending (+ rolled-back). NO DDL
-/// beyond the journal's idempotent bootstrap (design §9).
+/// beyond the journal's idempotent bootstrap (design §9). Dispatches by engine:
+/// the PG `&Client` snapshot path on Postgres, the backend-generic
+/// [`status_via_backend`] on SQLite.
 ///
 /// # Errors
-/// [`RunError`] on load / connect / a journal read failure.
+/// [`RunError`] on an unsupported engine / load / connect / a journal read failure.
 pub async fn run_status(cfg: &RunConfig) -> Result<RunReport, RunError> {
     let migrations = load_dir(&cfg.dir)?;
-    let conn = connect(&cfg.database_url).await?;
-    let exec_cfg = build_exec_cfg(cfg);
-    let st = status(&conn, &exec_cfg, &migrations).await?;
+    let st = match classify_engine(&cfg.database_url) {
+        Engine::Postgres => {
+            let conn = connect(&cfg.database_url).await?;
+            let exec_cfg = build_exec_cfg(cfg);
+            status(&conn, &exec_cfg, &migrations).await?
+        }
+        Engine::Sqlite(app) => {
+            let backend = open_sqlite_backend(&app)?;
+            let exec_cfg = sqlite_exec_cfg(cfg);
+            status_via_backend(&backend, &exec_cfg, &migrations).await?
+        }
+        Engine::Unsupported => return Err(RunError::UnsupportedEngine),
+    };
     Ok(RunReport::Status(Box::new(st)))
 }
 
@@ -339,9 +540,21 @@ pub async fn run_status(cfg: &RunConfig) -> Result<RunReport, RunError> {
 /// the journal + surface destructive advisories. NO DDL on the real DB (design §9;
 /// `update-sql` + `validate`).
 ///
+/// Postgres-only: `validate` is shadow-dry-run-driven, and the SQLite backend
+/// DELIBERATELY exposes no `ShadowDryRun` capability (`shadow()` is `None` — SQLite
+/// DDL is trusted descriptor output and dev is recoverable, so a pre-apply shadow
+/// clone adds nothing; the engine would surface the explicit `ShadowUnsupported`).
+/// On SQLite this refuses honestly rather than reporting a fake dry-run pass.
+///
 /// # Errors
-/// [`RunError`] on load / connect / the shadow harness / a drift read failure.
+/// [`RunError`] on an unsupported engine / load / connect / the shadow harness / a
+/// drift read failure.
 pub async fn run_validate(cfg: &RunConfig) -> Result<RunReport, RunError> {
+    match classify_engine(&cfg.database_url) {
+        Engine::Postgres => {}
+        Engine::Sqlite(_) => return Err(RunError::UnsupportedOnSqlite("validate")),
+        Engine::Unsupported => return Err(RunError::UnsupportedEngine),
+    }
     let migrations = load_dir(&cfg.dir)?;
     let conn = connect(&cfg.database_url).await?;
     let exec_cfg = build_exec_cfg(cfg);
@@ -419,16 +632,25 @@ pub async fn run_rollback(
             advisories: Vec::new(),
         });
     }
-    let migrations = load_dir(&cfg.dir)?;
-    let conn = connect(&cfg.database_url).await?;
-    let exec_cfg = build_exec_cfg(cfg);
-    let engine = MigrationEngine::new();
-
     let target = match (to_version, steps) {
         (Some(v), _) => RollbackTarget::ToVersion(migration_id_for_version(v)),
         (None, Some(n)) => RollbackTarget::Steps(n),
         (None, None) => RollbackTarget::All,
     };
+
+    match classify_engine(&cfg.database_url) {
+        Engine::Postgres => run_rollback_pg(cfg, target).await,
+        Engine::Sqlite(app) => run_rollback_sqlite(cfg, &app, target).await,
+        Engine::Unsupported => Err(RunError::UnsupportedEngine),
+    }
+}
+
+/// The Postgres leg of `rollback` — the existing path, byte-identical.
+async fn run_rollback_pg(cfg: &RunConfig, target: RollbackTarget) -> Result<RunReport, RunError> {
+    let migrations = load_dir(&cfg.dir)?;
+    let conn = connect(&cfg.database_url).await?;
+    let exec_cfg = build_exec_cfg(cfg);
+    let engine = MigrationEngine::new();
     let request = RollbackRequest::new(target);
     let outcome = engine
         .rollback(
@@ -441,6 +663,67 @@ pub async fn run_rollback(
         )
         .await?;
     Ok(RunReport::Rollback(outcome))
+}
+
+/// The SQLite leg of `rollback`: select the target versions from the net-applied
+/// `_mig` journal and reverse each via [`MigrationBackend::rollback_one_transactional`]
+/// (the additive `down` + `_rolled_back` append, atomic on the single actor) in
+/// reverse-version order — the SQLite peer of the PG executor's rollback. SQLite
+/// has no `depends_on` graph on the CLI's flat dbmate set, so reverse-version order
+/// IS reverse-apply order. A rebuild-needing `down` surfaces the backend's explicit
+/// `SqliteRebuildRequired` error (the CLI does not auto-rebuild on rollback).
+async fn run_rollback_sqlite(
+    cfg: &RunConfig,
+    app: &Path,
+    target: RollbackTarget,
+) -> Result<RunReport, RunError> {
+    let migrations = load_dir(&cfg.dir)?;
+    let backend = open_sqlite_backend(app)?;
+    let exec_cfg = sqlite_exec_cfg(cfg);
+    backend.ensure_journal(&exec_cfg).await?;
+
+    // Net-applied versions (latest event = completed), highest version first.
+    let entries = backend.applied(&exec_cfg).await?;
+    let mut applied: Vec<MigrationId> = entries
+        .iter()
+        .filter(|e| e.phase == crate::journal::Phase::Completed)
+        .filter_map(|e| MigrationId::parse(&e.version).ok())
+        .collect();
+    applied.sort();
+    applied.reverse(); // most-recent (highest version) first.
+
+    // Which net-applied versions does the target select? (Same semantics as the PG
+    // RollbackTarget: ToVersion keeps the target, Steps takes the N most-recent.)
+    let selected: Vec<MigrationId> = match &target {
+        RollbackTarget::All => applied.clone(),
+        RollbackTarget::Steps(n) => applied.iter().take(*n).cloned().collect(),
+        RollbackTarget::ToVersion(v) => {
+            applied.iter().filter(|a| *a > v).cloned().collect()
+        }
+    };
+
+    // Index loaded migrations by version so each selected version's `down` is found.
+    let by_version: std::collections::HashMap<&str, &crate::migration::Migration> =
+        migrations.iter().map(|m| (m.version.as_str(), m)).collect();
+
+    let mut rolled_back = Vec::new();
+    for version in &selected {
+        let Some(m) = by_version.get(version.as_str()) else {
+            return Err(RunError::Sqlite(format!(
+                "applied version {} has no migration file in --dir to source its `down`",
+                version.as_str()
+            )));
+        };
+        backend
+            .rollback_one_transactional(&exec_cfg, m, "platform-rollback")
+            .await?;
+        rolled_back.push(version.as_str().to_string());
+    }
+
+    Ok(RunReport::Rollback(RollbackOutcome {
+        rolled_back,
+        skipped_irreversible: Vec::new(),
+    }))
 }
 
 /// `down` — roll back the SINGLE most-recently-applied migration (dbmate `down`
@@ -518,14 +801,28 @@ pub async fn run_wait(
     }
 }
 
-/// One `wait` probe: connect + `SELECT 1`. Returns `Ok(())` if the DB answered,
-/// or a stringified error to surface as the last failure on timeout.
+/// One `wait` probe, dispatched by engine. Postgres: connect + `SELECT 1` (the
+/// existing probe, byte-identical). SQLite: the file is openable as a hardened
+/// backend (the dev-file analog of "the DB accepts a connection" — `:memory:` is
+/// always ready). An unsupported URL fails the probe with a clear message (so
+/// `wait` times out honestly rather than panicking).
 async fn probe_once(database_url: &str) -> Result<(), String> {
-    let conn = connect(database_url).await.map_err(|e| e.to_string())?;
-    conn.query("SELECT 1", &[])
-        .await
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    match classify_engine(database_url) {
+        Engine::Postgres => {
+            let conn = connect(database_url).await.map_err(|e| e.to_string())?;
+            conn.query("SELECT 1", &[])
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+        Engine::Sqlite(app) => {
+            // The SQLite "is it ready?" probe: can we open the hardened backend on
+            // the file? (`:memory:` always opens.) No journal mutation — the open
+            // path hardens the connection but does not bootstrap the journal.
+            open_sqlite_backend(&app).map(|_| ()).map_err(|e| e.to_string())
+        }
+        Engine::Unsupported => Err(RunError::UnsupportedEngine.to_string()),
+    }
 }
 
 /// Convenience for the bin: the conventional Platform schema allowlist default.
@@ -698,5 +995,64 @@ mod tests {
     fn rollback_target_version_round_trips() {
         let id: MigrationId = migration_id_for_version(25);
         assert!(MigrationId::parse(id.as_str()).is_ok());
+    }
+
+    // ---- multi-engine URL dispatch (P7) ------------------------------------
+
+    #[test]
+    fn classify_engine_routes_postgres_sqlite_and_unsupported() {
+        assert_eq!(
+            classify_engine("postgres://u:p@host:5432/db"),
+            Engine::Postgres
+        );
+        assert_eq!(classify_engine("postgresql://host/db"), Engine::Postgres);
+        // The libpq keyword/value DSN form (the existing PG callers) is Postgres,
+        // NOT a SQLite bare path — the byte-identical guard for keyword DSNs.
+        assert_eq!(
+            classify_engine(
+                "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_migrate_test"
+            ),
+            Engine::Postgres
+        );
+        assert_eq!(classify_engine("dbname=mydb"), Engine::Postgres);
+
+        // SQLite schemes + a bare path all route to the SQLite leg with the file.
+        assert_eq!(
+            classify_engine("sqlite:/tmp/dev.sqlite"),
+            Engine::Sqlite(PathBuf::from("/tmp/dev.sqlite"))
+        );
+        assert_eq!(
+            classify_engine("sqlite://./data/app.sqlite"),
+            Engine::Sqlite(PathBuf::from("./data/app.sqlite"))
+        );
+        assert_eq!(
+            classify_engine("file:./local.db"),
+            Engine::Sqlite(PathBuf::from("./local.db"))
+        );
+        assert_eq!(
+            classify_engine(":memory:"),
+            Engine::Sqlite(PathBuf::from(":memory:"))
+        );
+        assert_eq!(
+            classify_engine("/var/lib/zeroship/dev.sqlite"),
+            Engine::Sqlite(PathBuf::from("/var/lib/zeroship/dev.sqlite"))
+        );
+
+        // An explicit unknown scheme is the honest unsupported refusal.
+        assert_eq!(classify_engine("mysql://localhost/db"), Engine::Unsupported);
+        assert_eq!(classify_engine("redis://localhost:6379"), Engine::Unsupported);
+    }
+
+    #[test]
+    fn sqlite_journal_path_is_a_sibling_migrations_file() {
+        assert_eq!(
+            sqlite_journal_path(&PathBuf::from("/tmp/app.sqlite")),
+            PathBuf::from("/tmp/app.sqlite.migrations")
+        );
+        // `:memory:` journals to a matching in-memory DB (throwaway by nature).
+        assert_eq!(
+            sqlite_journal_path(&PathBuf::from(":memory:")),
+            PathBuf::from(":memory:")
+        );
     }
 }

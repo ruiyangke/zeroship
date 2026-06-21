@@ -3026,10 +3026,11 @@ pub(crate) async fn rollback_one_transactional(
 mod pg_confinement_shape_tests {
     //! Pins the M2 confinement refactor: the **PG** apply leaf still emits its
     //! `SET LOCAL search_path` / `SET LOCAL ROLE` / `SET LOCAL statement_timeout`
-    //! + `lock_timeout` bracket from the [`PgConfinement`](crate::db::PgConfinement)
-    //! block (now grouped under `cfg.pg`, not flat on the neutral config), and a
-    //! default (SQLite-shaped construction reuses this same `new`) carries the
-    //! INERT PG confinement — never PG role/cross-schema confinement of its own.
+    //! and `SET LOCAL lock_timeout` bracket from the
+    //! [`PgConfinement`](crate::db::PgConfinement) block (now grouped under
+    //! `cfg.pg`, not flat on the neutral config), and a default (SQLite-shaped
+    //! construction reuses this same `new`) carries the INERT PG confinement —
+    //! never PG role/cross-schema confinement of its own.
     use super::*;
     use crate::migration::{Checksum, MigrationFlags, MigrationId};
 
