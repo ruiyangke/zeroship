@@ -2464,24 +2464,32 @@ fn def_elem_string_args(args: &[protobuf::Node]) -> Vec<String> {
 
 /// Pull single-quoted string literals out of a body (best-effort, for
 /// `EXECUTE 'literal sql'`). Handles doubled-quote `''` escapes.
+///
+/// Iterates real `char`s (not raw bytes): a `bytes[j] as char` cast truncates
+/// every non-ASCII UTF-8 byte to a Latin-1 codepoint, corrupting any multi-byte
+/// character inside a literal — which could split a dangerous token off from its
+/// adjacent multi-byte char and let the backstop's word-scan miss it. The primary
+/// defense is the `pg_query` parse + least-priv role; this is the body token-scan
+/// backstop, so its extraction must be byte-faithful.
 fn extract_string_literals(body: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let bytes = body.as_bytes();
+    // (byte_offset, char) pairs so we can index forward over the source faithfully.
+    let chars: Vec<(usize, char)> = body.char_indices().collect();
     let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\'' {
+    while i < chars.len() {
+        if chars[i].1 == '\'' {
             let mut j = i + 1;
             let mut buf = String::new();
-            while j < bytes.len() {
-                if bytes[j] == b'\'' {
-                    if j + 1 < bytes.len() && bytes[j + 1] == b'\'' {
+            while j < chars.len() {
+                if chars[j].1 == '\'' {
+                    if j + 1 < chars.len() && chars[j + 1].1 == '\'' {
                         buf.push('\'');
                         j += 2;
                         continue;
                     }
                     break;
                 }
-                buf.push(bytes[j] as char);
+                buf.push(chars[j].1);
                 j += 1;
             }
             if !buf.is_empty() {
@@ -2567,6 +2575,38 @@ mod tests {
             g.check(sql),
             Err(GuardError::Denied { .. } | GuardError::CrossSchema { .. })
         )
+    }
+
+    // ---- M3: extract_string_literals is UTF-8-faithful ---------------------
+
+    /// The body token-scan backstop's literal extractor must preserve multi-byte
+    /// UTF-8 verbatim. Pre-fix it built each literal via `bytes[j] as char`, which
+    /// truncates every non-ASCII byte to a Latin-1 codepoint — corrupting the
+    /// literal and potentially splitting a dangerous token off from its adjacent
+    /// multi-byte char so the word-scan misses it. This pins faithful extraction.
+    #[test]
+    fn m3_extract_string_literals_preserves_multibyte_utf8() {
+        // A literal with a multi-byte char (`é`, `λ`, `→`, `名`) directly adjacent to
+        // a dangerous token (`pg_read_file`). Faithful extraction must yield the
+        // exact bytes; the byte-cast bug would mangle each multi-byte char.
+        let body = "EXECUTE 'café λ pg_read_file 名→ done'";
+        let got = extract_string_literals(body);
+        assert_eq!(
+            got,
+            vec!["café λ pg_read_file 名→ done".to_string()],
+            "literal must be extracted byte-for-byte (no Latin-1 truncation)"
+        );
+        // The dangerous token survives as a whole word adjacent to the multi-byte
+        // chars — so the backstop's word_present scan can still find it.
+        assert!(
+            word_present(&got[0], "pg_read_file"),
+            "pg_read_file must remain findable in the faithfully-extracted literal"
+        );
+        // A standalone multi-byte literal round-trips exactly.
+        assert_eq!(
+            extract_string_literals("'日本語'"),
+            vec!["日本語".to_string()]
+        );
     }
 
     // ---- T11: capability minting is platform_runner-only -------------------
