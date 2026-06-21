@@ -526,8 +526,9 @@ async fn run_rebuild_steps(
         .exec(&format!(
             "INSERT INTO \"_mig\".schema_migrations \
              (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind) \
-             VALUES ('applied', {version}, {name}, {checksum}, {by}, {exec_ms}, \
-                     'completed', 'success', 'apply')"
+             VALUES ('{applied}', {version}, {name}, {checksum}, {by}, {exec_ms}, \
+                     'completed', 'success', 'apply')",
+            applied = crate::journal::EventKind::Applied.as_str()
         ))
         .await
         .map_err(|e| step_err(table, e))?;

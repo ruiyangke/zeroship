@@ -36,7 +36,7 @@
 //! them and is read at each prepare. All on the single migration connection,
 //! strictly sequential — race-free by construction.
 
-use crate::journal::{AppliedEntry, JournaledKind, Phase};
+use crate::journal::{AppliedEntry, EventKind, JournaledKind, Phase};
 use crate::migration::Migration;
 
 use super::actor::{MigrationActor, SqliteActorError};
@@ -241,8 +241,9 @@ pub(crate) async fn baseline(
             .exec(&format!(
                 "INSERT INTO \"_mig\".schema_migrations \
                  (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
-                 VALUES ('applied', {version_lit}, {name}, {checksum}, {applied_by_lit}, \
-                         'completed', 'success', 'baseline')"
+                 VALUES ('{applied}', {version_lit}, {name}, {checksum}, {applied_by_lit}, \
+                         'completed', 'success', 'baseline')",
+                applied = EventKind::Applied.as_str()
             ))
             .await?;
         Ok::<(), SqliteActorError>(())
@@ -326,8 +327,9 @@ async fn run_apply_txn(
             .exec(&format!(
                 "INSERT INTO \"_mig\".schema_migrations \
                  (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
-                 VALUES ('applied', {version_lit}, {name}, {checksum}, {applied_by_lit}, \
-                         'completed', 'success', 'apply')"
+                 VALUES ('{applied}', {version_lit}, {name}, {checksum}, {applied_by_lit}, \
+                         'completed', 'success', 'apply')",
+                applied = EventKind::Applied.as_str()
             ))
             .await?;
         Ok::<(), SqliteActorError>(())
@@ -388,21 +390,24 @@ pub(crate) async fn applied(actor: &MigrationActor) -> Result<Vec<AppliedEntry>,
     // territory; a SELECT-only read does not write, but reading `_mig` should not
     // be gated by the creator deny on `_mig`).
     actor.set_mode(Mode::EngineJournal).await?;
-    let sql = "\
+    let sql = format!(
+        "\
         WITH ranked AS ( \
             SELECT version, checksum, event_kind, kind AS mig_kind, \
                    ROW_NUMBER() OVER (PARTITION BY version ORDER BY event_seq DESC) AS rn \
               FROM \"_mig\".schema_migrations \
         ), \
         latest AS (SELECT version, checksum, event_kind, mig_kind FROM ranked WHERE rn = 1), \
-        net_applied AS (SELECT version, checksum, mig_kind FROM latest WHERE event_kind = 'applied') \
+        net_applied AS (SELECT version, checksum, mig_kind FROM latest WHERE event_kind = '{applied}') \
         SELECT version, checksum, mig_kind, 'completed' AS phase FROM net_applied \
         UNION ALL \
         SELECT i.version, i.checksum, NULL AS mig_kind, 'started' AS phase \
           FROM \"_mig\".schema_migrations_inflight i \
          WHERE NOT EXISTS (SELECT 1 FROM net_applied n WHERE n.version = i.version) \
-        ORDER BY version";
-    let rows = actor.query(sql).await?;
+        ORDER BY version",
+        applied = EventKind::Applied.as_str()
+    );
+    let rows = actor.query(&sql).await?;
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         let version = cell(&r, 0)?;
@@ -435,7 +440,8 @@ pub(crate) async fn superseded_versions(
     actor: &MigrationActor,
 ) -> Result<Vec<String>, SqliteActorError> {
     actor.set_mode(Mode::EngineJournal).await?;
-    let sql = "\
+    let sql = format!(
+        "\
         WITH ranked AS ( \
             SELECT version, event_kind, kind AS mig_kind, \
                    ROW_NUMBER() OVER (PARTITION BY version ORDER BY event_seq DESC) AS rn \
@@ -443,13 +449,15 @@ pub(crate) async fn superseded_versions(
         ), \
         latest AS (SELECT version, event_kind, mig_kind FROM ranked WHERE rn = 1), \
         net_applied_squashes AS ( \
-            SELECT version FROM latest WHERE event_kind = 'applied' AND mig_kind = 'squash' \
+            SELECT version FROM latest WHERE event_kind = '{applied}' AND mig_kind = 'squash' \
         ) \
         SELECT DISTINCT s.superseded_version AS v \
           FROM \"_mig\".schema_migrations_supersedes s \
           JOIN net_applied_squashes n ON n.version = s.squash_version \
-         ORDER BY 1";
-    let rows = actor.query(sql).await?;
+         ORDER BY 1",
+        applied = EventKind::Applied.as_str()
+    );
+    let rows = actor.query(&sql).await?;
     rows.iter().map(|r| cell(r, 0)).collect()
 }
 
@@ -460,15 +468,18 @@ pub(crate) async fn latest_completed_checksums(
     actor: &MigrationActor,
 ) -> Result<std::collections::HashMap<String, String>, SqliteActorError> {
     actor.set_mode(Mode::EngineJournal).await?;
-    let sql = "\
+    let sql = format!(
+        "\
         WITH ranked AS ( \
             SELECT version, checksum, \
                    ROW_NUMBER() OVER (PARTITION BY version ORDER BY event_seq DESC) AS rn \
               FROM \"_mig\".schema_migrations \
-             WHERE event_kind = 'applied' AND kind = 'repeatable' \
+             WHERE event_kind = '{applied}' AND kind = 'repeatable' \
         ) \
-        SELECT version, checksum FROM ranked WHERE rn = 1";
-    let rows = actor.query(sql).await?;
+        SELECT version, checksum FROM ranked WHERE rn = 1",
+        applied = EventKind::Applied.as_str()
+    );
+    let rows = actor.query(&sql).await?;
     let mut map = std::collections::HashMap::new();
     for r in rows {
         map.insert(cell(&r, 0)?, cell(&r, 1)?);

@@ -194,6 +194,11 @@ pub enum JournalError {
     /// seeing one means out-of-band mutation).
     #[error("unrecognized journal kind '{0}'")]
     BadKind(String),
+    /// A journal row carried an unrecognized `event_kind` value — a corrupted /
+    /// tampered row (the CHECK constraint forbids it on write, so seeing one
+    /// means out-of-band mutation).
+    #[error("unrecognized journal event_kind '{0}'")]
+    BadEventKind(String),
 }
 
 /// Quote a SQL identifier by doubling embedded quotes and wrapping in
@@ -441,7 +446,7 @@ pub async fn applied(
                  ),
                  net_applied AS (
                      SELECT version, checksum, mig_kind
-                       FROM latest WHERE event_kind = 'applied'
+                       FROM latest WHERE event_kind = '{applied}'
                  ),
                  union_all AS (
                      SELECT version, checksum, mig_kind, 'completed' AS phase
@@ -454,7 +459,8 @@ pub async fn applied(
                       )
                  )
                  SELECT version, checksum, mig_kind, phase FROM union_all
-                 ORDER BY version COLLATE \"C\""
+                 ORDER BY version COLLATE \"C\"",
+                applied = EventKind::Applied.as_str()
             ),
             &[],
         )
@@ -564,8 +570,9 @@ pub async fn net_rolled_back(
                  SELECT version, name, checksum, actor,
                         exec_ms, to_char(at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS at
                    FROM latest
-                  WHERE event_kind = 'rolled_back'
-                  ORDER BY version COLLATE \"C\""
+                  WHERE event_kind = '{rolled_back}'
+                  ORDER BY version COLLATE \"C\"",
+                rolled_back = EventKind::RolledBack.as_str()
             ),
             &[],
         )
@@ -613,10 +620,12 @@ pub async fn history(
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let kind_s: String = row.get("event_kind");
-        let kind = match kind_s.as_str() {
-            "applied" => HistoryKind::Completed,
-            "rolled_back" => HistoryKind::RolledBack,
-            other => return Err(JournalError::BadPhase(other.to_string())),
+        // Route the read-back string through the typed `EventKind` contract: an
+        // unparseable value is a corrupted / tampered row, surfaced as a typed
+        // error rather than silently mis-classified.
+        let kind = match EventKind::parse(&kind_s).ok_or(JournalError::BadEventKind(kind_s))? {
+            EventKind::Applied => HistoryKind::Completed,
+            EventKind::RolledBack => HistoryKind::RolledBack,
         };
         out.push(HistoryEvent {
             event_seq: row.get("event_seq"),
@@ -660,7 +669,8 @@ pub async fn record_rolled_back(
             &format!(
                 "INSERT INTO {meta}.schema_migrations
                      (event_kind, version, name, checksum, \"by\", exec_ms)
-                 VALUES ('rolled_back', $1, $2, $3, $4, $5)"
+                 VALUES ('{rolled_back}', $1, $2, $3, $4, $5)",
+                rolled_back = EventKind::RolledBack.as_str()
             ),
             &[&version, &name, &checksum, &rolled_back_by, &exec_ms],
         )
@@ -739,7 +749,8 @@ pub async fn record_completed(
             &format!(
                 "INSERT INTO {meta}.schema_migrations
                      (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
-                 VALUES ('applied', $1, $2, $3, $4, $5, 'completed', 'success', $6)"
+                 VALUES ('{applied}', $1, $2, $3, $4, $5, 'completed', 'success', $6)",
+                applied = EventKind::Applied.as_str()
             ),
             &[
                 &rec.version,
@@ -782,7 +793,8 @@ pub async fn applied_count(conn: &Client, cfg: &ExecutorConfig) -> Result<i64, J
                        FROM {meta}.schema_migrations
                       ORDER BY version, event_seq DESC
                  )
-                 SELECT count(*)::bigint AS n FROM latest WHERE event_kind = 'applied'"
+                 SELECT count(*)::bigint AS n FROM latest WHERE event_kind = '{applied}'",
+                applied = EventKind::Applied.as_str()
             ),
             &[],
         )
@@ -830,12 +842,13 @@ pub async fn superseded_versions(
                      -- `squash_version` would over-supersede — suppressing a real
                      -- migration (the C1 forgery class).
                      SELECT version FROM latest
-                      WHERE event_kind = 'applied' AND mig_kind = 'squash'
+                      WHERE event_kind = '{applied}' AND mig_kind = 'squash'
                  )
                  SELECT DISTINCT s.superseded_version AS v
                    FROM {meta}.schema_migrations_supersedes s
                    JOIN net_applied_squashes n ON n.version = s.squash_version
-                  ORDER BY 1"
+                  ORDER BY 1",
+                applied = EventKind::Applied.as_str()
             ),
             &[],
         )
@@ -888,8 +901,9 @@ pub async fn latest_completed_checksums(
             &format!(
                 "SELECT DISTINCT ON (version) version, checksum
                    FROM {meta}.schema_migrations
-                  WHERE event_kind = 'applied' AND kind = 'repeatable'
-                  ORDER BY version, event_seq DESC"
+                  WHERE event_kind = '{applied}' AND kind = 'repeatable'
+                  ORDER BY version, event_seq DESC",
+                applied = EventKind::Applied.as_str()
             ),
             &[],
         )
@@ -971,7 +985,8 @@ async fn record_baseline_inner(
             &format!(
                 "INSERT INTO {meta}.schema_migrations
                      (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
-                 VALUES ('applied', $1, $2, $3, $4, 0, 'completed', 'success', $5)"
+                 VALUES ('{applied}', $1, $2, $3, $4, 0, 'completed', 'success', $5)",
+                applied = EventKind::Applied.as_str()
             ),
             &[&rec.version, &rec.name, &rec.checksum, &rec.applied_by, &rec.kind],
         )
@@ -1008,4 +1023,44 @@ pub async fn clear_inflight(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EventKind, JournalError};
+
+    /// The `event_kind` wire contract is byte-exact: every INSERT/SELECT in the
+    /// journal (PG + SQLite) now interpolates these literals from this single
+    /// typed source, so a drift here would silently desync the schema CHECK,
+    /// the writers, and the net-state readers. Pin them.
+    #[test]
+    fn event_kind_wire_literals_are_exact() {
+        assert_eq!(EventKind::Applied.as_str(), "applied");
+        assert_eq!(EventKind::RolledBack.as_str(), "rolled_back");
+    }
+
+    /// `parse` is the exact inverse of `as_str` for every variant, and rejects
+    /// anything else (a corrupted / tampered row), so a read-back can never
+    /// silently mis-classify the event direction.
+    #[test]
+    fn event_kind_parse_round_trips_and_rejects_garbage() {
+        for k in [EventKind::Applied, EventKind::RolledBack] {
+            assert_eq!(EventKind::parse(k.as_str()), Some(k));
+        }
+        assert_eq!(EventKind::parse("rolledback"), None);
+        assert_eq!(EventKind::parse("Applied"), None);
+        assert_eq!(EventKind::parse(""), None);
+    }
+
+    /// A read site (e.g. `history`) maps an unparseable `event_kind` to the
+    /// dedicated `BadEventKind` arm — NOT `BadPhase` (the pre-fix misuse) — so a
+    /// tampered row surfaces a faithful, type-distinct error.
+    #[test]
+    fn unparseable_event_kind_is_bad_event_kind_not_bad_phase() {
+        let raw = "garbage".to_string();
+        let err = EventKind::parse(&raw)
+            .ok_or(JournalError::BadEventKind(raw))
+            .unwrap_err();
+        assert!(matches!(err, JournalError::BadEventKind(s) if s == "garbage"));
+    }
 }

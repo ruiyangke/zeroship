@@ -130,7 +130,8 @@ async fn run_rollback_txn(
             .exec(&format!(
                 "INSERT INTO \"_mig\".schema_migrations \
                  (event_kind, version, name, checksum, \"by\", exec_ms) \
-                 VALUES ('rolled_back', {version}, {name}, {checksum}, {by}, {exec_ms})"
+                 VALUES ('{rolled_back}', {version}, {name}, {checksum}, {by}, {exec_ms})",
+                rolled_back = crate::journal::EventKind::RolledBack.as_str()
             ))
             .await?;
         Ok::<(), SqliteActorError>(())
