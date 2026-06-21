@@ -26,8 +26,8 @@ use zeroship_migrate::journal::{JournaledKind, Phase};
 use zeroship_migrate::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
 use zeroship_migrate::{
     desired_snapshot, Approval, CollectionDescriptor, DeclarativeAuthor, DeclarativeApplyError,
-    EngineError, ExecutorConfig, FieldDescriptor, GuardConfig, IndexDescriptor, MigrationEngine,
-    RenameHint, SchemaSnapshot, SqliteBackend,
+    EngineError, ExecutorConfig, FieldDescriptor, GuardConfig, IndexDescriptor, MigrationBackend,
+    MigrationEngine, RenameHint, SchemaSnapshot, SqliteBackend,
 };
 use zeroship_migrate::backend_sqlite::Mode;
 use zeroship_schema::query::SqlDialect;
@@ -389,6 +389,16 @@ async fn engine_sqlite_rename_routes_to_rebuild_not_run_expand() {
         plan2.rebuilds.len(),
         1,
         "the SQLite rename is reconciled by exactly one rebuild"
+    );
+
+    // L1/H1 — the SQLite backend has NO online schema-change capability: `online()`
+    // is `None`. This is the honest capability the old `expand_conn() == None`
+    // sentinel became — paired with the renames-empty invariant above, it proves the
+    // online path is structurally never reached on SQLite (no `compio_postgres::Client`
+    // anywhere in the SQLite leg).
+    assert!(
+        be.online().is_none(),
+        "SQLite exposes no OnlineSchemaChange capability — online() must be None"
     );
 
     let rebuild_version = plan2.rebuilds[0].migration.version.as_str().to_string();

@@ -115,7 +115,8 @@ pub use engine::{
     MigrationEngine, MigrationPlan, OnlineError, PlannedMigration, RollbackEngineError,
 };
 pub use expand_contract::{
-    ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
+    ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent, OnlineSchemaChange,
+    PgOnline,
 };
 pub use db::{connect, ConnectError, ExecutorConfig};
 pub use drift::{

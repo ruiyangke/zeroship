@@ -241,18 +241,23 @@ pub trait MigrationBackend {
         applied_by: &str,
     ) -> Result<(), ApplyError>;
 
-    /// The Postgres connection for the **not-yet-abstracted** online expand-contract
-    /// rename drive (`run_expand` / `run_backfill`, PG `pg_advisory_xact_lock` +
-    /// paged `UPDATE`; deferred to P6c). Returns `Some` for the Postgres backend,
-    /// `None` for SQLite.
+    /// The **online schema-change capability** (multi-engine abstraction L1/L2/H1).
     ///
-    /// This is the single escape hatch the generic declarative apply path uses to
-    /// reach the PG-shaped `run_expand_with_lock`. It is only ever consulted to drive
-    /// `plan.renames`, which the SQLite differ keeps EMPTY (a SQLite rename is routed
-    /// to a [`rebuild_one`](Self::rebuild_one), never expand-contract) — so the
-    /// `None` arm is never reached with a non-empty rename set, and `run_expand` is
-    /// never called on a SQLite backend (design §3.3 / P6a CONDITION ii / H1).
-    fn expand_conn(&self) -> Option<&Client>;
+    /// `Some(&dyn OnlineSchemaChange)` for an engine that drives zero-downtime
+    /// online operations (Postgres — expand-contract rename via dual-write trigger
+    /// plus paged backfill; the [`PgOnline`](crate::expand_contract::PgOnline) impl
+    /// owns its `Client` **internally**, so the connection NEVER appears on this
+    /// neutral trait surface). `None` for an engine with no online path (SQLite,
+    /// where every existing-table change, rename included, is routed to a
+    /// [`rebuild_one`](Self::rebuild_one), so its declarative `renames` set is
+    /// structurally EMPTY).
+    ///
+    /// This REPLACES the old `expand_conn() -> Option<&compio_postgres::Client>`
+    /// escape hatch: the generic declarative apply path branches on
+    /// `online().is_some()`, never holding a concrete connection, and a backend
+    /// with no online capability MUST receive an empty `renames` (asserted at the
+    /// call site — a non-empty rename set with `online() == None` is a routing bug).
+    fn online(&self) -> Option<&dyn crate::expand_contract::OnlineSchemaChange>;
 }
 
 /// The Postgres [`MigrationBackend`] — P1's first and only impl.
@@ -278,6 +283,11 @@ pub struct PostgresBackend<'a> {
     /// borrow; the trust/project that actually gates an apply always comes from
     /// `cfg`.
     guard: crate::guard::PgGuard,
+    /// The Postgres online schema-change capability returned by
+    /// [`online`](MigrationBackend::online). Holds the SAME borrowed
+    /// [`Client`] as `conn` (a private field — the connection never crosses the
+    /// neutral trait surface), driving the expand-contract rename path.
+    online: crate::expand_contract::PgOnline<'a>,
 }
 
 impl<'a> PostgresBackend<'a> {
@@ -289,6 +299,7 @@ impl<'a> PostgresBackend<'a> {
             guard: crate::guard::PgGuard::from_config(crate::guard::GuardConfig::confined(
                 String::new(),
             )),
+            online: crate::expand_contract::PgOnline::new(conn),
         }
     }
 
@@ -441,7 +452,7 @@ impl MigrationBackend for PostgresBackend<'_> {
         )))
     }
 
-    fn expand_conn(&self) -> Option<&Client> {
-        Some(self.conn)
+    fn online(&self) -> Option<&dyn crate::expand_contract::OnlineSchemaChange> {
+        Some(&self.online)
     }
 }

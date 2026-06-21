@@ -506,30 +506,43 @@ impl MigrationEngine {
         //    after) — also with the lock already held. 4. Collect the contract as
         //    the deferred set.
         //
-        // P6a — the online expand-contract drive (`run_expand` / `run_backfill`) is
-        // NOT yet abstracted over the backend seam (deferred P6c); it is PG-shaped
-        // (`pg_advisory_xact_lock` + paged UPDATE). It is reached ONLY for the PG
-        // backend: a SQLite declarative rename is routed to a REBUILD above, never
-        // expand-contract, so `plan.renames` is EMPTY on the SQLite leg. We obtain the
-        // PG connection through `backend.expand_conn()`; it is `Some` for PG and
-        // `None` for SQLite. A non-empty `renames` with a `None` conn would be a SQLite
-        // routing bug (renames must be empty on SQLite) — fail closed rather than
-        // silently drop the renames.
+        // 3/4 — the online expand-contract drive, through the dialect-neutral
+        // [`OnlineSchemaChange`](crate::expand_contract::OnlineSchemaChange) capability
+        // (multi-engine abstraction L1/L2/H1). We branch on `backend.online()`, NOT on
+        // a raw `&Client` (`expand_conn` is gone): `Some` for an engine with an online
+        // path (Postgres' `PgOnline`, owning its `Client` internally), `None` for an
+        // engine with none (SQLite — every existing-table change, rename included, is
+        // routed to a REBUILD above, so `plan.renames` is structurally EMPTY on SQLite).
+        //
+        // ASSERTION (H1 invariant): a backend with NO online capability MUST receive an
+        // empty `renames` — a non-empty rename set with `online() == None` is an internal
+        // routing bug (the differ failed to route a rename to a rebuild), never a
+        // silently-dropped rename. We fail closed.
         let mut pending_contract: Vec<Migration> = Vec::new();
         if !plan.renames.is_empty() {
-            let Some(conn) = backend.expand_conn() else {
+            let Some(online) = backend.online() else {
                 return Err(DeclarativeApplyError::Plain(EngineError::Apply(
                     ApplyError::Backend(
                         "declarative deploy carries online renames but the backend has no \
-                         expand-contract drive (SQLite renames must be routed to a rebuild; \
-                         a non-empty rename set here is a routing bug)"
+                         online schema-change capability (SQLite renames must be routed to a \
+                         rebuild; a non-empty rename set here is a routing bug)"
                             .to_string(),
                     ),
                 )));
             };
             for rename in &plan.renames {
-                let outcome = self
-                    .run_expand_with_lock(rename, approval, conn, exec_cfg, applied_by, LockMode::AlreadyHeld)
+                // The seam takes the NEUTRAL intent + the pre-authored, version-stable
+                // expand steps (H1) — never a `Client`, never the PG-named plan type.
+                let outcome = online
+                    .run_online(
+                        &rename.intent,
+                        &rename.expand,
+                        &rename.backfill,
+                        approval,
+                        exec_cfg,
+                        applied_by,
+                        LockMode::AlreadyHeld,
+                    )
                     .await?;
                 applied.applied.extend(outcome.applied);
                 applied.skipped.extend(outcome.skipped);
@@ -904,32 +917,20 @@ impl MigrationEngine {
         applied_by: &str,
         lock_mode: LockMode,
     ) -> Result<ApplyOutcome, OnlineError> {
-        if approval != Approval::Approved {
-            return Err(OnlineError::Approval);
-        }
-        // The expand sequence is E1, E2, E3 (the marker) in order. Split off E3:
-        // it is journaled LAST, after the real backfill, never as part of the
-        // structural apply.
-        let Some((e3, head)) = plan.expand.split_last() else {
-            return Ok(ApplyOutcome {
-                applied: Vec::new(),
-                skipped: Vec::new(),
-                recovered: Vec::new(),
-            });
-        };
-        // 1. Apply E1 + E2 — trigger live before any backfill row is touched.
-        let mut outcome =
-            executor::apply_with_lock(conn, exec_cfg, head, approval, applied_by, lock_mode).await?;
-        // 2. Run the real backfill (mirrors pre-existing rows).
-        crate::backfill::run_backfill(conn, exec_cfg, &plan.backfill, approval, applied_by).await?;
-        // 3. Journal E3 (the backfill marker) — records the backfill complete, so
-        //    the gate now sees the expand fully applied and the contract may land.
-        let e3_outcome =
-            executor::apply_with_lock(conn, exec_cfg, std::slice::from_ref(e3), approval, applied_by, lock_mode)
-                .await?;
-        outcome.applied.extend(e3_outcome.applied);
-        outcome.recovered.extend(e3_outcome.recovered);
-        Ok(outcome)
+        // The E1+E2 → backfill → E3-journaled-LAST sequence lives in ONE place
+        // ([`run_expand_pg`](crate::expand_contract::run_expand_pg)) so the public
+        // `&Client` API here and the [`PgOnline`](crate::expand_contract::PgOnline)
+        // capability seam share byte-identical behavior (M3).
+        crate::expand_contract::run_expand_pg(
+            conn,
+            &plan.expand,
+            &plan.backfill,
+            approval,
+            exec_cfg,
+            applied_by,
+            lock_mode,
+        )
+        .await
     }
 }
 
