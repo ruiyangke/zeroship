@@ -311,12 +311,28 @@ async fn run_apply_txn(
 
     // Run the rest; on ANY error, roll back and propagate.
     let result = async {
-        // 2. CreatorUp — the creator `up` is confined from `_mig`.
-        actor.set_mode(Mode::CreatorUp).await?;
-        // The `up` may be multiple statements; each is prepared+stepped under
-        // CreatorUp via execute_batch (single mode for the whole creator `up`,
-        // which is correct — the creator phase is one mode). It must NOT contain a
-        // journal write (the authorizer denies it).
+        // 2. Run the `up`. Ordinary creator/AI DDL runs under the confined
+        //    **CreatorUp** mode (denied from `_mig`, from transaction boundaries,
+        //    from PRAGMA, from making a vtable). The ONE exception is **engine-emitted
+        //    goodie DDL** (§2.6, `engine_goodie_ddl`): the SQLite FTS5 virtual table +
+        //    its sync triggers. That DDL is engine-AUTHORED from a `.fts()` descriptor
+        //    (no untrusted SQL string), and the hardened authorizer allows
+        //    `CREATE VIRTUAL TABLE … USING fts5(…)` ONLY in EngineJournal mode. So a
+        //    goodie-DDL `up` runs under EngineJournal; everything else stays confined.
+        //    (The `_mig` journal write below is a SEPARATE EngineJournal phase either
+        //    way; the goodie `up` never touches `_mig` — it only creates the vtable +
+        //    triggers in `main`.)
+        let up_mode = if m.flags.engine_goodie_ddl {
+            Mode::EngineJournal
+        } else {
+            Mode::CreatorUp
+        };
+        actor.set_mode(up_mode).await?;
+        // The `up` may be multiple statements; each is prepared+stepped under the
+        // chosen mode via execute_batch (single mode for the whole `up`, which is
+        // correct — the up phase is one mode). A creator `up` must NOT contain a
+        // journal write (the authorizer denies it); an engine-goodie `up` is
+        // engine-authored DDL that touches only `main`.
         actor.exec(&m.up).await?;
 
         // 3. EngineJournal — allocate event_seq + INSERT the completed row. SEPARATE

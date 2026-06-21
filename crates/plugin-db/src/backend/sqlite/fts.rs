@@ -80,19 +80,11 @@ pub(crate) fn build_create_fts_table_sql(
     collection: &str,
     columns: &[String],
 ) -> String {
-    let qschema = quote_ident(app_id);
-    let qfts = quote_ident(&format!("{collection}__fts"));
-    let qcols_csv: String = columns
-        .iter()
-        .map(|c| quote_ident(c))
-        .collect::<Vec<_>>()
-        .join(",");
-    let qcoll = quote_ident(collection);
-    let qrowid = quote_ident("rowid");
-    format!(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS {qschema}.{qfts} \
-         USING fts5({qcols_csv}, content={qcoll}, content_rowid={qrowid})"
-    )
+    // Single source of truth: the shared `zeroship-schema` FTS5 builder. The
+    // runtime data plane uses the schema-QUALIFIED form (the app's ATTACHed
+    // database). The migrate engine uses the same builder with `None` (unqualified
+    // `main`) so an engine-emitted FTS index is byte-identical structure to this.
+    zeroship_schema::fts_sqlite::build_create_fts_table_sql(Some(app_id), collection, columns)
 }
 
 /// Build the initial-population `INSERT INTO __fts SELECT FROM coll`
@@ -121,18 +113,7 @@ pub(crate) fn build_initial_population_sql(
     collection: &str,
     columns: &[String],
 ) -> String {
-    let qschema = quote_ident(app_id);
-    let qfts = quote_ident(&format!("{collection}__fts"));
-    let qcoll = quote_ident(collection);
-    let qcols_csv: String = columns
-        .iter()
-        .map(|c| quote_ident(c))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "INSERT INTO {qschema}.{qfts} (rowid, {qcols_csv}) \
-         SELECT rowid, {qcols_csv} FROM {qschema}.{qcoll}"
-    )
+    zeroship_schema::fts_sqlite::build_initial_population_sql(Some(app_id), collection, columns)
 }
 
 /// Build the `AFTER INSERT` trigger DDL.
@@ -171,29 +152,7 @@ pub(crate) fn build_insert_trigger_sql(
     collection: &str,
     columns: &[String],
 ) -> String {
-    let qschema = quote_ident(app_id);
-    let qcoll = quote_ident(collection);
-    let qfts_unqual = quote_ident(&format!("{collection}__fts"));
-    let qtrg = quote_ident(&format!("{collection}__fts_ai"));
-    let qcols_csv: String = columns
-        .iter()
-        .map(|c| quote_ident(c))
-        .collect::<Vec<_>>()
-        .join(", ");
-    // `NEW."col"` reads from the row being inserted. Same identifier
-    // quoting as the column list — keeps any embedded `"` in the
-    // column name handled uniformly.
-    let new_cols_csv: String = columns
-        .iter()
-        .map(|c| format!("NEW.{}", quote_ident(c)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "CREATE TRIGGER IF NOT EXISTS {qschema}.{qtrg} \
-         AFTER INSERT ON {qschema}.{qcoll} BEGIN \
-         INSERT INTO {qfts_unqual} (rowid, {qcols_csv}) \
-         VALUES (NEW.rowid, {new_cols_csv}); END"
-    )
+    zeroship_schema::fts_sqlite::build_insert_trigger_sql(Some(app_id), collection, columns)
 }
 
 /// Build the `AFTER DELETE` trigger DDL.
@@ -233,30 +192,7 @@ pub(crate) fn build_delete_trigger_sql(
     collection: &str,
     columns: &[String],
 ) -> String {
-    let qschema = quote_ident(app_id);
-    let qcoll = quote_ident(collection);
-    let qfts_unqual = quote_ident(&format!("{collection}__fts"));
-    // The FTS5 "command sentinel" column name is the vtable name
-    // itself. Inside the trigger body, the table is unqualified so
-    // the sentinel matches the unqualified form too.
-    let sentinel = quote_ident(&format!("{collection}__fts"));
-    let qtrg = quote_ident(&format!("{collection}__fts_ad"));
-    let qcols_csv: String = columns
-        .iter()
-        .map(|c| quote_ident(c))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let old_cols_csv: String = columns
-        .iter()
-        .map(|c| format!("OLD.{}", quote_ident(c)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "CREATE TRIGGER IF NOT EXISTS {qschema}.{qtrg} \
-         AFTER DELETE ON {qschema}.{qcoll} BEGIN \
-         INSERT INTO {qfts_unqual} ({sentinel}, rowid, {qcols_csv}) \
-         VALUES ('delete', OLD.rowid, {old_cols_csv}); END"
-    )
+    zeroship_schema::fts_sqlite::build_delete_trigger_sql(Some(app_id), collection, columns)
 }
 
 /// Build the `AFTER UPDATE OF cols` trigger DDL.
@@ -290,34 +226,7 @@ pub(crate) fn build_update_trigger_sql(
     collection: &str,
     columns: &[String],
 ) -> String {
-    let qschema = quote_ident(app_id);
-    let qcoll = quote_ident(collection);
-    let qfts_unqual = quote_ident(&format!("{collection}__fts"));
-    let sentinel = quote_ident(&format!("{collection}__fts"));
-    let qtrg = quote_ident(&format!("{collection}__fts_au"));
-    let qcols_csv: String = columns
-        .iter()
-        .map(|c| quote_ident(c))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let old_cols_csv: String = columns
-        .iter()
-        .map(|c| format!("OLD.{}", quote_ident(c)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let new_cols_csv: String = columns
-        .iter()
-        .map(|c| format!("NEW.{}", quote_ident(c)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "CREATE TRIGGER IF NOT EXISTS {qschema}.{qtrg} \
-         AFTER UPDATE OF {qcols_csv} ON {qschema}.{qcoll} BEGIN \
-         INSERT INTO {qfts_unqual} ({sentinel}, rowid, {qcols_csv}) \
-         VALUES ('delete', OLD.rowid, {old_cols_csv}); \
-         INSERT INTO {qfts_unqual} (rowid, {qcols_csv}) \
-         VALUES (NEW.rowid, {new_cols_csv}); END"
-    )
+    zeroship_schema::fts_sqlite::build_update_trigger_sql(Some(app_id), collection, columns)
 }
 
 /// Build the FTS search SQL.

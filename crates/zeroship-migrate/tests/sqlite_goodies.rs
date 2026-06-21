@@ -16,17 +16,25 @@
 //!   - a `geoPoint` field → a packed `BLOB` column + a plain B-tree index (no
 //!     PostGIS/GIST equivalent; spatial search is a haversine flat-scan in
 //!     plugin-db per `docs/reference/sqlite-divergences.md`).
-//!   - an `.fts()` field → BROKEN on this engine path (see the `#[ignore]` test +
-//!     its note at the bottom): the PG-shaped `__fts` tsvector index is emitted
-//!     over a `__fts` column the SQLite create-table never materialises.
+//!   - an `.fts()` field → an FTS5 **virtual table** (`<coll>__fts`) over the
+//!     source columns + AFTER sync triggers, emitted via the SHARED
+//!     `zeroship_schema::fts_sqlite` builders (the SAME structure plugin-db's
+//!     runtime `ensure_fts_index` builds). This is the SQLite FTS shape — there is
+//!     NO PG `__fts` tsvector column and NO GIN index (`tsvector` has no SQLite
+//!     spelling). The SQLite-dialect `desired_snapshot_for_dialect` models it as an
+//!     `IndexSnapshot` with `access_method = "fts5"`, the SQLite emitter emits the
+//!     vtable+triggers (run under engine mode, since the hardened authorizer permits
+//!     a vtable create ONLY in engine mode), and the drift introspector recognises
+//!     the live vtable (excluding its FTS5 shadow tables), so a re-diff is
+//!     ZERO-drift. (See `fts_field_applies_cleanly_on_sqlite` below.)
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zeroship_migrate::{
-    desired_snapshot, CollectionDescriptor, DeclarativeAuthor, FieldDescriptor, SchemaSnapshot,
-    SqliteBackend,
+    desired_snapshot, desired_snapshot_for_dialect, CollectionDescriptor, DeclarativeAuthor,
+    FieldDescriptor, SchemaSnapshot, SqliteBackend,
 };
 use zeroship_schema::query::SqlDialect;
 
@@ -250,28 +258,22 @@ async fn geopoint_field_applies_as_blob_and_drift_round_trips() {
 }
 
 // ===========================================================================
-// FTS — BUG (see report). The `.fts()` greenfield path is BROKEN on the SQLite
-// migrate-engine leg: `desired_snapshot`'s `fts_objects` unconditionally adds a
-// PG-shaped `__fts` (tsvector) GENERATED column + a GIN index to the snapshot,
-// but the shared SQLite create-table emitter does NOT materialise the `__fts`
-// column (tsvector + `to_tsvector(...)` GENERATED has no SQLite spelling), while
-// the index over it STILL becomes `CREATE INDEX ... ("__fts")` via the engine's
-// SqliteEmitter — which fails at apply with `no such column: "__fts"`.
+// FTS — an `.fts()` field applies on SQLite as an FTS5 external-content VIRTUAL
+// TABLE (`<coll>__fts`) + AFTER sync triggers (the SAME structure plugin-db's
+// runtime `ensure_fts_index` builds, via the shared `zeroship_schema::fts_sqlite`
+// builders), NOT the PG `__fts` tsvector column + GIN index (`tsvector` has no
+// SQLite spelling). The SQLite-dialect `desired_snapshot_for_dialect` models it as
+// an `IndexSnapshot { access_method: "fts5" }`; the SQLite emitter emits the
+// vtable+triggers (run under engine mode — the hardened authorizer permits a vtable
+// create ONLY in engine mode); and the drift introspector recognises the live
+// vtable (excluding its FTS5 shadow tables), so a re-diff is ZERO-drift.
 //
-// FTS5 virtual tables + sync triggers are the **plugin-db runtime** concern
-// (`backend/sqlite/fts.rs`, `ensure_fts_index`), NOT something the migrate engine
-// emits today — and `register_model::apply` does not yet dispatch FTS DDL by
-// dialect on SQLite (see the note in `plugin-db/tests/sqlite_integration.rs`
-// near `fts_search_matches_substring`). So this is a genuine engine-path gap, not
-// a test artefact. Kept as an `#[ignore]`d RED reproduction so the fix has a
-// faithful failing target; do NOT "green" it by asserting the error string.
-#[ignore = "BUG: SQLite FTS greenfield emits a __fts (tsvector/GIN) index over a \
-            column the SQLite create-table never materialises → apply fails with \
-            'no such column: \"__fts\"'. FTS5 is a plugin-db runtime concern not \
-            wired through the migrate engine; see this file's header + the report."]
+// REGRESSION: pre-fix this was `#[ignore]`d — the dialect-blind `desired_snapshot`
+// emitted a PG-shaped `__fts` (tsvector/GIN) index over a column the SQLite
+// create-table never materialised → apply failed with `no such column: "__fts"`.
 #[compio::test]
 async fn fts_field_applies_cleanly_on_sqlite() {
-    let desc = CollectionDescriptor {
+    let mk = || CollectionDescriptor {
         name: "posts".into(),
         owner_app: APP.into(),
         fields: vec![FieldDescriptor {
@@ -282,17 +284,80 @@ async fn fts_field_applies_cleanly_on_sqlite() {
         }],
         indexes: vec![],
     };
-    let desired = desired_snapshot(PROJECT, &[desc]).expect("desired");
+    // DIALECT-AWARE desired: on SQLite the FTS index is the FTS5 vtable, not the PG
+    // `__fts` GIN index. (Using the PG-default `desired_snapshot` here is exactly the
+    // pre-fix bug — it would emit the broken `__fts` index.)
+    let desired = desired_snapshot_for_dialect(PROJECT, &[mk()], SqlDialect::Sqlite)
+        .expect("desired");
     let plan = sqlite_author()
         .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
         .expect("diff");
 
-    let p = paths("fts_broken");
+    let p = paths("fts_sqlite");
     let be = backend(&p);
-    // This loop FAILS today on the `create_index_posts__fts_idx` migration.
     for m in &plan.all_migrations() {
         be.apply_one_additive(m, "deployer")
             .await
             .unwrap_or_else(|e| panic!("apply {} must succeed: {e:?}", m.name));
     }
+
+    // REAL end-state: the FTS5 vtable + its three AFTER triggers exist.
+    be.actor()
+        .set_mode(zeroship_migrate::backend_sqlite::Mode::EngineJournal)
+        .await
+        .expect("engine mode");
+    let vtables = be
+        .actor()
+        .query(
+            "SELECT name FROM main.sqlite_master \
+             WHERE type='table' AND name='posts__fts'",
+        )
+        .await
+        .expect("scan for the fts vtable");
+    assert_eq!(
+        vtables.len(),
+        1,
+        "the FTS5 virtual table posts__fts must exist: {vtables:?}"
+    );
+    let triggers = be
+        .actor()
+        .query(
+            "SELECT name FROM main.sqlite_master \
+             WHERE type='trigger' AND name IN \
+             ('posts__fts_ai','posts__fts_ad','posts__fts_au') ORDER BY name",
+        )
+        .await
+        .expect("scan for the fts triggers");
+    assert_eq!(
+        triggers.len(),
+        3,
+        "the three FTS sync triggers must exist: {triggers:?}"
+    );
+
+    // NOTE on queryability: actual FTS reads/writes (the tokenising INSERT through
+    // the trigger, a `MATCH` query) are the **plugin-db data plane's** job, NOT the
+    // migrate engine's — and the engine's hardened SQLite authorizer deliberately
+    // does NOT allowlist the fts5 runtime tokenizer functions (a creator/AI `up`
+    // has no business running them). So the faithful in-LAYER assertions here are
+    // (a) the vtable + triggers exist, and (b) the structure round-trips zero-drift.
+    // The end-to-end MATCH-finds-the-mirrored-row queryability is exercised against
+    // the runtime backend in `plugin-db/tests/sqlite_integration.rs` (the data-plane
+    // connection, which shares these exact FTS5 builders via `zeroship_schema`).
+
+    // A re-diff against the REAL introspected live snapshot → ZERO drift (the FTS5
+    // vtable is recognised as the fts5 IndexSnapshot; its shadow tables are excluded;
+    // no spurious ADD/DROP).
+    let live = be.snapshot_schema_sqlite().await.expect("introspect live");
+    let own = ownership_of(&desired);
+    let desired2 = desired_snapshot_for_dialect(PROJECT, &[mk()], SqlDialect::Sqlite)
+        .expect("re-desired");
+    let plan2 = sqlite_author()
+        .diff(&desired2, &live, &own, &[])
+        .expect("re-diff must succeed");
+    assert!(
+        plan2.all_migrations().is_empty() && plan2.rebuilds.is_empty(),
+        "an FTS field must round-trip ZERO-drift; got migs={:?} rebuilds={}",
+        plan2.all_migrations().iter().map(|m| m.name.clone()).collect::<Vec<_>>(),
+        plan2.rebuilds.len()
+    );
 }

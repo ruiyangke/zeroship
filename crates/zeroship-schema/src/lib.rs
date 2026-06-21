@@ -69,5 +69,6 @@
 pub mod descriptors;
 pub mod diff;
 pub mod error;
+pub mod fts_sqlite;
 pub mod mask_codec;
 pub mod query;
