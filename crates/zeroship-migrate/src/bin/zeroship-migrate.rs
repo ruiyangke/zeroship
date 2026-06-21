@@ -30,7 +30,8 @@ use clap::{Parser, Subcommand};
 // The runner module is `pub(crate)`; the bin is part of the same crate so it can
 // reach it. External crates cannot — the token mint stays confined.
 use zeroship_migrate::guard::platform_runner::{
-    self, default_platform_extensions, default_platform_schemas, RunConfig, RunProfile, RunReport,
+    self, default_platform_extensions, default_platform_schemas, Engine, RunConfig, RunError,
+    RunProfile, RunReport,
 };
 use zeroship_migrate::loader::new_dbmate_migration;
 
@@ -394,6 +395,22 @@ fn run_new(cli: &Cli, name: &str) -> Result<(), String> {
 /// listing the journal's applied versions (dbmate `dump`). If `pg_dump` is not on
 /// `PATH`, error (don't half-dump).
 async fn run_dump(cfg: &RunConfig, schema_file: &Path) -> Result<(), String> {
+    // `dump` is `pg_dump` — Postgres-only. On SQLite this CLI refuses honestly
+    // rather than faking a schema dump (a `sqlite3 .dump` equivalent is a deferred
+    // command; see the multi-engine report). The engine classifier gates it.
+    match platform_runner::classify_engine(&cfg.database_url) {
+        Engine::Postgres => {}
+        Engine::Sqlite(_) => {
+            return Err(
+                "dump is not supported on SQLite via this CLI yet (pg_dump is Postgres-only; \
+                 a `sqlite3 .dump` equivalent is a deferred command)"
+                    .to_string(),
+            );
+        }
+        Engine::Unsupported => {
+            return Err(RunError::UnsupportedEngine.to_string());
+        }
+    }
     // Faithful dbmate behaviour: shell pg_dump. Find it on PATH (or honour
     // PG_DUMP for a pinned binary, e.g. under Nix where it is not on PATH).
     let pg_dump = std::env::var("PG_DUMP").unwrap_or_else(|_| "pg_dump".to_string());
