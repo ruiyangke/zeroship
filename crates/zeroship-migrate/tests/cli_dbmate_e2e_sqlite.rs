@@ -244,3 +244,26 @@ fn dump_on_sqlite_refuses_honestly() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// `validate` on a SQLite URL is the honest "not supported on SQLite" refusal
+/// (validate dry-runs on a throwaway shadow DATABASE — a Postgres-only capability;
+/// the SQLite backend has no shadow clone, see `engine_sqlite`'s
+/// `sqlite_backend_has_no_shadow_*` test). Never a faked "validated ok".
+#[test]
+fn validate_on_sqlite_refuses_honestly() {
+    let tok = token();
+    let tmp = std::env::temp_dir().join(format!("zsmig_validatesq_dir_{tok}"));
+    std::fs::create_dir_all(&tmp).expect("create temp migration dir");
+    let dir_s = tmp.to_str().unwrap().to_string();
+    let app_s = tmp.join("v.sqlite").to_str().unwrap().to_string();
+    let url = format!("sqlite:{app_s}");
+
+    let (ok, _out, err) = run_bin(&["validate", "--dir", &dir_s, "--database-url", &url]);
+    assert!(!ok, "`validate` on SQLite must refuse (non-zero exit)");
+    assert!(
+        err.to_ascii_lowercase().contains("sqlite") && err.to_ascii_lowercase().contains("validate"),
+        "the refusal explains validate is unsupported on SQLite: {err}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

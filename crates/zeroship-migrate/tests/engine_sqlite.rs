@@ -515,6 +515,317 @@ async fn engine_sqlite_rebuild_refused_without_approval() {
 }
 
 // ---------------------------------------------------------------------------
+// (ROLL-FORWARD over destructive history) — the SQLite leg has NO rollback for a
+// rebuild (no shadow clone; `online()`/`shadow()` are None). The engine's stance
+// is ROLL-FORWARD: a destructive migration in the applied history is compensated
+// by a LATER forward migration, never an unwind. This mirrors the PG
+// lifecycle/rollback roll-forward semantics on the SQLite backend.
+//
+// Sequence (all forward, in order, on ONE backend):
+//   v1  create `accounts(amount: number, legacy: string)` + seed rows;
+//   v2  DESTRUCTIVE: drop `legacy` (a rebuild — destructive + approval-gated),
+//       APPROVED at deploy → the column is gone, rows preserved;
+//   v3  additive forward: add `note` — built on the v2 (post-destructive) shape.
+// End-state: `legacy` gone, `note` present, original `amount` data intact, and
+// EVERY step journaled `completed` (nothing rolled back).
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn roll_forward_over_destructive_history_on_sqlite() {
+    // v1: accounts(amount: number, legacy: string).
+    let v1 = vec![CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: APP.into(),
+        fields: vec![
+            FieldDescriptor {
+                name: "amount".into(),
+                ty: "number".into(),
+                required: true,
+                ..Default::default()
+            },
+            // `legacy` carries a `min` → an inline CHECK constraint, so dropping it
+            // CANNOT use native `ALTER … DROP COLUMN` (SQLite errors on a
+            // CHECK-constrained column) and MUST route through the 12-step rebuild —
+            // i.e. a genuinely destructive, approval-gated step in the history.
+            FieldDescriptor {
+                name: "legacy".into(),
+                ty: "number".into(),
+                required: true,
+                min: Some(0.0),
+                ..Default::default()
+            },
+        ],
+        indexes: vec![],
+    }];
+    // v2: drop `legacy` (destructive — a rebuild on SQLite, CHECK-constrained).
+    let v2 = vec![CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "amount".into(),
+            ty: "number".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    }];
+    // v3: add `note` on top of the post-destructive shape (additive forward).
+    let v3 = vec![CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: APP.into(),
+        fields: vec![
+            FieldDescriptor {
+                name: "amount".into(),
+                ty: "number".into(),
+                required: true,
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "note".into(),
+                ty: "string".into(),
+                ..Default::default()
+            },
+        ],
+        indexes: vec![],
+    }];
+
+    let p = paths("roll_forward_destructive");
+    let be = backend(&p);
+    let engine = MigrationEngine::new();
+    let cfg = exec_cfg();
+
+    // --- v1: create + seed. ---
+    let desired1 = desired_snapshot(PROJECT, &v1).expect("v1 desired");
+    let plan1 = engine
+        .plan_declarative(
+            &desired1,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &sqlite_author(),
+            &[],
+            &guard_cfg(),
+        )
+        .expect("plan v1");
+    engine
+        .apply_declarative(&plan1, Approval::None, &be, &cfg, "deployer")
+        .await
+        .expect("apply v1");
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .exec("INSERT INTO main.accounts (id, amount, legacy) VALUES ('a1', 10, 1), ('a2', 20, 2)")
+        .await
+        .expect("seed rows");
+
+    // --- v2: the DESTRUCTIVE drop of `legacy` (a rebuild), APPROVED. ---
+    let (live1, own1) = live_from(&v1);
+    let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
+    let plan2 = engine
+        .plan_declarative(&desired2, &live1, &own1, &sqlite_author(), &[], &guard_cfg())
+        .expect("plan v2");
+    assert_eq!(plan2.rebuilds.len(), 1, "the destructive drop is a rebuild");
+    let v2_version = plan2.rebuilds[0].migration.version.as_str().to_string();
+    assert!(
+        plan2.rebuilds[0].migration.flags.destructive
+            && plan2.rebuilds[0].migration.flags.requires_approval,
+        "the legacy-column drop is destructive + approval-gated"
+    );
+    // Roll-FORWARD: we approve and APPLY the destructive step (not roll anything back).
+    engine
+        .apply_declarative(&plan2, Approval::Approved, &be, &cfg, "deployer")
+        .await
+        .expect("apply the approved destructive rebuild (roll-forward)");
+
+    // `legacy` is gone; the `amount` data is intact (rows carried through the rebuild).
+    assert!(
+        column_type(&be, "accounts", "legacy").await.is_empty(),
+        "the destructive drop removed `legacy`"
+    );
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    let amounts = be
+        .actor()
+        .query("SELECT amount FROM main.accounts ORDER BY id")
+        .await
+        .expect("read amount");
+    assert_eq!(
+        amounts.iter().filter_map(|r| r[0].clone()).collect::<Vec<_>>(),
+        vec!["10", "20"],
+        "the surviving `amount` data carried through the destructive rebuild"
+    );
+
+    // --- v3: an additive forward migration on the POST-destructive shape. ---
+    let (live2, own2) = live_from(&v2);
+    let desired3 = desired_snapshot(PROJECT, &v3).expect("v3 desired");
+    let plan3 = engine
+        .plan_declarative(&desired3, &live2, &own2, &sqlite_author(), &[], &guard_cfg())
+        .expect("plan v3");
+    assert!(plan3.rebuilds.is_empty(), "v3 is a plain additive forward step");
+    let v3_version = plan3
+        .plain
+        .items
+        .iter()
+        .map(|i| i.migration.version.as_str().to_string())
+        .collect::<Vec<_>>();
+    engine
+        .apply_declarative(&plan3, Approval::None, &be, &cfg, "deployer")
+        .await
+        .expect("apply v3 (additive forward, no rollback)");
+
+    // End-state: `note` present, `legacy` still gone, data intact.
+    assert!(
+        !column_type(&be, "accounts", "note").await.is_empty(),
+        "the additive forward column landed on the post-destructive shape"
+    );
+    assert!(
+        column_type(&be, "accounts", "legacy").await.is_empty(),
+        "the dropped column stays gone (no rollback resurrected it)"
+    );
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    let count = be
+        .actor()
+        .query("SELECT COUNT(*) FROM main.accounts")
+        .await
+        .expect("count");
+    assert_eq!(count[0][0].as_deref(), Some("2"), "rows survived the whole roll-forward history");
+
+    // EVERY step is journaled `completed` — nothing was rolled back.
+    assert!(is_completed(&be, &v2_version).await, "the destructive rebuild is completed");
+    for v in &v3_version {
+        assert!(is_completed(&be, v).await, "the additive forward step {v} is completed");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (WARM MULTI-COLLECTION BOOT) — a deploy with 2+ collections, then a "fresh
+// isolate" RE-DEPLOY of the SAME declared set against the live file. The warm
+// re-plan against the REAL introspected live schema yields an EMPTY diff — no
+// spurious DROP of either table — and BOTH tables stay usable (a write into each
+// succeeds). This is the H1 declared-set path on the SQLite schema authority (the
+// migrate engine; `register_model`/`run_pipeline` is PG-only by construction —
+// its `RegisterBackend` bound requires `PgSqlExecutor` +
+// `LockManager<Client = compio_postgres::Client>`, which SQLite does not satisfy,
+// so the warm-boot authority on SQLite is the engine, not the runtime pipeline).
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
+    // Two collections in one declared set.
+    let set = || {
+        vec![
+            CollectionDescriptor {
+                name: "users".into(),
+                owner_app: APP.into(),
+                fields: vec![FieldDescriptor {
+                    name: "handle".into(),
+                    ty: "string".into(),
+                    required: true,
+                    ..Default::default()
+                }],
+                indexes: vec![],
+            },
+            CollectionDescriptor {
+                name: "posts".into(),
+                owner_app: APP.into(),
+                fields: vec![FieldDescriptor {
+                    name: "title".into(),
+                    ty: "string".into(),
+                    required: true,
+                    ..Default::default()
+                }],
+                indexes: vec![],
+            },
+        ]
+    };
+
+    let p = paths("warm_multi_boot");
+    let be = backend(&p);
+    let engine = MigrationEngine::new();
+    let cfg = exec_cfg();
+
+    // --- Cold deploy: create both collections. ---
+    let desired1 = desired_snapshot(PROJECT, &set()).expect("desired");
+    let plan1 = engine
+        .plan_declarative(
+            &desired1,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &sqlite_author(),
+            &[],
+            &guard_cfg(),
+        )
+        .expect("plan cold");
+    engine
+        .apply_declarative(&plan1, Approval::None, &be, &cfg, "deployer")
+        .await
+        .expect("apply cold deploy");
+
+    // Both tables exist + seed one row in each.
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    for t in ["users", "posts"] {
+        let rows = be
+            .actor()
+            .query(&format!(
+                "SELECT name FROM main.sqlite_master WHERE type='table' AND name='{t}'"
+            ))
+            .await
+            .expect("introspect");
+        assert_eq!(rows.len(), 1, "table {t} must exist after the cold deploy");
+    }
+    be.actor()
+        .exec("INSERT INTO main.users (id, handle) VALUES ('u1', 'ada')")
+        .await
+        .expect("seed users");
+    be.actor()
+        .exec("INSERT INTO main.posts (id, title) VALUES ('p1', 'hello')")
+        .await
+        .expect("seed posts");
+
+    // --- WARM reboot: a fresh isolate re-introspects the live file and re-plans the
+    //     SAME declared set. The diff against the REAL live schema must be EMPTY —
+    //     no spurious drop of either table (the H1 declared-set guard). ---
+    let live = be.snapshot_schema_sqlite().await.expect("introspect live");
+    let own: HashMap<String, String> =
+        desired1.ownership.iter().map(|(t, a)| (t.clone(), a.clone())).collect();
+    let desired2 = desired_snapshot(PROJECT, &set()).expect("re-desired");
+    let plan2 = engine
+        .plan_declarative(&desired2, &live, &own, &sqlite_author(), &[], &guard_cfg())
+        .expect("warm re-plan");
+    assert!(
+        plan2.plain.items.is_empty() && plan2.rebuilds.is_empty(),
+        "a warm reboot of the same declared set must yield an EMPTY diff (no spurious \
+         drop/add/rebuild); got plain={:?} rebuilds={}",
+        plan2.plain.items.iter().map(|i| i.migration.name.clone()).collect::<Vec<_>>(),
+        plan2.rebuilds.len()
+    );
+    // Applying the empty plan is a clean no-op.
+    engine
+        .apply_declarative(&plan2, Approval::None, &be, &cfg, "deployer")
+        .await
+        .expect("applying the empty warm-reboot plan is a no-op");
+
+    // BOTH tables are still present + usable after the warm reboot: the seeded rows
+    // survive AND a fresh write into each succeeds (no table was dropped/recreated).
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .exec("INSERT INTO main.users (id, handle) VALUES ('u2', 'grace')")
+        .await
+        .expect("users still usable after warm reboot");
+    be.actor()
+        .exec("INSERT INTO main.posts (id, title) VALUES ('p2', 'world')")
+        .await
+        .expect("posts still usable after warm reboot");
+    let users_n = be
+        .actor()
+        .query("SELECT COUNT(*) FROM main.users")
+        .await
+        .expect("count users");
+    let posts_n = be
+        .actor()
+        .query("SELECT COUNT(*) FROM main.posts")
+        .await
+        .expect("count posts");
+    assert_eq!(users_n[0][0].as_deref(), Some("2"), "users: seeded + new row both present");
+    assert_eq!(posts_n[0][0].as_deref(), Some("2"), "posts: seeded + new row both present");
+}
+
+// ---------------------------------------------------------------------------
 // (5) BASELINE (H3): a SQLite baseline records the live schema as a `'baseline'`
 //     journal entry WITHOUT running its `up`, adopting an existing journal-less
 //     file. First-entry semantics: idempotent for the same version, refuses a
