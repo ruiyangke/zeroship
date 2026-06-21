@@ -515,12 +515,28 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
             Authorization::Deny
         }
 
+        // -- Total `_mig` confinement in CreatorUp (M1) — the catch-all backstop --
+        // A creator has NO business touching `_mig` in ANY way, including a plain
+        // `SELECT … FROM "_mig".schema_migrations` (an `AuthAction::Read` with
+        // `accessor: None`, which the trigger/view-body arm above does NOT cover
+        // because that arm requires `accessor.is_some()`). Without this arm such a
+        // Read falls through to the `_ => Allow` catch-all and the creator can read
+        // the immutable journal. Deny ANY action whose OUTER database_name is `_mig`
+        // in CreatorUp (Read included), ahead of the catch-all. EngineJournal is
+        // unaffected — the engine's own journal reads/writes are allowed by the arms
+        // above and by the catch-all in engine mode.
+        action if targets_mig && matches!(current, Mode::CreatorUp) => {
+            let _ = action;
+            Authorization::Deny
+        }
+
         // -- Everything else: allowed (creator DDL/DML on `main`, SELECT/READ) --
         // CreateTable/CreateIndex/CreateTrigger/CreateView/DML on `main` (the app
         // file; database_name `Some("main")` or `None`) flow here, as do
         // SELECT/READ/Recursive. Reads are not a confinement concern (cross-tenant
         // reads are already impossible — no foreign alias is bound). Transaction
-        // control, temp creates, and Analyze/Reindex are handled above.
+        // control, temp creates, and Analyze/Reindex are handled above. The engine's
+        // own `_mig` Reads (EngineJournal mode) also land here and are allowed.
         _ => Authorization::Allow,
     }
 }
@@ -895,6 +911,50 @@ mod tests {
             authorize(&m, &ctx(AuthAction::Reindex { index_name: "ix_users" }, None, None)),
             Authorization::Allow,
             "REINDEX with None db (main) must be allowed"
+        );
+    }
+
+    // M1: a creator `up` doing a plain `SELECT … FROM "_mig".schema_migrations` is a
+    // `Read { accessor: None }` on `_mig`. Pre-fix it fell through to the `_ => Allow`
+    // catch-all (the trigger/view-body arm requires `accessor.is_some()`), letting the
+    // creator read the immutable journal. It must now be DENIED in CreatorUp — while
+    // the engine's own journal reads (EngineJournal mode) stay allowed.
+    #[test]
+    fn creator_read_of_mig_denied_engine_read_allowed() {
+        let m = AuthMode::new();
+        // Creator mode: a bare Read on `_mig` (no accessor) must be denied.
+        m.store(Mode::CreatorUp);
+        assert_eq!(
+            authorize(
+                &m,
+                &ctx(
+                    AuthAction::Read {
+                        table_name: "schema_migrations",
+                        column_name: "version",
+                    },
+                    Some(MIG_ALIAS),
+                    None
+                )
+            ),
+            Authorization::Deny,
+            "creator SELECT FROM \"_mig\".schema_migrations must be denied (M1)"
+        );
+        // The engine's own journal reads (EngineJournal mode) stay allowed.
+        m.store(Mode::EngineJournal);
+        assert_eq!(
+            authorize(
+                &m,
+                &ctx(
+                    AuthAction::Read {
+                        table_name: "schema_migrations",
+                        column_name: "version",
+                    },
+                    Some(MIG_ALIAS),
+                    None
+                )
+            ),
+            Authorization::Allow,
+            "engine journal Read on _mig must stay allowed"
         );
     }
 
