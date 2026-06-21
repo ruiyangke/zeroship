@@ -2060,6 +2060,19 @@ impl DeclarativeAuthor {
         self.dialect
     }
 
+    /// Select the per-dialect DDL emission seam (P1). The dialect choice is made
+    /// ONCE here; the render methods are thin callers of the returned emitter. A
+    /// closed `SqlDialect` enum ⇒ an exhaustive match (a new engine would not
+    /// compile until it has an emitter).
+    fn emitter(&self) -> Box<dyn DdlEmitter> {
+        match self.dialect {
+            SqlDialect::Postgres => Box::new(PgEmitter {
+                project_schema: self.project_schema.clone(),
+            }),
+            SqlDialect::Sqlite => Box::new(SqliteEmitter),
+        }
+    }
+
     /// Render `<schema>.<object>`, both parts quoted.
     fn qualified(&self, object: &str) -> String {
         format!("{}.{}", quote_ident(&self.project_schema), quote_ident(object))
@@ -3293,75 +3306,14 @@ impl DeclarativeAuthor {
     /// `diff.rs:15-26` reasoning (it never emits a volatile default either). The
     /// classifier therefore correctly classifies it additive, not destructive.
     fn render_add_column(&self, table: &str, c: &ColumnSnapshot) -> Migration {
-        let is_sqlite = matches!(self.dialect, SqlDialect::Sqlite);
-        let null = if c.nullable { "" } else { " NOT NULL" };
-        // DEFAULT clause, or a STORED GENERATED clause for the T12 `__fts` column.
-        let default = default_clause(c.default.as_deref());
-        // **P4 HALF A** — inline `/* zsenc:… */` for an encrypted column added
-        // after the table exists (e.g. a later-declared `t.encrypted` field).
-        let enc = c
-            .encryption_sentinel
-            .as_deref()
-            .map(|s| format!(" {s}"))
-            .unwrap_or_default();
-        // PHASE 4 — on SQLite the table is `main` (the app file): emit an UNqualified
-        // `ALTER TABLE <t> ADD COLUMN …`. A schema-qualified `"schema"."t"` would
-        // resolve to no table ("no such table"). The PG path keeps `self.qualified`.
-        let table_ref = if is_sqlite {
-            quote_ident(table)
-        } else {
-            self.qualified(table)
-        };
-        // PHASE 4 — on SQLite the mask sentinel rides INLINE in the column clause
-        // (there is NO `COMMENT ON COLUMN` in SQLite — it is a syntax error). SQLite
-        // preserves the inline `/* … */` comment through `ADD COLUMN` in
-        // `sqlite_master.sql` (verified), so the P5 drift recovery
-        // (`recover_inline_sentinel`) round-trips it from the stored CREATE text
-        // exactly like a create-time sentinel. The PG path appends `COMMENT ON COLUMN`
-        // after the statement.
-        //
-        // `comment_sentinel` holds the BARE body (`__zsmask:…` / `zsenc:…`, no
-        // `/* */`); the SQLite inline form needs the `/* */` wrapper. The ENCRYPTED
-        // column case is already covered by `enc` above (`encryption_sentinel` is the
-        // pre-wrapped `/* zsenc:… */` form), so only the MASKED-SIBLING case
-        // (`comment_sentinel` set, `encryption_sentinel` unset) rides here — wrapped.
-        let sqlite_inline_sentinel = if is_sqlite && c.encryption_sentinel.is_none() {
-            c.comment_sentinel
-                .as_deref()
-                .map(|s| format!(" /* {s} */"))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-        let mut up = format!(
-            "ALTER TABLE {} ADD COLUMN {} {}{}{}{}{}",
-            table_ref,
-            quote_ident(&c.name),
-            ddl_type(&c.data_type),
-            enc,
-            sqlite_inline_sentinel,
-            null,
-            default,
-        );
-        // **P4 HALF A** (PG only) — a column added via ADD COLUMN carries its comment
-        // sentinel (`__zsmask:…` for a masked sibling, `zsenc:…` for an
-        // encrypted column) in the same migration (atomic with the column). On SQLite
-        // the sentinel already rode inline above (no `COMMENT ON COLUMN`).
-        if !is_sqlite {
-            if let Some(stmt) = self.comment_stmt(table, c) {
-                up.push_str(";\n");
-                up.push_str(&stmt);
-            }
-        }
-        let down = format!(
-            "ALTER TABLE {} DROP COLUMN {}",
-            table_ref,
-            quote_ident(&c.name)
-        );
+        // P1 — emission delegated to the per-dialect `DdlEmitter` (the mask /
+        // encrypted sentinel spelling + qualification differ by dialect). This
+        // method owns only the migration identity / flags.
+        let (up, down) = self.emitter().add_column(table, c);
         self.make(
             &format!("add_column_{table}_{}", c.name),
             up,
-            Some(down),
+            down,
             MigrationFlags::default(),
             Vec::new(),
         )
@@ -3461,64 +3413,13 @@ impl DeclarativeAuthor {
         idx: &IndexSnapshot,
         depends_on: Vec<MigrationId>,
     ) -> Migration {
-        // The snapshot carries the index's covered columns VERBATIM (1a), so we
-        // emit them directly — no name-based reconstruction (which broke for
-        // composite / custom-named indexes, recovering `a_b` from `events_a_b_idx`
-        // and producing `column "a_b" does not exist`).
-        let unique = if idx.unique { "UNIQUE " } else { "" };
-        // **T12** — `USING <method>` for a non-btree index (GIN over the `__fts`
-        // tsvector, ivfflat/hnsw over a vector column). A btree index omits the
-        // clause (PG's default), so existing btree indexes are byte-unchanged.
-        let using = if idx.access_method == "btree" {
-            String::new()
-        } else {
-            format!(" USING {}", idx.access_method)
-        };
-        // Per-column operator class for an ANN index (`"col" vector_cosine_ops`).
-        // The (emission-only) opclass applies to the single ANN column; a plain /
-        // GIN index has `opclass = None` and emits the bare column list.
-        let opclass_suffix = idx
-            .opclass
-            .as_deref()
-            .map(|oc| format!(" {oc}"))
-            .unwrap_or_default();
-        let col_list = idx
-            .columns
-            .iter()
-            .map(|c| format!("{}{opclass_suffix}", quote_ident(c)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        // ivfflat takes a `WITH (lists = N)` storage parameter (matches
-        // plugin-db's runtime `WITH (lists = 100)`); other methods take none.
-        let with_clause = if idx.access_method == "ivfflat" {
-            " WITH (lists = 100)"
-        } else {
-            ""
-        };
-        // PHASE 4 — SQLite indexes are UNqualified (`main` = the app file), and
-        // SQLite has no `USING <method>` / `WITH (lists=…)` (those PG access-method
-        // clauses are emitted only on the PG arm; a SQLite B-tree is the only kind
-        // the additive index path emits). The schema qualifier is on neither the
-        // index name nor the table.
-        let (up, down) = if matches!(self.dialect, SqlDialect::Sqlite) {
-            (
-                format!(
-                    "CREATE {unique}INDEX IF NOT EXISTS {} ON {} ({col_list})",
-                    quote_ident(&idx.name),
-                    quote_ident(table),
-                ),
-                format!("DROP INDEX IF EXISTS {}", quote_ident(&idx.name)),
-            )
-        } else {
-            (
-                format!(
-                    "CREATE {unique}INDEX IF NOT EXISTS {} ON {}{using} ({col_list}){with_clause}",
-                    quote_ident(&idx.name),
-                    self.qualified(table),
-                ),
-                format!("DROP INDEX IF EXISTS {}", self.qualified(&idx.name)),
-            )
-        };
+        // P1 — emission delegated to the per-dialect `DdlEmitter`: PG spells the
+        // access-method (`USING …`), the per-column opclass, the `WITH (lists=…)`
+        // storage param and qualifies; SQLite emits a plain unqualified B-tree
+        // index. (The snapshot carries covered columns VERBATIM — 1a — so the
+        // emitter writes them directly, no name-based reconstruction.) This method
+        // owns only the migration identity / deps.
+        let (up, down) = self.emitter().create_index(table, idx);
         self.make(
             &format!("create_index_{}", idx.name),
             up,
@@ -3538,12 +3439,8 @@ impl DeclarativeAuthor {
     /// UNqualified. A schema-qualified `"default"."c2"` resolves to no table on
     /// SQLite ("no such table: default.c2"). The PG path keeps `self.qualified`.
     fn render_drop_table(&self, table: &str) -> Migration {
-        let table_ref = if matches!(self.dialect, SqlDialect::Sqlite) {
-            quote_ident(table)
-        } else {
-            self.qualified(table)
-        };
-        let up = format!("DROP TABLE {table_ref}");
+        // P1 — qualification delegated to the per-dialect `DdlEmitter`.
+        let up = self.emitter().drop_table_up(table);
         self.make(
             &format!("drop_table_{table}"),
             up,
@@ -3559,16 +3456,8 @@ impl DeclarativeAuthor {
     /// UNqualified (`main` = the app file). A schema-qualified `"schema"."t"` would
     /// resolve to no table. The PG path keeps `self.qualified`.
     fn render_drop_column(&self, table: &str, col: &str) -> Migration {
-        let table_ref = if matches!(self.dialect, SqlDialect::Sqlite) {
-            quote_ident(table)
-        } else {
-            self.qualified(table)
-        };
-        let up = format!(
-            "ALTER TABLE {} DROP COLUMN {}",
-            table_ref,
-            quote_ident(col)
-        );
+        // P1 — qualification delegated to the per-dialect `DdlEmitter`.
+        let up = self.emitter().drop_column_up(table, col);
         self.make(
             &format!("drop_column_{table}_{col}"),
             up,
@@ -3594,16 +3483,11 @@ impl DeclarativeAuthor {
     /// `down` recreates nothing because the declarative re-diff would re-add the
     /// index from the desired snapshot.
     fn render_drop_index(&self, idx: &IndexSnapshot) -> Migration {
-        // PHASE 4 — on SQLite an index lives UNqualified in `main` (the app file).
-        // A schema-qualified `DROP INDEX "schema"."ix"` does NOT error on SQLite — it
-        // SILENTLY no-ops (the qualified name never resolves), reporting success while
-        // the index survives: silent drift, the dangerous failure mode. Emit the
-        // unqualified `DROP INDEX <name>` so the index is ACTUALLY dropped.
-        let up = if matches!(self.dialect, SqlDialect::Sqlite) {
-            format!("DROP INDEX {}", quote_ident(&idx.name))
-        } else {
-            format!("DROP INDEX {}", self.qualified(&idx.name))
-        };
+        // P1 — the index-name qualification is delegated to the per-dialect
+        // `DdlEmitter` (PG qualifies; SQLite MUST emit unqualified or the DROP
+        // silently no-ops). The unique-vs-plain GATING below is diff-logic and
+        // stays here.
+        let up = self.emitter().drop_index_up(&idx.name);
         let flags = if idx.unique {
             destructive_flags()
         } else {
@@ -3616,6 +3500,276 @@ impl DeclarativeAuthor {
             flags,
             Vec::new(),
         )
+    }
+}
+
+// ===========================================================================
+// DdlEmitter — the per-dialect EMISSION seam (P1).
+//
+// The differ's diff-COMPARISON is dialect-neutral; only the final DDL spelling
+// differs by dialect. This trait isolates exactly those emission concerns — the
+// ADD COLUMN statement (incl. mask/encrypted sentinel spelling), the CREATE INDEX
+// up/down (access-method + WITH + qualification), and the DROP table/column/index
+// qualification — so `DeclarativeAuthor`'s render methods are thin callers and the
+// dialect choice is made ONCE (via `DeclarativeAuthor::emitter`).
+//
+// Two impls — `PgEmitter` (schema-qualified PG DDL: access methods, WITH storage
+// params, `COMMENT ON COLUMN` sentinels) and `SqliteEmitter` (unqualified `main`
+// DDL: inline `/* … */` sentinels, plain B-tree indexes). Each method body is
+// the EXACT former `if is_sqlite { … } else { … }` arm, moved VERBATIM — code
+// motion, not a rewrite, so the bytes are unchanged (the Phase-0 goldens prove
+// it). The ROUTING branches (FK inline-vs-defer, rebuild-vs-ALTER, system-field
+// index skip, the unreachable guard) stay in `diff()` — they are diff-logic.
+//
+// NOT extracted (out of P1 scope, see the design): `render_create_table` (PG,
+// snapshot-rendered) and `render_create_table_sqlite` (routes to the shared
+// `zeroship_schema` emitter) — different input shapes, no shared byte bar.
+trait DdlEmitter {
+    /// Render an `ALTER TABLE … ADD COLUMN …` as `(up, down)`. The mask / encrypted
+    /// sentinel spelling differs by dialect: PG appends a trailing
+    /// `COMMENT ON COLUMN`; `SQLite` rides the sentinel inline in the column clause.
+    fn add_column(&self, table: &str, c: &ColumnSnapshot) -> (String, Option<String>);
+
+    /// Render a `CREATE … INDEX …` as `(up, down)`. PG emits the access-method
+    /// (`USING …`), the `WITH (lists=…)` storage param, and qualifies; `SQLite`
+    /// emits a plain unqualified b-tree index.
+    fn create_index(&self, table: &str, idx: &IndexSnapshot) -> (String, String);
+
+    /// Render the `up` of a `DROP TABLE` (qualification differs).
+    fn drop_table_up(&self, table: &str) -> String;
+
+    /// Render the `up` of an `ALTER TABLE … DROP COLUMN …` (qualification differs).
+    fn drop_column_up(&self, table: &str, col: &str) -> String;
+
+    /// Render the `up` of a `DROP INDEX …`. PG qualifies the index name; `SQLite`
+    /// must emit it unqualified (a qualified `DROP INDEX "schema"."ix"` silently
+    /// no-ops on `SQLite` — the dangerous silent-drift mode).
+    fn drop_index_up(&self, idx_name: &str) -> String;
+}
+
+/// Postgres DDL emitter — schema-qualified, access-method / `WITH`-aware, with
+/// trailing `COMMENT ON COLUMN` sentinels. Holds the project schema for
+/// qualification. Byte-identical to the former PG arm of each render method.
+struct PgEmitter {
+    project_schema: String,
+}
+
+impl PgEmitter {
+    /// Render `<schema>.<object>`, both parts quoted. (Was `DeclarativeAuthor::qualified`.)
+    fn qualified(&self, object: &str) -> String {
+        format!(
+            "{}.{}",
+            quote_ident(&self.project_schema),
+            quote_ident(object)
+        )
+    }
+
+    /// The PG `COMMENT ON COLUMN` sentinel statement, or `None`. (Was
+    /// `DeclarativeAuthor::comment_stmt`, moved VERBATIM.)
+    fn comment_stmt(&self, table: &str, c: &ColumnSnapshot) -> Option<String> {
+        let sentinel = c.comment_sentinel.as_deref()?;
+        let escaped = sentinel.replace('\'', "''");
+        Some(format!(
+            "COMMENT ON COLUMN {}.{} IS '{}'",
+            self.qualified(table),
+            quote_ident(&c.name),
+            escaped,
+        ))
+    }
+}
+
+impl DdlEmitter for PgEmitter {
+    fn add_column(&self, table: &str, c: &ColumnSnapshot) -> (String, Option<String>) {
+        let null = if c.nullable { "" } else { " NOT NULL" };
+        let default = default_clause(c.default.as_deref());
+        let enc = c
+            .encryption_sentinel
+            .as_deref()
+            .map(|s| format!(" {s}"))
+            .unwrap_or_default();
+        let table_ref = self.qualified(table);
+        let mut up = format!(
+            "ALTER TABLE {} ADD COLUMN {} {}{}{}{}",
+            table_ref,
+            quote_ident(&c.name),
+            ddl_type(&c.data_type),
+            enc,
+            null,
+            default,
+        );
+        // **P4 HALF A** (PG only) — a column added via ADD COLUMN carries its comment
+        // sentinel (`__zsmask:…` for a masked sibling, `zsenc:…` for an
+        // encrypted column) in the same migration (atomic with the column).
+        if let Some(stmt) = self.comment_stmt(table, c) {
+            up.push_str(";\n");
+            up.push_str(&stmt);
+        }
+        let down = format!(
+            "ALTER TABLE {} DROP COLUMN {}",
+            table_ref,
+            quote_ident(&c.name)
+        );
+        (up, Some(down))
+    }
+
+    fn create_index(&self, table: &str, idx: &IndexSnapshot) -> (String, String) {
+        let unique = if idx.unique { "UNIQUE " } else { "" };
+        // **T12** — `USING <method>` for a non-btree index (GIN over the `__fts`
+        // tsvector, ivfflat/hnsw over a vector column). A btree index omits the
+        // clause (PG's default), so existing btree indexes are byte-unchanged.
+        let using = if idx.access_method == "btree" {
+            String::new()
+        } else {
+            format!(" USING {}", idx.access_method)
+        };
+        // Per-column operator class for an ANN index (`"col" vector_cosine_ops`).
+        let opclass_suffix = idx
+            .opclass
+            .as_deref()
+            .map(|oc| format!(" {oc}"))
+            .unwrap_or_default();
+        let col_list = idx
+            .columns
+            .iter()
+            .map(|c| format!("{}{opclass_suffix}", quote_ident(c)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // ivfflat takes a `WITH (lists = N)` storage parameter.
+        let with_clause = if idx.access_method == "ivfflat" {
+            " WITH (lists = 100)"
+        } else {
+            ""
+        };
+        (
+            format!(
+                "CREATE {unique}INDEX IF NOT EXISTS {} ON {}{using} ({col_list}){with_clause}",
+                quote_ident(&idx.name),
+                self.qualified(table),
+            ),
+            format!("DROP INDEX IF EXISTS {}", self.qualified(&idx.name)),
+        )
+    }
+
+    fn drop_table_up(&self, table: &str) -> String {
+        format!("DROP TABLE {}", self.qualified(table))
+    }
+
+    fn drop_column_up(&self, table: &str, col: &str) -> String {
+        format!(
+            "ALTER TABLE {} DROP COLUMN {}",
+            self.qualified(table),
+            quote_ident(col)
+        )
+    }
+
+    fn drop_index_up(&self, idx_name: &str) -> String {
+        format!("DROP INDEX {}", self.qualified(idx_name))
+    }
+}
+
+/// Confined-`SQLite` DDL emitter — unqualified (`main` = the app file), inline
+/// `/* … */` sentinels, plain b-tree indexes (no `USING` / `WITH`). Byte-identical
+/// to the former `SQLite` arm of each render method.
+struct SqliteEmitter;
+
+impl DdlEmitter for SqliteEmitter {
+    fn add_column(&self, table: &str, c: &ColumnSnapshot) -> (String, Option<String>) {
+        let null = if c.nullable { "" } else { " NOT NULL" };
+        let default = default_clause(c.default.as_deref());
+        // **P4 HALF A** — inline `/* zsenc:… */` for an encrypted column added
+        // after the table exists.
+        let enc = c
+            .encryption_sentinel
+            .as_deref()
+            .map(|s| format!(" {s}"))
+            .unwrap_or_default();
+        // PHASE 4 — on SQLite the table is `main` (the app file): emit an UNqualified
+        // `ALTER TABLE <t> ADD COLUMN …`. A schema-qualified `"schema"."t"` would
+        // resolve to no table ("no such table").
+        let table_ref = quote_ident(table);
+        // PHASE 4 — on SQLite the mask sentinel rides INLINE in the column clause
+        // (there is NO `COMMENT ON COLUMN` in SQLite — it is a syntax error). SQLite
+        // preserves the inline `/* … */` comment through `ADD COLUMN` in
+        // `sqlite_master.sql` (verified), so the P5 drift recovery
+        // (`recover_inline_sentinel`) round-trips it from the stored CREATE text
+        // exactly like a create-time sentinel.
+        //
+        // `comment_sentinel` holds the BARE body (`__zsmask:…` / `zsenc:…`, no
+        // `/* */`); the SQLite inline form needs the `/* */` wrapper. The ENCRYPTED
+        // column case is already covered by `enc` above (`encryption_sentinel` is the
+        // pre-wrapped `/* zsenc:… */` form), so only the MASKED-SIBLING case
+        // (`comment_sentinel` set, `encryption_sentinel` unset) rides here — wrapped.
+        let sqlite_inline_sentinel = if c.encryption_sentinel.is_none() {
+            c.comment_sentinel
+                .as_deref()
+                .map(|s| format!(" /* {s} */"))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let up = format!(
+            "ALTER TABLE {} ADD COLUMN {} {}{}{}{}{}",
+            table_ref,
+            quote_ident(&c.name),
+            ddl_type(&c.data_type),
+            enc,
+            sqlite_inline_sentinel,
+            null,
+            default,
+        );
+        let down = format!(
+            "ALTER TABLE {} DROP COLUMN {}",
+            table_ref,
+            quote_ident(&c.name)
+        );
+        (up, Some(down))
+    }
+
+    fn create_index(&self, table: &str, idx: &IndexSnapshot) -> (String, String) {
+        let unique = if idx.unique { "UNIQUE " } else { "" };
+        let col_list = idx
+            .columns
+            .iter()
+            .map(|c| quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // PHASE 4 — SQLite indexes are UNqualified (`main` = the app file), and
+        // SQLite has no `USING <method>` / `WITH (lists=…)` (those PG access-method
+        // clauses are emitted only on the PG arm; a SQLite B-tree is the only kind
+        // the additive index path emits). The schema qualifier is on neither the
+        // index name nor the table.
+        (
+            format!(
+                "CREATE {unique}INDEX IF NOT EXISTS {} ON {} ({col_list})",
+                quote_ident(&idx.name),
+                quote_ident(table),
+            ),
+            format!("DROP INDEX IF EXISTS {}", quote_ident(&idx.name)),
+        )
+    }
+
+    fn drop_table_up(&self, table: &str) -> String {
+        format!("DROP TABLE {}", quote_ident(table))
+    }
+
+    fn drop_column_up(&self, table: &str, col: &str) -> String {
+        // PHASE 4 — SQLite ≥ 3.35 has native `ALTER TABLE … DROP COLUMN`; emit it
+        // UNqualified (`main` = the app file). A schema-qualified `"schema"."t"` would
+        // resolve to no table.
+        format!(
+            "ALTER TABLE {} DROP COLUMN {}",
+            quote_ident(table),
+            quote_ident(col)
+        )
+    }
+
+    fn drop_index_up(&self, idx_name: &str) -> String {
+        // PHASE 4 — on SQLite an index lives UNqualified in `main` (the app file).
+        // A schema-qualified `DROP INDEX "schema"."ix"` does NOT error on SQLite — it
+        // SILENTLY no-ops (the qualified name never resolves), reporting success while
+        // the index survives: silent drift, the dangerous failure mode. Emit the
+        // unqualified `DROP INDEX <name>` so the index is ACTUALLY dropped.
+        format!("DROP INDEX {}", quote_ident(idx_name))
     }
 }
 
