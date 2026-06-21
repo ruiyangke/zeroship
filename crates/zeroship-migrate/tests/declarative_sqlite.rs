@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zeroship_migrate::{
     desired_snapshot, CollectionDescriptor, DeclarativeAuthor, DeclarativeError, FieldDescriptor,
-    GuardConfig, GuardError, IndexDescriptor, MigrationEngine, SchemaSnapshot, SqliteBackend,
-    SqlGuard,
+    GuardConfig, GuardError, IndexDescriptor, Migration, MigrationEngine, SchemaSnapshot,
+    SqliteBackend, SqlGuard,
 };
 use zeroship_schema::query::SqlDialect;
 
@@ -864,4 +864,247 @@ async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {
         plan.renames.is_empty(),
         "SQLite renames are routed to rebuilds, never expand-contract (run_expand)"
     );
+}
+
+// ===========================================================================
+// GOLDEN DDL — exact-byte assertions on the SQLite emitter (Phase 0).
+//
+// These pin the FULL `up`/`down` strings the SQLite render paths emit today, for
+// the create-table / add-column / create-index / drop-{table,column,index} paths
+// over a representative schema (PK, plain column, mask column, encrypted column,
+// FK, index). They are the explicit byte bar for the P1 `DdlEmitter` extraction:
+// it is code-motion only, so these MUST stay green and UNCHANGED across it.
+//
+// Note the create-table `up` is the SHARED `zeroship_schema` emitter's output
+// (routed, out of P1 scope) — pinned here so we'd notice an unrelated drift; the
+// add-column / index / drop paths are the engine's OWN render methods (the P1
+// extraction targets).
+// ===========================================================================
+
+fn golden_find<'a>(migs: &'a [Migration], name: &str) -> &'a Migration {
+    migs.iter()
+        .find(|m| m.name == name)
+        .unwrap_or_else(|| panic!("migration {name} present; have: {:?}",
+            migs.iter().map(|m| &m.name).collect::<Vec<_>>()))
+}
+
+fn golden_live(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String, String>) {
+    let d = desired_snapshot(PROJECT, descs).expect("golden live desired_snapshot");
+    let ownership: HashMap<String, String> =
+        d.ownership.iter().map(|(t, a)| (t.clone(), a.clone())).collect();
+    (d.snapshot, ownership)
+}
+
+#[compio::test]
+async fn golden_sqlite_create_table_and_index() {
+    let users = CollectionDescriptor {
+        name: "users".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "handle".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let accounts = CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: APP.into(),
+        fields: vec![
+            FieldDescriptor {
+                name: "title".into(),
+                ty: "string".into(),
+                required: true,
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "ssn".into(),
+                ty: "string".into(),
+                mask: Some(serde_json::json!({ "kind": "last4", "classification": "pii" })),
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "secret".into(),
+                ty: "bytes".into(),
+                encrypted: Some(serde_json::json!({ "mode": "randomized", "keyId": "k1" })),
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "owner".into(),
+                ty: "ref".into(),
+                references: Some("users".into()),
+                ..Default::default()
+            },
+        ],
+        indexes: vec![IndexDescriptor {
+            name: "accounts_title_idx".into(),
+            columns: vec!["title".into()],
+            unique: false,
+        }],
+    };
+    let desired = desired_snapshot(PROJECT, &[users, accounts]).expect("desired_snapshot");
+    let migs = sqlite_author()
+        .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .expect("greenfield diff")
+        .all_migrations();
+
+    // create_table users — shared emitter, unqualified, system-field indexes inline.
+    let users_mig = golden_find(&migs, "create_table_users");
+    assert_eq!(
+        users_mig.up,
+        "CREATE TABLE IF NOT EXISTS \"users\" (\n  id TEXT PRIMARY KEY,\n  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  created_by TEXT NULL,\n  updated_by TEXT NULL,\n  version INTEGER NOT NULL DEFAULT 1,\n  deleted_at TEXT NULL,\n  \"handle\" TEXT NOT NULL\n);\nCREATE INDEX IF NOT EXISTS \"users_deleted_at_idx\" ON \"users\" (\"deleted_at\");\nCREATE INDEX IF NOT EXISTS \"users_updated_at_idx\" ON \"users\" (\"updated_at\");\nCREATE INDEX IF NOT EXISTS \"users_created_by_idx\" ON \"users\" (\"created_by\")",
+    );
+    assert_eq!(users_mig.down.as_deref(), Some(r#"DROP TABLE "users""#));
+
+    // create_table accounts — mask sibling + encrypted BLOB inline + inline FK.
+    let accounts_mig = golden_find(&migs, "create_table_accounts");
+    assert_eq!(
+        accounts_mig.up,
+        "CREATE TABLE IF NOT EXISTS \"accounts\" (\n  id TEXT PRIMARY KEY,\n  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  created_by TEXT NULL,\n  updated_by TEXT NULL,\n  version INTEGER NOT NULL DEFAULT 1,\n  deleted_at TEXT NULL,\n  \"title\" TEXT NOT NULL,\n  \"ssn\" TEXT,\n  \"ssn_masked\" TEXT NOT NULL /* __zsmask:kind=last4,classification=pii */,\n  \"secret\" BLOB /* zsenc:randomised:k1:string */,\n  \"owner\" TEXT,\n  CONSTRAINT \"owner_fkey\" FOREIGN KEY (\"owner\") REFERENCES \"users\" (id) ON DELETE RESTRICT ON UPDATE RESTRICT DEFERRABLE INITIALLY DEFERRED\n);\nCREATE INDEX IF NOT EXISTS \"accounts_deleted_at_idx\" ON \"accounts\" (\"deleted_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_updated_at_idx\" ON \"accounts\" (\"updated_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_created_by_idx\" ON \"accounts\" (\"created_by\")",
+    );
+    assert_eq!(accounts_mig.down.as_deref(), Some(r#"DROP TABLE "accounts""#));
+
+    // create_index — engine render path: unqualified, no USING/WITH, unqualified DROP.
+    let idx = golden_find(&migs, "create_index_accounts_title_idx");
+    assert_eq!(
+        idx.up,
+        r#"CREATE INDEX IF NOT EXISTS "accounts_title_idx" ON "accounts" ("title")"#,
+    );
+    assert_eq!(idx.down.as_deref(), Some(r#"DROP INDEX IF EXISTS "accounts_title_idx""#));
+}
+
+#[compio::test]
+async fn golden_sqlite_add_column() {
+    let v1 = CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "title".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let mut v2 = v1.clone();
+    v2.fields.push(FieldDescriptor {
+        name: "note".into(),
+        ty: "string".into(),
+        ..Default::default()
+    });
+    v2.fields.push(FieldDescriptor {
+        name: "ssn".into(),
+        ty: "string".into(),
+        mask: Some(serde_json::json!({ "kind": "last4", "classification": "pii" })),
+        ..Default::default()
+    });
+    v2.fields.push(FieldDescriptor {
+        name: "secret".into(),
+        ty: "bytes".into(),
+        encrypted: Some(serde_json::json!({ "mode": "randomized", "keyId": "k1" })),
+        ..Default::default()
+    });
+    let (live, ownership) = golden_live(std::slice::from_ref(&v1));
+    let desired2 = desired_snapshot(PROJECT, &[v2]).expect("v2 desired");
+    let migs = sqlite_author()
+        .diff(&desired2, &live, &ownership, &[])
+        .expect("add-column diff")
+        .all_migrations();
+
+    // plain — unqualified, lowercase `text` (engine `ddl_type`, NOT shared `TEXT`),
+    // NO COMMENT ON COLUMN.
+    let note = golden_find(&migs, "add_column_accounts_note");
+    assert_eq!(note.up, r#"ALTER TABLE "accounts" ADD COLUMN "note" text"#);
+    assert_eq!(note.down.as_deref(), Some(r#"ALTER TABLE "accounts" DROP COLUMN "note""#));
+
+    // encrypted — inline `/* zsenc:… */`, lowercase `bytea`, no COMMENT tail.
+    let secret = golden_find(&migs, "add_column_accounts_secret");
+    assert_eq!(
+        secret.up,
+        r#"ALTER TABLE "accounts" ADD COLUMN "secret" bytea /* zsenc:randomised:k1:string */"#,
+    );
+    assert_eq!(
+        secret.down.as_deref(),
+        Some(r#"ALTER TABLE "accounts" DROP COLUMN "secret""#),
+    );
+
+    // mask sibling — inline `/* __zsmask:… */` (no COMMENT ON COLUMN on SQLite).
+    let masked = golden_find(&migs, "add_column_accounts_ssn_masked");
+    assert_eq!(
+        masked.up,
+        r#"ALTER TABLE "accounts" ADD COLUMN "ssn_masked" text /* __zsmask:kind=last4,classification=pii */"#,
+    );
+    assert_eq!(
+        masked.down.as_deref(),
+        Some(r#"ALTER TABLE "accounts" DROP COLUMN "ssn_masked""#),
+    );
+}
+
+#[compio::test]
+async fn golden_sqlite_drops() {
+    let live_accounts = CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: APP.into(),
+        fields: vec![
+            FieldDescriptor {
+                name: "title".into(),
+                ty: "string".into(),
+                required: true,
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "drop_me".into(),
+                ty: "string".into(),
+                ..Default::default()
+            },
+        ],
+        indexes: vec![IndexDescriptor {
+            name: "accounts_dropidx".into(),
+            columns: vec!["title".into()],
+            unique: false,
+        }],
+    };
+    let gone = CollectionDescriptor {
+        name: "gone".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "x".into(),
+            ty: "string".into(),
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let desired_accounts = CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "title".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let (live, ownership) = golden_live(&[live_accounts, gone]);
+    let desired = desired_snapshot(PROJECT, &[desired_accounts]).expect("desired");
+    let migs = sqlite_author()
+        .diff(&desired, &live, &ownership, &[])
+        .expect("drop diff")
+        .all_migrations();
+
+    // DROP COLUMN — unqualified (native SQLite ≥ 3.35).
+    let dc = golden_find(&migs, "drop_column_accounts_drop_me");
+    assert_eq!(dc.up, r#"ALTER TABLE "accounts" DROP COLUMN "drop_me""#);
+    assert_eq!(dc.down, None);
+
+    // DROP INDEX — unqualified (a qualified DROP silently no-ops on SQLite).
+    let di = golden_find(&migs, "drop_index_accounts_dropidx");
+    assert_eq!(di.up, r#"DROP INDEX "accounts_dropidx""#);
+    assert_eq!(di.down, None);
+
+    // DROP TABLE — unqualified (main IS the app file).
+    let dt = golden_find(&migs, "drop_table_gone");
+    assert_eq!(dt.up, r#"DROP TABLE "gone""#);
+    assert_eq!(dt.down, None);
 }
