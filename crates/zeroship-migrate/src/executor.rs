@@ -1950,7 +1950,8 @@ pub(crate) async fn apply_transactional(
             &format!(
                 "INSERT INTO {meta}.schema_migrations
                      (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
-                 VALUES ('applied', $1, $2, $3, $4, $5, 'completed', 'success', $6)"
+                 VALUES ('{applied}', $1, $2, $3, $4, $5, 'completed', 'success', $6)",
+                applied = journal::EventKind::Applied.as_str()
             ),
             &[
                 &m.version.as_str(),
@@ -2996,7 +2997,8 @@ pub(crate) async fn rollback_one_transactional(
             &format!(
                 "INSERT INTO {meta}.schema_migrations
                      (event_kind, version, name, checksum, \"by\", exec_ms)
-                 VALUES ('rolled_back', $1, $2, $3, $4, $5)"
+                 VALUES ('{rolled_back}', $1, $2, $3, $4, $5)",
+                rolled_back = journal::EventKind::RolledBack.as_str()
             ),
             &[
                 &m.version.as_str(),
