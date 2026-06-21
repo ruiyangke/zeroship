@@ -26,7 +26,7 @@ mod rollback_sql;
 
 use std::collections::HashMap;
 
-use crate::backend::{MigrationBackend, SessionSnapshot};
+use crate::backend::{JournalAtomicity, MigrationBackend, SessionSnapshot};
 use crate::baseline::{BaselineError, BaselineOutcome};
 use crate::db::ExecutorConfig;
 use crate::drift::{ChecksumDriftReport, DriftError, SchemaSnapshot};
@@ -190,6 +190,14 @@ impl MigrationBackend for SqliteBackend {
         // borrow of a `static` is sufficient — no per-backend state.
         static GUARD: crate::guard::SqliteDescriptorGuard = crate::guard::SqliteDescriptorGuard;
         &GUARD
+    }
+
+    fn journal_atomicity(&self) -> JournalAtomicity {
+        // SQLite DDL is transactional: the `<up>` and its journal row commit
+        // together in one transaction. SQLite has no non-txn DDL at all
+        // (`transaction:false` is rejected at the dialect boundary, design §2.3/L3),
+        // so the atomic path is the ONLY path. Byte-identical apply behavior.
+        JournalAtomicity::Transactional
     }
 
     // -- connection / session I/O -------------------------------------------
