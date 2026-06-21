@@ -1,14 +1,14 @@
 //! Additive transactional rollback on SQLite (SQLite-parity design §2.7, P5).
 //!
 //! Reverses ONE applied migration via its `down` SQL inside a single
-//! `BEGIN IMMEDIATE` transaction, then appends an immutable `_rolled_back` journal
-//! event with a freshly-allocated shared `event_seq` — the SAME atomic
-//! single-connection model as the P2 apply path (§2.2.2):
+//! `BEGIN IMMEDIATE` transaction, then appends an immutable `rolled_back` event to
+//! the consolidated `schema_migrations` table (event_seq is native AUTOINCREMENT)
+//! — the SAME atomic single-connection model as the P2 apply path (§2.2.2):
 //!
 //! ```text
 //! BEGIN IMMEDIATE        (EngineJournal — the engine owns txn boundaries)
 //!   CreatorUp:  run the creator `down` (confined from `_mig`)
-//!   EngineJournal: alloc event_seq + INSERT schema_migrations_rolled_back
+//!   EngineJournal: INSERT schema_migrations (event_kind='rolled_back')
 //! COMMIT                 (down + rolled_back event commit atomically)
 //! ```
 //!
@@ -32,7 +32,7 @@
 //!
 //! The creator `down` runs under `CreatorUp` — a malicious `down` attempting a
 //! `_mig` write / ATTACH / PRAGMA is still denied by the authorizer at prepare
-//! time. The `_rolled_back` journal write runs under `EngineJournal` (the only
+//! time. The `rolled_back` journal write runs under `EngineJournal` (the only
 //! mode that permits a `_mig` write). The mode flip lands between separate
 //! prepares, never inside one batch.
 
@@ -116,11 +116,11 @@ async fn run_rollback_txn(
         actor.set_mode(Mode::CreatorUp).await?;
         actor.exec(down).await?;
 
-        // 3. EngineJournal — allocate event_seq from the SHARED counter + INSERT the
-        //    immutable rolled_back event. SEPARATE prepares from the creator `down`,
-        //    mode flip strictly between.
+        // 3. EngineJournal — INSERT the immutable rolled_back event into the
+        //    consolidated table (event_seq is AUTOINCREMENT, not supplied). SEPARATE
+        //    prepares from the creator `down`, mode flip strictly between. A
+        //    rolled_back row leaves kind/phase/outcome NULL (the event-shape CHECK).
         actor.set_mode(Mode::EngineJournal).await?;
-        let seq = journal_sql::alloc_event_seq(actor).await?;
         let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
         let version = journal_sql::sql_lit(m.version.as_str());
         let name = journal_sql::sql_lit(&m.name);
@@ -128,9 +128,9 @@ async fn run_rollback_txn(
         let by = journal_sql::sql_lit(applied_by);
         actor
             .exec(&format!(
-                "INSERT INTO \"_mig\".schema_migrations_rolled_back \
-                 (event_seq, version, name, checksum, rolled_back_by, exec_ms) \
-                 VALUES ({seq}, {version}, {name}, {checksum}, {by}, {exec_ms})"
+                "INSERT INTO \"_mig\".schema_migrations \
+                 (event_kind, version, name, checksum, \"by\", exec_ms) \
+                 VALUES ('rolled_back', {version}, {name}, {checksum}, {by}, {exec_ms})"
             ))
             .await?;
         Ok::<(), SqliteActorError>(())

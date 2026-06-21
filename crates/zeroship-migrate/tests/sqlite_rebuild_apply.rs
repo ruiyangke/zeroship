@@ -640,8 +640,8 @@ async fn confinement_holds_across_rebuild() {
     // A creator `up` cannot reach `_mig`.
     let mig_attack = simple_migration(
         "mig_write_attack",
-        "INSERT INTO \"_mig\".schema_migrations (event_seq, version, name, checksum, \
-         applied_by, phase, outcome, kind) VALUES (999, 'x', 'x', 'x', 'x', 'completed', \
+        "INSERT INTO \"_mig\".schema_migrations (event_kind, version, name, checksum, \
+         \"by\", phase, outcome, kind) VALUES ('applied', 'x', 'x', 'x', 'x', 'completed', \
          'success', 'apply');",
     );
     let e = be

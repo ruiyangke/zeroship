@@ -1,11 +1,21 @@
 //! The migration journal — `schema_migrations` (design §2.2).
 //!
 //! Append-only + tamper-evident. The journal of record,
-//! `<meta>.schema_migrations`, holds one row per **completed** migration
-//! (version, name, checksum, timestamp, actor, exec time, phase, outcome) and
-//! is guarded by an **immutability trigger** that rejects UPDATE and DELETE
-//! outright — the billing-ledger pattern (`db/changelog/changesets/
+//! `<meta>.schema_migrations`, is the SINGLE events table: one row per migration
+//! **event** — an `applied` (forward) event or a `rolled_back` event,
+//! discriminated by the `event_kind` column. It carries (version, name,
+//! checksum, actor, timestamp, exec time) for every event, plus the
+//! applied-only fields (kind, phase, outcome) which are NULL on a `rolled_back`
+//! row. It is guarded by an **immutability trigger** that rejects UPDATE and
+//! DELETE outright — the billing-ledger pattern (`db/changelog/changesets/
 //! 0048_credit_ledger.sql`): a correction is a *new* row, never an edit.
+//!
+//! **The total event order is the native auto-increment PK** (`event_seq
+//! BIGINT GENERATED ALWAYS AS IDENTITY`). There is NO standalone sequence
+//! object and NO separate rolled-back table: a single IDENTITY column assigns a
+//! strictly-increasing `event_seq` that never ties (even across two events in
+//! one transaction), and the net state of a version is its **latest event** on
+//! that scale. `applied()` reads net state off it.
 //!
 //! Non-transactional migrations (`CREATE INDEX CONCURRENTLY`, …) cannot wrap
 //! their DDL + journal write in one transaction, so they use a **two-phase**
@@ -108,6 +118,43 @@ impl JournaledKind {
     }
 }
 
+/// The discriminator on the consolidated `schema_migrations` events table: an
+/// `applied` (forward) event or a `rolled_back` event. Distinct from the
+/// applied-only [`JournaledKind`] (`apply`/`baseline`/`squash`/`repeatable`),
+/// which describes the migration TYPE of an `applied` event; `event_kind` is the
+/// direction (applied vs rolled-back). A `rolled_back` row carries NULL for the
+/// applied-only columns (`kind`/`phase`/`outcome`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventKind {
+    /// A forward apply event (the migration's `up` ran, or was recorded-not-run
+    /// for a baseline/squash). Carries `kind`/`phase`/`outcome`.
+    Applied,
+    /// A rollback event (the migration's `down` ran). The applied-only columns
+    /// are NULL.
+    RolledBack,
+}
+
+impl EventKind {
+    /// The wire string stored in the `event_kind` column.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::RolledBack => "rolled_back",
+        }
+    }
+
+    /// Parse an event_kind from its wire string.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "applied" => Some(Self::Applied),
+            "rolled_back" => Some(Self::RolledBack),
+            _ => None,
+        }
+    }
+}
+
 /// One journal entry (completed) or inflight marker (started), as read back for
 /// the drift check + pending computation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,70 +220,62 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
     conn.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {meta}"))
         .await?;
 
-    // 1b. A single monotonic sequence shared by BOTH event tables
-    //     (schema_migrations + schema_migrations_rolled_back), so the latest event
-    //     per version is decided by a total order that never ties — `now()` can be
-    //     equal across two events in one transaction / fast succession, but the
-    //     sequence is strictly increasing. `applied()` reads net state off it.
-    conn.batch_execute(&format!(
-        "CREATE SEQUENCE IF NOT EXISTS {meta}.schema_migrations_event_seq"
-    ))
-    .await?;
-
-    // 2. The append-only journal of record (design §2.2 columns).
+    // 2. The append-only journal of record — the SINGLE consolidated events table
+    //    (design §2.2 columns). ONE row per migration EVENT: an `applied` (forward)
+    //    event or a `rolled_back` event, discriminated by `event_kind`.
     //
-    //    Rollback is append-only too (Plan 5): a `completed` row is NEVER deleted
-    //    on rollback — a `rolled_back` event is appended to the side table below.
-    //    A rolled-back migration becomes pending again and may be RE-APPLIED,
-    //    which appends a NEW `completed` row for the same version. So `version` is
-    //    NOT a primary key here (multiple completed events per version are legal,
-    //    across rollback↔re-apply cycles); the surrogate `event_seq` is the PK and
-    //    the total order. The immutability trigger still forbids UPDATE/DELETE, so
-    //    the log stays append-only.
-    //    The `kind` column (Plan 9) distinguishes how the `completed` event was
-    //    recorded, for auditing: an ordinary `apply` (the `up` actually ran), a
-    //    `baseline` (the schema already existed; the `up` was recorded NOT run —
-    //    adoption path), a `squash` (a supersession; the squash's `up` was
-    //    recorded NOT run because `[v1..vN]` were already applied — see
-    //    [`record_baseline`] / [`crate::squash`]), or a `repeatable` (v3 Plan E —
-    //    a re-applied repeatable's `up` ran, but the version's IDENTITY is a
-    //    repeatable, not a once-only). The `repeatable` kind is LOAD-BEARING for the
-    //    tamper guard: the drift exemption anchors on the JOURNALED kind, not the
-    //    attacker-suppliable `flags.repeatable`, so flipping an applied once-only to
-    //    `repeatable=true` is a kind mismatch ⇒ tamper, not a re-run. It does NOT
-    //    alter the append-only model — it is just a fact stamped on each immutable
-    //    event row.
+    //    **Native total order.** `event_seq BIGINT GENERATED ALWAYS AS IDENTITY` is
+    //    the PK and the total order: the DB assigns a strictly-increasing value on
+    //    every INSERT (the INSERTs never supply it). It never ties — `now()` can be
+    //    equal across two events in one transaction, but the IDENTITY is monotonic
+    //    — so the latest event per version decides net state. There is NO standalone
+    //    sequence object (the old `CREATE SEQUENCE … schema_migrations_event_seq` +
+    //    `DEFAULT nextval(...)` are gone; the column is its OWN identity).
+    //
+    //    Rollback is append-only too (Plan 5): an `applied` row is NEVER deleted on
+    //    rollback — a `rolled_back` event is appended to THIS SAME table. A
+    //    rolled-back migration becomes pending again and may be RE-APPLIED, which
+    //    appends a NEW `applied` row for the same version. So `version` is NOT a
+    //    primary key here (multiple events per version are legal, across
+    //    rollback↔re-apply cycles); `event_seq` is the PK and the total order. The
+    //    immutability trigger forbids UPDATE/DELETE, so the log stays append-only.
+    //
+    //    `event_kind` ∈ {`applied`,`rolled_back`} is the event DIRECTION. Distinct
+    //    from `kind` ∈ {`apply`,`baseline`,`squash`,`repeatable`}, the migration
+    //    TYPE of an `applied` event (Plan 9): an ordinary `apply` (the `up` actually
+    //    ran), a `baseline` (the schema already existed; the `up` recorded NOT run —
+    //    adoption path), a `squash` (a supersession; the squash's `up` recorded NOT
+    //    run because `[v1..vN]` were already applied — see [`record_baseline`] /
+    //    [`crate::squash`]), or a `repeatable` (v3 Plan E — a re-applied
+    //    repeatable's `up` ran, but the version's IDENTITY is a repeatable). The
+    //    `repeatable` kind is LOAD-BEARING for the tamper guard: the drift exemption
+    //    anchors on the JOURNALED kind, not the attacker-suppliable
+    //    `flags.repeatable`, so flipping an applied once-only to `repeatable=true` is
+    //    a kind mismatch ⇒ tamper. The applied-only columns (`kind`/`phase`/
+    //    `outcome`) are NULL on a `rolled_back` row; a CHECK documents the
+    //    per-`event_kind` shape (`applied` ⇒ all three NOT NULL; `rolled_back` ⇒ all
+    //    three NULL). `by`/`at` unify the old `applied_by`/`rolled_back_by` and
+    //    `applied_at`/`rolled_back_at`.
     conn.batch_execute(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations (
-            event_seq   BIGINT PRIMARY KEY DEFAULT nextval('{meta}.schema_migrations_event_seq'),
+            event_seq   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            event_kind  TEXT NOT NULL CHECK (event_kind IN ('applied','rolled_back')),
             version     TEXT NOT NULL,
             name        TEXT NOT NULL,
             checksum    TEXT NOT NULL,
-            applied_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-            applied_by  TEXT NOT NULL,
+            \"at\"        TIMESTAMPTZ NOT NULL DEFAULT now(),
+            \"by\"        TEXT NOT NULL,
             exec_ms     BIGINT,
-            phase       TEXT NOT NULL CHECK (phase IN ('started','completed')),
-            outcome     TEXT NOT NULL,
-            kind        TEXT NOT NULL DEFAULT 'apply'
-                          CHECK (kind IN ('apply','baseline','squash','repeatable'))
-        )"
-    ))
-    .await?;
-
-    // 2a. The append-only ROLLBACK event log (Plan 5). One row per `rolled_back`
-    //     event, written by the ADMIN (the migrator has no grant on the meta
-    //     schema — Plan 3 C1). It shares the same monotonic sequence as
-    //     schema_migrations so `applied()` can order a version's completed vs
-    //     rolled-back events on one total scale. Immutable too (trigger below).
-    conn.batch_execute(&format!(
-        "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations_rolled_back (
-            event_seq     BIGINT PRIMARY KEY DEFAULT nextval('{meta}.schema_migrations_event_seq'),
-            version       TEXT NOT NULL,
-            name          TEXT NOT NULL,
-            checksum      TEXT NOT NULL,
-            rolled_back_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            rolled_back_by TEXT NOT NULL,
-            exec_ms       BIGINT
+            phase       TEXT CHECK (phase IS NULL OR phase IN ('started','completed')),
+            outcome     TEXT,
+            kind        TEXT CHECK (kind IS NULL OR kind IN ('apply','baseline','squash','repeatable')),
+            CONSTRAINT schema_migrations_event_shape CHECK (
+                (event_kind = 'applied'
+                     AND kind IS NOT NULL AND phase IS NOT NULL AND outcome IS NOT NULL)
+                OR
+                (event_kind = 'rolled_back'
+                     AND kind IS NULL AND phase IS NULL AND outcome IS NULL)
+            )
         )"
     ))
     .await?;
@@ -255,9 +294,11 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
     //     caller. (No FK to `schema_migrations` — that table allows multiple
     //     `completed` rows per version, so there is no single PK to reference; the
     //     squash_version is validated by the caller before journaling.)
+    //     (No shared sequence: supersedes is a relation [set-membership of edges],
+    //     not part of the event total order, so it gets its OWN native IDENTITY PK.)
     conn.batch_execute(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations_supersedes (
-            event_seq          BIGINT PRIMARY KEY DEFAULT nextval('{meta}.schema_migrations_event_seq'),
+            id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             squash_version     TEXT NOT NULL,
             superseded_version TEXT NOT NULL,
             recorded_at        TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -281,7 +322,8 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
 
     // 3. Immutability trigger function (billing-ledger pattern,
     //    0048_credit_ledger). Reject UPDATE + DELETE outright. Shared by both
-    //    append-only event tables (schema_migrations + …_rolled_back).
+    //    append-only tables (the consolidated schema_migrations events table +
+    //    …_supersedes).
     conn.batch_execute(&format!(
         "CREATE OR REPLACE FUNCTION {trg_fn}() RETURNS trigger AS $fn$
          BEGIN
@@ -291,9 +333,10 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
     ))
     .await?;
 
-    // 4. Attach the immutability triggers idempotently to ALL THREE append-only
-    //    event tables (PG 16 has no CREATE TRIGGER IF NOT EXISTS; guard on
-    //    pg_trigger).
+    // 4. Attach the immutability triggers idempotently to BOTH append-only
+    //    tables — the consolidated events table + …_supersedes (PG 16 has no
+    //    CREATE TRIGGER IF NOT EXISTS; guard on pg_trigger). Fewer triggers overall
+    //    now that the two event tables are one.
     //
     //    TWO triggers per table, both calling the same RAISE function:
     //      - `BEFORE UPDATE OR DELETE ... FOR EACH ROW` — blocks row mutation.
@@ -317,11 +360,7 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
     //    fixed names sidestep all of that. They are still quoted as identifiers
     //    (`trg_q`) for uniformity, and the existence check compares the raw name
     //    as a string literal (`trg_lit`).
-    for tbl in [
-        "schema_migrations",
-        "schema_migrations_rolled_back",
-        "schema_migrations_supersedes",
-    ] {
+    for tbl in ["schema_migrations", "schema_migrations_supersedes"] {
         for (trg, level, events) in [
             ("zs_immutable_trg", "FOR EACH ROW", "UPDATE OR DELETE"),
             (
@@ -358,15 +397,15 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
 /// Read the **net applied state** of the journal for the drift check + pending
 /// computation, ordered by version (`UUIDv7` apply order).
 ///
-/// The journal is append-only, including rollback (Plan 5): a `completed` row is
-/// never deleted; rollback **appends** a `rolled_back` event to
-/// `schema_migrations_rolled_back`, and a re-apply appends a fresh `completed`
+/// The journal is append-only, including rollback (Plan 5): an `applied` row is
+/// never deleted; rollback **appends** a `rolled_back` event to the SAME
+/// `schema_migrations` events table, and a re-apply appends a fresh `applied`
 /// row. So a version can carry several events over rollback↔re-apply cycles. The
-/// NET state of a version is decided by its **latest event** on the shared
-/// monotonic `event_seq` scale:
+/// NET state of a version is decided by its **latest event** on the native
+/// monotonic `event_seq` (IDENTITY PK) scale:
 ///
-/// - latest event is `completed` ⇒ the version is **applied** (returned as a
-///   [`Phase::Completed`] entry carrying that latest completed row's checksum, so
+/// - latest event is `applied` ⇒ the version is **applied** (returned as a
+///   [`Phase::Completed`] entry carrying that latest applied row's checksum, so
 ///   the drift check compares against the current incarnation);
 /// - latest event is `rolled_back` ⇒ the version is **pending again** (NOT
 ///   returned as completed; it re-enters `pending = set − completed` and can be
@@ -382,43 +421,36 @@ pub async fn applied(
     cfg: &ExecutorConfig,
 ) -> Result<Vec<AppliedEntry>, JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema);
-    // Union every completed + rolled_back event onto one (event_seq, kind, …)
-    // stream, take the LATEST per version with DISTINCT ON, and keep only the
-    // versions whose latest event is `completed` (net-applied). Then UNION the
-    // lone `started` inflight markers for versions that are NOT net-completed.
-    // `event_kind` distinguishes the source table (completed vs rolled_back) for
-    // the net-state decision; `mig_kind` carries the journaled `kind` column of a
-    // `completed` row (NULL for a rolled_back event, which has no kind) and rides
-    // through to the net-applied entry so the drift/tamper guard can read it.
+    // Single-table net state: take the LATEST event per version (DISTINCT ON over
+    // the consolidated events table, by `event_seq DESC`) and keep only the
+    // versions whose latest event is `applied` (net-applied). Then UNION the lone
+    // `started` inflight markers for versions that are NOT net-applied. No 3-way
+    // UNION of separate tables — `event_kind` is now a column on the one table.
+    // `mig_kind` carries the journaled `kind` column of the latest event (NULL for
+    // a `rolled_back` event, which has no kind) and rides through to the net-applied
+    // entry so the drift/tamper guard can read it. The net-applied entry is
+    // surfaced as `phase='completed'` (the executor's pending/drift machinery keys
+    // on Phase, not the raw stored phase).
     let rows = conn
         .query(
             &format!(
-                "WITH events AS (
-                     SELECT version, checksum, event_seq,
-                            'completed' AS event_kind, kind AS mig_kind
+                "WITH latest AS (
+                     SELECT DISTINCT ON (version) version, checksum, event_kind, kind AS mig_kind
                        FROM {meta}.schema_migrations
-                     UNION ALL
-                     SELECT version, checksum, event_seq,
-                            'rolled_back' AS event_kind, NULL AS mig_kind
-                       FROM {meta}.schema_migrations_rolled_back
-                 ),
-                 latest AS (
-                     SELECT DISTINCT ON (version) version, checksum, event_kind, mig_kind
-                       FROM events
                       ORDER BY version, event_seq DESC
                  ),
-                 net_completed AS (
+                 net_applied AS (
                      SELECT version, checksum, mig_kind
-                       FROM latest WHERE event_kind = 'completed'
+                       FROM latest WHERE event_kind = 'applied'
                  ),
                  union_all AS (
                      SELECT version, checksum, mig_kind, 'completed' AS phase
-                       FROM net_completed
+                       FROM net_applied
                      UNION ALL
                      SELECT version, checksum, NULL AS mig_kind, 'started' AS phase
                        FROM {meta}.schema_migrations_inflight i
                       WHERE NOT EXISTS (
-                          SELECT 1 FROM net_completed n WHERE n.version = i.version
+                          SELECT 1 FROM net_applied n WHERE n.version = i.version
                       )
                  )
                  SELECT version, checksum, mig_kind, phase FROM union_all
@@ -451,9 +483,9 @@ pub async fn applied(
     Ok(out)
 }
 
-/// A net-rolled-back version: one whose **latest** event (on the shared
-/// `event_seq` scale) is a `rolled_back` event. Such a version is pending again
-/// and re-appliable; the status API surfaces it distinctly from net-applied.
+/// A net-rolled-back version: one whose **latest** event (on the native
+/// `event_seq` IDENTITY scale) is a `rolled_back` event. Such a version is pending
+/// again and re-appliable; the status API surfaces it distinctly from net-applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RolledBackEntry {
     /// The version (`mig_…`).
@@ -473,9 +505,9 @@ pub struct RolledBackEntry {
 /// The kind of a [`HistoryEvent`] — a forward apply or a rollback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryKind {
-    /// A `completed` apply event (from `schema_migrations`).
+    /// An `applied` (forward) event (`event_kind='applied'`).
     Completed,
-    /// A `rolled_back` event (from `schema_migrations_rolled_back`).
+    /// A `rolled_back` event (`event_kind='rolled_back'`).
     RolledBack,
 }
 
@@ -522,25 +554,17 @@ pub async fn net_rolled_back(
     let rows = conn
         .query(
             &format!(
-                "WITH events AS (
-                     SELECT version, name, checksum, applied_by AS actor, exec_ms,
-                            applied_at AS at, event_seq, 'completed' AS kind
-                       FROM {meta}.schema_migrations
-                     UNION ALL
-                     SELECT version, name, checksum, rolled_back_by AS actor, exec_ms,
-                            rolled_back_at AS at, event_seq, 'rolled_back' AS kind
-                       FROM {meta}.schema_migrations_rolled_back
-                 ),
-                 latest AS (
+                "WITH latest AS (
                      SELECT DISTINCT ON (version)
-                            version, name, checksum, actor, exec_ms, at, kind
-                       FROM events
+                            version, name, checksum, \"by\" AS actor, exec_ms,
+                            \"at\" AS at, event_kind
+                       FROM {meta}.schema_migrations
                       ORDER BY version, event_seq DESC
                  )
                  SELECT version, name, checksum, actor,
                         exec_ms, to_char(at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS at
                    FROM latest
-                  WHERE kind = 'rolled_back'
+                  WHERE event_kind = 'rolled_back'
                   ORDER BY version COLLATE \"C\""
             ),
             &[],
@@ -560,8 +584,9 @@ pub async fn net_rolled_back(
     Ok(out)
 }
 
-/// Read the FULL append-only event log (every `completed` + every `rolled_back`
-/// event) in `event_seq` order — the audit trail (design §2.2, scenario 46).
+/// Read the FULL append-only event log (every `applied` + every `rolled_back`
+/// event) in `event_seq` order — the audit trail (design §2.2, scenario 46). One
+/// table, ordered by the native IDENTITY PK.
 ///
 /// This is NOT net state: a version that was applied, rolled back, and re-applied
 /// appears as three events here. Read-only.
@@ -577,14 +602,9 @@ pub async fn history(
         .query(
             &format!(
                 "SELECT event_seq, version, name,
-                        to_char(applied_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS at,
-                        exec_ms, applied_by AS actor, checksum, 'completed' AS kind
+                        to_char(\"at\", 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS at,
+                        exec_ms, \"by\" AS actor, checksum, event_kind
                    FROM {meta}.schema_migrations
-                 UNION ALL
-                 SELECT event_seq, version, name,
-                        to_char(rolled_back_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS at,
-                        exec_ms, rolled_back_by AS actor, checksum, 'rolled_back' AS kind
-                   FROM {meta}.schema_migrations_rolled_back
                  ORDER BY event_seq"
             ),
             &[],
@@ -592,9 +612,9 @@ pub async fn history(
         .await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let kind_s: String = row.get("kind");
+        let kind_s: String = row.get("event_kind");
         let kind = match kind_s.as_str() {
-            "completed" => HistoryKind::Completed,
+            "applied" => HistoryKind::Completed,
             "rolled_back" => HistoryKind::RolledBack,
             other => return Err(JournalError::BadPhase(other.to_string())),
         };
@@ -618,8 +638,10 @@ pub async fn history(
 /// C1): the executor brackets a rollback's `down` SQL under the migrator role,
 /// then `RESET ROLE`s back to admin before this journal append, exactly mirroring
 /// the up path. The append is immutable (UPDATE/DELETE forbidden by trigger); a
-/// later re-apply appends a fresh `completed` row, and `applied()` reads the
-/// latest event per version off the shared `event_seq`.
+/// later re-apply appends a fresh `applied` row, and `applied()` reads the latest
+/// event per version off the native `event_seq` IDENTITY. A `rolled_back` row
+/// carries NULL for the applied-only columns (`kind`/`phase`/`outcome`), per the
+/// `event_kind` shape CHECK.
 ///
 /// # Errors
 /// [`JournalError::Db`] on insert failure.
@@ -636,9 +658,9 @@ pub async fn record_rolled_back(
     let n = conn
         .execute(
             &format!(
-                "INSERT INTO {meta}.schema_migrations_rolled_back
-                     (version, name, checksum, rolled_back_by, exec_ms)
-                 VALUES ($1, $2, $3, $4, $5)"
+                "INSERT INTO {meta}.schema_migrations
+                     (event_kind, version, name, checksum, \"by\", exec_ms)
+                 VALUES ('rolled_back', $1, $2, $3, $4, $5)"
             ),
             &[&version, &name, &checksum, &rolled_back_by, &exec_ms],
         )
@@ -716,8 +738,8 @@ pub async fn record_completed(
         .execute(
             &format!(
                 "INSERT INTO {meta}.schema_migrations
-                     (version, name, checksum, applied_by, exec_ms, phase, outcome, kind)
-                 VALUES ($1, $2, $3, $4, $5, 'completed', 'success', $6)"
+                     (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
+                 VALUES ('applied', $1, $2, $3, $4, $5, 'completed', 'success', $6)"
             ),
             &[
                 &rec.version,
@@ -755,19 +777,12 @@ pub async fn applied_count(conn: &Client, cfg: &ExecutorConfig) -> Result<i64, J
     let row = conn
         .query_one(
             &format!(
-                "WITH events AS (
-                     SELECT version, event_seq, 'completed' AS kind
+                "WITH latest AS (
+                     SELECT DISTINCT ON (version) version, event_kind
                        FROM {meta}.schema_migrations
-                     UNION ALL
-                     SELECT version, event_seq, 'rolled_back' AS kind
-                       FROM {meta}.schema_migrations_rolled_back
-                 ),
-                 latest AS (
-                     SELECT DISTINCT ON (version) version, kind
-                       FROM events
                       ORDER BY version, event_seq DESC
                  )
-                 SELECT count(*)::bigint AS n FROM latest WHERE kind = 'completed'"
+                 SELECT count(*)::bigint AS n FROM latest WHERE event_kind = 'applied'"
             ),
             &[],
         )
@@ -779,8 +794,9 @@ pub async fn applied_count(conn: &Client, cfg: &ExecutorConfig) -> Result<i64, J
 ///
 /// A version `v_i` is satisfied-by-supersession when some squash `S` with an edge
 /// `S → v_i` in `schema_migrations_supersedes` is itself **net-applied** (its
-/// latest event in `schema_migrations`/`…_rolled_back` is `completed`) AND `S`'s
-/// recorded `kind` is `'squash'`. The executor unions this with the net-applied set
+/// latest event in the consolidated `schema_migrations` table has
+/// `event_kind='applied'`) AND `S`'s recorded `kind` is `'squash'`. The executor
+/// unions this with the net-applied set
 /// to compute `pending`, so a superseded `v_i` is never (re-)run.
 ///
 /// Only edges of a NET-APPLIED squash count: if `S` was rolled back, its
@@ -802,16 +818,9 @@ pub async fn superseded_versions(
     let rows = conn
         .query(
             &format!(
-                "WITH events AS (
-                     SELECT version, event_seq, 'completed' AS event_kind, kind AS mig_kind
+                "WITH latest AS (
+                     SELECT DISTINCT ON (version) version, event_kind, kind AS mig_kind
                        FROM {meta}.schema_migrations
-                     UNION ALL
-                     SELECT version, event_seq, 'rolled_back' AS event_kind, NULL AS mig_kind
-                       FROM {meta}.schema_migrations_rolled_back
-                 ),
-                 latest AS (
-                     SELECT DISTINCT ON (version) version, event_kind, mig_kind
-                       FROM events
                       ORDER BY version, event_seq DESC
                  ),
                  net_applied_squashes AS (
@@ -821,7 +830,7 @@ pub async fn superseded_versions(
                      -- `squash_version` would over-supersede — suppressing a real
                      -- migration (the C1 forgery class).
                      SELECT version FROM latest
-                      WHERE event_kind = 'completed' AND mig_kind = 'squash'
+                      WHERE event_kind = 'applied' AND mig_kind = 'squash'
                  )
                  SELECT DISTINCT s.superseded_version AS v
                    FROM {meta}.schema_migrations_supersedes s
@@ -846,15 +855,16 @@ pub async fn superseded_versions(
 /// **most recent** `completed` event's checksum for that identity.
 ///
 /// Returns a map `version → latest completed checksum`, taking the latest by the
-/// shared monotonic `event_seq` (which never ties, even within one transaction).
-/// Versions with no `completed` row are absent from the map (never applied).
+/// native monotonic `event_seq` IDENTITY (which never ties, even within one
+/// transaction). Versions with no `applied` row are absent from the map (never
+/// applied).
 ///
-/// Unlike [`applied`], this reads ONLY `schema_migrations` (the completed-event
-/// table) and is INDIFFERENT to rollback: a repeatable carries `down: None` and
-/// is never rolled back, so its latest event is always its newest `completed`
-/// one. (Reading `…_rolled_back` here would be meaningless — there are no
-/// repeatable rollbacks — and would risk masking the latest completed checksum
-/// behind an unrelated event.) The drift/pending machinery still uses [`applied`]
+/// Unlike [`applied`], this filters to `event_kind='applied'` (the forward-event
+/// rows) and is INDIFFERENT to rollback: a repeatable carries `down: None` and is
+/// never rolled back, so its latest event is always its newest `applied` one.
+/// (`rolled_back` rows carry `kind=NULL`, so they are excluded by the
+/// `kind='repeatable'` filter regardless — but the explicit `event_kind='applied'`
+/// keeps the intent legible.) The drift/pending machinery still uses [`applied`]
 /// for versioned migrations; this is the repeatable-specific lens.
 ///
 /// **Kind-aware (v3 Plan E re-critic #2).** Only events whose journaled
@@ -878,7 +888,7 @@ pub async fn latest_completed_checksums(
             &format!(
                 "SELECT DISTINCT ON (version) version, checksum
                    FROM {meta}.schema_migrations
-                  WHERE kind = 'repeatable'
+                  WHERE event_kind = 'applied' AND kind = 'repeatable'
                   ORDER BY version, event_seq DESC"
             ),
             &[],
@@ -960,8 +970,8 @@ async fn record_baseline_inner(
         .execute(
             &format!(
                 "INSERT INTO {meta}.schema_migrations
-                     (version, name, checksum, applied_by, exec_ms, phase, outcome, kind)
-                 VALUES ($1, $2, $3, $4, 0, 'completed', 'success', $5)"
+                     (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
+                 VALUES ('applied', $1, $2, $3, $4, 0, 'completed', 'success', $5)"
             ),
             &[&rec.version, &rec.name, &rec.checksum, &rec.applied_by, &rec.kind],
         )

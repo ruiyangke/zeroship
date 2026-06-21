@@ -157,8 +157,8 @@ fn assert_attack_succeeds_unhardened(setup: &str, attack_sql: &str) {
 /// (and its immutability trigger) resolve on the raw control connection.
 const CONTROL_JOURNAL_SETUP: &str = "\
     CREATE TABLE \"_mig\".schema_migrations (\
-        event_seq INTEGER PRIMARY KEY, version TEXT, name TEXT, checksum TEXT, \
-        applied_by TEXT, phase TEXT, outcome TEXT, kind TEXT); \
+        event_seq INTEGER PRIMARY KEY AUTOINCREMENT, event_kind TEXT, version TEXT, \
+        name TEXT, checksum TEXT, \"by\" TEXT, phase TEXT, outcome TEXT, kind TEXT); \
     CREATE TRIGGER \"_mig\".zs_immutable_trg_schema_migrations_delete \
         BEFORE DELETE ON \"_mig\".schema_migrations \
         BEGIN SELECT RAISE(ABORT,'append-only'); END;";
@@ -277,8 +277,8 @@ async fn confine_f_direct_journal_insert_denied() {
     let be = backend(&p);
     be.ensure_journal_sqlite().await.expect("bootstrap journal");
     let attack = "INSERT INTO \"_mig\".schema_migrations \
-         (event_seq, version, name, checksum, applied_by, phase, outcome, kind) \
-         VALUES (999, 'forged', 'x', 'x', 'attacker', 'completed', 'success', 'apply');";
+         (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
+         VALUES ('applied', 'forged', 'x', 'x', 'attacker', 'completed', 'success', 'apply');";
     assert_denied_and_journal_clean(&be, attack, DenyKind::Authorizer).await;
     // Positive control: the forged INSERT succeeds on a raw connection (no
     // authorizer; INSERT is not blocked by the append-only trigger).
@@ -318,8 +318,8 @@ async fn confine_g_creator_trigger_writing_mig_denied() {
     // (g1) Qualified `_mig.` body — parser-rejected, journal stays clean.
     let qualified = "CREATE TRIGGER t1 AFTER INSERT ON app_tbl BEGIN \
             INSERT INTO \"_mig\".schema_migrations \
-            (event_seq, version, name, checksum, applied_by, phase, outcome, kind) \
-            VALUES (998, 'forged', 'x', 'x', 'attacker', 'completed', 'success', 'apply'); \
+            (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
+            VALUES ('applied', 'forged', 'x', 'x', 'attacker', 'completed', 'success', 'apply'); \
          END;";
     assert_denied_and_journal_clean(&be, qualified, DenyKind::AuthorizerOrDefensive).await;
 
@@ -332,8 +332,8 @@ async fn confine_g_creator_trigger_writing_mig_denied() {
         &mig(
             "CREATE TRIGGER t2 AFTER INSERT ON app_tbl BEGIN \
                 INSERT INTO schema_migrations \
-                (event_seq, version, name, checksum, applied_by, phase, outcome, kind) \
-                VALUES (997, 'forged2', 'x', 'x', 'attacker', 'completed', 'success', 'apply'); \
+                (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
+                VALUES ('applied', 'forged2', 'x', 'x', 'attacker', 'completed', 'success', 'apply'); \
              END;",
         ),
         "tester",

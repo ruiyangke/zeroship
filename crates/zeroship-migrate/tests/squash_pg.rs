@@ -815,8 +815,8 @@ async fn superseded_versions_ignores_edges_of_non_squash_versions() {
     conn.execute(
         &format!(
             "INSERT INTO \"{meta}\".schema_migrations
-                 (version, name, checksum, applied_by, exec_ms, phase, outcome, kind)
-             VALUES ($1, 'ord', 'c', 'ci', 0, 'completed', 'success', 'apply')"
+                 (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
+             VALUES ('applied', $1, 'ord', 'c', 'ci', 0, 'completed', 'success', 'apply')"
         ),
         &[&v_ord.as_str()],
     )
@@ -826,8 +826,8 @@ async fn superseded_versions_ignores_edges_of_non_squash_versions() {
     conn.execute(
         &format!(
             "INSERT INTO \"{meta}\".schema_migrations
-                 (version, name, checksum, applied_by, exec_ms, phase, outcome, kind)
-             VALUES ($1, 'squash', 'c', 'ci', 0, 'completed', 'success', 'squash')"
+                 (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
+             VALUES ('applied', $1, 'squash', 'c', 'ci', 0, 'completed', 'success', 'squash')"
         ),
         &[&s.as_str()],
     )

@@ -1,13 +1,19 @@
-//! The SQLite journal: schema, immutability, shared monotonic `event_seq`, and
-//! the atomic single-connection apply (SQLite-parity design §2.2 / §2.2.1 /
-//! §2.2.2).
+//! The SQLite journal: schema, immutability, native `event_seq`, and the atomic
+//! single-connection apply (SQLite-parity design §2.2 / §2.2.1 / §2.2.2).
 //!
 //! The journal lives in the attached `_mig` database (a separate file), mirroring
 //! the PG per-project meta schema. It carries the SAME logical shape as
-//! `journal.rs` (the PG side): `schema_migrations` + `_rolled_back` + `_supersedes`
-//! event tables, an inflight side-table, and net-state computed via window
-//! functions over a SHARED monotonic `event_seq` (M4 — one counter across all
-//! three tables, never per-table AUTOINCREMENT).
+//! `journal.rs` (the PG side): a SINGLE consolidated `schema_migrations` events
+//! table (one row per `applied`/`rolled_back` event, discriminated by
+//! `event_kind`), a `_supersedes` edge table, an inflight side-table, and
+//! net-state computed via window functions over the native total order.
+//!
+//! **Native total order.** `event_seq INTEGER PRIMARY KEY AUTOINCREMENT` is the
+//! total order: SQLite assigns a strictly-increasing rowid on every INSERT (the
+//! INSERTs never supply it). AUTOINCREMENT (not bare rowid) is REQUIRED so the
+//! order is strictly monotonic and never reused — a deleted row's seq can never be
+//! recycled. There is NO standalone `event_seq` counter table and NO separate
+//! `_rolled_back` table (both removed in the "go native seq" consolidation).
 //!
 //! # Immutability (§2.2.1, defense in depth)
 //!
@@ -24,11 +30,11 @@
 //! # Atomic apply (§2.2.2)
 //!
 //! `BEGIN IMMEDIATE` → mode=CreatorUp → run the creator `up` → mode=EngineJournal
-//! → allocate `event_seq` (`UPDATE _mig.event_seq … RETURNING next-1`) + INSERT
-//! the journal row → COMMIT. The creator `up` and the journal write are SEPARATE
-//! prepare/execute calls (never one batch) so the mode flip lands between them and
-//! is read at each prepare. All on the single migration connection, strictly
-//! sequential — race-free by construction.
+//! → INSERT the journal row (the DB assigns `event_seq` via AUTOINCREMENT; no
+//! separate allocation step) → COMMIT. The creator `up` and the journal write are
+//! SEPARATE prepare/execute calls (never one batch) so the mode flip lands between
+//! them and is read at each prepare. All on the single migration connection,
+//! strictly sequential — race-free by construction.
 
 use crate::journal::{AppliedEntry, JournaledKind, Phase};
 use crate::migration::Migration;
@@ -50,55 +56,46 @@ const IMMUTABLE_TRG: &str = "zs_immutable_trg";
 pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteActorError> {
     actor.set_mode(Mode::EngineJournal).await?;
 
-    // 1. The shared monotonic sequence (M4): a single-row counter, NOT per-table
-    //    AUTOINCREMENT, so event_seq is comparable across all three event tables.
-    actor
-        .exec(
-            "CREATE TABLE IF NOT EXISTS \"_mig\".event_seq (\
-                id INTEGER PRIMARY KEY CHECK (id = 1), \
-                next INTEGER NOT NULL)",
-        )
-        .await?;
-    actor
-        .exec("INSERT OR IGNORE INTO \"_mig\".event_seq (id, next) VALUES (1, 1)")
-        .await?;
-
-    // 2. The append-only event tables. event_seq is a plain INTEGER (the assigned
-    //    value), the PRIMARY KEY + total order. version is NOT unique (rollback ↔
-    //    re-apply appends multiple completed rows). TEXT CURRENT_TIMESTAMP replaces
-    //    PG's TIMESTAMPTZ DEFAULT now().
+    // 1. The SINGLE consolidated append-only events table. `event_seq INTEGER
+    //    PRIMARY KEY AUTOINCREMENT` is the native total order — SQLite assigns it on
+    //    INSERT (never supplied); AUTOINCREMENT (not bare rowid) guarantees strictly
+    //    monotonic, never-reused values, so the latest event per version is a true
+    //    total order. One row per migration EVENT: an `applied` (forward) event or a
+    //    `rolled_back` event, discriminated by `event_kind`. version is NOT unique
+    //    (rollback ↔ re-apply appends multiple rows). TEXT CURRENT_TIMESTAMP replaces
+    //    PG's TIMESTAMPTZ DEFAULT now(); `at`/`by` unify the old
+    //    applied_at/rolled_back_at and applied_by/rolled_back_by. The applied-only
+    //    columns (kind/phase/outcome) are NULL on a `rolled_back` row; a CHECK
+    //    documents the per-event_kind shape (mirrors the PG side). There is NO
+    //    `event_seq` counter table and NO separate `_rolled_back` table any more.
     actor
         .exec(
             "CREATE TABLE IF NOT EXISTS \"_mig\".schema_migrations (\
-                event_seq  INTEGER PRIMARY KEY, \
+                event_seq  INTEGER PRIMARY KEY AUTOINCREMENT, \
+                event_kind TEXT NOT NULL CHECK (event_kind IN ('applied','rolled_back')), \
                 version    TEXT NOT NULL, \
                 name       TEXT NOT NULL, \
                 checksum   TEXT NOT NULL, \
-                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, \
-                applied_by TEXT NOT NULL, \
+                \"at\"       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+                \"by\"       TEXT NOT NULL, \
                 exec_ms    INTEGER, \
-                phase      TEXT NOT NULL CHECK (phase IN ('started','completed')), \
-                outcome    TEXT NOT NULL, \
-                kind       TEXT NOT NULL DEFAULT 'apply' \
-                             CHECK (kind IN ('apply','baseline','squash','repeatable')))",
+                phase      TEXT CHECK (phase IS NULL OR phase IN ('started','completed')), \
+                outcome    TEXT, \
+                kind       TEXT CHECK (kind IS NULL OR kind IN ('apply','baseline','squash','repeatable')), \
+                CONSTRAINT schema_migrations_event_shape CHECK ( \
+                    (event_kind = 'applied' \
+                         AND kind IS NOT NULL AND phase IS NOT NULL AND outcome IS NOT NULL) \
+                    OR \
+                    (event_kind = 'rolled_back' \
+                         AND kind IS NULL AND phase IS NULL AND outcome IS NULL)))",
         )
         .await?;
-    actor
-        .exec(
-            "CREATE TABLE IF NOT EXISTS \"_mig\".schema_migrations_rolled_back (\
-                event_seq      INTEGER PRIMARY KEY, \
-                version        TEXT NOT NULL, \
-                name           TEXT NOT NULL, \
-                checksum       TEXT NOT NULL, \
-                rolled_back_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, \
-                rolled_back_by TEXT NOT NULL, \
-                exec_ms        INTEGER)",
-        )
-        .await?;
+    // The supersedes edge table — a relation, not part of the event order, so it
+    // gets its OWN native AUTOINCREMENT PK (no shared counter).
     actor
         .exec(
             "CREATE TABLE IF NOT EXISTS \"_mig\".schema_migrations_supersedes (\
-                event_seq          INTEGER PRIMARY KEY, \
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT, \
                 squash_version     TEXT NOT NULL, \
                 superseded_version TEXT NOT NULL, \
                 recorded_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
@@ -119,7 +116,8 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
         )
         .await?;
 
-    // 4. Append-only immutability triggers on the three event tables. SQLite has
+    // 4. Append-only immutability triggers on the two append-only tables (the
+    //    consolidated events table + the supersedes edge table). SQLite has
     //    `CREATE TRIGGER IF NOT EXISTS`, so no pg_trigger-style existence guard is
     //    needed. Short table-local names (`zs_immutable_trg`) — disambiguated per
     //    table by SQLite's per-table trigger namespace, but SQLite trigger names are
@@ -127,11 +125,7 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
     //    SQLite has no TRUNCATE and no DROP-fires-DELETE-trigger, so these defend
     //    row mutation only; DROP TABLE / wholesale wipe is closed by the authorizer
     //    + DEFENSIVE (§2.2.1), not by a trigger.
-    for tbl in [
-        "schema_migrations",
-        "schema_migrations_rolled_back",
-        "schema_migrations_supersedes",
-    ] {
+    for tbl in ["schema_migrations", "schema_migrations_supersedes"] {
         for op in ["UPDATE", "DELETE"] {
             let trg = format!("{IMMUTABLE_TRG}_{tbl}_{}", op.to_ascii_lowercase());
             actor
@@ -145,22 +139,6 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
     }
 
     Ok(())
-}
-
-/// Allocate the next `event_seq` from the shared counter (§2.2). ONE statement,
-/// inside the apply transaction, under engine mode: `UPDATE … RETURNING next - 1`
-/// yields the pre-increment value atomically. Returns the allocated `event_seq`.
-pub(crate) async fn alloc_event_seq(actor: &MigrationActor) -> Result<i64, SqliteActorError> {
-    let rows = actor
-        .query("UPDATE \"_mig\".event_seq SET next = next + 1 WHERE id = 1 RETURNING next - 1")
-        .await?;
-    let cell = rows
-        .first()
-        .and_then(|r| r.first())
-        .and_then(|c| c.as_ref())
-        .ok_or_else(|| SqliteActorError::Exec("event_seq allocation returned no row".to_string()))?;
-    cell.parse::<i64>()
-        .map_err(|e| SqliteActorError::Exec(format!("event_seq parse: {e}")))
 }
 
 /// Apply ONE additive migration atomically with confinement (§2.2.2).
@@ -253,16 +231,17 @@ pub(crate) async fn baseline(
     actor.set_mode(Mode::EngineJournal).await?;
     actor.exec("BEGIN IMMEDIATE").await?;
     let result = async {
-        let seq = alloc_event_seq(actor).await?;
         let name = sql_lit(&m.name);
         let checksum = sql_lit(m.checksum.as_str());
         let applied_by_lit = sql_lit(applied_by);
         let version_lit = sql_lit(&version);
+        // event_seq is AUTOINCREMENT — not supplied. event_kind='applied' (a
+        // baseline is a forward event recorded-not-run).
         actor
             .exec(&format!(
                 "INSERT INTO \"_mig\".schema_migrations \
-                 (event_seq, version, name, checksum, applied_by, phase, outcome, kind) \
-                 VALUES ({seq}, {version_lit}, {name}, {checksum}, {applied_by_lit}, \
+                 (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
+                 VALUES ('applied', {version_lit}, {name}, {checksum}, {applied_by_lit}, \
                          'completed', 'success', 'baseline')"
             ))
             .await?;
@@ -335,10 +314,10 @@ async fn run_apply_txn(
         // engine-authored DDL that touches only `main`.
         actor.exec(&m.up).await?;
 
-        // 3. EngineJournal — allocate event_seq + INSERT the completed row. SEPARATE
-        //    prepares from the creator `up`, with the mode flip strictly between.
+        // 3. EngineJournal — INSERT the applied row (event_seq is AUTOINCREMENT, not
+        //    supplied). SEPARATE prepares from the creator `up`, with the mode flip
+        //    strictly between.
         actor.set_mode(Mode::EngineJournal).await?;
-        let seq = alloc_event_seq(actor).await?;
         let name = sql_lit(&m.name);
         let checksum = sql_lit(m.checksum.as_str());
         let applied_by_lit = sql_lit(applied_by);
@@ -346,8 +325,8 @@ async fn run_apply_txn(
         actor
             .exec(&format!(
                 "INSERT INTO \"_mig\".schema_migrations \
-                 (event_seq, version, name, checksum, applied_by, phase, outcome, kind) \
-                 VALUES ({seq}, {version_lit}, {name}, {checksum}, {applied_by_lit}, \
+                 (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
+                 VALUES ('applied', {version_lit}, {name}, {checksum}, {applied_by_lit}, \
                          'completed', 'success', 'apply')"
             ))
             .await?;
@@ -410,25 +389,18 @@ pub(crate) async fn applied(actor: &MigrationActor) -> Result<Vec<AppliedEntry>,
     // be gated by the creator deny on `_mig`).
     actor.set_mode(Mode::EngineJournal).await?;
     let sql = "\
-        WITH events AS ( \
-            SELECT version, checksum, event_seq, 'completed' AS event_kind, kind AS mig_kind \
-              FROM \"_mig\".schema_migrations \
-            UNION ALL \
-            SELECT version, checksum, event_seq, 'rolled_back' AS event_kind, NULL AS mig_kind \
-              FROM \"_mig\".schema_migrations_rolled_back \
-        ), \
-        ranked AS ( \
-            SELECT version, checksum, event_kind, mig_kind, \
+        WITH ranked AS ( \
+            SELECT version, checksum, event_kind, kind AS mig_kind, \
                    ROW_NUMBER() OVER (PARTITION BY version ORDER BY event_seq DESC) AS rn \
-              FROM events \
+              FROM \"_mig\".schema_migrations \
         ), \
         latest AS (SELECT version, checksum, event_kind, mig_kind FROM ranked WHERE rn = 1), \
-        net_completed AS (SELECT version, checksum, mig_kind FROM latest WHERE event_kind = 'completed') \
-        SELECT version, checksum, mig_kind, 'completed' AS phase FROM net_completed \
+        net_applied AS (SELECT version, checksum, mig_kind FROM latest WHERE event_kind = 'applied') \
+        SELECT version, checksum, mig_kind, 'completed' AS phase FROM net_applied \
         UNION ALL \
         SELECT i.version, i.checksum, NULL AS mig_kind, 'started' AS phase \
           FROM \"_mig\".schema_migrations_inflight i \
-         WHERE NOT EXISTS (SELECT 1 FROM net_completed n WHERE n.version = i.version) \
+         WHERE NOT EXISTS (SELECT 1 FROM net_applied n WHERE n.version = i.version) \
         ORDER BY version";
     let rows = actor.query(sql).await?;
     let mut out = Vec::with_capacity(rows.len());
@@ -464,21 +436,14 @@ pub(crate) async fn superseded_versions(
 ) -> Result<Vec<String>, SqliteActorError> {
     actor.set_mode(Mode::EngineJournal).await?;
     let sql = "\
-        WITH events AS ( \
-            SELECT version, event_seq, 'completed' AS event_kind, kind AS mig_kind \
-              FROM \"_mig\".schema_migrations \
-            UNION ALL \
-            SELECT version, event_seq, 'rolled_back' AS event_kind, NULL AS mig_kind \
-              FROM \"_mig\".schema_migrations_rolled_back \
-        ), \
-        ranked AS ( \
-            SELECT version, event_kind, mig_kind, \
+        WITH ranked AS ( \
+            SELECT version, event_kind, kind AS mig_kind, \
                    ROW_NUMBER() OVER (PARTITION BY version ORDER BY event_seq DESC) AS rn \
-              FROM events \
+              FROM \"_mig\".schema_migrations \
         ), \
         latest AS (SELECT version, event_kind, mig_kind FROM ranked WHERE rn = 1), \
         net_applied_squashes AS ( \
-            SELECT version FROM latest WHERE event_kind = 'completed' AND mig_kind = 'squash' \
+            SELECT version FROM latest WHERE event_kind = 'applied' AND mig_kind = 'squash' \
         ) \
         SELECT DISTINCT s.superseded_version AS v \
           FROM \"_mig\".schema_migrations_supersedes s \
@@ -499,7 +464,8 @@ pub(crate) async fn latest_completed_checksums(
         WITH ranked AS ( \
             SELECT version, checksum, \
                    ROW_NUMBER() OVER (PARTITION BY version ORDER BY event_seq DESC) AS rn \
-              FROM \"_mig\".schema_migrations WHERE kind = 'repeatable' \
+              FROM \"_mig\".schema_migrations \
+             WHERE event_kind = 'applied' AND kind = 'repeatable' \
         ) \
         SELECT version, checksum FROM ranked WHERE rn = 1";
     let rows = actor.query(sql).await?;

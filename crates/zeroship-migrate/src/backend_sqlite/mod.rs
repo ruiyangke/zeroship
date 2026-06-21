@@ -6,8 +6,8 @@
 //! and enforces line-2 confinement through a two-mode `prepare`-time authorizer
 //! ([`authorizer`], §2.5.1) — the runtime analog of Postgres's least-privilege
 //! `migrator` role. The journal lives in an attached `_mig` database, immutable by
-//! authorizer construction + DEFENSIVE + append-only triggers (§2.2.1), with a
-//! single shared monotonic `event_seq` counter (§2.2, M4). One migration's DDL and
+//! authorizer construction + DEFENSIVE + append-only triggers (§2.2.1), with the
+//! native `event_seq` AUTOINCREMENT PK as the total order (§2.2). One migration's DDL and
 //! its journal row commit atomically on the single connection, with the creator
 //! `up` confined from `_mig` and the journal write done under engine mode, the
 //! mode flip landing between separate prepares (§2.2.2).
@@ -78,7 +78,7 @@ impl SqliteBackend {
 
     /// Apply ONE additive migration atomically with confinement (§2.2.2). This is
     /// the P2 end-to-end seam: BEGIN IMMEDIATE → CreatorUp → run `up` →
-    /// EngineJournal → allocate event_seq + INSERT journal → COMMIT. Idempotent:
+    /// EngineJournal → INSERT journal (event_seq AUTOINCREMENT) → COMMIT. Idempotent:
     /// a version whose latest event is `completed` is a no-op (returns `false`).
     /// Returns `true` iff the migration was newly applied.
     ///
@@ -100,13 +100,13 @@ impl SqliteBackend {
     }
 
     /// The net-applied + lone-`started` entries, mirroring the PG `applied()`
-    /// logical shape (§2.2) — window-function net-state over the shared event_seq.
+    /// logical shape (§2.2) — window-function net-state over the native event_seq PK.
     pub async fn applied_sqlite(&self) -> Result<Vec<AppliedEntry>, SqliteActorError> {
         journal_sql::applied(&self.actor).await
     }
 
     /// Roll back ONE migration's `down` ADDITIVELY (§2.7, P5) + append a
-    /// `_rolled_back` event, atomically. The direct executor-internal seam (no
+    /// `rolled_back` event, atomically. The direct executor-internal seam (no
     /// approval gate; the generic executor gates approval before reaching here).
     /// A rebuild-needing `down` is refused with
     /// [`RollbackError::SqliteRebuildRequired`](crate::executor::RollbackError::SqliteRebuildRequired);
@@ -283,7 +283,7 @@ impl MigrationBackend for SqliteBackend {
         applied_by: &str,
     ) -> Result<(), RollbackError> {
         // P5 ADDITIVE rollback (§2.7): reverse the `down` (DROP TABLE/COLUMN/INDEX,
-        // RENAME) transactionally + append a `_rolled_back` event. A rebuild-needing
+        // RENAME) transactionally + append a `rolled_back` event. A rebuild-needing
         // `down` is refused with `SqliteRebuildRequired` (the rebuild is P3b).
         rollback_sql::rollback_one_transactional(&self.actor, m, applied_by).await
     }
