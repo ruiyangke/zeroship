@@ -181,6 +181,15 @@ pub struct SqliteRebuildSpec {
     /// CreatorUp on `main`. A replay failure FAILS CLOSED
     /// ([`RebuildError::DependentReplayFailed`]) — never silently lost.
     pub recreate_objects: Vec<String>,
+    /// **H1** — the BARE names of columns being DROPPED by this rebuild (live
+    /// columns absent from the new shape, excluding a rename's `from`). A captured
+    /// dependent (index / trigger) whose verbatim DDL references one of these
+    /// columns CANNOT be replayed after the swap (the column no longer exists) — so
+    /// the executor SKIPS replaying it (the dependent is intentionally dropped WITH
+    /// the column, the data-preserving outcome). Empty for a rebuild that drops no
+    /// column (type / nullability / rename / FK-set change), where every captured
+    /// dependent is replayed verbatim as before.
+    pub dropped_columns: Vec<String>,
     /// A human-readable description of what change drove the rebuild (for the
     /// journal name + diagnostics), e.g. `alter column age type integer → text`.
     pub reason: String,
@@ -454,6 +463,21 @@ async fn run_rebuild_steps(
     //     with a typed error so the txn rolls back and the object is never silently
     //     lost — the original table + all dependents are restored.
     for obj in &captured {
+        // H1 — a captured dependent (index / trigger) whose DDL references a column
+        // this rebuild DROPS cannot be replayed (the column is gone); it is dropped
+        // WITH the column, which is the data-preserving intent. SKIP it rather than
+        // FAIL CLOSED. The match is whole-word case-insensitive so a column name is
+        // not matched as a substring of another identifier. (A dependent that
+        // references ONLY surviving columns still replays verbatim, preserving its
+        // full attributes; a dependent that fails for an UNRELATED reason still
+        // FAILS CLOSED below.)
+        if spec
+            .dropped_columns
+            .iter()
+            .any(|dc| ddl_references_column(&obj.sql, dc))
+        {
+            continue;
+        }
         actor.exec(&obj.sql).await.map_err(|e| RebuildError::DependentReplayFailed {
             table: spec.table.clone(),
             kind: obj.kind.clone(),
@@ -573,6 +597,35 @@ async fn capture_dependents(
     Ok(out)
 }
 
+/// True iff `ddl` references the column `col` as a whole word (case-insensitive).
+/// Used by the H1 replay-skip: a captured dependent (index / trigger) whose DDL
+/// names a dropped column cannot be replayed after the swap. Whole-word so `id`
+/// does not match `idx` / `user_id`; a double-quote is a word boundary so a quoted
+/// `"col"` reference matches. Conservative: a coincidental match (e.g. the column
+/// name inside a string literal) only causes the dependent to be DROPPED rather
+/// than replayed — never a wrongful replay that would error the whole rebuild.
+fn ddl_references_column(ddl: &str, col: &str) -> bool {
+    if col.is_empty() {
+        return false;
+    }
+    let hay = ddl.to_ascii_lowercase();
+    let need = col.to_ascii_lowercase();
+    let hb = hay.as_bytes();
+    let nb = need.as_bytes();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    let mut start = 0;
+    while let Some(pos) = hay[start..].find(&need) {
+        let abs = start + pos;
+        let before = abs.checked_sub(1).map(|p| hb[p]);
+        let after = hb.get(abs + nb.len()).copied();
+        if before.is_none_or(|b| !is_ident(b)) && after.is_none_or(|b| !is_ident(b)) {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
 /// Wrap an actor error as a [`RebuildError::Step`] for `table`.
 fn step_err(table: &str, source: SqliteActorError) -> RebuildError {
     RebuildError::Step {
@@ -594,5 +647,29 @@ mod tests {
     fn quote_ident_escapes_embedded_quotes() {
         assert_eq!(quote_ident("users"), "\"users\"");
         assert_eq!(quote_ident("a\"b"), "\"a\"\"b\"");
+    }
+
+    // H1 — the replay-skip column scan. A captured dependent's DDL referencing a
+    // dropped column (whole-word, case-insensitive, quoted or bare) must match, so
+    // the executor skips replaying it; a substring of another identifier must NOT.
+    #[test]
+    fn ddl_references_column_is_whole_word_ci() {
+        assert!(ddl_references_column(
+            "CREATE INDEX i ON t (\"drop_me\")",
+            "drop_me"
+        ));
+        assert!(ddl_references_column("CREATE INDEX i ON t (drop_me)", "drop_me"));
+        assert!(ddl_references_column("CREATE INDEX i ON t (DROP_ME)", "drop_me"));
+        // Substring must NOT match: `id` is not `user_id` / `idx`.
+        assert!(!ddl_references_column(
+            "CREATE INDEX idx ON t (user_id)",
+            "id"
+        ));
+        // A dependent over an unrelated column does not match.
+        assert!(!ddl_references_column(
+            "CREATE INDEX i ON t (keep)",
+            "drop_me"
+        ));
+        assert!(!ddl_references_column("anything", ""));
     }
 }

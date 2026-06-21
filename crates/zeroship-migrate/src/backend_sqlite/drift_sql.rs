@@ -118,15 +118,22 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
         if is_internal(&name) {
             continue;
         }
-        if let Some(Some(sql)) = r.get(1) {
+        let stored_sql = if let Some(Some(sql)) = r.get(1) {
             create_sql.insert(name.clone(), sql.clone());
-        }
+            Some(sql.clone())
+        } else {
+            None
+        };
         tables.insert(
             name,
             TableSnapshot {
                 columns: Vec::new(),
                 indexes: Vec::new(),
                 constraints: Vec::new(),
+                // H1 — carry the verbatim CREATE text so the DROP-COLUMN rebuild
+                // router can detect CHECK / generated / partial-index references the
+                // structured PRAGMA buckets do not surface.
+                stored_create_sql: stored_sql,
             },
         );
     }

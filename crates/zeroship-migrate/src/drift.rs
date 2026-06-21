@@ -411,7 +411,20 @@ pub struct ConstraintSnapshot {
 }
 
 /// A live table's structure (deterministic ordering throughout).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `stored_create_sql` is **introspection-only** (like `ColumnSnapshot::default`
+/// / `IndexSnapshot::opclass`): it is EXCLUDED from `PartialEq` / `Eq` / `Hash`,
+/// so it never participates in drift comparison. The `SQLite` drift path populates
+/// it with the verbatim `sqlite_master.sql` of the table; the Postgres path leaves
+/// it `None` (PG recovers CHECK / generated / partial-index references from the
+/// structured `constraints` / `indexes` buckets via `pg_get_constraintdef` /
+/// `pg_get_expr`, so it needs no raw text). It is read by the `SQLite` DROP-COLUMN
+/// rebuild router (H1): a native `ALTER TABLE … DROP COLUMN` ERRORS when the
+/// column participates in a CHECK / generated-column expression / partial-index
+/// predicate, and those references are NOT in the `SQLite` structured snapshot (the
+/// drift PRAGMAs surface only FK / UNIQUE / PK / index-key columns), so the router
+/// consults this raw text to fail-closed into the 12-step rebuild.
+#[derive(Debug, Clone)]
 pub struct TableSnapshot {
     /// Columns, ordered by name.
     pub columns: Vec<ColumnSnapshot>,
@@ -419,7 +432,25 @@ pub struct TableSnapshot {
     pub indexes: Vec<IndexSnapshot>,
     /// Constraints, ordered by name.
     pub constraints: Vec<ConstraintSnapshot>,
+    /// **Introspection-only** verbatim `CREATE TABLE` text (`SQLite`
+    /// `sqlite_master.sql`). `None` on the Postgres path and on author-built
+    /// desired snapshots. EXCLUDED from equality / hashing — see the type doc.
+    pub stored_create_sql: Option<String>,
 }
+
+// `stored_create_sql` is intentionally excluded from equality + hashing — it is
+// introspection metadata, not a drift attribute (see the type doc). Comparing it
+// would make every SQLite table phantom-drift against an author-built desired
+// snapshot (which carries `None`). The drift attributes are columns / indexes /
+// constraints.
+impl PartialEq for TableSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.columns == other.columns
+            && self.indexes == other.indexes
+            && self.constraints == other.constraints
+    }
+}
+impl Eq for TableSnapshot {}
 
 /// A deterministic snapshot of a project schema's structure.
 ///
@@ -556,6 +587,9 @@ pub async fn snapshot_schema(
             columns: Vec::new(),
             indexes: Vec::new(),
             constraints: Vec::new(),
+            // PG recovers CHECK / generated / partial-index references from the
+            // structured buckets (pg_get_constraintdef / pg_get_expr); no raw text.
+            stored_create_sql: None,
         });
     }
 
