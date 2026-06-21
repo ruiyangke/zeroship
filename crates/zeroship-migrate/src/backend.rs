@@ -276,6 +276,30 @@ pub trait MigrationBackend {
         m: &Migration,
     ) -> Result<crate::executor::PreconditionVerdict, ApplyError>;
 
+    // -- squash (DB-coupled supersession journal write) ---------------------
+
+    /// Journal a **squash** as a `completed` `kind='squash'` event WITHOUT running
+    /// its `up`, plus the `S → v_i` supersession edges — the dialect-coupled write
+    /// behind the generic [`crate::squash::squash`] (multi-engine abstraction C3).
+    ///
+    /// Called only after the generic body has verified, under the project lock,
+    /// that ALL of `supersedes` are net-applied (the existing-DB squash path). The
+    /// PG impl delegates to [`crate::journal::record_baseline`] with
+    /// `kind='squash'`; a SQLite impl writes the same row+edges atomically through
+    /// its actor. The connection / `pg_advisory_lock` never cross this surface.
+    ///
+    /// # Errors
+    /// [`ApplyError::Db`] (PG) or [`ApplyError::Backend`] (non-PG) on a write
+    /// failure; the dialect-neutral [`crate::executor::ApplyError`] is what crosses
+    /// the trait.
+    async fn record_squash(
+        &self,
+        cfg: &ExecutorConfig,
+        squash_migration: &Migration,
+        applied_by: &str,
+        supersedes: &[&str],
+    ) -> Result<(), ApplyError>;
+
     // -- declarative-only structured ops (P6a) ------------------------------
 
     /// Apply ONE structured SQLite 12-step table REBUILD atomically with
@@ -572,7 +596,38 @@ impl MigrationBackend for PostgresBackend<'_> {
         cfg: &ExecutorConfig,
         m: &Migration,
     ) -> Result<crate::executor::PreconditionVerdict, ApplyError> {
-        crate::executor::pg::evaluate_preconditions(self.conn, cfg, m).await
+        // The PG precondition leaf: validation (`pg_query`) + evaluation
+        // (`information_schema` + the `&Client`-bound `SqlBoolean` run) are all
+        // contained in `precondition`, reached ONLY through this backend method —
+        // the generic apply body holds no connection and runs no `pg_query` (C3).
+        crate::precondition::evaluate_all(self.conn, cfg, m).await
+    }
+
+    async fn record_squash(
+        &self,
+        cfg: &ExecutorConfig,
+        squash_migration: &Migration,
+        applied_by: &str,
+        supersedes: &[&str],
+    ) -> Result<(), ApplyError> {
+        // Delegate verbatim to the existing PG squash journal write: a `completed`
+        // `kind='squash'` row + the supersession edges, in ONE `BEGIN … COMMIT`
+        // (`record_baseline`'s #3 atomicity). The `&Client` stays private to this
+        // backend; the dialect-neutral `ApplyError` is what crosses the surface.
+        crate::journal::record_baseline(
+            self.conn,
+            cfg,
+            crate::journal::BaselineRecord {
+                version: squash_migration.version.as_str(),
+                name: &squash_migration.name,
+                checksum: squash_migration.checksum.as_str(),
+                applied_by,
+                kind: "squash",
+                supersedes,
+            },
+        )
+        .await
+        .map_err(ApplyError::Journal)
     }
 
     async fn rebuild_one(

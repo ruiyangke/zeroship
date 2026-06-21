@@ -8,6 +8,8 @@ use zeroship_migrate::backend::MigrationBackend;
 use zeroship_migrate::db::ExecutorConfig;
 use zeroship_migrate::journal::Phase;
 use zeroship_migrate::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
+use zeroship_migrate::precondition::{Precondition, PreconditionCheck};
+use zeroship_migrate::PreconditionVerdict;
 use zeroship_migrate::SqliteBackend;
 
 struct Paths {
@@ -314,6 +316,69 @@ async fn transaction_false_rejected() {
     assert!(
         msg.contains("sqlite") && msg.contains("non-transactional"),
         "error must name the dialect + the missing non-txn path, got: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// C3 SEAM PIN — squash routes THROUGH the backend. The SQLite backend never
+// produces a squash (the descriptor author emits empty `supersedes`), so a squash
+// reaching the SQLite `record_squash` is a routing bug: it fails closed with a
+// clear dialect-named error rather than silently journaling a supersession. This
+// pins that `squash()` reaches the journal write through the trait (a raw-PG
+// `record_baseline` would never reach this backend).
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn record_squash_rejected_on_sqlite_backend() {
+    let p = paths("sqlite_squash");
+    let be = backend(&p);
+    let c = cfg();
+    let m = mig("CREATE TABLE t (id INTEGER);");
+
+    let err = MigrationBackend::record_squash(&be, &c, &m, "operator", &["mig_xyz"])
+        .await
+        .expect_err("squash must be rejected on the SQLite backend (routing bug)");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("sqlite") && msg.contains("squash"),
+        "error must name the dialect + that squash is unsupported, got: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// C3 SEAM PIN — precondition VALIDATION + EVALUATION route THROUGH the backend.
+// A migration with NO preconditions is trivially `AllMet` (the descriptor-author
+// common case); a migration that DECLARES one fails closed (precondition
+// evaluation is a later-phase SQLite capability) rather than running `pg_query` /
+// `information_schema`. This pins that the generic apply path asks the backend —
+// the PG `pg_query`/`&Client` precondition leaf is never reached on SQLite.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn evaluate_preconditions_through_sqlite_backend() {
+    let p = paths("sqlite_precond");
+    let be = backend(&p);
+    let c = cfg();
+
+    // No preconditions → AllMet (the descriptor-generated common case).
+    let m_none = mig("CREATE TABLE t (id INTEGER);");
+    let verdict = MigrationBackend::evaluate_preconditions(&be, &c, &m_none)
+        .await
+        .expect("a migration with no preconditions is AllMet");
+    assert_eq!(verdict, PreconditionVerdict::AllMet);
+
+    // A DECLARED precondition → fail closed (no PG pg_query/information_schema on
+    // SQLite; the generic body routed here, not into the PG leaf).
+    let mut m_pre = mig("CREATE TABLE t (id INTEGER);");
+    m_pre.preconditions = vec![PreconditionCheck::halt(Precondition::TableExists {
+        table: "users".to_string(),
+    })];
+    m_pre.checksum = Checksum::of(&ChecksumInput::from_migration(&m_pre));
+    let err = MigrationBackend::evaluate_preconditions(&be, &c, &m_pre)
+        .await
+        .expect_err("a declared precondition must fail closed on SQLite");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("sqlite") && msg.contains("precondition"),
+        "error must name the dialect + that precondition eval is unsupported, got: {msg}"
     );
 }
 

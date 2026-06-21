@@ -16,7 +16,7 @@ use zeroship_migrate::migration::Checksum;
 use zeroship_migrate::squash::SquashError;
 use zeroship_migrate::{
     apply, ensure_journal, journal, squash, status, Approval, ExecutorConfig, Migration,
-    MigrationFlags, MigrationId,
+    MigrationFlags, MigrationId, PostgresBackend,
 };
 
 const DEFAULT_DSN: &str =
@@ -166,7 +166,7 @@ async fn existing_db_squash_records_without_running_up() {
 
     // Squash on the EXISTING DB — records S without running its up (which would
     // fail: the tables already exist and S.up has no IF NOT EXISTS).
-    let out = squash(&conn, &cfg, &s, "operator")
+    let out = squash(&PostgresBackend::new(&conn), &cfg, &s, "operator")
         .await
         .expect("squash on existing db");
     assert!(!out.already_present);
@@ -342,7 +342,7 @@ async fn partial_overlap_is_refused() {
         .expect("apply v1,v2");
 
     // squash() refuses the partial overlap (2 of 3 applied).
-    let err = squash(&conn, &cfg, &s, "operator")
+    let err = squash(&PostgresBackend::new(&conn), &cfg, &s, "operator")
         .await
         .expect_err("squash must refuse a partial overlap");
     assert!(
@@ -398,7 +398,7 @@ async fn squash_up_guard_denied() {
         "CREATE TABLE control.users (id bigint)",
         vec![m1.version.clone(), m2.version.clone(), m3.version.clone()],
     );
-    let err = squash(&conn, &cfg, &evil, "operator")
+    let err = squash(&PostgresBackend::new(&conn), &cfg, &evil, "operator")
         .await
         .expect_err("squash with a cross-schema up must be guard-denied");
     assert!(
@@ -421,7 +421,7 @@ async fn squash_refuses_when_none_applied() {
     ensure_journal(&conn, &cfg).await.expect("journal");
 
     let (_m1, _m2, _m3, s) = three_plus_squash(&cfg.project_schema).await;
-    let err = squash(&conn, &cfg, &s, "operator")
+    let err = squash(&PostgresBackend::new(&conn), &cfg, &s, "operator")
         .await
         .expect_err("squash must refuse when none of the superseded are applied");
     assert!(
@@ -445,9 +445,9 @@ async fn re_squash_is_idempotent() {
     apply(&conn, &cfg, &[m1, m2, m3], Approval::None, "ci")
         .await
         .expect("apply");
-    let o1 = squash(&conn, &cfg, &s, "operator").await.expect("squash 1");
+    let o1 = squash(&PostgresBackend::new(&conn), &cfg, &s, "operator").await.expect("squash 1");
     assert!(!o1.already_present);
-    let o2 = squash(&conn, &cfg, &s, "operator").await.expect("squash 2");
+    let o2 = squash(&PostgresBackend::new(&conn), &cfg, &s, "operator").await.expect("squash 2");
     assert!(o2.already_present, "re-squash is idempotent");
 
     drop_schemas(&conn, &cfg).await;
@@ -763,7 +763,7 @@ async fn existing_db_squash_record_baseline_is_atomic() {
 
     // squash() on the existing DB: the completed-row insert succeeds, the edge
     // insert raises → the whole record_baseline txn rolls back.
-    let err = squash(&conn, &cfg, &s, "operator")
+    let err = squash(&PostgresBackend::new(&conn), &cfg, &s, "operator")
         .await
         .expect_err("edge insert must fail and roll back record_baseline");
     assert!(
