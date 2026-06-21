@@ -26,8 +26,8 @@ use zeroship_migrate::journal::{JournaledKind, Phase};
 use zeroship_migrate::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
 use zeroship_migrate::{
     desired_snapshot, Approval, CollectionDescriptor, DeclarativeAuthor, DeclarativeApplyError,
-    EngineError, ExecutorConfig, FieldDescriptor, GuardConfig, IndexDescriptor, MigrationBackend,
-    MigrationEngine, RenameHint, SchemaSnapshot, SqliteBackend,
+    DryRunError, EngineError, ExecutorConfig, FieldDescriptor, GuardConfig, IndexDescriptor,
+    MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot, ShadowConfig, SqliteBackend,
 };
 use zeroship_migrate::backend_sqlite::Mode;
 use zeroship_schema::query::SqlDialect;
@@ -708,5 +708,80 @@ async fn sqlite_baseline_refuses_when_engine_already_manages_the_file() {
     assert!(
         err.to_string().contains("first-entry") || err.to_string().contains("already"),
         "expected a first-entry refusal, got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (C3) SHADOW DRY-RUN CAPABILITY GAP: the SQLite backend has NO shadow dry-run
+//      capability (`shadow()` is `None`), and the engine's `dry_run` /
+//      `dry_run_declarative` surface the EXPLICIT `DryRunError::ShadowUnsupported`
+//      — NOT a false-success `DryRunReport`. This is the honest outcome of the
+//      deliberate capability gap (SQLite DDL is trusted + dev-recoverable, so no
+//      pre-apply shadow clone): the caller must never believe a dry-run happened
+//      when it did not.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn sqlite_backend_has_no_shadow_and_dry_run_is_explicitly_unsupported() {
+    let p = paths("shadow_unsupported");
+    let be = backend(&p);
+    let engine = MigrationEngine::new();
+    let cfg = exec_cfg();
+
+    // The capability itself is absent — a deliberate `None`, not a stub.
+    assert!(
+        be.shadow().is_none(),
+        "the SQLite backend exposes NO shadow dry-run capability (C3)"
+    );
+
+    let shadow_cfg = ShadowConfig {
+        // Unused — `dry_run` short-circuits to ShadowUnsupported before any DSN is
+        // touched (there is no PG admin connection on the SQLite leg).
+        admin_dsn: String::new(),
+        db_name_prefix: "zsmig_shadow_".to_string(),
+    };
+
+    // (a) `dry_run` over a plain migration set returns ShadowUnsupported — an
+    //     explicit error, asserted, NOT a `DryRunReport { ok: true, .. }`.
+    let mig = baseline_migration("any", "CREATE TABLE main.t (id TEXT PRIMARY KEY)");
+    let err = engine
+        .dry_run(&be, &[mig], &cfg, &shadow_cfg, "deployer")
+        .await
+        .expect_err("a dry-run on a backend with no shadow capability must NOT report a fake pass");
+    assert!(
+        matches!(err, DryRunError::ShadowUnsupported),
+        "the honest outcome is the explicit ShadowUnsupported, got: {err:?}"
+    );
+
+    // (b) the DECLARATIVE dry-run path is equally honest: a real plan, but the same
+    //     explicit ShadowUnsupported (no shadow clone exists to validate against).
+    let v1 = vec![CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "amount".into(),
+            ty: "number".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    }];
+    let desired = desired_snapshot(PROJECT, &v1).expect("v1 desired");
+    let plan = engine
+        .plan_declarative(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &sqlite_author(),
+            &[],
+            &guard_cfg(),
+        )
+        .expect("plan create");
+    let err = engine
+        .dry_run_declarative(&be, &plan, &desired, &cfg, &shadow_cfg, "deployer")
+        .await
+        .expect_err("declarative dry-run must also be explicitly unsupported on SQLite");
+    assert!(
+        matches!(err, DryRunError::ShadowUnsupported),
+        "declarative dry-run yields the explicit ShadowUnsupported, got: {err:?}"
     );
 }

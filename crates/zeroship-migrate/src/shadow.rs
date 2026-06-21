@@ -177,6 +177,20 @@ pub enum DryRunError {
     /// not a migration failure — it surfaces here rather than in the report.
     #[error("seed shadow from live schema: {0}")]
     Seed(#[source] SeedError),
+    /// The active [`MigrationBackend`](crate::backend::MigrationBackend) has **no
+    /// shadow dry-run capability** ([`shadow()`](crate::backend::MigrationBackend::shadow)
+    /// returned `None`) — e.g. the SQLite dev backend, which applies only TRUSTED
+    /// descriptor-generated DDL on a recoverable dev path, so a pre-apply shadow
+    /// clone adds little (a future untrusted/prod non-PG engine, e.g. MySQL, would
+    /// provide one).
+    ///
+    /// This is the **honest** outcome the engine returns when a caller asks for a
+    /// dry-run on a backend that cannot perform one: it is an explicit error, NOT a
+    /// false-success [`DryRunReport`] — the caller must never believe a dry-run
+    /// happened when it did not. It is a deliberate capability gap, surfaced rather
+    /// than silently passed.
+    #[error("shadow dry-run unsupported on this backend (no ShadowDryRun capability)")]
+    ShadowUnsupported,
 }
 
 /// A failure to reconstruct the LIVE project structure inside the fresh shadow
@@ -647,6 +661,139 @@ async fn dry_run_incremental_body(
         teardown_ok: true,
         teardown_error: None,
     })
+}
+
+// =============================================================================
+// The shadow dry-run CAPABILITY seam (multi-engine abstraction, C3).
+// =============================================================================
+
+/// The **shadow dry-run** capability — the dialect-neutral seam
+/// [`MigrationEngine::dry_run`](crate::engine::MigrationEngine::dry_run) /
+/// [`dry_run_declarative`](crate::engine::MigrationEngine::dry_run_declarative)
+/// drive a pre-apply preview through, **without ever holding a concrete
+/// connection** (C3: this REPLACES the `MigrationEngine::dry_run(admin_conn:
+/// &Client, …)` / `PostgresBackend::conn() -> &Client` leak — the last prominent
+/// PG-driver leak on the engine's public methods).
+///
+/// A backend that can dry-run untrusted/AI-authored DDL against a throwaway clone
+/// returns `Some(&dyn ShadowDryRun)` from
+/// [`MigrationBackend::shadow`](crate::backend::MigrationBackend::shadow); one that
+/// has no shadow path (SQLite — see that method's doc) returns `None`. The engine
+/// branches on `shadow()`, never on the dialect, and never touches a `Client`.
+///
+/// # The seam is the NEUTRAL intent, not the PG admin connection
+///
+/// The methods take the engine's neutral inputs (the planned [`Migration`]s, or a
+/// [`DeclarativeDeployPlan`] + [`DesiredSchema`], plus the [`ExecutorConfig`] /
+/// [`ShadowConfig`]). They do **not** take a `compio_postgres::Client`. The
+/// Postgres impl ([`PgShadow`]) owns its admin `Client` **internally** and runs
+/// the existing throwaway-database harness ([`dry_run`] / [`dry_run_declarative`])
+/// verbatim; a future untrusted/prod non-PG engine (MySQL) would lower the *same*
+/// inputs to its own shadow mechanism — which a raw `&Client` could never have
+/// admitted.
+///
+/// Returned as boxed futures so the trait is `dyn`-dispatchable
+/// (`Option<&dyn ShadowDryRun>`); a dry-run runs at deploy/preview time, never the
+/// apply hot path, so the box allocation is irrelevant (mirrors
+/// [`OnlineSchemaChange`](crate::expand_contract::OnlineSchemaChange)).
+#[allow(clippy::module_name_repetitions)]
+pub trait ShadowDryRun {
+    /// Dry-run a migration batch against a throwaway shadow DATABASE clone,
+    /// reporting per-migration success/failure WITHOUT touching the real schema.
+    ///
+    /// Byte-identical to the free [`dry_run`] harness: the PG impl forwards to it
+    /// verbatim. A *migration* failing is reported in the [`DryRunReport`]
+    /// (`ok == false`), not returned as an error; a [`DryRunError`] is a harness
+    /// fault (CREATE/DROP DATABASE, shadow connect, provisioning).
+    fn dry_run<'a>(
+        &'a self,
+        migrations: &'a [Migration],
+        cfg: &'a ExecutorConfig,
+        shadow_cfg: &'a ShadowConfig,
+        applied_by: &'a str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<DryRunReport, DryRunError>> + 'a>,
+    >;
+
+    /// Dry-run a DECLARATIVE deploy plan against a shadow DATABASE seeded from the
+    /// live structure, validating the resulting schema against `desired`, WITHOUT
+    /// touching the real schema.
+    ///
+    /// Byte-identical to the free [`dry_run_declarative`] harness: the PG impl
+    /// forwards to it verbatim.
+    fn dry_run_declarative<'a>(
+        &'a self,
+        plan: &'a DeclarativeDeployPlan,
+        desired: &'a DesiredSchema,
+        cfg: &'a ExecutorConfig,
+        shadow_cfg: &'a ShadowConfig,
+        applied_by: &'a str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<DryRunReport, DryRunError>> + 'a>,
+    >;
+}
+
+/// The Postgres [`ShadowDryRun`] — owns its admin [`Client`] internally (the
+/// connection NEVER appears on the neutral trait surface; C3 fixed).
+///
+/// Each method lowers the neutral inputs to the existing throwaway-DATABASE
+/// harness ([`dry_run`] / [`dry_run_declarative`]) VERBATIM — the temp shadow-DB
+/// CREATE/DROP, the second compio-postgres session, the shadow-unique migrator
+/// role, the catch-unwind-then-teardown discipline, and the `Approval::Approved`
+/// shadow-only invariant all stay inside those functions, behavior-identical. This
+/// is the regression bar: the entire existing shadow/dry_run suite must pass
+/// unchanged.
+///
+/// [`Client`]: compio_postgres::Client
+#[derive(Debug)]
+pub struct PgShadow<'a> {
+    /// The admin connection (its `dbname` IS the project DB; its role has
+    /// `CREATEDB`). Private — it never crosses the [`ShadowDryRun`] surface.
+    admin_conn: &'a Client,
+}
+
+impl<'a> PgShadow<'a> {
+    /// Wrap an admin connection as the Postgres shadow-dry-run capability.
+    #[must_use]
+    pub fn new(admin_conn: &'a Client) -> Self {
+        Self { admin_conn }
+    }
+}
+
+impl ShadowDryRun for PgShadow<'_> {
+    fn dry_run<'a>(
+        &'a self,
+        migrations: &'a [Migration],
+        cfg: &'a ExecutorConfig,
+        shadow_cfg: &'a ShadowConfig,
+        applied_by: &'a str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<DryRunReport, DryRunError>> + 'a>,
+    > {
+        // Forward to the byte-identical free harness; the admin `&Client` stays
+        // private to this impl and never crosses the neutral trait surface.
+        Box::pin(dry_run(self.admin_conn, migrations, cfg, shadow_cfg, applied_by))
+    }
+
+    fn dry_run_declarative<'a>(
+        &'a self,
+        plan: &'a DeclarativeDeployPlan,
+        desired: &'a DesiredSchema,
+        cfg: &'a ExecutorConfig,
+        shadow_cfg: &'a ShadowConfig,
+        applied_by: &'a str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<DryRunReport, DryRunError>> + 'a>,
+    > {
+        Box::pin(dry_run_declarative(
+            self.admin_conn,
+            plan,
+            desired,
+            cfg,
+            shadow_cfg,
+            applied_by,
+        ))
+    }
 }
 
 /// Tear down the shadow (DB + role) and reconcile with the body's outcome.

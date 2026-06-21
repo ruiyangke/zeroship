@@ -422,6 +422,20 @@ impl MigrationBackend for SqliteBackend {
         None
     }
 
+    fn shadow(&self) -> Option<&dyn crate::shadow::ShadowDryRun> {
+        // SQLite has NO shadow dry-run capability (C3) — a DELIBERATE capability
+        // gap, not a silent hole. The SQLite dev path applies only TRUSTED
+        // descriptor-generated DDL (there is no untrusted/raw SQLite author whose
+        // DDL would need previewing), and dev is recoverable (a local file the
+        // developer can re-create), so a pre-apply shadow clone adds little. The
+        // shadow exists to safely preview untrusted/AI-authored DDL before it
+        // touches a DURABLE schema; neither condition holds here. A future
+        // untrusted/prod non-PG engine (e.g. MySQL) WOULD provide one. Returning
+        // `None` is honest: the engine's `dry_run` surfaces the explicit
+        // `DryRunError::ShadowUnsupported`, never a fake "dry-run passed".
+        None
+    }
+
     async fn baseline_one(
         &self,
         _cfg: &ExecutorConfig,

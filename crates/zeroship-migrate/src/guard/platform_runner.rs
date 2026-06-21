@@ -368,7 +368,13 @@ pub async fn run_validate(cfg: &RunConfig) -> Result<RunReport, RunError> {
         db_name_prefix: "zsmig_shadow_".to_string(),
     };
     let dry_run = engine
-        .dry_run(&conn, &migrations, &exec_cfg, &shadow_cfg, "platform-validate")
+        .dry_run(
+            &PostgresBackend::new(&conn),
+            &migrations,
+            &exec_cfg,
+            &shadow_cfg,
+            "platform-validate",
+        )
         .await?;
 
     // Checksum drift against the REAL journal (read-only). Bootstrap the journal

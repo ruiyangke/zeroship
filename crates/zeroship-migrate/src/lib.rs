@@ -164,7 +164,7 @@ pub use precondition::{
 pub use role::{deprovision_migrator, migrator_role_name, provision_migrator, RoleError};
 pub use shadow::{
     dry_run, dry_run_declarative, dry_run_incremental, sweep_leaked_shadows, DryRunError,
-    DryRunReport, MigrationResult, ShadowConfig,
+    DryRunReport, MigrationResult, PgShadow, ShadowConfig, ShadowDryRun,
 };
 #[doc(hidden)]
 pub use shadow::arm_panic_after_provision;
