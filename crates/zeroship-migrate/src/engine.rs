@@ -31,19 +31,21 @@ use crate::db::ExecutorConfig;
 use crate::executor::{
     self, ApplyError, ApplyOutcome, LockMode, RollbackError, RollbackOutcome, RollbackRequest,
 };
-use crate::guard::{GuardConfig, GuardError, GuardReport, SqlGuard};
+use crate::guard::{GuardConfig, GuardError, GuardOutcome};
 use crate::manifest::{compute_manifest, verify_manifest, ManifestError, ManifestHash};
 use crate::migration::Migration;
-use zeroship_schema::query::SqlDialect;
 
 /// One linted migration in a [`MigrationPlan`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedMigration {
     /// The migration itself (clone of the input).
     pub migration: Migration,
-    /// Its passing guard report (classes + destructive flag + operational
-    /// [`Advisory`](crate::analyze::Advisory)s).
-    pub report: GuardReport,
+    /// Its passing **neutral** guard outcome — the destructive flag + operational
+    /// [`Advisory`](crate::analyze::Advisory)s the engine consumes. The
+    /// PG-specific statement `classes` stay inside the PG guard
+    /// ([`SqlGuard`](crate::guard::SqlGuard)/[`GuardReport`](crate::guard::GuardReport))
+    /// and are not surfaced here — the engine seam is dialect-neutral (P0 H2).
+    pub report: GuardOutcome,
 }
 
 /// The read-only result of [`MigrationEngine::plan`] — the dry-run / preview
@@ -139,18 +141,16 @@ impl MigrationEngine {
     /// if any passing item's report flags data loss.
     #[must_use]
     pub fn plan(&self, migrations: &[Migration], cfg: &GuardConfig) -> MigrationPlan {
-        // P6a / design §2.5.3 — the Confined SQLite path is **descriptor-diff-only**:
-        // `libpg_query` (the line-1 string guard) cannot parse SQLite, so a SQLite
-        // `up` is NEVER routed through `SqlGuard::check` (which fail-closes on any
-        // SQLite string). The SQLite line-1 vet is the descriptor emitter (author
-        // boundary) and the line-2 defense is the backend authorizer the executor
-        // runs at apply. So on the SQLite dialect we lint from the migration's OWN
-        // author flags (destructive / requires_approval) and an EMPTY guard report —
-        // no string check, no denial path. The PG branch below is byte-identical.
-        if cfg.dialect() == SqlDialect::Sqlite {
-            return Self::plan_sqlite_trusted(migrations);
-        }
-        let guard = SqlGuard::new(cfg.clone());
+        // Multi-engine P0 (design 2026-06-21 §2.2 L3) — run the **per-engine**
+        // line-1 guard for `cfg`'s dialect through the [`MigrationGuard`] seam, NOT
+        // an `if dialect == Sqlite` branch. Postgres → [`PgGuard`] (libpg_query
+        // deny-list); SQLite → [`SqliteDescriptorGuard`] (the trusted
+        // descriptor-diff path: `libpg_query` cannot vet SQLite, so its `check`
+        // returns the empty clean outcome — the line-1 vet is the descriptor emitter
+        // at the author boundary, the line-2 defense the `SqliteBackend` authorizer
+        // at apply). The destructive / approval combination with the migration's OWN
+        // author flags stays here (engine logic), identical for both dialects.
+        let guard = crate::guard::guard_for(cfg);
         let mut items = Vec::new();
         let mut denied = Vec::new();
         let mut destructive = false;
@@ -183,37 +183,6 @@ impl MigrationEngine {
             destructive,
             requires_approval,
             denied,
-        }
-    }
-
-    /// The SQLite lint path (design §2.5.3): descriptor-diff-generated DDL is trusted
-    /// by construction (validated at the author boundary, enforced at apply by the
-    /// backend authorizer). `libpg_query` cannot parse SQLite, so there is NO string
-    /// guard and NO denial path here — every migration is a planned item with an
-    /// EMPTY [`GuardReport`], and the plan's destructive / approval flags come purely
-    /// from the migrations' OWN author flags (the SQLite differ stamps a rebuild's
-    /// journal migration `destructive + requires_approval`).
-    fn plan_sqlite_trusted(migrations: &[Migration]) -> MigrationPlan {
-        let mut items = Vec::new();
-        let mut destructive = false;
-        let mut requires_approval = false;
-        for m in migrations {
-            destructive |= m.flags.destructive;
-            requires_approval |= m.flags.destructive || m.flags.requires_approval;
-            items.push(PlannedMigration {
-                migration: m.clone(),
-                report: GuardReport {
-                    classes: Vec::new(),
-                    destructive: m.flags.destructive,
-                    advisories: Vec::new(),
-                },
-            });
-        }
-        MigrationPlan {
-            items,
-            destructive,
-            requires_approval,
-            denied: Vec::new(),
         }
     }
 

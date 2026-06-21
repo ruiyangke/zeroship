@@ -206,6 +206,14 @@ impl MigrationBackend for SqliteBackend {
         SqlDialect::Sqlite
     }
 
+    fn guard(&self) -> &dyn crate::guard::MigrationGuard {
+        // SQLite's line-1 is the stateless descriptor guard: descriptor-diff DDL is
+        // trusted (author-boundary line-1 + runtime-authorizer line-2). A ZST, so a
+        // borrow of a `static` is sufficient — no per-backend state.
+        static GUARD: crate::guard::SqliteDescriptorGuard = crate::guard::SqliteDescriptorGuard;
+        &GUARD
+    }
+
     // -- connection / session I/O -------------------------------------------
     // The in-process lock is the single-actor serialization itself (§2.3): one
     // writer, one flume queue. Cross-process is P5b (NOT built here). So the

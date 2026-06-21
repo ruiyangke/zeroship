@@ -464,15 +464,16 @@ impl SqlGuard {
     /// (malformed SQL has no parse tree to classify), but no `Denied`/`CrossSchema`
     /// can: there is no deny arm on the Trusted path.
     pub fn check(&self, sql: &str) -> Result<GuardReport, GuardError> {
-        // PHASE 4 — the Confined SQLite path is descriptor-diff-only (design
-        // §2.5.3). `libpg_query` (the line-1 guard below) cannot parse SQLite, so a
-        // raw SQLite SQL string presented here has NO trustworthy line-1 vet. We
-        // fail closed: the only legitimate SQLite DDL is produced by the engine's
-        // descriptor emitter (which never routes back through `check` — it is
-        // applied straight through the `SqliteBackend`'s authorizer, the line-2
-        // defense). Reaching `check` with a SQLite config means an untrusted raw
-        // string slipped in — reject it. (Trusted SQLite, if it ever exists, is a
-        // separate operator-gated concern; today no SQLite config is Trusted.)
+        // SQLite fail-closed backstop. `SqlGuard` is the **Postgres** line-1
+        // (libpg_query below); it is the PG arm of the per-engine
+        // [`MigrationGuard`] seam ([`PgGuard`] wraps it). The engine never selects
+        // `SqlGuard` for SQLite — it routes through [`SqliteDescriptorGuard`] (via
+        // [`guard_for`] / `backend.guard()`), the trusted descriptor-diff path.
+        // This arm is the defensive fail-closed for the *wrong caller*: if a raw,
+        // untrusted SQLite string is ever handed to the PG guard (a SQLite-keyed
+        // `GuardConfig`), `libpg_query` cannot vet it, so we reject rather than
+        // mis-parse. (Trusted SQLite, if it ever exists, is a separate
+        // operator-gated concern; today no SQLite config is Trusted.)
         if self.cfg.dialect() == SqlDialect::Sqlite {
             return Err(GuardError::SqliteRawSqlRejected);
         }
@@ -1338,6 +1339,155 @@ pub fn flags_for(report: &GuardReport) -> MigrationFlags {
         // Repeatable is an authoring-time facet (a stable-identity, replace-style
         // R__ migration), not derivable from a single SQL blob — defaults off.
         repeatable: false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The per-engine line-1 guard seam (multi-engine abstraction, P0 / design
+// 2026-06-21 §2.2 L3).
+// ---------------------------------------------------------------------------
+
+/// The **dialect-neutral** result of a passing [`MigrationGuard::check`].
+///
+/// This is the line-1 output the core engine actually consumes: the engine's
+/// `plan()`/`apply` only read `destructive` (to drive the destructive/approval
+/// gate) and `advisories` (to surface operational footguns) — see
+/// [`crate::engine::MigrationEngine::plan`]. Deliberately **does not** carry the
+/// PG-specific `classes: Vec<StatementClass>` (the libpg_query `DdlKind`
+/// vocabulary): that stays *inside* the PG guard ([`SqlGuard`]/[`GuardReport`]),
+/// because a non-PG engine (SQLite descriptor diff, a future MySQL parser) has no
+/// `DdlKind` to populate. Keeping the neutral seam free of PG vocabulary (H2) is
+/// what lets a new engine bring its own line-1 without inheriting libpg_query.
+///
+/// The PG-only consumers of `classes` ([`flags_for`], the author/submit/loader
+/// flag derivation, the `guard_security` matrix) keep calling [`SqlGuard::check`]
+/// directly and keep the rich [`GuardReport`]; only the engine seam is neutral.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GuardOutcome {
+    /// True if *any* statement is destructive (data loss). The engine's gate
+    /// decides on approval; the guard only flags.
+    pub destructive: bool,
+    /// Operational [`Advisory`](crate::analyze::Advisory)s (lock-heavy ops,
+    /// backward-incompatible shapes, missing FK indexes, …). Advisory-only —
+    /// never deny or gate. Empty for engines that emit none (e.g. SQLite's
+    /// descriptor path).
+    pub advisories: Vec<Advisory>,
+}
+
+/// The **per-engine line-1 defense**, behind a trait so the core engine never
+/// selects it by dialect (`if dialect == Sqlite`) — it asks `backend.guard()` /
+/// [`guard_for`] and runs whatever line-1 that engine brings.
+///
+/// - **Postgres** ([`PgGuard`]) — the libpg_query parse + deny-list + classify +
+///   analyze ([`SqlGuard`]), mapped onto the neutral [`GuardOutcome`].
+/// - **SQLite** ([`SqliteDescriptorGuard`]) — the descriptor-diff path is trusted
+///   by construction (validated at the author boundary, line-2 enforced by the
+///   `SqliteBackend` authorizer at apply), so `check` returns the **empty/clean**
+///   outcome. The raw-untrusted-SQL fail-closed (libpg_query cannot vet SQLite)
+///   lives on [`SqlGuard::check`] itself — if the PG guard is ever mis-handed a
+///   SQLite-keyed config it returns [`GuardError::SqliteRawSqlRejected`] rather
+///   than mis-parsing (the existing defensive property).
+/// - A future MySQL engine brings its own parser/allowlist impl.
+///
+/// `GuardOutcome` / [`GuardError`] are shared + neutral; each engine's parser is
+/// its own concern (design §2.2 / §6 G1).
+pub trait MigrationGuard {
+    /// Run line-1 over a migration's `up` SQL. `Ok(GuardOutcome)` when every
+    /// statement is safe (destructive ops flagged, not denied); `Err` on the
+    /// first hard-denied / cross-tenant / unparseable / raw-rejected construct.
+    ///
+    /// # Errors
+    /// Engine-specific: PG surfaces [`GuardError::Denied`] /
+    /// [`GuardError::CrossSchema`] / [`GuardError::Parse`]; SQLite's descriptor
+    /// path does not deny (it trusts), so its `check` is infallible in practice.
+    fn check(&self, up: &str) -> Result<GuardOutcome, GuardError>;
+}
+
+/// The Postgres line-1: the existing [`SqlGuard`] (libpg_query deny-list +
+/// cross-schema confinement + classify + analyze) behind [`MigrationGuard`].
+/// Behavior-identical to calling [`SqlGuard::check`] — `check` only drops the
+/// PG-specific `classes` from the returned report (the neutral seam, H2).
+#[derive(Debug, Clone)]
+pub struct PgGuard(SqlGuard);
+
+impl PgGuard {
+    /// Wrap a [`SqlGuard`] as the Postgres [`MigrationGuard`].
+    #[must_use]
+    pub const fn new(inner: SqlGuard) -> Self {
+        Self(inner)
+    }
+
+    /// Build the PG guard from a [`GuardConfig`] (the common case).
+    #[must_use]
+    pub const fn from_config(cfg: GuardConfig) -> Self {
+        Self(SqlGuard::new(cfg))
+    }
+}
+
+impl MigrationGuard for PgGuard {
+    fn check(&self, up: &str) -> Result<GuardOutcome, GuardError> {
+        let report = self.0.check(up)?;
+        // Drop the PG-specific `classes`; expose only the neutral fields the
+        // engine seam consumes (H2). `flags_for` and the other `classes`
+        // consumers call `SqlGuard::check` directly, never through this seam.
+        Ok(GuardOutcome {
+            destructive: report.destructive,
+            advisories: report.advisories,
+        })
+    }
+}
+
+/// The SQLite line-1: the descriptor-diff path is **trusted by construction**.
+///
+/// SQLite migrations are produced ONLY by the declarative differ
+/// ([`crate::declarative::DeclarativeAuthor::diff`]) — there is no raw-SQL SQLite
+/// author. libpg_query cannot parse SQLite, so there is no string deny-list to
+/// run; the line-1 vet is the descriptor emitter at the author boundary and the
+/// line-2 defense is the `SqliteBackend`'s runtime authorizer applied per
+/// statement at execution (design §2.5.3). So `check` returns the **empty**
+/// [`GuardOutcome`] — exactly the pre-seam `plan_sqlite_trusted` report + the
+/// executor's `run_string_guard == false` skip, now expressed as a per-engine
+/// guard instead of an `if dialect == Sqlite` branch.
+///
+/// (The raw-untrusted-SQL fail-closed — refusing a hand-written SQLite string
+/// handed to the *PG* guard — stays on [`SqlGuard::check`] as
+/// [`GuardError::SqliteRawSqlRejected`]; that defensive property is unchanged.)
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SqliteDescriptorGuard;
+
+impl SqliteDescriptorGuard {
+    /// Construct the SQLite descriptor guard (stateless).
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl MigrationGuard for SqliteDescriptorGuard {
+    fn check(&self, _up: &str) -> Result<GuardOutcome, GuardError> {
+        // Descriptor-diff-generated DDL is trusted (author boundary line-1 +
+        // backend authorizer line-2). No string check, no denial — the empty
+        // clean outcome. Destructive/approval flags come from the migration's
+        // OWN author flags, combined by the engine's `plan()`, not from here.
+        Ok(GuardOutcome::default())
+    }
+}
+
+/// Select the per-engine line-1 [`MigrationGuard`] for a [`GuardConfig`]'s
+/// dialect — the read-only `plan()` path (which has a [`GuardConfig`] but no
+/// live backend). The apply path uses
+/// [`MigrationBackend::guard`](crate::backend::MigrationBackend::guard) instead,
+/// which returns the same per-engine guard from the live backend.
+///
+/// Postgres → [`PgGuard`] (libpg_query deny-list); SQLite → [`SqliteDescriptorGuard`]
+/// (trusted descriptor path). This replaces the `if dialect == Sqlite` branch in
+/// `plan()` — the core no longer knows SQLite by name; it asks for the dialect's
+/// guard and runs it uniformly.
+#[must_use]
+pub fn guard_for(cfg: &GuardConfig) -> Box<dyn MigrationGuard> {
+    match cfg.dialect() {
+        SqlDialect::Postgres => Box::new(PgGuard::from_config(cfg.clone())),
+        SqlDialect::Sqlite => Box::new(SqliteDescriptorGuard::new()),
     }
 }
 

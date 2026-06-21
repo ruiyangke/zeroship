@@ -356,7 +356,7 @@ async fn raw_sql_complex_up_gated_then_applied_e2e() {
 #[compio::test]
 async fn executor_reruns_guard_even_on_a_hand_built_clean_plan() {
     use zeroship_migrate::{MigrationPlan, PlannedMigration};
-    use zeroship_migrate::GuardReport;
+    use zeroship_migrate::GuardOutcome;
 
     let conn = pg().await;
     let cfg = cfg_for(&token());
@@ -380,9 +380,8 @@ async fn executor_reruns_guard_even_on_a_hand_built_clean_plan() {
     let forged_plan = MigrationPlan {
         items: vec![PlannedMigration {
             migration: evil,
-            // A plausible-looking clean report.
-            report: GuardReport {
-                classes: Vec::new(),
+            // A plausible-looking clean outcome.
+            report: GuardOutcome {
                 destructive: false,
                 advisories: Vec::new(),
             },

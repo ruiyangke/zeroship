@@ -543,7 +543,7 @@ mod tests {
     use super::*;
     use crate::engine::PlannedMigration;
     use crate::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
-    use super::super::{GuardReport, TrustProfile};
+    use super::super::{GuardOutcome, TrustProfile};
 
     fn mk_migration(version: u64, destructive: bool, requires_approval: bool) -> Migration {
         let flags = MigrationFlags {
@@ -580,8 +580,7 @@ mod tests {
         MigrationPlan {
             items: vec![PlannedMigration {
                 migration: m,
-                report: GuardReport {
-                    classes: Vec::new(),
+                report: GuardOutcome {
                     destructive,
                     advisories: Vec::new(),
                 },
