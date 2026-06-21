@@ -454,7 +454,7 @@ fn set_local_session_sql(cfg: &ExecutorConfig, m: &Migration) -> String {
 /// is configured (tests / single-tenant dev). Brackets ONLY the `<up>`; the
 /// caller `RESET ROLE`s before the journal write (C1).
 fn set_local_role_sql(cfg: &ExecutorConfig) -> Option<String> {
-    cfg.migrator_role
+    cfg.pg.migrator_role
         .as_ref()
         .map(|role| format!("SET LOCAL ROLE \"{}\"", role.replace('"', "\"\"")))
 }
@@ -1941,7 +1941,7 @@ pub(crate) async fn apply_transactional(
     // journal INSERT below runs as the admin (the migrator cannot write the
     // journal). `RESET ROLE` mid-transaction is supported and does not end the
     // txn, so atomicity of `<up>` + journal is preserved.
-    if cfg.migrator_role.is_some() {
+    if cfg.pg.migrator_role.is_some() {
         if let Err(e) = conn.batch_execute("RESET ROLE").await {
             let _ = conn.batch_execute("ROLLBACK").await;
             return Err(ApplyError::Db(e));
@@ -1961,7 +1961,7 @@ pub(crate) async fn apply_transactional(
         !supersedes.is_empty(),
         "kind='squash' iff supersedes is non-empty"
     );
-    let meta = format!("\"{}\"", cfg.meta_schema.replace('"', "\"\""));
+    let meta = format!("\"{}\"", cfg.pg.meta_schema.replace('"', "\"\""));
     if let Err(e) = conn
         .execute(
             &format!(
@@ -2012,7 +2012,7 @@ async fn insert_supersedes_edges(
     squash_version: &str,
     supersedes: &[&str],
 ) -> Result<(), JournalError> {
-    let meta = format!("\"{}\"", cfg.meta_schema.replace('"', "\"\""));
+    let meta = format!("\"{}\"", cfg.pg.meta_schema.replace('"', "\"\""));
     for sup in supersedes {
         conn.execute(
             &format!(
@@ -2064,12 +2064,12 @@ pub(crate) async fn apply_non_transactional(
     // admin. `RESET ROLE` runs on ALL exit paths (including the error path) so
     // the role never leaks onto the session even if the `<up>` fails — and
     // `apply`'s `restore_session` is an unconditional backstop (L1).
-    if let Some(role) = &cfg.migrator_role {
+    if let Some(role) = &cfg.pg.migrator_role {
         conn.batch_execute(&format!("SET ROLE \"{}\"", role.replace('"', "\"\"")))
             .await?;
     }
     let up_result = conn.batch_execute(&m.up).await;
-    if cfg.migrator_role.is_some() {
+    if cfg.pg.migrator_role.is_some() {
         // RESET ROLE regardless of the up's success, so the journal writes below
         // run as admin and no role leaks onto the session.
         if let Err(e) = conn.batch_execute("RESET ROLE").await {
@@ -2985,7 +2985,7 @@ pub(crate) async fn rollback_one_transactional(
     }
     // RESET ROLE back to admin — still inside the txn — so the journal append runs
     // as the admin (the migrator cannot write the journal).
-    if cfg.migrator_role.is_some() {
+    if cfg.pg.migrator_role.is_some() {
         if let Err(e) = conn.batch_execute("RESET ROLE").await {
             let _ = conn.batch_execute("ROLLBACK").await;
             return Err(RollbackError::Db(e));
@@ -2994,7 +2994,7 @@ pub(crate) async fn rollback_one_transactional(
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
 
     // Append the immutable `rolled_back` event in the SAME transaction, as admin.
-    let meta = format!("\"{}\"", cfg.meta_schema.replace('"', "\"\""));
+    let meta = format!("\"{}\"", cfg.pg.meta_schema.replace('"', "\"\""));
     if let Err(e) = conn
         .execute(
             &format!(
@@ -3020,6 +3020,91 @@ pub(crate) async fn rollback_one_transactional(
 
     conn.batch_execute("COMMIT").await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod pg_confinement_shape_tests {
+    //! Pins the M2 confinement refactor: the **PG** apply leaf still emits its
+    //! `SET LOCAL search_path` / `SET LOCAL ROLE` / `SET LOCAL statement_timeout`
+    //! + `lock_timeout` bracket from the [`PgConfinement`](crate::db::PgConfinement)
+    //! block (now grouped under `cfg.pg`, not flat on the neutral config), and a
+    //! default (SQLite-shaped construction reuses this same `new`) carries the
+    //! INERT PG confinement — never PG role/cross-schema confinement of its own.
+    use super::*;
+    use crate::migration::{Checksum, MigrationFlags, MigrationId};
+
+    fn trivial_migration() -> Migration {
+        let flags = MigrationFlags::default();
+        let version = MigrationId::generate();
+        let checksum = Checksum::of(&crate::migration::ChecksumInput {
+            up: "CREATE TABLE t (id int)",
+            down: None,
+            flags: &flags,
+            owner_app: "app_test",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        });
+        Migration {
+            version,
+            name: "n".into(),
+            up: "CREATE TABLE t (id int)".into(),
+            down: None,
+            checksum,
+            flags,
+            owner_app: "app_test".into(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+        }
+    }
+
+    /// PG confinement bracket is emitted from the grouped `cfg.pg` block,
+    /// byte-identically to the pre-M2 flat shape: search_path = project schema
+    /// (+ extension schema), and the mandatory timeouts in ms.
+    #[test]
+    fn pg_confinement_bracket_is_emitted_from_the_pg_block() {
+        let cfg = ExecutorConfig::new("prj_x", "proj_x").with_migrator_role("migrator_proj_x");
+        let m = trivial_migration();
+
+        let session = set_local_session_sql(&cfg, &m);
+        // search_path is the project schema, then the `public` extension schema
+        // (the `new()` default) — pinned for confined resolution.
+        assert_eq!(
+            session,
+            "SET LOCAL search_path TO \"proj_x\", \"public\"; \
+             SET LOCAL statement_timeout = 60000; \
+             SET LOCAL lock_timeout = 30000;",
+            "PG SET LOCAL session bracket must come from cfg.pg byte-identically"
+        );
+
+        // The migrator role bracket comes from cfg.pg.migrator_role.
+        let role = set_local_role_sql(&cfg).expect("migrator role set");
+        assert_eq!(role, "SET LOCAL ROLE \"migrator_proj_x\"");
+    }
+
+    /// A default-constructed config (the SHAPE the SQLite engine builds via
+    /// `ExecutorConfig::new(app_id, app_id)`) carries NO migrator role — its
+    /// PG confinement is inert; SQLite confines via its runtime authorizer
+    /// mode-flip, never these PG params (M2).
+    #[test]
+    fn sqlite_shaped_config_carries_no_pg_role_confinement() {
+        // Exactly what crates/plugin-db sqlite_engine.rs constructs.
+        let cfg = ExecutorConfig::new("app_test", "app_test");
+        assert!(
+            cfg.pg.migrator_role.is_none(),
+            "a SQLite-shaped config must carry no PG migrator role (SET ROLE) — \
+             it confines via the runtime authorizer mode-flip, not the PG bracket"
+        );
+        // And the PG-only role bracket is therefore absent.
+        assert!(
+            set_local_role_sql(&cfg).is_none(),
+            "no SET LOCAL ROLE is emitted when the PG confinement carries no role"
+        );
+        // The neutral identity fields ARE populated (engine-agnostic).
+        assert_eq!(cfg.project_id, "app_test");
+        assert_eq!(cfg.project_schema, "app_test");
+    }
 }
 
 #[cfg(test)]
@@ -3526,9 +3611,9 @@ mod trusted_apply_pg {
     fn trusted_cfg(tok: &str) -> ExecutorConfig {
         let cap = OperatorCapability::for_test();
         let mut c = ExecutorConfig::trusted(&cap, format!("prj_{tok}"), format!("proj_{tok}"));
-        c.meta_schema = format!("meta_{tok}");
-        c.statement_timeout = std::time::Duration::from_secs(30);
-        c.lock_timeout = std::time::Duration::from_secs(10);
+        c.pg.meta_schema = format!("meta_{tok}");
+        c.pg.statement_timeout = std::time::Duration::from_secs(30);
+        c.pg.lock_timeout = std::time::Duration::from_secs(10);
         c
     }
 
@@ -3648,7 +3733,7 @@ mod trusted_apply_pg {
                  DROP SCHEMA IF EXISTS \"{}\" CASCADE; \
                  DROP SCHEMA IF EXISTS \"{}\" CASCADE; \
                  DROP ROLE IF EXISTS \"{}\";",
-                other_schema, cfg.project_schema, cfg.meta_schema, role
+                other_schema, cfg.project_schema, cfg.pg.meta_schema, role
             ))
             .await;
         assert!(
@@ -3721,7 +3806,7 @@ mod trusted_apply_pg {
         let _ = conn
             .batch_execute(&format!(
                 "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-                cfg.project_schema, cfg.meta_schema
+                cfg.project_schema, cfg.pg.meta_schema
             ))
             .await;
     }

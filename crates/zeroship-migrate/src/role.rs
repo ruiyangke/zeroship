@@ -199,7 +199,7 @@ pub async fn provision_migrator(admin: &Client, cfg: &ExecutorConfig) -> Result<
     let role_q = quote_ident(&role);
     let role_lit = quote_lit(&role);
     let proj_q = quote_ident(&cfg.project_schema);
-    let meta_q = quote_ident(&cfg.meta_schema);
+    let meta_q = quote_ident(&cfg.pg.meta_schema);
 
     // 1. Create the role idempotently with the locked-down attribute set.
     //    NOLOGIN: reached only via SET ROLE from the admin connection.
@@ -281,7 +281,7 @@ pub async fn provision_migrator(admin: &Client, cfg: &ExecutorConfig) -> Result<
                     EXECUTE 'REVOKE ALL ON SCHEMA {meta_q} FROM {role_q}';
                 END IF;
              END $revoke$",
-            meta_lit = quote_lit(&cfg.meta_schema),
+            meta_lit = quote_lit(&cfg.pg.meta_schema),
         ),
     )
     .await?;
@@ -302,7 +302,7 @@ pub async fn provision_migrator(admin: &Client, cfg: &ExecutorConfig) -> Result<
     //    grants (never given), so this does not relax cross-schema write
     //    confinement.
     let mut path_parts = vec![proj_q.clone()];
-    for ext in &cfg.extension_schemas {
+    for ext in &cfg.pg.extension_schemas {
         if ext != &cfg.project_schema {
             path_parts.push(quote_ident(ext));
         }
@@ -324,7 +324,7 @@ pub async fn provision_migrator(admin: &Client, cfg: &ExecutorConfig) -> Result<
     //    grants NO write/CREATE and NO access to existing tables (those need
     //    per-object grants the migrator never receives). Net: the migrator can
     //    resolve `vector(N)` but cannot create or write anything in `public`.
-    for ext in &cfg.extension_schemas {
+    for ext in &cfg.pg.extension_schemas {
         if ext == &cfg.project_schema {
             continue;
         }

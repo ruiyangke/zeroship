@@ -64,9 +64,9 @@ fn token() -> String {
 
 fn cfg_for(tok: &str) -> ExecutorConfig {
     let mut c = ExecutorConfig::new(format!("prj_{tok}"), format!("proj_{tok}"));
-    c.meta_schema = format!("meta_{tok}");
-    c.statement_timeout = Duration::from_secs(30);
-    c.lock_timeout = Duration::from_secs(10);
+    c.pg.meta_schema = format!("meta_{tok}");
+    c.pg.statement_timeout = Duration::from_secs(30);
+    c.pg.lock_timeout = Duration::from_secs(10);
     let role = migrator_role_name(&c.project_id).unwrap();
     c.with_migrator_role(role)
 }
@@ -106,7 +106,7 @@ async fn teardown(conn: &Client, cfg: &ExecutorConfig) {
     let _ = conn
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-            cfg.project_schema, cfg.meta_schema
+            cfg.project_schema, cfg.pg.meta_schema
         ))
         .await;
 }
@@ -140,7 +140,7 @@ async fn journal_completed_count(conn: &Client, cfg: &ExecutorConfig) -> i64 {
         .query(
             &format!(
                 "SELECT count(*)::bigint AS n FROM \"{}\".schema_migrations WHERE phase = 'completed'",
-                cfg.meta_schema
+                cfg.pg.meta_schema
             ),
             &[],
         )

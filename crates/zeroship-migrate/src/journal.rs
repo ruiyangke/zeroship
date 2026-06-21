@@ -165,9 +165,9 @@ fn quote_ident(ident: &str) -> String {
 /// # Errors
 /// [`JournalError::Db`] on any DDL failure.
 pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.meta_schema);
-    let trg_fn = quote_ident(&format!("{}_schema_migrations_immutable", cfg.meta_schema));
-    let meta_lit = cfg.meta_schema.replace('\'', "''");
+    let meta = quote_ident(&cfg.pg.meta_schema);
+    let trg_fn = quote_ident(&format!("{}_schema_migrations_immutable", cfg.pg.meta_schema));
+    let meta_lit = cfg.pg.meta_schema.replace('\'', "''");
 
     // 1. Meta schema.
     conn.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {meta}"))
@@ -381,7 +381,7 @@ pub async fn applied(
     conn: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<AppliedEntry>, JournalError> {
-    let meta = quote_ident(&cfg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema);
     // Union every completed + rolled_back event onto one (event_seq, kind, …)
     // stream, take the LATEST per version with DISTINCT ON, and keep only the
     // versions whose latest event is `completed` (net-applied). Then UNION the
@@ -518,7 +518,7 @@ pub async fn net_rolled_back(
     conn: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<RolledBackEntry>, JournalError> {
-    let meta = quote_ident(&cfg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema);
     let rows = conn
         .query(
             &format!(
@@ -572,7 +572,7 @@ pub async fn history(
     conn: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<HistoryEvent>, JournalError> {
-    let meta = quote_ident(&cfg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema);
     let rows = conn
         .query(
             &format!(
@@ -632,7 +632,7 @@ pub async fn record_rolled_back(
     rolled_back_by: &str,
     exec_ms: i64,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema);
     let n = conn
         .execute(
             &format!(
@@ -661,7 +661,7 @@ pub async fn record_started(
     checksum: &str,
     applied_by: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema);
     conn.execute(
         &format!(
             "INSERT INTO {meta}.schema_migrations_inflight
@@ -706,7 +706,7 @@ pub async fn record_completed(
     cfg: &ExecutorConfig,
     rec: CompletedRecord<'_>,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema);
     // Plain INSERT (consistent with the transactional path, M3). `event_seq` is a
     // surrogate identity PK, so this appends a fresh `completed` event — including
     // a re-apply after a rollback (Plan 5), where a prior `completed` + a later
@@ -751,7 +751,7 @@ pub async fn record_completed(
 /// # Errors
 /// [`JournalError::Db`] on query failure.
 pub async fn applied_count(conn: &Client, cfg: &ExecutorConfig) -> Result<i64, JournalError> {
-    let meta = quote_ident(&cfg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema);
     let row = conn
         .query_one(
             &format!(
@@ -798,7 +798,7 @@ pub async fn superseded_versions(
     conn: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<String>, JournalError> {
-    let meta = quote_ident(&cfg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema);
     let rows = conn
         .query(
             &format!(
@@ -872,7 +872,7 @@ pub async fn latest_completed_checksums(
     conn: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<std::collections::HashMap<String, String>, JournalError> {
-    let meta = quote_ident(&cfg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema);
     let rows = conn
         .query(
             &format!(
@@ -955,7 +955,7 @@ async fn record_baseline_inner(
     cfg: &ExecutorConfig,
     rec: BaselineRecord<'_>,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema);
     let n = conn
         .execute(
             &format!(
@@ -991,7 +991,7 @@ pub async fn clear_inflight(
     cfg: &ExecutorConfig,
     version: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema);
     conn.execute(
         &format!("DELETE FROM {meta}.schema_migrations_inflight WHERE version = $1"),
         &[&version],

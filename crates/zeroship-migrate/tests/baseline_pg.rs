@@ -49,9 +49,9 @@ fn token() -> String {
 
 fn cfg_for(tok: &str) -> ExecutorConfig {
     let mut c = ExecutorConfig::new(format!("prj_{tok}"), format!("proj_{tok}"));
-    c.meta_schema = format!("meta_{tok}");
-    c.statement_timeout = Duration::from_secs(30);
-    c.lock_timeout = Duration::from_secs(10);
+    c.pg.meta_schema = format!("meta_{tok}");
+    c.pg.statement_timeout = Duration::from_secs(30);
+    c.pg.lock_timeout = Duration::from_secs(10);
     c
 }
 
@@ -68,7 +68,7 @@ async fn drop_schemas(conn: &Client, cfg: &ExecutorConfig) {
     let _ = conn
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-            cfg.project_schema, cfg.meta_schema
+            cfg.project_schema, cfg.pg.meta_schema
         ))
         .await;
 }
@@ -170,7 +170,7 @@ async fn baseline_records_completed_without_running_up() {
         .query_one(
             &format!(
                 "SELECT kind FROM \"{}\".schema_migrations WHERE version = $1",
-                cfg.meta_schema
+                cfg.pg.meta_schema
             ),
             &[&v.as_str()],
         )
@@ -332,7 +332,7 @@ async fn re_baseline_same_version_is_idempotent() {
         .query_one(
             &format!(
                 "SELECT count(*)::bigint AS n FROM \"{}\".schema_migrations",
-                cfg.meta_schema
+                cfg.pg.meta_schema
             ),
             &[],
         )

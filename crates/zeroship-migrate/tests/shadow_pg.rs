@@ -69,10 +69,10 @@ fn cfg_for(tok: &str) -> ExecutorConfig {
     let project_id = format!("prj_{tok}");
     let role = migrator_role_name(&project_id).expect("role name");
     let mut c = ExecutorConfig::new(project_id, format!("proj_{tok}"));
-    c.meta_schema = format!("meta_{tok}");
-    c.statement_timeout = Duration::from_secs(30);
-    c.lock_timeout = Duration::from_secs(10);
-    c.migrator_role = Some(role);
+    c.pg.meta_schema = format!("meta_{tok}");
+    c.pg.statement_timeout = Duration::from_secs(30);
+    c.pg.lock_timeout = Duration::from_secs(10);
+    c.pg.migrator_role = Some(role);
     c
 }
 
@@ -252,7 +252,7 @@ async fn dry_run_broken_migration_fails_and_never_touches_prod() {
         "dry_run must NOT create the real project schema in the admin DB"
     );
     assert!(
-        !schema_exists(&admin, &cfg.meta_schema).await,
+        !schema_exists(&admin, &cfg.pg.meta_schema).await,
         "dry_run must NOT create the real meta schema in the admin DB"
     );
 }
@@ -512,8 +512,8 @@ async fn dry_run_drops_shadow_when_provision_fails_after_create() {
     // shadow connect.
     let tok = token();
     let mut cfg = ExecutorConfig::new(format!("prj_{tok}"), String::new());
-    cfg.meta_schema = format!("meta_{tok}");
-    cfg.migrator_role = Some("migrator_unused".to_string());
+    cfg.pg.meta_schema = format!("meta_{tok}");
+    cfg.pg.migrator_role = Some("migrator_unused".to_string());
 
     let m = mig(
         MigrationId::generate(),
@@ -975,7 +975,7 @@ async fn dry_run_declarative_incremental_add_column_on_prior_table_is_ok() {
     let _ = admin
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-            cfg.project_schema, cfg.meta_schema
+            cfg.project_schema, cfg.pg.meta_schema
         ))
         .await;
 }

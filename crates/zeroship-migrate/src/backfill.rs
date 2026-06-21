@@ -351,7 +351,7 @@ pub async fn ensure_backfill_progress(
     conn: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema);
     conn.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {meta}"))
         .await?;
     conn.batch_execute(&format!(
@@ -411,7 +411,7 @@ pub async fn backfill_progress(
     backfill_id: &str,
 ) -> Result<Option<BackfillProgress>, JournalError> {
     ensure_backfill_progress(conn, cfg).await?;
-    let meta = quote_ident(&cfg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema);
     let rows = conn
         .query(
             &format!(
@@ -453,7 +453,7 @@ pub async fn list_backfills(
     cfg: &ExecutorConfig,
 ) -> Result<Vec<BackfillProgress>, JournalError> {
     ensure_backfill_progress(conn, cfg).await?;
-    let meta = quote_ident(&cfg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema);
     let rows = conn
         .query(
             &format!(
@@ -833,7 +833,7 @@ async fn upsert_progress_row(
     spec: &BackfillSpec,
     applied_by: &str,
 ) -> Result<(), BackfillError> {
-    let meta = quote_ident(&cfg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema);
     conn.execute(
         &format!(
             "INSERT INTO {meta}.schema_backfills
@@ -859,7 +859,7 @@ async fn mark_complete(
     cfg: &ExecutorConfig,
     backfill_id: &str,
 ) -> Result<(), BackfillError> {
-    let meta = quote_ident(&cfg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema);
     conn.execute(
         &format!(
             "UPDATE {meta}.schema_backfills
@@ -920,7 +920,7 @@ async fn run_one_batch(
     }
 
     // Drop to the migrator role for the authored `UPDATE` ONLY (line-2 confinement).
-    if let Some(role) = &cfg.migrator_role {
+    if let Some(role) = &cfg.pg.migrator_role {
         if let Err(e) = conn
             .batch_execute(&format!("SET LOCAL ROLE \"{}\"", role.replace('"', "\"\"")))
             .await
@@ -955,7 +955,7 @@ async fn run_one_batch(
 
     // RESET ROLE back to admin (still inside the txn) so the progress write — meta
     // schema, which the migrator has no grant for — runs as the admin.
-    if cfg.migrator_role.is_some() {
+    if cfg.pg.migrator_role.is_some() {
         if let Err(e) = conn.batch_execute("RESET ROLE").await {
             let _ = conn.batch_execute("ROLLBACK").await;
             return Err(BackfillError::Db(e));
@@ -970,7 +970,7 @@ async fn run_one_batch(
 
     if n > 0 {
         // Advance progress IN THE SAME TRANSACTION as the UPDATE (both-or-neither).
-        let meta = quote_ident(&cfg.meta_schema);
+        let meta = quote_ident(&cfg.pg.meta_schema);
         if let Err(e) = conn
             .execute(
                 &format!(

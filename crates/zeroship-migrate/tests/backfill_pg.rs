@@ -52,9 +52,9 @@ fn token() -> String {
 /// happy-path / resume tests that focus on batching + cursor correctness.
 fn cfg_for(tok: &str) -> ExecutorConfig {
     let mut c = ExecutorConfig::new(format!("prj_{tok}"), format!("proj_{tok}"));
-    c.meta_schema = format!("meta_{tok}");
+    c.pg.meta_schema = format!("meta_{tok}");
     // A generous statement_timeout so a 1000-row batch never trips it.
-    c.statement_timeout = Duration::from_secs(30);
+    c.pg.statement_timeout = Duration::from_secs(30);
     c
 }
 
@@ -83,7 +83,7 @@ async fn drop_schemas(conn: &Client, cfg: &ExecutorConfig) {
     let _ = conn
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-            cfg.project_schema, cfg.meta_schema
+            cfg.project_schema, cfg.pg.meta_schema
         ))
         .await;
     let _ = zeroship_migrate::role::deprovision_migrator(conn, cfg).await;
@@ -646,7 +646,7 @@ async fn backfill_runs_under_migrator_role_and_completes() {
     provision_migrator(&conn, &cfg).await.expect("re-provision");
     seed_widgets(&conn, &cfg.project_schema, 2000).await;
     // The migrator must own the table it updates; the admin created it, so grant.
-    let role = cfg.migrator_role.clone().unwrap();
+    let role = cfg.pg.migrator_role.clone().unwrap();
     conn.batch_execute(&format!(
         "ALTER TABLE \"{}\".widgets OWNER TO \"{}\"",
         cfg.project_schema, role

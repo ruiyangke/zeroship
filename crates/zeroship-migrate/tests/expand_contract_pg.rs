@@ -52,7 +52,7 @@ fn token() -> String {
 
 fn cfg_for(tok: &str) -> ExecutorConfig {
     let mut c = ExecutorConfig::new(format!("prj_{tok}"), format!("proj_{tok}"));
-    c.meta_schema = format!("meta_{tok}");
+    c.pg.meta_schema = format!("meta_{tok}");
     c
 }
 
@@ -69,7 +69,7 @@ async fn drop_schemas(conn: &Client, cfg: &ExecutorConfig) {
     let _ = conn
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-            cfg.project_schema, cfg.meta_schema
+            cfg.project_schema, cfg.pg.meta_schema
         ))
         .await;
 }
@@ -316,7 +316,7 @@ fn cfg_with_role(tok: &str) -> ExecutorConfig {
 /// DROP COLUMN — works under SET ROLE). The test admin seeds the table, then
 /// transfers ownership.
 async fn give_table_to_migrator(conn: &Client, cfg: &ExecutorConfig) {
-    let role = cfg.migrator_role.as_ref().unwrap();
+    let role = cfg.pg.migrator_role.as_ref().unwrap();
     conn.batch_execute(&format!(
         "ALTER TABLE \"{}\".\"users\" OWNER TO \"{role}\"",
         cfg.project_schema
@@ -1036,7 +1036,7 @@ async fn split_column_expand_contract_dual_write_under_app_role() {
     // The migrator must own the table it ALTERs / triggers under SET ROLE.
     conn.batch_execute(&format!(
         "ALTER TABLE \"{schema}\".\"people\" OWNER TO \"{}\"",
-        cfg.migrator_role.as_ref().unwrap()
+        cfg.pg.migrator_role.as_ref().unwrap()
     ))
     .await
     .expect("chown people to migrator");
@@ -1315,7 +1315,7 @@ async fn merge_columns_expand_contract_dual_write_under_app_role() {
     let schema = cfg.project_schema.clone();
     conn.batch_execute(&format!(
         "ALTER TABLE \"{schema}\".\"contacts\" OWNER TO \"{}\"",
-        cfg.migrator_role.as_ref().unwrap()
+        cfg.pg.migrator_role.as_ref().unwrap()
     ))
     .await
     .expect("chown contacts to migrator");

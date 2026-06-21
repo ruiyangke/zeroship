@@ -367,11 +367,11 @@ fn shadow_executor_cfg(cfg: &ExecutorConfig, shadow_db: &str) -> Result<Executor
                 cfg.platform_exts.clone(),
             );
             // Carry the byte-faithful fields the `platform` ctor does not take.
-            sc.meta_schema.clone_from(&cfg.meta_schema);
-            sc.statement_timeout = cfg.statement_timeout;
-            sc.lock_timeout = cfg.lock_timeout;
+            sc.pg.meta_schema.clone_from(&cfg.pg.meta_schema);
+            sc.pg.statement_timeout = cfg.pg.statement_timeout;
+            sc.pg.lock_timeout = cfg.pg.lock_timeout;
             // Platform applies as the admin connection — NO SET ROLE (§8).
-            sc.migrator_role = None;
+            sc.pg.migrator_role = None;
             Ok(sc)
         }
         crate::guard::TrustProfile::Trusted => {
@@ -384,10 +384,10 @@ fn shadow_executor_cfg(cfg: &ExecutorConfig, shadow_db: &str) -> Result<Executor
             let cap = crate::guard::platform_runner::mint_shadow_operator_capability();
             let mut sc =
                 ExecutorConfig::trusted(&cap, shadow_db.to_string(), cfg.project_schema.clone());
-            sc.meta_schema.clone_from(&cfg.meta_schema);
-            sc.statement_timeout = cfg.statement_timeout;
-            sc.lock_timeout = cfg.lock_timeout;
-            sc.migrator_role = None;
+            sc.pg.meta_schema.clone_from(&cfg.pg.meta_schema);
+            sc.pg.statement_timeout = cfg.pg.statement_timeout;
+            sc.pg.lock_timeout = cfg.pg.lock_timeout;
+            sc.pg.migrator_role = None;
             Ok(sc)
         }
         _ => {
@@ -396,7 +396,7 @@ fn shadow_executor_cfg(cfg: &ExecutorConfig, shadow_db: &str) -> Result<Executor
             // faithful on the shadow too.
             let mut sc = cfg.clone();
             sc.project_id = shadow_db.to_string();
-            sc.migrator_role = Some(migrator_role_name(shadow_db)?);
+            sc.pg.migrator_role = Some(migrator_role_name(shadow_db)?);
             Ok(sc)
         }
     }
@@ -860,7 +860,7 @@ async fn open_and_provision_shadow(
     // NOSUPERUSER role). The branch is keyed on `migrator_role` (set by
     // [`shadow_executor_cfg`] from the source's trust profile), so the role-skip is
     // strictly Platform-only — a Confined dry-run ALWAYS provisions + SET ROLEs.
-    if cfg.migrator_role.is_some() {
+    if cfg.pg.migrator_role.is_some() {
         provision_migrator(&shadow, cfg).await?;
     }
     Ok((shadow, run_loop))
@@ -1321,12 +1321,12 @@ async fn teardown_shadow(
     //    Confined dry-run provisioned a role (Platform runs as admin, no role; §8),
     //    so skip the drop when none was provisioned — keyed on `migrator_role` so
     //    no cluster-global role can leak from a Platform shadow (there is none).
-    if shadow_exec_cfg.migrator_role.is_some() {
+    if shadow_exec_cfg.pg.migrator_role.is_some() {
         if let Err(e) = deprovision_migrator(admin_conn, shadow_exec_cfg).await {
             tracing::warn!(
                 error = %e,
                 shadow = %shadow_db,
-                role = ?shadow_exec_cfg.migrator_role,
+                role = ?shadow_exec_cfg.pg.migrator_role,
                 "zeroship-migrate: failed to drop shadow migrator role (cluster-global leak)"
             );
             first_err.get_or_insert_with(|| format!("drop shadow role: {e}"));

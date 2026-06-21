@@ -238,7 +238,7 @@ async fn first_baseline_version(
     conn: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<Option<String>, BaselineError> {
-    let meta = format!("\"{}\"", cfg.meta_schema.replace('"', "\"\""));
+    let meta = format!("\"{}\"", cfg.pg.meta_schema.replace('"', "\"\""));
     let rows = conn
         .query(
             &format!(

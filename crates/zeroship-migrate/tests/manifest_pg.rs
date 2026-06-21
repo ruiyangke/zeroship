@@ -57,7 +57,7 @@ fn token() -> String {
 
 fn cfg_for(tok: &str) -> ExecutorConfig {
     let mut c = ExecutorConfig::new(format!("prj_{tok}"), format!("proj_{tok}"));
-    c.meta_schema = format!("meta_{tok}");
+    c.pg.meta_schema = format!("meta_{tok}");
     let role = migrator_role_name(&c.project_id).unwrap();
     c.with_migrator_role(role)
 }
@@ -87,7 +87,7 @@ async fn teardown(conn: &Client, cfg: &ExecutorConfig) {
     let _ = conn
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-            cfg.project_schema, cfg.meta_schema
+            cfg.project_schema, cfg.pg.meta_schema
         ))
         .await;
 }
@@ -111,7 +111,7 @@ async fn journal_table_exists(conn: &Client, cfg: &ExecutorConfig) -> bool {
         .query(
             "SELECT 1 FROM information_schema.tables \
              WHERE table_schema = $1 AND table_name = 'schema_migrations'",
-            &[&cfg.meta_schema],
+            &[&cfg.pg.meta_schema],
         )
         .await
         .expect("query journal table existence");

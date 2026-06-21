@@ -670,7 +670,7 @@ async fn log_noop_name_mismatch(
     checksum: &str,
     submitted_name: &str,
 ) {
-    let meta = &cfg.meta_schema;
+    let meta = &cfg.pg.meta_schema;
     // The latest completed journal row for this checksum carries the name the unit
     // was first applied under. `meta_schema` is a server-controlled identifier (not
     // submitter input); the checksum is bound as a parameter.
@@ -777,9 +777,9 @@ mod low1_two_guard_coupling_pg {
             vec![schema, "public".to_string()],
             Vec::new(),
         );
-        c.meta_schema = format!("meta_{tok}");
-        c.statement_timeout = Duration::from_secs(30);
-        c.lock_timeout = Duration::from_secs(10);
+        c.pg.meta_schema = format!("meta_{tok}");
+        c.pg.statement_timeout = Duration::from_secs(30);
+        c.pg.lock_timeout = Duration::from_secs(10);
         let role = migrator_role_name(&c.project_id).unwrap();
         c.with_migrator_role(role)
     }
@@ -813,7 +813,7 @@ mod low1_two_guard_coupling_pg {
         let _ = conn
             .batch_execute(&format!(
                 "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-                cfg.project_schema, cfg.meta_schema
+                cfg.project_schema, cfg.pg.meta_schema
             ))
             .await;
     }
@@ -959,9 +959,9 @@ mod low1_two_guard_coupling_pg {
         let schema = format!("proj_{tok}");
         let mut c =
             ExecutorConfig::trusted(&cap, format!("prj_{tok}"), schema.clone());
-        c.meta_schema = format!("meta_{tok}");
-        c.statement_timeout = Duration::from_secs(30);
-        c.lock_timeout = Duration::from_secs(10);
+        c.pg.meta_schema = format!("meta_{tok}");
+        c.pg.statement_timeout = Duration::from_secs(30);
+        c.pg.lock_timeout = Duration::from_secs(10);
         c
     }
 
@@ -1031,7 +1031,7 @@ mod low1_two_guard_coupling_pg {
         let _ = conn
             .batch_execute(&format!(
                 "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-                cfg.project_schema, cfg.meta_schema
+                cfg.project_schema, cfg.pg.meta_schema
             ))
             .await;
     }

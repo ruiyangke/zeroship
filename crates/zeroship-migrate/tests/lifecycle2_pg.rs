@@ -88,7 +88,7 @@ fn token() -> String {
 /// A config + matching least-privilege migrator role for an isolated project.
 fn cfg_for(tok: &str) -> ExecutorConfig {
     let mut c = ExecutorConfig::new(format!("prj_{tok}"), format!("proj_{tok}"));
-    c.meta_schema = format!("meta_{tok}");
+    c.pg.meta_schema = format!("meta_{tok}");
     let role = migrator_role_name(&c.project_id).unwrap();
     c.with_migrator_role(role)
 }
@@ -119,7 +119,7 @@ async fn teardown(conn: &Client, cfg: &ExecutorConfig) {
     let _ = conn
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-            cfg.project_schema, cfg.meta_schema
+            cfg.project_schema, cfg.pg.meta_schema
         ))
         .await;
 }
@@ -127,7 +127,7 @@ async fn teardown(conn: &Client, cfg: &ExecutorConfig) {
 /// Hand a project table to the migrator role (mirrors the platform, where project
 /// tables are owned by the migrator so its DDL works under SET ROLE).
 async fn give_table_to_migrator(conn: &Client, cfg: &ExecutorConfig, table: &str) {
-    let role = cfg.migrator_role.as_ref().unwrap();
+    let role = cfg.pg.migrator_role.as_ref().unwrap();
     conn.batch_execute(&format!(
         "ALTER TABLE \"{}\".\"{table}\" OWNER TO \"{role}\"",
         cfg.project_schema
@@ -217,7 +217,7 @@ async fn journaled_kind(conn: &Client, cfg: &ExecutorConfig, version: &str) -> O
                 "SELECT kind FROM \"{}\".schema_migrations \
                  WHERE version = $1 AND phase = 'completed' \
                  ORDER BY event_seq DESC LIMIT 1",
-                cfg.meta_schema
+                cfg.pg.meta_schema
             ),
             &[&version],
         )
@@ -232,7 +232,7 @@ async fn completed_events(conn: &Client, cfg: &ExecutorConfig, version: &str) ->
         &format!(
             "SELECT count(*)::bigint AS n FROM \"{}\".schema_migrations \
              WHERE version = $1 AND phase = 'completed'",
-            cfg.meta_schema
+            cfg.pg.meta_schema
         ),
         &[&version],
     )
@@ -1112,7 +1112,7 @@ async fn meta_schema_exists(conn: &Client, cfg: &ExecutorConfig) -> bool {
     let rows = conn
         .query(
             "SELECT 1 FROM information_schema.schemata WHERE schema_name = $1",
-            &[&cfg.meta_schema],
+            &[&cfg.pg.meta_schema],
         )
         .await
         .expect("meta_schema_exists");

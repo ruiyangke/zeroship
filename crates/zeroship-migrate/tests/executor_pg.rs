@@ -51,7 +51,7 @@ fn token() -> String {
 
 fn cfg_for(tok: &str) -> ExecutorConfig {
     let mut c = ExecutorConfig::new(format!("prj_{tok}"), format!("proj_{tok}"));
-    c.meta_schema = format!("meta_{tok}");
+    c.pg.meta_schema = format!("meta_{tok}");
     c
 }
 
@@ -70,7 +70,7 @@ async fn drop_schemas(conn: &Client, cfg: &ExecutorConfig) {
     let _ = conn
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-            cfg.project_schema, cfg.meta_schema
+            cfg.project_schema, cfg.pg.meta_schema
         ))
         .await;
 }
@@ -158,11 +158,11 @@ async fn journal_bootstrap_creates_schema_and_table() {
     ensure_journal(&conn, &cfg).await.expect("ensure_journal");
 
     assert!(
-        table_exists(&conn, &cfg.meta_schema, "schema_migrations").await,
+        table_exists(&conn, &cfg.pg.meta_schema, "schema_migrations").await,
         "journal table must exist after bootstrap"
     );
     assert!(
-        table_exists(&conn, &cfg.meta_schema, "schema_migrations_inflight").await,
+        table_exists(&conn, &cfg.pg.meta_schema, "schema_migrations_inflight").await,
         "inflight side-table must exist after bootstrap"
     );
     assert_eq!(journal_count(&conn, &cfg).await, 0, "fresh journal is empty");
@@ -231,7 +231,7 @@ async fn journal_immutability_trigger_rejects_update_and_delete() {
     let upd = conn
         .batch_execute(&format!(
             "UPDATE \"{}\".schema_migrations SET name = 'x' WHERE version = 'mig_immut'",
-            cfg.meta_schema
+            cfg.pg.meta_schema
         ))
         .await;
     assert!(upd.is_err(), "UPDATE must be rejected by the immutability trigger");
@@ -239,7 +239,7 @@ async fn journal_immutability_trigger_rejects_update_and_delete() {
     let del = conn
         .batch_execute(&format!(
             "DELETE FROM \"{}\".schema_migrations WHERE version = 'mig_immut'",
-            cfg.meta_schema
+            cfg.pg.meta_schema
         ))
         .await;
     assert!(del.is_err(), "DELETE must be rejected by the immutability trigger");
@@ -285,7 +285,7 @@ async fn journal_immutability_trigger_rejects_truncate() {
         "schema_migrations_supersedes",
     ] {
         let trunc = conn
-            .batch_execute(&format!("TRUNCATE \"{}\".{tbl}", cfg.meta_schema))
+            .batch_execute(&format!("TRUNCATE \"{}\".{tbl}", cfg.pg.meta_schema))
             .await;
         assert!(
             trunc.is_err(),
@@ -666,7 +666,7 @@ async fn non_transactional_recovers_from_crashed_started_marker() {
         .query(
             &format!(
                 "SELECT 1 FROM \"{}\".schema_migrations_inflight",
-                cfg.meta_schema
+                cfg.pg.meta_schema
             ),
             &[],
         )
@@ -861,7 +861,7 @@ async fn statement_timeout_aborts_long_migration_cleanly() {
     let tok = token();
     let mut cfg = cfg_for(&tok);
     // Tiny timeout so a 5s sleep trips it fast.
-    cfg.statement_timeout = Duration::from_millis(250);
+    cfg.pg.statement_timeout = Duration::from_millis(250);
     drop_schemas(&conn, &cfg).await;
     ensure_project_schema(&conn, &cfg).await;
 
@@ -1227,7 +1227,7 @@ async fn h2_session_settings_do_not_leak_after_apply() {
     let conn = pg().await;
     let tok = token();
     let mut cfg = cfg_for(&tok);
-    cfg.statement_timeout = Duration::from_millis(12_345);
+    cfg.pg.statement_timeout = Duration::from_millis(12_345);
     drop_schemas(&conn, &cfg).await;
     ensure_project_schema(&conn, &cfg).await;
 
@@ -1268,7 +1268,7 @@ async fn h2_session_settings_do_not_leak_after_non_txn_apply() {
     let conn = pg().await;
     let tok = token();
     let mut cfg = cfg_for(&tok);
-    cfg.statement_timeout = Duration::from_millis(23_456);
+    cfg.pg.statement_timeout = Duration::from_millis(23_456);
     drop_schemas(&conn, &cfg).await;
     ensure_project_schema(&conn, &cfg).await;
 
@@ -1310,7 +1310,7 @@ async fn h3_per_migration_timeout_override_lets_long_migration_complete() {
     let tok = token();
     let mut cfg = cfg_for(&tok);
     // Default would kill anything over 300ms.
-    cfg.statement_timeout = Duration::from_millis(300);
+    cfg.pg.statement_timeout = Duration::from_millis(300);
     drop_schemas(&conn, &cfg).await;
     ensure_project_schema(&conn, &cfg).await;
 
@@ -1389,7 +1389,7 @@ async fn executor_apply_refuses_destructive_batch_without_approval() {
     // The gate refuses before even bootstrapping the journal, so the journal
     // table must not exist — proof nothing was applied or recorded.
     assert!(
-        !table_exists(&conn, &cfg.meta_schema, "schema_migrations").await,
+        !table_exists(&conn, &cfg.pg.meta_schema, "schema_migrations").await,
         "a refused destructive apply must not even bootstrap the journal"
     );
 
@@ -1474,7 +1474,7 @@ async fn ensure_journal_and_apply_under_hyphenated_uuid_schema() {
     // A real per-app id: a hyphenated UUID, exactly what the platform uses.
     let app_id = uuid::Uuid::now_v7().to_string();
     let mut cfg = ExecutorConfig::new(app_id.clone(), app_id.clone());
-    cfg.meta_schema = format!("{app_id}_migrations");
+    cfg.pg.meta_schema = format!("{app_id}_migrations");
     drop_schemas(&conn, &cfg).await;
     ensure_project_schema(&conn, &cfg).await;
 

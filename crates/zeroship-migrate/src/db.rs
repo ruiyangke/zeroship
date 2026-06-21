@@ -18,19 +18,26 @@ pub enum ConnectError {
     Connect(#[from] compio_postgres::Error),
 }
 
-/// Per-run executor configuration (design §2.3 / §1.5).
+/// The **Postgres confinement parameters** — the per-engine apply-confinement
+/// strategy inputs that are PG-shaped and meaningless to a non-PG engine
+/// (multi-engine abstraction M2, design §2.3 / §1.5).
 ///
-/// `statement_timeout` + `lock_timeout` are **mandatory** (§1.5: no indefinite
-/// locks / `DoS`). They are applied per migration before its SQL runs.
+/// These are NOT engine-agnostic. The PG apply leaf (`crate::executor::pg`)
+/// reads them to emit its confinement bracket — `SET LOCAL search_path` (built
+/// from `project_schema` + `extension_schemas`), `SET LOCAL ROLE <migrator>`,
+/// and the mandatory `SET LOCAL statement_timeout` / `lock_timeout` — plus the
+/// `meta_schema` the journal lives in. The SQLite engine confines through a
+/// runtime two-mode authorizer (`Arc<AtomicU8>` mode-flip) instead and carries
+/// NONE of these; it builds an [`ExecutorConfig`] via [`ExecutorConfig::new`]
+/// whose `pg` block is inert default.
+///
+/// Grouping these into one named struct keeps the neutral [`ExecutorConfig`]
+/// from being PG-shaped at the type level: a non-PG backend never reads `pg`,
+/// and the M2 confinement STRATEGY stays where it already lives — in each
+/// backend's apply leaf (PG's `SET ROLE`/search_path/timeout bracket; SQLite's
+/// mode-flip), NOT in the neutral core.
 #[derive(Debug, Clone)]
-pub struct ExecutorConfig {
-    /// The project id (`prj_…`) — its bytes seed the apply-serializing advisory
-    /// lock (`pg_advisory_lock(hashtext(project_id))`).
-    pub project_id: String,
-    /// The one schema this project's migrations own and may touch. Pinned into
-    /// `search_path` for every apply, and the [`crate::guard::SqlGuard`]'s
-    /// confinement target.
-    pub project_schema: String,
+pub struct PgConfinement {
     /// The per-project **meta schema** that holds the append-only
     /// `schema_migrations` journal (design §2.2). Separate from the project
     /// schema so a creator migration can't touch its own history.
@@ -47,23 +54,6 @@ pub struct ExecutorConfig {
     /// model is not provisioned. In the platform this is always `Some`,
     /// matching a role created by [`crate::role::provision_migrator`].
     pub migrator_role: Option<String>,
-    /// PRIVATE (`pub(crate)`). The trust posture every executor-path guard build
-    /// derives from (design §4.1 / §5). `Confined` for the creator path (set by
-    /// [`ExecutorConfig::new`]); `Platform` ONLY via [`ExecutorConfig::platform`]
-    /// and `Trusted` ONLY via [`ExecutorConfig::trusted`] (both require an
-    /// [`OperatorCapability`] token). Not `pub`, so the control plane — outside
-    /// this crate — can neither name `Platform`/`Trusted` (the enum is
-    /// `#[non_exhaustive]`) nor reach the constructors: it cannot flip the
-    /// executor into a privileged profile.
-    pub(crate) trust: crate::guard::TrustProfile,
-    /// PRIVATE (`pub(crate)`). The schema allowlist a Platform guard permits
-    /// references to (e.g. `zeroship` / `oauth_hydra` / `public`). Empty for
-    /// Confined (the `project_schema` is the sole permitted schema there) and for
-    /// Trusted (no cross-schema confinement at all).
-    pub(crate) platform_schemas: Vec<String>,
-    /// PRIVATE (`pub(crate)`). The `CREATE EXTENSION` allowlist a Platform guard
-    /// permits (e.g. `citext` / `uuid-ossp`). Empty for Confined and Trusted.
-    pub(crate) platform_exts: Vec<String>,
     /// The schema(s) that host shared **extension types/functions** the engine
     /// emits UNQUALIFIED (e.g. pgvector's `vector(N)`, `PostGIS`'s
     /// `geography(POINT,4326)`). pgvector / `PostGIS` install into `public` on the
@@ -82,6 +72,76 @@ pub struct ExecutorConfig {
     /// receives). So the cross-schema **write** confinement is unchanged — these
     /// schemas are resolution-only.
     pub extension_schemas: Vec<String>,
+}
+
+impl PgConfinement {
+    /// The default PG confinement for a project whose journal lives in
+    /// `meta_schema` (the `<project_schema>_migrations` namespace by default):
+    /// conservative non-zero timeouts (§1.5: no indefinite locks), no `SET ROLE`
+    /// (the platform sets it via [`ExecutorConfig::with_migrator_role`]), and
+    /// `public` as the extension-type resolution schema.
+    #[must_use]
+    fn new(meta_schema: String) -> Self {
+        Self {
+            meta_schema,
+            // Conservative defaults; callers tune per deploy. Non-zero so a
+            // runaway migration cannot hold locks indefinitely.
+            statement_timeout: Duration::from_secs(60),
+            lock_timeout: Duration::from_secs(30),
+            // Defaults to no SET ROLE; the platform sets this to the provisioned
+            // `migrator_<project>` role. Tests opt in explicitly.
+            migrator_role: None,
+            // Extension types/functions (pgvector `vector`, PostGIS `geography`)
+            // live in `public` on the platform/dev image. Resolution-only; the
+            // migrator gets USAGE (not CREATE) on these — see the field doc.
+            extension_schemas: vec!["public".to_string()],
+        }
+    }
+}
+
+/// Per-run executor configuration (design §2.3 / §1.5).
+///
+/// The engine-agnostic fields (project identity + trust posture) live directly
+/// on this struct; the **PG-specific confinement parameters** are grouped under
+/// [`pg`](Self::pg) (a [`PgConfinement`]) so the neutral core is not PG-shaped
+/// at the type level. A non-PG backend (SQLite, which confines via a runtime
+/// mode-flip) never reads `pg` (multi-engine abstraction M2).
+///
+/// The PG `statement_timeout` + `lock_timeout` under [`pg`](Self::pg) are
+/// **mandatory** (§1.5: no indefinite locks / `DoS`). They are applied per
+/// migration before its SQL runs.
+#[derive(Debug, Clone)]
+pub struct ExecutorConfig {
+    /// The project id (`prj_…`) — its bytes seed the apply-serializing advisory
+    /// lock (`pg_advisory_lock(hashtext(project_id))`).
+    pub project_id: String,
+    /// The one schema this project's migrations own and may touch. Pinned into
+    /// `search_path` for every apply, and the [`crate::guard::SqlGuard`]'s
+    /// confinement target.
+    pub project_schema: String,
+    /// The **Postgres confinement parameters** (meta schema, migrator role,
+    /// timeouts, extension-resolution schemas). PG-shaped by construction; read
+    /// ONLY by the PG apply leaf. A SQLite-backed [`ExecutorConfig`] carries the
+    /// inert [`PgConfinement::new`] default and never consults this — its
+    /// confinement is the runtime authorizer mode-flip (M2).
+    pub pg: PgConfinement,
+    /// PRIVATE (`pub(crate)`). The trust posture every executor-path guard build
+    /// derives from (design §4.1 / §5). `Confined` for the creator path (set by
+    /// [`ExecutorConfig::new`]); `Platform` ONLY via [`ExecutorConfig::platform`]
+    /// and `Trusted` ONLY via [`ExecutorConfig::trusted`] (both require an
+    /// [`OperatorCapability`] token). Not `pub`, so the control plane — outside
+    /// this crate — can neither name `Platform`/`Trusted` (the enum is
+    /// `#[non_exhaustive]`) nor reach the constructors: it cannot flip the
+    /// executor into a privileged profile.
+    pub(crate) trust: crate::guard::TrustProfile,
+    /// PRIVATE (`pub(crate)`). The schema allowlist a Platform guard permits
+    /// references to (e.g. `zeroship` / `oauth_hydra` / `public`). Empty for
+    /// Confined (the `project_schema` is the sole permitted schema there) and for
+    /// Trusted (no cross-schema confinement at all).
+    pub(crate) platform_schemas: Vec<String>,
+    /// PRIVATE (`pub(crate)`). The `CREATE EXTENSION` allowlist a Platform guard
+    /// permits (e.g. `citext` / `uuid-ossp`). Empty for Confined and Trusted.
+    pub(crate) platform_exts: Vec<String>,
     /// PRIVATE (`pub(crate)`). The OPERATOR capability token, present ONLY on a
     /// config built via [`ExecutorConfig::platform`] or [`ExecutorConfig::trusted`].
     /// It rides here so the executor-path guard builds
@@ -104,23 +164,14 @@ impl ExecutorConfig {
         Self {
             project_id: project_id.into(),
             project_schema,
-            meta_schema,
-            // Conservative defaults; callers tune per deploy. Non-zero so a
-            // runaway migration cannot hold locks indefinitely.
-            statement_timeout: Duration::from_secs(60),
-            lock_timeout: Duration::from_secs(30),
-            // Defaults to no SET ROLE; the platform sets this to the provisioned
-            // `migrator_<project>` role. Tests opt in explicitly.
-            migrator_role: None,
+            // The PG-specific confinement block (meta schema, timeouts, role,
+            // extension-resolution schemas). Inert for a SQLite-backed config.
+            pg: PgConfinement::new(meta_schema),
             // Confined by default — the creator path. `Platform` is reachable
             // ONLY via `ExecutorConfig::platform` (token-gated, §4.1).
             trust: crate::guard::TrustProfile::Confined,
             platform_schemas: Vec::new(),
             platform_exts: Vec::new(),
-            // Extension types/functions (pgvector `vector`, PostGIS `geography`)
-            // live in `public` on the platform/dev image. Resolution-only; the
-            // migrator gets USAGE (not CREATE) on these — see the field doc.
-            extension_schemas: vec!["public".to_string()],
             operator_cap: None,
         }
     }
@@ -220,7 +271,7 @@ impl ExecutorConfig {
     /// flow runs migrations under. Builder convenience.
     #[must_use]
     pub fn with_migrator_role(mut self, role: impl Into<String>) -> Self {
-        self.migrator_role = Some(role.into());
+        self.pg.migrator_role = Some(role.into());
         self
     }
 
@@ -262,7 +313,7 @@ impl ExecutorConfig {
             // `role::provision_migrator`), so this is resolution, not write reach.
             _ => {
                 let mut parts = vec![quote(&self.project_schema)];
-                for ext in &self.extension_schemas {
+                for ext in &self.pg.extension_schemas {
                     // Avoid duplicating the project schema if it (oddly) appears.
                     if ext != &self.project_schema {
                         parts.push(quote(ext));
@@ -276,13 +327,13 @@ impl ExecutorConfig {
     /// `statement_timeout` in whole milliseconds (the unit `SET` takes).
     #[must_use]
     pub fn statement_timeout_ms(&self) -> u64 {
-        u64::try_from(self.statement_timeout.as_millis()).unwrap_or(u64::MAX)
+        u64::try_from(self.pg.statement_timeout.as_millis()).unwrap_or(u64::MAX)
     }
 
     /// `lock_timeout` in whole milliseconds (the unit `SET` takes).
     #[must_use]
     pub fn lock_timeout_ms(&self) -> u64 {
-        u64::try_from(self.lock_timeout.as_millis()).unwrap_or(u64::MAX)
+        u64::try_from(self.pg.lock_timeout.as_millis()).unwrap_or(u64::MAX)
     }
 }
 

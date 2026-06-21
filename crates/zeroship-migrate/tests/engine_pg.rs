@@ -54,7 +54,7 @@ fn token() -> String {
 /// double as the project schema the deterministic/raw authors qualify into.
 fn cfg_for(tok: &str) -> ExecutorConfig {
     let mut c = ExecutorConfig::new(format!("prj_{tok}"), format!("proj_{tok}"));
-    c.meta_schema = format!("meta_{tok}");
+    c.pg.meta_schema = format!("meta_{tok}");
     let role = migrator_role_name(&c.project_id).unwrap();
     c.with_migrator_role(role)
 }
@@ -85,7 +85,7 @@ async fn teardown(conn: &Client, cfg: &ExecutorConfig) {
     let _ = conn
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-            cfg.project_schema, cfg.meta_schema
+            cfg.project_schema, cfg.pg.meta_schema
         ))
         .await;
 }
@@ -120,7 +120,7 @@ async fn journaled(conn: &Client, cfg: &ExecutorConfig, version: &str) -> bool {
             &format!(
                 "SELECT 1 FROM \"{}\".schema_migrations \
                  WHERE version = $1 AND phase = 'completed'",
-                cfg.meta_schema
+                cfg.pg.meta_schema
             ),
             &[&version],
         )
@@ -297,7 +297,7 @@ async fn deterministic_create_table_e2e_under_migrator_role() {
         .await
         .expect("owner query")
         .get("tableowner");
-    assert_eq!(owner, cfg.migrator_role.clone().unwrap(), "DDL ran under migrator role");
+    assert_eq!(owner, cfg.pg.migrator_role.clone().unwrap(), "DDL ran under migrator role");
     teardown(&conn, &cfg).await;
 }
 

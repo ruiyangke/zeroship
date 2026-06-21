@@ -51,9 +51,9 @@ fn token() -> String {
 
 fn cfg_for(tok: &str) -> ExecutorConfig {
     let mut c = ExecutorConfig::new(format!("prj_{tok}"), format!("proj_{tok}"));
-    c.meta_schema = format!("meta_{tok}");
-    c.statement_timeout = Duration::from_secs(30);
-    c.lock_timeout = Duration::from_secs(10);
+    c.pg.meta_schema = format!("meta_{tok}");
+    c.pg.statement_timeout = Duration::from_secs(30);
+    c.pg.lock_timeout = Duration::from_secs(10);
     c
 }
 
@@ -70,7 +70,7 @@ async fn drop_schemas(conn: &Client, cfg: &ExecutorConfig) {
     let _ = conn
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-            cfg.project_schema, cfg.meta_schema
+            cfg.project_schema, cfg.pg.meta_schema
         ))
         .await;
 }
@@ -177,7 +177,7 @@ async fn existing_db_squash_records_without_running_up() {
         .query_one(
             &format!(
                 "SELECT kind FROM \"{}\".schema_migrations WHERE version = $1",
-                cfg.meta_schema
+                cfg.pg.meta_schema
             ),
             &[&s.version.as_str()],
         )
@@ -642,12 +642,12 @@ async fn fresh_squash_records_completed_row_and_edges_atomically() {
         .expect("fresh apply of squash S");
 
     assert_eq!(
-        completed_count(&conn, &cfg.meta_schema, s.version.as_str()).await,
+        completed_count(&conn, &cfg.pg.meta_schema, s.version.as_str()).await,
         1,
         "S has exactly one completed row"
     );
     assert_eq!(
-        edge_count(&conn, &cfg.meta_schema, s.version.as_str()).await,
+        edge_count(&conn, &cfg.pg.meta_schema, s.version.as_str()).await,
         3,
         "all three supersession edges present"
     );
@@ -681,7 +681,7 @@ async fn fresh_squash_edge_failure_rolls_back_completed_row_same_txn() {
          $fn$ LANGUAGE plpgsql;
          CREATE TRIGGER poison_sup_trg BEFORE INSERT ON \"{meta}\".schema_migrations_supersedes
              FOR EACH ROW EXECUTE FUNCTION \"{meta}\".\"{trg_fn}\"();",
-        meta = cfg.meta_schema
+        meta = cfg.pg.meta_schema
     ))
     .await
     .expect("install poison trigger");
@@ -700,12 +700,12 @@ async fn fresh_squash_edge_failure_rolls_back_completed_row_same_txn() {
 
     // ATOMICITY: neither the completed row nor any edge survived (same txn).
     assert_eq!(
-        completed_count(&conn, &cfg.meta_schema, s.version.as_str()).await,
+        completed_count(&conn, &cfg.pg.meta_schema, s.version.as_str()).await,
         0,
         "S's completed row must NOT survive an edge-insert failure (same txn)"
     );
     assert_eq!(
-        edge_count(&conn, &cfg.meta_schema, s.version.as_str()).await,
+        edge_count(&conn, &cfg.pg.meta_schema, s.version.as_str()).await,
         0,
         "no edges survive"
     );
@@ -756,7 +756,7 @@ async fn existing_db_squash_record_baseline_is_atomic() {
          $fn$ LANGUAGE plpgsql;
          CREATE TRIGGER poison_sup_trg BEFORE INSERT ON \"{meta}\".schema_migrations_supersedes
              FOR EACH ROW EXECUTE FUNCTION \"{meta}\".\"{trg_fn}\"();",
-        meta = cfg.meta_schema
+        meta = cfg.pg.meta_schema
     ))
     .await
     .expect("install poison trigger");
@@ -773,12 +773,12 @@ async fn existing_db_squash_record_baseline_is_atomic() {
 
     // ATOMICITY: neither the completed row nor any edge survived (same txn).
     assert_eq!(
-        completed_count(&conn, &cfg.meta_schema, s.version.as_str()).await,
+        completed_count(&conn, &cfg.pg.meta_schema, s.version.as_str()).await,
         0,
         "S's completed row must NOT survive an edge-insert failure (record_baseline txn)"
     );
     assert_eq!(
-        edge_count(&conn, &cfg.meta_schema, s.version.as_str()).await,
+        edge_count(&conn, &cfg.pg.meta_schema, s.version.as_str()).await,
         0,
         "no edges survive"
     );
@@ -805,7 +805,7 @@ async fn superseded_versions_ignores_edges_of_non_squash_versions() {
     ensure_project_schema(&conn, &cfg).await;
     ensure_journal(&conn, &cfg).await.expect("journal");
 
-    let meta = &cfg.meta_schema;
+    let meta = &cfg.pg.meta_schema;
     let v_ord = MigrationId::generate();
     let s = MigrationId::generate();
     let v_a = MigrationId::generate();
