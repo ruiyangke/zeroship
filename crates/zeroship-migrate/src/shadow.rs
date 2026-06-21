@@ -181,8 +181,7 @@ pub enum DryRunError {
     /// shadow dry-run capability** ([`shadow()`](crate::backend::MigrationBackend::shadow)
     /// returned `None`) — e.g. the SQLite dev backend, which applies only TRUSTED
     /// descriptor-generated DDL on a recoverable dev path, so a pre-apply shadow
-    /// clone adds little (a future untrusted/prod non-PG engine, e.g. MySQL, would
-    /// provide one).
+    /// clone adds little (a future untrusted/prod non-PG engine would provide one).
     ///
     /// This is the **honest** outcome the engine returns when a caller asks for a
     /// dry-run on a backend that cannot perform one: it is an explicit error, NOT a
@@ -688,9 +687,8 @@ async fn dry_run_incremental_body(
 /// [`ShadowConfig`]). They do **not** take a `compio_postgres::Client`. The
 /// Postgres impl ([`PgShadow`]) owns its admin `Client` **internally** and runs
 /// the existing throwaway-database harness ([`dry_run`] / [`dry_run_declarative`])
-/// verbatim; a future untrusted/prod non-PG engine (MySQL) would lower the *same*
-/// inputs to its own shadow mechanism — which a raw `&Client` could never have
-/// admitted.
+/// verbatim; a future untrusted/prod non-PG engine would lower the *same* inputs
+/// to its own shadow mechanism — which a raw `&Client` could never have admitted.
 ///
 /// Returned as boxed futures so the trait is `dyn`-dispatchable
 /// (`Option<&dyn ShadowDryRun>`); a dry-run runs at deploy/preview time, never the

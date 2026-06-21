@@ -38,7 +38,7 @@ use compio_postgres::Client;
 use pg_query::protobuf::node::Node as NodeEnum;
 
 use crate::approval::Approval;
-use crate::backend::{JournalAtomicity, MigrationBackend, PostgresBackend, SessionSnapshot};
+use crate::backend::{MigrationBackend, PostgresBackend, SessionSnapshot};
 use crate::db::ExecutorConfig;
 use crate::guard::{GuardError, SqlGuard};
 use crate::journal::{self, AppliedEntry, JournalError, Phase};
@@ -1032,11 +1032,10 @@ async fn apply_locked<B: MigrationBackend>(
         // (re-runnable by crash recovery). Reject the non-idempotent form with a
         // clear error. Behind the seam: PG parses with `pg_query`; SQLite rejects
         // `transaction:false` at the dialect boundary (design §2.3/L3). The gate
-        // mirrors the apply-path decision ([`uses_two_phase_path`]) so a
-        // non-transactional (`InflightMarker`) backend validates EVERY migration's
-        // idempotency, while PG/SQLite (`Transactional`) keep the byte-identical
-        // `transaction:false`-only check.
-        if uses_two_phase_path(backend, m) {
+        // mirrors the apply-path decision ([`uses_two_phase_path`]): a
+        // `transaction:false` migration must be idempotent (re-runnable by crash
+        // recovery).
+        if uses_two_phase_path(m) {
             backend.validate_non_txn(m)?;
         }
     }
@@ -1069,27 +1068,14 @@ async fn apply_locked<B: MigrationBackend>(
 
 /// Whether a migration must take the **two-phase non-transactional** apply path
 /// (`started → completed` inflight marker + crash recovery) rather than the atomic
-/// `BEGIN; <up>; INSERT journal; COMMIT` path (multi-engine abstraction C2).
+/// `BEGIN; <up>; INSERT journal; COMMIT` path.
 ///
-/// Two independent reasons route a migration onto the two-phase path; either is
-/// sufficient (an OR):
-///
-/// 1. **Per-migration `transaction:false`** — the migration itself contains a
-///    statement that cannot run inside a transaction (Postgres `CREATE INDEX
-///    CONCURRENTLY` / `ALTER TYPE … ADD VALUE`). This is the pre-existing,
-///    per-migration opt-in, unchanged.
-/// 2. **A non-transactional backend** — the backend reports
-///    [`JournalAtomicity::InflightMarker`] (a MySQL-class engine whose DDL
-///    auto-commits per statement, so NO migration on it can be wrapped in one
-///    transaction with its journal row). Such a backend routes ALL its migrations
-///    through the two-phase path.
-///
-/// Postgres and SQLite both report [`JournalAtomicity::Transactional`], so clause
-/// (2) NEVER fires for them and this reduces to exactly the pre-seam
-/// `!m.flags.transactional` test — their apply behavior is byte-identical. The
-/// `InflightMarker` clause is the seam by which a MySQL-class backend plugs in.
-fn uses_two_phase_path<B: MigrationBackend>(backend: &B, m: &Migration) -> bool {
-    !m.flags.transactional || backend.journal_atomicity() == JournalAtomicity::InflightMarker
+/// A migration takes the two-phase path when it is `transaction:false` — i.e. it
+/// contains a statement that cannot run inside a transaction (Postgres `CREATE
+/// INDEX CONCURRENTLY` / `ALTER TYPE … ADD VALUE`). This is the per-migration
+/// opt-in; every transactional migration on PG/SQLite takes the atomic path.
+fn uses_two_phase_path(m: &Migration) -> bool {
+    !m.flags.transactional
 }
 
 /// The execute pass (design §2.3 step 6): for each pending migration, evaluate
@@ -1164,13 +1150,10 @@ async fn execute_pending<B: MigrationBackend>(
         // repeatable never reaches the versioned pipeline (it is partitioned out).
         let kind = if sups.is_empty() { "apply" } else { "squash" };
 
-        if uses_two_phase_path(backend, m) {
+        if uses_two_phase_path(m) {
             // Two-phase `started → completed` path. Reached when the migration is
-            // `transaction:false`, OR the backend is non-transactional
-            // (`JournalAtomicity::InflightMarker`, MySQL-class) so no migration can
-            // be wrapped in one transaction with its journal row. PG/SQLite report
-            // `Transactional`, so for them this fires only on `transaction:false` —
-            // byte-identical to the pre-seam path.
+            // `transaction:false` (PG `CREATE INDEX CONCURRENTLY` / `ALTER TYPE …
+            // ADD VALUE`); SQLite has no non-txn DDL so it never fires there.
             //
             // Mandatory timeouts + pinned search_path on the session (the non-txn
             // path has no transaction to SET LOCAL within). Restored on exit by
@@ -3195,240 +3178,6 @@ mod non_txn_idempotency_tests {
                 "idempotent non-txn op must pass: {sql}"
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod journal_atomicity_seam_tests {
-    //! The `JournalAtomicity` seam (multi-engine abstraction C2): prove the
-    //! atomic-vs-two-phase apply decision ([`uses_two_phase_path`]) actually
-    //! consults [`MigrationBackend::journal_atomicity`], and that PG/SQLite's
-    //! `Transactional` reduces it to the byte-identical `!transactional` test.
-    //!
-    //! Uses a minimal test backend that overrides ONLY `journal_atomicity`; every
-    //! other trait method is `unimplemented!()` because the decision function never
-    //! touches them — that is the whole point (the capability is consulted in
-    //! isolation, no DB needed).
-    use super::*;
-    use crate::backend::{JournalAtomicity, SessionSnapshot};
-    use crate::baseline::{BaselineError, BaselineOutcome};
-    use crate::drift::{DriftError, SchemaSnapshot};
-    use crate::journal::JournalError;
-    use crate::migration::{Checksum, MigrationFlags, MigrationId};
-    use zeroship_schema::query::SqlDialect;
-
-    /// A backend that reports a configurable [`JournalAtomicity`] and panics on any
-    /// other method. The decision function only calls `journal_atomicity()`, so the
-    /// `unimplemented!()` stubs are never reached.
-    struct AtomicityProbe {
-        atomicity: JournalAtomicity,
-    }
-
-    impl MigrationBackend for AtomicityProbe {
-        fn dialect(&self) -> SqlDialect {
-            SqlDialect::Postgres
-        }
-        fn guard(&self) -> &dyn crate::guard::MigrationGuard {
-            unimplemented!("seam probe: guard not consulted by uses_two_phase_path")
-        }
-        fn journal_atomicity(&self) -> JournalAtomicity {
-            self.atomicity
-        }
-        async fn acquire_project_lock(&self, _: &str) -> Result<(), ApplyError> {
-            unimplemented!()
-        }
-        async fn release_project_lock(&self, _: &str) -> Result<(), ApplyError> {
-            unimplemented!()
-        }
-        async fn snapshot_session(&self) -> Result<SessionSnapshot, ApplyError> {
-            unimplemented!()
-        }
-        async fn restore_session(&self, _: &SessionSnapshot) -> Result<(), ApplyError> {
-            unimplemented!()
-        }
-        async fn reset_role_best_effort(&self) {
-            unimplemented!()
-        }
-        async fn apply_up_transactional(
-            &self,
-            _: &ExecutorConfig,
-            _: &Migration,
-            _: &str,
-            _: &[&str],
-            _: &str,
-        ) -> Result<(), ApplyError> {
-            unimplemented!()
-        }
-        async fn configure_session_non_txn(
-            &self,
-            _: &ExecutorConfig,
-            _: &Migration,
-        ) -> Result<(), ApplyError> {
-            unimplemented!()
-        }
-        async fn apply_up_non_transactional(
-            &self,
-            _: &ExecutorConfig,
-            _: &Migration,
-            _: &str,
-            _: bool,
-            _: &[&str],
-        ) -> Result<bool, ApplyError> {
-            unimplemented!()
-        }
-        async fn rollback_one_transactional(
-            &self,
-            _: &ExecutorConfig,
-            _: &Migration,
-            _: &str,
-        ) -> Result<(), RollbackError> {
-            unimplemented!()
-        }
-        fn validate_non_txn(&self, _: &Migration) -> Result<(), ApplyError> {
-            unimplemented!()
-        }
-        async fn ensure_journal(&self, _: &ExecutorConfig) -> Result<(), JournalError> {
-            unimplemented!()
-        }
-        async fn applied(&self, _: &ExecutorConfig) -> Result<Vec<AppliedEntry>, JournalError> {
-            unimplemented!()
-        }
-        async fn superseded_versions(
-            &self,
-            _: &ExecutorConfig,
-        ) -> Result<Vec<String>, JournalError> {
-            unimplemented!()
-        }
-        async fn latest_completed_checksums(
-            &self,
-            _: &ExecutorConfig,
-        ) -> Result<HashMap<String, String>, JournalError> {
-            unimplemented!()
-        }
-        async fn check_checksum_drift(
-            &self,
-            _: &ExecutorConfig,
-            _: &[Migration],
-        ) -> Result<crate::drift::ChecksumDriftReport, DriftError> {
-            unimplemented!()
-        }
-        async fn snapshot_schema(&self, _: &ExecutorConfig) -> Result<SchemaSnapshot, DriftError> {
-            unimplemented!()
-        }
-        async fn evaluate_preconditions(
-            &self,
-            _: &ExecutorConfig,
-            _: &Migration,
-        ) -> Result<PreconditionVerdict, ApplyError> {
-            unimplemented!()
-        }
-        async fn record_squash(
-            &self,
-            _: &ExecutorConfig,
-            _: &Migration,
-            _: &str,
-            _: &[&str],
-        ) -> Result<(), ApplyError> {
-            unimplemented!()
-        }
-        async fn rebuild_one(
-            &self,
-            _: &crate::backend_sqlite::SqliteRebuildSpec,
-            _: &Migration,
-            _: &str,
-        ) -> Result<(), ApplyError> {
-            unimplemented!()
-        }
-        fn online(&self) -> Option<&dyn crate::expand_contract::OnlineSchemaChange> {
-            unimplemented!()
-        }
-        fn shadow(&self) -> Option<&dyn crate::shadow::ShadowDryRun> {
-            unimplemented!()
-        }
-        async fn baseline_one(
-            &self,
-            _: &ExecutorConfig,
-            _: &Migration,
-            _: &str,
-        ) -> Result<BaselineOutcome, BaselineError> {
-            unimplemented!()
-        }
-    }
-
-    /// Build a migration with the given `transactional` flag.
-    fn mig(transactional: bool) -> Migration {
-        let flags = MigrationFlags {
-            transactional,
-            ..MigrationFlags::default()
-        };
-        let up = "CREATE TABLE t ()";
-        let checksum = Checksum::of(&crate::migration::ChecksumInput {
-            up,
-            down: None,
-            flags: &flags,
-            owner_app: "app_test",
-            depends_on: &[],
-            supersedes: &[],
-            preconditions: &[],
-        });
-        Migration {
-            version: MigrationId::generate(),
-            name: "n".into(),
-            up: up.into(),
-            down: None,
-            checksum,
-            flags,
-            owner_app: "app_test".into(),
-            depends_on: Vec::new(),
-            supersedes: Vec::new(),
-            preconditions: Vec::new(),
-        }
-    }
-
-    // A `Transactional` backend (PG/SQLite) takes the ATOMIC path for an ordinary
-    // `transaction:true` migration — the OR-clause never fires. Byte-identical to
-    // the pre-seam `!m.flags.transactional` test.
-    #[test]
-    fn transactional_backend_txn_migration_uses_atomic_path() {
-        let b = AtomicityProbe {
-            atomicity: JournalAtomicity::Transactional,
-        };
-        assert!(
-            !uses_two_phase_path(&b, &mig(true)),
-            "Transactional + transaction:true must use the atomic path"
-        );
-    }
-
-    // A `Transactional` backend still routes a per-migration `transaction:false`
-    // through the two-phase path (the pre-existing PG CONCURRENTLY behavior).
-    #[test]
-    fn transactional_backend_non_txn_migration_uses_two_phase() {
-        let b = AtomicityProbe {
-            atomicity: JournalAtomicity::Transactional,
-        };
-        assert!(
-            uses_two_phase_path(&b, &mig(false)),
-            "Transactional + transaction:false must still use the two-phase path"
-        );
-    }
-
-    // The seam: an `InflightMarker` backend (MySQL-class) routes EVERY migration —
-    // even a `transaction:true` one — through the two-phase path. This proves the
-    // capability is consulted: only `journal_atomicity()` differs between this and
-    // the atomic-path case above.
-    #[test]
-    fn inflight_marker_backend_routes_txn_migration_through_two_phase() {
-        let b = AtomicityProbe {
-            atomicity: JournalAtomicity::InflightMarker,
-        };
-        assert!(
-            uses_two_phase_path(&b, &mig(true)),
-            "InflightMarker backend must route even a transaction:true migration through two-phase"
-        );
-        assert!(
-            uses_two_phase_path(&b, &mig(false)),
-            "InflightMarker backend routes transaction:false through two-phase as well"
-        );
     }
 }
 

@@ -202,3 +202,18 @@ Legend: **A**=auto/deterministic · **G**=gated(confirm) · **AI**=AI-authored �
 - Per-app capability scoping default surface (read-only storefront) — opt-in mechanism shape.
 - Online-executor (pgroll vs Reshape vs own) selection — deferred to the L8r phase; seam keeps it open.
 - Backup/snapshot hook before destructive/irreversible applies (PITR vs logical) — recommended for the destructive gate.
+
+## 10. Scope note — MySQL descoped (2026-06-21)
+
+The supported engines are **exactly Postgres + SQLite**. The earlier multi-engine
+sweep included speculative MySQL scaffolding (a `MysqlBackend` compile-stub, a
+`JournalAtomicity { Transactional, InflightMarker }` capability that existed only
+to express MySQL's per-statement auto-commit DDL, and assorted "future MySQL"
+doc-comments). With no MySQL engine planned, that was dead/speculative code and has
+been removed: the `mysql_stub_typecheck` test, the `JournalAtomicity` enum +
+`MigrationBackend::journal_atomicity()` method, and the MySQL comments. The
+`uses_two_phase_path` decision reverts to `!m.flags.transactional` — byte-identical
+to the pre-`JournalAtomicity` behavior, since PG/SQLite always reported
+`Transactional` (the `InflightMarker` clause was always false). The
+`MigrationBackend` abstraction itself stays — it is how PG and SQLite are *both*
+supported, and a future non-PG engine can still be added behind it.
