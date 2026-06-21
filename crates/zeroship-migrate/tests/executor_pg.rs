@@ -677,6 +677,101 @@ async fn non_transactional_recovers_from_crashed_started_marker() {
     drop_schemas(&conn, &cfg).await;
 }
 
+// M2: a non-txn double-crash must NOT lose the inflight marker. On the recovery
+// path, `recover_non_transactional` clears the `started` marker, then the `<up>`
+// re-runs. If that re-run itself crashes BEFORE `record_completed`, a SECOND
+// recovery attempt would observe `had_inflight = false` (the marker is gone) and
+// treat the next attempt as a FRESH apply — skipping the INVALID-index cleanup.
+// The fix re-writes a `started` marker AFTER recovery and BEFORE the re-run, so a
+// re-crash re-enters recovery. We exercise the re-arm faithfully: seed a lone
+// `started` marker (had_inflight), then drive a non-txn `up` that FAILS on its
+// re-run (its target table does not exist). After the failed apply the inflight
+// marker MUST still be present — proof it was re-armed. Pre-fix it would be gone
+// (recovery cleared it and nothing re-wrote it), so a re-crash would mis-recover.
+#[compio::test]
+async fn m2_non_txn_recovery_rearms_inflight_marker_before_rerun() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    ensure_journal(&conn, &cfg).await.expect("bootstrap");
+
+    // A non-txn migration whose `up` REFERENCES A NONEXISTENT table, so its re-run
+    // after recovery FAILS (relation does not exist) — standing in for a crash
+    // before `completed`. It is still idempotency-valid (`IF NOT EXISTS` present).
+    let m = mig_nontxn(
+        MigrationId::generate(),
+        "idx_missing",
+        &format!(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_missing \
+             ON \"{}\".does_not_exist (col)",
+            cfg.project_schema
+        ),
+    );
+
+    // Seed a lone `started` marker (no completed row) → the apply takes the
+    // recovery path (`had_inflight = true`).
+    journal::record_started(
+        &conn,
+        &cfg,
+        m.version.as_str(),
+        &m.name,
+        m.checksum.as_str(),
+        "actor",
+    )
+    .await
+    .expect("seed started marker");
+
+    // The apply MUST fail (the re-run references a nonexistent table).
+    let err = apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
+        .await
+        .expect_err("the failing re-run must surface as an error");
+    assert!(
+        matches!(err, ApplyError::MigrationFailed { .. }),
+        "expected a MigrationFailed from the nonexistent-table up, got: {err:?}"
+    );
+
+    // THE M2 PROPERTY: the inflight marker for this version must STILL be present
+    // (re-armed after recovery), so a re-crash re-enters the recovery path. Pre-fix
+    // recovery cleared it and nothing re-wrote it, so this row would be ABSENT.
+    let inflight = conn
+        .query(
+            &format!(
+                "SELECT 1 FROM \"{}\".schema_migrations_inflight WHERE version = $1",
+                cfg.pg.meta_schema
+            ),
+            &[&m.version.as_str()],
+        )
+        .await
+        .expect("inflight query");
+    assert!(
+        !inflight.is_empty(),
+        "after a recovery whose re-run failed, the inflight marker MUST be re-armed \
+         (M2) so a second crash re-enters recovery; pre-fix it was lost"
+    );
+    // And no COMPLETED row was journaled (the up failed). We query the completed
+    // table directly — `journal::applied` deliberately surfaces the lone `started`
+    // inflight marker as an entry too, so it cannot distinguish a re-armed marker
+    // from a completed row.
+    let completed = conn
+        .query(
+            &format!(
+                "SELECT 1 FROM \"{}\".schema_migrations WHERE version = $1",
+                cfg.pg.meta_schema
+            ),
+            &[&m.version.as_str()],
+        )
+        .await
+        .expect("completed query");
+    assert!(
+        completed.is_empty(),
+        "the failed up must not journal a completed row"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
 /// v1.x scope fix: recovery of a crashed non-txn migration must drop ONLY the
 /// index its `up` names — an UNRELATED invalid index elsewhere in the project
 /// schema (e.g. a human's manual CONCURRENTLY build in progress) must survive.

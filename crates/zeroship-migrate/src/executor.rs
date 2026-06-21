@@ -2032,14 +2032,27 @@ pub(crate) async fn apply_non_transactional(
     // the migrator owns) runs as the migrator.
     if had_inflight {
         // Recovery path: a prior run wrote `started` then crashed before
-        // `completed`. Inspect the real state and make the apply idempotent. The
-        // INVALID-index DROP inside runs as the migrator (it owns the index); the
-        // inflight `clear` runs as admin. See `recover_non_transactional`.
+        // `completed`. Inspect the real state and make the apply idempotent.
+        // `recover_non_transactional` runs entirely as the ADMIN (it is called
+        // BEFORE the `<up>`'s `SET ROLE`): both the INVALID-index DROP and the
+        // inflight `clear` run as admin (the admin is privileged over the project
+        // schema, so it can DROP the index without the migrator role). See
+        // `recover_non_transactional`. It CLEARS the inflight marker; the
+        // `record_started` below then RE-ARMS it before the `<up>` re-runs.
         recover_non_transactional(conn, cfg, m).await?;
-    } else {
-        journal::record_started(conn, cfg, version, &m.name, m.checksum.as_str(), applied_by)
-            .await?;
     }
+    // Write (fresh path) or RE-WRITE (post-recovery, M2) the `started` marker
+    // BEFORE the `<up>` runs. The re-arm matters on the recovery path:
+    // `recover_non_transactional` cleared the marker, but the re-run below can
+    // itself crash before `record_completed`. Without a fresh `started` marker a
+    // SECOND crash would observe `had_inflight = false` and treat the next attempt
+    // as a FRESH apply — skipping the INVALID-index cleanup, so an interrupted
+    // `CREATE INDEX CONCURRENTLY` left INVALID would satisfy `IF NOT EXISTS` and
+    // never be rebuilt. Re-writing `started` here keeps every subsequent crash
+    // re-entering recovery until a `completed` row lands. Runs as admin (still
+    // before the `SET ROLE`). `record_started` is `ON CONFLICT DO NOTHING`, so on
+    // the fresh path (where recovery did not run) it is the original single write.
+    journal::record_started(conn, cfg, version, &m.name, m.checksum.as_str(), applied_by).await?;
 
     let started = Instant::now();
     // C1: bracket the `<up>` with SET ROLE / RESET ROLE so the migration's DDL
