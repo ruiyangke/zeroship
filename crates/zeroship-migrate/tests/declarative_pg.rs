@@ -4083,3 +4083,264 @@ async fn p4_half_a_generated_ddl_carries_sentinels_and_round_trips_through_intro
 
     teardown(&conn, &cfg).await;
 }
+
+// ===========================================================================
+// GOLDEN DDL — exact-byte assertions on the Postgres emitter (Phase 0).
+//
+// These pin the FULL `up`/`down` strings the PG render paths emit today, for the
+// create-table / add-column / create-index / drop-{table,column,index} render
+// paths over a representative schema (PK, plain column, mask column, encrypted
+// column, FK, index). They are the explicit byte bar for the P1 `DdlEmitter`
+// extraction: the extraction is code-motion only, so these MUST stay green and
+// UNCHANGED across it. Pure-diff (no live DB) so they capture emission exactly.
+// ===========================================================================
+
+const G_PROJECT: &str = "prj_g";
+const G_APP: &str = "app_g";
+
+/// (users) FK target + (accounts) feature-rich child: PK (system `id`), a plain
+/// `title`, a `.mask()`ed `ssn` (→ `ssn_masked` sibling), a `.encrypted()`
+/// `secret`, an FK `owner → users`, and a declared index.
+fn golden_descs() -> Vec<CollectionDescriptor> {
+    let users = CollectionDescriptor {
+        name: "users".into(),
+        owner_app: G_APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "handle".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let accounts = CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: G_APP.into(),
+        fields: vec![
+            FieldDescriptor {
+                name: "title".into(),
+                ty: "string".into(),
+                required: true,
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "ssn".into(),
+                ty: "string".into(),
+                mask: Some(serde_json::json!({ "kind": "last4", "classification": "pii" })),
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "secret".into(),
+                ty: "bytes".into(),
+                encrypted: Some(serde_json::json!({ "mode": "randomized", "keyId": "k1" })),
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "owner".into(),
+                ty: "ref".into(),
+                references: Some("users".into()),
+                ..Default::default()
+            },
+        ],
+        indexes: vec![IndexDescriptor {
+            name: "accounts_title_idx".into(),
+            columns: vec!["title".into()],
+            unique: false,
+        }],
+    };
+    vec![users, accounts]
+}
+
+fn golden_author() -> DeclarativeAuthor {
+    // Default dialect is Postgres.
+    DeclarativeAuthor::new(G_PROJECT, G_APP)
+}
+
+/// A live snapshot built from the SAME `desired_snapshot` machinery (system
+/// fields injected), so a second-deploy diff sees matching data_types.
+fn golden_live(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String, String>) {
+    let d = desired_snapshot(G_PROJECT, descs).expect("golden live desired_snapshot");
+    let ownership: HashMap<String, String> =
+        d.ownership.iter().map(|(t, a)| (t.clone(), a.clone())).collect();
+    (d.snapshot, ownership)
+}
+
+fn find_mig<'a>(migs: &'a [Migration], name: &str) -> &'a Migration {
+    migs.iter()
+        .find(|m| m.name == name)
+        .unwrap_or_else(|| panic!("migration {name} present; have: {:?}",
+            migs.iter().map(|m| &m.name).collect::<Vec<_>>()))
+}
+
+#[test]
+fn golden_pg_create_table_and_index() {
+    let desired = desired_snapshot(G_PROJECT, &golden_descs()).expect("desired_snapshot");
+    let plan = golden_author()
+        .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .expect("greenfield diff");
+    let migs = plan.all_migrations();
+
+    // --- create_table users (PK + plain column, schema-qualified) ---
+    let users = find_mig(&migs, "create_table_users");
+    assert_eq!(
+        users.up,
+        r#"CREATE TABLE "prj_g"."users" ("created_at" timestamptz NOT NULL, "created_by" text, "deleted_at" timestamptz, "handle" text NOT NULL, "id" text PRIMARY KEY NOT NULL, "updated_at" timestamptz NOT NULL, "updated_by" text, "version" integer NOT NULL)"#,
+    );
+    assert_eq!(users.down.as_deref(), Some(r#"DROP TABLE "prj_g"."users""#));
+
+    // --- create_table accounts (mask sibling + encrypted + inline FK + COMMENTs) ---
+    let accounts = find_mig(&migs, "create_table_accounts");
+    assert_eq!(
+        accounts.up,
+        "CREATE TABLE \"prj_g\".\"accounts\" (\"created_at\" timestamptz NOT NULL, \"created_by\" text, \"deleted_at\" timestamptz, \"id\" text PRIMARY KEY NOT NULL, \"owner\" text, \"secret\" bytea /* zsenc:randomised:k1:string */, \"ssn\" text, \"ssn_masked\" text, \"title\" text NOT NULL, \"updated_at\" timestamptz NOT NULL, \"updated_by\" text, \"version\" integer NOT NULL, CONSTRAINT \"owner_fkey\" FOREIGN KEY (\"owner\") REFERENCES \"prj_g\".\"users\" (id) ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED);\nCOMMENT ON COLUMN \"prj_g\".\"accounts\".\"secret\" IS 'zsenc:randomised:k1:string';\nCOMMENT ON COLUMN \"prj_g\".\"accounts\".\"ssn_masked\" IS '__zsmask:kind=last4,classification=pii'",
+    );
+    assert_eq!(accounts.down.as_deref(), Some(r#"DROP TABLE "prj_g"."accounts""#));
+
+    // --- create_index (qualified table ref + qualified DROP in down) ---
+    let idx = find_mig(&migs, "create_index_accounts_title_idx");
+    assert_eq!(
+        idx.up,
+        r#"CREATE INDEX IF NOT EXISTS "accounts_title_idx" ON "prj_g"."accounts" ("title")"#,
+    );
+    assert_eq!(
+        idx.down.as_deref(),
+        Some(r#"DROP INDEX IF EXISTS "prj_g"."accounts_title_idx""#),
+    );
+}
+
+#[test]
+fn golden_pg_add_column() {
+    // v1: accounts(title). v2 adds a plain + a masked + an encrypted column.
+    let v1 = CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: G_APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "title".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let mut v2 = v1.clone();
+    v2.fields.push(FieldDescriptor {
+        name: "note".into(),
+        ty: "string".into(),
+        ..Default::default()
+    });
+    v2.fields.push(FieldDescriptor {
+        name: "ssn".into(),
+        ty: "string".into(),
+        mask: Some(serde_json::json!({ "kind": "last4", "classification": "pii" })),
+        ..Default::default()
+    });
+    v2.fields.push(FieldDescriptor {
+        name: "secret".into(),
+        ty: "bytes".into(),
+        encrypted: Some(serde_json::json!({ "mode": "randomized", "keyId": "k1" })),
+        ..Default::default()
+    });
+    let (live, ownership) = golden_live(std::slice::from_ref(&v1));
+    let desired2 = desired_snapshot(G_PROJECT, &[v2]).expect("v2 desired");
+    let migs = golden_author()
+        .diff(&desired2, &live, &ownership, &[])
+        .expect("add-column diff")
+        .all_migrations();
+
+    // plain column — no COMMENT tail.
+    let note = find_mig(&migs, "add_column_accounts_note");
+    assert_eq!(note.up, r#"ALTER TABLE "prj_g"."accounts" ADD COLUMN "note" text"#);
+    assert_eq!(
+        note.down.as_deref(),
+        Some(r#"ALTER TABLE "prj_g"."accounts" DROP COLUMN "note""#),
+    );
+
+    // encrypted column — inline `/* zsenc:… */` + trailing COMMENT ON COLUMN.
+    let secret = find_mig(&migs, "add_column_accounts_secret");
+    assert_eq!(
+        secret.up,
+        "ALTER TABLE \"prj_g\".\"accounts\" ADD COLUMN \"secret\" bytea /* zsenc:randomised:k1:string */;\nCOMMENT ON COLUMN \"prj_g\".\"accounts\".\"secret\" IS 'zsenc:randomised:k1:string'",
+    );
+    assert_eq!(
+        secret.down.as_deref(),
+        Some(r#"ALTER TABLE "prj_g"."accounts" DROP COLUMN "secret""#),
+    );
+
+    // mask sibling column — trailing COMMENT ON COLUMN (the `__zsmask:` sentinel).
+    let masked = find_mig(&migs, "add_column_accounts_ssn_masked");
+    assert_eq!(
+        masked.up,
+        "ALTER TABLE \"prj_g\".\"accounts\" ADD COLUMN \"ssn_masked\" text;\nCOMMENT ON COLUMN \"prj_g\".\"accounts\".\"ssn_masked\" IS '__zsmask:kind=last4,classification=pii'",
+    );
+    assert_eq!(
+        masked.down.as_deref(),
+        Some(r#"ALTER TABLE "prj_g"."accounts" DROP COLUMN "ssn_masked""#),
+    );
+}
+
+#[test]
+fn golden_pg_drops() {
+    // live: accounts(title, drop_me, an index) + a `gone` table.
+    // desired: accounts(title) only → DROP COLUMN drop_me, DROP INDEX, DROP TABLE gone.
+    let live_accounts = CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: G_APP.into(),
+        fields: vec![
+            FieldDescriptor {
+                name: "title".into(),
+                ty: "string".into(),
+                required: true,
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "drop_me".into(),
+                ty: "string".into(),
+                ..Default::default()
+            },
+        ],
+        indexes: vec![IndexDescriptor {
+            name: "accounts_dropidx".into(),
+            columns: vec!["title".into()],
+            unique: false,
+        }],
+    };
+    let gone = CollectionDescriptor {
+        name: "gone".into(),
+        owner_app: G_APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "x".into(),
+            ty: "string".into(),
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let desired_accounts = CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: G_APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "title".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let (live, ownership) = golden_live(&[live_accounts, gone]);
+    let desired = desired_snapshot(G_PROJECT, &[desired_accounts]).expect("desired");
+    let migs = golden_author()
+        .diff(&desired, &live, &ownership, &[])
+        .expect("drop diff")
+        .all_migrations();
+
+    let dc = find_mig(&migs, "drop_column_accounts_drop_me");
+    assert_eq!(dc.up, r#"ALTER TABLE "prj_g"."accounts" DROP COLUMN "drop_me""#);
+    assert_eq!(dc.down, None);
+
+    let di = find_mig(&migs, "drop_index_accounts_dropidx");
+    assert_eq!(di.up, r#"DROP INDEX "prj_g"."accounts_dropidx""#);
+    assert_eq!(di.down, None);
+
+    let dt = find_mig(&migs, "drop_table_gone");
+    assert_eq!(dt.up, r#"DROP TABLE "prj_g"."gone""#);
+    assert_eq!(dt.down, None);
+}
