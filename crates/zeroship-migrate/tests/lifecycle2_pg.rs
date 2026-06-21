@@ -30,15 +30,30 @@ use std::collections::HashMap;
 
 use compio_postgres::Client;
 use zeroship_migrate::executor::ApplyError;
+use zeroship_migrate::baseline::BaselineOutcome;
 use zeroship_migrate::{
-    PostgresBackend,
-    analyze_migration, baseline, check_checksum_drift, compute_manifest, desired_snapshot,
+    MigrationBackend, PostgresBackend,
+    analyze_migration, check_checksum_drift, compute_manifest, desired_snapshot,
     diff_snapshots, history, migrator_role_name, provision_migrator, role::deprovision_migrator,
     snapshot_schema, squash, status, Approval, Checksum, ChecksumInput, CollectionDescriptor,
     DeclarativeError, EngineError, ExecutorConfig, FieldDescriptor, GuardConfig, HistoryKind,
     ManifestHash, Migration, MigrationEngine, MigrationFlags, MigrationId, OnUnmet, Precondition,
     PreconditionCheck, SchemaSnapshot, Severity, ShadowConfig, SquashError,
 };
+
+/// Baseline through the neutral [`MigrationBackend::baseline_one`] seam (multi-engine
+/// abstraction L5) — the PG free `baseline()` is now the `pub(crate)` body behind
+/// `PostgresBackend::baseline_one`, keeping the `&Client`/advisory-lock confined.
+async fn baseline(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    m: &Migration,
+    applied_by: &str,
+) -> Result<BaselineOutcome, zeroship_migrate::baseline::BaselineError> {
+    PostgresBackend::new(conn)
+        .baseline_one(cfg, m, applied_by)
+        .await
+}
 
 const DEFAULT_DSN: &str =
     "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_migrate_test";
