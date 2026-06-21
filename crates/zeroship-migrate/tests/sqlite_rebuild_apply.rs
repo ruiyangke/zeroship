@@ -1364,6 +1364,210 @@ async fn h1_drop_column_in_check_routes_to_rebuild() {
 }
 
 // ---------------------------------------------------------------------------
+// (NULL-LOOSEN) Nullability LOOSEN (NOT NULL → nullable) via rebuild. Only the
+// TIGHTEN direction was tested (`nullability_tighten_rebuild`); this is the
+// loosen half. v1: body required (NOT NULL); v2: body optional (nullable). The
+// second-deploy diff yields one rebuild ("alter column body nullability false →
+// true"); applying it preserves the rows and the new shape is nullable.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn nullability_loosen_rebuild_preserves_data() {
+    // v1: notes(body: required string → NOT NULL). v2: body optional → nullable.
+    let v1 = vec![CollectionDescriptor {
+        name: "notes".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "body".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    }];
+    let mut v2 = v1.clone();
+    v2[0].fields[0].required = false;
+
+    let p = paths("rebuild_null_loosen");
+    let be = backend(&p);
+    apply_first_deploy(&be, &v1).await;
+
+    // The pre-rebuild shape is NOT NULL on `body`.
+    let info_before = be
+        .actor()
+        .query("PRAGMA main.table_info(notes)")
+        .await
+        .expect("table_info pre");
+    let notnull_before = info_before
+        .iter()
+        .find(|r| r[1].as_deref() == Some("body"))
+        .and_then(|r| r[3].clone())
+        .expect("body present");
+    assert_eq!(notnull_before, "1", "body starts NOT NULL");
+
+    // Seed rows (engine mode lets the test write `main`).
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .exec("INSERT INTO main.notes (id, body) VALUES ('n1', 'hello'), ('n2', 'world')")
+        .await
+        .expect("seed rows");
+
+    let rb = one_rebuild(&v1, &v2);
+    assert!(
+        rb.spec.reason.contains("nullability"),
+        "the rebuild reason names the nullability change: {}",
+        rb.spec.reason
+    );
+    be.rebuild_one(&rb.spec, &rb.migration, "deployer")
+        .await
+        .expect("nullability-loosen rebuild applies");
+
+    // The new shape is NULLABLE on `body` (notnull = 0).
+    let info_after = be
+        .actor()
+        .query("PRAGMA main.table_info(notes)")
+        .await
+        .expect("table_info post");
+    let notnull_after = info_after
+        .iter()
+        .find(|r| r[1].as_deref() == Some("body"))
+        .and_then(|r| r[3].clone())
+        .expect("body present");
+    assert_eq!(notnull_after, "0", "body is now nullable after the loosen rebuild");
+
+    // The data is preserved across the rebuild.
+    let vals = be
+        .actor()
+        .query("SELECT body FROM main.notes ORDER BY id")
+        .await
+        .expect("read body");
+    assert_eq!(
+        vals.iter().filter_map(|r| r[0].clone()).collect::<Vec<_>>(),
+        vec!["hello", "world"],
+        "rows preserved across the nullability-loosen rebuild"
+    );
+    // A nullable column now ACCEPTS a NULL insert (the loosen actually took effect).
+    be.actor()
+        .exec("INSERT INTO main.notes (id, body) VALUES ('n3', NULL)")
+        .await
+        .expect("a NULL body is now accepted after the loosen");
+    assert!(foreign_keys_on(&be).await, "foreign_keys ON post-rebuild");
+}
+
+// ---------------------------------------------------------------------------
+// (DROP-FK) Removing a FOREIGN KEY via rebuild → positive end-state: the FK is
+// GONE (`PRAGMA foreign_key_list` is empty) and integrity holds. Previously only
+// the deferred-FK-is-an-error path existed; this proves the reachable drop. v1:
+// posts(author ref→users); v2: posts(author plain string, no FK). The diff yields
+// one rebuild ("drop foreign key posts.author_fkey").
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn drop_foreign_key_via_rebuild_removes_the_fk() {
+    let users = CollectionDescriptor {
+        name: "users".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "handle".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let posts_fk = CollectionDescriptor {
+        name: "posts".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "author".into(),
+            ty: "ref".into(),
+            references: Some("users".into()),
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    // v2: `author` becomes a plain string column — the FK is dropped.
+    let posts_nofk = CollectionDescriptor {
+        name: "posts".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "author".into(),
+            ty: "string".into(),
+            required: false,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let v1 = vec![users.clone(), posts_fk];
+    let v2 = vec![users, posts_nofk];
+
+    let p = paths("rebuild_drop_fk");
+    let be = backend(&p);
+    apply_first_deploy(&be, &v1).await;
+
+    // Pre-rebuild: `posts` has exactly one FK (author → users).
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    let fk_before = be
+        .actor()
+        .query("PRAGMA main.foreign_key_list(posts)")
+        .await
+        .expect("fk_list pre");
+    assert_eq!(fk_before.len(), 1, "posts starts with one FK: {fk_before:?}");
+
+    // Seed a referentially-valid pair so integrity is intact going in.
+    be.actor()
+        .exec("INSERT INTO main.users (id, handle) VALUES ('u1', 'ada')")
+        .await
+        .expect("seed user");
+    be.actor()
+        .exec("INSERT INTO main.posts (id, author) VALUES ('p1', 'u1')")
+        .await
+        .expect("seed post");
+
+    // The drop-FK diff yields exactly one rebuild on `posts`.
+    let rb = one_rebuild(&v1, &v2);
+    assert_eq!(rb.spec.table, "posts");
+    assert!(
+        rb.spec.reason.contains("drop foreign key"),
+        "the rebuild reason names the FK drop: {}",
+        rb.spec.reason
+    );
+    be.rebuild_one(&rb.spec, &rb.migration, "deployer")
+        .await
+        .expect("drop-FK rebuild applies");
+
+    // POSITIVE end-state: `posts` now has NO foreign keys.
+    let fk_after = be
+        .actor()
+        .query("PRAGMA main.foreign_key_list(posts)")
+        .await
+        .expect("fk_list post");
+    assert!(
+        fk_after.is_empty(),
+        "the FK must be GONE after the drop-FK rebuild: {fk_after:?}"
+    );
+    // Integrity holds, and the (formerly FK-constrained) column is now free: a row
+    // whose `author` does NOT exist in `users` is now insertable (the FK is gone).
+    be.actor()
+        .exec("INSERT INTO main.posts (id, author) VALUES ('p2', 'no_such_user')")
+        .await
+        .expect("a dangling author is now allowed (no FK)");
+    // The original row survived the rebuild.
+    let count = be
+        .actor()
+        .query("SELECT COUNT(*) FROM main.posts")
+        .await
+        .expect("count");
+    assert_eq!(count[0][0].as_deref(), Some("2"), "rows preserved + new row inserted");
+    // A whole-DB integrity check passes (no orphaned constraints left behind).
+    let integrity = be
+        .actor()
+        .query("PRAGMA main.foreign_key_check")
+        .await
+        .expect("fk check");
+    assert!(integrity.is_empty(), "foreign_key_check is clean: {integrity:?}");
+    assert!(foreign_keys_on(&be).await, "foreign_keys ON post-rebuild");
+}
+
+// ---------------------------------------------------------------------------
 // Helpers: build a Migration without the declarative author (for direct specs).
 // ---------------------------------------------------------------------------
 
