@@ -1949,8 +1949,8 @@ pub(crate) async fn apply_transactional(
         .execute(
             &format!(
                 "INSERT INTO {meta}.schema_migrations
-                     (version, name, checksum, applied_by, exec_ms, phase, outcome, kind)
-                 VALUES ($1, $2, $3, $4, $5, 'completed', 'success', $6)"
+                     (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
+                 VALUES ('applied', $1, $2, $3, $4, $5, 'completed', 'success', $6)"
             ),
             &[
                 &m.version.as_str(),
@@ -2994,9 +2994,9 @@ pub(crate) async fn rollback_one_transactional(
     if let Err(e) = conn
         .execute(
             &format!(
-                "INSERT INTO {meta}.schema_migrations_rolled_back
-                     (version, name, checksum, rolled_back_by, exec_ms)
-                 VALUES ($1, $2, $3, $4, $5)"
+                "INSERT INTO {meta}.schema_migrations
+                     (event_kind, version, name, checksum, \"by\", exec_ms)
+                 VALUES ('rolled_back', $1, $2, $3, $4, $5)"
             ),
             &[
                 &m.version.as_str(),

@@ -193,11 +193,12 @@ async fn unqualified_ddl_persists_to_app_file_and_reapply_idempotent() {
 }
 
 // ---------------------------------------------------------------------------
-// Two migrations get monotonically increasing, comparable event_seq from the
-// SHARED counter (M4) — proving the cross-table total order.
+// Two migrations get monotonically increasing event_seq from the NATIVE
+// AUTOINCREMENT PK on the SINGLE consolidated events table — proving the total
+// order with NO standalone counter object ("go native seq").
 // ---------------------------------------------------------------------------
 #[compio::test]
-async fn shared_event_seq_is_monotonic() {
+async fn native_event_seq_is_monotonic() {
     let p = paths("seq");
     let be = backend(&p);
     let m1 = mig_named("first", "CREATE TABLE a (id INTEGER);");
@@ -214,14 +215,31 @@ async fn shared_event_seq_is_monotonic() {
     let s0: i64 = rows[0][1].as_deref().unwrap().parse().unwrap();
     let s1: i64 = rows[1][1].as_deref().unwrap().parse().unwrap();
     assert!(s1 > s0, "event_seq must strictly increase across migrations");
-    // The shared counter's `next` is now past both allocations.
-    let nxt = be
+
+    // "go native seq": there is NO standalone `event_seq` counter table any more.
+    let cnt = be
         .actor()
-        .query("SELECT next FROM \"_mig\".event_seq WHERE id = 1")
+        .query(
+            "SELECT count(*) FROM \"_mig\".sqlite_master \
+             WHERE type = 'table' AND name = 'event_seq'",
+        )
         .await
-        .expect("read counter");
-    let next: i64 = nxt[0][0].as_deref().unwrap().parse().unwrap();
-    assert!(next > s1, "counter advanced past the last allocation");
+        .expect("introspect");
+    let n: i64 = cnt[0][0].as_deref().unwrap().parse().unwrap();
+    assert_eq!(n, 0, "no standalone event_seq counter table must exist");
+
+    // AUTOINCREMENT (not bare rowid) is in force — sqlite_sequence tracks it, so the
+    // order is strictly monotonic and never reused.
+    let autoinc = be
+        .actor()
+        .query(
+            "SELECT count(*) FROM \"_mig\".sqlite_master \
+             WHERE type = 'table' AND name = 'sqlite_sequence'",
+        )
+        .await
+        .expect("introspect autoincrement");
+    let has_seq: i64 = autoinc[0][0].as_deref().unwrap().parse().unwrap();
+    assert_eq!(has_seq, 1, "AUTOINCREMENT must be active (sqlite_sequence present)");
 }
 
 // ---------------------------------------------------------------------------

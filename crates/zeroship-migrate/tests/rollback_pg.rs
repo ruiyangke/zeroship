@@ -147,11 +147,12 @@ async fn applied_versions(conn: &Client, cfg: &ExecutorConfig) -> Vec<String> {
         .collect()
 }
 
-/// Count `rolled_back` events for a version in the rollback event log.
+/// Count `rolled_back` events for a version in the consolidated events table.
 async fn rolled_back_count(conn: &Client, cfg: &ExecutorConfig, version: &str) -> i64 {
     conn.query_one(
         &format!(
-            "SELECT count(*)::bigint AS c FROM \"{}\".schema_migrations_rolled_back WHERE version = $1",
+            "SELECT count(*)::bigint AS c FROM \"{}\".schema_migrations \
+             WHERE event_kind = 'rolled_back' AND version = $1",
             cfg.pg.meta_schema
         ),
         &[&version],
@@ -229,7 +230,8 @@ async fn rollback_to_version_unwinds_in_reverse_and_is_reappliable() {
     let completed_rows: i64 = conn
         .query_one(
             &format!(
-                "SELECT count(*)::bigint AS c FROM \"{}\".schema_migrations",
+                "SELECT count(*)::bigint AS c FROM \"{}\".schema_migrations \
+                 WHERE event_kind = 'applied'",
                 cfg.pg.meta_schema
             ),
             &[],
@@ -237,7 +239,7 @@ async fn rollback_to_version_unwinds_in_reverse_and_is_reappliable() {
         .await
         .expect("completed count")
         .get("c");
-    assert_eq!(completed_rows, 3, "completed rows are append-only (not deleted on rollback)");
+    assert_eq!(completed_rows, 3, "applied rows are append-only (not deleted on rollback)");
 
     // applied() net state == [v1] (2,3 became pending again).
     assert_eq!(applied_versions(&conn, &cfg).await, vec![m1.version.as_str()]);

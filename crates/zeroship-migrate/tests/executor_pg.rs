@@ -170,6 +170,123 @@ async fn journal_bootstrap_creates_schema_and_table() {
     drop_schemas(&conn, &cfg).await;
 }
 
+/// "go native seq": the journal is ONE consolidated events table whose NATIVE
+/// auto-increment PK provides the total order — there is NO standalone
+/// `schema_migrations_event_seq` SEQUENCE, NO separate `schema_migrations_rolled_back`
+/// table, and applied/rolled_back coexist in one table discriminated by
+/// `event_kind`. Net-state ("latest event per version wins") and the immutability of
+/// the consolidated table are preserved.
+#[compio::test]
+async fn journal_is_one_events_table_with_native_pk_order() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_journal(&conn, &cfg).await.expect("ensure_journal");
+
+    let meta = &cfg.pg.meta_schema;
+
+    // No standalone event_seq SEQUENCE object exists (it was folded into the
+    // events table's GENERATED ALWAYS AS IDENTITY PK).
+    let seq_count: i64 = conn
+        .query_one(
+            "SELECT count(*)::bigint AS c FROM pg_class c
+               JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE c.relkind = 'S' AND n.nspname = $1
+                AND c.relname = 'schema_migrations_event_seq'",
+            &[&meta.as_str()],
+        )
+        .await
+        .expect("introspect sequences")
+        .get("c");
+    assert_eq!(seq_count, 0, "no standalone schema_migrations_event_seq sequence must exist");
+
+    // No separate rolled_back table (it folded into schema_migrations).
+    assert!(
+        !table_exists(&conn, meta, "schema_migrations_rolled_back").await,
+        "the separate rolled_back table must NOT exist (folded into schema_migrations)"
+    );
+
+    // The events table's event_seq is a true IDENTITY column.
+    let is_identity: String = conn
+        .query_one(
+            "SELECT is_identity FROM information_schema.columns
+              WHERE table_schema = $1 AND table_name = 'schema_migrations'
+                AND column_name = 'event_seq'",
+            &[&meta.as_str()],
+        )
+        .await
+        .expect("introspect identity")
+        .get("is_identity");
+    assert_eq!(is_identity, "YES", "event_seq must be a GENERATED IDENTITY column");
+
+    // Apply (applied) then rollback (rolled_back) coexist in ONE table; net-state is
+    // the latest event per version. Apply v: an `applied` event; then a `rolled_back`
+    // event — net state = pending (no completed entry).
+    let v = MigrationId::generate();
+    journal::record_completed(
+        &conn,
+        &cfg,
+        journal::CompletedRecord {
+            version: v.as_str(),
+            name: "n",
+            checksum: "c1",
+            applied_by: "actor",
+            exec_ms: 1,
+            kind: "apply",
+        },
+    )
+    .await
+    .expect("applied event");
+    // After the applied event, net-state has v as completed.
+    let net = journal::applied(&conn, &cfg).await.expect("applied");
+    assert!(
+        net.iter().any(|e| e.version == v.as_str() && e.phase == journal::Phase::Completed),
+        "v is net-applied after the applied event"
+    );
+
+    journal::record_rolled_back(&conn, &cfg, v.as_str(), "n", "c1", "actor", 2)
+        .await
+        .expect("rolled_back event");
+    // The latest event (rolled_back) wins → v is NOT net-applied.
+    let net = journal::applied(&conn, &cfg).await.expect("applied after rollback");
+    assert!(
+        !net.iter().any(|e| e.version == v.as_str() && e.phase == journal::Phase::Completed),
+        "the latest event (rolled_back) wins → v is pending again (net-state preserved)"
+    );
+
+    // Both events live in the ONE table, ordered by the native PK.
+    let total: i64 = conn
+        .query_one(
+            &format!("SELECT count(*)::bigint AS c FROM \"{meta}\".schema_migrations"),
+            &[],
+        )
+        .await
+        .expect("count events")
+        .get("c");
+    assert_eq!(total, 2, "both the applied and rolled_back events live in one table");
+
+    let kinds: Vec<String> = conn
+        .query(
+            &format!(
+                "SELECT event_kind FROM \"{meta}\".schema_migrations ORDER BY event_seq"
+            ),
+            &[],
+        )
+        .await
+        .expect("read event_kinds")
+        .iter()
+        .map(|r| r.get::<_, String>("event_kind"))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["applied".to_string(), "rolled_back".to_string()],
+        "native PK order = applied then rolled_back"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
 #[compio::test]
 async fn journal_bootstrap_is_idempotent() {
     let conn = pg().await;
@@ -253,9 +370,9 @@ async fn journal_immutability_trigger_rejects_update_and_delete() {
 /// Regression (T9, finding `journal-truncate-not-blocked`): a row-level
 /// `BEFORE UPDATE OR DELETE` trigger does NOT fire on `TRUNCATE`, so without a
 /// dedicated statement-level `BEFORE TRUNCATE` trigger, `TRUNCATE` would
-/// silently wipe the append-only journal. Assert TRUNCATE is rejected on ALL
-/// THREE append-only tables (schema_migrations, _rolled_back, _supersedes), and
-/// that the seeded row survives.
+/// silently wipe the append-only journal. Assert TRUNCATE is rejected on BOTH
+/// append-only tables (the consolidated schema_migrations events table +
+/// _supersedes), and that the seeded row survives.
 #[compio::test]
 async fn journal_immutability_trigger_rejects_truncate() {
     let conn = pg().await;
@@ -279,11 +396,7 @@ async fn journal_immutability_trigger_rejects_truncate() {
     .await
     .expect("insert row");
 
-    for tbl in [
-        "schema_migrations",
-        "schema_migrations_rolled_back",
-        "schema_migrations_supersedes",
-    ] {
+    for tbl in ["schema_migrations", "schema_migrations_supersedes"] {
         let trunc = conn
             .batch_execute(&format!("TRUNCATE \"{}\".{tbl}", cfg.pg.meta_schema))
             .await;

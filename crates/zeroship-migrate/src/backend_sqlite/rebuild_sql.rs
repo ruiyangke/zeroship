@@ -35,7 +35,7 @@
 //!                                       <replay each captured index / trigger
 //!                                        VERBATIM + any explicit recreate_objects> [main]
 //!  (engine, EngineJournal)              PRAGMA foreign_key_check       -- UNSCOPED (H1)
-//!  (engine, EngineJournal)              UPDATE _mig.event_seq ...; INSERT _mig journal
+//!  (engine, EngineJournal)              INSERT _mig journal (event_seq AUTOINCREMENT)
 //!  (engine, EngineJournal)              COMMIT
 //!  (engine, AUTOCOMMIT, EngineJournal)  PRAGMA foreign_keys = ON       -- ALL PATHS
 //! ```
@@ -514,12 +514,9 @@ async fn run_rebuild_steps(
         });
     }
 
-    // (g) Allocate event_seq from the shared counter + INSERT the immutable journal
-    //     row (a rebuild is an `apply`-kind completed event, like any other applied
-    //     migration). SEPARATE prepares from the rebuild DDL; mode already flipped.
-    let seq = journal_sql::alloc_event_seq(actor)
-        .await
-        .map_err(|e| step_err(table, e))?;
+    // (g) INSERT the immutable journal row — a rebuild is an `applied`/`apply`-kind
+    //     event, like any other applied migration (event_seq is AUTOINCREMENT, not
+    //     supplied). SEPARATE prepares from the rebuild DDL; mode already flipped.
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
     let version = journal_sql::sql_lit(m.version.as_str());
     let name = journal_sql::sql_lit(&m.name);
@@ -528,8 +525,8 @@ async fn run_rebuild_steps(
     actor
         .exec(&format!(
             "INSERT INTO \"_mig\".schema_migrations \
-             (event_seq, version, name, checksum, applied_by, exec_ms, phase, outcome, kind) \
-             VALUES ({seq}, {version}, {name}, {checksum}, {by}, {exec_ms}, \
+             (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind) \
+             VALUES ('applied', {version}, {name}, {checksum}, {by}, {exec_ms}, \
                      'completed', 'success', 'apply')"
         ))
         .await

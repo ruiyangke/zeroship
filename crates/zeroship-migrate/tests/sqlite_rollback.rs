@@ -98,7 +98,8 @@ async fn rollback_drop_table_then_repending_and_reapply() {
     let rb_rows = be
         .actor()
         .query(&format!(
-            "SELECT version FROM \"_mig\".schema_migrations_rolled_back WHERE version='{v}'"
+            "SELECT version FROM \"_mig\".schema_migrations \
+             WHERE event_kind='rolled_back' AND version='{v}'"
         ))
         .await
         .expect("read rolled_back");
@@ -211,7 +212,8 @@ async fn rollback_rebuild_needed_returns_p3b_deferred_error() {
     let rb_rows = be
         .actor()
         .query(&format!(
-            "SELECT version FROM \"_mig\".schema_migrations_rolled_back WHERE version='{}'",
+            "SELECT version FROM \"_mig\".schema_migrations \
+             WHERE event_kind='rolled_back' AND version='{}'",
             m.version.as_str()
         ))
         .await
@@ -270,7 +272,8 @@ async fn malicious_down_writing_mig_is_denied() {
     let rb = be
         .actor()
         .query(&format!(
-            "SELECT version FROM \"_mig\".schema_migrations_rolled_back WHERE version='{}'",
+            "SELECT version FROM \"_mig\".schema_migrations \
+             WHERE event_kind='rolled_back' AND version='{}'",
             mal.version.as_str()
         ))
         .await
