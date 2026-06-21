@@ -62,7 +62,7 @@ fn token() -> String {
 /// A config + matching least-privilege migrator role for an isolated project.
 fn cfg_for(tok: &str) -> ExecutorConfig {
     let mut c = ExecutorConfig::new(format!("prj_{tok}"), format!("proj_{tok}"));
-    c.meta_schema = format!("meta_{tok}");
+    c.pg.meta_schema = format!("meta_{tok}");
     let role = migrator_role_name(&c.project_id).unwrap();
     c.with_migrator_role(role)
 }
@@ -93,7 +93,7 @@ async fn teardown(conn: &Client, cfg: &ExecutorConfig) {
     let _ = conn
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-            cfg.project_schema, cfg.meta_schema
+            cfg.project_schema, cfg.pg.meta_schema
         ))
         .await;
 }
@@ -102,7 +102,7 @@ async fn teardown(conn: &Client, cfg: &ExecutorConfig) {
 /// tables are owned by the migrator so its DDL — ADD/DROP COLUMN, CREATE TRIGGER —
 /// works under SET ROLE). The test admin seeds the table, then transfers ownership.
 async fn give_table_to_migrator(conn: &Client, cfg: &ExecutorConfig, table: &str) {
-    let role = cfg.migrator_role.as_ref().unwrap();
+    let role = cfg.pg.migrator_role.as_ref().unwrap();
     conn.batch_execute(&format!(
         "ALTER TABLE \"{}\".\"{table}\" OWNER TO \"{role}\"",
         cfg.project_schema
@@ -984,7 +984,7 @@ async fn p0_4_security_full_stack_guard_dry_run_and_role_backstop() {
 
     // --- LAYER 3: the role backstop denies a runtime-constructed cross-schema
     //     write AT THE DB, even though the guard can't statically see it. ---
-    let role = cfg.migrator_role.clone().unwrap();
+    let role = cfg.pg.migrator_role.clone().unwrap();
     // (i) Confirm the guard (line 1) does NOT statically deny dynamic SQL — this is
     //     the documented residual the role backstops.
     let dynamic = format!(

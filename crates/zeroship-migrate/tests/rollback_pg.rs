@@ -56,7 +56,7 @@ fn token() -> String {
 /// A config WITHOUT a migrator role (role-free path; admin runs downs).
 fn cfg_for(tok: &str) -> ExecutorConfig {
     let mut c = ExecutorConfig::new(format!("prj_{tok}"), format!("proj_{tok}"));
-    c.meta_schema = format!("meta_{tok}");
+    c.pg.meta_schema = format!("meta_{tok}");
     c
 }
 
@@ -64,7 +64,7 @@ fn cfg_for(tok: &str) -> ExecutorConfig {
 fn cfg_for_role(tok: &str) -> ExecutorConfig {
     let mut c = cfg_for(tok);
     let role = migrator_role_name(&c.project_id).unwrap();
-    c.migrator_role = Some(role);
+    c.pg.migrator_role = Some(role);
     c
 }
 
@@ -82,7 +82,7 @@ async fn drop_schemas(conn: &Client, cfg: &ExecutorConfig) {
     let _ = conn
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-            cfg.project_schema, cfg.meta_schema
+            cfg.project_schema, cfg.pg.meta_schema
         ))
         .await;
 }
@@ -152,7 +152,7 @@ async fn rolled_back_count(conn: &Client, cfg: &ExecutorConfig, version: &str) -
     conn.query_one(
         &format!(
             "SELECT count(*)::bigint AS c FROM \"{}\".schema_migrations_rolled_back WHERE version = $1",
-            cfg.meta_schema
+            cfg.pg.meta_schema
         ),
         &[&version],
     )
@@ -230,7 +230,7 @@ async fn rollback_to_version_unwinds_in_reverse_and_is_reappliable() {
         .query_one(
             &format!(
                 "SELECT count(*)::bigint AS c FROM \"{}\".schema_migrations",
-                cfg.meta_schema
+                cfg.pg.meta_schema
             ),
             &[],
         )

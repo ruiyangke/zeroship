@@ -52,7 +52,7 @@ fn token() -> String {
 
 fn cfg_for(tok: &str) -> ExecutorConfig {
     let mut c = ExecutorConfig::new(format!("prj_{tok}"), format!("proj_{tok}"));
-    c.meta_schema = format!("meta_{tok}");
+    c.pg.meta_schema = format!("meta_{tok}");
     let role = migrator_role_name(&c.project_id).unwrap();
     c.with_migrator_role(role)
 }
@@ -75,7 +75,7 @@ async fn teardown(conn: &Client, cfg: &ExecutorConfig) {
     let _ = conn
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-            cfg.project_schema, cfg.meta_schema
+            cfg.project_schema, cfg.pg.meta_schema
         ))
         .await;
 }
@@ -194,7 +194,7 @@ async fn provision_creates_locked_down_role_and_is_idempotent() {
     let conn = pg().await;
     let tok = token();
     let cfg = cfg_for(&tok);
-    let role = cfg.migrator_role.clone().unwrap();
+    let role = cfg.pg.migrator_role.clone().unwrap();
     teardown(&conn, &cfg).await;
     ensure_project_schema(&conn, &cfg).await;
     ensure_journal(&conn, &cfg).await.expect("journal");
@@ -234,7 +234,7 @@ async fn provision_creates_locked_down_role_and_is_idempotent() {
     let meta_owner: String = conn
         .query_one(
             "SELECT pg_get_userbyid(nspowner) AS o FROM pg_namespace WHERE nspname = $1",
-            &[&cfg.meta_schema],
+            &[&cfg.pg.meta_schema],
         )
         .await
         .expect("meta owner")
@@ -247,7 +247,7 @@ async fn provision_creates_locked_down_role_and_is_idempotent() {
     let has_usage: bool = conn
         .query_one(
             "SELECT has_schema_privilege($1, $2, 'USAGE') AS p",
-            &[&role, &cfg.meta_schema],
+            &[&role, &cfg.pg.meta_schema],
         )
         .await
         .expect("has_schema_privilege")
@@ -255,7 +255,7 @@ async fn provision_creates_locked_down_role_and_is_idempotent() {
     assert!(!has_usage, "migrator must NOT have USAGE on the meta schema");
 
     for (verb, ok) in [("INSERT", false), ("SELECT", false), ("UPDATE", false)] {
-        let priv_str = format!("{}.schema_migrations", cfg.meta_schema);
+        let priv_str = format!("{}.schema_migrations", cfg.pg.meta_schema);
         let has: bool = conn
             .query_one(
                 "SELECT has_table_privilege($1, $2, $3) AS p",
@@ -269,7 +269,7 @@ async fn provision_creates_locked_down_role_and_is_idempotent() {
             "migrator {verb} on schema_migrations must be {ok} (journal unforgeable)"
         );
     }
-    let inflight_str = format!("{}.schema_migrations_inflight", cfg.meta_schema);
+    let inflight_str = format!("{}.schema_migrations_inflight", cfg.pg.meta_schema);
     for verb in ["INSERT", "DELETE", "SELECT"] {
         let has: bool = conn
             .query_one(
@@ -298,7 +298,7 @@ async fn provision_creates_locked_down_role_and_is_idempotent() {
         .await
         .map_or_else(|_| String::new(), |row| row.get("sp"));
     assert!(
-        !sp.contains(&cfg.meta_schema),
+        !sp.contains(&cfg.pg.meta_schema),
         "migrator search_path must not include the meta schema (got {sp:?})"
     );
 
@@ -323,7 +323,7 @@ async fn migrator_can_ddl_its_own_schema_and_apply_runs_under_the_role() {
     // Direct: as the migrator, CREATE TABLE in its own schema succeeds.
     as_migrator(
         &conn,
-        cfg.migrator_role.as_ref().unwrap(),
+        cfg.pg.migrator_role.as_ref().unwrap(),
         &format!("CREATE TABLE \"{}\".direct_ok (x int)", cfg.project_schema),
     )
     .await
@@ -349,7 +349,7 @@ async fn migrator_can_ddl_its_own_schema_and_apply_runs_under_the_role() {
         .query_one(
             &format!(
                 "SELECT count(*)::bigint AS c FROM \"{}\".schema_migrations",
-                cfg.meta_schema
+                cfg.pg.meta_schema
             ),
             &[],
         )
@@ -366,7 +366,7 @@ async fn migrator_can_ddl_its_own_schema_and_apply_runs_under_the_role() {
         .get("u");
     assert_ne!(
         cur,
-        *cfg.migrator_role.as_ref().unwrap(),
+        *cfg.pg.migrator_role.as_ref().unwrap(),
         "apply must RESET ROLE — the migrator role must not leak onto the session"
     );
 
@@ -451,7 +451,7 @@ async fn migrator_cannot_write_public_even_with_it_on_search_path() {
     let conn = pg().await;
     let tok = token();
     let cfg = cfg_for(&tok);
-    let role = cfg.migrator_role.clone().unwrap();
+    let role = cfg.pg.migrator_role.clone().unwrap();
     teardown(&conn, &cfg).await;
     ensure_project_schema(&conn, &cfg).await;
     ensure_journal(&conn, &cfg).await.expect("journal");
@@ -485,7 +485,7 @@ async fn migrator_cannot_reach_control_schema() {
     let conn = pg().await;
     let tok = token();
     let cfg = cfg_for(&tok);
-    let role = cfg.migrator_role.clone().unwrap();
+    let role = cfg.pg.migrator_role.clone().unwrap();
     teardown(&conn, &cfg).await;
     ensure_project_schema(&conn, &cfg).await;
     ensure_journal(&conn, &cfg).await.expect("journal");
@@ -530,7 +530,7 @@ async fn migrator_a_cannot_touch_project_b_schema() {
     let tok_b = token();
     let cfg_a = cfg_for(&tok_a);
     let cfg_b = cfg_for(&tok_b);
-    let role_a = cfg_a.migrator_role.clone().unwrap();
+    let role_a = cfg_a.pg.migrator_role.clone().unwrap();
     teardown(&conn, &cfg_a).await;
     teardown(&conn, &cfg_b).await;
 
@@ -581,7 +581,7 @@ async fn migrator_cannot_escalate_privileges() {
     let conn = pg().await;
     let tok = token();
     let cfg = cfg_for(&tok);
-    let role = cfg.migrator_role.clone().unwrap();
+    let role = cfg.pg.migrator_role.clone().unwrap();
     teardown(&conn, &cfg).await;
     ensure_project_schema(&conn, &cfg).await;
     ensure_journal(&conn, &cfg).await.expect("journal");
@@ -618,7 +618,7 @@ async fn backstop_runtime_constructed_cross_schema_is_denied_at_execution() {
     let conn = pg().await;
     let tok = token();
     let cfg = cfg_for(&tok);
-    let role = cfg.migrator_role.clone().unwrap();
+    let role = cfg.pg.migrator_role.clone().unwrap();
     teardown(&conn, &cfg).await;
     ensure_project_schema(&conn, &cfg).await;
     ensure_journal(&conn, &cfg).await.expect("journal");
@@ -705,7 +705,7 @@ async fn backstop_through_apply_flow_is_denied() {
         .query_one(
             &format!(
                 "SELECT count(*)::bigint AS c FROM \"{}\".schema_migrations",
-                cfg.meta_schema
+                cfg.pg.meta_schema
             ),
             &[],
         )
@@ -778,7 +778,7 @@ async fn migration_up_cannot_forge_journal_via_unqualified_insert() {
         .query_one(
             &format!(
                 "SELECT count(*)::bigint AS c FROM \"{}\".schema_migrations WHERE version = 'mig_victim'",
-                cfg.meta_schema
+                cfg.pg.meta_schema
             ),
             &[],
         )
@@ -811,7 +811,7 @@ async fn migration_up_cannot_forge_journal_via_qualified_insert() {
             "INSERT INTO \"{}\".schema_migrations \
                  (version, name, checksum, applied_by, exec_ms, phase, outcome) \
              VALUES ('mig_victim2', 'victim', 'deadbeef', 'attacker', 0, 'completed', 'success')",
-            cfg.meta_schema
+            cfg.pg.meta_schema
         ),
     );
     let err = apply(&conn, &cfg, std::slice::from_ref(&forge), Approval::None, "actor")
@@ -831,7 +831,7 @@ async fn migration_up_cannot_forge_journal_via_qualified_insert() {
         .query_one(
             &format!(
                 "SELECT count(*)::bigint AS c FROM \"{}\".schema_migrations WHERE version = 'mig_victim2'",
-                cfg.meta_schema
+                cfg.pg.meta_schema
             ),
             &[],
         )
@@ -883,7 +883,7 @@ async fn forged_completed_row_does_not_suppress_a_future_victim_migration() {
         .query_one(
             &format!(
                 "SELECT count(*)::bigint AS c FROM \"{}\".schema_migrations WHERE version = $1",
-                cfg.meta_schema
+                cfg.pg.meta_schema
             ),
             &[&victim_version.as_str()],
         )

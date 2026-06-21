@@ -271,9 +271,9 @@ fn build_exec_cfg(cfg: &RunConfig) -> ExecutorConfig {
         }
         RunProfile::Confined => ExecutorConfig::new(cfg.project_id.clone(), cfg.project_schema.clone()),
     };
-    exec.meta_schema.clone_from(&cfg.meta_schema);
-    exec.statement_timeout = cfg.statement_timeout;
-    exec.lock_timeout = cfg.lock_timeout;
+    exec.pg.meta_schema.clone_from(&cfg.meta_schema);
+    exec.pg.statement_timeout = cfg.statement_timeout;
+    exec.pg.lock_timeout = cfg.lock_timeout;
     // Platform applies run as the admin connection (no SET ROLE) — design §8.
     // `migrator_role` stays `None` (the `ExecutorConfig::new`/`platform` default).
     exec
@@ -666,7 +666,7 @@ mod tests {
             TrustProfile::Platform,
             "the runner mints a Platform executor config"
         );
-        assert!(exec.migrator_role.is_none(), "Platform runs as admin (no SET ROLE)");
+        assert!(exec.pg.migrator_role.is_none(), "Platform runs as admin (no SET ROLE)");
         let guard = build_guard_cfg(&cfg);
         assert_eq!(guard.trust(), TrustProfile::Platform);
     }

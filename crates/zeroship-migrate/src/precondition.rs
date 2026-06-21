@@ -686,7 +686,7 @@ async fn run_sql_boolean_in_txn(
     .await?;
     // Drop to the migrator role for the read, scoped to this txn (line-2). No
     // role configured (tests / single-tenant dev) runs as the connecting role.
-    if let Some(role) = &cfg.migrator_role {
+    if let Some(role) = &cfg.pg.migrator_role {
         conn.batch_execute(&format!("SET LOCAL ROLE \"{}\"", role.replace('"', "\"\"")))
             .await?;
     }

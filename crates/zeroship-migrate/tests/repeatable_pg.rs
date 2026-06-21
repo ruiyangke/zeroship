@@ -46,7 +46,7 @@ fn token() -> String {
 
 fn cfg_for(tok: &str) -> ExecutorConfig {
     let mut c = ExecutorConfig::new(format!("prj_{tok}"), format!("proj_{tok}"));
-    c.meta_schema = format!("meta_{tok}");
+    c.pg.meta_schema = format!("meta_{tok}");
     c
 }
 
@@ -63,7 +63,7 @@ async fn drop_schemas(conn: &Client, cfg: &ExecutorConfig) {
     let _ = conn
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-            cfg.project_schema, cfg.meta_schema
+            cfg.project_schema, cfg.pg.meta_schema
         ))
         .await;
 }
@@ -116,7 +116,7 @@ async fn completed_events(conn: &Client, cfg: &ExecutorConfig, version: &str) ->
             &format!(
                 "SELECT count(*)::bigint AS n FROM \"{}\".schema_migrations \
                  WHERE version = $1 AND phase = 'completed'",
-                cfg.meta_schema
+                cfg.pg.meta_schema
             ),
             &[&version],
         )

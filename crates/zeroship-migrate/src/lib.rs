@@ -116,7 +116,7 @@ pub use expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent, OnlineSchemaChange,
     PgOnline,
 };
-pub use db::{connect, ConnectError, ExecutorConfig};
+pub use db::{connect, ConnectError, ExecutorConfig, PgConfinement};
 pub use drift::{
     check_checksum_drift, diff_snapshots, snapshot_schema, AlteredObject, ChecksumDrift,
     ChecksumDriftReport, ColumnSnapshot, ConstraintSnapshot, DriftError, DriftReport, IndexSnapshot,
