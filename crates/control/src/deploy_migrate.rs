@@ -54,8 +54,8 @@ use std::path::Path;
 
 use uuid::Uuid;
 use zeroship_migrate::{
-    connect, load_dir, provision_migrator, Approval, ConnectError, EngineError, ExecutorConfig,
-    LoaderError, MigrationEngine, PostgresBackend, RoleError,
+    compute_manifest, connect, load_dir, provision_migrator, Approval, ConnectError, EngineError,
+    ExecutorConfig, LoaderError, MigrationEngine, PostgresBackend, RoleError,
 };
 
 /// What a successful deploy-migrate produced (for logging / the deploy log).
@@ -159,19 +159,60 @@ pub async fn apply_bundle_migrations(
     //     control/auth/other schemas.
     provision_migrator(&conn, &exec_cfg).await?;
 
-    // (c) Plan (Confined guard) + apply PENDING. Approval::None ⇒ a destructive
-    //     migration is refused at deploy (no go-live); additive-forward is the
-    //     routine path. The engine independently re-runs the guard + the
-    //     migrator role on every up (defense in depth) — we do not skip those.
+    // (c) Plan (Confined guard) + apply PENDING via the integrity-manifest seam
+    //     (`apply_verified`). Approval::None ⇒ a destructive migration is refused
+    //     at deploy (no go-live); additive-forward is the routine path. The engine
+    //     independently re-runs the guard + the migrator role on every up (defense
+    //     in depth) — we do not skip those.
+    //
+    //     H2 — INTEGRITY MANIFEST: the manifest gate (`manifest.rs`) detects a
+    //     creator / AI-author / build-pipeline tampering the migration SET between
+    //     authoring/review and apply (reorder / edit / insert / remove). For that
+    //     guarantee to hold, the EXPECTED hash MUST come from a TRUSTED, OUT-OF-BAND
+    //     source — NOT from the same `.zship` the migrations arrived in (an attacker
+    //     who can edit the migrations can edit a hash shipped alongside them, and the
+    //     check would vacuously pass; see manifest.rs "Trust model").
+    //
+    //     No such build-side stamp exists yet: the `.zship` manifest carries only
+    //     per-file blob hashes (which travel WITH the migrations — self-consistency,
+    //     not an independent expectation), and the control DB stores no migration
+    //     manifest hash. So we CANNOT honestly pass an `expected` hash here — doing
+    //     so against a bundle-derived value would be a FAKE "verified". Instead we
+    //     compute the manifest over the loaded set and LOG it for traceability /
+    //     incident forensics, and route through `apply_verified(expected: None)` so
+    //     the gate is wired and threading a trusted stamp later is a one-line change.
+    //
+    //     FOLLOW-UP (REQUIRED for the SEC defense to bite): the build/review side
+    //     must stamp `compute_manifest(...)` at authoring time and persist it
+    //     out-of-band (control DB, keyed by app + bundle), and this call must then
+    //     pass `Some(&expected)` so a tampered/reordered set is REFUSED before any
+    //     DDL. Until then this is traceability only, NOT tamper-prevention.
+    let manifest = compute_manifest(&migrations);
+    tracing::info!(
+        app_id = %app_id,
+        migration_count = migrations.len(),
+        manifest = %manifest.as_str(),
+        "deploy-migrate: computed migration-set integrity manifest (traceability only — \
+         no trusted build-side stamp to verify against yet; see H2 follow-up)"
+    );
     let engine = MigrationEngine::new();
     let guard_cfg = zeroship_migrate::GuardConfig::confined(schema.clone());
-    let plan = engine.plan(&migrations, &guard_cfg);
     // P6a genericized `MigrationEngine::apply` over `MigrationBackend`; the
     // platform/control deploy path is Postgres, so wrap the connection in the
     // PG backend (behavior-identical to the pre-seam `&Client` call).
     let backend = PostgresBackend::new(&conn);
     let outcome = engine
-        .apply(&plan, Approval::None, &backend, &exec_cfg, "deploy")
+        .apply_verified(
+            &migrations,
+            &guard_cfg,
+            // No trusted expectation available (see the H2 note above). NEVER pass a
+            // bundle-derived hash here — it would be a vacuous self-check.
+            None,
+            Approval::None,
+            &backend,
+            &exec_cfg,
+            "deploy",
+        )
         .await?;
 
     Ok(MigrateOutcome {

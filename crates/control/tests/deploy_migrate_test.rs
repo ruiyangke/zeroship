@@ -320,6 +320,82 @@ async fn deploy_migrate_applies_multiple_in_order() {
     cleanup_app(&conn, &app_id).await;
 }
 
+// H2 — the deploy-migrate path now routes through the integrity-manifest seam
+// (`apply_verified`). No trusted build-side stamp exists yet, so the deploy
+// passes `expected: None` (Case 2 — traceability, not yet tamper-prevention). This
+// test pins TWO things:
+//   1. The deploy still applies correctly through the verified seam (no regression
+//      vs the old direct `apply`).
+//   2. The manifest the deploy computes over the LOADED set (the value it logs, and
+//      the value a future trusted stamp will be compared against) is
+//      tamper-SENSITIVE: editing a migration file's body yields a DIFFERENT
+//      manifest. This is the foundation the H2 follow-up needs — once the build side
+//      stamps + persists this hash out-of-band and the deploy passes `Some(&hash)`,
+//      a tampered/reordered set is REFUSED before any DDL (the gate itself is
+//      already proven in zeroship-migrate's manifest_pg.rs tamper/reorder tests).
+#[compio::test]
+async fn h2_deploy_routes_through_verified_seam_and_manifest_is_tamper_sensitive() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    let files: &[(&str, &str)] = &[
+        (
+            "V0001__create_widgets.sql",
+            "CREATE TABLE widgets (id bigint PRIMARY KEY);",
+        ),
+        (
+            "V0002__add_widgets_name.sql",
+            "ALTER TABLE widgets ADD COLUMN name text;",
+        ),
+    ];
+    let dir = migrations_dir(files);
+
+    // (1) The deploy applies correctly through the verified seam.
+    let outcome = apply_bundle_migrations(&admin_dsn(), &app_id, &dir)
+        .await
+        .expect("deploy-migrate via the verified seam must succeed");
+    assert_eq!(outcome.applied.len(), 2, "both migrations applied");
+    assert_eq!(journaled_count(&conn, &app_id).await, 2);
+
+    // (2) The manifest over the loaded set is deterministic + tamper-sensitive: the
+    //     same files load to the SAME manifest, but an edited body changes it. We
+    //     load via the real `load_dir` (the same loader the deploy uses) so this is
+    //     faithful to the value the deploy computes + logs.
+    let set = zeroship_migrate::load_dir(&dir).expect("load original set");
+    let manifest_a = zeroship_migrate::compute_manifest(&set);
+    let manifest_a2 = zeroship_migrate::compute_manifest(&set);
+    assert_eq!(
+        manifest_a, manifest_a2,
+        "the manifest must be deterministic over the same set"
+    );
+
+    // Tamper: edit V0002's body in a fresh dir, reload, recompute.
+    let tampered_files: &[(&str, &str)] = &[
+        files[0],
+        (
+            "V0002__add_widgets_name.sql",
+            // A DIFFERENT body (an extra column) — the content the manifest folds.
+            "ALTER TABLE widgets ADD COLUMN name text; ALTER TABLE widgets ADD COLUMN pwned text;",
+        ),
+    ];
+    let tampered_dir = migrations_dir(tampered_files);
+    let tampered_set = zeroship_migrate::load_dir(&tampered_dir).expect("load tampered set");
+    let manifest_b = zeroship_migrate::compute_manifest(&tampered_set);
+    assert_ne!(
+        manifest_a, manifest_b,
+        "editing a migration body MUST change the manifest (tamper-sensitive); this is \
+         the property the H2 follow-up's trusted stamp will rely on to refuse a tampered set"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&tampered_dir);
+    cleanup_app(&conn, &app_id).await;
+}
+
 // A path-only reference so an unused-import lint never fires if a test is
 // cfg'd out in a future refactor.
 #[allow(dead_code)]
