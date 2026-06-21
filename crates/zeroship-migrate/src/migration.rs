@@ -168,6 +168,21 @@ pub struct MigrationFlags {
     ///
     /// A repeatable's `down` is always `None` (replace-style; no true reverse).
     pub repeatable: bool,
+    /// **Engine-emitted goodie DDL** (§2.6) — the `up` is descriptor-derived,
+    /// engine-AUTHORED DDL (NOT raw creator/AI SQL) that must run under the SQLite
+    /// **EngineJournal** authorizer mode rather than the confined **CreatorUp** mode.
+    ///
+    /// The only DDL that needs this today is the SQLite **FTS5 virtual table** (+ its
+    /// sync triggers): the hardened SQLite authorizer denies `CREATE VIRTUAL TABLE …
+    /// USING fts5(…)` in CreatorUp (a creator may never make a vtable) and allows it
+    /// ONLY in engine mode. The FTS index is emitted by the engine from a `.fts()`
+    /// descriptor — it carries no untrusted SQL string — so running it in engine mode
+    /// does not widen the creator surface. `false` (default) ⇒ the historical
+    /// CreatorUp-confined `up` (every ordinary CREATE TABLE / ADD COLUMN / CREATE
+    /// INDEX), byte-identical to before this flag existed; the **Postgres** path never
+    /// sets it (PG has no confined-creator-mode split).
+    #[serde(default)]
+    pub engine_goodie_ddl: bool,
 }
 
 impl Default for MigrationFlags {
@@ -180,6 +195,7 @@ impl Default for MigrationFlags {
             timeout_ms: None,
             phase: None,
             repeatable: false,
+            engine_goodie_ddl: false,
         }
     }
 }
@@ -304,7 +320,8 @@ impl Checksum {
         }
         // flags — canonical JSON, length-prefixed. Covers transactional /
         // destructive / online / requires_approval / timeout_ms / phase /
-        // repeatable in one deterministic image, so any flip changes the hash.
+        // repeatable / engine_goodie_ddl in one deterministic image, so any flip
+        // changes the hash.
         let flags_json = serde_json::to_string(input.flags)
             .expect("MigrationFlags is infallibly serializable");
         hasher.update((flags_json.len() as u64).to_be_bytes());

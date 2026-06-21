@@ -1014,6 +1014,38 @@ pub fn desired_snapshot(
     project_schema: &str,
     descriptors: &[CollectionDescriptor],
 ) -> Result<DesiredSchema, DeclarativeError> {
+    // The historical entry point defaults to the **Postgres** desired shape —
+    // byte-identical to before FTS became dialect-aware. The only dialect-divergent
+    // part of the snapshot is full-text search (PG: a `__fts` tsvector column + GIN
+    // index; SQLite: an FTS5 virtual table). Every other facet (vector→BLOB,
+    // geoPoint→BLOB, …) is already modelled dialect-agnostically and SQLite tests
+    // call THIS entry safely. A SQLite schema that uses `.fts()` MUST instead call
+    // [`desired_snapshot_for_dialect`] with `SqlDialect::Sqlite` so the FTS index is
+    // modelled as the FTS5 vtable the SQLite emitter actually produces (otherwise
+    // the PG-shaped `__fts` GIN index is emitted over a column SQLite never
+    // materialises → apply fails with `no such column: "__fts"`).
+    desired_snapshot_for_dialect(project_schema, descriptors, SqlDialect::Postgres)
+}
+
+/// Dialect-aware [`desired_snapshot`] (P0). Identical to [`desired_snapshot`] for
+/// every facet EXCEPT full-text search, whose physical shape differs by engine:
+///
+/// - **Postgres** — a `.fts()` field folds into ONE `__fts` GENERATED `tsvector`
+///   column + a `<coll>__fts_idx` GIN index (the trigger-free declarative form the
+///   engine owns end-to-end). BYTE-IDENTICAL to the pre-dialect snapshot.
+/// - **SQLite** — a `.fts()` field folds into an FTS5 **virtual table**
+///   (`<coll>__fts`) over the source columns, mirrored by AFTER triggers — the same
+///   structure plugin-db's runtime `ensure_fts_index` builds and the shared
+///   `zeroship_schema::fts_sqlite` builders emit. NO `__fts` column, NO GIN index
+///   (`tsvector` has no SQLite spelling).
+///
+/// Modelling the FTS index as what the per-dialect emitter actually produces is
+/// what makes a re-diff of an unchanged FTS schema ZERO-drift on both legs.
+pub fn desired_snapshot_for_dialect(
+    project_schema: &str,
+    descriptors: &[CollectionDescriptor],
+    dialect: SqlDialect,
+) -> Result<DesiredSchema, DeclarativeError> {
     // First pass: accumulate EVERY declaration per table as (owner_app, shape),
     // independent of order. Conflict detection + ownership are then derived from
     // the FULL declarer set in a deterministic second pass — so with 3+ declarers
@@ -1250,19 +1282,39 @@ pub fn desired_snapshot(
             ));
         }
 
-        // **T12** — full-text search: every `.fts()`-marked text column on this
-        // collection folds into ONE composite `__fts` GENERATED tsvector column +
-        // a `<coll>__fts_idx` GIN index (Q-P4-B, matching plugin-db's runtime
-        // `__fts` / `<coll>__fts_idx` contract the data plane's `fts_search`
-        // reads). Without this the live FTS objects the runtime built were unknown
-        // to the differ and phantom-dropped; modeling them in `desired` both stops
-        // the drop AND makes the engine the authority that emits them (the
-        // schema-authority cutover intent). The generated-column form is
-        // trigger-free (no `tsvector_update_trigger`), so the whole FTS shape is
-        // pure DDL the engine owns.
-        if let Some((fts_col, fts_idx)) = fts_objects(&d.name, &d.fields) {
-            columns.push(fts_col);
-            indexes.push(fts_idx);
+        // **T12** — full-text search, DIALECT-AWARE (the only dialect-divergent
+        // part of the snapshot):
+        //
+        // - **Postgres**: every `.fts()`-marked text column folds into ONE composite
+        //   `__fts` GENERATED tsvector column + a `<coll>__fts_idx` GIN index
+        //   (Q-P4-B, matching plugin-db's runtime `__fts` / `<coll>__fts_idx`
+        //   contract the data plane's `fts_search` reads). The generated-column form
+        //   is trigger-free, so the whole FTS shape is pure DDL the engine owns.
+        // - **SQLite**: `tsvector` has no SQLite spelling, so there is NO `__fts`
+        //   column and NO GIN index. Instead the FTS index is an FTS5 **virtual
+        //   table** (`<coll>__fts`) over the source columns + AFTER triggers — the
+        //   SAME structure plugin-db's runtime `ensure_fts_index` and the shared
+        //   `zeroship_schema::fts_sqlite` builders produce. It is modelled as an
+        //   `IndexSnapshot` with `access_method = "fts5"` over the SOURCE columns so
+        //   the SQLite emitter emits the vtable+triggers and a live re-diff (the
+        //   drift introspector recognises the vtable) round-trips ZERO-drift.
+        //
+        // Without modelling the engine-built FTS objects in `desired`, the live
+        // ones would be unknown to the differ and phantom-dropped; modelling them
+        // also makes the engine the authority that EMITS them (the schema-authority
+        // cutover intent).
+        match dialect {
+            SqlDialect::Postgres => {
+                if let Some((fts_col, fts_idx)) = fts_objects_pg(&d.name, &d.fields) {
+                    columns.push(fts_col);
+                    indexes.push(fts_idx);
+                }
+            }
+            SqlDialect::Sqlite => {
+                if let Some(fts_idx) = fts_index_snapshot_sqlite(&d.name, &d.fields) {
+                    indexes.push(fts_idx);
+                }
+            }
         }
 
         // Deterministic ordering (snapshot_schema sorts everything by name).
@@ -1463,9 +1515,9 @@ fn fts_language(fields: &[FieldDescriptor]) -> String {
         .unwrap_or_else(|| "english".to_string())
 }
 
-/// Build the generated `__fts` tsvector COLUMN + its GIN index for the
-/// `.fts()`-marked text columns of a collection, or `None` when the collection
-/// has no FTS fields.
+/// **Postgres FTS** — build the generated `__fts` tsvector COLUMN + its GIN index
+/// for the `.fts()`-marked text columns of a collection, or `None` when the
+/// collection has no FTS fields.
 ///
 /// The column is `GENERATED ALWAYS AS (to_tsvector('<lang>'::regconfig,
 /// coalesce("c1",''::text) || ' '::text || …)) STORED` — a trigger-free,
@@ -1474,7 +1526,7 @@ fn fts_language(fields: &[FieldDescriptor]) -> String {
 /// sole schema authority, replaces it). The index is `USING gin("__fts")`. The
 /// `__fts` column name + `<coll>__fts_idx` index name are the contract
 /// `fts_search` reads, so they are preserved.
-fn fts_objects(
+fn fts_objects_pg(
     table: &str,
     fields: &[FieldDescriptor],
 ) -> Option<(ColumnSnapshot, IndexSnapshot)> {
@@ -1515,6 +1567,54 @@ fn fts_objects(
         opclass: None,
     };
     Some((col, idx))
+}
+
+/// The `access_method` sentinel that marks an [`IndexSnapshot`] as the SQLite
+/// FTS5 virtual table (vs. a PG `gin`/`gist`/`ivfflat` index or a plain `btree`).
+/// The SQLite emitter ([`SqliteEmitter::create_index`]) branches on this to emit
+/// the `CREATE VIRTUAL TABLE … USING fts5(...)` + AFTER triggers instead of a
+/// plain `CREATE INDEX`, and the SQLite drift introspector stamps it on the live
+/// vtable it recognises — so an FTS index round-trips ZERO-drift.
+pub(crate) const SQLITE_FTS5_ACCESS_METHOD: &str = "fts5";
+
+/// The name of the SQLite FTS5 virtual table for a collection (`<coll>__fts`).
+/// Matches [`zeroship_schema::fts_sqlite::fts_vtable_name`] and plugin-db's runtime
+/// `ensure_fts_index` contract, so an engine-emitted vtable and a runtime-built one
+/// are interchangeable. NOTE: this is DELIBERATELY the bare `<coll>__fts` (the
+/// vtable name), NOT the PG `<coll>__fts_idx` index name — on SQLite the FTS index
+/// *is* the vtable, and the drift introspector reads the vtable's name back.
+fn sqlite_fts_vtable_name(table: &str) -> String {
+    zeroship_schema::fts_sqlite::fts_vtable_name(table)
+}
+
+/// **SQLite FTS** — model a collection's `.fts()` fields as the FTS5 virtual-table
+/// [`IndexSnapshot`] the SQLite emitter produces, or `None` when the collection has
+/// no FTS fields.
+///
+/// Shape: `access_method = "fts5"`, `name = "<coll>__fts"` (the vtable), `columns =`
+/// the SOURCE columns (in declared order — NOT a `__fts` generated column, which
+/// has no SQLite spelling). The SQLite drift introspector parses the live vtable's
+/// `fts5(...)` column list back to this exact list, so a re-diff is zero-drift.
+fn fts_index_snapshot_sqlite(
+    table: &str,
+    fields: &[FieldDescriptor],
+) -> Option<IndexSnapshot> {
+    let cols: Vec<String> = fields
+        .iter()
+        .filter(|f| f.fts)
+        .map(|f| f.name.clone())
+        .collect();
+    if cols.is_empty() {
+        return None;
+    }
+    Some(IndexSnapshot {
+        name: sqlite_fts_vtable_name(table),
+        unique: false,
+        columns: cols,
+        access_method: SQLITE_FTS5_ACCESS_METHOD.to_string(),
+        expression: None,
+        opclass: None,
+    })
 }
 
 /// Validate a creator-declared typed-id prefix (`t.id("blog")`, #5).
@@ -3592,11 +3692,22 @@ impl DeclarativeAuthor {
         // emitter writes them directly, no name-based reconstruction.) This method
         // owns only the migration identity / deps.
         let (up, down) = self.emitter().create_index(table, idx);
+        // **FTS** — the SQLite FTS5 index is a `CREATE VIRTUAL TABLE … USING fts5(…)`
+        // (+ sync triggers), which the hardened SQLite authorizer permits ONLY under
+        // EngineJournal mode (a creator may never make a vtable). Mark the migration
+        // `engine_goodie_ddl` so the apply path runs its `up` in engine mode. This is
+        // safe — the DDL is engine-authored from the `.fts()` descriptor, not raw
+        // creator SQL. Every other index (PG gin/gist/ivfflat, plain btree) is
+        // ordinary CreatorUp-confined DDL, byte-identical to before.
+        let flags = MigrationFlags {
+            engine_goodie_ddl: idx.access_method == SQLITE_FTS5_ACCESS_METHOD,
+            ..MigrationFlags::default()
+        };
         self.make(
             &format!("create_index_{}", idx.name),
             up,
             Some(down),
-            MigrationFlags::default(),
+            flags,
             depends_on,
         )
     }
@@ -3839,6 +3950,47 @@ impl DdlEmitter for PgEmitter {
     }
 }
 
+/// **SQLite FTS5** — build the `(up, down)` for a collection's FTS5 index, an
+/// external-content virtual table + AFTER triggers (the same structure plugin-db's
+/// runtime `ensure_fts_index` builds, via the SHARED
+/// [`zeroship_schema::fts_sqlite`] builders in their UNqualified `main` form).
+///
+/// `up` (one multi-statement batch, run under EngineJournal — see the
+/// `engine_goodie_ddl` flag): CREATE VIRTUAL TABLE → initial population →
+/// AFTER INSERT/DELETE/UPDATE triggers. `down`: DROP the three triggers + DROP the
+/// vtable (CreatorUp-allowed: a plain `DROP TABLE`/`DROP TRIGGER` on `main`). The
+/// vtable's drop cascades its FTS5 shadow tables (`_data`/`_idx`/…).
+fn sqlite_fts5_create_teardown(table: &str, source_columns: &[String]) -> (String, String) {
+    use zeroship_schema::fts_sqlite as fts;
+    let cols = source_columns.to_vec();
+    // UNqualified `main` form (`schema = None`) — the confined SQLite engine opens
+    // the per-app file directly as `main`.
+    let create = fts::build_create_fts_table_sql(None, table, &cols);
+    let populate = fts::build_initial_population_sql(None, table, &cols);
+    let ai = fts::build_insert_trigger_sql(None, table, &cols);
+    let ad = fts::build_delete_trigger_sql(None, table, &cols);
+    let au = fts::build_update_trigger_sql(None, table, &cols);
+    // `execute_batch` runs all statements; mirror the create-table-sqlite path's
+    // `;\n` joining so a single migration `up` materialises the whole FTS shape.
+    let up = [create, populate, ai, ad, au].join(";\n");
+
+    let vtable = fts::fts_vtable_name(table);
+    let [ai_n, ad_n, au_n] = fts::fts_trigger_names(table);
+    // Drop the triggers BEFORE the vtable (so the trigger bodies' vtable reference
+    // is gone before the vtable). All unqualified `main` objects.
+    let down = format!(
+        "DROP TRIGGER IF EXISTS {};\n\
+         DROP TRIGGER IF EXISTS {};\n\
+         DROP TRIGGER IF EXISTS {};\n\
+         DROP TABLE IF EXISTS {}",
+        quote_ident(&ai_n),
+        quote_ident(&ad_n),
+        quote_ident(&au_n),
+        quote_ident(&vtable),
+    );
+    (up, down)
+}
+
 /// Confined-`SQLite` DDL emitter — unqualified (`main` = the app file), inline
 /// `/* … */` sentinels, plain b-tree indexes (no `USING` / `WITH`). Byte-identical
 /// to the former `SQLite` arm of each render method.
@@ -3898,6 +4050,17 @@ impl DdlEmitter for SqliteEmitter {
     }
 
     fn create_index(&self, table: &str, idx: &IndexSnapshot) -> (String, String) {
+        // **FTS** — an `access_method = "fts5"` index is NOT a plain `CREATE INDEX`:
+        // on SQLite the FTS index is an FTS5 external-content VIRTUAL TABLE
+        // (`<coll>__fts`) over the source columns, mirrored by three AFTER triggers.
+        // Emit the SAME structure plugin-db's runtime `ensure_fts_index` builds, via
+        // the shared `zeroship_schema::fts_sqlite` builders (UNqualified `main`
+        // form). This replaces the broken PG-shaped `__fts`-column GIN index that
+        // would otherwise be emitted over a column the SQLite create-table never
+        // materialises (`no such column: "__fts"`).
+        if idx.access_method == SQLITE_FTS5_ACCESS_METHOD {
+            return sqlite_fts5_create_teardown(table, &idx.columns);
+        }
         let unique = if idx.unique { "UNIQUE " } else { "" };
         let col_list = idx
             .columns
