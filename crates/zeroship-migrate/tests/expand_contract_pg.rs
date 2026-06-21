@@ -12,12 +12,12 @@
 //! test runs in its OWN meta + project schema (unique token) for isolation.
 
 use compio_postgres::Client;
-use zeroship_migrate::executor::{ApplyError, RollbackRequest, RollbackTarget};
+use zeroship_migrate::executor::{ApplyError, LockMode, RollbackRequest, RollbackTarget};
 use zeroship_migrate::{
     apply, migrator_role_name, provision_migrator, rollback, role::deprovision_migrator,
     run_backfill, Approval, BackfillSpec, Checksum, ExecutorConfig, ExpandContractAuthor,
-    ExpandContractPlan, GuardConfig, Migration, MigrationFlags, MigrationId, MigrationEngine,
-    OnlineIntent, OnlinePhase, RawSqlAuthor, SqlGuard,
+    ExpandContractPlan, GuardConfig, Migration, MigrationBackend, MigrationFlags, MigrationId,
+    MigrationEngine, OnlineIntent, OnlinePhase, PostgresBackend, RawSqlAuthor, SqlGuard,
 };
 
 const DEFAULT_DSN: &str =
@@ -458,6 +458,79 @@ async fn dual_write_correctness_under_app_role() {
     );
 
     full_teardown(&conn, &cfg, Some(&app_role)).await;
+}
+
+/// L1/L2/H1 — the EXPAND drives byte-identically through the
+/// `MigrationBackend::online()` capability seam (the `expand_conn() -> &Client`
+/// escape hatch is GONE). `PostgresBackend::online()` is `Some`; we hand the seam
+/// the NEUTRAL `OnlineIntent` + the pre-authored expand steps + backfill (never a
+/// `Client`, never the PG `ExpandContractPlan` type), and it applies E1+E2, runs
+/// the real backfill, and journals E3 LAST — exactly as `run_expand` does. The
+/// pre-existing rows are mirrored into `<to>`, and the dual-write trigger is live.
+#[compio::test]
+async fn expand_drives_through_online_capability_seam_byte_identical() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    full_teardown(&conn, &cfg, None).await;
+    ensure_project_schema(&conn, &cfg).await;
+    provision_migrator(&conn, &cfg).await.expect("provision migrator");
+    seed_users(&conn, &cfg.project_schema).await;
+    give_table_to_migrator(&conn, &cfg).await;
+
+    let plan = rename_plan(&cfg);
+    let backend = PostgresBackend::new(&conn);
+
+    // The PG backend exposes the online capability; SQLite returns None (proven in
+    // engine_sqlite). The connection is owned INSIDE the capability, never returned.
+    let online = backend
+        .online()
+        .expect("PostgresBackend exposes the OnlineSchemaChange capability (online() is Some)");
+
+    // Drive the EXPAND through the NEUTRAL seam: intent + pre-authored expand +
+    // backfill. LockMode::Acquire mirrors the standalone `run_expand` entry.
+    let outcome = online
+        .run_online(
+            &plan.intent,
+            &plan.expand,
+            &plan.backfill,
+            Approval::Approved,
+            &cfg,
+            "tester",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("online().run_online drives the expand byte-identically");
+
+    // E1, E2, E3 all journaled (the E3 marker LAST, after the real backfill).
+    assert_eq!(
+        outcome.applied.len(),
+        3,
+        "E1+E2 applied then E3 journaled last → 3 applied steps (byte-identical to run_expand)"
+    );
+
+    let schema = &cfg.project_schema;
+    // The new column exists and the dual-write trigger is live.
+    assert!(column_exists(&conn, schema, "users", "email_address").await, "<to> added");
+    assert!(trigger_exists(&conn, schema, "users").await, "dual-write trigger live");
+
+    // The real backfill mirrored EVERY pre-existing `<from>` into `<to>` — the
+    // whole point of run_backfill running before E3 is journaled.
+    let rows = conn
+        .query(
+            &format!("SELECT id, email, email_address FROM \"{schema}\".\"users\" ORDER BY id"),
+            &[],
+        )
+        .await
+        .expect("read rows after online expand");
+    assert_eq!(rows.len(), 3, "all three pre-existing rows present");
+    for row in &rows {
+        let from: Option<String> = row.get("email");
+        let to: Option<String> = row.get("email_address");
+        assert_eq!(to, from, "backfill mirrored pre-existing <from> into <to> through the seam");
+    }
+
+    full_teardown(&conn, &cfg, None).await;
 }
 
 /// MARQUEE 1b — the dual-write trigger is TOTAL: a single statement that

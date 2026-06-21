@@ -426,11 +426,13 @@ impl MigrationBackend for SqliteBackend {
             .map_err(|e| ApplyError::Backend(e.to_string()))
     }
 
-    fn expand_conn(&self) -> Option<&compio_postgres::Client> {
-        // SQLite has no online expand-contract drive: a SQLite declarative rename is
-        // routed to a `rebuild_one`, never expand-contract, so `plan.renames` is
-        // EMPTY on the SQLite leg and this `None` is never reached with renames to
-        // drive (design §3.3 / P6a CONDITION ii / H1).
+    fn online(&self) -> Option<&dyn crate::expand_contract::OnlineSchemaChange> {
+        // SQLite has NO online schema-change capability: a SQLite declarative rename
+        // is routed to a `rebuild_one` (the 12-step offline rebuild), never
+        // expand-contract, so `plan.renames` is structurally EMPTY on the SQLite leg
+        // and `None` here is never reached with renames to drive (design §3.3 / H1).
+        // Returning `None` (no PG `Client`) is what removes this backend's only
+        // PG-driver dependency (L-b): nothing on the shared trait is PG-typed here.
         None
     }
 }

@@ -113,6 +113,12 @@ pub struct ExpandContractPlan {
     /// step and the gate keys on as "the expand". Carried out so the
     /// orchestrator / gate need not re-derive it.
     pub trigger_version: MigrationId,
+    /// The neutral [`OnlineIntent`] this plan was authored from. Carried so the
+    /// generic declarative apply path hands the **intent** (not the PG-DDL plan)
+    /// to the [`OnlineSchemaChange`] seam (H1) — the Postgres impl ignores it and
+    /// runs the pre-authored [`expand`](Self::expand) steps verbatim, while a
+    /// future engine lowers the intent to its own native online DDL.
+    pub intent: OnlineIntent,
 }
 
 impl ExpandContractPlan {
@@ -477,6 +483,12 @@ impl ExpandContractAuthor {
             contract: vec![c1, c2],
             backfill,
             trigger_version,
+            intent: OnlineIntent::RenameColumn {
+                table: table.to_string(),
+                from: from.to_string(),
+                to: to.to_string(),
+                ty: ty.to_string(),
+            },
         })
     }
 
@@ -599,6 +611,178 @@ fn build_dual_write_sql(
          FOR EACH ROW EXECUTE FUNCTION {fn_q}()"
     );
     format!("{func};\n{trigger}")
+}
+
+// =============================================================================
+// The online expand-contract CAPABILITY seam (multi-engine abstraction, L1/L2/H1).
+// =============================================================================
+
+/// The online schema-change capability — the dialect-neutral seam the generic
+/// declarative apply path uses to drive a zero-downtime online operation
+/// (e.g. a column rename via expand-contract), **without ever holding a concrete
+/// connection** (L1: this REPLACES the `MigrationBackend::expand_conn() ->
+/// Option<&compio_postgres::Client>` escape hatch).
+///
+/// A backend that supports online schema change returns `Some(&dyn
+/// OnlineSchemaChange)` from [`MigrationBackend::online`](crate::backend::MigrationBackend::online);
+/// one that does not (SQLite — every existing-table change, including a rename,
+/// is routed to an offline 12-step `rebuild`) returns `None`. The generic core
+/// (`apply_declarative_locked`) branches on `online().is_some()`, never on the
+/// dialect, and never touches a `Client`.
+///
+/// # The seam is the NEUTRAL intent, not the PG plan (H1)
+///
+/// The method takes the dialect-neutral [`OnlineIntent`] plus the engine's own
+/// neutral migration types ([`Migration`] / [`BackfillSpec`] — the pre-authored,
+/// version-stable expand steps the integrity manifest was stamped over). It does
+/// **not** take the PG-named [`ExpandContractPlan`] container or a
+/// `compio_postgres::Client`. The Postgres impl ([`PgOnline`]) owns its `Client`
+/// **internally** and lowers the intent to its own PL/pgSQL dual-write DDL; a
+/// future engine that has a native online rename (MySQL `ALGORITHM=INPLACE`)
+/// lowers the *same* intent to its own DDL — which a raw `&Client` could never
+/// have admitted.
+#[allow(clippy::module_name_repetitions)]
+pub trait OnlineSchemaChange {
+    /// Drive ONE online intent's EXPAND (additive + dual-write + the real
+    /// backfill, journaling the backfill marker E3 **last** — Plan-8 ordering, M3).
+    ///
+    /// `expand` are the pre-authored expand migrations (E1 ADD COLUMN, E2
+    /// dual-write trigger, E3 backfill marker, in order) and `backfill` is E3's
+    /// structured spec — both version-stable (the manifest was computed over the
+    /// SAME instances), so this runs them verbatim rather than re-authoring (which
+    /// would mint fresh ids and diverge from the stamped manifest). `intent` is
+    /// carried for a non-PG engine that lowers the intent to its own native DDL
+    /// instead of running PG's authored steps.
+    ///
+    /// Returned as a boxed future so the trait is `dyn`-dispatchable
+    /// (`Option<&dyn OnlineSchemaChange>`); the online path runs at deploy time on
+    /// a rename only, never the apply hot path, so the box allocation is irrelevant.
+    #[allow(clippy::too_many_arguments)]
+    fn run_online<'a>(
+        &'a self,
+        intent: &'a OnlineIntent,
+        expand: &'a [Migration],
+        backfill: &'a BackfillSpec,
+        approval: crate::approval::Approval,
+        cfg: &'a crate::db::ExecutorConfig,
+        applied_by: &'a str,
+        lock_mode: crate::executor::LockMode,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<crate::executor::ApplyOutcome, crate::engine::OnlineError>,
+                > + 'a,
+        >,
+    >;
+}
+
+/// Run the Postgres EXPAND sequence VERBATIM (the byte-identical body relocated
+/// from `MigrationEngine::run_expand_with_lock`, M3).
+///
+/// The sequence is deliberately E1+E2 → backfill → E3, with E3 (the backfill
+/// marker) journaled **LAST**, after [`run_backfill`](crate::backfill::run_backfill)
+/// succeeds — never before — so the expand/contract gate (whose single source of
+/// truth is the journal) only sees the expand complete after the data is actually
+/// mirrored. The per-batch `pg_advisory_xact_lock` is taken *inside*
+/// [`run_backfill`], re-entrant under the session-scoped project lock the caller
+/// already holds (`lock_mode`), so whole-deploy serialization is preserved through
+/// the backfill without ever freeing the project lock.
+///
+/// `expand` is `[E1, E2, E3]` in order: E1+E2 are the structural head applied
+/// first, E3 is split off and journaled last.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_expand_pg(
+    conn: &compio_postgres::Client,
+    expand: &[Migration],
+    backfill: &BackfillSpec,
+    approval: crate::approval::Approval,
+    cfg: &crate::db::ExecutorConfig,
+    applied_by: &str,
+    lock_mode: crate::executor::LockMode,
+) -> Result<crate::executor::ApplyOutcome, crate::engine::OnlineError> {
+    use crate::executor::{self, ApplyOutcome};
+    if approval != crate::approval::Approval::Approved {
+        return Err(crate::engine::OnlineError::Approval);
+    }
+    // The expand sequence is E1, E2, E3 (the marker) in order. Split off E3: it is
+    // journaled LAST, after the real backfill, never as part of the structural apply.
+    let Some((e3, head)) = expand.split_last() else {
+        return Ok(ApplyOutcome {
+            applied: Vec::new(),
+            skipped: Vec::new(),
+            recovered: Vec::new(),
+        });
+    };
+    // 1. Apply E1 + E2 — trigger live before any backfill row is touched.
+    let mut outcome =
+        executor::apply_with_lock(conn, cfg, head, approval, applied_by, lock_mode).await?;
+    // 2. Run the real backfill (mirrors pre-existing rows).
+    crate::backfill::run_backfill(conn, cfg, backfill, approval, applied_by).await?;
+    // 3. Journal E3 (the backfill marker) — records the backfill complete, so the
+    //    gate now sees the expand fully applied and the contract may land.
+    let e3_outcome = executor::apply_with_lock(
+        conn,
+        cfg,
+        std::slice::from_ref(e3),
+        approval,
+        applied_by,
+        lock_mode,
+    )
+    .await?;
+    outcome.applied.extend(e3_outcome.applied);
+    outcome.recovered.extend(e3_outcome.recovered);
+    Ok(outcome)
+}
+
+/// The Postgres [`OnlineSchemaChange`] — owns its migrator [`Client`] internally
+/// (the connection NEVER appears on the neutral trait surface; L1/L2 fixed).
+///
+/// `run_online` lowers the neutral [`OnlineIntent`] to Postgres's authored
+/// expand-contract steps by running the pre-authored `expand` migrations through
+/// [`run_expand_pg`] — byte-identical to the pre-seam
+/// `MigrationEngine::run_expand_with_lock`, including the session advisory lock
+/// (held by the caller via `lock_mode`), the per-batch `pg_advisory_xact_lock`
+/// inside the backfill, and the E3-journaled-LAST invariant (M3).
+///
+/// [`Client`]: compio_postgres::Client
+#[derive(Debug)]
+pub struct PgOnline<'a> {
+    conn: &'a compio_postgres::Client,
+}
+
+impl<'a> PgOnline<'a> {
+    /// Wrap a migrator connection as the Postgres online-schema-change capability.
+    #[must_use]
+    pub fn new(conn: &'a compio_postgres::Client) -> Self {
+        Self { conn }
+    }
+}
+
+impl OnlineSchemaChange for PgOnline<'_> {
+    fn run_online<'a>(
+        &'a self,
+        _intent: &'a OnlineIntent,
+        expand: &'a [Migration],
+        backfill: &'a BackfillSpec,
+        approval: crate::approval::Approval,
+        cfg: &'a crate::db::ExecutorConfig,
+        applied_by: &'a str,
+        lock_mode: crate::executor::LockMode,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<crate::executor::ApplyOutcome, crate::engine::OnlineError>,
+                > + 'a,
+        >,
+    > {
+        // PG ignores `_intent` and runs the pre-authored, version-stable expand
+        // steps verbatim (re-authoring would mint fresh ids and diverge from the
+        // stamped manifest). A future MySQL impl would instead lower `_intent` to
+        // its own `ALGORITHM=INPLACE` DDL.
+        Box::pin(run_expand_pg(
+            self.conn, expand, backfill, approval, cfg, applied_by, lock_mode,
+        ))
+    }
 }
 
 #[cfg(test)]
