@@ -56,6 +56,59 @@ fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
+/// True iff `b` is a SQL identifier byte (so a whole-word scan does not match a
+/// substring of a larger identifier). ASCII alphanumerics + `_` + `$`. A
+/// double-quote is NOT an identifier byte, so `"col"` boundaries match a word.
+const fn is_sql_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+/// Count whole-word, case-insensitive occurrences of `needle` in `haystack`.
+/// Used by the H1 DROP-COLUMN rebuild router to find references to a dropped
+/// column in the stored `CREATE TABLE` DDL (CHECK / generated / partial-index
+/// expressions). A match is whole-word so `id` does not match `idx` or `user_id`.
+/// Empty `needle` counts zero.
+fn word_count_ci(haystack: &str, needle: &str) -> usize {
+    if needle.is_empty() {
+        return 0;
+    }
+    let hay = haystack.as_bytes();
+    let need = needle.as_bytes();
+    let mut count = 0;
+    let mut start = 0;
+    let lower_hay = haystack.to_ascii_lowercase();
+    let lower_need = needle.to_ascii_lowercase();
+    let lh = lower_hay.as_bytes();
+    let ln = lower_need.as_bytes();
+    while let Some(pos) = find_sub(&lh[start..], ln) {
+        let abs = start + pos;
+        let before = abs.checked_sub(1).map(|p| hay[p]);
+        let after = hay.get(abs + need.len()).copied();
+        let ok_before = before.is_none_or(|b| !is_sql_ident_byte(b));
+        let ok_after = after.is_none_or(|b| !is_sql_ident_byte(b));
+        if ok_before && ok_after {
+            count += 1;
+        }
+        start = abs + 1;
+    }
+    count
+}
+
+/// True iff `needle` appears as a whole word (case-insensitive) in `haystack`.
+fn word_present_ci(haystack: &str, needle: &str) -> bool {
+    word_count_ci(haystack, needle) > 0
+}
+
+/// First byte offset of `needle` in `haystack` (plain substring search).
+fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|w| w == needle)
+}
+
 /// Sentinel prefix on a [`ColumnSnapshot::default`] marking a STORED generated
 /// column (T12: the `__fts` tsvector). When the `default` body starts with this
 /// prefix, the emitter writes `GENERATED ALWAYS AS (<expr>) STORED` instead of a
@@ -1217,7 +1270,14 @@ pub fn desired_snapshot(
         indexes.sort_by(|a, b| a.name.cmp(&b.name));
         constraints.sort_by(|a, b| a.name.cmp(&b.name));
 
-        let this = TableSnapshot { columns, indexes, constraints };
+        // An author-built DESIRED snapshot carries no raw CREATE text (it is
+        // introspection-only; H1). It rides as `None` and is excluded from equality.
+        let this = TableSnapshot {
+            columns,
+            indexes,
+            constraints,
+            stored_create_sql: None,
+        };
         declarations
             .entry(d.name.clone())
             .or_default()
@@ -3045,6 +3105,100 @@ impl DeclarativeAuthor {
             }
         }
 
+        // (6) A DROP COLUMN of a CONSTRAINED column (H1). SQLite's native
+        //     `ALTER TABLE … DROP COLUMN` ERRORS at apply when the dropped column
+        //     participates in ANY index, CHECK, foreign key, generated-column
+        //     expression, or partial-index predicate — so the per-op
+        //     `render_drop_column` would abort the migration. We route such a drop
+        //     to the 12-step rebuild (which omits the column from `copy_columns` and
+        //     recreates only the surviving dependents). A column that is
+        //     UNconstrained drops natively via the per-op path (no rebuild).
+        //
+        //     "Dropped" = a column present in LIVE, absent from DESIRED, and NOT a
+        //     rename `from` (a rename is its own rebuild trigger, handled in step 1).
+        let desired_names: BTreeSet<&str> =
+            dt.columns.iter().map(|c| c.name.as_str()).collect();
+        let renamed_from: BTreeSet<&str> =
+            table_renames.iter().map(|r| r.from.as_str()).collect();
+        for lc in &lt.columns {
+            let col = lc.name.as_str();
+            if desired_names.contains(col) || renamed_from.contains(col) {
+                continue; // surviving column, or handled by the rename path
+            }
+            // This `col` is being dropped. Does any index / constraint / raw-DDL
+            // dependent of the LIVE table reference it? If so → rebuild.
+            if let Some(dep) = Self::sqlite_dropped_column_dependent(table, lc, lt) {
+                return Some(dep);
+            }
+        }
+
+        None
+    }
+
+    /// **H1 helper** — is the live column `lc` (being dropped) referenced by any
+    /// index, constraint, or raw-DDL dependent of the live table `lt`, such that a
+    /// native `SQLite` `DROP COLUMN` would ERROR? Returns `Some(reason)` to route the
+    /// drop to the 12-step rebuild, `None` if the column drops cleanly per-op.
+    ///
+    /// Sources, in fail-closed order:
+    ///   1. INDEX key columns (`IndexSnapshot::columns`) — a column in any index.
+    ///   2. CONSTRAINT definitions (`ConstraintSnapshot::definition`) — the synthesised
+    ///      FK / UNIQUE / PK bodies carry the member column names verbatim.
+    ///   3. The verbatim `CREATE TABLE` text (`TableSnapshot::stored_create_sql`),
+    ///      the ONLY source for CHECK predicates, generated-column expressions, and
+    ///      partial-index predicates — none of which the `SQLite` drift PRAGMAs surface
+    ///      into the structured snapshot. We do a CONSERVATIVE whole-word scan: if the
+    ///      column name appears as a word ANYWHERE in the stored DDL beyond its own
+    ///      definition, we rebuild. This can over-trigger a rebuild (a comment / a
+    ///      coincidental match) but NEVER under-triggers — a rebuild is always
+    ///      data-preserving, while a wrong native DROP COLUMN aborts the migration.
+    fn sqlite_dropped_column_dependent(
+        table: &str,
+        lc: &ColumnSnapshot,
+        lt: &TableSnapshot,
+    ) -> Option<String> {
+        let col = lc.name.as_str();
+
+        // (1) Any index over this column.
+        for idx in &lt.indexes {
+            if idx.columns.iter().any(|c| c == col) {
+                return Some(format!(
+                    "drop column {table}.{col} referenced by index {}",
+                    idx.name
+                ));
+            }
+        }
+
+        // (2) Any constraint whose definition names this column (FK / UNIQUE / PK).
+        for c in &lt.constraints {
+            if word_present_ci(&c.definition, col) {
+                return Some(format!(
+                    "drop column {table}.{col} referenced by constraint {} ({})",
+                    c.name, c.kind
+                ));
+            }
+        }
+
+        // (3) The verbatim CREATE text — the only source for CHECK / generated /
+        //     partial-index references. We scan the WHOLE statement (conservative:
+        //     over-trigger acceptable, under-trigger never), as a whole word so a
+        //     substring of another identifier does not false-match.
+        if let Some(sql) = lt.stored_create_sql.as_deref() {
+            // Strip this column's OWN definition clause is unnecessary for
+            // correctness (a rebuild is always safe); a hit anywhere routes to the
+            // rebuild. The column's own clause naturally matches, but the per-op
+            // path is only taken when NO dependent exists — and a column always
+            // appears in its own clause — so we must look for a SECOND occurrence
+            // (a reference beyond the bare declaration) to avoid rebuilding EVERY
+            // drop. Count whole-word occurrences; >1 means a reference exists.
+            if word_count_ci(sql, col) > 1 {
+                return Some(format!(
+                    "drop column {table}.{col} referenced by a CHECK / generated / \
+                     partial-index expression in the stored table DDL"
+                ));
+            }
+        }
+
         None
     }
 
@@ -3135,12 +3289,30 @@ impl DeclarativeAuthor {
         // remains on the spec as an explicit escape hatch for direct-spec callers.
         let recreate_objects: Vec<String> = Vec::new();
 
+        // H1 — the columns this rebuild DROPS: live columns absent from the new
+        // (desired) shape, excluding a rename's `from` (a rename CARRIES the column
+        // under a new name, it is not a drop). The executor uses this to SKIP
+        // replaying any captured dependent (index / trigger) that references a
+        // dropped column — such a dependent is dropped WITH the column.
+        let desired_names: BTreeSet<&str> =
+            dt.columns.iter().map(|c| c.name.as_str()).collect();
+        let rename_from: BTreeSet<&str> =
+            table_renames.iter().map(|r| r.from.as_str()).collect();
+        let dropped_columns: Vec<String> = lt
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .filter(|n| !desired_names.contains(n) && !rename_from.contains(n))
+            .map(ToString::to_string)
+            .collect();
+
         let spec = SqliteRebuildSpec {
             table: table.to_string(),
             tmp_table: tmp,
             new_table_create,
             copy_columns,
             recreate_objects,
+            dropped_columns,
             reason: reason.clone(),
         };
 
@@ -3962,6 +4134,35 @@ fn fk_local_column(definition: &str) -> Option<String> {
     }
 }
 
+
+#[cfg(test)]
+mod h1_word_scan_tests {
+    use super::{word_count_ci, word_present_ci};
+
+    // H1 — the whole-word, case-insensitive column scan used by the DROP-COLUMN
+    // rebuild router. A column must NOT match as a substring of a larger identifier,
+    // a quoted reference must match, and the case must be folded.
+    #[test]
+    fn word_scan_is_whole_word_and_case_insensitive() {
+        // Whole-word: `id` does not match `idx` / `user_id` / `idle`.
+        assert!(!word_present_ci("CREATE INDEX idx ON t (user_id)", "id"));
+        assert_eq!(word_count_ci("idx idle paranoid", "id"), 0);
+        // A bare and a quoted reference both match.
+        assert!(word_present_ci("CHECK (age > 0)", "age"));
+        assert!(word_present_ci("CHECK (\"age\" > 0)", "age"));
+        // Case-insensitive.
+        assert!(word_present_ci("CHECK (AGE > 0)", "age"));
+        // Count counts each whole-word occurrence (declaration + CHECK reference).
+        assert_eq!(
+            word_count_ci("\"points\" INTEGER, CHECK (points >= 0)", "points"),
+            2
+        );
+        // A column appearing ONLY in its own declaration counts once (drops natively).
+        assert_eq!(word_count_ci("\"solo\" TEXT", "solo"), 1);
+        // Empty needle counts zero (never matches).
+        assert_eq!(word_count_ci("anything", ""), 0);
+    }
+}
 
 #[cfg(test)]
 mod advisory_seam_tests {

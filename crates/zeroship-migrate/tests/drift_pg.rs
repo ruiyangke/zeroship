@@ -411,6 +411,7 @@ async fn diff_reports_missing_table_when_expected_has_an_extra() {
             }],
             indexes: Vec::new(),
             constraints: Vec::new(),
+            stored_create_sql: None,
         },
     );
     let expected = SchemaSnapshot { tables };
@@ -480,6 +481,7 @@ async fn diff_reports_missing_and_unexpected_columns_within_a_shared_table() {
             ],
             indexes: Vec::new(),
             constraints: Vec::new(),
+            stored_create_sql: None,
         },
     );
     let expected = SchemaSnapshot { tables };
@@ -594,6 +596,7 @@ async fn diff_reports_altered_column_data_type() {
             }],
             indexes: Vec::new(),
             constraints: Vec::new(),
+            stored_create_sql: None,
         },
     );
     let expected = SchemaSnapshot { tables };
@@ -642,6 +645,7 @@ async fn diff_reports_altered_column_nullability() {
             }],
             indexes: Vec::new(),
             constraints: Vec::new(),
+            stored_create_sql: None,
         },
     );
     let expected = SchemaSnapshot { tables };
@@ -697,6 +701,7 @@ async fn diff_reports_altered_index_uniqueness() {
                 opclass: None,
             }],
             constraints: Vec::new(),
+            stored_create_sql: None,
         },
     );
     let expected = SchemaSnapshot { tables };
@@ -759,6 +764,7 @@ async fn diff_reports_altered_check_constraint_definition() {
                 kind: "CHECK".into(),
                 definition: "CHECK ((age > 0))".into(),
             }],
+            stored_create_sql: None,
         },
     );
     let expected = SchemaSnapshot { tables };
@@ -828,6 +834,7 @@ async fn t12_out_of_band_gin_index_surfaces_as_unexpected() {
             columns: actual.tables["docs"].columns.clone(),
             indexes: Vec::new(),
             constraints: Vec::new(),
+            stored_create_sql: None,
         },
     );
     let expected = SchemaSnapshot { tables };
@@ -886,6 +893,7 @@ async fn t12_btree_to_ivfflat_access_method_flip_is_reported() {
                 opclass: Some("vector_cosine_ops".into()),
             }],
             constraints: Vec::new(),
+            stored_create_sql: None,
         },
     );
     let expected = SchemaSnapshot { tables };

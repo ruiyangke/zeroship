@@ -542,6 +542,7 @@ async fn fk_violation_aborts_rebuild_intact_and_fk_back_on() {
             ("parent_id".into(), "parent_id".into()),
         ],
         recreate_objects: vec![],
+        dropped_columns: vec![],
         reason: "fk integrity test rebuild".into(),
     };
     let m = rebuild_migration("child", &spec);
@@ -707,6 +708,7 @@ async fn aborting_rebuild_leaves_no_wedge_and_fk_on() {
         recreate_objects: vec![
             "CREATE INDEX \"t_bogus_idx\" ON \"t\" (\"does_not_exist\")".into(),
         ],
+        dropped_columns: vec![],
         reason: "wedge test".into(),
     };
     let m = rebuild_migration("t", &spec);
@@ -897,6 +899,12 @@ async fn dependent_referencing_dropped_column_fails_closed() {
         new_table_create: "CREATE TABLE \"t__zsrebuild\" (\"id\" TEXT PRIMARY KEY)".into(),
         copy_columns: vec![("id".into(), "id".into())],
         recreate_objects: vec![],
+        // EMPTY on purpose: a DIRECT-spec caller that does not declare the dropped
+        // column gets the FAIL-CLOSED safety net (the captured index over `drop_me`
+        // cannot replay and aborts). The declarative path, by contrast, populates
+        // `dropped_columns` so the dependent is skipped (H1) — see the
+        // `h1_drop_column_in_index_routes_to_rebuild` faithful test.
+        dropped_columns: vec![],
         reason: "drop column drop_me".into(),
     };
     let m = rebuild_migration("t", &spec);
@@ -988,6 +996,7 @@ async fn cross_table_fk_orphan_caught_by_unscoped_check() {
         // instead pre-delete the row out-of-band below and copy straight across.
         copy_columns: vec![("id".into(), "id".into()), ("label".into(), "label".into())],
         recreate_objects: vec![],
+        dropped_columns: vec![],
         reason: "parent rebuild dropping referenced row".into(),
     };
     // Drop the referenced parent row BEFORE the rebuild (engine mode, FK is ON so we
@@ -1130,6 +1139,228 @@ async fn pre_created_temp_table_does_not_pollute_rebuild() {
         Some("1"),
         "only the legit row survives; the POLLUTION junk row never entered"
     );
+}
+
+// ---------------------------------------------------------------------------
+// H1 — dropping a CONSTRAINED column routes to the 12-step rebuild (a native
+// SQLite `ALTER TABLE … DROP COLUMN` ERRORS on such a column, aborting the
+// migration). Two faithful end-to-end cases on the REAL hardened backend.
+// ---------------------------------------------------------------------------
+
+// (H1-a) DROP a column that participates in an INDEX. The detector source (1)
+// (IndexSnapshot::columns) catches it. The drop must apply via REBUILD: the
+// column is gone, its index is gone, a SURVIVING column's index is intact, and
+// the other column's data is preserved.
+#[compio::test]
+async fn h1_drop_column_in_index_routes_to_rebuild() {
+    // v1: events(n number [indexed], extra string [indexed]).
+    let v1 = vec![CollectionDescriptor {
+        name: "events".into(),
+        owner_app: APP.into(),
+        fields: vec![
+            FieldDescriptor {
+                name: "n".into(),
+                ty: "number".into(),
+                required: true,
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "extra".into(),
+                ty: "string".into(),
+                required: false,
+                ..Default::default()
+            },
+        ],
+        indexes: vec![
+            IndexDescriptor {
+                name: "events_n_idx".into(),
+                columns: vec!["n".into()],
+                unique: false,
+            },
+            IndexDescriptor {
+                name: "events_extra_idx".into(),
+                columns: vec!["extra".into()],
+                unique: false,
+            },
+        ],
+    }];
+    // v2: drop `extra` (and its index). `n` + its index survive.
+    let v2 = vec![CollectionDescriptor {
+        name: "events".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "n".into(),
+            ty: "number".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![IndexDescriptor {
+            name: "events_n_idx".into(),
+            columns: vec!["n".into()],
+            unique: false,
+        }],
+    }];
+
+    let p = paths("h1_idx");
+    let be = backend(&p);
+    apply_first_deploy(&be, &v1).await;
+
+    // Seed rows.
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .exec("INSERT INTO main.events (id, n, extra) VALUES ('e1', 1, 'a'), ('e2', 2, 'b')")
+        .await
+        .expect("seed rows");
+
+    // The second-deploy diff MUST produce a rebuild (not a native DROP COLUMN).
+    let rb = one_rebuild(&v1, &v2);
+    be.rebuild_one(&rb.spec, &rb.migration, "deployer")
+        .await
+        .expect("the constrained-column drop must apply via rebuild");
+
+    // The dropped column is gone.
+    let info = be
+        .actor()
+        .query("PRAGMA main.table_info(events)")
+        .await
+        .expect("table_info");
+    assert!(
+        !info.iter().any(|r| r[1].as_deref() == Some("extra")),
+        "the dropped column `extra` must be gone after the rebuild"
+    );
+    // Its index is gone; the surviving column's index is intact. (Other indexes are
+    // the platform system-field indexes emitted inline by the create; we assert the
+    // two user indexes specifically.)
+    let idx = be
+        .actor()
+        .query("SELECT name FROM main.sqlite_master WHERE type='index'")
+        .await
+        .expect("index query");
+    let idx_names: Vec<String> = idx.iter().filter_map(|r| r[0].clone()).collect();
+    assert!(
+        !idx_names.iter().any(|n| n == "events_extra_idx"),
+        "events_extra_idx (over the dropped column) must be gone: {idx_names:?}"
+    );
+    assert!(
+        idx_names.iter().any(|n| n == "events_n_idx"),
+        "events_n_idx (over the surviving column) must be intact: {idx_names:?}"
+    );
+    // Data preserved (both rows, `n` intact).
+    let vals = be
+        .actor()
+        .query("SELECT n FROM main.events ORDER BY id")
+        .await
+        .expect("read n");
+    assert_eq!(
+        vals.iter().filter_map(|r| r[0].clone()).collect::<Vec<_>>(),
+        vec!["1", "2"],
+        "surviving column data preserved across the drop-via-rebuild"
+    );
+    assert!(foreign_keys_on(&be).await, "foreign_keys ON post-rebuild");
+}
+
+// (H1-b) DROP a column that participates in a CHECK constraint (emitted inline by
+// a numeric `min`). The CHECK is NOT in the structured SQLite snapshot — the
+// detector's source (3) (stored CREATE text scan) catches it. The drop must apply
+// via REBUILD: the column is gone and the other column's data is preserved.
+#[compio::test]
+async fn h1_drop_column_in_check_routes_to_rebuild() {
+    // v1: scores(label string, points number [min:0 → inline CHECK (points >= 0)]).
+    let v1 = vec![CollectionDescriptor {
+        name: "scores".into(),
+        owner_app: APP.into(),
+        fields: vec![
+            FieldDescriptor {
+                name: "label".into(),
+                ty: "string".into(),
+                required: true,
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "points".into(),
+                ty: "number".into(),
+                required: true,
+                min: Some(0.0),
+                ..Default::default()
+            },
+        ],
+        indexes: vec![],
+    }];
+    // v2: drop `points` (the CHECK-constrained column). `label` survives.
+    let v2 = vec![CollectionDescriptor {
+        name: "scores".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "label".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    }];
+
+    let p = paths("h1_check");
+    let be = backend(&p);
+    apply_first_deploy(&be, &v1).await;
+
+    // Sanity: the live table's stored DDL really carries the CHECK over `points`
+    // (so this test exercises the source-(3) path, not source (1)/(2)).
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    let ddl = be
+        .actor()
+        .query("SELECT sql FROM main.sqlite_master WHERE type='table' AND name='scores'")
+        .await
+        .expect("read stored DDL");
+    let ddl_text = ddl[0][0].clone().unwrap_or_default();
+    assert!(
+        ddl_text.to_ascii_uppercase().contains("CHECK") && ddl_text.contains("points"),
+        "the live DDL must carry a CHECK referencing points: {ddl_text}"
+    );
+
+    be.actor()
+        .exec("INSERT INTO main.scores (id, label, points) VALUES ('s1', 'x', 5), ('s2', 'y', 9)")
+        .await
+        .expect("seed rows");
+
+    // The second-deploy diff MUST produce a rebuild (a native DROP COLUMN would
+    // ERROR: the column is used by a CHECK constraint).
+    let rb = one_rebuild(&v1, &v2);
+    be.rebuild_one(&rb.spec, &rb.migration, "deployer")
+        .await
+        .expect("the CHECK-constrained-column drop must apply via rebuild");
+
+    // The dropped column is gone; the CHECK referencing it is gone with it.
+    let info = be
+        .actor()
+        .query("PRAGMA main.table_info(scores)")
+        .await
+        .expect("table_info");
+    assert!(
+        !info.iter().any(|r| r[1].as_deref() == Some("points")),
+        "the dropped CHECK column `points` must be gone after the rebuild"
+    );
+    let ddl_after = be
+        .actor()
+        .query("SELECT sql FROM main.sqlite_master WHERE type='table' AND name='scores'")
+        .await
+        .expect("read stored DDL after");
+    let after_text = ddl_after[0][0].clone().unwrap_or_default();
+    assert!(
+        !after_text.contains("points"),
+        "the surviving table DDL must not reference the dropped column: {after_text}"
+    );
+    // Surviving column data preserved.
+    let labels = be
+        .actor()
+        .query("SELECT label FROM main.scores ORDER BY id")
+        .await
+        .expect("read label");
+    assert_eq!(
+        labels.iter().filter_map(|r| r[0].clone()).collect::<Vec<_>>(),
+        vec!["x".to_string(), "y".to_string()],
+        "surviving column data preserved across the CHECK-drop-via-rebuild"
+    );
+    assert!(foreign_keys_on(&be).await, "foreign_keys ON post-rebuild");
 }
 
 // ---------------------------------------------------------------------------
