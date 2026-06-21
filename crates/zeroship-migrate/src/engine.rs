@@ -762,7 +762,8 @@ impl MigrationEngine {
     }
 
     /// Dry-run a migration batch against a throwaway **shadow DATABASE** clone
-    /// (v3 Plan C) — a thin delegate to [`crate::shadow::dry_run`].
+    /// (v3 Plan C) — routed through the backend's
+    /// [`ShadowDryRun`](crate::shadow::ShadowDryRun) capability (C3).
     ///
     /// Previews the FULL batch against a faithful copy (same `project_schema`
     /// name, confined migrator role, the UNMODIFIED [`executor::apply`] path)
@@ -771,40 +772,64 @@ impl MigrationEngine {
     /// recommendation is mandatory for destructive / AI-authored sets); this
     /// method is the primitive.
     ///
+    /// The dry-run goes through [`backend.shadow()`](crate::backend::MigrationBackend::shadow)
+    /// rather than a raw `&Client`, so no PG-driver type appears on this surface.
+    /// A backend with no shadow capability (e.g. SQLite — its DDL is trusted +
+    /// dev-recoverable) yields the explicit
+    /// [`DryRunError::ShadowUnsupported`](crate::shadow::DryRunError::ShadowUnsupported),
+    /// NOT a false-success report: the caller must never believe a dry-run happened
+    /// when it did not.
+    ///
     /// # Errors
-    /// [`crate::shadow::DryRunError`] on a harness failure (CREATE/DROP DATABASE,
-    /// the shadow connection, role provisioning). A *migration* failing is not an
-    /// error — it is reported in the [`crate::shadow::DryRunReport`].
-    pub async fn dry_run(
+    /// - [`crate::shadow::DryRunError::ShadowUnsupported`] — the backend has no
+    ///   shadow dry-run capability.
+    /// - other [`crate::shadow::DryRunError`] — a harness failure (CREATE/DROP
+    ///   DATABASE, the shadow connection, role provisioning). A *migration* failing
+    ///   is not an error — it is reported in the [`crate::shadow::DryRunReport`].
+    pub async fn dry_run<B: MigrationBackend>(
         &self,
-        admin_conn: &Client,
+        backend: &B,
         migrations: &[Migration],
         exec_cfg: &ExecutorConfig,
         shadow_cfg: &crate::shadow::ShadowConfig,
         applied_by: &str,
     ) -> Result<crate::shadow::DryRunReport, crate::shadow::DryRunError> {
-        crate::shadow::dry_run(admin_conn, migrations, exec_cfg, shadow_cfg, applied_by).await
+        let Some(shadow) = backend.shadow() else {
+            return Err(crate::shadow::DryRunError::ShadowUnsupported);
+        };
+        shadow
+            .dry_run(migrations, exec_cfg, shadow_cfg, applied_by)
+            .await
     }
 
     /// Dry-run a DECLARATIVE deploy plan against a shadow DATABASE, validating
-    /// the resulting schema against the desired snapshot (v3 Plan C, Phase 2) — a
-    /// thin delegate to [`crate::shadow::dry_run_declarative`].
+    /// the resulting schema against the desired snapshot (v3 Plan C, Phase 2) —
+    /// routed through the backend's [`ShadowDryRun`](crate::shadow::ShadowDryRun)
+    /// capability (C3).
+    ///
+    /// Like [`dry_run`](Self::dry_run), a backend with no shadow capability yields
+    /// the explicit [`DryRunError::ShadowUnsupported`](crate::shadow::DryRunError::ShadowUnsupported),
+    /// never a false-success report.
     ///
     /// # Errors
-    /// [`crate::shadow::DryRunError`] on a harness failure.
-    pub async fn dry_run_declarative(
+    /// - [`crate::shadow::DryRunError::ShadowUnsupported`] — the backend has no
+    ///   shadow dry-run capability.
+    /// - other [`crate::shadow::DryRunError`] — a harness failure.
+    pub async fn dry_run_declarative<B: MigrationBackend>(
         &self,
-        admin_conn: &Client,
+        backend: &B,
         plan: &DeclarativeDeployPlan,
         desired: &crate::declarative::DesiredSchema,
         exec_cfg: &ExecutorConfig,
         shadow_cfg: &crate::shadow::ShadowConfig,
         applied_by: &str,
     ) -> Result<crate::shadow::DryRunReport, crate::shadow::DryRunError> {
-        crate::shadow::dry_run_declarative(
-            admin_conn, plan, desired, exec_cfg, shadow_cfg, applied_by,
-        )
-        .await
+        let Some(shadow) = backend.shadow() else {
+            return Err(crate::shadow::DryRunError::ShadowUnsupported);
+        };
+        shadow
+            .dry_run_declarative(plan, desired, exec_cfg, shadow_cfg, applied_by)
+            .await
     }
 
     /// Roll back applied migrations to a [`RollbackTarget`] through the gate

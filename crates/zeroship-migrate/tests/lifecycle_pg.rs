@@ -638,7 +638,14 @@ async fn p0_2_dry_run_declarative_predicts_real_apply() {
 
     // --- dry_run_declarative: simulate BOTH deploys on a throwaway shadow DB. ---
     let report = engine
-        .dry_run_declarative(&conn, &plan, &d_to, &cfg, &shadow_cfg(&tok), "app_acme")
+        .dry_run_declarative(
+            &PostgresBackend::new(&conn),
+            &plan,
+            &d_to,
+            &cfg,
+            &shadow_cfg(&tok),
+            "app_acme",
+        )
         .await
         .expect("dry_run_declarative");
 
@@ -954,7 +961,7 @@ async fn p0_4_security_full_stack_guard_dry_run_and_role_backstop() {
     // --- LAYER 2: dry_run reports the malicious migration AND the REAL project
     //     schema + journal are provably untouched (the dry-run uses a throwaway DB). ---
     let report = engine
-        .dry_run(&conn, &batch, &cfg, &shadow_cfg(&tok), "app_acme")
+        .dry_run(&PostgresBackend::new(&conn), &batch, &cfg, &shadow_cfg(&tok), "app_acme")
         .await
         .expect("dry_run harness must succeed (a denied migration is reported, not an error)");
     // The dry-run reports the malicious migration as not-ok (denied / failed).

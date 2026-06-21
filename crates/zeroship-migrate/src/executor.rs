@@ -3299,6 +3299,9 @@ mod journal_atomicity_seam_tests {
         fn online(&self) -> Option<&dyn crate::expand_contract::OnlineSchemaChange> {
             unimplemented!()
         }
+        fn shadow(&self) -> Option<&dyn crate::shadow::ShadowDryRun> {
+            unimplemented!()
+        }
         async fn baseline_one(
             &self,
             _: &ExecutorConfig,

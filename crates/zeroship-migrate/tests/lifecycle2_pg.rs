@@ -1030,7 +1030,7 @@ async fn l8_destructive_analyzer_advisory_dry_run_gate_apply() {
     let shadow_batch = vec![create_for_shadow.clone(), drop_for_shadow.clone()];
 
     let report = engine
-        .dry_run(&conn, &shadow_batch, &cfg, &shadow_cfg(&tok), "app_acme")
+        .dry_run(&PostgresBackend::new(&conn), &shadow_batch, &cfg, &shadow_cfg(&tok), "app_acme")
         .await
         .expect("dry_run harness");
     // The dry-run applies cleanly on the shadow (the destructive op is valid SQL).

@@ -326,6 +326,37 @@ pub trait MigrationBackend {
     /// call site — a non-empty rename set with `online() == None` is a routing bug).
     fn online(&self) -> Option<&dyn crate::expand_contract::OnlineSchemaChange>;
 
+    /// The **shadow dry-run capability** (multi-engine abstraction C3).
+    ///
+    /// `Some(&dyn ShadowDryRun)` for an engine that can preview a migration batch
+    /// against a throwaway shadow clone before the real apply (Postgres — the
+    /// [`PgShadow`](crate::shadow::PgShadow) impl owns its admin `Client`
+    /// **internally**, so the connection NEVER appears on this neutral trait
+    /// surface). `None` for an engine with no shadow path.
+    ///
+    /// This REPLACES the old `MigrationEngine::dry_run(admin_conn: &Client, …)` /
+    /// `PostgresBackend::conn() -> &Client` escape hatch: the engine's
+    /// [`dry_run`](crate::engine::MigrationEngine::dry_run) /
+    /// [`dry_run_declarative`](crate::engine::MigrationEngine::dry_run_declarative)
+    /// branch on `shadow().is_some()`, never holding a concrete connection, and a
+    /// backend with no shadow capability surfaces a clear
+    /// [`DryRunError::ShadowUnsupported`](crate::shadow::DryRunError::ShadowUnsupported)
+    /// rather than a false-success report.
+    ///
+    /// # Why SQLite is `None` (a deliberate capability gap, not a silent hole)
+    ///
+    /// The SQLite dev path applies only **TRUSTED descriptor-generated DDL** —
+    /// there is no untrusted/raw SQLite author whose DDL would need previewing
+    /// against a throwaway clone — and dev is **recoverable** (a local file the
+    /// developer can re-create), so a pre-apply shadow dry-run adds little. The
+    /// shadow exists to safely preview *untrusted/AI-authored* DDL before it
+    /// touches a *durable* schema; neither condition holds on the SQLite dev leg.
+    /// A future untrusted/prod non-PG engine (e.g. MySQL) WOULD provide a
+    /// `ShadowDryRun`. So `None` here is honest: a caller that asks for a dry-run
+    /// on SQLite gets the explicit `ShadowUnsupported` outcome, never a fake
+    /// "dry-run passed".
+    fn shadow(&self) -> Option<&dyn crate::shadow::ShadowDryRun>;
+
     // -- baseline / adoption ------------------------------------------------
 
     /// Adopt the LIVE schema as the project's **baseline** (design §5 / H3,
@@ -389,6 +420,12 @@ pub struct PostgresBackend<'a> {
     /// [`Client`] as `conn` (a private field — the connection never crosses the
     /// neutral trait surface), driving the expand-contract rename path.
     online: crate::expand_contract::PgOnline<'a>,
+    /// The Postgres shadow dry-run capability returned by
+    /// [`shadow`](MigrationBackend::shadow). Holds the SAME borrowed [`Client`] as
+    /// `conn` (a private field — the connection never crosses the neutral trait
+    /// surface) as its **admin** connection (the `CREATE DATABASE`/`DROP DATABASE`
+    /// issuer), driving the throwaway-shadow-DB dry-run (C3).
+    shadow: crate::shadow::PgShadow<'a>,
 }
 
 impl<'a> PostgresBackend<'a> {
@@ -401,15 +438,8 @@ impl<'a> PostgresBackend<'a> {
                 String::new(),
             )),
             online: crate::expand_contract::PgOnline::new(conn),
+            shadow: crate::shadow::PgShadow::new(conn),
         }
-    }
-
-    /// The borrowed connection — for the (few) PG-only call sites that still take
-    /// a raw `&Client` and are out of P1's seam scope (the shadow-DB dry-run and
-    /// the standalone lock helpers re-exported for `submit`/`engine`).
-    #[must_use]
-    pub fn conn(&self) -> &'a Client {
-        self.conn
     }
 }
 
@@ -564,6 +594,13 @@ impl MigrationBackend for PostgresBackend<'_> {
 
     fn online(&self) -> Option<&dyn crate::expand_contract::OnlineSchemaChange> {
         Some(&self.online)
+    }
+
+    fn shadow(&self) -> Option<&dyn crate::shadow::ShadowDryRun> {
+        // Postgres CAN dry-run untrusted/AI-authored DDL against a throwaway shadow
+        // DATABASE before the durable apply. The `PgShadow` owns the admin `Client`
+        // privately; the connection never crosses this neutral surface (C3).
+        Some(&self.shadow)
     }
 
     async fn baseline_one(
