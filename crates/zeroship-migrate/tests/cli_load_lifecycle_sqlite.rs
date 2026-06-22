@@ -35,6 +35,21 @@ fn run_bin(args: &[&str]) -> (bool, String, String) {
     )
 }
 
+/// Run the binary with an explicit working directory (L3: exercise the DEFAULT
+/// `./db/schema.sql` auto-dump path relative to CWD).
+fn run_bin_in(cwd: &Path, args: &[&str]) -> (bool, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_zeroship-migrate"))
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .expect("spawn the built zeroship-migrate binary");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
 /// Does table `T` exist on `main` of the given SQLite app file?
 fn table_exists(app_file: &str, table: &str) -> bool {
     use zeroship_migrate::backend_sqlite::Mode;
@@ -217,6 +232,195 @@ fn cli_load_refuses_already_managed_db() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Count user objects on `main` (excluding internal `sqlite_*`).
+fn main_user_object_count(app_file: &str) -> i64 {
+    use zeroship_migrate::backend_sqlite::Mode;
+    use zeroship_migrate::SqliteBackend;
+    let app = PathBuf::from(app_file);
+    let journal = {
+        let mut s = app.clone().into_os_string();
+        s.push(".migrations");
+        PathBuf::from(s)
+    };
+    compio::runtime::Runtime::new()
+        .expect("compio runtime")
+        .block_on(async move {
+            let be = SqliteBackend::open(&app, &journal).expect("re-open sqlite backend");
+            be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+            let rows = be
+                .actor()
+                .query("SELECT count(*) FROM main.sqlite_master WHERE name NOT LIKE 'sqlite_%'")
+                .await
+                .expect("count user objects");
+            rows.first()
+                .and_then(|r| r.first())
+                .and_then(|c| c.as_deref())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0)
+        })
+}
+
+/// C1 RED (SQLite): `load --profile confined`/`--profile platform` must REFUSE
+/// (non-zero) and execute NO DDL — same Trusted-only gate as PG. Pre-fix `load`
+/// ignored `--profile` and restored the DDL onto `main` regardless — RED.
+#[test]
+fn cli_load_under_confined_or_platform_profile_is_refused_on_sqlite() {
+    let tok = token();
+    let root = std::env::temp_dir().join(format!("zsmig_loadprofsq_{tok}"));
+    let (dir_s, _app_s, url) = scaffold(
+        &root,
+        "-- migrate:up\nCREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT);\n\n\
+         -- migrate:down\nDROP TABLE widgets;\n",
+        "widgets",
+    );
+    let base = ["--dir", &dir_s, "--database-url", &url];
+    let mut migrate_args = vec!["migrate"];
+    migrate_args.extend_from_slice(&base);
+    let (ok_mig, _o, e) = run_bin(&migrate_args);
+    assert!(ok_mig, "migrate\nstderr={e}");
+
+    let schema_file = root.join("schema.sql");
+    let schema_s = schema_file.to_str().unwrap().to_string();
+    let (ok_dump, _o, e) = run_bin(&["dump", "--dir", &dir_s, "--database-url", &url, "--schema-file", &schema_s]);
+    assert!(ok_dump, "dump\nstderr={e}");
+
+    for profile in ["confined", "platform"] {
+        let fresh = root.join(format!("fresh_{profile}.sqlite"));
+        let fresh_s = fresh.to_str().unwrap().to_string();
+        let fresh_url = format!("sqlite:{fresh_s}");
+        let (ok_load, o, err) = run_bin(&[
+            "load", "--dir", &dir_s, "--database-url", &fresh_url,
+            "--schema-file", &schema_s, "--profile", profile,
+        ]);
+        assert!(!ok_load, "load --profile {profile} must refuse\nstdout={o}\nstderr={err}");
+        assert!(err.to_lowercase().contains("trusted"), "refusal mentions trusted-only: {err}");
+        assert!(
+            !table_exists(&fresh_s, "widgets"),
+            "load --profile {profile} must NOT create the widgets table on main"
+        );
+        assert_eq!(
+            main_user_object_count(&fresh_s),
+            0,
+            "load --profile {profile} must leave main entirely untouched"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// H2 RED (SQLite): `load` onto a DB whose `main` already has a user table (but no
+/// journal) is refused with NOTHING further mutated — the guard runs BEFORE the DDL
+/// restore. Pre-fix `restore_schema_sqlite` mutated `main` first and the journal-only
+/// first-entry check fired afterward, so `main` was already clobbered — RED.
+#[test]
+fn cli_load_onto_populated_main_without_journal_is_refused_on_sqlite() {
+    let tok = token();
+    let root = std::env::temp_dir().join(format!("zsmig_loadpopsq_{tok}"));
+    let (dir_s, _app_s, url) = scaffold(
+        &root,
+        "-- migrate:up\nCREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT);\n\n\
+         -- migrate:down\nDROP TABLE widgets;\n",
+        "widgets",
+    );
+    let base = ["--dir", &dir_s, "--database-url", &url];
+    let mut migrate_args = vec!["migrate"];
+    migrate_args.extend_from_slice(&base);
+    let (ok_mig, _o, e) = run_bin(&migrate_args);
+    assert!(ok_mig, "migrate\nstderr={e}");
+    let schema_file = root.join("schema.sql");
+    let schema_s = schema_file.to_str().unwrap().to_string();
+    let (ok_dump, _o, e) = run_bin(&["dump", "--dir", &dir_s, "--database-url", &url, "--schema-file", &schema_s]);
+    assert!(ok_dump, "dump\nstderr={e}");
+
+    // Pre-populate a FRESH target's `main` with a user table, NO journal.
+    let tgt = root.join("populated.sqlite");
+    let tgt_s = tgt.to_str().unwrap().to_string();
+    let tgt_url = format!("sqlite:{tgt_s}");
+    {
+        use zeroship_migrate::backend_sqlite::Mode;
+        use zeroship_migrate::SqliteBackend;
+        let app = PathBuf::from(&tgt_s);
+        let journal = {
+            let mut s = app.clone().into_os_string();
+            s.push(".migrations");
+            PathBuf::from(s)
+        };
+        compio::runtime::Runtime::new().expect("rt").block_on(async move {
+            let be = SqliteBackend::open(&app, &journal).expect("open");
+            be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+            be.actor()
+                .exec("CREATE TABLE preexisting (id INTEGER)")
+                .await
+                .expect("seed user table");
+        });
+    }
+
+    let (ok_load, _o, err) = run_bin(&["load", "--dir", &dir_s, "--database-url", &tgt_url, "--schema-file", &schema_s]);
+    assert!(!ok_load, "load onto a populated (journal-less) main must refuse");
+    assert!(
+        err.to_lowercase().contains("already") || err.to_lowercase().contains("user object"),
+        "refusal explains main is not fresh: {err}"
+    );
+    assert!(table_exists(&tgt_s, "preexisting"), "the seed table survives untouched");
+    assert!(!table_exists(&tgt_s, "widgets"), "no DDL ran from the dump");
+    assert_eq!(main_user_object_count(&tgt_s), 1, "only the seed table exists on main");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// M2 RED (SQLite): `load` reconstructs the journal from the dump trailer alone, NOT
+/// from `--dir`. Load from the dump with `--dir` pointing at an EMPTY directory, then
+/// dump the loaded DB and assert its trailer (version+checksum+name) is byte-identical
+/// to the source. Pre-fix, with no file in `--dir`, the loaded journal recorded empty
+/// checksum/name and the trailers differed — RED.
+#[test]
+fn cli_load_reconstructs_journal_from_trailer_not_dir_on_sqlite() {
+    let tok = token();
+    let root = std::env::temp_dir().join(format!("zsmig_loadindepsq_{tok}"));
+    let (dir_s, _app_s, url) = scaffold(
+        &root,
+        "-- migrate:up\nCREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT);\n\n\
+         -- migrate:down\nDROP TABLE widgets;\n",
+        "widgets",
+    );
+    let empty_dir = root.join("empty_migrations");
+    std::fs::create_dir_all(&empty_dir).expect("mkdir empty");
+    let empty_dir_s = empty_dir.to_str().unwrap().to_string();
+
+    let base = ["--dir", &dir_s, "--database-url", &url];
+    let mut migrate_args = vec!["migrate"];
+    migrate_args.extend_from_slice(&base);
+    let (ok_mig, _o, e) = run_bin(&migrate_args);
+    assert!(ok_mig, "migrate\nstderr={e}");
+    let schema_file = root.join("schema.sql");
+    let schema_s = schema_file.to_str().unwrap().to_string();
+    let (ok_dump, _o, e) = run_bin(&["dump", "--dir", &dir_s, "--database-url", &url, "--schema-file", &schema_s]);
+    assert!(ok_dump, "dump\nstderr={e}");
+    let src_dump = std::fs::read_to_string(&schema_file).expect("read src dump");
+    let src_trailer = src_dump
+        .split_once("-- zeroship-migrate schema_migrations")
+        .map(|(_, t)| t.to_string())
+        .expect("src trailer");
+
+    let fresh = root.join("fresh.sqlite");
+    let fresh_url = format!("sqlite:{}", fresh.to_str().unwrap());
+    let (ok_load, o, e) = run_bin(&["load", "--dir", &empty_dir_s, "--database-url", &fresh_url, "--schema-file", &schema_s]);
+    assert!(ok_load, "load (empty --dir)\nstdout={o}\nstderr={e}");
+
+    let schema2 = root.join("schema2.sql");
+    let schema2_s = schema2.to_str().unwrap().to_string();
+    let (ok_d2, o, e) = run_bin(&["dump", "--dir", &empty_dir_s, "--database-url", &fresh_url, "--schema-file", &schema2_s]);
+    assert!(ok_d2, "dump loaded\nstdout={o}\nstderr={e}");
+    let loaded_dump = std::fs::read_to_string(&schema2).expect("read loaded dump");
+    let loaded_trailer = loaded_dump
+        .split_once("-- zeroship-migrate schema_migrations")
+        .map(|(_, t)| t.to_string())
+        .expect("loaded trailer");
+    assert_eq!(
+        loaded_trailer, src_trailer,
+        "the loaded journal's trailer is reconstructed from the dump trailer alone (empty --dir)"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Auto-dump after `migrate` (dbmate parity): `migrate` with NO explicit `dump`
 /// call refreshes `schema.sql` automatically; `--no-dump-schema` suppresses it;
 /// `down` also refreshes; a read-only `status` does NOT.
@@ -290,6 +494,57 @@ fn cli_auto_dump_after_migrate_and_down_but_not_status() {
         after_nd, "SENTINEL-NODUMP\n",
         "--no-dump-schema suppressed the auto-dump (sentinel preserved)"
     );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// L3: the DEFAULT auto-dump-ON path (no `--no-dump-schema`, default
+/// `./db/schema.sql` relative to CWD) — the path most users actually hit. `migrate`
+/// auto-writes `db/schema.sql`; that dump then round-trips (dump→load→dump stable).
+/// The other apply e2e suites all opt OUT via `--no-dump-schema`, so this is the one
+/// covering the default ON behavior end-to-end.
+#[test]
+fn cli_default_auto_dump_on_round_trips_on_sqlite() {
+    let tok = token();
+    let root = std::env::temp_dir().join(format!("zsmig_defdump_{tok}"));
+    let (dir_s, _app_s, url) = scaffold(
+        &root,
+        "-- migrate:up\nCREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT);\n\
+         CREATE INDEX idx_widgets_name ON widgets (name);\n\n\
+         -- migrate:down\nDROP TABLE widgets;\n",
+        "widgets",
+    );
+
+    // migrate with NO --schema-file and NO --no-dump-schema: the DEFAULT auto-dump
+    // ON writes `./db/schema.sql` relative to the CWD.
+    let (ok_mig, o, e) = run_bin_in(&root, &["migrate", "--dir", &dir_s, "--database-url", &url]);
+    assert!(ok_mig, "migrate (default auto-dump)\nstdout={o}\nstderr={e}");
+    let default_schema = root.join("db").join("schema.sql");
+    assert!(
+        default_schema.exists(),
+        "default auto-dump wrote ./db/schema.sql at {}",
+        default_schema.display()
+    );
+    let dump1 = std::fs::read_to_string(&default_schema).expect("read default-dumped schema");
+    assert!(dump1.contains("CREATE TABLE widgets"), "default dump carries DDL:\n{dump1}");
+    assert!(
+        dump1.contains("-- zeroship-migrate schema_migrations"),
+        "default dump carries the trailer:\n{dump1}"
+    );
+
+    // The default-dumped schema.sql round-trips: load it into a fresh DB, dump that,
+    // and the two dumps are byte-stable.
+    let fresh = root.join("fresh.sqlite");
+    let fresh_url = format!("sqlite:{}", fresh.to_str().unwrap());
+    let schema_s = default_schema.to_str().unwrap().to_string();
+    let (ok_load, o, e) = run_bin(&["load", "--dir", &dir_s, "--database-url", &fresh_url, "--schema-file", &schema_s]);
+    assert!(ok_load, "load default dump\nstdout={o}\nstderr={e}");
+    let schema2 = root.join("schema2.sql");
+    let schema2_s = schema2.to_str().unwrap().to_string();
+    let (ok_d2, o, e) = run_bin(&["dump", "--dir", &dir_s, "--database-url", &fresh_url, "--schema-file", &schema2_s]);
+    assert!(ok_d2, "dump loaded\nstdout={o}\nstderr={e}");
+    let dump2 = std::fs::read_to_string(&schema2).expect("read loaded dump");
+    assert_eq!(dump1, dump2, "the default auto-dumped schema round-trips byte-stably");
 
     let _ = std::fs::remove_dir_all(&root);
 }

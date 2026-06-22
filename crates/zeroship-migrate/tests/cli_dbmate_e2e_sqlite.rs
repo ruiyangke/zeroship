@@ -313,7 +313,9 @@ fn cli_dump_on_sqlite_writes_schema_and_applied_trailer() {
     );
 
     // The applied-versions trailer matches the PG `dump` shape, byte-for-byte in
-    // structure: a `-- zeroship-migrate schema_migrations` marker then `--   <ver>`.
+    // structure: a `-- zeroship-migrate schema_migrations` marker then one
+    // `--   <ver>\t<checksum>\t<name>` line per applied migration (M1+M2 — the
+    // trailer is self-contained so `load` reconstructs the journal from it alone).
     assert!(
         schema.contains("-- zeroship-migrate schema_migrations"),
         "the dump appends the applied-versions trailer marker:\n{schema}"

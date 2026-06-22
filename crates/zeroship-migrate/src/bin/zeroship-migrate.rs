@@ -617,12 +617,17 @@ async fn run_dump(cfg: &RunConfig, schema_file: &Path) -> Result<(), String> {
     };
 
     // Append the applied-versions trailer (dbmate writes the schema_migrations
-    // rows so a fresh `db:setup` knows which versions are already applied). We read
-    // the journal via the runner's status view. Identical shape for BOTH engines.
-    let versions = applied_versions(cfg).await?;
+    // rows so a fresh `db:setup` knows which versions are already applied). Each
+    // entry carries the version + checksum + name sourced from the JOURNAL so the
+    // trailer is SELF-CONTAINED: `load` reconstructs the journal from the trailer
+    // alone (M1+M2), never re-deriving checksum/name from `--dir`. Tab-delimited so
+    // a name with spaces round-trips. Identical shape for BOTH engines.
+    let entries = platform_runner::run_dump_trailer(cfg)
+        .await
+        .map_err(|e| format!("read journal for dump trailer: {e}"))?;
     schema.push_str("\n-- zeroship-migrate schema_migrations\n");
-    for v in &versions {
-        let _ = writeln!(schema, "--   {v}");
+    for e in &entries {
+        let _ = writeln!(schema, "--   {}\t{}\t{}", e.version, e.checksum, e.name);
     }
 
     if let Some(parent) = schema_file.parent() {
@@ -635,20 +640,6 @@ async fn run_dump(cfg: &RunConfig, schema_file: &Path) -> Result<(), String> {
         .map_err(|e| format!("write {}: {e}", schema_file.display()))?;
     println!("Dumped schema to {}", schema_file.display());
     Ok(())
-}
-
-/// Read the applied migration versions from the journal (for the `dump` trailer),
-/// via the runner's `status` view. Returns the version strings in applied order.
-async fn applied_versions(cfg: &RunConfig) -> Result<Vec<String>, String> {
-    match platform_runner::run_status(cfg).await {
-        Ok(RunReport::Status(st)) => Ok(st
-            .applied
-            .iter()
-            .map(|e| e.version.as_str().to_string())
-            .collect()),
-        Ok(_) => Ok(Vec::new()),
-        Err(e) => Err(format!("read journal for dump trailer: {e}")),
-    }
 }
 
 #[compio::main]

@@ -210,6 +210,276 @@ fn cli_load_refuses_already_managed_pg_db() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Count BASE TABLEs in `public` on the throwaway DB (C1/H1/H2 "nothing mutated").
+async fn public_table_count(db: &str) -> i64 {
+    let conn = connect(&throwaway_dsn(db)).await;
+    let rows = conn
+        .query(
+            "SELECT count(*)::bigint AS n FROM information_schema.tables \
+             WHERE table_schema='public' AND table_type='BASE TABLE'",
+            &[],
+        )
+        .await
+        .expect("count tables");
+    rows.first().map(|r| r.get::<_, i64>("n")).unwrap_or(0)
+}
+
+/// C1 RED: `load --profile confined`/`--profile platform` must REFUSE (non-zero)
+/// and execute NO DDL — `load` pipes schema.sql straight at the admin connection
+/// with no guard/migrator-role, a posture only sound under `--profile trusted`.
+/// Pre-fix `load` ignored `--profile` and ran the raw DDL as admin under ANY
+/// profile, bypassing the confinement model — RED (the table would materialize).
+#[test]
+fn cli_load_under_confined_or_platform_profile_is_refused_and_runs_no_ddl() {
+    let tok = token();
+    let root = std::env::temp_dir().join(format!("zsmig_loadprof_{tok}"));
+    let dir_s = scaffold(
+        &root,
+        "-- migrate:up\nCREATE TABLE widgets (id serial PRIMARY KEY, name text);\n\n\
+         -- migrate:down\nDROP TABLE widgets;\n",
+        "widgets",
+    );
+    let src_db = format!("zsmig_lp_src_{tok}");
+    block_on(async {
+        let admin = connect(&admin_dsn()).await;
+        create_db(&admin, &src_db).await;
+    });
+    let src_url = bin_database_url(&src_db);
+    let schema_file = root.join("schema.sql");
+    let schema_s = schema_file.to_str().unwrap().to_string();
+
+    // Build a real dump from a trusted-migrated source.
+    let (ok_mig, _o, e) = run_bin(&["migrate", "--dir", &dir_s, "--database-url", &src_url, "--no-dump-schema"]);
+    assert!(ok_mig, "migrate src\nstderr={e}");
+    let (ok_dump, _o, e) = run_bin(&["dump", "--dir", &dir_s, "--database-url", &src_url, "--schema-file", &schema_s]);
+    assert!(ok_dump, "dump src\nstderr={e}");
+
+    for profile in ["confined", "platform"] {
+        let fresh_db = format!("zsmig_lp_fresh_{profile}_{tok}");
+        block_on(async {
+            let admin = connect(&admin_dsn()).await;
+            create_db(&admin, &fresh_db).await;
+        });
+        let fresh_url = bin_database_url(&fresh_db);
+
+        let (ok_load, o, err) = run_bin(&[
+            "load", "--dir", &dir_s, "--database-url", &fresh_url,
+            "--schema-file", &schema_s, "--profile", profile,
+        ]);
+        assert!(
+            !ok_load,
+            "load --profile {profile} must REFUSE (non-zero)\nstdout={o}\nstderr={err}"
+        );
+        assert!(
+            err.to_lowercase().contains("trusted"),
+            "the refusal mentions trusted-only: {err}"
+        );
+        // NO DDL executed: the target schema is untouched (no widgets table, in fact
+        // zero user tables — no journal either since journal-create is part of load).
+        assert!(
+            !block_on(table_exists(&fresh_db, "widgets")),
+            "load --profile {profile} must NOT create the widgets table"
+        );
+        assert_eq!(
+            block_on(public_table_count(&fresh_db)),
+            0,
+            "load --profile {profile} must leave the target schema entirely untouched"
+        );
+        block_on(async {
+            let admin = connect(&admin_dsn()).await;
+            drop_db(&admin, &fresh_db).await;
+        });
+    }
+
+    block_on(async {
+        let admin = connect(&admin_dsn()).await;
+        drop_db(&admin, &src_db).await;
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// H1 RED: a `load` whose schema.sql body has a FAILING statement in the middle must
+/// fully ROLL BACK — the target DB is left EMPTY, not half-restored. Pre-fix the
+/// restore ran `batch_execute` with no transaction wrapper, so the statements before
+/// the failure committed (partial objects survived) — RED.
+#[test]
+fn cli_load_failing_mid_dump_rolls_back_fully() {
+    let tok = token();
+    let root = std::env::temp_dir().join(format!("zsmig_loadtx_{tok}"));
+    let dir_s = scaffold(
+        &root,
+        "-- migrate:up\nCREATE TABLE noop (id serial PRIMARY KEY);\n\n\
+         -- migrate:down\nDROP TABLE noop;\n",
+        "noop",
+    );
+    let db = format!("zsmig_loadtx_{tok}");
+    block_on(async {
+        let admin = connect(&admin_dsn()).await;
+        create_db(&admin, &db).await;
+    });
+    let url = bin_database_url(&db);
+
+    // Hand-craft a schema.sql: a valid table, then a deliberately failing statement,
+    // then another table. A non-transactional restore would leave `early` behind.
+    let schema_file = root.join("broken.sql");
+    let schema_s = schema_file.to_str().unwrap().to_string();
+    std::fs::write(
+        &schema_file,
+        "CREATE TABLE public.early (id integer NOT NULL);\n\
+         INSERT INTO public.does_not_exist VALUES (1);\n\
+         CREATE TABLE public.late (id integer NOT NULL);\n\n\
+         -- zeroship-migrate schema_migrations\n",
+    )
+    .expect("write broken schema");
+
+    let (ok_load, _o, err) = run_bin(&["load", "--dir", &dir_s, "--database-url", &url, "--schema-file", &schema_s]);
+    assert!(!ok_load, "load with a failing mid-dump statement must fail (non-zero)");
+    assert!(
+        err.to_lowercase().contains("restore") || err.to_lowercase().contains("does_not_exist"),
+        "the error surfaces the failing restore: {err}"
+    );
+    // Fully rolled back: NEITHER `early` NOR `late` survives.
+    assert!(!block_on(table_exists(&db, "early")), "the pre-failure table must roll back");
+    assert!(!block_on(table_exists(&db, "late")), "the post-failure table must not exist");
+    assert_eq!(block_on(public_table_count(&db)), 0, "the DB is left EMPTY after a failed load");
+
+    block_on(async {
+        let admin = connect(&admin_dsn()).await;
+        drop_db(&admin, &db).await;
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// H2 RED: `load` onto a DB that already has a USER TABLE (but no journal) is refused
+/// with nothing further mutated. Pre-fix the first-entry guard checked ONLY the
+/// journal, so a journal-less but populated DB fell through to the DDL restore and
+/// failed mid-batch on the first `CREATE TABLE` collision — RED.
+#[test]
+fn cli_load_onto_populated_db_without_journal_is_refused() {
+    let tok = token();
+    let root = std::env::temp_dir().join(format!("zsmig_loadpop_{tok}"));
+    let dir_s = scaffold(
+        &root,
+        "-- migrate:up\nCREATE TABLE widgets (id serial PRIMARY KEY, name text);\n\n\
+         -- migrate:down\nDROP TABLE widgets;\n",
+        "widgets",
+    );
+    let src_db = format!("zsmig_pop_src_{tok}");
+    let tgt_db = format!("zsmig_pop_tgt_{tok}");
+    block_on(async {
+        let admin = connect(&admin_dsn()).await;
+        create_db(&admin, &src_db).await;
+        create_db(&admin, &tgt_db).await;
+        // Pre-populate the target with a user table, NO journal.
+        let tgt = connect(&throwaway_dsn(&tgt_db)).await;
+        tgt.batch_execute("CREATE TABLE public.preexisting (id integer);")
+            .await
+            .expect("seed a pre-existing user table");
+    });
+    let src_url = bin_database_url(&src_db);
+    let tgt_url = bin_database_url(&tgt_db);
+    let schema_file = root.join("schema.sql");
+    let schema_s = schema_file.to_str().unwrap().to_string();
+
+    let (ok_mig, _o, e) = run_bin(&["migrate", "--dir", &dir_s, "--database-url", &src_url, "--no-dump-schema"]);
+    assert!(ok_mig, "migrate src\nstderr={e}");
+    let (ok_dump, _o, e) = run_bin(&["dump", "--dir", &dir_s, "--database-url", &src_url, "--schema-file", &schema_s]);
+    assert!(ok_dump, "dump src\nstderr={e}");
+
+    let (ok_load, _o, err) = run_bin(&["load", "--dir", &dir_s, "--database-url", &tgt_url, "--schema-file", &schema_s]);
+    assert!(!ok_load, "load onto a populated (journal-less) DB must refuse");
+    assert!(
+        err.to_lowercase().contains("already") || err.to_lowercase().contains("user table"),
+        "the refusal explains the target is not fresh: {err}"
+    );
+    // Nothing further mutated: the pre-existing table is untouched and `widgets`
+    // was never created.
+    assert!(block_on(table_exists(&tgt_db, "preexisting")), "the seed table survives");
+    assert!(!block_on(table_exists(&tgt_db, "widgets")), "no DDL ran from the dump");
+    assert_eq!(block_on(public_table_count(&tgt_db)), 1, "only the seed table exists");
+
+    block_on(async {
+        let admin = connect(&admin_dsn()).await;
+        drop_db(&admin, &src_db).await;
+        drop_db(&admin, &tgt_db).await;
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// M2 RED: `load` reconstructs the journal from the DUMP TRAILER alone — NOT from
+/// `--dir`. We load from the dump while pointing `--dir` at an EMPTY directory (the
+/// migration files are absent), then dump the LOADED DB and assert its trailer is
+/// byte-identical to the source dump's trailer — i.e. the loaded journal carries the
+/// DUMP's version+checksum+name, sourced with zero help from `--dir`. Pre-fix `load`
+/// re-sourced checksum/name from the file in `--dir`, so with the file ABSENT the
+/// loaded journal recorded empty checksum/name and the round-trip trailer differed
+/// (or drift lied) — RED.
+#[test]
+fn cli_load_reconstructs_journal_from_trailer_not_dir() {
+    let tok = token();
+    let root = std::env::temp_dir().join(format!("zsmig_loadindep_{tok}"));
+    let dir_s = scaffold(
+        &root,
+        "-- migrate:up\nCREATE TABLE widgets (id serial PRIMARY KEY, name text);\n\n\
+         -- migrate:down\nDROP TABLE widgets;\n",
+        "widgets",
+    );
+    // An EMPTY migration dir — `load` must not need ANY file here for journal fidelity.
+    let empty_dir = root.join("empty_migrations");
+    std::fs::create_dir_all(&empty_dir).expect("mkdir empty");
+    let empty_dir_s = empty_dir.to_str().unwrap().to_string();
+
+    let src_db = format!("zsmig_indep_src_{tok}");
+    let fresh_db = format!("zsmig_indep_fresh_{tok}");
+    block_on(async {
+        let admin = connect(&admin_dsn()).await;
+        create_db(&admin, &src_db).await;
+        create_db(&admin, &fresh_db).await;
+    });
+    let src_url = bin_database_url(&src_db);
+    let fresh_url = bin_database_url(&fresh_db);
+    let schema_file = root.join("schema.sql");
+    let schema_s = schema_file.to_str().unwrap().to_string();
+
+    let (ok_mig, _o, e) = run_bin(&["migrate", "--dir", &dir_s, "--database-url", &src_url, "--no-dump-schema"]);
+    assert!(ok_mig, "migrate src\nstderr={e}");
+    let (ok_dump, _o, e) = run_bin(&["dump", "--dir", &dir_s, "--database-url", &src_url, "--schema-file", &schema_s]);
+    assert!(ok_dump, "dump src\nstderr={e}");
+    let src_dump = std::fs::read_to_string(&schema_file).expect("read src dump");
+    let src_trailer = src_dump
+        .split_once("-- zeroship-migrate schema_migrations")
+        .map(|(_, t)| t.to_string())
+        .expect("src dump has a trailer");
+
+    // load from the dump into a fresh DB, with `--dir` pointing at the EMPTY dir.
+    let (ok_load, o, e) = run_bin(&["load", "--dir", &empty_dir_s, "--database-url", &fresh_url, "--schema-file", &schema_s]);
+    assert!(ok_load, "load into fresh (empty --dir)\nstdout={o}\nstderr={e}");
+
+    // dump the LOADED DB; its trailer must equal the source dump's trailer exactly —
+    // proving the journal was reconstructed from the trailer, not from `--dir`.
+    let schema2 = root.join("schema2.sql");
+    let schema2_s = schema2.to_str().unwrap().to_string();
+    let (ok_d2, o, e) = run_bin(&["dump", "--dir", &empty_dir_s, "--database-url", &fresh_url, "--schema-file", &schema2_s]);
+    assert!(ok_d2, "dump loaded\nstdout={o}\nstderr={e}");
+    let loaded_dump = std::fs::read_to_string(&schema2).expect("read loaded dump");
+    let loaded_trailer = loaded_dump
+        .split_once("-- zeroship-migrate schema_migrations")
+        .map(|(_, t)| t.to_string())
+        .expect("loaded dump has a trailer");
+    assert_eq!(
+        loaded_trailer, src_trailer,
+        "the loaded journal's trailer (version+checksum+name) is reconstructed from the \
+         dump trailer alone — identical to the source, with an EMPTY --dir"
+    );
+
+    block_on(async {
+        let admin = connect(&admin_dsn()).await;
+        drop_db(&admin, &src_db).await;
+        drop_db(&admin, &fresh_db).await;
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Auto-dump after `migrate` on PG refreshes `schema.sql` automatically; status does not.
 #[test]
 fn cli_auto_dump_after_migrate_on_pg() {
