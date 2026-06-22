@@ -59,9 +59,15 @@ fn kind_rank(obj_type: &str) -> u8 {
 /// # Errors
 /// [`SqliteActorError`] on a `sqlite_master` read failure.
 pub(crate) async fn dump_schema(actor: &MigrationActor) -> Result<String, SqliteActorError> {
-    // Engine mode: reading `sqlite_master` on the hardened connection requires it
-    // (CreatorUp would deny the engine's own introspection). Read-only — no DDL.
-    actor.set_mode(Mode::EngineJournal).await?;
+    // Least privilege: the dump is a single plain `SELECT … FROM main.sqlite_master`
+    // — an `AuthAction::Read` on `main`, which the hardened authorizer already allows
+    // under the most-confined `CreatorUp` (the `_ => Allow` catch-all; the `_mig`
+    // deny arms never fire for a `main`-scoped read). Unlike the drift introspector
+    // (which ALSO issues `PRAGMA table_info/index_list/…`, and so MUST run under
+    // `EngineJournal` where those PRAGMAs are allowlisted), the dump touches no
+    // PRAGMA and no `_mig`, so `EngineJournal` would be strictly broader than needed.
+    // Run under `CreatorUp`. Read-only — no DDL.
+    actor.set_mode(Mode::CreatorUp).await?;
 
     // `type, name, sql` for every object with stored DDL on `main`. The
     // `sql IS NOT NULL` filter drops the implicit indexes (rowid PK auto-index)
@@ -135,5 +141,49 @@ mod tests {
         assert!(is_internal("sqlite_stat1"));
         assert!(!is_internal("widgets"));
         assert!(!is_internal("idx_widgets_name"));
+    }
+
+    /// Least-privilege regression (fix #4): the `dump` read must succeed under the
+    /// confined `CreatorUp` authorizer mode — a plain `SELECT … FROM
+    /// main.sqlite_master` is an `AuthAction::Read` on `main`, which CreatorUp
+    /// already allows (the `_ => Allow` catch-all). `dump_schema` itself sets
+    /// `CreatorUp`; this test additionally proves the read is NOT dependent on the
+    /// broader `EngineJournal` mode by leaving the actor in CreatorUp throughout and
+    /// asserting the table DDL still comes back. (Pre-fix, `dump_schema` flipped the
+    /// connection to EngineJournal; this exercises the tightened path.)
+    #[test]
+    fn dump_read_succeeds_under_creator_up() {
+        use crate::backend_sqlite::Mode;
+        let dir = std::env::temp_dir().join(format!(
+            "zsmig_dump_creatorup_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let app = dir.join("app.sqlite");
+        let journal = dir.join("app.sqlite.migrations");
+
+        compio::runtime::Runtime::new()
+            .expect("compio runtime")
+            .block_on(async move {
+                let actor = MigrationActor::open(&app, &journal).expect("open actor");
+                // Create a creator table the way the creator `up` would: under CreatorUp.
+                actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
+                actor
+                    .exec("CREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT)")
+                    .await
+                    .expect("create table under CreatorUp");
+                // dump_schema sets CreatorUp itself and reads sqlite_master. It must
+                // succeed and surface the table DDL without ever needing EngineJournal.
+                let ddl = dump_schema(&actor).await.expect("dump under CreatorUp");
+                assert!(
+                    ddl.contains("CREATE TABLE widgets"),
+                    "dump must include the creator table DDL: {ddl}"
+                );
+            });
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

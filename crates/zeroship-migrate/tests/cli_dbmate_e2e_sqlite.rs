@@ -395,10 +395,16 @@ fn cli_validate_on_sqlite_clean_passes_then_flags_drift_and_destructive() {
          -- migrate:down\nDROP TABLE widgets;\n",
     )
     .expect("rewrite migration body (drift)");
-    let (_ok_d, out_d, _e) = run_bin(&validate_args);
+    let (ok_d, out_d, _e) = run_bin(&validate_args);
     assert!(
         out_d.contains("drift_clean=false") && out_d.contains("DRIFT"),
         "validate flags the checksum drift: {out_d}"
+    );
+    // Fix #3: a drifted `validate` must EXIT NON-ZERO so CI can gate on it (the
+    // printed lines are unchanged; only the exit code reflects the verdict).
+    assert!(
+        !ok_d,
+        "a drifted `validate` must exit non-zero (CI gate): {out_d}"
     );
 
     // (c) DESTRUCTIVE — a second migration that drops a table is reported
@@ -421,6 +427,116 @@ fn cli_validate_on_sqlite_clean_passes_then_flags_drift_and_destructive() {
         out_x.contains("destructive=true"),
         "validate reports the DROP TABLE migration destructive: {out_x}"
     );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Fix #1 (shadow dry-run attribution): a 3-migration SQLite set whose SECOND
+/// migration FAILS on the shadow (a `CREATE INDEX` on a table that does not exist).
+/// The dry-run report must (a) blame the migration that ACTUALLY failed (#2), not
+/// blanket-blame #1 (the pre-fix bug hard-coded the offending version to
+/// `plan.items.first()`); and (b) record #1 as `applied_ok: true` (the success
+/// PREFIX that committed on the shadow before the abort — pre-fix it was dropped
+/// entirely). That is exactly what the PG shadow leg reports for the same set. The
+/// test inspects `dry_run.per_migration` directly via the library `run_validate`
+/// (the binary only prints the `dry-run ok=…` summary, not the per-migration
+/// attribution).
+#[test]
+fn sqlite_shadow_dry_run_blames_the_real_failing_migration_with_success_prefix() {
+    use std::time::Duration;
+    use zeroship_migrate::guard::platform_runner::{
+        run_validate, RunConfig, RunProfile, RunReport,
+    };
+
+    let tok = token();
+    let root = std::env::temp_dir().join(format!("zsmig_sqfail_{tok}"));
+    let migrations_dir = root.join("migrations");
+    std::fs::create_dir_all(&migrations_dir).expect("create temp migration dir");
+
+    let app_file = root.join("app.sqlite");
+    let url = format!("sqlite:{}", app_file.to_str().unwrap());
+
+    // #1 — clean additive: creates `widgets`. Applies fine on the shadow.
+    std::fs::write(
+        migrations_dir.join("20240101000001_one.sql"),
+        "-- migrate:up\nCREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT);\n\n\
+         -- migrate:down\nDROP TABLE widgets;\n",
+    )
+    .expect("write migration #1");
+    // #2 — FAILS at apply: a CREATE INDEX on a table that does not exist. The SQLite
+    // line-1 descriptor guard trusts the DDL (no syntactic/parse rejection), so it
+    // reaches the shadow apply and fails there ("no such table") — exactly the
+    // mid-batch failure class this attribution must get right.
+    std::fs::write(
+        migrations_dir.join("20240101000002_two.sql"),
+        "-- migrate:up\nCREATE INDEX idx_missing ON does_not_exist (col);\n\n\
+         -- migrate:down\nSELECT 1;\n",
+    )
+    .expect("write migration #2");
+    // #3 — would be clean, but must NEVER run (the batch aborts at #2).
+    std::fs::write(
+        migrations_dir.join("20240101000003_three.sql"),
+        "-- migrate:up\nCREATE TABLE gadgets (id INTEGER PRIMARY KEY);\n\n\
+         -- migrate:down\nDROP TABLE gadgets;\n",
+    )
+    .expect("write migration #3");
+
+    let cfg = RunConfig {
+        dir: migrations_dir.clone(),
+        database_url: url,
+        profile: RunProfile::Trusted,
+        project_id: "prj_sqfail".to_string(),
+        project_schema: "main".to_string(),
+        schemas: vec!["main".to_string()],
+        extensions: vec![],
+        meta_schema: "_mig".to_string(),
+        yes: true,
+        statement_timeout: Duration::from_secs(30),
+        lock_timeout: Duration::from_secs(30),
+    };
+
+    let report = compio::runtime::Runtime::new()
+        .expect("compio runtime")
+        .block_on(async move { run_validate(&cfg).await.expect("validate runs") });
+
+    let RunReport::Validate(v) = report else {
+        panic!("expected a Validate report");
+    };
+    assert!(
+        !v.dry_run.ok,
+        "the shadow dry-run must report failure (migration #2 fails): {:?}",
+        v.dry_run
+    );
+
+    let pm = &v.dry_run.per_migration;
+    // #1 is recorded as the applied success prefix.
+    let one = pm
+        .iter()
+        .find(|r| r.version.contains("one") || r.version.ends_with("0001"))
+        .or_else(|| pm.iter().find(|r| r.applied_ok))
+        .expect("a success-prefix entry for migration #1");
+    assert!(
+        one.applied_ok,
+        "migration #1 must be recorded applied (success prefix): {pm:?}"
+    );
+    // The FAILURE is attributed to #2 — exactly one failed entry, and it is NOT #1.
+    let failed: Vec<_> = pm.iter().filter(|r| !r.applied_ok).collect();
+    assert_eq!(
+        failed.len(),
+        1,
+        "exactly one migration is blamed (the one that failed): {pm:?}"
+    );
+    let blamed = failed[0];
+    assert_ne!(
+        blamed.version, one.version,
+        "the blame must NOT fall on the applied #1: {pm:?}"
+    );
+    assert!(
+        blamed.error.is_some(),
+        "the blamed migration carries the apply error: {pm:?}"
+    );
+    // The two distinct versions prove #2 (not #1) is blamed and #1 applied — the
+    // exact PG-parity attribution.
 
     let _ = std::fs::remove_dir_all(&root);
 }

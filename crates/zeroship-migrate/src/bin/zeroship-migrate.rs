@@ -545,6 +545,18 @@ async fn main() -> ExitCode {
                     Err(e) => eprintln!("zeroship-migrate: lint: {e}"),
                 }
             }
+            // `validate` is a GATE: a failing shadow dry-run or detected checksum
+            // drift must FAIL the process so CI can block on it — `validate` exits 0
+            // ONLY on a fully clean validate. The printed lines are unchanged
+            // (`print_report` already emitted `dry-run ok=… drift_clean=…`); only the
+            // process exit code reflects the verdict. Applies uniformly to both the
+            // PG and SQLite legs (the verdict is read off the engine-agnostic
+            // `ValidateReport`). Every other command keeps its prior exit semantics.
+            if let RunReport::Validate(v) = &report {
+                if !v.dry_run.ok || !v.drift.is_clean() {
+                    return ExitCode::FAILURE;
+                }
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {
