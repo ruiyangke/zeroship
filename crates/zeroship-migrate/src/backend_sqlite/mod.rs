@@ -203,6 +203,91 @@ impl SqliteBackend {
         self.actor.exec(ddl).await
     }
 
+    /// Net-applied migrations as `(version, checksum, name)` for the dump trailer
+    /// (M1+M2) — read straight from the `_mig` journal so the dumped checksum/name
+    /// are the JOURNAL's, never re-derived from `--dir`. Per version, the LATEST
+    /// event must be `applied` (net-applied); its `name`/`checksum` are taken from
+    /// that latest completed event. Ordered by version (the trailer order).
+    ///
+    /// # Errors
+    /// [`SqliteActorError`] on a journal read failure.
+    pub async fn net_applied_trailer_sqlite(
+        &self,
+    ) -> Result<Vec<(String, String, String)>, SqliteActorError> {
+        self.actor.set_mode(authorizer::Mode::EngineJournal).await?;
+        let sql = format!(
+            "WITH ranked AS ( \
+                 SELECT version, name, checksum, event_kind, \
+                        ROW_NUMBER() OVER (PARTITION BY version ORDER BY event_seq DESC) AS rn \
+                   FROM \"_mig\".schema_migrations \
+             ) \
+             SELECT version, name, checksum FROM ranked \
+              WHERE rn = 1 AND event_kind = '{applied}' \
+              ORDER BY version",
+            applied = crate::journal::EventKind::Applied.as_str()
+        );
+        let rows = self.actor.query(&sql).await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let version = r.first().and_then(|c| c.clone()).unwrap_or_default();
+            let name = r.get(1).and_then(|c| c.clone()).unwrap_or_default();
+            let checksum = r.get(2).and_then(|c| c.clone()).unwrap_or_default();
+            out.push((version, name, checksum));
+        }
+        Ok(out)
+    }
+
+    /// `load` first-entry guard (H2) — run BEFORE any `main` mutation. Refuses
+    /// (errors, nothing touched) if `main` already carries user objects (any
+    /// `sqlite_master` row that is not an internal `sqlite_*` object) OR if the
+    /// journal already records net-applied migrations. `load` bootstraps a FRESH DB;
+    /// `restore_schema_sqlite` mutates `main`, so this MUST be checked before it
+    /// (the in-`record_loaded_versions` journal check fires only AFTER the restore).
+    ///
+    /// # Errors
+    /// [`SqliteActorError`] if `main` is non-empty / the journal is already managed /
+    /// on a probe failure.
+    pub async fn ensure_fresh_load_target_sqlite(&self) -> Result<(), SqliteActorError> {
+        // (a) `main` user objects. Internal `sqlite_*` objects (autoindex, the
+        //     `sqlite_sequence`/`sqlite_stat*` bookkeeping) are NOT user data.
+        self.actor.set_mode(authorizer::Mode::EngineJournal).await?;
+        let rows = self
+            .actor
+            .query(
+                "SELECT count(*) FROM main.sqlite_master \
+                 WHERE name NOT LIKE 'sqlite_%'",
+            )
+            .await?;
+        let user_objects: i64 = rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(|c| c.as_deref())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if user_objects > 0 {
+            return Err(SqliteActorError::Exec(format!(
+                "cannot load: the target database already has {user_objects} user \
+                 object(s) on `main`; `load` targets a fresh/empty database"
+            )));
+        }
+        // (b) journal first-entry check (a managed DB with an emptied `main` is still
+        //     already-managed). Reuse the same net-applied probe `load` records over.
+        journal_sql::ensure_journal(&self.actor).await?;
+        let net = journal_sql::applied(&self.actor)
+            .await?
+            .into_iter()
+            .filter(|e| e.phase == crate::journal::Phase::Completed)
+            .count();
+        if net > 0 {
+            return Err(SqliteActorError::Exec(format!(
+                "cannot load: the journal already records {net} net-applied \
+                 migration(s); `load` targets a fresh/empty database (a DB the engine \
+                 already manages cannot be loaded over)"
+            )));
+        }
+        Ok(())
+    }
+
     /// `load` — journal the dump trailer's versions as `baseline`-kind `completed`
     /// events WITHOUT running any `up` (the DDL was already restored by
     /// [`restore_schema_sqlite`](Self::restore_schema_sqlite)). First-entry-only: it
