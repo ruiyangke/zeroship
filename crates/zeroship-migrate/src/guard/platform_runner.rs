@@ -151,6 +151,8 @@ pub enum RunReport {
     Validate(Box<ValidateReport>),
     /// `rollback` reversed migrations via `.down.sql`.
     Rollback(RollbackOutcome),
+    /// `load` (a.k.a. `db:setup`) restored a dumped schema + reconstructed the journal.
+    Load(LoadOutcome),
 }
 
 /// The result of `validate`: the dry-run report on a shadow DB + checksum drift +
@@ -242,6 +244,11 @@ pub enum RunError {
     /// A SQLite backend op (open / hardening / apply / journal) failed.
     #[error("sqlite: {0}")]
     Sqlite(String),
+    /// `load` (a.k.a. `db:setup`) was refused or failed: the schema file is
+    /// missing/unreadable, the target DB is already engine-managed (first-entry-only —
+    /// `load` must not clobber an existing DB), or restoring the dump DDL failed.
+    #[error("load: {0}")]
+    LoadCmd(String),
 }
 
 /// The H1 destructive-gate decision (design §9, pure + unit-testable).
@@ -980,6 +987,320 @@ pub async fn dump_schema_sqlite(app: &Path) -> Result<String, RunError> {
         .map_err(|e| RunError::Sqlite(e.to_string()))
 }
 
+/// The marker line that separates a dump's DDL body from its applied-versions
+/// trailer (dbmate `db:dump`/`db:load` round-trip). The bin's `dump` writes
+/// `\n{TRAILER_MARKER}\n` then one `--   <version>` line per applied version;
+/// [`parse_schema_dump`] splits on exactly this marker so `load` faithfully
+/// reconstructs the journal from what `dump` wrote.
+pub const SCHEMA_TRAILER_MARKER: &str = "-- zeroship-migrate schema_migrations";
+
+/// The per-version trailer-line prefix (`--   <version>`). The three spaces are
+/// the dump writer's exact format.
+const SCHEMA_TRAILER_VERSION_PREFIX: &str = "--   ";
+
+/// Split a dumped `schema.sql` into (DDL body, applied versions), the EXACT inverse
+/// of what the bin's `dump` writes (so dump↔load round-trips faithfully). The body
+/// is everything BEFORE the [`SCHEMA_TRAILER_MARKER`]; the versions are parsed from
+/// the `--   <version>` lines after it. A dump with no trailer (e.g. a hand-written
+/// schema) yields the whole content as the body and an empty version list.
+#[must_use]
+pub fn parse_schema_dump(content: &str) -> (String, Vec<String>) {
+    let Some(idx) = content.find(SCHEMA_TRAILER_MARKER) else {
+        return (content.to_string(), Vec::new());
+    };
+    let body = content[..idx].to_string();
+    let trailer = &content[idx + SCHEMA_TRAILER_MARKER.len()..];
+    let versions = trailer
+        .lines()
+        .filter_map(|l| l.trim_end().strip_prefix(SCHEMA_TRAILER_VERSION_PREFIX))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .collect();
+    (body, versions)
+}
+
+/// The pg_dump SESSION-PREAMBLE settings — pure dump-session cosmetics emitted as a
+/// `SET <key> = …;` (or `SELECT pg_catalog.set_config('search_path', …)`) block at
+/// the top of every `pg_dump --schema-only`. They configure the DUMPING session,
+/// not the schema, and the dumped DDL is fully schema-qualified (`public.…`) so it
+/// does not depend on them. Stripping them on restore makes `load` robust across
+/// pg_dump↔server VERSION SKEW (e.g. a pg_dump ≥17 `SET transaction_timeout = 0;`
+/// that an older server rejects as an unrecognised GUC) — dbmate sidesteps this by
+/// piping to `psql`, but we restore over the SQL protocol where one rejected GUC
+/// would abort the whole batch.
+const PG_DUMP_SESSION_SETTINGS: &[&str] = &[
+    "statement_timeout",
+    "lock_timeout",
+    "idle_in_transaction_session_timeout",
+    "transaction_timeout",
+    "client_encoding",
+    "standard_conforming_strings",
+    "check_function_bodies",
+    "xmloption",
+    "client_min_messages",
+    "row_security",
+    "default_tablespace",
+    "default_table_access_method",
+    "escape_string_warning",
+    "search_path",
+];
+
+/// `true` iff `line` is a pg_dump session-preamble setting line (`SET <known> = …`
+/// or `SELECT pg_catalog.set_config('search_path', …)`) safe to drop on restore.
+fn is_pg_dump_session_setting(line: &str) -> bool {
+    let t = line.trim();
+    if let Some(rest) = t.strip_prefix("SET ").or_else(|| t.strip_prefix("set ")) {
+        let key = rest
+            .split(|c: char| c == '=' || c.is_whitespace())
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        return PG_DUMP_SESSION_SETTINGS.contains(&key.as_str());
+    }
+    // The `SELECT pg_catalog.set_config('search_path', '', false);` form.
+    let lower = t.to_ascii_lowercase();
+    lower.starts_with("select pg_catalog.set_config('search_path'")
+        || lower.starts_with("select set_config('search_path'")
+}
+
+/// Sanitize a `pg_dump --schema-only` body for restore over the raw SQL protocol
+/// (we do not shell `psql`). Strips two classes of NON-schema noise, line-oriented
+/// (a multi-line SQL statement is preserved verbatim):
+/// 1. `psql` META-COMMANDS — backslash lines like the `\restrict`/`\unrestrict`
+///    directives pg_dump ≥17 emits (psql client directives, not SQL).
+/// 2. The pg_dump SESSION-PREAMBLE `SET`/`set_config` settings (see
+///    [`PG_DUMP_SESSION_SETTINGS`]) — dump-session cosmetics that would otherwise
+///    abort the restore batch under pg_dump↔server version skew.
+///
+/// Everything else (the real schema DDL) is the verbatim dump.
+fn strip_psql_meta_commands(ddl: &str) -> String {
+    let mut out = String::with_capacity(ddl.len());
+    for line in ddl.lines() {
+        if line.trim_start().starts_with('\\') || is_pg_dump_session_setting(line) {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// What [`run_load`] did — printable by the bin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadOutcome {
+    /// The versions journaled (reconstructed from the dump trailer), in dump order.
+    pub versions: Vec<String>,
+}
+
+/// `load` (a.k.a. `db:setup`) — RESTORE a dumped `schema.sql` onto a FRESH database
+/// and reconstruct the journal from the dump's applied-versions trailer, WITHOUT
+/// replaying every migration (dbmate `db:load`).
+///
+/// Two halves, both engine-dispatched:
+/// 1. **Execute the DDL** body (everything before [`SCHEMA_TRAILER_MARKER`]) to
+///    recreate the schema — a restore of an operator-/engine-generated dump (the
+///    Trusted CLI posture pipes it straight at the engine, exactly as dbmate pipes
+///    `schema.sql` to `psql`).
+/// 2. **Reconstruct the journal** — record each trailer version as a
+///    `baseline`-kind `completed` event (recorded-not-run) via the SAME immutable
+///    journal path [`baseline`](crate::baseline) uses, so the versions end up
+///    net-applied and a subsequent `migrate` runs only the genuinely-pending ones.
+///    Each version's name + checksum is sourced from its migration file in `--dir`
+///    (so the recorded checksum matches the file and drift stays clean).
+///
+/// **First-entry-only** (mirrors baseline): refuses if the target DB already records
+/// any net-applied migration — `load` bootstraps a FRESH DB and must never clobber a
+/// DB the engine already manages. `content` is the schema-file text the bin read.
+///
+/// # Errors
+/// [`RunError`] on an unsupported engine / connect / a DDL failure / an
+/// already-managed DB / a journal-write failure.
+pub async fn run_load(cfg: &RunConfig, content: &str) -> Result<RunReport, RunError> {
+    let (ddl, versions) = parse_schema_dump(content);
+    // Source each trailer version's name + checksum from its migration file (so the
+    // journaled checksum matches the file → drift stays clean). A version with no
+    // file still loads, with an empty name/checksum (best-effort adoption).
+    let migrations = load_dir(&cfg.dir).unwrap_or_default();
+    let by_version: std::collections::HashMap<&str, &crate::migration::Migration> =
+        migrations.iter().map(|m| (m.version.as_str(), m)).collect();
+
+    match cfg.resolve_engine()? {
+        Engine::Postgres => run_load_pg(cfg, &ddl, &versions, &by_version).await,
+        Engine::Sqlite(app) => run_load_sqlite(cfg, &app, &ddl, &versions, &by_version).await,
+        Engine::Unsupported => Err(RunError::UnsupportedEngine),
+    }
+}
+
+/// The Postgres leg of `load`: restore the DDL via the admin connection, then
+/// record each trailer version as a baseline `completed` event under the project
+/// advisory lock (the SAME serialization + immutable journal path `migrate` uses).
+async fn run_load_pg(
+    cfg: &RunConfig,
+    ddl: &str,
+    versions: &[String],
+    by_version: &std::collections::HashMap<&str, &crate::migration::Migration>,
+) -> Result<RunReport, RunError> {
+    let conn = connect(&cfg.database_url).await?;
+    let exec_cfg = build_exec_cfg(cfg);
+
+    // Serialize against all migration activity (design §2.3), exactly like apply /
+    // baseline. Held for the whole load; released on every exit.
+    conn.execute(
+        "SELECT pg_advisory_lock(hashtext($1)::bigint)",
+        &[&cfg.project_id],
+    )
+    .await
+    .map_err(crate::journal::JournalError::Db)?;
+    let result = run_load_pg_locked(&conn, &exec_cfg, ddl, versions, by_version).await;
+    let unlock = conn
+        .execute(
+            "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
+            &[&cfg.project_id],
+        )
+        .await;
+    let outcome = result?;
+    unlock.map_err(crate::journal::JournalError::Db)?;
+    Ok(RunReport::Load(outcome))
+}
+
+/// The PG `load` body, run while holding the project advisory lock: first-entry
+/// guard → restore DDL → journal the trailer versions.
+async fn run_load_pg_locked(
+    conn: &compio_postgres::Client,
+    exec_cfg: &ExecutorConfig,
+    ddl: &str,
+    versions: &[String],
+    by_version: &std::collections::HashMap<&str, &crate::migration::Migration>,
+) -> Result<LoadOutcome, RunError> {
+    // First-entry guard: refuse to clobber a DB the engine already manages. Probe
+    // the EXISTING journal WITHOUT creating it (an `ensure_journal` here would
+    // pre-create `<meta>.schema_migrations`, which then collides with the dump's own
+    // `CREATE TABLE … schema_migrations` on restore — the journal objects live in
+    // the dumped schema under the Trusted `public` meta). A DB with no journal table
+    // yet is fresh (the probe returns an empty net set).
+    let net = load_pg_net_applied(conn, exec_cfg).await?;
+    if !net.is_empty() {
+        return Err(RunError::LoadCmd(format!(
+            "cannot load: the journal already records {} net-applied migration(s); \
+             `load` targets a fresh/empty database (a DB the engine already manages \
+             cannot be loaded over)",
+            net.len()
+        )));
+    }
+
+    // 1. Restore the dump DDL (an operator restore — the Trusted posture runs it
+    //    directly, exactly as dbmate pipes schema.sql to psql). The dump RECREATES
+    //    the journal objects too (they live in the dumped schema), so we must NOT
+    //    pre-create them above. `strip_psql_meta_commands` drops the psql backslash
+    //    directives + the pg_dump session-`SET` preamble; everything else is verbatim.
+    let sql = strip_psql_meta_commands(ddl);
+    if !sql.trim().is_empty() {
+        conn.batch_execute(&sql)
+            .await
+            .map_err(|e| RunError::LoadCmd(format!("restore dump DDL: {e}")))?;
+    }
+
+    // 1b. Ensure the journal exists (idempotent `CREATE … IF NOT EXISTS`): a dump
+    //     that did NOT carry the journal objects (e.g. a hand-written schema, or a
+    //     platform meta-schema not in the dumped set) still needs them to record into.
+    crate::journal::ensure_journal(conn, exec_cfg).await?;
+
+    // 2. Journal each trailer version as a baseline `completed` event (recorded-
+    //    not-run), via the SAME immutable `record_baseline` path baseline uses.
+    for v in versions {
+        let (name, checksum) = by_version.get(v.as_str()).map_or_else(
+            || (String::new(), String::new()),
+            |m| (m.name.clone(), m.checksum.as_str().to_string()),
+        );
+        crate::journal::record_baseline(
+            conn,
+            exec_cfg,
+            crate::journal::BaselineRecord {
+                version: v,
+                name: &name,
+                checksum: &checksum,
+                applied_by: "platform-load",
+                kind: "baseline",
+                supersedes: &[],
+            },
+        )
+        .await?;
+    }
+
+    Ok(LoadOutcome {
+        versions: versions.to_vec(),
+    })
+}
+
+/// Probe the EXISTING PG journal's net-applied versions WITHOUT creating it (the
+/// `load` first-entry guard). A `load` target with no journal table yet is FRESH;
+/// pre-creating the table here would collide with the dump's own
+/// `CREATE TABLE … schema_migrations` on restore. So we check the meta table's
+/// existence first (via `to_regclass`, NULL when absent) and only read net state if
+/// it exists.
+async fn load_pg_net_applied(
+    conn: &compio_postgres::Client,
+    exec_cfg: &ExecutorConfig,
+) -> Result<Vec<String>, RunError> {
+    // Does `<meta>.schema_migrations` exist? `to_regclass` returns NULL if not.
+    let qualified = format!("{}.schema_migrations", exec_cfg.pg.meta_schema);
+    let row = conn
+        .query("SELECT to_regclass($1) IS NOT NULL AS present", &[&qualified])
+        .await
+        .map_err(crate::journal::JournalError::Db)?;
+    let present = row.first().map(|r| r.get::<_, bool>("present")).unwrap_or(false);
+    if !present {
+        return Ok(Vec::new());
+    }
+    let already = crate::journal::applied(conn, exec_cfg).await?;
+    Ok(already
+        .iter()
+        .filter(|e| e.phase == crate::journal::Phase::Completed)
+        .map(|e| e.version.as_str().to_string())
+        .collect())
+}
+
+/// The SQLite leg of `load`: restore the DDL onto `main` then journal the trailer
+/// versions through the hardened backend (first-entry-guarded).
+async fn run_load_sqlite(
+    cfg: &RunConfig,
+    app: &Path,
+    ddl: &str,
+    versions: &[String],
+    by_version: &std::collections::HashMap<&str, &crate::migration::Migration>,
+) -> Result<RunReport, RunError> {
+    let _ = cfg;
+    let backend = open_sqlite_backend(app)?;
+    // 1. Restore the dump DDL onto `main`.
+    backend
+        .restore_schema_sqlite(ddl)
+        .await
+        .map_err(|e| RunError::Sqlite(e.to_string()))?;
+    // 2. Journal the trailer versions (first-entry-guarded inside the backend).
+    let loaded: Vec<crate::backend_sqlite::LoadedVersion> = versions
+        .iter()
+        .map(|v| {
+            let (name, checksum) = by_version.get(v.as_str()).map_or_else(
+                || (String::new(), String::new()),
+                |m| (m.name.clone(), m.checksum.as_str().to_string()),
+            );
+            crate::backend_sqlite::LoadedVersion {
+                version: v.clone(),
+                name,
+                checksum,
+            }
+        })
+        .collect();
+    backend
+        .record_loaded_versions_sqlite(&loaded, "platform-load")
+        .await
+        .map_err(|e| RunError::Sqlite(e.to_string()))?;
+    Ok(RunReport::Load(LoadOutcome {
+        versions: versions.to_vec(),
+    }))
+}
+
 /// `rollback` — reverse applied migrations via their `.down.sql` to a target
 /// version (or N steps), GATED on `--yes` (rollback is always destructive, design
 /// §9 / `engine.rs:719`).
@@ -1572,5 +1893,74 @@ mod tests {
             sqlite_shadow_path(&PathBuf::from(":memory:")),
             PathBuf::from(":memory:")
         );
+    }
+
+    // ---- load: dump-trailer parse + restore-DDL sanitization ---------------
+
+    /// `parse_schema_dump` is the EXACT inverse of what the bin's `dump` writes: the
+    /// body is everything before the trailer marker; the versions are parsed from
+    /// the `--   <version>` lines. The faithful dump↔load round-trip contract.
+    #[test]
+    fn parse_schema_dump_splits_body_and_trailer_versions() {
+        let dumped = format!(
+            "CREATE TABLE widgets (id int);\n\n{SCHEMA_TRAILER_MARKER}\n--   20240101000001\n--   20240101000002\n"
+        );
+        let (body, versions) = parse_schema_dump(&dumped);
+        assert!(body.contains("CREATE TABLE widgets"), "body is the DDL: {body}");
+        assert!(
+            !body.contains(SCHEMA_TRAILER_MARKER),
+            "the trailer marker is NOT part of the body: {body}"
+        );
+        assert_eq!(versions, vec!["20240101000001", "20240101000002"]);
+    }
+
+    /// A dump with NO trailer (e.g. a hand-written schema) yields the whole content
+    /// as the body and an empty version list (load restores the DDL, journals nothing).
+    #[test]
+    fn parse_schema_dump_without_trailer_is_all_body() {
+        let (body, versions) = parse_schema_dump("CREATE TABLE t (id int);\n");
+        assert_eq!(body, "CREATE TABLE t (id int);\n");
+        assert!(versions.is_empty());
+    }
+
+    /// The restore sanitizer drops psql backslash META-COMMANDS (e.g. pg_dump ≥17's
+    /// `\restrict`/`\unrestrict`) and the pg_dump session-`SET`/`set_config` preamble
+    /// (which would abort the batch under pg_dump↔server version skew), while keeping
+    /// the real schema DDL verbatim — including a multi-line CREATE statement.
+    #[test]
+    fn strip_psql_meta_commands_drops_backslash_and_session_settings() {
+        let dump = "\\restrict ABCdef123\n\
+                    SET statement_timeout = 0;\n\
+                    SET transaction_timeout = 0;\n\
+                    SELECT pg_catalog.set_config('search_path', '', false);\n\
+                    SET row_security = off;\n\
+                    CREATE TABLE public.widgets (\n    id integer NOT NULL,\n    name text\n);\n\
+                    \\unrestrict ABCdef123\n";
+        let out = strip_psql_meta_commands(dump);
+        assert!(!out.contains("\\restrict"), "backslash directives stripped: {out}");
+        assert!(!out.contains("\\unrestrict"), "backslash directives stripped: {out}");
+        assert!(!out.contains("transaction_timeout"), "session SET stripped: {out}");
+        assert!(!out.contains("statement_timeout"), "session SET stripped: {out}");
+        assert!(!out.contains("set_config"), "set_config stripped: {out}");
+        // The real DDL — including its inner lines — is preserved verbatim.
+        assert!(out.contains("CREATE TABLE public.widgets ("), "DDL kept: {out}");
+        assert!(out.contains("id integer NOT NULL"), "multi-line DDL body kept: {out}");
+        assert!(out.contains("name text"), "multi-line DDL body kept: {out}");
+    }
+
+    /// `is_pg_dump_session_setting` recognises the session-preamble lines but never a
+    /// real schema-`SET` (none exist in `--schema-only` output, but the predicate must
+    /// not over-match a `SET`-prefixed identifier inside DDL).
+    #[test]
+    fn is_pg_dump_session_setting_matches_only_the_preamble() {
+        assert!(is_pg_dump_session_setting("SET statement_timeout = 0;"));
+        assert!(is_pg_dump_session_setting("  SET search_path = public;"));
+        assert!(is_pg_dump_session_setting(
+            "SELECT pg_catalog.set_config('search_path', '', false);"
+        ));
+        // Not a session setting: a CREATE statement that merely starts with "SE…".
+        assert!(!is_pg_dump_session_setting("CREATE TABLE settings (id int);"));
+        // An unknown GUC is NOT in the allowlist → not stripped (kept verbatim).
+        assert!(!is_pg_dump_session_setting("SET my_custom_guc = 1;"));
     }
 }

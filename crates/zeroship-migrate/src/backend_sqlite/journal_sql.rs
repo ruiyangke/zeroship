@@ -275,6 +275,104 @@ pub(crate) async fn baseline(
     }
 }
 
+/// A single trailer version to journal during `load` (a.k.a. `db:setup`): its
+/// version, name, and checksum (sourced from the migration file in `--dir` so the
+/// recorded checksum matches what a subsequent `migrate`/drift-check expects).
+#[derive(Debug, Clone)]
+pub struct LoadedVersion {
+    /// The migration version (`<14-digit>` / `mig_…`).
+    pub version: String,
+    /// The migration's display name (best-effort from the file; may be empty).
+    pub name: String,
+    /// The migration's checksum (from the file; empty when the file is absent).
+    pub checksum: String,
+}
+
+/// Record a batch of `load`ed versions as `baseline`-kind `completed` events
+/// WITHOUT running any `up` (the schema DDL has ALREADY been replayed by the
+/// caller). The journal-reconstruction half of `load` (dbmate `db:load`): after
+/// the dump's DDL is restored, the dump trailer's versions are journaled so
+/// `status` reports them applied and a subsequent `migrate` runs only the
+/// genuinely-pending ones.
+///
+/// **First-entry-only**, mirroring [`baseline`]: refuses (errors, nothing
+/// journaled) if the journal ALREADY records any net-applied migration — `load`
+/// targets a FRESH/empty DB and must never clobber a DB the engine already
+/// manages. The whole batch is recorded in ONE `BEGIN IMMEDIATE` transaction
+/// under engine mode (no creator `up` runs — same recorded-not-run shape as
+/// [`baseline`]); on any error the transaction is rolled back, leaving the journal
+/// untouched.
+///
+/// # Errors
+/// [`SqliteActorError`] if the journal already records net-applied migrations
+/// (already-managed) or on an INSERT/commit failure.
+pub(crate) async fn record_loaded_versions(
+    actor: &MigrationActor,
+    versions: &[LoadedVersion],
+    applied_by: &str,
+) -> Result<usize, SqliteActorError> {
+    ensure_journal(actor).await?;
+
+    // First-entry guard — `load` must not clobber an already-managed DB.
+    let net_completed: Vec<String> = applied(actor)
+        .await?
+        .into_iter()
+        .filter(|e| e.phase == Phase::Completed)
+        .map(|e| e.version)
+        .collect();
+    if !net_completed.is_empty() {
+        return Err(SqliteActorError::Exec(format!(
+            "cannot load: the journal already records {} net-applied migration(s); \
+             `load` targets a fresh/empty database (a DB the engine already manages \
+             cannot be loaded over)",
+            net_completed.len()
+        )));
+    }
+
+    actor.set_mode(Mode::EngineJournal).await?;
+    actor.exec("BEGIN IMMEDIATE").await?;
+    let result = async {
+        for v in versions {
+            let name = sql_lit(&v.name);
+            let checksum = sql_lit(&v.checksum);
+            let applied_by_lit = sql_lit(applied_by);
+            let version_lit = sql_lit(&v.version);
+            actor
+                .exec(&format!(
+                    "INSERT INTO \"_mig\".schema_migrations \
+                     (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
+                     VALUES ('{applied}', {version_lit}, {name}, {checksum}, {applied_by_lit}, \
+                             'completed', 'success', 'baseline')",
+                    applied = EventKind::Applied.as_str()
+                ))
+                .await?;
+        }
+        Ok::<(), SqliteActorError>(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => {
+            actor.exec("COMMIT").await?;
+            Ok(versions.len())
+        }
+        Err(e) => {
+            let rb = actor.exec("ROLLBACK").await;
+            match actor.is_autocommit().await {
+                Ok(true) => Err(e),
+                Ok(false) => Err(SqliteActorError::Poisoned(format!(
+                    "transaction still open after ROLLBACK (rollback result: {rb:?}); \
+                     original load error: {e}"
+                ))),
+                Err(probe) => Err(SqliteActorError::Poisoned(format!(
+                    "could not confirm autocommit after ROLLBACK: {probe}; \
+                     original load error: {e}"
+                ))),
+            }
+        }
+    }
+}
+
 /// The transactional body, factored so a failure path can ROLLBACK cleanly.
 async fn run_apply_txn(
     actor: &MigrationActor,

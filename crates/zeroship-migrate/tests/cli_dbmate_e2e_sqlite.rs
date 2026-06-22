@@ -114,8 +114,12 @@ fn cli_dbmate_full_workflow_on_sqlite() {
     let base = ["--dir", &dir_s, "--database-url", &url];
 
     // 3. `migrate` — default Trusted profile applies it onto the SQLite file.
+    //    `--no-dump-schema` opts out of the new auto-`schema.sql` refresh (dbmate
+    //    parity, ON by default) so this apply-path e2e (run_bin inherits the crate
+    //    CWD) does not litter a `./db/schema.sql`.
     let mut migrate_args = vec!["migrate"];
     migrate_args.extend_from_slice(&base);
+    migrate_args.push("--no-dump-schema");
     let (ok_mig, out_mig, err_mig) = run_bin(&migrate_args);
     assert!(
         ok_mig,
@@ -155,9 +159,11 @@ fn cli_dbmate_full_workflow_on_sqlite() {
     );
 
     // 5b. `down --yes` — rolls back the one migration; the table is gone.
+    //     `--no-dump-schema`: same apply-path-only rationale as the migrate above.
     let mut down_args = vec!["down"];
     down_args.extend_from_slice(&base);
     down_args.push("--yes");
+    down_args.push("--no-dump-schema");
     let (ok_down, out_down, err_down) = run_bin(&down_args);
     assert!(
         ok_down,
@@ -255,9 +261,12 @@ fn cli_dump_on_sqlite_writes_schema_and_applied_trailer() {
 
     let base = ["--dir", &dir_s, "--database-url", &url];
 
-    // 2. `migrate` it onto the SQLite file.
+    // 2. `migrate` it onto the SQLite file. `--no-dump-schema`: the explicit `dump`
+    //    below is what this test exercises; suppress the auto-refresh so it does not
+    //    write a stray `./db/schema.sql` into the crate CWD.
     let mut migrate_args = vec!["migrate"];
     migrate_args.extend_from_slice(&base);
+    migrate_args.push("--no-dump-schema");
     let (ok_mig, out_mig, err_mig) = run_bin(&migrate_args);
     assert!(ok_mig, "`migrate` must exit 0\nstdout={out_mig}\nstderr={err_mig}");
 
@@ -382,8 +391,10 @@ fn cli_validate_on_sqlite_clean_passes_then_flags_drift_and_destructive() {
     );
 
     // Apply it so the journal has a recorded checksum to drift against.
+    // `--no-dump-schema`: this is the validate/drift e2e, not the schema-dump path.
     let mut migrate_args = vec!["migrate"];
     migrate_args.extend_from_slice(&base);
+    migrate_args.push("--no-dump-schema");
     let (ok_mig, _o, e) = run_bin(&migrate_args);
     assert!(ok_mig, "`migrate`\nstderr={e}");
 

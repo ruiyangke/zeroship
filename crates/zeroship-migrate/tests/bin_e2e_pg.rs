@@ -214,6 +214,10 @@ async fn binary_migrate_applies_whole_set_idempotently_and_materializes_schema()
         "--meta-schema",
         &meta,
         "--yes",
+        // This e2e exercises the apply path, not the schema-dump lifecycle. Opt out
+        // of the new auto-`schema.sql` refresh (dbmate parity, ON by default) so the
+        // test does not write a stray `./db/schema.sql` into the crate CWD.
+        "--no-dump-schema",
     ];
 
     // 1. First apply: exit 0.
