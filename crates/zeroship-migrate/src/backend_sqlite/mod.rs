@@ -20,6 +20,7 @@
 pub mod actor;
 pub mod authorizer;
 mod drift_sql;
+mod dump_sql;
 mod journal_sql;
 pub mod rebuild_sql;
 mod rollback_sql;
@@ -166,6 +167,18 @@ impl SqliteBackend {
     /// [`DriftError`] on a `sqlite_master` / PRAGMA read failure.
     pub async fn snapshot_schema_sqlite(&self) -> Result<SchemaSnapshot, DriftError> {
         drift_sql::snapshot_schema(&self.actor).await
+    }
+
+    /// Serialize the LIVE `main` schema as a deterministic CREATE-statement script
+    /// for the `dump` command (engine-agnostic `dump` parity with the PG
+    /// `pg_dump --schema-only` leg). Tables/views before indexes/triggers, each
+    /// name-ordered; the `_mig` journal + `sqlite_*` internals never leak (§2.5.2).
+    /// The bin appends the SAME applied-versions trailer the PG `dump` writes.
+    ///
+    /// # Errors
+    /// [`SqliteActorError`] on a `sqlite_master` read failure.
+    pub async fn dump_schema_sqlite(&self) -> Result<String, SqliteActorError> {
+        dump_sql::dump_schema(&self.actor).await
     }
 }
 

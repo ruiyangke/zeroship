@@ -177,8 +177,10 @@ enum Command {
         #[arg(long, default_value_t = 60)]
         timeout_secs: u64,
     },
-    /// Dump the DB schema to a file via `pg_dump --schema-only`, with a trailer
-    /// listing the journal's applied versions (dbmate `dump`).
+    /// Dump the DB schema to a file, with a trailer listing the journal's applied
+    /// versions (dbmate `dump`). Engine-agnostic: Postgres shells
+    /// `pg_dump --schema-only`; SQLite derives the CREATE statements from
+    /// `sqlite_master` (no `sqlite3` shell-out). Both write the same trailer.
     Dump {
         /// Output path. Default `./db/schema.sql`.
         #[arg(long, default_value = DEFAULT_SCHEMA_FILE)]
@@ -391,39 +393,20 @@ fn run_new(cli: &Cli, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// `dump` — shell `pg_dump --schema-only` against the DSN, then append a trailer
-/// listing the journal's applied versions (dbmate `dump`). If `pg_dump` is not on
-/// `PATH`, error (don't half-dump).
-async fn run_dump(cfg: &RunConfig, schema_file: &Path) -> Result<(), String> {
-    // `dump` is `pg_dump` — Postgres-only. On SQLite this CLI refuses honestly
-    // rather than faking a schema dump (a `sqlite3 .dump` equivalent is a deferred
-    // command; see the multi-engine report). The engine classifier gates it.
-    match platform_runner::classify_engine(&cfg.database_url) {
-        Engine::Postgres => {}
-        Engine::Sqlite(_) => {
-            return Err(
-                "dump is not supported on SQLite via this CLI yet (pg_dump is Postgres-only; \
-                 a `sqlite3 .dump` equivalent is a deferred command)"
-                    .to_string(),
-            );
-        }
-        Engine::Unsupported => {
-            return Err(RunError::UnsupportedEngine.to_string());
-        }
-    }
-    // Faithful dbmate behaviour: shell pg_dump. Find it on PATH (or honour
-    // PG_DUMP for a pinned binary, e.g. under Nix where it is not on PATH).
+/// The Postgres `dump` schema body: shell `pg_dump --schema-only` against the DSN.
+/// Find it on `PATH` (or honour `PG_DUMP` for a pinned binary, e.g. under Nix where
+/// it is not on `PATH`). If `pg_dump` is unavailable / fails, error (don't
+/// half-dump). Byte-identical to the pre-multi-engine PG dump body.
+fn dump_schema_pg(database_url: &str) -> Result<String, String> {
     let pg_dump = std::env::var("PG_DUMP").unwrap_or_else(|_| "pg_dump".to_string());
     let output = ProcCommand::new(&pg_dump)
         .arg("--schema-only")
         .arg("--no-owner")
         .arg("--no-privileges")
-        .arg(&cfg.database_url)
+        .arg(database_url)
         .output()
         .map_err(|e| {
-            format!(
-                "could not run `{pg_dump}` (is it on PATH? set PG_DUMP to a path): {e}"
-            )
+            format!("could not run `{pg_dump}` (is it on PATH? set PG_DUMP to a path): {e}")
         })?;
     if !output.status.success() {
         return Err(format!(
@@ -431,11 +414,28 @@ async fn run_dump(cfg: &RunConfig, schema_file: &Path) -> Result<(), String> {
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    let mut schema = String::from_utf8_lossy(&output.stdout).into_owned();
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// `dump` — derive the DB schema (engine-agnostic), then append a trailer listing
+/// the journal's applied versions (dbmate `dump`). Postgres shells
+/// `pg_dump --schema-only`; SQLite derives the CREATE statements from
+/// `sqlite_master` through the hardened backend (no `sqlite3` shell-out). Both
+/// engines write the SAME applied-versions trailer, so `schema.sql` is one
+/// consistent contract. An unsupported engine is an honest refusal.
+async fn run_dump(cfg: &RunConfig, schema_file: &Path) -> Result<(), String> {
+    // The schema body is engine-specific; the trailer is shared (below).
+    let mut schema = match platform_runner::classify_engine(&cfg.database_url) {
+        Engine::Postgres => dump_schema_pg(&cfg.database_url)?,
+        Engine::Sqlite(app) => platform_runner::dump_schema_sqlite(&app)
+            .await
+            .map_err(|e| e.to_string())?,
+        Engine::Unsupported => return Err(RunError::UnsupportedEngine.to_string()),
+    };
 
     // Append the applied-versions trailer (dbmate writes the schema_migrations
     // rows so a fresh `db:setup` knows which versions are already applied). We read
-    // the journal via the runner's status view.
+    // the journal via the runner's status view. Identical shape for BOTH engines.
     let versions = applied_versions(cfg).await?;
     schema.push_str("\n-- zeroship-migrate schema_migrations\n");
     for v in &versions {

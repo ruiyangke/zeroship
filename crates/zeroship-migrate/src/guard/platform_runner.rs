@@ -221,10 +221,6 @@ pub enum RunError {
     /// A SQLite backend op (open / hardening / apply / journal) failed.
     #[error("sqlite: {0}")]
     Sqlite(String),
-    /// A command is not supported on the SQLite leg of this CLI (`dump` =
-    /// `pg_dump`, PG-only). An explicit, honest refusal — never a fake success.
-    #[error("{0} is not supported on SQLite via this CLI (Postgres-only)")]
-    UnsupportedOnSqlite(&'static str),
 }
 
 /// The H1 destructive-gate decision (design §9, pure + unit-testable).
@@ -536,29 +532,31 @@ pub async fn run_status(cfg: &RunConfig) -> Result<RunReport, RunError> {
 /// the journal + surface destructive advisories. NO DDL on the real DB (design §9;
 /// `update-sql` + `validate`).
 ///
-/// Postgres-only: `validate` is shadow-dry-run-driven, and the SQLite backend
-/// DELIBERATELY exposes no `ShadowDryRun` capability (`shadow()` is `None` — SQLite
-/// DDL is trusted descriptor output and dev is recoverable, so a pre-apply shadow
-/// clone adds nothing; the engine would surface the explicit `ShadowUnsupported`).
-/// On SQLite this refuses honestly rather than reporting a fake dry-run pass.
+/// Engine-agnostic (dbmate parity): Postgres dry-runs on a throwaway shadow
+/// DATABASE (CREATE/DROP DATABASE on a clone); SQLite dry-runs on a throwaway
+/// SQLite file (a fresh `<file>.shadow` the CLI creates, replays the set onto, and
+/// deletes) — no admin CREATEDB needed. Both engines then run the SAME checksum
+/// drift check + destructive advisories, and emit the same [`ValidateReport`]
+/// shape. An unsupported URL is an honest refusal.
 ///
 /// # Errors
 /// [`RunError`] on an unsupported engine / load / connect / the shadow harness / a
 /// drift read failure.
 pub async fn run_validate(cfg: &RunConfig) -> Result<RunReport, RunError> {
     match classify_engine(&cfg.database_url) {
-        Engine::Postgres => {}
-        Engine::Sqlite(_) => return Err(RunError::UnsupportedOnSqlite("validate")),
-        Engine::Unsupported => return Err(RunError::UnsupportedEngine),
+        Engine::Postgres => run_validate_pg(cfg).await,
+        Engine::Sqlite(app) => run_validate_sqlite(cfg, &app).await,
+        Engine::Unsupported => Err(RunError::UnsupportedEngine),
     }
-    let migrations = load_dir(&cfg.dir)?;
-    let conn = connect(&cfg.database_url).await?;
-    let exec_cfg = build_exec_cfg(cfg);
-    let guard_cfg = build_guard_cfg(cfg);
-    let engine = MigrationEngine::new();
+}
 
-    // The plan tells us destructiveness + advisories WITHOUT touching the DB.
-    let plan = engine.plan(&migrations, &guard_cfg);
+/// Extract the per-migration `(version, advisories)` from a plan + the plan's
+/// destructiveness — the ENGINE-AGNOSTIC half of `validate` both legs share (no
+/// DB touched). Factored so the PG + SQLite legs report the identical advisory /
+/// destructive surface rather than duplicating the extraction.
+fn validate_plan_signals(
+    plan: &MigrationPlan,
+) -> (Vec<(String, Vec<Advisory>)>, bool) {
     let advisories: Vec<(String, Vec<Advisory>)> = plan
         .items
         .iter()
@@ -569,6 +567,20 @@ pub async fn run_validate(cfg: &RunConfig) -> Result<RunReport, RunError> {
             )
         })
         .collect();
+    (advisories, plan.destructive || plan.requires_approval)
+}
+
+/// The Postgres leg of `validate` — the existing path, byte-identical.
+async fn run_validate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
+    let migrations = load_dir(&cfg.dir)?;
+    let conn = connect(&cfg.database_url).await?;
+    let exec_cfg = build_exec_cfg(cfg);
+    let guard_cfg = build_guard_cfg(cfg);
+    let engine = MigrationEngine::new();
+
+    // The plan tells us destructiveness + advisories WITHOUT touching the DB.
+    let plan = engine.plan(&migrations, &guard_cfg);
+    let (advisories, destructive) = validate_plan_signals(&plan);
 
     // Dry-run on a THROWAWAY shadow database (CREATE/DROP DATABASE on a clone) —
     // the real DB sees no migration DDL.
@@ -600,9 +612,171 @@ pub async fn run_validate(cfg: &RunConfig) -> Result<RunReport, RunError> {
     Ok(RunReport::Validate(Box::new(ValidateReport {
         dry_run,
         drift,
-        destructive: plan.destructive || plan.requires_approval,
+        destructive,
         advisories,
     })))
+}
+
+/// The SQLite leg of `validate` — the dbmate-parity peer of [`run_validate_pg`].
+///
+/// SQLite has no admin `CREATEDB` and the backend deliberately exposes no
+/// `ShadowDryRun` capability (`shadow()` is `None`), so we build the shadow
+/// OURSELVES: a fresh throwaway SQLite file alongside the app file (`<app>.shadow`
+/// + its sibling journal), onto which we REPLAY the loaded set through the SAME
+/// generic engine `apply` the real `migrate` uses. The shadow file + journal are
+/// removed on exit. The throwaway clone is created, applied to, and torn down
+/// WITHOUT touching the real DB's schema. We then run the SAME checksum-drift
+/// check + destructive advisories the PG leg runs (shared `validate_plan_signals`
+/// + the backend-generic `check_checksum_drift`), emitting the same
+/// [`ValidateReport`] shape.
+async fn run_validate_sqlite(cfg: &RunConfig, app: &Path) -> Result<RunReport, RunError> {
+    let migrations = load_dir(&cfg.dir)?;
+    let exec_cfg = sqlite_exec_cfg(cfg);
+    let guard_cfg = sqlite_guard_cfg(cfg);
+    let engine = MigrationEngine::new();
+
+    // The plan: destructiveness + advisories WITHOUT touching any DB (same as PG).
+    let plan = engine.plan(&migrations, &guard_cfg);
+    let (advisories, destructive) = validate_plan_signals(&plan);
+
+    // --- shadow dry-run on a THROWAWAY SQLite clone -------------------------
+    // A fresh shadow file (+ its sibling journal) the CLI owns, applies the set
+    // onto, and deletes — the SQLite peer of the PG throwaway shadow DATABASE. The
+    // real app file is never opened for the dry-run.
+    let shadow_app = sqlite_shadow_path(app);
+    let dry_run = sqlite_shadow_dry_run(&shadow_app, &migrations, &exec_cfg, &guard_cfg).await;
+    // Best-effort cleanup of the throwaway shadow + its journal (never fails the
+    // command; a leaked dev temp file is harmless and `:memory:` has no file).
+    cleanup_sqlite_shadow(&shadow_app);
+    let dry_run = dry_run?;
+
+    // --- checksum drift against the REAL journal (read-only) ----------------
+    // Bootstrap the journal first (idempotent), exactly as `status` does, then run
+    // the backend-generic drift comparison — identical rules to the PG leg.
+    let backend = open_sqlite_backend(app)?;
+    backend.ensure_journal(&exec_cfg).await?;
+    let drift = backend.check_checksum_drift(&exec_cfg, &migrations).await?;
+
+    Ok(RunReport::Validate(Box::new(ValidateReport {
+        dry_run,
+        drift,
+        destructive,
+        advisories,
+    })))
+}
+
+/// The throwaway SQLite shadow app-file path for `validate`: a sibling `<file>.shadow`
+/// (engine-constructed, never creator input). For `:memory:` the shadow is its own
+/// `:memory:` (a private throwaway DB by nature — each open is fresh).
+fn sqlite_shadow_path(app: &Path) -> PathBuf {
+    if app.as_os_str() == ":memory:" {
+        return PathBuf::from(":memory:");
+    }
+    let mut s = app.to_path_buf().into_os_string();
+    s.push(".shadow");
+    PathBuf::from(s)
+}
+
+/// Replay the loaded set onto a FRESH throwaway SQLite shadow + report each
+/// migration's outcome as a [`DryRunReport`] — the SQLite-built peer of the PG
+/// shadow harness. A pre-existing shadow file from a crashed prior run is removed
+/// first so the clone always starts empty. The set is applied through the SAME
+/// generic engine `apply` the real `migrate` uses (with the plan's `Approval` so a
+/// destructive migration still dry-runs on the throwaway clone), so the dry-run is
+/// a FAITHFUL replay, not a parse-only check.
+async fn sqlite_shadow_dry_run(
+    shadow_app: &Path,
+    migrations: &[crate::migration::Migration],
+    exec_cfg: &ExecutorConfig,
+    guard_cfg: &super::GuardConfig,
+) -> Result<crate::shadow::DryRunReport, RunError> {
+    // Start from an EMPTY clone: drop any leaked shadow from a crashed prior run.
+    cleanup_sqlite_shadow(shadow_app);
+    let shadow_journal = sqlite_journal_path(shadow_app);
+    let backend =
+        SqliteBackend::open(shadow_app, &shadow_journal).map_err(|e| RunError::Sqlite(e.to_string()))?;
+
+    let engine = MigrationEngine::new();
+    let plan = engine.plan(migrations, guard_cfg);
+    // The throwaway clone is ours to mutate freely; replay the WHOLE set (a
+    // destructive migration is approved here — it only touches the shadow, never
+    // the real DB), recording per-migration success/failure into the report.
+    let mut per_migration = Vec::new();
+    let mut ok = true;
+    match engine
+        .apply(&plan, Approval::Approved, &backend, exec_cfg, "platform-validate")
+        .await
+    {
+        Ok(outcome) => {
+            for v in outcome.applied.iter().chain(outcome.recovered.iter()) {
+                per_migration.push(crate::shadow::MigrationResult {
+                    version: v.clone(),
+                    applied_ok: true,
+                    error: None,
+                });
+            }
+        }
+        Err(e) => {
+            // The batch aborted; surface the failure (the offending version is in
+            // the message). `ok=false` makes the bin print `dry-run ok=false`.
+            ok = false;
+            per_migration.push(crate::shadow::MigrationResult {
+                version: plan
+                    .items
+                    .first()
+                    .map_or_else(String::new, |p| p.migration.version.as_str().to_string()),
+                applied_ok: false,
+                error: Some(e.to_string()),
+            });
+        }
+    }
+
+    Ok(crate::shadow::DryRunReport {
+        ok,
+        per_migration,
+        resulting_drift: None,
+        advisories: Vec::new(),
+        teardown_ok: true,
+        teardown_error: None,
+    })
+}
+
+/// Best-effort removal of a throwaway SQLite shadow file + its sibling journal (and
+/// the WAL/SHM side files if any). Never errors — a leaked dev temp file is
+/// harmless, and `:memory:` has no on-disk file to remove.
+fn cleanup_sqlite_shadow(shadow_app: &Path) {
+    if shadow_app.as_os_str() == ":memory:" {
+        return;
+    }
+    let journal = sqlite_journal_path(shadow_app);
+    for base in [shadow_app.to_path_buf(), journal] {
+        let _ = std::fs::remove_file(&base);
+        // Rollback-journal / WAL side files SQLite may leave alongside the DB.
+        for suffix in ["-journal", "-wal", "-shm"] {
+            let mut s = base.clone().into_os_string();
+            s.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(s));
+        }
+    }
+}
+
+/// `dump` (SQLite leg) — serialize the LIVE `main` schema as a deterministic
+/// CREATE-statement script, derived from `sqlite_master` through the hardened
+/// [`SqliteBackend`] (NOT a `sqlite3` shell-out). The engine-agnostic `dump`
+/// parity peer of the PG `pg_dump --schema-only` leg; the bin appends the SAME
+/// applied-versions trailer to both.
+///
+/// The `_mig` journal (a separate attached DB) and `sqlite_*` internals never
+/// appear in the output (§2.5.2) — the `main`-scoped read cannot see them.
+///
+/// # Errors
+/// [`RunError::Sqlite`] on a `sqlite_master` read / backend-open failure.
+pub async fn dump_schema_sqlite(app: &Path) -> Result<String, RunError> {
+    let backend = open_sqlite_backend(app)?;
+    backend
+        .dump_schema_sqlite()
+        .await
+        .map_err(|e| RunError::Sqlite(e.to_string()))
 }
 
 /// `rollback` — reverse applied migrations via their `.down.sql` to a target
