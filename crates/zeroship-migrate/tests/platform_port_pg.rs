@@ -69,6 +69,7 @@ fn platform_cfg(meta: &str, yes: bool) -> RunConfig {
     RunConfig {
         dir: migrations_dir(),
         database_url: dsn(),
+        engine_override: None,
         profile: RunProfile::Platform,
         project_id: "platform".to_string(),
         project_schema: "zeroship".to_string(),

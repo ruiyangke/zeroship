@@ -83,9 +83,12 @@ pub(crate) const fn mint_shadow_operator_capability() -> OperatorCapability {
 
 /// The trust profile the runner builds its configs under (design §9 `--profile`).
 ///
-/// `Platform` is the binary's default (the CLI is the only place `platform` is
-/// selectable — §5); `Confined` is offered for completeness (an operator may run
-/// the same binary against a single creator schema with the full deny-list).
+/// `Trusted` is the public CLI's DEFAULT (`--profile trusted`, the binary default):
+/// the operator owns the DB, so the deny-list is OFF and there is no schema
+/// confinement. `Platform` (the widened guard for the zeroship platform schemas)
+/// and `Confined` (the full creator deny-list, single-schema) are EXPLICIT opt-ins
+/// the CLI selects only when `--profile platform`/`confined` is passed — the
+/// control plane uses `submit_migration` (Confined) and never reaches this binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunProfile {
     /// Trusted operator SQL for the platform schemas — the widened guard (§4).
@@ -108,10 +111,15 @@ pub struct RunConfig {
     pub dir: std::path::PathBuf,
     /// Admin Postgres DSN (`--database-url` / `DATABASE_URL`).
     pub database_url: String,
-    /// Trust profile (`--profile`, default `Platform`).
+    /// An explicit engine override (`--engine pg|sqlite`). When `Some`, it
+    /// overrides the DSN-shape auto-detection in [`RunConfig::resolve_engine`] (and
+    /// errors if it contradicts an unambiguous DSN scheme). When `None`, the engine
+    /// is auto-detected from the DSN shape (`classify_engine`) — the default.
+    pub engine_override: Option<EngineKind>,
+    /// Trust profile (`--profile`, default `Trusted` — the public CLI default).
     pub profile: RunProfile,
     /// The advisory-lock serialization sentinel + journal project id
-    /// (`--project-id`, default `"platform"`). Two concurrent `migrate` runs hash
+    /// (`--project-id`, default `"default"`). Two concurrent `migrate` runs hash
     /// to the same `pg_advisory_lock(hashtext(project_id))` and serialize (§9).
     pub project_id: String,
     /// The primary platform schema, pinned into `search_path` (the first
@@ -218,6 +226,19 @@ pub enum RunError {
     /// refusal, not a panic — only the Postgres + SQLite backends are supported.
     #[error("unsupported database engine (only postgres and sqlite are supported)")]
     UnsupportedEngine,
+    /// An explicit `--engine` (or `ZEROSHIP_MIGRATE_ENGINE` / config `engine`)
+    /// contradicts the engine the DSN's unambiguous scheme implies. We refuse
+    /// rather than silently trusting one side.
+    #[error(
+        "engine conflict: --engine {requested} contradicts the {dsn} scheme of the \
+         database URL; drop --engine (the DSN already selects the engine) or fix the URL"
+    )]
+    EngineConflict {
+        /// The engine the operator asked for explicitly.
+        requested: &'static str,
+        /// The engine the DSN's unambiguous scheme implies.
+        dsn: &'static str,
+    },
     /// A SQLite backend op (open / hardening / apply / journal) failed.
     #[error("sqlite: {0}")]
     Sqlite(String),
@@ -340,6 +361,104 @@ fn is_libpq_keyword_dsn(dsn: &str) -> bool {
     })
 }
 
+/// The operator's EXPLICIT engine choice (`--engine pg|sqlite`). Distinct from the
+/// resolved [`Engine`] (which carries the SQLite app-file path): this is just the
+/// kind, before a DSN is bound. It overrides DSN auto-detection and is checked for
+/// contradiction against an unambiguous DSN scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineKind {
+    /// `--engine pg` — force the Postgres backend.
+    Postgres,
+    /// `--engine sqlite` — force the SQLite backend.
+    Sqlite,
+}
+
+impl EngineKind {
+    /// The operator-facing name, for error messages.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Postgres => "pg",
+            Self::Sqlite => "sqlite",
+        }
+    }
+}
+
+/// The engine a DSN's UNAMBIGUOUS scheme implies, if any. `postgres://` /
+/// `postgresql://` / a libpq keyword DSN ⇒ Postgres; `sqlite:` / `sqlite://` /
+/// `file:` / `:memory:` ⇒ SQLite. A BARE filesystem path is AMBIGUOUS (it has no
+/// scheme — it defaults to SQLite under auto-detect, but `--engine` may legitimately
+/// resolve it either way), so this returns `None` for it. An unknown explicit
+/// scheme also returns `None` (it has no supported engine to contradict). This is
+/// the predicate the conflict check uses: a contradiction only exists when the DSN
+/// UNAMBIGUOUSLY names a different engine than `--engine`.
+fn dsn_scheme_engine(url: &str) -> Option<EngineKind> {
+    let trimmed = url.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("postgres://")
+        || lower.starts_with("postgresql://")
+        || is_libpq_keyword_dsn(trimmed)
+    {
+        return Some(EngineKind::Postgres);
+    }
+    if lower == ":memory:"
+        || lower.starts_with("sqlite://")
+        || lower.starts_with("sqlite:")
+        || lower.starts_with("file:")
+    {
+        return Some(EngineKind::Sqlite);
+    }
+    // A bare path (ambiguous) or an unknown scheme (no supported engine): the
+    // explicit `--engine` has nothing to contradict.
+    None
+}
+
+/// Resolve the [`Engine`] to dispatch onto, honouring an explicit `--engine`
+/// override and DSN auto-detection.
+///
+/// - `override_kind = None` ⇒ pure DSN auto-detect ([`classify_engine`]) — the
+///   default; existing invocations are byte-identical.
+/// - `override_kind = Some(k)` ⇒ `k` wins. If the DSN's scheme UNAMBIGUOUSLY names
+///   a *different* engine ([`dsn_scheme_engine`]), that is a hard
+///   [`RunError::EngineConflict`] (we never silently trust one side). For an
+///   AMBIGUOUS bare-path DSN the override resolves it deterministically: `pg` ⇒
+///   [`Engine::Postgres`], `sqlite` ⇒ the hardened SQLite backend on that path.
+///
+/// # Errors
+/// [`RunError::EngineConflict`] when the override contradicts an unambiguous DSN
+/// scheme.
+pub fn resolve_engine(database_url: &str, override_kind: Option<EngineKind>) -> Result<Engine, RunError> {
+    let Some(kind) = override_kind else {
+        return Ok(classify_engine(database_url));
+    };
+    if let Some(dsn_kind) = dsn_scheme_engine(database_url) {
+        if dsn_kind != kind {
+            return Err(RunError::EngineConflict {
+                requested: kind.as_str(),
+                dsn: dsn_kind.as_str(),
+            });
+        }
+    }
+    Ok(match kind {
+        EngineKind::Postgres => Engine::Postgres,
+        // For an ambiguous bare path the DSN has no scheme; `sqlite_file_path`
+        // returns it verbatim. For a `sqlite:`/`file:`/`:memory:` DSN it strips the
+        // scheme the same way `classify_engine` would.
+        EngineKind::Sqlite => Engine::Sqlite(sqlite_file_path(database_url)),
+    })
+}
+
+impl RunConfig {
+    /// The [`Engine`] this config dispatches onto: [`resolve_engine`] applied to the
+    /// DSN + the `engine_override`. The single seam every runner command goes
+    /// through, so `--engine` is honoured uniformly.
+    ///
+    /// # Errors
+    /// [`RunError::EngineConflict`] when `engine_override` contradicts the DSN.
+    pub fn resolve_engine(&self) -> Result<Engine, RunError> {
+        resolve_engine(&self.database_url, self.engine_override)
+    }
+}
+
 /// Extract the SQLite app-file path from a SQLite DSN, mirroring plugin-db's
 /// `backend_for_url` exactly (`sqlite://host/db` folds the authority into the
 /// path; `sqlite:` / `file:` strip the scheme; `:memory:` and a bare path pass
@@ -458,7 +577,7 @@ fn sqlite_guard_cfg(cfg: &RunConfig) -> super::GuardConfig {
 /// [`RunError`] on an unsupported engine / load / connect / a
 /// destructive-without-`--yes` refusal / apply.
 pub async fn run_migrate(cfg: &RunConfig) -> Result<RunReport, RunError> {
-    match classify_engine(&cfg.database_url) {
+    match cfg.resolve_engine()? {
         Engine::Postgres => run_migrate_pg(cfg).await,
         Engine::Sqlite(app) => run_migrate_sqlite(cfg, &app).await,
         Engine::Unsupported => Err(RunError::UnsupportedEngine),
@@ -512,7 +631,7 @@ async fn run_migrate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
 /// [`RunError`] on an unsupported engine / load / connect / a journal read failure.
 pub async fn run_status(cfg: &RunConfig) -> Result<RunReport, RunError> {
     let migrations = load_dir(&cfg.dir)?;
-    let st = match classify_engine(&cfg.database_url) {
+    let st = match cfg.resolve_engine()? {
         Engine::Postgres => {
             let conn = connect(&cfg.database_url).await?;
             let exec_cfg = build_exec_cfg(cfg);
@@ -543,7 +662,7 @@ pub async fn run_status(cfg: &RunConfig) -> Result<RunReport, RunError> {
 /// [`RunError`] on an unsupported engine / load / connect / the shadow harness / a
 /// drift read failure.
 pub async fn run_validate(cfg: &RunConfig) -> Result<RunReport, RunError> {
-    match classify_engine(&cfg.database_url) {
+    match cfg.resolve_engine()? {
         Engine::Postgres => run_validate_pg(cfg).await,
         Engine::Sqlite(app) => run_validate_sqlite(cfg, &app).await,
         Engine::Unsupported => Err(RunError::UnsupportedEngine),
@@ -880,7 +999,7 @@ pub async fn run_rollback(
         (None, None) => RollbackTarget::All,
     };
 
-    match classify_engine(&cfg.database_url) {
+    match cfg.resolve_engine()? {
         Engine::Postgres => run_rollback_pg(cfg, target).await,
         Engine::Sqlite(app) => run_rollback_sqlite(cfg, &app, target).await,
         Engine::Unsupported => Err(RunError::UnsupportedEngine),
@@ -1023,12 +1142,16 @@ pub fn lint_advisories(cfg: &RunConfig) -> Result<Vec<(String, Vec<Advisory>)>, 
 /// [`RunError::WaitTimeout`] if the DB is not reachable within `timeout`.
 pub async fn run_wait(
     database_url: &str,
+    engine_override: Option<EngineKind>,
     timeout: Duration,
     interval: Duration,
 ) -> Result<(), RunError> {
+    // Resolve the engine ONCE up front so an `--engine` conflict surfaces as a
+    // clear error rather than failing every probe until the deadline.
+    let engine = resolve_engine(database_url, engine_override)?;
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        let last_err = match probe_once(database_url).await {
+        let last_err = match probe_once(&engine, database_url).await {
             Ok(()) => return Ok(()),
             Err(e) => e,
         };
@@ -1048,8 +1171,8 @@ pub async fn run_wait(
 /// backend (the dev-file analog of "the DB accepts a connection" — `:memory:` is
 /// always ready). An unsupported URL fails the probe with a clear message (so
 /// `wait` times out honestly rather than panicking).
-async fn probe_once(database_url: &str) -> Result<(), String> {
-    match classify_engine(database_url) {
+async fn probe_once(engine: &Engine, database_url: &str) -> Result<(), String> {
+    match engine {
         Engine::Postgres => {
             let conn = connect(database_url).await.map_err(|e| e.to_string())?;
             conn.query("SELECT 1", &[])
@@ -1061,7 +1184,7 @@ async fn probe_once(database_url: &str) -> Result<(), String> {
             // The SQLite "is it ready?" probe: can we open the hardened backend on
             // the file? (`:memory:` always opens.) No journal mutation — the open
             // path hardens the connection but does not bootstrap the journal.
-            open_sqlite_backend(&app).map(|_| ()).map_err(|e| e.to_string())
+            open_sqlite_backend(app).map(|_| ()).map_err(|e| e.to_string())
         }
         Engine::Unsupported => Err(RunError::UnsupportedEngine.to_string()),
     }
@@ -1189,6 +1312,7 @@ mod tests {
         let cfg = RunConfig {
             dir: std::path::PathBuf::from("db/migrations"),
             database_url: "host=localhost".to_string(),
+            engine_override: None,
             profile: RunProfile::Platform,
             project_id: "platform".to_string(),
             project_schema: "zeroship".to_string(),
@@ -1215,6 +1339,7 @@ mod tests {
         let cfg = RunConfig {
             dir: std::path::PathBuf::from("db/migrations"),
             database_url: "host=localhost".to_string(),
+            engine_override: None,
             profile: RunProfile::Confined,
             project_id: "proj_x".to_string(),
             project_schema: "proj_x".to_string(),
@@ -1282,6 +1407,77 @@ mod tests {
 
         // An explicit unknown scheme is the honest unsupported refusal.
         assert_eq!(classify_engine("redis://localhost:6379"), Engine::Unsupported);
+    }
+
+    #[test]
+    fn resolve_engine_none_is_pure_dsn_autodetect() {
+        // No override ⇒ byte-identical to classify_engine for every shape.
+        for url in [
+            "postgres://h/db",
+            "host=h dbname=db",
+            "sqlite:/tmp/x.db",
+            "/bare/path.db",
+            "redis://h",
+        ] {
+            assert_eq!(
+                resolve_engine(url, None).unwrap_or(Engine::Unsupported),
+                classify_engine(url),
+                "no-override must match classify_engine for {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_engine_override_resolves_ambiguous_bare_path() {
+        // A bare path is ambiguous; the override decides deterministically.
+        assert_eq!(
+            resolve_engine("/data/app.db", Some(EngineKind::Sqlite)).expect("ok"),
+            Engine::Sqlite(PathBuf::from("/data/app.db"))
+        );
+        assert_eq!(
+            resolve_engine("/data/app.db", Some(EngineKind::Postgres)).expect("ok"),
+            Engine::Postgres
+        );
+    }
+
+    #[test]
+    fn resolve_engine_override_agreeing_with_dsn_is_ok() {
+        assert_eq!(
+            resolve_engine("sqlite:/tmp/x.db", Some(EngineKind::Sqlite)).expect("ok"),
+            Engine::Sqlite(PathBuf::from("/tmp/x.db"))
+        );
+        assert_eq!(
+            resolve_engine("postgres://h/db", Some(EngineKind::Postgres)).expect("ok"),
+            Engine::Postgres
+        );
+    }
+
+    #[test]
+    fn resolve_engine_override_contradicting_unambiguous_dsn_is_conflict() {
+        // --engine pg vs a sqlite: DSN.
+        let err = resolve_engine("sqlite:/tmp/x.db", Some(EngineKind::Postgres)).unwrap_err();
+        assert!(
+            matches!(err, RunError::EngineConflict { requested: "pg", dsn: "sqlite" }),
+            "expected an engine conflict, got {err:?}"
+        );
+        // --engine sqlite vs a postgres:// DSN.
+        let err = resolve_engine("postgres://h/db", Some(EngineKind::Sqlite)).unwrap_err();
+        assert!(
+            matches!(err, RunError::EngineConflict { requested: "sqlite", dsn: "pg" }),
+            "expected an engine conflict, got {err:?}"
+        );
+        // --engine sqlite vs a libpq keyword DSN (also unambiguously PG).
+        let err = resolve_engine("host=h dbname=db", Some(EngineKind::Sqlite)).unwrap_err();
+        assert!(matches!(err, RunError::EngineConflict { .. }));
+    }
+
+    #[test]
+    fn dsn_scheme_engine_treats_bare_path_and_unknown_scheme_as_ambiguous() {
+        assert_eq!(dsn_scheme_engine("/bare/path.db"), None);
+        assert_eq!(dsn_scheme_engine("redis://h"), None);
+        assert_eq!(dsn_scheme_engine("postgres://h/db"), Some(EngineKind::Postgres));
+        assert_eq!(dsn_scheme_engine("sqlite:/x"), Some(EngineKind::Sqlite));
+        assert_eq!(dsn_scheme_engine(":memory:"), Some(EngineKind::Sqlite));
     }
 
     #[test]
