@@ -139,6 +139,23 @@ struct Cli {
     /// Per-statement lock-acquisition timeout, seconds.
     #[arg(long, global = true, default_value_t = 30)]
     lock_timeout_secs: u64,
+
+    /// Schema-dump file path — the output of `dump`, the input of `load`, and the
+    /// target of the auto-refresh after `migrate`/`up`/`rollback`/`down`. Global so
+    /// it is available on every command (dbmate's `--schema-file`). Precedence
+    /// (highest first): this flag, then `ZEROSHIP_MIGRATE_SCHEMA_FILE` env, then
+    /// `schema_file` in `zeroship-migrate.toml`, then the default `./db/schema.sql`.
+    #[arg(long, global = true)]
+    schema_file: Option<PathBuf>,
+
+    /// Suppress the automatic `schema.sql` refresh that follows a successful
+    /// `migrate`/`up`/`rollback`/`down` (dbmate's `--no-dump-schema`). Auto-dump is
+    /// ON by default (dbmate parity). Precedence (highest first): this flag, then
+    /// `ZEROSHIP_MIGRATE_DUMP_SCHEMA` env, then `dump_schema` in the config; default
+    /// = auto-dump ON. The flag is one-directional (it can only turn auto-dump OFF);
+    /// to force it ON despite a config that disables it, simply omit the flag.
+    #[arg(long, global = true)]
+    no_dump_schema: bool,
 }
 
 /// The CLI trust-profile flag value.
@@ -253,12 +270,16 @@ enum Command {
     /// versions (dbmate `dump`). Engine-agnostic: Postgres shells
     /// `pg_dump --schema-only`; SQLite derives the CREATE statements from
     /// `sqlite_master` (no `sqlite3` shell-out). Both write the same trailer.
-    Dump {
-        /// Output path. Precedence: this flag > `ZEROSHIP_MIGRATE_SCHEMA_FILE` env >
-        /// `schema_file` in `zeroship-migrate.toml` > default `./db/schema.sql`.
-        #[arg(long)]
-        schema_file: Option<PathBuf>,
-    },
+    Dump,
+    /// Bootstrap a FRESH database to the current schema FAST by REPLAYING the dumped
+    /// `schema.sql` (dbmate `db:load` / `db:setup`), then reconstructing the journal
+    /// from the dump's applied-versions trailer — so `status` reports those versions
+    /// applied and a subsequent `migrate` runs only the genuinely-pending ones. Both
+    /// engines. Refuses (non-zero) if the schema file is missing/unreadable or the
+    /// target DB is already engine-managed (first-entry-only — never clobbers). The
+    /// schema file is the global `--schema-file` (default `./db/schema.sql`).
+    #[command(visible_alias = "setup")]
+    Load,
 }
 
 /// The effective migration directory under the precedence rule (CLI flag > env >
@@ -278,6 +299,18 @@ fn effective_schema_file(flag: Option<&Path>, layer: &FileEnvLayer) -> PathBuf {
     flag.map(Path::to_path_buf)
         .or_else(|| layer.schema_file.clone().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(DEFAULT_SCHEMA_FILE))
+}
+
+/// Whether to auto-refresh `schema.sql` after a successful schema-changing command
+/// (dbmate parity). Precedence: the CLI `--no-dump-schema` flag (one-directional —
+/// it can only turn auto-dump OFF) > the folded `dump_schema` env/config value >
+/// the built-in default ON. `--no-dump-schema` always wins (it is the explicit
+/// operator opt-out for this invocation).
+fn effective_auto_dump(cli: &Cli, layer: &FileEnvLayer) -> bool {
+    if cli.no_dump_schema {
+        return false;
+    }
+    layer.dump_schema.unwrap_or(true)
 }
 
 /// The effective trust profile (CLI flag > env > config > default `trusted`).
@@ -500,6 +533,13 @@ fn print_report(report: &RunReport) {
                 outcome.rolled_back, outcome.skipped_irreversible
             );
         }
+        RunReport::Load(outcome) => {
+            println!(
+                "load: restored schema, journaled {} version(s) {:?}",
+                outcome.versions.len(),
+                outcome.versions
+            );
+        }
     }
 }
 
@@ -679,10 +719,38 @@ async fn main() -> ExitCode {
     }
 
     // `dump` shells pg_dump; no migration plan.
-    if let Command::Dump { schema_file } = &cli.command {
-        let out = effective_schema_file(schema_file.as_deref(), &layer);
+    if let Command::Dump = &cli.command {
+        let out = effective_schema_file(cli.schema_file.as_deref(), &layer);
         return match run_dump(&cfg, &out).await {
             Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("zeroship-migrate: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    // `load` (db:setup) replays a dumped schema.sql + reconstructs the journal; no
+    // migration plan. Read the schema file FIRST (a missing/unreadable file is a
+    // clean non-zero refusal BEFORE touching the DB), then dispatch by engine.
+    if let Command::Load = &cli.command {
+        let path = effective_schema_file(cli.schema_file.as_deref(), &layer);
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "zeroship-migrate: load: read schema file {}: {e}",
+                    path.display()
+                );
+                return ExitCode::FAILURE;
+            }
+        };
+        return match platform_runner::run_load(&cfg, &content).await {
+            Ok(report) => {
+                println!("load: replayed {}", path.display());
+                print_report(&report);
+                ExitCode::SUCCESS
+            }
             Err(e) => {
                 eprintln!("zeroship-migrate: {e}");
                 ExitCode::FAILURE
@@ -699,7 +767,9 @@ async fn main() -> ExitCode {
             platform_runner::run_rollback(&cfg, *to, *steps).await
         }
         // Handled above (offline / non-plan commands).
-        Command::New { .. } | Command::Wait { .. } | Command::Dump { .. } => unreachable!(),
+        Command::New { .. } | Command::Wait { .. } | Command::Dump | Command::Load => {
+            unreachable!()
+        }
     };
 
     match result {
@@ -723,6 +793,25 @@ async fn main() -> ExitCode {
             if let RunReport::Validate(v) = &report {
                 if !v.dry_run.ok || !v.drift.is_clean() {
                     return ExitCode::FAILURE;
+                }
+            }
+            // Auto-refresh `schema.sql` after a SUCCESSFUL schema-changing command
+            // (dbmate parity): migrate/up/rollback/down. NEVER after read-only
+            // status/validate (their reports are not Migrate/Rollback). A dump
+            // failure here is NON-FATAL — the migration already committed; we warn
+            // to stderr and keep the success exit. `--no-dump-schema` / config opt
+            // out. The schema path is the global `--schema-file` (env/config/default).
+            if matches!(report, RunReport::Migrate(_) | RunReport::Rollback(_))
+                && effective_auto_dump(&cli, &layer)
+            {
+                let out = effective_schema_file(cli.schema_file.as_deref(), &layer);
+                if let Err(e) = run_dump(&cfg, &out).await {
+                    eprintln!(
+                        "zeroship-migrate: warning: auto-dump of {} after a successful \
+                         {:?} failed (the migration already committed): {e}",
+                        out.display(),
+                        cli.command
+                    );
                 }
             }
             ExitCode::SUCCESS
@@ -892,18 +981,16 @@ mod tests {
 
     #[test]
     fn dump_parses_schema_file_default_and_override() {
-        // No flag ⇒ the subcommand value is None; the effective path is the default.
+        // No flag ⇒ the global schema_file is None; the effective path is the default.
         let cli = parse(&["zeroship-migrate", "dump", "--database-url", "x"]);
-        match &cli.command {
-            Command::Dump { schema_file } => {
-                assert_eq!(schema_file.as_deref(), None);
-                assert_eq!(
-                    effective_schema_file(schema_file.as_deref(), &empty_layer()),
-                    PathBuf::from(DEFAULT_SCHEMA_FILE)
-                );
-            }
-            other => panic!("expected Dump, got {other:?}"),
-        }
+        assert!(matches!(cli.command, Command::Dump));
+        assert_eq!(cli.schema_file.as_deref(), None);
+        assert_eq!(
+            effective_schema_file(cli.schema_file.as_deref(), &empty_layer()),
+            PathBuf::from(DEFAULT_SCHEMA_FILE)
+        );
+        // `--schema-file` is now a GLOBAL flag (dbmate parity); it parses on `dump`
+        // and wins over a config schema_file.
         let cli = parse(&[
             "zeroship-migrate",
             "dump",
@@ -912,21 +999,72 @@ mod tests {
             "--schema-file",
             "/tmp/s.sql",
         ]);
-        match &cli.command {
-            Command::Dump { schema_file } => {
-                assert_eq!(schema_file.as_deref(), Some(Path::new("/tmp/s.sql")));
-                // Flag wins over a config schema_file.
-                let layer = FileEnvLayer {
-                    schema_file: Some("/from/config.sql".to_string()),
-                    ..FileEnvLayer::default()
-                };
-                assert_eq!(
-                    effective_schema_file(schema_file.as_deref(), &layer),
-                    PathBuf::from("/tmp/s.sql")
-                );
-            }
-            other => panic!("expected Dump, got {other:?}"),
-        }
+        assert!(matches!(cli.command, Command::Dump));
+        assert_eq!(cli.schema_file.as_deref(), Some(Path::new("/tmp/s.sql")));
+        let layer = FileEnvLayer {
+            schema_file: Some("/from/config.sql".to_string()),
+            ..FileEnvLayer::default()
+        };
+        assert_eq!(
+            effective_schema_file(cli.schema_file.as_deref(), &layer),
+            PathBuf::from("/tmp/s.sql")
+        );
+    }
+
+    #[test]
+    fn load_is_a_command_with_setup_alias_and_global_schema_file() {
+        // `load` parses and accepts the global `--schema-file`.
+        let cli = parse(&[
+            "zeroship-migrate",
+            "load",
+            "--database-url",
+            "x",
+            "--schema-file",
+            "/tmp/s.sql",
+        ]);
+        assert!(matches!(cli.command, Command::Load));
+        assert_eq!(cli.schema_file.as_deref(), Some(Path::new("/tmp/s.sql")));
+        // The `setup` visible alias resolves to the same command.
+        let cli = parse(&["zeroship-migrate", "setup", "--database-url", "x"]);
+        assert!(matches!(cli.command, Command::Load));
+    }
+
+    #[test]
+    fn auto_dump_defaults_on_and_no_dump_schema_turns_it_off() {
+        // Default: no flag, empty layer ⇒ auto-dump ON (dbmate parity).
+        let cli = parse(&["zeroship-migrate", "migrate", "--database-url", "x"]);
+        assert!(!cli.no_dump_schema);
+        assert!(effective_auto_dump(&cli, &empty_layer()));
+        // `--no-dump-schema` turns it OFF (one-directional override).
+        let cli = parse(&[
+            "zeroship-migrate",
+            "migrate",
+            "--database-url",
+            "x",
+            "--no-dump-schema",
+        ]);
+        assert!(cli.no_dump_schema);
+        assert!(!effective_auto_dump(&cli, &empty_layer()));
+        // A config `dump_schema = false` disables it when the flag is absent.
+        let cli = parse(&["zeroship-migrate", "migrate", "--database-url", "x"]);
+        let layer = FileEnvLayer {
+            dump_schema: Some(false),
+            ..FileEnvLayer::default()
+        };
+        assert!(!effective_auto_dump(&cli, &layer));
+        // The CLI flag still wins to turn it OFF over a config that says ON.
+        let cli_off = parse(&[
+            "zeroship-migrate",
+            "migrate",
+            "--database-url",
+            "x",
+            "--no-dump-schema",
+        ]);
+        let layer_on = FileEnvLayer {
+            dump_schema: Some(true),
+            ..FileEnvLayer::default()
+        };
+        assert!(!effective_auto_dump(&cli_off, &layer_on));
     }
 
     #[test]

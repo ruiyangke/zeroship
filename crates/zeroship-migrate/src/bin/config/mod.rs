@@ -30,6 +30,7 @@ pub const ENV_MIGRATIONS_DIR: &str = "ZEROSHIP_MIGRATE_MIGRATIONS_DIR";
 pub const ENV_SCHEMA_FILE: &str = "ZEROSHIP_MIGRATE_SCHEMA_FILE";
 pub const ENV_ENGINE: &str = "ZEROSHIP_MIGRATE_ENGINE";
 pub const ENV_PROFILE: &str = "ZEROSHIP_MIGRATE_PROFILE";
+pub const ENV_DUMP_SCHEMA: &str = "ZEROSHIP_MIGRATE_DUMP_SCHEMA";
 
 /// The parsed `zeroship-migrate.toml`. Every key is optional; an absent key leaves
 /// that field `None` so the next-lower precedence layer supplies it.
@@ -46,6 +47,10 @@ pub struct FileConfig {
     pub engine: Option<String>,
     /// `trusted` | `platform` | `confined` (validated when folded into the profile).
     pub profile: Option<String>,
+    /// Auto-refresh `schema.sql` after a successful `migrate`/`up`/`rollback`/`down`
+    /// (dbmate parity, default ON). `false` disables the auto-dump. The CLI
+    /// `--no-dump-schema` flag can only turn it OFF (one-directional override).
+    pub dump_schema: Option<bool>,
 }
 
 /// A failure resolving the file/env layer (printed by the bin; exits non-zero).
@@ -152,6 +157,12 @@ pub struct FileEnvLayer {
     pub database_url: Option<String>,
     pub engine: Option<String>,
     pub profile: Option<String>,
+    /// Auto-dump `schema.sql` after a schema-changing command (env wins over file;
+    /// `None` ⇒ neither layer set it, so the built-in default ON applies). A
+    /// present-but-EMPTY env var is treated as unset; a non-empty env value is
+    /// parsed as a bool (`true`/`1`/`yes`/`on` ⇒ true; `false`/`0`/`no`/`off` ⇒
+    /// false; anything else falls through to the file value).
+    pub dump_schema: Option<bool>,
 }
 
 impl FileEnvLayer {
@@ -172,7 +183,28 @@ impl FileEnvLayer {
             database_url: f(|c| c.database_url.as_deref(), ENV_DATABASE_URL),
             engine: f(|c| c.engine.as_deref(), ENV_ENGINE),
             profile: f(|c| c.profile.as_deref(), ENV_PROFILE),
+            dump_schema: resolve_dump_schema(file.and_then(|c| c.dump_schema)),
         }
+    }
+}
+
+/// Parse a boolean env string (`true`/`1`/`yes`/`on` vs `false`/`0`/`no`/`off`,
+/// case-insensitive). `None` for an unrecognised value (so it falls through to the
+/// file/default rather than silently flipping the setting).
+fn parse_bool_env(s: &str) -> Option<bool> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// Fold `ZEROSHIP_MIGRATE_DUMP_SCHEMA` (non-empty, parseable) over the file value.
+/// A present-but-empty / unparseable env var is treated as unset.
+fn resolve_dump_schema(file_value: Option<bool>) -> Option<bool> {
+    match std::env::var(ENV_DUMP_SCHEMA) {
+        Ok(v) if !v.is_empty() => parse_bool_env(&v).or(file_value),
+        _ => file_value,
     }
 }
 
@@ -203,6 +235,29 @@ mod tests {
     fn empty_config_is_all_none() {
         let cfg: FileConfig = toml::from_str("").expect("parse empty");
         assert_eq!(cfg, FileConfig::default());
+    }
+
+    #[test]
+    fn parse_dump_schema_bool_from_config() {
+        let cfg: FileConfig = toml::from_str("dump_schema = false\n").expect("parse");
+        assert_eq!(cfg.dump_schema, Some(false));
+        let cfg: FileConfig = toml::from_str("dump_schema = true\n").expect("parse");
+        assert_eq!(cfg.dump_schema, Some(true));
+        // Absent ⇒ None (so the bin's ON default applies).
+        let cfg: FileConfig = toml::from_str("migrations_dir = \"x\"\n").expect("parse");
+        assert_eq!(cfg.dump_schema, None);
+    }
+
+    #[test]
+    fn parse_bool_env_accepts_the_usual_truthy_falsy_set() {
+        for t in ["true", "1", "yes", "on", "TRUE", "On"] {
+            assert_eq!(parse_bool_env(t), Some(true), "{t} should be true");
+        }
+        for f in ["false", "0", "no", "off", "FALSE", "Off"] {
+            assert_eq!(parse_bool_env(f), Some(false), "{f} should be false");
+        }
+        // An unrecognised value falls through (None) rather than silently flipping.
+        assert_eq!(parse_bool_env("maybe"), None);
     }
 
     #[test]

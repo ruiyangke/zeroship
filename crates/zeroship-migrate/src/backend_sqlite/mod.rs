@@ -38,6 +38,7 @@ use zeroship_schema::query::SqlDialect;
 
 pub use actor::{MigrationActor, SqliteActorError};
 pub use authorizer::Mode;
+pub use journal_sql::LoadedVersion;
 pub use rebuild_sql::{RebuildError, SqliteRebuildSpec};
 
 /// The SQLite [`MigrationBackend`]. Holds the dedicated hardened migration actor
@@ -179,6 +180,44 @@ impl SqliteBackend {
     /// [`SqliteActorError`] on a `sqlite_master` read failure.
     pub async fn dump_schema_sqlite(&self) -> Result<String, SqliteActorError> {
         dump_sql::dump_schema(&self.actor).await
+    }
+
+    /// `load` (a.k.a. `db:setup`) — RESTORE a dumped schema's DDL onto `main`. The
+    /// SQLite peer of piping `schema.sql` into `psql`: the operator-/engine-generated
+    /// dump body is replayed verbatim under engine mode (the Trusted/restore posture —
+    /// this is an operator restore of a dump, not an untrusted creator `up`). Runs as
+    /// one `execute_batch` (the dump body is multi-statement). The `_mig` journal is a
+    /// SEPARATE attached DB and the dump never references it, so this only recreates
+    /// `main` objects.
+    ///
+    /// # Errors
+    /// [`SqliteActorError`] on a DDL failure (e.g. a malformed dump body).
+    pub async fn restore_schema_sqlite(&self, ddl: &str) -> Result<(), SqliteActorError> {
+        // Engine mode: an operator dump restore may CREATE tables/indexes/triggers/
+        // views on `main`; the engine authorizer allows `main` DDL in EngineJournal.
+        // (A no-op empty body is harmless.)
+        if ddl.trim().is_empty() {
+            return Ok(());
+        }
+        self.actor.set_mode(authorizer::Mode::EngineJournal).await?;
+        self.actor.exec(ddl).await
+    }
+
+    /// `load` — journal the dump trailer's versions as `baseline`-kind `completed`
+    /// events WITHOUT running any `up` (the DDL was already restored by
+    /// [`restore_schema_sqlite`](Self::restore_schema_sqlite)). First-entry-only: it
+    /// refuses if the journal already records net-applied migrations (the
+    /// already-managed guard). Returns how many versions were journaled.
+    ///
+    /// # Errors
+    /// [`SqliteActorError`] if the DB is already engine-managed or on a journal-write
+    /// failure.
+    pub async fn record_loaded_versions_sqlite(
+        &self,
+        versions: &[journal_sql::LoadedVersion],
+        applied_by: &str,
+    ) -> Result<usize, SqliteActorError> {
+        journal_sql::record_loaded_versions(&self.actor, versions, applied_by).await
     }
 }
 

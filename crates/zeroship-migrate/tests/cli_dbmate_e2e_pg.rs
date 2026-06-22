@@ -176,9 +176,12 @@ async fn cli_dbmate_full_workflow_under_default_trusted_profile() {
         &meta,
     ];
 
-    // 3. `migrate` — default Trusted profile applies it.
+    // 3. `migrate` — default Trusted profile applies it. `--no-dump-schema` opts
+    //    out of the new auto-`schema.sql` refresh (dbmate parity, ON by default) so
+    //    this apply-path e2e does not litter `./db/schema.sql` in the crate CWD.
     let mut migrate_args = vec!["migrate"];
     migrate_args.extend_from_slice(&base);
+    migrate_args.push("--no-dump-schema");
     let (ok_mig, out_mig, err_mig) = run_bin(&migrate_args);
     assert!(
         ok_mig,
@@ -211,9 +214,12 @@ async fn cli_dbmate_full_workflow_under_default_trusted_profile() {
     );
 
     // 5. `down --yes` — rolls back the one migration; the table is gone.
+    //    `--no-dump-schema`: rollback/down also auto-refreshes schema.sql; suppress
+    //    it (apply-path e2e, run_bin inherits the crate CWD).
     let mut down_args = vec!["down"];
     down_args.extend_from_slice(&base);
     down_args.push("--yes");
+    down_args.push("--no-dump-schema");
     let (ok_down, out_down, err_down) = run_bin(&down_args);
     assert!(
         ok_down,
@@ -285,6 +291,9 @@ async fn explicit_platform_profile_still_applies() {
         "platform",
         "--meta-schema",
         &meta,
+        // Apply-path e2e (run_bin inherits the crate CWD): opt out of the auto-dump
+        // so it does not write a stray `./db/schema.sql`.
+        "--no-dump-schema",
     ]);
     assert!(
         ok,
@@ -390,9 +399,11 @@ async fn cli_validate_pg_clean_exits_zero_then_drift_exits_nonzero() {
         "clean validate prints dry-run ok + drift clean: {out_clean}"
     );
 
-    // Apply so the journal records a checksum to drift against.
+    // Apply so the journal records a checksum to drift against. `--no-dump-schema`:
+    // this validate/drift e2e is not the schema-dump lifecycle (avoid a stray dump).
     let mut migrate_args = vec!["migrate"];
     migrate_args.extend_from_slice(&base);
+    migrate_args.push("--no-dump-schema");
     let (ok_mig, _o, e) = run_bin(&migrate_args);
     assert!(ok_mig, "`migrate`\nstderr={e}");
 
