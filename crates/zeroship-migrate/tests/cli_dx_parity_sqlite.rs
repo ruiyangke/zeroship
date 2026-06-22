@@ -237,3 +237,185 @@ fn malformed_config_is_a_clear_error() {
         "error should name the config/toml problem, got: {err}"
     );
 }
+
+/// MED-1 RED: an EMPTY `DATABASE_URL` (a present-but-empty env var — the classic
+/// `export DATABASE_URL=` shell footgun) must be treated as UNSET, falling back to
+/// the config file's `database_url`. Pre-fix, clap's `env = "DATABASE_URL"` yields
+/// `Some("")`, the config fallback is skipped, and `classify_engine("")` →
+/// Unsupported, so `status` fails. Post-fix the config DSN is used. The other four
+/// `ZEROSHIP_MIGRATE_*` vars already treat empty-as-unset; the DSN must match.
+#[test]
+fn empty_database_url_env_falls_back_to_config_dsn() {
+    let tok = token();
+    let root = std::env::temp_dir().join(format!("zsmig_dx_emptyenv_{tok}"));
+    let migs = root.join("migrations");
+    std::fs::create_dir_all(&migs).expect("migs");
+    // A SQLite app file the config DSN points at (a bare-path-free sqlite: scheme so
+    // there is no ambiguity).
+    let app = root.join("app.db");
+    let cfg_dsn = format!("sqlite:{}", app.to_str().unwrap());
+    std::fs::write(
+        root.join("zeroship-migrate.toml"),
+        format!(
+            "migrations_dir = \"migrations\"\ndatabase_url = \"{}\"\n",
+            cfg_dsn.replace('\\', "/")
+        ),
+    )
+    .expect("write config");
+
+    // EMPTY DATABASE_URL in the env (run_bin_in env_removes it first, so set it back
+    // to "" explicitly here to reproduce the footgun).
+    let mut env = HashMap::new();
+    env.insert("DATABASE_URL", String::new());
+
+    // `status` reads the journal; it must succeed using the CONFIG dsn, NOT fail with
+    // an unsupported/missing-url error from an empty DSN.
+    let (ok, out, err) = run_bin_in(&root, &env, &["status"]);
+    let msg = format!("{out}{err}").to_lowercase();
+    assert!(
+        ok,
+        "empty DATABASE_URL must fall through to the config DSN\nstdout+stderr: {msg}"
+    );
+    assert!(
+        !msg.contains("unsupported") && !msg.contains("missing database url"),
+        "empty DATABASE_URL must not surface an unsupported/missing-url error: {msg}"
+    );
+}
+
+/// MED-1: a NON-EMPTY `DATABASE_URL` still wins over the config `database_url`
+/// (precedence: flag > env(non-empty) > config). Guards the fix from inverting
+/// precedence. We point the env at a sqlite file and the config at a DIFFERENT one,
+/// then observe which file `migrate` creates.
+#[test]
+fn nonempty_database_url_env_wins_over_config_dsn() {
+    let tok = token();
+    let root = std::env::temp_dir().join(format!("zsmig_dx_envwins_{tok}"));
+    let migs = root.join("migrations");
+    std::fs::create_dir_all(&migs).expect("migs");
+    let dir_s = migs.to_str().unwrap().to_string();
+
+    let env_app = root.join("env.db");
+    let cfg_app = root.join("cfg.db");
+    std::fs::write(
+        root.join("zeroship-migrate.toml"),
+        format!(
+            "migrations_dir = \"migrations\"\ndatabase_url = \"sqlite:{}\"\n",
+            cfg_app.to_str().unwrap().replace('\\', "/")
+        ),
+    )
+    .expect("write config");
+
+    // A trivial migration.
+    let empty: HashMap<&str, String> = HashMap::new();
+    let (ok, _o, _e) = run_bin_in(&root, &empty, &["new", "mk", "--dir", &dir_s]);
+    assert!(ok, "new");
+    let file = list_sql(&migs).into_iter().next().expect("a file");
+    std::fs::write(
+        &file,
+        "-- migrate:up\nCREATE TABLE mk (id INTEGER PRIMARY KEY);\n\n-- migrate:down\nDROP TABLE mk;\n",
+    )
+    .expect("body");
+
+    let mut env = HashMap::new();
+    env.insert("DATABASE_URL", format!("sqlite:{}", env_app.to_str().unwrap()));
+    let (ok, out, err) = run_bin_in(&root, &env, &["migrate"]);
+    assert!(ok, "migrate with env DSN\n{out}\n{err}");
+    assert!(env_app.exists(), "env DSN's file was created (env wins)");
+    assert!(!cfg_app.exists(), "config DSN's file was NOT touched");
+}
+
+/// MED-2 RED (binary level): `--engine sqlite` + an UNSUPPORTED explicit scheme
+/// (`redis://h`) must REFUSE — it must NOT open a file literally named `redis://h`.
+/// `--engine pg` + `mysql://h/db` must likewise refuse, NOT hand the URL to libpq.
+#[test]
+fn engine_override_refuses_unsupported_scheme() {
+    let tok = token();
+    let root = std::env::temp_dir().join(format!("zsmig_dx_unsup_{tok}"));
+    let migs = root.join("migrations");
+    std::fs::create_dir_all(&migs).expect("migs");
+    let dir_s = migs.to_str().unwrap().to_string();
+    let empty: HashMap<&str, String> = HashMap::new();
+
+    // --engine sqlite + redis://h : must refuse, must NOT create a "redis:" file.
+    let (ok, out, err) = run_bin_in(
+        &root,
+        &empty,
+        &[
+            "status",
+            "--dir",
+            &dir_s,
+            "--database-url",
+            "redis://h",
+            "--engine",
+            "sqlite",
+        ],
+    );
+    assert!(!ok, "unsupported scheme under --engine must exit non-zero\n{out}\n{err}");
+    let msg = format!("{out}{err}").to_lowercase();
+    assert!(
+        msg.contains("unsupported") || msg.contains("engine"),
+        "error should name the unsupported engine, got: {err}"
+    );
+    // No SQLite file literally named after the redis URL was created anywhere.
+    assert!(
+        !root.join("redis:").exists() && !root.join("redis://h").exists(),
+        "must NOT create a file from the redis:// URL"
+    );
+
+    // --engine pg + mysql://h/db : must refuse (not a libpq attempt on a mysql URL).
+    let (ok, out, err) = run_bin_in(
+        &root,
+        &empty,
+        &[
+            "status",
+            "--dir",
+            &dir_s,
+            "--database-url",
+            "mysql://h/db",
+            "--engine",
+            "pg",
+        ],
+    );
+    assert!(!ok, "mysql scheme under --engine pg must exit non-zero\n{out}\n{err}");
+    let msg = format!("{out}{err}").to_lowercase();
+    assert!(
+        msg.contains("unsupported") || msg.contains("engine"),
+        "error should name the unsupported engine, got: {err}"
+    );
+}
+
+/// LOW-3 RED: when a `zeroship-migrate.toml` IS discovered+loaded, the CLI echoes a
+/// one-line `using config: <abs path>` note to STDERR (so an ancestor-dir config —
+/// possibly carrying a `database_url` — is never adopted invisibly). When NO config
+/// exists, no such line appears.
+#[test]
+fn discovered_config_path_is_echoed_to_stderr() {
+    let tok = token();
+    let root = std::env::temp_dir().join(format!("zsmig_dx_echo_{tok}"));
+    std::fs::create_dir_all(&root).expect("root");
+    let cfg_path = root.join("zeroship-migrate.toml");
+    std::fs::write(&cfg_path, "migrations_dir = \"migrations\"\n").expect("config");
+    let empty: HashMap<&str, String> = HashMap::new();
+
+    // `new` is offline; it still discovers+loads the config, so the echo must fire.
+    let (ok, _out, err) = run_bin_in(&root, &empty, &["new", "echotest"]);
+    assert!(ok, "new with a config must succeed\n{err}");
+    assert!(
+        err.contains("using config:"),
+        "the discovered config path must be echoed to stderr, got: {err:?}"
+    );
+    assert!(
+        err.contains(cfg_path.to_str().unwrap()) || err.contains("zeroship-migrate.toml"),
+        "the echo should carry the config path, got: {err:?}"
+    );
+
+    // No config anywhere ⇒ no echo line.
+    let bare = std::env::temp_dir().join(format!("zsmig_dx_noecho_{tok}"));
+    std::fs::create_dir_all(&bare).expect("bare");
+    let (ok, _out, err) = run_bin_in(&bare, &empty, &["new", "echotest2", "--dir", "m"]);
+    assert!(ok, "new without a config must succeed\n{err}");
+    assert!(
+        !err.contains("using config:"),
+        "no config ⇒ no echo line, got: {err:?}"
+    );
+}
