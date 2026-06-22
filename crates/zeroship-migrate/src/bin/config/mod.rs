@@ -19,8 +19,13 @@ use std::path::{Path, PathBuf};
 /// The config-file name discovered in the project tree.
 pub const CONFIG_FILE_NAME: &str = "zeroship-migrate.toml";
 
-/// Env var names (analogous to the existing `DATABASE_URL`). `DATABASE_URL` itself
-/// is NOT renamed — it remains the DSN env, read by clap's `env=` on the bin.
+/// The DSN env var (unchanged name). Read HERE through the same empty-is-unset rule
+/// as the `ZEROSHIP_MIGRATE_*` vars (MED-1) — NOT via clap's `env=`, which would
+/// surface a present-but-empty `DATABASE_URL=` as `Some("")` and defeat the config
+/// fallback.
+pub const ENV_DATABASE_URL: &str = "DATABASE_URL";
+
+/// Env var names (analogous to the existing `DATABASE_URL`).
 pub const ENV_MIGRATIONS_DIR: &str = "ZEROSHIP_MIGRATE_MIGRATIONS_DIR";
 pub const ENV_SCHEMA_FILE: &str = "ZEROSHIP_MIGRATE_SCHEMA_FILE";
 pub const ENV_ENGINE: &str = "ZEROSHIP_MIGRATE_ENGINE";
@@ -67,21 +72,39 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+/// A discovered + parsed project config, paired with the absolute-ish path it was
+/// loaded FROM (so the bin can echo `using config: <path>` — LOW-3). The path is the
+/// `start`-relative join walked up to where the file was found; the bin canonicalizes
+/// it for the echo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredConfig {
+    /// The path the config was loaded from (the discovered `zeroship-migrate.toml`).
+    pub path: PathBuf,
+    /// The parsed config.
+    pub config: FileConfig,
+}
+
 /// Discover + read the project config file, starting at `start` and walking UP to
 /// the filesystem root. Returns:
 /// - `Ok(None)` if no `zeroship-migrate.toml` exists anywhere up the tree (fine);
-/// - `Ok(Some(cfg))` for the first one found (parsed);
+/// - `Ok(Some(discovered))` for the first one found (parsed), carrying the PATH it
+///   was loaded from (so the bin can echo it — an ancestor-dir config must never be
+///   adopted invisibly);
 /// - `Err(..)` if a found file cannot be read or is malformed.
 ///
 /// # Errors
 /// [`ConfigError::Read`] / [`ConfigError::Parse`] for an unreadable / malformed
 /// discovered file.
-pub fn discover_file_config(start: &Path) -> Result<Option<FileConfig>, ConfigError> {
+pub fn discover_file_config(start: &Path) -> Result<Option<DiscoveredConfig>, ConfigError> {
     let mut dir = Some(start);
     while let Some(d) = dir {
         let candidate = d.join(CONFIG_FILE_NAME);
         if candidate.is_file() {
-            return load_file_config(&candidate).map(Some);
+            let config = load_file_config(&candidate)?;
+            return Ok(Some(DiscoveredConfig {
+                path: candidate,
+                config,
+            }));
         }
         dir = d.parent();
     }
@@ -100,7 +123,10 @@ pub fn load_file_config(path: &Path) -> Result<FileConfig, ConfigError> {
     })?;
     toml::from_str(&text).map_err(|e| ConfigError::Parse {
         path: path.to_path_buf(),
-        message: e.message().to_string(),
+        // `Display` (`to_string`) carries the line/column span + source snippet;
+        // `.message()` strips the location, leaving the operator with no pointer to
+        // the offending line in a multi-line config. Keep the span (LOW-2).
+        message: e.to_string(),
     })
 }
 
@@ -130,9 +156,11 @@ pub struct FileEnvLayer {
 
 impl FileEnvLayer {
     /// Fold a (possibly absent) file config with the process env into the
-    /// file+env layer (env wins over file per key). `DATABASE_URL` is read here too
-    /// for parity, but the bin's clap `env=` already covers it — the bin treats the
-    /// clap value as authoritative and only consults `database_url` from the file.
+    /// file+env layer (env wins over file per key, with a present-but-EMPTY env var
+    /// treated as unset). `database_url` is folded the SAME way (MED-1): a non-empty
+    /// `DATABASE_URL` env wins over the file; an empty `DATABASE_URL=` falls through
+    /// to the file's `database_url`. The bin then lets the `--database-url` flag win
+    /// on top of this folded value.
     #[must_use]
     pub fn resolve(file: Option<&FileConfig>) -> Self {
         let f = |get: fn(&FileConfig) -> Option<&str>, env_var: &str| {
@@ -141,10 +169,7 @@ impl FileEnvLayer {
         Self {
             migrations_dir: f(|c| c.migrations_dir.as_deref(), ENV_MIGRATIONS_DIR),
             schema_file: f(|c| c.schema_file.as_deref(), ENV_SCHEMA_FILE),
-            // database_url's env is DATABASE_URL (unchanged), handled by the bin's
-            // clap layer; here we only surface the FILE value for the bin to fall
-            // back to when neither --database-url nor DATABASE_URL is set.
-            database_url: file.and_then(|c| c.database_url.clone()),
+            database_url: f(|c| c.database_url.as_deref(), ENV_DATABASE_URL),
             engine: f(|c| c.engine.as_deref(), ENV_ENGINE),
             profile: f(|c| c.profile.as_deref(), ENV_PROFILE),
         }
@@ -200,6 +225,33 @@ mod tests {
         assert!(err.to_string().contains("malformed config"));
     }
 
+    /// LOW-2 RED: the parse error must PRESERVE the TOML span (line/column), not just
+    /// the bare message — so an operator with a multi-line config gets pointed at the
+    /// offending line. `toml::de::Error`'s `Display` carries the span; `.message()`
+    /// strips it. Pre-fix (using `.message()`) this assertion fails.
+    #[test]
+    fn malformed_toml_error_preserves_line_column_span() {
+        let dir = std::env::temp_dir().join(format!("zsmig_cfg_span_{}", uniq()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONFIG_FILE_NAME);
+        // A multi-line config whose error is on line 3, so a line indication is
+        // meaningful (not trivially line 1).
+        std::fs::write(
+            &path,
+            "migrations_dir = \"db/m\"\nschema_file = \"db/s.sql\"\nengine = = broken\n",
+        )
+        .unwrap();
+        let err = load_file_config(&path).unwrap_err();
+        let s = err.to_string();
+        // `toml`'s Display embeds a `line N, column M` (and a TOML source span). The
+        // bare `.message()` form does not. Match the location wording robustly.
+        let lc = s.to_lowercase();
+        assert!(
+            lc.contains("line ") && lc.contains("column "),
+            "parse error must carry a line/column span, got: {s}"
+        );
+    }
+
     // ---- discovery (walks up) ----
 
     #[test]
@@ -213,7 +265,9 @@ mod tests {
         )
         .unwrap();
         let found = discover_file_config(&sub).expect("discover").expect("some");
-        assert_eq!(found.migrations_dir.as_deref(), Some("from_root"));
+        assert_eq!(found.config.migrations_dir.as_deref(), Some("from_root"));
+        // The discovered PATH is the ancestor's config (LOW-3: the bin echoes this).
+        assert_eq!(found.path, root.join(CONFIG_FILE_NAME));
     }
 
     #[test]

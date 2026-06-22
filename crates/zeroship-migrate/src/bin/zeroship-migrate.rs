@@ -67,10 +67,15 @@ struct Cli {
     #[arg(long, global = true)]
     dir: Option<PathBuf>,
 
-    /// Postgres/SQLite DSN. Precedence (highest first): this flag, then the
-    /// `DATABASE_URL` env, then `database_url` in `zeroship-migrate.toml`. (clap's
-    /// `env=` folds the first two; the bin folds the config below them.)
-    #[arg(long, global = true, env = "DATABASE_URL")]
+    /// Postgres/SQLite DSN. Precedence (highest first): this flag, then a NON-EMPTY
+    /// `DATABASE_URL` env, then `database_url` in `zeroship-migrate.toml`. We do NOT
+    /// use clap's `env=` here: clap 4 yields `Some("")` for a present-but-empty var,
+    /// which would defeat the config fallback (and `classify_engine("")` is an
+    /// Unsupported error). Instead the bin reads `DATABASE_URL` explicitly through the
+    /// SAME empty-is-unset rule the four `ZEROSHIP_MIGRATE_*` vars use, so an empty
+    /// value falls through to the config DSN (MED-1). This field holds ONLY the
+    /// `--database-url` flag value.
+    #[arg(long, global = true)]
     database_url: Option<String>,
 
     /// Force the database engine, overriding DSN-shape auto-detection: `pg` |
@@ -302,8 +307,9 @@ fn effective_engine(cli: &Cli, layer: &FileEnvLayer) -> Result<Option<EngineKind
 /// layer (precedence applied here, per §9). `main` stays thin: parse → this →
 /// delegate.
 fn run_config(cli: &Cli, layer: &FileEnvLayer) -> Result<RunConfig, String> {
-    // DSN precedence: clap already folded --database-url > DATABASE_URL; the file's
-    // `database_url` is the lowest fallback below them.
+    // DSN precedence: --database-url flag > non-empty DATABASE_URL env > config
+    // `database_url`. The env (empty-is-unset) and file are already folded into
+    // `layer.database_url` by `FileEnvLayer::resolve`; the flag wins on top here.
     let database_url = cli
         .database_url
         .clone()
@@ -613,13 +619,22 @@ async fn main() -> ExitCode {
     // env into the file+env precedence layer. A MISSING file is fine; a MALFORMED
     // one is a hard, clear error (never silently ignored).
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let file_cfg = match config::discover_file_config(&cwd) {
+    let discovered = match config::discover_file_config(&cwd) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("zeroship-migrate: {e}");
             return ExitCode::FAILURE;
         }
     };
+    // LOW-3: when a config IS discovered+loaded, echo its path to STDERR so an
+    // ancestor-dir `zeroship-migrate.toml` (possibly carrying a `database_url`) is
+    // never adopted invisibly. Silent when none is found. Canonicalize for an
+    // absolute path; fall back to the discovered (relative) path if that fails.
+    if let Some(d) = &discovered {
+        let shown = std::fs::canonicalize(&d.path).unwrap_or_else(|_| d.path.clone());
+        eprintln!("using config: {}", shown.display());
+    }
+    let file_cfg = discovered.map(|d| d.config);
     let layer = FileEnvLayer::resolve(file_cfg.as_ref());
 
     // `new` is offline (no DB): handle it before building a DSN-bearing RunConfig.

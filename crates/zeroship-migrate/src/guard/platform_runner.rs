@@ -437,6 +437,16 @@ pub fn resolve_engine(database_url: &str, override_kind: Option<EngineKind>) -> 
                 dsn: dsn_kind.as_str(),
             });
         }
+    } else if classify_engine(database_url) == Engine::Unsupported {
+        // The DSN has no engine the override could resolve: an UNSUPPORTED explicit
+        // scheme (`redis://`, `mysql://h/db`, …). `dsn_scheme_engine` returns `None`
+        // for BOTH this and an ambiguous bare path, but only a bare path is
+        // override-resolvable (it classifies as SQLite, not Unsupported). An
+        // unsupported explicit scheme must still REFUSE under an override — never be
+        // coerced into a file literally named `redis://h` (sqlite) or a doomed libpq
+        // attempt (pg). With no override, `classify_engine` already refuses; the
+        // override must not make it worse.
+        return Err(RunError::UnsupportedEngine);
     }
     Ok(match kind {
         EngineKind::Postgres => Engine::Postgres,
@@ -1469,6 +1479,50 @@ mod tests {
         // --engine sqlite vs a libpq keyword DSN (also unambiguously PG).
         let err = resolve_engine("host=h dbname=db", Some(EngineKind::Sqlite)).unwrap_err();
         assert!(matches!(err, RunError::EngineConflict { .. }));
+    }
+
+    /// MED-2 RED: an UNSUPPORTED explicit scheme (`redis://`, `mysql://…`) must NOT
+    /// be coerced by `--engine` into a file/connect attempt. With no override,
+    /// `classify_engine` already refuses (Unsupported); `--engine` must still refuse
+    /// — it must never make the unsupported-scheme case WORSE. The url
+    /// `redis://h` must NOT become `Engine::Sqlite(redis://h)` (a file literally
+    /// named `redis://h`) under `--engine sqlite`, nor `Engine::Postgres` (a libpq
+    /// attempt) under `--engine pg`.
+    #[test]
+    fn resolve_engine_override_does_not_coerce_unsupported_scheme() {
+        // --engine sqlite + redis://h must refuse, NOT open a file named "redis://h".
+        let err = resolve_engine("redis://h", Some(EngineKind::Sqlite)).unwrap_err();
+        assert!(
+            matches!(err, RunError::UnsupportedEngine | RunError::EngineConflict { .. }),
+            "expected a clean refusal, got {err:?}"
+        );
+        // --engine pg + mysql://h/db must refuse, NOT hand mysql://h/db to libpq.
+        let err = resolve_engine("mysql://h/db", Some(EngineKind::Postgres)).unwrap_err();
+        assert!(
+            matches!(err, RunError::UnsupportedEngine | RunError::EngineConflict { .. }),
+            "expected a clean refusal, got {err:?}"
+        );
+        // --engine pg + redis://h must also refuse.
+        let err = resolve_engine("redis://h", Some(EngineKind::Postgres)).unwrap_err();
+        assert!(
+            matches!(err, RunError::UnsupportedEngine | RunError::EngineConflict { .. }),
+            "expected a clean refusal, got {err:?}"
+        );
+    }
+
+    /// MED-2: an AMBIGUOUS bare path (no scheme) remains override-resolvable — the
+    /// override must NOT be downgraded by the unsupported-scheme refusal. Guards the
+    /// fix from over-refusing.
+    #[test]
+    fn resolve_engine_override_still_resolves_bare_path_after_fix() {
+        assert_eq!(
+            resolve_engine("/data/app.db", Some(EngineKind::Sqlite)).expect("ok"),
+            Engine::Sqlite(PathBuf::from("/data/app.db"))
+        );
+        assert_eq!(
+            resolve_engine("/data/app.db", Some(EngineKind::Postgres)).expect("ok"),
+            Engine::Postgres
+        );
     }
 
     #[test]
