@@ -327,3 +327,95 @@ fn compose_and_ops_pass_profile_platform_explicitly() {
         "ops/db-migrate.sh must pass --profile to the binary explicitly"
     );
 }
+
+/// `validate` is a CI GATE (fix #3): a CLEAN set exits 0, but a checksum-DRIFTED
+/// set must exit NON-ZERO so CI can block on it — while the printed lines stay the
+/// same (`validate: … drift_clean=false` + a `DRIFT` line). Pre-fix the drifted run
+/// printed `drift_clean=false` yet still exited 0; this pins the non-zero exit on
+/// the PG leg (the SQLite peer is in `cli_dbmate_e2e_sqlite.rs`).
+///
+/// Driven under `--profile platform` against a fresh throwaway DB + a unique schema
+/// the migration `CREATE`s — the Platform shadow path the binary exercises today (it
+/// provisions a throwaway shadow DATABASE under the admin connection, design §8).
+#[compio::test]
+async fn cli_validate_pg_clean_exits_zero_then_drift_exits_nonzero() {
+    let tok = token();
+    let db = format!("zsmig_valgate_{tok}");
+    let meta = format!("valgate_meta_{tok}");
+    let schema = format!("valgate_s_{tok}");
+
+    let admin = connect(&admin_dsn()).await;
+    create_db(&admin, &db).await;
+
+    let tmp = std::env::temp_dir().join(format!("zsmig_valgate_dir_{tok}"));
+    std::fs::create_dir_all(&tmp).expect("create temp migration dir");
+    let dir_s = tmp.to_str().unwrap().to_string();
+    let url = bin_database_url(&db);
+
+    // A Flyway-shaped migration that creates its own schema + table (so the Platform
+    // shadow apply has a clean target). The CREATE SCHEMA is the Platform path.
+    let mig = tmp.join("V0001__widgets.sql");
+    std::fs::write(
+        &mig,
+        format!(
+            "CREATE SCHEMA IF NOT EXISTS \"{schema}\";\n\
+             CREATE TABLE \"{schema}\".widgets (id int);\n"
+        ),
+    )
+    .expect("write migration body");
+
+    let base = [
+        "--dir",
+        &dir_s,
+        "--database-url",
+        &url,
+        "--profile",
+        "platform",
+        "--schema",
+        &schema,
+        "--meta-schema",
+        &meta,
+    ];
+    let mut validate_args = vec!["validate"];
+    validate_args.extend_from_slice(&base);
+
+    // (a) CLEAN — validate before any apply: dry-run ok + drift clean → EXIT 0.
+    let (ok_clean, out_clean, err_clean) = run_bin(&validate_args);
+    assert!(
+        ok_clean,
+        "clean `validate` must exit 0\nstdout={out_clean}\nstderr={err_clean}"
+    );
+    assert!(
+        out_clean.contains("dry-run ok=true") && out_clean.contains("drift_clean=true"),
+        "clean validate prints dry-run ok + drift clean: {out_clean}"
+    );
+
+    // Apply so the journal records a checksum to drift against.
+    let mut migrate_args = vec!["migrate"];
+    migrate_args.extend_from_slice(&base);
+    let (ok_mig, _o, e) = run_bin(&migrate_args);
+    assert!(ok_mig, "`migrate`\nstderr={e}");
+
+    // (b) DRIFT — mutate the migration body AFTER apply; the journal holds the old
+    //     checksum. validate must FLAG the drift AND exit NON-ZERO (the CI gate).
+    std::fs::write(
+        &mig,
+        format!(
+            "CREATE SCHEMA IF NOT EXISTS \"{schema}\";\n\
+             CREATE TABLE \"{schema}\".widgets (id int, extra text);\n"
+        ),
+    )
+    .expect("rewrite migration body (drift)");
+    let (ok_drift, out_drift, _e) = run_bin(&validate_args);
+    assert!(
+        out_drift.contains("drift_clean=false") && out_drift.contains("DRIFT"),
+        "validate prints the drift (output unchanged): {out_drift}"
+    );
+    assert!(
+        !ok_drift,
+        "a drifted `validate` must exit NON-ZERO so CI can gate on it: {out_drift}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    drop_db(&admin, &db).await;
+}

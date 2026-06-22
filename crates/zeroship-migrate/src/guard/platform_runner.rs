@@ -621,14 +621,15 @@ async fn run_validate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
 ///
 /// SQLite has no admin `CREATEDB` and the backend deliberately exposes no
 /// `ShadowDryRun` capability (`shadow()` is `None`), so we build the shadow
-/// OURSELVES: a fresh throwaway SQLite file alongside the app file (`<app>.shadow`
-/// + its sibling journal), onto which we REPLAY the loaded set through the SAME
-/// generic engine `apply` the real `migrate` uses. The shadow file + journal are
-/// removed on exit. The throwaway clone is created, applied to, and torn down
-/// WITHOUT touching the real DB's schema. We then run the SAME checksum-drift
-/// check + destructive advisories the PG leg runs (shared `validate_plan_signals`
-/// + the backend-generic `check_checksum_drift`), emitting the same
-/// [`ValidateReport`] shape.
+/// OURSELVES: a fresh throwaway SQLite file alongside the app file (a unique
+/// `<app>.<uuid>.shadow` plus its sibling journal), onto which we REPLAY the loaded
+/// set through the SAME generic engine `apply` the real `migrate` uses. The shadow
+/// file and journal are removed on exit (every path, success and error). The
+/// throwaway clone is created, applied to, and torn down WITHOUT touching the real
+/// DB's schema. We then run the SAME checksum-drift check and destructive
+/// advisories the PG leg runs (shared `validate_plan_signals` and the
+/// backend-generic `check_checksum_drift`), emitting the same [`ValidateReport`]
+/// shape.
 async fn run_validate_sqlite(cfg: &RunConfig, app: &Path) -> Result<RunReport, RunError> {
     let migrations = load_dir(&cfg.dir)?;
     let exec_cfg = sqlite_exec_cfg(cfg);
@@ -665,33 +666,50 @@ async fn run_validate_sqlite(cfg: &RunConfig, app: &Path) -> Result<RunReport, R
     })))
 }
 
-/// The throwaway SQLite shadow app-file path for `validate`: a sibling `<file>.shadow`
-/// (engine-constructed, never creator input). For `:memory:` the shadow is its own
-/// `:memory:` (a private throwaway DB by nature — each open is fresh).
+/// The throwaway SQLite shadow app-file path for `validate`: a sibling
+/// `<file>.<uuid>.shadow` (engine-constructed, never creator input). The per-call
+/// UUID v4 suffix makes the path UNIQUE per invocation so two concurrent `validate`
+/// runs on the SAME app file never collide on a fixed `<file>.shadow` (one run's
+/// teardown must never delete another run's in-flight shadow). For `:memory:` the
+/// shadow is its own `:memory:` (a private throwaway DB by nature — each open is
+/// fresh, so no on-disk name to disambiguate).
 fn sqlite_shadow_path(app: &Path) -> PathBuf {
     if app.as_os_str() == ":memory:" {
         return PathBuf::from(":memory:");
     }
     let mut s = app.to_path_buf().into_os_string();
-    s.push(".shadow");
+    // UUID v4 (the crate's existing uuid facility) — a fresh random id per call, so
+    // distinct invocations get distinct shadow files even on the same app path.
+    s.push(format!(".{}.shadow", uuid::Uuid::new_v4().simple()));
     PathBuf::from(s)
 }
 
 /// Replay the loaded set onto a FRESH throwaway SQLite shadow + report each
 /// migration's outcome as a [`DryRunReport`] — the SQLite-built peer of the PG
-/// shadow harness. A pre-existing shadow file from a crashed prior run is removed
-/// first so the clone always starts empty. The set is applied through the SAME
-/// generic engine `apply` the real `migrate` uses (with the plan's `Approval` so a
-/// destructive migration still dry-runs on the throwaway clone), so the dry-run is
-/// a FAITHFUL replay, not a parse-only check.
+/// shadow harness. The shadow path is UNIQUE per invocation ([`sqlite_shadow_path`]
+/// stamps a UUID), so the clone always starts empty without a pre-cleanup blow-away
+/// (which would race a concurrent run's in-flight shadow). The set is applied
+/// through the SAME generic engine `apply` the real `migrate` uses (with the plan's
+/// `Approval` so a destructive migration still dry-runs on the throwaway clone), so
+/// the dry-run is a FAITHFUL replay, not a parse-only check.
+///
+/// On a mid-batch failure the report mirrors the PG shadow leg's attribution: the
+/// migrations that COMMITTED before the failure (read back from the shadow journal)
+/// are recorded `applied_ok: true`, and the failure is attributed to the migration
+/// that ACTUALLY failed — the first plan item NOT in the shadow journal — not
+/// blanket-blamed on `plan.items.first()`. (A SQLite `up` failure surfaces as the
+/// dialect-neutral `ApplyError::Backend(_)` which carries no version, so the
+/// offending version is recovered from the committed-prefix rather than the typed
+/// error — the journal is the ground truth for what landed on the shadow.)
 async fn sqlite_shadow_dry_run(
     shadow_app: &Path,
     migrations: &[crate::migration::Migration],
     exec_cfg: &ExecutorConfig,
     guard_cfg: &super::GuardConfig,
 ) -> Result<crate::shadow::DryRunReport, RunError> {
-    // Start from an EMPTY clone: drop any leaked shadow from a crashed prior run.
-    cleanup_sqlite_shadow(shadow_app);
+    // No pre-cleanup blow-away: the shadow path is unique per invocation, so the
+    // file does not pre-exist (and a fixed-name blow-away would delete a concurrent
+    // run's in-flight shadow). Open the fresh clone directly.
     let shadow_journal = sqlite_journal_path(shadow_app);
     let backend =
         SqliteBackend::open(shadow_app, &shadow_journal).map_err(|e| RunError::Sqlite(e.to_string()))?;
@@ -717,17 +735,50 @@ async fn sqlite_shadow_dry_run(
             }
         }
         Err(e) => {
-            // The batch aborted; surface the failure (the offending version is in
-            // the message). `ok=false` makes the bin print `dry-run ok=false`.
+            // The batch aborted. Mirror the PG shadow leg: record the committed
+            // PREFIX as applied, and attribute the failure to the migration that
+            // ACTUALLY failed (the first plan item not committed), rather than
+            // blanket-blaming `plan.items.first()`. The shadow journal is the ground
+            // truth — every migration whose atomic apply COMMITTED before the abort
+            // has a `completed` event there (the failed one rolled back, so it does
+            // not). This recovers the true offending version even when the SQLite
+            // `up` failure surfaces as the version-less `ApplyError::Backend(_)`.
             ok = false;
-            per_migration.push(crate::shadow::MigrationResult {
-                version: plan
-                    .items
-                    .first()
-                    .map_or_else(String::new, |p| p.migration.version.as_str().to_string()),
-                applied_ok: false,
-                error: Some(e.to_string()),
-            });
+            let committed = shadow_committed_versions(&backend, exec_cfg).await;
+            for p in &plan.items {
+                let version = p.migration.version.as_str().to_string();
+                if committed.contains(&version) {
+                    // Applied before the failure → success-prefix entry.
+                    per_migration.push(crate::shadow::MigrationResult {
+                        version,
+                        applied_ok: true,
+                        error: None,
+                    });
+                } else {
+                    // The first not-committed plan item is the one that failed; the
+                    // engine aborts the batch on the first failure, so nothing after
+                    // it ran. Attribute the error here and stop.
+                    per_migration.push(crate::shadow::MigrationResult {
+                        version,
+                        applied_ok: false,
+                        error: Some(e.to_string()),
+                    });
+                    break;
+                }
+            }
+            // Defensive: if every plan item somehow committed yet apply errored
+            // (e.g. a post-loop engine error), still surface the failure with a
+            // batch-level entry so `ok=false` is never silently empty.
+            if per_migration.iter().all(|r| r.applied_ok) {
+                per_migration.push(crate::shadow::MigrationResult {
+                    version: plan
+                        .items
+                        .first()
+                        .map_or_else(String::new, |p| p.migration.version.as_str().to_string()),
+                    applied_ok: false,
+                    error: Some(e.to_string()),
+                });
+            }
         }
     }
 
@@ -739,6 +790,27 @@ async fn sqlite_shadow_dry_run(
         teardown_ok: true,
         teardown_error: None,
     })
+}
+
+/// Read the shadow journal's net-applied (`completed`) versions — the set of
+/// migrations whose atomic apply COMMITTED on the throwaway clone. Used by
+/// [`sqlite_shadow_dry_run`] to reconstruct the success prefix + locate the true
+/// offending migration after a mid-batch failure. Best-effort: a journal read
+/// failure yields an empty set (the failure is still surfaced via the apply error).
+async fn shadow_committed_versions(
+    backend: &SqliteBackend,
+    exec_cfg: &ExecutorConfig,
+) -> std::collections::HashSet<String> {
+    use crate::journal::Phase;
+    backend.applied(exec_cfg).await.map_or_else(
+        |_| std::collections::HashSet::new(),
+        |rows| {
+            rows.into_iter()
+                .filter(|e| e.phase == Phase::Completed)
+                .map(|e| e.version)
+                .collect()
+        },
+    )
 }
 
 /// Best-effort removal of a throwaway SQLite shadow file + its sibling journal (and
@@ -1221,6 +1293,33 @@ mod tests {
         // `:memory:` journals to a matching in-memory DB (throwaway by nature).
         assert_eq!(
             sqlite_journal_path(&PathBuf::from(":memory:")),
+            PathBuf::from(":memory:")
+        );
+    }
+
+    /// Fix #2 (shadow-file race): two `sqlite_shadow_path` calls for the SAME app
+    /// file must yield DISTINCT paths so two concurrent `validate` runs never collide
+    /// on a fixed `<file>.shadow` (and one run's teardown can never delete another's
+    /// in-flight shadow). Pre-fix the path was deterministic (`<file>.shadow`) and
+    /// these two would be equal — RED. Post-fix the per-call UUID suffix makes them
+    /// distinct. Both remain siblings of the app file, prefixed by the app name and
+    /// suffixed `.shadow`.
+    #[test]
+    fn sqlite_shadow_path_is_unique_per_invocation() {
+        let app = PathBuf::from("/tmp/app.sqlite");
+        let a = sqlite_shadow_path(&app);
+        let b = sqlite_shadow_path(&app);
+        assert_ne!(a, b, "two shadow paths for the same app must differ (no race)");
+        for p in [&a, &b] {
+            let s = p.to_string_lossy();
+            assert!(
+                s.starts_with("/tmp/app.sqlite.") && s.ends_with(".shadow"),
+                "shadow path must be a `<app>.<uuid>.shadow` sibling: {s}"
+            );
+        }
+        // `:memory:` is its own throwaway DB — no on-disk name to disambiguate.
+        assert_eq!(
+            sqlite_shadow_path(&PathBuf::from(":memory:")),
             PathBuf::from(":memory:")
         );
     }
