@@ -310,6 +310,37 @@ fn is_valid_description(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
+/// `true` iff `name` is a valid migration description the loader's filename parser
+/// would later accept: `[A-Za-z0-9_]+` (non-empty). This is the SINGLE source of
+/// truth — the CLI's `new` pre-check calls THIS so a scaffolded name can never be
+/// written and then rejected at load time (no false accept/reject drift).
+#[must_use]
+pub fn is_valid_migration_name(name: &str) -> bool {
+    is_valid_description(name)
+}
+
+/// Normalize an arbitrary user-supplied `new <name>` into a valid migration
+/// description, for the CLI's "did you mean …?" suggestion when a name is rejected.
+/// Every run of disallowed characters collapses to a single `_`, leading/trailing
+/// `_` are trimmed; an all-invalid name yields the empty string (the caller treats
+/// that as "no suggestion"). PURE; does NO I/O — the CLI decides whether to print
+/// it. This NEVER auto-renames: rejection is the contract; this is only a hint.
+#[must_use]
+pub fn suggest_migration_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut prev_us = false;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch);
+            prev_us = ch == '_';
+        } else if !prev_us {
+            out.push('_');
+            prev_us = true;
+        }
+    }
+    out.trim_matches('_').to_string()
+}
+
 // =============================================================================
 // dbmate-native format (Track A, Phase A2)
 // =============================================================================
@@ -1405,6 +1436,49 @@ mod tests {
             new_dbmate_migration("20240617123000", "create_users"),
             (filename, contents)
         );
+    }
+
+    #[test]
+    fn is_valid_migration_name_matches_loader_grammar() {
+        // The public pre-check is EXACTLY the loader's `is_valid_description`.
+        assert!(is_valid_migration_name("create_users"));
+        assert!(is_valid_migration_name("v2_users_42"));
+        assert!(is_valid_migration_name("A"));
+        // Rejected: spaces, dashes, punctuation, empty.
+        assert!(!is_valid_migration_name("bad name"));
+        assert!(!is_valid_migration_name("with-dash"));
+        assert!(!is_valid_migration_name("bang!"));
+        assert!(!is_valid_migration_name(""));
+        // The pre-check agrees with the filename parser it guards: any name it
+        // accepts produces a filename `parse_dbmate_filename` accepts, and any it
+        // rejects produces one the parser rejects (no false accept/reject).
+        for name in ["ok_name", "bad name", "x-y", ""] {
+            let fname = format!("20240101000000_{name}.sql");
+            assert_eq!(
+                is_valid_migration_name(name),
+                parse_dbmate_filename(&fname).is_some(),
+                "pre-check must agree with the loader for {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn suggest_migration_name_normalizes_invalid_input() {
+        assert_eq!(suggest_migration_name("bad name!"), "bad_name");
+        assert_eq!(suggest_migration_name("with-dash"), "with_dash");
+        assert_eq!(suggest_migration_name("  lead  trail  "), "lead_trail");
+        assert_eq!(suggest_migration_name("a--b__c"), "a_b__c");
+        assert_eq!(suggest_migration_name("already_ok"), "already_ok");
+        // An all-invalid name yields the empty string (caller: "no suggestion").
+        assert_eq!(suggest_migration_name("!!!"), "");
+        // The suggestion is itself always a valid name (or empty).
+        for raw in ["bad name!", "with-dash", "a.b.c", "café"] {
+            let s = suggest_migration_name(raw);
+            assert!(
+                s.is_empty() || is_valid_migration_name(&s),
+                "suggestion {s:?} for {raw:?} must be valid or empty"
+            );
+        }
     }
 
     #[test]

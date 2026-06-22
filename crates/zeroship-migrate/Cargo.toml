@@ -61,6 +61,9 @@ tracing = { workspace = true }
 # SYNC — zero tokio — so it does not violate the zero-tokio invariant; the
 # `env` feature backs the `--database-url` / `DATABASE_URL` env fallback.
 clap = { workspace = true }
+# The `zeroship-migrate.toml` project config for the CLI (DX parity). SYNC + leaf —
+# zero tokio. Only the bin reads it; the library trust domain is unchanged.
+toml = { workspace = true }
 
 # ---------------------------------------------------------------------------
 # The operator-side CLI binary (Phase 3, design §9). compio (NOT tokio): the

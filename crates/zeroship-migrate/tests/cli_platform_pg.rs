@@ -75,6 +75,7 @@ fn platform_cfg(dir: &Path, schema: &str, meta: &str, yes: bool) -> RunConfig {
     RunConfig {
         dir: dir.to_path_buf(),
         database_url: dsn(),
+        engine_override: None,
         profile: RunProfile::Platform,
         project_id: format!("platform_test_{schema}"),
         project_schema: schema.to_string(),
@@ -470,6 +471,7 @@ async fn run_validate_confined_privileged_op_still_denied_on_shadow() {
     let cfg = RunConfig {
         dir: dir.path().to_path_buf(),
         database_url: dsn(),
+        engine_override: None,
         profile: RunProfile::Confined,
         project_id: format!("confined_test_{schema}"),
         project_schema: schema.clone(),

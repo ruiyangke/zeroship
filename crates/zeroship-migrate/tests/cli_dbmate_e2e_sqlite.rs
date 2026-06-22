@@ -484,6 +484,7 @@ fn sqlite_shadow_dry_run_blames_the_real_failing_migration_with_success_prefix()
     let cfg = RunConfig {
         dir: migrations_dir.clone(),
         database_url: url,
+        engine_override: None,
         profile: RunProfile::Trusted,
         project_id: "prj_sqfail".to_string(),
         project_schema: "main".to_string(),

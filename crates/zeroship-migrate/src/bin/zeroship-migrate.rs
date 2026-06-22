@@ -30,10 +30,15 @@ use clap::{Parser, Subcommand};
 // The runner module is `pub(crate)`; the bin is part of the same crate so it can
 // reach it. External crates cannot — the token mint stays confined.
 use zeroship_migrate::guard::platform_runner::{
-    self, default_platform_extensions, default_platform_schemas, Engine, RunConfig, RunError,
-    RunProfile, RunReport,
+    self, default_platform_extensions, default_platform_schemas, Engine, EngineKind, RunConfig,
+    RunError, RunProfile, RunReport,
 };
-use zeroship_migrate::loader::new_dbmate_migration;
+use zeroship_migrate::loader::{
+    is_valid_migration_name, new_dbmate_migration, suggest_migration_name,
+};
+
+mod config;
+use config::FileEnvLayer;
 
 /// The generic-by-default migration directory for the public tool (dbmate parity).
 const DEFAULT_DIR: &str = "./db/migrations";
@@ -55,21 +60,36 @@ struct Cli {
 
     /// Migration directory. dbmate files (`<14-digit>_<desc>.sql` with
     /// `-- migrate:up`/`down` sections) or Flyway files (`V<NNNN>__*.sql`) are
-    /// auto-detected. Default `./db/migrations`.
-    #[arg(long, global = true, default_value = DEFAULT_DIR)]
-    dir: PathBuf,
+    /// auto-detected. Precedence (highest first): this flag, then the
+    /// `ZEROSHIP_MIGRATE_MIGRATIONS_DIR` env, then `migrations_dir` in
+    /// `zeroship-migrate.toml`, then the default `./db/migrations`. No clap
+    /// `default_value`, so the bin can tell "flag absent" from "flag given".
+    #[arg(long, global = true)]
+    dir: Option<PathBuf>,
 
-    /// Postgres DSN. Falls back to the `DATABASE_URL` env var.
+    /// Postgres/SQLite DSN. Precedence (highest first): this flag, then the
+    /// `DATABASE_URL` env, then `database_url` in `zeroship-migrate.toml`. (clap's
+    /// `env=` folds the first two; the bin folds the config below them.)
     #[arg(long, global = true, env = "DATABASE_URL")]
     database_url: Option<String>,
+
+    /// Force the database engine, overriding DSN-shape auto-detection: `pg` |
+    /// `sqlite`. Resolves an ambiguous bare-path DSN; ERRORS if it contradicts an
+    /// unambiguous DSN scheme (e.g. `--engine sqlite` with a `postgres://` URL).
+    /// Precedence (highest first): this flag, then `ZEROSHIP_MIGRATE_ENGINE`, then
+    /// `engine` in the config. Absent means DSN auto-detect (no behaviour change for
+    /// existing runs).
+    #[arg(long, global = true, value_enum)]
+    engine: Option<EngineArg>,
 
     /// Trust profile. `trusted` (DEFAULT — the public posture: the operator owns
     /// the DB, so the deny-list is OFF and there is no schema confinement);
     /// `platform` widens the guard for the zeroship platform schemas (the
     /// internal compose/ops posture — must be passed EXPLICITLY); `confined` is
-    /// the full creator deny-list, single-schema.
-    #[arg(long, global = true, value_enum, default_value_t = ProfileArg::Trusted)]
-    profile: ProfileArg,
+    /// the full creator deny-list, single-schema. Precedence: this flag >
+    /// `ZEROSHIP_MIGRATE_PROFILE` env > `profile` in the config > default `trusted`.
+    #[arg(long, global = true, value_enum)]
+    profile: Option<ProfileArg>,
 
     /// Schema allowlist for the `platform` profile (repeatable). Default:
     /// `zeroship`, `oauth_hydra`, `public`. The FIRST value is the primary schema
@@ -138,6 +158,53 @@ impl From<ProfileArg> for RunProfile {
     }
 }
 
+impl ProfileArg {
+    /// Parse a profile from an env-var / config-file string (case-insensitive). The
+    /// SAME accepted set as the clap `--profile` value-enum, so the three layers
+    /// agree.
+    fn from_config_str(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "trusted" => Ok(Self::Trusted),
+            "platform" => Ok(Self::Platform),
+            "confined" => Ok(Self::Confined),
+            other => Err(format!(
+                "invalid profile {other:?} (allowed: trusted, platform, confined)"
+            )),
+        }
+    }
+}
+
+/// The CLI engine-override flag value (`--engine pg|sqlite`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum EngineArg {
+    /// Force the Postgres backend.
+    Pg,
+    /// Force the `SQLite` backend.
+    Sqlite,
+}
+
+impl From<EngineArg> for EngineKind {
+    fn from(e: EngineArg) -> Self {
+        match e {
+            EngineArg::Pg => Self::Postgres,
+            EngineArg::Sqlite => Self::Sqlite,
+        }
+    }
+}
+
+impl EngineArg {
+    /// Parse an engine from an env-var / config-file string (case-insensitive).
+    /// `postgres` is accepted as a friendly alias of `pg`. SAME accepted set the
+    /// clap value-enum exposes (plus the alias), so the layers agree.
+    fn from_config_str(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "pg" | "postgres" | "postgresql" => Ok(Self::Pg),
+            "sqlite" => Ok(Self::Sqlite),
+            other => Err(format!("invalid engine {other:?} (allowed: pg, sqlite)")),
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Generate a new dbmate-format migration file (`<14-digit-ts>_<name>.sql`) in
@@ -182,21 +249,73 @@ enum Command {
     /// `pg_dump --schema-only`; SQLite derives the CREATE statements from
     /// `sqlite_master` (no `sqlite3` shell-out). Both write the same trailer.
     Dump {
-        /// Output path. Default `./db/schema.sql`.
-        #[arg(long, default_value = DEFAULT_SCHEMA_FILE)]
-        schema_file: PathBuf,
+        /// Output path. Precedence: this flag > `ZEROSHIP_MIGRATE_SCHEMA_FILE` env >
+        /// `schema_file` in `zeroship-migrate.toml` > default `./db/schema.sql`.
+        #[arg(long)]
+        schema_file: Option<PathBuf>,
     },
 }
 
-/// Build the runner [`RunConfig`] from the parsed CLI args (defaults applied here,
-/// per §9). `main` stays thin: parse → this → delegate.
-fn run_config(cli: &Cli) -> Result<RunConfig, String> {
+/// The effective migration directory under the precedence rule (CLI flag > env >
+/// config file > default `./db/migrations`). The clap `--dir` flag, when present,
+/// is highest; otherwise the folded file+env `migrations_dir` (env already wins
+/// over file inside [`FileEnvLayer`]); otherwise the built-in default.
+fn effective_dir(cli: &Cli, layer: &FileEnvLayer) -> PathBuf {
+    cli.dir
+        .clone()
+        .or_else(|| layer.migrations_dir.clone().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_DIR))
+}
+
+/// The effective schema-dump path (CLI `--schema-file` > env > config > default).
+/// `flag` is the `Dump { schema_file }` value (already highest).
+fn effective_schema_file(flag: Option<&Path>, layer: &FileEnvLayer) -> PathBuf {
+    flag.map(Path::to_path_buf)
+        .or_else(|| layer.schema_file.clone().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_SCHEMA_FILE))
+}
+
+/// The effective trust profile (CLI flag > env > config > default `trusted`).
+fn effective_profile(cli: &Cli, layer: &FileEnvLayer) -> Result<RunProfile, String> {
+    if let Some(p) = cli.profile {
+        return Ok(p.into());
+    }
+    if let Some(s) = &layer.profile {
+        return Ok(ProfileArg::from_config_str(s)?.into());
+    }
+    Ok(RunProfile::Trusted)
+}
+
+/// The effective engine override (CLI flag > env > config). `None` ⇒ DSN
+/// auto-detect (the default; no behaviour change for existing invocations).
+fn effective_engine(cli: &Cli, layer: &FileEnvLayer) -> Result<Option<EngineKind>, String> {
+    if let Some(e) = cli.engine {
+        return Ok(Some(e.into()));
+    }
+    if let Some(s) = &layer.engine {
+        return Ok(Some(EngineArg::from_config_str(s)?.into()));
+    }
+    Ok(None)
+}
+
+/// Build the runner [`RunConfig`] from the parsed CLI args + the folded file+env
+/// layer (precedence applied here, per §9). `main` stays thin: parse → this →
+/// delegate.
+fn run_config(cli: &Cli, layer: &FileEnvLayer) -> Result<RunConfig, String> {
+    // DSN precedence: clap already folded --database-url > DATABASE_URL; the file's
+    // `database_url` is the lowest fallback below them.
     let database_url = cli
         .database_url
         .clone()
-        .ok_or_else(|| "missing --database-url (or DATABASE_URL env)".to_string())?;
+        .or_else(|| layer.database_url.clone())
+        .ok_or_else(|| {
+            "missing database URL (pass --database-url, set DATABASE_URL, or set \
+             `database_url` in zeroship-migrate.toml)"
+                .to_string()
+        })?;
 
-    let profile: RunProfile = cli.profile.into();
+    let engine_override = effective_engine(cli, layer)?;
+    let profile: RunProfile = effective_profile(cli, layer)?;
 
     // Schema allowlist + primary schema depend on the profile:
     // - Platform: the zeroship allowlist (or the explicit --schema list).
@@ -239,8 +358,9 @@ fn run_config(cli: &Cli) -> Result<RunConfig, String> {
     });
 
     Ok(RunConfig {
-        dir: cli.dir.clone(),
+        dir: effective_dir(cli, layer),
         database_url,
+        engine_override,
         profile,
         project_id: cli.project_id.clone(),
         project_schema,
@@ -377,17 +497,33 @@ fn print_report(report: &RunReport) {
     }
 }
 
-/// `new` — generate a dbmate-format migration file in `--dir`. Errors if the file
-/// already exists (never clobbers). Prints the created path.
-fn run_new(cli: &Cli, name: &str) -> Result<(), String> {
+/// `new` — generate a dbmate-format migration file in the effective `dir`. VALIDATES
+/// the name against the loader's accepted grammar BEFORE writing (so a name the
+/// loader would later reject as `UnrecognizedFile` is refused at scaffold time, with
+/// NO file written), errors if the file already exists (never clobbers), and prints
+/// the created path. The name is NEVER auto-renamed — an invalid name is rejected
+/// with a normalized suggestion.
+fn run_new(dir: &Path, name: &str) -> Result<(), String> {
+    // Validate FIRST — before any I/O — using the exact grammar `load_dir` enforces.
+    if !is_valid_migration_name(name) {
+        let suggestion = suggest_migration_name(name);
+        let hint = if suggestion.is_empty() {
+            String::new()
+        } else {
+            format!(" (did you mean `{suggestion}`?)")
+        };
+        return Err(format!(
+            "invalid migration name {name:?}: allowed characters are [A-Za-z0-9_] \
+             (use `_` for spaces/dashes){hint}"
+        ));
+    }
     let stamp = timestamp_14(SystemTime::now());
     let (filename, contents) = new_dbmate_migration(&stamp, name);
-    let path = cli.dir.join(&filename);
+    let path = dir.join(&filename);
     if path.exists() {
         return Err(format!("refusing to overwrite existing file: {}", path.display()));
     }
-    std::fs::create_dir_all(&cli.dir)
-        .map_err(|e| format!("create dir {}: {e}", cli.dir.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("create dir {}: {e}", dir.display()))?;
     std::fs::write(&path, contents).map_err(|e| format!("write {}: {e}", path.display()))?;
     println!("Creating migration: {}", path.display());
     Ok(())
@@ -424,8 +560,9 @@ fn dump_schema_pg(database_url: &str) -> Result<String, String> {
 /// engines write the SAME applied-versions trailer, so `schema.sql` is one
 /// consistent contract. An unsupported engine is an honest refusal.
 async fn run_dump(cfg: &RunConfig, schema_file: &Path) -> Result<(), String> {
-    // The schema body is engine-specific; the trailer is shared (below).
-    let mut schema = match platform_runner::classify_engine(&cfg.database_url) {
+    // The schema body is engine-specific; the trailer is shared (below). The engine
+    // honours `--engine` via `resolve_engine` (a conflict is an honest error).
+    let mut schema = match cfg.resolve_engine().map_err(|e| e.to_string())? {
         Engine::Postgres => dump_schema_pg(&cfg.database_url)?,
         Engine::Sqlite(app) => platform_runner::dump_schema_sqlite(&app)
             .await
@@ -472,9 +609,23 @@ async fn applied_versions(cfg: &RunConfig) -> Result<Vec<String>, String> {
 async fn main() -> ExitCode {
     let cli = Cli::parse();
 
+    // Discover + fold the project config file (CWD, walking up) with the process
+    // env into the file+env precedence layer. A MISSING file is fine; a MALFORMED
+    // one is a hard, clear error (never silently ignored).
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let file_cfg = match config::discover_file_config(&cwd) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("zeroship-migrate: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let layer = FileEnvLayer::resolve(file_cfg.as_ref());
+
     // `new` is offline (no DB): handle it before building a DSN-bearing RunConfig.
     if let Command::New { name } = &cli.command {
-        return match run_new(&cli, name) {
+        let dir = effective_dir(&cli, &layer);
+        return match run_new(&dir, name) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("zeroship-migrate: {e}");
@@ -483,7 +634,7 @@ async fn main() -> ExitCode {
         };
     }
 
-    let cfg = match run_config(&cli) {
+    let cfg = match run_config(&cli, &layer) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("zeroship-migrate: {e}");
@@ -495,6 +646,7 @@ async fn main() -> ExitCode {
     if let Command::Wait { timeout_secs } = &cli.command {
         let res = platform_runner::run_wait(
             &cfg.database_url,
+            cfg.engine_override,
             Duration::from_secs(*timeout_secs),
             Duration::from_millis(500),
         )
@@ -513,7 +665,8 @@ async fn main() -> ExitCode {
 
     // `dump` shells pg_dump; no migration plan.
     if let Command::Dump { schema_file } = &cli.command {
-        return match run_dump(&cfg, schema_file).await {
+        let out = effective_schema_file(schema_file.as_deref(), &layer);
+        return match run_dump(&cfg, &out).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("zeroship-migrate: {e}");
@@ -575,11 +728,21 @@ mod tests {
         Cli::try_parse_from(args).expect("args parse")
     }
 
+    /// An empty file+env layer (the no-config baseline): every precedence test that
+    /// is not specifically about env/file uses this so the built-in defaults apply.
+    fn empty_layer() -> FileEnvLayer {
+        FileEnvLayer::default()
+    }
+
     #[test]
     fn profile_defaults_to_trusted() {
+        // No --profile flag, no env/config ⇒ the effective profile is Trusted.
         let cli = parse(&["zeroship-migrate", "migrate", "--database-url", "x"]);
-        assert_eq!(cli.profile, ProfileArg::Trusted);
-        assert_eq!(RunProfile::from(cli.profile), RunProfile::Trusted);
+        assert_eq!(cli.profile, None, "flag is absent");
+        assert_eq!(
+            effective_profile(&cli, &empty_layer()).expect("profile"),
+            RunProfile::Trusted
+        );
     }
 
     #[test]
@@ -599,7 +762,75 @@ mod tests {
             "--profile",
             "platform",
         ]);
-        assert_eq!(cli.profile, ProfileArg::Platform);
+        assert_eq!(cli.profile, Some(ProfileArg::Platform));
+        assert_eq!(
+            effective_profile(&cli, &empty_layer()).expect("profile"),
+            RunProfile::Platform
+        );
+    }
+
+    #[test]
+    fn profile_precedence_flag_over_env_over_config() {
+        let cli_flag = parse(&[
+            "zeroship-migrate",
+            "migrate",
+            "--database-url",
+            "x",
+            "--profile",
+            "confined",
+        ]);
+        // Flag beats a config that says platform.
+        let layer = FileEnvLayer {
+            profile: Some("platform".to_string()),
+            ..FileEnvLayer::default()
+        };
+        assert_eq!(
+            effective_profile(&cli_flag, &layer).expect("profile"),
+            RunProfile::Confined,
+            "flag wins"
+        );
+        // No flag ⇒ the folded layer's profile (env-or-config) wins over the default.
+        let cli_noflag = parse(&["zeroship-migrate", "migrate", "--database-url", "x"]);
+        assert_eq!(
+            effective_profile(&cli_noflag, &layer).expect("profile"),
+            RunProfile::Platform,
+            "layer wins over the trusted default"
+        );
+    }
+
+    #[test]
+    fn engine_precedence_flag_over_layer_and_invalid_config_errors() {
+        // No flag, no layer ⇒ None (DSN auto-detect).
+        let cli = parse(&["zeroship-migrate", "migrate", "--database-url", "x"]);
+        assert_eq!(effective_engine(&cli, &empty_layer()).expect("engine"), None);
+        // Flag wins over a contradicting layer value.
+        let cli_flag = parse(&[
+            "zeroship-migrate",
+            "migrate",
+            "--database-url",
+            "x",
+            "--engine",
+            "pg",
+        ]);
+        let layer = FileEnvLayer {
+            engine: Some("sqlite".to_string()),
+            ..FileEnvLayer::default()
+        };
+        assert_eq!(
+            effective_engine(&cli_flag, &layer).expect("engine"),
+            Some(EngineKind::Postgres)
+        );
+        // No flag ⇒ the layer's `sqlite` resolves; `postgres` alias is accepted.
+        assert_eq!(
+            effective_engine(&cli, &layer).expect("engine"),
+            Some(EngineKind::Sqlite)
+        );
+        // An invalid layer engine is a clear error (not a silent ignore).
+        let bad = FileEnvLayer {
+            engine: Some("mysql".to_string()),
+            ..FileEnvLayer::default()
+        };
+        assert!(effective_engine(&cli, &bad).is_err());
     }
 
     #[test]
@@ -646,10 +877,15 @@ mod tests {
 
     #[test]
     fn dump_parses_schema_file_default_and_override() {
+        // No flag ⇒ the subcommand value is None; the effective path is the default.
         let cli = parse(&["zeroship-migrate", "dump", "--database-url", "x"]);
-        match cli.command {
+        match &cli.command {
             Command::Dump { schema_file } => {
-                assert_eq!(schema_file, PathBuf::from(DEFAULT_SCHEMA_FILE));
+                assert_eq!(schema_file.as_deref(), None);
+                assert_eq!(
+                    effective_schema_file(schema_file.as_deref(), &empty_layer()),
+                    PathBuf::from(DEFAULT_SCHEMA_FILE)
+                );
             }
             other => panic!("expected Dump, got {other:?}"),
         }
@@ -661,8 +897,19 @@ mod tests {
             "--schema-file",
             "/tmp/s.sql",
         ]);
-        match cli.command {
-            Command::Dump { schema_file } => assert_eq!(schema_file, PathBuf::from("/tmp/s.sql")),
+        match &cli.command {
+            Command::Dump { schema_file } => {
+                assert_eq!(schema_file.as_deref(), Some(Path::new("/tmp/s.sql")));
+                // Flag wins over a config schema_file.
+                let layer = FileEnvLayer {
+                    schema_file: Some("/from/config.sql".to_string()),
+                    ..FileEnvLayer::default()
+                };
+                assert_eq!(
+                    effective_schema_file(schema_file.as_deref(), &layer),
+                    PathBuf::from("/tmp/s.sql")
+                );
+            }
             other => panic!("expected Dump, got {other:?}"),
         }
     }
@@ -683,19 +930,44 @@ mod tests {
 
     #[test]
     fn dir_defaults_to_generic_db_migrations() {
+        // No flag, no env/config ⇒ the effective dir is the built-in default.
         let cli = parse(&["zeroship-migrate", "migrate", "--database-url", "x"]);
-        assert_eq!(cli.dir, PathBuf::from(DEFAULT_DIR));
+        assert_eq!(cli.dir, None, "flag is absent");
+        assert_eq!(effective_dir(&cli, &empty_layer()), PathBuf::from(DEFAULT_DIR));
+    }
+
+    #[test]
+    fn dir_precedence_flag_over_layer_over_default() {
+        let layer = FileEnvLayer {
+            migrations_dir: Some("from_layer".to_string()),
+            ..FileEnvLayer::default()
+        };
+        // No flag ⇒ the layer value wins over the default.
+        let cli = parse(&["zeroship-migrate", "migrate", "--database-url", "x"]);
+        assert_eq!(effective_dir(&cli, &layer), PathBuf::from("from_layer"));
+        // Flag present ⇒ it wins over the layer.
+        let cli_flag = parse(&[
+            "zeroship-migrate",
+            "migrate",
+            "--database-url",
+            "x",
+            "--dir",
+            "from_flag",
+        ]);
+        assert_eq!(effective_dir(&cli_flag, &layer), PathBuf::from("from_flag"));
     }
 
     #[test]
     fn trusted_run_config_uses_generic_public_meta_and_single_schema() {
         let cli = parse(&["zeroship-migrate", "migrate", "--database-url", "x"]);
-        let cfg = run_config(&cli).expect("config builds");
+        let cfg = run_config(&cli, &empty_layer()).expect("config builds");
         assert_eq!(cfg.profile, RunProfile::Trusted);
         assert_eq!(cfg.project_schema, DEFAULT_GENERIC_SCHEMA);
         assert_eq!(cfg.meta_schema, DEFAULT_GENERIC_SCHEMA);
         assert_eq!(cfg.schemas, vec![DEFAULT_GENERIC_SCHEMA.to_string()]);
         assert_eq!(cfg.project_id, "default");
+        // No --engine ⇒ DSN auto-detect (override is None).
+        assert_eq!(cfg.engine_override, None);
     }
 
     #[test]
@@ -708,11 +980,42 @@ mod tests {
             "--profile",
             "platform",
         ]);
-        let cfg = run_config(&cli).expect("config builds");
+        let cfg = run_config(&cli, &empty_layer()).expect("config builds");
         assert_eq!(cfg.profile, RunProfile::Platform);
         assert_eq!(cfg.project_schema, "zeroship");
         assert_eq!(cfg.meta_schema, "zeroship_migrations");
         assert!(cfg.schemas.contains(&"oauth_hydra".to_string()));
+    }
+
+    #[test]
+    fn engine_flag_threads_into_run_config() {
+        let cli = parse(&[
+            "zeroship-migrate",
+            "migrate",
+            "--database-url",
+            "/bare/path.db",
+            "--engine",
+            "sqlite",
+        ]);
+        let cfg = run_config(&cli, &empty_layer()).expect("config builds");
+        assert_eq!(cfg.engine_override, Some(EngineKind::Sqlite));
+    }
+
+    #[test]
+    fn run_config_falls_back_to_config_database_url() {
+        // No --database-url and no DATABASE_URL: the file's `database_url` is the
+        // lowest fallback (clap leaves cli.database_url None when the env is unset).
+        let cli = parse(&["zeroship-migrate", "migrate"]);
+        if cli.database_url.is_some() {
+            // A DATABASE_URL is set in this environment; skip (can't assert fallback).
+            return;
+        }
+        let layer = FileEnvLayer {
+            database_url: Some("sqlite:/tmp/from_config.db".to_string()),
+            ..FileEnvLayer::default()
+        };
+        let cfg = run_config(&cli, &layer).expect("config builds from file DSN");
+        assert_eq!(cfg.database_url, "sqlite:/tmp/from_config.db");
     }
 
     #[test]
