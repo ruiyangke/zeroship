@@ -216,54 +216,211 @@ fn unknown_engine_url_is_an_explicit_unsupported_engine_error() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// `dump` on a SQLite URL is the honest "not supported on SQLite yet" refusal
-/// (pg_dump is Postgres-only) — never a faked schema dump.
+/// `dump` on SQLite (full parity with the PG path): `new` → `migrate` → `dump`
+/// writes a `schema.sql` carrying the live CREATE statements (derived from
+/// `sqlite_master`, NOT a `sqlite3` shell-out) plus the SAME applied-versions
+/// trailer the PG `dump` emits. Proves no `_mig`/journal artifact leaks into the
+/// dump.
 #[test]
-fn dump_on_sqlite_refuses_honestly() {
+fn cli_dump_on_sqlite_writes_schema_and_applied_trailer() {
     let tok = token();
-    let tmp = std::env::temp_dir().join(format!("zsmig_dumpsq_dir_{tok}"));
-    std::fs::create_dir_all(&tmp).expect("create temp migration dir");
-    let dir_s = tmp.to_str().unwrap().to_string();
-    let app_s = tmp.join("d.sqlite").to_str().unwrap().to_string();
-    let url = format!("sqlite:{app_s}");
+    let root = std::env::temp_dir().join(format!("zsmig_dumpsq_{tok}"));
+    let migrations_dir = root.join("migrations");
+    std::fs::create_dir_all(&migrations_dir).expect("create temp migration dir");
+    let dir_s = migrations_dir.to_str().unwrap().to_string();
 
-    let (ok, _out, err) = run_bin(&[
-        "dump",
-        "--dir",
-        &dir_s,
-        "--database-url",
-        &url,
-        "--schema-file",
-        tmp.join("schema.sql").to_str().unwrap(),
-    ]);
-    assert!(!ok, "`dump` on SQLite must refuse (non-zero exit)");
+    let app_file = root.join("app.sqlite");
+    let app_s = app_file.to_str().unwrap().to_string();
+    let url = format!("sqlite:{app_s}");
+    let schema_file = root.join("schema.sql");
+    let schema_s = schema_file.to_str().unwrap().to_string();
+
+    // 1. `new` then write a real up/down body (a table + a secondary index, so the
+    //    dump must order the index after its table).
+    let (ok_new, _o, e) = run_bin(&["new", "widgets", "--dir", &dir_s]);
+    assert!(ok_new, "`new` must exit 0\nstderr={e}");
+    let created: PathBuf = std::fs::read_dir(&migrations_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|x| x.path())
+        .find(|p| p.extension().and_then(|x| x.to_str()) == Some("sql"))
+        .expect("`new` created a .sql file");
+    std::fs::write(
+        &created,
+        "-- migrate:up\nCREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT);\n\
+         CREATE INDEX idx_widgets_name ON widgets (name);\n\n\
+         -- migrate:down\nDROP TABLE widgets;\n",
+    )
+    .expect("write migration body");
+
+    let base = ["--dir", &dir_s, "--database-url", &url];
+
+    // 2. `migrate` it onto the SQLite file.
+    let mut migrate_args = vec!["migrate"];
+    migrate_args.extend_from_slice(&base);
+    let (ok_mig, out_mig, err_mig) = run_bin(&migrate_args);
+    assert!(ok_mig, "`migrate` must exit 0\nstdout={out_mig}\nstderr={err_mig}");
+
+    // Capture the version `status` reports applied — the trailer must list it.
+    let mut status_args = vec!["status"];
+    status_args.extend_from_slice(&base);
+    let (_ok, out_st, _e) = run_bin(&status_args);
+    // status prints "  applied  <version> (...)"; pull the first applied version.
+    let applied_version: String = out_st
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("applied  "))
+        .map(|rest| rest.split_whitespace().next().unwrap_or("").to_string())
+        .expect("status reports an applied version");
+    assert!(!applied_version.is_empty(), "an applied version: {out_st}");
+
+    // 3. `dump`.
+    let mut dump_args = vec!["dump"];
+    dump_args.extend_from_slice(&base);
+    dump_args.push("--schema-file");
+    dump_args.push(&schema_s);
+    let (ok_dump, out_dump, err_dump) = run_bin(&dump_args);
     assert!(
-        err.to_ascii_lowercase().contains("sqlite") && err.contains("dump"),
-        "the refusal explains dump is unsupported on SQLite: {err}"
+        ok_dump,
+        "`dump` on SQLite must exit 0\nstdout={out_dump}\nstderr={err_dump}"
+    );
+    assert!(out_dump.contains("Dumped schema"), "dump prints a path: {out_dump}");
+
+    let schema = std::fs::read_to_string(&schema_file).expect("read dumped schema.sql");
+
+    // The DDL is derived from sqlite_master.
+    assert!(
+        schema.contains("CREATE TABLE widgets"),
+        "the dump carries the table DDL:\n{schema}"
+    );
+    assert!(
+        schema.contains("CREATE INDEX idx_widgets_name"),
+        "the dump carries the index DDL:\n{schema}"
+    );
+    // The index DDL is ordered AFTER its table (tables before their indexes).
+    assert!(
+        schema.find("CREATE TABLE widgets").unwrap()
+            < schema.find("CREATE INDEX idx_widgets_name").unwrap(),
+        "tables are emitted before their indexes:\n{schema}"
     );
 
-    let _ = std::fs::remove_dir_all(&tmp);
+    // The applied-versions trailer matches the PG `dump` shape, byte-for-byte in
+    // structure: a `-- zeroship-migrate schema_migrations` marker then `--   <ver>`.
+    assert!(
+        schema.contains("-- zeroship-migrate schema_migrations"),
+        "the dump appends the applied-versions trailer marker:\n{schema}"
+    );
+    assert!(
+        schema.contains(&format!("--   {applied_version}")),
+        "the trailer lists the applied version `{applied_version}`:\n{schema}"
+    );
+
+    // NO journal / _mig artifact leaks into the DDL body (the trailer marker
+    // legitimately contains the words `schema_migrations`, so check only the DDL
+    // section that precedes the trailer).
+    let ddl_body = schema
+        .split("-- zeroship-migrate schema_migrations")
+        .next()
+        .unwrap_or(&schema);
+    assert!(
+        !ddl_body.contains("schema_migrations") && !ddl_body.contains("_mig"),
+        "no journal/_mig artifact leaks into the dump DDL:\n{ddl_body}"
+    );
+    // sqlite internal tables never leak either.
+    assert!(
+        !ddl_body.contains("sqlite_sequence") && !ddl_body.contains("sqlite_autoindex"),
+        "no sqlite_* internal leaks into the dump DDL:\n{ddl_body}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
 }
 
-/// `validate` on a SQLite URL is the honest "not supported on SQLite" refusal
-/// (validate dry-runs on a throwaway shadow DATABASE — a Postgres-only capability;
-/// the SQLite backend has no shadow clone, see `engine_sqlite`'s
-/// `sqlite_backend_has_no_shadow_*` test). Never a faked "validated ok".
+/// `validate` on SQLite (full parity): a CLEAN set validates ok (shadow dry-run on
+/// a throwaway SQLite + clean checksum drift). A checksum-DRIFTED set is flagged
+/// (the journal checksum != the on-disk file's checksum), and a DESTRUCTIVE
+/// migration is reported destructive — all without touching the real DB's schema.
 #[test]
-fn validate_on_sqlite_refuses_honestly() {
+fn cli_validate_on_sqlite_clean_passes_then_flags_drift_and_destructive() {
     let tok = token();
-    let tmp = std::env::temp_dir().join(format!("zsmig_validatesq_dir_{tok}"));
-    std::fs::create_dir_all(&tmp).expect("create temp migration dir");
-    let dir_s = tmp.to_str().unwrap().to_string();
-    let app_s = tmp.join("v.sqlite").to_str().unwrap().to_string();
-    let url = format!("sqlite:{app_s}");
+    let root = std::env::temp_dir().join(format!("zsmig_validatesq_{tok}"));
+    let migrations_dir = root.join("migrations");
+    std::fs::create_dir_all(&migrations_dir).expect("create temp migration dir");
+    let dir_s = migrations_dir.to_str().unwrap().to_string();
 
-    let (ok, _out, err) = run_bin(&["validate", "--dir", &dir_s, "--database-url", &url]);
-    assert!(!ok, "`validate` on SQLite must refuse (non-zero exit)");
+    let app_file = root.join("app.sqlite");
+    let app_s = app_file.to_str().unwrap().to_string();
+    let url = format!("sqlite:{app_s}");
+    let base = ["--dir", &dir_s, "--database-url", &url];
+
+    // A clean additive migration.
+    let (ok_new, _o, _e) = run_bin(&["new", "widgets", "--dir", &dir_s]);
+    assert!(ok_new, "`new`");
+    let created: PathBuf = std::fs::read_dir(&migrations_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|x| x.path())
+        .find(|p| p.extension().and_then(|x| x.to_str()) == Some("sql"))
+        .expect("`new` created a .sql file");
+    std::fs::write(
+        &created,
+        "-- migrate:up\nCREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT);\n\n\
+         -- migrate:down\nDROP TABLE widgets;\n",
+    )
+    .expect("write migration body");
+
+    // (a) CLEAN — validate BEFORE any apply: dry-run on a throwaway SQLite passes,
+    //     drift is clean (empty journal vs the set).
+    let mut validate_args = vec!["validate"];
+    validate_args.extend_from_slice(&base);
+    let (ok_v, out_v, err_v) = run_bin(&validate_args);
     assert!(
-        err.to_ascii_lowercase().contains("sqlite") && err.to_ascii_lowercase().contains("validate"),
-        "the refusal explains validate is unsupported on SQLite: {err}"
+        ok_v,
+        "`validate` on a clean SQLite set must exit 0\nstdout={out_v}\nstderr={err_v}"
+    );
+    assert!(
+        out_v.contains("dry-run ok=true") && out_v.contains("drift_clean=true"),
+        "clean validate: dry-run ok + drift clean: {out_v}"
     );
 
-    let _ = std::fs::remove_dir_all(&tmp);
+    // Apply it so the journal has a recorded checksum to drift against.
+    let mut migrate_args = vec!["migrate"];
+    migrate_args.extend_from_slice(&base);
+    let (ok_mig, _o, e) = run_bin(&migrate_args);
+    assert!(ok_mig, "`migrate`\nstderr={e}");
+
+    // (b) DRIFT — mutate the migration body AFTER it was applied. The journal still
+    //     holds the old checksum; `validate` must flag the drift.
+    std::fs::write(
+        &created,
+        "-- migrate:up\nCREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT, extra TEXT);\n\n\
+         -- migrate:down\nDROP TABLE widgets;\n",
+    )
+    .expect("rewrite migration body (drift)");
+    let (_ok_d, out_d, _e) = run_bin(&validate_args);
+    assert!(
+        out_d.contains("drift_clean=false") && out_d.contains("DRIFT"),
+        "validate flags the checksum drift: {out_d}"
+    );
+
+    // (c) DESTRUCTIVE — a second migration that drops a table is reported
+    //     destructive by validate (no --yes needed; validate never applies).
+    std::fs::write(
+        migrations_dir.join("20990101000000_drop.sql"),
+        "-- migrate:up\nDROP TABLE widgets;\n\n-- migrate:down\nSELECT 1;\n",
+    )
+    .expect("write destructive migration");
+    // Restore the first migration so only the new one is destructive (keep drift out
+    // of the picture for this assertion).
+    std::fs::write(
+        &created,
+        "-- migrate:up\nCREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT);\n\n\
+         -- migrate:down\nDROP TABLE widgets;\n",
+    )
+    .expect("restore first migration body");
+    let (_ok_x, out_x, _e) = run_bin(&validate_args);
+    assert!(
+        out_x.contains("destructive=true"),
+        "validate reports the DROP TABLE migration destructive: {out_x}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
 }
