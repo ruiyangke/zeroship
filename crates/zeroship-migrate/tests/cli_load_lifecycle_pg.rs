@@ -42,8 +42,26 @@ fn token() -> String {
     format!("{pid}_{nanos}")
 }
 
+/// A process-wide temp "sink" CWD for `run_bin`. Auto-dump (default ON) writes
+/// `./db/schema.sql` RELATIVE to the child's CWD; without this the children would
+/// inherit the crate dir and litter `crates/zeroship-migrate/db/`. Running them from
+/// a throwaway temp dir means the default `./db/schema.sql` lands in temp — still
+/// FAITHFULLY exercising the default auto-dump path — and the crate tree stays clean.
+/// (Every `--dir`/`--database-url`/`--schema-file` in this file is an absolute path,
+/// so the CWD change does not affect any other behaviour.)
+fn sink_dir() -> &'static std::path::Path {
+    use std::sync::OnceLock;
+    static SINK: OnceLock<PathBuf> = OnceLock::new();
+    SINK.get_or_init(|| {
+        let d = std::env::temp_dir().join(format!("zsmig_sink_{}", std::process::id()));
+        std::fs::create_dir_all(&d).expect("create run_bin sink dir");
+        d
+    })
+}
+
 fn run_bin(args: &[&str]) -> (bool, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_zeroship-migrate"))
+        .current_dir(sink_dir())
         .args(args)
         .output()
         .expect("spawn the built zeroship-migrate binary");
