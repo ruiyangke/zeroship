@@ -88,11 +88,27 @@ fn migrations_dir() -> PathBuf {
         .expect("db/migrations exists at repo root")
 }
 
+/// A process-wide temp "sink" CWD for `run_bin`. Auto-dump (default ON) writes
+/// `./db/schema.sql` RELATIVE to the child's CWD; running the children from a
+/// throwaway temp dir keeps the crate tree clean even if a call forgets
+/// `--no-dump-schema`. Defense-in-depth (this suite passes `--no-dump-schema`) —
+/// every `--dir`/`--database-url` here is absolute, so the CWD change is invisible.
+fn sink_dir() -> &'static std::path::Path {
+    use std::sync::OnceLock;
+    static SINK: OnceLock<PathBuf> = OnceLock::new();
+    SINK.get_or_init(|| {
+        let d = std::env::temp_dir().join(format!("zsmig_sink_{}", std::process::id()));
+        std::fs::create_dir_all(&d).expect("create run_bin sink dir");
+        d
+    })
+}
+
 /// Run the BUILT `zeroship-migrate` binary as a subprocess. Returns
 /// `(success, stdout, stderr)`. `CARGO_BIN_EXE_zeroship-migrate` is injected by
 /// cargo for integration tests and points at the freshly-built binary.
 fn run_bin(args: &[&str]) -> (bool, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_zeroship-migrate"))
+        .current_dir(sink_dir())
         .args(args)
         .output()
         .expect("spawn the built zeroship-migrate binary");
