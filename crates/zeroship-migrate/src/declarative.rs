@@ -854,6 +854,23 @@ fn system_field_columns() -> Vec<ColumnSnapshot> {
     ]
 }
 
+/// The seven platform-managed system-field NAMES, in canonical order — the single
+/// source of truth shared by [`system_field_columns`] (which stamps types onto
+/// them) and the IR validator's `createTable` rule-(c) scope
+/// (`validate.rs`), so a Check / partial-index predicate referencing a system
+/// field (`WHERE deleted_at IS NULL`, a Check on `id`/`created_at`) resolves
+/// instead of being rejected. Kept BYTE-IDENTICAL to the names produced by
+/// [`system_field_columns`] (a debug-assert in tests enforces the tie).
+pub const SYSTEM_FIELD_NAMES: [&str; 7] = [
+    "id",
+    "created_at",
+    "updated_at",
+    "created_by",
+    "updated_by",
+    "version",
+    "deleted_at",
+];
+
 /// The columns the platform auto-indexes on every table (#6). Mirrors
 /// plugin-db's `build_system_field_indexes` (`query.rs:900`): `deleted_at`
 /// (soft-delete filtering), `updated_at` (cursor-paged reads), `created_by`
@@ -4297,6 +4314,27 @@ fn fk_local_column(definition: &str) -> Option<String> {
     }
 }
 
+
+#[cfg(test)]
+mod system_field_names_tie_tests {
+    use super::{system_field_columns, SYSTEM_FIELD_NAMES};
+
+    // The shared-source guarantee (MED): the IR validator's createTable rule-(c)
+    // scope unions SYSTEM_FIELD_NAMES, which MUST stay byte-identical (and in the
+    // same canonical order) to the names `system_field_columns` stamps types onto.
+    // If a system field is ever added/renamed in one place, this fails until both
+    // agree — so the validator never diverges from the injected columns.
+    #[test]
+    fn system_field_names_match_system_field_columns() {
+        let from_columns: Vec<String> =
+            system_field_columns().into_iter().map(|c| c.name).collect();
+        let expected: Vec<String> = SYSTEM_FIELD_NAMES.iter().map(|s| (*s).to_string()).collect();
+        assert_eq!(
+            from_columns, expected,
+            "SYSTEM_FIELD_NAMES must mirror system_field_columns() exactly (single source)"
+        );
+    }
+}
 
 #[cfg(test)]
 mod h1_word_scan_tests {

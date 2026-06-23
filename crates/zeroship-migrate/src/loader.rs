@@ -611,9 +611,10 @@ pub fn load_dir(dir: impl AsRef<Path>) -> Result<Vec<crate::plan::AppliedPlan>, 
     // the fail-closed load gate [`crate::ir_load::load_ir_document`] (deserialize →
     // `ir_version` → `validate_ir` → server-stamped ownership → advisory
     // checksum-hint compare), threaded with the deploy-target dialect — feeding
-    // `IrAuthor::lower` (the per-dialect DDL compiler, a later wave). A `.sql`
-    // platform file never carries an `.ir.json`, so this Flyway path stays a
-    // one-step plan and does not route IR.
+    // `IrAuthor::lower` (the per-dialect DDL compiler, a later wave). That branch
+    // is NOT yet routed here: wiring `load_ir_document` onto a real load/deploy
+    // path is the deferred task #80. A `.sql` platform file never carries an
+    // `.ir.json`, so this Flyway path stays a one-step plan and does not route IR.
     let migrations = load_dir_migrations(dir)?;
     Ok(migrations
         .into_iter()

@@ -88,6 +88,29 @@ pub enum IrLoadError {
         /// The engine's authoritative recompute over the hint domain.
         recomputed: String,
     },
+    /// The artifact carried an advisory `checksum` hint AND a field whose
+    /// contribution to the hint domain this engine build cannot yet compute
+    /// (a non-empty `depends_on`/`supersedes`, or a non-default `flags`
+    /// override). The §2.4-point-2 hint domain is
+    /// `ops + flags + depends_on + supersedes + preconditions`, but the
+    /// `IrFlagsOverride`→`MigrationFlags` + `String`→`MigrationId` merge is a
+    /// later wave, so the engine refuses fail-closed rather than compare a
+    /// PARTIAL domain (which would both false-reject a spec-correct hint and
+    /// false-accept tampering of the un-folded fields). Authoring those fields
+    /// WITHOUT a hint is unaffected.
+    #[error(
+        "checksum hint not yet computable: the .ir.json carries an advisory checksum hint \
+         alongside {field} ({detail}), which this engine build cannot fold into the §2.4 hint \
+         domain yet (the flags/deps merge is a later wave). Drop the advisory hint, or omit \
+         {field}, until the merge lands — the engine refuses to validate a hint against a \
+         partial domain"
+    )]
+    ChecksumHintNotComputable {
+        /// The field present alongside the hint that is not yet foldable.
+        field: &'static str,
+        /// A human-readable detail of the offending value.
+        detail: String,
+    },
 }
 
 /// The sentinel an ownership lookup yields for a table absent from the registry.
@@ -175,16 +198,29 @@ pub fn enforce_ir_ownership(
 
 /// Recompute the §2.4-point-2 **advisory hint domain** checksum for a loaded IR.
 ///
-/// The hint domain is the op list + the dialect-neutral flags + deps + supersedes
-/// + preconditions, with `owner_app = ""` (server-stamped and so unpredictable to
-/// the builder — excluded, design §2.4 / line 1094). The
-/// [`IrFlagsOverride`](crate::ir::IrFlagsOverride)→[`MigrationFlags`] merge is a
-/// later wave, so the PR1 hint domain folds the dialect-neutral default flags +
-/// the op region (which fully determines the artifact's logical content); the JS
-/// builder computes the hint over the SAME domain. The result is what
-/// [`load_ir_document`] compares to a present `checksum` hint.
+/// The hint domain (design §2.4 point 2 + [`MigrationIr::checksum`] doc) is
+/// `ops + flags + depends_on + supersedes + preconditions`, with `owner_app = ""`
+/// (server-stamped and so unpredictable to the builder — excluded, §2.4 /
+/// line 1094).
+///
+/// **PR1 only folds the SUBSET it can compute faithfully**: the op region (which
+/// fully determines the artifact's logical content) + preconditions + the
+/// dialect-neutral DEFAULT flags + EMPTY deps/supersedes. The
+/// [`IrFlagsOverride`](crate::ir::IrFlagsOverride)→[`MigrationFlags`] and
+/// `String`→`MigrationId` merges are a later wave, so this recompute is ONLY
+/// valid for an IR whose `flags`/`depends_on`/`supersedes` are at their
+/// defaults — the caller MUST gate on that ([`hint_domain_uncomputable_field`])
+/// and refuse a hint over a wider domain rather than compare a partial one (a
+/// partial compare both false-rejects a spec-correct hint and false-accepts
+/// tampering of the un-folded fields). The result is what [`load_ir_document`]
+/// compares to a present `checksum` hint, only after the gate passes.
 #[must_use]
 pub fn recompute_hint_domain_checksum(ir: &MigrationIr) -> Checksum {
+    debug_assert!(
+        hint_domain_uncomputable_field(ir).is_none(),
+        "recompute_hint_domain_checksum called on an IR with a not-yet-foldable \
+         flags/deps/supersedes domain — the caller must gate first"
+    );
     Checksum::of_ir(
         &crate::ir::CanonicalOpList(&ir.ops),
         &MigrationFlags::default(),
@@ -193,6 +229,24 @@ pub fn recompute_hint_domain_checksum(ir: &MigrationIr) -> Checksum {
         &[],
         &ir.preconditions,
     )
+}
+
+/// Return the §2.4 hint-domain field this engine build cannot yet fold for `ir`,
+/// or `None` when the hint domain IS fully computable (flags at default + no
+/// deps/supersedes). Used to fail closed on a hint over a not-yet-foldable
+/// domain (the `IrFlagsOverride`/`MigrationId` merges are a later wave).
+#[must_use]
+fn hint_domain_uncomputable_field(ir: &MigrationIr) -> Option<(&'static str, String)> {
+    if !ir.depends_on.is_empty() {
+        return Some(("depends_on", format!("{:?}", ir.depends_on)));
+    }
+    if !ir.supersedes.is_empty() {
+        return Some(("supersedes", format!("{:?}", ir.supersedes)));
+    }
+    if ir.flags != crate::ir::IrFlagsOverride::default() {
+        return Some(("flags", format!("{:?}", ir.flags)));
+    }
+    None
 }
 
 /// Load + GATE a `.ir.json` document (the fail-closed §5.2 chain). Returns the
@@ -237,6 +291,12 @@ pub fn load_ir_document(
     //    against the artifact's claimed hint BEFORE we stamp owner_app, since the
     //    hint domain excludes owner_app anyway.
     if let Some(hint) = ir.checksum.clone() {
+        // Fail closed if the §2.4 hint domain is not yet fully computable for this
+        // IR (a non-default flags / deps / supersedes contribution the Wave-C
+        // merge has not landed). Never compare a hint against a PARTIAL domain.
+        if let Some((field, detail)) = hint_domain_uncomputable_field(&ir) {
+            return Err(IrLoadError::ChecksumHintNotComputable { field, detail });
+        }
         let recomputed = recompute_hint_domain_checksum(&ir);
         if recomputed.as_str() != hint {
             return Err(IrLoadError::ChecksumHintMismatch {
@@ -481,6 +541,78 @@ mod tests {
         let bytes = ir_json(ops, "");
         let reg = registry(&[("users", "app_a")]);
         assert!(load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg).is_ok());
+    }
+
+    // ── HIGH: hint domain is not yet fully computable (deps/supersedes/flags) ─
+    // Until the Wave-C IrFlagsOverride→MigrationFlags + String→MigrationId merge
+    // lands, the recompute folds ONLY ops+preconditions (neutral flags, empty
+    // deps). A hint-bearing IR that ALSO carries depends_on/supersedes or
+    // non-default flags must NOT be silently compared against a PARTIAL domain
+    // (that would both false-reject a spec-correct hint AND false-accept tampering
+    // of the un-folded fields). The loader fails closed with a clear error.
+
+    #[test]
+    fn load_rejects_hint_bearing_ir_with_depends_on_fail_closed() {
+        // A hint over an IR that carries a depends_on entry: the hint domain
+        // (per §2.4 / ir.rs doc) includes depends_on, but PR1 cannot fold it, so
+        // the loader refuses rather than compare a partial domain.
+        let ops = r#"[{"op":"dropTable","table":"users"}]"#;
+        let bytes = ir_json(
+            ops,
+            r#", "depends_on": ["m_0001"], "checksum": "deadbeefdeadbeef""#,
+        );
+        let reg = registry(&[("users", "app_a")]);
+        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg).unwrap_err();
+        assert!(
+            matches!(err, IrLoadError::ChecksumHintNotComputable { .. }),
+            "a hint over a depends_on-bearing IR must fail closed, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_hint_bearing_ir_with_supersedes_fail_closed() {
+        let ops = r#"[{"op":"dropTable","table":"users"}]"#;
+        let bytes = ir_json(
+            ops,
+            r#", "supersedes": ["m_0001"], "checksum": "deadbeefdeadbeef""#,
+        );
+        let reg = registry(&[("users", "app_a")]);
+        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg).unwrap_err();
+        assert!(
+            matches!(err, IrLoadError::ChecksumHintNotComputable { .. }),
+            "a hint over a supersedes-bearing IR must fail closed, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_hint_bearing_ir_with_non_default_flags_fail_closed() {
+        // A non-default flag override (transactional:false) is outside the PR1
+        // foldable domain (neutral defaults), so a hint over it fails closed.
+        let ops = r#"[{"op":"dropTable","table":"users"}]"#;
+        let bytes = ir_json(
+            ops,
+            r#", "flags": {"transactional": false}, "checksum": "deadbeefdeadbeef""#,
+        );
+        let reg = registry(&[("users", "app_a")]);
+        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg).unwrap_err();
+        assert!(
+            matches!(err, IrLoadError::ChecksumHintNotComputable { .. }),
+            "a hint over a non-default-flags IR must fail closed, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_allows_depends_on_when_no_hint_is_present() {
+        // The fail-closed gate is HINT-SPECIFIC: a depends_on-bearing IR with NO
+        // advisory hint is fine (nothing to compare), so authoring deps is not
+        // blocked — only a hint OVER an uncomputable domain is.
+        let ops = r#"[{"op":"dropTable","table":"users"}]"#;
+        let bytes = ir_json(ops, r#", "depends_on": ["m_0001"]"#);
+        let reg = registry(&[("users", "app_a")]);
+        assert!(
+            load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg).is_ok(),
+            "a depends_on-bearing IR WITHOUT a hint must load"
+        );
     }
 
     // ── order: ir_version is checked BEFORE validate/ownership/checksum ──────

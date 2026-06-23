@@ -1316,14 +1316,17 @@ mod tests {
     #[test]
     fn advisory_checksum_hint_is_excluded_from_of_ir() {
         use crate::migration::{Checksum, MigrationFlags};
-        // Build TWO MigrationIr values that differ in NOTHING but `.checksum` (one
-        // `Some`, one `None`), then derive the of_ir inputs from EACH the same way
-        // the loader's hint-domain recompute does — from `ir.ops` (owner = "" for
-        // the hint domain, §2.4 point 2). If a future regression folded the hint
-        // into the checksum domain, the two would diverge; this catches it. The
-        // prior test was tautological — it called of_ir twice with IDENTICAL
-        // arguments and so only proved of_ir is deterministic, not that the hint
-        // is excluded.
+        // DOCUMENTATION TEST (LOW): the hint's exclusion from the IR checksum is
+        // guaranteed STRUCTURALLY by `Checksum::of_ir`'s SIGNATURE — it takes
+        // `ops`/`flags`/`owner`/`deps`/`supersedes`/`preconditions` and has NO
+        // checksum/hint parameter, so `MigrationIr.checksum` is unreachable from
+        // it by construction. This test cannot fail for the reason it documents
+        // without changing of_ir's parameter list (the day someone tries to thread
+        // the hint through of_ir, THIS call site stops compiling). It therefore
+        // serves as: (1) executable documentation that of_ir's input domain
+        // excludes the hint, and (2) a determinism check over identical inputs.
+        // Build two MigrationIr differing only in `.checksum` to make the intent
+        // legible; the equality below is true by the signature, not by chance.
         let base_ops = vec![Op::DropTable { table: "t".into(), if_exists: None, cascade: None }];
         let with_hint = MigrationIr {
             ir_version: 1,
