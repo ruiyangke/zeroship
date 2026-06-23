@@ -19,6 +19,12 @@ hex = { workspace = true }
 # `schemars::schema_for!`. Sync + leaf — zero tokio; does not widen the trust
 # domain (it only describes the IR shape, it does not parse untrusted SQL).
 schemars = { workspace = true }
+# Strict base64 decode + canonical encode for `IrScalar::Bytes`. The payload is
+# stored DECODED internally and re-encoded with the canonical STANDARD (padded)
+# alphabet on serialize, so two non-canonical encodings of the same bytes cannot
+# hash differently across the JS/Rust front doors (§2.5). The strict decoder
+# refuses an invalid alphabet / wrong padding at LOAD, before any checksum.
+base64 = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

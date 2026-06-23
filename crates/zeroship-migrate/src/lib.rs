@@ -71,6 +71,7 @@ pub mod drift;
 pub mod engine;
 pub mod expand_contract;
 pub mod executor;
+pub mod expr;
 #[doc(hidden)]
 pub mod fault;
 pub mod guard;
@@ -86,6 +87,7 @@ pub mod shadow;
 pub mod squash;
 pub mod status;
 pub mod submit;
+pub mod validate;
 
 // ---------------------------------------------------------------------------
 // Public API surface — re-exports (later plans depend on these names).
@@ -163,10 +165,21 @@ pub use migration::{
 };
 // The `op.*` portable IR (§2.1/§2.3/§2.5): the migration document, the closed
 // `Op` enum, the constrained numeric scalar, and the canonical op-list the
-// `Checksum::of_ir` front door folds.
+// `Checksum::of_ir` front door folds. There is NO `Raw`/`RawDown` (property A);
+// every transform/predicate is the closed [`expr::Expr`] AST.
 pub use ir::{
-    CanonicalOpList, ColType, IrBatch, IrColumn, IrConstraint, IrConstraintKind, IrFlagsOverride,
-    IrFragment, IrIndex, IrScalar, MigrationIr, Op, RawDown, EXPR_INVALID_NUMERIC,
+    CanonicalOpList, ColType, IrBatch, IrColumn, IrConstraint, IrConstraintKind, IrDefault,
+    IrFlagsOverride, IrIndex, IrScalar, MigrationIr, Op, SafeU64, EXPR_INVALID_NUMERIC,
+};
+// The closed expression AST (§3.3.1) the IR's transform/predicate positions
+// carry. Constructed in JS, serialized as data, NEVER parsed from text.
+pub use expr::{BinaryOp, CaseBranch, CastTarget, Expr, ScalarFn, SynthFn, UnaryOp};
+// The STRUCTURAL expression-AST validator + the structured-error envelope
+// (§3.3.1.1 / §8.8). No parser, no fuzzer — a pure allow-list walk.
+pub use validate::{
+    validate_expr, AuthoringError, Dialect as ValidatorDialect, TargetScope, UnsupportedKind,
+    CODE_DIALECT_SCOPE_PGONLY, CODE_EXPR_NOT_PORTABLE, CODE_OP_OUTSIDE_RECORDER, CODE_UNSUPPORTED,
+    SPLIT_PART_MAX_N,
 };
 // The `op.*` DSL plan model (§2.0). Distinct from the dry-run `MigrationPlan`
 // (re-exported from `engine`, unchanged): these are the net-new ordered

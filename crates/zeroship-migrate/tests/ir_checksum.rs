@@ -164,10 +164,13 @@ fn checksum_of_ir_deterministic_and_sensitive() {
 }
 
 /// Changing a typed `IrScalar` inside an `Insert` row changes `of_ir` (the JCS
-/// of the op folds its binds), and changing EITHER string of a `Raw` op is
-/// drift (both pg + sqlite fold).
+/// of the op folds its binds), and changing an embedded expression-AST `Literal`
+/// param (the §2.3.2 / §2.4-point-3 obligation) is also drift.
 #[test]
-fn checksum_of_ir_folds_scalars_and_raw_both_dialects() {
+fn checksum_of_ir_folds_scalars_and_ast_literals() {
+    use std::collections::BTreeMap;
+    use zeroship_migrate::expr::{BinaryOp, Expr};
+
     let flags = MigrationFlags::default();
     let owner = "app_ir";
 
@@ -189,32 +192,66 @@ fn checksum_of_ir_folds_scalars_and_raw_both_dialects() {
         "an Insert row scalar change must be drift"
     );
 
-    // Raw: changing the pg string is drift.
-    let raw_pg1 = vec![Op::Raw {
-        pg: Some("SELECT 1".into()),
-        sqlite: Some("SELECT 1".into()),
-        down: None,
-    }];
-    let raw_pg2 = vec![Op::Raw {
-        pg: Some("SELECT 2".into()),
-        sqlite: Some("SELECT 1".into()),
-        down: None,
-    }];
+    // Two `update` ops differing ONLY in an in-AST `Literal` threshold value
+    // (`c("total").gt(0)` vs `c("total").gt(5)`) must have different of_ir —
+    // the "changing a threshold value is drift" guarantee for AST-embedded
+    // params (§2.3.2).
+    let mk_update = |threshold: i64| {
+        let mut set = BTreeMap::new();
+        set.insert(
+            "flagged".to_string(),
+            Expr::lit(IrScalar::Bool(true)),
+        );
+        Op::Update {
+            table: "t".into(),
+            set,
+            r#where: Some(Expr::BinOp {
+                op: BinaryOp::Gt,
+                lhs: Box::new(Expr::col("total")),
+                rhs: Box::new(Expr::lit(IrScalar::Int(threshold))),
+            }),
+            batch: None,
+        }
+    };
+    let u0 = vec![mk_update(0)];
+    let u5 = vec![mk_update(5)];
     assert_ne!(
-        Checksum::of_ir(&CanonicalOpList(&raw_pg1), &flags, owner, &[], &[], &[]),
-        Checksum::of_ir(&CanonicalOpList(&raw_pg2), &flags, owner, &[], &[], &[]),
-        "a Raw.pg change must be drift"
+        Checksum::of_ir(&CanonicalOpList(&u0), &flags, owner, &[], &[], &[]),
+        Checksum::of_ir(&CanonicalOpList(&u5), &flags, owner, &[], &[], &[]),
+        "an in-AST Literal threshold change must be drift"
     );
-    // …and changing ONLY the sqlite string is ALSO drift.
-    let raw_sq2 = vec![Op::Raw {
-        pg: Some("SELECT 1".into()),
-        sqlite: Some("SELECT 2".into()),
+}
+
+/// Explicit domain separation: `of_ir` carries a one-sided domain tag so it is
+/// provably non-colliding with `of` even for a crafted equal-length input. We
+/// construct an `of` input whose up/down region length equals the `of_ir` region
+/// length and confirm the two front doors STILL differ — the tag, not just the
+/// structural ordering, keeps them apart.
+#[test]
+fn of_and_of_ir_never_collide_even_with_equal_length_regions() {
+    let flags = MigrationFlags::default();
+    let owner = "app_dom";
+
+    // An empty op-list: of_ir's region is just the u64 op-count (8 bytes, value
+    // 0). Build an `of` input engineered to fold an identical-shaped region were
+    // there no domain tag, then assert they differ regardless.
+    let empty_ops: Vec<Op> = vec![];
+    let ir = Checksum::of_ir(&CanonicalOpList(&empty_ops), &flags, owner, &[], &[], &[]);
+
+    let sql_input = ChecksumInput {
+        up: "",
         down: None,
-    }];
+        flags: &flags,
+        owner_app: owner,
+        depends_on: &[],
+        supersedes: &[],
+        preconditions: &[],
+    };
+    let sql = Checksum::of(&sql_input);
     assert_ne!(
-        Checksum::of_ir(&CanonicalOpList(&raw_pg1), &flags, owner, &[], &[], &[]),
-        Checksum::of_ir(&CanonicalOpList(&raw_sq2), &flags, owner, &[], &[], &[]),
-        "a Raw.sqlite change must be drift"
+        ir.as_str(),
+        sql.as_str(),
+        "of_ir's domain tag must keep it distinct from of for every input"
     );
 }
 

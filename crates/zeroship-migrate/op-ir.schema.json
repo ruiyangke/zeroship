@@ -65,6 +65,7 @@
       "default": []
     }
   },
+  "additionalProperties": false,
   "required": [
     "ir_version",
     "name",
@@ -110,6 +111,7 @@
               "const": "createTable"
             }
           },
+          "additionalProperties": false,
           "required": [
             "op",
             "name",
@@ -124,7 +126,7 @@
               "description": "Table to drop.",
               "type": "string"
             },
-            "if_exists": {
+            "ifExists": {
               "description": "`IF EXISTS`.",
               "type": [
                 "boolean",
@@ -143,6 +145,7 @@
               "const": "dropTable"
             }
           },
+          "additionalProperties": false,
           "required": [
             "op",
             "table"
@@ -172,10 +175,14 @@
               ]
             },
             "default": {
-              "description": "Default expression.",
-              "type": [
-                "string",
-                "null"
+              "description": "Structured default (typed literal or synth scalar) — never raw SQL.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/IrDefault"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "op": {
@@ -183,6 +190,7 @@
               "const": "addColumn"
             }
           },
+          "additionalProperties": false,
           "required": [
             "op",
             "table",
@@ -202,7 +210,7 @@
               "description": "Column to drop.",
               "type": "string"
             },
-            "if_exists": {
+            "ifExists": {
               "description": "`IF EXISTS`.",
               "type": [
                 "boolean",
@@ -214,6 +222,7 @@
               "const": "dropColumn"
             }
           },
+          "additionalProperties": false,
           "required": [
             "op",
             "table",
@@ -275,6 +284,7 @@
               "const": "createIndex"
             }
           },
+          "additionalProperties": false,
           "required": [
             "op",
             "table",
@@ -296,7 +306,7 @@
                 "null"
               ]
             },
-            "if_exists": {
+            "ifExists": {
               "description": "`IF EXISTS`.",
               "type": [
                 "boolean",
@@ -315,6 +325,7 @@
               "const": "dropIndex"
             }
           },
+          "additionalProperties": false,
           "required": [
             "op",
             "name"
@@ -348,6 +359,7 @@
               "const": "alterColumnType"
             }
           },
+          "additionalProperties": false,
           "required": [
             "op",
             "table",
@@ -376,6 +388,7 @@
               "const": "alterColumnNullability"
             }
           },
+          "additionalProperties": false,
           "required": [
             "op",
             "table",
@@ -408,6 +421,7 @@
               "const": "renameColumn"
             }
           },
+          "additionalProperties": false,
           "required": [
             "op",
             "table",
@@ -433,6 +447,7 @@
               "const": "addConstraint"
             }
           },
+          "additionalProperties": false,
           "required": [
             "op",
             "table",
@@ -456,6 +471,7 @@
               "const": "dropConstraint"
             }
           },
+          "additionalProperties": false,
           "required": [
             "op",
             "table",
@@ -492,6 +508,7 @@
               "const": "insert"
             }
           },
+          "additionalProperties": false,
           "required": [
             "op",
             "table",
@@ -508,17 +525,17 @@
               "type": "string"
             },
             "set": {
-              "description": "Column → fragment assignments (sorted map for canonicality).",
+              "description": "Column → closed-AST assignment (sorted map for canonicality).",
               "type": "object",
               "additionalProperties": {
-                "$ref": "#/$defs/IrFragment"
+                "$ref": "#/$defs/Expr"
               }
             },
             "where": {
-              "description": "Optional WHERE fragment.",
+              "description": "Optional WHERE predicate (closed AST).",
               "anyOf": [
                 {
-                  "$ref": "#/$defs/IrFragment"
+                  "$ref": "#/$defs/Expr"
                 },
                 {
                   "type": "null"
@@ -541,6 +558,7 @@
               "const": "update"
             }
           },
+          "additionalProperties": false,
           "required": [
             "op",
             "table",
@@ -556,23 +574,26 @@
               "type": "string"
             },
             "where": {
-              "description": "The WHERE fragment (mandatory — no unfiltered delete).",
-              "$ref": "#/$defs/IrFragment"
+              "description": "The WHERE predicate (mandatory — no unfiltered delete).",
+              "$ref": "#/$defs/Expr"
             },
             "limit": {
-              "description": "Optional LIMIT.",
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "uint64",
-              "minimum": 0
+              "description": "Optional LIMIT (JS-safe-integer bounded).",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SafeU64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "op": {
               "type": "string",
               "const": "delete"
             }
           },
+          "additionalProperties": false,
           "required": [
             "op",
             "table",
@@ -587,28 +608,26 @@
               "description": "Target table.",
               "type": "string"
             },
-            "cursor_column": {
+            "cursorColumn": {
               "description": "Cursor column to page over.",
               "type": "string"
             },
-            "batch_size": {
-              "description": "Rows per batch.",
-              "type": "integer",
-              "format": "uint64",
-              "minimum": 0
+            "batchSize": {
+              "description": "Rows per batch (JS-safe-integer bounded).",
+              "$ref": "#/$defs/SafeU64"
             },
             "set": {
-              "description": "Column → fragment assignments.",
+              "description": "Column → closed-AST assignment.",
               "type": "object",
               "additionalProperties": {
-                "$ref": "#/$defs/IrFragment"
+                "$ref": "#/$defs/Expr"
               }
             },
             "filter": {
-              "description": "Optional row filter.",
+              "description": "Optional row filter (closed AST).",
               "anyOf": [
                 {
-                  "$ref": "#/$defs/IrFragment"
+                  "$ref": "#/$defs/Expr"
                 },
                 {
                   "type": "null"
@@ -624,51 +643,14 @@
               "const": "backfill"
             }
           },
+          "additionalProperties": false,
           "required": [
             "op",
             "table",
-            "cursor_column",
-            "batch_size",
+            "cursorColumn",
+            "batchSize",
             "set",
             "name"
-          ]
-        },
-        {
-          "description": "A dialect-split RAW escape hatch — both `pg` and `sqlite` carried so the\nchecksum sees BOTH (a change to either is drift).",
-          "type": "object",
-          "properties": {
-            "pg": {
-              "description": "Postgres forward SQL.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "sqlite": {
-              "description": "SQLite forward SQL.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "down": {
-              "description": "Reverse SQL.",
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/RawDown"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "op": {
-              "type": "string",
-              "const": "raw"
-            }
-          },
-          "required": [
-            "op"
           ]
         }
       ]
@@ -693,10 +675,14 @@
           ]
         },
         "default": {
-          "description": "Default expression (a literal / portable expression string).",
-          "type": [
-            "string",
-            "null"
+          "description": "Structured default (a typed literal or a synth scalar) — never raw SQL.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IrDefault"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "unique": {
@@ -707,6 +693,7 @@
           ]
         }
       },
+      "additionalProperties": false,
       "required": [
         "name",
         "type"
@@ -871,157 +858,55 @@
         }
       ]
     },
-    "IrConstraint": {
-      "description": "A named table constraint.",
-      "type": "object",
-      "properties": {
-        "name": {
-          "description": "Optional constraint name (engine-derived if absent).",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
+    "IrDefault": {
+      "description": "A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —\neither a typed scalar literal or an engine-synthesized apply-time scalar\n(`now`/`genRandomUuid`). NEVER a raw SQL string (property A); the per-dialect\ndefault clause is rendered by the shared snapshot-builder kernel from this\nstructured value (§6.5).",
       "oneOf": [
         {
-          "description": "PRIMARY KEY over the named columns.",
+          "description": "A typed scalar literal default (constrained numeric domain — §2.5).",
           "type": "object",
           "properties": {
-            "columns": {
-              "description": "The key columns.",
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "kind": {
-              "type": "string",
-              "const": "pk"
+            "literal": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "description": "The literal value.",
+                  "$ref": "#/$defs/IrScalar"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "value"
+              ]
             }
           },
           "required": [
-            "kind",
-            "columns"
-          ]
+            "literal"
+          ],
+          "additionalProperties": false
         },
         {
-          "description": "FOREIGN KEY referencing `(references_table.references_columns)`.",
+          "description": "An engine-synthesized apply-time default (`now()` / `gen_random_uuid()`),\nrendered per dialect by the kernel (§4.3). Only the no-arg synth scalars\n(`now`, `genRandomUuid`) are admissible as a default.",
           "type": "object",
           "properties": {
-            "columns": {
-              "description": "The referencing columns.",
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "references_table": {
-              "description": "The referenced table.",
-              "type": "string"
-            },
-            "references_columns": {
-              "description": "The referenced columns.",
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "kind": {
-              "type": "string",
-              "const": "fk"
+            "fn": {
+              "type": "object",
+              "properties": {
+                "fn": {
+                  "description": "The synthesized function (must be `now` or `genRandomUuid`).",
+                  "$ref": "#/$defs/SynthFn"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "fn"
+              ]
             }
           },
           "required": [
-            "kind",
-            "columns",
-            "references_table",
-            "references_columns"
-          ]
-        },
-        {
-          "description": "UNIQUE over the named columns.",
-          "type": "object",
-          "properties": {
-            "columns": {
-              "description": "The unique columns.",
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "kind": {
-              "type": "string",
-              "const": "unique"
-            }
-          },
-          "required": [
-            "kind",
-            "columns"
-          ]
-        },
-        {
-          "description": "CHECK with a portable boolean expression string.",
-          "type": "object",
-          "properties": {
-            "expr": {
-              "description": "The check expression.",
-              "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "const": "check"
-            }
-          },
-          "required": [
-            "kind",
-            "expr"
-          ]
+            "fn"
+          ],
+          "additionalProperties": false
         }
-      ]
-    },
-    "IrIndex": {
-      "description": "An index definition inside a `createTable` op.",
-      "type": "object",
-      "properties": {
-        "name": {
-          "description": "Optional index name (engine-derived if absent).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "columns": {
-          "description": "Indexed columns.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "unique": {
-          "description": "Whether the index is UNIQUE.",
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "using": {
-          "description": "Index method (`btree`/`gin`/…); dialect-validated in Wave D.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "where": {
-          "description": "Partial-index predicate (a portable expression string).",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "columns"
       ]
     },
     "IrScalar": {
@@ -1066,66 +951,624 @@
         }
       ]
     },
-    "IrFragment": {
-      "description": "A `set` / `where` / `filter` body (§3.3.1.2): a portable SQL TEMPLATE plus\nits typed positional binds. The template carries placeholders the lowering\nfills; the binds are constrained [`IrScalar`]s. (Template VALIDATION — that\nit is a safe portable fragment — is Wave D.)",
+    "SynthFn": {
+      "description": "The engine-SYNTHESIZED helpers (`FnSynth`) whose per-dialect lowering the\nengine pins (§9). CLOSED. `splitPart` is admitted only within its pinned\nsingle-ASCII-delimiter + positive-literal-`n` envelope (validated structurally\n— §3.3.1.1(b)); `concatWs` is the NULL-skipping join; `now`/`genRandomUuid`\nare apply-time DB-evaluated scalars (the structured replacement for a frozen\n`Date.now()` / UUID literal, §4.3).",
+      "oneOf": [
+        {
+          "description": "NULL-skipping `concat_ws` (PG) / `coalesce`-folded `||` (SQLite).",
+          "type": "string",
+          "const": "concatWs"
+        },
+        {
+          "description": "`split_part` (PG) / pinned `instr`/`substr` unroll (SQLite), in-envelope only.",
+          "type": "string",
+          "const": "splitPart"
+        },
+        {
+          "description": "`now()` / current timestamp, evaluated at apply time.",
+          "type": "string",
+          "const": "now"
+        },
+        {
+          "description": "`gen_random_uuid()`, evaluated at apply time.",
+          "type": "string",
+          "const": "genRandomUuid"
+        }
+      ]
+    },
+    "IrConstraint": {
+      "description": "A named table constraint.\n\n`kind` is a NESTED object (`{\"name\":…,\"kind\":{\"kind\":\"fk\",…}}`), NOT a\nflattened sibling — un-flattening makes [`deny_unknown_fields`] sound (serde\nforbids `flatten` + `deny_unknown_fields` together) and removes the\nflatten-merge ambiguity that made the generated JSON Schema lossy.",
       "type": "object",
       "properties": {
-        "template": {
-          "description": "The portable fragment template.",
-          "type": "string"
+        "name": {
+          "description": "Optional constraint name (engine-derived if absent).",
+          "type": [
+            "string",
+            "null"
+          ]
         },
-        "binds": {
-          "description": "Positional binds, in template order.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/IrScalar"
-          },
-          "default": []
+        "kind": {
+          "description": "The constraint kind + its operands (a nested, internally-tagged object).",
+          "$ref": "#/$defs/IrConstraintKind"
         }
       },
+      "additionalProperties": false,
       "required": [
-        "template"
+        "kind"
+      ]
+    },
+    "IrConstraintKind": {
+      "description": "The kind of a table constraint. CLOSED enum, internally tagged on `\"kind\"`.",
+      "oneOf": [
+        {
+          "description": "PRIMARY KEY over the named columns.",
+          "type": "object",
+          "properties": {
+            "columns": {
+              "description": "The key columns.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "pk"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "columns"
+          ]
+        },
+        {
+          "description": "FOREIGN KEY referencing `(referencesTable.referencesColumns)`.",
+          "type": "object",
+          "properties": {
+            "columns": {
+              "description": "The referencing columns.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "referencesTable": {
+              "description": "The referenced table.",
+              "type": "string"
+            },
+            "referencesColumns": {
+              "description": "The referenced columns.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "fk"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "columns",
+            "referencesTable",
+            "referencesColumns"
+          ]
+        },
+        {
+          "description": "UNIQUE over the named columns.",
+          "type": "object",
+          "properties": {
+            "columns": {
+              "description": "The unique columns.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "unique"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "columns"
+          ]
+        },
+        {
+          "description": "CHECK with a portable boolean expression (closed AST, never raw SQL).",
+          "type": "object",
+          "properties": {
+            "expr": {
+              "description": "The check expression (a boolean closed-AST node).",
+              "$ref": "#/$defs/Expr"
+            },
+            "kind": {
+              "type": "string",
+              "const": "check"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "expr"
+          ]
+        }
+      ]
+    },
+    "Expr": {
+      "description": "The CLOSED expression AST node (§3.3.1). Internally tagged on `\"node\"`,\ncamel-cased (`{\"node\":\"colRef\",\"name\":\"first\"}`). NO `untagged`, NO `flatten`\n— same discipline as [`Op`](crate::ir::Op), so schemars derives a clean\ndiscriminated union and serde rejects any out-of-set node tag at deserialize.",
+      "oneOf": [
+        {
+          "description": "A column reference (`c(\"name\")`). The name is a plain string, resolved\nagainst the enclosing op's single target table at apply/render time\n(§3.3.1.1(c)) — never `tsc`-bound to the live schema (§3.3).",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The column name (plain string).",
+              "type": "string"
+            },
+            "node": {
+              "type": "string",
+              "const": "colRef"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "name"
+          ]
+        },
+        {
+          "description": "A typed scalar literal (a bare JS value auto-wrapped by a fluent operator\nmethod). Carries an [`IrScalar`] so the numeric domain is enforced at\ndeserialize (§2.5) and the value folds into the checksum (§2.4 point 3).",
+          "type": "object",
+          "properties": {
+            "value": {
+              "description": "The typed scalar value.",
+              "$ref": "#/$defs/IrScalar"
+            },
+            "node": {
+              "type": "string",
+              "const": "literal"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "value"
+          ]
+        },
+        {
+          "description": "A binary operation (`lhs <op> rhs`).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "description": "The operator.",
+              "$ref": "#/$defs/BinaryOp"
+            },
+            "lhs": {
+              "description": "Left operand.",
+              "$ref": "#/$defs/Expr"
+            },
+            "rhs": {
+              "description": "Right operand.",
+              "$ref": "#/$defs/Expr"
+            },
+            "node": {
+              "type": "string",
+              "const": "binOp"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "op",
+            "lhs",
+            "rhs"
+          ]
+        },
+        {
+          "description": "A unary operation (`<op> operand` / `operand <op>`).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "description": "The operator.",
+              "$ref": "#/$defs/UnaryOp"
+            },
+            "operand": {
+              "description": "The operand.",
+              "$ref": "#/$defs/Expr"
+            },
+            "node": {
+              "type": "string",
+              "const": "unaryOp"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "op",
+            "operand"
+          ]
+        },
+        {
+          "description": "A searched `CASE` (`c.fn.case([[cond, val], …], else?)`). Each branch is\n`(condition, result)`; both halves are themselves closed-AST nodes.",
+          "type": "object",
+          "properties": {
+            "branches": {
+              "description": "`(condition, result)` branches, in order.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CaseBranch"
+              }
+            },
+            "else": {
+              "description": "Optional `ELSE` result.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "node": {
+              "type": "string",
+              "const": "case"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "branches"
+          ]
+        },
+        {
+          "description": "An allow-listed named scalar function call (§3.3.1.1(a)).",
+          "type": "object",
+          "properties": {
+            "fn": {
+              "description": "The function (allow-listed).",
+              "$ref": "#/$defs/ScalarFn"
+            },
+            "args": {
+              "description": "The argument expressions.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Expr"
+              }
+            },
+            "node": {
+              "type": "string",
+              "const": "fnCall"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "fn",
+            "args"
+          ]
+        },
+        {
+          "description": "An engine-SYNTHESIZED helper call (§9). The per-dialect lowering is the\nengine's; the author never sees the rendered form.",
+          "type": "object",
+          "properties": {
+            "fn": {
+              "description": "The synthesized function.",
+              "$ref": "#/$defs/SynthFn"
+            },
+            "args": {
+              "description": "The argument expressions (a `splitPart`'s `delim`/`n` are `Literal`\nargs, validated in-envelope structurally — §3.3.1.1(b)).",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Expr"
+              }
+            },
+            "node": {
+              "type": "string",
+              "const": "fnSynth"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "fn",
+            "args"
+          ]
+        },
+        {
+          "description": "A cast to a portable type (`.cast(\"integer\")`).",
+          "type": "object",
+          "properties": {
+            "operand": {
+              "description": "The expression being cast.",
+              "$ref": "#/$defs/Expr"
+            },
+            "target": {
+              "description": "The portable target type.",
+              "$ref": "#/$defs/CastTarget"
+            },
+            "node": {
+              "type": "string",
+              "const": "cast"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "operand",
+            "target"
+          ]
+        }
+      ]
+    },
+    "BinaryOp": {
+      "description": "A binary operator admitted in the closed AST (§3.3.1 method↔node table).\n\nCamel/lower-cased on the wire so the JS builder emits the same tokens\n(`{\"node\":\"binOp\",\"op\":\"eq\", …}`). The set is closed: comparison, boolean,\narithmetic, and string concatenation (`||`, the one place PG/SQLite NULL\nsemantics agree — §3.3.1).",
+      "oneOf": [
+        {
+          "description": "`=`",
+          "type": "string",
+          "const": "eq"
+        },
+        {
+          "description": "`<>` / `!=`",
+          "type": "string",
+          "const": "ne"
+        },
+        {
+          "description": "`<`",
+          "type": "string",
+          "const": "lt"
+        },
+        {
+          "description": "`<=`",
+          "type": "string",
+          "const": "le"
+        },
+        {
+          "description": "`>`",
+          "type": "string",
+          "const": "gt"
+        },
+        {
+          "description": "`>=`",
+          "type": "string",
+          "const": "ge"
+        },
+        {
+          "description": "boolean `AND`",
+          "type": "string",
+          "const": "and"
+        },
+        {
+          "description": "boolean `OR`",
+          "type": "string",
+          "const": "or"
+        },
+        {
+          "description": "`+`",
+          "type": "string",
+          "const": "add"
+        },
+        {
+          "description": "`-`",
+          "type": "string",
+          "const": "sub"
+        },
+        {
+          "description": "`*`",
+          "type": "string",
+          "const": "mul"
+        },
+        {
+          "description": "`/`",
+          "type": "string",
+          "const": "div"
+        },
+        {
+          "description": "`||` string concatenation (NULL-propagating on BOTH backends).",
+          "type": "string",
+          "const": "concat"
+        }
+      ]
+    },
+    "UnaryOp": {
+      "description": "A unary operator admitted in the closed AST (§3.3.1).",
+      "oneOf": [
+        {
+          "description": "boolean `NOT`",
+          "type": "string",
+          "const": "not"
+        },
+        {
+          "description": "`IS NULL`",
+          "type": "string",
+          "const": "isNull"
+        },
+        {
+          "description": "`IS NOT NULL`",
+          "type": "string",
+          "const": "isNotNull"
+        },
+        {
+          "description": "`IS TRUE`",
+          "type": "string",
+          "const": "isTrue"
+        },
+        {
+          "description": "`IS FALSE`",
+          "type": "string",
+          "const": "isFalse"
+        }
+      ]
+    },
+    "CaseBranch": {
+      "description": "One `(condition, result)` branch of a [`Expr::Case`].",
+      "type": "object",
+      "properties": {
+        "condition": {
+          "description": "The branch condition (a boolean closed-AST node).",
+          "$ref": "#/$defs/Expr"
+        },
+        "result": {
+          "description": "The branch result.",
+          "$ref": "#/$defs/Expr"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "condition",
+        "result"
+      ]
+    },
+    "ScalarFn": {
+      "description": "The allow-listed *named* scalar functions (`c.fn.*` that are NOT engine-\nsynthesized `FnSynth`). CLOSED — a function outside this set has no builder\nmethod and no AST variant (§3.3.1.1(a)). These are the provably-identical\ncross-dialect scalars.",
+      "oneOf": [
+        {
+          "description": "`coalesce(...)`",
+          "type": "string",
+          "const": "coalesce"
+        },
+        {
+          "description": "`nullif(a, b)`",
+          "type": "string",
+          "const": "nullif"
+        },
+        {
+          "description": "`lower(e)`",
+          "type": "string",
+          "const": "lower"
+        },
+        {
+          "description": "`upper(e)`",
+          "type": "string",
+          "const": "upper"
+        },
+        {
+          "description": "`trim(e)`",
+          "type": "string",
+          "const": "trim"
+        },
+        {
+          "description": "`length(e)`",
+          "type": "string",
+          "const": "length"
+        },
+        {
+          "description": "`abs(e)`",
+          "type": "string",
+          "const": "abs"
+        }
+      ]
+    },
+    "CastTarget": {
+      "description": "The closed portable cast-target set (§3.3.1). A non-portable cast target is\nrejected (`UNSUPPORTED { kind: \"expr\" }`).",
+      "oneOf": [
+        {
+          "description": "`text`",
+          "type": "string",
+          "const": "text"
+        },
+        {
+          "description": "`integer`",
+          "type": "string",
+          "const": "integer"
+        },
+        {
+          "description": "`real`",
+          "type": "string",
+          "const": "real"
+        },
+        {
+          "description": "`boolean`",
+          "type": "string",
+          "const": "boolean"
+        },
+        {
+          "description": "`blob` (`BYTEA` on PG)",
+          "type": "string",
+          "const": "blob"
+        }
+      ]
+    },
+    "IrIndex": {
+      "description": "An index definition inside a `createTable` op.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Optional index name (engine-derived if absent).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "columns": {
+          "description": "Indexed columns.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unique": {
+          "description": "Whether the index is UNIQUE.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "using": {
+          "description": "Index method (`btree`/`gin`/…); dialect-validated by the validator.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "where": {
+          "description": "Partial-index predicate (a closed-AST node, never raw SQL).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Expr"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "columns"
       ]
     },
     "IrBatch": {
       "description": "A batched-backfill / batched-update knob.",
       "type": "object",
       "properties": {
-        "cursor_column": {
+        "cursorColumn": {
           "description": "The cursor column to page over.",
           "type": "string"
         },
-        "batch_size": {
-          "description": "Rows per batch.",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
+        "batchSize": {
+          "description": "Rows per batch (JS-safe-integer bounded).",
+          "$ref": "#/$defs/SafeU64"
         }
       },
+      "additionalProperties": false,
       "required": [
-        "cursor_column",
-        "batch_size"
+        "cursorColumn",
+        "batchSize"
       ]
     },
-    "RawDown": {
-      "description": "The reverse half of a [`Op::Raw`] op (dialect-specific down SQL).",
-      "type": "object",
-      "properties": {
-        "pg": {
-          "description": "Postgres reverse SQL.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "sqlite": {
-          "description": "SQLite reverse SQL.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      }
+    "SafeU64": {
+      "description": "A non-negative author-supplied STRUCTURAL integer (`batchSize`, `limit`,\n`timeout_ms`, …) constrained to the JS safe-integer range `< 2^53` at\nDESERIALIZE — the same numeric domain [`IrScalar::Int`] enforces for typed\nbinds (§2.5).\n\nA JS author carries these as a `number`; `JSON.stringify` of an integer\n`>= 2^53` is lossy, so the SAME logical migration would otherwise produce a\ndifferent typed value (and a different [`Checksum::of_ir`](crate::migration::Checksum::of_ir))\non the two sides. Bounding them here closes that cross-impl divergence — and\nrejects a hostile `.ir.json` that smuggles an out-of-range count past the\nloader BEFORE any checksum runs.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
     },
     "IrFlagsOverride": {
       "description": "All-`Option` mirror of [`MigrationFlags`] — the override carrier in the IR\n(§2.1). An absent key and an explicit `null` both mean \"no override\" here;\nthe derive-then-override MERGE is Wave C, NOT this type's job.",
@@ -1180,13 +1623,15 @@
           "default": null
         },
         "timeout_ms": {
-          "description": "Override for the optional `timeout_ms` facet.",
-          "type": [
-            "integer",
-            "null"
+          "description": "Override for the optional `timeout_ms` facet (JS-safe-integer bounded).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SafeU64"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "format": "uint64",
-          "minimum": 0,
           "default": null
         },
         "phase": {
@@ -1201,7 +1646,8 @@
           ],
           "default": null
         }
-      }
+      },
+      "additionalProperties": false
     },
     "OnlinePhase": {
       "description": "The phase of a zero-downtime **expand-contract** online migration (design\n§5, Plan 8). Carried only by `online` migrations (`flags.online == true`);\n`None` for an ordinary one-shot migration.\n\nAn online column RENAME (or type change) is split across **two deploys**:\n\n- **`Expand`** — additively grow the schema so old and new shapes coexist\n  (add the new nullable column, install a dual-write trigger, backfill).\n  Lands *before* dependent code switches over.\n- **`Contract`** — drop the old shape once no code uses it (drop the\n  trigger + function, drop the old column). Lands *after* code switches over.\n\nThe engine enforces the split via a gate (design Plan 8 v1.2): a `Contract`\nmigration is refused unless every `Expand` migration it `depends_on` is\n**net-applied in the journal**. This makes the journal the single source of\ntruth for the expand→contract timeline and gives cross-deploy partitioning\nfor free (a separate, later deploy can apply the contract).",

@@ -342,9 +342,9 @@ impl Checksum {
     ///
     /// The op-list region is [`CanonicalOpList::canonical_bytes`]: an op count,
     /// then each `Op`'s RFC 8785 (JCS) bytes length-prefixed in op order — so a
-    /// reorder/insert, an `Insert` row scalar change, or a change to either
-    /// string of a `Raw` op (both fold, since they live inside the op value) is
-    /// drift. The region is folded as ONE length-prefixed blob so it is
+    /// reorder/insert, an `Insert` row scalar change, or a change to an embedded
+    /// expression-AST `Literal` (all fold, since they live inside the op value)
+    /// is drift. The region is folded as ONE length-prefixed blob so it is
     /// domain-separated from the `of` up/down region (an IR migration and a
     /// rendered-SQL migration with the same common tail get distinct checksums).
     ///
@@ -360,6 +360,17 @@ impl Checksum {
         preconditions: &[PreconditionCheck],
     ) -> Self {
         let mut hasher = Sha256::new();
+        // Explicit domain tag — an IR migration's checksum is provably
+        // non-colliding with a rendered-SQL migration's (`Checksum::of`)
+        // REGARDLESS of any future field addition to either front door. `of`
+        // carries NO tag (its byte output is frozen by a golden fixture and by
+        // every stored declarative-path checksum), so this one-sided tag on the
+        // brand-new `of_ir` (no persisted checksums yet) is the safe way to add
+        // the separation without drifting `of`. Folded length-prefixed like
+        // every other field so it cannot run together with the region.
+        const IR_DOMAIN_TAG: &[u8] = b"zeroship-migrate/of_ir/v1";
+        hasher.update((IR_DOMAIN_TAG.len() as u64).to_be_bytes());
+        hasher.update(IR_DOMAIN_TAG);
         // op-list region — the canonical bytes folded as one length-prefixed
         // blob (domain-separated from the up/down region of `of`).
         let region = ops.canonical_bytes();
