@@ -101,7 +101,9 @@ impl MigrationId {
 /// **net-applied in the journal**. This makes the journal the single source of
 /// truth for the expand→contract timeline and gives cross-deploy partitioning
 /// for free (a separate, later deploy can apply the contract).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub enum OnlinePhase {
     /// The additive, coexistence-establishing half (add column, dual-write
     /// trigger, backfill). Lands before dependent code switches over.
@@ -222,8 +224,10 @@ pub struct ChecksumInput<'a> {
     pub up: &'a str,
     /// The reverse SQL, or `None` = explicitly irreversible.
     pub down: Option<&'a str>,
-    /// Apply-time flags (`transactional` / `destructive` / `online` /
-    /// `requires_approval` / `timeout_ms` / `phase` / `repeatable`) — all fold in.
+    /// Apply-time flags — all fold in. The six bools `transactional` /
+    /// `destructive` / `online` / `requires_approval` / `repeatable` /
+    /// `engine_goodie_ddl`, plus the two OPTIONAL FACETS `timeout_ms`
+    /// (`Option<u64>`) and `phase` (`Option<OnlinePhase>`).
     pub flags: &'a MigrationFlags,
     /// The declaring app (per-table ownership).
     pub owner_app: &'a str,
@@ -318,39 +322,58 @@ impl Checksum {
                 hasher.update(u64::MAX.to_be_bytes());
             }
         }
-        // flags — canonical JSON, length-prefixed. Covers transactional /
-        // destructive / online / requires_approval / timeout_ms / phase /
-        // repeatable / engine_goodie_ddl in one deterministic image, so any flip
-        // changes the hash.
-        let flags_json = serde_json::to_string(input.flags)
-            .expect("MigrationFlags is infallibly serializable");
-        hasher.update((flags_json.len() as u64).to_be_bytes());
-        hasher.update(flags_json.as_bytes());
-        // owner_app — length-prefixed.
-        hasher.update((input.owner_app.len() as u64).to_be_bytes());
-        hasher.update(input.owner_app.as_bytes());
-        // depends_on — ordered list: count, then each version string
-        // length-prefixed in the GIVEN order (a reorder or set change shifts the
-        // hash). Domain-separated from supersedes by being folded first with its
-        // own count word, so a dep `[a]` + supersedes `[]` can never collide with
-        // a dep `[]` + supersedes `[a]`.
-        fold_version_list(&mut hasher, input.depends_on);
-        // supersedes — same ordered-list discipline.
-        fold_version_list(&mut hasher, input.supersedes);
-        // preconditions: count, then each canonical-JSON-serialized +
-        // length-prefixed. An empty list folds a 0 count and contributes nothing
-        // else.
-        hasher.update((input.preconditions.len() as u64).to_be_bytes());
-        for pc in input.preconditions {
-            // `.expect` (not `.unwrap_or_default()`): a PreconditionCheck is
-            // infallibly serializable; if it ever did fail, an empty string would
-            // silently collide two DISTINCT preconditions into the SAME checksum
-            // (a tamper-evidence hole). Fail loud instead.
-            let json = serde_json::to_string(pc)
-                .expect("PreconditionCheck is infallibly serializable");
-            hasher.update((json.len() as u64).to_be_bytes());
-            hasher.update(json.as_bytes());
-        }
+        // The common tail (flags + owner_app + depends_on + supersedes +
+        // preconditions) is folded identically to `of_ir` — extracted into
+        // `fold_common` so the two front doors cannot drift.
+        fold_common(
+            &mut hasher,
+            input.flags,
+            input.owner_app,
+            input.depends_on,
+            input.supersedes,
+            input.preconditions,
+        );
+        Self(hex::encode(hasher.finalize()))
+    }
+
+    /// Compute the checksum over a migration authored in the `op.*` IR — the
+    /// canonical op-list region (§2.4 point 2) in PLACE OF the `up`/`down`
+    /// region, then the SAME [`fold_common`] tail as [`Checksum::of`].
+    ///
+    /// The op-list region is [`CanonicalOpList::canonical_bytes`]: an op count,
+    /// then each `Op`'s RFC 8785 (JCS) bytes length-prefixed in op order — so a
+    /// reorder/insert, an `Insert` row scalar change, or a change to either
+    /// string of a `Raw` op (both fold, since they live inside the op value) is
+    /// drift. The region is folded as ONE length-prefixed blob so it is
+    /// domain-separated from the `of` up/down region (an IR migration and a
+    /// rendered-SQL migration with the same common tail get distinct checksums).
+    ///
+    /// Scope of JCS = the op-list region ONLY; the `fold_common` tail keeps the
+    /// existing serde discipline (§2.4 point 5), NOT JCS.
+    #[must_use]
+    pub fn of_ir(
+        ops: &crate::ir::CanonicalOpList<'_>,
+        flags: &MigrationFlags,
+        owner_app: &str,
+        depends_on: &[MigrationId],
+        supersedes: &[MigrationId],
+        preconditions: &[PreconditionCheck],
+    ) -> Self {
+        let mut hasher = Sha256::new();
+        // op-list region — the canonical bytes folded as one length-prefixed
+        // blob (domain-separated from the up/down region of `of`).
+        let region = ops.canonical_bytes();
+        hasher.update((region.len() as u64).to_be_bytes());
+        hasher.update(&region);
+        // …then the SAME common tail.
+        fold_common(
+            &mut hasher,
+            flags,
+            owner_app,
+            depends_on,
+            supersedes,
+            preconditions,
+        );
         Self(hex::encode(hasher.finalize()))
     }
 
@@ -358,6 +381,62 @@ impl Checksum {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Fold the **common tail** shared by [`Checksum::of`] and [`Checksum::of_ir`]:
+/// `flags` (canonical JSON, length-prefixed) + `owner_app` (length-prefixed) +
+/// `depends_on` + `supersedes` (each an ordered, domain-separated version list)
+/// + `preconditions` (count, then each canonical-JSON + length-prefixed).
+///
+/// This is a PURE lift of the tail that used to live inline in `Checksum::of`;
+/// extracting it guarantees the two front doors fold the identity fields
+/// byte-identically (a drift between them would be a tamper-evidence hole).
+///
+/// # Panics
+/// Panics only if [`MigrationFlags`] or a [`PreconditionCheck`] fails to
+/// JSON-serialize — infallible for these plain structs/enums (no maps), so in
+/// practice never. We `.expect` rather than swallow to a default: a silent empty
+/// serialization would collide two distinct inputs into the same checksum.
+fn fold_common(
+    hasher: &mut Sha256,
+    flags: &MigrationFlags,
+    owner_app: &str,
+    depends_on: &[MigrationId],
+    supersedes: &[MigrationId],
+    preconditions: &[PreconditionCheck],
+) {
+    // flags — canonical JSON, length-prefixed. Covers transactional /
+    // destructive / online / requires_approval / timeout_ms / phase /
+    // repeatable / engine_goodie_ddl in one deterministic image, so any flip
+    // changes the hash.
+    let flags_json =
+        serde_json::to_string(flags).expect("MigrationFlags is infallibly serializable");
+    hasher.update((flags_json.len() as u64).to_be_bytes());
+    hasher.update(flags_json.as_bytes());
+    // owner_app — length-prefixed.
+    hasher.update((owner_app.len() as u64).to_be_bytes());
+    hasher.update(owner_app.as_bytes());
+    // depends_on — ordered list: count, then each version string length-prefixed
+    // in the GIVEN order (a reorder or set change shifts the hash). Domain-
+    // separated from supersedes by being folded first with its own count word,
+    // so a dep `[a]` + supersedes `[]` can never collide with a dep `[]` +
+    // supersedes `[a]`.
+    fold_version_list(hasher, depends_on);
+    // supersedes — same ordered-list discipline.
+    fold_version_list(hasher, supersedes);
+    // preconditions: count, then each canonical-JSON-serialized + length-
+    // prefixed. An empty list folds a 0 count and contributes nothing else.
+    hasher.update((preconditions.len() as u64).to_be_bytes());
+    for pc in preconditions {
+        // `.expect` (not `.unwrap_or_default()`): a PreconditionCheck is
+        // infallibly serializable; if it ever did fail, an empty string would
+        // silently collide two DISTINCT preconditions into the SAME checksum
+        // (a tamper-evidence hole). Fail loud instead.
+        let json =
+            serde_json::to_string(pc).expect("PreconditionCheck is infallibly serializable");
+        hasher.update((json.len() as u64).to_be_bytes());
+        hasher.update(json.as_bytes());
     }
 }
 

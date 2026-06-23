@@ -1,0 +1,1448 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MigrationIr",
+  "description": "The portable migration IR document (`.ir.json`, §2.1).\n\nDeserialized from the JS builder's output. `owner_app` is a HINT — the server\noverrides it at submit time (per-table ownership is server-authoritative) —\nbut the field is carried so the local/dev path and the checksum see it.",
+  "type": "object",
+  "properties": {
+    "ir_version": {
+      "description": "IR wire-format version (bump on a breaking shape change).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "name": {
+      "description": "Human-readable migration name (no apply effect; mirrors `Migration::name`).",
+      "type": "string"
+    },
+    "owner_app": {
+      "description": "The declaring app (a HINT — server overrides at submit). Kept so the\nchecksum and the dev path see an owner.",
+      "type": "string",
+      "default": ""
+    },
+    "ops": {
+      "description": "The ordered op list — the heart of the migration.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Op"
+      }
+    },
+    "flags": {
+      "description": "All-`Option` overrides of the migration flags (Wave C merges them over\nthe derived defaults).",
+      "$ref": "#/$defs/IrFlagsOverride",
+      "default": {
+        "transactional": null,
+        "destructive": null,
+        "online": null,
+        "requires_approval": null,
+        "repeatable": null,
+        "engine_goodie_ddl": null,
+        "timeout_ms": null,
+        "phase": null
+      }
+    },
+    "depends_on": {
+      "description": "Cross-slice ordering dependencies (migration version strings).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "supersedes": {
+      "description": "Versions this migration supersedes (squash).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "preconditions": {
+      "description": "Preconditions evaluated before apply (reuses the engine's check type).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PreconditionCheck"
+      },
+      "default": []
+    }
+  },
+  "required": [
+    "ir_version",
+    "name",
+    "ops"
+  ],
+  "$defs": {
+    "Op": {
+      "description": "The CLOSED `op.*` operation enum (§2.3), internally tagged on `\"op\"` and\ncamel-cased (`{\"op\":\"createTable\", …}`). NO `untagged`, NO `flatten` on the\nenum itself — see the module-level note + the ADR.",
+      "oneOf": [
+        {
+          "description": "`CREATE TABLE` with columns + table constraints + indexes.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Table name.",
+              "type": "string"
+            },
+            "columns": {
+              "description": "Columns.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/IrColumn"
+              }
+            },
+            "constraints": {
+              "description": "Table-level constraints.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/IrConstraint"
+              },
+              "default": []
+            },
+            "indexes": {
+              "description": "Indexes created with the table.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/IrIndex"
+              },
+              "default": []
+            },
+            "op": {
+              "type": "string",
+              "const": "createTable"
+            }
+          },
+          "required": [
+            "op",
+            "name",
+            "columns"
+          ]
+        },
+        {
+          "description": "`DROP TABLE`.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Table to drop.",
+              "type": "string"
+            },
+            "if_exists": {
+              "description": "`IF EXISTS`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "cascade": {
+              "description": "`CASCADE`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "dropTable"
+            }
+          },
+          "required": [
+            "op",
+            "table"
+          ]
+        },
+        {
+          "description": "`ALTER TABLE … ADD COLUMN`.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "column": {
+              "description": "New column name.",
+              "type": "string"
+            },
+            "type": {
+              "description": "New column type.",
+              "$ref": "#/$defs/ColType"
+            },
+            "nullable": {
+              "description": "Nullability.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "default": {
+              "description": "Default expression.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "addColumn"
+            }
+          },
+          "required": [
+            "op",
+            "table",
+            "column",
+            "type"
+          ]
+        },
+        {
+          "description": "`ALTER TABLE … DROP COLUMN`.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "column": {
+              "description": "Column to drop.",
+              "type": "string"
+            },
+            "if_exists": {
+              "description": "`IF EXISTS`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "dropColumn"
+            }
+          },
+          "required": [
+            "op",
+            "table",
+            "column"
+          ]
+        },
+        {
+          "description": "`CREATE [UNIQUE] INDEX [CONCURRENTLY]`.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "columns": {
+              "description": "Indexed columns.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "name": {
+              "description": "Optional index name.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "unique": {
+              "description": "UNIQUE.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "using": {
+              "description": "Index method.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "where": {
+              "description": "Partial-index predicate.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "concurrently": {
+              "description": "`CONCURRENTLY`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "createIndex"
+            }
+          },
+          "required": [
+            "op",
+            "table",
+            "columns"
+          ]
+        },
+        {
+          "description": "`DROP INDEX [CONCURRENTLY]`.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Index name.",
+              "type": "string"
+            },
+            "table": {
+              "description": "Owning table (dialect hint).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "if_exists": {
+              "description": "`IF EXISTS`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "concurrently": {
+              "description": "`CONCURRENTLY`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "dropIndex"
+            }
+          },
+          "required": [
+            "op",
+            "name"
+          ]
+        },
+        {
+          "description": "`ALTER TABLE … ALTER COLUMN … TYPE …`.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "column": {
+              "description": "Target column.",
+              "type": "string"
+            },
+            "type": {
+              "description": "New type.",
+              "$ref": "#/$defs/ColType"
+            },
+            "using": {
+              "description": "`USING` cast expression.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "alterColumnType"
+            }
+          },
+          "required": [
+            "op",
+            "table",
+            "column",
+            "type"
+          ]
+        },
+        {
+          "description": "`ALTER TABLE … ALTER COLUMN … SET/DROP NOT NULL`.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "column": {
+              "description": "Target column.",
+              "type": "string"
+            },
+            "nullable": {
+              "description": "The desired nullability.",
+              "type": "boolean"
+            },
+            "op": {
+              "type": "string",
+              "const": "alterColumnNullability"
+            }
+          },
+          "required": [
+            "op",
+            "table",
+            "column",
+            "nullable"
+          ]
+        },
+        {
+          "description": "`ALTER TABLE … RENAME COLUMN …` (the new type carried for re-derivation).",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "from": {
+              "description": "Old column name.",
+              "type": "string"
+            },
+            "to": {
+              "description": "New column name.",
+              "type": "string"
+            },
+            "type": {
+              "description": "The column type after rename.",
+              "$ref": "#/$defs/ColType"
+            },
+            "op": {
+              "type": "string",
+              "const": "renameColumn"
+            }
+          },
+          "required": [
+            "op",
+            "table",
+            "from",
+            "to",
+            "type"
+          ]
+        },
+        {
+          "description": "`ALTER TABLE … ADD CONSTRAINT …`.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "constraint": {
+              "description": "The constraint to add.",
+              "$ref": "#/$defs/IrConstraint"
+            },
+            "op": {
+              "type": "string",
+              "const": "addConstraint"
+            }
+          },
+          "required": [
+            "op",
+            "table",
+            "constraint"
+          ]
+        },
+        {
+          "description": "`ALTER TABLE … DROP CONSTRAINT …`.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "name": {
+              "description": "Constraint name.",
+              "type": "string"
+            },
+            "op": {
+              "type": "string",
+              "const": "dropConstraint"
+            }
+          },
+          "required": [
+            "op",
+            "table",
+            "name"
+          ]
+        },
+        {
+          "description": "`INSERT INTO … VALUES …` with typed scalar rows.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "columns": {
+              "description": "Column list.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "rows": {
+              "description": "Rows, each a positional list of typed scalars.",
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/IrScalar"
+                }
+              }
+            },
+            "op": {
+              "type": "string",
+              "const": "insert"
+            }
+          },
+          "required": [
+            "op",
+            "table",
+            "columns",
+            "rows"
+          ]
+        },
+        {
+          "description": "`UPDATE … SET … WHERE …` (optionally batched).",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "set": {
+              "description": "Column → fragment assignments (sorted map for canonicality).",
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/IrFragment"
+              }
+            },
+            "where": {
+              "description": "Optional WHERE fragment.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/IrFragment"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "batch": {
+              "description": "Optional batching knob.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/IrBatch"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "update"
+            }
+          },
+          "required": [
+            "op",
+            "table",
+            "set"
+          ]
+        },
+        {
+          "description": "`DELETE FROM … WHERE …`.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "where": {
+              "description": "The WHERE fragment (mandatory — no unfiltered delete).",
+              "$ref": "#/$defs/IrFragment"
+            },
+            "limit": {
+              "description": "Optional LIMIT.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "op": {
+              "type": "string",
+              "const": "delete"
+            }
+          },
+          "required": [
+            "op",
+            "table",
+            "where"
+          ]
+        },
+        {
+          "description": "A resumable, cursor-paged backfill.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "cursor_column": {
+              "description": "Cursor column to page over.",
+              "type": "string"
+            },
+            "batch_size": {
+              "description": "Rows per batch.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "set": {
+              "description": "Column → fragment assignments.",
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/IrFragment"
+              }
+            },
+            "filter": {
+              "description": "Optional row filter.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/IrFragment"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "name": {
+              "description": "Backfill name (journaled progress key).",
+              "type": "string"
+            },
+            "op": {
+              "type": "string",
+              "const": "backfill"
+            }
+          },
+          "required": [
+            "op",
+            "table",
+            "cursor_column",
+            "batch_size",
+            "set",
+            "name"
+          ]
+        },
+        {
+          "description": "A dialect-split RAW escape hatch — both `pg` and `sqlite` carried so the\nchecksum sees BOTH (a change to either is drift).",
+          "type": "object",
+          "properties": {
+            "pg": {
+              "description": "Postgres forward SQL.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sqlite": {
+              "description": "SQLite forward SQL.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "down": {
+              "description": "Reverse SQL.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RawDown"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "raw"
+            }
+          },
+          "required": [
+            "op"
+          ]
+        }
+      ]
+    },
+    "IrColumn": {
+      "description": "A column definition inside a `createTable` / `addColumn` op.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Column name.",
+          "type": "string"
+        },
+        "type": {
+          "description": "Column type.",
+          "$ref": "#/$defs/ColType"
+        },
+        "nullable": {
+          "description": "Nullability (default dialect behaviour if absent).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "default": {
+          "description": "Default expression (a literal / portable expression string).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unique": {
+          "description": "Whether the column carries a single-column UNIQUE.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ]
+    },
+    "ColType": {
+      "description": "Dialect-NEUTRAL column type lexicon (§3.2). A CLOSED enum so the schema\nenumerates exactly the supported types and the lowering (Wave C) is a total\nmatch. Camel-cased on the wire (`\"int\"`, `\"bigInt\"`, `\"geoPoint\"`, …).",
+      "oneOf": [
+        {
+          "description": "Bounded variable-length string (`VARCHAR`-ish).",
+          "type": "string",
+          "const": "string"
+        },
+        {
+          "description": "Unbounded text (`TEXT`).",
+          "type": "string",
+          "const": "text"
+        },
+        {
+          "description": "32-bit signed integer.",
+          "type": "string",
+          "const": "int"
+        },
+        {
+          "description": "64-bit signed integer.",
+          "type": "string",
+          "const": "bigInt"
+        },
+        {
+          "description": "Double-precision float.",
+          "type": "string",
+          "const": "float"
+        },
+        {
+          "description": "Boolean.",
+          "type": "string",
+          "const": "bool"
+        },
+        {
+          "description": "JSON document (`JSONB` on PG).",
+          "type": "string",
+          "const": "json"
+        },
+        {
+          "description": "Timestamp (with time zone on PG).",
+          "type": "string",
+          "const": "timestamp"
+        },
+        {
+          "description": "UUID.",
+          "type": "string",
+          "const": "uuid"
+        },
+        {
+          "description": "Raw bytes (`BYTEA` on PG, `BLOB` on SQLite).",
+          "type": "string",
+          "const": "bytea"
+        },
+        {
+          "description": "Foreign-key reference to another table (the referenced table name).",
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "object",
+              "properties": {
+                "references": {
+                  "description": "The referenced table.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "references"
+              ]
+            }
+          },
+          "required": [
+            "ref"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "pgvector embedding column of the given dimensionality.",
+          "type": "object",
+          "properties": {
+            "vector": {
+              "type": "object",
+              "properties": {
+                "vector": {
+                  "description": "Vector dimensionality.",
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "vector"
+              ]
+            }
+          },
+          "required": [
+            "vector"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "Geographic point (PostGIS `geometry(Point)` / emulated on SQLite).",
+          "type": "string",
+          "const": "geoPoint"
+        },
+        {
+          "description": "Fixed-precision decimal.",
+          "type": "object",
+          "properties": {
+            "decimal": {
+              "type": "object",
+              "properties": {
+                "precision": {
+                  "description": "Total digits.",
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "scale": {
+                  "description": "Digits after the point.",
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "precision",
+                "scale"
+              ]
+            }
+          },
+          "required": [
+            "decimal"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "Application-level encrypted column wrapping an inner type.",
+          "type": "object",
+          "properties": {
+            "encrypted": {
+              "type": "object",
+              "properties": {
+                "of": {
+                  "description": "The inner (plaintext) type.",
+                  "$ref": "#/$defs/ColType"
+                }
+              },
+              "required": [
+                "of"
+              ]
+            }
+          },
+          "required": [
+            "encrypted"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "IrConstraint": {
+      "description": "A named table constraint.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Optional constraint name (engine-derived if absent).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "description": "PRIMARY KEY over the named columns.",
+          "type": "object",
+          "properties": {
+            "columns": {
+              "description": "The key columns.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "pk"
+            }
+          },
+          "required": [
+            "kind",
+            "columns"
+          ]
+        },
+        {
+          "description": "FOREIGN KEY referencing `(references_table.references_columns)`.",
+          "type": "object",
+          "properties": {
+            "columns": {
+              "description": "The referencing columns.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "references_table": {
+              "description": "The referenced table.",
+              "type": "string"
+            },
+            "references_columns": {
+              "description": "The referenced columns.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "fk"
+            }
+          },
+          "required": [
+            "kind",
+            "columns",
+            "references_table",
+            "references_columns"
+          ]
+        },
+        {
+          "description": "UNIQUE over the named columns.",
+          "type": "object",
+          "properties": {
+            "columns": {
+              "description": "The unique columns.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "unique"
+            }
+          },
+          "required": [
+            "kind",
+            "columns"
+          ]
+        },
+        {
+          "description": "CHECK with a portable boolean expression string.",
+          "type": "object",
+          "properties": {
+            "expr": {
+              "description": "The check expression.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "check"
+            }
+          },
+          "required": [
+            "kind",
+            "expr"
+          ]
+        }
+      ]
+    },
+    "IrIndex": {
+      "description": "An index definition inside a `createTable` op.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Optional index name (engine-derived if absent).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "columns": {
+          "description": "Indexed columns.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unique": {
+          "description": "Whether the index is UNIQUE.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "using": {
+          "description": "Index method (`btree`/`gin`/…); dialect-validated in Wave D.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "where": {
+          "description": "Partial-index predicate (a portable expression string).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "columns"
+      ]
+    },
+    "IrScalar": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "decimal": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "decimal"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "bytes": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "bytes"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "IrFragment": {
+      "description": "A `set` / `where` / `filter` body (§3.3.1.2): a portable SQL TEMPLATE plus\nits typed positional binds. The template carries placeholders the lowering\nfills; the binds are constrained [`IrScalar`]s. (Template VALIDATION — that\nit is a safe portable fragment — is Wave D.)",
+      "type": "object",
+      "properties": {
+        "template": {
+          "description": "The portable fragment template.",
+          "type": "string"
+        },
+        "binds": {
+          "description": "Positional binds, in template order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IrScalar"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "template"
+      ]
+    },
+    "IrBatch": {
+      "description": "A batched-backfill / batched-update knob.",
+      "type": "object",
+      "properties": {
+        "cursor_column": {
+          "description": "The cursor column to page over.",
+          "type": "string"
+        },
+        "batch_size": {
+          "description": "Rows per batch.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "cursor_column",
+        "batch_size"
+      ]
+    },
+    "RawDown": {
+      "description": "The reverse half of a [`Op::Raw`] op (dialect-specific down SQL).",
+      "type": "object",
+      "properties": {
+        "pg": {
+          "description": "Postgres reverse SQL.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sqlite": {
+          "description": "SQLite reverse SQL.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "IrFlagsOverride": {
+      "description": "All-`Option` mirror of [`MigrationFlags`] — the override carrier in the IR\n(§2.1). An absent key and an explicit `null` both mean \"no override\" here;\nthe derive-then-override MERGE is Wave C, NOT this type's job.",
+      "type": "object",
+      "properties": {
+        "transactional": {
+          "description": "Override for `transactional`.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "destructive": {
+          "description": "Override for `destructive`.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "online": {
+          "description": "Override for `online`.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "requires_approval": {
+          "description": "Override for `requires_approval`.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "repeatable": {
+          "description": "Override for `repeatable`.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "engine_goodie_ddl": {
+          "description": "Override for `engine_goodie_ddl`.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "timeout_ms": {
+          "description": "Override for the optional `timeout_ms` facet.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
+        },
+        "phase": {
+          "description": "Override for the optional `phase` facet.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OnlinePhase"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      }
+    },
+    "OnlinePhase": {
+      "description": "The phase of a zero-downtime **expand-contract** online migration (design\n§5, Plan 8). Carried only by `online` migrations (`flags.online == true`);\n`None` for an ordinary one-shot migration.\n\nAn online column RENAME (or type change) is split across **two deploys**:\n\n- **`Expand`** — additively grow the schema so old and new shapes coexist\n  (add the new nullable column, install a dual-write trigger, backfill).\n  Lands *before* dependent code switches over.\n- **`Contract`** — drop the old shape once no code uses it (drop the\n  trigger + function, drop the old column). Lands *after* code switches over.\n\nThe engine enforces the split via a gate (design Plan 8 v1.2): a `Contract`\nmigration is refused unless every `Expand` migration it `depends_on` is\n**net-applied in the journal**. This makes the journal the single source of\ntruth for the expand→contract timeline and gives cross-deploy partitioning\nfor free (a separate, later deploy can apply the contract).",
+      "oneOf": [
+        {
+          "description": "The additive, coexistence-establishing half (add column, dual-write\ntrigger, backfill). Lands before dependent code switches over.",
+          "type": "string",
+          "const": "Expand"
+        },
+        {
+          "description": "The destructive, cleanup half (drop trigger/function, drop old column).\nLands after code stops using the old shape; gated on the matching\n`Expand` being net-applied.",
+          "type": "string",
+          "const": "Contract"
+        }
+      ]
+    },
+    "PreconditionCheck": {
+      "description": "One precondition + its unmet policy, carried by a [`Migration`](crate::migration::Migration).",
+      "type": "object",
+      "properties": {
+        "check": {
+          "description": "The assertion to evaluate against the live DB.",
+          "$ref": "#/$defs/Precondition"
+        },
+        "on_unmet": {
+          "description": "What to do if `check` is unmet (default [`OnUnmet::Halt`]).",
+          "$ref": "#/$defs/OnUnmet",
+          "default": "Halt"
+        }
+      },
+      "required": [
+        "check"
+      ]
+    },
+    "Precondition": {
+      "description": "A single precondition assertion evaluated against the live DB before a\nmigration's `up` runs.\n\nStructured variants are engine-built parameterized catalog queries\n(injection-safe); [`Precondition::SqlBoolean`] is untrusted SQL run behind\nthe guard + migrator role + single-read-only-SELECT shape gate. See the\nmodule docs.",
+      "oneOf": [
+        {
+          "description": "The project schema contains a table named `table` (a base table or view).",
+          "type": "object",
+          "properties": {
+            "TableExists": {
+              "type": "object",
+              "properties": {
+                "table": {
+                  "description": "The bare table name (no schema qualifier).",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "table"
+              ]
+            }
+          },
+          "required": [
+            "TableExists"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "The project schema does NOT contain a table named `table`.",
+          "type": "object",
+          "properties": {
+            "TableNotExists": {
+              "type": "object",
+              "properties": {
+                "table": {
+                  "description": "The bare table name (no schema qualifier).",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "table"
+              ]
+            }
+          },
+          "required": [
+            "TableNotExists"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "The project-schema table `table` has a column named `column`.",
+          "type": "object",
+          "properties": {
+            "ColumnExists": {
+              "type": "object",
+              "properties": {
+                "table": {
+                  "description": "The bare table name (no schema qualifier).",
+                  "type": "string"
+                },
+                "column": {
+                  "description": "The bare column name.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "table",
+                "column"
+              ]
+            }
+          },
+          "required": [
+            "ColumnExists"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "The project-schema table `table` does NOT have a column named `column`.",
+          "type": "object",
+          "properties": {
+            "ColumnNotExists": {
+              "type": "object",
+              "properties": {
+                "table": {
+                  "description": "The bare table name (no schema qualifier).",
+                  "type": "string"
+                },
+                "column": {
+                  "description": "The bare column name.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "table",
+                "column"
+              ]
+            }
+          },
+          "required": [
+            "ColumnNotExists"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "`count(*)` of the project-schema table `table` compares to `value` under\n`op` (e.g. `RowCount { table, op: Eq, value: 0 }` = \"the table is empty\").",
+          "type": "object",
+          "properties": {
+            "RowCount": {
+              "type": "object",
+              "properties": {
+                "table": {
+                  "description": "The bare table name (no schema qualifier).",
+                  "type": "string"
+                },
+                "op": {
+                  "description": "The comparison operator (`count(*) <op> value`).",
+                  "$ref": "#/$defs/CmpOp"
+                },
+                "value": {
+                  "description": "The right-hand operand.",
+                  "type": "integer",
+                  "format": "int64"
+                }
+              },
+              "required": [
+                "table",
+                "op",
+                "value"
+              ]
+            }
+          },
+          "required": [
+            "RowCount"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "An UNTRUSTED single read-only `SELECT` returning one boolean column. Run\nbehind the guard + migrator role + shape gate. The escape hatch for\nassertions the structured checks cannot express.",
+          "type": "object",
+          "properties": {
+            "SqlBoolean": {
+              "type": "object",
+              "properties": {
+                "sql": {
+                  "description": "The read-only `SELECT … ` returning exactly one boolean.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "sql"
+              ]
+            }
+          },
+          "required": [
+            "SqlBoolean"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "CmpOp": {
+      "description": "A comparison operator for a [`Precondition::RowCount`] assertion.",
+      "oneOf": [
+        {
+          "description": "`=`",
+          "type": "string",
+          "const": "Eq"
+        },
+        {
+          "description": "`<>`",
+          "type": "string",
+          "const": "Ne"
+        },
+        {
+          "description": "`<`",
+          "type": "string",
+          "const": "Lt"
+        },
+        {
+          "description": "`<=`",
+          "type": "string",
+          "const": "Le"
+        },
+        {
+          "description": "`>`",
+          "type": "string",
+          "const": "Gt"
+        },
+        {
+          "description": "`>=`",
+          "type": "string",
+          "const": "Ge"
+        }
+      ]
+    },
+    "OnUnmet": {
+      "description": "What to do when a precondition is **unmet** (evaluates false).",
+      "oneOf": [
+        {
+          "description": "Abort the whole apply (fail-closed): return [`PreconditionFailed`] and\napply NOTHING for THIS migration. The default — an unmet precondition\nusually means the world is not as the migration assumes, and silently\nskipping could leave the schema inconsistent.\n\n**Scope of \"halt\":** this stops the batch going FORWARD — no\nlater-in-order migration is applied after the failing one. It does NOT\nundo migrations already committed earlier in the same batch: each\nmigration commits independently (per-migration commit), so the migrations\nthat succeeded before the halt stay applied. Halt is fail-forward-stop,\nnot a batch-wide rollback.\n\n[`PreconditionFailed`]: crate::executor::ApplyError::PreconditionFailed",
+          "type": "string",
+          "const": "Halt"
+        },
+        {
+          "description": "Skip THIS migration this run (do not apply it, do not journal it — it\nstays pending and is re-evaluated on the next deploy), and continue with\nthe rest of the batch. The \"apply this once the DB reaches shape X\"\nidempotent-deploy primitive. A skipped migration's dependents do not run\nthis batch either (a dependent of a not-yet-applied migration is blocked\nby the dependency ordering — see [`crate::executor::order_pending`]).\n\n**Skip relies on COMPLETE `depends_on`.** The transitive-skip above only\nfollows DECLARED dependencies: a later migration that actually depends on\nthe skipped one but does NOT declare it in `depends_on` is NOT held back —\nit will still run, against a schema the skipped migration was supposed to\nshape first, and will either fail or (worse) succeed against a stale\nshape. This makes `Skip` MORE dangerous than [`OnUnmet::Halt`] when deps\nare incomplete: `Halt` aborts the batch forward loudly, whereas `Skip`\nsilently no-ops the gated migration and lets an undeclared dependent\nproceed. Authors choosing `Skip` MUST declare every real dependency.",
+          "type": "string",
+          "const": "Skip"
+        }
+      ]
+    }
+  }
+}

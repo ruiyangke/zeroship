@@ -46,6 +46,12 @@ indexmap = { version = "2", features = ["serde"] }
 # CLI argument parsing
 clap = { version = "4", features = ["derive", "env"] }
 
+# JSON Schema generation for the `op.*` migration IR contract (op-ir.schema.json).
+# schemars 1.x: `schemars::schema_for!(T)` -> `schemars::Schema`, `#[derive(schemars::JsonSchema)]`.
+# Used only by zeroship-migrate to emit the discriminated-union schema the JS
+# `op.*` builder targets; leaf, sync, no tokio.
+schemars = "1"
+
 # Crypto
 sha2 = "0.10"
 sha1 = "0.10"

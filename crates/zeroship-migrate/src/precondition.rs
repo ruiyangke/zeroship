@@ -96,7 +96,9 @@ const MUTATING_OR_LOCK_BUILTINS: &[&str] = &[
 ];
 
 /// A comparison operator for a [`Precondition::RowCount`] assertion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub enum CmpOp {
     /// `=`
     Eq,
@@ -134,7 +136,9 @@ impl CmpOp {
 /// (injection-safe); [`Precondition::SqlBoolean`] is untrusted SQL run behind
 /// the guard + migrator role + single-read-only-SELECT shape gate. See the
 /// module docs.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub enum Precondition {
     /// The project schema contains a table named `table` (a base table or view).
     TableExists {
@@ -180,7 +184,17 @@ pub enum Precondition {
 }
 
 /// What to do when a precondition is **unmet** (evaluates false).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
 pub enum OnUnmet {
     /// Abort the whole apply (fail-closed): return [`PreconditionFailed`] and
     /// apply NOTHING for THIS migration. The default — an unmet precondition
@@ -217,7 +231,9 @@ pub enum OnUnmet {
 }
 
 /// One precondition + its unmet policy, carried by a [`Migration`](crate::migration::Migration).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct PreconditionCheck {
     /// The assertion to evaluate against the live DB.
     pub check: Precondition,
