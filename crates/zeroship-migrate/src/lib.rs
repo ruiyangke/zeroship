@@ -74,6 +74,7 @@ pub mod executor;
 #[doc(hidden)]
 pub mod fault;
 pub mod guard;
+pub mod ir;
 pub mod journal;
 pub mod loader;
 pub mod manifest;
@@ -159,6 +160,13 @@ pub use manifest::{
 pub use migration::{
     Checksum, ChecksumInput, IdError, Migration, MigrationFlags, MigrationId, OnlinePhase,
     MIGRATION_PREFIX,
+};
+// The `op.*` portable IR (§2.1/§2.3/§2.5): the migration document, the closed
+// `Op` enum, the constrained numeric scalar, and the canonical op-list the
+// `Checksum::of_ir` front door folds.
+pub use ir::{
+    CanonicalOpList, ColType, IrBatch, IrColumn, IrConstraint, IrConstraintKind, IrFlagsOverride,
+    IrFragment, IrIndex, IrScalar, MigrationIr, Op, RawDown, EXPR_INVALID_NUMERIC,
 };
 // The `op.*` DSL plan model (§2.0). Distinct from the dry-run `MigrationPlan`
 // (re-exported from `engine`, unchanged): these are the net-new ordered
