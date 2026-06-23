@@ -298,6 +298,30 @@ pub struct IrConstraint {
     pub kind: IrConstraintKind,
 }
 
+/// The CLOSED index-method lexicon (§3.3.1 `createIndex` `using` union, design
+/// line 648). A CLOSED enum — serde rejects any out-of-set token at DESERIALIZE,
+/// so a hand-crafted `.ir.json` cannot smuggle an arbitrary / injection-shaped
+/// method string into an unvalidated position that would reach the render seam.
+/// `gin`/`gist`/`ivfflat`/`hnsw` are Postgres-only logical hints; `fts5` maps to
+/// the SQLite FTS5 virtual-table path (per-dialect lowering is Wave C's job).
+/// Camel/lower-cased on the wire (`"btree"`, `"ivfflat"`, …).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum IndexMethod {
+    /// B-tree (the default).
+    Btree,
+    /// PG GIN.
+    Gin,
+    /// PG GiST.
+    Gist,
+    /// pgvector IVFFlat ANN.
+    Ivfflat,
+    /// pgvector HNSW ANN.
+    Hnsw,
+    /// Full-text search (PG GIN-over-tsvector / SQLite FTS5 virtual table).
+    Fts5,
+}
+
 /// An index definition inside a `createTable` op.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -308,8 +332,8 @@ pub struct IrIndex {
     pub columns: Vec<String>,
     /// Whether the index is UNIQUE.
     pub unique: Option<bool>,
-    /// Index method (`btree`/`gin`/…); dialect-validated by the validator.
-    pub using: Option<String>,
+    /// Index method (a CLOSED [`IndexMethod`] — never a raw SQL string).
+    pub using: Option<IndexMethod>,
     /// Partial-index predicate (a closed-AST node, never raw SQL).
     #[serde(rename = "where")]
     pub r#where: Option<Expr>,
@@ -386,11 +410,11 @@ pub enum Op {
         name: Option<String>,
         /// UNIQUE.
         unique: Option<bool>,
-        /// Index method.
-        using: Option<String>,
-        /// Partial-index predicate.
+        /// Index method (a CLOSED [`IndexMethod`] — never a raw SQL string).
+        using: Option<IndexMethod>,
+        /// Partial-index predicate (a closed-AST node, never raw SQL — property A).
         #[serde(rename = "where")]
-        r#where: Option<String>,
+        r#where: Option<Expr>,
         /// `CONCURRENTLY`.
         concurrently: Option<bool>,
     },
@@ -414,8 +438,8 @@ pub enum Op {
         /// New type.
         #[serde(rename = "type")]
         ty: ColType,
-        /// `USING` cast expression.
-        using: Option<String>,
+        /// `USING` cast expression (a closed-AST node, never raw SQL — property A).
+        using: Option<Expr>,
     },
     /// `ALTER TABLE … ALTER COLUMN … SET/DROP NOT NULL`.
     AlterColumnNullability {

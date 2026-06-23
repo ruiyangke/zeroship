@@ -350,6 +350,23 @@ impl Checksum {
     ///
     /// Scope of JCS = the op-list region ONLY; the `fold_common` tail keeps the
     /// existing serde discipline (§2.4 point 5), NOT JCS.
+    ///
+    /// # The `flags` argument MUST be dialect-NEUTRAL
+    ///
+    /// `of_ir` is dialect-neutral BY CONSTRUCTION — it takes no dialect parameter
+    /// and hashes only the neutral op list + the derived+overridden flags +
+    /// owner + deps + preconditions. A single portable migration therefore has
+    /// ONE checksum across the PG and SQLite renders (the single-artifact /
+    /// single-checksum invariant, §2.5 / spec line 1267).
+    ///
+    /// A future `IrAuthor` MUST pass the **dialect-neutral derived-then-overridden**
+    /// flags here — NEVER the per-dialect *lowered* flags. The lowering legitimately
+    /// diverges per dialect (e.g. SQLite forces `transactional: true` and drops
+    /// `concurrently` for a concurrent index while PG keeps `transactional: false`,
+    /// §2 / spec line 257). Folding those POST-lowering per-dialect flags into the
+    /// hash would make `of_ir` diverge per dialect and silently break the
+    /// single-checksum invariant. The `transactional`/`concurrently` divergence is
+    /// a render-time concern; it does not belong in the identity checksum.
     #[must_use]
     pub fn of_ir(
         ops: &crate::ir::CanonicalOpList<'_>,
