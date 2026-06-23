@@ -29,16 +29,7 @@
     "flags": {
       "description": "All-`Option` overrides of the migration flags (Wave C merges them over\nthe derived defaults).",
       "$ref": "#/$defs/IrFlagsOverride",
-      "default": {
-        "transactional": null,
-        "destructive": null,
-        "online": null,
-        "requires_approval": null,
-        "repeatable": null,
-        "engine_goodie_ddl": null,
-        "timeout_ms": null,
-        "phase": null
-      }
+      "default": {}
     },
     "depends_on": {
       "description": "Cross-slice ordering dependencies (migration version strings).",
@@ -1630,48 +1621,42 @@
           "type": [
             "boolean",
             "null"
-          ],
-          "default": null
+          ]
         },
         "destructive": {
           "description": "Override for `destructive`.",
           "type": [
             "boolean",
             "null"
-          ],
-          "default": null
+          ]
         },
         "online": {
           "description": "Override for `online`.",
           "type": [
             "boolean",
             "null"
-          ],
-          "default": null
+          ]
         },
         "requires_approval": {
           "description": "Override for `requires_approval`.",
           "type": [
             "boolean",
             "null"
-          ],
-          "default": null
+          ]
         },
         "repeatable": {
           "description": "Override for `repeatable`.",
           "type": [
             "boolean",
             "null"
-          ],
-          "default": null
+          ]
         },
         "engine_goodie_ddl": {
           "description": "Override for `engine_goodie_ddl`.",
           "type": [
             "boolean",
             "null"
-          ],
-          "default": null
+          ]
         },
         "timeout_ms": {
           "description": "Override for the optional `timeout_ms` facet (JS-safe-integer bounded).",
@@ -1682,8 +1667,7 @@
             {
               "type": "null"
             }
-          ],
-          "default": null
+          ]
         },
         "phase": {
           "description": "Override for the optional `phase` facet.",
@@ -1694,8 +1678,7 @@
             {
               "type": "null"
             }
-          ],
-          "default": null
+          ]
         }
       },
       "additionalProperties": false

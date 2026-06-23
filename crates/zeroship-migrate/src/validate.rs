@@ -25,8 +25,16 @@
 //!
 //! There is **NO lexer, NO Pratt/precedence parser, NO `libpg_query`, NO
 //! differential fuzzer** — HIGH-1 is dissolved, not mitigated (§3.3.1.1). The
-//! Rust validator here is the SOLE authoritative gate; the JS side runs an
-//! optional best-effort structural hint over the SAME schemars schema.
+//! Rust validator here is the authoritative STRUCTURAL gate (checks (a), (b),
+//! (d) — node allow-list, `FnSynth` arity/envelope, portable cast target); the
+//! JS side runs an optional best-effort structural hint over the SAME schemars
+//! schema. Rule (c) — `ColRef` resolution against the live target table — runs
+//! at the apply/render seam (§3.3.1.1(c) is an apply-time check): at IR load the
+//! live column set is generally unknown for the DML ops, `alterColumnType`,
+//! `addConstraint` and `createIndex`, so those positions validate
+//! [`TargetScope::structural_only`] here and the seam re-runs the walk with a
+//! resolved column set. A self-contained `createTable` DOES resolve (c) against
+//! its own declared columns at load.
 
 use crate::expr::{CaseBranch, Expr, SynthFn};
 
@@ -215,7 +223,10 @@ pub fn validate_expr(
 
 /// Walk an entire [`MigrationIr`](crate::ir::MigrationIr) and validate EVERY
 /// embedded expression-AST node against `target_dialect` — the §3.3.1.1 "the
-/// Rust validator is the SOLE authoritative gate" obligation made operative.
+/// Rust validator is the authoritative STRUCTURAL gate" obligation made
+/// operative. Checks (a)/(b)/(d) run at load for every Expr slot; check (c)
+/// (`ColRef` resolution) runs here only for a self-contained `createTable`, and
+/// otherwise at the apply/render seam (see the module note).
 ///
 /// This is the walker that enumerates each [`Op`](crate::ir::Op) variant's
 /// expression positions and calls [`validate_expr`] per node with the enclosing
@@ -444,8 +455,12 @@ impl Ctx<'_> {
         ))
     }
 
-    /// Rule (b): `c.fn.splitPart` envelope. `now`/`genRandomUuid`/`concatWs`
-    /// recurse into their args.
+    /// Rule (b): the `FnSynth` arity/shape backstop. Each synth helper has a
+    /// pinned argument shape; an out-of-shape call is rejected STRUCTURALLY here
+    /// — independent of the (per-dialect) render seam — so a hostile/buggy
+    /// `.ir.json` carrying e.g. `FnSynth{fn:now, args:[…]}` or a zero-arg
+    /// `concatWs` cannot pass the structural gate and defer the blow-up to
+    /// rendering. After the shape check each variant recurses into its args.
     fn check_synth(&self, f: SynthFn, args: &[Expr]) -> Result<(), AuthoringError> {
         match f {
             SynthFn::SplitPart => {
@@ -456,13 +471,54 @@ impl Ctx<'_> {
                 }
                 Ok(())
             }
-            SynthFn::ConcatWs | SynthFn::Now | SynthFn::GenRandomUuid => {
+            // now()/gen_random_uuid() are NULLARY apply-time scalars: no args.
+            SynthFn::Now | SynthFn::GenRandomUuid => {
+                if !args.is_empty() {
+                    return Err(self.synth_shape_err(format!(
+                        "c.fn.{} takes no arguments; got {}",
+                        match f {
+                            SynthFn::Now => "now",
+                            SynthFn::GenRandomUuid => "genRandomUuid",
+                            _ => unreachable!(),
+                        },
+                        args.len()
+                    )));
+                }
+                Ok(())
+            }
+            // concatWs(delim, value, …): a delimiter + at least one value.
+            SynthFn::ConcatWs => {
+                if args.len() < 2 {
+                    return Err(self.synth_shape_err(format!(
+                        "c.fn.concatWs takes a delimiter plus at least one value \
+                         (>=2 args); got {}",
+                        args.len()
+                    )));
+                }
                 for a in args {
                     self.walk(a)?;
                 }
                 Ok(())
             }
         }
+    }
+
+    /// A `FnSynth` arity/shape rejection. Like `split_part_err`, the synth
+    /// helpers are PG-renderable but the unsupported shape is non-portable, so
+    /// the rejection is [`CODE_EXPR_NOT_PORTABLE`] on the SQLite leg.
+    fn synth_shape_err(&self, reason: String) -> AuthoringError {
+        self.err(
+            CODE_EXPR_NOT_PORTABLE,
+            None,
+            Dialect::Sqlite,
+            reason,
+            Some(
+                "call the synth helper with its pinned argument shape \
+                 (now/genRandomUuid take no args; concatWs takes a delimiter + \
+                 >=1 value)"
+                    .to_string(),
+            ),
+        )
     }
 
     fn split_part_err(&self, reason: String) -> AuthoringError {
@@ -669,6 +725,69 @@ mod tests {
         }
         // n=8 is the boundary that PASSES.
         assert!(validate_expr(&split(" ", 8), Dialect::Sqlite, &sc, 0, None).is_ok());
+    }
+
+    // ── (b') the remaining SynthFn arities — structural backstop ───────────
+    // now/genRandomUuid take ZERO args; concatWs takes >=2 (a delimiter + >=1
+    // value). Independent of the (not-yet-existing) render seam, the validator
+    // is the structural backstop. RED before the check_synth arity fix.
+
+    fn synth(f: SynthFn, args: Vec<Expr>) -> Expr {
+        Expr::FnSynth { r#fn: f, args }
+    }
+
+    #[test]
+    fn now_with_args_is_rejected() {
+        let sc = TargetScope::structural_only("t");
+        let e = synth(SynthFn::Now, vec![Expr::lit(IrScalar::Int(1))]);
+        let err = validate_expr(&e, Dialect::Postgres, &sc, 0, None).unwrap_err();
+        assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
+        // zero-arg form passes.
+        assert!(validate_expr(&synth(SynthFn::Now, vec![]), Dialect::Postgres, &sc, 0, None).is_ok());
+    }
+
+    #[test]
+    fn gen_random_uuid_with_args_is_rejected() {
+        let sc = TargetScope::structural_only("t");
+        let e = synth(SynthFn::GenRandomUuid, vec![Expr::col("x"), Expr::col("y")]);
+        let err = validate_expr(&e, Dialect::Postgres, &sc, 0, None).unwrap_err();
+        assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
+        assert!(
+            validate_expr(&synth(SynthFn::GenRandomUuid, vec![]), Dialect::Postgres, &sc, 0, None)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn concat_ws_arity_is_enforced() {
+        let c = cols();
+        let sc = scope("users", &c);
+        // 0 args and 1 arg (delimiter only, no values) are out of shape.
+        for bad in [vec![], vec![Expr::lit(IrScalar::Str(",".into()))]] {
+            let err =
+                validate_expr(&synth(SynthFn::ConcatWs, bad), Dialect::Sqlite, &sc, 0, None).unwrap_err();
+            assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE, "concatWs needs delim + >=1 value");
+        }
+        // delim + 1 value is the minimum valid shape; the value still recurses.
+        let ok = synth(
+            SynthFn::ConcatWs,
+            vec![Expr::lit(IrScalar::Str(",".into())), Expr::col("name")],
+        );
+        assert!(validate_expr(&ok, Dialect::Sqlite, &sc, 0, None).is_ok());
+    }
+
+    #[test]
+    fn concat_ws_recurses_into_a_bad_nested_value() {
+        // The arity gate must not short-circuit recursion: a nested
+        // out-of-envelope splitPart inside a well-shaped concatWs still rejects.
+        let c = cols();
+        let sc = scope("users", &c);
+        let e = synth(
+            SynthFn::ConcatWs,
+            vec![Expr::lit(IrScalar::Str(",".into())), split(", ", 1)],
+        );
+        let err = validate_expr(&e, Dialect::Sqlite, &sc, 0, None).unwrap_err();
+        assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
     }
 
     #[test]
