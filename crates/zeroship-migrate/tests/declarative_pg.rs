@@ -2594,6 +2594,96 @@ async fn declarative_rename_preserves_preexisting_rows_through_expand_then_contr
 }
 
 #[compio::test]
+async fn rename_only_deploy_leaves_session_role_and_search_path_clean() {
+    // REGRESSION (code-critic LOW #4 — empty-plain-set session hygiene). Pre-PR0,
+    // `apply_declarative_locked` ALWAYS ran one snapshot/reset-role/restore-session
+    // hygiene cycle up front (via `apply_inner(&plan.plain, …)`), even for an EMPTY
+    // plain set. Post-PR0 the coalesce loop only runs `apply_with_lock_backend` when
+    // there is a Ddl step, so a rename-only (empty-plain) declarative deploy skips
+    // that *initial* hygiene cycle — a deliberate, state-neutral simplification (each
+    // step kind that can run with an empty plain set — a PG online rename, a SQLite
+    // rebuild — manages its OWN session hygiene). This test PINS the state-neutral
+    // guarantee: a rename-only deploy leaves the session role + search_path clean
+    // (admin role, no leaked migrator role, no pinned project schema). It is the
+    // standing guard that the dropped up-front cycle never regresses into an actual
+    // session leak from a future rename/rebuild path.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    // Record the baseline session role BEFORE any deploy — this is what a clean
+    // restore must return to (the admin connection role, never the migrator role).
+    let role_before: String = conn
+        .query_one("SELECT current_user", &[])
+        .await
+        .unwrap()
+        .get(0);
+
+    // Create `users(email)` (a normal deploy with a plain set).
+    let v1 = CollectionDescriptor {
+        name: "users".into(),
+        owner_app: "app_test".into(),
+        fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
+        indexes: vec![],
+    };
+    let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
+    apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
+        .await
+        .expect("create users");
+
+    // Now desire `email_address` with a rename hint → a PURE rename: empty plain set
+    // + one structured rename. This is the empty-plain-hygiene code path.
+    let v2 = CollectionDescriptor {
+        name: "users".into(),
+        owner_app: "app_test".into(),
+        fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
+        indexes: vec![],
+    };
+    let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
+    let hints = vec![RenameHint { table: "users".into(), from: "email".into(), to: "email_address".into() }];
+    let plan = engine
+        .plan_declarative(&d2, &live, &HashMap::new(), &author, &hints, &guard_cfg(&cfg))
+        .expect("plan_declarative");
+    assert!(plan.plain.items.is_empty(), "a pure rename has an EMPTY plain set (the hygiene path)");
+    assert_eq!(plan.renames.len(), 1, "one structured rename");
+
+    engine
+        .apply_declarative(&plan, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_test")
+        .await
+        .expect("rename-only deploy applies");
+
+    // The connection's session is clean: the role is back to the admin role (NOT the
+    // migrator role), and the search_path is not pinned to the project schema.
+    let role_after: String = conn
+        .query_one("SELECT current_user", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        role_after, role_before,
+        "the rename-only deploy must restore the session role (no leaked migrator role)"
+    );
+    let migrator = zeroship_migrate::migrator_role_name(&cfg.project_id).unwrap();
+    assert_ne!(role_after, migrator, "the migrator role must not leak onto the connection");
+    let search_path: String = conn
+        .query_one("SHOW search_path", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        !search_path.contains(&cfg.project_schema),
+        "the project schema must not be left pinned on the session search_path (got {search_path:?})"
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
 async fn flattening_a_rename_into_the_plain_plan_loses_data_or_is_gate_blocked() {
     // C1 RED witness: the OLD behaviour — flatten the rename's ExpandContractPlan
     // into the plain set and push it through `plan`→`apply` (discarding the

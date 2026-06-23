@@ -307,10 +307,21 @@ pub trait MigrationBackend {
     /// PR6a (the shared SQLite-DML module); until it lands the SQLite arm fails
     /// closed.
     ///
+    /// `destructive` carries the step's data-loss flag (a `delete`). The
+    /// implementation re-runs the approval gate as **defense in depth**: a
+    /// destructive DML under any approval other than [`Approval::Approved`] is
+    /// refused with [`ApplyError::ApprovalRequired`] BEFORE the template executes,
+    /// mirroring the per-`Migration` gate in
+    /// [`apply_with_lock_backend`](crate::executor::apply_with_lock_backend). The
+    /// engine's [`apply_plan`](crate::engine::MigrationEngine::apply_plan) gate runs
+    /// first; this is the independent executor-layer check so a direct seam caller
+    /// cannot bypass it.
+    ///
     /// Returns `true` if the step was applied this run, `false` if it was already
     /// net-applied (skipped).
     ///
     /// # Errors
+    /// [`ApplyError::ApprovalRequired`] for a destructive DML without approval;
     /// [`ApplyError`] on a DML/journal failure or the SQLite-unsupported arm.
     #[allow(clippy::too_many_arguments)]
     async fn run_dml_step(
@@ -320,6 +331,7 @@ pub trait MigrationBackend {
         name: &str,
         template: &str,
         binds: &[crate::plan::BindValue],
+        destructive: bool,
         approval: crate::approval::Approval,
         applied_by: &str,
         lock_mode: crate::executor::LockMode,
@@ -669,16 +681,19 @@ impl MigrationBackend for PostgresBackend<'_> {
         name: &str,
         template: &str,
         binds: &[crate::plan::BindValue],
+        destructive: bool,
         approval: crate::approval::Approval,
         applied_by: &str,
         _lock_mode: crate::executor::LockMode,
     ) -> Result<bool, ApplyError> {
-        // Defense-in-depth: a destructive DML (a `delete`) needs approval, mirroring
-        // the per-Migration gate. PR0's trusted constructor only hand-builds inserts
-        // for the standalone-Dml test, but the gate is the engine-level guarantee.
-        // (The PlanStep carries `destructive`; the orchestrator passes the same
-        // `approval` through, and the executor-layer gate is the per-step check.)
-        let _ = approval;
+        // Defense-in-depth: a destructive DML (a `delete`) needs explicit approval,
+        // mirroring the per-Migration gate in `apply_with_lock_backend`. The engine's
+        // `apply_plan` gate runs first; this is the independent executor-layer check
+        // so a direct seam caller cannot bypass it. Refuse BEFORE touching the journal
+        // or the template, so a refused destructive DML applies NOTHING.
+        if destructive && approval != crate::approval::Approval::Approved {
+            return Err(ApplyError::ApprovalRequired);
+        }
         // Net-applied-skip: if this sub-version is already journaled `completed`,
         // the re-run is a no-op (idempotency, §2.0.1).
         let already: bool = self
