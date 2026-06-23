@@ -365,7 +365,7 @@ async fn h2_deploy_routes_through_verified_seam_and_manifest_is_tamper_sensitive
     //     same files load to the SAME manifest, but an edited body changes it. We
     //     load via the real `load_dir` (the same loader the deploy uses) so this is
     //     faithful to the value the deploy computes + logs.
-    let set = zeroship_migrate::load_dir(&dir).expect("load original set");
+    let set = zeroship_migrate::load_dir_migrations(&dir).expect("load original set");
     let manifest_a = zeroship_migrate::compute_manifest(&set);
     let manifest_a2 = zeroship_migrate::compute_manifest(&set);
     assert_eq!(
@@ -383,7 +383,7 @@ async fn h2_deploy_routes_through_verified_seam_and_manifest_is_tamper_sensitive
         ),
     ];
     let tampered_dir = migrations_dir(tampered_files);
-    let tampered_set = zeroship_migrate::load_dir(&tampered_dir).expect("load tampered set");
+    let tampered_set = zeroship_migrate::load_dir_migrations(&tampered_dir).expect("load tampered set");
     let manifest_b = zeroship_migrate::compute_manifest(&tampered_set);
     assert_ne!(
         manifest_a, manifest_b,

@@ -54,7 +54,8 @@ use std::path::Path;
 
 use uuid::Uuid;
 use zeroship_migrate::{
-    compute_manifest, connect, load_dir, provision_migrator, Approval, ConnectError, EngineError,
+    compute_manifest, connect, load_dir_migrations, provision_migrator, Approval, ConnectError,
+    EngineError,
     ExecutorConfig, LoaderError, MigrationEngine, PostgresBackend, RoleError,
 };
 
@@ -130,7 +131,13 @@ pub async fn apply_bundle_migrations(
     // Load the migration set FIRST — a malformed directory is a deploy error we
     // surface before touching the DB (no schema/role provisioned for a bundle
     // that can't load).
-    let migrations = load_dir(migrations_dir)?;
+    // PR0 (`op.*` DSL §5.2): `load_dir` now returns `Vec<AppliedPlan>`. The
+    // platform/control deploy path is the trusted `.sql` path (every file is a
+    // single-step plan), and its apply runs over the FLAT `Migration` set
+    // (`apply_verified` + the integrity-manifest fold), so we load the flat form
+    // via `load_dir_migrations` — byte-identical to the pre-PR0 behavior. The
+    // IR-path apply (PR1+) routes `Vec<AppliedPlan>` through `apply_plan`.
+    let migrations = load_dir_migrations(migrations_dir)?;
 
     // Open the admin connection (CREATEROLE + CREATE SCHEMA). Detaches its
     // driver loop onto the compio runtime.

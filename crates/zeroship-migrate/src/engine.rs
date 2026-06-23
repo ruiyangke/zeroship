@@ -34,6 +34,7 @@ use crate::executor::{
 use crate::guard::{GuardConfig, GuardError, GuardOutcome};
 use crate::manifest::{compute_manifest, verify_manifest, ManifestError, ManifestHash};
 use crate::migration::Migration;
+use crate::plan::{PlanStep, RenameStep};
 
 /// One linted migration in a [`MigrationPlan`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -440,9 +441,23 @@ impl MigrationEngine {
     }
 
     /// The body of [`apply_declarative`](Self::apply_declarative), run while the
-    /// outer project advisory lock is held (H10). Each inner sub-batch is driven
-    /// with [`LockMode::AlreadyHeld`] so it does NOT re-acquire / re-release the
-    /// lock — the lock is owned by `apply_declarative` for the whole deploy.
+    /// outer project advisory lock is held (H10).
+    ///
+    /// **PR0 — re-pointed onto the single shared [`apply_plan`](Self::apply_plan)
+    /// via the thin shape-adapter (§6.0).** This function no longer *contains* the
+    /// interleave/journal/`pending_contract` orchestration; it is now a
+    /// shape-adapter that lowers the declarative [`DeclarativeDeployPlan`] into the
+    /// neutral ordered [`PlanStep`] list — its `plain.items` → [`PlanStep::Ddl`],
+    /// its `rebuilds` → [`PlanStep::OnlineRename`]`(`[`RenameStep::SqliteRebuild`]`)`,
+    /// its `renames` → [`PlanStep::OnlineRename`]`(`[`RenameStep::PgExpandContract`]`)`,
+    /// preserving the historical order plain → rebuilds → renames — then feeds it
+    /// to [`apply_plan`](Self::apply_plan). After PR0 there is exactly ONE
+    /// orchestrator; the declarative path is a *producer* of `Vec<PlanStep>`.
+    ///
+    /// The plain set's denial / approval **gate** (the
+    /// [`apply_inner`](Self::apply_inner) gate) still runs here, before lowering —
+    /// a denied or un-approved-destructive plain set is refused exactly as before,
+    /// untouched by the convergence.
     async fn apply_declarative_locked<B: MigrationBackend>(
         &self,
         plan: &DeclarativeDeployPlan,
@@ -451,103 +466,240 @@ impl MigrationEngine {
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
-        // 1. The plain additive / destructive set, through the existing gate
-        //    (denial / approval), but with the lock already held outside it.
-        let mut applied = self
-            .apply_inner(&plan.plain, approval, backend, exec_cfg, applied_by, LockMode::AlreadyHeld)
-            .await?;
-
-        // 2. P6a — each SQLite 12-step table REBUILD, driven through the dialect seam
-        //    (`backend.rebuild_one`) within the SAME held lock + the journal the
-        //    rebuild writes atomically. The destructive/approval gate is the SAME one
-        //    the plain set passes: a rebuild's journal migration carries `destructive
-        //    + requires_approval`, so an un-approved rebuild is refused HERE (before
-        //    any rebuild runs) — never auto-approved (the dev-relaxed posture is P6b's
-        //    concern). On PG `plan.rebuilds` is empty, so this whole block is a no-op
-        //    and the PG path is byte-identical.
-        if !plan.rebuilds.is_empty() && approval != Approval::Approved {
-            // A rebuild on a populated table is destructive; refuse without approval
-            // exactly like the plain destructive gate (defense in depth at the engine
-            // layer). Nothing ran for the rebuilds.
+        // Preserve the plain-set gate exactly as `apply_inner` runs it: a denied
+        // plain plan can never apply; a destructive plain plan needs approval.
+        // (The executor re-runs its own destructive gate as defense in depth.)
+        if !plan.plain.denied.is_empty() {
+            return Err(DeclarativeApplyError::Plain(EngineError::Denied(
+                plan.plain.denied.clone(),
+            )));
+        }
+        if plan.plain.requires_approval && approval != Approval::Approved {
             return Err(DeclarativeApplyError::Plain(EngineError::ApprovalRequired));
         }
-        // The net-applied journal state — to make a re-run a NO-OP: a rebuild whose
-        // version is already `completed` in the journal is skipped (idempotent), the
-        // same net-state gate the versioned executor applies for plain migrations.
-        // `backend.applied` is the dialect-coupled journal read (SQLite `_mig`
-        // window-function net-state). Read once, BEFORE driving any rebuild.
-        let already: std::collections::HashSet<String> = if plan.rebuilds.is_empty() {
-            std::collections::HashSet::new()
-        } else {
-            backend
-                .applied(exec_cfg)
-                .await
-                .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?
-                .into_iter()
-                .filter(|e| matches!(e.phase, crate::journal::Phase::Completed))
-                .map(|e| e.version)
-                .collect()
-        };
+
+        // Shape-adapter (§6.0): declarative plan → the neutral ordered PlanStep
+        // list, in the historical execution order (plain DDL spine, then each
+        // SQLite rebuild, then each PG online rename's EXPAND). Empty `rebuilds`
+        // on PG and empty `renames` on SQLite, so each dialect produces exactly
+        // the steps its old code path drove.
+        let mut steps: Vec<PlanStep> = Vec::new();
+        for p in &plan.plain.items {
+            steps.push(PlanStep::Ddl(p.migration.clone()));
+        }
         for rebuild in &plan.rebuilds {
-            let version = rebuild.migration.version.as_str().to_string();
-            if already.contains(&version) {
-                // Already net-applied — idempotent re-run skips it.
-                applied.skipped.push(version);
-                continue;
-            }
-            backend
-                .rebuild_one(&rebuild.spec, &rebuild.migration, applied_by)
-                .await
-                .map_err(EngineError::Apply)?;
-            applied.applied.push(version);
+            steps.push(PlanStep::OnlineRename(RenameStep::SqliteRebuild(
+                rebuild.clone(),
+            )));
+        }
+        for rename in &plan.renames {
+            steps.push(PlanStep::OnlineRename(RenameStep::PgExpandContract(
+                rename.clone(),
+            )));
         }
 
-        // 3. Each rename's EXPAND, through run_expand (real backfill; E3 journaled
-        //    after) — also with the lock already held. 4. Collect the contract as
-        //    the deferred set.
-        //
-        // 3/4 — the online expand-contract drive, through the dialect-neutral
-        // [`OnlineSchemaChange`](crate::expand_contract::OnlineSchemaChange) capability
-        // (multi-engine abstraction L1/L2/H1). We branch on `backend.online()`, NOT on
-        // a raw `&Client` (`expand_conn` is gone): `Some` for an engine with an online
-        // path (Postgres' `PgOnline`, owning its `Client` internally), `None` for an
-        // engine with none (SQLite — every existing-table change, rename included, is
-        // routed to a REBUILD above, so `plan.renames` is structurally EMPTY on SQLite).
-        //
-        // ASSERTION (H1 invariant): a backend with NO online capability MUST receive an
-        // empty `renames` — a non-empty rename set with `online() == None` is an internal
-        // routing bug (the differ failed to route a rename to a rebuild), never a
-        // silently-dropped rename. We fail closed.
+        // The single shared orchestrator. The outer project lock is already held
+        // (H10), so every inner sub-batch re-enters it with `LockMode::AlreadyHeld`.
+        self.apply_plan(&steps, approval, backend, exec_cfg, applied_by, LockMode::AlreadyHeld)
+            .await
+    }
+
+    /// **The single shared plan orchestrator (`op.*` DSL §2.0 / §6 / §6.0, PR0).**
+    ///
+    /// Runs an ordered [`PlanStep`] list — the convergence point of the declarative
+    /// path (re-pointed here via the shape-adapter in
+    /// [`apply_declarative_locked`](Self::apply_declarative_locked)) and the future
+    /// IR `op.*` path. It is plan-shape-neutral: it dispatches by step kind,
+    /// reusing the existing downstream primitives unchanged as execution
+    /// destinations —
+    /// [`apply_with_lock_backend`](crate::executor::apply_with_lock_backend) for
+    /// DDL, [`run_online`](crate::expand_contract::OnlineSchemaChange::run_online)
+    /// for a PG online rename (with the `pending_contract` partition),
+    /// [`rebuild_one`](crate::backend::MigrationBackend::rebuild_one) for a SQLite
+    /// rebuild rename, and the data-step seams
+    /// ([`run_backfill_step`](crate::backend::MigrationBackend::run_backfill_step) /
+    /// [`run_dml_step`](crate::backend::MigrationBackend::run_dml_step)).
+    ///
+    /// # Lock discipline
+    /// `lock_mode` is threaded into every sub-batch. The declarative caller holds
+    /// the project lock for the whole deploy and passes
+    /// [`LockMode::AlreadyHeld`]; a standalone caller passes
+    /// [`LockMode::Acquire`] for the first DDL batch and `AlreadyHeld` thereafter
+    /// (the orchestrator does this coalescing internally so the whole plan runs
+    /// under one lock acquisition).
+    ///
+    /// # Coalescing
+    /// Consecutive [`PlanStep::Ddl`] steps are coalesced into ONE
+    /// `apply_with_lock_backend` batch, so the declarative plain set (a contiguous
+    /// run of `Ddl` steps) is applied as a single batch — byte-identical session
+    /// hygiene + journaling to the pre-PR0 path.
+    ///
+    /// # `OnlineRename` dual-execution dispatch (§2.6.2)
+    /// A [`RenameStep::PgExpandContract`] runs E1+E2→backfill→E3 atomically under
+    /// the held lock via `run_online` and surfaces C1/C2 as `pending_contract`
+    /// (the cross-deploy partition, §2.0.2). A [`RenameStep::SqliteRebuild`] is one
+    /// atomic offline `rebuild_one` (approval-gated + net-applied-skipped); it has
+    /// NO `pending_contract`.
+    ///
+    /// # Errors
+    /// [`DeclarativeApplyError`] — `Plain` for a gate / DDL / DML / backfill /
+    /// rebuild failure, `Expand` for an online-rename expand/backfill failure.
+    pub async fn apply_plan<B: MigrationBackend>(
+        &self,
+        steps: &[PlanStep],
+        approval: Approval,
+        backend: &B,
+        exec_cfg: &ExecutorConfig,
+        applied_by: &str,
+        lock_mode: LockMode,
+    ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
+        let mut applied = ApplyOutcome {
+            applied: Vec::new(),
+            skipped: Vec::new(),
+            recovered: Vec::new(),
+        };
         let mut pending_contract: Vec<Migration> = Vec::new();
-        if !plan.renames.is_empty() {
-            let Some(online) = backend.online() else {
-                return Err(DeclarativeApplyError::Plain(EngineError::Apply(
-                    ApplyError::Backend(
-                        "declarative deploy carries online renames but the backend has no \
-                         online schema-change capability (SQLite renames must be routed to a \
-                         rebuild; a non-empty rename set here is a routing bug)"
-                            .to_string(),
-                    ),
-                )));
-            };
-            for rename in &plan.renames {
-                // The seam takes the NEUTRAL intent + the pre-authored, version-stable
-                // expand steps (H1) — never a `Client`, never the PG-named plan type.
-                let outcome = online
-                    .run_online(
-                        &rename.intent,
-                        &rename.expand,
-                        &rename.backfill,
-                        approval,
-                        exec_cfg,
-                        applied_by,
-                        LockMode::AlreadyHeld,
+        // Track whether WE have already acquired the project lock for an
+        // `Acquire`-mode standalone call: the first DDL batch acquires, every
+        // subsequent sub-batch re-enters with `AlreadyHeld` so the whole plan runs
+        // under one acquisition. Under `AlreadyHeld` (the declarative path) the
+        // outer caller owns the lock for every step.
+        let mut next_lock = lock_mode;
+
+        // Net-applied journal state for the rebuild net-applied-skip — read lazily
+        // on the first rebuild step (avoids an extra journal read on the common
+        // no-rebuild PG path; matches the pre-PR0 behavior which read `applied`
+        // only when `plan.rebuilds` was non-empty).
+        let mut rebuild_already: Option<std::collections::HashSet<String>> = None;
+
+        let mut i = 0usize;
+        while i < steps.len() {
+            match &steps[i] {
+                PlanStep::Ddl(_) => {
+                    // Coalesce the maximal run of consecutive Ddl steps into one
+                    // batch (byte-identical to the declarative plain-set apply).
+                    let start = i;
+                    while i < steps.len() && matches!(steps[i], PlanStep::Ddl(_)) {
+                        i += 1;
+                    }
+                    let batch: Vec<Migration> = steps[start..i]
+                        .iter()
+                        .map(|s| match s {
+                            PlanStep::Ddl(m) => m.clone(),
+                            _ => unreachable!("coalesced run is all Ddl"),
+                        })
+                        .collect();
+                    let outcome = crate::executor::apply_with_lock_backend(
+                        backend, exec_cfg, &batch, approval, applied_by, next_lock,
                     )
-                    .await?;
-                applied.applied.extend(outcome.applied);
-                applied.skipped.extend(outcome.skipped);
-                applied.recovered.extend(outcome.recovered);
-                pending_contract.extend(rename.contract.iter().cloned());
+                    .await
+                    .map_err(EngineError::Apply)?;
+                    applied.applied.extend(outcome.applied);
+                    applied.skipped.extend(outcome.skipped);
+                    applied.recovered.extend(outcome.recovered);
+                    next_lock = LockMode::AlreadyHeld;
+                }
+                PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild)) => {
+                    // Re-expresses the declarative `plan.rebuilds` loop
+                    // (`engine.rs:491-503`): approval gate + net-applied-skip +
+                    // `rebuild_one`.
+                    if approval != Approval::Approved {
+                        return Err(DeclarativeApplyError::Plain(
+                            EngineError::ApprovalRequired,
+                        ));
+                    }
+                    if rebuild_already.is_none() {
+                        rebuild_already = Some(
+                            backend
+                                .applied(exec_cfg)
+                                .await
+                                .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?
+                                .into_iter()
+                                .filter(|e| matches!(e.phase, crate::journal::Phase::Completed))
+                                .map(|e| e.version)
+                                .collect(),
+                        );
+                    }
+                    let version = rebuild.migration.version.as_str().to_string();
+                    if rebuild_already
+                        .as_ref()
+                        .is_some_and(|set| set.contains(&version))
+                    {
+                        applied.skipped.push(version);
+                    } else {
+                        backend
+                            .rebuild_one(&rebuild.spec, &rebuild.migration, applied_by)
+                            .await
+                            .map_err(EngineError::Apply)?;
+                        applied.applied.push(version);
+                    }
+                    i += 1;
+                }
+                PlanStep::OnlineRename(RenameStep::PgExpandContract(rename)) => {
+                    // Re-expresses the declarative online drive
+                    // (`engine.rs:533-552`): run EXPAND+backfill atomically under
+                    // the held lock, defer C1/C2 as `pending_contract` (§2.0.2).
+                    let Some(online) = backend.online() else {
+                        return Err(DeclarativeApplyError::Plain(EngineError::Apply(
+                            ApplyError::Backend(
+                                "plan carries a PG online rename but the backend has no \
+                                 online schema-change capability (a SQLite rename must be a \
+                                 RenameStep::SqliteRebuild; a PgExpandContract here is a \
+                                 routing bug)"
+                                    .to_string(),
+                            ),
+                        )));
+                    };
+                    let outcome = online
+                        .run_online(
+                            &rename.intent,
+                            &rename.expand,
+                            &rename.backfill,
+                            approval,
+                            exec_cfg,
+                            applied_by,
+                            LockMode::AlreadyHeld,
+                        )
+                        .await?;
+                    applied.applied.extend(outcome.applied);
+                    applied.skipped.extend(outcome.skipped);
+                    applied.recovered.extend(outcome.recovered);
+                    pending_contract.extend(rename.contract.iter().cloned());
+                    i += 1;
+                }
+                PlanStep::Backfill(spec) => {
+                    let outcome = backend
+                        .run_backfill_step(exec_cfg, spec, approval, applied_by, next_lock)
+                        .await
+                        .map_err(EngineError::Apply)?;
+                    applied.applied.extend(outcome.applied);
+                    applied.skipped.extend(outcome.skipped);
+                    applied.recovered.extend(outcome.recovered);
+                    next_lock = LockMode::AlreadyHeld;
+                    i += 1;
+                }
+                PlanStep::Dml {
+                    version,
+                    name,
+                    template,
+                    binds,
+                    ..
+                } => {
+                    let ran = backend
+                        .run_dml_step(
+                            exec_cfg, version, name, template, binds, approval, applied_by,
+                            next_lock,
+                        )
+                        .await
+                        .map_err(EngineError::Apply)?;
+                    if ran {
+                        applied.applied.push(version.as_str().to_string());
+                    } else {
+                        applied.skipped.push(version.as_str().to_string());
+                    }
+                    next_lock = LockMode::AlreadyHeld;
+                    i += 1;
+                }
             }
         }
 

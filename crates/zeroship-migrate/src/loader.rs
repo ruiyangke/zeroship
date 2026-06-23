@@ -603,7 +603,25 @@ fn flags_for_file_opts(
 ///
 /// [`LoaderError`] on an unrecognized filename, an orphan `.down.sql`, a duplicate
 /// `V<NNNN>`, an out-of-range version, an unparseable body, or an I/O fault.
-pub fn load_dir(dir: impl AsRef<Path>) -> Result<Vec<Migration>, LoaderError> {
+pub fn load_dir(dir: impl AsRef<Path>) -> Result<Vec<crate::plan::AppliedPlan>, LoaderError> {
+    // PR0 (`op.*` DSL §5.2): `load_dir` returns `Vec<AppliedPlan>`. A `.sql` file
+    // lowers to a **single-step plan** via the `AppliedPlan::single_step()` facade
+    // (one `Ddl` step), preserving the order-by-version contract. When the IR
+    // `.ir.json` branch lands (PR1), a richer artifact lowers to a multi-step plan
+    // here; the `.sql` path stays a one-step plan.
+    let migrations = load_dir_migrations(dir)?;
+    Ok(migrations
+        .into_iter()
+        .map(crate::plan::AppliedPlan::single_step)
+        .collect())
+}
+
+/// The `Vec<Migration>` form of [`load_dir`] — the directory read + version-order
+/// grammar pass that produces the raw [`Migration`]s, before they are wrapped
+/// into single-step [`AppliedPlan`](crate::plan::AppliedPlan)s. Retained as the
+/// internal core (and for any caller that still needs the flat `Migration` set,
+/// e.g. the integrity-manifest fold), so the wrap into plans is a thin shell.
+pub fn load_dir_migrations(dir: impl AsRef<Path>) -> Result<Vec<Migration>, LoaderError> {
     let dir = dir.as_ref();
     let mut entries: Vec<PathBuf> = Vec::new();
     let read = std::fs::read_dir(dir).map_err(|e| LoaderError::Io {
@@ -993,7 +1011,7 @@ mod tests {
         let dir = tempdir();
         write_file(&dir, "V1__ok.sql", "CREATE TABLE t ();");
         write_file(&dir, "garbage.sql", "SELECT 1;");
-        let err = load_dir(&dir).unwrap_err();
+        let err = load_dir_migrations(&dir).unwrap_err();
         assert!(
             matches!(err, LoaderError::UnrecognizedFile { ref name } if name == "garbage.sql"),
             "got {err:?}"
@@ -1005,7 +1023,7 @@ mod tests {
         let dir = tempdir();
         write_file(&dir, "V1__ok.sql", "CREATE TABLE t ();");
         write_file(&dir, "V2__orphan.down.sql", "DROP TABLE t;");
-        let err = load_dir(&dir).unwrap_err();
+        let err = load_dir_migrations(&dir).unwrap_err();
         assert!(
             matches!(err, LoaderError::OrphanDown { version: 2, .. }),
             "got {err:?}"
@@ -1017,7 +1035,7 @@ mod tests {
         let dir = tempdir();
         write_file(&dir, "V1__one.sql", "CREATE TABLE a ();");
         write_file(&dir, "V1__two.sql", "CREATE TABLE b ();");
-        let err = load_dir(&dir).unwrap_err();
+        let err = load_dir_migrations(&dir).unwrap_err();
         assert!(
             matches!(err, LoaderError::DuplicateVersion { version: 1, .. }),
             "got {err:?}"
@@ -1106,8 +1124,8 @@ mod tests {
     fn loaded_repeatable_id_is_deterministic_across_loads() {
         let dir = tempdir();
         write_file(&dir, "R__a_view.sql", "CREATE OR REPLACE VIEW v AS SELECT 1;");
-        let first = load_dir(&dir).unwrap();
-        let second = load_dir(&dir).unwrap();
+        let first = load_dir_migrations(&dir).unwrap();
+        let second = load_dir_migrations(&dir).unwrap();
         // The same R__ file must get the SAME version id on a fresh reload — this is
         // what makes the version-keyed re-run oracle skip an unchanged repeatable.
         assert_eq!(first[0].version, second[0].version, "repeatable id must be stable across loads");
@@ -1126,7 +1144,7 @@ mod tests {
         write_file(&dir, "V1__create.down.sql", "DROP TABLE t;");
         write_file(&dir, "R__a_view.sql", "CREATE OR REPLACE VIEW v AS SELECT 1;");
 
-        let migs = load_dir(&dir).expect("load must succeed");
+        let migs = load_dir_migrations(&dir).expect("load must succeed");
         // 3 versioned + 1 repeatable.
         assert_eq!(migs.len(), 4);
 
@@ -1161,7 +1179,7 @@ mod tests {
         let dir = tempdir();
         write_file(&dir, "V1__drop_it.sql", "DROP TABLE legacy;");
         write_file(&dir, "V2__additive.sql", "CREATE TABLE t (id int);");
-        let migs = load_dir(&dir).unwrap();
+        let migs = load_dir_migrations(&dir).unwrap();
         let drop = migs.iter().find(|m| m.name == "drop_it").unwrap();
         let add = migs.iter().find(|m| m.name == "additive").unwrap();
         // DROP TABLE => destructive => requires_approval (server-derived, like submit).
@@ -1180,7 +1198,7 @@ mod tests {
             "V1__concurrent_index.sql",
             "CREATE INDEX CONCURRENTLY i ON t (a);",
         );
-        let migs = load_dir(&dir).unwrap();
+        let migs = load_dir_migrations(&dir).unwrap();
         assert!(
             !migs[0].flags.transactional,
             "CREATE INDEX CONCURRENTLY must auto-route to the non-transactional path"
@@ -1190,7 +1208,7 @@ mod tests {
     #[test]
     fn empty_dir_loads_to_empty_vec() {
         let dir = tempdir();
-        assert!(load_dir(&dir).unwrap().is_empty());
+        assert!(load_dir_migrations(&dir).unwrap().is_empty());
     }
 
     // ----- dbmate-native format (Phase A2) -----
@@ -1282,7 +1300,7 @@ mod tests {
         write_file(&dir, "20240101000000_create.sql", "-- migrate:up\nCREATE TABLE t (id int);\n-- migrate:down\nDROP TABLE t;\n");
         write_file(&dir, "20240301000000_add_col.sql", "-- migrate:up\nALTER TABLE t ADD COLUMN a int;\n");
 
-        let migs = load_dir(&dir).expect("dbmate dir loads");
+        let migs = load_dir_migrations(&dir).expect("dbmate dir loads");
         assert_eq!(migs.len(), 3);
         // Ordered by numeric timestamp: 20240101 < 20240301 < 20240617.
         assert_eq!(migs[0].name, "create");
@@ -1309,7 +1327,7 @@ mod tests {
     fn load_dir_dbmate_drop_table_is_destructive() {
         let dir = tempdir();
         write_file(&dir, "20240101000000_drop_it.sql", "-- migrate:up\nDROP TABLE legacy;\n");
-        let migs = load_dir(&dir).unwrap();
+        let migs = load_dir_migrations(&dir).unwrap();
         assert!(migs[0].flags.destructive, "DROP TABLE up must be destructive");
         assert!(migs[0].flags.requires_approval, "destructive => requires approval");
     }
@@ -1324,7 +1342,7 @@ mod tests {
             "20240101000000_seed.sql",
             "-- migrate:up transaction:false\nINSERT INTO t (id) VALUES (1);\n",
         );
-        let migs = load_dir(&dir).unwrap();
+        let migs = load_dir_migrations(&dir).unwrap();
         assert!(
             !migs[0].flags.transactional,
             "transaction:false must honor the non-transactional path even when classify would allow a txn"
@@ -1335,7 +1353,7 @@ mod tests {
     fn load_dir_dbmate_missing_up_is_hard_error() {
         let dir = tempdir();
         write_file(&dir, "20240101000000_bad.sql", "-- migrate:down\nDROP TABLE t;\n");
-        let err = load_dir(&dir).unwrap_err();
+        let err = load_dir_migrations(&dir).unwrap_err();
         assert!(matches!(err, LoaderError::MissingUpSection { .. }), "got {err:?}");
     }
 
@@ -1349,7 +1367,7 @@ mod tests {
         // depth, identical to `migration_id_for_version`'s debug-assert contract.
         let dir = tempdir();
         write_file(&dir, "20991231235959_far_future.sql", "-- migrate:up\nCREATE TABLE t (id int);\n");
-        let migs = load_dir(&dir).unwrap();
+        let migs = load_dir_migrations(&dir).unwrap();
         assert_eq!(migs.len(), 1);
         assert_eq!(migs[0].version, migration_id_for_version(20_991_231_235_959));
     }
@@ -1359,7 +1377,7 @@ mod tests {
         let dir = tempdir();
         write_file(&dir, "20240101000000_one.sql", "-- migrate:up\nCREATE TABLE a ();\n");
         write_file(&dir, "20240101000000_two.sql", "-- migrate:up\nCREATE TABLE b ();\n");
-        let err = load_dir(&dir).unwrap_err();
+        let err = load_dir_migrations(&dir).unwrap_err();
         assert!(
             matches!(err, LoaderError::DuplicateVersion { version: 20_240_101_000_000, .. }),
             "got {err:?}"
@@ -1373,7 +1391,7 @@ mod tests {
         write_file(&dir, "20240102000000_also.sql", "-- migrate:up\nCREATE TABLE u ();\n");
         // A bare non-dbmate, non-Flyway file in a dbmate-detected dir.
         write_file(&dir, "notes.txt", "hello");
-        let err = load_dir(&dir).unwrap_err();
+        let err = load_dir_migrations(&dir).unwrap_err();
         assert!(
             matches!(err, LoaderError::UnrecognizedFile { ref name } if name == "notes.txt"),
             "got {err:?}"
@@ -1410,7 +1428,7 @@ mod tests {
         let dir = tempdir();
         write_file(&dir, "V0001__flyway.sql", "CREATE TABLE t ();");
         write_file(&dir, "20240101000000_dbmate.sql", "-- migrate:up\nCREATE TABLE u ();\n");
-        let err = load_dir(&dir).unwrap_err();
+        let err = load_dir_migrations(&dir).unwrap_err();
         assert!(matches!(err, LoaderError::MixedFormats { .. }), "got {err:?}");
     }
 
@@ -1508,7 +1526,7 @@ mod tests {
             eprintln!("skipping: {} not present", dir.display());
             return;
         }
-        let migs = load_dir(&dir).expect("the platform Flyway port still loads");
+        let migs = load_dir_migrations(&dir).expect("the platform Flyway port still loads");
         assert_eq!(migs.len(), 56, "all 56 ported V<NNNN>__ files load (0045 is a gap)");
         // Auto-detect chose Flyway, not dbmate: none is repeatable here and the
         // versions are strictly ascending (the Flyway numeric ordering).
