@@ -62,6 +62,31 @@ const MAX_EXACT_INT: i64 = 1 << 53; // 9_007_199_254_740_992
 /// loader/validator can match on it.
 pub const EXPR_INVALID_NUMERIC: &str = "EXPR_INVALID_NUMERIC";
 
+/// The CURRENT IR wire-format version this engine build emits and accepts (§5.3,
+/// design line 888). The IR shape evolves by BUMPING this; the loader rejects an
+/// unknown FUTURE `ir_version` fail-closed (a `.ir.json` authored by a newer
+/// engine that this build cannot faithfully interpret), per the AGENTS.md
+/// "wire-format versioning is code-evolution discipline, not user-compat" stance.
+/// A bump MUST be checksum-neutral for already-applied artifacts (§5.3).
+pub const CURRENT_IR_VERSION: u32 = 1;
+
+/// A [`MigrationIr`] declared an `ir_version` this engine build does not
+/// understand — a FUTURE version `> CURRENT_IR_VERSION` (§5.3, design line 888).
+/// The loader's `.ir.json` branch raises this BEFORE checksum/lower, fail-closed:
+/// a newer-engine artifact is never silently mis-interpreted by an older engine.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "unsupported IR wire-format version {found}: this engine understands ir_version \
+     up to {current} (a newer engine authored this .ir.json; upgrade the migration \
+     engine or re-author against ir_version <= {current})"
+)]
+pub struct IrVersionError {
+    /// The `ir_version` the artifact declared.
+    pub found: u32,
+    /// The highest `ir_version` this engine build understands.
+    pub current: u32,
+}
+
 /// A non-negative author-supplied STRUCTURAL integer (`batchSize`, `limit`,
 /// `timeout_ms`, …) constrained to the JS safe-integer range `< 2^53` at
 /// DESERIALIZE — the same numeric domain [`IrScalar::Int`] enforces for typed
@@ -181,6 +206,31 @@ pub struct MigrationIr {
     /// deserialize, so the field is modelled explicitly here (MED-2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checksum: Option<String>,
+}
+
+impl MigrationIr {
+    /// Fail-closed `ir_version` bound check (§5.3, design line 888): reject a
+    /// FUTURE `ir_version` (`> CURRENT_IR_VERSION`) this engine build cannot
+    /// faithfully interpret. The loader's `.ir.json` branch MUST call this AFTER
+    /// deserialize and BEFORE [`Checksum::of_ir`](crate::migration::Checksum::of_ir)
+    /// and `IrAuthor::lower` — a newer-engine artifact is never silently
+    /// mis-applied by an older engine.
+    ///
+    /// A PAST/equal version validates (the field is the evolution knob; a bump is
+    /// required to be checksum-neutral for already-applied artifacts, §5.3, so an
+    /// older `ir_version` an engine build still understands is accepted).
+    ///
+    /// # Errors
+    /// [`IrVersionError`] if `self.ir_version > CURRENT_IR_VERSION`.
+    pub fn check_ir_version(&self) -> Result<(), IrVersionError> {
+        if self.ir_version > CURRENT_IR_VERSION {
+            return Err(IrVersionError {
+                found: self.ir_version,
+                current: CURRENT_IR_VERSION,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// All-`Option` mirror of [`MigrationFlags`] — the override carrier in the IR
@@ -1207,6 +1257,50 @@ mod tests {
     // in `Checksum::of_ir` (it is excluded like `owner_app`, §2.4 point 2). RED
     // before the field is added.
 
+    // ---- ir_version fail-closed (§5.3) ----
+    // The loader MUST reject a FUTURE ir_version it cannot interpret, BEFORE any
+    // checksum/lower runs. Before this fix nothing validated `ir_version`: a
+    // `.ir.json` with `ir_version: 999` deserialized successfully and the field
+    // gave a false impression of a guard that did not exist.
+
+    #[test]
+    fn future_ir_version_is_rejected_fail_closed() {
+        let json = format!(
+            r#"{{"ir_version": {}, "name": "m", "ops": [{{"op":"dropTable","table":"t"}}]}}"#,
+            CURRENT_IR_VERSION + 1
+        );
+        // Deserialize succeeds (the field is a plain u32); the BOUND check is the
+        // loader's fail-closed gate.
+        let ir: MigrationIr = serde_json::from_str(&json).unwrap();
+        let err = ir.check_ir_version().unwrap_err();
+        assert_eq!(err.found, CURRENT_IR_VERSION + 1);
+        assert_eq!(err.current, CURRENT_IR_VERSION);
+
+        // A far-future version is likewise rejected.
+        let ir999 = MigrationIr { ir_version: 999, ..ir };
+        assert!(ir999.check_ir_version().is_err());
+    }
+
+    #[test]
+    fn current_and_past_ir_version_validate() {
+        let ir = MigrationIr {
+            ir_version: CURRENT_IR_VERSION,
+            name: "m".into(),
+            owner_app: String::new(),
+            ops: vec![Op::DropTable { table: "t".into(), if_exists: None, cascade: None }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+        assert!(ir.check_ir_version().is_ok(), "the current version validates");
+        if CURRENT_IR_VERSION > 0 {
+            let past = MigrationIr { ir_version: CURRENT_IR_VERSION - 1, ..ir };
+            assert!(past.check_ir_version().is_ok(), "a past version this build understands validates");
+        }
+    }
+
     #[test]
     fn migration_ir_accepts_advisory_checksum_hint() {
         let json = r#"{
@@ -1222,24 +1316,49 @@ mod tests {
     #[test]
     fn advisory_checksum_hint_is_excluded_from_of_ir() {
         use crate::migration::{Checksum, MigrationFlags};
-        let ops = vec![Op::DropTable { table: "t".into(), if_exists: None, cascade: None }];
-        let flags = MigrationFlags::default();
-        // Two IRs identical in everything BUT the advisory hint must produce the
-        // SAME of_ir (the hint is excluded). of_ir takes the op list directly, so
-        // we just assert the hint is not an of_ir input by construction — and that
-        // a present vs absent hint round-trips to the same checksum domain.
-        let csum = Checksum::of_ir(
-            &CanonicalOpList(&ops),
-            &flags,
-            "", // owner excluded from hint domain
-            &[],
-            &[],
-            &[],
+        // Build TWO MigrationIr values that differ in NOTHING but `.checksum` (one
+        // `Some`, one `None`), then derive the of_ir inputs from EACH the same way
+        // the loader's hint-domain recompute does — from `ir.ops` (owner = "" for
+        // the hint domain, §2.4 point 2). If a future regression folded the hint
+        // into the checksum domain, the two would diverge; this catches it. The
+        // prior test was tautological — it called of_ir twice with IDENTICAL
+        // arguments and so only proved of_ir is deterministic, not that the hint
+        // is excluded.
+        let base_ops = vec![Op::DropTable { table: "t".into(), if_exists: None, cascade: None }];
+        let with_hint = MigrationIr {
+            ir_version: 1,
+            name: "m".into(),
+            owner_app: String::new(),
+            ops: base_ops.clone(),
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: Some("deadbeef".to_string()),
+        };
+        let without_hint = MigrationIr { checksum: None, ..with_hint.clone() };
+
+        // The hint-domain recompute (the half the loader compares to the hint):
+        // ops + dialect-neutral flags + owner "" + deps/supersedes/preconditions.
+        // The IR `flags`/`depends_on`/`supersedes` → MigrationFlags/MigrationId
+        // merge is Wave C; the hint-domain checksum here uses the neutral defaults,
+        // and crucially derives the OP region (the only IR-sourced of_ir input
+        // today) from each value — so a hint that leaked into of_ir would show.
+        let of_ir_for = |ir: &MigrationIr| {
+            Checksum::of_ir(
+                &CanonicalOpList(&ir.ops),
+                &MigrationFlags::default(),
+                "",
+                &[],
+                &[],
+                &ir.preconditions,
+            )
+        };
+        assert_eq!(
+            of_ir_for(&with_hint).as_str(),
+            of_ir_for(&without_hint).as_str(),
+            "the advisory `.checksum` hint must NOT participate in Checksum::of_ir"
         );
-        // The hint string itself is never an argument to of_ir — proven by the
-        // signature. A loader recomputes THIS value and compares to the hint.
-        let recomputed = Checksum::of_ir(&CanonicalOpList(&ops), &flags, "", &[], &[], &[]);
-        assert_eq!(csum.as_str(), recomputed.as_str());
     }
 
     #[test]

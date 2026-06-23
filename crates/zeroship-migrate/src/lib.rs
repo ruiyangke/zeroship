@@ -76,6 +76,7 @@ pub mod expr;
 pub mod fault;
 pub mod guard;
 pub mod ir;
+pub mod ir_load;
 pub mod journal;
 pub mod loader;
 pub mod manifest;
@@ -169,8 +170,15 @@ pub use migration::{
 // every transform/predicate is the closed [`expr::Expr`] AST.
 pub use ir::{
     CanonicalOpList, ColType, IndexMethod, IrBatch, IrColumn, IrConstraint, IrConstraintKind,
-    IrDefault, IrFlagsOverride, IrIndex, IrScalar, MigrationIr, Op, SafeU64, SynthDefaultFn,
-    EXPR_INVALID_NUMERIC,
+    IrDefault, IrFlagsOverride, IrIndex, IrScalar, IrVersionError, MigrationIr, Op, SafeU64,
+    SynthDefaultFn, CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
+};
+// The fail-closed `.ir.json` load gate (§5.2/§5.3/§8.6): deserialize →
+// `ir_version` → `validate_ir` → server-stamped ownership → advisory checksum-hint
+// compare. The single production seam every creator-authored IR passes before
+// `IrAuthor::lower` (a later wave).
+pub use ir_load::{
+    enforce_ir_ownership, load_ir_document, recompute_hint_domain_checksum, IrLoadError,
 };
 // The closed expression AST (§3.3.1) the IR's transform/predicate positions
 // carry. Constructed in JS, serialized as data, NEVER parsed from text.
