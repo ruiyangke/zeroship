@@ -175,8 +175,11 @@ pub use ir::{
 };
 // The fail-closed `.ir.json` load gate (§5.2/§5.3/§8.6): deserialize →
 // `ir_version` → `validate_ir` → server-stamped ownership → advisory checksum-hint
-// compare. The single production seam every creator-authored IR passes before
-// `IrAuthor::lower` (a later wave).
+// compare. This is the gate `IrAuthor::lower` WILL call once the loader's
+// `.ir.json` branch lands (task #80): it is the precondition the lowering compiler
+// runs behind, not yet wired onto a deploy path. Today it has no production caller
+// (the loader change is comment-only) — it is exercised by its own unit tests; the
+// wiring is the deferred task #80.
 pub use ir_load::{
     enforce_ir_ownership, load_ir_document, recompute_hint_domain_checksum, IrLoadError,
 };

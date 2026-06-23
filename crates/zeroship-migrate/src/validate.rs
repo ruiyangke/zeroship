@@ -297,8 +297,15 @@ pub fn validate_op(
     match op {
         Op::CreateTable { name, columns, constraints, indexes } => {
             // A createTable is self-contained: resolve ColRefs against its own
-            // declared columns (rule (c) is enforceable here).
-            let cols: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
+            // declared columns PLUS the seven platform system fields the engine
+            // auto-injects at lower/render time (`declarative::SYSTEM_FIELD_NAMES`).
+            // A legitimate Check or partial-index predicate referencing a system
+            // field — e.g. the canonical soft-delete partial-unique index
+            // `WHERE deleted_at IS NULL`, or a Check on `id`/`created_at` — must
+            // resolve, not be falsely rejected (rule (c) is enforceable here).
+            let mut cols: Vec<String> =
+                crate::declarative::SYSTEM_FIELD_NAMES.iter().map(|s| (*s).to_string()).collect();
+            cols.extend(columns.iter().map(|c| c.name.clone()));
             let scope = TargetScope::new(name, &cols);
             for ix in indexes {
                 if let Some(pred) = &ix.r#where {
@@ -1127,6 +1134,82 @@ mod tests {
         ]);
         assert!(validate_ir(&ir, Dialect::Postgres, &[]).is_ok());
         assert!(validate_ir(&ir, Dialect::Sqlite, &[]).is_ok());
+    }
+
+    #[test]
+    fn validate_ir_create_table_resolves_system_fields_in_scope() {
+        // MED: createTable auto-injects the seven platform system fields at
+        // lower/render time. A legitimate soft-delete partial-unique index
+        // `WHERE deleted_at IS NULL` and a Check referencing `id` reference those
+        // system fields — they MUST resolve in rule (c) scope, not be rejected.
+        let ir = ir_with(vec![Op::CreateTable {
+            name: "users".into(),
+            columns: vec![IrColumn {
+                name: "first".into(),
+                ty: ColType::Text,
+                nullable: None,
+                default: None,
+                unique: None,
+            }],
+            constraints: vec![IrConstraint {
+                name: None,
+                kind: IrConstraintKind::Check {
+                    // references `id`, a system field → must resolve
+                    expr: Expr::UnaryOp {
+                        op: UnaryOp::IsNotNull,
+                        operand: Box::new(Expr::col("id")),
+                    },
+                },
+            }],
+            indexes: vec![IrIndex {
+                name: None,
+                columns: vec!["first".into()],
+                unique: Some(true),
+                using: None,
+                // the canonical soft-delete partial-unique predicate
+                r#where: Some(Expr::UnaryOp {
+                    op: UnaryOp::IsNull,
+                    operand: Box::new(Expr::col("deleted_at")),
+                }),
+            }],
+        }]);
+        assert!(
+            validate_ir(&ir, Dialect::Postgres, &[]).is_ok(),
+            "a Check on `id` + partial index on `deleted_at` must resolve system fields (PG)"
+        );
+        assert!(
+            validate_ir(&ir, Dialect::Sqlite, &[]).is_ok(),
+            "a Check on `id` + partial index on `deleted_at` must resolve system fields (SQLite)"
+        );
+    }
+
+    #[test]
+    fn validate_ir_create_table_still_rejects_truly_unknown_column() {
+        // The system-field union must NOT loosen the gate for a genuinely unknown
+        // column — `ghost` is neither declared nor a system field.
+        let ir = ir_with(vec![Op::CreateTable {
+            name: "users".into(),
+            columns: vec![IrColumn {
+                name: "first".into(),
+                ty: ColType::Text,
+                nullable: None,
+                default: None,
+                unique: None,
+            }],
+            constraints: vec![IrConstraint {
+                name: None,
+                kind: IrConstraintKind::Check {
+                    expr: Expr::UnaryOp {
+                        op: UnaryOp::IsNotNull,
+                        operand: Box::new(Expr::col("ghost")),
+                    },
+                },
+            }],
+            indexes: vec![],
+        }]);
+        let err = validate_ir(&ir, Dialect::Postgres, &[]).unwrap_err();
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
     }
 
     #[test]
