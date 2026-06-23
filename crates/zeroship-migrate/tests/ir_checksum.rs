@@ -255,6 +255,58 @@ fn of_and_of_ir_never_collide_even_with_equal_length_regions() {
     );
 }
 
+/// Dialect-stability (spec line 1267): a portable migration's `of_ir` is
+/// IDENTICAL across the PG and SQLite renders, because `of_ir` is dialect-neutral
+/// by construction (no dialect parameter; it hashes the neutral op list + the
+/// derived-then-overridden flags). This pins the single-artifact / single-checksum
+/// invariant so a future `IrAuthor` that leaks per-dialect *lowered* flags into
+/// the hash (the latent risk the `of_ir` doc forbids) fails the gate.
+#[test]
+fn checksum_of_ir_is_identical_across_dialect_renders() {
+    // A `createIndex { concurrently: true }` is the canonical case where the
+    // per-dialect LOWERING diverges: PG keeps `transactional:false` + the
+    // CONCURRENTLY; SQLite forces `transactional:true` and drops CONCURRENTLY
+    // (spec line 257). The IR-level flags fed to `of_ir` are the DIALECT-NEUTRAL
+    // derived+overridden flags — the SAME struct for both renders.
+    let neutral_flags = MigrationFlags {
+        transactional: false, // the neutral derived value (concurrent index)
+        ..MigrationFlags::default()
+    };
+    let owner = "app_portable";
+    let ops = vec![Op::CreateIndex {
+        table: "users".into(),
+        columns: vec!["email".into()],
+        name: None,
+        unique: Some(true),
+        using: None,
+        r#where: None,
+        concurrently: Some(true),
+    }];
+
+    // What a CORRECT IrAuthor does: compute the neutral flags ONCE and feed the
+    // SAME neutral flags to of_ir regardless of which dialect it is lowering for.
+    let pg_render = Checksum::of_ir(&CanonicalOpList(&ops), &neutral_flags, owner, &[], &[], &[]);
+    let sqlite_render =
+        Checksum::of_ir(&CanonicalOpList(&ops), &neutral_flags, owner, &[], &[], &[]);
+    assert_eq!(
+        pg_render, sqlite_render,
+        "of_ir must be identical across dialect renders for one portable migration"
+    );
+
+    // Guard the doc contract: were a buggy IrAuthor to leak the per-dialect
+    // LOWERED flags (SQLite forcing transactional:true) into the hash, the two
+    // renders WOULD diverge — demonstrating exactly the invariant break the
+    // of_ir doc forbids, and proving this test is load-bearing (not vacuous).
+    let sqlite_lowered_flags = MigrationFlags { transactional: true, ..neutral_flags.clone() };
+    let sqlite_render_buggy =
+        Checksum::of_ir(&CanonicalOpList(&ops), &sqlite_lowered_flags, owner, &[], &[], &[]);
+    assert_ne!(
+        pg_render, sqlite_render_buggy,
+        "leaking per-dialect lowered flags into of_ir WOULD break the single-checksum \
+         invariant — IrAuthor must pass the neutral flags (see Checksum::of_ir doc)"
+    );
+}
+
 /// JCS key-order independence: building the same logical op two ways (here via
 /// a CreateTable with columns in a fixed order) is stable, and the canonical
 /// encoding does not depend on Rust struct field declaration order — it sorts

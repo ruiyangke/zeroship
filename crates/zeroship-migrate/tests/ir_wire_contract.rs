@@ -22,6 +22,10 @@
 //!   encodings of the same bytes hash identically.
 //! - **un-flattened constraint** — `IrConstraint.kind` is a nested object, not
 //!   a flattened sibling (so `deny_unknown_fields` is sound).
+//! - **property A (no raw SQL)** — `createIndex.where` + `alterColumnType.using`
+//!   are closed `Expr` AST nodes (not raw SQL strings), and `createIndex.using`
+//!   / `IrIndex.using` are the closed `IndexMethod` enum — a raw-SQL string or an
+//!   out-of-set method is rejected at load (code-critic HIGH + MED).
 
 use zeroship_migrate::ir::{IrScalar, MigrationIr, Op};
 use zeroship_migrate::EXPR_INVALID_NUMERIC;
@@ -241,6 +245,133 @@ fn expr_node_with_unknown_field_is_rejected() {
     assert!(
         err.to_string().contains("evil") || err.to_string().contains("unknown field"),
         "an unknown field on an expr node must be rejected, got: {err}"
+    );
+}
+
+// ----------------------------------------------------------------------------
+// property A (no raw SQL) — createIndex.where / .using are NOT raw strings
+// (code-critic HIGH + MED: the partial-index predicate must be a closed Expr
+// AST, and the index method must be a closed enum — never a raw SQL string).
+// ----------------------------------------------------------------------------
+
+#[test]
+fn create_index_where_is_a_closed_expr_not_raw_sql() {
+    use zeroship_migrate::expr::{BinaryOp, Expr};
+    // A `createIndex` with a partial-index predicate authored as the closed AST
+    // the JS `createIndex({where:(c)=>Expr})` emits — it MUST round-trip into a
+    // typed `Expr`, exactly like IrIndex.where inside createTable.
+    let json = r#"{"op":"createIndex","table":"t","columns":["a"],
+        "where":{"node":"binOp","op":"gt","lhs":{"node":"colRef","name":"a"},
+                 "rhs":{"node":"literal","value":0}}}"#;
+    let op: Op = serde_json::from_str(json).unwrap();
+    match op {
+        Op::CreateIndex { r#where, .. } => {
+            assert_eq!(
+                r#where,
+                Some(Expr::BinOp {
+                    op: BinaryOp::Gt,
+                    lhs: Box::new(Expr::col("a")),
+                    rhs: Box::new(Expr::lit(IrScalar::Int(0))),
+                }),
+                "createIndex.where must deserialize into a closed Expr AST node"
+            );
+        }
+        _ => panic!("expected CreateIndex"),
+    }
+}
+
+#[test]
+fn create_index_where_rejects_raw_sql_string() {
+    // A raw SQL string in the partial-index predicate slot is the exact
+    // injection surface property A exists to eliminate — it must NOT deserialize
+    // (a String is not a valid Expr node object).
+    let json = r#"{"op":"createIndex","table":"t","columns":["a"],
+        "where":"a > 0 OR 1=1"}"#;
+    let err = serde_json::from_str::<Op>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("expected")
+            || err.to_string().contains("invalid type")
+            || err.to_string().contains("node"),
+        "a raw-SQL string where must be rejected (not a closed Expr), got: {err}"
+    );
+}
+
+#[test]
+fn create_index_using_is_a_closed_method_enum() {
+    // The index method is a closed union ("btree"|"gin"|"gist"|"ivfflat"|"hnsw"
+    // |"fts5", design line 648) — an arbitrary/injection-shaped string must NOT
+    // deserialize, and a valid member round-trips.
+    use zeroship_migrate::ir::IndexMethod;
+    let ok = r#"{"op":"createIndex","table":"t","columns":["a"],"using":"gin"}"#;
+    let op: Op = serde_json::from_str(ok).unwrap();
+    match op {
+        Op::CreateIndex { using, .. } => assert_eq!(using, Some(IndexMethod::Gin)),
+        _ => panic!("expected CreateIndex"),
+    }
+    let bad = r#"{"op":"createIndex","table":"t","columns":["a"],
+        "using":"btree; DROP TABLE users"}"#;
+    let err = serde_json::from_str::<Op>(bad).unwrap_err();
+    assert!(
+        err.to_string().contains("unknown variant") || err.to_string().contains("btree"),
+        "an out-of-set index method must be rejected at load, got: {err}"
+    );
+}
+
+#[test]
+fn create_table_index_using_is_a_closed_method_enum() {
+    // The same closed-enum guard applies to IrIndex.using inside createTable.
+    use zeroship_migrate::ir::IndexMethod;
+    let ok = r#"{"op":"createTable","name":"t","columns":[
+        {"name":"a","type":"int"}],
+        "indexes":[{"columns":["a"],"using":"hnsw"}]}"#;
+    let op: Op = serde_json::from_str(ok).unwrap();
+    match op {
+        Op::CreateTable { indexes, .. } => {
+            assert_eq!(indexes[0].using, Some(IndexMethod::Hnsw));
+        }
+        _ => panic!("expected CreateTable"),
+    }
+    let bad = r#"{"op":"createTable","name":"t","columns":[
+        {"name":"a","type":"int"}],
+        "indexes":[{"columns":["a"],"using":"evilmethod"}]}"#;
+    let err = serde_json::from_str::<Op>(bad).unwrap_err();
+    assert!(
+        err.to_string().contains("unknown variant"),
+        "an out-of-set IrIndex.using must be rejected at load, got: {err}"
+    );
+}
+
+#[test]
+fn alter_column_type_using_is_a_closed_expr_not_raw_sql() {
+    use zeroship_migrate::expr::{CastTarget, Expr};
+    // The USING cast expression must be the closed AST (a Cast node here), never
+    // raw SQL — property A is binding everywhere a transform/predicate appears.
+    let json = r#"{"op":"alterColumnType","table":"t","column":"a","type":"int",
+        "using":{"node":"cast","operand":{"node":"colRef","name":"a"},
+                 "target":"integer"}}"#;
+    let op: Op = serde_json::from_str(json).unwrap();
+    match op {
+        Op::AlterColumnType { using, .. } => {
+            assert_eq!(
+                using,
+                Some(Expr::Cast {
+                    operand: Box::new(Expr::col("a")),
+                    target: CastTarget::Integer,
+                }),
+                "alterColumnType.using must deserialize into a closed Expr AST node"
+            );
+        }
+        _ => panic!("expected AlterColumnType"),
+    }
+    // A raw SQL cast string must NOT deserialize.
+    let bad = r#"{"op":"alterColumnType","table":"t","column":"a","type":"int",
+        "using":"a::int"}"#;
+    let err = serde_json::from_str::<Op>(bad).unwrap_err();
+    assert!(
+        err.to_string().contains("expected")
+            || err.to_string().contains("invalid type")
+            || err.to_string().contains("node"),
+        "a raw-SQL string using must be rejected (not a closed Expr), got: {err}"
     );
 }
 

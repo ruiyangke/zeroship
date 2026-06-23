@@ -213,6 +213,148 @@ pub fn validate_expr(
     ctx.walk(expr)
 }
 
+/// Walk an entire [`MigrationIr`](crate::ir::MigrationIr) and validate EVERY
+/// embedded expression-AST node against `target_dialect` — the §3.3.1.1 "the
+/// Rust validator is the SOLE authoritative gate" obligation made operative.
+///
+/// This is the walker that enumerates each [`Op`](crate::ir::Op) variant's
+/// expression positions and calls [`validate_expr`] per node with the enclosing
+/// op's index + single target table as scope:
+///
+/// - `createTable` — each `IrIndex.where` partial-index predicate + each
+///   `Check` constraint `expr` (scoped to the table's own declared columns, so
+///   rule (c) `ColRef` resolution runs against them).
+/// - `createIndex` — the `where` partial-index predicate (closed AST since the
+///   property-A fix).
+/// - `alterColumnType` — the `using` cast expression (closed AST since the
+///   property-A fix).
+/// - `addConstraint` — a `Check` constraint `expr`.
+/// - `update` — every `set` RHS + the optional `where`.
+/// - `delete` — the mandatory `where`.
+/// - `backfill` — every `set` RHS + the optional `filter`.
+///
+/// Ops with no expression slot (e.g. `dropTable`, `addColumn`, `insert`) walk to
+/// `Ok(())`. For the DML ops (`update`/`delete`/`backfill`) and `alterColumnType`
+/// the live-schema column set is generally not known at IR-load time, so the
+/// scope is [`TargetScope::structural_only`] — the structural checks (a),(b),(d)
+/// still run; the apply/render seam (a later wave) re-runs the walk with a
+/// resolved column set to enforce (c). A `createTable` is self-contained, so its
+/// embedded predicates ARE resolved against the table's own columns here.
+///
+/// Returns the FIRST [`AuthoringError`] encountered, or `Ok(())`.
+///
+/// `ts_locations`, when supplied, maps a 0-based op index to its `.ts` source
+/// location for the §8.8 payload; a missing entry yields `None`.
+///
+/// # Errors
+/// Returns the first [`AuthoringError`] any embedded expression produces.
+pub fn validate_ir(
+    ir: &crate::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        let ts = ts_locations.get(op_index).and_then(Option::as_deref);
+        validate_op(op, target_dialect, op_index, ts)?;
+    }
+    Ok(())
+}
+
+/// Validate every expression slot of a single [`Op`](crate::ir::Op) at
+/// `op_index`. The per-variant Expr enumeration the SOLE-gate property needs;
+/// see [`validate_ir`] for the slot map.
+///
+/// # Errors
+/// Returns the first [`AuthoringError`] any embedded expression produces.
+pub fn validate_op(
+    op: &crate::ir::Op,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+) -> Result<(), AuthoringError> {
+    use crate::ir::{IrConstraintKind, Op};
+
+    // A `Check` constraint's expr validates against the given scope.
+    let check_constraint =
+        |kind: &IrConstraintKind, scope: &TargetScope<'_>| -> Result<(), AuthoringError> {
+            if let IrConstraintKind::Check { expr } = kind {
+                validate_expr(expr, target_dialect, scope, op_index, ts_location)?;
+            }
+            Ok(())
+        };
+
+    match op {
+        Op::CreateTable { name, columns, constraints, indexes } => {
+            // A createTable is self-contained: resolve ColRefs against its own
+            // declared columns (rule (c) is enforceable here).
+            let cols: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
+            let scope = TargetScope::new(name, &cols);
+            for ix in indexes {
+                if let Some(pred) = &ix.r#where {
+                    validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
+                }
+            }
+            for c in constraints {
+                check_constraint(&c.kind, &scope)?;
+            }
+            Ok(())
+        }
+        Op::CreateIndex { table, r#where, .. } => {
+            // The partial-index predicate. The live column set is not known at
+            // load (the table pre-exists), so structural-only here.
+            if let Some(pred) = r#where {
+                let scope = TargetScope::structural_only(table);
+                validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
+            }
+            Ok(())
+        }
+        Op::AlterColumnType { table, using, .. } => {
+            if let Some(cast) = using {
+                let scope = TargetScope::structural_only(table);
+                validate_expr(cast, target_dialect, &scope, op_index, ts_location)?;
+            }
+            Ok(())
+        }
+        Op::AddConstraint { table, constraint } => {
+            let scope = TargetScope::structural_only(table);
+            check_constraint(&constraint.kind, &scope)
+        }
+        Op::Update { table, set, r#where, .. } => {
+            let scope = TargetScope::structural_only(table);
+            for rhs in set.values() {
+                validate_expr(rhs, target_dialect, &scope, op_index, ts_location)?;
+            }
+            if let Some(pred) = r#where {
+                validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
+            }
+            Ok(())
+        }
+        Op::Delete { table, r#where, .. } => {
+            let scope = TargetScope::structural_only(table);
+            validate_expr(r#where, target_dialect, &scope, op_index, ts_location)
+        }
+        Op::Backfill { table, set, filter, .. } => {
+            let scope = TargetScope::structural_only(table);
+            for rhs in set.values() {
+                validate_expr(rhs, target_dialect, &scope, op_index, ts_location)?;
+            }
+            if let Some(pred) = filter {
+                validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
+            }
+            Ok(())
+        }
+        // Ops with no embedded expression slot.
+        Op::DropTable { .. }
+        | Op::AddColumn { .. }
+        | Op::DropColumn { .. }
+        | Op::DropIndex { .. }
+        | Op::AlterColumnNullability { .. }
+        | Op::RenameColumn { .. }
+        | Op::DropConstraint { .. }
+        | Op::Insert { .. } => Ok(()),
+    }
+}
+
 struct Ctx<'a> {
     target_dialect: Dialect,
     scope: &'a TargetScope<'a>,
@@ -589,6 +731,166 @@ mod tests {
         assert!(validate_expr(&Expr::col("anything"), Dialect::Sqlite, &sc, 0, None).is_ok());
         // …but an out-of-envelope splitPart STILL rejects (structural).
         let err = validate_expr(&split(", ", 1), Dialect::Sqlite, &sc, 0, None).unwrap_err();
+        assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
+    }
+
+    // ── validate_ir / validate_op — the SOLE-gate walker over a whole IR ────
+    //
+    // These pin the §3.3.1.1 obligation that the validator is actually INVOKED
+    // over every embedded Expr slot of every Op (the walker did not exist
+    // before the code-critic MED fix).
+
+    use crate::ir::{
+        ColType, IrColumn, IrConstraint, IrConstraintKind, IrIndex, MigrationIr, Op,
+    };
+    use std::collections::BTreeMap;
+
+    fn ir_with(ops: Vec<Op>) -> MigrationIr {
+        MigrationIr {
+            ir_version: 1,
+            name: "n".into(),
+            owner_app: String::new(),
+            ops,
+            flags: Default::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+        }
+    }
+
+    #[test]
+    fn validate_ir_passes_a_clean_migration() {
+        let ir = ir_with(vec![
+            Op::CreateTable {
+                name: "users".into(),
+                columns: vec![
+                    IrColumn { name: "first".into(), ty: ColType::Text, nullable: None, default: None, unique: None },
+                    IrColumn { name: "total".into(), ty: ColType::Int, nullable: None, default: None, unique: None },
+                ],
+                constraints: vec![IrConstraint {
+                    name: None,
+                    kind: IrConstraintKind::Check {
+                        // references `total`, which IS a column of users → ok
+                        expr: Expr::UnaryOp {
+                            op: UnaryOp::IsNotNull,
+                            operand: Box::new(Expr::col("total")),
+                        },
+                    },
+                }],
+                indexes: vec![IrIndex {
+                    name: None,
+                    columns: vec!["first".into()],
+                    unique: None,
+                    using: None,
+                    r#where: Some(Expr::UnaryOp {
+                        op: UnaryOp::IsNotNull,
+                        operand: Box::new(Expr::col("first")),
+                    }),
+                }],
+            },
+            Op::Delete {
+                table: "users".into(),
+                r#where: Expr::lit(IrScalar::Bool(true)),
+                limit: None,
+            },
+        ]);
+        assert!(validate_ir(&ir, Dialect::Postgres, &[]).is_ok());
+        assert!(validate_ir(&ir, Dialect::Sqlite, &[]).is_ok());
+    }
+
+    #[test]
+    fn validate_ir_rejects_check_colref_to_nonexistent_column() {
+        // A createTable whose Check references a column NOT on the table — rule
+        // (c). The walker resolves the createTable's own columns, so this fails.
+        let ir = ir_with(vec![Op::CreateTable {
+            name: "users".into(),
+            columns: vec![IrColumn {
+                name: "first".into(),
+                ty: ColType::Text,
+                nullable: None,
+                default: None,
+                unique: None,
+            }],
+            constraints: vec![IrConstraint {
+                name: None,
+                kind: IrConstraintKind::Check {
+                    expr: Expr::UnaryOp {
+                        op: UnaryOp::IsNotNull,
+                        operand: Box::new(Expr::col("ghost")),
+                    },
+                },
+            }],
+            indexes: vec![],
+        }]);
+        let err = validate_ir(&ir, Dialect::Postgres, &[]).unwrap_err();
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        assert_eq!(err.op_index, 0);
+    }
+
+    #[test]
+    fn validate_ir_rejects_out_of_envelope_split_part_in_update_set() {
+        // The Update is the SECOND op — the walker must stamp op_index = 1, and
+        // it must reach the `set` RHS (the splitPart) to reject it.
+        let mut set = BTreeMap::new();
+        set.insert("name".to_string(), split(", ", 1)); // multi-char delim
+        let ir = ir_with(vec![
+            Op::DropColumn { table: "t".into(), column: "x".into(), if_exists: None },
+            Op::Update { table: "users".into(), set, r#where: None, batch: None },
+        ]);
+        let ts = vec![None, Some("m.ts:9".to_string())];
+        let err = validate_ir(&ir, Dialect::Sqlite, &ts).unwrap_err();
+        assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
+        assert_eq!(err.op_index, 1, "the walker must stamp the enclosing op's index");
+        assert_eq!(err.ts_location.as_deref(), Some("m.ts:9"));
+    }
+
+    #[test]
+    fn validate_ir_walks_create_index_where_predicate() {
+        // The property-A fix made createIndex.where a closed Expr — the walker
+        // must now reach it. An out-of-envelope splitPart there must reject.
+        let ir = ir_with(vec![Op::CreateIndex {
+            table: "users".into(),
+            columns: vec!["a".into()],
+            name: None,
+            unique: None,
+            using: None,
+            r#where: Some(split(", ", 1)),
+            concurrently: None,
+        }]);
+        let err = validate_ir(&ir, Dialect::Sqlite, &[]).unwrap_err();
+        assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
+        assert_eq!(err.op_index, 0);
+    }
+
+    #[test]
+    fn validate_ir_walks_alter_column_type_using_cast() {
+        // The property-A fix made alterColumnType.using a closed Expr — the
+        // walker must reach it. A splitPart cast operand with a bad delim rejects.
+        let ir = ir_with(vec![Op::AlterColumnType {
+            table: "users".into(),
+            column: "a".into(),
+            ty: ColType::Int,
+            using: Some(split(", ", 1)),
+        }]);
+        let err = validate_ir(&ir, Dialect::Sqlite, &[]).unwrap_err();
+        assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
+        assert_eq!(err.op_index, 0);
+    }
+
+    #[test]
+    fn validate_ir_walks_backfill_filter_and_set() {
+        let mut set = BTreeMap::new();
+        set.insert("name".to_string(), Expr::col("first")); // fine structurally
+        let ir = ir_with(vec![Op::Backfill {
+            table: "users".into(),
+            cursor_column: "id".into(),
+            batch_size: serde_json::from_str("100").unwrap(),
+            set,
+            filter: Some(split(", ", 1)), // out-of-envelope → reject
+            name: "bf".into(),
+        }]);
+        let err = validate_ir(&ir, Dialect::Sqlite, &[]).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
     }
 }

@@ -259,17 +259,25 @@
               ]
             },
             "using": {
-              "description": "Index method.",
-              "type": [
-                "string",
-                "null"
+              "description": "Index method (a CLOSED [`IndexMethod`] — never a raw SQL string).",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/IndexMethod"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "where": {
-              "description": "Partial-index predicate.",
-              "type": [
-                "string",
-                "null"
+              "description": "Partial-index predicate (a closed-AST node, never raw SQL — property A).",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "concurrently": {
@@ -348,10 +356,14 @@
               "$ref": "#/$defs/ColType"
             },
             "using": {
-              "description": "`USING` cast expression.",
-              "type": [
-                "string",
-                "null"
+              "description": "`USING` cast expression (a closed-AST node, never raw SQL — property A).",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "op": {
@@ -1522,10 +1534,14 @@
           ]
         },
         "using": {
-          "description": "Index method (`btree`/`gin`/…); dialect-validated by the validator.",
-          "type": [
-            "string",
-            "null"
+          "description": "Index method (a CLOSED [`IndexMethod`] — never a raw SQL string).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IndexMethod"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "where": {
@@ -1543,6 +1559,41 @@
       "additionalProperties": false,
       "required": [
         "columns"
+      ]
+    },
+    "IndexMethod": {
+      "description": "The CLOSED index-method lexicon (§3.3.1 `createIndex` `using` union, design\nline 648). A CLOSED enum — serde rejects any out-of-set token at DESERIALIZE,\nso a hand-crafted `.ir.json` cannot smuggle an arbitrary / injection-shaped\nmethod string into an unvalidated position that would reach the render seam.\n`gin`/`gist`/`ivfflat`/`hnsw` are Postgres-only logical hints; `fts5` maps to\nthe SQLite FTS5 virtual-table path (per-dialect lowering is Wave C's job).\nCamel/lower-cased on the wire (`\"btree\"`, `\"ivfflat\"`, …).",
+      "oneOf": [
+        {
+          "description": "B-tree (the default).",
+          "type": "string",
+          "const": "btree"
+        },
+        {
+          "description": "PG GIN.",
+          "type": "string",
+          "const": "gin"
+        },
+        {
+          "description": "PG GiST.",
+          "type": "string",
+          "const": "gist"
+        },
+        {
+          "description": "pgvector IVFFlat ANN.",
+          "type": "string",
+          "const": "ivfflat"
+        },
+        {
+          "description": "pgvector HNSW ANN.",
+          "type": "string",
+          "const": "hnsw"
+        },
+        {
+          "description": "Full-text search (PG GIN-over-tsvector / SQLite FTS5 virtual table).",
+          "type": "string",
+          "const": "fts5"
+        }
       ]
     },
     "IrBatch": {
