@@ -54,6 +54,13 @@
         "$ref": "#/$defs/PreconditionCheck"
       },
       "default": []
+    },
+    "checksum": {
+      "description": "An ADVISORY integrity hint (§2.4 point 2): the hex `Checksum::of_ir` the\nbuilder computed over the hint-domain (`ops` + `flags` + `depends_on` +\n`supersedes` + `preconditions` — NEVER `owner_app`, which is server-stamped\nand so unpredictable to the builder). The engine RECOMPUTES and is\nauthoritative; when this hint is present the loader compares its\nrecomputed hint-domain checksum to it (a mismatch is genuine drift). The\nhint is **EXCLUDED from [`Checksum::of_ir`]** (exactly like `owner_app` is\nexcluded from the hint domain) — folding the artifact's own checksum into\nthe artifact's checksum would be circular. `deny_unknown_fields` would\notherwise reject a `.ir.json` carrying this §2.4-permitted hint at\ndeserialize, so the field is modelled explicitly here (MED-2).",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "additionalProperties": false,
@@ -569,7 +576,7 @@
           ]
         },
         {
-          "description": "`DELETE FROM … WHERE …`.",
+          "description": "`DELETE FROM … WHERE …`.\n\nWIRE TAG: the JS DSL's `del()` op-function records this variant as\n`{\"op\":\"delete\"}` (the camelCased variant name), NOT `{\"op\":\"del\"}`. The\nbuilder method is named `del` to avoid the JS reserved word `delete`, but\nthe recorded discriminant is the full `\"delete\"` (pinned here + in the ADR\n`docs/decisions/2026-06-23-op-ir-serde-repr.md`).",
           "type": "object",
           "properties": {
             "table": {

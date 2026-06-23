@@ -472,9 +472,12 @@ impl Ctx<'_> {
                 Ok(())
             }
             // now()/gen_random_uuid() are NULLARY apply-time scalars: no args.
+            // A non-nullary call is genuinely MALFORMED — `now()`/`gen_random_uuid()`
+            // are nullary on BOTH dialects — so it is an unconditional
+            // CODE_UNSUPPORTED, never a dialect-gated portability reject (MED-1).
             SynthFn::Now | SynthFn::GenRandomUuid => {
                 if !args.is_empty() {
-                    return Err(self.synth_shape_err(format!(
+                    return Err(self.malformed_synth_err(format!(
                         "c.fn.{} takes no arguments; got {}",
                         match f {
                             SynthFn::Now => "now",
@@ -486,10 +489,12 @@ impl Ctx<'_> {
                 }
                 Ok(())
             }
-            // concatWs(delim, value, …): a delimiter + at least one value.
+            // concatWs(delim, value, …): a delimiter + at least one value. Fewer
+            // than two args is a genuinely-malformed join on EITHER dialect →
+            // unconditional CODE_UNSUPPORTED (MED-1).
             SynthFn::ConcatWs => {
                 if args.len() < 2 {
-                    return Err(self.synth_shape_err(format!(
+                    return Err(self.malformed_synth_err(format!(
                         "c.fn.concatWs takes a delimiter plus at least one value \
                          (>=2 args); got {}",
                         args.len()
@@ -503,27 +508,36 @@ impl Ctx<'_> {
         }
     }
 
-    /// A `FnSynth` arity/shape rejection. Like `split_part_err`, the synth
-    /// helpers are PG-renderable but the unsupported shape is non-portable, so
-    /// the rejection is [`CODE_EXPR_NOT_PORTABLE`] on the SQLite leg.
-    fn synth_shape_err(&self, reason: String) -> AuthoringError {
+    /// A genuinely-MALFORMED synth-helper call — a shape broken on BOTH dialects
+    /// (`now(arg)`, `genRandomUuid(args)`, `concatWs` with <2 args, `splitPart`
+    /// with the wrong arity). This is NOT a portability boundary: there is no
+    /// dialect on which it renders, so it is an unconditional
+    /// [`CODE_UNSUPPORTED`] (`kind:"expr"`), independent of `target_dialect`
+    /// (MED-1). Distinct from [`Self::split_part_envelope_err`], which is the
+    /// PG-renderable-but-SQLite-unsupported portability reject.
+    fn malformed_synth_err(&self, reason: String) -> AuthoringError {
         self.err(
-            CODE_EXPR_NOT_PORTABLE,
-            None,
-            Dialect::Sqlite,
+            CODE_UNSUPPORTED,
+            Some(UnsupportedKind::Expr),
+            // The shape is broken regardless of target; report the current target
+            // so the payload's `dialect` field is faithful to the deploy.
+            self.target_dialect,
             reason,
             Some(
                 "call the synth helper with its pinned argument shape \
                  (now/genRandomUuid take no args; concatWs takes a delimiter + \
-                 >=1 value)"
+                 >=1 value; splitPart takes exactly (column, delim, n))"
                     .to_string(),
             ),
         )
     }
 
-    fn split_part_err(&self, reason: String) -> AuthoringError {
-        // splitPart is PG-renderable but the out-of-envelope shape only fails on
-        // the SQLite leg (§9) — the rejection is dialect=sqlite.
+    /// A splitPart **portability-boundary** reject: the call is well-formed and
+    /// PG-renderable (`split_part` accepts it), but OUT of the pinned SQLite
+    /// envelope (§9). It is therefore a hard error ONLY on the SQLite leg and
+    /// loads fine on a Postgres target — the §2.4.1 loads-on-PG/rejected-on-SQLite
+    /// verdict. The caller must only reach this when `target_dialect == Sqlite`.
+    fn split_part_envelope_err(&self, reason: String) -> AuthoringError {
         self.err(
             CODE_EXPR_NOT_PORTABLE,
             None,
@@ -539,64 +553,74 @@ impl Ctx<'_> {
     }
 
     fn check_split_part(&self, args: &[Expr]) -> Result<(), AuthoringError> {
-        // Shape: splitPart(col, delim, n) — exactly three args.
+        // Shape: splitPart(col, delim, n) — exactly three args. The WRONG ARITY is
+        // broken on BOTH dialects (`split_part` is ternary on PG too), so it is an
+        // unconditional CODE_UNSUPPORTED, NOT a dialect-gated envelope reject
+        // (MED-1). This is checked first, regardless of target_dialect.
         if args.len() != 3 {
-            return Err(self.split_part_err(format!(
+            return Err(self.malformed_synth_err(format!(
                 "c.fn.splitPart takes exactly (column, delim, n); got {} args",
                 args.len()
             )));
         }
-        // delim — a single-ASCII-character string Literal.
+        // The remaining checks are the PORTABILITY ENVELOPE: a multi-char/non-ASCII
+        // delim, n outside 1..=8, or a non-literal delim/n is renderable on
+        // Postgres but out of the pinned SQLite envelope (§9). On a POSTGRES
+        // target the node loads fine; only a SQLITE target rejects it (§2.4.1).
+        if self.target_dialect == Dialect::Postgres {
+            return Ok(());
+        }
+        // delim — a single-ASCII-character string Literal (SQLite envelope).
         match &args[1] {
             Expr::Literal { value } => match value {
                 crate::ir::IrScalar::Str(s) => {
                     let bytes = s.as_bytes();
                     if bytes.len() != 1 || bytes[0] >= 0x80 {
-                        return Err(self.split_part_err(format!(
+                        return Err(self.split_part_envelope_err(format!(
                             "c.fn.splitPart delimiter must be a single ASCII character \
                              (one byte, code point < 0x80); got {s:?}"
                         )));
                     }
                 }
                 other => {
-                    return Err(self.split_part_err(format!(
+                    return Err(self.split_part_envelope_err(format!(
                         "c.fn.splitPart delimiter must be a single-ASCII string literal; \
                          got {other:?}"
                     )));
                 }
             },
             other => {
-                return Err(self.split_part_err(format!(
+                return Err(self.split_part_envelope_err(format!(
                     "c.fn.splitPart delimiter must be a literal (a runtime/computed \
                      delimiter is not portable); got {other:?}"
                 )));
             }
         }
-        // n — a positive integer Literal in 1..=8.
+        // n — a positive integer Literal in 1..=8 (SQLite envelope).
         match &args[2] {
             Expr::Literal { value } => match value {
                 crate::ir::IrScalar::Int(n) => {
                     if *n < 1 {
-                        return Err(self.split_part_err(format!(
+                        return Err(self.split_part_envelope_err(format!(
                             "c.fn.splitPart part index n must be a positive integer; got {n}"
                         )));
                     }
                     if *n > SPLIT_PART_MAX_N {
-                        return Err(self.split_part_err(format!(
+                        return Err(self.split_part_envelope_err(format!(
                             "c.fn.splitPart part index n must be <= {SPLIT_PART_MAX_N} \
                              (the proven inline-unroll bound); got {n}"
                         )));
                     }
                 }
                 other => {
-                    return Err(self.split_part_err(format!(
+                    return Err(self.split_part_envelope_err(format!(
                         "c.fn.splitPart part index n must be a positive integer literal; \
                          got {other:?}"
                     )));
                 }
             },
             other => {
-                return Err(self.split_part_err(format!(
+                return Err(self.split_part_envelope_err(format!(
                     "c.fn.splitPart part index n must be a literal positive integer \
                      (a runtime n is not portable); got {other:?}"
                 )));
@@ -707,6 +731,62 @@ mod tests {
         assert_eq!(obj["code"], CODE_EXPR_NOT_PORTABLE);
     }
 
+    // ── MED-1: the splitPart envelope verdict is DIALECT-GATED ──────────────
+    // An OUT-OF-ENVELOPE-but-PG-renderable c.fn.splitPart (multi-char delim,
+    // n>8, …) is renderable on Postgres (`split_part` accepts it) and only a
+    // hard reject on the SQLite leg (§2.4.1/§9). The SAME node must therefore
+    // validate OK on a Postgres target and be EXPR_NOT_PORTABLE on a SQLite
+    // target. RED before check_split_part branches on target_dialect.
+
+    #[test]
+    fn out_of_envelope_split_part_loads_on_pg_rejected_on_sqlite() {
+        let c = cols();
+        let sc = scope("users", &c);
+        // The §2.4.1 loads-on-PG / rejected-on-SQLite fixture: multi-char delim.
+        let node = split(", ", 1);
+        assert!(
+            validate_expr(&node, Dialect::Postgres, &sc, 0, None).is_ok(),
+            "an out-of-envelope-but-PG-renderable splitPart must VALIDATE on a Postgres target"
+        );
+        let err = validate_expr(&node, Dialect::Sqlite, &sc, 0, None).unwrap_err();
+        assert_eq!(
+            err.code, CODE_EXPR_NOT_PORTABLE,
+            "the same node must be EXPR_NOT_PORTABLE on a SQLite target"
+        );
+        assert_eq!(err.dialect, Dialect::Sqlite);
+
+        // Likewise n>8 and a non-ASCII delim: PG-renderable, SQLite-rejected.
+        for node in [split(" ", 9), split("·", 1)] {
+            assert!(
+                validate_expr(&node, Dialect::Postgres, &sc, 0, None).is_ok(),
+                "out-of-envelope splitPart loads on PG"
+            );
+            assert_eq!(
+                validate_expr(&node, Dialect::Sqlite, &sc, 0, None).unwrap_err().code,
+                CODE_EXPR_NOT_PORTABLE
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_split_part_arity_is_unconditional_unsupported() {
+        // A genuinely-MALFORMED splitPart — wrong arity (not exactly 3 args) — is
+        // broken on BOTH dialects (`split_part` is ternary on PG too), so it is
+        // an unconditional CODE_UNSUPPORTED, NOT a dialect-gated portability
+        // reject. Rejected on PG AND SQLite.
+        let c = cols();
+        let sc = scope("users", &c);
+        let two_arg = Expr::FnSynth {
+            r#fn: SynthFn::SplitPart,
+            args: vec![Expr::col("name"), Expr::lit(IrScalar::Str(" ".into()))],
+        };
+        for d in [Dialect::Postgres, Dialect::Sqlite] {
+            let err = validate_expr(&two_arg, d, &sc, 0, None).unwrap_err();
+            assert_eq!(err.code, CODE_UNSUPPORTED, "wrong arity is broken on both dialects ({d:?})");
+            assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        }
+    }
+
     #[test]
     fn split_part_non_ascii_delim_rejected() {
         let c = cols();
@@ -738,20 +818,31 @@ mod tests {
 
     #[test]
     fn now_with_args_is_rejected() {
+        // MED-1: now(arg) is a genuinely-MALFORMED synth — `now()` is nullary on
+        // BOTH dialects — so it is an unconditional CODE_UNSUPPORTED, on PG AND
+        // SQLite (not a dialect-gated portability reject).
         let sc = TargetScope::structural_only("t");
         let e = synth(SynthFn::Now, vec![Expr::lit(IrScalar::Int(1))]);
-        let err = validate_expr(&e, Dialect::Postgres, &sc, 0, None).unwrap_err();
-        assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
-        // zero-arg form passes.
+        for d in [Dialect::Postgres, Dialect::Sqlite] {
+            let err = validate_expr(&e, d, &sc, 0, None).unwrap_err();
+            assert_eq!(err.code, CODE_UNSUPPORTED, "now(arg) is broken on both dialects ({d:?})");
+            assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        }
+        // zero-arg form passes on both.
         assert!(validate_expr(&synth(SynthFn::Now, vec![]), Dialect::Postgres, &sc, 0, None).is_ok());
+        assert!(validate_expr(&synth(SynthFn::Now, vec![]), Dialect::Sqlite, &sc, 0, None).is_ok());
     }
 
     #[test]
     fn gen_random_uuid_with_args_is_rejected() {
+        // MED-1: genRandomUuid(args) is genuinely malformed → unconditional
+        // CODE_UNSUPPORTED on both dialects.
         let sc = TargetScope::structural_only("t");
         let e = synth(SynthFn::GenRandomUuid, vec![Expr::col("x"), Expr::col("y")]);
-        let err = validate_expr(&e, Dialect::Postgres, &sc, 0, None).unwrap_err();
-        assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
+        for d in [Dialect::Postgres, Dialect::Sqlite] {
+            let err = validate_expr(&e, d, &sc, 0, None).unwrap_err();
+            assert_eq!(err.code, CODE_UNSUPPORTED);
+        }
         assert!(
             validate_expr(&synth(SynthFn::GenRandomUuid, vec![]), Dialect::Postgres, &sc, 0, None)
                 .is_ok()
@@ -760,13 +851,17 @@ mod tests {
 
     #[test]
     fn concat_ws_arity_is_enforced() {
+        // MED-1: concatWs with <2 args is genuinely malformed (no valid join on
+        // EITHER dialect) → unconditional CODE_UNSUPPORTED on PG and SQLite.
         let c = cols();
         let sc = scope("users", &c);
         // 0 args and 1 arg (delimiter only, no values) are out of shape.
         for bad in [vec![], vec![Expr::lit(IrScalar::Str(",".into()))]] {
-            let err =
-                validate_expr(&synth(SynthFn::ConcatWs, bad), Dialect::Sqlite, &sc, 0, None).unwrap_err();
-            assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE, "concatWs needs delim + >=1 value");
+            for d in [Dialect::Postgres, Dialect::Sqlite] {
+                let err = validate_expr(&synth(SynthFn::ConcatWs, bad.clone()), d, &sc, 0, None)
+                    .unwrap_err();
+                assert_eq!(err.code, CODE_UNSUPPORTED, "concatWs needs delim + >=1 value ({d:?})");
+            }
         }
         // delim + 1 value is the minimum valid shape; the value still recurses.
         let ok = synth(
@@ -874,6 +969,7 @@ mod tests {
             depends_on: vec![],
             supersedes: vec![],
             preconditions: vec![],
+            checksum: None,
         }
     }
 
