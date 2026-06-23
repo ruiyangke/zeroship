@@ -76,6 +76,7 @@ pub mod expr;
 pub mod fault;
 pub mod guard;
 pub mod ir;
+pub mod ir_author;
 pub mod ir_load;
 pub mod journal;
 pub mod loader;
@@ -175,14 +176,15 @@ pub use ir::{
 };
 // The fail-closed `.ir.json` load gate (§5.2/§5.3/§8.6): deserialize →
 // `ir_version` → `validate_ir` → server-stamped ownership → advisory checksum-hint
-// compare. This is the gate `IrAuthor::lower` WILL call once the loader's
-// `.ir.json` branch lands (task #80): it is the precondition the lowering compiler
-// runs behind, not yet wired onto a deploy path. Today it has no production caller
-// (the loader change is comment-only) — it is exercised by its own unit tests; the
-// wiring is the deferred task #80.
+// compare. The loader's IR branch ([`ir_author::IrAuthor::load_and_lower`]) runs
+// this gate and then lowers the validated, owned IR to migrations (§7.2).
 pub use ir_load::{
     enforce_ir_ownership, load_ir_document, recompute_hint_domain_checksum, IrLoadError,
 };
+// The IR-path DDL Lower phase (§6/§6.4/§6.5): compiles a validated, ownership-
+// checked `MigrationIr` to migrations, reusing the SHARED snapshot-builder +
+// declarative render seam so its SQL is byte-identical to the differ's path.
+pub use ir_author::{IrAuthor, IrLowerError, LoadAndLowerError};
 // The closed expression AST (§3.3.1) the IR's transform/predicate positions
 // carry. Constructed in JS, serialized as data, NEVER parsed from text.
 pub use expr::{BinaryOp, CaseBranch, CastTarget, Expr, ScalarFn, SynthFn, UnaryOp};

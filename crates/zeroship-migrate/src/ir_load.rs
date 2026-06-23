@@ -122,8 +122,16 @@ const UNKNOWN_OWNER: &str = "<unregistered>";
 /// admits operates on exactly one table (the closed `Op` enum carries a `name`
 /// for `createTable`, a `table` for every alter/DML op, and `DropIndex` carries
 /// an optional owning-table hint). A `DropIndex` with no `table` hint has no
-/// ownership-checkable target and returns `None` (it names only an index; the
-/// index's table ownership was enforced when the index was created).
+/// ownership-checkable target and returns `None`.
+///
+/// **A bare-name `DropIndex` (`table: None`) is REJECTED UPSTREAM fail-closed**
+/// by [`crate::validate::validate_op`] (§8.6: a name-only index drop is not
+/// ownership-checkable, so it would let a migration drop another app's index by
+/// name). So by the time this function runs, every `DropIndex` reaching the
+/// ownership pass carries a `table` hint and IS ownership-checked. The `None` arm
+/// below is retained as defense-in-depth — if a future caller invokes the
+/// ownership pass without the validator, a bare-name `DropIndex` still finds no
+/// checkable target rather than silently passing as an owned op.
 #[must_use]
 fn op_target_table(op: &Op) -> Option<&str> {
     match op {
@@ -457,6 +465,64 @@ mod tests {
                 assert_eq!(owner, UNKNOWN_OWNER, "unknown owner must fail closed");
             }
             other => panic!("expected NotTableOwner (unknown-owner), got: {other}"),
+        }
+    }
+
+    #[test]
+    fn load_refuses_bare_name_drop_index_fail_closed() {
+        // §8.6 fail-closed (HIGH): a bare-name DropIndex (`table: None`) has no
+        // ownership-checkable target, so the ownership pass `continue`d over it —
+        // letting a hostile `.ir.json` `{op:"dropIndex", name:"<other_app_index>"}`
+        // (no table hint) DROP another app's index cross-tenant. The fix refuses a
+        // bare-name DropIndex at validate time (no name→owner registry resolver
+        // exists), so the bypass is closed. An intruder targeting another app's
+        // index by NAME is now REFUSED, not silently applied.
+        let ops = r#"[{"op":"dropIndex","name":"victim_secret_idx"}]"#;
+        let bytes = ir_json(ops, "");
+        // The registry knows the victim app owns tables; the intruder owns nothing.
+        let reg = registry(&[("victim_secrets", "app_victim")]);
+        let err = load_ir_document(&bytes, "app_intruder", Dialect::Postgres, &reg).unwrap_err();
+        match err {
+            IrLoadError::Validate(ae) => {
+                assert_eq!(ae.code, crate::validate::CODE_UNSUPPORTED);
+                assert_eq!(
+                    ae.kind,
+                    Some(crate::validate::UnsupportedKind::Op),
+                    "a bare-name DropIndex is an UNSUPPORTED op (kind:op), fail-closed"
+                );
+                assert_eq!(ae.op_index, 0);
+            }
+            other => panic!("expected a fail-closed Validate(UNSUPPORTED op), got: {other}"),
+        }
+    }
+
+    #[test]
+    fn load_allows_table_hinted_drop_index_owned_by_deployer() {
+        // The remedy: a DropIndex carrying its owning-table hint IS ownership-
+        // checkable (the table's owner resolves through the registry), so a
+        // table-hinted drop on a table the deployer owns is allowed — the fix
+        // refuses ONLY the un-checkable bare-name form.
+        let ops = r#"[{"op":"dropIndex","name":"mine_idx","table":"mine"}]"#;
+        let bytes = ir_json(ops, "");
+        let reg = registry(&[("mine", "app_a")]);
+        load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg)
+            .expect("a table-hinted DropIndex on an owned table is allowed");
+    }
+
+    #[test]
+    fn load_refuses_table_hinted_drop_index_on_another_apps_table() {
+        // And a table-hinted DropIndex against ANOTHER app's table is refused by the
+        // ownership pass (the table hint resolves to a foreign owner).
+        let ops = r#"[{"op":"dropIndex","name":"theirs_idx","table":"theirs"}]"#;
+        let bytes = ir_json(ops, "");
+        let reg = registry(&[("theirs", "app_owner")]);
+        let err = load_ir_document(&bytes, "app_intruder", Dialect::Postgres, &reg).unwrap_err();
+        match err {
+            IrLoadError::NotTableOwner { table, owner, .. } => {
+                assert_eq!(table, "theirs");
+                assert_eq!(owner, "app_owner");
+            }
+            other => panic!("expected NotTableOwner, got: {other}"),
         }
     }
 
