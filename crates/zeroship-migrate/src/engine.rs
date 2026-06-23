@@ -622,6 +622,26 @@ impl MigrationEngine {
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
+        // **Bootstrap the journal up front (§2.0.1).** The journal is the
+        // net-applied ledger every sub-step reads (idempotency/net-applied-skip)
+        // before it writes. The pre-PR0 declarative path always ran a DDL batch
+        // first, whose `apply_with_lock_backend` → `apply_locked` bootstrapped the
+        // journal via `ensure_journal`; but `apply_plan` is public API and a
+        // standalone plan whose FIRST step is `Dml`/`Backfill`/`OnlineRename` would
+        // otherwise make its first journal touch a READ (`backend.applied` /
+        // `run_dml_step`'s net-applied lookup) against a non-existent journal table
+        // → "relation does not exist". Bootstrapping here once, unconditionally,
+        // restores the invariant that the journal is always materialized before any
+        // step runs, for EVERY plan shape and BOTH backends (PG meta schema +
+        // SQLite `_mig`). `ensure_journal` is idempotent (`CREATE … IF NOT EXISTS`),
+        // so on the Ddl-first/declarative path — where the first DDL batch's
+        // `apply_locked` also calls it — this is a harmless no-op (the golden trace
+        // stays byte-identical).
+        backend
+            .ensure_journal(exec_cfg)
+            .await
+            .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
+
         let mut applied = ApplyOutcome {
             applied: Vec::new(),
             skipped: Vec::new(),
