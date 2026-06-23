@@ -361,11 +361,45 @@ pub fn validate_op(
             }
             Ok(())
         }
+        Op::DropIndex { name, table, .. } => {
+            // §8.6 fail-closed (HIGH): a DropIndex carries an index `name` and an
+            // OPTIONAL owning-table hint. The ownership gate
+            // ([`crate::ir_load::enforce_ir_ownership`]) checks the op's TARGET
+            // TABLE — but a bare-name DropIndex (`table: None`) has no
+            // ownership-checkable target, so the gate would SKIP it, letting a
+            // hostile `.ir.json` `{op:"dropIndex", name:"<other_app_index>"}` drop
+            // ANOTHER app's index cross-tenant. Until a name→owning-table registry
+            // resolver exists, we refuse a bare-name DropIndex fail-closed: the
+            // author must carry the owning-table hint, which makes the drop
+            // ownership-checkable. (A name-only drop is also intrinsically
+            // dialect-ambiguous on PG, where an index lives in a schema, not a
+            // table.) An `UNSUPPORTED { kind: "op" }` so the AI/author loop's
+            // remedy is "carry the owning table".
+            if table.is_none() {
+                return Err(AuthoringError {
+                    code: CODE_UNSUPPORTED.to_string(),
+                    kind: Some(UnsupportedKind::Op),
+                    op_index,
+                    ts_location: ts_location.map(str::to_string),
+                    dialect: target_dialect,
+                    reason: format!(
+                        "dropIndex of {name:?} omits its owning table, so the §8.6 \
+                         ownership check cannot resolve the index's owner — a \
+                         bare-name index drop is refused fail-closed (it would let a \
+                         migration drop another app's index by name)"
+                    ),
+                    suggested_fix: Some(format!(
+                        "name the owning table, e.g. op.dropIndex({name:?}, {{ table: \
+                         \"<owning_table>\" }}), so the drop is ownership-checked"
+                    )),
+                });
+            }
+            Ok(())
+        }
         // Ops with no embedded expression slot.
         Op::DropTable { .. }
         | Op::AddColumn { .. }
         | Op::DropColumn { .. }
-        | Op::DropIndex { .. }
         | Op::AlterColumnNullability { .. }
         | Op::RenameColumn { .. }
         | Op::DropConstraint { .. }

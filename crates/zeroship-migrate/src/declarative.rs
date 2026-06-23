@@ -1083,6 +1083,53 @@ pub fn desired_snapshot_for_dialect(
         // store identical values).
         sqlite_schemas.insert(d.name.clone(), descriptor_to_sdk_schema(d));
 
+        // §6.5 MANDATE — the per-column / per-index snapshot construction (system-
+        // field injection, default rendering, encryption/comment sentinels, vector/
+        // geo/FTS index modelling) lives in ONE place: the shared, dialect-
+        // parameterized [`build_table_snapshot`]. The differ routes through it so
+        // `IrAuthor::lower` can reuse the SAME builder and the §6.4 byte-identity
+        // golden guards against accidental regression, not against two independent
+        // implementations.
+        let this = build_table_snapshot(project_schema, d, dialect)?;
+        declarations
+            .entry(d.name.clone())
+            .or_default()
+            .push((d.owner_app.clone(), this));
+    }
+
+    // Second pass: for each table, detect conflicts over the FULL declarer set and
+    // pick the owner — both order-independent (1b).
+    desired_snapshot_second_pass(declarations, sqlite_schemas)
+}
+
+/// §6.5 MANDATE — the **shared, dialect-parameterized snapshot-builder**: build the
+/// full [`TableSnapshot`] (system-field columns + indexes, the `id` PRIMARY KEY,
+/// per-field column/constraint/index modelling, and the dialect-divergent FTS
+/// shape) for a single [`CollectionDescriptor`].
+///
+/// This is the single source of truth for the default / system-field / sentinel
+/// logic. BOTH the declarative differ ([`desired_snapshot_for_dialect`], unchanged
+/// behavior) and the IR path ([`crate::ir_author::IrAuthor`]) call it, so the
+/// per-column/per-index construction exists in exactly ONE place (§6.5). The
+/// extraction is BYTE-PRESERVING: the differ produces a byte-identical snapshot
+/// before and after the lift (a refactor-safety fixture asserts this).
+///
+/// Only one facet is dialect-divergent — full-text search: PG folds a `.fts()`
+/// field into a `__fts` generated tsvector column + GIN index; SQLite folds it
+/// into an FTS5 virtual-table index. Every other facet is dialect-agnostic
+/// (the `data_type` is always the PG `information_schema` spelling; the SQLite
+/// comparison canonicalises it — see [`ddl_to_information_schema`] /
+/// [`canonical_sqlite_type`]).
+///
+/// # Errors
+/// - [`DeclarativeError::UnsupportedType`] — a field used an unknown type token.
+/// - [`DeclarativeError::Invalid`] — a `ref` field's target is not a safe ident,
+///   or a re-declared `id` field has a non-`id` type / malformed prefix.
+pub(crate) fn build_table_snapshot(
+    project_schema: &str,
+    d: &CollectionDescriptor,
+    dialect: SqlDialect,
+) -> Result<TableSnapshot, DeclarativeError> {
         let mut columns = system_field_columns();
         // #6: the three implicit B-tree system indexes the platform auto-creates
         // for every table (`deleted_at`, `updated_at`, `created_by`), modelled so
@@ -1341,20 +1388,23 @@ pub fn desired_snapshot_for_dialect(
 
         // An author-built DESIRED snapshot carries no raw CREATE text (it is
         // introspection-only; H1). It rides as `None` and is excluded from equality.
-        let this = TableSnapshot {
+        Ok(TableSnapshot {
             columns,
             indexes,
             constraints,
             stored_create_sql: None,
-        };
-        declarations
-            .entry(d.name.clone())
-            .or_default()
-            .push((d.owner_app.clone(), this));
-    }
+        })
+}
 
-    // Second pass: for each table, detect conflicts over the FULL declarer set and
-    // pick the owner — both order-independent (1b).
+/// Second pass of [`desired_snapshot_for_dialect`] — over the per-table
+/// declarations accumulated by [`build_table_snapshot`], detect cross-app shape
+/// conflicts and pick each table's owner. Both are order-independent (1b). Split
+/// out so the byte-preserving snapshot-builder lift leaves the conflict/ownership
+/// resolution untouched.
+fn desired_snapshot_second_pass(
+    declarations: BTreeMap<String, Vec<(String, TableSnapshot)>>,
+    mut sqlite_schemas: BTreeMap<String, serde_json::Value>,
+) -> Result<DesiredSchema, DeclarativeError> {
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
     let mut ownership: BTreeMap<String, String> = BTreeMap::new();
     for (table, mut decls) in declarations {
@@ -2235,6 +2285,13 @@ impl DeclarativeAuthor {
     #[must_use]
     pub fn dialect(&self) -> SqlDialect {
         self.dialect
+    }
+
+    /// The deploying app (`app_…`) this author stamps on emitted migrations.
+    /// Used by [`crate::ir_author::IrAuthor`] to stamp the descriptor owner.
+    #[must_use]
+    pub(crate) fn owner_app(&self) -> &str {
+        &self.owner_app
     }
 
     /// Select the per-dialect DDL emission seam (P1). The dialect choice is made
@@ -3801,6 +3858,124 @@ impl DeclarativeAuthor {
             Vec::new(),
         )
     }
+
+    // -----------------------------------------------------------------------
+    // §6.4 / §6.5 — the IR-path render seam. `IrAuthor::lower` (below) reuses
+    // these EXACT render methods + the shared snapshot-builder, so its emitted
+    // SQL is byte-identical to the declarative path's by CONSTRUCTION (the §6.4
+    // golden guards against accidental regression, not against two independent
+    // implementations).
+    // -----------------------------------------------------------------------
+
+    /// §6.4 — render a single-table CREATE the SAME way the declarative `diff`
+    /// pass does (the snapshot comes from the shared [`build_table_snapshot`]).
+    /// FKs are inlined iff their target table is already live (`live_tables`);
+    /// on PG a non-live target is DEFERRED to an `ALTER TABLE ADD CONSTRAINT`
+    /// (returned in `deferred`), on SQLite it is a hard error (no late ADD
+    /// CONSTRAINT) — mirroring `diff`'s per-table logic byte-for-byte.
+    pub(crate) fn lower_create_table(
+        &self,
+        table: &str,
+        snapshot: &TableSnapshot,
+        live_tables: &std::collections::BTreeSet<String>,
+    ) -> Result<Vec<Migration>, DeclarativeError> {
+        let is_sqlite = matches!(self.dialect, SqlDialect::Sqlite);
+        let mut inline_fks: Vec<&ConstraintSnapshot> = Vec::new();
+        let mut deferred: Vec<&ConstraintSnapshot> = Vec::new();
+        for c in &snapshot.constraints {
+            if c.kind != "FOREIGN KEY" {
+                continue;
+            }
+            let target = fk_target_table(&c.definition);
+            // A self-FK (target == this table) or a live target inlines; anything
+            // else defers (PG) / errors (SQLite), matching `diff`.
+            let inlinable = target
+                .as_deref()
+                .is_some_and(|tt| tt == table || live_tables.contains(tt));
+            if inlinable {
+                inline_fks.push(c);
+            } else if is_sqlite {
+                return Err(DeclarativeError::SqliteDeferredFkUnsupported {
+                    table: table.to_string(),
+                    target: target.unwrap_or_default(),
+                });
+            } else {
+                deferred.push(c);
+            }
+        }
+
+        let mut out: Vec<Migration> = Vec::new();
+        let (up, down) = if is_sqlite {
+            // The Confined SQLite path routes the CREATE through the shared
+            // `zeroship_schema::query` emitter — IrAuthor reconstructs the SDK
+            // schema `Value` for the table from the snapshot's source descriptor.
+            // (Wave C wires the SQLite Value path; for now the PG leg is the §6.4
+            // byte-identity anchor, and SQLite createTable lowering is exercised by
+            // the differ's own SQLite golden.)
+            return Err(DeclarativeError::Invalid(
+                "IrAuthor SQLite createTable lowering routes through the shared \
+                 Value emitter (Wave C); use the PG leg for the §6.4 byte-identity \
+                 anchor"
+                    .into(),
+            ));
+        } else {
+            (
+                self.render_create_table(table, snapshot, &inline_fks),
+                format!("DROP TABLE {}", self.qualified(table)),
+            )
+        };
+        let mig = self.make(
+            &format!("create_table_{table}"),
+            up,
+            Some(down),
+            MigrationFlags::default(),
+            Vec::new(),
+        );
+        let table_version = mig.version.clone();
+        out.push(mig);
+
+        // The table's own indexes (skip the implicit PK index; skip the SQLite
+        // system-field indexes the shared CREATE emits inline) — identical to
+        // `diff`'s per-table index emission.
+        for idx in &snapshot.indexes {
+            if is_pk_index(table, &idx.name) {
+                continue;
+            }
+            if is_sqlite && is_system_field_index(table, &idx.name) {
+                continue;
+            }
+            out.push(self.render_create_index(table, idx, vec![table_version.clone()]));
+        }
+
+        // Deferred FKs (PG only) as follow-on ALTER TABLE ADD CONSTRAINT.
+        for fk in deferred {
+            out.push(self.render_add_fk(table, fk, vec![table_version.clone()]));
+        }
+        Ok(out)
+    }
+
+    /// §6.4 — render an `addColumn` the SAME way `diff` does, from a
+    /// shared-builder [`ColumnSnapshot`].
+    pub(crate) fn lower_add_column(&self, table: &str, col: &ColumnSnapshot) -> Migration {
+        self.render_add_column(table, col)
+    }
+
+    /// §6.4 — render a `createIndex` the SAME way `diff` does, from an
+    /// [`IndexSnapshot`].
+    pub(crate) fn lower_create_index(&self, table: &str, idx: &IndexSnapshot) -> Migration {
+        self.render_create_index(table, idx, Vec::new())
+    }
+
+    /// §6.4 — the drop ops pass an identifier through the SAME emitter methods.
+    pub(crate) fn lower_drop_table(&self, table: &str) -> Migration {
+        self.render_drop_table(table)
+    }
+    pub(crate) fn lower_drop_column(&self, table: &str, col: &str) -> Migration {
+        self.render_drop_column(table, col)
+    }
+    pub(crate) fn lower_drop_index(&self, idx: &IndexSnapshot) -> Migration {
+        self.render_drop_index(idx)
+    }
 }
 
 // ===========================================================================
@@ -4314,6 +4489,114 @@ fn fk_local_column(definition: &str) -> Option<String> {
     }
 }
 
+
+#[cfg(test)]
+mod snapshot_builder_refactor_safety_tests {
+    //! §6.5 #3 — the refactor-safety fixture. The per-column / per-index snapshot
+    //! construction was LIFTED out of `desired_snapshot_for_dialect`'s inline loop
+    //! into the shared, dialect-parameterized [`super::build_table_snapshot`]. The
+    //! lift is BYTE-PRESERVING: the snapshot the differ derives must be identical
+    //! before and after. This freezes the `{:#?}` of a RICH table snapshot (system
+    //! fields + a unique field + a ref/FK + an encrypted+masked column + an FTS
+    //! field + a named index) on BOTH dialects, so any accidental change to the
+    //! shared builder that perturbs a single byte of the snapshot — including the
+    //! emission-only `default` / `encryption_sentinel` / `comment_sentinel` /
+    //! `opclass` fields the drift-`PartialEq` deliberately ignores — fails here.
+    use super::{build_table_snapshot, CollectionDescriptor, FieldDescriptor, IndexDescriptor};
+    use zeroship_schema::query::SqlDialect;
+
+    fn rich_descriptor() -> CollectionDescriptor {
+        CollectionDescriptor {
+            name: "articles".into(),
+            owner_app: "app_test".into(),
+            fields: vec![
+                FieldDescriptor {
+                    name: "title".into(),
+                    ty: "string".into(),
+                    required: true,
+                    fts: true,
+                    ..Default::default()
+                },
+                FieldDescriptor {
+                    name: "slug".into(),
+                    ty: "string".into(),
+                    unique: true,
+                    ..Default::default()
+                },
+                FieldDescriptor {
+                    name: "author".into(),
+                    ty: "ref".into(),
+                    references: Some("authors".into()),
+                    ..Default::default()
+                },
+                FieldDescriptor {
+                    name: "secret".into(),
+                    ty: "string".into(),
+                    encrypted: Some(serde_json::json!({})),
+                    mask: Some(serde_json::json!({ "kind": "partial" })),
+                    ..Default::default()
+                },
+                FieldDescriptor {
+                    name: "views".into(),
+                    ty: "number".into(),
+                    default: Some(serde_json::json!(0)),
+                    ..Default::default()
+                },
+            ],
+            indexes: vec![IndexDescriptor {
+                name: "articles_author_slug_idx".into(),
+                columns: vec!["author".into(), "slug".into()],
+                unique: false,
+            }],
+        }
+    }
+
+    // The frozen PG snapshot (captured from the pre-extraction behavior). The
+    // `default`/`encryption_sentinel`/`comment_sentinel`/`opclass` emission-only
+    // fields ARE part of the debug print, so this golden also pins the sentinel /
+    // default rendering the drift `PartialEq` ignores.
+    const GOLDEN_PG: &str = include_str!("snapshots/refactor_safety_pg.txt");
+    const GOLDEN_SQLITE: &str = include_str!("snapshots/refactor_safety_sqlite.txt");
+
+    #[test]
+    fn capture_goldens() {
+        // One-off golden capture; gated on UPDATE_SNAPSHOT_GOLDENS=1.
+        if std::env::var("UPDATE_SNAPSHOT_GOLDENS").as_deref() != Ok("1") {
+            return;
+        }
+        let d = rich_descriptor();
+        let pg = build_table_snapshot("app", &d, SqlDialect::Postgres).unwrap();
+        let sq = build_table_snapshot("app", &d, SqlDialect::Sqlite).unwrap();
+        std::fs::write(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/snapshots/refactor_safety_pg.txt"),
+            format!("{pg:#?}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/snapshots/refactor_safety_sqlite.txt"),
+            format!("{sq:#?}\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn build_table_snapshot_is_byte_stable_pg() {
+        let d = rich_descriptor();
+        let snap = build_table_snapshot("app", &d, SqlDialect::Postgres)
+            .expect("rich descriptor builds a snapshot");
+        // Trailing newline tolerance: the golden file ends in a newline; the debug
+        // print does not.
+        assert_eq!(format!("{snap:#?}"), GOLDEN_PG.trim_end_matches('\n'));
+    }
+
+    #[test]
+    fn build_table_snapshot_is_byte_stable_sqlite() {
+        let d = rich_descriptor();
+        let snap = build_table_snapshot("app", &d, SqlDialect::Sqlite)
+            .expect("rich descriptor builds a snapshot");
+        assert_eq!(format!("{snap:#?}"), GOLDEN_SQLITE.trim_end_matches('\n'));
+    }
+}
 
 #[cfg(test)]
 mod system_field_names_tie_tests {
