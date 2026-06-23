@@ -594,6 +594,7 @@ impl MigrationBackend for SqliteBackend {
         _template: &str,
         _binds: &[crate::plan::BindValue],
         _destructive: bool,
+        _owner_app: &str,
         _approval: crate::approval::Approval,
         _applied_by: &str,
         _lock_mode: crate::executor::LockMode,

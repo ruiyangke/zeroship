@@ -317,6 +317,12 @@ pub trait MigrationBackend {
     /// first; this is the independent executor-layer check so a direct seam caller
     /// cannot bypass it.
     ///
+    /// `owner_app` is the declaring app's identity — it is folded into the journal
+    /// [`ChecksumInput`](crate::migration::ChecksumInput) so two DML steps with an
+    /// identical `(template, binds)` authored by DIFFERENT apps hash to DIFFERENT
+    /// journal checksums (correct multi-tenant journal identity/attribution for
+    /// PR6a's creator-DML assembler).
+    ///
     /// Returns `true` if the step was applied this run, `false` if it was already
     /// net-applied (skipped).
     ///
@@ -332,6 +338,7 @@ pub trait MigrationBackend {
         template: &str,
         binds: &[crate::plan::BindValue],
         destructive: bool,
+        owner_app: &str,
         approval: crate::approval::Approval,
         applied_by: &str,
         lock_mode: crate::executor::LockMode,
@@ -682,6 +689,7 @@ impl MigrationBackend for PostgresBackend<'_> {
         template: &str,
         binds: &[crate::plan::BindValue],
         destructive: bool,
+        owner_app: &str,
         approval: crate::approval::Approval,
         applied_by: &str,
         _lock_mode: crate::executor::LockMode,
@@ -713,6 +721,7 @@ impl MigrationBackend for PostgresBackend<'_> {
             name,
             template,
             binds,
+            owner_app,
             applied_by,
         )
         .await?;

@@ -2000,6 +2000,7 @@ pub(crate) async fn apply_transactional(
 /// [`ApplyError::MigrationFailed`] if the DML failed (rolled back, nothing
 /// journaled); [`ApplyError::Db`]/[`ApplyError::Journal`] on infrastructure
 /// failure.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_dml_transactional(
     conn: &Client,
     cfg: &ExecutorConfig,
@@ -2007,6 +2008,7 @@ pub(crate) async fn apply_dml_transactional(
     name: &str,
     template: &str,
     binds: &[crate::plan::BindValue],
+    owner_app: &str,
     applied_by: &str,
 ) -> Result<(), ApplyError> {
     use compio_postgres::types::ToSql;
@@ -2069,15 +2071,26 @@ pub(crate) async fn apply_dml_transactional(
             return Err(ApplyError::Db(e));
         }
     }
+    // Fault seam (test-only): a simulated crash AFTER the DML statement ran but
+    // BEFORE the journal row — the open txn rolls back the data write too, so the
+    // step left NOTHING (resume re-applies cleanly).
+    if let Err(e) = crate::fault::trip(crate::fault::points::DML_AFTER_STMT_BEFORE_JOURNAL) {
+        let _ = conn.batch_execute("ROLLBACK").await;
+        return Err(e);
+    }
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
     // The journal checksum is over the PARAMETERIZED template (binds fold into the
     // plan checksum, not the journal row — §2.3.2). Use the migration checksum
     // discipline over (template, None).
+    // The journal checksum binds the DECLARING app's identity (§2.0.1): two DML
+    // steps with an identical `(template, binds)` authored by different
+    // `owner_app`s hash to DIFFERENT checksums, so the journal row's owner
+    // attribution is correct for multi-tenant DML (PR6a's creator-DML assembler).
     let checksum = crate::migration::Checksum::of(&crate::migration::ChecksumInput {
         up: template,
         down: None,
         flags: &crate::migration::MigrationFlags::default(),
-        owner_app: crate::loader::PLATFORM_OWNER_APP,
+        owner_app,
         depends_on: &[],
         supersedes: &[],
         preconditions: &[],
@@ -2099,6 +2112,13 @@ pub(crate) async fn apply_dml_transactional(
             tracing::warn!(error = %rb, version = %version, "zeroship-migrate: ROLLBACK failed after a DML journal-insert error");
         }
         return Err(ApplyError::Journal(JournalError::Db(e)));
+    }
+    // Fault seam (test-only): a simulated crash AFTER the journal INSERT but
+    // BEFORE COMMIT — the INSERT is inside the uncommitted txn, so it rolls back
+    // with the data write; the step still left NOTHING (resume re-applies).
+    if let Err(e) = crate::fault::trip(crate::fault::points::DML_AFTER_JOURNAL_BEFORE_COMMIT) {
+        let _ = conn.batch_execute("ROLLBACK").await;
+        return Err(e);
     }
     conn.batch_execute("COMMIT").await?;
     Ok(())

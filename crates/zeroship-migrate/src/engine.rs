@@ -750,6 +750,7 @@ impl MigrationEngine {
                     template,
                     binds,
                     destructive,
+                    owner_app,
                     ..
                 } => {
                     // **Destructive-DML approval gate (§2.1.1).** A destructive DML
@@ -770,8 +771,8 @@ impl MigrationEngine {
                     }
                     let ran = backend
                         .run_dml_step(
-                            exec_cfg, version, name, template, binds, *destructive, approval,
-                            applied_by, next_lock,
+                            exec_cfg, version, name, template, binds, *destructive, owner_app,
+                            approval, applied_by, next_lock,
                         )
                         .await
                         .map_err(EngineError::Apply)?;

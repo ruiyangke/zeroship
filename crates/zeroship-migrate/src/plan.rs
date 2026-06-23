@@ -120,6 +120,13 @@ pub enum PlanStep {
         transactional: bool,
         /// `true` ⇒ data loss (a `delete`); the gate decides (§2.1.1).
         destructive: bool,
+        /// The declaring app's `owner_app` — the journal-identity attribution
+        /// (§2.0.1). Folded into the journal `ChecksumInput` so two DML steps
+        /// with an identical `(template, binds)` authored by DIFFERENT apps hash
+        /// to DIFFERENT journal checksums (and the journal row attributes the
+        /// right owner). PR0 hand-builds Dml steps in tests; PR6a's creator-DML
+        /// assembler MUST supply the real declaring `owner_app` here.
+        owner_app: String,
     },
     /// A crash-safe batched data backfill — an existing
     /// [`BackfillSpec`](crate::backfill::BackfillSpec), run by `run_backfill`
