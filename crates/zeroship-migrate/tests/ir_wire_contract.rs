@@ -27,7 +27,7 @@
 //!   / `IrIndex.using` are the closed `IndexMethod` enum — a raw-SQL string or an
 //!   out-of-set method is rejected at load (code-critic HIGH + MED).
 
-use zeroship_migrate::ir::{IrScalar, MigrationIr, Op};
+use zeroship_migrate::ir::{CanonicalOpList, IrScalar, MigrationIr, Op};
 use zeroship_migrate::EXPR_INVALID_NUMERIC;
 
 // ----------------------------------------------------------------------------
@@ -376,9 +376,14 @@ fn alter_column_type_using_is_a_closed_expr_not_raw_sql() {
 }
 
 #[test]
-fn non_canonical_base64_normalizes_and_hashes_equal() {
-    // Two encodings of the SAME 3 bytes must canonicalize to one form, so the
-    // typed value (and any downstream checksum) is identical.
+fn bytes_decode_then_canonical_reencode_is_stable() {
+    // The `{"bytes":…}` carrier stores DECODED bytes and re-encodes with the
+    // canonical STANDARD (padded) alphabet, so the typed value (and any
+    // downstream checksum) is determined by the payload, not the source
+    // spelling. NB: the decoder is STRICT (`BASE64_STANDARD.decode`) — a
+    // non-canonical encoding is REJECTED at load rather than normalized (a
+    // defensible, deterministic choice; see the code-critic LOW finding that
+    // this test's old name over-promised "normalizes non-canonical").
     let canonical: IrScalar = serde_json::from_str(r#"{"bytes":"AAEC"}"#).unwrap();
     // re-serialize must be canonical base64
     let reser = serde_json::to_string(&canonical).unwrap();
@@ -387,4 +392,181 @@ fn non_canonical_base64_normalizes_and_hashes_equal() {
     let v: IrScalar = serde_json::from_str(r#"{"bytes":"3q2+7w=="}"#).unwrap();
     let back: IrScalar = serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
     assert_eq!(v, back, "bytes round-trip must be stable");
+
+    // Strict-decode contract: a NON-canonical encoding (unpadded / wrong
+    // padding) is rejected, not silently normalized.
+    assert!(
+        serde_json::from_str::<IrScalar>(r#"{"bytes":"AAE"}"#).is_err(),
+        "non-canonical (mis-padded) base64 must be rejected by the strict decoder"
+    );
+}
+
+// ----------------------------------------------------------------------------
+// Absent-optional canonicalization (code-critic HIGH): an unset Option field is
+// OMITTED on the wire, never emitted as `"field":null`. This is the
+// cross-impl-determinism invariant: an idiomatic JS builder drops `undefined`
+// keys (`JSON.stringify` omits them), so a Rust serialization that emitted
+// explicit nulls would fold a DIFFERENT byte image into `Checksum::of_ir` than
+// the JS side for the SAME logical migration — breaking the single-artifact /
+// single-checksum invariant (items 2 & 10). These tests are RED before the
+// `skip_serializing_if = "Option::is_none"` fix and GREEN after.
+// ----------------------------------------------------------------------------
+
+#[test]
+fn add_column_omits_absent_optionals() {
+    // nullable:None, default:None — both MUST be absent from the JSON object,
+    // exactly as an idiomatic JS `op.addColumn("t","x","int")` (no opts) emits.
+    let op = Op::AddColumn {
+        table: "t".into(),
+        column: "x".into(),
+        ty: zeroship_migrate::ir::ColType::Int,
+        nullable: None,
+        default: None,
+    };
+    let v = serde_json::to_value(&op).unwrap();
+    let obj = v.as_object().unwrap();
+    assert!(
+        !obj.contains_key("nullable"),
+        "absent `nullable` must be OMITTED, not serialized as null: {v}"
+    );
+    assert!(
+        !obj.contains_key("default"),
+        "absent `default` must be OMITTED, not serialized as null: {v}"
+    );
+    // The serialized object is EXACTLY the four present keys.
+    assert_eq!(obj.len(), 4, "addColumn with no opts must emit exactly op/table/column/type: {v}");
+    // …and it still round-trips.
+    let back: Op = serde_json::from_value(v).unwrap();
+    assert_eq!(op, back);
+}
+
+#[test]
+fn create_index_omits_all_absent_optionals() {
+    let op = Op::CreateIndex {
+        table: "users".into(),
+        columns: vec!["email".into()],
+        name: None,
+        unique: None,
+        using: None,
+        r#where: None,
+        concurrently: None,
+    };
+    let v = serde_json::to_value(&op).unwrap();
+    let obj = v.as_object().unwrap();
+    for absent in ["name", "unique", "using", "where", "concurrently"] {
+        assert!(
+            !obj.contains_key(absent),
+            "absent `{absent}` must be OMITTED, not null: {v}"
+        );
+    }
+    assert_eq!(obj.len(), 3, "only op/table/columns present: {v}");
+}
+
+#[test]
+fn nested_ir_column_index_constraint_omit_absent_optionals() {
+    use zeroship_migrate::ir::{ColType, IrColumn, IrConstraint, IrConstraintKind, IrIndex};
+    // IrColumn nullable/default/unique absent.
+    let col = IrColumn {
+        name: "id".into(),
+        ty: ColType::Uuid,
+        nullable: None,
+        default: None,
+        unique: None,
+    };
+    let cv = serde_json::to_value(&col).unwrap();
+    let cobj = cv.as_object().unwrap();
+    for absent in ["nullable", "default", "unique"] {
+        assert!(!cobj.contains_key(absent), "IrColumn absent `{absent}` must be omitted: {cv}");
+    }
+    // IrIndex name/unique/using/where absent.
+    let ix = IrIndex {
+        name: None,
+        columns: vec!["id".into()],
+        unique: None,
+        using: None,
+        r#where: None,
+    };
+    let iv = serde_json::to_value(&ix).unwrap();
+    let iobj = iv.as_object().unwrap();
+    for absent in ["name", "unique", "using", "where"] {
+        assert!(!iobj.contains_key(absent), "IrIndex absent `{absent}` must be omitted: {iv}");
+    }
+    // IrConstraint.name absent.
+    let con = IrConstraint {
+        name: None,
+        kind: IrConstraintKind::Pk { columns: vec!["id".into()] },
+    };
+    let conv = serde_json::to_value(&con).unwrap();
+    assert!(
+        !conv.as_object().unwrap().contains_key("name"),
+        "IrConstraint absent `name` must be omitted: {conv}"
+    );
+}
+
+#[test]
+fn expr_case_omits_absent_else() {
+    use zeroship_migrate::Expr;
+    use zeroship_migrate::expr::{CaseBranch, UnaryOp};
+    let e = Expr::Case {
+        branches: vec![CaseBranch {
+            condition: Expr::UnaryOp {
+                op: UnaryOp::IsNull,
+                operand: Box::new(Expr::col("a")),
+            },
+            result: Expr::lit(IrScalar::Int(1)),
+        }],
+        r#else: None,
+    };
+    let v = serde_json::to_value(&e).unwrap();
+    assert!(
+        !v.as_object().unwrap().contains_key("else"),
+        "absent Case `else` must be OMITTED, not null: {v}"
+    );
+}
+
+#[test]
+fn checksum_of_ir_matches_js_idiomatic_omitted_optionals() {
+    // The portable single-checksum invariant across the JS and Rust front doors
+    // (code-critic HIGH, items 2 & 10): a JS builder emits ops with UNSET
+    // optionals OMITTED. The Rust `Op` (built with `None`) must hash IDENTICALLY
+    // to the same op deserialized from that idiomatic JS-shaped JSON. Before the
+    // fix, the Rust side folded `"nullable":null,"default":null` while the JS
+    // doc omitted them — distinct bytes, distinct checksum. After the fix both
+    // canonicalize to the same omitted-key image.
+    use zeroship_migrate::{Checksum, MigrationFlags};
+    use zeroship_migrate::ir::ColType;
+
+    // Rust-built op (None optionals).
+    let rust_op = Op::AddColumn {
+        table: "t".into(),
+        column: "x".into(),
+        ty: ColType::Int,
+        nullable: None,
+        default: None,
+    };
+    // The idiomatic JS-emitted document: the optional keys are simply ABSENT.
+    let js_json = r#"{"op":"addColumn","table":"t","column":"x","type":"int"}"#;
+    let js_op: Op = serde_json::from_str(js_json).unwrap();
+    assert_eq!(rust_op, js_op, "both decode to the same logical op");
+
+    let flags = MigrationFlags::default();
+    let rust_ck = Checksum::of_ir(&CanonicalOpList(&[rust_op]), &flags, "app", &[], &[], &[]);
+    let js_ck = Checksum::of_ir(&CanonicalOpList(&[js_op]), &flags, "app", &[], &[], &[]);
+    assert_eq!(
+        rust_ck, js_ck,
+        "Rust(None) and JS(omitted) must yield the SAME of_ir checksum"
+    );
+
+    // Belt-and-braces: an explicit-`null` document — the SHAPE the buggy Rust
+    // serializer produced — must ALSO decode to the same logical op AND, once we
+    // omit on re-serialize, hash to the same value (deny_unknown_fields permits
+    // a present-but-null optional on input; canonicalization drops it).
+    let null_json =
+        r#"{"op":"addColumn","table":"t","column":"x","type":"int","nullable":null,"default":null}"#;
+    let null_op: Op = serde_json::from_str(null_json).unwrap();
+    let null_ck = Checksum::of_ir(&CanonicalOpList(&[null_op]), &flags, "app", &[], &[], &[]);
+    assert_eq!(
+        rust_ck, null_ck,
+        "an explicit-null input must canonicalize to the SAME checksum as the omitted form"
+    );
 }

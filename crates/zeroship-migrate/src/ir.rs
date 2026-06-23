@@ -23,6 +23,17 @@
 //!   magnitude ≥ 2^53, is REJECTED with an `EXPR_INVALID_NUMERIC` error BEFORE
 //!   any checksum runs — so a hand-crafted malicious `.ir.json` cannot smuggle a
 //!   lossy float past the loader.
+//! - **An absent optional is OMITTED on the wire, NEVER `"field":null`** — every
+//!   `Option` field carries `#[serde(skip_serializing_if = "Option::is_none")]`.
+//!   This is the cross-impl-determinism contract behind the single-checksum
+//!   invariant (§2.5, spec line 1267): an idiomatic JS `op.*` builder drops an
+//!   unset key (`JSON.stringify` omits `undefined`), so the Rust serialization
+//!   that [`CanonicalOpList::canonical_bytes`] folds into [`Checksum::of_ir`]
+//!   must produce the SAME omitted-key image — otherwise the identical logical
+//!   migration would hash differently on the two sides. Deserialize still ACCEPTS
+//!   an explicit `null` for an optional (a tolerant input), and it canonicalizes
+//!   back to the omitted form, so a null-bearing `.ir.json` and an omitted one
+//!   yield the same checksum.
 //!
 //! Wave A scope: the data types + the closed `Op` enum + the numeric scalar +
 //! the canonical op-list folding ([`CanonicalOpList`]). The loader, the
@@ -145,20 +156,28 @@ pub struct MigrationIr {
 #[serde(default, deny_unknown_fields)]
 pub struct IrFlagsOverride {
     /// Override for `transactional`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub transactional: Option<bool>,
     /// Override for `destructive`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub destructive: Option<bool>,
     /// Override for `online`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub online: Option<bool>,
     /// Override for `requires_approval`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub requires_approval: Option<bool>,
     /// Override for `repeatable`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub repeatable: Option<bool>,
     /// Override for `engine_goodie_ddl`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub engine_goodie_ddl: Option<bool>,
     /// Override for the optional `timeout_ms` facet (JS-safe-integer bounded).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<SafeU64>,
     /// Override for the optional `phase` facet.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<OnlinePhase>,
 }
 
@@ -246,10 +265,13 @@ pub struct IrColumn {
     #[serde(rename = "type")]
     pub ty: ColType,
     /// Nullability (default dialect behaviour if absent).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub nullable: Option<bool>,
     /// Structured default (a typed literal or a synth scalar) — never raw SQL.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<IrDefault>,
     /// Whether the column carries a single-column UNIQUE.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub unique: Option<bool>,
 }
 
@@ -293,6 +315,7 @@ pub enum IrConstraintKind {
 #[serde(deny_unknown_fields)]
 pub struct IrConstraint {
     /// Optional constraint name (engine-derived if absent).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// The constraint kind + its operands (a nested, internally-tagged object).
     pub kind: IrConstraintKind,
@@ -327,15 +350,18 @@ pub enum IndexMethod {
 #[serde(deny_unknown_fields)]
 pub struct IrIndex {
     /// Optional index name (engine-derived if absent).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Indexed columns.
     pub columns: Vec<String>,
     /// Whether the index is UNIQUE.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub unique: Option<bool>,
     /// Index method (a CLOSED [`IndexMethod`] — never a raw SQL string).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub using: Option<IndexMethod>,
     /// Partial-index predicate (a closed-AST node, never raw SQL).
-    #[serde(rename = "where")]
+    #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
     pub r#where: Option<Expr>,
 }
 
@@ -373,8 +399,10 @@ pub enum Op {
         /// Table to drop.
         table: String,
         /// `IF EXISTS`.
+        #[serde(skip_serializing_if = "Option::is_none")]
         if_exists: Option<bool>,
         /// `CASCADE`.
+        #[serde(skip_serializing_if = "Option::is_none")]
         cascade: Option<bool>,
     },
     /// `ALTER TABLE … ADD COLUMN`.
@@ -387,8 +415,10 @@ pub enum Op {
         #[serde(rename = "type")]
         ty: ColType,
         /// Nullability.
+        #[serde(skip_serializing_if = "Option::is_none")]
         nullable: Option<bool>,
         /// Structured default (typed literal or synth scalar) — never raw SQL.
+        #[serde(skip_serializing_if = "Option::is_none")]
         default: Option<IrDefault>,
     },
     /// `ALTER TABLE … DROP COLUMN`.
@@ -398,6 +428,7 @@ pub enum Op {
         /// Column to drop.
         column: String,
         /// `IF EXISTS`.
+        #[serde(skip_serializing_if = "Option::is_none")]
         if_exists: Option<bool>,
     },
     /// `CREATE [UNIQUE] INDEX [CONCURRENTLY]`.
@@ -407,15 +438,19 @@ pub enum Op {
         /// Indexed columns.
         columns: Vec<String>,
         /// Optional index name.
+        #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
         /// UNIQUE.
+        #[serde(skip_serializing_if = "Option::is_none")]
         unique: Option<bool>,
         /// Index method (a CLOSED [`IndexMethod`] — never a raw SQL string).
+        #[serde(skip_serializing_if = "Option::is_none")]
         using: Option<IndexMethod>,
         /// Partial-index predicate (a closed-AST node, never raw SQL — property A).
-        #[serde(rename = "where")]
+        #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
         r#where: Option<Expr>,
         /// `CONCURRENTLY`.
+        #[serde(skip_serializing_if = "Option::is_none")]
         concurrently: Option<bool>,
     },
     /// `DROP INDEX [CONCURRENTLY]`.
@@ -423,10 +458,13 @@ pub enum Op {
         /// Index name.
         name: String,
         /// Owning table (dialect hint).
+        #[serde(skip_serializing_if = "Option::is_none")]
         table: Option<String>,
         /// `IF EXISTS`.
+        #[serde(skip_serializing_if = "Option::is_none")]
         if_exists: Option<bool>,
         /// `CONCURRENTLY`.
+        #[serde(skip_serializing_if = "Option::is_none")]
         concurrently: Option<bool>,
     },
     /// `ALTER TABLE … ALTER COLUMN … TYPE …`.
@@ -439,6 +477,7 @@ pub enum Op {
         #[serde(rename = "type")]
         ty: ColType,
         /// `USING` cast expression (a closed-AST node, never raw SQL — property A).
+        #[serde(skip_serializing_if = "Option::is_none")]
         using: Option<Expr>,
     },
     /// `ALTER TABLE … ALTER COLUMN … SET/DROP NOT NULL`.
@@ -492,9 +531,10 @@ pub enum Op {
         /// Column → closed-AST assignment (sorted map for canonicality).
         set: BTreeMap<String, Expr>,
         /// Optional WHERE predicate (closed AST).
-        #[serde(rename = "where")]
+        #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
         r#where: Option<Expr>,
         /// Optional batching knob.
+        #[serde(skip_serializing_if = "Option::is_none")]
         batch: Option<IrBatch>,
     },
     /// `DELETE FROM … WHERE …`.
@@ -505,6 +545,7 @@ pub enum Op {
         #[serde(rename = "where")]
         r#where: Expr,
         /// Optional LIMIT (JS-safe-integer bounded).
+        #[serde(skip_serializing_if = "Option::is_none")]
         limit: Option<SafeU64>,
     },
     /// A resumable, cursor-paged backfill.
@@ -518,6 +559,7 @@ pub enum Op {
         /// Column → closed-AST assignment.
         set: BTreeMap<String, Expr>,
         /// Optional row filter (closed AST).
+        #[serde(skip_serializing_if = "Option::is_none")]
         filter: Option<Expr>,
         /// Backfill name (journaled progress key).
         name: String,

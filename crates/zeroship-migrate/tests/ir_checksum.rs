@@ -261,6 +261,16 @@ fn of_and_of_ir_never_collide_even_with_equal_length_regions() {
 /// derived-then-overridden flags). This pins the single-artifact / single-checksum
 /// invariant so a future `IrAuthor` that leaks per-dialect *lowered* flags into
 /// the hash (the latent risk the `of_ir` doc forbids) fails the gate.
+///
+/// PLACEHOLDER caveat: until `IrAuthor::lower` exists (a later wave), this drives
+/// `of_ir` directly with hand-built neutral flags. The positive arm is therefore
+/// a SELF-comparison (`of_ir(neutral) == of_ir(neutral)`) — it documents the
+/// contract and is kept load-bearing by the negative arm (DIFFERENT flags hash
+/// differently). When `IrAuthor::lower` lands, the positive arm MUST be replaced
+/// by driving the actual lowering for BOTH dialects through one `IrAuthor` and
+/// asserting the `of_ir` it computes is identical — i.e. assert the producing
+/// code feeds neutral flags, not merely that `neutral == neutral`. See the
+/// code-critic LOW finding on this test.
 #[test]
 fn checksum_of_ir_is_identical_across_dialect_renders() {
     // A `createIndex { concurrently: true }` is the canonical case where the

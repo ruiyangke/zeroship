@@ -189,7 +189,7 @@ pub enum Expr {
         /// `(condition, result)` branches, in order.
         branches: Vec<CaseBranch>,
         /// Optional `ELSE` result.
-        #[serde(rename = "else")]
+        #[serde(rename = "else", skip_serializing_if = "Option::is_none")]
         r#else: Option<Box<Expr>>,
     },
     /// An allow-listed named scalar function call (§3.3.1.1(a)).
