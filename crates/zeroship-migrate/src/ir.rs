@@ -73,7 +73,7 @@ pub const EXPR_INVALID_NUMERIC: &str = "EXPR_INVALID_NUMERIC";
 /// on the two sides. Bounding them here closes that cross-impl divergence — and
 /// rejects a hostile `.ir.json` that smuggles an out-of-range count past the
 /// loader BEFORE any checksum runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct SafeU64(u64);
 
@@ -82,6 +82,28 @@ impl SafeU64 {
     #[must_use]
     pub fn get(self) -> u64 {
         self.0
+    }
+}
+
+impl JsonSchema for SafeU64 {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "SafeU64".into()
+    }
+
+    fn json_schema(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // Hand-written (NOT the transparent `u64` derive) so the emitted schema
+        // carries the SAME `< 2^53` upper bound the Deserialize impl enforces
+        // (§2.5). The derive would emit only `{type:integer, format:uint64,
+        // minimum:0}`, and a schema-driven JS hint would then accept a `2^53`
+        // count the Rust loader rejects — a schema/loader divergence on the very
+        // cross-impl determinism boundary `SafeU64` exists for. `maximum` mirrors
+        // [`IrScalar`]'s hand-written bound.
+        schemars::json_schema!({
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "maximum": MAX_EXACT_INT - 1
+        })
     }
 }
 
@@ -233,6 +255,32 @@ pub enum ColType {
     },
 }
 
+/// The CLOSED set of synth scalars admissible as a COLUMN DEFAULT — the two
+/// NULLARY apply-time scalars only (§4.3). A dedicated 2-variant enum (NOT the
+/// full [`SynthFn`]) makes the fail-closed property STRUCTURAL: serde rejects a
+/// non-nullary synth (`splitPart`/`concatWs`) as an unknown variant at
+/// DESERIALIZE, so a hand-crafted `.ir.json` carrying `{"fn":"splitPart"}` as a
+/// default cannot pass the loader and defer the blow-up to rendering. The wire
+/// tokens match [`SynthFn`]'s (`"now"`, `"genRandomUuid"`) so the on-disk bytes
+/// are unchanged from the pre-narrowing type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum SynthDefaultFn {
+    /// `now()` / current timestamp, evaluated at apply time.
+    Now,
+    /// `gen_random_uuid()`, evaluated at apply time.
+    GenRandomUuid,
+}
+
+impl From<SynthDefaultFn> for SynthFn {
+    fn from(d: SynthDefaultFn) -> Self {
+        match d {
+            SynthDefaultFn::Now => SynthFn::Now,
+            SynthDefaultFn::GenRandomUuid => SynthFn::GenRandomUuid,
+        }
+    }
+}
+
 /// A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —
 /// either a typed scalar literal or an engine-synthesized apply-time scalar
 /// (`now`/`genRandomUuid`). NEVER a raw SQL string (property A); the per-dialect
@@ -247,11 +295,12 @@ pub enum IrDefault {
         value: IrScalar,
     },
     /// An engine-synthesized apply-time default (`now()` / `gen_random_uuid()`),
-    /// rendered per dialect by the kernel (§4.3). Only the no-arg synth scalars
-    /// (`now`, `genRandomUuid`) are admissible as a default.
+    /// rendered per dialect by the kernel (§4.3). Constrained at the TYPE level to
+    /// the two nullary synth scalars ([`SynthDefaultFn`]) — a non-nullary synth is
+    /// rejected at deserialize, not at render.
     Fn {
-        /// The synthesized function (must be `now` or `genRandomUuid`).
-        r#fn: SynthFn,
+        /// The synthesized function (`now` or `genRandomUuid`).
+        r#fn: SynthDefaultFn,
     },
 }
 
@@ -1098,5 +1147,50 @@ mod tests {
         let s = serde_json::to_string(&t).unwrap();
         let back: ColType = serde_json::from_str(&s).unwrap();
         assert_eq!(t, back);
+    }
+
+    // ---- IrDefault::Fn is fail-CLOSED to the two nullary synth scalars ----
+    // (code-critic MED). The doc says only now/genRandomUuid are admissible as a
+    // column default; a hand-crafted `.ir.json` carrying a non-nullary synth
+    // (`splitPart`/`concatWs`) MUST be rejected at DESERIALIZE, not deferred to a
+    // render-time blow-up. RED before SynthDefaultFn narrows the type.
+
+    #[test]
+    fn ir_default_fn_rejects_split_part_at_deserialize() {
+        // A column whose default is the synth `splitPart` — splitPart is NOT a
+        // nullary apply-time scalar, so it is not a legal default. The
+        // externally-tagged `IrDefault::Fn` carries its inner synth in the `fn`
+        // field (`{"fn":{"fn":"splitPart"}}`).
+        let json = r#"{"name":"c","type":"text","default":{"fn":{"fn":"splitPart"}}}"#;
+        let err = serde_json::from_str::<IrColumn>(json).unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("splitpart")
+                || err.to_string().contains("unknown variant"),
+            "splitPart must be rejected as a default at deserialize, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ir_default_fn_rejects_concat_ws_at_deserialize() {
+        let json = r#"{"name":"c","type":"text","default":{"fn":{"fn":"concatWs"}}}"#;
+        let err = serde_json::from_str::<IrColumn>(json).unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("concatws")
+                || err.to_string().contains("unknown variant"),
+            "concatWs must be rejected as a default at deserialize, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ir_default_fn_accepts_now_and_gen_random_uuid() {
+        for (wire, want) in [
+            (r#"{"fn":{"fn":"now"}}"#, SynthDefaultFn::Now),
+            (r#"{"fn":{"fn":"genRandomUuid"}}"#, SynthDefaultFn::GenRandomUuid),
+        ] {
+            let d: IrDefault = serde_json::from_str(wire).unwrap();
+            assert_eq!(d, IrDefault::Fn { r#fn: want });
+            // …and round-trips byte-identically (the wire shape is unchanged).
+            assert_eq!(serde_json::to_string(&d).unwrap(), wire);
+        }
     }
 }
