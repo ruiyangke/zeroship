@@ -27,7 +27,21 @@ The `op.*` migration IR's operation enum (`crates/zeroship-migrate/src/ir.rs`,
   unsound schema. The op-list's whole value as a contract is the JSON Schema we
   emit to `op-ir.schema.json`, so the representation must be schemars-derivable.
 
-`IrConstraint` does use `#[serde(flatten)]` to inline its `IrConstraintKind`
-(itself internally-tagged on `"kind"`) — that is a struct flattening one
-internally-tagged enum, which schemars handles, and is distinct from flattening
-the top-level `Op` enum, which this decision forbids.
+`IrConstraint` carries its `IrConstraintKind` (itself internally-tagged on
+`"kind"`) as a **nested object** (`{"name":…,"kind":{"kind":"fk",…}}`), NOT a
+`#[serde(flatten)]` sibling: serde forbids `flatten` together with
+`deny_unknown_fields`, and the nested form keeps the strict-unknown-key gate
+sound while still emitting a clean, schemars-derivable discriminated union.
+
+## The closed expression AST (`Expr`) — same discipline (§3.3.1)
+
+The transform/predicate positions (`update`/`backfill` `set`, `where`, an
+`addCheck` body, a partial-index `where:`) carry the **closed expression AST**
+(`crates/zeroship-migrate/src/expr.rs`, `Expr`), internally-tagged via
+`#[serde(tag = "node")]` + `rename_all = "camelCase"` (`{"node":"colRef",…}`) —
+the identical representation choice as `Op`, for the identical reasons (a stable
+discriminant, a schemars-derivable `oneOf`, an unknown node tag rejected at
+deserialize). The AST is **constructed in JS and serialized as data, NEVER parsed
+from text** — so validation is purely structural (no lexer/parser/fuzzer), and
+there is **no raw-SQL escape** anywhere in the IR (property A): no `Op::Raw`, no
+`op.raw`/`op.sql`, no SQL-string transform fragment.

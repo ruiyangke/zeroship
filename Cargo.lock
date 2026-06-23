@@ -6881,6 +6881,7 @@ dependencies = [
 name = "zeroship-migrate"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "clap",
  "compio",
  "compio-postgres",

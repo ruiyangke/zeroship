@@ -13,7 +13,11 @@
 //!   emits directly. See `docs/decisions/2026-06-23-op-ir-serde-repr.md`.
 //! - **All identifier fields are plain `String`** (§3.3): the IR carries NO
 //!   live-schema binding. Validation that those identifiers exist / are safe is
-//!   Wave C/D, not here.
+//!   the apply/render-time structural validator ([`crate::validate`]), not here.
+//! - **There is NO raw-SQL escape** (property A, §0): no `Op::Raw`, no
+//!   `op.raw`/`op.sql`. Every transform / predicate is the CLOSED expression AST
+//!   ([`Expr`]), never a SQL string. Every byte of SQL the engine applies is
+//!   engine-rendered from this structured data.
 //! - **[`IrScalar`] enforces the constrained numeric domain at DESERIALIZE
 //!   time** (§2.5): a fractional / exponential JS number, or an integer with
 //!   magnitude ≥ 2^53, is REJECTED with an `EXPR_INVALID_NUMERIC` error BEFORE
@@ -27,9 +31,12 @@
 
 use std::collections::BTreeMap;
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::expr::{Expr, SynthFn};
 use crate::migration::OnlinePhase;
 use crate::precondition::PreconditionCheck;
 
@@ -44,12 +51,66 @@ const MAX_EXACT_INT: i64 = 1 << 53; // 9_007_199_254_740_992
 /// loader/validator can match on it.
 pub const EXPR_INVALID_NUMERIC: &str = "EXPR_INVALID_NUMERIC";
 
+/// A non-negative author-supplied STRUCTURAL integer (`batchSize`, `limit`,
+/// `timeout_ms`, …) constrained to the JS safe-integer range `< 2^53` at
+/// DESERIALIZE — the same numeric domain [`IrScalar::Int`] enforces for typed
+/// binds (§2.5).
+///
+/// A JS author carries these as a `number`; `JSON.stringify` of an integer
+/// `>= 2^53` is lossy, so the SAME logical migration would otherwise produce a
+/// different typed value (and a different [`Checksum::of_ir`](crate::migration::Checksum::of_ir))
+/// on the two sides. Bounding them here closes that cross-impl divergence — and
+/// rejects a hostile `.ir.json` that smuggles an out-of-range count past the
+/// loader BEFORE any checksum runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, JsonSchema)]
+#[serde(transparent)]
+pub struct SafeU64(u64);
+
+impl SafeU64 {
+    /// The wrapped value (guaranteed `< 2^53`).
+    #[must_use]
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<SafeU64> for u64 {
+    fn from(v: SafeU64) -> Self {
+        v.0
+    }
+}
+
+impl<'de> Deserialize<'de> for SafeU64 {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        // Funnel through serde_json::Value so a fractional/exponential token is
+        // caught the same way IrScalar catches it — a JS author MUST NOT pass a
+        // float where a count is expected.
+        let v = serde_json::Value::deserialize(de)?;
+        let n = v.as_u64().ok_or_else(|| {
+            D::Error::custom(format!(
+                "{EXPR_INVALID_NUMERIC}: structural integer {v} must be a non-negative \
+                 integer (no fraction/exponent/sign)"
+            ))
+        })?;
+        if n >= MAX_EXACT_INT as u64 {
+            return Err(D::Error::custom(format!(
+                "{EXPR_INVALID_NUMERIC}: structural integer {n} has magnitude >= 2^53; \
+                 it would round in a JS number — keep counts/limits below the JS \
+                 safe-integer boundary"
+            )));
+        }
+        Ok(SafeU64(n))
+    }
+}
+
 /// The portable migration IR document (`.ir.json`, §2.1).
 ///
 /// Deserialized from the JS builder's output. `owner_app` is a HINT — the server
 /// overrides it at submit time (per-table ownership is server-authoritative) —
 /// but the field is carried so the local/dev path and the checksum see it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MigrationIr {
     /// IR wire-format version (bump on a breaking shape change).
     pub ir_version: u32,
@@ -81,7 +142,7 @@ pub struct MigrationIr {
 /// the derive-then-override MERGE is Wave C, NOT this type's job.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct IrFlagsOverride {
     /// Override for `transactional`.
     pub transactional: Option<bool>,
@@ -95,8 +156,8 @@ pub struct IrFlagsOverride {
     pub repeatable: Option<bool>,
     /// Override for `engine_goodie_ddl`.
     pub engine_goodie_ddl: Option<bool>,
-    /// Override for the optional `timeout_ms` facet.
-    pub timeout_ms: Option<u64>,
+    /// Override for the optional `timeout_ms` facet (JS-safe-integer bounded).
+    pub timeout_ms: Option<SafeU64>,
     /// Override for the optional `phase` facet.
     pub phase: Option<OnlinePhase>,
 }
@@ -153,8 +214,31 @@ pub enum ColType {
     },
 }
 
+/// A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —
+/// either a typed scalar literal or an engine-synthesized apply-time scalar
+/// (`now`/`genRandomUuid`). NEVER a raw SQL string (property A); the per-dialect
+/// default clause is rendered by the shared snapshot-builder kernel from this
+/// structured value (§6.5).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub enum IrDefault {
+    /// A typed scalar literal default (constrained numeric domain — §2.5).
+    Literal {
+        /// The literal value.
+        value: IrScalar,
+    },
+    /// An engine-synthesized apply-time default (`now()` / `gen_random_uuid()`),
+    /// rendered per dialect by the kernel (§4.3). Only the no-arg synth scalars
+    /// (`now`, `genRandomUuid`) are admissible as a default.
+    Fn {
+        /// The synthesized function (must be `now` or `genRandomUuid`).
+        r#fn: SynthFn,
+    },
+}
+
 /// A column definition inside a `createTable` / `addColumn` op.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct IrColumn {
     /// Column name.
     pub name: String,
@@ -163,22 +247,22 @@ pub struct IrColumn {
     pub ty: ColType,
     /// Nullability (default dialect behaviour if absent).
     pub nullable: Option<bool>,
-    /// Default expression (a literal / portable expression string).
-    pub default: Option<String>,
+    /// Structured default (a typed literal or a synth scalar) — never raw SQL.
+    pub default: Option<IrDefault>,
     /// Whether the column carries a single-column UNIQUE.
     pub unique: Option<bool>,
 }
 
 /// The kind of a table constraint. CLOSED enum, internally tagged on `"kind"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
 pub enum IrConstraintKind {
     /// PRIMARY KEY over the named columns.
     Pk {
         /// The key columns.
         columns: Vec<String>,
     },
-    /// FOREIGN KEY referencing `(references_table.references_columns)`.
+    /// FOREIGN KEY referencing `(referencesTable.referencesColumns)`.
     Fk {
         /// The referencing columns.
         columns: Vec<String>,
@@ -192,25 +276,31 @@ pub enum IrConstraintKind {
         /// The unique columns.
         columns: Vec<String>,
     },
-    /// CHECK with a portable boolean expression string.
+    /// CHECK with a portable boolean expression (closed AST, never raw SQL).
     Check {
-        /// The check expression.
-        expr: String,
+        /// The check expression (a boolean closed-AST node).
+        expr: Expr,
     },
 }
 
 /// A named table constraint.
+///
+/// `kind` is a NESTED object (`{"name":…,"kind":{"kind":"fk",…}}`), NOT a
+/// flattened sibling — un-flattening makes [`deny_unknown_fields`] sound (serde
+/// forbids `flatten` + `deny_unknown_fields` together) and removes the
+/// flatten-merge ambiguity that made the generated JSON Schema lossy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct IrConstraint {
     /// Optional constraint name (engine-derived if absent).
     pub name: Option<String>,
-    /// The constraint kind + its operands.
-    #[serde(flatten)]
+    /// The constraint kind + its operands (a nested, internally-tagged object).
     pub kind: IrConstraintKind,
 }
 
 /// An index definition inside a `createTable` op.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct IrIndex {
     /// Optional index name (engine-derived if absent).
     pub name: Option<String>,
@@ -218,49 +308,28 @@ pub struct IrIndex {
     pub columns: Vec<String>,
     /// Whether the index is UNIQUE.
     pub unique: Option<bool>,
-    /// Index method (`btree`/`gin`/…); dialect-validated in Wave D.
+    /// Index method (`btree`/`gin`/…); dialect-validated by the validator.
     pub using: Option<String>,
-    /// Partial-index predicate (a portable expression string).
+    /// Partial-index predicate (a closed-AST node, never raw SQL).
     #[serde(rename = "where")]
-    pub r#where: Option<String>,
+    pub r#where: Option<Expr>,
 }
 
 /// A batched-backfill / batched-update knob.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IrBatch {
     /// The cursor column to page over.
     pub cursor_column: String,
-    /// Rows per batch.
-    pub batch_size: u64,
-}
-
-/// A `set` / `where` / `filter` body (§3.3.1.2): a portable SQL TEMPLATE plus
-/// its typed positional binds. The template carries placeholders the lowering
-/// fills; the binds are constrained [`IrScalar`]s. (Template VALIDATION — that
-/// it is a safe portable fragment — is Wave D.)
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct IrFragment {
-    /// The portable fragment template.
-    pub template: String,
-    /// Positional binds, in template order.
-    #[serde(default)]
-    pub binds: Vec<IrScalar>,
-}
-
-/// The reverse half of a [`Op::Raw`] op (dialect-specific down SQL).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct RawDown {
-    /// Postgres reverse SQL.
-    pub pg: Option<String>,
-    /// SQLite reverse SQL.
-    pub sqlite: Option<String>,
+    /// Rows per batch (JS-safe-integer bounded).
+    pub batch_size: SafeU64,
 }
 
 /// The CLOSED `op.*` operation enum (§2.3), internally tagged on `"op"` and
 /// camel-cased (`{"op":"createTable", …}`). NO `untagged`, NO `flatten` on the
 /// enum itself — see the module-level note + the ADR.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "op", rename_all = "camelCase")]
+#[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
 pub enum Op {
     /// `CREATE TABLE` with columns + table constraints + indexes.
     CreateTable {
@@ -295,8 +364,8 @@ pub enum Op {
         ty: ColType,
         /// Nullability.
         nullable: Option<bool>,
-        /// Default expression.
-        default: Option<String>,
+        /// Structured default (typed literal or synth scalar) — never raw SQL.
+        default: Option<IrDefault>,
     },
     /// `ALTER TABLE … DROP COLUMN`.
     DropColumn {
@@ -396,11 +465,11 @@ pub enum Op {
     Update {
         /// Target table.
         table: String,
-        /// Column → fragment assignments (sorted map for canonicality).
-        set: BTreeMap<String, IrFragment>,
-        /// Optional WHERE fragment.
+        /// Column → closed-AST assignment (sorted map for canonicality).
+        set: BTreeMap<String, Expr>,
+        /// Optional WHERE predicate (closed AST).
         #[serde(rename = "where")]
-        r#where: Option<IrFragment>,
+        r#where: Option<Expr>,
         /// Optional batching knob.
         batch: Option<IrBatch>,
     },
@@ -408,11 +477,11 @@ pub enum Op {
     Delete {
         /// Target table.
         table: String,
-        /// The WHERE fragment (mandatory — no unfiltered delete).
+        /// The WHERE predicate (mandatory — no unfiltered delete).
         #[serde(rename = "where")]
-        r#where: IrFragment,
-        /// Optional LIMIT.
-        limit: Option<u64>,
+        r#where: Expr,
+        /// Optional LIMIT (JS-safe-integer bounded).
+        limit: Option<SafeU64>,
     },
     /// A resumable, cursor-paged backfill.
     Backfill {
@@ -420,24 +489,14 @@ pub enum Op {
         table: String,
         /// Cursor column to page over.
         cursor_column: String,
-        /// Rows per batch.
-        batch_size: u64,
-        /// Column → fragment assignments.
-        set: BTreeMap<String, IrFragment>,
-        /// Optional row filter.
-        filter: Option<IrFragment>,
+        /// Rows per batch (JS-safe-integer bounded).
+        batch_size: SafeU64,
+        /// Column → closed-AST assignment.
+        set: BTreeMap<String, Expr>,
+        /// Optional row filter (closed AST).
+        filter: Option<Expr>,
         /// Backfill name (journaled progress key).
         name: String,
-    },
-    /// A dialect-split RAW escape hatch — both `pg` and `sqlite` carried so the
-    /// checksum sees BOTH (a change to either is drift).
-    Raw {
-        /// Postgres forward SQL.
-        pg: Option<String>,
-        /// SQLite forward SQL.
-        sqlite: Option<String>,
-        /// Reverse SQL.
-        down: Option<RawDown>,
     },
 }
 
@@ -460,8 +519,12 @@ pub enum IrScalar {
     Decimal(String),
     /// A UTF-8 string.
     Str(String),
-    /// Raw bytes carried base64-encoded.
-    Bytes(String),
+    /// Raw bytes. Carried on the wire as a canonical base64 string
+    /// (`{"bytes":"…"}`), but stored DECODED so two non-canonical encodings of
+    /// the same payload normalize to one value (and thus one checksum) — the
+    /// cross-impl determinism the §2.5 contract needs. Re-encoded with the
+    /// canonical STANDARD (padded) alphabet on serialize.
+    Bytes(Vec<u8>),
 }
 
 impl Serialize for IrScalar {
@@ -480,8 +543,10 @@ impl Serialize for IrScalar {
                 m.end()
             }
             IrScalar::Bytes(b) => {
+                // Canonical STANDARD (padded) base64 — one encoding per payload.
+                let encoded = BASE64_STANDARD.encode(b);
                 let mut m = ser.serialize_map(Some(1))?;
-                m.serialize_entry("bytes", b)?;
+                m.serialize_entry("bytes", &encoded)?;
                 m.end()
             }
         }
@@ -568,7 +633,14 @@ impl<'de> Deserialize<'de> for IrScalar {
                     let s = b.as_str().ok_or_else(|| {
                         D::Error::custom("IrScalar bytes must be a base64 string")
                     })?;
-                    Ok(IrScalar::Bytes(s.to_string()))
+                    // Strict decode (rejects invalid alphabet / wrong padding) so
+                    // garbage cannot fold into the checksum and explode at lowering.
+                    let decoded = BASE64_STANDARD.decode(s).map_err(|e| {
+                        D::Error::custom(format!(
+                            "IrScalar bytes is not valid canonical base64: {e}"
+                        ))
+                    })?;
+                    Ok(IrScalar::Bytes(decoded))
                 } else {
                     Err(D::Error::custom(
                         "IrScalar object key must be \"decimal\" or \"bytes\"",
@@ -624,8 +696,8 @@ impl JsonSchema for IrScalar {
 /// §2.4-point-2 byte image: each `Op` is serialized to `serde_json::Value`,
 /// RFC 8785 (JCS) canonicalized (object keys sorted recursively), and folded
 /// LENGTH-PREFIXED in op order — so a reorder, insert, or any field change
-/// (including either string of a `Raw` op, which both live inside the op value)
-/// shifts the bytes.
+/// (including an embedded expression-AST `Literal`, which lives inside the op
+/// value) shifts the bytes.
 #[derive(Debug, Clone, Copy)]
 pub struct CanonicalOpList<'a>(pub &'a [Op]);
 
@@ -700,10 +772,16 @@ fn jcs_write(value: &serde_json::Value, out: &mut String) {
             out.push(']');
         }
         serde_json::Value::Object(map) => {
-            // Sort keys lexicographically (byte order over the ASCII keys the IR
-            // uses == UTF-16 code-unit order for that subset).
+            // RFC 8785 §3.2.3 mandates object keys are sorted by their UTF-16
+            // code-unit sequence. For the ASCII serde field names the closed IR
+            // schema uses this equals byte order — but an author-supplied map key
+            // (an `Update`/`Backfill` `set` COLUMN name) MAY be non-ASCII, and
+            // Rust's `str` Ord is UTF-8-scalar order, which diverges from UTF-16
+            // for supplementary-plane (U+10000+) code points. We sort by the
+            // actual UTF-16 code-unit sequence so a conformant JS JCS serializer
+            // agrees byte-for-byte regardless of the key alphabet.
             let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort_unstable();
+            keys.sort_unstable_by(|a, b| utf16_code_unit_cmp(a, b));
             out.push('{');
             for (i, k) in keys.iter().enumerate() {
                 if i > 0 {
@@ -716,6 +794,16 @@ fn jcs_write(value: &serde_json::Value, out: &mut String) {
             out.push('}');
         }
     }
+}
+
+/// Compare two strings by their UTF-16 code-unit sequence (RFC 8785 §3.2.3
+/// object-key ordering). Lexicographic over the `u16` code units `encode_utf16`
+/// yields — which for BMP characters equals scalar order, but for supplementary-
+/// plane characters (U+10000+) differs from Rust's UTF-8-scalar `str` Ord
+/// (their surrogate-pair lead unit `0xD800..` sorts BELOW BMP code points above
+/// `0xE000`). This is the exact comparison a conformant JS JCS serializer uses.
+fn utf16_code_unit_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    a.encode_utf16().cmp(b.encode_utf16())
 }
 
 /// JSON-escape a string per RFC 8785 §3.2.2.2 (minimal escaping: the two-char
@@ -811,7 +899,7 @@ mod tests {
         assert_eq!(serde_json::from_str::<IrScalar>("null").unwrap(), IrScalar::Null);
         assert_eq!(
             serde_json::from_str::<IrScalar>(r#"{"bytes":"AAEC"}"#).unwrap(),
-            IrScalar::Bytes("AAEC".to_string())
+            IrScalar::Bytes(vec![0x00, 0x01, 0x02])
         );
     }
 
@@ -823,7 +911,7 @@ mod tests {
             IrScalar::Int(-9_007_199_254_740_991),
             IrScalar::Decimal("0.001".to_string()),
             IrScalar::Str("x".to_string()),
-            IrScalar::Bytes("AAEC".to_string()),
+            IrScalar::Bytes(vec![0x00, 0x01, 0x02]),
         ] {
             let s = serde_json::to_string(&v).unwrap();
             let back: IrScalar = serde_json::from_str(&s).unwrap();
@@ -885,6 +973,28 @@ mod tests {
     fn jcs_sorts_object_keys() {
         let v = serde_json::json!({ "b": 1, "a": 2, "c": { "z": 1, "y": 2 } });
         assert_eq!(jcs_encode(&v), r#"{"a":2,"b":1,"c":{"y":2,"z":1}}"#);
+    }
+
+    #[test]
+    fn utf16_key_order_differs_from_utf8_scalar_order() {
+        // U+10000 (supplementary plane) vs U+FFFF (BMP). UTF-8-scalar order puts
+        // U+FFFF first (0xFFFF < 0x10000); UTF-16 order puts U+10000 first (its
+        // lead surrogate 0xD800 < 0xFFFF). RFC 8785 demands the UTF-16 order.
+        let hi = "\u{10000}"; // supplementary
+        let bmp = "\u{ffff}"; // BMP
+        // Sanity: the two orderings genuinely disagree here.
+        assert_eq!(hi.cmp(bmp), std::cmp::Ordering::Greater, "UTF-8 scalar: hi > bmp");
+        assert_eq!(
+            utf16_code_unit_cmp(hi, bmp),
+            std::cmp::Ordering::Less,
+            "UTF-16 code-unit: hi < bmp"
+        );
+        // And the encoder uses the UTF-16 order: the supplementary key sorts FIRST.
+        let v = serde_json::json!({ bmp: 1, hi: 2 });
+        let encoded = jcs_encode(&v);
+        let hi_pos = encoded.find(hi).unwrap();
+        let bmp_pos = encoded.find(bmp).unwrap();
+        assert!(hi_pos < bmp_pos, "JCS must sort keys by UTF-16 code unit: {encoded}");
     }
 
     #[test]

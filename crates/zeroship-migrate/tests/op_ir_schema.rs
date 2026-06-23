@@ -96,7 +96,6 @@ fn op_variant_names_from_schema() {
         "update",
         "delete",
         "backfill",
-        "raw",
     ]
     .iter()
     .map(|s| (*s).to_string())
