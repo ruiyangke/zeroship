@@ -33,6 +33,35 @@ The `op.*` migration IR's operation enum (`crates/zeroship-migrate/src/ir.rs`,
 `deny_unknown_fields`, and the nested form keeps the strict-unknown-key gate
 sound while still emitting a clean, schemars-derivable discriminated union.
 
+## Wire-tag pins (the discriminant strings the JS builder emits)
+
+The `"op"` discriminant for each variant is the camelCased Rust variant name. One
+pin is non-obvious and is recorded here so a JS-builder author does not guess:
+
+- **`del()` records `{"op":"delete"}`, NOT `{"op":"del"}`.** The JS DSL exposes
+  the delete op-function as `del` (the bare word `delete` is a JS reserved word
+  and cannot be a clean named export), but the recorded IR discriminant is the
+  full camelCased variant `"delete"` (`Op::Delete` → `rename_all="camelCase"` →
+  `"delete"`). The Rust loader, the `op-ir.schema.json` `oneOf` branch
+  (`properties.op.const == "delete"`), and the Wave-E exhaustiveness gate all key
+  on `"delete"`. A `.ir.json` carrying `{"op":"del"}` is an unknown-variant reject
+  at deserialize. (The `Op::Delete` doc-comment in `ir.rs` carries the same pin,
+  which flows into the generated schema's branch description.)
+
+## The advisory `checksum` hint field on `MigrationIr`
+
+`MigrationIr` carries an optional `checksum: Option<String>` field (§2.4 point 2):
+an ADVISORY integrity hint the builder MAY emit, holding the hex `Checksum::of_ir`
+over the hint domain (`ops` + `flags` + `depends_on` + `supersedes` +
+`preconditions` — **never** `owner_app`, which is server-stamped and so
+unpredictable to the builder). The engine RECOMPUTES and is authoritative; when
+present the loader compares its recomputed hint-domain checksum to the hint (a
+mismatch is genuine drift). The hint is **EXCLUDED from `Checksum::of_ir`** (just
+as `owner_app` is excluded from the hint domain) — folding an artifact's own
+checksum into that artifact's checksum would be circular. Because `MigrationIr`
+carries `deny_unknown_fields`, the §2.4-permitted hint must be modelled
+explicitly or a hint-bearing `.ir.json` would be rejected at deserialize.
+
 ## The closed expression AST (`Expr`) — same discipline (§3.3.1)
 
 The transform/predicate positions (`update`/`backfill` `set`, `where`, an

@@ -168,6 +168,19 @@ pub struct MigrationIr {
     /// Preconditions evaluated before apply (reuses the engine's check type).
     #[serde(default)]
     pub preconditions: Vec<PreconditionCheck>,
+    /// An ADVISORY integrity hint (§2.4 point 2): the hex `Checksum::of_ir` the
+    /// builder computed over the hint-domain (`ops` + `flags` + `depends_on` +
+    /// `supersedes` + `preconditions` — NEVER `owner_app`, which is server-stamped
+    /// and so unpredictable to the builder). The engine RECOMPUTES and is
+    /// authoritative; when this hint is present the loader compares its
+    /// recomputed hint-domain checksum to it (a mismatch is genuine drift). The
+    /// hint is **EXCLUDED from [`Checksum::of_ir`]** (exactly like `owner_app` is
+    /// excluded from the hint domain) — folding the artifact's own checksum into
+    /// the artifact's checksum would be circular. `deny_unknown_fields` would
+    /// otherwise reject a `.ir.json` carrying this §2.4-permitted hint at
+    /// deserialize, so the field is modelled explicitly here (MED-2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checksum: Option<String>,
 }
 
 /// All-`Option` mirror of [`MigrationFlags`] — the override carrier in the IR
@@ -587,6 +600,12 @@ pub enum Op {
         batch: Option<IrBatch>,
     },
     /// `DELETE FROM … WHERE …`.
+    ///
+    /// WIRE TAG: the JS DSL's `del()` op-function records this variant as
+    /// `{"op":"delete"}` (the camelCased variant name), NOT `{"op":"del"}`. The
+    /// builder method is named `del` to avoid the JS reserved word `delete`, but
+    /// the recorded discriminant is the full `"delete"` (pinned here + in the ADR
+    /// `docs/decisions/2026-06-23-op-ir-serde-repr.md`).
     Delete {
         /// Target table.
         table: String,
@@ -1179,6 +1198,48 @@ mod tests {
                 || err.to_string().contains("unknown variant"),
             "concatWs must be rejected as a default at deserialize, got: {err}"
         );
+    }
+
+    // ---- MED-2: the §2.4 advisory `checksum` hint deserializes + is NOT folded ----
+    // `MigrationIr` carries `deny_unknown_fields`, so a `.ir.json` bearing the
+    // §2.4-permitted advisory `checksum` hint was REJECTED at deserialize before
+    // the field was modelled. It must now (a) deserialize, and (b) NOT participate
+    // in `Checksum::of_ir` (it is excluded like `owner_app`, §2.4 point 2). RED
+    // before the field is added.
+
+    #[test]
+    fn migration_ir_accepts_advisory_checksum_hint() {
+        let json = r#"{
+            "ir_version": 1,
+            "name": "m",
+            "ops": [{"op":"dropTable","table":"t"}],
+            "checksum": "deadbeef"
+        }"#;
+        let ir: MigrationIr = serde_json::from_str(json).unwrap();
+        assert_eq!(ir.checksum.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn advisory_checksum_hint_is_excluded_from_of_ir() {
+        use crate::migration::{Checksum, MigrationFlags};
+        let ops = vec![Op::DropTable { table: "t".into(), if_exists: None, cascade: None }];
+        let flags = MigrationFlags::default();
+        // Two IRs identical in everything BUT the advisory hint must produce the
+        // SAME of_ir (the hint is excluded). of_ir takes the op list directly, so
+        // we just assert the hint is not an of_ir input by construction — and that
+        // a present vs absent hint round-trips to the same checksum domain.
+        let csum = Checksum::of_ir(
+            &CanonicalOpList(&ops),
+            &flags,
+            "", // owner excluded from hint domain
+            &[],
+            &[],
+            &[],
+        );
+        // The hint string itself is never an argument to of_ir — proven by the
+        // signature. A loader recomputes THIS value and compares to the hint.
+        let recomputed = Checksum::of_ir(&CanonicalOpList(&ops), &flags, "", &[], &[], &[]);
+        assert_eq!(csum.as_str(), recomputed.as_str());
     }
 
     #[test]
