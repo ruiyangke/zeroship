@@ -888,15 +888,15 @@
           "additionalProperties": false
         },
         {
-          "description": "An engine-synthesized apply-time default (`now()` / `gen_random_uuid()`),\nrendered per dialect by the kernel (§4.3). Only the no-arg synth scalars\n(`now`, `genRandomUuid`) are admissible as a default.",
+          "description": "An engine-synthesized apply-time default (`now()` / `gen_random_uuid()`),\nrendered per dialect by the kernel (§4.3). Constrained at the TYPE level to\nthe two nullary synth scalars ([`SynthDefaultFn`]) — a non-nullary synth is\nrejected at deserialize, not at render.",
           "type": "object",
           "properties": {
             "fn": {
               "type": "object",
               "properties": {
                 "fn": {
-                  "description": "The synthesized function (must be `now` or `genRandomUuid`).",
-                  "$ref": "#/$defs/SynthFn"
+                  "description": "The synthesized function (`now` or `genRandomUuid`).",
+                  "$ref": "#/$defs/SynthDefaultFn"
                 }
               },
               "additionalProperties": false,
@@ -954,19 +954,9 @@
         }
       ]
     },
-    "SynthFn": {
-      "description": "The engine-SYNTHESIZED helpers (`FnSynth`) whose per-dialect lowering the\nengine pins (§9). CLOSED. `splitPart` is admitted only within its pinned\nsingle-ASCII-delimiter + positive-literal-`n` envelope (validated structurally\n— §3.3.1.1(b)); `concatWs` is the NULL-skipping join; `now`/`genRandomUuid`\nare apply-time DB-evaluated scalars (the structured replacement for a frozen\n`Date.now()` / UUID literal, §4.3).",
+    "SynthDefaultFn": {
+      "description": "The CLOSED set of synth scalars admissible as a COLUMN DEFAULT — the two\nNULLARY apply-time scalars only (§4.3). A dedicated 2-variant enum (NOT the\nfull [`SynthFn`]) makes the fail-closed property STRUCTURAL: serde rejects a\nnon-nullary synth (`splitPart`/`concatWs`) as an unknown variant at\nDESERIALIZE, so a hand-crafted `.ir.json` carrying `{\"fn\":\"splitPart\"}` as a\ndefault cannot pass the loader and defer the blow-up to rendering. The wire\ntokens match [`SynthFn`]'s (`\"now\"`, `\"genRandomUuid\"`) so the on-disk bytes\nare unchanged from the pre-narrowing type.",
       "oneOf": [
-        {
-          "description": "NULL-skipping `concat_ws` (PG) / `coalesce`-folded `||` (SQLite).",
-          "type": "string",
-          "const": "concatWs"
-        },
-        {
-          "description": "`split_part` (PG) / pinned `instr`/`substr` unroll (SQLite), in-envelope only.",
-          "type": "string",
-          "const": "splitPart"
-        },
         {
           "description": "`now()` / current timestamp, evaluated at apply time.",
           "type": "string",
@@ -1469,6 +1459,31 @@
         }
       ]
     },
+    "SynthFn": {
+      "description": "The engine-SYNTHESIZED helpers (`FnSynth`) whose per-dialect lowering the\nengine pins (§9). CLOSED. `splitPart` is admitted only within its pinned\nsingle-ASCII-delimiter + positive-literal-`n` envelope (validated structurally\n— §3.3.1.1(b)); `concatWs` is the NULL-skipping join; `now`/`genRandomUuid`\nare apply-time DB-evaluated scalars (the structured replacement for a frozen\n`Date.now()` / UUID literal, §4.3).",
+      "oneOf": [
+        {
+          "description": "NULL-skipping `concat_ws` (PG) / `coalesce`-folded `||` (SQLite).",
+          "type": "string",
+          "const": "concatWs"
+        },
+        {
+          "description": "`split_part` (PG) / pinned `instr`/`substr` unroll (SQLite), in-envelope only.",
+          "type": "string",
+          "const": "splitPart"
+        },
+        {
+          "description": "`now()` / current timestamp, evaluated at apply time.",
+          "type": "string",
+          "const": "now"
+        },
+        {
+          "description": "`gen_random_uuid()`, evaluated at apply time.",
+          "type": "string",
+          "const": "genRandomUuid"
+        }
+      ]
+    },
     "CastTarget": {
       "description": "The closed portable cast-target set (§3.3.1). A non-portable cast target is\nrejected (`UNSUPPORTED { kind: \"expr\" }`).",
       "oneOf": [
@@ -1607,10 +1622,10 @@
       ]
     },
     "SafeU64": {
-      "description": "A non-negative author-supplied STRUCTURAL integer (`batchSize`, `limit`,\n`timeout_ms`, …) constrained to the JS safe-integer range `< 2^53` at\nDESERIALIZE — the same numeric domain [`IrScalar::Int`] enforces for typed\nbinds (§2.5).\n\nA JS author carries these as a `number`; `JSON.stringify` of an integer\n`>= 2^53` is lossy, so the SAME logical migration would otherwise produce a\ndifferent typed value (and a different [`Checksum::of_ir`](crate::migration::Checksum::of_ir))\non the two sides. Bounding them here closes that cross-impl divergence — and\nrejects a hostile `.ir.json` that smuggles an out-of-range count past the\nloader BEFORE any checksum runs.",
       "type": "integer",
       "format": "uint64",
-      "minimum": 0
+      "minimum": 0,
+      "maximum": 9007199254740991
     },
     "IrFlagsOverride": {
       "description": "All-`Option` mirror of [`MigrationFlags`] — the override carrier in the IR\n(§2.1). An absent key and an explicit `null` both mean \"no override\" here;\nthe derive-then-override MERGE is Wave C, NOT this type's job.",

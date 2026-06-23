@@ -169,7 +169,8 @@ pub use migration::{
 // every transform/predicate is the closed [`expr::Expr`] AST.
 pub use ir::{
     CanonicalOpList, ColType, IndexMethod, IrBatch, IrColumn, IrConstraint, IrConstraintKind,
-    IrDefault, IrFlagsOverride, IrIndex, IrScalar, MigrationIr, Op, SafeU64, EXPR_INVALID_NUMERIC,
+    IrDefault, IrFlagsOverride, IrIndex, IrScalar, MigrationIr, Op, SafeU64, SynthDefaultFn,
+    EXPR_INVALID_NUMERIC,
 };
 // The closed expression AST (§3.3.1) the IR's transform/predicate positions
 // carry. Constructed in JS, serialized as data, NEVER parsed from text.

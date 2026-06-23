@@ -185,6 +185,33 @@ fn structural_ints_below_2pow53_accepted() {
     }
 }
 
+/// The `SafeU64` JSON Schema MUST carry the same `< 2^53` upper bound the Rust
+/// deserializer enforces (code-critic MED): `batchSize`/`limit`/`timeout_ms` are
+/// exactly the JS-safe-integer boundary `SafeU64` exists to police, and the
+/// schemars schema is the single source a JS best-effort hint validates against.
+/// Without `maximum`, a schema-driven JS validator would ACCEPT a `2^53` count
+/// the Rust loader REJECTS — a schema/loader divergence on the determinism
+/// boundary. RED before `SafeU64` gets a hand-written `JsonSchema`.
+#[test]
+fn safe_u64_schema_carries_the_2pow53_upper_bound() {
+    let schema = schemars::schema_for!(MigrationIr);
+    let value: serde_json::Value = serde_json::to_value(&schema).expect("schema -> value");
+    let def = value
+        .get("$defs")
+        .and_then(|d| d.get("SafeU64"))
+        .expect("schema must define $defs/SafeU64");
+    assert_eq!(
+        def.get("minimum").and_then(serde_json::Value::as_i64),
+        Some(0),
+        "SafeU64 schema must pin minimum:0"
+    );
+    assert_eq!(
+        def.get("maximum").and_then(serde_json::Value::as_i64),
+        Some(9_007_199_254_740_991),
+        "SafeU64 schema must pin maximum:2^53-1 to match the Rust deserializer"
+    );
+}
+
 // ----------------------------------------------------------------------------
 // base64 bytes — validate + canonicalize at load
 // ----------------------------------------------------------------------------
