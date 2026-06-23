@@ -1,0 +1,12 @@
+# journal (#i|phase|kind), net order
+#0|Completed|Some(Apply)
+#1|Completed|Some(Apply)
+# people table_info (cid name type notnull)
+0 id TEXT 0
+1 created_at TEXT 1
+2 updated_at TEXT 1
+3 created_by TEXT 0
+4 updated_by TEXT 0
+5 version INTEGER 1
+6 deleted_at TEXT 0
+7 handle TEXT 1

@@ -158,6 +158,10 @@ pub enum BackfillError {
     /// A progress / journal-schema operation failed.
     #[error(transparent)]
     Journal(#[from] JournalError),
+    /// A test-only injected fault (simulated crash) at a batch boundary. Inert in
+    /// production (no fault is ever armed); see [`crate::fault`].
+    #[error("backfill fault-injection: {0}")]
+    Fault(String),
     /// A backfill is destructive-ish data mutation, so it requires
     /// [`Approval::Approved`]. With [`Approval::None`] this is refused before any
     /// batch runs — the executor's own defense-in-depth approval gate (design
@@ -804,6 +808,13 @@ pub async fn run_backfill_bounded(
         batches += 1;
         rows_updated += n;
         last_cursor = max_cursor;
+        // Fault seam (test-only): a simulated crash BETWEEN batches — the last
+        // batch's UPDATE + cursor advance already COMMITted, but the backfill is
+        // NOT marked complete, so a resume reads the committed cursor and finishes
+        // the tail (the §5 resumability invariant).
+        if let Err(e) = crate::fault::trip(crate::fault::points::BACKFILL_MID_BATCHES) {
+            return Err(BackfillError::Fault(e.to_string()));
+        }
         // A short batch (fewer than batch_size rows) means the window had no more
         // rows after it — the table tail is reached.
         if n < u64::from(spec.batch_size) {

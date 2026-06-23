@@ -309,6 +309,7 @@ async fn standalone_dml_step_applies_and_is_idempotent() {
         binds: vec![BindValue::Text("hello".into()), BindValue::Text("world".into())],
         transactional: true,
         destructive: false,
+        owner_app: "app_test".to_string(),
     };
 
     let engine = MigrationEngine::new();
@@ -345,6 +346,7 @@ async fn standalone_dml_step_applies_and_is_idempotent() {
         binds: vec![BindValue::Text("hello".into()), BindValue::Text("world".into())],
         transactional: true,
         destructive: false,
+        owner_app: "app_test".to_string(),
     };
     let out2 = engine
         .apply_plan(
@@ -377,6 +379,7 @@ async fn standalone_dml_step_applies_and_is_idempotent() {
         ],
         transactional: true,
         destructive: false,
+        owner_app: "app_test".to_string(),
     };
     engine
         .apply_plan(
@@ -748,35 +751,72 @@ async fn golden_trace_declarative_refusal_and_idempotent_reapply() {
 }
 
 // ---------------------------------------------------------------------------
-// (12) PROPERTY-BASED CRASH FUZZ — resume from any crash point reaches the
-//      same final DB + journal as the no-crash apply.
+// (12) PROPERTY-BASED CRASH FUZZ — resume from a crash at SUB-STEP / journal-write
+//      granularity reaches the SAME final DB + the SAME FULL ORDERED journal trace
+//      as the no-crash apply, cross-checked against an explicit model of the legal
+//      journal phase transitions (code-critic HIGH #2).
+//
+// Stronger than a whole-step prefix:
+//   - crashes are injected at INTRA-step boundaries via the executor fault seam
+//     (`fault::arm`): mid-DML (after the statement, before the journal row; and
+//     after the journal row, before COMMIT), mid-backfill (between committed
+//     batches), and BETWEEN an online rename's E1+E2 and its E3 backfill — exactly
+//     the partial-step / partial-journal-write / expand-contract-phase boundaries
+//     a whole-step prefix can NEVER reach;
+//   - the generated plan INCLUDES a `PlanStep::OnlineRename(PgExpandContract)` so
+//     the most fragile resume path (the expand-contract phase boundary) is fuzzed;
+//   - the assertion is the FULL ORDERED journal trace (not a sorted-deduped length)
+//     plus the materialized data, cross-checked against a state-machine model.
 // ---------------------------------------------------------------------------
 
-/// A small deterministic in-grammar plan generator: a CREATE TABLE spine + N
-/// add-column DDL steps + a Dml seed + a backfill, parameterized by a seed so the
-/// generated plan is reproducible. The "crash injection" is modeled by applying a
-/// PREFIX of the steps (a crash after step k leaves steps 0..k journaled), then
-/// resuming with the WHOLE plan and asserting the final DB + journal equals the
-/// no-crash apply. Because each step journals independently and re-runs net-skip,
-/// resume-from-any-prefix must converge.
-fn gen_plan(seed: u64, schema: &str) -> Vec<PlanStep> {
+/// The named sub-step fault boundaries the executor trips at, mirrored from
+/// `zeroship_migrate::fault::points` (the journal-state-machine model: the set of
+/// legal crash boundaries). A crash at ANY of these must converge on resume.
+fn fault_boundaries() -> &'static [&'static str] {
+    use zeroship_migrate::fault::points::*;
+    &[
+        DML_AFTER_STMT_BEFORE_JOURNAL,
+        DML_AFTER_JOURNAL_BEFORE_COMMIT,
+        BACKFILL_MID_BATCHES,
+        EXPAND_BETWEEN_E2_AND_BACKFILL,
+    ]
+}
+
+/// Build the fuzz plan: a CREATE-TABLE spine (seeded rows for the backfill +
+/// the online-rename mirror), a Dml seed, `n_cols` add-column DDLs, a Backfill,
+/// and — the new part — an online rename `email → email_address`
+/// (`PgExpandContract`) so the expand-contract phase boundary is exercised. The
+/// rename is authored against the live `cfg`'s schema.
+fn gen_fuzz_plan(seed: u64, cfg: &ExecutorConfig) -> Vec<PlanStep> {
+    let schema = &cfg.project_schema;
     let s = q(schema);
     let n_cols = 1 + (seed % 3); // 1..3 add-column steps
     let mut steps: Vec<PlanStep> = Vec::new();
+    // Create with several seed rows so the backfill + the expand backfill page
+    // over real data (batch_size below the row count to force multiple batches).
     steps.push(PlanStep::Ddl(ddl(
         1,
         "create_f",
         schema,
-        &format!("CREATE TABLE {s}.f (id bigint PRIMARY KEY, src text)"),
+        &format!(
+            "CREATE TABLE {s}.f (id bigint PRIMARY KEY, src text, email text); \
+             INSERT INTO {s}.f (id, src, email) \
+             SELECT g, 'RAW' || g, 'u' || g || '@x.test' FROM generate_series(1, 5) g"
+        ),
         None,
     )));
     steps.push(PlanStep::Dml {
         version: zeroship_migrate::migration_id_for_version(10),
         name: "seed_f".to_string(),
-        template: format!("INSERT INTO {s}.f (id, src) VALUES ($1, $2)"),
-        binds: vec![BindValue::Int(1), BindValue::Text("RAW".into())],
+        template: format!("INSERT INTO {s}.f (id, src, email) VALUES ($1, $2, $3)"),
+        binds: vec![
+            BindValue::Int(99),
+            BindValue::Text("RAW99".into()),
+            BindValue::Text("u99@x.test".into()),
+        ],
         transactional: true,
         destructive: false,
+        owner_app: "app_test".to_string(),
     });
     for c in 0..n_cols {
         steps.push(PlanStep::Ddl(ddl(
@@ -790,35 +830,27 @@ fn gen_plan(seed: u64, schema: &str) -> Vec<PlanStep> {
     steps.push(PlanStep::Backfill(BackfillSpec {
         table: "f".to_string(),
         cursor_column: "id".to_string(),
-        batch_size: 100,
+        batch_size: 2, // < 6 rows ⇒ multiple committed batches (mid-batch crash)
         set_clause: "c0 = lower(src)".to_string(),
         filter: Some("c0 IS NULL".to_string()),
         name: "bf_c0".to_string(),
     }));
+    // The online rename email → email_address (PgExpandContract) — its own E1/E2/
+    // backfill/E3 with the expand-contract phase boundary.
+    let rename = ExpandContractAuthor::new(schema, "app_test")
+        .author(&OnlineIntent::RenameColumn {
+            table: "f".into(),
+            from: "email".into(),
+            to: "email_address".into(),
+            ty: "text".into(),
+        })
+        .expect("author online rename");
+    steps.push(PlanStep::OnlineRename(RenameStep::PgExpandContract(rename)));
     steps
 }
 
-async fn apply_prefix_then_full(
-    conn: &Client,
-    cfg: &ExecutorConfig,
-    steps: &[PlanStep],
-    crash_after: usize,
-) {
+async fn apply_whole(conn: &Client, cfg: &ExecutorConfig, steps: &[PlanStep]) -> bool {
     let engine = MigrationEngine::new();
-    // Crash injection: apply only the prefix [0..crash_after], simulating a crash
-    // that journaled those steps, then resume with the WHOLE plan.
-    if crash_after > 0 {
-        let _ = engine
-            .apply_plan(
-                &steps[..crash_after],
-                Approval::Approved,
-                &zeroship_migrate::PostgresBackend::new(conn),
-                cfg,
-                "app_test",
-                zeroship_migrate::executor::LockMode::Acquire,
-            )
-            .await;
-    }
     engine
         .apply_plan(
             steps,
@@ -829,62 +861,151 @@ async fn apply_prefix_then_full(
             zeroship_migrate::executor::LockMode::Acquire,
         )
         .await
-        .expect("resume-from-prefix completes");
+        .is_ok()
 }
 
-/// The final DB+journal fingerprint: net-applied journal versions (sorted) + the
-/// row's backfilled value — the model the crash fuzz cross-checks.
-async fn fingerprint(conn: &Client, cfg: &ExecutorConfig) -> (Vec<String>, Option<String>) {
-    let mut versions = journal_trace(conn, cfg).await;
-    versions.sort();
-    versions.dedup();
-    let s = q(&cfg.project_schema);
-    let val = conn
-        .query_opt(&format!("SELECT c0 FROM {s}.f WHERE id = 1"), &[])
+/// The full ordered journal trace BY STEP NAME (the per-event `name` column, in
+/// `event_seq` order). Step names are schema-INDEPENDENT (unlike the
+/// schema-derived version ids), so the no-crash golden and a crash-resumed run in
+/// a DIFFERENT schema are comparable byte-for-byte.
+async fn journal_name_trace(conn: &Client, cfg: &ExecutorConfig) -> Vec<String> {
+    let rows = conn
+        .query(
+            &format!(
+                "SELECT name FROM \"{}\".schema_migrations \
+                 WHERE phase = 'completed' AND event_kind = 'applied' ORDER BY event_seq ASC",
+                cfg.pg.meta_schema
+            ),
+            &[],
+        )
         .await
-        .ok()
-        .flatten()
-        .and_then(|r| r.try_get::<_, Option<String>>(0).ok().flatten());
-    (versions, val)
+        .expect("query journal name trace");
+    rows.iter().map(|r| r.get::<_, String>(0)).collect()
+}
+
+/// The convergence fingerprint: the FULL ORDERED journal trace (by name) + the
+/// raw ordered VERSION trace (for the duplicate-detection model cross-check) + the
+/// backfilled `c0` values + the mirrored `email_address` values — the complete
+/// model the crash fuzz cross-checks (not a sorted-deduped length).
+async fn fuzz_fingerprint(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+) -> (Vec<String>, Vec<String>, Vec<Option<String>>, Vec<Option<String>>) {
+    let name_trace = journal_name_trace(conn, cfg).await; // ORDERED, schema-stable
+    let version_trace = journal_trace(conn, cfg).await; // ORDERED versions (dup check)
+    let s = q(&cfg.project_schema);
+    let rows = conn
+        .query(
+            &format!("SELECT c0, email_address FROM {s}.f ORDER BY id"),
+            &[],
+        )
+        .await
+        .expect("read materialized data");
+    let c0: Vec<Option<String>> = rows.iter().map(|r| r.get::<_, Option<String>>(0)).collect();
+    let mirrored: Vec<Option<String>> =
+        rows.iter().map(|r| r.get::<_, Option<String>>(1)).collect();
+    (name_trace, version_trace, c0, mirrored)
 }
 
 #[compio::test]
-async fn crash_fuzz_resume_from_any_point_converges() {
+async fn crash_fuzz_resume_from_any_subistep_boundary_converges() {
     let conn = pg().await;
 
-    for seed in 0u64..4 {
-        // Baseline: a clean no-crash apply of the generated plan.
+    for seed in 0u64..3 {
+        // Baseline: a clean no-crash apply (no fault armed) → the GOLDEN full
+        // ordered journal trace + materialized data.
+        zeroship_migrate::fault::disarm_all();
         let cfg_base = cfg_for(&token());
         setup(&conn, &cfg_base).await;
-        let steps_base = gen_plan(seed, &cfg_base.project_schema);
-        apply_prefix_then_full(&conn, &cfg_base, &steps_base, 0).await;
-        let golden = fingerprint(&conn, &cfg_base).await;
+        let steps_base = gen_fuzz_plan(seed, &cfg_base);
+        assert!(
+            apply_whole(&conn, &cfg_base, &steps_base).await,
+            "seed {seed}: the no-crash baseline applies cleanly"
+        );
+        let golden = fuzz_fingerprint(&conn, &cfg_base).await;
         teardown(&conn, &cfg_base).await;
+        // The golden trace is non-trivial: it covers the DDL spine, the DML, the
+        // backfill, and the online rename's E1/E2/E3.
+        assert!(
+            golden.0.len() >= 4,
+            "seed {seed}: the golden journal trace covers every phase, got {:?}",
+            golden.0
+        );
+        // The online-rename mirror populated the new column for every row.
+        assert!(
+            golden.3.iter().all(Option::is_some),
+            "seed {seed}: the expand backfill mirrored every row, got {:?}",
+            golden.3
+        );
 
-        // For every crash point, a fresh DB resumes and must reach the SAME
-        // fingerprint as the no-crash apply.
-        let n = steps_base.len();
-        for crash_after in 1..=n {
+        // For EACH sub-step fault boundary: a fresh DB, arm that one fault, apply
+        // (it CRASHES mid-step at that boundary), then resume with no fault armed
+        // and assert convergence to the GOLDEN full ordered trace + data.
+        for &boundary in fault_boundaries() {
             let cfg = cfg_for(&token());
             setup(&conn, &cfg).await;
-            let steps = gen_plan(seed, &cfg.project_schema);
-            apply_prefix_then_full(&conn, &cfg, &steps, crash_after).await;
-            let got = fingerprint(&conn, &cfg).await;
+            let steps = gen_fuzz_plan(seed, &cfg);
+
+            // Crash injection at this sub-step boundary.
+            zeroship_migrate::fault::arm(boundary, 0);
+            let first = apply_whole(&conn, &cfg, &steps).await;
+            // EVERY boundary in `fault_boundaries()` is on this plan's path (the
+            // plan has a DML, a multi-batch backfill — 6 rows / batch_size 2 — and
+            // an online rename), so the first apply MUST have CRASHED at the armed
+            // boundary (the seam fired). This is what gives the fuzz teeth: if the
+            // seam were a no-op the first apply would succeed and the test would be
+            // vacuous.
+            assert!(
+                !first,
+                "seed {seed}, boundary {boundary}: the armed fault did NOT fire — \
+                 the first apply unexpectedly succeeded (the crash injection is \
+                 inert, so the resume below would prove nothing)"
+            );
+            zeroship_migrate::fault::disarm_all();
+            // Resume — must complete and converge regardless of whether the first
+            // attempt crashed.
+            assert!(
+                apply_whole(&conn, &cfg, &steps).await,
+                "seed {seed}, boundary {boundary}: resume after the simulated crash \
+                 must complete"
+            );
+
+            let got = fuzz_fingerprint(&conn, &cfg).await;
+            // (1) the FULL ORDERED journal trace (by schema-stable step name)
+            //     converges byte-for-byte with the no-crash golden;
             assert_eq!(
-                got.1, golden.1,
-                "seed {seed}, crash_after {crash_after}: backfilled value diverged"
+                got.0, golden.0,
+                "seed {seed}, boundary {boundary}: the resumed FULL ORDERED journal \
+                 trace must equal the no-crash golden (got {:?}, golden {:?})",
+                got.0, golden.0
+            );
+            // (2) the backfilled + mirrored data converges;
+            assert_eq!(
+                got.2, golden.2,
+                "seed {seed}, boundary {boundary}: backfilled c0 diverged"
             );
             assert_eq!(
-                got.0.len(),
-                golden.0.len(),
-                "seed {seed}, crash_after {crash_after}: journal version SET diverged \
-                 (got {:?}, golden {:?})",
-                got.0,
-                golden.0
+                got.3, golden.3,
+                "seed {seed}, boundary {boundary}: mirrored email_address diverged"
+            );
+            // (3) state-machine model cross-check: the converged VERSION trace is a
+            //     UNIQUE set — NO duplicate completed versions (a partial-then-resume
+            //     must NOT double-journal a step, an illegal phase transition).
+            let mut sorted = got.1.clone();
+            sorted.sort();
+            sorted.dedup();
+            assert_eq!(
+                sorted.len(),
+                got.1.len(),
+                "seed {seed}, boundary {boundary}: the converged journal trace has a \
+                 DUPLICATE completed version — a resume double-journaled a step \
+                 (illegal state-machine transition): {:?}",
+                got.1
             );
             teardown(&conn, &cfg).await;
         }
     }
+    zeroship_migrate::fault::disarm_all();
 }
 
 // ---------------------------------------------------------------------------
@@ -938,6 +1059,7 @@ async fn destructive_dml_is_refused_without_approval_and_applies_nothing() {
         binds: vec![BindValue::Int(1)],
         transactional: true,
         destructive: true,
+        owner_app: "app_test".to_string(),
     };
     let refused = engine
         .apply_plan(
@@ -1056,6 +1178,7 @@ async fn dml_first_plan_holds_the_project_lock_for_the_whole_deploy() {
         binds: vec![BindValue::Text("a".into())],
         transactional: true,
         destructive: false,
+        owner_app: "app_test".to_string(),
     };
 
     // Drive the Dml-first deploy on a THIRD connection in the background; it must
@@ -1283,4 +1406,127 @@ async fn apply_plan_online_rename_defers_contract_to_pending_contract() {
         );
     }
     teardown(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// REGRESSION (code-critic LOW #5): DML journal identity binds the DECLARING
+// `owner_app`.
+//
+// Pre-fix, `apply_dml_transactional` hard-coded `owner_app:
+// crate::loader::PLATFORM_OWNER_APP` in the journal `ChecksumInput` regardless of
+// the step's actual declaring app, so two DML steps with an IDENTICAL
+// `(template, binds)` authored by DIFFERENT `owner_app`s hashed to the SAME
+// journal checksum — wrong multi-tenant identity/attribution (the hole PR6a's
+// creator-DML assembler would walk into). Post-fix, `PlanStep::Dml` carries
+// `owner_app`, threaded through `run_dml_step` → `apply_dml_transactional` into
+// the checksum, so the two identical-statement steps hash DIFFERENTLY.
+//
+// RED proof: with `owner_app` still hard-coded to `PLATFORM_OWNER_APP`, the two
+// checksums are EQUAL and the final assertion (`cksum_a != cksum_b`) fails.
+// ---------------------------------------------------------------------------
+
+/// Read the journal checksum for a given version (the most recent `completed`
+/// apply row).
+async fn journal_checksum(conn: &Client, cfg: &ExecutorConfig, version: &str) -> Option<String> {
+    conn.query_opt(
+        &format!(
+            "SELECT checksum FROM \"{}\".schema_migrations \
+             WHERE version = $1 AND phase = 'completed' ORDER BY event_seq DESC LIMIT 1",
+            cfg.pg.meta_schema
+        ),
+        &[&version],
+    )
+    .await
+    .expect("query journal checksum")
+    .map(|r| r.get::<_, String>(0))
+}
+
+#[compio::test]
+async fn dml_journal_checksum_binds_the_declaring_owner_app() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let s = q(&cfg.project_schema);
+
+    // A target table for two structurally IDENTICAL inserts.
+    engine_apply_create(&conn, &cfg, &s).await;
+
+    // Two DML steps with an IDENTICAL (template, binds) but DIFFERENT owner_app.
+    // They MUST hash to different journal checksums (owner is part of the
+    // journal identity, §2.0.1).
+    let tmpl = format!("INSERT INTO {s}.t (k, v) VALUES ($1, $2)");
+    let binds = vec![BindValue::Text("k".into()), BindValue::Text("v".into())];
+
+    let va = zeroship_migrate::migration_id_for_version(7001);
+    let vb = zeroship_migrate::migration_id_for_version(7002);
+    let dml_a = PlanStep::Dml {
+        version: va.clone(),
+        name: "ins".to_string(),
+        template: tmpl.clone(),
+        binds: binds.clone(),
+        transactional: true,
+        destructive: false,
+        owner_app: "app_alpha".to_string(),
+    };
+    let dml_b = PlanStep::Dml {
+        // A different row so the second INSERT does not violate the PK; the
+        // checksum is over the (template, owner) — NOT the binds — so this is
+        // still a faithful identity test.
+        version: vb.clone(),
+        name: "ins".to_string(),
+        template: format!("INSERT INTO {s}.t (k, v) VALUES ($1, $2)"),
+        binds: vec![BindValue::Text("k2".into()), BindValue::Text("v".into())],
+        transactional: true,
+        destructive: false,
+        owner_app: "app_beta".to_string(),
+    };
+
+    let engine = MigrationEngine::new();
+    engine
+        .apply_plan(
+            &[dml_a, dml_b],
+            Approval::None,
+            &zeroship_migrate::PostgresBackend::new(&conn),
+            &cfg,
+            "deployer",
+            zeroship_migrate::executor::LockMode::Acquire,
+        )
+        .await
+        .expect("both DML steps apply");
+
+    let cksum_a = journal_checksum(&conn, &cfg, va.as_str())
+        .await
+        .expect("dml_a journaled");
+    let cksum_b = journal_checksum(&conn, &cfg, vb.as_str())
+        .await
+        .expect("dml_b journaled");
+    assert_ne!(
+        cksum_a, cksum_b,
+        "two DML steps authored by DIFFERENT owner_apps must hash to DIFFERENT \
+         journal checksums (owner is part of the journal identity); equal checksums \
+         mean owner_app is NOT threaded into the ChecksumInput (the pre-fix bug)"
+    );
+    teardown(&conn, &cfg).await;
+}
+
+/// Create `t(k text PRIMARY KEY, v text)` through apply_plan.
+async fn engine_apply_create(conn: &Client, cfg: &ExecutorConfig, s: &str) {
+    let engine = MigrationEngine::new();
+    engine
+        .apply_plan(
+            &[PlanStep::Ddl(ddl(
+                1,
+                "create_t_owner",
+                &cfg.project_schema,
+                &format!("CREATE TABLE {s}.t (k text PRIMARY KEY, v text)"),
+                None,
+            ))],
+            Approval::None,
+            &zeroship_migrate::PostgresBackend::new(conn),
+            cfg,
+            "deployer",
+            zeroship_migrate::executor::LockMode::Acquire,
+        )
+        .await
+        .expect("create target table");
 }

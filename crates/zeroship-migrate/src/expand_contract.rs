@@ -715,6 +715,11 @@ pub(crate) async fn run_expand_pg(
     // 1. Apply E1 + E2 — trigger live before any backfill row is touched.
     let mut outcome =
         executor::apply_with_lock(conn, cfg, head, approval, applied_by, lock_mode).await?;
+    // Fault seam (test-only): a simulated crash BETWEEN the E1+E2 apply and the E3
+    // backfill — E1/E2 are journaled `completed`, but E3 is NOT, so on resume the
+    // expand re-enters, finds E1/E2 net-applied (skipped), and re-runs the backfill
+    // + journals E3 (the expand-contract phase-boundary resume, spec path (e)).
+    crate::fault::trip(crate::fault::points::EXPAND_BETWEEN_E2_AND_BACKFILL)?;
     // 2. Run the real backfill (mirrors pre-existing rows).
     crate::backfill::run_backfill(conn, cfg, backfill, approval, applied_by).await?;
     // 3. Journal E3 (the backfill marker) — records the backfill complete, so the

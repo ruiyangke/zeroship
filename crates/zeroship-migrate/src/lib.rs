@@ -71,6 +71,8 @@ pub mod drift;
 pub mod engine;
 pub mod expand_contract;
 pub mod executor;
+#[doc(hidden)]
+pub mod fault;
 pub mod guard;
 pub mod journal;
 pub mod loader;
