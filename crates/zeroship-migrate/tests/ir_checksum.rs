@@ -69,6 +69,74 @@ fn checksum_of_byte_stable_golden() {
     );
 }
 
+/// THE `Checksum::of_ir` byte-stability golden — the IR front door's peer of
+/// [`checksum_of_byte_stable_golden`]. The `.sql` front door (`Checksum::of`)
+/// has a frozen-hex golden; without one for `of_ir` an accidental change to the
+/// `of_ir` WIRE FORMAT (`IR_DOMAIN_TAG`, `CanonicalOpList::canonical_bytes`
+/// layout, or the `fold_common` fold order) that moves BOTH the production code
+/// AND a computed-vs-computed test in lockstep would pass undetected. This pins
+/// the exact bytes over a fixed `(ops, flags, owner, deps, supersedes,
+/// preconditions)` tuple, captured once, so any `of_ir` wire drift fails CI.
+///
+/// If this hex ever changes the `of_ir` wire format drifted — NOT allowed
+/// pre-launch without a deliberate, documented break (and a matching JS-builder
+/// bump, since the JS `op.*` author must emit the same advisory hint).
+#[test]
+fn checksum_of_ir_byte_stable_golden() {
+    // A fixed, fully-populated tuple: two ops (a createTable + an insert whose
+    // row folds a typed IrScalar), non-default flags, a frozen owner, one dep,
+    // one supersedes, and no preconditions. Frozen literals only — no
+    // generate() — so the hash is reproducible across runs.
+    let flags = MigrationFlags {
+        transactional: false,
+        destructive: true,
+        online: false,
+        requires_approval: false,
+        timeout_ms: Some(30_000),
+        phase: None,
+        repeatable: false,
+        engine_goodie_ddl: false,
+    };
+    let ops = vec![
+        Op::CreateTable {
+            name: "accounts".into(),
+            columns: vec![IrColumn {
+                name: "id".into(),
+                ty: zeroship_migrate::ir::ColType::Int,
+                nullable: Some(false),
+                default: None,
+                unique: Some(true),
+            }],
+            constraints: vec![],
+            indexes: vec![],
+        },
+        Op::Insert {
+            table: "accounts".into(),
+            columns: vec!["id".into()],
+            rows: vec![vec![IrScalar::Int(7)]],
+        },
+    ];
+    let deps = [dep()];
+    let sups = [sup()];
+    // Hard-coded expected — captured once from the current of_ir wire format.
+    const EXPECTED: &str =
+        "6b3ccb9486a7445409b75f047d1c88b9516526dcebdae34a48f63f3fb0ff797a";
+    assert_eq!(
+        Checksum::of_ir(
+            &CanonicalOpList(&ops),
+            &flags,
+            "app_of_ir_golden",
+            &deps,
+            &sups,
+            &[],
+        )
+        .as_str(),
+        EXPECTED,
+        "Checksum::of_ir byte output drifted — the of_ir wire format \
+         (IR_DOMAIN_TAG / canonical_bytes / fold_common) must stay frozen"
+    );
+}
+
 /// `Checksum::of_ir` is deterministic and order/content-sensitive over the
 /// canonical op-list region, and is a DISTINCT front door from `Checksum::of`.
 #[test]
