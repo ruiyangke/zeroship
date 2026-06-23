@@ -604,11 +604,16 @@ fn flags_for_file_opts(
 /// [`LoaderError`] on an unrecognized filename, an orphan `.down.sql`, a duplicate
 /// `V<NNNN>`, an out-of-range version, an unparseable body, or an I/O fault.
 pub fn load_dir(dir: impl AsRef<Path>) -> Result<Vec<crate::plan::AppliedPlan>, LoaderError> {
-    // PR0 (`op.*` DSL §5.2): `load_dir` returns `Vec<AppliedPlan>`. A `.sql` file
-    // lowers to a **single-step plan** via the `AppliedPlan::single_step()` facade
-    // (one `Ddl` step), preserving the order-by-version contract. When the IR
-    // `.ir.json` branch lands (PR1), a richer artifact lowers to a multi-step plan
-    // here; the `.sql` path stays a one-step plan.
+    // `load_dir` is the platform **Flyway** loader: it returns `Vec<AppliedPlan>`,
+    // a `.sql` file lowering to a **single-step plan** via the
+    // `AppliedPlan::single_step()` facade (one `Ddl` step), preserving the
+    // order-by-version contract. The creator `.ir.json` path is a SEPARATE seam —
+    // the fail-closed load gate [`crate::ir_load::load_ir_document`] (deserialize →
+    // `ir_version` → `validate_ir` → server-stamped ownership → advisory
+    // checksum-hint compare), threaded with the deploy-target dialect — feeding
+    // `IrAuthor::lower` (the per-dialect DDL compiler, a later wave). A `.sql`
+    // platform file never carries an `.ir.json`, so this Flyway path stays a
+    // one-step plan and does not route IR.
     let migrations = load_dir_migrations(dir)?;
     Ok(migrations
         .into_iter()

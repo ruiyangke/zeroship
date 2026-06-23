@@ -465,9 +465,18 @@ impl Ctx<'_> {
         match f {
             SynthFn::SplitPart => {
                 self.check_split_part(args)?;
-                // The column arg (and any in-AST sub-expression) still validates.
-                if let Some(col) = args.first() {
-                    self.walk(col)?;
+                // Structurally walk EVERY arg, regardless of target_dialect. The
+                // envelope checks in `check_split_part` return early on a Postgres
+                // target (the delim/n LITERAL shape is a SQLite-only envelope), but
+                // rule (c) — `ColRef` resolution — and the structural backstop are
+                // dialect-NEUTRAL and must cover all three slots on BOTH dialects.
+                // Recursing only `args.first()` (the column) let a `ColRef` to a
+                // nonexistent column — or a malformed nested synth — hide in the
+                // delim/n slot and slip past on PG, deferring the failure to
+                // render/execute (item-4). A `Literal` slot recurses to a no-op,
+                // so this is idempotent with the envelope literal checks.
+                for a in args {
+                    self.walk(a)?;
                 }
                 Ok(())
             }
@@ -896,6 +905,113 @@ mod tests {
         };
         let err = validate_expr(&e, Dialect::Sqlite, &sc, 0, None).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
+    }
+
+    // ── item-4 regression: rule (c) ColRef resolution must cover EVERY splitPart
+    // arg, on PG too. check_split_part returns Ok early on a Postgres target
+    // (the envelope is PG-renderable); but the structural ColRef-resolution walk
+    // (rule c) must STILL run over args[1]/args[2]. Before the fix, check_synth
+    // recursed only args.first() (the column), so a ColRef to a nonexistent
+    // column hidden in the delim/n slot slipped past on PG and deferred the
+    // failure to render/execute. RED before walking every arg unconditionally.
+
+    #[test]
+    fn split_part_colref_in_delim_slot_rejected_on_pg() {
+        let c = cols();
+        let sc = scope("users", &c);
+        // delim slot is a ColRef to a column NOT on `users` — rule (c) must fire,
+        // even on a Postgres target (the structural resolution is dialect-neutral).
+        let e = Expr::FnSynth {
+            r#fn: SynthFn::SplitPart,
+            args: vec![
+                Expr::col("name"),
+                Expr::col("nonexistent"),
+                Expr::lit(IrScalar::Int(1)),
+            ],
+        };
+        let err = validate_expr(&e, Dialect::Postgres, &sc, 0, None).unwrap_err();
+        assert_eq!(
+            err.code, CODE_UNSUPPORTED,
+            "an unresolved ColRef in the delim slot must reject on PG (rule c), got: {err}"
+        );
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+    }
+
+    #[test]
+    fn split_part_colref_in_n_slot_rejected_on_pg() {
+        let c = cols();
+        let sc = scope("users", &c);
+        // n slot is a ColRef to a nonexistent column — rule (c), on PG.
+        let e = Expr::FnSynth {
+            r#fn: SynthFn::SplitPart,
+            args: vec![
+                Expr::col("name"),
+                Expr::lit(IrScalar::Str(" ".into())),
+                Expr::col("ghost"),
+            ],
+        };
+        let err = validate_expr(&e, Dialect::Postgres, &sc, 0, None).unwrap_err();
+        assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+    }
+
+    #[test]
+    fn split_part_nested_bad_synth_in_delim_slot_rejected_on_pg() {
+        // A NESTED out-of-... no: on PG the inner splitPart envelope is fine, but
+        // a nested splitPart with WRONG ARITY (malformed on both dialects) hidden
+        // in the delim slot must still be reached by the walk on PG.
+        let c = cols();
+        let sc = scope("users", &c);
+        let bad_inner = Expr::FnSynth {
+            r#fn: SynthFn::SplitPart,
+            args: vec![Expr::col("name")], // arity 1 → malformed on both dialects
+        };
+        let e = Expr::FnSynth {
+            r#fn: SynthFn::SplitPart,
+            args: vec![Expr::col("name"), bad_inner, Expr::lit(IrScalar::Int(1))],
+        };
+        let err = validate_expr(&e, Dialect::Postgres, &sc, 0, None).unwrap_err();
+        assert_eq!(
+            err.code, CODE_UNSUPPORTED,
+            "a malformed nested splitPart in the delim slot must be reached on PG, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_ir_rejects_split_part_colref_in_n_slot_on_pg() {
+        // The production-path proof: drive a hostile IR through validate_ir on a
+        // Postgres target. A createTable Check whose splitPart hides a ColRef to a
+        // nonexistent column in the n slot must reject (rule c), not pass on PG.
+        let ir = ir_with(vec![Op::CreateTable {
+            name: "users".into(),
+            columns: vec![IrColumn {
+                name: "first".into(),
+                ty: ColType::Text,
+                nullable: None,
+                default: None,
+                unique: None,
+            }],
+            constraints: vec![IrConstraint {
+                name: None,
+                kind: IrConstraintKind::Check {
+                    expr: Expr::UnaryOp {
+                        op: UnaryOp::IsNotNull,
+                        operand: Box::new(Expr::FnSynth {
+                            r#fn: SynthFn::SplitPart,
+                            args: vec![
+                                Expr::col("first"),
+                                Expr::lit(IrScalar::Str(" ".into())),
+                                Expr::col("ghost"), // not a column of users
+                            ],
+                        }),
+                    },
+                },
+            }],
+            indexes: vec![],
+        }]);
+        let err = validate_ir(&ir, Dialect::Postgres, &[]).unwrap_err();
+        assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
+        assert_eq!(err.op_index, 0);
     }
 
     // ── (c) ColRef resolution against the target table ─────────────────────
