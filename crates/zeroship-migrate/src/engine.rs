@@ -498,6 +498,25 @@ impl MigrationEngine {
             )));
         }
 
+        // **Empty-plain-set session hygiene — intentional, state-neutral
+        // simplification (code-critic LOW #4).** Pre-PR0,
+        // `apply_declarative_locked` ALWAYS called `apply_inner(&plan.plain, …)` →
+        // `apply_with_lock_backend` first, which ran one
+        // `snapshot_session`/`reset_role_best_effort`/`restore_session` hygiene cycle
+        // up front — even for an empty `plain.items`. Post-PR0 the coalesce loop only
+        // calls `apply_with_lock_backend` when there is at least one `Ddl` step, so a
+        // rebuild-only or rename-only declarative deploy (empty plain set) skips that
+        // *initial* hygiene cycle. This is a deliberate simplification, NOT a leak:
+        // every step kind that can run with an empty plain set manages its OWN session
+        // hygiene — a PG online rename's `run_online` snapshots+restores the session
+        // around its dual-write trigger / `SET ROLE` DDL, and a SQLite `rebuild_one`
+        // owns its single actor — so the connection is left with the admin role and an
+        // un-pinned `search_path` regardless. The redundant empty up-front cycle bought
+        // nothing but an extra round-trip; dropping it is state-neutral. The invariant
+        // (a rename-only / rebuild-only deploy leaves the session role + search_path
+        // clean) is asserted by `declarative_pg::
+        // rename_only_deploy_leaves_session_role_and_search_path_clean`.
+
         // The single shared orchestrator. The outer project lock is already held
         // (H10), so every inner sub-batch re-enters it with `LockMode::AlreadyHeld`.
         self.apply_plan(&steps, approval, backend, exec_cfg, applied_by, LockMode::AlreadyHeld)
@@ -553,18 +572,67 @@ impl MigrationEngine {
         applied_by: &str,
         lock_mode: LockMode,
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
+        // **Whole-plan project-lock acquisition (§2.0.3(1)).** When the caller asks
+        // us to `Acquire`, take the project advisory lock ONCE up front for the
+        // ENTIRE plan and thread `AlreadyHeld` into every sub-step — regardless of
+        // which step kind comes first. The pre-PR0 declarative path relied on the
+        // first DDL batch's `apply_with_lock_backend` to acquire, but a standalone
+        // plan whose first step is `Dml`/`Backfill` would then run with NO project
+        // lock ever taken (the data seams take only a per-batch xact lock, not the
+        // session-scoped project lock), silently violating the "lock held across the
+        // ENTIRE deploy" invariant. Acquiring here closes that hole for every plan
+        // shape. Under `AlreadyHeld` (the declarative path) the outer caller owns the
+        // lock and we acquire/release nothing.
+        let we_hold_lock = lock_mode == LockMode::Acquire;
+        if we_hold_lock {
+            backend
+                .acquire_project_lock(&exec_cfg.project_id)
+                .await
+                .map_err(EngineError::Apply)?;
+        }
+        // Run the plan body in a helper so we can release the lock we acquired on
+        // EVERY exit path (success or error) before returning.
+        let result = self
+            .apply_plan_locked(steps, approval, backend, exec_cfg, applied_by)
+            .await;
+        if we_hold_lock {
+            // Release the lock we own, surfacing the body's error first. The lock
+            // auto-releases on session end regardless, so a release failure after a
+            // body error is not masked-but-lost data; we still log it.
+            let unlock = backend.release_project_lock(&exec_cfg.project_id).await;
+            return match result {
+                Ok(o) => unlock.map(|()| o).map_err(|e| {
+                    DeclarativeApplyError::Plain(EngineError::Apply(e))
+                }),
+                Err(e) => Err(e),
+            };
+        }
+        result
+    }
+
+    /// The plan body, run with the project lock already held (either because the
+    /// outer declarative caller owns it, or because [`apply_plan`](Self::apply_plan)
+    /// acquired it up front for an `Acquire`-mode standalone call). Every sub-step
+    /// therefore runs with [`LockMode::AlreadyHeld`].
+    async fn apply_plan_locked<B: MigrationBackend>(
+        &self,
+        steps: &[PlanStep],
+        approval: Approval,
+        backend: &B,
+        exec_cfg: &ExecutorConfig,
+        applied_by: &str,
+    ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
         let mut applied = ApplyOutcome {
             applied: Vec::new(),
             skipped: Vec::new(),
             recovered: Vec::new(),
         };
         let mut pending_contract: Vec<Migration> = Vec::new();
-        // Track whether WE have already acquired the project lock for an
-        // `Acquire`-mode standalone call: the first DDL batch acquires, every
-        // subsequent sub-batch re-enters with `AlreadyHeld` so the whole plan runs
-        // under one acquisition. Under `AlreadyHeld` (the declarative path) the
-        // outer caller owns the lock for every step.
-        let mut next_lock = lock_mode;
+        // The project lock is held for the whole plan (acquired by `apply_plan` or
+        // owned by the outer declarative caller), so every sub-batch re-enters it
+        // with `AlreadyHeld` — never re-acquiring (which would pop a re-entrant level
+        // on release and free the lock between sub-batches).
+        let next_lock = LockMode::AlreadyHeld;
 
         // Net-applied journal state for the rebuild net-applied-skip — read lazily
         // on the first rebuild step (avoids an extra journal read on the common
@@ -597,7 +665,6 @@ impl MigrationEngine {
                     applied.applied.extend(outcome.applied);
                     applied.skipped.extend(outcome.skipped);
                     applied.recovered.extend(outcome.recovered);
-                    next_lock = LockMode::AlreadyHeld;
                 }
                 PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild)) => {
                     // Re-expresses the declarative `plan.rebuilds` loop
@@ -675,7 +742,6 @@ impl MigrationEngine {
                     applied.applied.extend(outcome.applied);
                     applied.skipped.extend(outcome.skipped);
                     applied.recovered.extend(outcome.recovered);
-                    next_lock = LockMode::AlreadyHeld;
                     i += 1;
                 }
                 PlanStep::Dml {
@@ -683,12 +749,29 @@ impl MigrationEngine {
                     name,
                     template,
                     binds,
+                    destructive,
                     ..
                 } => {
+                    // **Destructive-DML approval gate (§2.1.1).** A destructive DML
+                    // (a `delete`) needs explicit approval, mirroring the per-Migration
+                    // gate the DDL spine runs in `apply_with_lock_backend`. We wire the
+                    // step's own destructiveness via `PlanStep::is_destructive()` (its
+                    // sole live call site) and refuse BEFORE the executor runs the
+                    // template, so a destructive DML applies NOTHING under
+                    // `Approval::None`. The DDL spine is gated downstream; the
+                    // `OnlineRename(SqliteRebuild)` arm above is gated likewise; this
+                    // closes the same hole for the net-new DML surface PR6a builds on.
+                    // The executor-layer `run_dml_step` re-runs this gate as defense
+                    // in depth.
+                    if steps[i].is_destructive() && approval != Approval::Approved {
+                        return Err(DeclarativeApplyError::Plain(
+                            EngineError::ApprovalRequired,
+                        ));
+                    }
                     let ran = backend
                         .run_dml_step(
-                            exec_cfg, version, name, template, binds, approval, applied_by,
-                            next_lock,
+                            exec_cfg, version, name, template, binds, *destructive, approval,
+                            applied_by, next_lock,
                         )
                         .await
                         .map_err(EngineError::Apply)?;
@@ -697,7 +780,6 @@ impl MigrationEngine {
                     } else {
                         applied.skipped.push(version.as_str().to_string());
                     }
-                    next_lock = LockMode::AlreadyHeld;
                     i += 1;
                 }
             }

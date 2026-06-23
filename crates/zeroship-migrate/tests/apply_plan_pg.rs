@@ -29,9 +29,9 @@ use compio_postgres::Client;
 use zeroship_migrate::{
     backfill::BackfillSpec,
     migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId},
-    plan::{AppliedPlan, BindValue, NotSingleStep, PlanStep},
-    provision_migrator, role::deprovision_migrator, Approval, ExecutorConfig, GuardConfig,
-    MigrationEngine,
+    plan::{AppliedPlan, BindValue, NotSingleStep, PlanStep, RenameStep},
+    provision_migrator, role::deprovision_migrator, Approval, DeclarativeApplyError, EngineError,
+    ExecutorConfig, ExpandContractAuthor, GuardConfig, MigrationEngine, OnlineIntent,
 };
 
 const DEFAULT_DSN: &str =
@@ -580,10 +580,18 @@ fn single_step_facade_yields_migration_for_sql_plan_and_fails_closed_otherwise()
 
 #[test]
 fn every_platform_changelog_sql_lowers_to_a_single_step_plan() {
-    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    // The concrete platform changelog dir is an UNTRACKED build artifact — not all
+    // checkouts have it. Gate on its existence (mirroring `loaded_platform_changelog`)
+    // so the suite is not brittle to its absence; the GENERATED-Flyway property test
+    // `generated_flyway_dirs_always_lower_to_single_step_plans` is the changelog-dir-
+    // independent proof that `single_step()`'s Err arm is unreachable on the .sql path.
+    let Ok(dir) = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../db/migrations")
         .canonicalize()
-        .expect("db/migrations exists at repo root");
+    else {
+        eprintln!("skipping: ../../db/migrations not present in this checkout");
+        return;
+    };
     let plans = zeroship_migrate::load_dir(&dir).expect("platform changelog loads");
     assert!(!plans.is_empty(), "the platform changelog is non-empty");
     for plan in &plans {
@@ -598,6 +606,77 @@ fn every_platform_changelog_sql_lowers_to_a_single_step_plan() {
         // And the facade actually yields that one migration (never the Err arm).
         plan.single_step_migration()
             .expect("platform single-step facade yields its migration");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (7a, spec test #7) PROPERTY TEST over GENERATED Flyway-mode `.sql` dirs:
+// every plan `load_dir` produces from a `.sql` path lowers to a single Ddl step,
+// so `AppliedPlan::single_step()`'s `Err(NotSingleStep)` arm is UNREACHABLE on the
+// `.sql` path — and the proof does NOT depend on the one untracked concrete
+// `db/migrations` dir. A small deterministic LCG generates random valid Flyway
+// dirs (1..N versioned `V<NNNN>__<desc>.sql` files, some with `.down.sql`, some
+// `R__` repeatables) into a tempdir, loads them, and asserts `is_single_step()`
+// on every plan.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn generated_flyway_dirs_always_lower_to_single_step_plans() {
+    // A tiny deterministic LCG (Numerical Recipes constants) — reproducible, no
+    // external proptest dependency.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 >> 16
+        }
+        fn range(&mut self, lo: u64, hi: u64) -> u64 {
+            lo + self.next() % (hi - lo + 1)
+        }
+    }
+
+    for seed in 0u64..40 {
+        let mut rng = Lcg(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let n = rng.range(1, 6); // 1..6 versioned migrations
+        for v in 1..=n {
+            // A valid single-statement DDL body — the `.sql` grammar lowers it to
+            // exactly one Ddl step regardless of which DDL it is.
+            let kind = rng.range(0, 2);
+            let body = match kind {
+                0 => format!("CREATE TABLE t{v} (id bigint PRIMARY KEY)"),
+                1 => format!("ALTER TABLE t1 ADD COLUMN c{v} text"),
+                _ => format!("CREATE INDEX i{v} ON t1 (id)"),
+            };
+            let up = dir.path().join(format!("V{v:04}__gen_{v}.sql"));
+            std::fs::write(&up, body).expect("write up");
+            // Sometimes add a matching `.down.sql` (still a single up step).
+            if rng.range(0, 1) == 1 {
+                let down = dir.path().join(format!("V{v:04}__gen_{v}.down.sql"));
+                std::fs::write(&down, format!("DROP TABLE IF EXISTS t{v}")).expect("write down");
+            }
+        }
+        // Sometimes add a repeatable (also lowers to one step).
+        if rng.range(0, 1) == 1 {
+            let r = dir.path().join("R__refresh_view.sql");
+            std::fs::write(&r, "CREATE TABLE IF NOT EXISTS rrr (id bigint)").expect("write R");
+        }
+
+        let plans = zeroship_migrate::load_dir(dir.path())
+            .unwrap_or_else(|e| panic!("seed {seed}: generated Flyway dir must load: {e:?}"));
+        assert!(!plans.is_empty(), "seed {seed}: at least one plan");
+        for plan in &plans {
+            assert!(
+                plan.is_single_step(),
+                "seed {seed}: every generated .sql must lower to ONE Ddl step \
+                 (single_step()'s Err arm must be unreachable on the .sql path); \
+                 version {} got {} steps",
+                plan.version.as_str(),
+                plan.steps.len()
+            );
+            plan.single_step_migration()
+                .unwrap_or_else(|e| panic!("seed {seed}: facade must yield the migration: {e:?}"));
+        }
     }
 }
 
@@ -806,4 +885,402 @@ async fn crash_fuzz_resume_from_any_point_converges() {
             teardown(&conn, &cfg).await;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// REGRESSION (code-critic HIGH #2): the destructive-DML approval gate.
+//
+// A `PlanStep::Dml { destructive: true }` under `Approval::None` MUST be refused
+// (ApprovalRequired) and apply NOTHING — mirroring the per-Migration destructive
+// gate the DDL spine runs. Pre-fix, `apply_plan`'s Dml arm passed `approval`
+// straight through and `run_dml_step` discarded it (`let _ = approval;`), so a
+// destructive DML applied silently under no approval — a latent data-loss hole.
+// Under `Approval::Approved` the same step applies.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn destructive_dml_is_refused_without_approval_and_applies_nothing() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let s = q(&cfg.project_schema);
+
+    // Seed a table + a row so the destructive DELETE has a target to (not) touch.
+    let create = PlanStep::Ddl(ddl(
+        1,
+        "create_d",
+        &cfg.project_schema,
+        &format!(
+            "CREATE TABLE {s}.d (id bigint PRIMARY KEY); \
+             INSERT INTO {s}.d (id) VALUES (1)"
+        ),
+        None,
+    ));
+    let engine = MigrationEngine::new();
+    engine
+        .apply_plan(
+            &[create],
+            Approval::None,
+            &zeroship_migrate::PostgresBackend::new(&conn),
+            &cfg,
+            "app_test",
+            zeroship_migrate::executor::LockMode::Acquire,
+        )
+        .await
+        .expect("additive create applies");
+
+    // A destructive DML (a DELETE) WITHOUT approval is refused.
+    let del_version = zeroship_migrate::migration_id_for_version(950);
+    let delete = PlanStep::Dml {
+        version: del_version.clone(),
+        name: "wipe_d".to_string(),
+        template: format!("DELETE FROM {s}.d WHERE id = $1"),
+        binds: vec![BindValue::Int(1)],
+        transactional: true,
+        destructive: true,
+    };
+    let refused = engine
+        .apply_plan(
+            std::slice::from_ref(&delete),
+            Approval::None,
+            &zeroship_migrate::PostgresBackend::new(&conn),
+            &cfg,
+            "app_test",
+            zeroship_migrate::executor::LockMode::Acquire,
+        )
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(DeclarativeApplyError::Plain(EngineError::ApprovalRequired))
+        ),
+        "destructive DML under Approval::None must be refused, got {refused:?}"
+    );
+
+    // NOTHING was applied: the row survives, the DML version is NOT journaled.
+    let count = conn
+        .query_one(&format!("SELECT count(*)::bigint FROM {s}.d"), &[])
+        .await
+        .unwrap()
+        .get::<_, i64>(0);
+    assert_eq!(count, 1, "the destructive DML must apply nothing when refused");
+    assert!(
+        !journaled(&conn, &cfg, del_version.as_str()).await,
+        "a refused destructive DML must not be journaled"
+    );
+
+    // The SAME step under Approval::Approved applies (the row is deleted).
+    engine
+        .apply_plan(
+            &[delete],
+            Approval::Approved,
+            &zeroship_migrate::PostgresBackend::new(&conn),
+            &cfg,
+            "app_test",
+            zeroship_migrate::executor::LockMode::Acquire,
+        )
+        .await
+        .expect("destructive DML applies under approval");
+    let count = conn
+        .query_one(&format!("SELECT count(*)::bigint FROM {s}.d"), &[])
+        .await
+        .unwrap()
+        .get::<_, i64>(0);
+    assert_eq!(count, 0, "the approved destructive DML deletes the row");
+    assert!(
+        journaled(&conn, &cfg, del_version.as_str()).await,
+        "the approved destructive DML is journaled"
+    );
+    teardown(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// REGRESSION (code-critic HIGH #3): whole-deploy project-lock discipline for a
+// plan whose FIRST step is Dml/Backfill (not Ddl).
+//
+// Two standalone `apply_plan(LockMode::Acquire)` deploys whose first step is a
+// Dml MUST serialize on the project advisory lock. Pre-fix, `apply_plan` relied
+// on the FIRST Ddl batch to acquire the lock, but a Dml/Backfill-first plan took
+// NO whole-deploy project lock at all (the data seams take only a per-batch xact
+// lock), so two such deploys could interleave — violating §2.0.3(1). Post-fix,
+// `apply_plan` acquires the project lock up front for the whole plan regardless
+// of first-step kind, so a concurrent same-project Dml-first deploy blocks until
+// the first releases.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn dml_first_plan_holds_the_project_lock_for_the_whole_deploy() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let s = q(&cfg.project_schema);
+
+    // Prepare a target table (separate deploy) so the contended deploys start
+    // with a Dml step, not a Ddl one.
+    let engine = MigrationEngine::new();
+    engine
+        .apply_plan(
+            &[PlanStep::Ddl(ddl(
+                1,
+                "create_lk",
+                &cfg.project_schema,
+                &format!("CREATE TABLE {s}.lk (k text PRIMARY KEY)"),
+                None,
+            ))],
+            Approval::None,
+            &zeroship_migrate::PostgresBackend::new(&conn),
+            &cfg,
+            "app_test",
+            zeroship_migrate::executor::LockMode::Acquire,
+        )
+        .await
+        .expect("create target table");
+
+    // A SECOND connection takes the project advisory lock by hand and holds it,
+    // standing in for an in-flight concurrent deploy. A Dml-first `apply_plan`
+    // with LockMode::Acquire must BLOCK on it — proving it tries to take the
+    // whole-deploy project lock (pre-fix it would NOT, and would race through).
+    let holder = pg().await;
+    holder
+        .execute(
+            "SELECT pg_advisory_lock(hashtext($1)::bigint)",
+            &[&cfg.project_id],
+        )
+        .await
+        .expect("holder grabs the project lock");
+
+    let dml = PlanStep::Dml {
+        version: zeroship_migrate::migration_id_for_version(951),
+        name: "seed_lk".to_string(),
+        template: format!("INSERT INTO {s}.lk (k) VALUES ($1)"),
+        binds: vec![BindValue::Text("a".into())],
+        transactional: true,
+        destructive: false,
+    };
+
+    // Drive the Dml-first deploy on a THIRD connection in the background; it must
+    // not complete while the holder owns the lock.
+    let dsn_owned = dsn();
+    let cfg_owned = cfg.clone();
+    let handle = compio::runtime::spawn(async move {
+        let (c3, conn3) = compio_postgres::connect(&dsn_owned, compio_postgres::NoTls)
+            .await
+            .expect("third connection");
+        compio::runtime::spawn(async move {
+            let _ = conn3.run().await;
+        })
+        .detach();
+        let engine = MigrationEngine::new();
+        engine
+            .apply_plan(
+                &[dml],
+                Approval::None,
+                &zeroship_migrate::PostgresBackend::new(&c3),
+                &cfg_owned,
+                "app_test",
+                zeroship_migrate::executor::LockMode::Acquire,
+            )
+            .await
+            .expect("dml-first deploy eventually applies");
+    });
+
+    // Poll until the background deploy EITHER registers as a waiter on the
+    // project advisory lock (the post-fix behavior — it took the whole-deploy lock
+    // and is now blocked behind the holder) OR inserts its row (the pre-fix bug — it
+    // took NO project lock and raced straight through while the holder held it).
+    //
+    // The single bigint advisory key K is stored in pg_locks as classid = high 32
+    // bits of K, objid = low 32 bits, objsubid = 1. Decode the split via bit(64)
+    // substrings → bit(32)::int (a reinterpret cast that can't overflow int4, unlike
+    // `(K >> 32)::int`), matching the project's key EXACTLY so the many test binaries
+    // that run in parallel against :5440 cannot satisfy this assertion.
+    let mut waiter_seen = false;
+    let mut raced_through = false;
+    for _ in 0..2000u32 {
+        let waiters: i64 = conn
+            .query_one(
+                "WITH k AS (SELECT (hashtext($1))::bigint::bit(64) AS b) \
+                 SELECT count(*)::bigint FROM pg_locks, k \
+                 WHERE locktype = 'advisory' AND objsubid = 1 \
+                   AND classid = substring(k.b FROM 1 FOR 32)::int \
+                   AND objid = substring(k.b FROM 33 FOR 32)::int \
+                   AND NOT granted",
+                &[&cfg.project_id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        let rows_now: i64 = conn
+            .query_one(&format!("SELECT count(*)::bigint FROM {s}.lk"), &[])
+            .await
+            .unwrap()
+            .get(0);
+        if rows_now >= 1 {
+            raced_through = true;
+            break;
+        }
+        if waiters >= 1 {
+            waiter_seen = true;
+            break;
+        }
+        // Yield so the background deploy makes progress and the lock-wait registers.
+        let _ = compio::runtime::spawn(async {}).await;
+    }
+    assert!(
+        !raced_through,
+        "a Dml-first apply_plan(Acquire) raced through while the project lock was \
+         held — it took NO whole-deploy project lock (the pre-fix bug)"
+    );
+    assert!(
+        waiter_seen,
+        "a Dml-first apply_plan(Acquire) must contend on the project advisory lock"
+    );
+
+    // The contended deploy is still NOT done (no row inserted yet).
+    let count_before = conn
+        .query_one(&format!("SELECT count(*)::bigint FROM {s}.lk"), &[])
+        .await
+        .unwrap()
+        .get::<_, i64>(0);
+    assert_eq!(
+        count_before, 0,
+        "the Dml-first deploy must be blocked on the project lock (no row yet)"
+    );
+
+    // Release the holder's lock; the blocked deploy now proceeds to completion.
+    holder
+        .execute(
+            "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
+            &[&cfg.project_id],
+        )
+        .await
+        .expect("holder releases the lock");
+    handle.await.expect("background deploy task joins");
+
+    let count_after = conn
+        .query_one(&format!("SELECT count(*)::bigint FROM {s}.lk"), &[])
+        .await
+        .unwrap()
+        .get::<_, i64>(0);
+    assert_eq!(count_after, 1, "the deploy applied once the lock was free");
+    teardown(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// (spec test #4) apply_plan-level PG online-rename PENDING-CONTRACT PARTITION.
+//
+// Drive a `PlanStep::OnlineRename(RenameStep::PgExpandContract(_))` DIRECTLY
+// through `apply_plan` (not via the declarative adapter) and assert the EXPAND
+// runs atomically under the held lock while C1/C2 are DEFERRED into
+// `pending_contract` — the cross-deploy partition (§2.0.2). This pins the
+// apply_plan-level partition the declarative-suite tests exercise only through
+// `apply_declarative`.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn apply_plan_online_rename_defers_contract_to_pending_contract() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let s = q(&cfg.project_schema);
+    let engine = MigrationEngine::new();
+
+    // Create `users(id, email)` THROUGH apply_plan so the migrator role owns it
+    // (the dual-write trigger DDL runs under SET ROLE).
+    engine
+        .apply_plan(
+            &[PlanStep::Ddl(ddl(
+                1,
+                "create_users",
+                &cfg.project_schema,
+                &format!(
+                    "CREATE TABLE {s}.users (id bigint PRIMARY KEY, email text); \
+                     INSERT INTO {s}.users (id, email) VALUES (1,'a@x.test'),(2,'b@x.test')"
+                ),
+                None,
+            ))],
+            Approval::None,
+            &zeroship_migrate::PostgresBackend::new(&conn),
+            &cfg,
+            "app_test",
+            zeroship_migrate::executor::LockMode::Acquire,
+        )
+        .await
+        .expect("create users");
+
+    // Author the canonical online rename email → email_address and drive its
+    // ExpandContractPlan as a SINGLE PgExpandContract step through apply_plan.
+    let rename = ExpandContractAuthor::new(&cfg.project_schema, "app_test")
+        .author(&OnlineIntent::RenameColumn {
+            table: "users".into(),
+            from: "email".into(),
+            to: "email_address".into(),
+            ty: "text".into(),
+        })
+        .expect("author rename");
+    let contract_versions: Vec<String> =
+        rename.contract.iter().map(|m| m.version.as_str().to_string()).collect();
+    assert!(!contract_versions.is_empty(), "the rename has a deferred contract");
+
+    let steps = vec![PlanStep::OnlineRename(RenameStep::PgExpandContract(rename))];
+    let outcome = engine
+        .apply_plan(
+            &steps,
+            Approval::Approved, // the expand's backfill mutates data
+            &zeroship_migrate::PostgresBackend::new(&conn),
+            &cfg,
+            "app_test",
+            zeroship_migrate::executor::LockMode::Acquire,
+        )
+        .await
+        .expect("online rename expand applies via apply_plan");
+
+    // The CONTRACT is partitioned into pending_contract (deferred to deploy N+1),
+    // NOT applied this deploy.
+    let got_pending: Vec<String> = outcome
+        .pending_contract
+        .iter()
+        .map(|m| m.version.as_str().to_string())
+        .collect();
+    assert_eq!(
+        got_pending, contract_versions,
+        "apply_plan must defer C1/C2 into pending_contract (the cross-deploy partition)"
+    );
+    assert!(
+        outcome.pending_contract.iter().any(|m| m.flags.destructive),
+        "the deferred DROP COLUMN is destructive"
+    );
+
+    // After the EXPAND: BOTH columns exist (the old `email` is NOT yet dropped —
+    // that is the deferred contract), and the backfill mirrored the rows into the
+    // new column.
+    assert!(
+        column_exists(&conn, &cfg.project_schema, "users", "email").await,
+        "the old column survives the expand (its drop is the deferred contract)"
+    );
+    assert!(
+        column_exists(&conn, &cfg.project_schema, "users", "email_address").await,
+        "the new column exists after the expand"
+    );
+    let rows = conn
+        .query(
+            &format!("SELECT email, email_address FROM {s}.users ORDER BY id"),
+            &[],
+        )
+        .await
+        .expect("read mirrored rows");
+    for r in &rows {
+        let from: Option<String> = r.get(0);
+        let to: Option<String> = r.get(1);
+        assert_eq!(to, from, "the backfill mirrored email → email_address");
+    }
+
+    // The contract was NOT journaled this deploy (it is pending, not applied).
+    for v in &contract_versions {
+        assert!(
+            !journaled(&conn, &cfg, v).await,
+            "contract version {v} must NOT be journaled at the expand deploy"
+        );
+    }
+    teardown(&conn, &cfg).await;
 }
