@@ -199,3 +199,103 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
     );
     assert_eq!(out2.applied.skipped, vec![rebuild_version]);
 }
+
+// ---------------------------------------------------------------------------
+// REGRESSION (code-critic MED): apply_plan bootstraps the journal up front.
+//
+// A standalone plan whose FIRST step is `OnlineRename(SqliteRebuild)`, applied
+// against a FRESH SQLite file with NO `_mig` journal, made its first journal
+// touch a READ (`journal_sql::applied` SELECT on a non-existent
+// `_mig.schema_migrations`, via the rebuild arm's net-applied-skip lookup) →
+// "no such table". The shipped declarative path always bootstrapped the journal
+// before any read, but `apply_plan` is public API consumed with this net-new
+// rebuild-first shape.
+//
+// The v1 schema is built (with its full system columns) on one backend, then the
+// rebuild-first plan is driven on a SECOND backend opened over the SAME app file
+// but a FRESH (empty) journal file — faithfully reproducing "existing schema, no
+// journal yet". Pre-fix: errors on the journal read (`no such table`). Post-fix:
+// the up-front `ensure_journal` bootstraps `_mig` and the rebuild applies.
+#[compio::test]
+async fn rebuild_first_plan_against_fresh_journal_bootstraps_it() {
+    let v1 = vec![CollectionDescriptor {
+        name: "people".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "nickname".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    }];
+    let mut v2 = v1.clone();
+    v2[0].fields[0].name = "handle".into();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app = dir.path().join("zs-app.sqlite");
+
+    // 1) Build the v1 `people` table (with its full descriptor-generated system
+    //    columns) on a FIRST backend; this also bootstraps that backend's journal.
+    let journal_a = dir.path().join("zs-app.migrations-a.sqlite");
+    {
+        let be_a = SqliteBackend::open(&app, &journal_a).expect("open backend A");
+        apply_first_deploy(&be_a, &v1).await;
+        be_a.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+        be_a.actor()
+            .exec("INSERT INTO main.people (id, nickname) VALUES ('p1', 'ada')")
+            .await
+            .expect("seed row");
+    }
+
+    // 2) Build the SqliteRebuild via the differ (pure — no DB write).
+    let (live, ownership) = live_from(&v1);
+    let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
+    let hint = RenameHint {
+        table: "people".into(),
+        from: "nickname".into(),
+        to: "handle".into(),
+    };
+    let plan = sqlite_author()
+        .diff(&desired2, &live, &ownership, std::slice::from_ref(&hint))
+        .expect("rename diff");
+    assert_eq!(plan.rebuilds.len(), 1, "a rename yields one rebuild on SQLite");
+    let rebuild = plan.rebuilds.into_iter().next().unwrap();
+    let rebuild_version = rebuild.migration.version.as_str().to_string();
+
+    // 3) Open a SECOND backend over the SAME app file but a FRESH journal file:
+    //    the schema is fully present, the `_mig` journal is empty/unbootstrapped.
+    let journal_b = dir.path().join("zs-app.migrations-b.sqlite");
+    let be = SqliteBackend::open(&app, &journal_b).expect("open backend B (fresh journal)");
+
+    // The FIRST (and only) step is the SqliteRebuild; the `_mig` journal does not
+    // exist yet — the rebuild arm's net-applied-skip lookup reads it first.
+    let steps = vec![PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild))];
+    let engine = MigrationEngine::new();
+    let out = engine
+        .apply_plan(
+            &steps,
+            Approval::Approved,
+            &be,
+            &exec_cfg(),
+            "deployer",
+            zeroship_migrate::executor::LockMode::Acquire,
+        )
+        .await
+        .expect("a rebuild-first plan against a fresh journal must bootstrap it up front");
+
+    assert!(
+        out.applied.applied.contains(&rebuild_version),
+        "apply_plan journaled the rebuild migration's version"
+    );
+    let vals = be
+        .actor()
+        .query("SELECT handle FROM main.people ORDER BY id")
+        .await
+        .expect("read handle");
+    assert_eq!(
+        vals.iter().filter_map(|r| r[0].clone()).collect::<Vec<_>>(),
+        vec!["ada"],
+        "the renamed column carries the data through the rebuild"
+    );
+}

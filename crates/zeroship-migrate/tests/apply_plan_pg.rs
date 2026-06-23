@@ -1117,6 +1117,122 @@ async fn destructive_dml_is_refused_without_approval_and_applies_nothing() {
 }
 
 // ---------------------------------------------------------------------------
+// REGRESSION (code-critic LOW): the executor-layer `run_dml_step` is a TRUE
+// second gate (defense in depth), independent of the orchestrator.
+//
+// The orchestrator (`apply_plan`'s Dml arm) gates a destructive DML; this test
+// proves the SEAM itself — `MigrationBackend::run_dml_step`, the method PR6a's
+// creator-DML assembler calls — independently refuses a destructive DML without
+// approval, so a direct seam caller that bypasses the orchestrator gate is STILL
+// refused. Calling `run_dml_step` directly (not through `apply_plan`) isolates the
+// executor-layer check. Pre-the-d023a7d5-fix, `run_dml_step` discarded `approval`
+// (`let _ = approval;`) and the "executor-layer gate re-runs this" comment was
+// false; this test would have applied the DELETE under no approval.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn run_dml_step_seam_refuses_destructive_dml_without_approval() {
+    use zeroship_migrate::{ApplyError, MigrationBackend};
+
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let s = q(&cfg.project_schema);
+
+    // Bootstrap the schema + a seed row THROUGH apply_plan (so the table is
+    // migrator-owned and the journal exists for the seam's net-applied read).
+    let create = PlanStep::Ddl(ddl(
+        1,
+        "create_seam_d",
+        &cfg.project_schema,
+        &format!(
+            "CREATE TABLE {s}.seam_d (id bigint PRIMARY KEY); \
+             INSERT INTO {s}.seam_d (id) VALUES (1)"
+        ),
+        None,
+    ));
+    let engine = MigrationEngine::new();
+    engine
+        .apply_plan(
+            &[create],
+            Approval::None,
+            &zeroship_migrate::PostgresBackend::new(&conn),
+            &cfg,
+            "app_test",
+            zeroship_migrate::executor::LockMode::Acquire,
+        )
+        .await
+        .expect("additive create applies");
+
+    let backend = zeroship_migrate::PostgresBackend::new(&conn);
+    let del_version = zeroship_migrate::migration_id_for_version(960);
+    let template = format!("DELETE FROM {s}.seam_d WHERE id = $1");
+
+    // Call the SEAM DIRECTLY (NOT through apply_plan): a destructive DML under
+    // Approval::None must be refused by the executor-layer gate ITSELF.
+    let refused = backend
+        .run_dml_step(
+            &cfg,
+            &del_version,
+            "wipe_seam_d",
+            &template,
+            &[BindValue::Int(1)],
+            true, // destructive
+            "app_test",
+            Approval::None,
+            "app_test",
+            zeroship_migrate::executor::LockMode::AlreadyHeld,
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(ApplyError::ApprovalRequired)),
+        "the run_dml_step seam must refuse a destructive DML without approval \
+         (executor-layer gate, defense in depth), got {refused:?}"
+    );
+
+    // NOTHING applied: the row survives, the version is NOT journaled.
+    let count = conn
+        .query_one(&format!("SELECT count(*)::bigint FROM {s}.seam_d"), &[])
+        .await
+        .unwrap()
+        .get::<_, i64>(0);
+    assert_eq!(count, 1, "a seam-refused destructive DML applies nothing");
+    assert!(
+        !journaled(&conn, &cfg, del_version.as_str()).await,
+        "a seam-refused destructive DML is not journaled"
+    );
+
+    // The SAME step through the seam under Approval::Approved applies.
+    let ran = backend
+        .run_dml_step(
+            &cfg,
+            &del_version,
+            "wipe_seam_d",
+            &template,
+            &[BindValue::Int(1)],
+            true,
+            "app_test",
+            Approval::Approved,
+            "app_test",
+            zeroship_migrate::executor::LockMode::AlreadyHeld,
+        )
+        .await
+        .expect("the seam applies a destructive DML under approval");
+    assert!(ran, "the approved destructive DML applied this run");
+    let count = conn
+        .query_one(&format!("SELECT count(*)::bigint FROM {s}.seam_d"), &[])
+        .await
+        .unwrap()
+        .get::<_, i64>(0);
+    assert_eq!(count, 0, "the approved destructive DML deletes the row");
+    assert!(
+        journaled(&conn, &cfg, del_version.as_str()).await,
+        "the approved destructive DML is journaled"
+    );
+    teardown(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
 // REGRESSION (code-critic HIGH #3): whole-deploy project-lock discipline for a
 // plan whose FIRST step is Dml/Backfill (not Ddl).
 //
@@ -1506,6 +1622,77 @@ async fn dml_journal_checksum_binds_the_declaring_owner_app() {
          journal checksums (owner is part of the journal identity); equal checksums \
          mean owner_app is NOT threaded into the ChecksumInput (the pre-fix bug)"
     );
+    teardown(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// REGRESSION (code-critic MED): apply_plan bootstraps the journal up front.
+//
+// `apply_plan_locked` never called `ensure_journal` before the step loop; the
+// journal was bootstrapped lazily only inside the Ddl coalesce arm
+// (`apply_with_lock_backend` → `apply_locked` → `ensure_journal`). So a
+// standalone plan whose FIRST step is `Dml`/`Backfill`/`OnlineRename`, applied
+// against a FRESH DB with NO journal, made its first journal touch a READ
+// (`journal::applied` SELECT on a non-existent meta schema) → "relation does not
+// exist". The shipped declarative path always ran a DDL batch first so it never
+// hit this, but `apply_plan` is public API PR1/PR6a consume with exactly these
+// net-new Dml-first shapes.
+//
+// Pre-fix: this errors on the journal read. Post-fix: the up-front
+// `ensure_journal` bootstraps the meta schema so the Dml-first plan succeeds.
+#[compio::test]
+async fn dml_first_plan_against_fresh_db_bootstraps_the_journal() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await; // creates project schema + migrator role — NOT the journal
+    let s = q(&cfg.project_schema);
+
+    // Create the DML's target table via RAW SQL (NOT through apply_plan), so the
+    // meta schema / `schema_migrations` journal is still absent when the plan runs.
+    // Hand ownership to the migrator role (a table created by the migrator path
+    // would be migrator-owned), so the least-privilege DML — which runs as the
+    // migrator role — can write to it.
+    let migrator = zeroship_migrate::migrator_role_name(&cfg.project_id).unwrap();
+    conn.batch_execute(&format!(
+        "CREATE TABLE {s}.kv (k text PRIMARY KEY, v text); \
+         ALTER TABLE {s}.kv OWNER TO \"{migrator}\";"
+    ))
+    .await
+    .expect("create target table out-of-band");
+
+    let dml_version = zeroship_migrate::migration_id_for_version(700);
+    let dml = PlanStep::Dml {
+        version: dml_version.clone(),
+        name: "seed_kv".to_string(),
+        template: format!("INSERT INTO {s}.kv (k, v) VALUES ($1, $2)"),
+        binds: vec![BindValue::Text("hello".into()), BindValue::Text("world".into())],
+        transactional: true,
+        destructive: false,
+        owner_app: "app_test".to_string(),
+    };
+
+    let engine = MigrationEngine::new();
+    // The FIRST (and only) step is a Dml; the meta journal does not exist yet.
+    let out = engine
+        .apply_plan(
+            &[dml],
+            Approval::None,
+            &zeroship_migrate::PostgresBackend::new(&conn),
+            &cfg,
+            "app_test",
+            zeroship_migrate::executor::LockMode::Acquire,
+        )
+        .await
+        .expect("a Dml-first plan against a fresh DB must bootstrap the journal up front");
+
+    assert!(out.applied.applied.contains(&dml_version.as_str().to_string()));
+    let v = conn
+        .query_one(&format!("SELECT v FROM {s}.kv WHERE k = $1"), &[&"hello"])
+        .await
+        .expect("the bound row is present")
+        .get::<_, String>(0);
+    assert_eq!(v, "world");
+    assert!(journaled(&conn, &cfg, dml_version.as_str()).await);
     teardown(&conn, &cfg).await;
 }
 
