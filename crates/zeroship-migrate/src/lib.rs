@@ -76,6 +76,7 @@ pub mod journal;
 pub mod loader;
 pub mod manifest;
 pub mod migration;
+pub mod plan;
 pub mod precondition;
 pub mod role;
 pub mod shadow;
@@ -142,8 +143,8 @@ pub use journal::{
     HistoryKind, JournalError, JournaledKind, Phase, RolledBackEntry,
 };
 pub use loader::{
-    load_dir, migration_id_for_version, new_dbmate_migration, repeatable_id_for_name, LoaderError,
-    PLATFORM_OWNER_APP,
+    load_dir, load_dir_migrations, migration_id_for_version, new_dbmate_migration,
+    repeatable_id_for_name, LoaderError, PLATFORM_OWNER_APP,
 };
 pub use squash::{squash, SquashError, SquashOutcome};
 pub use status::{history, status, MigrationStatus, StatusError};
@@ -156,6 +157,13 @@ pub use manifest::{
 pub use migration::{
     Checksum, ChecksumInput, IdError, Migration, MigrationFlags, MigrationId, OnlinePhase,
     MIGRATION_PREFIX,
+};
+// The `op.*` DSL plan model (§2.0). Distinct from the dry-run `MigrationPlan`
+// (re-exported from `engine`, unchanged): these are the net-new ordered
+// EXECUTION artifact + its steps. `+AppliedPlan, +PlanStep, +RenameStep` added;
+// `MigrationPlan` kept.
+pub use plan::{
+    AppliedPlan, BindValue, DialectScope, NotSingleStep, PlanStep, RenameStep,
 };
 pub use precondition::{
     evaluate as evaluate_precondition, CmpOp, OnUnmet, Precondition, PreconditionCheck,

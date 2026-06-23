@@ -703,7 +703,7 @@ async fn repeatable_with_down_is_rejected() {
 /// re-applied on EVERY load (accruing a phantom journal event each time).
 #[compio::test]
 async fn loaded_repeatable_is_stable_across_reloads() {
-    use zeroship_migrate::loader::load_dir;
+    use zeroship_migrate::loader::load_dir_migrations;
 
     let conn = pg().await;
     let tok = token();
@@ -717,7 +717,7 @@ async fn loaded_repeatable_is_stable_across_reloads() {
     write_loader_file(&dir, "R__a_view.sql", &v1);
 
     // Load 1 (fresh) + apply: the repeatable applies once.
-    let migs1 = load_dir(&dir).expect("load 1");
+    let migs1 = load_dir_migrations(&dir).expect("load 1");
     let rep_id = migs1
         .iter()
         .find(|m| m.name == "a_view")
@@ -733,7 +733,7 @@ async fn loaded_repeatable_is_stable_across_reloads() {
 
     // Load 2 (a SEPARATE fresh load), file UNCHANGED ⇒ the derived id must be
     // IDENTICAL ⇒ the re-run oracle SKIPS it (no second journal event).
-    let migs2 = load_dir(&dir).expect("load 2");
+    let migs2 = load_dir_migrations(&dir).expect("load 2");
     let rep_id2 = migs2
         .iter()
         .find(|m| m.name == "a_view")
@@ -766,7 +766,7 @@ async fn loaded_repeatable_is_stable_across_reloads() {
     // Change the file body ⇒ same id, new checksum ⇒ RE-APPLIES.
     let v2 = format!("CREATE OR REPLACE VIEW \"{schema}\".v AS SELECT 2 AS n");
     write_loader_file(&dir, "R__a_view.sql", &v2);
-    let migs3 = load_dir(&dir).expect("load 3");
+    let migs3 = load_dir_migrations(&dir).expect("load 3");
     let out3 = apply(&conn, &cfg, &migs3, Approval::None, "actor")
         .await
         .expect("apply load 3");

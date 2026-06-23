@@ -249,6 +249,29 @@ pub enum RunError {
     /// `load` must not clobber an existing DB), or restoring the dump DDL failed.
     #[error("load: {0}")]
     LoadCmd(String),
+    /// A loaded migration plan was not a single-step DDL plan (`op.*` DSL §5.2):
+    /// the platform Flyway-mode runner consumes plans through the thin
+    /// `AppliedPlan::single_step_migration()` facade, which fails closed on a
+    /// multi-step plan. This arm is **provably unreachable on the platform path**
+    /// (a Flyway/dbmate `.sql` always lowers to one `Ddl` step — asserted by the
+    /// single-step-shape precondition test) and exists for defense in depth.
+    #[error("plan shape: {0}")]
+    NotSingleStep(#[from] crate::plan::NotSingleStep),
+}
+
+/// Load the migration directory and project each [`AppliedPlan`] down to its one
+/// `&Migration` through the [`single_step_migration`](crate::plan::AppliedPlan::single_step_migration)
+/// facade (`op.*` DSL §5.2). The platform Flyway-mode runner operates over
+/// `Migration` and never touches `PlanStep`/`RenameStep`, so it stays decoupled
+/// from plan-shape evolution; the facade fails closed if a platform changelog
+/// ever produced a multi-step plan (it cannot today — see the precondition test).
+fn load_dir_flat(dir: &Path) -> Result<Vec<crate::migration::Migration>, RunError> {
+    let plans = load_dir(dir)?;
+    let mut migrations = Vec::with_capacity(plans.len());
+    for plan in &plans {
+        migrations.push(plan.single_step_migration()?.clone());
+    }
+    Ok(migrations)
 }
 
 /// The H1 destructive-gate decision (design §9, pure + unit-testable).
@@ -604,7 +627,7 @@ pub async fn run_migrate(cfg: &RunConfig) -> Result<RunReport, RunError> {
 /// The SQLite leg of `migrate`: plan with the SQLite guard, gate destructive, then
 /// apply through the hardened [`SqliteBackend`] via the SAME generic engine path.
 async fn run_migrate_sqlite(cfg: &RunConfig, app: &Path) -> Result<RunReport, RunError> {
-    let migrations = load_dir(&cfg.dir)?;
+    let migrations = load_dir_flat(&cfg.dir)?;
     let backend = open_sqlite_backend(app)?;
     let exec_cfg = sqlite_exec_cfg(cfg);
     let guard_cfg = sqlite_guard_cfg(cfg);
@@ -619,7 +642,7 @@ async fn run_migrate_sqlite(cfg: &RunConfig, app: &Path) -> Result<RunReport, Ru
 
 /// The Postgres leg of `migrate` — the existing path, byte-identical.
 async fn run_migrate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
-    let migrations = load_dir(&cfg.dir)?;
+    let migrations = load_dir_flat(&cfg.dir)?;
     let conn = connect(&cfg.database_url).await?;
     let exec_cfg = build_exec_cfg(cfg);
     let guard_cfg = build_guard_cfg(cfg);
@@ -647,7 +670,7 @@ async fn run_migrate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
 /// # Errors
 /// [`RunError`] on an unsupported engine / load / connect / a journal read failure.
 pub async fn run_status(cfg: &RunConfig) -> Result<RunReport, RunError> {
-    let migrations = load_dir(&cfg.dir)?;
+    let migrations = load_dir_flat(&cfg.dir)?;
     let st = match cfg.resolve_engine()? {
         Engine::Postgres => {
             let conn = connect(&cfg.database_url).await?;
@@ -708,7 +731,7 @@ fn validate_plan_signals(
 
 /// The Postgres leg of `validate` — the existing path, byte-identical.
 async fn run_validate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
-    let migrations = load_dir(&cfg.dir)?;
+    let migrations = load_dir_flat(&cfg.dir)?;
     let conn = connect(&cfg.database_url).await?;
     let exec_cfg = build_exec_cfg(cfg);
     let guard_cfg = build_guard_cfg(cfg);
@@ -767,7 +790,7 @@ async fn run_validate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
 /// backend-generic `check_checksum_drift`), emitting the same [`ValidateReport`]
 /// shape.
 async fn run_validate_sqlite(cfg: &RunConfig, app: &Path) -> Result<RunReport, RunError> {
-    let migrations = load_dir(&cfg.dir)?;
+    let migrations = load_dir_flat(&cfg.dir)?;
     let exec_cfg = sqlite_exec_cfg(cfg);
     let guard_cfg = sqlite_guard_cfg(cfg);
     let engine = MigrationEngine::new();
@@ -1539,7 +1562,7 @@ pub async fn run_rollback(
 
 /// The Postgres leg of `rollback` — the existing path, byte-identical.
 async fn run_rollback_pg(cfg: &RunConfig, target: RollbackTarget) -> Result<RunReport, RunError> {
-    let migrations = load_dir(&cfg.dir)?;
+    let migrations = load_dir_flat(&cfg.dir)?;
     let conn = connect(&cfg.database_url).await?;
     let exec_cfg = build_exec_cfg(cfg);
     let engine = MigrationEngine::new();
@@ -1569,7 +1592,7 @@ async fn run_rollback_sqlite(
     app: &Path,
     target: RollbackTarget,
 ) -> Result<RunReport, RunError> {
-    let migrations = load_dir(&cfg.dir)?;
+    let migrations = load_dir_flat(&cfg.dir)?;
     let backend = open_sqlite_backend(app)?;
     let exec_cfg = sqlite_exec_cfg(cfg);
     backend.ensure_journal(&exec_cfg).await?;
@@ -1645,7 +1668,7 @@ pub async fn run_down(cfg: &RunConfig) -> Result<RunReport, RunError> {
 /// # Errors
 /// [`RunError`] only on a load/parse failure of the migration directory.
 pub fn lint_advisories(cfg: &RunConfig) -> Result<Vec<(String, Vec<Advisory>)>, RunError> {
-    let migrations = load_dir(&cfg.dir)?;
+    let migrations = load_dir_flat(&cfg.dir)?;
     let guard_cfg = build_guard_cfg(cfg);
     let engine = MigrationEngine::new();
     let plan = engine.plan(&migrations, &guard_cfg);

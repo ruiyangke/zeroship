@@ -564,6 +564,49 @@ impl MigrationBackend for SqliteBackend {
             .map_err(|e| ApplyError::Backend(e.to_string()))
     }
 
+    async fn run_backfill_step(
+        &self,
+        _cfg: &ExecutorConfig,
+        spec: &crate::backfill::BackfillSpec,
+        _approval: crate::approval::Approval,
+        _applied_by: &str,
+        _lock_mode: crate::executor::LockMode,
+    ) -> Result<crate::executor::ApplyOutcome, ApplyError> {
+        // The SQLite BATCHED-backfill executor is net-new and COMMITTED for PR6b
+        // (§2.3.1 — the bi-dialect "one script, both backends, DDL+DML" headline).
+        // Until it lands, a SQLite-targeted batched backfill is a HARD error — never
+        // a silent skip of the data transform (§10 PR6a: "a plan whose only data
+        // step is a batched backfill against a SQLite target surfaces as a hard
+        // error on a SQLite deploy, never silent — until PR6b lands").
+        Err(ApplyError::Backend(format!(
+            "sqlite backend: batched backfill '{}' is not yet supported (the SQLite \
+             backfill executor lands in PR6b); a SQLite-targeted batched backfill is a \
+             hard error, never a silent skip",
+            spec.name
+        )))
+    }
+
+    async fn run_dml_step(
+        &self,
+        _cfg: &ExecutorConfig,
+        version: &crate::migration::MigrationId,
+        _name: &str,
+        _template: &str,
+        _binds: &[crate::plan::BindValue],
+        _approval: crate::approval::Approval,
+        _applied_by: &str,
+        _lock_mode: crate::executor::LockMode,
+    ) -> Result<bool, ApplyError> {
+        // The SQLite one-shot DML executor (the shared SQLite-DML-assembly module)
+        // is net-new for PR6a. Until it lands the SQLite arm fails closed rather
+        // than silently dropping a data statement.
+        Err(ApplyError::Backend(format!(
+            "sqlite backend: parameterized DML step '{}' is not yet supported (the \
+             SQLite one-shot DML executor lands in PR6a)",
+            version.as_str()
+        )))
+    }
+
     fn online(&self) -> Option<&dyn crate::expand_contract::OnlineSchemaChange> {
         // SQLite has NO online schema-change capability: a SQLite declarative rename
         // is routed to a `rebuild_one` (the 12-step offline rebuild), never

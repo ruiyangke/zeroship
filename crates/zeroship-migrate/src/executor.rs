@@ -1985,6 +1985,125 @@ pub(crate) async fn apply_transactional(
     Ok(())
 }
 
+/// Transactional apply of a single **parameterized DML** step (`op.*` DSL §2.3.2)
+/// — the PG executor behind
+/// [`MigrationBackend::run_dml_step`](crate::backend::MigrationBackend::run_dml_step).
+///
+/// Mirrors [`apply_transactional`]'s `BEGIN; SET LOCAL …; SET LOCAL ROLE; <stmt>;
+/// RESET ROLE; INSERT journal; COMMIT` discipline, but the statement is the DML
+/// `template` executed with `binds` bound **natively** as `$n` parameters (never
+/// interpolated). The step journals a `completed` event under `version`/`name`
+/// with a checksum over the template, so a re-run is a net-applied-skip
+/// (idempotency is the caller's `applied()` pre-check). DDL + journal are atomic.
+///
+/// # Errors
+/// [`ApplyError::MigrationFailed`] if the DML failed (rolled back, nothing
+/// journaled); [`ApplyError::Db`]/[`ApplyError::Journal`] on infrastructure
+/// failure.
+pub(crate) async fn apply_dml_transactional(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    version: &str,
+    name: &str,
+    template: &str,
+    binds: &[crate::plan::BindValue],
+    applied_by: &str,
+) -> Result<(), ApplyError> {
+    use compio_postgres::types::ToSql;
+
+    let started = Instant::now();
+    // Materialize the typed binds into owned values that outlive the `&dyn ToSql`
+    // borrows. `Decimal` is carried as its canonical text form (the IR numeric
+    // domain is i64 + decimal-string, §2.3.2); PG coerces the text param via the
+    // target column type.
+    let owned: Vec<Box<dyn ToSql + Sync>> = binds
+        .iter()
+        .map(|b| -> Box<dyn ToSql + Sync> {
+            match b {
+                crate::plan::BindValue::Null => Box::new(Option::<String>::None),
+                crate::plan::BindValue::Bool(v) => Box::new(*v),
+                crate::plan::BindValue::Int(v) => Box::new(*v),
+                crate::plan::BindValue::Decimal(s) => Box::new(s.clone()),
+                crate::plan::BindValue::Text(s) => Box::new(s.clone()),
+            }
+        })
+        .collect();
+    let params: Vec<&(dyn ToSql + Sync)> = owned.iter().map(|b| b.as_ref()).collect();
+
+    conn.batch_execute("BEGIN").await?;
+    // SET LOCAL search_path + the mandatory timeouts, txn-scoped (vanish at
+    // COMMIT/ROLLBACK). Built from cfg directly (a DML step has no per-migration
+    // timeout override slot in PR0).
+    let set_local = format!(
+        "SET LOCAL search_path TO {}; \
+         SET LOCAL statement_timeout = {}; \
+         SET LOCAL lock_timeout = {};",
+        cfg.search_path_clause(),
+        cfg.statement_timeout_ms(),
+        cfg.lock_timeout_ms(),
+    );
+    if let Err(e) = conn.batch_execute(&set_local).await {
+        let _ = conn.batch_execute("ROLLBACK").await;
+        return Err(ApplyError::Db(e));
+    }
+    // Drop to the migrator role for the DML ONLY (line-2 confinement); RESET
+    // before the journal write so the journal stays unforgeable by the step.
+    if let Some(set_role) = set_local_role_sql(cfg) {
+        if let Err(e) = conn.batch_execute(&set_role).await {
+            let _ = conn.batch_execute("ROLLBACK").await;
+            return Err(ApplyError::Db(e));
+        }
+    }
+    if let Err(e) = conn.execute(template, &params).await {
+        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+            tracing::warn!(error = %rb, version = %version, "zeroship-migrate: ROLLBACK failed after a DML error (op.* §2.3.2)");
+        }
+        return Err(ApplyError::MigrationFailed {
+            version: version.to_string(),
+            source: e,
+        });
+    }
+    if cfg.pg.migrator_role.is_some() {
+        if let Err(e) = conn.batch_execute("RESET ROLE").await {
+            let _ = conn.batch_execute("ROLLBACK").await;
+            return Err(ApplyError::Db(e));
+        }
+    }
+    let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+    // The journal checksum is over the PARAMETERIZED template (binds fold into the
+    // plan checksum, not the journal row — §2.3.2). Use the migration checksum
+    // discipline over (template, None).
+    let checksum = crate::migration::Checksum::of(&crate::migration::ChecksumInput {
+        up: template,
+        down: None,
+        flags: &crate::migration::MigrationFlags::default(),
+        owner_app: crate::loader::PLATFORM_OWNER_APP,
+        depends_on: &[],
+        supersedes: &[],
+        preconditions: &[],
+    });
+    let meta = format!("\"{}\"", cfg.pg.meta_schema.replace('"', "\"\""));
+    if let Err(e) = conn
+        .execute(
+            &format!(
+                "INSERT INTO {meta}.schema_migrations
+                     (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
+                 VALUES ('{applied}', $1, $2, $3, $4, $5, 'completed', 'success', 'apply')",
+                applied = journal::EventKind::Applied.as_str()
+            ),
+            &[&version, &name, &checksum.as_str(), &applied_by, &exec_ms],
+        )
+        .await
+    {
+        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+            tracing::warn!(error = %rb, version = %version, "zeroship-migrate: ROLLBACK failed after a DML journal-insert error");
+        }
+        return Err(ApplyError::Journal(JournalError::Db(e)));
+    }
+    conn.batch_execute("COMMIT").await?;
+    Ok(())
+}
+
 /// Insert the `S → v_i` supersession edges for a squash whose `up` RAN this batch
 /// (Plan 9 B fresh path). Each `conn.execute` participates in whatever transaction
 /// the caller has open — the txn apply path calls this INSIDE its `BEGIN…COMMIT`

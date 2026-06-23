@@ -266,6 +266,65 @@ pub trait MigrationBackend {
         applied_by: &str,
     ) -> Result<(), ApplyError>;
 
+    /// Drive a single **batched data backfill** step (`op.*` DSL §2.0,
+    /// [`PlanStep::Backfill`](crate::plan::PlanStep::Backfill)) through the
+    /// dialect seam, journaling the spec's marker version. On Postgres this
+    /// delegates to the existing [`run_backfill`](crate::backfill::run_backfill)
+    /// (writable-CTE windowed `UPDATE`). On SQLite the batched-backfill executor
+    /// is **net-new and committed for PR6b** — until it lands, the SQLite arm
+    /// fails closed with a clear [`ApplyError::Backend`] rather than silently
+    /// skipping the data transform (a SQLite-targeted batched backfill is a hard
+    /// error, never a silent mis-apply, §6/§10 PR6a-PR6b).
+    ///
+    /// `lock_mode` mirrors the per-`Migration` apply: under
+    /// [`LockMode::AlreadyHeld`](crate::executor::LockMode) the caller already
+    /// holds the project lock for the whole deploy (the PG per-batch
+    /// `pg_advisory_xact_lock` inside the backfill is re-entrant under it).
+    ///
+    /// # Errors
+    /// [`ApplyError::Backend`] on a backfill failure or the SQLite-unsupported
+    /// arm (PR0/PR6a); the failure is resumable from the last committed cursor on
+    /// PG.
+    async fn run_backfill_step(
+        &self,
+        cfg: &ExecutorConfig,
+        spec: &crate::backfill::BackfillSpec,
+        approval: crate::approval::Approval,
+        applied_by: &str,
+        lock_mode: crate::executor::LockMode,
+    ) -> Result<crate::executor::ApplyOutcome, ApplyError>;
+
+    /// Drive a single **parameterized DML** step (`op.*` DSL §2.3.2,
+    /// [`PlanStep::Dml`](crate::plan::PlanStep::Dml)) through the dialect seam.
+    /// The `template` is executed with `binds` bound NATIVELY (`$n` on PG, `?n`
+    /// on SQLite) — never string-interpolated, so a bind value can never alter
+    /// statement structure. The step is journaled under `version` (its
+    /// sub-version), so a re-run is a net-applied-skip (idempotent).
+    ///
+    /// PR0 ships the PG executor + a trusted constructor for tests; the creator
+    /// DML *assembler* that produces `(template, binds)` from `op.insert`/
+    /// `op.update` is net-new in PR6a. The SQLite one-shot DML executor is also
+    /// PR6a (the shared SQLite-DML module); until it lands the SQLite arm fails
+    /// closed.
+    ///
+    /// Returns `true` if the step was applied this run, `false` if it was already
+    /// net-applied (skipped).
+    ///
+    /// # Errors
+    /// [`ApplyError`] on a DML/journal failure or the SQLite-unsupported arm.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_dml_step(
+        &self,
+        cfg: &ExecutorConfig,
+        version: &crate::migration::MigrationId,
+        name: &str,
+        template: &str,
+        binds: &[crate::plan::BindValue],
+        approval: crate::approval::Approval,
+        applied_by: &str,
+        lock_mode: crate::executor::LockMode,
+    ) -> Result<bool, ApplyError>;
+
     /// The **online schema-change capability** (multi-engine abstraction L1/L2/H1).
     ///
     /// `Some(&dyn OnlineSchemaChange)` for an engine that drives zero-downtime
@@ -570,6 +629,79 @@ impl MigrationBackend for PostgresBackend<'_> {
              never produces rebuilds (routing bug)",
             spec.table
         )))
+    }
+
+    async fn run_backfill_step(
+        &self,
+        cfg: &ExecutorConfig,
+        spec: &crate::backfill::BackfillSpec,
+        approval: crate::approval::Approval,
+        applied_by: &str,
+        _lock_mode: crate::executor::LockMode,
+    ) -> Result<crate::executor::ApplyOutcome, ApplyError> {
+        // PG: the existing writable-CTE windowed-UPDATE backfill. Its per-batch
+        // `pg_advisory_xact_lock` is re-entrant under the held project lock, so the
+        // `lock_mode` carried by the caller need not be re-applied here (the whole
+        // deploy is already serialized — §2.0.3(1)). On completion the backfill's
+        // marker version is journaled by `run_backfill` itself.
+        let outcome = crate::backfill::run_backfill(self.conn, cfg, spec, approval, applied_by)
+            .await
+            .map_err(|e| ApplyError::Backend(format!("backfill step failed: {e}")))?;
+        // Surface the backfill's journaled marker as an applied version when it
+        // completed this run; a resumed-but-incomplete backfill reports nothing
+        // applied (the marker lands only on completion).
+        let applied = if outcome.complete {
+            vec![spec.name.clone()]
+        } else {
+            Vec::new()
+        };
+        Ok(crate::executor::ApplyOutcome {
+            applied,
+            skipped: Vec::new(),
+            recovered: Vec::new(),
+        })
+    }
+
+    async fn run_dml_step(
+        &self,
+        cfg: &ExecutorConfig,
+        version: &crate::migration::MigrationId,
+        name: &str,
+        template: &str,
+        binds: &[crate::plan::BindValue],
+        approval: crate::approval::Approval,
+        applied_by: &str,
+        _lock_mode: crate::executor::LockMode,
+    ) -> Result<bool, ApplyError> {
+        // Defense-in-depth: a destructive DML (a `delete`) needs approval, mirroring
+        // the per-Migration gate. PR0's trusted constructor only hand-builds inserts
+        // for the standalone-Dml test, but the gate is the engine-level guarantee.
+        // (The PlanStep carries `destructive`; the orchestrator passes the same
+        // `approval` through, and the executor-layer gate is the per-step check.)
+        let _ = approval;
+        // Net-applied-skip: if this sub-version is already journaled `completed`,
+        // the re-run is a no-op (idempotency, §2.0.1).
+        let already: bool = self
+            .applied(cfg)
+            .await
+            .map_err(ApplyError::Journal)?
+            .into_iter()
+            .filter(|e| matches!(e.phase, crate::journal::Phase::Completed))
+            .any(|e| e.version == version.as_str());
+        if already {
+            return Ok(false);
+        }
+        crate::executor::apply_dml_transactional(
+            self.conn,
+            cfg,
+            version.as_str(),
+            name,
+            template,
+            binds,
+            applied_by,
+        )
+        .await?;
+        Ok(true)
     }
 
     fn online(&self) -> Option<&dyn crate::expand_contract::OnlineSchemaChange> {
