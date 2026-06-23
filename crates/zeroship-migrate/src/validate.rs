@@ -400,22 +400,52 @@ impl Ctx<'_> {
         }
     }
 
+    /// The maximum expression-AST nesting [`Ctx::walk`] will descend before
+    /// refusing the tree as a [`CODE_UNSUPPORTED`] DoS guard. The bound is OWNED
+    /// by the validator (an explicit counter, below) rather than left implicit to
+    /// `serde_json`'s compile-time `recursion_limit` (~128) at deserialize: a
+    /// future switch to a streaming/custom deserializer, or a raised serde limit,
+    /// would otherwise silently expose a stack-overflow on a deeply-nested hostile
+    /// `.ir.json`. `128` is comfortably below any realistic legitimate nesting and
+    /// matches serde's own default so it never narrows the accepted set in
+    /// practice. If a deserializer ever admits deeper trees, THIS bound — not an
+    /// upstream default — is what protects the recursive walk.
+    const MAX_EXPR_DEPTH: u32 = 128;
+
     fn walk(&self, expr: &Expr) -> Result<(), AuthoringError> {
+        self.walk_depth(expr, 0)
+    }
+
+    fn walk_depth(&self, expr: &Expr, depth: u32) -> Result<(), AuthoringError> {
+        if depth >= Self::MAX_EXPR_DEPTH {
+            return Err(self.err(
+                CODE_UNSUPPORTED,
+                Some(UnsupportedKind::Expr),
+                self.target_dialect,
+                format!(
+                    "expression nesting exceeds the maximum supported depth ({}); \
+                     flatten the expression",
+                    Self::MAX_EXPR_DEPTH
+                ),
+                Some("reduce the nesting depth of this expression".to_string()),
+            ));
+        }
+        let d = depth + 1;
         match expr {
             Expr::ColRef { name } => self.check_colref(name),
             Expr::Literal { .. } => Ok(()),
             Expr::BinOp { lhs, rhs, .. } => {
-                self.walk(lhs)?;
-                self.walk(rhs)
+                self.walk_depth(lhs, d)?;
+                self.walk_depth(rhs, d)
             }
-            Expr::UnaryOp { operand, .. } => self.walk(operand),
+            Expr::UnaryOp { operand, .. } => self.walk_depth(operand, d),
             Expr::Case { branches, r#else } => {
                 for CaseBranch { condition, result } in branches {
-                    self.walk(condition)?;
-                    self.walk(result)?;
+                    self.walk_depth(condition, d)?;
+                    self.walk_depth(result, d)?;
                 }
                 if let Some(e) = r#else {
-                    self.walk(e)?;
+                    self.walk_depth(e, d)?;
                 }
                 Ok(())
             }
@@ -423,14 +453,14 @@ impl Ctx<'_> {
             // ScalarFn enum) — only its args need recursion.
             Expr::FnCall { args, .. } => {
                 for a in args {
-                    self.walk(a)?;
+                    self.walk_depth(a, d)?;
                 }
                 Ok(())
             }
-            Expr::FnSynth { r#fn, args } => self.check_synth(*r#fn, args),
+            Expr::FnSynth { r#fn, args } => self.check_synth(*r#fn, args, d),
             // Cast target is portable by the closed CastTarget enum (rule d);
             // recurse into the operand.
-            Expr::Cast { operand, .. } => self.walk(operand),
+            Expr::Cast { operand, .. } => self.walk_depth(operand, d),
         }
     }
 
@@ -468,7 +498,7 @@ impl Ctx<'_> {
     /// `.ir.json` carrying e.g. `FnSynth{fn:now, args:[…]}` or a zero-arg
     /// `concatWs` cannot pass the structural gate and defer the blow-up to
     /// rendering. After the shape check each variant recurses into its args.
-    fn check_synth(&self, f: SynthFn, args: &[Expr]) -> Result<(), AuthoringError> {
+    fn check_synth(&self, f: SynthFn, args: &[Expr], depth: u32) -> Result<(), AuthoringError> {
         match f {
             SynthFn::SplitPart => {
                 self.check_split_part(args)?;
@@ -483,7 +513,7 @@ impl Ctx<'_> {
                 // render/execute (item-4). A `Literal` slot recurses to a no-op,
                 // so this is idempotent with the envelope literal checks.
                 for a in args {
-                    self.walk(a)?;
+                    self.walk_depth(a, depth)?;
                 }
                 Ok(())
             }
@@ -517,7 +547,7 @@ impl Ctx<'_> {
                     )));
                 }
                 for a in args {
-                    self.walk(a)?;
+                    self.walk_depth(a, depth)?;
                 }
                 Ok(())
             }
@@ -658,6 +688,53 @@ mod tests {
 
     fn scope<'a>(table: &'a str, cols: &'a [String]) -> TargetScope<'a> {
         TargetScope::new(table, cols)
+    }
+
+    // ── DoS guard: explicit walk depth bound (code-critic LOW) ──────────────
+    // The validator OWNS the recursion bound (Ctx::MAX_EXPR_DEPTH), not an
+    // implicit serde_json::recursion_limit. Build the AST in Rust (bypassing
+    // serde entirely, exactly as a future streaming/custom deserializer or a
+    // raised serde limit would) and assert the walker still refuses an
+    // over-deep tree as CODE_UNSUPPORTED rather than recursing to a stack
+    // overflow.
+
+    /// Wrap `inner` in `depth` nested `UnaryOp::Not` nodes.
+    fn nest_not(depth: u32, inner: Expr) -> Expr {
+        let mut e = inner;
+        for _ in 0..depth {
+            e = Expr::UnaryOp { op: UnaryOp::Not, operand: Box::new(e) };
+        }
+        e
+    }
+
+    #[test]
+    fn walk_refuses_over_deep_expression_as_unsupported() {
+        let c = cols();
+        let sc = scope("users", &c);
+        // Comfortably past the bound — would stack-overflow a naive walker.
+        let deep = nest_not(Ctx::MAX_EXPR_DEPTH + 50, Expr::col("name"));
+        let err = validate_expr(&deep, Dialect::Postgres, &sc, 0, None)
+            .expect_err("an over-deep expression must be refused, not recursed");
+        assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        assert!(
+            err.reason.contains("nesting"),
+            "the error must name the depth bound, got: {}",
+            err.reason
+        );
+    }
+
+    #[test]
+    fn walk_accepts_expression_within_the_depth_bound() {
+        let c = cols();
+        let sc = scope("users", &c);
+        // A legitimately-shallow tree (well under the bound) still validates —
+        // the bound never narrows the realistic accepted set.
+        let ok = nest_not(Ctx::MAX_EXPR_DEPTH - 2, Expr::col("name"));
+        assert!(
+            validate_expr(&ok, Dialect::Postgres, &sc, 0, None).is_ok(),
+            "a tree within the depth bound must validate"
+        );
     }
 
     // ── (a) every allow-listed node validates ──────────────────────────────

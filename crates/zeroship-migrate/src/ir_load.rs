@@ -160,6 +160,17 @@ fn op_target_table(op: &Op) -> Option<&str> {
 ///    never-declared table is refused, exactly as the declarative drop path
 ///    refuses an unknown-owner drop.
 ///
+/// **The `createTable` pre-pass is intentionally op-ORDER-INDEPENDENT.** Because
+/// step 1 registers every `createTable` in the migration BEFORE step 2's per-op
+/// check, a DML/alter op that appears *positionally before* its `createTable` in
+/// the op list still passes ownership (the table is already pre-registered to the
+/// deploying app). This is deliberate: ownership is a WHO-MAY-TOUCH question, not
+/// an apply-ORDER-VALIDITY question — and it mirrors the declarative/snapshot
+/// path, whose set-semantics union has no op order at all. Apply-order
+/// correctness (you cannot INSERT into a table the same migration has not yet
+/// created at execution time) is the EXECUTOR's concern and surfaces there; it is
+/// NOT a security relaxation in this gate.
+///
 /// # Errors
 /// [`IrLoadError::NotTableOwner`] on a non-owned or unregistered target table.
 pub fn enforce_ir_ownership(
@@ -461,6 +472,44 @@ mod tests {
     }
 
     #[test]
+    fn load_allows_dml_positioned_before_its_create_table_in_same_migration() {
+        // ORDER-INDEPENDENCE (code-critic LOW): the createTable ownership pre-pass
+        // registers ALL createTable names BEFORE the per-op check, so an op that
+        // appears POSITIONALLY BEFORE its createTable still passes ownership — the
+        // table is pre-registered to the deploying app. This is who-may-touch, not
+        // apply-order validity (the executor enforces apply order). It is NOT a
+        // security relaxation: the table is still owned by the deploying app, and a
+        // collision with ANOTHER app's table is still refused (see the test below).
+        let ops = r#"[{"op":"insert","table":"fresh","columns":["id"],"rows":[[1]]},{"op":"createTable","name":"fresh","columns":[{"name":"id","type":"int"}]}]"#;
+        let bytes = ir_json(ops, "");
+        let reg = registry(&[]); // `fresh` is brand new — declared later in THIS migration
+        let ir = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg)
+            .expect("DML before its createTable passes ownership (order-independent pre-pass)");
+        assert_eq!(ir.owner_app, "app_a");
+    }
+
+    #[test]
+    fn load_refuses_dml_before_create_table_when_table_belongs_to_another_app() {
+        // The order-independence above is NOT a relaxation: if the table named by
+        // the pre-positioned DML is ALREADY owned by a DIFFERENT app, the per-op
+        // check still refuses it (the pre-pass only inserts when ABSENT, so the
+        // existing foreign owner is never overwritten). A createTable colliding
+        // with that foreign table is likewise refused.
+        let ops = r#"[{"op":"insert","table":"users","columns":["id"],"rows":[[1]]},{"op":"createTable","name":"users","columns":[{"name":"id","type":"int"}]}]"#;
+        let bytes = ir_json(ops, "");
+        let reg = registry(&[("users", "app_owner")]);
+        let err = load_ir_document(&bytes, "app_intruder", Dialect::Postgres, &reg).unwrap_err();
+        match err {
+            IrLoadError::NotTableOwner { table, owner, op_index, .. } => {
+                assert_eq!(table, "users");
+                assert_eq!(owner, "app_owner", "foreign owner must not be overwritten by the pre-pass");
+                assert_eq!(op_index, 0, "the FIRST op (the pre-positioned DML) is the one refused");
+            }
+            other => panic!("expected NotTableOwner, got: {other}"),
+        }
+    }
+
+    #[test]
     fn load_refuses_create_table_colliding_with_another_apps_table() {
         // A createTable for a table ALREADY owned by another app does not silently
         // take ownership — the per-op check refuses it (the working registry only
@@ -493,6 +542,35 @@ mod tests {
     }
 
     // ── checksum-hint compare wired (finding 5) ─────────────────────────────
+
+    /// FROZEN-HEX hint golden (code-critic MED): pin the §2.4 hint-domain
+    /// checksum for a FIXED IR to a hard-coded literal, then drive the loader
+    /// with that literal embedded in the `.ir.json` bytes. This breaks the
+    /// self-reference of [`load_accepts_a_correct_checksum_hint`] (which computes
+    /// the "correct" hint with the very function under test): here the accepted
+    /// value is an INDEPENDENT literal captured once, so a drift in EITHER
+    /// `recompute_hint_domain_checksum` (the hint-domain fold — incl. how it
+    /// folds `MigrationFlags::default()` when the override is all-None) OR the
+    /// loader's compare is caught. The JS builder MUST emit this same hex for
+    /// this IR (a JS-produced fixture lands with the #80 JS golden); until then
+    /// this frozen literal is the independent oracle.
+    ///
+    /// If this hex changes, the hint-domain wire format drifted — the JS `op.*`
+    /// author would emit a hint the engine rejects. Not allowed without a
+    /// deliberate, matched break on both sides.
+    #[test]
+    fn load_accepts_a_frozen_checksum_hint_golden() {
+        // A fixed dropTable IR with all-default flags/deps/supersedes/precond.
+        let ops = r#"[{"op":"dropTable","table":"users"}]"#;
+        // Hard-coded literal — NOT computed by the function under test.
+        const FROZEN_HINT: &str =
+            "94383de0064858b3bff63599509d674a111aaad6874630c4c584357032ae2ced";
+        let bytes = ir_json(ops, &format!(r#", "checksum": "{FROZEN_HINT}""#));
+        let reg = registry(&[("users", "app_a")]);
+        let loaded = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg)
+            .expect("loader must accept the frozen-hex hint for this fixed IR");
+        assert_eq!(loaded.checksum.as_deref(), Some(FROZEN_HINT));
+    }
 
     #[test]
     fn load_accepts_a_correct_checksum_hint() {
