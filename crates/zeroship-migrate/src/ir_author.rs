@@ -40,6 +40,55 @@ use crate::ir::{
 use crate::migration::Migration;
 use zeroship_schema::query::SqlDialect;
 
+/// The LIVE-schema facts the IR-path Lower phase consults — the IR-path peer of
+/// the full [`crate::drift::SchemaSnapshot`] the differ diffs against.
+///
+/// The differ reads BOTH "which tables already exist" (drives FK inline-vs-defer)
+/// and "is THIS index UNIQUE in the live catalog" (drives the `render_drop_index`
+/// destructive/approval gate) from the authoritative introspected snapshot. The
+/// IR path must consult the SAME authoritative source — never trust an
+/// author-supplied hint for a security-relevant gate — so this bundle carries both
+/// live facts the lower needs:
+///
+/// - `tables` — the set of tables already present (FK to a live target inlines; to
+///   a not-yet-live target defers on PG / errors on SQLite — mirroring `diff`).
+/// - `unique_indexes` — the set of index NAMES the live catalog reports as UNIQUE.
+///   A `dropIndex` of a name in this set lowers `destructive + requires_approval`
+///   REGARDLESS of the IR's `unique` hint: the hint is advisory and is OR-ed with
+///   this live fact, so a hostile/buggy author who sets `unique:false` (or omits
+///   it) on a drop of an actually-unique index can NOT defeat the approval gate
+///   (the gate the spec intends — silently dropping a unique index removes a
+///   data-integrity guarantee). When introspection is unavailable (a unit lower
+///   with no live schema), the set is empty and gating falls back to the hint
+///   alone — never LESS strict than the hint.
+#[derive(Debug, Clone, Default)]
+pub struct LiveSchema {
+    /// Tables already present in the project schema (FK inline-vs-defer).
+    pub tables: BTreeSet<String>,
+    /// Index NAMES the live catalog reports as UNIQUE (drop-gating, OR-ed with the
+    /// IR's advisory `unique` hint — the live fact is authoritative).
+    pub unique_indexes: BTreeSet<String>,
+}
+
+impl LiveSchema {
+    /// A live schema with `tables` and NO known unique indexes — for a unit lower
+    /// that has the live table set (FK inlining) but no introspected index facts.
+    /// Drop-gating then falls back to the IR's advisory `unique` hint alone (never
+    /// LESS strict than the hint).
+    #[must_use]
+    pub fn from_tables(tables: BTreeSet<String>) -> Self {
+        Self { tables, unique_indexes: BTreeSet::new() }
+    }
+}
+
+impl From<&BTreeSet<String>> for LiveSchema {
+    /// Bridge the bare live-table set used throughout the unit lower tests into the
+    /// bundled facts (no known unique indexes — the hint-only fallback).
+    fn from(tables: &BTreeSet<String>) -> Self {
+        Self::from_tables(tables.clone())
+    }
+}
+
 /// The IR-path DDL author (§6). Wraps a [`DeclarativeAuthor`] so it reuses the
 /// declarative render seam verbatim; the IR-specific work is the op→descriptor
 /// mapping that feeds the shared snapshot-builder.
@@ -225,7 +274,9 @@ impl IrAuthor {
     /// ([`crate::loader::load_dir`]), which never routes IR.
     ///
     /// `registry` is the project's table→owner map (drives the §8.6 ownership
-    /// check); `live_tables` the tables already present (drives FK inline-vs-defer).
+    /// check); `live` the introspected [`LiveSchema`] facts — the tables already
+    /// present (FK inline-vs-defer) AND the live UNIQUE-index names (the
+    /// authoritative `dropIndex` destructive/approval gate, OR-ed with the IR hint).
     ///
     /// # Errors
     /// - [`LoadAndLowerError::Load`] — the load gate refused the artifact
@@ -237,7 +288,7 @@ impl IrAuthor {
         bytes: &str,
         deploying_app: &str,
         registry: &std::collections::BTreeMap<String, String>,
-        live_tables: &BTreeSet<String>,
+        live: &LiveSchema,
     ) -> Result<Vec<Migration>, LoadAndLowerError> {
         let target = match self.dialect {
             SqlDialect::Postgres => crate::validate::Dialect::Postgres,
@@ -245,7 +296,7 @@ impl IrAuthor {
         };
         let ir = crate::ir_load::load_ir_document(bytes, deploying_app, target, registry)
             .map_err(LoadAndLowerError::Load)?;
-        self.lower(&ir, live_tables).map_err(LoadAndLowerError::Lower)
+        self.lower(&ir, live).map_err(LoadAndLowerError::Lower)
     }
 
     /// The PRODUCTION `.ir.json` deploy entry (§6.1.1 + §7.2): run the fail-closed
@@ -269,7 +320,7 @@ impl IrAuthor {
         bytes: &str,
         deploying_app: &str,
         registry: &std::collections::BTreeMap<String, String>,
-        live_tables: &BTreeSet<String>,
+        live: &LiveSchema,
         guard_cfg: &GuardConfig,
     ) -> Result<LoweredArtifact, LoadAndLowerGuardedError> {
         let target = match self.dialect {
@@ -289,17 +340,20 @@ impl IrAuthor {
             })
             .collect();
         let (migrations, fragments) = self
-            .lower_guarded(&ir, guard_cfg, live_tables)
+            .lower_guarded(&ir, guard_cfg, live)
             .map_err(LoadAndLowerGuardedError::Lower)?;
         Ok(LoweredArtifact { migrations, fragments, created_tables })
     }
 
     /// Lower a validated [`MigrationIr`]'s DDL ops to [`Migration`]s.
     ///
-    /// `live_tables` is the set of tables already present in the project (so an FK
-    /// to a live target inlines, and a non-live target defers on PG / errors on
-    /// SQLite — mirroring `diff`). Tables created EARLIER in the same IR are added
-    /// to the working live set as lowering proceeds, so an intra-migration FK
+    /// `live` carries the introspected [`LiveSchema`] facts: `live.tables` is the
+    /// set of tables already present in the project (so an FK to a live target
+    /// inlines, and a non-live target defers on PG / errors on SQLite — mirroring
+    /// `diff`); `live.unique_indexes` is the authoritative set of live UNIQUE-index
+    /// names that drives the `dropIndex` destructive/approval gate (OR-ed with the
+    /// IR's advisory `unique` hint). Tables created EARLIER in the same IR are added
+    /// to the working live-table set as lowering proceeds, so an intra-migration FK
     /// inlines correctly.
     ///
     /// # Errors
@@ -308,12 +362,12 @@ impl IrAuthor {
     pub fn lower(
         &self,
         ir: &MigrationIr,
-        live_tables: &BTreeSet<String>,
+        live: &LiveSchema,
     ) -> Result<Vec<Migration>, IrLowerError> {
         let mut out: Vec<Migration> = Vec::new();
-        let mut live: BTreeSet<String> = live_tables.clone();
+        let mut live_tables: BTreeSet<String> = live.tables.clone();
         for op in &ir.ops {
-            out.extend(self.lower_one_op(op, &mut live)?);
+            out.extend(self.lower_one_op(op, &mut live_tables, &live.unique_indexes)?);
         }
         Ok(out)
     }
@@ -330,9 +384,18 @@ impl IrAuthor {
         &self,
         op: &Op,
         live: &mut BTreeSet<String>,
+        live_unique_indexes: &BTreeSet<String>,
     ) -> Result<Vec<Migration>, IrLowerError> {
         let migs = match op {
             Op::CreateTable { name, columns, .. } => {
+                // A column carrying a SYNTH default (`now()`/`genRandomUuid()`) must
+                // FAIL CLOSED, not silently lower with NO default. `ir_default_to_value`
+                // maps `IrDefault::Fn → None` — correct for the system-field path the
+                // differ owns (it never emits a volatile synth on a user column), but a
+                // user-authored synth default would be SILENTLY DROPPED. Rendering a
+                // synth default is the deferred Expr→SQL synth wave; until it lands, an
+                // author-supplied synth default is refused here rather than lost.
+                reject_synth_default(columns.iter().map(|c| (c.name.as_str(), c.default.as_ref())))?;
                 let desc = self.create_table_descriptor(name, columns);
                 let snap = build_table_snapshot(&self.project_schema, &desc, self.dialect)?;
                 // The SQLite CREATE routes through the shared `zeroship_schema`
@@ -347,6 +410,9 @@ impl IrAuthor {
                 migs
             }
             Op::AddColumn { table, column, ty, nullable, default } => {
+                // Fail-closed on a synth default (see the createTable arm): a
+                // user-authored `now()`/`genRandomUuid()` must NOT be silently dropped.
+                reject_synth_default(std::iter::once((column.as_str(), default.as_ref())))?;
                 let col =
                     self.add_column_snapshot(table, column, ty, *nullable, default.as_ref())?;
                 vec![self.decl.lower_add_column(table, &col)]
@@ -361,16 +427,28 @@ impl IrAuthor {
             }
             Op::DropIndex { name, unique, .. } => {
                 // A bare-name DropIndex is rejected fail-closed UPSTREAM by the
-                // validator (§8.6); a table-hinted one reaches here. The IR carries
-                // a `unique` hint (stamped by the JS `op.dropIndex` builder from the
-                // authored index's declared uniqueness): a `unique: true` drop lowers
-                // `destructive + requires_approval` — matching the differ's
-                // `render_drop_index`, which gates a unique-index drop because it
-                // silently removes a data-integrity guarantee — so it is REFUSED
-                // under `Approval::None` rather than applied silently. A plain
-                // (absent/false) drop stays ungated/reversible. The render is the
-                // same `DROP INDEX` either way; only the gating flag differs.
-                let idx = IndexSnapshot::btree(name.clone(), unique.unwrap_or(false), Vec::new());
+                // validator (§8.6); a table-hinted one reaches here.
+                //
+                // The destructive/approval GATE is driven by the index's TRUE
+                // uniqueness, resolved from the AUTHORITATIVE live catalog
+                // (`live_unique_indexes`, introspected the SAME way the differ's
+                // `render_drop_index` reads `IndexSnapshot::unique`) — NOT from the
+                // author-supplied `unique` hint alone. The hint is advisory and is
+                // OR-ed with the live fact: a hostile/buggy author who sets
+                // `unique:false` (or omits it) on a drop of an ACTUALLY-unique index
+                // can NOT defeat the gate. Dropping a UNIQUE index silently removes a
+                // data-integrity guarantee (duplicate rows become possible; a later
+                // re-add fails on the dirtied data), so it lowers
+                // `destructive + requires_approval` and is REFUSED under
+                // `Approval::None` rather than applied silently. A plain
+                // (live-non-unique AND no hint) drop stays ungated/reversible. The
+                // render is the same `DROP INDEX` either way; only the gating differs.
+                //
+                // Hint-only fallback: when the live facts are unavailable (a unit
+                // lower with no introspected schema), `live_unique_indexes` is empty
+                // and gating falls back to the hint — never LESS strict than before.
+                let is_unique = unique.unwrap_or(false) || live_unique_indexes.contains(name);
+                let idx = IndexSnapshot::btree(name.clone(), is_unique, Vec::new());
                 vec![self.decl.lower_drop_index(&idx)]
             }
             Op::AlterColumnType { table, column, ty, using } => {
@@ -438,18 +516,18 @@ impl IrAuthor {
         &self,
         ir: &MigrationIr,
         guard_cfg: &GuardConfig,
-        live_tables: &BTreeSet<String>,
+        live: &LiveSchema,
     ) -> Result<(Vec<Migration>, Vec<GuardedFragment>), IrGuardedLowerError> {
         let guard = guard_for(guard_cfg);
         let mut migrations: Vec<Migration> = Vec::new();
         let mut fragments: Vec<GuardedFragment> = Vec::new();
-        let mut live: BTreeSet<String> = live_tables.clone();
+        let mut live_tables: BTreeSet<String> = live.tables.clone();
 
         for (op_index, op) in ir.ops.iter().enumerate() {
             let op_kind = op_kind_tag(op);
-            // Lower this op (advancing `live` for intra-IR FK inlining). A lower
-            // failure aborts before any guarding — nothing applied.
-            let op_migs = self.lower_one_op(op, &mut live)?;
+            // Lower this op (advancing `live_tables` for intra-IR FK inlining). A
+            // lower failure aborts before any guarding — nothing applied.
+            let op_migs = self.lower_one_op(op, &mut live_tables, &live.unique_indexes)?;
 
             for mig in op_migs {
                 // Split the rendered `up` into its individual statement FRAGMENTS on
@@ -719,12 +797,38 @@ fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
     }
 }
 
+/// Fail-closed guard: refuse any column carrying a SYNTH default
+/// (`IrDefault::Fn`, i.e. `now()`/`genRandomUuid()`) at lower, rather than letting
+/// [`ir_default_to_value`] silently map it to `None` (no default). This closes the
+/// self-footgun the §LOW finding flagged: a user-authored synth default would
+/// otherwise be DROPPED with no error. Rendering a synth default to per-dialect SQL
+/// is the deferred Expr→SQL synth wave (the same wave DML waits on); until then an
+/// author-supplied synth default is REFUSED ([`IrLowerError::ExprRenderDeferred`]),
+/// never lost.
+///
+/// The differ's own system-field path (`id`/timestamps) injects its volatile
+/// defaults through the shared builder, NOT through an `IrDefault::Fn` on a user
+/// column, so this guard never trips on a legitimate createTable — only on an
+/// explicit author-supplied synth default the renderer cannot yet materialize.
+fn reject_synth_default<'a>(
+    cols: impl Iterator<Item = (&'a str, Option<&'a IrDefault>)>,
+) -> Result<(), IrLowerError> {
+    for (_name, default) in cols {
+        if matches!(default, Some(IrDefault::Fn { .. })) {
+            return Err(IrLowerError::ExprRenderDeferred("column default (synth now/genRandomUuid)"));
+        }
+    }
+    Ok(())
+}
+
 /// Map an [`IrDefault`] to the descriptor's `default` JSON value. A literal maps
-/// to its scalar; a synth `now`/`genRandomUuid` is an apply-time default that the
-/// `t.*` lexicon expresses as a `{ fn }` object — but the declarative differ only
-/// emits IMMUTABLE literal defaults (never a volatile synth), so a synth default
-/// is left to the shared builder's policy (carried as `None` here, matching the
-/// differ which never sees a synth default on an autogenerated column).
+/// to its scalar. A synth `now`/`genRandomUuid` maps to `None` HERE — but it is
+/// never reached for a user-authored synth default, because [`reject_synth_default`]
+/// fails that case CLOSED at lower (the self-footgun fix): the silent `None` is
+/// reserved for the differ's system-field path, which never routes a synth through
+/// this function. So `None` here matches the differ (which never sees a synth
+/// default on an autogenerated column) WITHOUT silently dropping an author's
+/// request.
 fn ir_default_to_value(d: &IrDefault) -> Option<serde_json::Value> {
     use crate::ir::IrScalar;
     use serde_json::Value;
@@ -830,7 +934,7 @@ mod tests {
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let guard_cfg = GuardConfig::confined("app".to_string());
         let (migs, frags) = author
-            .lower_guarded(&ir, &guard_cfg, &BTreeSet::new())
+            .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
             .expect("guarded lower of a clean createTable passes");
 
         // The createTable emits a multi-statement `up` (CREATE + COMMENT sentinel),
@@ -880,7 +984,7 @@ mod tests {
         // cross-schema reference the Confined guard denies.
         let guard_cfg = GuardConfig::confined("other".to_string());
         let err = author
-            .lower_guarded(&ir, &guard_cfg, &BTreeSet::new())
+            .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
             .expect_err("a fragment outside the confined schema must be denied");
         match err {
             IrGuardedLowerError::Denied(d) => {
@@ -909,7 +1013,7 @@ mod tests {
         let author = IrAuthor::new("app", "app_a", SqlDialect::Sqlite);
         let guard_cfg = GuardConfig::confined_sqlite("app".to_string());
         let (migs, frags) = author
-            .lower_guarded(&ir, &guard_cfg, &BTreeSet::new())
+            .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
             .expect("SQLite guarded lower passes (descriptor guard trusts IR DDL)");
         assert!(!frags.is_empty(), "fragments are still attributed on SQLite");
         for m in &migs {
@@ -946,7 +1050,7 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         };
-        let migs = author.lower(&ir_unique, &BTreeSet::new()).expect("lower");
+        let migs = author.lower(&ir_unique, &LiveSchema::default()).expect("lower");
         let m = migs.iter().find(|m| m.up.contains("DROP INDEX")).expect("a DROP INDEX");
         assert!(
             m.flags.destructive,
@@ -975,10 +1079,332 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         };
-        let migs = author.lower(&ir_plain, &BTreeSet::new()).expect("lower");
+        let migs = author.lower(&ir_plain, &LiveSchema::default()).expect("lower");
         let m = migs.iter().find(|m| m.up.contains("DROP INDEX")).expect("a DROP INDEX");
         assert!(!m.flags.destructive, "a plain index drop stays non-destructive");
         assert!(!m.flags.requires_approval, "a plain index drop stays ungated");
+    }
+
+    /// Byte-compare a [`ColumnSnapshot`] including the EMISSION-ONLY facets that its
+    /// `PartialEq` excludes (`default` + the two sentinels). The §6.5 fixtures pin
+    /// EXACTLY those excluded fields (the encryption / comment sentinels), so a
+    /// plain `==` would not detect a sentinel divergence — we assert them field by
+    /// field.
+    fn assert_col_byte_eq(a: &ColumnSnapshot, b: &ColumnSnapshot, ctx: &str) {
+        assert_eq!(a.name, b.name, "{ctx}: name");
+        assert_eq!(a.data_type, b.data_type, "{ctx}: data_type");
+        assert_eq!(a.nullable, b.nullable, "{ctx}: nullable");
+        assert_eq!(a.default, b.default, "{ctx}: default (emission-only)");
+        assert_eq!(
+            a.encryption_sentinel, b.encryption_sentinel,
+            "{ctx}: encryption_sentinel (emission-only, the §6.5 fixture-1 property)"
+        );
+        assert_eq!(
+            a.comment_sentinel, b.comment_sentinel,
+            "{ctx}: comment_sentinel (emission-only, the §6.5 fixture-1 property)"
+        );
+    }
+
+    // §6.5 FIXTURE 1 (code-critic LOW, snapshot-level): `IrAuthor`'s `addColumn` of an
+    // ENCRYPTED column yields a `ColumnSnapshot` whose `encryption_sentinel` +
+    // `comment_sentinel` are BYTE-EQUAL to the differ's — pinned at the SNAPSHOT
+    // layer, independent of the §6.4 render golden. Because both paths route the
+    // field through the SAME shared `build_table_snapshot`, the property holds by
+    // construction; this fixture is the dedicated regression-pin the spec enumerates
+    // so a future divergence in IrAuthor's op→descriptor mapping (e.g. dropping the
+    // `encrypted` facet) is caught at the snapshot layer, not only via render.
+    #[test]
+    fn ir_author_encrypted_addcolumn_snapshot_is_byte_equal_to_differ_pg() {
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+            let author = IrAuthor::new("app", "app_a", dialect);
+
+            // IrAuthor's snapshot for the encrypted column (its real lowering seam).
+            let ir_col = author
+                .add_column_snapshot(
+                    "vault",
+                    "secret",
+                    &ColType::Encrypted { of: Box::new(ColType::String) },
+                    None,
+                    None,
+                )
+                .expect("ir add_column_snapshot");
+
+            // The differ's snapshot for the SAME field, via the SAME shared builder
+            // fed from a `t.encrypted(...)`-shaped descriptor (`encrypted: {}` selects
+            // the kernel defaults — the shape `ir_column_to_field` emits).
+            let desc = CollectionDescriptor {
+                name: "vault".into(),
+                owner_app: "app_a".into(),
+                fields: vec![FieldDescriptor {
+                    name: "secret".into(),
+                    ty: "string".into(),
+                    encrypted: Some(serde_json::json!({})),
+                    ..Default::default()
+                }],
+                indexes: vec![],
+            };
+            let differ_snap = build_table_snapshot("app", &desc, dialect).expect("differ snapshot");
+            let differ_col = differ_snap
+                .columns
+                .iter()
+                .find(|c| c.name == "secret")
+                .expect("differ secret column");
+
+            assert_col_byte_eq(&ir_col, differ_col, &format!("{dialect:?} encrypted addColumn"));
+            // The encrypted column actually CARRIES a sentinel (so the equality above
+            // is a meaningful pin, not a None==None tautology).
+            assert!(
+                ir_col.encryption_sentinel.is_some() || ir_col.comment_sentinel.is_some(),
+                "{dialect:?}: an encrypted column must carry an encryption/comment sentinel"
+            );
+        }
+    }
+
+    // §6.5 FIXTURE 2 (code-critic LOW, snapshot-level): `IrAuthor`'s `createTable`
+    // injects the SEVEN system fields + THREE system indexes BYTE-EQUAL to the
+    // differ's `desired_snapshot` TableSnapshot. Pinned at the snapshot layer,
+    // independent of the §6.4 render golden — so a future fork of IrAuthor's
+    // descriptor mapping that drops/renames a system field or index is caught here.
+    #[test]
+    fn ir_author_createtable_snapshot_injects_system_fields_byte_equal_to_differ() {
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+            let author = IrAuthor::new("app", "app_a", dialect);
+            let user_cols = vec![
+                TIrColumn {
+                    name: "title".into(),
+                    ty: ColType::Text,
+                    nullable: Some(false),
+                    default: None,
+                    unique: None,
+                },
+            ];
+
+            // IrAuthor's createTable snapshot (its real lowering seam: the private
+            // descriptor mapping → shared builder).
+            let ir_desc = author.create_table_descriptor("notes", &user_cols);
+            let ir_snap = build_table_snapshot("app", &ir_desc, dialect).expect("ir snapshot");
+
+            // The differ's snapshot for the SAME user-facing table.
+            let differ_desc = CollectionDescriptor {
+                name: "notes".into(),
+                owner_app: "app_a".into(),
+                fields: vec![FieldDescriptor {
+                    name: "title".into(),
+                    ty: "string".into(),
+                    required: true,
+                    ..Default::default()
+                }],
+                indexes: vec![],
+            };
+            let differ_snap =
+                build_table_snapshot("app", &differ_desc, dialect).expect("differ snapshot");
+
+            // The full TableSnapshot (columns + indexes + constraints) is byte-equal
+            // — system fields injected identically. `TableSnapshot`'s `==` covers
+            // columns/indexes/constraints; the per-column sentinels of the (non-
+            // encrypted) system fields are all `None`, so `==` is exact here.
+            assert_eq!(
+                ir_snap.columns, differ_snap.columns,
+                "{dialect:?}: createTable columns (incl. injected system fields) must be byte-equal"
+            );
+            assert_eq!(
+                ir_snap.indexes, differ_snap.indexes,
+                "{dialect:?}: createTable indexes (incl. system indexes) must be byte-equal"
+            );
+            assert_eq!(
+                ir_snap.constraints, differ_snap.constraints,
+                "{dialect:?}: createTable constraints must be byte-equal"
+            );
+            // The injected system fields are actually PRESENT (so the equality is a
+            // meaningful pin). The seven system fields include `id`, `created_at`,
+            // `updated_at` — assert a representative subset by name.
+            for sys in ["id", "created_at", "updated_at"] {
+                assert!(
+                    ir_snap.columns.iter().any(|c| c.name == sys),
+                    "{dialect:?}: system field {sys:?} must be injected by createTable"
+                );
+            }
+        }
+    }
+
+    // LOW (code-critic, this fix): an author-supplied SYNTH default
+    // (`now()`/`genRandomUuid()`) on a user column must FAIL CLOSED at lower
+    // (`ExprRenderDeferred`), NOT be silently dropped to no-default. Pre-fix
+    // `ir_default_to_value` mapped `IrDefault::Fn → None`, so the lower SUCCEEDED and
+    // the column emitted with NO default — the author's request silently lost (the
+    // self-footgun this pins). RED before the fix: `lower` returns Ok with a
+    // default-less CREATE; GREEN after: `lower` returns `ExprRenderDeferred`.
+    #[test]
+    fn synth_default_on_user_column_fails_closed_not_silently_dropped() {
+        use crate::ir::SynthDefaultFn;
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+
+        // createTable with a column whose default is a synth `now()`.
+        let ir_create = MigrationIr {
+            ir_version: 1,
+            name: "m".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::CreateTable {
+                name: "events".into(),
+                columns: vec![TIrColumn {
+                    name: "at".into(),
+                    ty: ColType::Timestamp,
+                    nullable: None,
+                    default: Some(IrDefault::Fn { r#fn: SynthDefaultFn::Now }),
+                    unique: None,
+                }],
+                constraints: vec![],
+                indexes: vec![],
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+        let err = author
+            .lower(&ir_create, &LiveSchema::default())
+            .expect_err("a synth default on a user column must fail closed, not silently drop");
+        assert!(
+            matches!(err, IrLowerError::ExprRenderDeferred(slot) if slot.contains("synth")),
+            "expected ExprRenderDeferred for the synth default, got {err:?}"
+        );
+
+        // addColumn with a synth `genRandomUuid()` default — same fail-closed.
+        let ir_add = MigrationIr {
+            ir_version: 1,
+            name: "m".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::AddColumn {
+                table: "events".into(),
+                column: "token".into(),
+                ty: ColType::Uuid,
+                nullable: Some(false),
+                default: Some(IrDefault::Fn { r#fn: SynthDefaultFn::GenRandomUuid }),
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+        let err = author
+            .lower(&ir_add, &LiveSchema::default())
+            .expect_err("a synth default on an addColumn must fail closed");
+        assert!(
+            matches!(err, IrLowerError::ExprRenderDeferred(slot) if slot.contains("synth")),
+            "expected ExprRenderDeferred for the addColumn synth default, got {err:?}"
+        );
+
+        // A LITERAL default still lowers fine (the guard is synth-specific, not a
+        // blanket default ban).
+        let ir_lit = MigrationIr {
+            ir_version: 1,
+            name: "m".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::AddColumn {
+                table: "events".into(),
+                column: "kind".into(),
+                ty: ColType::Text,
+                nullable: Some(false),
+                default: Some(IrDefault::Literal { value: crate::ir::IrScalar::Str("x".into()) }),
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+        author
+            .lower(&ir_lit, &LiveSchema::default())
+            .expect("a literal default must still lower");
+    }
+
+    // MED-1 (code-critic, this fix): the destructive/approval gate for a UNIQUE-index
+    // drop must NOT trust the author-supplied `unique` hint alone — it must resolve
+    // the index's TRUE uniqueness from the AUTHORITATIVE live catalog
+    // (`LiveSchema::unique_indexes`, the same source the differ's `render_drop_index`
+    // reads), OR-ed with the hint. A hostile/buggy author who sets `unique:false`
+    // (or omits it) on a drop of an actually-unique index must STILL lower
+    // `destructive + requires_approval`, so the drop is refused under
+    // `Approval::None` rather than silently removing a data-integrity guarantee.
+    //
+    // RED before the fix: pre-fix the gate read `unique.unwrap_or(false)` ONLY, so a
+    // `unique:false`/absent drop of a live-unique index lowered UNGATED (the
+    // approval-gate bypass this pins).
+    #[test]
+    fn drop_index_uniqueness_resolved_from_live_overrides_understated_hint() {
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+
+        // The index IS unique in the live catalog…
+        let mut live = LiveSchema::default();
+        live.unique_indexes.insert("users_email_uniq".to_string());
+
+        // …but the author UNDER-DECLARES it (`unique:false`) on the drop — a
+        // hostile/buggy hint that must NOT defeat the gate.
+        let ir_understated = MigrationIr {
+            ir_version: 1,
+            name: "m".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::DropIndex {
+                name: "users_email_uniq".into(),
+                table: Some("users".into()),
+                unique: Some(false),
+                if_exists: None,
+                concurrently: None,
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+        let migs = author.lower(&ir_understated, &live).expect("lower");
+        let m = migs.iter().find(|m| m.up.contains("DROP INDEX")).expect("a DROP INDEX");
+        assert!(
+            m.flags.destructive,
+            "a drop of a LIVE-unique index must lower destructive even when the IR hint says unique:false"
+        );
+        assert!(
+            m.flags.requires_approval,
+            "a drop of a LIVE-unique index must lower requires_approval even when the IR hint under-declares it"
+        );
+
+        // The SAME drop with an EMPTY live set (no introspection) falls back to the
+        // hint alone — `unique:false` ⇒ ungated. The live fact, when present, is what
+        // adds the gate; the hint-only fallback is never LESS strict than the hint.
+        let migs_no_live = author.lower(&ir_understated, &LiveSchema::default()).expect("lower");
+        let m = migs_no_live.iter().find(|m| m.up.contains("DROP INDEX")).expect("a DROP INDEX");
+        assert!(
+            !m.flags.destructive && !m.flags.requires_approval,
+            "with no live facts, the gate falls back to the (false) hint — ungated"
+        );
+
+        // And a live-unique index dropped with an ABSENT hint (the common
+        // omit-the-flag case) is ALSO gated by the live fact.
+        let ir_absent_hint = MigrationIr {
+            ir_version: 1,
+            name: "m".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::DropIndex {
+                name: "users_email_uniq".into(),
+                table: Some("users".into()),
+                unique: None,
+                if_exists: None,
+                concurrently: None,
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+        let migs = author.lower(&ir_absent_hint, &live).expect("lower");
+        let m = migs.iter().find(|m| m.up.contains("DROP INDEX")).expect("a DROP INDEX");
+        assert!(
+            m.flags.destructive && m.flags.requires_approval,
+            "a drop of a LIVE-unique index with no hint must STILL be gated by the live fact"
+        );
     }
 
     // The loader's IR branch end-to-end (§7.2): a well-formed `.ir.json`
@@ -991,7 +1417,7 @@ mod tests {
         ]}"#;
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let migs = author
-            .load_and_lower(bytes, "app_a", &registry(&[]), &BTreeSet::new())
+            .load_and_lower(bytes, "app_a", &registry(&[]), &LiveSchema::default())
             .expect("a fresh createTable by its declarer loads + lowers");
         assert!(
             migs.iter().any(|m| m.up.contains("CREATE TABLE \"app\".\"fresh\"")),
@@ -1013,7 +1439,7 @@ mod tests {
                 bytes,
                 "app_intruder",
                 &registry(&[("victim", "app_victim")]),
-                &BTreeSet::new(),
+                &LiveSchema::default(),
             )
             .unwrap_err();
         match err {
@@ -1041,7 +1467,7 @@ mod tests {
         // reference the Confined guard denies, attributed to op #0.
         let guard_cfg = GuardConfig::confined("other".to_string());
         let err = author
-            .load_and_lower_guarded(bytes, "app_a", &registry(&[]), &BTreeSet::new(), &guard_cfg)
+            .load_and_lower_guarded(bytes, "app_a", &registry(&[]), &LiveSchema::default(), &guard_cfg)
             .expect_err("a fragment outside the confined schema must be denied via the wired entry");
         match err {
             LoadAndLowerGuardedError::Lower(IrGuardedLowerError::Denied(d)) => {
@@ -1062,7 +1488,7 @@ mod tests {
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let guard_cfg = GuardConfig::confined("app".to_string());
         let out = author
-            .load_and_lower_guarded(bytes, "app_a", &registry(&[]), &BTreeSet::new(), &guard_cfg)
+            .load_and_lower_guarded(bytes, "app_a", &registry(&[]), &LiveSchema::default(), &guard_cfg)
             .expect("a clean createTable loads + guarded-lowers");
         assert_eq!(out.created_tables, vec!["fresh".to_string()], "the createTable is reported");
         assert!(out.migrations.iter().any(|m| m.up.contains("CREATE TABLE \"app\".\"fresh\"")));
@@ -1082,7 +1508,7 @@ mod tests {
                 bytes,
                 "app_intruder",
                 &registry(&[("users", "app_owner")]),
-                &BTreeSet::new(),
+                &LiveSchema::default(),
             )
             .unwrap_err();
         assert!(

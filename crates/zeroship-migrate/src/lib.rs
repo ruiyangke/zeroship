@@ -188,7 +188,7 @@ pub use ir_load::{
 // checked `MigrationIr` to migrations, reusing the SHARED snapshot-builder +
 // declarative render seam so its SQL is byte-identical to the differ's path.
 pub use ir_author::{
-    FragmentGuardDenied, GuardedFragment, IrAuthor, IrGuardedLowerError, IrLowerError,
+    FragmentGuardDenied, GuardedFragment, IrAuthor, IrGuardedLowerError, IrLowerError, LiveSchema,
     LoadAndLowerError, LoadAndLowerGuardedError, LoweredArtifact,
 };
 // The closed expression AST (§3.3.1) the IR's transform/predicate positions

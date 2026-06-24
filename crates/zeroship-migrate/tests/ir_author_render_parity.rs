@@ -20,7 +20,7 @@ use zeroship_migrate::ir::{ColType, IrColumn, IrIndex, MigrationIr, Op};
 use zeroship_migrate::ir_author::IrAuthor;
 use zeroship_migrate::{
     CollectionDescriptor, DeclarativeAuthor, DesiredSchema, FieldDescriptor, IndexDescriptor,
-    SchemaSnapshot, TableSnapshot,
+    LiveSchema, SchemaSnapshot, TableSnapshot,
 };
 use zeroship_schema::query::SqlDialect;
 
@@ -85,7 +85,7 @@ fn ir_pairs_for(
         checksum: None,
     };
     let author = IrAuthor::new(SCHEMA, OWNER, dialect);
-    let migs = author.lower(&ir, live).expect("ir lower");
+    let migs = author.lower(&ir, &LiveSchema::from(live)).expect("ir lower");
     sql_pairs(&migs)
 }
 
@@ -417,7 +417,7 @@ fn ir_lower_one(op: Op, live: &BTreeSet<String>, dialect: SqlDialect) -> Vec<zer
         checksum: None,
     };
     IrAuthor::new(SCHEMA, OWNER, dialect)
-        .lower(&ir, live)
+        .lower(&ir, &LiveSchema::from(live))
         .expect("ir lower")
 }
 
@@ -663,7 +663,7 @@ fn standalone_alter_and_constraint_are_sqlite_rebuild_only() {
             preconditions: vec![],
             checksum: None,
         };
-        author.lower(&ir, &live)
+        author.lower(&ir, &LiveSchema::from(&live))
     };
     for (op, tag) in [
         (
@@ -754,6 +754,84 @@ fn create_table_render_is_byte_identical_sqlite() {
     assert!(
         decl.iter().any(|(up, _)| up.contains("CREATE UNIQUE INDEX")),
         "the unique index must be emitted on both paths (SQLite)"
+    );
+}
+
+// §6.4 (code-critic MED-2) — the SQLite peer of
+// `create_table_with_live_fk_render_is_byte_identical_pg`. A `posts` table with a
+// ref → an ALREADY-LIVE `authors` table: both the differ and `IrAuthor::lower`
+// route through `render_create_table_sqlite_value`, so the inline FK render is
+// byte-identical BY CONSTRUCTION. This regression-pins the SQLite FK shape so a
+// future fork of the SQLite FK render is caught (pre-fix only the PG FK shape was
+// pinned; the SQLite leg had no cross-path golden).
+#[test]
+fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
+    let posts = CollectionDescriptor {
+        name: "posts".into(),
+        owner_app: OWNER.into(),
+        fields: vec![FieldDescriptor {
+            name: "author".into(),
+            ty: "ref".into(),
+            references: Some("authors".into()),
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    // `authors` is declared (stays in the union) AND already live (so the FK
+    // INLINES — on SQLite a non-live FK target is a hard error, no late ADD
+    // CONSTRAINT, so the live target is what makes the inline path reachable).
+    let authors = CollectionDescriptor {
+        name: "authors".into(),
+        owner_app: OWNER.into(),
+        fields: vec![],
+        indexes: vec![],
+    };
+    let mut live_snapshot = SchemaSnapshot::default();
+    live_snapshot.tables.insert("authors".into(), empty_table_snapshot());
+
+    let desired = zeroship_migrate::declarative::desired_snapshot_for_dialect(
+        SCHEMA,
+        &[posts, authors],
+        SqlDialect::Sqlite,
+    )
+    .expect("desired snapshot (sqlite)");
+    let mut live_ownership = HashMap::new();
+    live_ownership.insert("authors".to_string(), OWNER.to_string());
+    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, SqlDialect::Sqlite);
+    let plan = author
+        .diff(&desired, &live_snapshot, &live_ownership, &[])
+        .expect("declarative diff (sqlite)");
+    let decl = sql_pairs(&plan.migrations);
+
+    let ops = vec![Op::CreateTable {
+        name: "posts".into(),
+        columns: vec![IrColumn {
+            name: "author".into(),
+            ty: ColType::Ref { references: "authors".into() },
+            nullable: None,
+            default: None,
+            unique: None,
+        }],
+        constraints: vec![],
+        indexes: vec![],
+    }];
+    let mut live = BTreeSet::new();
+    live.insert("authors".to_string());
+    let ir = ir_pairs_for(ops, &live, SqlDialect::Sqlite);
+
+    // Compare only the `posts`-related render (the empty live `authors` snapshot
+    // makes the differ also backfill `authors`' system fields — a test-setup
+    // artifact unrelated to the createTable-with-FK render we are pinning).
+    let decl_posts: Vec<_> =
+        decl.into_iter().filter(|(up, _)| up.contains("posts")).collect();
+    let ir_posts: Vec<_> = ir.into_iter().filter(|(up, _)| up.contains("posts")).collect();
+    assert_eq!(
+        decl_posts, ir_posts,
+        "createTable-with-inline-FK render must match across paths on SQLite"
+    );
+    assert!(
+        decl_posts.iter().any(|(up, _)| up.contains("FOREIGN KEY") || up.contains("REFERENCES")),
+        "the FK must be inlined into the SQLite CREATE on both paths"
     );
 }
 
