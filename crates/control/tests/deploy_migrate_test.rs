@@ -20,8 +20,19 @@ use uuid::Uuid;
 
 use zeroship_control::deploy_migrate::{
     apply_bundle_migrations, apply_bundle_migrations_approved, apply_bundle_migrations_routed,
-    plan_reviewed_versions, DeployMigrateError,
+    plan_reviewed_versions, DeployActor, DeployMigrateError,
 };
+
+/// A stand-in operator/admin approver for the approved-go-live tests. In production
+/// this principal is the control-plane user the deploy handler authorized via the
+/// operator-only `Action::AppsApproveMigration` gate; the engine-level tests below drive
+/// the seam directly, so they pass a fixed approver to exercise the journal-actor
+/// attribution path (`deploy-approved:<approver>` / `deploy-ir-approved:<approver>`).
+fn test_approver() -> DeployActor {
+    DeployActor::Approved {
+        approver: "test-operator".to_string(),
+    }
+}
 
 /// PR9b test helper: approve the WHOLE reviewed bundle. Runs the read-only reviewer
 /// plan (`plan_reviewed_versions`) to learn every per-version scope-key the bundle's
@@ -38,7 +49,7 @@ async fn approve_whole_bundle(
     let reviewed = plan_reviewed_versions(dsn, app_id, dir)
         .await
         .expect("reviewer plan must enumerate the bundle's destructive scope-versions");
-    apply_bundle_migrations_approved(dsn, app_id, dir, &reviewed).await
+    apply_bundle_migrations_approved(dsn, app_id, dir, &reviewed, &test_approver()).await
 }
 
 /// Admin DSN with CREATEROLE + CREATE SCHEMA (the `postgres` superuser), the
@@ -165,6 +176,60 @@ async fn journaled_count(conn: &compio_postgres::Client, app_id: &Uuid) -> i64 {
         .await
         .expect("count journal");
     rows[0].get::<_, i64>("n")
+}
+
+/// How many OUTSTANDING pending online-rename contracts are journaled for this app?
+/// Returns 0 when the per-app meta schema / `schema_pending_contracts` table does not
+/// exist yet (no EXPAND ever completed) — exactly the post-state a fail-closed,
+/// fully-rolled-back refusal must leave (PR9c HIGH: no half-renamed table owing a
+/// forever-pending contract after a refused co-bundled deploy).
+async fn pending_contract_count(conn: &compio_postgres::Client, app_id: &Uuid) -> i64 {
+    let meta = format!("{}_migrations", app_id);
+    let q = format!("\"{}\".schema_pending_contracts", meta.replace('"', "\"\""));
+    let lit = q.replace('\'', "''");
+    let present = conn
+        .query(&format!("SELECT to_regclass('{lit}') IS NOT NULL AS p"), &[])
+        .await
+        .expect("regclass probe");
+    if !present[0].get::<_, bool>("p") {
+        return 0;
+    }
+    // `state = 'pending'` is the outstanding (un-discharged) obligation shape —
+    // the same predicate `outstanding_pending_contracts` keys on.
+    let rows = conn
+        .query(
+            &format!("SELECT count(*)::int8 AS n FROM {q} WHERE state = 'pending'"),
+            &[],
+        )
+        .await
+        .expect("count pending contracts");
+    rows[0].get::<_, i64>("n")
+}
+
+/// The DISTINCT set of journal actor (`"by"`) strings recorded for this app's
+/// completed migration events. PR9c CRITICAL forensic-attribution: an
+/// operator-approved go-live must record `deploy-approved:<approver>` /
+/// `deploy-ir-approved:<approver>`, NOT the static `"deploy"`/`"deploy-ir"` marker, so
+/// the §2.2 immutable journal records WHO approved a destructive/online completion.
+async fn journal_actors(conn: &compio_postgres::Client, app_id: &Uuid) -> Vec<String> {
+    let meta = format!("{}_migrations", app_id);
+    let q = format!("\"{}\".schema_migrations", meta.replace('"', "\"\""));
+    let lit = q.replace('\'', "''");
+    let present = conn
+        .query(&format!("SELECT to_regclass('{lit}') IS NOT NULL AS p"), &[])
+        .await
+        .expect("regclass probe");
+    if !present[0].get::<_, bool>("p") {
+        return Vec::new();
+    }
+    let rows = conn
+        .query(
+            &format!("SELECT DISTINCT \"by\" AS actor FROM {q} ORDER BY actor"),
+            &[],
+        )
+        .await
+        .expect("read journal actors");
+    rows.iter().map(|r| r.get::<_, String>("actor")).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1508,7 +1573,7 @@ async fn deploy_migrate_two_concurrent_same_project_deploys_serialize_a1() {
     let a_done_task = a_done.clone();
     let deploy_a = compio::runtime::spawn(async move {
         let r =
-            apply_bundle_migrations_approved(&dsn_a, &app_a, &dir_a_clone, &reviewed_a).await;
+            apply_bundle_migrations_approved(&dsn_a, &app_a, &dir_a_clone, &reviewed_a, &test_approver()).await;
         a_done_task.set(true);
         r
     });
@@ -1618,7 +1683,7 @@ async fn deploy_migrate_different_project_proceeds_while_p_backfills_a2() {
         .await
         .expect("reviewer plan for deploy P");
     let deploy_p = compio::runtime::spawn(async move {
-        apply_bundle_migrations_approved(&dsn_p, &app_p, &dirp2_clone, &reviewed_p).await
+        apply_bundle_migrations_approved(&dsn_p, &app_p, &dirp2_clone, &reviewed_p, &test_approver()).await
     });
 
     // While P is (or is about to be) parked under its held lock, deploy Q — a
@@ -1810,7 +1875,7 @@ async fn deploy_migrate_routed_approved_rename_completes_expand_pg() {
         ]}
     ]}"#;
     let dir1 = migrations_dir(&[("0001_create_users.ir.json", create)]);
-    apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir1, &[])
+    apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir1, &[], &DeployActor::Routine)
         .await
         .expect("routine create deploy (empty approved set) must apply");
     assert!(column_exists(&conn, &app_id, "users", "name").await, "name created");
@@ -1842,7 +1907,7 @@ async fn deploy_migrate_routed_approved_rename_completes_expand_pg() {
 
     // (A1) NON-APPROVED through the SAME seam (empty set) ⇒ FAIL-CLOSED: the EXPAND is
     // refused, no go-live, the column is still `name`, the seeded row is untouched.
-    let refused = apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir2, &[])
+    let refused = apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir2, &[], &DeployActor::Routine)
         .await
         .expect_err("an UNAPPROVED rename through the routing seam must be refused");
     match refused {
@@ -1856,7 +1921,7 @@ async fn deploy_migrate_routed_approved_rename_completes_expand_pg() {
     );
 
     // (A2) APPROVED through the seam (the reviewed set) ⇒ the EXPAND COMPLETES.
-    let outcome = apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir2, &reviewed)
+    let outcome = apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir2, &reviewed, &test_approver())
         .await
         .expect("the operator-approved rename through the routing seam must COMPLETE the expand");
     assert!(!outcome.applied.is_empty(), "the approved EXPAND applied migrations");
@@ -1883,6 +1948,19 @@ async fn deploy_migrate_routed_approved_rename_completes_expand_pg() {
         .expect("read full_name");
     let names: Vec<String> = rows.iter().filter_map(|r| r.get::<_, Option<String>>(0)).collect();
     assert_eq!(names, vec!["Ada".to_string()], "the backfill mirrored the seeded row");
+
+    // PR9c CRITICAL (forensic attribution): the operator-approved EXPAND's journal events
+    // record the APPROVER (`deploy-ir-approved:<approver>`), so an approved go-live is
+    // auditably DISTINCT from a routine deploy — defeating the static `"deploy-ir"` marker
+    // the critique flagged. (Deploy #1's routine create still carries the plain `deploy-ir`
+    // marker; the point is the APPROVED EXPAND now carries the approver.) `test_approver()`
+    // is `test-operator`.
+    let actors = journal_actors(&conn, &app_id).await;
+    assert!(
+        actors.iter().any(|a| a == "deploy-ir-approved:test-operator"),
+        "the approved go-live's EXPAND must journal the approver (deploy-ir-approved:test-operator); \
+         got {actors:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir1);
     let _ = std::fs::remove_dir_all(&dir2);
@@ -1912,7 +1990,7 @@ async fn deploy_migrate_routed_interlock_inherited_refuses_touch_of_pending_tabl
         ]}
     ]}"#;
     let dir1 = migrations_dir(&[("0001_create_members.ir.json", create)]);
-    apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir1, &[])
+    apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir1, &[], &DeployActor::Routine)
         .await
         .expect("routine create deploy must apply");
 
@@ -1925,7 +2003,7 @@ async fn deploy_migrate_routed_interlock_inherited_refuses_touch_of_pending_tabl
     let reviewed = plan_reviewed_versions(&admin_dsn(), &app_id, &dir2)
         .await
         .expect("reviewer plan");
-    apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir2, &reviewed)
+    apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir2, &reviewed, &test_approver())
         .await
         .expect("approved rename completes EXPAND + journals the obligation");
 
@@ -1935,7 +2013,7 @@ async fn deploy_migrate_routed_interlock_inherited_refuses_touch_of_pending_tabl
         {"op":"addColumn","table":"members","column":"nickname","type":"text","nullable":true}
     ]}"#;
     let dir3 = migrations_dir(&[("0003_add_nickname.ir.json", touch)]);
-    let err = apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir3, &[])
+    let err = apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir3, &[], &DeployActor::Routine)
         .await
         .expect_err("a deploy touching the pending table must be refused on the routed path");
     match err {
@@ -1966,6 +2044,15 @@ async fn deploy_migrate_routed_interlock_inherited_refuses_touch_of_pending_tabl
 // through the seam with the rename-only reviewed set, the unreviewed drop is fail-closed
 // refused — approving one reviewed rename can NOT blanket-authorize an unrelated
 // co-bundled destruction.
+//
+// PR9c HIGH (bundle atomicity / no half-state): this test ALSO pins that the
+// wholesale refusal is ATOMIC — the co-bundled APPROVED rename's EXPAND must NOT
+// have partially committed before the later out-of-scope drop was refused. The tail
+// asserts `accounts.email_address` does NOT exist, the original `accounts.email`
+// survives, and NO pending online-rename contract was journaled. Pre-fix (per-step
+// commit, no bundle-level pre-validation) those assertions FAILED RED: the EXPAND
+// committed durably and owed a `TABLE_HAS_PENDING_CONTRACT`, so a refused approved
+// deploy left a half-renamed table that fail-closed every future deploy touching it.
 #[compio::test]
 async fn deploy_migrate_routed_co_bundled_unreviewed_destructive_is_refused_pg() {
     let Some(conn) = admin_conn().await else {
@@ -1986,7 +2073,7 @@ async fn deploy_migrate_routed_co_bundled_unreviewed_destructive_is_refused_pg()
         ]}
     ]}"#;
     let dir1 = migrations_dir(&[("0001_create_tables.ir.json", create)]);
-    apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir1, &[])
+    apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir1, &[], &DeployActor::Routine)
         .await
         .expect("routine create deploy must apply");
 
@@ -2010,7 +2097,7 @@ async fn deploy_migrate_routed_co_bundled_unreviewed_destructive_is_refused_pg()
         ("0002_rename_email.ir.json", rename),
         ("0003_drop_legacy.ir.json", drop),
     ]);
-    let err = apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir2, &reviewed_rename_only)
+    let err = apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir2, &reviewed_rename_only, &test_approver())
         .await
         .expect_err(
             "an unreviewed co-bundled destructive dropColumn (different table) must be refused \
@@ -2031,6 +2118,33 @@ async fn deploy_migrate_routed_co_bundled_unreviewed_destructive_is_refused_pg()
     assert!(
         column_exists(&conn, &app_id, "audit", "legacy").await,
         "the unreviewed dropColumn applied NOTHING — `audit.legacy` survives"
+    );
+
+    // PR9c HIGH (no half-state) — the refused co-bundled deploy must roll back the
+    // APPROVED rename too, not just leave the unrelated drop untouched. Pre-fix the
+    // executor committed per-step, so the approved EXPAND on `accounts` durably
+    // committed (live dual-write trigger + duplicated `email_address` column + a
+    // journaled `TABLE_HAS_PENDING_CONTRACT`) BEFORE the later out-of-scope drop was
+    // refused — a half-renamed table that fail-closed every future deploy touching
+    // `accounts`. The bundle-level pre-apply scope gate refuses the WHOLE bundle BEFORE
+    // any file applies, so:
+    //   (1) the rename's EXPAND did NOT persist — no duplicated column,
+    assert!(
+        !column_exists(&conn, &app_id, "accounts", "email_address").await,
+        "PR9c HIGH: the refused co-bundled deploy must NOT leave the approved rename's EXPAND \
+         half-applied — `accounts.email_address` must not exist"
+    );
+    //   (2) the original column survives untouched,
+    assert!(
+        column_exists(&conn, &app_id, "accounts", "email").await,
+        "the original `accounts.email` must survive a wholesale-refused deploy"
+    );
+    //   (3) and NO pending online-rename contract was journaled (nothing owes a
+    //       forever-pending CONTRACT that would fail-close future deploys).
+    assert_eq!(
+        pending_contract_count(&conn, &app_id).await,
+        0,
+        "PR9c HIGH: a wholesale-refused approved deploy must journal NO pending contract"
     );
 
     let _ = std::fs::remove_dir_all(&dir1);

@@ -615,8 +615,48 @@ pub async fn deploy(
             // keeps the routine fail-closed apply; a non-empty set routes to the SCOPED
             // approved apply so the reviewed online-rename/destructive ops complete.
             let approved_versions = approval_query.approved_version_ids();
-            if let Err(resp) =
-                run_deploy_migrations(&uid, &success.manifest_json, &approved_versions, &state).await
+
+            // PR9c CRITICAL — OPERATOR-ONLY APPROVAL GATE. `?approved_versions=` is the
+            // go-live channel that COMPLETES an online-rename EXPAND / a scoped destructive
+            // migration. It MUST NOT be self-satisfiable by the bundle AUTHOR with their own
+            // `apps:deploy` grant (the anti-bypass point: a creator — or a prompt-injected AI
+            // deploying on their behalf, threat-model vector 4 — could otherwise enumerate
+            // their own destructive/online version-ids and self-approve). So a NON-EMPTY
+            // approval set is gated on the DISTINCT, operator-only `Action::AppsApproveMigration`
+            // (`migrations:approve`) — NOT granted by app_owner/editor/viewer/self_service; only
+            // the platform `admin` role's universal-allow grants it. A caller holding only
+            // `apps:deploy` is refused 403 here, BEFORE any approval set reaches the migrate
+            // phase. The empty-set routine deploy is unaffected (no approval ⇒ no extra gate).
+            //
+            // The authorized approver's principal is then stamped into the §2.2 immutable
+            // journal (`DeployActor::Approved`) so an operator-approved go-live is forensically
+            // distinct from a routine deploy — defeating the static `"deploy"` actor string.
+            let deploy_actor = if approved_versions.is_empty() {
+                crate::deploy_migrate::DeployActor::Routine
+            } else {
+                if let Err(resp) = authz
+                    .require(
+                        Action::AppsApproveMigration,
+                        Resource::App { id: uid.to_string() },
+                        &state,
+                    )
+                    .await
+                {
+                    return resp;
+                }
+                crate::deploy_migrate::DeployActor::Approved {
+                    approver: authz.principal_id.to_string(),
+                }
+            };
+
+            if let Err(resp) = run_deploy_migrations(
+                &uid,
+                &success.manifest_json,
+                &approved_versions,
+                &deploy_actor,
+                &state,
+            )
+            .await
             {
                 return resp;
             }
@@ -662,6 +702,10 @@ async fn run_deploy_migrations(
     // apply (`ApprovalScope::Versions`): only the listed versions' destructive/online
     // ops run; everything else stays refused. NEVER a blanket bundle-wide approval.
     approved_versions: &[String],
+    // PR9c CRITICAL: the forensic actor for the §2.2 journal — `Routine` (static marker)
+    // when no approval set was passed, or `Approved { approver }` carrying the
+    // operator/admin principal the handler authorized via `Action::AppsApproveMigration`.
+    deploy_actor: &crate::deploy_migrate::DeployActor,
     state: &AppState,
 ) -> Result<(), web::HttpResponse> {
     // Re-parse the (already-validated) ingested manifest for its migrations.
@@ -733,6 +777,7 @@ async fn run_deploy_migrations(
                 app_id,
                 &mig_dir,
                 approved_versions,
+                deploy_actor,
             )
             .await
         }

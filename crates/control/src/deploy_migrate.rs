@@ -236,15 +236,59 @@ pub async fn apply_bundle_migrations(
     // online expand is refused at the approval gate (no go-live). The AI/creator
     // never auto-applies a gated migration. The scope is irrelevant under
     // `Approval::None` (no destructive op ever runs), so it carries
-    // `ApprovalScope::All` for byte-identical behavior.
+    // `ApprovalScope::All` for byte-identical behavior. The journal actor is the
+    // static routine marker (`"deploy"`/`"deploy-ir"`) — no operator approved it.
     apply_bundle_migrations_with_approval(
         migrate_dsn,
         app_id,
         migrations_dir,
         Approval::None,
         &ApprovalScope::All,
+        &DeployActor::Routine,
     )
     .await
+}
+
+/// **PR9c CRITICAL (forensic attribution)** — who drove a deploy's migrate phase,
+/// stamped into the §2.2 immutable journal's `applied_by`/actor so an
+/// operator-approved go-live is auditably DISTINCT from a routine deploy. The
+/// routine path records the static marker; the approved path records the
+/// operator/admin principal who passed `?approved_versions=` (authorized by the
+/// operator-only [`Action::AppsApproveMigration`](zeroship_authz::Action) gate in
+/// `api.rs`, NOT the bundle author's `apps:deploy`). Defeating the static
+/// `"deploy"` string the critique flagged — the journal can now record WHO
+/// approved.
+#[derive(Debug, Clone)]
+pub enum DeployActor {
+    /// Routine fail-closed deploy — no operator approval. The journal records the
+    /// static marker (`"deploy"` for the `.sql` leg, `"deploy-ir"` for the IR leg),
+    /// byte-identical to pre-PR9c.
+    Routine,
+    /// Operator-approved go-live. The journal records the approver's principal so a
+    /// destructive/online completion is forensically attributable to the human who
+    /// approved it.
+    Approved {
+        /// The approving operator/admin principal (a control-plane user id).
+        approver: String,
+    },
+}
+
+impl DeployActor {
+    /// The journal `applied_by`/actor string for the `.sql` leg.
+    fn sql_actor(&self) -> String {
+        match self {
+            Self::Routine => "deploy".to_string(),
+            Self::Approved { approver } => format!("deploy-approved:{approver}"),
+        }
+    }
+
+    /// The journal `applied_by`/actor string for the IR (`.ir.json`) leg.
+    fn ir_actor(&self) -> String {
+        match self {
+            Self::Routine => "deploy-ir".to_string(),
+            Self::Approved { approver } => format!("deploy-ir-approved:{approver}"),
+        }
+    }
 }
 
 /// **PR7 online-rename go-live SEAM (engine-wired, deploy-handler deferred)** — the
@@ -309,6 +353,7 @@ pub async fn apply_bundle_migrations_approved(
     app_id: &Uuid,
     migrations_dir: &Path,
     reviewed_versions: &[String],
+    actor: &DeployActor,
 ) -> Result<MigrateOutcome, DeployMigrateError> {
     let scope = ApprovalScope::Versions(reviewed_versions.iter().cloned().collect());
     apply_bundle_migrations_with_approval(
@@ -317,6 +362,7 @@ pub async fn apply_bundle_migrations_approved(
         migrations_dir,
         Approval::Approved,
         &scope,
+        actor,
     )
     .await
 }
@@ -339,12 +385,21 @@ pub async fn apply_bundle_migrations_routed(
     app_id: &Uuid,
     migrations_dir: &Path,
     approved_versions: &[String],
+    // PR9c CRITICAL: the operator/admin approver identity for forensic attribution.
+    // On the EMPTY-set routine path this is ignored (the routine actor marker is
+    // recorded); on the NON-EMPTY approved path it is stamped into the immutable
+    // journal so the go-live is auditably distinct from a routine deploy. The
+    // handler MUST have authorized this principal via `Action::AppsApproveMigration`
+    // (operator-only) before passing a non-empty set — see `api.rs`.
+    actor: &DeployActor,
 ) -> Result<MigrateOutcome, DeployMigrateError> {
     if approved_versions.is_empty() {
         apply_bundle_migrations(migrate_dsn, app_id, migrations_dir).await
     } else {
-        apply_bundle_migrations_approved(migrate_dsn, app_id, migrations_dir, approved_versions)
-            .await
+        // NOTE: kept single-line on `migrate_dsn` so the PR9c guard test's structural
+        // pin (`apply_bundle_migrations_approved(migrate_dsn`) matches — it proves the
+        // non-empty branch routes to the SCOPED approved surface.
+        apply_bundle_migrations_approved(migrate_dsn, app_id, migrations_dir, approved_versions, actor).await
     }
 }
 
@@ -354,6 +409,7 @@ async fn apply_bundle_migrations_with_approval(
     migrations_dir: &Path,
     approval: Approval,
     scope: &ApprovalScope,
+    actor: &DeployActor,
 ) -> Result<MigrateOutcome, DeployMigrateError> {
     // The per-app schema + project id are the trusted path id. The plugin-db
     // model maps app_id → schema "<app_id>"; the engine uses the same id to seed
@@ -398,6 +454,20 @@ async fn apply_bundle_migrations_with_approval(
     //     control/auth/other schemas.
     provision_migrator(&conn, &exec_cfg).await?;
 
+    // (b.5) PR9c HIGH — BUNDLE-LEVEL PRE-APPLY SCOPE GATE (no half-state). Under an
+    //       APPROVED deploy, refuse the WHOLE bundle BEFORE applying ANY file if a
+    //       co-bundled destructive / online-rename-EXPAND step's version is OUTSIDE the
+    //       operator's approved set. This makes the refusal ATOMIC: pre-fix, an earlier
+    //       approved online-rename EXPAND committed per-step (PG DDL is transactional only
+    //       WITHIN a step), then a later out-of-scope op got refused — leaving a
+    //       half-renamed table (live dual-write trigger + duplicated column + a journaled
+    //       `TABLE_HAS_PENDING_CONTRACT`) that fail-closed every future deploy touching it,
+    //       even though the creator saw a 4xx. By validating the entire bundle's scope up
+    //       front, no EXPAND ever commits ahead of a guaranteed-later refusal. The per-step
+    //       scope gate in the apply loop is RETAINED as defense-in-depth; this gate makes
+    //       the refusal whole-bundle. A no-op on the routine (`ApprovalScope::All`) path.
+    prevalidate_bundle_scope(&conn, app_id, migrations_dir, scope).await?;
+
     // (c) Plan (Confined guard) + apply PENDING via the integrity-manifest seam
     //     (`apply_verified`). Approval::None ⇒ a destructive migration is refused
     //     at deploy (no go-live); additive-forward is the routine path. The engine
@@ -426,6 +496,14 @@ async fn apply_bundle_migrations_with_approval(
     //     out-of-band (control DB, keyed by app + bundle), and this call must then
     //     pass `Some(&expected)` so a tampered/reordered set is REFUSED before any
     //     DDL. Until then this is traceability only, NOT tamper-prevention.
+    //
+    //     PR9c NOTE — now a LIVE gap, not a dormant one. With the approved go-live
+    //     path active (`?approved_versions=` COMPLETES destructive/online ops), an
+    //     operator's approval of a REVIEWED version set does not bind the BYTES that
+    //     run: a set reordered/edited between review and apply is not refused here.
+    //     The runbook (`docs/runbooks/db-migrations.md`, "Operator-approved creator
+    //     go-live") documents this — treat approved go-live as integrity-traceable
+    //     but NOT tamper-prevented until the H2 stamp lands.
     let manifest = compute_manifest(&migrations);
     tracing::info!(
         app_id = %app_id,
@@ -458,7 +536,10 @@ async fn apply_bundle_migrations_with_approval(
             scope,
             &backend,
             &exec_cfg,
-            "deploy",
+            // PR9c: the journal actor — the static `"deploy"` marker on the routine path,
+            // or `deploy-approved:<approver>` on an operator-approved go-live, so the
+            // §2.2 immutable journal records WHO approved a destructive completion.
+            &actor.sql_actor(),
         )
         .await?;
 
@@ -478,6 +559,7 @@ async fn apply_bundle_migrations_with_approval(
         &guard_cfg,
         approval,
         scope,
+        actor,
     )
     .await?;
 
@@ -519,9 +601,32 @@ pub async fn plan_reviewed_versions(
     app_id: &Uuid,
     migrations_dir: &Path,
 ) -> Result<Vec<String>, DeployMigrateError> {
+    let conn = connect(migrate_dsn).await?;
+    let reviewed = collect_scope_gated_versions(&conn, app_id, migrations_dir).await?;
+    Ok(reviewed.into_iter().collect())
+}
+
+/// **PR9c HIGH (bundle atomicity) + PR9b reviewer plan — the SHARED scope-gate
+/// enumerator.** Lower the WHOLE bundle (`.sql` + every `.ir.json`, version-ordered)
+/// read-only — applying NOTHING — and collect the full set of per-version scope-keys
+/// any destructive / online-rename-EXPAND step would require approval for. This is the
+/// SINGLE source of truth shared by:
+///   • [`plan_reviewed_versions`] (the reviewer-facing "what needs approval" list), and
+///   • the pre-apply bundle-scope gate ([`prevalidate_bundle_scope`]) that refuses a
+///     co-bundled out-of-scope op BEFORE any earlier file's EXPAND can commit.
+///
+/// Because it runs the SAME load + guarded-lower pipeline the real apply does
+/// (advancing the ownership registry + live-set per file across this bundle's
+/// freshly-created tables), the version-ids are byte-identical to what the apply loop's
+/// per-step scope gate keys on — so a pre-validation pass can NEVER drift from the apply
+/// pass and let a half-state slip through.
+async fn collect_scope_gated_versions(
+    conn: &compio_postgres::Client,
+    app_id: &Uuid,
+    migrations_dir: &Path,
+) -> Result<std::collections::BTreeSet<String>, DeployMigrateError> {
     let schema = app_id.to_string();
     let app = schema.clone();
-    let conn = connect(migrate_dsn).await?;
 
     let mut reviewed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
@@ -559,7 +664,7 @@ pub async fn plan_reviewed_versions(
         ir_files.sort();
         let exec_cfg = ExecutorConfig::new(schema.clone(), schema.clone());
         let guard_cfg = zeroship_migrate::GuardConfig::confined(schema.clone());
-        let backend = PostgresBackend::new(&conn);
+        let backend = PostgresBackend::new(conn);
         // Seed the ownership registry + live facts from the LIVE catalog — the same
         // introspection the apply loop runs (read-only). Advance per file across this
         // bundle's freshly-created tables so a later file's ops lower correctly.
@@ -605,7 +710,45 @@ pub async fn plan_reviewed_versions(
         }
     }
 
-    Ok(reviewed.into_iter().collect())
+    Ok(reviewed)
+}
+
+/// **PR9c HIGH (bundle atomicity / no half-state) — the PRE-APPLY bundle-scope gate.**
+/// Under an APPROVED deploy ([`ApprovalScope::Versions`]), refuse the WHOLE bundle BEFORE
+/// applying ANY file if ANY scope-gated step's version is OUTSIDE the operator's approved
+/// set. This closes the self-inflicted half-state the critique found: pre-fix, the
+/// multi-file apply committed each file per-step (PG DDL is transactional only WITHIN a
+/// step), so an earlier approved online-rename EXPAND could durably COMMIT (live dual-write
+/// trigger + duplicated column + a journaled `TABLE_HAS_PENDING_CONTRACT` obligation) and
+/// THEN a later co-bundled out-of-scope op got refused — leaving a half-renamed table that
+/// fail-closes every future deploy touching it, even though the creator saw a 4xx and
+/// reasonably believes "nothing happened".
+///
+/// By validating the ENTIRE bundle's scope up front (option (b) of the fix), no EXPAND ever
+/// commits ahead of a guaranteed-later refusal: a bundle whose approved set does not cover
+/// every destructive/online-rename version is rejected wholesale, applying NOTHING. The
+/// per-step scope gate inside the apply loop is RETAINED as defense-in-depth; this gate
+/// makes the refusal atomic.
+///
+/// Only consulted on the [`ApprovalScope::Versions`] (approved) path — the routine
+/// `ApprovalScope::All` / `Approval::None` deploy refuses each destructive op individually
+/// at apply, and additive-only routine deploys have no scope-gated step to pre-validate.
+async fn prevalidate_bundle_scope(
+    conn: &compio_postgres::Client,
+    app_id: &Uuid,
+    migrations_dir: &Path,
+    scope: &ApprovalScope,
+) -> Result<(), DeployMigrateError> {
+    let ApprovalScope::Versions(_) = scope else {
+        return Ok(());
+    };
+    let gated = collect_scope_gated_versions(conn, app_id, migrations_dir).await?;
+    if let Some(unscoped) = gated.iter().find(|v| !scope.admits(v)) {
+        return Err(DeployMigrateError::from(EngineError::ApprovalNotScoped {
+            version: unscoped.clone(),
+        }));
+    }
+    Ok(())
 }
 
 /// Discover + apply the bundle's `.ir.json` creator artifacts (§5.2/§8.6).
@@ -633,6 +776,7 @@ async fn apply_bundle_ir_migrations(
     guard_cfg: &zeroship_migrate::GuardConfig,
     approval: Approval,
     scope: &ApprovalScope,
+    actor: &DeployActor,
 ) -> Result<MigrateOutcome, DeployMigrateError> {
     // Discover `*.ir.json` files, version-ordered by filename (deterministic).
     let mut ir_files: Vec<std::path::PathBuf> = Vec::new();
@@ -760,6 +904,10 @@ async fn apply_bundle_ir_migrations(
         .await
         .map_err(|e| DeployMigrateError::from(EngineError::from(e)))?;
 
+    // PR9c: the IR-leg journal actor — static `"deploy-ir"` on the routine path, or
+    // `deploy-ir-approved:<approver>` on an operator-approved go-live (computed once).
+    let ir_actor = actor.ir_actor();
+
     // Run the whole file loop under the held lock, capturing the result so the lock
     // is released on EVERY path (success/error/early-return) before we surface it.
     let loop_result: Result<(), DeployMigrateError> = async {
@@ -826,7 +974,7 @@ async fn apply_bundle_ir_migrations(
                 scope,
                 backend,
                 exec_cfg,
-                "deploy-ir",
+                &ir_actor,
                 LockMode::AlreadyHeld,
             )
             .await

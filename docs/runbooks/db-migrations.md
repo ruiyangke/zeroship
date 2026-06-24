@@ -95,6 +95,47 @@ The loader picks the file up by its numeric `V<NNNN>` version order — no maste
 file to edit. **Never edit an already-applied migration** (the engine validates
 per-migration checksums and aborts on drift); add a new versioned file instead.
 
+## Operator-approved creator go-live (online rename / destructive ops)
+
+A creator app's `.zship` deploy applies its migrations on the
+`POST /api/apps/{id}/deploy` path. A **routine** deploy is fail-closed: an online
+`renameColumn` EXPAND or any destructive op (drop/truncate/lossy) is **refused
+before go-live** — the AI/creator never auto-applies a gated change.
+
+Completing such an op is an **operator** action, gated separately from the deploy
+itself:
+
+- The deploy carries `?approved_versions=<comma-joined version-ids>` — the
+  individually-reviewed migration versions approved for this go-live (enumerate
+  them with `deploy_migrate::plan_reviewed_versions`).
+- A non-empty approval set is authorized by the **operator-only**
+  `migrations:approve` action (`Action::AppsApproveMigration`). It is **not** in
+  the creator OAuth scope vocabulary and **not** granted by the
+  app-owner/editor/viewer policies — only the platform `admin` role. A caller
+  holding merely `apps:deploy` (the bundle author, or an AI deploying on their
+  behalf) is refused **403** the instant they pass an approval set, so the author
+  cannot self-approve their own destructive go-live.
+- The approval is **per-version scoped**: only the listed versions' destructive/
+  online ops complete; any co-bundled op outside the set is refused
+  (`ApprovalNotScoped`). The whole bundle is **pre-validated** before any file
+  applies — if any scope-gated op is out-of-scope the deploy is refused
+  wholesale, so an earlier approved EXPAND never commits ahead of a guaranteed
+  later refusal (no half-renamed-table state).
+- The approver's principal is stamped into the immutable journal
+  (`applied_by = deploy-approved:<approver>` / `deploy-ir-approved:<approver>`),
+  so an operator-approved go-live is forensically distinct from a routine deploy.
+
+> ⚠️ **NOT tamper-proof yet (H2 follow-up).** Approving a reviewed version set
+> does **not** currently bind the *bytes* that run. The H2 integrity manifest is
+> computed-and-logged only (`apply_verified_scoped(expected: None)`) — there is no
+> trusted out-of-band stamp persisted at review time to verify the apply-time set
+> against. A migration set reordered/edited/inserted-into between authoring/review
+> and apply is **not** refused. Until the H2 follow-up lands (persist
+> `compute_manifest(...)` at review time keyed by app + bundle, then pass
+> `Some(&expected)` on the go-live apply), treat an operator-approved go-live as
+> **integrity-traceable but not tamper-prevented**: review the migration set from
+> a trusted source of truth, not from the `.zship` alone.
+
 ## Tests
 
 The control/auth integration tests connect to a **pre-migrated** database
