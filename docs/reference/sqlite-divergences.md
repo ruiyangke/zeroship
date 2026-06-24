@@ -2,6 +2,8 @@
 
 `plugin-db` keeps the creator-facing CRUD surface aligned across Postgres and SQLite. The remaining intentional differences are in engine-specific search, transaction isolation, locking, scoring, and text-ordering behavior.
 
+For the **migration** authoring surface, the equivalent boundary — which DML transforms are portable across both backends, the `c.fn.splitPart` portable-expression envelope, and the `EXPR_NOT_PORTABLE` hard error out of envelope — is documented in [migrate-op-dsl.md](./migrate-op-dsl.md#the-dml-portability-boundary).
+
 ## Current differences
 
 | Area | Postgres | SQLite | Contract |
