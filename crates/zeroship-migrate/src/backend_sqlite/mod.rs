@@ -590,23 +590,53 @@ impl MigrationBackend for SqliteBackend {
         &self,
         _cfg: &ExecutorConfig,
         version: &crate::migration::MigrationId,
-        _name: &str,
-        _template: &str,
-        _binds: &[crate::plan::BindValue],
-        _destructive: bool,
-        _owner_app: &str,
-        _approval: crate::approval::Approval,
-        _applied_by: &str,
+        name: &str,
+        template: &str,
+        binds: &[crate::plan::BindValue],
+        destructive: bool,
+        owner_app: &str,
+        approval: crate::approval::Approval,
+        applied_by: &str,
         _lock_mode: crate::executor::LockMode,
     ) -> Result<bool, ApplyError> {
-        // The SQLite one-shot DML executor (the shared SQLite-DML-assembly module)
-        // is net-new for PR6a. Until it lands the SQLite arm fails closed rather
-        // than silently dropping a data statement.
-        Err(ApplyError::Backend(format!(
-            "sqlite backend: parameterized DML step '{}' is not yet supported (the \
-             SQLite one-shot DML executor lands in PR6a)",
-            version.as_str()
-        )))
+        // §PR6a — the SQLite one-shot DML executor. The `template` carries `?n`
+        // placeholders; the binds are bound NATIVELY (never interpolated, §2.3.2).
+        //
+        // Defense-in-depth: a destructive DML (a `delete`) needs explicit approval,
+        // mirroring the per-Migration gate + the PG `run_dml_step`. Refuse BEFORE
+        // touching the journal or running the statement, so a refused destructive
+        // DML applies NOTHING.
+        if destructive && approval != crate::approval::Approval::Approved {
+            return Err(ApplyError::ApprovalRequired);
+        }
+        // Net-applied-skip: if this sub-version is already journaled `completed`,
+        // the re-run is a no-op (idempotency, §2.0.1).
+        let already: bool = journal_sql::applied(&self.actor)
+            .await
+            .map_err(journal_err)
+            .map_err(ApplyError::Journal)?
+            .into_iter()
+            .filter(|e| matches!(e.phase, crate::journal::Phase::Completed))
+            .any(|e| e.version == version.as_str());
+        if already {
+            return Ok(false);
+        }
+        // Map the plan binds to the transport-safe SQLite bind mirror (the shared
+        // `?n`-binding seam — `SqliteBind::from_bind`).
+        let sqlite_binds: Vec<crate::backend_sqlite::actor::SqliteBind> =
+            binds.iter().map(crate::backend_sqlite::actor::SqliteBind::from_bind).collect();
+        journal_sql::run_dml(
+            &self.actor,
+            version.as_str(),
+            name,
+            template,
+            &sqlite_binds,
+            owner_app,
+            applied_by,
+        )
+        .await
+        .map_err(apply_err)?;
+        Ok(true)
     }
 
     fn online(&self) -> Option<&dyn crate::expand_contract::OnlineSchemaChange> {

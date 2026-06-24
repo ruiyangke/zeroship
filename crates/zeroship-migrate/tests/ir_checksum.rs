@@ -114,6 +114,7 @@ fn checksum_of_ir_byte_stable_golden() {
             table: "accounts".into(),
             columns: vec!["id".into()],
             rows: vec![vec![IrScalar::Int(7)]],
+            on_conflict: None,
         },
     ];
     let deps = [dep()];
@@ -246,11 +247,13 @@ fn checksum_of_ir_folds_scalars_and_ast_literals() {
         table: "t".into(),
         columns: vec!["a".into()],
         rows: vec![vec![IrScalar::Int(1)]],
+        on_conflict: None,
     };
     let ins2 = Op::Insert {
         table: "t".into(),
         columns: vec!["a".into()],
         rows: vec![vec![IrScalar::Int(2)]],
+        on_conflict: None,
     };
     let v1 = vec![ins1];
     let v2 = vec![ins2];

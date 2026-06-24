@@ -473,6 +473,20 @@ impl Client {
             .await
     }
 
+    /// Execute a non-row statement with NULL-aware **text-format** parameters,
+    /// returning the affected-row count. The `execute` peer of
+    /// [`query_text_params`](Self::query_text_params): the server infers each
+    /// parameter's type from its SQL position and a text value implicit-casts to
+    /// the target column type — the coercion model a schema-blind DML assembler
+    /// (op.* §3.3) needs. A `None` element is a SQL NULL.
+    pub async fn execute_text_params(
+        &self,
+        sql: &str,
+        params: &[Option<String>],
+    ) -> Result<u64, Error> {
+        query::execute_text_params(&self.inner, sql, params).await
+    }
+
     /// Like `query_one`, but requires the types of query parameters to be explicitly specified.
     pub async fn query_typed_one(
         &self,

@@ -60,6 +60,16 @@ enum LoweredOp {
     /// `RenameStep::PgExpandContract` is large (the full E1..C2 plan), so boxing it
     /// keeps the common `Ddl` arm cheap (`clippy::large_enum_variant`).
     Rename(Box<RenameStep>),
+    /// **PR6a** — a DML op (`insert`/`update`/`del`/`backfill`) lowered through the
+    /// creator-DML assembler ([`crate::dml`]) into a [`PlanStep::Dml`]
+    /// (parameterized one-shot) or [`PlanStep::Backfill`] (PG batched). NOT
+    /// fragment-guarded the way DDL is: a one-shot `Dml` step's values are NATIVE
+    /// binds (never interpolated), so there is no rendered-literal fragment a guard
+    /// would inspect, and the executor's `run_dml_step` re-runs the destructive
+    /// approval gate; a `Backfill`'s assembled `UPDATE` is guard-checked by the
+    /// backfill executor itself before any batch runs (`backfill.rs`). The DML op's
+    /// expression AST is gated by the structural validator BEFORE assembly.
+    Dml(PlanStep),
 }
 
 /// The LIVE-schema facts the IR-path Lower phase consults — the IR-path peer of
@@ -261,6 +271,20 @@ pub enum IrLowerError {
          alone"
     )]
     RenameNeedsLiveColumn(String, String),
+    /// **PR6a** — the structural expression validator ([`crate::validate`])
+    /// rejected an embedded closed-AST node of a DML op (`update`/`del`/`backfill`
+    /// `set`/`where`/`filter`) BEFORE assembly: an out-of-policy node, an
+    /// out-of-envelope synth, a non-portable cast. Boxed (the `AuthoringError`
+    /// payload is large). The structured §8.8 payload reaches the author through
+    /// the boxed error's `Display`.
+    #[error("IrAuthor::lower of a DML op: {0}")]
+    DmlValidate(Box<crate::validate::AuthoringError>),
+    /// **PR6a** — the creator-DML assembler ([`crate::dml`]) rejected a DML op: a
+    /// malformed identifier, an empty/ragged insert, a SQLite `onConflict`
+    /// (`dialect_scope = PgOnly`, §9), or a SQLite-targeted batched backfill (PR6b).
+    /// All are HARD errors — a DML op is NEVER silently dropped or mis-applied.
+    #[error("IrAuthor::lower of a DML op: {0}")]
+    DmlAssemble(#[from] crate::dml::DmlError),
 }
 
 /// One rendered SQL FRAGMENT of a lowered op, carrying its attribution (§6.1.1):
@@ -660,6 +684,7 @@ impl IrAuthor {
                     out.extend(units.into_iter().map(|(mig, _statements)| PlanStep::Ddl(mig)));
                 }
                 LoweredOp::Rename(step) => out.push(PlanStep::OnlineRename(*step)),
+                LoweredOp::Dml(step) => out.push(step),
             }
         }
         Ok(out)
@@ -795,12 +820,183 @@ impl IrAuthor {
                 self.require_pg_for("dropConstraint")?;
                 vec![self.decl.lower_drop_constraint(table, name)]
             }
-            Op::Insert { .. } => return Err(IrLowerError::UnsupportedOp("insert")),
-            Op::Update { .. } => return Err(IrLowerError::UnsupportedOp("update")),
-            Op::Delete { .. } => return Err(IrLowerError::UnsupportedOp("delete")),
-            Op::Backfill { .. } => return Err(IrLowerError::UnsupportedOp("backfill")),
+            // §PR6a — the DML ops lower through the creator-DML assembler
+            // (`crate::dml`) into a `PlanStep::Dml`/`PlanStep::Backfill`, NOT a DDL
+            // `Migration`. Each returns early with a `LoweredOp::Dml`.
+            Op::Insert { .. }
+            | Op::Update { .. }
+            | Op::Delete { .. }
+            | Op::Backfill { .. } => {
+                return Ok(LoweredOp::Dml(self.lower_dml_op(op)?));
+            }
         };
         Ok(LoweredOp::Ddl(migs))
+    }
+
+    /// **§PR6a — lower a DML op** (`insert`/`update`/`del`/`backfill`) into a
+    /// [`PlanStep`] via the creator-DML assembler ([`crate::dml`]).
+    ///
+    /// The closed-AST expression slots (`update`/`del`/`backfill` `set`/`where`/
+    /// `filter`) are gated STRUCTURALLY by [`crate::validate::validate_op`] FIRST
+    /// (the (a)/(b)/(d) checks — node allow-list, synth envelope, portable cast),
+    /// so a non-portable / out-of-policy node is rejected BEFORE any SQL is
+    /// assembled. The `ColRef`-resolution rule (c) runs against the live target
+    /// table at the apply/render seam (`validate_ir_resolved`); the lower here is
+    /// the structural-scope leg.
+    ///
+    /// Portability boundaries (§9), all HARD errors (never silent):
+    /// - `insert { onConflict }` on **SQLite** → [`crate::dml::DmlError::OnConflictNotPortable`].
+    /// - a **batched** `backfill` / `update { batch }` on **SQLite** → PR6b
+    ///   ([`crate::dml::DmlError::BatchedBackfillNotPortable`]).
+    ///
+    /// # Errors
+    /// - [`IrLowerError::DmlValidate`] — the structural validator rejected an
+    ///   embedded expression.
+    /// - [`IrLowerError::DmlAssemble`] — the assembler rejected the op (malformed
+    ///   identifier / empty insert / SQLite `onConflict` / SQLite batched backfill).
+    fn lower_dml_op(&self, op: &Op) -> Result<PlanStep, IrLowerError> {
+        use crate::ir::Op;
+        let dialect = self.dialect;
+        let target = match dialect {
+            SqlDialect::Postgres => crate::validate::Dialect::Postgres,
+            SqlDialect::Sqlite => crate::validate::Dialect::Sqlite,
+        };
+        // Structural gate (a)/(b)/(d) BEFORE assembly. op_index 0 is a local
+        // attribution; the loader's `validate_ir` already ran with the true op
+        // index for the production path — this is the lower-time defense-in-depth.
+        crate::validate::validate_op(op, target, 0, None)
+            .map_err(|e| IrLowerError::DmlValidate(Box::new(e)))?;
+
+        match op {
+            Op::Insert { table, columns, rows, on_conflict } => {
+                let oc = on_conflict.as_ref().map(|c| crate::dml::OnConflict {
+                    columns: c.columns.clone(),
+                    do_update: c.do_update.clone(),
+                });
+                let asm = crate::dml::assemble_insert(
+                    &self.project_schema,
+                    dialect,
+                    table,
+                    columns,
+                    rows,
+                    oc.as_ref(),
+                )
+                .map_err(IrLowerError::DmlAssemble)?;
+                Ok(self.dml_step(table, "insert", asm, false))
+            }
+            Op::Update { table, set, r#where, batch } => {
+                if batch.is_some() {
+                    // A batched update is a backfill in disguise (resumable, paged):
+                    // route it through the backfill path so its SQLite leg hits the
+                    // PR6b boundary, never a silent one-shot UPDATE.
+                    let b = batch.as_ref().expect("batch is_some");
+                    return self.lower_backfill(
+                        table,
+                        &b.cursor_column,
+                        b.batch_size.get(),
+                        set,
+                        r#where.as_ref(),
+                        // A batched update has no separate name; derive a stable one.
+                        &format!("batched_update_{table}"),
+                    );
+                }
+                let asm = crate::dml::assemble_update(
+                    &self.project_schema,
+                    dialect,
+                    table,
+                    set,
+                    r#where.as_ref(),
+                )
+                .map_err(IrLowerError::DmlAssemble)?;
+                Ok(self.dml_step(table, "update", asm, false))
+            }
+            Op::Delete { table, r#where, limit } => {
+                let asm = crate::dml::assemble_delete(
+                    &self.project_schema,
+                    dialect,
+                    table,
+                    r#where,
+                    limit.map(crate::ir::SafeU64::get),
+                )
+                .map_err(IrLowerError::DmlAssemble)?;
+                // A delete is DESTRUCTIVE (data loss) — the executor's approval gate
+                // refuses it without `Approval::Approved`.
+                Ok(self.dml_step(table, "delete", asm, true))
+            }
+            Op::Backfill { table, cursor_column, batch_size, set, filter, name } => self
+                .lower_backfill(
+                    table,
+                    cursor_column,
+                    batch_size.get(),
+                    set,
+                    filter.as_ref(),
+                    name,
+                ),
+            // Unreachable: lower_one_op only routes the four DML ops here.
+            _ => Err(IrLowerError::UnsupportedOp("non-DML op routed to lower_dml_op")),
+        }
+    }
+
+    /// Build a [`PlanStep::Dml`] from an assembled one-shot statement, minting a
+    /// deterministic sub-version id from the owner + table + template + binds so a
+    /// re-deploy of the SAME op is idempotent (the journal net-applied-skip keys on
+    /// this version) and a re-authored op (a changed template/binds) gets a fresh
+    /// id (no false resume).
+    fn dml_step(
+        &self,
+        table: &str,
+        kind: &str,
+        asm: crate::dml::AssembledDml,
+        destructive: bool,
+    ) -> PlanStep {
+        let owner = self.decl.owner_app().to_string();
+        let version = dml_step_version(&owner, kind, &asm.template, &asm.binds);
+        PlanStep::Dml {
+            version,
+            name: format!("{kind} {table}"),
+            template: asm.template,
+            binds: asm.binds,
+            transactional: true,
+            destructive,
+            owner_app: owner,
+        }
+    }
+
+    /// Lower a `backfill` (or batched `update`) into a [`PlanStep::Backfill`]. The
+    /// `set`/`filter` render to INLINE SQL strings ([`crate::dml::assemble_backfill_clauses`])
+    /// the existing [`crate::backfill::BackfillSpec`] executor consumes (it
+    /// guard-checks the assembled `UPDATE` before any batch). **PG-only**: a SQLite
+    /// target hits the PR6b boundary fail-closed.
+    fn lower_backfill(
+        &self,
+        table: &str,
+        cursor_column: &str,
+        batch_size: u64,
+        set: &std::collections::BTreeMap<String, crate::expr::Expr>,
+        filter: Option<&crate::expr::Expr>,
+        name: &str,
+    ) -> Result<PlanStep, IrLowerError> {
+        if self.dialect == SqlDialect::Sqlite {
+            return Err(IrLowerError::DmlAssemble(
+                crate::dml::DmlError::BatchedBackfillNotPortable {
+                    name: name.to_string(),
+                    table: table.to_string(),
+                },
+            ));
+        }
+        let clauses =
+            crate::dml::assemble_backfill_clauses(self.dialect, table, set, filter)
+                .map_err(IrLowerError::DmlAssemble)?;
+        let batch_size = u32::try_from(batch_size).unwrap_or(u32::MAX).max(1);
+        let spec = crate::backfill::BackfillSpec {
+            table: table.to_string(),
+            cursor_column: cursor_column.to_string(),
+            batch_size,
+            set_clause: clauses.set_clause,
+            filter: clauses.filter,
+            name: name.to_string(),
+        };
+        Ok(PlanStep::Backfill(spec))
     }
 
     /// **Guard-per-fragment + reassembly (§6.1.1).** Lower the IR's DDL ops and,
@@ -855,6 +1051,19 @@ impl IrAuthor {
                     // fragment-guarded (the producer is trusted; `apply_plan`
                     // re-guards at execution). It produces no `GuardedFragment` row.
                     steps.push(PlanStep::OnlineRename(*step));
+                    continue;
+                }
+                LoweredOp::Dml(step) => {
+                    // §PR6a — a DML step is NOT fragment-guarded the way DDL is. A
+                    // one-shot `Dml` carries its values as NATIVE binds (`$n`/`?n`),
+                    // so there is no rendered-literal fragment a deny-list guard
+                    // would inspect; the executor's `run_dml_step` re-runs the
+                    // destructive approval gate. A `Backfill`'s assembled `UPDATE` is
+                    // guard-checked by the backfill executor before any batch runs
+                    // (`backfill.rs`). The op's expression AST was already gated by
+                    // the structural validator in `lower_dml_op`. So it produces no
+                    // `GuardedFragment` row, exactly like an online rename.
+                    steps.push(step);
                     continue;
                 }
             };
@@ -1191,9 +1400,7 @@ fn split_up_fragments(up: &str) -> Vec<&str> {
 /// outer `version` borrows from its FIRST step (§2.0.1). A `Ddl` uses its
 /// migration version; an `OnlineRename` uses its first sub-migration's version
 /// (PG: E1; SQLite: the rebuild journal migration); a `Dml` uses its own version;
-/// a `Backfill` mints a fresh marker (it has no `Migration` of its own at this
-/// seam — PR1/PR2 never emit a standalone Backfill step from `IrAuthor`, so this
-/// arm is unreached here, present for totality).
+/// a `Backfill` (PR6a) derives a deterministic marker from its stable backfill id.
 fn plan_step_version(step: &PlanStep) -> crate::migration::MigrationId {
     match step {
         PlanStep::Ddl(m) => m.version.clone(),
@@ -1203,8 +1410,78 @@ fn plan_step_version(step: &PlanStep) -> crate::migration::MigrationId {
             .map_or_else(crate::migration::MigrationId::generate, |m| m.version.clone()),
         PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => rb.migration.version.clone(),
         PlanStep::Dml { version, .. } => version.clone(),
-        PlanStep::Backfill(_) => crate::migration::MigrationId::generate(),
+        PlanStep::Backfill(spec) => {
+            // A backfill's plan-step identity is derived deterministically from its
+            // stable backfill id (table + cursor + transform + name) so a re-deploy
+            // of the same backfill is idempotent and a re-authored one gets a fresh
+            // id (matching the executor's `BackfillSpec::backfill_id` resume key).
+            dml_id_from_seed("backfill", spec.backfill_id().as_bytes())
+        }
     }
+}
+
+/// Mint a DETERMINISTIC, STABLE [`MigrationId`] for a DML/backfill plan step
+/// (§PR6a / §2.0.1). A DML step has no `Migration` of its own, but it still needs
+/// a journal identity for the net-applied-skip (idempotent re-deploy) and the
+/// per-step journal row. Deriving it from the step's content (owner + kind +
+/// template + binds) makes a re-deploy of the SAME op map to the SAME id (skipped
+/// when net-applied) and a re-authored op (a changed template/binds) get a FRESH
+/// id (no false resume) — the same property `repeatable_id_for_name` /
+/// `BackfillSpec::backfill_id` give their respective steps.
+fn dml_step_version(
+    owner: &str,
+    kind: &str,
+    template: &str,
+    binds: &[crate::plan::BindValue],
+) -> crate::migration::MigrationId {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for field in [owner, kind, template] {
+        h.update((field.len() as u64).to_be_bytes());
+        h.update(field.as_bytes());
+    }
+    h.update((binds.len() as u64).to_be_bytes());
+    for b in binds {
+        // A stable, injective-enough byte image of each bind so two distinct bind
+        // lists hash differently (the same content folding the same id is the
+        // idempotency property).
+        let (tag, body): (u8, Vec<u8>) = match b {
+            crate::plan::BindValue::Null => (0, Vec::new()),
+            crate::plan::BindValue::Bool(v) => (1, vec![u8::from(*v)]),
+            crate::plan::BindValue::Int(v) => (2, v.to_be_bytes().to_vec()),
+            crate::plan::BindValue::Decimal(s) => (3, s.as_bytes().to_vec()),
+            crate::plan::BindValue::Text(s) => (4, s.as_bytes().to_vec()),
+        };
+        h.update([tag]);
+        h.update((body.len() as u64).to_be_bytes());
+        h.update(&body);
+    }
+    dml_id_from_seed("dml", &h.finalize())
+}
+
+/// Build a deterministic [`MigrationId`] from a domain tag + a seed digest, using
+/// the SAME high-48-bit `0xFF…` marker layout `repeatable_id_for_name` uses — so a
+/// derived DML/backfill id can NEVER collide with a versioned migration id (whose
+/// high 48 bits hold a small numeric version) and is stable per seed. The `tag`
+/// folds into the low bits so a `"dml"` and a `"backfill"` seed never collide.
+fn dml_id_from_seed(tag: &str, seed: &[u8]) -> crate::migration::MigrationId {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(tag.as_bytes());
+    h.update([0u8]);
+    h.update(seed);
+    let digest = h.finalize();
+    let mut bytes = [0u8; 16];
+    // High 48 bits = the repeatable/derived marker (never a real file version) ⇒
+    // never collides with a versioned id.
+    bytes[0..6].copy_from_slice(&[0xFFu8; 6]);
+    bytes[6..16].copy_from_slice(&digest[0..10]);
+    let uuid = uuid::Uuid::from_bytes(bytes);
+    crate::migration::MigrationId::parse(&format!(
+        "mig_{}",
+        zeroship_core::typed_id::uuid_to_base62(&uuid)
+    ))
+    .expect("derived DML id is a valid mig_ typed id")
 }
 
 /// The op kind tag for §6.1.1 attribution — the human-facing name the guard

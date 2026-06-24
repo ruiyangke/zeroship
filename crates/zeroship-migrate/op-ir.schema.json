@@ -520,6 +520,17 @@
                 }
               }
             },
+            "onConflict": {
+              "description": "**PR6a** — the optional upsert clause (`ON CONFLICT …`). PostgreSQL-only:\nPG renders it natively; on a SQLite target it is a hard authoring error\n(`dialect_scope = PgOnly` / `UNSUPPORTED { kind: \"op\" }`, §9) — there is\nno portable SQLite upsert and no raw route (property A). Absent ⇒ a plain\ninsert (portable on both backends).",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/IrOnConflict"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "op": {
               "type": "string",
               "const": "insert"
@@ -1614,6 +1625,33 @@
           "type": "string",
           "const": "fts5"
         }
+      ]
+    },
+    "IrOnConflict": {
+      "description": "**PR6a** — the optional `insert { onConflict }` upsert clause (§3.4 / §9). A\nCLOSED carrier: the conflict-target columns + an optional `doUpdate` map of\n`column → typed scalar` assignment (absent `doUpdate` ⇒ `DO NOTHING`). NEVER a\nraw SQL string (property A). **PostgreSQL-only** — the lowering renders it on\nPG and HARD-REJECTS it on SQLite (`dialect_scope = PgOnly`). Modelled as a\ndistinct IR type so the wire shape is closed + schemars-expressible and a\nhand-crafted `.ir.json` cannot smuggle an arbitrary clause.",
+      "type": "object",
+      "properties": {
+        "columns": {
+          "description": "The conflict-target columns (`ON CONFLICT (cols)`).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "doUpdate": {
+          "description": "`Some` ⇒ `DO UPDATE SET <col = scalar, …>`; absent ⇒ `DO NOTHING`. The\nassignment values are typed scalars (the §2.5 numeric domain), bound\nnatively at assembly — never inlined.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "$ref": "#/$defs/IrScalar"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "columns"
       ]
     },
     "IrBatch": {

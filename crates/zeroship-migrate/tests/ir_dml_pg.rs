@@ -1,0 +1,341 @@
+//! §PR6a — FAITHFUL e2e for the creator DML surface on **real Postgres** (`:5440`),
+//! driven through the AUTHORING path: a `.ir.json` → the REAL load-gate + the
+//! creator-DML assembler (`IrAuthor::lower_plan`) → `MigrationEngine::apply_plan`
+//! → a real PG schema under the least-priv migrator role. No shims, no hand-built
+//! `PlanStep::Dml` (that PR0 path is covered by `apply_plan_pg.rs`); here the
+//! statement + binds come from the ASSEMBLER, completing PR0 test (9)'s
+//! authoring-path obligation.
+//!
+//! Coverage:
+//! - **insert → update → delete one-shot** authored as IR ops apply on real PG and
+//!   the row state proves the transform happened;
+//! - **bind-safety**: an `insert` whose value carries SQL metacharacters is stored
+//!   verbatim (native `$n`) and cannot alter the statement shape;
+//! - **`insert { onConflict }` renders natively on PG** (an upsert really upserts);
+//! - **a batched `backfill`** runs through the existing PG `BackfillSpec` executor
+//!   (resumable, crash-safe) — the assembler-rendered set/filter applies.
+//!
+//! Requires `:5440` (the `*_pg` suite convention); run with `--test-threads=1`.
+
+use compio_postgres::Client;
+use zeroship_migrate::{
+    executor::LockMode,
+    migration::MigrationId,
+    provision_migrator, role::deprovision_migrator, Approval, ExecutorConfig, IrAuthor, LiveSchema,
+    MigrationEngine, SqlDialect,
+};
+
+const DEFAULT_DSN: &str =
+    "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_migrate_test";
+
+fn dsn() -> String {
+    std::env::var("MIGRATE_TEST_DB").unwrap_or_else(|_| DEFAULT_DSN.to_string())
+}
+
+async fn pg() -> Client {
+    let (client, conn) = compio_postgres::connect(&dsn(), compio_postgres::NoTls)
+        .await
+        .expect("connect to zeroship_migrate_test on :5440");
+    compio::runtime::spawn(async move {
+        let _ = conn.run().await;
+    })
+    .detach();
+    client
+}
+
+fn token() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{pid}_{nanos}_{n}")
+}
+
+fn cfg_for(tok: &str) -> ExecutorConfig {
+    let mut c = ExecutorConfig::new(format!("prj_{tok}"), format!("proj_{tok}"));
+    c.pg.meta_schema = format!("meta_{tok}");
+    let role = zeroship_migrate::migrator_role_name(&c.project_id).unwrap();
+    c.with_migrator_role(role)
+}
+
+async fn setup(conn: &Client, cfg: &ExecutorConfig) {
+    conn.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", cfg.project_schema))
+        .await
+        .expect("create project schema");
+    provision_migrator(conn, cfg).await.expect("provision migrator role");
+}
+
+async fn teardown(conn: &Client, cfg: &ExecutorConfig) {
+    let _ = deprovision_migrator(conn, cfg).await;
+    let _ = conn
+        .batch_execute(&format!(
+            "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
+            cfg.project_schema, cfg.pg.meta_schema
+        ))
+        .await;
+}
+
+fn q(schema: &str) -> String {
+    format!("\"{}\"", schema.replace('"', "\"\""))
+}
+
+fn registry(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+    pairs.iter().map(|(t, o)| (t.to_string(), o.to_string())).collect()
+}
+
+const APP: &str = "app_test";
+
+/// Author a `.ir.json` (the deploying app `APP`) → REAL load-gate + assembler
+/// (`lower_plan`) → `apply_plan` on real PG. Asserts apply success.
+async fn author_and_apply(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    ir: &str,
+    reg: &std::collections::BTreeMap<String, String>,
+    approval: Approval,
+) {
+    let author = IrAuthor::new(cfg.project_schema.clone(), APP, SqlDialect::Postgres);
+    let document = zeroship_migrate::ir_load::load_ir_document(
+        ir,
+        APP,
+        zeroship_migrate::validate::Dialect::Postgres,
+        reg,
+    )
+    .expect("load gate");
+    let plan = author.lower_plan(&document, &LiveSchema::default()).expect("lower the IR plan on PG");
+    let engine = MigrationEngine::new();
+    engine
+        .apply_plan(
+            &plan.steps,
+            approval,
+            &zeroship_migrate::PostgresBackend::new(conn),
+            cfg,
+            APP,
+            LockMode::Acquire,
+        )
+        .await
+        .expect("apply the authored DML plan on PG");
+}
+
+#[compio::test]
+async fn ir_authored_insert_update_delete_on_pg() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let s = q(&cfg.project_schema);
+
+    // DDL: a real table (the migrator role creates it).
+    let create = format!(
+        r#"{{"ir_version":1,"name":"create_codes","ops":[
+            {{"op":"createTable","name":"codes","columns":[
+                {{"name":"code","type":"int","nullable":false,"unique":true}},
+                {{"name":"label","type":"text"}}
+            ]}}
+        ]}}"#
+    );
+    let _ = s;
+    author_and_apply(&conn, &cfg, &create, &registry(&[]), Approval::None).await;
+
+    // INSERT two rows through the assembler.
+    let seed = r#"{"ir_version":1,"name":"seed","ops":[
+        {"op":"insert","table":"codes",
+         "columns":["id","created_at","updated_at","version","code","label"],
+         "rows":[
+            ["c1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,200,"ok"],
+            ["c2","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,404,null]
+         ]}
+    ]}"#;
+    author_and_apply(&conn, &cfg, seed, &registry(&[("codes", APP)]), Approval::None).await;
+    let s = q(&cfg.project_schema);
+    let n = conn
+        .query_one(&format!("SELECT count(*)::bigint FROM {s}.codes"), &[])
+        .await
+        .unwrap()
+        .get::<_, i64>(0);
+    assert_eq!(n, 2, "two rows seeded via the assembler on PG");
+
+    // UPDATE: coalesce the null label where code > 300.
+    let update = r#"{"ir_version":1,"name":"fixup","ops":[
+        {"op":"update","table":"codes",
+         "set":{"label":{"node":"fnCall","fn":"coalesce","args":[
+             {"node":"colRef","name":"label"},
+             {"node":"literal","value":"unknown"}]}},
+         "where":{"node":"binOp","op":"gt",
+             "lhs":{"node":"colRef","name":"code"},
+             "rhs":{"node":"literal","value":300}}}
+    ]}"#;
+    author_and_apply(&conn, &cfg, update, &registry(&[("codes", APP)]), Approval::None).await;
+    let label: String = conn
+        .query_one(&format!("SELECT label FROM {s}.codes WHERE code = 404"), &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(label, "unknown", "the assembler-authored one-shot UPDATE ran on PG");
+
+    // DELETE (destructive ⇒ needs approval).
+    let delete = r#"{"ir_version":1,"name":"prune","ops":[
+        {"op":"delete","table":"codes",
+         "where":{"node":"binOp","op":"eq",
+             "lhs":{"node":"colRef","name":"code"},
+             "rhs":{"node":"literal","value":200}}}
+    ]}"#;
+    author_and_apply(&conn, &cfg, delete, &registry(&[("codes", APP)]), Approval::Approved).await;
+    let n = conn
+        .query_one(&format!("SELECT count(*)::bigint FROM {s}.codes"), &[])
+        .await
+        .unwrap()
+        .get::<_, i64>(0);
+    assert_eq!(n, 1, "one row pruned via the assembler-authored DELETE");
+
+    teardown(&conn, &cfg).await;
+}
+
+/// Bind-safety on real PG: a metacharacter-laden insert value is stored verbatim
+/// (native `$n` bind) — the table survives and the value is byte-identical.
+#[compio::test]
+async fn ir_bind_safety_on_pg() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let s = q(&cfg.project_schema);
+
+    let create = r#"{"ir_version":1,"name":"create_codes","ops":[
+        {"op":"createTable","name":"codes","columns":[
+            {"name":"code","type":"int","nullable":false,"unique":true},
+            {"name":"label","type":"text"}
+        ]}
+    ]}"#;
+    author_and_apply(&conn, &cfg, create, &registry(&[]), Approval::None).await;
+
+    let hostile = "x'); DROP TABLE codes; --";
+    let seed = format!(
+        r#"{{"ir_version":1,"name":"seed","ops":[
+            {{"op":"insert","table":"codes",
+             "columns":["id","created_at","updated_at","version","code","label"],
+             "rows":[["c1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,1,{hostile:?}]]}}
+        ]}}"#
+    );
+    author_and_apply(&conn, &cfg, &seed, &registry(&[("codes", APP)]), Approval::None).await;
+
+    // The table survived; the value is verbatim.
+    let label: String = conn
+        .query_one(&format!("SELECT label FROM {s}.codes WHERE code = 1"), &[])
+        .await
+        .expect("table survived the injection attempt")
+        .get(0);
+    assert_eq!(label, hostile, "metacharacter value stored verbatim, not interpreted");
+
+    teardown(&conn, &cfg).await;
+}
+
+/// `insert { onConflict }` renders natively on PG and really upserts: a second
+/// insert on a conflicting key DOES UPDATE the row (the PG-only path, §9).
+#[compio::test]
+async fn ir_on_conflict_upserts_on_pg() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let s = q(&cfg.project_schema);
+
+    let create = r#"{"ir_version":1,"name":"create_codes","ops":[
+        {"op":"createTable","name":"codes","columns":[
+            {"name":"code","type":"int","nullable":false,"unique":true},
+            {"name":"label","type":"text"}
+        ]}
+    ]}"#;
+    author_and_apply(&conn, &cfg, create, &registry(&[]), Approval::None).await;
+
+    // First insert: code=1, label='first'.
+    let seed = r#"{"ir_version":1,"name":"seed","ops":[
+        {"op":"insert","table":"codes",
+         "columns":["id","created_at","updated_at","version","code","label"],
+         "rows":[["c1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,1,"first"]]}
+    ]}"#;
+    author_and_apply(&conn, &cfg, seed, &registry(&[("codes", APP)]), Approval::None).await;
+
+    // Upsert: insert the same code with ON CONFLICT (code) DO UPDATE SET label='second'.
+    let upsert = r#"{"ir_version":1,"name":"upsert","ops":[
+        {"op":"insert","table":"codes",
+         "columns":["id","created_at","updated_at","version","code","label"],
+         "rows":[["c1b","2026-01-02T00:00:00Z","2026-01-02T00:00:00Z",1,1,"second"]],
+         "onConflict":{"columns":["code"],"doUpdate":{"label":"second"}}}
+    ]}"#;
+    author_and_apply(&conn, &cfg, upsert, &registry(&[("codes", APP)]), Approval::None).await;
+
+    let label: String = conn
+        .query_one(&format!("SELECT label FROM {s}.codes WHERE code = 1"), &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(label, "second", "ON CONFLICT DO UPDATE upserted the row on PG");
+    let n = conn
+        .query_one(&format!("SELECT count(*)::bigint FROM {s}.codes"), &[])
+        .await
+        .unwrap()
+        .get::<_, i64>(0);
+    assert_eq!(n, 1, "the upsert updated in place, no duplicate row");
+
+    teardown(&conn, &cfg).await;
+}
+
+/// A batched `backfill` authored as IR runs through the existing PG `BackfillSpec`
+/// executor (resumable, crash-safe) — the assembler-rendered `set`/`filter` apply.
+#[compio::test]
+async fn ir_batched_backfill_on_pg() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let s = q(&cfg.project_schema);
+
+    let create = r#"{"ir_version":1,"name":"create_codes","ops":[
+        {"op":"createTable","name":"codes","columns":[
+            {"name":"code","type":"int","nullable":false,"unique":true},
+            {"name":"label","type":"text"}
+        ]}
+    ]}"#;
+    author_and_apply(&conn, &cfg, create, &registry(&[]), Approval::None).await;
+
+    // Seed rows with NULL labels.
+    let seed = r#"{"ir_version":1,"name":"seed","ops":[
+        {"op":"insert","table":"codes",
+         "columns":["id","created_at","updated_at","version","code","label"],
+         "rows":[
+            ["c1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,1,null],
+            ["c2","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,2,null],
+            ["c3","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,3,null]
+         ]}
+    ]}"#;
+    author_and_apply(&conn, &cfg, seed, &registry(&[("codes", APP)]), Approval::None).await;
+
+    // Backfill: set label = 'filled' where label IS NULL, paged by `code`.
+    let backfill = r#"{"ir_version":1,"name":"bf","ops":[
+        {"op":"backfill","table":"codes","cursorColumn":"code","batchSize":2,
+         "set":{"label":{"node":"literal","value":"filled"}},
+         "filter":{"node":"unaryOp","op":"isNull","operand":{"node":"colRef","name":"label"}},
+         "name":"fill_labels"}
+    ]}"#;
+    // A backfill mutates data ⇒ Approval::Approved.
+    author_and_apply(&conn, &cfg, backfill, &registry(&[("codes", APP)]), Approval::Approved).await;
+
+    let filled = conn
+        .query_one(
+            &format!("SELECT count(*)::bigint FROM {s}.codes WHERE label = 'filled'"),
+            &[],
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0);
+    assert_eq!(filled, 3, "the assembler-authored batched backfill filled all 3 rows on PG");
+
+    teardown(&conn, &cfg).await;
+}
+
+// Touch MigrationId to keep the import meaningful across refactors.
+#[allow(dead_code)]
+fn _id() -> MigrationId {
+    MigrationId::generate()
+}

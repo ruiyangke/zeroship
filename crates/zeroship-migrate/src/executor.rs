@@ -2011,26 +2011,28 @@ pub(crate) async fn apply_dml_transactional(
     owner_app: &str,
     applied_by: &str,
 ) -> Result<(), ApplyError> {
-    use compio_postgres::types::ToSql;
-
     let started = Instant::now();
-    // Materialize the typed binds into owned values that outlive the `&dyn ToSql`
-    // borrows. `Decimal` is carried as its canonical text form (the IR numeric
-    // domain is i64 + decimal-string, §2.3.2); PG coerces the text param via the
-    // target column type.
-    let owned: Vec<Box<dyn ToSql + Sync>> = binds
+    // Materialize each typed bind to its **text representation** for NULL-aware,
+    // text-format binding (§2.3.2). Every value is sent in PG text format with a
+    // server-INFERRED parameter type (no fixed OID), so it implicit-casts to the
+    // target COLUMN type exactly as a quoted literal would — `'2026-01-01'` →
+    // `timestamptz`, `'1.5'` → `numeric`, `'t'`/`'f'`/`'true'` → `boolean`, a uuid
+    // string → `uuid`. This is the schema-blind coercion model the op.* assembler
+    // (names-are-strings, §3.3) needs: a concrete-typed binary bind (`text`/`int8`/
+    // `bool` OID) would make PG REFUSE a value against a different column type
+    // ("cannot bind text → timestamptz"). The value is STILL a native bind — never
+    // interpolated into the SQL — so the bind-safety property holds (a metacharacter
+    // value cannot alter the statement shape). `Null` → SQL NULL (no bytes).
+    let params: Vec<Option<String>> = binds
         .iter()
-        .map(|b| -> Box<dyn ToSql + Sync> {
-            match b {
-                crate::plan::BindValue::Null => Box::new(Option::<String>::None),
-                crate::plan::BindValue::Bool(v) => Box::new(*v),
-                crate::plan::BindValue::Int(v) => Box::new(*v),
-                crate::plan::BindValue::Decimal(s) => Box::new(s.clone()),
-                crate::plan::BindValue::Text(s) => Box::new(s.clone()),
-            }
+        .map(|b| match b {
+            crate::plan::BindValue::Null => None,
+            crate::plan::BindValue::Bool(v) => Some(if *v { "true".to_string() } else { "false".to_string() }),
+            crate::plan::BindValue::Int(v) => Some(v.to_string()),
+            crate::plan::BindValue::Decimal(s) => Some(s.clone()),
+            crate::plan::BindValue::Text(s) => Some(s.clone()),
         })
         .collect();
-    let params: Vec<&(dyn ToSql + Sync)> = owned.iter().map(|b| b.as_ref()).collect();
 
     conn.batch_execute("BEGIN").await?;
     // SET LOCAL search_path + the mandatory timeouts, txn-scoped (vanish at
@@ -2056,7 +2058,7 @@ pub(crate) async fn apply_dml_transactional(
             return Err(ApplyError::Db(e));
         }
     }
-    if let Err(e) = conn.execute(template, &params).await {
+    if let Err(e) = conn.execute_text_params(template, &params).await {
         if let Err(rb) = conn.batch_execute("ROLLBACK").await {
             tracing::warn!(error = %rb, version = %version, "zeroship-migrate: ROLLBACK failed after a DML error (op.* §2.3.2)");
         }

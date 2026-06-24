@@ -145,8 +145,12 @@ export function dropConstraint(table, name) {
 // gate cover every variant; the executors land in PR6a/PR6b).
 // ---------------------------------------------------------------------------
 
-export function insert(table, columns, rows) {
-  return push({ op: "insert", table, columns, rows });
+export function insert(table, columns, rows, opts = {}) {
+  // §PR6a — the optional `onConflict` upsert facet. PostgreSQL-ONLY: it renders
+  // natively on PG and is a hard authoring error on SQLite (dialect_scope=PgOnly,
+  // §9). The wire shape is `{ columns: string[], doUpdate?: { col: scalar } }`;
+  // absent `doUpdate` ⇒ `DO NOTHING`. Omitted entirely ⇒ a plain (portable) insert.
+  return push(compact({ op: "insert", table, columns, rows, onConflict: opts.onConflict }));
 }
 
 export function update(table, set, opts = {}) {

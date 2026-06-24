@@ -67,6 +67,7 @@ pub mod baseline;
 pub mod classify;
 pub mod db;
 pub mod declarative;
+pub mod dml;
 pub mod drift;
 pub mod engine;
 pub mod expand_contract;
