@@ -203,7 +203,8 @@ pub use ir_load::{
 // LiveSchema from the app's descriptor set so an IR `renameColumn` lowers + applies
 // via `rebuild_one` end-to-end.
 pub use ir_apply::{
-    apply_bundle_ir_sqlite, SqliteIrApplyError, SqliteIrApplyOutcome,
+    apply_bundle_ir_sqlite, apply_bundle_ir_sqlite_catalog, SqliteIrApplyError,
+    SqliteIrApplyOutcome,
 };
 // The IR-path DDL Lower phase (§6/§6.4/§6.5): compiles a validated, ownership-
 // checked `MigrationIr` to migrations, reusing the SHARED snapshot-builder +

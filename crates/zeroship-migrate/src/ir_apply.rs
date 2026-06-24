@@ -87,6 +87,11 @@ pub enum SqliteIrApplyError {
     /// invalid field/type token rejected at the author boundary).
     #[error("build SQLite live schema: {0}")]
     LiveSchema(#[source] DeclarativeError),
+    /// **PR9b** — reading the live SQLite catalog (`sqlite_master` + PRAGMA) to source
+    /// the rename rebuild's PRE-rename column facts failed
+    /// ([`apply_bundle_ir_sqlite_catalog`] via [`LiveSchema::from_sqlite_catalog`]).
+    #[error("read SQLite catalog for live facts: {0}")]
+    Catalog(#[source] crate::DriftError),
     /// A `.ir.json` failed the fail-closed LOAD GATE or its guard-per-fragment lower
     /// (malformed, future `ir_version`, ownership / structural reject, a guard-denied
     /// fragment with op-index attribution). A creator fault.
@@ -218,11 +223,130 @@ pub async fn apply_bundle_ir_sqlite(
         .map(|d| (d.name.clone(), owner_app.to_string()))
         .collect();
 
+    run_ir_files_sqlite(
+        backend,
+        project_schema,
+        owner_app,
+        &registry,
+        &live_schema,
+        &ir_files,
+        exec_cfg,
+        guard_cfg,
+        approval,
+    )
+    .await
+}
+
+/// **PR9b — the PRODUCTION SQLite IR-deploy entry (catalog-sourced live facts).**
+/// The faithful peer of the PG `apply_bundle_ir_migrations`: it sources the rename
+/// rebuild's PRE-rename column facts from a REAL pre-deploy SQLite-catalog read
+/// (`LiveSchema::from_sqlite_catalog`), so a production caller — which naturally
+/// derives `descriptors` from `registerModel` = the POST-deploy DESIRED schema (post
+/// rename: only `to` exists) — can run a `renameColumn` as a rebuild WITHOUT a
+/// hand-fed pre-rename descriptor set:
+///
+/// - the live `from` column (+ the whole live table shape) for the value-copy comes
+///   from the live catalog (`table_snapshots`), NOT the descriptors;
+/// - the post-rename SDK `Value` for the new-table CREATE comes from the `descriptors`
+///   (the desired `to` field, with FULL facets — no lossy catalog reconstruction);
+/// - the rebuild author pairs them (a rename preserves facets, so the desired `to`
+///   facets ARE the live `from` facets).
+///
+/// The descriptors are still the ownership-registry source (role A — the END-STATE
+/// union the IR-load gate checks). A rename whose live `from` column is genuinely
+/// absent (a post-rename live DB / an intermediate state) still FAILS CLOSED in the
+/// rebuild author — never a wrong rebuild.
+///
+/// Like [`apply_bundle_ir_sqlite`], a SQLite rename is an OFFLINE rebuild (no pending
+/// contract); a rebuild on a populated table is destructive ⇒ `Approval::Approved`.
+///
+/// # Errors
+/// [`SqliteIrApplyError`] on I/O / catalog-read / fail-closed gate / apply failure.
+#[allow(clippy::too_many_arguments)]
+pub async fn apply_bundle_ir_sqlite_catalog(
+    backend: &SqliteBackend,
+    project_schema: &str,
+    owner_app: &str,
+    descriptors: &[CollectionDescriptor],
+    migrations_dir: &Path,
+    exec_cfg: &crate::ExecutorConfig,
+    guard_cfg: &GuardConfig,
+    approval: Approval,
+) -> Result<SqliteIrApplyOutcome, SqliteIrApplyError> {
+    // Discover `*.ir.json`, version-ordered by filename (deterministic).
+    let mut ir_files: Vec<std::path::PathBuf> = Vec::new();
+    let read = std::fs::read_dir(migrations_dir).map_err(|e| SqliteIrApplyError::Read {
+        file: migrations_dir.display().to_string(),
+        message: e.to_string(),
+    })?;
+    for entry in read {
+        let entry = entry.map_err(|e| SqliteIrApplyError::Read {
+            file: migrations_dir.display().to_string(),
+            message: e.to_string(),
+        })?;
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".ir.json"))
+        {
+            ir_files.push(path);
+        }
+    }
+    if ir_files.is_empty() {
+        return Ok(SqliteIrApplyOutcome::default());
+    }
+    ir_files.sort();
+
+    // The PRE-rename live facts from a REAL catalog read (table_snapshots incl. `from`),
+    // with the descriptor-sourced SDK Values (full facets). See
+    // `LiveSchema::from_sqlite_catalog`.
+    let live_schema = LiveSchema::from_sqlite_catalog(backend, owner_app, descriptors)
+        .await
+        .map_err(SqliteIrApplyError::Catalog)?;
+    // Ownership registry: the descriptor END-STATE union (the IR-load gate's authority),
+    // identical to the descriptor entry.
+    let registry: BTreeMap<String, String> = descriptors
+        .iter()
+        .map(|d| (d.name.clone(), owner_app.to_string()))
+        .collect();
+
+    run_ir_files_sqlite(
+        backend,
+        project_schema,
+        owner_app,
+        &registry,
+        &live_schema,
+        &ir_files,
+        exec_cfg,
+        guard_cfg,
+        approval,
+    )
+    .await
+}
+
+/// The shared per-file load+guard-lower+apply loop both SQLite IR-deploy entries use
+/// once they have built their `LiveSchema` (descriptor-sourced or catalog-sourced) +
+/// ownership registry. Factored out so the two entries differ ONLY in how the live
+/// facts are sourced, not in the apply mechanics.
+#[allow(clippy::too_many_arguments)]
+async fn run_ir_files_sqlite(
+    backend: &SqliteBackend,
+    project_schema: &str,
+    owner_app: &str,
+    registry: &BTreeMap<String, String>,
+    live_schema: &LiveSchema,
+    ir_files: &[std::path::PathBuf],
+    exec_cfg: &crate::ExecutorConfig,
+    guard_cfg: &GuardConfig,
+    approval: Approval,
+) -> Result<SqliteIrApplyOutcome, SqliteIrApplyError> {
     let engine = MigrationEngine::new();
     let mut applied: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
 
-    for path in &ir_files {
+    for path in ir_files {
         let file = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -235,7 +359,7 @@ pub async fn apply_bundle_ir_sqlite(
 
         let author = IrAuthor::new(project_schema, owner_app, SqlDialect::Sqlite);
         let lowered = author
-            .load_and_lower_guarded(&bytes, owner_app, &registry, &live_schema, guard_cfg)
+            .load_and_lower_guarded(&bytes, owner_app, registry, live_schema, guard_cfg)
             .map_err(|source| SqliteIrApplyError::Ir { file: file.clone(), source })?;
 
         let outcome = engine
@@ -251,11 +375,6 @@ pub async fn apply_bundle_ir_sqlite(
             .map_err(SqliteIrApplyError::Apply)?;
         applied.extend(outcome.applied.applied);
         skipped.extend(outcome.applied.skipped);
-        // No per-file registry/live-set advance (unlike the PG path): the descriptor
-        // set is the END-STATE union, so all tables are present from the start. See the
-        // DESCRIPTOR-SET CONTRACT note above — the structural rebuild facts are
-        // descriptor-pinned and a deploy needing an intermediate structural state
-        // produced by an earlier file FAILS CLOSED, never silently emits a wrong rebuild.
     }
 
     Ok(SqliteIrApplyOutcome { applied, skipped })

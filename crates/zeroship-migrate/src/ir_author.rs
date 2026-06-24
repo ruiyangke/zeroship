@@ -221,6 +221,79 @@ impl LiveSchema {
         })
     }
 
+    /// **PR9b — the PRODUCTION SQLite IR-deploy live facts (catalog-sourced).**
+    /// Build the SQLite-dialect `LiveSchema` for a real deploy: the
+    /// `table_snapshots` (the pre-rename LIVE table shape, incl. the rename's `from`
+    /// column) come from a REAL pre-deploy SQLite-catalog read
+    /// (`backend.snapshot_schema_sqlite()` → `sqlite_master` + PRAGMA), NOT from the
+    /// post-deploy descriptor set — so a `renameColumn` rebuild can find + copy the
+    /// live `from` column.
+    ///
+    /// The SDK schema `Value`s (`sqlite_schemas`) come from the `descriptors` (the
+    /// app's `registerModel` = the POST-deploy DESIRED schema), which carry the FULL,
+    /// authoritative facets (encryption / mask / FK / enum / default / vector dims / …)
+    /// — none dropped. This is deliberately NOT a lossy catalog reconstruction: the
+    /// SQLite catalog cannot losslessly recover several SDK facets (a `TEXT` affinity
+    /// is shared by `string`/`date`/`json`/`ref`; enums/defaults/idPrefix are absent
+    /// from `sqlite_master`), so reconstructing the `Value` from the catalog would
+    /// silently corrupt the rebuilt table. The descriptor is the unforgeable,
+    /// lossless facet source; the catalog is the authoritative LIVE shape + the
+    /// `from`-column presence check. The rebuild author
+    /// (`DeclarativeAuthor::sqlite_rename_rebuild`) accepts the descriptor's
+    /// POST-rename `Value` directly (the `to` field, facets intact) as the post-rename
+    /// CREATE source, and uses the catalog snapshot for the value-copy mapping — a
+    /// rename preserves facets, so the `to` column's facets ARE the pre-rename `from`
+    /// column's facets.
+    ///
+    /// **Fail-closed (the genuinely-unsourceable case):** if the live catalog does NOT
+    /// carry the rename's `from` column (a post-rename live DB, or an intermediate
+    /// state an earlier same-deploy file produced that this single pre-deploy read has
+    /// not yet seen), the rebuild author refuses (`SqliteRenameNeedsLiveTable` /
+    /// `RenameNeedsLiveColumn`) rather than emit a wrong rebuild — exactly the cases
+    /// the existing `apply_bundle_ir_sqlite` fail-closed tests pin.
+    ///
+    /// `unique_indexes` / `table_ownership` are derived from the SAME catalog read
+    /// (the live unique-index names drive the `dropIndex` gate; every live table in the
+    /// per-app file is owned by the deploying app).
+    ///
+    /// # Errors
+    /// [`crate::DriftError`] on a catalog/PRAGMA read failure, or [`DeclarativeError`]
+    /// if a descriptor fails the author-boundary validation.
+    pub async fn from_sqlite_catalog(
+        backend: &crate::SqliteBackend,
+        owner_app: &str,
+        descriptors: &[crate::declarative::CollectionDescriptor],
+    ) -> Result<Self, crate::DriftError> {
+        // (1) the LIVE shape — the authoritative pre-rename table_snapshots (incl. the
+        //     `from` column) + unique-index names, from a real catalog read.
+        let live = backend.snapshot_schema_sqlite().await?;
+        let unique_indexes = live
+            .tables
+            .values()
+            .flat_map(|t| t.indexes.iter())
+            .filter(|idx| idx.unique)
+            .map(|idx| idx.name.clone())
+            .collect();
+        let table_ownership = live
+            .tables
+            .keys()
+            .map(|t| (t.clone(), owner_app.to_string()))
+            .collect();
+        // (2) the SDK `Value`s — the descriptor-sourced (post-deploy desired) facets,
+        //     keyed by table. Full facets, no lossy catalog reconstruction.
+        let sqlite_schemas = descriptors
+            .iter()
+            .map(|d| (d.name.clone(), crate::declarative::descriptor_to_sdk_schema(d)))
+            .collect();
+        Ok(Self {
+            tables: live.tables.keys().cloned().collect(),
+            unique_indexes,
+            table_snapshots: live.tables.clone(),
+            sqlite_schemas,
+            table_ownership,
+        })
+    }
+
     /// The per-table live column set for the DML apply/render-seam ColRef
     /// resolution (rule (c), §3.3.1.1(c)). Projects [`Self::table_snapshots`] into a
     /// `table → [column names]` map ([`crate::validate::validate_op_resolved`]'s
