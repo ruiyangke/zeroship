@@ -1,10 +1,15 @@
 // op.* migration fixture — `insert { onConflict }` (the PG-only upsert facet,
 // §PR6a / §9). This pins the `onConflict` wire shape on `Op::Insert` and is the
-// corpus member behind the op-level `dialect_scope = PgOnly` fixture: the IDENTICAL
-// `.ir.json` loads with target_dialect=Postgres and is REJECTED at load with
-// target_dialect=Sqlite (the op-level peer of PR1's expression-level out-of-envelope
-// splitPart PgOnly fixture). The executor + the load-gate behaviour are exercised in
-// `crates/zeroship-migrate/tests/ir_dml_*` (PG render + SQLite reject).
+// corpus member behind the op-level PG-only portability boundary: the IDENTICAL
+// `.ir.json` LOADS on BOTH dialects (the load gate / structural `validate_op` does
+// NOT inspect `Op::Insert.onConflict` — Insert walks to Ok), then renders on
+// target_dialect=Postgres but is a HARD reject at LOWER on target_dialect=Sqlite —
+// `assemble_insert` returns `DmlError::OnConflictNotPortable`, surfaced as
+// `IrLowerError::DmlAssemble`. It is NOT a load-gate reject. The render + the
+// lower-time reject are exercised end-to-end in
+// `crates/zeroship-migrate/tests/ir_dml_*` (PG render + SQLite lower reject; see
+// `on_conflict_rejected_on_sqlite`, which `.expect()`s the load gate then
+// `.expect_err()`s at lower).
 import { insert } from "@zeroship/migrate";
 
 export const name = "dml_upsert";

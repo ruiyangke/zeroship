@@ -438,60 +438,93 @@ pub fn validate_ir_resolved(
     live_columns: &std::collections::BTreeMap<String, Vec<String>>,
     ts_locations: &[Option<String>],
 ) -> Result<(), AuthoringError> {
-    use crate::ir::Op;
     for (op_index, op) in ir.ops.iter().enumerate() {
         let ts = ts_locations.get(op_index).and_then(Option::as_deref);
-        // The op's target table (for the DML / alterColumnType ops we resolve).
-        let resolved_scope = |table: &str| -> Option<Vec<String>> {
-            live_columns.get(table).cloned()
-        };
-        match op {
-            Op::Update { table, set, r#where, .. } => {
-                if let Some(cols) = resolved_scope(table) {
-                    let scope = TargetScope::new(table, &cols);
-                    for rhs in set.values() {
-                        validate_expr(rhs, target_dialect, &scope, op_index, ts)?;
-                    }
-                    if let Some(pred) = r#where {
-                        validate_expr(pred, target_dialect, &scope, op_index, ts)?;
-                    }
-                } else {
-                    validate_op(op, target_dialect, op_index, ts)?;
+        validate_op_resolved(op, target_dialect, live_columns, op_index, ts)?;
+    }
+    Ok(())
+}
+
+/// **Single-op apply/render-seam ColRef resolution (rule (c), MED).** The per-op
+/// peer of [`validate_ir_resolved`]: re-run the expression-AST walk for ONE op with
+/// a RESOLVING [`TargetScope`] when its target table's live column set is known.
+///
+/// This is the seam the DML LOWER calls ([`crate::ir_author::IrAuthor::lower_dml_op`]):
+/// at lower/apply the live schema HAS been introspected, so each DML op
+/// (`update`/`delete`/`backfill`) / `alterColumnType` resolves its embedded
+/// `ColRef`s against the live target-table columns BEFORE the SQL template is
+/// assembled. A `ColRef` to a column NOT on the enclosing target table (or a
+/// synthesized cross-table reference) is rejected with the structured
+/// [`AuthoringError`] (`UNSUPPORTED { kind: "expr" }`, rule (c)) at apply — NOT as
+/// an opaque raw DB `column does not exist` error mid-statement (§3.3.1.1(c) "at
+/// apply/render time").
+///
+/// `live_columns` maps a target table → its live column names (system fields
+/// included). An op whose table is ABSENT from the map keeps the structural-only
+/// scope (the (c) check is skipped — the caller could not resolve that table; the
+/// (a)/(b)/(d) structural checks still run). A non-DML / non-`alterColumnType` op
+/// re-runs the structural [`validate_op`] (harmless; keeps the walk total).
+///
+/// # Errors
+/// The first [`AuthoringError`] the op's embedded expressions produce — incl. a
+/// rule (c) `ColRef`-resolution failure now that the column set is known.
+pub fn validate_op_resolved(
+    op: &crate::ir::Op,
+    target_dialect: Dialect,
+    live_columns: &std::collections::BTreeMap<String, Vec<String>>,
+    op_index: usize,
+    ts_location: Option<&str>,
+) -> Result<(), AuthoringError> {
+    use crate::ir::Op;
+    let ts = ts_location;
+    // The op's target table (for the DML / alterColumnType ops we resolve).
+    let resolved_scope = |table: &str| -> Option<Vec<String>> { live_columns.get(table).cloned() };
+    match op {
+        Op::Update { table, set, r#where, .. } => {
+            if let Some(cols) = resolved_scope(table) {
+                let scope = TargetScope::new(table, &cols);
+                for rhs in set.values() {
+                    validate_expr(rhs, target_dialect, &scope, op_index, ts)?;
                 }
-            }
-            Op::Delete { table, r#where, .. } => {
-                if let Some(cols) = resolved_scope(table) {
-                    let scope = TargetScope::new(table, &cols);
-                    validate_expr(r#where, target_dialect, &scope, op_index, ts)?;
-                } else {
-                    validate_op(op, target_dialect, op_index, ts)?;
+                if let Some(pred) = r#where {
+                    validate_expr(pred, target_dialect, &scope, op_index, ts)?;
                 }
+            } else {
+                validate_op(op, target_dialect, op_index, ts)?;
             }
-            Op::Backfill { table, set, filter, .. } => {
-                if let Some(cols) = resolved_scope(table) {
-                    let scope = TargetScope::new(table, &cols);
-                    for rhs in set.values() {
-                        validate_expr(rhs, target_dialect, &scope, op_index, ts)?;
-                    }
-                    if let Some(pred) = filter {
-                        validate_expr(pred, target_dialect, &scope, op_index, ts)?;
-                    }
-                } else {
-                    validate_op(op, target_dialect, op_index, ts)?;
-                }
-            }
-            Op::AlterColumnType { table, using, .. } => {
-                if let (Some(cols), Some(cast)) = (resolved_scope(table), using) {
-                    let scope = TargetScope::new(table, &cols);
-                    validate_expr(cast, target_dialect, &scope, op_index, ts)?;
-                } else {
-                    validate_op(op, target_dialect, op_index, ts)?;
-                }
-            }
-            // Every other op: revalidate structurally (its own scope is already
-            // resolved or has no Expr slot).
-            other => validate_op(other, target_dialect, op_index, ts)?,
         }
+        Op::Delete { table, r#where, .. } => {
+            if let Some(cols) = resolved_scope(table) {
+                let scope = TargetScope::new(table, &cols);
+                validate_expr(r#where, target_dialect, &scope, op_index, ts)?;
+            } else {
+                validate_op(op, target_dialect, op_index, ts)?;
+            }
+        }
+        Op::Backfill { table, set, filter, .. } => {
+            if let Some(cols) = resolved_scope(table) {
+                let scope = TargetScope::new(table, &cols);
+                for rhs in set.values() {
+                    validate_expr(rhs, target_dialect, &scope, op_index, ts)?;
+                }
+                if let Some(pred) = filter {
+                    validate_expr(pred, target_dialect, &scope, op_index, ts)?;
+                }
+            } else {
+                validate_op(op, target_dialect, op_index, ts)?;
+            }
+        }
+        Op::AlterColumnType { table, using, .. } => {
+            if let (Some(cols), Some(cast)) = (resolved_scope(table), using) {
+                let scope = TargetScope::new(table, &cols);
+                validate_expr(cast, target_dialect, &scope, op_index, ts)?;
+            } else {
+                validate_op(op, target_dialect, op_index, ts)?;
+            }
+        }
+        // Every other op: revalidate structurally (its own scope is already
+        // resolved or has no Expr slot).
+        other => validate_op(other, target_dialect, op_index, ts)?,
     }
     Ok(())
 }

@@ -149,6 +149,24 @@ impl LiveSchema {
             table_ownership: std::collections::BTreeMap::new(),
         }
     }
+
+    /// The per-table live column set for the DML apply/render-seam ColRef
+    /// resolution (rule (c), §3.3.1.1(c)). Projects [`Self::table_snapshots`] into a
+    /// `table → [column names]` map ([`crate::validate::validate_op_resolved`]'s
+    /// input). A table absent from `table_snapshots` is absent here too, so its DML
+    /// op keeps the structural-only scope (the (c) check is SKIPPED — never weaker
+    /// than the load-time gate). The column names include the platform system fields
+    /// (`id`/`created_at`/… — they are real live columns), so a legitimate ColRef to
+    /// a system field resolves rather than being falsely rejected.
+    #[must_use]
+    pub fn dml_live_columns(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        self.table_snapshots
+            .iter()
+            .map(|(table, snap)| {
+                (table.clone(), snap.columns.iter().map(|c| c.name.clone()).collect())
+            })
+            .collect()
+    }
 }
 
 impl From<&BTreeSet<String>> for LiveSchema {
@@ -827,7 +845,7 @@ impl IrAuthor {
             | Op::Update { .. }
             | Op::Delete { .. }
             | Op::Backfill { .. } => {
-                return Ok(LoweredOp::Dml(self.lower_dml_op(op)?));
+                return Ok(LoweredOp::Dml(self.lower_dml_op(op, live_schema)?));
             }
         };
         Ok(LoweredOp::Ddl(migs))
@@ -837,12 +855,24 @@ impl IrAuthor {
     /// [`PlanStep`] via the creator-DML assembler ([`crate::dml`]).
     ///
     /// The closed-AST expression slots (`update`/`del`/`backfill` `set`/`where`/
-    /// `filter`) are gated STRUCTURALLY by [`crate::validate::validate_op`] FIRST
-    /// (the (a)/(b)/(d) checks — node allow-list, synth envelope, portable cast),
-    /// so a non-portable / out-of-policy node is rejected BEFORE any SQL is
-    /// assembled. The `ColRef`-resolution rule (c) runs against the live target
-    /// table at the apply/render seam (`validate_ir_resolved`); the lower here is
-    /// the structural-scope leg.
+    /// `filter`) are gated in TWO layers, BOTH before any SQL is assembled:
+    ///
+    /// 1. STRUCTURALLY by [`crate::validate::validate_op`] (the (a)/(b)/(d) checks —
+    ///    node allow-list, synth envelope, portable cast); a non-portable /
+    ///    out-of-policy node is rejected up front.
+    /// 2. RULE (c) — `ColRef` RESOLUTION against the live target table — by
+    ///    [`crate::validate::validate_op_resolved`], using the introspected
+    ///    [`LiveSchema::table_snapshots`] (the SAME live facts the rename/diff path
+    ///    consults). A `ColRef` to a column that does NOT exist on the enclosing
+    ///    target table (or a synthesized cross-table reference) is rejected with the
+    ///    structured `UNSUPPORTED { kind: "expr" }` AuthoringError AT APPLY/RENDER
+    ///    TIME (§3.3.1.1(c)) — NOT baked into the template to surface later as a raw
+    ///    DB `column does not exist` error mid-statement. When the op's target table
+    ///    is ABSENT from `table_snapshots` (a unit lower with no introspected schema,
+    ///    or a table created earlier in the SAME deploy whose columns are not yet
+    ///    snapshotted), the (c) check is SKIPPED — never weaker than the load-time
+    ///    structural-only gate, and the engine's per-statement guard + the DB itself
+    ///    remain the backstop.
     ///
     /// Portability boundaries (§9), all HARD errors (never silent):
     /// - `insert { onConflict }` on **SQLite** → [`crate::dml::DmlError::OnConflictNotPortable`].
@@ -850,11 +880,11 @@ impl IrAuthor {
     ///   ([`crate::dml::DmlError::BatchedBackfillNotPortable`]).
     ///
     /// # Errors
-    /// - [`IrLowerError::DmlValidate`] — the structural validator rejected an
-    ///   embedded expression.
+    /// - [`IrLowerError::DmlValidate`] — the structural validator (a)/(b)/(d) OR the
+    ///   resolved rule-(c) `ColRef` check rejected an embedded expression.
     /// - [`IrLowerError::DmlAssemble`] — the assembler rejected the op (malformed
     ///   identifier / empty insert / SQLite `onConflict` / SQLite batched backfill).
-    fn lower_dml_op(&self, op: &Op) -> Result<PlanStep, IrLowerError> {
+    fn lower_dml_op(&self, op: &Op, live_schema: &LiveSchema) -> Result<PlanStep, IrLowerError> {
         use crate::ir::Op;
         let dialect = self.dialect;
         let target = match dialect {
@@ -865,6 +895,17 @@ impl IrAuthor {
         // attribution; the loader's `validate_ir` already ran with the true op
         // index for the production path — this is the lower-time defense-in-depth.
         crate::validate::validate_op(op, target, 0, None)
+            .map_err(|e| IrLowerError::DmlValidate(Box::new(e)))?;
+
+        // RULE (c) — resolved ColRef gate at the apply/render seam (§3.3.1.1(c)).
+        // Resolve the op's embedded ColRefs against the LIVE target-table columns
+        // (from the introspected `table_snapshots`) BEFORE the template is
+        // assembled, so a column-not-on-target / cross-table ColRef is rejected with
+        // the structured AuthoringError here — not as a raw DB error at execution. A
+        // table absent from the live snapshot keeps the structural-only scope (the
+        // (c) check is skipped; see the fn doc).
+        let live_columns = live_schema.dml_live_columns();
+        crate::validate::validate_op_resolved(op, target, &live_columns, 0, None)
             .map_err(|e| IrLowerError::DmlValidate(Box::new(e)))?;
 
         match op {

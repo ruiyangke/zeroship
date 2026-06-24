@@ -198,9 +198,10 @@ pub use expr::{BinaryOp, CaseBranch, CastTarget, Expr, ScalarFn, SynthFn, UnaryO
 // The STRUCTURAL expression-AST validator + the structured-error envelope
 // (§3.3.1.1 / §8.8). No parser, no fuzzer — a pure allow-list walk.
 pub use validate::{
-    validate_expr, validate_ir, validate_ir_resolved, validate_op, AuthoringError,
-    Dialect as ValidatorDialect, TargetScope, UnsupportedKind, CODE_DIALECT_SCOPE_PGONLY,
-    CODE_EXPR_NOT_PORTABLE, CODE_OP_OUTSIDE_RECORDER, CODE_UNSUPPORTED, SPLIT_PART_MAX_N,
+    validate_expr, validate_ir, validate_ir_resolved, validate_op, validate_op_resolved,
+    AuthoringError, Dialect as ValidatorDialect, TargetScope, UnsupportedKind,
+    CODE_DIALECT_SCOPE_PGONLY, CODE_EXPR_NOT_PORTABLE, CODE_OP_OUTSIDE_RECORDER, CODE_UNSUPPORTED,
+    SPLIT_PART_MAX_N,
 };
 // The `op.*` DSL plan model (§2.0). Distinct from the dry-run `MigrationPlan`
 // (re-exported from `engine`, unchanged): these are the net-new ordered

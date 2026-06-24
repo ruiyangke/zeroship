@@ -22,7 +22,7 @@ use zeroship_migrate::{
     executor::LockMode,
     migration::MigrationId,
     provision_migrator, role::deprovision_migrator, Approval, ExecutorConfig, IrAuthor, LiveSchema,
-    MigrationEngine, SqlDialect,
+    MigrationBackend, MigrationEngine, SqlDialect,
 };
 
 const DEFAULT_DSN: &str =
@@ -330,6 +330,141 @@ async fn ir_batched_backfill_on_pg() {
         .unwrap()
         .get::<_, i64>(0);
     assert_eq!(filled, 3, "the assembler-authored batched backfill filled all 3 rows on PG");
+
+    teardown(&conn, &cfg).await;
+}
+
+/// **PR6a `c.fn.concatWs` NULL-skip apply on real PG (§9) — the byte-identity peer
+/// of the SQLite `concat_ws_null_skip_applies_byte_identical_on_sqlite`.** PG's
+/// native `concat_ws` SKIPS NULL arguments, so `concat_ws('-', '1', NULL)` = `'1'`
+/// (no trailing delimiter). This pins the PG render to the EXACT same expected value
+/// (`'1'`) the SQLite head-trim fold must produce — the two legs assert the same
+/// byte string, proving the SQLite lowering is byte-identical to PG.
+#[compio::test]
+async fn ir_concat_ws_null_skip_applies_on_pg() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let s = q(&cfg.project_schema);
+
+    let create = r#"{"ir_version":1,"name":"create_codes","ops":[
+        {"op":"createTable","name":"codes","columns":[
+            {"name":"code","type":"int","nullable":false,"unique":true},
+            {"name":"label","type":"text"}
+        ]}
+    ]}"#;
+    author_and_apply(&conn, &cfg, create, &registry(&[]), Approval::None).await;
+
+    // Seed: code=1, label=NULL.
+    let seed = r#"{"ir_version":1,"name":"seed","ops":[
+        {"op":"insert","table":"codes",
+         "columns":["id","created_at","updated_at","version","code","label"],
+         "rows":[["c1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,1,null]]}
+    ]}"#;
+    author_and_apply(&conn, &cfg, seed, &registry(&[("codes", APP)]), Approval::None).await;
+
+    // UPDATE: label = concatWs('-', cast(code as text), label)  where code = 1.
+    let ir = r#"{"ir_version":1,"name":"cws","ops":[
+        {"op":"update","table":"codes",
+         "set":{"label":{"node":"fnSynth","fn":"concatWs","args":[
+             {"node":"literal","value":"-"},
+             {"node":"cast","operand":{"node":"colRef","name":"code"},"target":"text"},
+             {"node":"colRef","name":"label"}]}},
+         "where":{"node":"binOp","op":"eq",
+             "lhs":{"node":"colRef","name":"code"},
+             "rhs":{"node":"literal","value":1}}}
+    ]}"#;
+    author_and_apply(&conn, &cfg, ir, &registry(&[("codes", APP)]), Approval::None).await;
+    let label: String = conn
+        .query_one(&format!("SELECT label FROM {s}.codes WHERE code = 1"), &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        label, "1",
+        "PG concat_ws('-', '1', NULL) = '1' — the SAME byte string the SQLite fold yields"
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
+/// **PR6a rule-(c) column-scoping at the apply/render seam (§3.3.1.1(c)).** An
+/// `update` whose SET RHS references a column that does NOT exist on the live
+/// target table must be rejected with the STRUCTURED `UNSUPPORTED { kind: "expr" }`
+/// AuthoringError at lower/apply — BEFORE the template is assembled — NOT surface
+/// as a raw DB "column does not exist" error at execution. This is the faithful
+/// production-path proof: the live `LiveSchema` is built from REAL PG introspection
+/// (`snapshot_schema`, the same facts `apply_bundle_ir_migrations` seeds), then the
+/// authoring path (`lower_plan`) is driven with it. A NOTHING-applied reject.
+#[compio::test]
+async fn ir_unresolved_colref_rejected_at_apply_seam_on_pg() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+
+    // DDL: create `codes` (code, label).
+    let create = r#"{"ir_version":1,"name":"create_codes","ops":[
+        {"op":"createTable","name":"codes","columns":[
+            {"name":"code","type":"int","nullable":false,"unique":true},
+            {"name":"label","type":"text"}
+        ]}
+    ]}"#;
+    author_and_apply(&conn, &cfg, create, &registry(&[]), Approval::None).await;
+
+    // Introspect the LIVE schema the SAME way the production deploy path does, so
+    // the lower sees the real live columns of `codes` (system fields + code/label).
+    let backend = zeroship_migrate::PostgresBackend::new(&conn);
+    let live = backend.snapshot_schema(&cfg).await.expect("introspect live schema");
+    let live_schema = LiveSchema {
+        tables: live.tables.keys().cloned().collect(),
+        unique_indexes: live
+            .tables
+            .values()
+            .flat_map(|t| t.indexes.iter())
+            .filter(|idx| idx.unique)
+            .map(|idx| idx.name.clone())
+            .collect(),
+        table_snapshots: live.tables.clone(),
+        table_ownership: live.tables.keys().map(|t| (t.clone(), APP.to_string())).collect(),
+        sqlite_schemas: std::collections::BTreeMap::new(),
+    };
+    assert!(
+        live_schema.table_snapshots.contains_key("codes"),
+        "introspection must surface the live `codes` table"
+    );
+
+    // An update whose SET RHS names `ghost` — a column NOT on the live `codes`
+    // table. Loads clean (load is structural-only for DML), but the resolved
+    // apply/render seam must reject it.
+    let bad = r#"{"ir_version":1,"name":"bad","ops":[
+        {"op":"update","table":"codes",
+         "set":{"label":{"node":"colRef","name":"ghost"}},
+         "where":{"node":"binOp","op":"eq",
+             "lhs":{"node":"colRef","name":"code"},
+             "rhs":{"node":"literal","value":1}}}
+    ]}"#;
+    let author = IrAuthor::new(cfg.project_schema.clone(), APP, SqlDialect::Postgres);
+    let document = zeroship_migrate::ir_load::load_ir_document(
+        bad,
+        APP,
+        zeroship_migrate::validate::Dialect::Postgres,
+        &registry(&[("codes", APP)]),
+    )
+    .expect("load gate (DML ColRef resolution is an apply-seam reject, not a load reject)");
+    let err = author
+        .lower_plan(&document, &live_schema)
+        .expect_err("an unresolved ColRef must be rejected at the resolved apply seam, pre-assembly");
+    match err {
+        zeroship_migrate::IrLowerError::DmlValidate(e) => {
+            assert_eq!(e.code, zeroship_migrate::CODE_UNSUPPORTED, "structured (c) reject");
+            assert_eq!(
+                e.kind,
+                Some(zeroship_migrate::UnsupportedKind::Expr),
+                "rule (c) is an expr-kind capability-boundary reject"
+            );
+        }
+        other => panic!("expected DmlValidate UNSUPPORTED expr, got {other:?}"),
+    }
 
     teardown(&conn, &cfg).await;
 }
