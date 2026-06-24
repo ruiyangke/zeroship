@@ -306,6 +306,14 @@ enum Command {
         /// `--apply`.
         #[arg(long)]
         abort: bool,
+        /// **REQUIRED for `--abort`** (and ONLY `--abort`): acknowledge that aborting
+        /// DISCARDS data written only to the shadow `to` column since cutover (the
+        /// shadow column is dropped). This is a DISTINCT acknowledgement, separate from
+        /// the shared `--yes` that `--apply` uses — a blanket `--yes` must not silently
+        /// authorize the data-discarding abort. `--apply` ignores this flag (it
+        /// preserves data).
+        #[arg(long)]
+        acknowledge_shadow_data_loss: bool,
         /// The pending contract's version (the EXPAND/`pending_version` reported by
         /// `status`).
         version: String,
@@ -578,6 +586,11 @@ fn print_report(report: &RunReport) {
                 outcome.pending_version,
                 outcome.applied
             );
+            // **PR9b L3** — surface the abort's data-loss warning PROMINENTLY (to
+            // stderr) so it is never lost in the routine line above.
+            if let Some(warning) = &outcome.data_loss_warning {
+                eprintln!("WARNING: {warning}");
+            }
         }
     }
 }
@@ -796,8 +809,15 @@ async fn main() -> ExitCode {
         Command::Rollback { to, steps } => {
             platform_runner::run_rollback(&cfg, *to, *steps).await
         }
-        Command::ResolvePending { apply, abort, version } => {
-            platform_runner::run_resolve_pending(&cfg, version, *apply, *abort).await
+        Command::ResolvePending { apply, abort, acknowledge_shadow_data_loss, version } => {
+            platform_runner::run_resolve_pending(
+                &cfg,
+                version,
+                *apply,
+                *abort,
+                *acknowledge_shadow_data_loss,
+            )
+            .await
         }
         // Handled above (offline / non-plan commands).
         Command::New { .. } | Command::Wait { .. } | Command::Dump | Command::Load => {

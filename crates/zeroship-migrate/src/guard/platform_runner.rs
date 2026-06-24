@@ -171,6 +171,12 @@ pub struct ResolveOutcome {
     /// The migration versions actually applied this run (the C1/C2 ids for
     /// `--apply`; the C1 + drop-shadow-column ids for `--abort`).
     pub applied: Vec<String>,
+    /// **PR9b L3** — set ONLY on the `--abort` path: the explicit operator-facing
+    /// warning that data written to the shadow `to` column since cutover was DISCARDED
+    /// (the shadow column was dropped). `None` on `--apply` (which preserves data). The
+    /// CLI printer surfaces this prominently so the destructive nature of an abort is
+    /// never silent.
+    pub data_loss_warning: Option<String>,
 }
 
 /// The result of `validate`: the dry-run report on a shadow DB + checksum drift +
@@ -739,6 +745,7 @@ pub async fn run_resolve_pending(
     version: &str,
     apply: bool,
     abort: bool,
+    ack_data_loss: bool,
 ) -> Result<RunReport, RunError> {
     // Exactly one of --apply / --abort.
     if apply == abort {
@@ -752,6 +759,24 @@ pub async fn run_resolve_pending(
         return Err(RunError::ResolvePending(
             "resolve-pending is destructive (the deferred online-rename contract / abort \
              drops a column + trigger); re-run with --yes to confirm"
+                .to_string(),
+        ));
+    }
+    // **PR9b L3 — DISTINCT acknowledgement for the DATA-DISCARDING `--abort`.**
+    // `--abort` does something `--apply` never does: it DISCARDS data. After cutover,
+    // app code may have written values ONLY to the shadow `to` column; `--abort` drops
+    // that shadow column, so any such writes are LOST. `--apply` instead preserves data
+    // (it completes the rename — the shadow `to` column becomes the live column). So
+    // `--abort` requires a SEPARATE, explicit acknowledgement (`--acknowledge-shadow-data-loss`)
+    // that is NOT satisfied by the shared `--yes` an `--apply` already uses — a blanket
+    // `--yes` must not silently authorize the data-discarding abort. `--apply` ignores
+    // this flag (its data is preserved).
+    if abort && !ack_data_loss {
+        return Err(RunError::ResolvePending(
+            "--abort discards data written ONLY to the shadow `to` column since cutover \
+             (the shadow column is dropped); re-run with --acknowledge-shadow-data-loss to \
+             confirm (this is SEPARATE from --yes, which --apply uses — --apply preserves \
+             data, --abort discards it)"
                 .to_string(),
         ));
     }
@@ -842,6 +867,18 @@ pub async fn run_resolve_pending(
             crate::journal::Resolution::Applied,
         )
     } else {
+        // **PR9b L3** — LOUD operator-facing warning on the data-discarding abort.
+        tracing::warn!(
+            table = %pc.table,
+            from_col = %pc.from_col,
+            to_col = %pc.to_col,
+            pending_version = %pc.pending_version,
+            "resolve-pending --abort: DISCARDING data written ONLY to the shadow `{to}` column \
+             since cutover — the shadow column is being dropped, leaving the pre-rename `{from}` \
+             column. Any value written to `{to}` (and not also to `{from}`) is permanently LOST.",
+            to = pc.to_col,
+            from = pc.from_col,
+        );
         let c1 = plan
             .contract
             .first()
@@ -911,11 +948,26 @@ pub async fn run_resolve_pending(
             }
         })?;
 
+    // **PR9b L3** — carry the explicit data-loss warning on the `--abort` outcome so
+    // the CLI printer surfaces it prominently. `--apply` preserves data ⇒ `None`.
+    let data_loss_warning = if resolution == crate::journal::Resolution::Aborted {
+        Some(format!(
+            "DATA DISCARDED: --abort dropped the shadow `{to}` column on `{table}` — any value \
+             written ONLY to `{to}` since cutover (not also to `{from}`) is permanently lost.",
+            to = pc.to_col,
+            from = pc.from_col,
+            table = pc.table,
+        ))
+    } else {
+        None
+    };
+
     Ok(RunReport::ResolvePending(ResolveOutcome {
         pending_version: pc.pending_version,
         table: pc.table,
         resolution,
         applied: outcome.applied.applied,
+        data_loss_warning,
     }))
 }
 

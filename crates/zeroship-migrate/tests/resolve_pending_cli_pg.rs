@@ -272,14 +272,20 @@ async fn resolve_pending_apply_discharges_and_applies_the_contract() {
     assert!(trigger_count(&conn, &cfg.project_schema, "members").await >= 1);
     assert!(column_exists(&conn, &cfg.project_schema, "members", "email").await);
 
-    let report = run_resolve_pending(&run_cfg(&cfg, true), &pending_version, true, false)
+    // --apply: ack is IGNORED (apply preserves data) — pass false to prove apply does
+    // not require the abort-only acknowledgement.
+    let report = run_resolve_pending(&run_cfg(&cfg, true), &pending_version, true, false, false)
         .await
-        .expect("resolve-pending --apply succeeds");
+        .expect("resolve-pending --apply succeeds (no shadow-data-loss ack required)");
     match report {
         RunReport::ResolvePending(o) => {
             assert_eq!(o.pending_version, pending_version);
             assert_eq!(o.table, "members");
             assert_eq!(o.resolution, zeroship_migrate::Resolution::Applied);
+            assert!(
+                o.data_loss_warning.is_none(),
+                "--apply preserves data — no data-loss warning"
+            );
         }
         other => panic!("expected ResolvePending, got {other:?}"),
     }
@@ -316,12 +322,20 @@ async fn resolve_pending_abort_drops_trigger_and_shadow_column() {
     setup(&conn, &cfg).await;
     let pending_version = seed_pending_rename(&conn, &cfg).await;
 
-    let report = run_resolve_pending(&run_cfg(&cfg, true), &pending_version, false, true)
+    // --abort: requires the DISTINCT --acknowledge-shadow-data-loss (ack=true).
+    let report = run_resolve_pending(&run_cfg(&cfg, true), &pending_version, false, true, true)
         .await
-        .expect("resolve-pending --abort succeeds");
+        .expect("resolve-pending --abort succeeds with the shadow-data-loss ack");
     match report {
         RunReport::ResolvePending(o) => {
             assert_eq!(o.resolution, zeroship_migrate::Resolution::Aborted);
+            let warning = o
+                .data_loss_warning
+                .expect("--abort outcome MUST carry the data-loss warning");
+            assert!(
+                warning.contains("DATA DISCARDED") && warning.contains("email_address"),
+                "the abort warning names the discarded shadow column: {warning}"
+            );
         }
         other => panic!("expected ResolvePending, got {other:?}"),
     }
@@ -355,7 +369,7 @@ async fn resolve_pending_without_yes_is_refused() {
     setup(&conn, &cfg).await;
     let pending_version = seed_pending_rename(&conn, &cfg).await;
 
-    let err = run_resolve_pending(&run_cfg(&cfg, false), &pending_version, true, false)
+    let err = run_resolve_pending(&run_cfg(&cfg, false), &pending_version, true, false, false)
         .await
         .expect_err("resolve-pending without --yes must refuse");
     assert!(matches!(err, RunError::ResolvePending(_)), "expected a ResolvePending refusal, got {err:?}");
@@ -380,22 +394,64 @@ async fn resolve_pending_bad_version_or_flags_is_refused() {
     let pending_version = seed_pending_rename(&conn, &cfg).await;
 
     // Both flags.
-    let err = run_resolve_pending(&run_cfg(&cfg, true), &pending_version, true, true)
+    let err = run_resolve_pending(&run_cfg(&cfg, true), &pending_version, true, true, false)
         .await
         .expect_err("both --apply and --abort must refuse");
     assert!(matches!(err, RunError::ResolvePending(_)));
 
     // Neither flag.
-    let err = run_resolve_pending(&run_cfg(&cfg, true), &pending_version, false, false)
+    let err = run_resolve_pending(&run_cfg(&cfg, true), &pending_version, false, false, false)
         .await
         .expect_err("neither flag must refuse");
     assert!(matches!(err, RunError::ResolvePending(_)));
 
     // Unknown version (not outstanding).
-    let err = run_resolve_pending(&run_cfg(&cfg, true), "mig_does_not_exist", true, false)
+    let err = run_resolve_pending(&run_cfg(&cfg, true), "mig_does_not_exist", true, false, false)
         .await
         .expect_err("unknown version must refuse");
     assert!(matches!(err, RunError::ResolvePending(_)));
+
+    teardown(&conn, &cfg).await;
+}
+
+/// **PR9b L3** — `--abort` WITHOUT the distinct `--acknowledge-shadow-data-loss` is
+/// REFUSED even WITH `--yes`. The data-discarding abort requires a SEPARATE
+/// acknowledgement that the shared `--yes` (which `--apply` uses) does NOT satisfy —
+/// so a blanket `--yes` cannot silently authorize discarding shadow-column data. The
+/// obligation is left untouched (still outstanding, trigger + shadow column live).
+///
+/// RED PRE-FIX: `--abort` gated only on `--yes`, so `(--yes, --abort)` succeeded and
+/// dropped the shadow column. POST-FIX it is refused without the ack.
+#[compio::test]
+async fn abort_without_shadow_ack_is_refused_even_with_yes() {
+    let conn = pg().await;
+    let cfg = exec_cfg(&token());
+    setup(&conn, &cfg).await;
+    let pending_version = seed_pending_rename(&conn, &cfg).await;
+
+    // --yes is present, but the distinct shadow-data-loss ack is NOT.
+    let err = run_resolve_pending(&run_cfg(&cfg, true), &pending_version, false, true, false)
+        .await
+        .expect_err("--abort without --acknowledge-shadow-data-loss must refuse even with --yes");
+    match err {
+        RunError::ResolvePending(msg) => assert!(
+            msg.contains("acknowledge-shadow-data-loss") && msg.contains("SEPARATE from --yes"),
+            "the refusal must name the distinct ack and that it is separate from --yes: {msg}"
+        ),
+        other => panic!("expected a ResolvePending refusal, got {other:?}"),
+    }
+
+    // FAIL CLOSED: the obligation is untouched — still outstanding, shadow column +
+    // trigger still live (the abort applied nothing).
+    let outstanding = zeroship_migrate::outstanding_pending_contracts(&conn, &cfg)
+        .await
+        .expect("read outstanding");
+    assert_eq!(outstanding.len(), 1, "the obligation is untouched without the abort ack");
+    assert!(
+        column_exists(&conn, &cfg.project_schema, "members", "email_address").await,
+        "the shadow column is INTACT — --abort applied nothing without the ack"
+    );
+    assert!(trigger_count(&conn, &cfg.project_schema, "members").await >= 1);
 
     teardown(&conn, &cfg).await;
 }
