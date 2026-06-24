@@ -34,7 +34,9 @@ use crate::declarative::{
 };
 use crate::drift::{ColumnSnapshot, IndexSnapshot};
 use crate::guard::{guard_for, GuardConfig, GuardError};
-use crate::ir::{ColType, IrColumn, IrDefault, IndexMethod, MigrationIr, Op};
+use crate::ir::{
+    ColType, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IndexMethod, MigrationIr, Op,
+};
 use crate::migration::Migration;
 use zeroship_schema::query::SqlDialect;
 
@@ -59,6 +61,29 @@ pub enum IrLowerError {
     /// later wave; this Lower phase covers the DDL ops). Carries the op tag.
     #[error("IrAuthor::lower does not yet compile op {0:?} (DDL ops only in this wave)")]
     UnsupportedOp(&'static str),
+    /// A DDL op whose body carries a closed-AST [`crate::expr::Expr`] (a `CHECK`
+    /// constraint predicate, or an `alterColumnType` `using` cast) that the
+    /// Wave-C expression→SQL renderer must materialize. The op family lowers; the
+    /// Expr-bearing variant waits on that renderer (the same wave the DML
+    /// executors wait on — there is no `Expr`→SQL path yet). Carries the slot tag.
+    #[error(
+        "IrAuthor::lower cannot yet render the closed-AST expression in {0} \
+         (the Expr→SQL renderer is the later expression wave)"
+    )]
+    ExprRenderDeferred(&'static str),
+    /// A stand-alone `alterColumn*` / `addConstraint` / `dropConstraint` op on the
+    /// SQLite dialect. SQLite has no native `ALTER COLUMN` / `ALTER TABLE
+    /// ADD|DROP CONSTRAINT`; the differ reconciles these via the 12-step table
+    /// REBUILD, which needs the full LIVE table structure (unavailable in this
+    /// pure-render lower). So stand-alone IR lowering of these ops is PG-only; the
+    /// SQLite leg routes through the declarative diff rebuild seam. Carries the op
+    /// tag.
+    #[error(
+        "IrAuthor::lower of stand-alone op {0:?} is Postgres-only — SQLite has no \
+         native ALTER COLUMN / ADD|DROP CONSTRAINT; route it through the \
+         declarative diff rebuild seam (the 12-step table rebuild)"
+    )]
+    SqliteRebuildOnly(&'static str),
 }
 
 /// One rendered SQL FRAGMENT of a lowered op, carrying its attribution (§6.1.1):
@@ -135,6 +160,41 @@ pub enum LoadAndLowerError {
     Lower(#[from] IrLowerError),
 }
 
+/// A failure in the GUARD-per-fragment loader branch
+/// ([`IrAuthor::load_and_lower_guarded`]): the fail-closed LOAD GATE refused the
+/// artifact, OR the guard-per-fragment lower failed/denied a rendered fragment
+/// (carrying the op-index attribution, §6.1.1). This is the error the PRODUCTION
+/// `.ir.json` deploy path surfaces, so a guard denial reaches the creator with the
+/// exact offending op index + kind — not buried in a whole-`up` denial.
+#[derive(Debug, thiserror::Error)]
+pub enum LoadAndLowerGuardedError {
+    /// The `.ir.json` LOAD GATE refused the artifact.
+    #[error(transparent)]
+    Load(#[from] crate::ir_load::IrLoadError),
+    /// The guard-per-fragment lower failed, denied a fragment (op-index
+    /// attribution), or broke the reassembly invariant.
+    #[error(transparent)]
+    Lower(#[from] IrGuardedLowerError),
+}
+
+/// The result of [`IrAuthor::load_and_lower_guarded`]: the lowered, guard-checked
+/// migrations + the per-op guarded fragments (DX attribution) + the set of tables
+/// this artifact CREATES (its `createTable` ops). The deploy loop folds
+/// `created_tables` into the ownership registry + FK-inline live-set BEFORE the
+/// next `.ir.json` file, so a same-deploy migration that touches an earlier file's
+/// table resolves ownership / inlines FKs correctly (cross-file correctness).
+#[derive(Debug)]
+pub struct LoweredArtifact {
+    /// The lowered, guard-checked migrations (their `up` is provably the
+    /// reassembly of the guarded fragments, §6.1.1).
+    pub migrations: Vec<Migration>,
+    /// The per-op guarded fragments (op-index + kind attribution).
+    pub fragments: Vec<GuardedFragment>,
+    /// The tables this artifact creates (its `createTable` op names), for the
+    /// deploy loop to fold into the cross-file registry + live-set.
+    pub created_tables: Vec<String>,
+}
+
 impl IrAuthor {
     /// Construct an IR author bound to a project schema + deploying app, for a
     /// target dialect. The deploying app is the `owner_app` stamped on every
@@ -186,6 +246,52 @@ impl IrAuthor {
         let ir = crate::ir_load::load_ir_document(bytes, deploying_app, target, registry)
             .map_err(LoadAndLowerError::Load)?;
         self.lower(&ir, live_tables).map_err(LoadAndLowerError::Lower)
+    }
+
+    /// The PRODUCTION `.ir.json` deploy entry (§6.1.1 + §7.2): run the fail-closed
+    /// LOAD GATE, then lower with **guard-per-fragment attribution**
+    /// ([`lower_guarded`]) so a guard denial carries the exact op-index + kind to
+    /// the creator (the 422), not a bare whole-`up` denial. Returns the lowered
+    /// migrations + the per-op fragments + the tables this artifact CREATES (for
+    /// the deploy loop's cross-file registry/live-set advance).
+    ///
+    /// This is the guard-attributed peer of [`load_and_lower`]: the deploy path
+    /// calls THIS so the §6.1.1 attribution reaches a real deploy (the engine's
+    /// subsequent whole-`up` guard is a belt-and-suspenders re-check, but the
+    /// op-attributed denial happens HERE first).
+    ///
+    /// # Errors
+    /// - [`LoadAndLowerGuardedError::Load`] — the load gate refused the artifact.
+    /// - [`LoadAndLowerGuardedError::Lower`] — a lower failure, a guard-denied
+    ///   fragment (op-index attributed), or a reassembly-invariant break.
+    pub fn load_and_lower_guarded(
+        &self,
+        bytes: &str,
+        deploying_app: &str,
+        registry: &std::collections::BTreeMap<String, String>,
+        live_tables: &BTreeSet<String>,
+        guard_cfg: &GuardConfig,
+    ) -> Result<LoweredArtifact, LoadAndLowerGuardedError> {
+        let target = match self.dialect {
+            SqlDialect::Postgres => crate::validate::Dialect::Postgres,
+            SqlDialect::Sqlite => crate::validate::Dialect::Sqlite,
+        };
+        let ir = crate::ir_load::load_ir_document(bytes, deploying_app, target, registry)
+            .map_err(LoadAndLowerGuardedError::Load)?;
+        // The tables this artifact creates — folded by the caller into the
+        // cross-file registry + live-set before the next `.ir.json`.
+        let created_tables: Vec<String> = ir
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::CreateTable { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        let (migrations, fragments) = self
+            .lower_guarded(&ir, guard_cfg, live_tables)
+            .map_err(LoadAndLowerGuardedError::Lower)?;
+        Ok(LoweredArtifact { migrations, fragments, created_tables })
     }
 
     /// Lower a validated [`MigrationIr`]'s DDL ops to [`Migration`]s.
@@ -253,27 +359,50 @@ impl IrAuthor {
             Op::DropColumn { table, column, .. } => {
                 vec![self.decl.lower_drop_column(table, column)]
             }
-            Op::DropIndex { name, .. } => {
+            Op::DropIndex { name, unique, .. } => {
                 // A bare-name DropIndex is rejected fail-closed UPSTREAM by the
-                // validator (§8.6); a table-hinted one reaches here. The IR
-                // DropIndex carries no unique hint, so the drop takes the plain
-                // (non-destructive) gating — matching the differ, which classes
-                // a unique-index drop destructive only when the DESIRED snapshot
-                // proves the dropped index was unique. The render is the same
-                // `DROP INDEX` regardless of the gating flag.
-                let idx = IndexSnapshot::btree(name.clone(), false, Vec::new());
+                // validator (§8.6); a table-hinted one reaches here. The IR carries
+                // a `unique` hint (stamped by the JS `op.dropIndex` builder from the
+                // authored index's declared uniqueness): a `unique: true` drop lowers
+                // `destructive + requires_approval` — matching the differ's
+                // `render_drop_index`, which gates a unique-index drop because it
+                // silently removes a data-integrity guarantee — so it is REFUSED
+                // under `Approval::None` rather than applied silently. A plain
+                // (absent/false) drop stays ungated/reversible. The render is the
+                // same `DROP INDEX` either way; only the gating flag differs.
+                let idx = IndexSnapshot::btree(name.clone(), unique.unwrap_or(false), Vec::new());
                 vec![self.decl.lower_drop_index(&idx)]
             }
-            Op::AlterColumnType { .. } => {
-                return Err(IrLowerError::UnsupportedOp("alterColumnType"))
+            Op::AlterColumnType { table, column, ty, using } => {
+                // SQLite has NO `ALTER COLUMN` — a type change is reconciled by the
+                // differ's 12-step table REBUILD, which needs the full live table
+                // structure (not available in this pure-render lower). So stand-alone
+                // alterColumnType lowers on PG only; on SQLite it routes through the
+                // declarative diff rebuild seam (fail-closed here).
+                self.require_pg_for("alterColumnType")?;
+                // A `using` cast is a closed-AST `Expr`; rendering an `Expr` to SQL is
+                // the Wave-C expression renderer (the same wave the DML executors wait
+                // on). Until it lands, a cast-bearing type change cannot lower.
+                if using.is_some() {
+                    return Err(IrLowerError::ExprRenderDeferred("alterColumnType.using"));
+                }
+                // Build the desired `ColumnSnapshot` via the SHARED builder (a
+                // one-field descriptor) so the emitted `data_type` is byte-identical
+                // to the differ's type mapping — never re-spelled (§6.5).
+                let col = self.add_column_snapshot(table, column, ty, None, None)?;
+                vec![self.decl.lower_alter_column_type(table, &col)]
             }
-            Op::AlterColumnNullability { .. } => {
-                return Err(IrLowerError::UnsupportedOp("alterColumnNullability"))
+            Op::AlterColumnNullability { table, column, nullable } => {
+                // Same SQLite rebuild constraint as alterColumnType.
+                self.require_pg_for("alterColumnNullability")?;
+                vec![self.decl.lower_alter_column_nullability(table, column, *nullable)]
             }
             Op::RenameColumn { .. } => return Err(IrLowerError::UnsupportedOp("renameColumn")),
-            Op::AddConstraint { .. } => return Err(IrLowerError::UnsupportedOp("addConstraint")),
-            Op::DropConstraint { .. } => {
-                return Err(IrLowerError::UnsupportedOp("dropConstraint"))
+            Op::AddConstraint { table, constraint } => self.lower_add_constraint(table, constraint)?,
+            Op::DropConstraint { table, name } => {
+                // SQLite has no `ALTER TABLE … DROP CONSTRAINT` (rebuild-only); PG only.
+                self.require_pg_for("dropConstraint")?;
+                vec![self.decl.lower_drop_constraint(table, name)]
             }
             Op::Insert { .. } => return Err(IrLowerError::UnsupportedOp("insert")),
             Op::Update { .. } => return Err(IrLowerError::UnsupportedOp("update")),
@@ -400,6 +529,77 @@ impl IrAuthor {
             .into_iter()
             .find(|c| c.name == column)
             .ok_or(IrLowerError::UnsupportedOp("addColumn (column folded away)"))
+    }
+
+    /// Fail closed unless the target dialect is Postgres — the stand-alone
+    /// `alterColumn*` / `addConstraint` / `dropConstraint` render coverage (§6) is
+    /// PG-native; SQLite reconciles these via the 12-step rebuild in the
+    /// declarative diff path (which needs full live structure, not this
+    /// pure-render lower). See [`IrLowerError::SqliteRebuildOnly`].
+    fn require_pg_for(&self, op: &'static str) -> Result<(), IrLowerError> {
+        match self.dialect {
+            SqlDialect::Postgres => Ok(()),
+            SqlDialect::Sqlite => Err(IrLowerError::SqliteRebuildOnly(op)),
+        }
+    }
+
+    /// Lower a stand-alone `addConstraint` op (§6). FK / UNIQUE / PRIMARY KEY are
+    /// column-list constraints that lower to `ALTER TABLE … ADD CONSTRAINT …` on
+    /// Postgres, reusing the differ's render seam (so an FK is byte-identical to a
+    /// deferred FK). A `CHECK` constraint carries a closed-AST `Expr` predicate
+    /// whose SQL rendering is the later expression wave, so it lowers to
+    /// [`IrLowerError::ExprRenderDeferred`] until that renderer lands. SQLite is
+    /// rebuild-only ([`IrLowerError::SqliteRebuildOnly`]).
+    fn lower_add_constraint(
+        &self,
+        table: &str,
+        constraint: &IrConstraint,
+    ) -> Result<Vec<Migration>, IrLowerError> {
+        self.require_pg_for("addConstraint")?;
+        let name = constraint.name.as_deref();
+        let mig = match &constraint.kind {
+            IrConstraintKind::Fk { columns, references_table, .. } => {
+                // PR1 single-column FK (the `ref` shape references the target's
+                // `id`); a multi-column FK is a later wave.
+                let local = columns.first().ok_or(IrLowerError::UnsupportedOp(
+                    "addConstraint(fk) with no local column",
+                ))?;
+                if columns.len() != 1 {
+                    return Err(IrLowerError::UnsupportedOp(
+                        "addConstraint(fk) multi-column (later wave)",
+                    ));
+                }
+                let fk = crate::declarative::ir_fk_constraint_snapshot(
+                    &self.project_schema,
+                    name,
+                    local,
+                    references_table,
+                );
+                self.decl.lower_add_fk(table, &fk)
+            }
+            IrConstraintKind::Unique { columns } => {
+                let body = format!("UNIQUE ({})", quote_cols(columns));
+                let cname =
+                    name.map_or_else(|| derived_constraint_name(table, columns, "key"), str::to_string);
+                // A UNIQUE add on an existing table scans + locks and can fail on
+                // existing duplicates — gated (requires_approval), like SET NOT NULL.
+                self.decl.lower_add_constraint(table, &cname, &body, true)
+            }
+            IrConstraintKind::Pk { columns } => {
+                let body = format!("PRIMARY KEY ({})", quote_cols(columns));
+                let cname =
+                    name.map_or_else(|| derived_constraint_name(table, columns, "pkey"), str::to_string);
+                // A PK add scans + locks the whole table under ACCESS EXCLUSIVE and
+                // fails on a NULL/duplicate key — gated (requires_approval).
+                self.decl.lower_add_constraint(table, &cname, &body, true)
+            }
+            IrConstraintKind::Check { .. } => {
+                // A CHECK predicate is a closed-AST `Expr`; rendering it to SQL is
+                // the Wave-C expression renderer (no `Expr`→SQL path yet).
+                return Err(IrLowerError::ExprRenderDeferred("addConstraint(check)"));
+            }
+        };
+        Ok(vec![mig])
     }
 
 }
@@ -546,6 +746,25 @@ fn ir_default_to_value(d: &IrDefault) -> Option<serde_json::Value> {
         }),
         IrDefault::Fn { .. } => None,
     }
+}
+
+/// Quote + comma-join a constraint's column list (`"a", "b"`). Each identifier is
+/// double-quoted (embedded `"` doubled) so the column list can never alter the
+/// statement structure — the SAME quoting the declarative emitter uses.
+fn quote_cols(cols: &[String]) -> String {
+    cols.iter()
+        .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A deterministic constraint name for an unnamed UNIQUE/PK add:
+/// `<table>_<cols>_<suffix>` (`key` for UNIQUE, `pkey` for PRIMARY KEY), capped to
+/// the server-side identifier limit via [`crate::author::cap_ident_name`] so the
+/// authored name matches what PG stores (an un-capped name would be truncated on
+/// CREATE and never round-trip).
+fn derived_constraint_name(table: &str, cols: &[String], suffix: &str) -> String {
+    crate::author::cap_ident_name(&format!("{table}_{}_{suffix}", cols.join("_")))
 }
 
 /// The access-method string for a closed [`IndexMethod`] — matches the spellings
@@ -699,6 +918,69 @@ mod tests {
         }
     }
 
+    // MED (code-critic): an IR dropIndex of a UNIQUE index must lower
+    // `destructive + requires_approval` — exactly like the differ's
+    // `render_drop_index` gates a unique-index drop — so it is REFUSED under
+    // `Approval::None` and never applies silently. A plain (non-unique) index drop
+    // stays ungated. Pre-fix, IrAuthor hardcoded `unique:false`, so a unique drop
+    // lowered ungated (the regression this pins).
+    #[test]
+    fn drop_unique_index_lowers_destructive_and_approval_gated() {
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+
+        // A UNIQUE-index drop: gated.
+        let ir_unique = MigrationIr {
+            ir_version: 1,
+            name: "m".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::DropIndex {
+                name: "users_email_uniq".into(),
+                table: Some("users".into()),
+                unique: Some(true),
+                if_exists: None,
+                concurrently: None,
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+        let migs = author.lower(&ir_unique, &BTreeSet::new()).expect("lower");
+        let m = migs.iter().find(|m| m.up.contains("DROP INDEX")).expect("a DROP INDEX");
+        assert!(
+            m.flags.destructive,
+            "a unique-index drop must lower destructive (removes a data-integrity guarantee)"
+        );
+        assert!(
+            m.flags.requires_approval,
+            "a unique-index drop must lower requires_approval (refused under Approval::None)"
+        );
+
+        // A PLAIN (non-unique) index drop: ungated, reversible.
+        let ir_plain = MigrationIr {
+            ir_version: 1,
+            name: "m".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::DropIndex {
+                name: "users_created_at_idx".into(),
+                table: Some("users".into()),
+                unique: None,
+                if_exists: None,
+                concurrently: None,
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+        let migs = author.lower(&ir_plain, &BTreeSet::new()).expect("lower");
+        let m = migs.iter().find(|m| m.up.contains("DROP INDEX")).expect("a DROP INDEX");
+        assert!(!m.flags.destructive, "a plain index drop stays non-destructive");
+        assert!(!m.flags.requires_approval, "a plain index drop stays ungated");
+    }
+
     // The loader's IR branch end-to-end (§7.2): a well-formed `.ir.json`
     // createTable by its declarer loads (fail-closed gate passes) AND lowers to a
     // CREATE TABLE migration.
@@ -741,6 +1023,50 @@ mod tests {
             }
             other => panic!("expected a fail-closed Load(Validate) reject, got: {other}"),
         }
+    }
+
+    // MED (code-critic): the PRODUCTION `.ir.json` deploy entry
+    // (`load_and_lower_guarded`, wired into `apply_bundle_ir_migrations`) carries
+    // the §6.1.1 op-index attribution on a guard denial — proving the attribution
+    // reaches the REAL deploy path, not only the `lower_guarded` unit tests. We
+    // force a denial with a guard CONFINED to a DIFFERENT schema, so the rendered
+    // `CREATE TABLE "app".…` is a cross-schema construct the guard refuses.
+    #[test]
+    fn load_and_lower_guarded_denial_carries_op_index_attribution() {
+        let bytes = r#"{"ir_version":1,"name":"m","ops":[
+            {"op":"createTable","name":"widgets","columns":[{"name":"title","type":"text"}]}
+        ]}"#;
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        // Guard confined to "other" — the rendered `"app".…` DDL is a cross-schema
+        // reference the Confined guard denies, attributed to op #0.
+        let guard_cfg = GuardConfig::confined("other".to_string());
+        let err = author
+            .load_and_lower_guarded(bytes, "app_a", &registry(&[]), &BTreeSet::new(), &guard_cfg)
+            .expect_err("a fragment outside the confined schema must be denied via the wired entry");
+        match err {
+            LoadAndLowerGuardedError::Lower(IrGuardedLowerError::Denied(d)) => {
+                assert_eq!(d.op_index, 0, "the denial attributes to op #0 through the deploy entry");
+                assert_eq!(d.op_kind, "createTable");
+            }
+            other => panic!("expected a per-fragment Denied via the guarded entry, got: {other}"),
+        }
+    }
+
+    // The guarded deploy entry also reports the artifact's created tables (for the
+    // cross-file registry/live-set advance) and lowers a clean createTable.
+    #[test]
+    fn load_and_lower_guarded_reports_created_tables() {
+        let bytes = r#"{"ir_version":1,"name":"m","ops":[
+            {"op":"createTable","name":"fresh","columns":[{"name":"title","type":"text"}]}
+        ]}"#;
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        let guard_cfg = GuardConfig::confined("app".to_string());
+        let out = author
+            .load_and_lower_guarded(bytes, "app_a", &registry(&[]), &BTreeSet::new(), &guard_cfg)
+            .expect("a clean createTable loads + guarded-lowers");
+        assert_eq!(out.created_tables, vec!["fresh".to_string()], "the createTable is reported");
+        assert!(out.migrations.iter().any(|m| m.up.contains("CREATE TABLE \"app\".\"fresh\"")));
+        assert!(!out.fragments.is_empty(), "fragments are attributed");
     }
 
     // An op on ANOTHER app's table is refused by the load gate (ownership) before

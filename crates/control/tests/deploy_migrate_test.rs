@@ -448,6 +448,100 @@ async fn deploy_migrate_applies_valid_ir_json() {
     cleanup_app(&conn, &app_id).await;
 }
 
+/// Does column `col` exist on `<app_id>.<table>`?
+async fn column_exists(
+    conn: &compio_postgres::Client,
+    app_id: &Uuid,
+    table: &str,
+    col: &str,
+) -> bool {
+    let schema = app_id.to_string();
+    let rows = conn
+        .query(
+            "SELECT 1 FROM information_schema.columns \
+             WHERE table_schema = $1 AND table_name = $2 AND column_name = $3",
+            &[&schema, &table, &col],
+        )
+        .await
+        .expect("query information_schema.columns");
+    !rows.is_empty()
+}
+
+/// Does a FOREIGN KEY constraint exist on `<app_id>.<table>`?
+async fn fk_exists(conn: &compio_postgres::Client, app_id: &Uuid, table: &str) -> bool {
+    let schema = app_id.to_string();
+    let rows = conn
+        .query(
+            "SELECT 1 FROM information_schema.table_constraints \
+             WHERE table_schema = $1 AND table_name = $2 AND constraint_type = 'FOREIGN KEY'",
+            &[&schema, &table],
+        )
+        .await
+        .expect("query information_schema.table_constraints");
+    !rows.is_empty()
+}
+
+// CROSS-FILE (code-critic HIGH): a MULTI-file `.ir.json` deploy where 0001
+// createTable `notes` and 0002 addColumn + addConstraint(FK) on `notes`. The
+// ownership registry + FK-inline live-set MUST advance as each file applies, so
+// 0002 sees `notes` as owned-by-the-deployer + live. Pre-fix, the registry/
+// live-set were introspected ONCE before the loop and never advanced, so 0002
+// resolved `notes`→<unregistered> and FAILED CLOSED on ownership — a legitimate
+// same-deploy migration. The 5 prior IR e2e are all SINGLE-FILE, so this case
+// was wholly untested.
+#[compio::test]
+async fn deploy_migrate_ir_cross_file_addcolumn_fk_on_earlier_file_table() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    // 0001 creates `notes` and `tags`. 0002 (a SEPARATE file) adds a column on
+    // `notes` AND a FK from `notes.tag_id` → `tags` — both touching tables created
+    // in the PRIOR file. The FK must INLINE/defer against the now-live `tags`.
+    let ir_0001 = r#"{"ir_version":1,"name":"create_notes","ops":[
+        {"op":"createTable","name":"notes","columns":[
+            {"name":"title","type":"text","nullable":false}
+        ]},
+        {"op":"createTable","name":"tags","columns":[
+            {"name":"label","type":"text"}
+        ]}
+    ]}"#;
+    let ir_0002 = r#"{"ir_version":1,"name":"link_notes_tags","ops":[
+        {"op":"addColumn","table":"notes","column":"tag_id","type":{"ref":{"references":"tags"}}},
+        {"op":"addConstraint","table":"notes","constraint":{
+            "kind":{"kind":"fk","columns":["tag_id"],"referencesTable":"tags","referencesColumns":["id"]}
+        }}
+    ]}"#;
+    let dir = migrations_dir(&[
+        ("0001_create_notes.ir.json", ir_0001),
+        ("0002_link_notes_tags.ir.json", ir_0002),
+    ]);
+
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir)
+        .await
+        .expect(
+            "a 2-file IR deploy that touches an earlier file's table must apply \
+             (the registry/live-set must advance across files)",
+        );
+
+    assert!(table_exists(&conn, &app_id, "notes").await, "0001 'notes' must exist");
+    assert!(table_exists(&conn, &app_id, "tags").await, "0001 'tags' must exist");
+    assert!(
+        column_exists(&conn, &app_id, "notes", "tag_id").await,
+        "0002 must add 'tag_id' to the 0001-created 'notes' table"
+    );
+    assert!(
+        fk_exists(&conn, &app_id, "notes").await,
+        "0002 must add the FK on 'notes' referencing the 0001-created 'tags'"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    cleanup_app(&conn, &app_id).await;
+}
+
 // A `.sql` and a `.ir.json` ship together: BOTH apply (the Flyway loader skips
 // the IR file; the IR seam handles it). Proves the discovery branch coexists with
 // the platform `.sql` path.

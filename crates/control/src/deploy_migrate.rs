@@ -56,7 +56,7 @@ use std::path::Path;
 use uuid::Uuid;
 use zeroship_migrate::{
     compute_manifest, connect, load_dir_migrations, provision_migrator, Approval, ConnectError,
-    DriftError, EngineError, ExecutorConfig, IrAuthor, LoadAndLowerError, LoaderError,
+    DriftError, EngineError, ExecutorConfig, IrAuthor, LoadAndLowerGuardedError, LoaderError,
     MigrationBackend, MigrationEngine, PostgresBackend, RoleError, SqlDialect,
 };
 
@@ -93,15 +93,18 @@ pub enum DeployMigrateError {
     Apply(#[from] EngineError),
     /// A creator `.ir.json` failed the fail-closed LOAD GATE (malformed, future
     /// `ir_version`, structural reject incl. the bare-name DropIndex, ownership
-    /// violation, checksum-hint mismatch) or its lowering failed (§5.2/§8.6). A
-    /// creator-fault — the deploy handler maps this to a 422; no go-live.
-    #[error("deploy-migrate IR load/lower ({file}): {source}")]
+    /// violation, checksum-hint mismatch) or its GUARD-PER-FRAGMENT lower (§6.1.1):
+    /// a guard-denied rendered fragment carries the exact op-index + kind
+    /// attribution (the production deploy path routes through
+    /// `load_and_lower_guarded`, so this attribution reaches the 422 the creator
+    /// sees). A creator-fault — the deploy handler maps this to a 422; no go-live.
+    #[error("deploy-migrate IR load/guarded-lower ({file}): {source}")]
     Ir {
-        /// The `.ir.json` filename the gate refused.
+        /// The `.ir.json` filename the gate / guard refused.
         file: String,
-        /// The fail-closed gate / lower error.
+        /// The fail-closed gate / guard-per-fragment lower error.
         #[source]
-        source: LoadAndLowerError,
+        source: LoadAndLowerGuardedError,
     },
     /// Reading the `.ir.json` file from the reconstructed migrations dir failed.
     #[error("deploy-migrate read IR file ({file}): {message}")]
@@ -318,13 +321,19 @@ async fn apply_bundle_ir_migrations(
 
     let app = app_id.to_string();
 
-    // Introspect the LIVE schema once: every live table in the per-app schema is
-    // owned by the deploying app, so the IR ownership registry maps each live
-    // table → `app_id`. The same key-set is the FK-inline live-table set.
+    // Introspect the LIVE schema ONCE to SEED the IR ownership registry + the
+    // FK-inline live-table set: every live table in the per-app schema is owned by
+    // the deploying app, so the registry maps each live table → `app_id` and the
+    // same key-set is the live-table set. Both are MUTABLE and ADVANCE as each
+    // `.ir.json` applies (below) — a `createTable` in `0001.ir.json` makes that
+    // table owned-by-the-deployer + live for `0002.ir.json`, so a same-deploy
+    // migration that touches an earlier file's table resolves ownership / inlines
+    // FKs correctly. (Pre-fix these were seeded once and never advanced, so a
+    // legitimate multi-file deploy FAILED CLOSED on ownership / mis-deferred FKs.)
     let live = backend.snapshot_schema(exec_cfg).await?;
-    let registry: BTreeMap<String, String> =
+    let mut registry: BTreeMap<String, String> =
         live.tables.keys().map(|t| (t.clone(), app.clone())).collect();
-    let live_tables: BTreeSet<String> = live.tables.keys().cloned().collect();
+    let mut live_tables: BTreeSet<String> = live.tables.keys().cloned().collect();
 
     let engine = MigrationEngine::new();
     let mut applied: Vec<String> = Vec::new();
@@ -341,20 +350,31 @@ async fn apply_bundle_ir_migrations(
             message: e.to_string(),
         })?;
 
-        // The FAIL-CLOSED gate + lower, with the deploy-target dialect (Postgres).
+        // The FAIL-CLOSED gate + GUARD-PER-FRAGMENT lower (§6.1.1), with the
+        // deploy-target dialect (Postgres). Routing through `load_and_lower_guarded`
+        // (not plain `load_and_lower`) means a guard denial reaches the creator with
+        // the exact op-index + kind attribution, not a bare whole-`up` denial.
         let author = IrAuthor::new(app.clone(), app.clone(), SqlDialect::Postgres);
-        let migrations = author
-            .load_and_lower(&bytes, &app, &registry, &live_tables)
+        let lowered = author
+            .load_and_lower_guarded(&bytes, &app, &registry, &live_tables, guard_cfg)
             .map_err(|source| DeployMigrateError::Ir { file: file.clone(), source })?;
 
         // Plan (Confined guard re-run as line-1) + apply under Approval::None — a
         // destructive op is refused at deploy, exactly like the `.sql` path.
-        let plan = engine.plan(&migrations, guard_cfg);
+        let plan = engine.plan(&lowered.migrations, guard_cfg);
         let outcome = engine
             .apply(&plan, Approval::None, backend, exec_cfg, "deploy-ir")
             .await?;
         applied.extend(outcome.applied);
         skipped.extend(outcome.skipped);
+
+        // ADVANCE the cross-file registry + live-set with THIS file's freshly-
+        // created tables (now applied), so the NEXT `.ir.json` sees them as
+        // owned-by-the-deployer + live.
+        for t in lowered.created_tables {
+            registry.entry(t.clone()).or_insert_with(|| app.clone());
+            live_tables.insert(t);
+        }
     }
 
     Ok(MigrateOutcome { applied, skipped })
