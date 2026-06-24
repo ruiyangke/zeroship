@@ -299,3 +299,105 @@ async fn rebuild_first_plan_against_fresh_journal_bootstraps_it() {
         "the renamed column carries the data through the rebuild"
     );
 }
+
+// ---------------------------------------------------------------------------
+// PR9a (§2.0.3 / Deliverable 7): the SQLite rebuild rename has NO pending-contract
+// partition, so the cross-deploy interlock can NEVER false-gate a SQLite deploy.
+//
+// After a SQLite rebuild rename completes, the backend reports an EMPTY outstanding
+// pending-contract set (a SQLite rename never opens an obligation), and a
+// FOLLOW-ON deploy that touches the SAME just-renamed table — which on the PG leg
+// would be refused while a contract is pending — applies cleanly. This pins that
+// the interlock is structurally PG-only.
+#[compio::test]
+async fn sqlite_rename_opens_no_obligation_and_never_gates_a_follow_on_deploy() {
+    let v1 = vec![CollectionDescriptor {
+        name: "people".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "nickname".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    }];
+    let mut v2 = v1.clone();
+    v2[0].fields[0].name = "handle".into();
+
+    let p = paths("sqlite_no_gate");
+    let be = backend(&p);
+    apply_first_deploy(&be, &v1).await;
+
+    let (live, ownership) = live_from(&v1);
+    let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
+    let hint = RenameHint {
+        table: "people".into(),
+        from: "nickname".into(),
+        to: "handle".into(),
+    };
+    let plan = sqlite_author()
+        .diff(&desired2, &live, &ownership, std::slice::from_ref(&hint))
+        .expect("rename diff");
+    let rebuild = plan.rebuilds.into_iter().next().unwrap();
+    let engine = MigrationEngine::new();
+    engine
+        .apply_plan(
+            &[PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild))],
+            Approval::Approved,
+            &be,
+            &exec_cfg(),
+            "deployer",
+            zeroship_migrate::executor::LockMode::Acquire,
+        )
+        .await
+        .expect("sqlite rebuild rename applies");
+
+    // Deliverable 7: NO obligation is ever opened on SQLite.
+    let outstanding = be
+        .outstanding_pending_contracts(&exec_cfg())
+        .await
+        .expect("read outstanding on sqlite");
+    assert!(
+        outstanding.is_empty(),
+        "a SQLite rebuild rename opens NO pending-contract obligation"
+    );
+
+    // A follow-on deploy that TOUCHES the just-renamed `people` table is NOT gated
+    // (on PG this would be refused while a contract is pending; on SQLite there is
+    // no pending partition, so it proceeds — the interlock is structurally PG-only).
+    let add = zeroship_migrate::migration::Migration {
+        version: zeroship_migrate::migration::MigrationId::generate(),
+        name: "add_people_label".into(),
+        up: "ALTER TABLE people ADD COLUMN label text".into(),
+        down: None,
+        checksum: zeroship_migrate::migration::Checksum::of(
+            &zeroship_migrate::migration::ChecksumInput {
+                up: "addlabel",
+                down: None,
+                flags: &zeroship_migrate::migration::MigrationFlags::default(),
+                owner_app: APP,
+                depends_on: &[],
+                supersedes: &[],
+                preconditions: &[],
+            },
+        ),
+        flags: zeroship_migrate::migration::MigrationFlags::default(),
+        owner_app: APP.into(),
+        depends_on: vec![],
+        supersedes: vec![],
+        preconditions: vec![],
+    };
+    engine
+        .apply_plan_with_touched(
+            &[PlanStep::Ddl(add)],
+            &["people".to_string()],
+            Approval::None,
+            &be,
+            &exec_cfg(),
+            "deployer",
+            zeroship_migrate::executor::LockMode::Acquire,
+        )
+        .await
+        .expect("a follow-on touch of the renamed table is NEVER gated on SQLite");
+}
