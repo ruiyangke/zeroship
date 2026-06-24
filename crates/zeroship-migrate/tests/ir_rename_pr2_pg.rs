@@ -25,7 +25,7 @@
 use compio_postgres::Client;
 use zeroship_migrate::drift::{ColumnSnapshot, TableSnapshot};
 use zeroship_migrate::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
-use zeroship_migrate::ir_author::{IrAuthor, LiveSchema};
+use zeroship_migrate::ir_author::{IrAuthor, IrLowerError, LiveSchema};
 use zeroship_migrate::plan::{PlanStep, RenameStep};
 use zeroship_migrate::{
     provision_migrator, role::deprovision_migrator, Approval, ExecutorConfig, MigrationEngine,
@@ -292,10 +292,18 @@ async fn ir_renamecolumn_applies_as_pg_online_dual_write_through_apply_plan() {
     teardown(&conn, &cfg).await;
 }
 
-// §2.6.2 — mid-sequence crash on the IR PG rename RESUMES roll-forward: re-running
-// the SAME PgExpandContract plan after the first apply reaches the same final
-// state (both columns, rows mirrored) and is a net-applied no-op (idempotent
-// resume), never a double-apply.
+// §2.6.2 — mid-sequence crash on the IR PG rename RESUMES roll-forward. This arms
+// the REAL fault seam (`EXPAND_BETWEEN_E2_AND_BACKFILL`) on the IR-LOWERED rename
+// plan (NOT a hand-built ExpandContractPlan): the first apply CRASHES between the
+// E2 trigger and the E3 backfill (E1/E2 journaled, E3 not), then a fault-free
+// resume converges to the same final state (both columns, rows mirrored) without
+// double-journaling. This proves a genuine mid-sequence crash recovery on the IR
+// path, not merely idempotent full-replay.
+//
+// MED (code-critic): the prior version of this test injected NO crash — it
+// applied the whole expand then re-applied the same plan and asserted full-replay
+// skips. That never armed the fault seam, so it did not exercise a mid-sequence
+// (E2→backfill) crash on the IR-lowered plan. This version arms the seam.
 #[compio::test]
 async fn ir_renamecolumn_pg_crash_resumes_roll_forward() {
     let conn = pg().await;
@@ -303,6 +311,9 @@ async fn ir_renamecolumn_pg_crash_resumes_roll_forward() {
     setup(&conn, &cfg).await;
     let s = q(&cfg.project_schema);
     let engine = MigrationEngine::new();
+
+    // Make sure no fault leaks in from a prior test in this binary.
+    zeroship_migrate::fault::disarm_all();
 
     engine
         .apply_plan(
@@ -346,8 +357,14 @@ async fn ir_renamecolumn_pg_crash_resumes_roll_forward() {
         ec.expand.iter().map(|m| m.version.as_str().to_string()).collect();
     let steps = vec![PlanStep::OnlineRename(RenameStep::PgExpandContract(ec))];
 
-    // First apply (the "pre-crash" deploy): the EXPAND lands + journals.
-    engine
+    // ARM the crash between E2 (dual-write trigger installed) and the E3 backfill.
+    // The first apply MUST fail at that boundary — E1/E2 land + journal, E3 does
+    // not. This is a genuine mid-sequence crash on the IR-lowered plan.
+    zeroship_migrate::fault::arm(
+        zeroship_migrate::fault::points::EXPAND_BETWEEN_E2_AND_BACKFILL,
+        0,
+    );
+    let crashed = engine
         .apply_plan(
             &steps,
             Approval::Approved,
@@ -356,15 +373,16 @@ async fn ir_renamecolumn_pg_crash_resumes_roll_forward() {
             "app_test",
             zeroship_migrate::executor::LockMode::Acquire,
         )
-        .await
-        .expect("first expand apply");
-    for v in &expand_versions {
-        assert!(journaled(&conn, &cfg, v).await, "expand step {v} journaled");
-    }
+        .await;
+    assert!(
+        crashed.is_err(),
+        "the armed E2→backfill fault MUST fire on the first apply (else the resume \
+         below proves nothing); got {crashed:?}"
+    );
+    zeroship_migrate::fault::disarm_all();
 
-    // RESUME: re-run the SAME plan (a crash-resume re-deploy). Each expand step is
-    // net-applied ⇒ skipped (roll-forward, NOT a double-apply). The final state is
-    // unchanged: both columns present, rows still mirrored.
+    // RESUME (fault-free): the rename converges. E1/E2 are net-applied ⇒ skipped;
+    // the E3 backfill (which the crash skipped) now runs and mirrors the rows.
     let resume = engine
         .apply_plan(
             &steps,
@@ -375,25 +393,51 @@ async fn ir_renamecolumn_pg_crash_resumes_roll_forward() {
             zeroship_migrate::executor::LockMode::Acquire,
         )
         .await
-        .expect("resume re-apply");
+        .expect("resume after the simulated crash must converge");
+    // The resume's applied+skipped tally must cover the whole expand (E1/E2 were
+    // journaled by the crashed first apply ⇒ skipped; E3 is freshly applied), and
+    // the crash boundary (E2→backfill) means at least one expand step actually
+    // re-applies on resume — this is roll-forward, not a vacuous no-op replay.
+    let touched: std::collections::BTreeSet<&String> =
+        resume.applied.applied.iter().chain(resume.applied.skipped.iter()).collect();
     for v in &expand_versions {
         assert!(
-            resume.applied.skipped.contains(v),
-            "resume skips the already-applied expand step {v} (roll-forward, no double-apply)"
+            journaled(&conn, &cfg, v).await,
+            "expand step {v} is journaled completed after the resume"
+        );
+        assert!(
+            touched.contains(v),
+            "the resume tally accounts for expand step {v} (applied or skipped)"
         );
     }
     assert!(
+        !resume.applied.applied.is_empty(),
+        "the resume re-applied the crash-skipped E3 backfill (roll-forward), not a \
+         pure no-op replay"
+    );
+    // The converged expand journal has NO duplicate completed version (a resume
+    // must not double-journal a step — an illegal state-machine transition).
+    let mut seen = expand_versions.clone();
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), expand_versions.len(), "no duplicate expand versions");
+
+    assert!(
         column_exists(&conn, &cfg.project_schema, "acct", "username").await,
-        "the new column is present after resume"
+        "the new column is present after the crash+resume"
     );
     let rows = conn
         .query(&format!("SELECT handle, username FROM {s}.acct ORDER BY id"), &[])
         .await
         .expect("read rows");
+    assert_eq!(rows.len(), 2, "two rows");
     for r in &rows {
         let from: Option<String> = r.get(0);
         let to: Option<String> = r.get(1);
-        assert_eq!(to, from, "the rows stay mirrored across the resume");
+        assert_eq!(
+            to, from,
+            "the E3 backfill ran on resume and mirrored handle → username"
+        );
     }
     teardown(&conn, &cfg).await;
 }
@@ -427,6 +471,63 @@ fn ir_renamecolumn_pg_renders_neutral_type_as_pg_string_in_online_intent() {
         "E1 adds the new column with the PG type string: {}",
         e1.up
     );
+}
+
+// HIGH (code-critic) — IR-vs-live type reconciliation on the PG leg. A
+// `renameColumn` whose IR-carried `ColType` DISAGREES with the live `from`
+// column's actual type MUST fail closed (`RenameTypeMismatch`) — the IR-path
+// mirror of the declarative differ's `RenameHintTypeMismatch`. A pure rename
+// mirrors values across the two columns (the dual-write `NEW.<to> := NEW.<from>`)
+// and cannot also change the type; trusting a wrong IR `ty` (here `Int` over a
+// live `text` column) would author a mismatched `ADD COLUMN <to> integer` + a
+// cross-type dual-write copy with no rejection. Pre-fix the PG leg derived the
+// type SOLELY from the IR `ColType` and never read the live column, so this
+// lowered successfully (the load-bearing HIGH defect). This is a pure-lowering
+// fact (no DB needed): the reconciliation runs before any author.
+#[test]
+fn ir_renamecolumn_pg_rejects_ir_type_disagreeing_with_live_column() {
+    let cfg = cfg_for("type_mismatch_pg");
+    // The live `email` column is `text`; the IR claims the renamed column is `Int`.
+    let live = live_with_column("users", "email", "text");
+    let author = IrAuthor::new(cfg.project_schema.clone(), "app_test", SqlDialect::Postgres);
+    let ir = rename_ir("users", "email", "addr", ColType::Int);
+    let err = author
+        .lower_steps(&ir, &live)
+        .expect_err("a rename whose IR type disagrees with the live column must fail closed");
+    match err {
+        IrLowerError::RenameTypeMismatch { table, from, to, live_type, .. } => {
+            assert_eq!(table, "users");
+            assert_eq!(from, "email");
+            assert_eq!(to, "addr");
+            assert_eq!(live_type, "text", "the live `from` type is the authority");
+        }
+        other => panic!("expected RenameTypeMismatch, got: {other}"),
+    }
+}
+
+// HIGH (code-critic) — the live `from` column structure is MANDATORY for a rename
+// on the PG leg: without it the IR-vs-live type reconciliation cannot run, so the
+// lowering fails closed (`RenameNeedsLiveColumn`) rather than trusting the
+// IR-carried type alone. Pre-fix the PG leg needed no live structure at all and
+// happily authored from `{from,to,ty}`.
+#[test]
+fn ir_renamecolumn_pg_fails_closed_without_live_from_column() {
+    let cfg = cfg_for("no_live_col_pg");
+    // LiveSchema knows the table name but carries NO column structure.
+    let mut live = LiveSchema::default();
+    live.tables.insert("users".into());
+    let author = IrAuthor::new(cfg.project_schema.clone(), "app_test", SqlDialect::Postgres);
+    let ir = rename_ir("users", "email", "addr", ColType::Text);
+    let err = author
+        .lower_steps(&ir, &live)
+        .expect_err("a PG rename with no live `from` column must fail closed");
+    match err {
+        IrLowerError::RenameNeedsLiveColumn(t, c) => {
+            assert_eq!(t, "users");
+            assert_eq!(c, "email");
+        }
+        other => panic!("expected RenameNeedsLiveColumn, got: {other}"),
+    }
 }
 
 // §2.6.1 — the E1..C2 `up`/`down`/`flags` SHAPE + intra-chain `depends_on`

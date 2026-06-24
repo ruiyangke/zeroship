@@ -3651,6 +3651,12 @@ impl DeclarativeAuthor {
     /// [`DeclarativeError`] if the expand-contract author rejects the intent (empty/
     /// identical names) or the differ cannot resolve the rebuild (un-matchable hint,
     /// emitter shape mismatch).
+    // This is a deliberate WIDE cross-subsystem bridge: it carries the rename's
+    // {table, from, to}, the per-dialect type/shape inputs (`pg_ty` for PG; the live
+    // snapshot + SDK Value for the SQLite rebuild), AND the real introspected owner
+    // for the cross-app guard. Bundling them into a struct would only relocate the
+    // same fields; the explicit signature documents exactly what each leg consumes.
+    #[allow(clippy::too_many_arguments)]
     pub fn lower_ir_rename(
         &self,
         table: &str,
@@ -3659,6 +3665,7 @@ impl DeclarativeAuthor {
         pg_ty: &str,
         live_snapshot: &TableSnapshot,
         live_sqlite_schema: &serde_json::Value,
+        live_owner: &str,
     ) -> Result<crate::plan::RenameStep, DeclarativeError> {
         match self.dialect {
             SqlDialect::Postgres => {
@@ -3682,8 +3689,14 @@ impl DeclarativeAuthor {
                 Ok(crate::plan::RenameStep::PgExpandContract(plan))
             }
             SqlDialect::Sqlite => {
-                let rebuild =
-                    self.sqlite_rename_rebuild(table, from, to, live_snapshot, live_sqlite_schema)?;
+                let rebuild = self.sqlite_rename_rebuild(
+                    table,
+                    from,
+                    to,
+                    live_snapshot,
+                    live_sqlite_schema,
+                    live_owner,
+                )?;
                 Ok(crate::plan::RenameStep::SqliteRebuild(rebuild))
             }
         }
@@ -3699,9 +3712,20 @@ impl DeclarativeAuthor {
     /// rename-hint resolver requires `live_from.data_type == desired_to.data_type`);
     /// the desired SDK schema is the live `Value` with the same field-key rename; the
     /// `RenameHint` lets the differ resolve the drop+add pair as a rename rather than
-    /// a destructive column swap. Ownership is the deploying app (the diff's
-    /// ownership-enforcement subject); `live_ownership` maps the one table to the
-    /// same app so the diff never trips the cross-app drop guard.
+    /// a destructive column swap.
+    ///
+    /// **Ownership (MED).** Both the desired `ownership` and the `live_ownership`
+    /// maps are stamped from the caller-supplied `live_owner` — the REAL introspected
+    /// owner of the table, NOT the deploying app. This keeps the differ's cross-app
+    /// guards honest: if `live_owner != self.owner_app`, the rename is a structural
+    /// change to a FOREIGN table and `enforce_ownership` refuses it with
+    /// `NotTableOwner`. (Previously both maps were fabricated as the deploying app,
+    /// which would let app B silently rebuild app A's table once this leg is
+    /// deploy-wired.)
+    // Wide by design (the SQLite arm of the cross-subsystem rename bridge): it needs
+    // the rename triple, the full live snapshot + SDK Value to author the rebuild,
+    // and the real owner for the cross-app guard. See `lower_ir_rename`.
+    #[allow(clippy::too_many_arguments)]
     fn sqlite_rename_rebuild(
         &self,
         table: &str,
@@ -3709,6 +3733,7 @@ impl DeclarativeAuthor {
         to: &str,
         live_snapshot: &TableSnapshot,
         live_sqlite_schema: &serde_json::Value,
+        live_owner: &str,
     ) -> Result<SqliteRebuild, DeclarativeError> {
         // ---- desired snapshot: live with `from`→`to` renamed (type unchanged) ----
         let mut desired_table = live_snapshot.clone();
@@ -3739,10 +3764,19 @@ impl DeclarativeAuthor {
             })?;
 
         // ---- assemble the one-table DesiredSchema + live snapshot ----
+        // **Cross-app guard correctness (MED).** The diff's `enforce_ownership`
+        // (desired side) + drop-ownership (live side) guards are only sound if they
+        // see the REAL introspected owner of the table — NOT the deploying app. So
+        // stamp BOTH ownership maps from the caller-supplied `live_owner`. If the
+        // table is owned by a DIFFERENT app, `enforce_ownership` sees the rename
+        // (a structural ALTER) on a foreign table and refuses with `NotTableOwner`
+        // (the deploying app is `self.owner_app`), exactly as a `t.*`-diff rename of
+        // a foreign table would. A rename of one's OWN table (live_owner ==
+        // self.owner_app) passes the guard unchanged.
         let mut desired_tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
         desired_tables.insert(table.to_string(), desired_table);
         let mut ownership: BTreeMap<String, String> = BTreeMap::new();
-        ownership.insert(table.to_string(), self.owner_app.clone());
+        ownership.insert(table.to_string(), live_owner.to_string());
         let mut sqlite_schemas: BTreeMap<String, serde_json::Value> = BTreeMap::new();
         sqlite_schemas.insert(table.to_string(), desired_schema_value);
         let desired = DesiredSchema {
@@ -3755,7 +3789,7 @@ impl DeclarativeAuthor {
         live_tables.insert(table.to_string(), live_snapshot.clone());
         let live = SchemaSnapshot { tables: live_tables };
         let mut live_ownership: HashMap<String, String> = HashMap::new();
-        live_ownership.insert(table.to_string(), self.owner_app.clone());
+        live_ownership.insert(table.to_string(), live_owner.to_string());
 
         let hint = RenameHint {
             table: table.to_string(),
