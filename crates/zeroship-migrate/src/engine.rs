@@ -1305,6 +1305,11 @@ impl MigrationEngine {
                             &rename.backfill,
                             approval,
                             scope,
+                            // PR9c LOW (i): thread the E2 `trigger_version` so the
+                            // executor-layer scope gate resolves its key UNCONDITIONALLY
+                            // (E1 else `trigger_version`) — an empty expand chain no
+                            // longer falls open.
+                            &rename.trigger_version,
                             exec_cfg,
                             applied_by,
                             LockMode::AlreadyHeld,
@@ -1956,6 +1961,11 @@ impl MigrationEngine {
             &plan.backfill,
             approval,
             &crate::approval::ApprovalScope::All,
+            // PR9c LOW (i): the standalone trusted surface threads the plan's E2
+            // `trigger_version` so the now-unconditional scope gate resolves a key even
+            // if `plan.expand` is empty. Under `ApprovalScope::All` the gate is vacuously
+            // true; the version is consulted only by the `Versions` fail-closed arm.
+            &plan.trigger_version,
             exec_cfg,
             applied_by,
             lock_mode,

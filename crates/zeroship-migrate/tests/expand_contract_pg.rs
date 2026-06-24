@@ -496,6 +496,9 @@ async fn expand_drives_through_online_capability_seam_byte_identical() {
             &plan.backfill,
             Approval::Approved,
             &ApprovalScope::All,
+            // PR9c LOW (i): the E2 trigger_version threads the now-unconditional scope gate
+            // (vacuous under ApprovalScope::All; resolves a key even on an empty expand).
+            &plan.trigger_version,
             &cfg,
             "tester",
             LockMode::Acquire,
