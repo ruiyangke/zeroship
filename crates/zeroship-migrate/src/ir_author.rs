@@ -1266,6 +1266,16 @@ fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
     // matching the differ's `t.encrypted(...)` shape.
     let encrypted = matches!(c.ty, ColType::Encrypted { .. })
         .then(|| serde_json::json!({}));
+    // A `vector(N)` column carries its dimensionality N (the `vector` facet on the
+    // neutral `ColType`). The shared snapshot builder spells `vector(N)` ONLY when
+    // the descriptor's `vector_dims` is set, so the dimension MUST be threaded here
+    // — otherwise the IR-derived `data_type` is a DIMENSIONLESS `vector`, which
+    // false-mismatches the live `vector(N)` in the rename type-gate (LOW, code-critic)
+    // and would emit a dimensionless `ADD COLUMN <to> vector` on a createTable.
+    let vector_dims = match &c.ty {
+        ColType::Vector { vector } => Some(i64::from(*vector)),
+        _ => None,
+    };
     FieldDescriptor {
         name: c.name.clone(),
         ty,
@@ -1274,6 +1284,7 @@ fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         references,
         default: c.default.as_ref().and_then(ir_default_to_value),
         encrypted,
+        vector_dims,
         ..Default::default()
     }
 }

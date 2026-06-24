@@ -530,6 +530,75 @@ fn ir_renamecolumn_pg_fails_closed_without_live_from_column() {
     }
 }
 
+// LOW (code-critic) — the IR-vs-live type-gate must be ROUND-TRIP-SYMMETRIC for a
+// PARAMETERISED EXTENSION type (`vector(N)`), not just the 9 base types. The live
+// `from` column introspects to `vector(3)` (PG `format_type` → `canonical_extension_type`
+// keeps `vector(N)` verbatim); the IR-derived `to` type comes from the SHARED
+// snapshot builder over `ColType::Vector { vector: 3 }`. The gate compares the two
+// `data_type` strings for EXACT equality, so if the IR path were to DROP the `(N)`
+// dimension (spell a dimensionless `vector`) a legitimate vector rename would
+// false-reject with `RenameTypeMismatch`. This test pins that the IR derives
+// `vector(3)` (carrying the dimension through `ir_column_to_field`), so the gate
+// PASSES and the rename lowers to a `PgExpandContract` whose E1 `ADD COLUMN`
+// carries the dimensioned `vector(3)` type — proving the extension-type round-trip
+// for the RENAME path, not only for plain createTable snapshots. Pure lowering (no
+// DB / no pgvector extension needed): the type-gate runs before any author.
+#[test]
+fn ir_renamecolumn_pg_vector_extension_type_gate_round_trips() {
+    let cfg = cfg_for("vector_gate_pg");
+    // The live `embedding` column introspects to the canonical `vector(3)` spelling
+    // (exactly what `drift::canonical_extension_type` recovers from `format_type`).
+    let live = live_with_column("docs", "embedding", "vector(3)");
+    let ec = lower_pg_rename(
+        &cfg,
+        "docs",
+        "embedding",
+        "vec",
+        ColType::Vector { vector: 3 },
+        &live,
+    );
+    // The reconciled type carried into the OnlineIntent (and E1's ADD COLUMN) keeps
+    // the `(3)` dimension — the extension-type round-trip is byte-symmetric.
+    match &ec.intent {
+        OnlineIntent::RenameColumn { ty, .. } => {
+            assert_eq!(
+                ty, "vector(3)",
+                "the vector rename keeps its dimension (round-trip symmetric with live)"
+            );
+        }
+    }
+    let e1 = &ec.expand[0];
+    assert!(
+        e1.up.contains("ADD COLUMN") && e1.up.contains("vector(3)"),
+        "E1 adds the new column with the dimensioned vector type: {}",
+        e1.up
+    );
+}
+
+// LOW (code-critic) — the companion NEGATIVE proof: a vector rename whose live
+// `from` column has a DIFFERENT dimension (`vector(4)`) than the IR asserts
+// (`vector: 3`) MUST fail closed with `RenameTypeMismatch`. This confirms the
+// extension-type gate is a real reconciliation (it actually compares the
+// dimensions), not a vacuous pass that would let a mismatched vector rename
+// through.
+#[test]
+fn ir_renamecolumn_pg_vector_dimension_mismatch_fails_closed() {
+    let cfg = cfg_for("vector_mismatch_pg");
+    let live = live_with_column("docs", "embedding", "vector(4)");
+    let author = IrAuthor::new(cfg.project_schema.clone(), "app_test", SqlDialect::Postgres);
+    let ir = rename_ir("docs", "embedding", "vec", ColType::Vector { vector: 3 });
+    let err = author
+        .lower_steps(&ir, &live)
+        .expect_err("a vector rename whose dimension disagrees with live must fail closed");
+    match err {
+        IrLowerError::RenameTypeMismatch { live_type, ir_type, .. } => {
+            assert_eq!(live_type, "vector(4)", "live dimension is the authority");
+            assert_eq!(ir_type, "vector(3)", "the IR-asserted dimension is carried, then rejected");
+        }
+        other => panic!("expected RenameTypeMismatch, got: {other}"),
+    }
+}
+
 // §2.6.1 — the E1..C2 `up`/`down`/`flags` SHAPE + intra-chain `depends_on`
 // topology of an IR-authored rename are byte-equal to the equivalent declarative
 // `ExpandContractAuthor`-authored rename's. Both call the SAME author with the
