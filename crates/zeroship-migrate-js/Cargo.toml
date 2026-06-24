@@ -38,6 +38,18 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 clap = { workspace = true }
 uuid = { workspace = true }
+# Raw syscalls for the §8.9 kernel sandbox child (RLIMIT_CPU/RLIMIT_AS,
+# PR_SET_NO_NEW_PRIVS, unshare(CLONE_NEWNET|CLONE_NEWUSER)). Mirrors the
+# established raw-libc posture of `crates/sandbox-agent/src/dropuser.rs`.
+libc = { workspace = true }
+
+# The seccomp-bpf default-deny syscall filter (Firecracker's `seccompiler`)
+# + the Landlock read-only filesystem ruleset (design §8.9). Linux-only:
+# both are gated behind cfg(target_os = "linux"); on other targets the
+# recorder runs the userland-budget floor (resolver + rlimits) only.
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = { workspace = true }
+landlock = { workspace = true }
 
 [dev-dependencies]
 compio = { workspace = true }
@@ -48,6 +60,15 @@ compio = { workspace = true }
 [[bin]]
 name = "zeroship-migrate-js"
 path = "src/bin/zeroship-migrate-js.rs"
+
+# The PR4a kernel-sandboxed recorder CHILD (design §8.9). Spawned fresh per
+# `record` invocation by the recorder service; it initializes V8 (pre-lockdown),
+# applies the §8.9 sandbox ruleset (seccomp + landlock + netns + rlimits), THEN
+# evaluates the untrusted migration `.ts` and emits the `.ir.json` envelope on
+# stdout. NEVER run in-process: the lockdown is irreversible and per-tenant.
+[[bin]]
+name = "zeroship-migrate-recorder-child"
+path = "src/bin/recorder-child.rs"
 
 [lints]
 workspace = true

@@ -1,0 +1,427 @@
+//! The PR4a §8.9 build-time kernel sandbox — OS-level isolation for the
+//! UNTRUSTED creator/AI migration `.ts` the recorder evaluates.
+//!
+//! This module is the build-time analogue of the apply-time least-priv
+//! `migrator_<project>` role: the kernel — not a userland convention — denies the
+//! recorder child the network, the filesystem (read-only to a tight allow-list,
+//! never writable), subprocess spawning, and an unbounded CPU/memory budget. It is
+//! applied INSIDE the recorder child (`src/bin/recorder-child.rs`), AFTER V8 has
+//! initialized but BEFORE any untrusted JS runs (V8 init needs `mmap`/`mprotect`/
+//! thread-create syscalls a post-lockdown default-deny filter forbids; the untrusted
+//! `up()` body does not).
+//!
+//! ## The ruleset (design §8.9)
+//!
+//! Full kernel baseline = **seccomp-bpf default-deny + landlock read-only + an
+//! interface-less network namespace**, plus the **`RLIMIT_CPU`/`RLIMIT_AS` + a
+//! wall-clock watchdog** resource budget. `landlock` needs Linux ≥ 5.13.
+//!
+//! - **netns**: applied at child-spawn time via `unshare(CLONE_NEWUSER|CLONE_NEWNET)`
+//!   in the child's `pre_exec` (see [`pre_exec_netns`]) — a fresh network namespace
+//!   with **no interfaces and no routes**, so even a syscall that slips past seccomp
+//!   reaches no network. This is the apply order: namespaces first (at clone), then
+//!   the in-process seccomp+landlock+rlimits.
+//! - **seccomp**: a default-deny (`SIGSYS`-kill) BPF filter with an explicit
+//!   allow-list of the compute syscalls V8 needs post-init; `socket`/`connect`/
+//!   `execve`/`fork`/`clone`(process)/`ptrace`/write-`openat` are NOT on it, so an
+//!   attempt is killed by the kernel with `SIGSYS` (the termination cause the
+//!   faithful e2e observes). See [`SandboxPosture`] + [`apply_seccomp`].
+//! - **landlock**: a read-only ruleset over the migration dir + the schema-types
+//!   blob path; ANY write, and any read outside the allow-list, is an `EACCES` the
+//!   kernel returns (Linux ≥ 5.13). On a landlock-less host this layer is replaced
+//!   by the userland module-allow-list resolver as the fs boundary (the degraded
+//!   floor).
+//! - **rlimits**: `RLIMIT_CPU` (seconds of CPU) + `RLIMIT_AS` (address-space bytes),
+//!   applied in `pre_exec`. The wall-clock watchdog is the parent's responsibility
+//!   (see `recorder_service`) — it `SIGKILL`s a child that overruns the wall budget.
+//!
+//! ## Baseline vs degraded floor (design §8.9)
+//!
+//! [`SandboxReport`] records which layers actually engaged. The HOSTED multi-tenant
+//! recorder **refuses to run** ([`SandboxPosture::require_hosted_floor`]) unless at
+//! least seccomp OR netns engaged — there is NO unconstrained-Node fallback. The
+//! LOCAL single-tenant recorder runs the developer's own code under the
+//! userland-budget floor (rlimits + the resolver) and applies the kernel layers
+//! opportunistically.
+
+#![allow(unsafe_code)] // raw syscalls (setrlimit/unshare/prctl), mirroring sandbox-agent::dropuser
+
+use std::path::PathBuf;
+
+/// Which trust posture the recorder runs under (design §8.9 / §8.9.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxPosture {
+    /// HOSTED multi-tenant: the recorder evaluates ONE tenant's `.ts` on shared
+    /// platform infrastructure. The kernel sandbox is MANDATORY — the child refuses
+    /// to run with neither seccomp nor netns engaged (no unconstrained-Node
+    /// fallback). landlock is required on the platform image by construction but
+    /// the hard floor is seccomp+netns (so a landlock-less platform misconfig
+    /// degrades to the §8.9 floor rather than running unconstrained).
+    Hosted,
+    /// LOCAL single-tenant / self-host: the developer's OWN `.ts` at their own trust
+    /// level. The userland-budget floor (rlimits + resolver) is the baseline; the
+    /// kernel layers (seccomp/landlock/netns) are applied OPPORTUNISTICALLY (free
+    /// hardening) and their absence does NOT refuse the run.
+    Local,
+}
+
+/// The kernel/userland layers that ACTUALLY engaged for one recorder child — the
+/// honest baseline-vs-degraded-floor record (design §8.9). Emitted by the child on
+/// its stderr-channel and asserted by the faithful e2e (which layer fired).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
+pub struct SandboxReport {
+    /// The interface-less network namespace engaged (`unshare(CLONE_NEWNET)`).
+    pub netns: bool,
+    /// The seccomp-bpf default-deny filter installed.
+    pub seccomp: bool,
+    /// The landlock read-only ruleset enforced (Linux ≥ 5.13 + landlock LSM on).
+    pub landlock: bool,
+    /// `RLIMIT_CPU` engaged.
+    pub rlimit_cpu: bool,
+    /// `RLIMIT_AS` engaged.
+    pub rlimit_as: bool,
+    /// The userland module-allow-list resolver is the fs boundary (always true —
+    /// defense-in-depth behind landlock, and the SOLE fs boundary on the degraded
+    /// floor).
+    pub resolver: bool,
+}
+
+impl SandboxReport {
+    /// The hosted multi-tenant refuse-to-run floor (design §8.9): at least seccomp
+    /// OR netns must have engaged. Returns `Err(reason)` if neither did — the
+    /// recorder MUST abort rather than evaluate untrusted JS unconstrained.
+    pub fn require_hosted_floor(&self) -> Result<(), String> {
+        if self.seccomp || self.netns {
+            Ok(())
+        } else {
+            Err("hosted recorder refuses to run: neither seccomp nor netns engaged \
+                 (no unconstrained-Node fallback, design §8.9)"
+                .into())
+        }
+    }
+}
+
+/// The resource budget the recorder child runs under (design §8.9). The defaults
+/// are conservative build-time bounds; the parent service may tighten them.
+#[derive(Debug, Clone, Copy)]
+pub struct ResourceBudget {
+    /// `RLIMIT_CPU` hard cap in CPU-seconds. A build-time infinite loop is killed
+    /// with `SIGXCPU`/`SIGKILL` once it burns this many CPU-seconds.
+    pub cpu_seconds: u64,
+    /// `RLIMIT_AS` hard cap in bytes (address-space) — a COARSE outer cap for native
+    /// allocations. It must be set ABOVE V8's enormous virtual reservation: V8's
+    /// Oilpan caged-heap + pointer-compression cage reserve ~tens of GiB of *sparse
+    /// virtual* address space at init that is never RSS-backed, so RLIMIT_AS is
+    /// useless as a tight PHYSICAL-memory bound for a V8 process. The real memory
+    /// bound is [`Self::heap_limit_mb`] (the in-VM V8 heap cap, RSS-correlated).
+    pub address_space_bytes: u64,
+    /// The V8 heap cap in MiB — the AUTHORITATIVE memory bound for an alloc bomb.
+    /// V8 enforces it and fires `terminate_execution` on sustained overrun (the
+    /// runtime's `near_heap_limit_callback`), so a build-time allocation bomb is
+    /// contained at the JS-allocation boundary (a terminated/`RangeError` eval)
+    /// rather than via the V8-incompatible `RLIMIT_AS`.
+    pub heap_limit_mb: u32,
+    /// The parent's wall-clock watchdog cap, in milliseconds. The PARENT `SIGKILL`s
+    /// the child if it does not exit within this wall time (covers a child blocked
+    /// on something that burns wall- but not CPU-time).
+    pub wall_ms: u64,
+}
+
+impl Default for ResourceBudget {
+    fn default() -> Self {
+        // V8 init + a recording pass is cheap; these bounds are generous enough not
+        // to false-positive a legitimate large migration but tight enough that a
+        // loop/alloc-bomb is killed quickly.
+        ResourceBudget {
+            cpu_seconds: 10,
+            // 96 GiB virtual — ABOVE V8's ~64 GiB caged-heap reservation so init
+            // never fails; the real memory bound is `heap_limit_mb` below.
+            address_space_bytes: 96 * 1024 * 1024 * 1024,
+            heap_limit_mb: 256, // a recording pass needs little heap; an alloc bomb trips this
+            wall_ms: 15_000,
+        }
+    }
+}
+
+/// `pre_exec` hook: enter a fresh USER + NETWORK namespace (design §8.9 netns layer).
+///
+/// Runs in the forked child BEFORE exec. We unshare a new **user** namespace (so an
+/// unprivileged process may create the net namespace) and a new **network**
+/// namespace with no interfaces — no `lo` brought up, no routes — so any socket the
+/// child manages to open reaches nowhere. Async-signal-safe (one `unshare`).
+///
+/// On failure (e.g. `unprivileged_userns_clone=0`), returns the OS error so the
+/// caller can record netns as not-engaged; the hosted floor then leans on seccomp.
+///
+/// # Safety
+/// MUST be called only from `Command::pre_exec` (in the forked child). Calling it in
+/// the parent would move the PARENT into a new netns.
+pub unsafe fn pre_exec_netns() -> std::io::Result<()> {
+    // CLONE_NEWUSER first (grants the capability to create other namespaces
+    // unprivileged), then CLONE_NEWNET. A single unshare with both flags is atomic
+    // and async-signal-safe.
+    let flags = libc::CLONE_NEWUSER | libc::CLONE_NEWNET;
+    if unsafe { libc::unshare(flags) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// `pre_exec` hook: apply the `RLIMIT_CPU` + `RLIMIT_AS` resource budget + the
+/// irreversible `PR_SET_NO_NEW_PRIVS` keystone (design §8.9 rlimits layer).
+///
+/// `PR_SET_NO_NEW_PRIVS` is required before installing a non-privileged seccomp
+/// filter (the kernel refuses `seccomp(2)` without it unless `CAP_SYS_ADMIN`), and
+/// irreversibly blocks setuid/file-cap elevation across exec. Async-signal-safe.
+///
+/// # Safety
+/// MUST be called only from `Command::pre_exec`.
+pub unsafe fn pre_exec_rlimits(budget: ResourceBudget) -> std::io::Result<()> {
+    // PR_SET_NO_NEW_PRIVS — keystone + seccomp precondition. Must succeed.
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // RLIMIT_CPU — CPU-seconds hard cap. The kernel sends SIGXCPU at the soft limit
+    // and SIGKILL at the hard limit; we set both equal so an infinite loop dies.
+    let cpu = libc::rlimit {
+        rlim_cur: budget.cpu_seconds,
+        rlim_max: budget.cpu_seconds,
+    };
+    if unsafe { libc::setrlimit(libc::RLIMIT_CPU, &cpu) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // RLIMIT_AS — address-space hard cap. An allocation bomb hits this.
+    let as_ = libc::rlimit {
+        rlim_cur: budget.address_space_bytes,
+        rlim_max: budget.address_space_bytes,
+    };
+    if unsafe { libc::setrlimit(libc::RLIMIT_AS, &as_) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// The Landlock read-only filesystem ruleset (design §8.9). Engaged in the child
+/// AFTER V8 init, BEFORE untrusted eval. Read-only access is granted ONLY to
+/// `allow_read` paths; ANY write, and any read outside them, is an `EACCES` the
+/// kernel returns. Requires Linux ≥ 5.13 (landlock ABI v1+).
+///
+/// Returns `Ok(true)` if the ruleset was enforced, `Ok(false)` if landlock is
+/// unavailable on this kernel (the degraded floor — the resolver is then the fs
+/// boundary). `Err` only on an unexpected enforcement error.
+#[cfg(target_os = "linux")]
+pub fn apply_landlock(allow_read: &[PathBuf]) -> Result<bool, String> {
+    use landlock::{
+        Access, AccessFs, PathBeneath, PathFd, RestrictionStatus, Ruleset, RulesetAttr,
+        RulesetCreatedAttr, RulesetStatus, ABI,
+    };
+
+    // ABI::V1 is the floor (Linux 5.13). `from_all` over the running ABI grants the
+    // widest read set the kernel knows; we then add ONLY read rules — never a write
+    // access — so the ruleset is read-only by construction.
+    let abi = ABI::V1;
+    let read_only = AccessFs::from_read(abi);
+
+    let mut ruleset = Ruleset::default()
+        .handle_access(AccessFs::from_all(abi))
+        .map_err(|e| format!("landlock handle_access: {e}"))?
+        .create()
+        .map_err(|e| format!("landlock create: {e}"))?;
+
+    for path in allow_read {
+        // A non-existent allow path is skipped (not fatal): the migration dir always
+        // exists, but the schema-types blob may be passed in-memory.
+        if let Ok(fd) = PathFd::new(path) {
+            ruleset = ruleset
+                .add_rule(PathBeneath::new(fd, read_only))
+                .map_err(|e| format!("landlock add_rule {}: {e}", path.display()))?;
+        }
+    }
+
+    let status: RestrictionStatus = ruleset
+        .restrict_self()
+        .map_err(|e| format!("landlock restrict_self: {e}"))?;
+
+    match status.ruleset {
+        // Fully enforced.
+        RulesetStatus::FullyEnforced => Ok(true),
+        // Partially enforced (a newer ABI subset unavailable) still gives us the
+        // read-only fs boundary for the v1 access set — count it engaged.
+        RulesetStatus::PartiallyEnforced => Ok(true),
+        // The running kernel has no landlock support — degraded floor.
+        RulesetStatus::NotEnforced => Ok(false),
+    }
+}
+
+/// Non-Linux stub: landlock is Linux-only; the resolver is the fs boundary.
+#[cfg(not(target_os = "linux"))]
+pub fn apply_landlock(_allow_read: &[PathBuf]) -> Result<bool, String> {
+    Ok(false)
+}
+
+/// Install the seccomp-bpf **default-deny** syscall filter (design §8.9).
+///
+/// The default action is `KillProcess` (the kernel delivers `SIGSYS` and terminates
+/// the process) for any syscall NOT on the compute allow-list. The dangerous
+/// syscalls — `socket`, `connect`, `execve`, `execveat`, `fork`, `vfork`,
+/// `clone`/`clone3` (process), `ptrace`, `bpf`, `mount`, etc. — are deliberately
+/// ABSENT from the allow-list, so an attempt is `SIGSYS`-killed. The allow-list is
+/// the syscall set V8 + glibc + the runtime use POST-init (init's heavier set has
+/// already run before this is called).
+///
+/// `KillProcess` is what makes the e2e faithful: a banned syscall does not return an
+/// errno the JS could catch — the kernel KILLS the child, and the parent observes
+/// `WTERMSIG == SIGSYS`.
+///
+/// Returns `Ok(())` on install; `Err` if seccomp is unavailable (the caller records
+/// it not-engaged; the hosted floor then requires netns).
+#[cfg(target_os = "linux")]
+pub fn apply_seccomp() -> Result<(), String> {
+    use seccompiler::{
+        BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
+        SeccompRule, TargetArch,
+    };
+    use std::collections::BTreeMap;
+
+    #[cfg(target_arch = "x86_64")]
+    let arch = TargetArch::x86_64;
+    #[cfg(target_arch = "aarch64")]
+    let arch = TargetArch::aarch64;
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    return Err("seccomp: unsupported target arch".into());
+
+    // The POST-init compute allow-list. Each entry maps to an empty rule vec =
+    // "allow unconditionally". The default action (below) is KillProcess, so any
+    // syscall NOT here SIGSYS-kills the child. This list is the syscalls V8 + the
+    // compio/runtime + glibc issue while evaluating `up()` and serializing the IR to
+    // stdout — established empirically by stracing the child (see
+    // tests/recorder_sandbox_e2e.rs::seccomp_allowlist_is_sufficient) and pinned
+    // here. CRITICALLY ABSENT: socket/connect/sendto/recvfrom (network),
+    // execve/execveat/fork/vfork (subprocess), clone/clone3 with CLONE_VM-for-process
+    // are gated by absence of execve anyway, ptrace, bpf, mount, open(O_WRONLY) is
+    // gated by landlock not seccomp (we allow openat for read but landlock denies
+    // writes; on the degraded floor the resolver is the boundary).
+    let allowed: &[libc::c_long] = &[
+        // --- memory ---
+        libc::SYS_brk,
+        libc::SYS_mmap,
+        libc::SYS_mprotect,
+        libc::SYS_munmap,
+        libc::SYS_mremap,
+        libc::SYS_madvise,
+        // --- fd / io the runtime + stdout writeback need ---
+        libc::SYS_read,
+        libc::SYS_write,
+        libc::SYS_readv,
+        libc::SYS_writev,
+        libc::SYS_close,
+        libc::SYS_lseek,
+        libc::SYS_fcntl,
+        libc::SYS_fstat,
+        libc::SYS_statx,
+        libc::SYS_pread64,
+        libc::SYS_pwrite64,
+        // openat is allowed (V8/glibc touch locale/tz/std fds); WRITES are denied by
+        // landlock (kernel) or the resolver (degraded floor), and there is no
+        // network fd to open. Without openat, glibc/V8 init residue post-fork fails.
+        libc::SYS_openat,
+        // --- futex / scheduling / signals (V8 GC threads, compio) ---
+        libc::SYS_futex,
+        libc::SYS_sched_yield,
+        libc::SYS_sched_getaffinity,
+        // V8's GC/heap-pressure path queries scheduling params (read-only, benign —
+        // no capability granted). Surfaced by the alloc-bomb under SECCOMP_TRAP.
+        libc::SYS_sched_getparam,
+        libc::SYS_sched_getscheduler,
+        libc::SYS_sched_get_priority_max,
+        libc::SYS_sched_get_priority_min,
+        libc::SYS_rt_sigaction,
+        libc::SYS_rt_sigprocmask,
+        libc::SYS_rt_sigreturn,
+        libc::SYS_nanosleep,
+        libc::SYS_clock_gettime,
+        libc::SYS_clock_nanosleep,
+        libc::SYS_gettimeofday,
+        libc::SYS_getpid,
+        libc::SYS_gettid,
+        libc::SYS_getrandom,
+        // NOTE: `clone`/`clone3` are NOT on this unconditional allow-list — they are
+        // added below with an ARG FILTER so only THREAD creation (CLONE_THREAD set)
+        // is permitted; a process `fork()` (clone without CLONE_THREAD) is
+        // SIGSYS-killed. `execve`/`execveat`/`fork`/`vfork` are absent entirely.
+        libc::SYS_set_robust_list,
+        libc::SYS_rseq,
+        libc::SYS_prctl,
+        libc::SYS_exit,
+        libc::SYS_exit_group,
+        libc::SYS_epoll_create1,
+        libc::SYS_epoll_ctl,
+        libc::SYS_epoll_wait,
+        libc::SYS_epoll_pwait,
+        libc::SYS_eventfd2,
+        libc::SYS_pipe2,
+        libc::SYS_dup,
+        libc::SYS_dup3,
+        libc::SYS_poll,
+        libc::SYS_ppoll,
+        libc::SYS_restart_syscall,
+        libc::SYS_membarrier,
+        libc::SYS_get_robust_list,
+        libc::SYS_sigaltstack,
+        libc::SYS_tgkill,
+        libc::SYS_rt_sigtimedwait,
+    ];
+
+    let mut rules: BTreeMap<libc::c_long, Vec<SeccompRule>> =
+        allowed.iter().map(|&s| (s, vec![])).collect();
+
+    // `clone` — allow ONLY thread creation (CLONE_THREAD bit set in flags / arg0).
+    // A process `fork()` issues `clone` WITHOUT CLONE_THREAD, so it falls through to
+    // the default KillProcess (SIGSYS). V8's pthread_create / GC threads set
+    // CLONE_THREAD, so they pass. This is the precise "no process fork, yes threads"
+    // posture the design's deny-list intends.
+    let clone_thread = libc::CLONE_THREAD as u64;
+    rules.insert(
+        libc::SYS_clone,
+        vec![SeccompRule::new(vec![SeccompCondition::new(
+            0, // arg0 = clone flags
+            SeccompCmpArgLen::Qword,
+            SeccompCmpOp::MaskedEq(clone_thread),
+            clone_thread,
+        )
+        .map_err(|e| format!("seccomp clone condition: {e}"))?])
+        .map_err(|e| format!("seccomp clone rule: {e}"))?],
+    );
+
+    // DEFAULT-DENY: any syscall not in `rules` -> KillProcess (SIGSYS). The faithful
+    // e2e observes WTERMSIG==SIGSYS for socket/connect/execve attempts.
+    //
+    // `ZS_RECORDER_SECCOMP_TRAP` is a DEBUG seam: it swaps the default action to
+    // `Trap` (still SIGSYS, but a userland SIGSYS handler can read `si_syscall` and
+    // log which syscall was denied) — used when tuning the allow-list. Never set in
+    // production; the production default is the hard `KillProcess`.
+    let mismatch = if std::env::var_os("ZS_RECORDER_SECCOMP_TRAP").is_some() {
+        SeccompAction::Trap
+    } else {
+        SeccompAction::KillProcess
+    };
+    let filter = SeccompFilter::new(
+        rules,
+        mismatch,             // mismatch_action: default-deny
+        SeccompAction::Allow, // match_action: allow the listed syscalls
+        arch,
+    )
+    .map_err(|e| format!("seccomp build: {e}"))?;
+
+    let prog: BpfProgram = filter
+        .try_into()
+        .map_err(|e| format!("seccomp compile: {e}"))?;
+    seccompiler::apply_filter(&prog).map_err(|e| format!("seccomp apply: {e}"))?;
+    Ok(())
+}
+
+/// Non-Linux stub: seccomp is Linux-only.
+#[cfg(not(target_os = "linux"))]
+pub fn apply_seccomp() -> Result<(), String> {
+    Err("seccomp: not supported on this platform".into())
+}

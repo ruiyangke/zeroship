@@ -1,0 +1,453 @@
+//! The PR4a §8.9.2 HOSTED recorder service — spawns a FRESH kernel-sandboxed child
+//! per `record` invocation, enforces the resource budget + wall-clock watchdog, and
+//! implements the §8.9.2 contract (`POST /v1/recorder/record`, PAT auth + server-side
+//! `app_id` ownership cross-check, per-token + global concurrency limits).
+//!
+//! Layering:
+//! - [`spawn_sandboxed_record`] is the SECURITY CORE: it spawns the
+//!   `zeroship-migrate-recorder-child` binary with the §8.9 `pre_exec` lockdown
+//!   (netns + rlimits + no_new_privs), pipes the request in-memory, applies the
+//!   parent wall-clock watchdog (`SIGKILL` on overrun), and classifies the child's
+//!   termination cause (SIGSYS / SIGXCPU / SIGKILL → the §8.8 structured error).
+//! - [`RecorderService`] wraps it with the §8.9.2 service contract: auth via an
+//!   injectable [`Authorizer`] seam (PAT → owned apps, the §8.6 ownership check),
+//!   per-token concurrency + a global cap with a queue.
+//!
+//! The wall watchdog + termination-cause classification are why a fork+exec, an
+//! infinite loop, and an allocation bomb all surface as a clean structured error
+//! rather than a hang or a confusing exit code.
+
+#![allow(unsafe_code)] // Command::pre_exec closure + waitpid/kill
+
+use std::io::Write;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+use crate::recorder_protocol::{ChildError, ChildRequest, ChildResponse};
+use crate::sandbox::{pre_exec_netns, pre_exec_rlimits, ResourceBudget, SandboxPosture, SandboxReport};
+
+/// The §8.8 structured error the recorder surfaces (mapped from the child's
+/// termination cause or its `ChildError`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecorderError {
+    /// The resource budget (RLIMIT_CPU / wall-watchdog / RLIMIT_AS) bounded the
+    /// child — `BUILD_RECORDER_BUDGET_EXCEEDED` (§8.8).
+    BudgetExceeded {
+        /// Which budget tripped: "cpu" (SIGXCPU), "wall" (watchdog SIGKILL),
+        /// "memory" (RLIMIT_AS / OOM), or "unknown-kill".
+        which: String,
+    },
+    /// The kernel killed the child for a denied syscall — `SIGSYS` from the seccomp
+    /// default-deny filter (a subprocess spawn / network socket attempt). Surfaced
+    /// distinctly so the faithful e2e can assert the KERNEL fired.
+    KilledBySeccomp,
+    /// The migration `.ts` evaluation reported an authoring error (op outside
+    /// recorder, throw, etc.).
+    EvalError(String),
+    /// The hosted recorder refused to run (kernel floor not met — neither seccomp
+    /// nor netns). Maps to a 503/environment refusal, NOT an authoring reject.
+    SandboxRefused(String),
+    /// The token/app ownership check failed (§8.6) — fail-closed.
+    Unauthorized(String),
+    /// A burst exceeded the global concurrency cap (after the queue) — backpressure.
+    Overloaded,
+    /// The child could not be spawned / the protocol broke (recorder-unreachable
+    /// class — the client retries / falls back to local).
+    Spawn(String),
+}
+
+impl RecorderError {
+    /// The §8.8 machine-readable code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            RecorderError::BudgetExceeded { .. } => "BUILD_RECORDER_BUDGET_EXCEEDED",
+            RecorderError::KilledBySeccomp => "BUILD_RECORDER_SANDBOX_VIOLATION",
+            RecorderError::EvalError(_) => "RECORD_EVAL_ERROR",
+            RecorderError::SandboxRefused(_) => "RECORDER_SANDBOX_UNAVAILABLE",
+            RecorderError::Unauthorized(_) => "RECORDER_UNAUTHORIZED",
+            RecorderError::Overloaded => "RECORDER_OVERLOADED",
+            RecorderError::Spawn(_) => "RECORDER_UNREACHABLE",
+        }
+    }
+}
+
+impl std::fmt::Display for RecorderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RecorderError::BudgetExceeded { which } => {
+                write!(f, "BUILD_RECORDER_BUDGET_EXCEEDED ({which})")
+            }
+            RecorderError::KilledBySeccomp => {
+                write!(f, "recorder child killed by seccomp (denied syscall, SIGSYS)")
+            }
+            RecorderError::EvalError(m) => write!(f, "migration evaluation failed: {m}"),
+            RecorderError::SandboxRefused(m) => write!(f, "recorder refused to run: {m}"),
+            RecorderError::Unauthorized(m) => write!(f, "unauthorized: {m}"),
+            RecorderError::Overloaded => write!(f, "recorder overloaded"),
+            RecorderError::Spawn(m) => write!(f, "recorder unreachable: {m}"),
+        }
+    }
+}
+impl std::error::Error for RecorderError {}
+
+/// The successful recording outcome (the §8.9.2 response body, pre-checksum). The
+/// caller computes the `Checksum::of_ir` + the `.ts` provenance blob.
+#[derive(Debug, Clone)]
+pub struct RecordResult {
+    /// The recorded `.ir.json` envelope string (the child's `ir_json`).
+    pub ir_json: String,
+    /// Which sandbox layers actually engaged (baseline-vs-degraded record).
+    pub report: SandboxReport,
+}
+
+/// Inputs for one sandboxed recording (post-auth).
+#[derive(Debug, Clone)]
+pub struct RecordRequest {
+    pub ts_source: String,
+    pub owner_app: String,
+    pub name: String,
+    pub posture: SandboxPosture,
+    pub budget: ResourceBudget,
+    /// The landlock read-only allow-list (migration dir + schema-types blob path).
+    pub allow_read_paths: Vec<PathBuf>,
+}
+
+/// Locate the recorder-child binary next to the current executable (the standard
+/// cargo layout: sibling in `target/<profile>/`). Overridable via
+/// `ZEROSHIP_RECORDER_CHILD` for packaged installs / tests.
+pub fn recorder_child_path() -> PathBuf {
+    if let Ok(p) = std::env::var("ZEROSHIP_RECORDER_CHILD") {
+        return PathBuf::from(p);
+    }
+    let exe = std::env::current_exe().unwrap_or_default();
+    let dir = exe.parent().map(PathBuf::from).unwrap_or_default();
+    // Test binaries live in target/<profile>/deps/; the child is one level up.
+    let candidate = dir.join("zeroship-migrate-recorder-child");
+    if candidate.exists() {
+        return candidate;
+    }
+    if let Some(parent) = dir.parent() {
+        let up = parent.join("zeroship-migrate-recorder-child");
+        if up.exists() {
+            return up;
+        }
+    }
+    candidate
+}
+
+/// The SECURITY CORE: spawn a FRESH kernel-sandboxed child for ONE recording, wait
+/// under the wall-clock watchdog, and classify the result.
+///
+/// This is what gives per-invocation tenant isolation (a brand-new locked-down
+/// process every call — no pooling, no reuse) and what surfaces a denied syscall /
+/// budget overrun as the §8.8 structured error.
+pub fn spawn_sandboxed_record(req: &RecordRequest) -> Result<RecordResult, RecorderError> {
+    let child_bin = recorder_child_path();
+    if !child_bin.exists() {
+        return Err(RecorderError::Spawn(format!(
+            "recorder child binary not found at {} (set ZEROSHIP_RECORDER_CHILD)",
+            child_bin.display()
+        )));
+    }
+
+    // We attempt netns + rlimits in pre_exec. netns can fail on a host with
+    // unprivileged userns disabled; we still proceed (the child records what
+    // engaged, and the hosted floor leans on seccomp). rlimits failing IS fatal for
+    // the budget guarantee, so we abort the spawn if pre_exec returns Err for them.
+    let budget = req.budget;
+    let posture = req.posture;
+
+    // The pre_exec closure runs in the forked child. netns first (at clone), then
+    // rlimits + no_new_privs. We encode "did netns engage" by trying it and, on
+    // failure, NOT failing the spawn (return Ok) — the child re-checks /proc. But
+    // rlimits failing returns Err (aborts spawn) so we never run without the budget.
+    let pre = move || -> std::io::Result<()> {
+        // netns: best-effort. On failure we keep going (do not abort) — the child
+        // detects it and the hosted floor requires seccomp instead.
+        let _ = unsafe { pre_exec_netns() };
+        // rlimits + no_new_privs: MUST succeed (budget guarantee + seccomp precond).
+        unsafe { pre_exec_rlimits(budget) }?;
+        Ok(())
+    };
+
+    let mut cmd = Command::new(&child_bin);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    // SAFETY: the closure is async-signal-safe (only unshare/setrlimit/prctl).
+    unsafe {
+        cmd.pre_exec(pre);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| RecorderError::Spawn(format!("spawn recorder child: {e}")))?;
+
+    // Pipe the request envelope in-memory.
+    let child_req = ChildRequest {
+        ts_source: req.ts_source.clone(),
+        owner_app: req.owner_app.clone(),
+        name: req.name.clone(),
+        hosted: posture == SandboxPosture::Hosted,
+        // We requested netns (best-effort) + rlimits (mandatory). The child confirms
+        // netns via /proc and ANDs it into its report.
+        netns_engaged: true,
+        rlimit_engaged: true,
+        heap_limit_mb: req.budget.heap_limit_mb,
+        allow_read_paths: req
+            .allow_read_paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect(),
+    };
+    let req_json = serde_json::to_string(&child_req)
+        .map_err(|e| RecorderError::Spawn(format!("serialize child request: {e}")))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        // Write may fail if the child already died (e.g. seccomp killed it before
+        // reading) — that's fine, we detect it via wait below.
+        let _ = stdin.write_all(req_json.as_bytes());
+        // Dropping stdin closes it (EOF for the child's read_to_string).
+    }
+
+    // ---- Wall-clock watchdog (design §8.9) ----
+    // RLIMIT_CPU bounds CPU-time; the wall watchdog bounds wall-time (covers a child
+    // that sleeps / blocks). We poll for exit; on overrun we SIGKILL.
+    let deadline = Instant::now() + Duration::from_millis(budget.wall_ms);
+    let mut wall_killed = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    // Wall budget exceeded — SIGKILL the child.
+                    let _ = child.kill();
+                    wall_killed = true;
+                    // Reap it.
+                    break child.wait().map_err(|e| {
+                        RecorderError::Spawn(format!("wait after wall-kill: {e}"))
+                    })?;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => return Err(RecorderError::Spawn(format!("try_wait: {e}"))),
+        }
+    };
+
+    // Read whatever the child wrote to stdout BEFORE classifying — a successful
+    // recording writes its envelope then exits 0.
+    let stdout = {
+        use std::io::Read;
+        let mut s = String::new();
+        if let Some(mut out) = child.stdout.take() {
+            let _ = out.read_to_string(&mut s);
+        }
+        s
+    };
+
+    // ---- Classify the termination cause (faithful kernel-level signal) ----
+    if wall_killed {
+        return Err(RecorderError::BudgetExceeded {
+            which: "wall".into(),
+        });
+    }
+    if let Some(sig) = status.signal() {
+        return Err(classify_signal(sig));
+    }
+
+    // Exited normally (code 0/non-0). Parse the response envelope.
+    if !status.success() && stdout.trim().is_empty() {
+        return Err(RecorderError::Spawn(format!(
+            "recorder child exited {} with no output",
+            status.code().unwrap_or(-1)
+        )));
+    }
+    let resp: ChildResponse = serde_json::from_str(stdout.trim()).map_err(|e| {
+        RecorderError::Spawn(format!(
+            "parse recorder child response: {e}; raw: {}",
+            stdout.chars().take(200).collect::<String>()
+        ))
+    })?;
+
+    if resp.ok {
+        let ir_json = resp.ir_json.ok_or_else(|| {
+            RecorderError::Spawn("recorder child reported ok but no ir_json".into())
+        })?;
+        Ok(RecordResult {
+            ir_json,
+            report: resp.report,
+        })
+    } else {
+        match resp.error {
+            Some(ChildError::EvalError(m)) => Err(RecorderError::EvalError(m)),
+            Some(ChildError::SandboxRefused(m)) => Err(RecorderError::SandboxRefused(m)),
+            None => Err(RecorderError::Spawn("recorder child failed with no error".into())),
+        }
+    }
+}
+
+/// Map a child's terminating signal to the §8.8 structured error.
+///
+/// - `SIGSYS` (31) ⇒ the seccomp default-deny filter killed it for a denied syscall
+///   (subprocess spawn / network socket). This is the FAITHFUL kernel-level signal.
+/// - `SIGXCPU` (24) ⇒ `RLIMIT_CPU` tripped (infinite loop) → budget.
+/// - `SIGKILL` (9) ⇒ the kernel OOM-killer or RLIMIT_AS-driven abort, or a
+///   late watchdog; treated as budget (memory/unknown).
+/// - `SIGSEGV`/`SIGABRT` ⇒ V8 crash (e.g. RLIMIT_AS made an allocation fail
+///   hard) → budget (memory).
+fn classify_signal(sig: i32) -> RecorderError {
+    match sig {
+        libc::SIGSYS => RecorderError::KilledBySeccomp,
+        libc::SIGXCPU => RecorderError::BudgetExceeded { which: "cpu".into() },
+        libc::SIGKILL => RecorderError::BudgetExceeded {
+            which: "memory".into(),
+        },
+        libc::SIGSEGV | libc::SIGABRT | libc::SIGBUS => RecorderError::BudgetExceeded {
+            which: "memory".into(),
+        },
+        other => RecorderError::BudgetExceeded {
+            which: format!("signal-{other}"),
+        },
+    }
+}
+
+// ===========================================================================
+// The §8.9.2 service contract: auth + ownership + concurrency limits
+// ===========================================================================
+
+/// The PAT → owned-apps authorizer seam (the §8.6 ownership check at record time).
+/// Injected so the service can be exercised without a live control plane; the
+/// production impl verifies the PAT and checks the `app_id` against the token's
+/// owned apps server-side.
+pub trait Authorizer: Send + Sync {
+    /// Returns `Ok(())` iff `token` is valid AND owns `app_id`. Fail-closed:
+    /// an unknown token / unknown owner / not-owned app is `Err`.
+    fn authorize(&self, token: &str, app_id: &str) -> Result<(), String>;
+}
+
+/// Per-token + global concurrency limits (design §8.9.2 DoS fairness). A simple
+/// counter-based limiter: per-token in-flight cap + a global in-flight cap. A burst
+/// past the global cap is `Overloaded` (the HTTP layer queues/retries).
+#[derive(Debug, Clone, Copy)]
+pub struct ConcurrencyLimits {
+    pub per_token_max: usize,
+    pub global_max: usize,
+}
+
+impl Default for ConcurrencyLimits {
+    fn default() -> Self {
+        ConcurrencyLimits {
+            per_token_max: 4,
+            global_max: 32,
+        }
+    }
+}
+
+/// The hosted recorder service. Holds the authorizer + the concurrency state.
+#[allow(missing_debug_implementations)] // holds a `Box<dyn Authorizer>` trait object
+pub struct RecorderService {
+    authorizer: Box<dyn Authorizer>,
+    limits: ConcurrencyLimits,
+    inflight: std::sync::Mutex<InflightState>,
+    pub budget: ResourceBudget,
+}
+
+#[derive(Default)]
+struct InflightState {
+    global: usize,
+    per_token: std::collections::HashMap<String, usize>,
+}
+
+/// An RAII guard that decrements the in-flight counters on drop (so a panic / early
+/// return during recording still releases the slot).
+struct InflightGuard<'a> {
+    svc: &'a RecorderService,
+    token: String,
+}
+impl Drop for InflightGuard<'_> {
+    fn drop(&mut self) {
+        let mut st = self.svc.inflight.lock().unwrap();
+        st.global = st.global.saturating_sub(1);
+        if let Some(c) = st.per_token.get_mut(&self.token) {
+            *c = c.saturating_sub(1);
+            if *c == 0 {
+                st.per_token.remove(&self.token);
+            }
+        }
+    }
+}
+
+impl RecorderService {
+    pub fn new(authorizer: Box<dyn Authorizer>) -> Self {
+        RecorderService {
+            authorizer,
+            limits: ConcurrencyLimits::default(),
+            inflight: std::sync::Mutex::new(InflightState::default()),
+            budget: ResourceBudget::default(),
+        }
+    }
+
+    pub fn with_limits(mut self, limits: ConcurrencyLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Try to acquire an in-flight slot for `token` (per-token + global caps). The
+    /// HTTP layer queues on `Overloaded`. Returns a guard that releases on drop.
+    fn acquire(&self, token: &str) -> Result<InflightGuard<'_>, RecorderError> {
+        let mut st = self.inflight.lock().unwrap();
+        if st.global >= self.limits.global_max {
+            return Err(RecorderError::Overloaded);
+        }
+        let tc = st.per_token.entry(token.to_string()).or_insert(0);
+        if *tc >= self.limits.per_token_max {
+            return Err(RecorderError::Overloaded);
+        }
+        *tc += 1;
+        st.global += 1;
+        drop(st);
+        Ok(InflightGuard {
+            svc: self,
+            token: token.to_string(),
+        })
+    }
+
+    /// The §8.9.2 `record` operation: authorize (PAT → owns app_id), acquire a
+    /// concurrency slot, then spawn a FRESH sandboxed child for this one recording.
+    ///
+    /// `token` is the PAT/`ZEROSHIP_TOKEN`; `app_id` is the claimed owner app
+    /// (cross-checked server-side). HOSTED posture is enforced here (the kernel
+    /// sandbox is mandatory for the multi-tenant path).
+    pub fn record(
+        &self,
+        token: &str,
+        app_id: &str,
+        ts_source: &str,
+        name: &str,
+    ) -> Result<RecordResult, RecorderError> {
+        // §8.6 ownership cross-check — fail-closed.
+        self.authorizer
+            .authorize(token, app_id)
+            .map_err(RecorderError::Unauthorized)?;
+
+        let _guard = self.acquire(token)?;
+
+        let req = RecordRequest {
+            ts_source: ts_source.to_string(),
+            owner_app: app_id.to_string(),
+            name: name.to_string(),
+            posture: SandboxPosture::Hosted, // hosted multi-tenant: kernel sandbox mandatory
+            budget: self.budget,
+            allow_read_paths: vec![], // source is in-memory; deny all fs reads
+        };
+        spawn_sandboxed_record(&req)
+        // _guard drops here → slot released.
+    }
+
+    /// Inspection helper: current global in-flight count (used by the isolation e2e
+    /// + ops metrics).
+    pub fn inflight_global(&self) -> usize {
+        self.inflight.lock().unwrap().global
+    }
+}

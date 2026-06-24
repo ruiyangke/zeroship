@@ -36,6 +36,10 @@
 pub mod eval;
 pub mod generate;
 pub mod record;
+pub mod recorder_http;
+pub mod recorder_protocol;
+pub mod recorder_service;
+pub mod sandbox;
 
 pub use eval::{eval_schema_to_ir, EvalError};
 pub use generate::{generate_migration, GenerateError, GenerateOutcome};
@@ -43,3 +47,8 @@ pub use record::{
     lint_migration_determinism, record_migration_to_ir, record_migration_to_ir_with_warnings,
     record_migration_to_json, DeterminismFinding, RecordError, RecordOutcome,
 };
+pub use recorder_service::{
+    recorder_child_path, spawn_sandboxed_record, Authorizer, ConcurrencyLimits, RecordRequest,
+    RecordResult, RecorderError, RecorderService,
+};
+pub use sandbox::{ResourceBudget, SandboxPosture, SandboxReport};

@@ -128,6 +128,14 @@ lru = "0.12"
 memmap2 = "0.9"
 mimalloc = { version = "0.1", default-features = false }
 libc = "0.2"
+# Kernel-sandbox primitives for the PR4a build-time recorder (design §8.9).
+# `seccompiler` is Firecracker's audited seccomp-bpf compiler (default-deny
+# syscall filter); `landlock` is the ABI-aware Landlock LSM wrapper (read-only
+# filesystem ruleset, requires Linux >= 5.13). Both are pure-Rust, no C
+# toolchain. Used ONLY by `zeroship-migrate-js`'s recorder child + sandbox
+# module — the build-time analogue of the apply-time least-priv migrator role.
+seccompiler = "0.5"
+landlock = "0.4"
 itoa = "1"
 socket2 = { version = "0.5", features = ["all"] }
 ada-url = "3.4.4"
