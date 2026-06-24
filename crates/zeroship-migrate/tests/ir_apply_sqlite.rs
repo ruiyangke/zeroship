@@ -13,8 +13,8 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zeroship_migrate::{
-    Approval, ExecutorConfig, GuardConfig, IrAuthor, LoadAndLowerError, MigrationEngine,
-    SqlDialect, SqliteBackend,
+    Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LoadAndLowerError,
+    MigrationEngine, SqlDialect, SqliteBackend,
 };
 
 const PROJECT: &str = "prj_ir";
@@ -62,7 +62,7 @@ async fn ir_json_lowers_and_applies_on_sqlite() {
     // The REAL fail-closed gate + lower, SQLite dialect.
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let migrations = author
-        .load_and_lower(ir, APP, &registry(&[]), &BTreeSet::new())
+        .load_and_lower(ir, APP, &registry(&[]), &LiveSchema::default())
         .expect("a valid .ir.json must lower on SQLite");
     assert!(!migrations.is_empty(), "lowering must yield migration(s)");
 
@@ -110,7 +110,7 @@ async fn ir_json_out_of_envelope_splitpart_refused_on_sqlite() {
     live.insert("users".to_string());
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let err = author
-        .load_and_lower(ir, APP, &registry(&[("users", APP)]), &live)
+        .load_and_lower(ir, APP, &registry(&[("users", APP)]), &(&live).into())
         .expect_err("an out-of-envelope splitPart must be refused on SQLite");
     match err {
         LoadAndLowerError::Load(zeroship_migrate::IrLoadError::Validate(ae)) => {

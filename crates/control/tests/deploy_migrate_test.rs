@@ -467,6 +467,19 @@ async fn column_exists(
     !rows.is_empty()
 }
 
+/// Does an index named `idx` exist in the per-app schema `<app_id>`?
+async fn index_exists(conn: &compio_postgres::Client, app_id: &Uuid, idx: &str) -> bool {
+    let schema = app_id.to_string();
+    let rows = conn
+        .query(
+            "SELECT 1 FROM pg_indexes WHERE schemaname = $1 AND indexname = $2",
+            &[&schema, &idx],
+        )
+        .await
+        .expect("query pg_indexes");
+    !rows.is_empty()
+}
+
 /// Does a FOREIGN KEY constraint exist on `<app_id>.<table>`?
 async fn fk_exists(conn: &compio_postgres::Client, app_id: &Uuid, table: &str) -> bool {
     let schema = app_id.to_string();
@@ -631,6 +644,64 @@ async fn deploy_migrate_refuses_bare_name_drop_index() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+    cleanup_app(&conn, &app_id).await;
+}
+
+// HOSTILE (MED-1, code-critic) — a `dropIndex` that UNDER-DECLARES uniqueness
+// (`unique:false`) on an index that is ACTUALLY UNIQUE in the live catalog must
+// STILL be gated destructive/requires_approval and REFUSED under `Approval::None`.
+// The deploy path resolves the index's true uniqueness from the introspected live
+// schema (`LiveSchema::unique_indexes`) and OR-s it with the hint, so a
+// hostile/buggy author cannot bypass the approval gate by lying about the flag.
+// Driven through the REAL deploy entrypoint on real PG. Pre-fix the gate trusted
+// the (false) hint alone, so the unique index would have dropped SILENTLY.
+#[compio::test]
+async fn deploy_migrate_refuses_understated_unique_drop_from_live_fact() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    // 0001 — create a table + a UNIQUE index on it (named so 0002 can target it).
+    let create = r#"{"ir_version":1,"name":"create_users","ops":[
+        {"op":"createTable","name":"users","columns":[
+            {"name":"email","type":"text","nullable":false}
+        ]},
+        {"op":"createIndex","table":"users","columns":["email"],
+         "name":"users_email_uniq","unique":true}
+    ]}"#;
+    let dir1 = migrations_dir(&[("0001_create_users.ir.json", create)]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir1)
+        .await
+        .expect("0001 createTable + unique createIndex applies");
+    assert!(
+        index_exists(&conn, &app_id, "users_email_uniq").await,
+        "the unique index must exist after 0001"
+    );
+    let _ = std::fs::remove_dir_all(&dir1);
+
+    // 0002 — a dropIndex that LIES about uniqueness (`unique:false`) on the
+    // actually-unique `users_email_uniq`. The live fact must override the hint:
+    // destructive ⇒ refused under Approval::None; the index survives.
+    let drop = r#"{"ir_version":1,"name":"drop_uniq","ops":[
+        {"op":"dropIndex","name":"users_email_uniq","table":"users","unique":false}
+    ]}"#;
+    let dir2 = migrations_dir(&[("0002_drop_uniq.ir.json", drop)]);
+    let err = apply_bundle_migrations(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect_err("an understated-unique drop of a LIVE-unique index must be refused");
+    assert!(
+        matches!(err, DeployMigrateError::Apply(_) | DeployMigrateError::Ir { .. }),
+        "expected a destructive-refusal (Apply) or gate (Ir) error, got {err:?}"
+    );
+    assert!(
+        index_exists(&conn, &app_id, "users_email_uniq").await,
+        "the unique index must SURVIVE the refused drop (nothing applied)"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir2);
     cleanup_app(&conn, &app_id).await;
 }
 

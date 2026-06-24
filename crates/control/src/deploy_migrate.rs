@@ -50,14 +50,14 @@
 //! surface / expand-contract across deploys (schema-authority §8.4), not a
 //! creator's routine deploy.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use uuid::Uuid;
 use zeroship_migrate::{
     compute_manifest, connect, load_dir_migrations, provision_migrator, Approval, ConnectError,
-    DriftError, EngineError, ExecutorConfig, IrAuthor, LoadAndLowerGuardedError, LoaderError,
-    MigrationBackend, MigrationEngine, PostgresBackend, RoleError, SqlDialect,
+    DriftError, EngineError, ExecutorConfig, IrAuthor, LiveSchema, LoadAndLowerGuardedError,
+    LoaderError, MigrationBackend, MigrationEngine, PostgresBackend, RoleError, SqlDialect,
 };
 
 /// What a successful deploy-migrate produced (for logging / the deploy log).
@@ -333,7 +333,23 @@ async fn apply_bundle_ir_migrations(
     let live = backend.snapshot_schema(exec_cfg).await?;
     let mut registry: BTreeMap<String, String> =
         live.tables.keys().map(|t| (t.clone(), app.clone())).collect();
-    let mut live_tables: BTreeSet<String> = live.tables.keys().cloned().collect();
+    // The IR-path Lower's live facts: the live table set (FK inline-vs-defer) PLUS
+    // the set of index NAMES the live catalog reports as UNIQUE. The latter is the
+    // AUTHORITATIVE source for the `dropIndex` destructive/approval gate — a drop of
+    // a live-unique index lowers `destructive + requires_approval` regardless of the
+    // IR's advisory `unique` hint (a hostile/buggy author cannot under-declare it to
+    // bypass the gate). Introspected the SAME way the differ's `render_drop_index`
+    // reads `IndexSnapshot::unique`.
+    let mut live_schema = LiveSchema {
+        tables: live.tables.keys().cloned().collect(),
+        unique_indexes: live
+            .tables
+            .values()
+            .flat_map(|t| t.indexes.iter())
+            .filter(|idx| idx.unique)
+            .map(|idx| idx.name.clone())
+            .collect(),
+    };
 
     let engine = MigrationEngine::new();
     let mut applied: Vec<String> = Vec::new();
@@ -356,7 +372,7 @@ async fn apply_bundle_ir_migrations(
         // the exact op-index + kind attribution, not a bare whole-`up` denial.
         let author = IrAuthor::new(app.clone(), app.clone(), SqlDialect::Postgres);
         let lowered = author
-            .load_and_lower_guarded(&bytes, &app, &registry, &live_tables, guard_cfg)
+            .load_and_lower_guarded(&bytes, &app, &registry, &live_schema, guard_cfg)
             .map_err(|source| DeployMigrateError::Ir { file: file.clone(), source })?;
 
         // Plan (Confined guard re-run as line-1) + apply under Approval::None — a
@@ -373,7 +389,7 @@ async fn apply_bundle_ir_migrations(
         // owned-by-the-deployer + live.
         for t in lowered.created_tables {
             registry.entry(t.clone()).or_insert_with(|| app.clone());
-            live_tables.insert(t);
+            live_schema.tables.insert(t);
         }
     }
 
