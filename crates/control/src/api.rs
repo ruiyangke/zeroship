@@ -716,6 +716,24 @@ async fn run_deploy_migrations(
                 skipped = report.skipped.len(),
                 "control: deploy-migrate applied"
             );
+            // PR7 (§2.0.2): the routine deploy applies under `Approval::None`, so
+            // `pending_contract` is ALWAYS empty here (an online-rename EXPAND is
+            // refused before it can complete + surface a pending contract). The
+            // approved out-of-band apply surface is the only producer. We still
+            // surface the signal at this boundary — never silently drop it — so that
+            // when the approved surface is wired through a deploy handler the owed
+            // CONTRACT (the C2 drop-old-column that, if lost, leaves a forever-pending
+            // dual-write trigger + orphaned old column) is recorded for the control
+            // plane to schedule the follow-up approved deploy, not dropped.
+            if !report.pending_contract.is_empty() {
+                tracing::warn!(
+                    app_id = %app_id,
+                    pending_contract = ?report.pending_contract,
+                    "control: deploy-migrate completed an online-rename EXPAND; a follow-up \
+                     APPROVED contract deploy (drop old column) is OWED (§2.0.2 cross-deploy \
+                     expand-contract) — the control plane must schedule it"
+                );
+            }
             Ok(())
         }
         Err(e) => {

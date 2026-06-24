@@ -250,6 +250,16 @@ pub async fn apply_bundle_migrations(
 /// change). A destructive DDL op also applies here (approval covers the whole set),
 /// so callers MUST gate access to this surface on a real approval decision.
 ///
+/// SCOPE WARNING (deferred to the approval-workflow wiring wave): this is a COARSE,
+/// bundle-wide [`Approval::Approved`] — approving an online-rename also green-lights
+/// any UNRELATED destructive op (e.g. a `dropTable`) co-bundled in the same
+/// `migrations_dir`. It is NOT exploitable today (no production caller drives this
+/// surface; the routine deploy at `api.rs` correctly uses [`Approval::None`]). When
+/// the control-plane approval endpoint is wired, it MUST scope approval to the
+/// specific reviewed version-ids (or split expand-approval from arbitrary-destructive
+/// approval) rather than handing this whole-bundle flag to an attacker-influenced set,
+/// so approving a rename cannot blanket-authorize co-bundled destructive DDL.
+///
 /// # Errors
 /// [`DeployMigrateError`] on connect / provision / load / apply failure (incl. a
 /// genuine mid-expand `OnlineExpand` failure that is NOT the approval refusal).

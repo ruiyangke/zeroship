@@ -1130,6 +1130,22 @@ async fn deploy_migrate_renamecolumn_approved_completes_expand_and_surfaces_pend
          drop-old-column owed to a later approved deploy), got {outcome:?}"
     );
 
+    // PR7 code-critic MED-2 (this fix): the owed-CONTRACT signal must SURVIVE the
+    // deploy-function boundary as the concrete version-id record the api.rs deploy
+    // handler surfaces (not silently dropped). Each pending id is a real, deterministic
+    // version string — the C2 drop-old-column record whose loss would orphan the old
+    // column behind a forever-pending dual-write trigger. Pin that the record reaches
+    // the caller intact (the seam api.rs now logs at WARN rather than discarding).
+    assert!(
+        outcome
+            .pending_contract
+            .iter()
+            .all(|v| !v.trim().is_empty()),
+        "every owed CONTRACT version id must be a concrete, non-empty record the control \
+         plane can schedule a follow-up approved deploy from, got {:?}",
+        outcome.pending_contract
+    );
+
     // The NEW column EXISTS (E1 ADD COLUMN applied) and the OLD column is STILL
     // present (the contract has NOT run — the cross-deploy partition).
     assert!(

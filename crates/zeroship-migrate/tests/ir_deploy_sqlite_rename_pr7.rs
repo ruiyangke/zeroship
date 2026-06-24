@@ -238,6 +238,138 @@ async fn deploy_renamecolumn_refused_under_no_approval_on_real_sqlite() {
     );
 }
 
+/// A one-text-field descriptor carrying a UNIQUE index on that field.
+fn descriptor_unique(table: &str, field: &str, index: &str) -> CollectionDescriptor {
+    CollectionDescriptor {
+        name: table.into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: field.into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![zeroship_migrate::declarative::IndexDescriptor {
+            name: index.into(),
+            columns: vec![field.into()],
+            unique: true,
+        }],
+    }
+}
+
+// PR7 code-critic MED-3 (this fix) — the SQLite peer of
+// `deploy_migrate_refuses_understated_unique_drop_from_live_fact`. A `dropIndex`
+// that LIES about uniqueness (`unique:false`) on an actually-UNIQUE index must be
+// REFUSED on the SQLite go-live path under Approval::None — the authoritative source
+// is the descriptor-derived unique-index set the deploy threads into the SQLite
+// `LiveSchema` (was discarded pre-fix, reopening the approval-gate hole the PG path
+// closes). The index survives; nothing applied.
+#[compio::test]
+async fn deploy_understated_unique_drop_refused_on_real_sqlite() {
+    let p = paths("uniq_drop_refused");
+    let be = backend(&p);
+
+    // Deploy #1: createTable users(email) + a UNIQUE index on email — op.* only.
+    let v1 = [descriptor_unique("users", "email", "users_email_uniq")];
+    let create = r#"{"ir_version":1,"name":"create_users","ops":[
+        {"op":"createTable","name":"users","columns":[{"name":"email","type":"text","nullable":false}]},
+        {"op":"createIndex","table":"users","columns":["email"],"name":"users_email_uniq","unique":true}
+    ]}"#;
+    write_ir(&p, "0001_create_users.ir.json", create);
+    apply_bundle_ir_sqlite(
+        &be, PROJECT, APP, &v1, &p.migrations, &exec_cfg(),
+        &GuardConfig::confined(PROJECT), Approval::None,
+    )
+    .await
+    .expect("createTable + unique createIndex deploy must succeed");
+
+    // Deploy #2: a dropIndex understating the unique index as `unique:false`. The
+    // descriptor-derived unique set must override the hint ⇒ destructive ⇒ refused
+    // under Approval::None.
+    clear_migrations(&p);
+    let drop = r#"{"ir_version":1,"name":"drop_uniq","ops":[
+        {"op":"dropIndex","name":"users_email_uniq","table":"users","unique":false}
+    ]}"#;
+    write_ir(&p, "0002_drop_uniq.ir.json", drop);
+    let err = apply_bundle_ir_sqlite(
+        &be, PROJECT, APP, &v1, &p.migrations, &exec_cfg(),
+        &GuardConfig::confined(PROJECT), Approval::None,
+    )
+    .await
+    .expect_err("an understated-unique drop of a descriptor-unique index must be refused");
+    assert!(
+        matches!(err, SqliteIrApplyError::Apply(_)),
+        "expected an apply-time destructive refusal, got {err:?}"
+    );
+
+    // The index SURVIVES the refused drop (nothing applied).
+    let idx = be
+        .actor()
+        .query("SELECT name FROM main.sqlite_master WHERE type='index' AND name='users_email_uniq'")
+        .await
+        .expect("query sqlite_master");
+    assert!(
+        idx.iter().any(|r| r[0].as_deref() == Some("users_email_uniq")),
+        "the unique index must SURVIVE the refused drop"
+    );
+}
+
+// PR7 code-critic MED-4 (this fix) — the descriptor-set contract is FAIL-CLOSED. The
+// SQLite leg's structural rebuild facts come from the END-STATE descriptor set (a
+// `sqlite_master` read can't recover the SDK-`Value` facets), so a multi-file deploy
+// whose LATER file depends on an INTERMEDIATE structural state produced by an EARLIER
+// file in the same directory CANNOT be represented — the rename's `from` column is not
+// in the descriptor-pinned live facts. This must FAIL CLOSED (refuse to emit a wrong
+// rebuild), never silently apply against the wrong shape. (Pins the chosen contract:
+// single-structural-op-per-directory / end-state descriptors; multi-file intermediate
+// state is rejected.)
+#[compio::test]
+async fn deploy_multi_file_intermediate_rename_fails_closed_on_real_sqlite() {
+    let p = paths("multi_file_intermediate");
+    let be = backend(&p);
+
+    // ONE deploy directory with TWO files: 0001 createTable people(nickname) and
+    // 0002 renameColumn nickname → handle. The descriptor set is the END-STATE
+    // (post-rename: `handle`), so 0002's rename `from=nickname` is NOT in the live
+    // facts the descriptor set pins.
+    let create = r#"{"ir_version":1,"name":"create_people","ops":[
+        {"op":"createTable","name":"people","columns":[{"name":"nickname","type":"text","nullable":false}]}
+    ]}"#;
+    let rename = r#"{"ir_version":1,"name":"rename_nickname","ops":[
+        {"op":"renameColumn","table":"people","from":"nickname","to":"handle","type":"text"}
+    ]}"#;
+    write_ir(&p, "0001_create_people.ir.json", create);
+    write_ir(&p, "0002_rename_nickname.ir.json", rename);
+    // The end-state descriptor set: the column is ALREADY `handle` (post-rename).
+    let end_state = [descriptor("people", "handle")];
+
+    let err = apply_bundle_ir_sqlite(
+        &be, PROJECT, APP, &end_state, &p.migrations, &exec_cfg(),
+        &GuardConfig::confined(PROJECT), Approval::Approved,
+    )
+    .await
+    .expect_err(
+        "a multi-file deploy needing the post-createTable intermediate shape must FAIL CLOSED \
+         (the end-state descriptors don't carry the pre-rename `nickname` column)",
+    );
+    assert!(
+        matches!(err, SqliteIrApplyError::Ir { .. }),
+        "expected a fail-closed IR lower error (rename needs the live `from` column), got {err:?}"
+    );
+
+    // Nothing partial: the table was created by 0001 but the rename did NOT apply, so
+    // the column is still `nickname` (no silent wrong rebuild to `handle`).
+    let info = be.actor().query("PRAGMA main.table_info(people)").await.expect("table_info");
+    assert!(
+        info.iter().any(|r| r[1].as_deref() == Some("nickname")),
+        "0001 created the table with `nickname`; the fail-closed 0002 must not have rebuilt it"
+    );
+    assert!(
+        info.iter().all(|r| r[1].as_deref() != Some("handle")),
+        "the rename must NOT have applied — no silent wrong rebuild"
+    );
+}
+
 /// A two-text-field descriptor (for the hero's post-add live shape).
 fn descriptor3(table: &str, a: &str, b: &str, c: &str) -> CollectionDescriptor {
     CollectionDescriptor {
