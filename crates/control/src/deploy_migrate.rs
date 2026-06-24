@@ -255,20 +255,20 @@ pub async fn apply_bundle_migrations(
 /// so callers MUST gate access to this surface on a real approval decision.
 ///
 /// WIRING PRECONDITIONS (HARD — do NOT wire this surface into a production deploy
-/// handler until BOTH are satisfied; the regression test
+/// handler until the remaining one is satisfied; the regression test
 /// `production_deploy_handler_never_wires_the_unguarded_approved_go_live_surface`
 /// fails RED the instant it is wired):
 ///
-/// 1. §2.0.3 CROSS-DEPLOY PENDING-CONTRACT INTERLOCK. The [`MigrateOutcome::
-///    pending_contract`] this surface returns when a PG EXPAND completes is a TRANSIENT
-///    value only — it is NOT journaled as an outstanding obligation and no later deploy
-///    reads it back. Before a production caller exists, the owed contract MUST be
-///    persisted (a Pending phase keyed by table+version) AND the §2.0.3(2) fail-closed
-///    refusal implemented (refuse a subsequent deploy whose ops touch a table with an
-///    OUTSTANDING pending contract) together with §2.0.3(3) orphan handling. Without
-///    this, a completed EXPAND whose follow-up contract deploy never runs leaves the old
-///    column behind a forever-pending dual-write trigger with no engine-level guard.
-/// 2. PER-VERSION APPROVAL SCOPING (the SCOPE WARNING below).
+/// 1. §2.0.3 CROSS-DEPLOY PENDING-CONTRACT INTERLOCK — **SATISFIED (PR9a).** The
+///    owed contract IS now journaled as a durable outstanding obligation (keyed on a
+///    deterministic, re-lower-stable version, §2.0.1), the §2.0.3(2) fail-closed
+///    refusal IS implemented (a subsequent deploy whose ops touch a table with an
+///    OUTSTANDING pending contract is refused with `TABLE_HAS_PENDING_CONTRACT`), the
+///    §2.0.3(3) orphan case IS surfaced by `status`, and `resolve-pending
+///    --apply|--abort` discharges it. The whole-deploy project advisory lock is held
+///    across the entire multi-file IR loop, so the obligation read-back is race-free.
+///    This precondition is met; it is no longer what gates the surface.
+/// 2. PER-VERSION APPROVAL SCOPING (the SCOPE WARNING below) — **the remaining gate.**
 ///
 /// SCOPE WARNING (deferred to the approval-workflow wiring wave): this is a COARSE,
 /// bundle-wide [`Approval::Approved`] — approving an online-rename also green-lights
@@ -563,6 +563,26 @@ async fn apply_bundle_ir_migrations(
     // traceability/anti-tamper seam the `.sql` path has (H2 follow-up, §8 point 5).
     let mut ir_lowered_all: Vec<zeroship_migrate::Migration> = Vec::new();
 
+    // PR9a MED — hold the project advisory lock across the ENTIRE multi-file IR
+    // loop, not per-file (§2.0.3(1) "the lock is held across the ENTIRE deploy").
+    // Pre-fix each file applied with `LockMode::Acquire`, so the lock was taken AND
+    // released PER FILE; between files it was free, letting a concurrent same-project
+    // deploy interleave at file boundaries — a multi-file deploy was not atomic and
+    // the cross-deploy interlock's "race-free by the held lock" argument did not
+    // hold for the whole deploy. We now acquire ONCE here and drive every file with
+    // `LockMode::AlreadyHeld` (skip the per-file acquire/release), releasing ONCE on
+    // EVERY exit path below — mirroring `apply_declarative`'s H10 single-acquire /
+    // single-release discipline. The same `pg_advisory_lock(hashtext(project))` key
+    // means the whole IR deploy serializes against any concurrent same-project
+    // deploy/rollback, while a DIFFERENT project (different key) never blocks.
+    backend
+        .acquire_project_lock(&exec_cfg.project_id)
+        .await
+        .map_err(|e| DeployMigrateError::from(EngineError::from(e)))?;
+
+    // Run the whole file loop under the held lock, capturing the result so the lock
+    // is released on EVERY path (success/error/early-return) before we surface it.
+    let loop_result: Result<(), DeployMigrateError> = async {
     for path in &ir_files {
         let file = path
             .file_name()
@@ -592,17 +612,20 @@ async fn apply_bundle_ir_migrations(
 
         // Route the file's plan through the SINGLE shared plan orchestrator
         // `apply_plan` (§5.2 — realizing the PR0 AppliedPlan/apply_plan plumbing on
-        // the IR path), NOT the flat `engine.apply`. `LockMode::Acquire` takes the
-        // project advisory lock once for the whole plan; `apply_with_lock_backend`
-        // inside re-runs the Confined guard + the destructive/approval gate under
-        // `Approval::None`, so a destructive op is refused at deploy exactly like the
-        // `.sql` path. For PR1's pure-DDL ops every step is `Ddl` (coalesced into one
-        // batch — byte-identical journaling to the pre-fix `engine.apply` path).
-        // §2.0.3 — thread the artifact's full op-list touched-set into the engine's
-        // cross-deploy pending-contract interlock. The read-back inside the held
-        // project lock fail-closed refuses ANY op (DDL or DML) touching a table with
-        // an outstanding online-rename contract from a prior deploy (mapped to a
-        // deploy error → the creator's 4xx).
+        // the IR path), NOT the flat `engine.apply`. `LockMode::AlreadyHeld` reuses
+        // the WHOLE-deploy project advisory lock acquired before this loop (PR9a MED
+        // — §2.0.3(1)); `apply_with_lock_backend` inside re-runs the Confined guard +
+        // the destructive/approval gate under `Approval::None`, so a destructive op
+        // is refused at deploy exactly like the `.sql` path. For PR1's pure-DDL ops
+        // every step is `Ddl` (coalesced into one batch — byte-identical journaling
+        // to the pre-fix `engine.apply` path). §2.0.3 — thread the artifact's full
+        // op-list touched-set into the engine's cross-deploy pending-contract
+        // interlock. The read-back inside the held project lock fail-closed refuses
+        // ANY op (DDL or DML) touching a table with an outstanding online-rename
+        // contract from a prior deploy (mapped to a deploy error → the creator's
+        // 4xx). Because the lock is held for the WHOLE loop, that read-back sees a
+        // consistent committed obligation set across all files, never a mid-deploy
+        // interleave from a racing same-project deploy.
         let outcome = engine
             .apply_plan_with_touched(
                 &lowered.plan.steps,
@@ -611,7 +634,7 @@ async fn apply_bundle_ir_migrations(
                 backend,
                 exec_cfg,
                 "deploy-ir",
-                LockMode::Acquire,
+                LockMode::AlreadyHeld,
             )
             .await
             .map_err(DeployMigrateError::from)?;
@@ -634,6 +657,21 @@ async fn apply_bundle_ir_migrations(
             live_schema.tables.insert(t);
         }
     }
+    Ok(())
+    }
+    .await;
+
+    // RELEASE the whole-deploy project lock on EVERY path (PR9a MED). Surface the
+    // loop's error first; a release failure is only logged (the lock auto-releases
+    // on session end regardless), mirroring `apply_declarative`'s release-or-warn.
+    if let Err(e) = backend.release_project_lock(&exec_cfg.project_id).await {
+        tracing::warn!(
+            error = %e,
+            project = %exec_cfg.project_id,
+            "deploy-migrate: failed to release whole-deploy project lock after IR loop (PR9a MED)"
+        );
+    }
+    loop_result?;
 
     // SET-LEVEL integrity manifest over the discovered+lowered `.ir.json` set
     // (§8 point 5). Mirrors the `.sql` path's `compute_manifest` traceability log:

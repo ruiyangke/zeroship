@@ -618,27 +618,34 @@ async fn deploy_migrate_applies_sql_and_ir_together() {
     cleanup_app(&conn, &app_id).await;
 }
 
-// PR7 code-critic MED (§2.0.3 cross-deploy pending-contract interlock) — ENFORCED
-// no-production-caller invariant.
+// §2.0.3 cross-deploy pending-contract interlock — ENFORCED no-production-caller
+// invariant.
 //
-// The completed-EXPAND `pending_contract` is a transient return value: it is NOT
-// journaled as an outstanding obligation, and no later deploy reads it back, so the
-// spec-mandated §2.0.3 fail-closed interlock (refuse a subsequent deploy whose ops
-// touch a table with an OUTSTANDING pending contract; handle the orphan case) is NOT
-// implemented yet. Until it IS, the `apply_bundle_migrations_approved` go-live surface
-// MUST NOT be wired into a production deploy handler — otherwise a completed EXPAND
-// whose follow-up contract deploy never runs leaves the old column behind a
-// forever-pending dual-write trigger with NO engine-level guard, and a second op on
-// that table would NOT be refused.
+// POST-PR9a STATE (this comment updated): the §2.0.3 interlock IS implemented,
+// persisted, and enforced. A completed EXPAND journals a DURABLE obligation
+// (keyed on a deterministic, re-lower-stable version, §2.0.1); a later deploy
+// whose ops touch the pending table IS fail-closed refused with
+// `TABLE_HAS_PENDING_CONTRACT` (the `apply_bundle_ir_migrations` loop reads the
+// obligation back under the WHOLE-deploy project lock); an orphan IS surfaced by
+// `status`; and `resolve-pending --apply|--abort` discharges it. So the OLD reason
+// for this gate ("the interlock is not implemented yet, the obligation is not
+// journaled / read back") is NO LONGER why the approved go-live surface stays
+// test-only.
+//
+// The approved `apply_bundle_migrations_approved` go-live surface remains gated for
+// the OTHER reason: PR9b PER-VERSION APPROVAL SCOPING is not wired yet — the
+// current approved flag is a coarse, bundle-wide `Approval::Approved` that would
+// also green-light any UNRELATED destructive op co-bundled in the same dir. Until
+// the control-plane approval endpoint scopes approval to the specific reviewed
+// version-ids, this surface MUST NOT be wired into a production deploy handler.
 //
 // This is the SAFETY pin: the ONLY production deploy entry point
 // (`api.rs::run_deploy_migrations`) uses the ROUTINE `apply_bundle_migrations`
 // (`Approval::None`, which refuses the EXPAND before it can complete + owe a contract),
 // and NEVER the approved surface. The instant someone wires the approved surface into
-// the production deploy path without first persisting+enforcing the §2.0.3 interlock,
-// this test goes RED — converting the doc-only "no production caller" guarantee into a
-// regression-pinned invariant. The approved/SQLite-go-live surfaces stay test-only by
-// construction, not by promise.
+// the production deploy path before per-version approval scoping lands, this test goes
+// RED — keeping the test-only status of the approved/SQLite-go-live surfaces a
+// regression-pinned invariant, not a promise.
 #[test]
 fn production_deploy_handler_never_wires_the_unguarded_approved_go_live_surface() {
     let api_src = include_str!("../src/api.rs");
@@ -1245,6 +1252,337 @@ async fn deploy_migrate_renamecolumn_approved_completes_expand_and_surfaces_pend
     let _ = std::fs::remove_dir_all(&dir1);
     let _ = std::fs::remove_dir_all(&dir2);
     cleanup_app(&conn, &app_id).await;
+}
+
+// PR9a MED-2 — CROSS-DEPLOY pending-contract refusal through the REAL production
+// `.ir.json` deploy path (`apply_bundle_migrations` → `apply_bundle_ir_migrations`
+// → `MigrationIr::touched_tables()` → engine interlock). Deploy #2 (APPROVED)
+// completes an online rename's EXPAND, opening a durable obligation on `members`;
+// deploy #3 (routine) ships a SECOND `.ir.json` whose op list TOUCHES `members`
+// (an `addColumn`). The interlock reads the committed obligation back under the
+// held project lock and FAIL-CLOSED refuses with `TABLE_HAS_PENDING_CONTRACT`,
+// applying NOTHING. This exercises the production touched-set derivation end to
+// end — NOT a hand-built touched slice injected into the engine.
+#[compio::test]
+async fn deploy_migrate_ddl_touching_pending_table_is_refused_e2e() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    // Deploy #1: create members(handle text).
+    let create = r#"{"ir_version":1,"name":"create_members","ops":[
+        {"op":"createTable","name":"members","columns":[
+            {"name":"handle","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    let dir1 = migrations_dir(&[("0001_create_members.ir.json", create)]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir1)
+        .await
+        .expect("createTable deploy must succeed");
+
+    // Deploy #2 (APPROVED): renameColumn handle → username completes EXPAND and
+    // opens the durable pending contract on `members`.
+    let rename = r#"{"ir_version":1,"name":"rename_handle","ops":[
+        {"op":"renameColumn","table":"members","from":"handle","to":"username","type":"text"}
+    ]}"#;
+    let dir2 = migrations_dir(&[("0002_rename_handle.ir.json", rename)]);
+    apply_bundle_migrations_approved(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect("approved rename completes EXPAND + opens the obligation");
+
+    // Deploy #3 (routine): a SECOND `.ir.json` whose op list touches `members`
+    // (addColumn nickname). The interlock refuses it via the REAL touched_tables().
+    let touch = r#"{"ir_version":1,"name":"add_nickname","ops":[
+        {"op":"addColumn","table":"members","column":"nickname","type":"text","nullable":true}
+    ]}"#;
+    let dir3 = migrations_dir(&[("0003_add_nickname.ir.json", touch)]);
+    let err = apply_bundle_migrations(&admin_dsn(), &app_id, &dir3)
+        .await
+        .expect_err("a deploy touching the pending table must be refused");
+    match err {
+        DeployMigrateError::Apply(zeroship_migrate::EngineError::PendingContract(payload)) => {
+            assert_eq!(payload.code, zeroship_migrate::CODE_TABLE_HAS_PENDING_CONTRACT);
+            assert_eq!(payload.table, "members");
+            assert_eq!(payload.apply_action.command, "migrate resolve-pending --apply");
+        }
+        other => panic!("expected a TABLE_HAS_PENDING_CONTRACT refusal, got {other:?}"),
+    }
+
+    // FAIL CLOSED: the touching column was NOT added.
+    assert!(
+        !column_exists(&conn, &app_id, "members", "nickname").await,
+        "the refused deploy applied NOTHING"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir1);
+    let _ = std::fs::remove_dir_all(&dir2);
+    let _ = std::fs::remove_dir_all(&dir3);
+    cleanup_app(&conn, &app_id).await;
+}
+
+// PR9a MED-2 (DML clause) — the §2.0.3(2) "any op (DDL or DML)" requirement: a
+// DML-ONLY second deploy (an `insert` into the pending table) is ALSO refused via
+// the REAL `MigrationIr::touched_tables()` derivation (a DML op contributes its
+// target table to the touched-set). Proves the interlock is not DDL-only.
+#[compio::test]
+async fn deploy_migrate_dml_only_touching_pending_table_is_refused_e2e() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    let create = r#"{"ir_version":1,"name":"create_members","ops":[
+        {"op":"createTable","name":"members","columns":[
+            {"name":"handle","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    let dir1 = migrations_dir(&[("0001_create_members.ir.json", create)]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir1)
+        .await
+        .expect("createTable deploy must succeed");
+
+    let rename = r#"{"ir_version":1,"name":"rename_handle","ops":[
+        {"op":"renameColumn","table":"members","from":"handle","to":"username","type":"text"}
+    ]}"#;
+    let dir2 = migrations_dir(&[("0002_rename_handle.ir.json", rename)]);
+    apply_bundle_migrations_approved(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect("approved rename completes EXPAND + opens the obligation");
+
+    // Deploy #3 (routine, DML ONLY): an insert into `members`. The DML op's target
+    // table is in the touched-set, so the interlock refuses it.
+    let dml = r#"{"ir_version":1,"name":"seed_member","ops":[
+        {"op":"insert","table":"members","columns":["username"],"rows":[["ada"]]}
+    ]}"#;
+    let dir3 = migrations_dir(&[("0003_seed_member.ir.json", dml)]);
+    let err = apply_bundle_migrations(&admin_dsn(), &app_id, &dir3)
+        .await
+        .expect_err("a DML-only deploy touching the pending table must be refused");
+    match err {
+        DeployMigrateError::Apply(zeroship_migrate::EngineError::PendingContract(payload)) => {
+            assert_eq!(payload.code, zeroship_migrate::CODE_TABLE_HAS_PENDING_CONTRACT);
+            assert_eq!(payload.table, "members");
+        }
+        other => panic!(
+            "expected a TABLE_HAS_PENDING_CONTRACT refusal for a DML-only touch \
+             (§2.0.3(2) 'any op DDL or DML'), got {other:?}"
+        ),
+    }
+
+    // FAIL CLOSED: no row was inserted (the table still has 0 rows).
+    let schema = app_id.to_string();
+    let rows = conn
+        .query(&format!("SELECT 1 FROM \"{schema}\".members"), &[])
+        .await
+        .expect("count members rows");
+    assert!(rows.is_empty(), "the refused DML deploy inserted NOTHING");
+
+    let _ = std::fs::remove_dir_all(&dir1);
+    let _ = std::fs::remove_dir_all(&dir2);
+    let _ = std::fs::remove_dir_all(&dir3);
+    cleanup_app(&conn, &app_id).await;
+}
+
+// PR9a MED §2.0.3(a1) — TWO REAL CONCURRENT DEPLOYS OF ONE PROJECT SERIALIZE on
+// the held project advisory lock, producing one of the two legal serial journals.
+// Deploy A is a SLOW approved online-rename (its EXPAND backfill runs a per-row
+// `pg_sleep` trigger so it is parked mid-deploy under the held lock); deploy B is a
+// concurrent routine deploy that TOUCHES the same table. Both share the
+// single-threaded compio runtime and open their OWN connections, so B's
+// `acquire_project_lock` cannot win until A releases. The interlock then refuses B
+// (it touches the table A's now-committed pending contract guards). We assert B
+// finished AFTER A committed (serial, never a both-mid-apply interleave) and that B
+// is the legal REFUSED order — never a half-applied B.
+#[compio::test]
+async fn deploy_migrate_two_concurrent_same_project_deploys_serialize_a1() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+    let schema = app_id.to_string();
+
+    // Deploy #1: create members(handle) + seed rows so A's EXPAND backfill is real.
+    let create = r#"{"ir_version":1,"name":"create_members","ops":[
+        {"op":"createTable","name":"members","columns":[
+            {"name":"handle","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    let dir1 = migrations_dir(&[("0001_create_members.ir.json", create)]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir1)
+        .await
+        .expect("createTable deploy must succeed");
+    for i in 0..30 {
+        conn.batch_execute(&format!(
+            "INSERT INTO \"{schema}\".members (id, handle, created_at, updated_at, version) \
+             VALUES ('m{i}', 'h{i}', now(), now(), 1)"
+        ))
+        .await
+        .expect("seed members");
+    }
+    // SLOW backfill: a BEFORE UPDATE trigger that sleeps per row, so A's EXPAND
+    // (which UPDATEs every row to mirror handle→username) is parked mid-deploy with
+    // the project lock held — a wide, reliable window for B to attempt to acquire.
+    conn.batch_execute(&format!(
+        "CREATE OR REPLACE FUNCTION \"{schema}\".\"_slow_bf\"() RETURNS trigger \
+           LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.05); RETURN NEW; END; $$;
+         CREATE TRIGGER \"_slow_bf_trg\" BEFORE UPDATE ON \"{schema}\".members \
+           FOR EACH ROW EXECUTE FUNCTION \"{schema}\".\"_slow_bf\"();"
+    ))
+    .await
+    .expect("install slow-backfill trigger");
+
+    // Deploy A (slow approved rename): completes EXPAND under the held lock + opens
+    // the obligation. Run on a spawned task.
+    let rename = r#"{"ir_version":1,"name":"rename_handle","ops":[
+        {"op":"renameColumn","table":"members","from":"handle","to":"username","type":"text"}
+    ]}"#;
+    let dir_a = migrations_dir(&[("0002_rename_handle.ir.json", rename)]);
+    let dsn_a = admin_dsn();
+    let app_a = app_id;
+    let dir_a_clone = dir_a.clone();
+    let a_done = std::rc::Rc::new(std::cell::Cell::new(false));
+    let a_done_task = a_done.clone();
+    let deploy_a = compio::runtime::spawn(async move {
+        let r = apply_bundle_migrations_approved(&dsn_a, &app_a, &dir_a_clone).await;
+        a_done_task.set(true);
+        r
+    });
+
+    // Deploy B (concurrent routine touch of members) — must BLOCK on the project
+    // lock until A commits, THEN be refused by the interlock (the legal serial
+    // order is "A then refused-B"). Yield first so A acquires the lock before B.
+    let touch = r#"{"ir_version":1,"name":"add_nickname","ops":[
+        {"op":"addColumn","table":"members","column":"nickname","type":"text","nullable":true}
+    ]}"#;
+    let dir_b = migrations_dir(&[("0003_add_nickname.ir.json", touch)]);
+    // Spin until A has at least started (acquired its lock) so B genuinely contends.
+    while !a_done.get()
+        && conn
+            .query_one(
+                "SELECT count(*) FROM pg_locks WHERE locktype='advisory'",
+                &[],
+            )
+            .await
+            .map(|r| r.get::<_, i64>(0))
+            .unwrap_or(0)
+            == 0
+    {}
+    let b_result = apply_bundle_migrations(&admin_dsn(), &app_id, &dir_b).await;
+
+    // B could only finish after acquiring the lock, which A held until it committed
+    // its obligation — so by the time B returns, A is done.
+    assert!(a_done.get(), "B returned before A committed — the deploys interleaved (a1 violated)");
+    let a_outcome = deploy_a.await.expect("A task join");
+    a_outcome.expect("A (approved rename) completes its EXPAND");
+
+    // The legal serial journal is "A committed, B refused": B touched the table A's
+    // committed pending contract guards, so B is fail-closed refused — never a
+    // half-applied B.
+    match b_result {
+        Err(DeployMigrateError::Apply(zeroship_migrate::EngineError::PendingContract(p))) => {
+            assert_eq!(p.table, "members");
+        }
+        other => panic!("B must be refused with TABLE_HAS_PENDING_CONTRACT (A-then-B serial order), got {other:?}"),
+    }
+    assert!(
+        !column_exists(&conn, &app_id, "members", "nickname").await,
+        "the refused B applied NOTHING — no both-mid-apply interleave"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir1);
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
+    cleanup_app(&conn, &app_id).await;
+}
+
+// PR9a MED §2.0.3(a2) — CROSS-PROJECT INDEPENDENCE: a concurrent deploy of a
+// DIFFERENT project PROCEEDS while project P's online-rename backfill is in flight.
+// The lock is per-project (`pg_advisory_lock(hashtext(project))`), so a different
+// project key never blocks. We start P's slow approved rename, and while it is
+// parked under P's held lock, deploy a createTable to a SEPARATE project Q — which
+// must SUCCEED without waiting for P.
+#[compio::test]
+async fn deploy_migrate_different_project_proceeds_while_p_backfills_a2() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let p_id = fresh_app_id();
+    let q_id = fresh_app_id();
+    cleanup_app(&conn, &p_id).await;
+    cleanup_app(&conn, &q_id).await;
+    let p_schema = p_id.to_string();
+
+    // P deploy #1: create + seed members.
+    let create = r#"{"ir_version":1,"name":"create_members","ops":[
+        {"op":"createTable","name":"members","columns":[
+            {"name":"handle","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    let dirp1 = migrations_dir(&[("0001_create_members.ir.json", create)]);
+    apply_bundle_migrations(&admin_dsn(), &p_id, &dirp1)
+        .await
+        .expect("P createTable must succeed");
+    for i in 0..30 {
+        conn.batch_execute(&format!(
+            "INSERT INTO \"{p_schema}\".members (id, handle, created_at, updated_at, version) \
+             VALUES ('m{i}', 'h{i}', now(), now(), 1)"
+        ))
+        .await
+        .expect("seed P members");
+    }
+    conn.batch_execute(&format!(
+        "CREATE OR REPLACE FUNCTION \"{p_schema}\".\"_slow_bf\"() RETURNS trigger \
+           LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.05); RETURN NEW; END; $$;
+         CREATE TRIGGER \"_slow_bf_trg\" BEFORE UPDATE ON \"{p_schema}\".members \
+           FOR EACH ROW EXECUTE FUNCTION \"{p_schema}\".\"_slow_bf\"();"
+    ))
+    .await
+    .expect("install P slow-backfill trigger");
+
+    let rename = r#"{"ir_version":1,"name":"rename_handle","ops":[
+        {"op":"renameColumn","table":"members","from":"handle","to":"username","type":"text"}
+    ]}"#;
+    let dirp2 = migrations_dir(&[("0002_rename_handle.ir.json", rename)]);
+    let dsn_p = admin_dsn();
+    let app_p = p_id;
+    let dirp2_clone = dirp2.clone();
+    let deploy_p = compio::runtime::spawn(async move {
+        apply_bundle_migrations_approved(&dsn_p, &app_p, &dirp2_clone).await
+    });
+
+    // While P is (or is about to be) parked under its held lock, deploy Q — a
+    // DIFFERENT project. Its key is `hashtext(Q)`, distinct from P's, so it must
+    // PROCEED without blocking on P.
+    let q_create = r#"{"ir_version":1,"name":"create_widgets","ops":[
+        {"op":"createTable","name":"widgets","columns":[
+            {"name":"label","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    let dirq = migrations_dir(&[("0001_create_widgets.ir.json", q_create)]);
+    apply_bundle_migrations(&admin_dsn(), &q_id, &dirq)
+        .await
+        .expect("Q (different project) must PROCEED while P backfills (per-project lock)");
+    assert!(
+        column_exists(&conn, &q_id, "widgets", "label").await,
+        "Q's table was created without waiting for P"
+    );
+
+    // P also completes (its rename EXPAND).
+    deploy_p.await.expect("P task join").expect("P rename completes");
+
+    let _ = std::fs::remove_dir_all(&dirp1);
+    let _ = std::fs::remove_dir_all(&dirp2);
+    let _ = std::fs::remove_dir_all(&dirq);
+    cleanup_app(&conn, &p_id).await;
+    cleanup_app(&conn, &q_id).await;
 }
 
 // MED — a rename whose IR `type` DISAGREES with the live `from` column's actual

@@ -42,6 +42,46 @@ impl MigrationId {
         Self(typed_id::generate(MIGRATION_PREFIX))
     }
 
+    /// Mint a DETERMINISTIC, STABLE migration id from a domain `tag` + a content
+    /// `seed` (§2.0.1 sub-step versioning). The id is `SHA-256(tag || seed)` laid
+    /// out with the SAME high-48-bit `0xFF…FF` MARKER the loader's
+    /// `repeatable_id_for_name` / the IR author's `dml_id_from_seed` use — so a
+    /// derived sub-step id can **never** collide with a versioned migration id
+    /// (whose high 48 bits hold a small numeric file version) and two distinct
+    /// seeds collide only on an 80-bit SHA-256 prefix collision (negligible).
+    ///
+    /// This is the deterministic-derivation discipline §2.0.1 mandates for every
+    /// `PlanStep` sub-version (`step_id = uuidv7_derive(plan.version, step_index)`):
+    /// the `ExpandContractAuthor`'s E1..C2 ids are derived from the rename's stable
+    /// identity (`schema + owner + table + from + to + ty`) plus the step index, so
+    /// **re-lowering the identical `.ir.json` reproduces byte-identical ids** — the
+    /// property the cross-deploy obligation key, the idempotent re-run skip, the
+    /// auto-discharge recognition, and the self-EXPAND exemption all depend on. A
+    /// fresh `generate()` per lower (the bug this replaces) gives each deploy a
+    /// different obligation key for the same logical rename, breaking all four.
+    ///
+    /// Deterministic (same `tag`+`seed` ⇒ same id); no OS/random/time input.
+    ///
+    /// # Panics
+    /// Never in practice: the derived 16-byte UUID always base62-encodes to a valid
+    /// `mig_…` id that [`MigrationId::parse`] accepts.
+    #[must_use]
+    pub fn derive(tag: &str, seed: &[u8]) -> Self {
+        let mut h = Sha256::new();
+        h.update(tag.as_bytes());
+        h.update([0u8]);
+        h.update(seed);
+        let digest = h.finalize();
+        let mut bytes = [0u8; 16];
+        // High 48 bits = the derived/repeatable MARKER (never a real file version) ⇒
+        // never collides with a versioned id.
+        bytes[0..6].copy_from_slice(&[0xFFu8; 6]);
+        bytes[6..16].copy_from_slice(&digest[0..10]);
+        let uuid = uuid::Uuid::from_bytes(bytes);
+        Self::parse(&format!("mig_{}", typed_id::uuid_to_base62(&uuid)))
+            .expect("derived migration id is a valid mig_ typed id")
+    }
+
     /// Borrow the wire string (`mig_…`).
     #[must_use]
     pub fn as_str(&self) -> &str {

@@ -199,6 +199,38 @@ fn qualified(schema: &str, object: &str) -> String {
     format!("{}.{}", quote_ident(schema), quote_ident(object))
 }
 
+/// §2.0.1 sub-step indices for the online-rename sequence — folded into the
+/// rename's stable seed so each of E1..C2 derives a DISTINCT, reproducible id.
+/// These are the `step_index` half of `step_id = derive(rename_seed, step_index)`.
+const EC_STEP_E1: u8 = 1;
+const EC_STEP_E2: u8 = 2;
+const EC_STEP_E3: u8 = 3;
+const EC_STEP_C1: u8 = 4;
+const EC_STEP_C2: u8 = 5;
+
+/// Build the rename's STABLE identity seed (§2.0.1): a length-prefixed image of
+/// every fact that identifies the logical rename — `schema`, `owner`, `table`,
+/// `from`, `to`, `ty`. Length-prefixing each field makes the encoding injective
+/// (so `("a","bc")` and `("ab","c")` never collide). NOTHING per-run is folded
+/// (no time, no random), so re-lowering the identical `.ir.json` reproduces the
+/// SAME seed → the SAME E1..C2 ids. A semantically different rename (different
+/// `to`/`ty`) produces a different seed → fresh ids.
+fn rename_id_seed(
+    schema: &str,
+    owner: &str,
+    table: &str,
+    from: &str,
+    to: &str,
+    ty: &str,
+) -> Vec<u8> {
+    let mut seed = Vec::new();
+    for field in [schema, owner, table, from, to, ty] {
+        seed.extend_from_slice(&(field.len() as u64).to_be_bytes());
+        seed.extend_from_slice(field.as_bytes());
+    }
+    seed
+}
+
 /// The Postgres identifier length limit (`NAMEDATALEN - 1`), in bytes. Mirrors
 /// [`crate::author`]'s constant: an over-long name is silently truncated
 /// server-side, desyncing the name we emit in `up`/`down`. We cap it ourselves.
@@ -344,6 +376,17 @@ impl ExpandContractAuthor {
         // Structural rollback BEFORE the backfill runs is allowed (Plan 8 v1):
         // dropping the just-added nullable column is a clean reverse.
         let e1_down = Some(format!("ALTER TABLE {tbl_q} DROP COLUMN {to_q}"));
+        // §2.0.1 — the rename's STABLE identity seed. Every E1..C2 sub-step id is
+        // `MigrationId::derive("ec", seed || step_index)`, so a re-lower of the
+        // identical `.ir.json` (the production path re-lowers on EVERY deploy,
+        // `deploy_migrate.rs`) reproduces byte-identical ids. The seed folds the
+        // schema + owner + table + from + to + ty — every fact that identifies the
+        // logical rename — and NOTHING per-run (no time, no random). A changed
+        // rename (different to/ty) gets fresh ids; the same rename always maps to
+        // the same obligation key (the E2 id), idempotent-skip key, contract ids,
+        // and self-EXPAND exemption key. This is the determinism the cross-deploy
+        // interlock leans on (PR9a HIGH).
+        let id_seed = rename_id_seed(schema, &self.owner_app, table, from, to, ty);
         let e1 = self.make(
             &format!("expand_add_column_{table}_{to}"),
             e1_up,
@@ -354,6 +397,8 @@ impl ExpandContractAuthor {
                 ..MigrationFlags::default()
             },
             Vec::new(),
+            &id_seed,
+            EC_STEP_E1,
         );
 
         // ---- E2: dual-write function + trigger (SECURITY INVOKER plpgsql) ----
@@ -381,6 +426,8 @@ impl ExpandContractAuthor {
                 ..MigrationFlags::default()
             },
             vec![e1.version.clone()],
+            &id_seed,
+            EC_STEP_E2,
         );
         let trigger_version = e2.version.clone();
 
@@ -426,6 +473,8 @@ impl ExpandContractAuthor {
                 ..MigrationFlags::default()
             },
             vec![e2.version.clone()],
+            &id_seed,
+            EC_STEP_E3,
         );
 
         // ---- C1: DROP TRIGGER + DROP FUNCTION (gated, depends_on E2) ----
@@ -445,6 +494,8 @@ impl ExpandContractAuthor {
                 ..MigrationFlags::default()
             },
             vec![e2.version.clone()],
+            &id_seed,
+            EC_STEP_C1,
         );
 
         // ---- C2: DROP COLUMN <from> (destructive, gated) ----
@@ -476,6 +527,8 @@ impl ExpandContractAuthor {
                 ..MigrationFlags::default()
             },
             vec![e1.version.clone(), e3.version.clone(), c1.version.clone()],
+            &id_seed,
+            EC_STEP_C2,
         );
 
         Ok(ExpandContractPlan {
@@ -493,6 +546,20 @@ impl ExpandContractAuthor {
     }
 
     /// Build a [`Migration`] from rendered `up`/`down` SQL + flags + deps.
+    ///
+    /// `id_seed` is the rename's stable identity image (see [`rename_id_seed`]) and
+    /// `step_index` is one of the `EC_STEP_*` constants — together they
+    /// DETERMINISTICALLY derive the sub-step's `version` via [`MigrationId::derive`]
+    /// (§2.0.1). A re-lower of the identical rename reproduces the SAME id, which is
+    /// what the cross-deploy obligation key + idempotent-skip + auto-discharge +
+    /// self-EXPAND exemption all depend on (PR9a HIGH). The version is NEVER
+    /// `MigrationId::generate()` (random per call), which would re-key the
+    /// obligation on every deploy.
+    // The id-derivation pair (`id_seed`, `step_index`) pushes this to 8 args; they
+    // are one logical unit (the §2.0.1 deterministic sub-version derivation) and
+    // bundling them into a struct would only relocate the same fields. Matches the
+    // crate's `lower_ir_rename` / `sqlite_rename_rebuild` allow pattern.
+    #[allow(clippy::too_many_arguments)]
     fn make(
         &self,
         name: &str,
@@ -500,6 +567,8 @@ impl ExpandContractAuthor {
         down: Option<String>,
         flags: MigrationFlags,
         depends_on: Vec<MigrationId>,
+        id_seed: &[u8],
+        step_index: u8,
     ) -> Migration {
         let checksum = Checksum::of(&crate::migration::ChecksumInput {
             up: &up,
@@ -510,8 +579,12 @@ impl ExpandContractAuthor {
             supersedes: &[],
             preconditions: &[],
         });
+        // §2.0.1 deterministic sub-version: fold the step index into the rename's
+        // stable seed so E1..C2 each get a distinct, reproducible id.
+        let mut seed = id_seed.to_vec();
+        seed.push(step_index);
         Migration {
-            version: MigrationId::generate(),
+            version: MigrationId::derive("ec", &seed),
             name: name.to_string(),
             up,
             down,
@@ -952,37 +1025,62 @@ mod tests {
 
     #[test]
     fn expand_sql_is_byte_stable_across_reauthoring() {
-        // Re-authoring the same intent yields identical Expand/Contract SQL (the
-        // SQL is a deterministic function of the intent). Mirrors author.rs
-        // index-name determinism.
-        //
-        // NOTE (v3 Plan F C1): the per-migration CHECKSUM is NOT stable across
-        // re-authoring for steps that carry `depends_on`, because the checksum now
-        // folds `depends_on` — and each authoring run mints FRESH UUIDv7 versions,
-        // so a step that depends on its freshly-generated sibling depends on a
-        // different version each run. That is correct: `depends_on` is
-        // apply-relevant (it determines order), so a different dependency edge is a
-        // different unit. We therefore assert SQL byte-stability here, and assert
-        // checksum determinism only for the leading dependency-free step, whose
-        // checksum input is fully intent-determined.
+        // Re-authoring the same intent yields identical Expand/Contract SQL AND
+        // identical sub-step ids + checksums (PR9a HIGH §2.0.1): the E1..C2
+        // versions are now DETERMINISTICALLY derived from the rename's stable seed
+        // (schema+owner+table+from+to+ty) plus the step index, not minted fresh
+        // per run. Because the checksum folds `depends_on` and `depends_on` now
+        // holds deterministic sibling ids, the FULL checksum is stable too — the
+        // pre-fix "dependency-free only" carve-out is gone. This is the property a
+        // re-lower of the identical `.ir.json` on every deploy relies on.
         let p1 = author().author(&rename()).expect("author 1");
         let p2 = author().author(&rename()).expect("author 2");
+        assert_eq!(p1.trigger_version, p2.trigger_version, "E2 obligation key is deterministic");
         for (a, b) in p1.expand.iter().zip(&p2.expand) {
+            assert_eq!(a.version, b.version, "expand sub-step id must be deterministic: {}", a.name);
             assert_eq!(a.up, b.up, "expand up SQL must be byte-stable: {}", a.name);
             assert_eq!(a.down, b.down, "expand down SQL must be byte-stable");
-            // The checksum is stable iff this step carries no `depends_on` (no
-            // run-specific sibling version folded in).
-            if a.depends_on.is_empty() && b.depends_on.is_empty() {
-                assert_eq!(a.checksum, b.checksum, "dependency-free expand checksum must be stable: {}", a.name);
-            }
+            assert_eq!(a.depends_on, b.depends_on, "expand depends_on must be deterministic");
+            assert_eq!(a.checksum, b.checksum, "expand checksum must be stable: {}", a.name);
         }
         for (a, b) in p1.contract.iter().zip(&p2.contract) {
+            assert_eq!(a.version, b.version, "contract sub-step id must be deterministic: {}", a.name);
             assert_eq!(a.up, b.up, "contract up SQL must be byte-stable: {}", a.name);
-            if a.depends_on.is_empty() && b.depends_on.is_empty() {
-                assert_eq!(a.checksum, b.checksum, "dependency-free contract checksum must be stable: {}", a.name);
-            }
+            assert_eq!(a.depends_on, b.depends_on, "contract depends_on must be deterministic");
+            assert_eq!(a.checksum, b.checksum, "contract checksum must be stable: {}", a.name);
         }
         assert_eq!(p1.backfill.backfill_id(), p2.backfill.backfill_id());
+    }
+
+    #[test]
+    fn substep_ids_are_deterministic_and_distinct() {
+        // §2.0.1 (PR9a HIGH): every E1..C2 id is derived (not random), so two
+        // authorings of the SAME rename produce byte-identical ids; and the five
+        // sub-steps are mutually DISTINCT (the step-index fold keeps E1..C2 apart).
+        let p1 = author().author(&rename()).expect("author 1");
+        let p2 = author().author(&rename()).expect("author 2");
+        // Compare id strings directly across the two authorings.
+        for (a, b) in p1.all().iter().zip(p2.all().iter()) {
+            assert_eq!(a.version, b.version, "sub-step id is deterministic");
+        }
+        // All five sub-step ids are distinct.
+        let mut seen = std::collections::HashSet::new();
+        for m in p1.all() {
+            assert!(seen.insert(m.version.as_str().to_string()), "sub-step ids must be distinct");
+        }
+        // A DIFFERENT rename (different `to`) gets a different obligation key.
+        let other = author()
+            .author(&OnlineIntent::RenameColumn {
+                table: "users".into(),
+                from: "email".into(),
+                to: "contact".into(),
+                ty: "text".into(),
+            })
+            .expect("author other");
+        assert_ne!(
+            p1.trigger_version, other.trigger_version,
+            "a semantically different rename gets a fresh obligation key"
+        );
     }
 
     #[test]

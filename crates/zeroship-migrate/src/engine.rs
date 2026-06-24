@@ -970,6 +970,21 @@ impl MigrationEngine {
                         table, from, to, ty,
                     } = &rename.intent;
                     let pending_version = rename.trigger_version.as_str().to_string();
+                    // The rename's PLAN-GROUP version — the stable identity the
+                    // SUPPLIED set / `depends_on` key on for orphan/blocked (§2.0.3
+                    // item 3 / §2.0.4). It is E1's deterministic id (the
+                    // `PgExpandContract` plan anchors its plan version on E1, see
+                    // `ir_author::plan_step_version`). Deterministic per rename
+                    // (§2.0.1), so a re-lowered IR reproduces it — which is exactly
+                    // what `status` re-derives from the supplied set to decide
+                    // orphan/present. Fail closed if the author somehow produced an
+                    // empty expand chain (an internal invariant violation): fall back
+                    // to the pending_version so the obligation still records SOME
+                    // stable key rather than panicking the deploy.
+                    let plan_version = rename
+                        .expand
+                        .first()
+                        .map_or_else(|| pending_version.clone(), |e1| e1.version.as_str().to_string());
                     let already_outstanding = outstanding
                         .iter()
                         .any(|pc| pc.pending_version == pending_version);
@@ -988,6 +1003,7 @@ impl MigrationEngine {
                                     to_col: to,
                                     ty,
                                     pending_version: &pending_version,
+                                    plan_version: &plan_version,
                                     contract_versions: &contract_versions,
                                     by: applied_by,
                                 },

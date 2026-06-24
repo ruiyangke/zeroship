@@ -604,18 +604,26 @@ today. That test-only status is load-bearing and pinned by a regression test
 `crates/control/tests/deploy_migrate_test.rs:643`), which fails RED the instant
 the approved surface is wired into a production handler.
 
-Two things gate production go-live (both documented planned follow-ups):
+Production go-live gating, post-PR9a:
 
 1. The cross-deploy **pending-contract interlock** — the PG expand/contract is a
    multi-deploy flow (the contract that drops the old column owes a later
-   approved deploy); that owed contract is not yet journaled or fail-closed
-   enforced across deploys.
+   approved deploy). As of PR9a this owed contract **IS** journaled as a durable
+   obligation and **IS** fail-closed enforced across deploys: a completed EXPAND
+   records the obligation (keyed on a deterministic, re-lower-stable version,
+   §2.0.1), a later deploy whose ops touch the pending table is refused with
+   `TABLE_HAS_PENDING_CONTRACT`, an orphaned obligation is surfaced by `status`,
+   and `resolve-pending --apply|--abort` discharges it. The whole-deploy project
+   advisory lock is held across the entire multi-file IR deploy, so the read-back
+   is race-free. (Resolved: the interlock is implemented + enforced — the
+   previously remaining orphan/blocked deterministic-keying gap is closed too.)
 2. **Per-version approval scoping** — the current approved surface is a coarse,
    bundle-wide approval; production needs approval scoped to the specific
-   reviewed version-ids.
+   reviewed version-ids. This is the remaining gate.
 
-Until those land, treat online `renameColumn` as a dev/CLI capability, not a
-shipped production deploy path.
+Until per-version approval scoping lands, the approved go-live surface stays
+test-only (the regression test above pins it); treat online `renameColumn` as a
+dev/CLI capability, not a shipped production deploy path.
 
 ## Appendix: the hero example as IR
 
