@@ -127,8 +127,10 @@ never has an imported-but-unused symbol.
 the live `@zeroship/db` schema. `table`, `column`, `from`, `to`, `name`,
 `cursorColumn`, every `set` key, every `where`-referenced column, and every
 `c("…")` argument are strings whose existence is validated at **apply time
-against the real DB**, never at `tsc` time (`sdks/migrate/src/types.ts:158-160`,
-the typing-stance comment block).
+against the real DB**, never at `tsc` time (the typing-stance prose lives in the
+module header, `sdks/migrate/src/types.ts:1-11`, "§3.3 — names are plain
+`string`, NOT live-schema-bound", and on the `Row`/`ScalarValue` types,
+`sdks/migrate/src/types.ts:91-93`).
 
 This is deliberate, and it is the single most important typing rule of the DSL.
 
@@ -388,7 +390,7 @@ backfill("orders", {
 `insert`'s `onConflict` (upsert) is **Postgres-only**. There is no portable
 SQLite upsert and no raw route; a SQLite-targeted `onConflict` is a hard build
 error (`dialect_scope = PgOnly`), surfaced at build, never at runtime
-(`sdks/migrate/src/types.ts:208-216`).
+(`sdks/migrate/src/types.ts:207-222`).
 
 ### SQLite-safe rebuild (`batchAlterTable`)
 
@@ -483,9 +485,8 @@ transform only through the closed fluent AST, never raw SQL.
 
 `c.fn.splitPart(col, delim, n)` lowers to `split_part(col, 'd', n)` on Postgres
 and to a pinned, exhibited `instr`/`substr` expression on SQLite, proven
-byte-identical to PG against real SQLite 3.51.2. It is admitted as portable
-**iff** all of the following hold (`sdks/migrate/src/ops.ts:698-712`, the
-`splitPartGrammarLint`):
+byte-identical to PG against real SQLite 3.51.2. The full portability envelope —
+admitting it on **both** backends — is:
 
 - `delim` is a literal, **non-empty, single ASCII character** (one byte, code
   point < 0x80);
@@ -493,6 +494,21 @@ byte-identical to PG against real SQLite 3.51.2. It is admitted as portable
   (the inline unroll grows O(2ⁿ); past 8 it can exceed SQLite's expression-depth
   limit);
 - `col` is a column ref or an in-AST sub-expression.
+
+This envelope is enforced across **two layers**, not one:
+
+- The record-time JS grammar lint (`sdks/migrate/src/ops.ts:698-712`, the
+  `splitPartGrammarLint`; mirrored at
+  `crates/zeroship-migrate-js/src/migrate_ops.js:1106-1127`) rejects only the
+  *dialect-neutral, clearly-malformed* shapes — a non-string or empty `delim`,
+  and a non-integer or non-positive `n`. It does **not** check single-ASCII,
+  multi-character, or the `1 ≤ n ≤ 8` bound (the recorder twin's own comment is
+  explicit, `migrate_ops.js:1101-1103`).
+- The single-ASCII delimiter and the SQLite-leg `1 ≤ n ≤ 8` bound are enforced
+  by the **Rust validator**: a multi-character / non-ASCII delimiter or `n > 8`
+  is *admitted on Postgres* (`dialect_scope = PgOnly`) and is a hard
+  `EXPR_NOT_PORTABLE` only on the SQLite leg. That is dialect-gated, so it
+  cannot live in the dialect-neutral JS lint.
 
 The value being split *may* contain multibyte UTF-8 content — it is the
 **delimiter** that is constrained to single-ASCII, because an ASCII byte never
@@ -509,9 +525,11 @@ you don't.
 
 A `c.fn.splitPart` call outside the envelope — a multi-character / empty /
 non-ASCII delimiter, `n = 0`, negative `n`, `n > 8`, or non-literal args — is a
-hard `EXPR_NOT_PORTABLE` error on the SQLite leg (and the JS grammar lint
-rejects the clearly-malformed shapes at record time). It is **never** silently
-mis-split. The structured error names the two real resolutions:
+hard `EXPR_NOT_PORTABLE` error on the SQLite leg. The clearly-malformed shapes
+(empty delimiter, non-positive / non-integer `n`) are caught earlier, at record
+time, by the JS grammar lint above; the dialect-gated single-ASCII and `n ≤ 8`
+bounds are caught by the Rust validator. It is **never** silently mis-split. The
+structured error names the two real resolutions:
 
 ```jsonc
 {
@@ -598,10 +616,18 @@ shipped production deploy path.
 A migration is recorded into a dialect-neutral `.ir.json` artifact (the frozen
 wire contract the engine loads). For reference — and because the
 bi-dialect-apply CI gate (below) applies exactly this artifact on **both**
-Postgres and SQLite — here is the `up()` of the hero example
-([Module shape](#module-shape)) as the IR it records to. The two `addColumn`s,
-the `splitPart` backfill, and the `dropColumn` apply byte-identically on PG and
-SQLite from this one artifact:
+Postgres and SQLite — here is a representative split-name migration as IR:
+structurally equivalent to the hero `up()` ([Module shape](#module-shape)) — the
+same two `addColumn`s, a `c.fn.splitPart` backfill, and a `dropColumn`, applying
+byte-identically on PG and SQLite from this one artifact.
+
+> This appendix is **illustrative, not the literal recording of the TS hero**.
+> The hero `up()` operates on `users` and relies on the engine's defaults
+> (`batchSize` 1000, an auto-derived backfill `name`); this artifact is the
+> standalone form the Rust apply gate seeds and applies, so it names `people`,
+> pins `batchSize: 50`, `cursorColumn: "id"`, and `name: "split_name_bf"`
+> explicitly. Copy the TS hero, not this JSON — the build evaluator records the
+> JSON for you (with the hero's own table and defaults).
 
 ```json
 {
@@ -638,6 +664,18 @@ This is the one place authors see the IR — you never hand-write it; the build
 evaluator records it from your `.ts`. It is shown here so the "one script, both
 backends" claim is concrete and so the CI gate has a doc-sourced artifact to
 apply.
+
+**What the doc-example gates do and do not prove.** Two gates keep this doc
+honest. The TS leg (`sdks/migrate/tests/doc-examples.test.ts`) compiles every
+typed snippet against the real `@zeroship/migrate` types, so a renamed op or a
+changed signature fails CI — but it only proves **type-correctness**; the
+snippets compile inside never-executed function bodies, so it does **not**
+exercise record-time runtime checks (the `splitPartGrammarLint` throw, `del`'s
+mandatory-`where` reject). Those runtime invariants are covered separately by
+`sdks/migrate/tests/ops.test.ts` and by the Rust apply gate
+(`crates/zeroship-migrate/tests/doc_hero_apply.rs`), which applies the appendix
+IR byte-identically on real PG + SQLite. Do not read a green TS gate as proof a
+snippet would also survive record-time.
 
 ## Further reading
 

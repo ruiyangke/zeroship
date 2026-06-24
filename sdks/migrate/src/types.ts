@@ -207,10 +207,16 @@ export interface AlterColumnChange {
 export interface InsertArgs<R extends Row = Row> {
   rows: R | R[];
   /**
-   * @deprecated **PG-ONLY.** Rejected as a hard build error on a SQLite target
-   * (`dialect_scope = PgOnly`, §9). There is no portable SQLite upsert and no raw
-   * route (property A); a SQLite-targeted `onConflict` surfaces at build with the
-   * structured envelope, never at runtime.
+   * **PG-ONLY** upsert. A live, intended feature — rejected as a hard build
+   * error only on a SQLite target (`dialect_scope = PgOnly`, §9). There is no
+   * portable SQLite upsert and no raw route (property A); a SQLite-targeted
+   * `onConflict` surfaces at build with the structured envelope, never at
+   * runtime.
+   *
+   * NOTE: intentionally NOT tagged `@deprecated` — that tag would strike the
+   * field through in editor autocomplete and falsely signal removal. `@deprecated`
+   * is reserved for genuinely-removed symbols (AGENTS.md: no `@deprecated`
+   * aliases for live surface).
    */
   onConflict?: { columns: string[]; doUpdate?: Partial<R> };
 }
