@@ -99,7 +99,7 @@ pub mod validate;
 // ---------------------------------------------------------------------------
 
 pub use analyze::{analyze, analyze_migration, Advisory, Severity};
-pub use approval::Approval;
+pub use approval::{Approval, ApprovalScope};
 pub use backend::{MigrationBackend, PostgresBackend, SessionSnapshot};
 pub use backend_sqlite::{RebuildError, SqliteActorError, SqliteBackend, SqliteRebuildSpec};
 pub use baseline::{BaselineError, BaselineOutcome};

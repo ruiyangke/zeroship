@@ -19,8 +19,27 @@ use compio_postgres::NoTls;
 use uuid::Uuid;
 
 use zeroship_control::deploy_migrate::{
-    apply_bundle_migrations, apply_bundle_migrations_approved, DeployMigrateError,
+    apply_bundle_migrations, apply_bundle_migrations_approved, plan_reviewed_versions,
+    DeployMigrateError,
 };
+
+/// PR9b test helper: approve the WHOLE reviewed bundle. Runs the read-only reviewer
+/// plan (`plan_reviewed_versions`) to learn every per-version scope-key the bundle's
+/// destructive ops require, then drives the approved go-live surface with exactly that
+/// set — the faithful "operator reviewed and approved the entire bundle" path (NOT a
+/// blanket bypass: the set is the bundle's real destructive version-ids). Mirrors the
+/// 3-arg pre-PR9b `apply_bundle_migrations_approved` ergonomics for the existing
+/// go-live tests, now that approval is per-version-scoped.
+async fn approve_whole_bundle(
+    dsn: &str,
+    app_id: &Uuid,
+    dir: &std::path::Path,
+) -> Result<zeroship_control::deploy_migrate::MigrateOutcome, DeployMigrateError> {
+    let reviewed = plan_reviewed_versions(dsn, app_id, dir)
+        .await
+        .expect("reviewer plan must enumerate the bundle's destructive scope-versions");
+    apply_bundle_migrations_approved(dsn, app_id, dir, &reviewed).await
+}
 
 /// Admin DSN with CREATEROLE + CREATE SCHEMA (the `postgres` superuser), the
 /// same DB the migrate crate's own integration tests use.
@@ -632,18 +651,23 @@ async fn deploy_migrate_applies_sql_and_ir_together() {
 // journaled / read back") is NO LONGER why the approved go-live surface stays
 // test-only.
 //
-// The approved `apply_bundle_migrations_approved` go-live surface remains gated for
-// the OTHER reason: PR9b PER-VERSION APPROVAL SCOPING is not wired yet — the
-// current approved flag is a coarse, bundle-wide `Approval::Approved` that would
-// also green-light any UNRELATED destructive op co-bundled in the same dir. Until
-// the control-plane approval endpoint scopes approval to the specific reviewed
-// version-ids, this surface MUST NOT be wired into a production deploy handler.
+// PR9b status (this PR): PER-VERSION APPROVAL SCOPING is now IMPLEMENTED — the
+// approved surface takes the operator's reviewed `reviewed_versions` and fail-closed
+// refuses any destructive op outside that set (`ApprovalNotScoped`), so approving one
+// reviewed rename no longer green-lights a co-bundled `dropTable`. BOTH wiring
+// preconditions (§2.0.3 interlock + per-version scoping) are now satisfied.
+//
+// The surface nonetheless remains LIBRARY-ONLY until PR9c performs the deliberate
+// deploy-handler wiring (constructing the operator's reviewed set from the
+// control-plane approval endpoint + flipping this pin). Keeping the wiring a separate,
+// explicitly-reviewed step — rather than letting it ride in on the scoping PR — is the
+// safety discipline: PR9b adds the mechanism; PR9c (and only PR9c) connects it.
 //
 // This is the SAFETY pin: the ONLY production deploy entry point
 // (`api.rs::run_deploy_migrations`) uses the ROUTINE `apply_bundle_migrations`
 // (`Approval::None`, which refuses the EXPAND before it can complete + owe a contract),
 // and NEVER the approved surface. The instant someone wires the approved surface into
-// the production deploy path before per-version approval scoping lands, this test goes
+// the production deploy path before the deliberate PR9c wiring lands, this test goes
 // RED — keeping the test-only status of the approved/SQLite-go-live surfaces a
 // regression-pinned invariant, not a promise.
 #[test]
@@ -753,7 +777,7 @@ async fn deploy_migrate_no_raw_sql_hero_ddl_backfill_applies_pg() {
             .all(|e| !e.file_name().to_string_lossy().ends_with(".sql")),
         "the hero bundle must contain NO raw .sql file"
     );
-    apply_bundle_migrations_approved(&admin_dsn(), &app_id, &dir2)
+    approve_whole_bundle(&admin_dsn(), &app_id, &dir2)
         .await
         .expect("the op.*-authored DDL+backfill hero must apply with no raw SQL");
 
@@ -1191,7 +1215,7 @@ async fn deploy_migrate_renamecolumn_approved_completes_expand_and_surfaces_pend
         {"op":"renameColumn","table":"members","from":"handle","to":"username","type":"text"}
     ]}"#;
     let dir2 = migrations_dir(&[("0002_rename_handle.ir.json", rename)]);
-    let outcome = apply_bundle_migrations_approved(&admin_dsn(), &app_id, &dir2)
+    let outcome = approve_whole_bundle(&admin_dsn(), &app_id, &dir2)
         .await
         .expect("an APPROVED renameColumn deploy must COMPLETE the expand");
 
@@ -1289,7 +1313,7 @@ async fn deploy_migrate_ddl_touching_pending_table_is_refused_e2e() {
         {"op":"renameColumn","table":"members","from":"handle","to":"username","type":"text"}
     ]}"#;
     let dir2 = migrations_dir(&[("0002_rename_handle.ir.json", rename)]);
-    apply_bundle_migrations_approved(&admin_dsn(), &app_id, &dir2)
+    approve_whole_bundle(&admin_dsn(), &app_id, &dir2)
         .await
         .expect("approved rename completes EXPAND + opens the obligation");
 
@@ -1350,7 +1374,7 @@ async fn deploy_migrate_dml_only_touching_pending_table_is_refused_e2e() {
         {"op":"renameColumn","table":"members","from":"handle","to":"username","type":"text"}
     ]}"#;
     let dir2 = migrations_dir(&[("0002_rename_handle.ir.json", rename)]);
-    apply_bundle_migrations_approved(&admin_dsn(), &app_id, &dir2)
+    approve_whole_bundle(&admin_dsn(), &app_id, &dir2)
         .await
         .expect("approved rename completes EXPAND + opens the obligation");
 
@@ -1447,10 +1471,17 @@ async fn deploy_migrate_two_concurrent_same_project_deploys_serialize_a1() {
     let dsn_a = admin_dsn();
     let app_a = app_id;
     let dir_a_clone = dir_a.clone();
+    // PR9b: the operator approved the whole reviewed bundle — compute its destructive
+    // scope-versions (the rename's EXPAND key) BEFORE the spawn so the concurrent
+    // deploy carries the real reviewed set (members already exists from deploy #1).
+    let reviewed_a = plan_reviewed_versions(&dsn_a, &app_a, &dir_a)
+        .await
+        .expect("reviewer plan for deploy A");
     let a_done = std::rc::Rc::new(std::cell::Cell::new(false));
     let a_done_task = a_done.clone();
     let deploy_a = compio::runtime::spawn(async move {
-        let r = apply_bundle_migrations_approved(&dsn_a, &app_a, &dir_a_clone).await;
+        let r =
+            apply_bundle_migrations_approved(&dsn_a, &app_a, &dir_a_clone, &reviewed_a).await;
         a_done_task.set(true);
         r
     });
@@ -1554,8 +1585,13 @@ async fn deploy_migrate_different_project_proceeds_while_p_backfills_a2() {
     let dsn_p = admin_dsn();
     let app_p = p_id;
     let dirp2_clone = dirp2.clone();
+    // PR9b: approve the whole reviewed bundle — compute P's destructive scope-versions
+    // before the spawn (P.members already exists from deploy #1).
+    let reviewed_p = plan_reviewed_versions(&dsn_p, &app_p, &dirp2)
+        .await
+        .expect("reviewer plan for deploy P");
     let deploy_p = compio::runtime::spawn(async move {
-        apply_bundle_migrations_approved(&dsn_p, &app_p, &dirp2_clone).await
+        apply_bundle_migrations_approved(&dsn_p, &app_p, &dirp2_clone, &reviewed_p).await
     });
 
     // While P is (or is about to be) parked under its held lock, deploy Q — a

@@ -97,9 +97,9 @@ use std::path::Path;
 
 use uuid::Uuid;
 use zeroship_migrate::{
-    compute_manifest, connect, load_dir_migrations, provision_migrator, Approval, ConnectError,
-    DeclarativeApplyError, DriftError, EngineError, ExecutorConfig, IrAuthor, LiveSchema,
-    LoadAndLowerGuardedError, LoaderError, LockMode, MigrationBackend, MigrationEngine,
+    compute_manifest, connect, load_dir_migrations, provision_migrator, Approval, ApprovalScope,
+    ConnectError, DeclarativeApplyError, DriftError, EngineError, ExecutorConfig, IrAuthor,
+    LiveSchema, LoadAndLowerGuardedError, LoaderError, LockMode, MigrationBackend, MigrationEngine,
     PostgresBackend, RoleError, SqlDialect,
 };
 
@@ -234,8 +234,17 @@ pub async fn apply_bundle_migrations(
 ) -> Result<MigrateOutcome, DeployMigrateError> {
     // The routine `.zship` deploy is NEVER auto-approved: a destructive op or an
     // online expand is refused at the approval gate (no go-live). The AI/creator
-    // never auto-applies a gated migration.
-    apply_bundle_migrations_with_approval(migrate_dsn, app_id, migrations_dir, Approval::None).await
+    // never auto-applies a gated migration. The scope is irrelevant under
+    // `Approval::None` (no destructive op ever runs), so it carries
+    // `ApprovalScope::All` for byte-identical behavior.
+    apply_bundle_migrations_with_approval(
+        migrate_dsn,
+        app_id,
+        migrations_dir,
+        Approval::None,
+        &ApprovalScope::All,
+    )
+    .await
 }
 
 /// **PR7 online-rename go-live SEAM (engine-wired, deploy-handler deferred)** — the
@@ -268,28 +277,48 @@ pub async fn apply_bundle_migrations(
 ///    --apply|--abort` discharges it. The whole-deploy project advisory lock is held
 ///    across the entire multi-file IR loop, so the obligation read-back is race-free.
 ///    This precondition is met; it is no longer what gates the surface.
-/// 2. PER-VERSION APPROVAL SCOPING (the SCOPE WARNING below) — **the remaining gate.**
+/// 2. PER-VERSION APPROVAL SCOPING — **SATISFIED (PR9b).** Approval is now SCOPED to
+///    the operator's individually-reviewed `reviewed_versions`: a destructive op (DDL
+///    drop/truncate/lossy, destructive DML, SQLite rebuild, PG online-rename EXPAND
+///    backfill) whose version-id is NOT in that set is fail-closed REFUSED with
+///    [`EngineError::ApprovalNotScoped`] even inside this approved deploy. So approving
+///    one reviewed online rename can no longer blanket-authorize an unrelated
+///    co-bundled `dropTable`/`dropColumn`. An EMPTY `reviewed_versions` authorizes
+///    NOTHING destructive (fail-closed). This precondition is met.
 ///
-/// SCOPE WARNING (deferred to the approval-workflow wiring wave): this is a COARSE,
-/// bundle-wide [`Approval::Approved`] — approving an online-rename also green-lights
-/// any UNRELATED destructive op (e.g. a `dropTable`) co-bundled in the same
-/// `migrations_dir`. It is NOT exploitable today (no production caller drives this
-/// surface; the routine deploy at `api.rs` correctly uses [`Approval::None`]). When
-/// the control-plane approval endpoint is wired, it MUST scope approval to the
-/// specific reviewed version-ids (or split expand-approval from arbitrary-destructive
-/// approval) rather than handing this whole-bundle flag to an attacker-influenced set,
-/// so approving a rename cannot blanket-authorize co-bundled destructive DDL.
+/// Both wiring preconditions are now SATISFIED. This surface remains
+/// LIBRARY-ONLY (no production handler call) until PR9c wires it into the deploy
+/// handler and flips the guard test — the guard test
+/// `production_deploy_handler_never_wires_the_unguarded_approved_go_live_surface`
+/// stays GREEN by construction here (the string is not introduced into `api.rs`).
+///
+/// `reviewed_versions` is the operator's individually-reviewed version-id set. It is
+/// threaded through to BOTH legs (the `.sql` `apply_verified_scoped` path and the IR
+/// `apply_plan_with_touched_and_depends_scoped` path) as an
+/// [`ApprovalScope::Versions`]; a destructive op outside it is refused. The non-
+/// destructive (additive) ops always run regardless of the set — scope only ever
+/// further-restricts destruction.
 ///
 /// # Errors
 /// [`DeployMigrateError`] on connect / provision / load / apply failure (incl. a
-/// genuine mid-expand `OnlineExpand` failure that is NOT the approval refusal).
+/// genuine mid-expand `OnlineExpand` failure that is NOT the approval refusal, and a
+/// [`DeployMigrateError::Apply`] wrapping [`EngineError::ApprovalNotScoped`] when a
+/// destructive op's version is outside `reviewed_versions`).
 pub async fn apply_bundle_migrations_approved(
     migrate_dsn: &str,
     app_id: &Uuid,
     migrations_dir: &Path,
+    reviewed_versions: &[String],
 ) -> Result<MigrateOutcome, DeployMigrateError> {
-    apply_bundle_migrations_with_approval(migrate_dsn, app_id, migrations_dir, Approval::Approved)
-        .await
+    let scope = ApprovalScope::Versions(reviewed_versions.iter().cloned().collect());
+    apply_bundle_migrations_with_approval(
+        migrate_dsn,
+        app_id,
+        migrations_dir,
+        Approval::Approved,
+        &scope,
+    )
+    .await
 }
 
 async fn apply_bundle_migrations_with_approval(
@@ -297,6 +326,7 @@ async fn apply_bundle_migrations_with_approval(
     app_id: &Uuid,
     migrations_dir: &Path,
     approval: Approval,
+    scope: &ApprovalScope,
 ) -> Result<MigrateOutcome, DeployMigrateError> {
     // The per-app schema + project id are the trusted path id. The plugin-db
     // model maps app_id → schema "<app_id>"; the engine uses the same id to seed
@@ -384,7 +414,7 @@ async fn apply_bundle_migrations_with_approval(
     // PG backend (behavior-identical to the pre-seam `&Client` call).
     let backend = PostgresBackend::new(&conn);
     let outcome = engine
-        .apply_verified(
+        .apply_verified_scoped(
             &migrations,
             &guard_cfg,
             // No trusted expectation available (see the H2 note above). NEVER pass a
@@ -394,6 +424,11 @@ async fn apply_bundle_migrations_with_approval(
             // routine `.zship` deploy (a destructive `.sql` migration is refused), and
             // `Approval::Approved` on the out-of-band approved-apply surface.
             approval,
+            // PR9b: the per-version scope threads from the entry point too — `All` on
+            // the routine deploy (irrelevant under `Approval::None`), the operator's
+            // reviewed version set on the approved surface, so a co-bundled destructive
+            // `.sql` migration outside the reviewed set is fail-closed refused.
+            scope,
             &backend,
             &exec_cfg,
             "deploy",
@@ -415,6 +450,7 @@ async fn apply_bundle_migrations_with_approval(
         &exec_cfg,
         &guard_cfg,
         approval,
+        scope,
     )
     .await?;
 
@@ -427,6 +463,122 @@ async fn apply_bundle_migrations_with_approval(
         skipped,
         pending_contract: ir_outcome.pending_contract,
     })
+}
+
+/// **PR9b — the reviewer-facing "what needs approval" primitive.** Read-only plan a
+/// bundle and return the full set of per-version scope-keys an APPROVED deploy would
+/// require approval for — exactly the version-ids
+/// [`apply_bundle_migrations_approved`]'s `reviewed_versions` should carry when the
+/// operator approves the WHOLE bundle.
+///
+/// This is the in-process source of truth the control-plane approval endpoint (PR9c)
+/// surfaces to the reviewer, and the helper the approved-go-live e2e tests use to
+/// approve exactly the destructive ops the bundle ships (so the test approves the
+/// real reviewed set, never a blanket pass). It runs the SAME load + guarded-lower
+/// pipeline the real deploy does (so the version-ids are byte-identical), but applies
+/// NOTHING — it only collects each scope-gated step's
+/// [`PlanStep::approval_scope_version`](zeroship_migrate::PlanStep::approval_scope_version).
+///
+/// The live schema must already exist (the bundle's earlier deploys created the
+/// tables a rename/backfill/drop targets) — this is read-only introspection, no
+/// provisioning. An empty / additive-only bundle returns an empty set (nothing needs
+/// approval).
+///
+/// # Errors
+/// [`DeployMigrateError`] on connect / load / IR gate / introspection failure (the
+/// same fail-closed errors the real deploy surfaces, since it runs the same pipeline).
+pub async fn plan_reviewed_versions(
+    migrate_dsn: &str,
+    app_id: &Uuid,
+    migrations_dir: &Path,
+) -> Result<Vec<String>, DeployMigrateError> {
+    let schema = app_id.to_string();
+    let app = schema.clone();
+    let conn = connect(migrate_dsn).await?;
+
+    let mut reviewed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    // (1) `.sql` leg: a destructive `.sql` migration's version is its own version-id.
+    let migrations = load_dir_migrations(migrations_dir)?;
+    for m in &migrations {
+        if m.flags.destructive {
+            reviewed.insert(m.version.as_str().to_string());
+        }
+    }
+
+    // (2) `.ir.json` leg: lower each file (read-only) the SAME way the deploy does and
+    //     collect every scope-gated step's scope-version. Discover IR files.
+    let mut ir_files: Vec<std::path::PathBuf> = Vec::new();
+    let read = std::fs::read_dir(migrations_dir).map_err(|e| DeployMigrateError::IrRead {
+        file: migrations_dir.display().to_string(),
+        message: e.to_string(),
+    })?;
+    for entry in read {
+        let entry = entry.map_err(|e| DeployMigrateError::IrRead {
+            file: migrations_dir.display().to_string(),
+            message: e.to_string(),
+        })?;
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".ir.json"))
+        {
+            ir_files.push(path);
+        }
+    }
+    if !ir_files.is_empty() {
+        ir_files.sort();
+        let exec_cfg = ExecutorConfig::new(schema.clone(), schema.clone());
+        let guard_cfg = zeroship_migrate::GuardConfig::confined(schema.clone());
+        let backend = PostgresBackend::new(&conn);
+        // Seed the ownership registry + live facts from the LIVE catalog — the same
+        // introspection the apply loop runs (read-only). Advance per file across this
+        // bundle's freshly-created tables so a later file's ops lower correctly.
+        let live = backend.snapshot_schema(&exec_cfg).await?;
+        let mut registry: BTreeMap<String, String> =
+            live.tables.keys().map(|t| (t.clone(), app.clone())).collect();
+        let mut live_schema = LiveSchema {
+            tables: live.tables.keys().cloned().collect(),
+            unique_indexes: live
+                .tables
+                .values()
+                .flat_map(|t| t.indexes.iter())
+                .filter(|idx| idx.unique)
+                .map(|idx| idx.name.clone())
+                .collect(),
+            table_snapshots: live.tables.clone(),
+            table_ownership: live.tables.keys().map(|t| (t.clone(), app.clone())).collect(),
+            sqlite_schemas: std::collections::BTreeMap::new(),
+        };
+        for path in &ir_files {
+            let file = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("<unknown>")
+                .to_string();
+            let bytes = std::fs::read_to_string(path).map_err(|e| DeployMigrateError::IrRead {
+                file: file.clone(),
+                message: e.to_string(),
+            })?;
+            let author = IrAuthor::new(app.clone(), app.clone(), SqlDialect::Postgres);
+            let lowered = author
+                .load_and_lower_guarded(&bytes, &app, &registry, &live_schema, &guard_cfg)
+                .map_err(|source| DeployMigrateError::Ir { file: file.clone(), source })?;
+            for step in &lowered.plan.steps {
+                if let Some(v) = step.approval_scope_version() {
+                    reviewed.insert(v.to_string());
+                }
+            }
+            for t in lowered.created_tables {
+                registry.entry(t.clone()).or_insert_with(|| app.clone());
+                live_schema.tables.insert(t);
+            }
+        }
+    }
+
+    Ok(reviewed.into_iter().collect())
 }
 
 /// Discover + apply the bundle's `.ir.json` creator artifacts (§5.2/§8.6).
@@ -453,6 +605,7 @@ async fn apply_bundle_ir_migrations(
     exec_cfg: &ExecutorConfig,
     guard_cfg: &zeroship_migrate::GuardConfig,
     approval: Approval,
+    scope: &ApprovalScope,
 ) -> Result<MigrateOutcome, DeployMigrateError> {
     // Discover `*.ir.json` files, version-ordered by filename (deterministic).
     let mut ir_files: Vec<std::path::PathBuf> = Vec::new();
@@ -632,11 +785,18 @@ async fn apply_bundle_ir_migrations(
         // EVEN when this file touches a DIFFERENT table than the pending one (the
         // case the touched-table refusal does not cover — the §2.0.4 double-bind).
         let outcome = engine
-            .apply_plan_with_touched_and_depends(
+            .apply_plan_with_touched_and_depends_scoped(
                 &lowered.plan.steps,
                 &lowered.touched_tables,
                 &lowered.depends_on,
                 approval,
+                // PR9b: the per-version scope — `All` on the routine `Approval::None`
+                // deploy (a destructive op is refused at the approval gate before scope
+                // ever matters), the operator's reviewed version set on the approved
+                // surface, so an unreviewed co-bundled destructive IR op (a `dropColumn`
+                // / the C2 of an unrelated rename) is fail-closed refused with
+                // `ApprovalNotScoped` even inside the approved deploy.
+                scope,
                 backend,
                 exec_cfg,
                 "deploy-ir",
