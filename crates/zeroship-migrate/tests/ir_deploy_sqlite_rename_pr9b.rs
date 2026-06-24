@@ -83,6 +83,20 @@ fn encrypted_field(name: &str) -> FieldDescriptor {
     }
 }
 
+/// A string field carrying a SAME-AFFINITY data-transforming facet — a `default`
+/// (TEXT affinity preserved, so the PR9b affinity guard does NOT catch it; the PR9c
+/// LOW (ii) full-facet guard must). Used to prove the tightened guard refuses a rename
+/// bundled with a facet change the rebuild's verbatim value-copy cannot certify.
+fn defaulted_text_field(name: &str) -> FieldDescriptor {
+    FieldDescriptor {
+        name: name.into(),
+        ty: "string".into(),
+        required: false,
+        default: Some(serde_json::json!("unknown")),
+        ..Default::default()
+    }
+}
+
 fn descriptor(table: &str, fields: Vec<FieldDescriptor>) -> CollectionDescriptor {
     CollectionDescriptor { name: table.into(), owner_app: APP.into(), fields, indexes: vec![] }
 }
@@ -123,12 +137,37 @@ async fn renamecolumn_runs_in_production_via_catalog_without_prerename_descripto
         "deploy #1 must create `secret` as an encrypted column with a zsenc sentinel: {create_text}"
     );
 
-    // Seed a row with both columns set (the encrypted value is stored as a tagged blob
-    // by the session actor; we only need the row to exist for the value-copy proof).
+    // Seed a row with BOTH columns set — `secret` carries a NON-NULL encrypted BLOB
+    // (a `zsenc:`-tagged ciphertext blob, the shape plugin-db writes at runtime). PR9b
+    // LOW (iii): the prior seed left `secret` NULL, so the rebuild's encrypted-column
+    // VALUE-COPY was never exercised with a real blob (copying NULL→NULL is vacuous).
+    // We seed a concrete blob so the rebuild's `INSERT … SELECT` must carry the bytes
+    // across the renamed table, and assert below it reads back BYTE-IDENTICAL.
+    //
+    // The blob is the literal AEAD-on-disk shape: the `zsenc:v1:` tag prefix + raw
+    // ciphertext bytes. We write it as a SQLite blob literal (X'…') so the stored bytes
+    // are deterministic and the post-rebuild assertion can compare them exactly.
     be.actor()
-        .exec("INSERT INTO main.users (id, name) VALUES ('u1','Ada Lovelace')")
+        .exec(
+            "INSERT INTO main.users (id, name, secret) \
+             VALUES ('u1','Ada Lovelace', X'7a73656e633a76313a0011223344aabbcc')",
+        )
         .await
-        .expect("seed user");
+        .expect("seed user with a non-null encrypted secret blob");
+
+    // Capture the seeded blob's exact bytes (as lower-hex) so the post-rebuild check is a
+    // byte-identical comparison, not a "non-null" smoke test.
+    let seeded_secret_hex = be
+        .actor()
+        .query("SELECT lower(hex(secret)) FROM main.users WHERE id='u1'")
+        .await
+        .expect("read seeded secret hex")[0][0]
+        .clone()
+        .expect("seeded secret must be non-null");
+    assert_eq!(
+        seeded_secret_hex, "7a73656e633a76313a0011223344aabbcc",
+        "the seeded encrypted blob is stored verbatim before the rebuild"
+    );
 
     // Deploy #2 (APPROVED rename via the CATALOG entry): renameColumn name → full_name.
     // The descriptor set is the POST-deploy DESIRED schema — `full_name` (NOT `name`)
@@ -206,6 +245,24 @@ async fn renamecolumn_runs_in_production_via_catalog_without_prerename_descripto
     assert_eq!(
         secret_type, "blob",
         "the rebuilt `secret` column keeps its encrypted BLOB affinity"
+    );
+
+    // PR9b LOW (iii): the encrypted-column VALUE-COPY round-trips a REAL blob. The rebuild
+    // copies `secret` across the new table via `INSERT … SELECT`; the seeded ciphertext
+    // bytes must survive BYTE-IDENTICAL (no truncation, no affinity coercion, no re-tag).
+    // Pre-fix this was vacuous (the seed left `secret` NULL); now it proves the rebuild
+    // does not corrupt an encrypted blob.
+    let post_secret_hex = be
+        .actor()
+        .query("SELECT lower(hex(secret)) FROM main.users WHERE id='u1'")
+        .await
+        .expect("read post-rebuild secret hex")[0][0]
+        .clone()
+        .expect("post-rebuild secret must still be non-null (the value-copy preserved it)");
+    assert_eq!(
+        post_secret_hex, seeded_secret_hex,
+        "the rebuild's value-copy preserved the encrypted `secret` blob byte-identically \
+         (pre={seeded_secret_hex}, post={post_secret_hex})"
     );
 
     // The journal records the rebuild migration version.
@@ -313,6 +370,83 @@ async fn catalog_entry_fails_closed_when_descriptor_to_affinity_diverges_from_li
         vals.iter().filter_map(|r| r[0].clone()).collect::<Vec<_>>(),
         vec!["Ada"],
         "the seeded row is intact — fail-closed means zero data loss / no affinity skew"
+    );
+}
+
+// REGRESSION (PR9c LOW (ii)) — affinity equality is NOT enough: a SAME-affinity
+// data-transforming facet change on the renamed column must ALSO fail closed. Deploy #1
+// creates `users(name TEXT)`; deploy #2 renames `name → full_name` but the post-rename
+// descriptor declares `full_name` with a `default` (still TEXT affinity, so the PR9b
+// affinity guard PASSES). The rebuild would render the new CREATE with that facet while
+// value-copying the old un-defaulted bytes — a facet the verbatim copy cannot certify
+// the live `from` already carried. The PR9c full-facet guard refuses with
+// `RenameHintFacetMismatch`. Pre-fix (affinity-only) this PASSED and rebuilt silently —
+// so this test FAILS RED pre-fix (the rebuild ran; no error).
+#[compio::test]
+async fn catalog_entry_fails_closed_on_same_affinity_facet_change_on_renamed_column() {
+    let p = paths("catalog_facet_skew");
+    let be = backend(&p);
+
+    // Deploy #1: createTable users(name TEXT). Seed a row.
+    let v1 = [descriptor("users", vec![text_field("name")])];
+    let create = r#"{"ir_version":1,"name":"create_users","ops":[
+        {"op":"createTable","name":"users","columns":[
+            {"name":"name","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    write_ir(&p, "0001_create_users.ir.json", create);
+    apply_bundle_ir_sqlite(
+        &be, PROJECT, APP, &v1, &p.migrations, &exec_cfg(),
+        &GuardConfig::confined(PROJECT), Approval::None,
+    )
+    .await
+    .expect("createTable users(name TEXT) must succeed");
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .exec("INSERT INTO main.users (id, name) VALUES ('u1','Ada')")
+        .await
+        .expect("seed");
+
+    // Deploy #2: renameColumn name → full_name, descriptor declares `full_name` with a
+    // `default` (TEXT affinity, same as live `name` — affinity guard passes). Must FAIL
+    // CLOSED on the facet change.
+    clear_migrations(&p);
+    let rename = r#"{"ir_version":1,"name":"rename_name","ops":[
+        {"op":"renameColumn","table":"users","from":"name","to":"full_name","type":"text"}
+    ]}"#;
+    write_ir(&p, "0002_rename_name.ir.json", rename);
+    let facet_changed_desired = [descriptor("users", vec![defaulted_text_field("full_name")])];
+
+    let err = apply_bundle_ir_sqlite_catalog(
+        &be, PROJECT, APP, &facet_changed_desired, &p.migrations, &exec_cfg(),
+        &GuardConfig::confined(PROJECT), Approval::Approved,
+    )
+    .await
+    .expect_err(
+        "a rename bundled with a same-affinity facet change (a `default` on the renamed \
+         column) must FAIL CLOSED — the rebuild cannot certify the verbatim-copied bytes \
+         carried that facet",
+    );
+    assert!(
+        matches!(err, SqliteIrApplyError::Ir { .. }),
+        "expected a fail-closed IR lower error on the facet change, got {err:?}"
+    );
+    assert!(
+        err.to_string().to_lowercase().contains("facet")
+            || err.to_string().to_lowercase().contains("default"),
+        "the fail-closed error should describe the data-transforming facet, got: {err}"
+    );
+
+    // NO DATA LOSS / NO SKEW: the live table is untouched — still `name` TEXT, row intact.
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    let info = be.actor().query("PRAGMA main.table_info(users)").await.expect("table_info");
+    assert!(
+        info.iter().any(|r| r[1].as_deref() == Some("name")),
+        "the original `name` column is intact (no rebuild ran)"
+    );
+    assert!(
+        info.iter().all(|r| r[1].as_deref() != Some("full_name")),
+        "no `full_name` column was created (the rebuild was refused)"
     );
 }
 

@@ -490,6 +490,42 @@ fn rename_sdk_schema_field(
     Some(serde_json::Value::Object(out))
 }
 
+/// **PR9c LOW (ii)** — does this SDK field def declare a DATA-TRANSFORMING facet that
+/// a verbatim value-copy across a SQLite rebuild cannot certify was already present on
+/// the source column? Returns the facet name (for the fail-closed error) or `None` for
+/// a plain column.
+///
+/// The catalog-sourced rename path (`apply_bundle_ir_sqlite_catalog`, branch 2) renders
+/// the rebuilt table's CREATE from the descriptor's POST-rename `to` def but copies the
+/// live `from` bytes UN-TRANSFORMED. A facet whose shape depends on the column's VALUE
+/// (encryption changes the on-disk bytes; `mask` adds a sibling masked column; `default`
+/// backfills a value; `enum`/`check`/range bounds constrain the values) therefore cannot
+/// be SAFELY introduced in the same op as the rename — the old bytes were authored under
+/// the (unknown) `from` facets. Affinity facets (plain `type`, `vector`, `required`,
+/// `unique`, FK) are NOT here: they are either already covered by the affinity guard or
+/// are structural (a unique/FK violation surfaces at rebuild time, not a silent value
+/// corruption). Conservative + fail-closed: any of these present ⇒ refuse.
+fn data_transforming_facet(def: &serde_json::Value) -> Option<&'static str> {
+    let obj = def.as_object()?;
+    if obj.contains_key("encrypted") {
+        return Some("encrypted");
+    }
+    if obj.contains_key("mask") {
+        return Some("mask");
+    }
+    if obj.contains_key("default") {
+        return Some("default");
+    }
+    if obj.contains_key("enum") {
+        return Some("enum");
+    }
+    // `min`/`max` lower to a CHECK range constraint over the column's values.
+    if obj.contains_key("min") || obj.contains_key("max") {
+        return Some("check");
+    }
+    None
+}
+
 pub(crate) fn descriptor_to_sdk_schema(d: &CollectionDescriptor) -> serde_json::Value {
     let mut schema = serde_json::Map::new();
     for f in &d.fields {
@@ -2032,6 +2068,39 @@ pub enum DeclarativeError {
         from_type: String,
         /// The desired `to` column's data type.
         to_type: String,
+    },
+    /// **PR9c LOW (ii)** — a SQLite catalog-sourced (`apply_bundle_ir_sqlite_catalog`)
+    /// renameColumn whose POST-rename descriptor `to` field declares a
+    /// **data-transforming facet** (encryption / mask / `default` / `enum` / `check`
+    /// range) the rebuild cannot certify was already present on the live `from`
+    /// column. The rebuild renders the new table's CREATE from the descriptor `to`
+    /// def while value-copying the live `from` bytes VERBATIM (no transform). A
+    /// rename preserves facets by contract, so a descriptor that simultaneously
+    /// CHANGES a facet on the renamed column would apply the new facet's shape to
+    /// un-transformed old bytes (e.g. rebuild an `encrypted` column over plaintext,
+    /// or stamp an `enum`/`check` the old values may violate). The live catalog read
+    /// does NOT recover SDK-level facets for the `from` column, so the rebuild cannot
+    /// prove preservation — it FAILS CLOSED rather than silently rebuild under a
+    /// changed facet. (The pre-rename-descriptor path keeps the `from` facets and is
+    /// unaffected; only the post-rename catalog path hits this.) Rename + facet change
+    /// is two intents: do the rename, then a separate facet-change deploy.
+    #[error(
+        "renameColumn {table}.{from} → {to}: the post-rename descriptor declares a \
+         data-transforming facet ({facet}) on the renamed column, but the live `{from}` \
+         column's facets cannot be recovered from the catalog to certify it was already \
+         present — refusing to rebuild under a changed facet over verbatim-copied bytes \
+         (do the rename and the facet change as separate deploys)"
+    )]
+    RenameHintFacetMismatch {
+        /// The table the rename named.
+        table: String,
+        /// The `from` column.
+        from: String,
+        /// The `to` column.
+        to: String,
+        /// Which data-transforming facet the descriptor `to` def declared
+        /// (`encrypted` / `mask` / `default` / `enum` / `check`).
+        facet: &'static str,
     },
     /// Two [`RenameHint`]s on the same table shared a `from` (e.g. `[a→c, a→d]`)
     /// or a `to` (e.g. `[a→c, b→c]`) column. Each hint resolves INDEPENDENTLY, so
@@ -3836,6 +3905,29 @@ impl DeclarativeAuthor {
                     to: to.to_string(),
                     from_type: live_from.data_type.clone(),
                     to_type: def_to_column_type_for_dialect(to_def, SqlDialect::Postgres),
+                });
+            }
+            // PR9c LOW (ii) — TIGHTEN past affinity to the FULL data-transforming facet
+            // set. Affinity equality alone is too weak: a same-affinity facet change on
+            // the renamed column (e.g. add `encrypted`/`mask`/`default`/`enum`/`check`,
+            // all of which a `string`/`number` column keeps its TEXT/NUMERIC affinity
+            // under) is still rendered into the rebuilt CREATE while the value-copy
+            // carries the live `from` bytes VERBATIM. The live catalog read does NOT
+            // recover the `from` column's SDK facets (`ColumnSnapshot`'s
+            // encryption/mask/default are emission-only and always `None` from
+            // introspection — see drift.rs), so on THIS post-rename-descriptor path we
+            // cannot prove the live `from` already carried the facet. Fail CLOSED if the
+            // descriptor `to` def declares ANY such facet, rather than silently rebuild a
+            // changed-facet column over un-transformed bytes (e.g. an `encrypted` CREATE
+            // over plaintext, or an `enum`/`check` the old values may violate). The
+            // pre-rename-descriptor path (branch 1) keeps the `from` facets and is
+            // unaffected. A plain rename (no facet on `to_def`) passes unchanged.
+            if let Some(facet) = data_transforming_facet(to_def) {
+                return Err(DeclarativeError::RenameHintFacetMismatch {
+                    table: table.to_string(),
+                    from: from.to_string(),
+                    to: to.to_string(),
+                    facet,
                 });
             }
             live_sqlite_schema.clone()

@@ -747,6 +747,7 @@ pub trait OnlineSchemaChange {
         backfill: &'a BackfillSpec,
         approval: crate::approval::Approval,
         scope: &'a crate::approval::ApprovalScope,
+        trigger_version: &'a MigrationId,
         cfg: &'a crate::db::ExecutorConfig,
         applied_by: &'a str,
         lock_mode: crate::executor::LockMode,
@@ -780,6 +781,7 @@ pub(crate) async fn run_expand_pg(
     backfill: &BackfillSpec,
     approval: crate::approval::Approval,
     scope: &crate::approval::ApprovalScope,
+    trigger_version: &MigrationId,
     cfg: &crate::db::ExecutorConfig,
     applied_by: &str,
     lock_mode: crate::executor::LockMode,
@@ -791,18 +793,26 @@ pub(crate) async fn run_expand_pg(
     // **PR9b per-version scope (executor-layer defense in depth).** The EXPAND's
     // dual-write backfill mirrors every pre-existing row, so under
     // `ApprovalScope::Versions` it runs ONLY if the operator individually reviewed
-    // THIS rename — keyed on the rename's PLAN-GROUP version (E1's deterministic id,
-    // the same anchor the engine's EXPAND scope gate and
-    // `PlanStep::approval_scope_version` key on), falling back to E2's version if the
-    // expand chain is somehow shorter. So a direct seam caller driving `run_online` /
-    // `run_expand_pg` cannot bypass the per-version scope. Fail-closed: refuse BEFORE
-    // applying E1/E2 or mirroring any row, so a non-scoped EXPAND mutates NOTHING.
-    if let Some(v) = expand.first().or_else(|| expand.get(1)) {
-        if !scope.admits(v.version.as_str()) {
-            return Err(crate::engine::OnlineError::ApprovalNotScoped {
-                version: v.version.as_str().to_string(),
-            });
-        }
+    // THIS rename — keyed on the rename's PLAN-GROUP version. That key is resolved by
+    // the SAME rule [`PlanStep::approval_scope_version`] and the engine's EXPAND gate
+    // use (plan.rs): E1's deterministic id, falling back to the E2 `trigger_version`
+    // when the expand chain is empty. So a direct seam caller driving `run_online` /
+    // `run_expand_pg` cannot bypass the per-version scope.
+    //
+    // PR9c LOW (i): the gate is now UNCONDITIONAL — the resolved scope-version is
+    // ALWAYS defined (E1, else `trigger_version`), so an empty `expand` no longer
+    // SKIPS the scope check (the prior `if let Some(v) = expand.first()…` fell open on
+    // an empty chain under `Versions({})`, never refusing a direct caller). The dead
+    // `.or_else(|| expand.get(1))` fallback is gone too (`.first()` already covers
+    // index 0; `.get(1)` was unreachable). Fail-closed: refuse BEFORE applying E1/E2 or
+    // mirroring any row, so a non-scoped EXPAND mutates NOTHING.
+    let scope_version = expand
+        .first()
+        .map_or_else(|| trigger_version.as_str(), |e1| e1.version.as_str());
+    if !scope.admits(scope_version) {
+        return Err(crate::engine::OnlineError::ApprovalNotScoped {
+            version: scope_version.to_string(),
+        });
     }
     // The expand sequence is E1, E2, E3 (the marker) in order. Split off E3: it is
     // journaled LAST, after the real backfill, never as part of the structural apply.
@@ -871,6 +881,7 @@ impl OnlineSchemaChange for PgOnline<'_> {
         backfill: &'a BackfillSpec,
         approval: crate::approval::Approval,
         scope: &'a crate::approval::ApprovalScope,
+        trigger_version: &'a MigrationId,
         cfg: &'a crate::db::ExecutorConfig,
         applied_by: &'a str,
         lock_mode: crate::executor::LockMode,
@@ -886,7 +897,15 @@ impl OnlineSchemaChange for PgOnline<'_> {
         // stamped manifest). A future engine with native online DDL would instead
         // lower `_intent` to its own online-rename DDL.
         Box::pin(run_expand_pg(
-            self.conn, expand, backfill, approval, scope, cfg, applied_by, lock_mode,
+            self.conn,
+            expand,
+            backfill,
+            approval,
+            scope,
+            trigger_version,
+            cfg,
+            applied_by,
+            lock_mode,
         ))
     }
 }
@@ -1245,5 +1264,92 @@ mod tests {
         assert!(e2.up.contains(&fn_name), "up must use capped fn name");
         assert!(e2.down.as_ref().unwrap().contains(&fn_name));
         assert!(e2.down.as_ref().unwrap().contains(&trg_name));
+    }
+
+    // PR9c LOW (i) REGRESSION — the executor-layer scope gate in `run_expand_pg` is now
+    // UNCONDITIONAL. A direct seam caller with an EMPTY `expand` vec under
+    // `ApprovalScope::Versions({})` MUST be refused with `ApprovalNotScoped` (keyed on
+    // the E2 `trigger_version`, the resolved scope-version when the expand chain is
+    // empty). Pre-fix the gate was `if let Some(v) = expand.first().or_else(|| expand.get(1))`
+    // — an empty `expand` yielded `None`, SKIPPED the gate entirely, and fell through to
+    // an `Ok(empty)` return: a fail-OPEN a malicious/buggy direct caller could ride.
+    // This test FAILS RED pre-fix (the old code returned `Ok`, never the refusal).
+    //
+    // The refusal fires BEFORE any DDL/backfill, so the connection is never used on this
+    // path — but `run_expand_pg` needs a `&Client`, so we open one (skip if :5440 is down).
+    #[compio::test]
+    async fn empty_expand_under_scoped_versions_is_refused_not_fail_open() {
+        const DSN: &str =
+            "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_migrate_test";
+        let dsn = std::env::var("MIGRATE_TEST_DB").unwrap_or_else(|_| DSN.to_string());
+        let Ok(conn) = crate::db::connect(&dsn).await else {
+            eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+            return;
+        };
+
+        let cfg = crate::db::ExecutorConfig::new("prj_low_i", "prj_low_i");
+        let backfill = BackfillSpec {
+            table: "users".into(),
+            cursor_column: "id".into(),
+            batch_size: 50,
+            set_clause: "full_name = name".into(),
+            filter: None,
+            name: "noop".into(),
+        };
+        // A deterministic E2 trigger version — the resolved scope-version when `expand`
+        // is empty. The reviewed set does NOT contain it ⇒ fail-closed refusal.
+        let trigger = MigrationId::generate();
+        let mut reviewed = std::collections::BTreeSet::new();
+        reviewed.insert("some_other_unreviewed_version".to_string());
+        let scope = crate::approval::ApprovalScope::Versions(reviewed);
+
+        let err = run_expand_pg(
+            &conn,
+            &[], // EMPTY expand chain — the fail-open hole pre-fix.
+            &backfill,
+            crate::approval::Approval::Approved,
+            &scope,
+            &trigger,
+            &cfg,
+            "test-low-i",
+            crate::executor::LockMode::Acquire,
+        )
+        .await
+        .expect_err("an empty expand under Versions({other}) must be REFUSED, not fall open");
+        match err {
+            crate::engine::OnlineError::ApprovalNotScoped { version } => {
+                assert_eq!(
+                    version,
+                    trigger.as_str(),
+                    "the refusal must key on the E2 trigger_version (the resolved scope-version \
+                     when the expand chain is empty)"
+                );
+            }
+            other => panic!("expected ApprovalNotScoped, got {other:?}"),
+        }
+
+        // POSITIVE CONTROL: with the trigger_version IN the reviewed set, the gate ADMITS;
+        // an empty expand then short-circuits to `Ok(empty)` (split_last on []), proving the
+        // gate's new unconditional form does not over-refuse a legitimately-scoped rename.
+        let mut ok_set = std::collections::BTreeSet::new();
+        ok_set.insert(trigger.as_str().to_string());
+        let scope_ok = crate::approval::ApprovalScope::Versions(ok_set);
+        let outcome = run_expand_pg(
+            &conn,
+            &[],
+            &backfill,
+            crate::approval::Approval::Approved,
+            &scope_ok,
+            &trigger,
+            &cfg,
+            "test-low-i-ok",
+            crate::executor::LockMode::Acquire,
+        )
+        .await
+        .expect("an in-scope empty expand is admitted then no-ops");
+        assert!(
+            outcome.applied.is_empty() && outcome.skipped.is_empty(),
+            "an empty expand applies nothing once admitted"
+        );
     }
 }
