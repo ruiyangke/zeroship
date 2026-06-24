@@ -150,14 +150,23 @@ impl LiveSchema {
         }
     }
 
-    /// **PR7 online-rename go-live (SQLite leg).** Build the FULL SQLite-dialect
+    /// **PR7 online-rename go-live SEAM — SQLite leg (engine-wired, no production
+    /// caller).** Build the FULL SQLite-dialect
     /// `LiveSchema` — `table_snapshots` + `sqlite_schemas` (the per-table SDK schema
     /// `Value`) + `table_ownership` + `unique_indexes` (the descriptor-derived UNIQUE
     /// index names that drive the `dropIndex` destructive/approval gate, the
-    /// author-independent authoritative source mirroring the PG path) — from the app's
-    /// live descriptor set (the
-    /// `registerModel` schema), the production/dev peer of the PG deploy path's live
-    /// introspection. The SQLite `renameColumn` rebuild needs the SDK schema `Value`
+    /// author-independent authoritative source mirroring the PG path) — from a
+    /// descriptor set threaded in by the caller.
+    ///
+    /// TRUTH-IN-LABELING (code-critic Q3). For DDL/DML and the ownership/FK registry
+    /// the descriptor set is the app's `registerModel` schema (the END-STATE union).
+    /// But for a `renameColumn` rebuild this set MUST carry the table's PRE-rename
+    /// shape (the `from` column present), which a `registerModel`-derived (POST-deploy
+    /// desired) set does NOT have — so a rename driven from a `registerModel` set fails
+    /// CLOSED (no data loss) and is un-runnable. The SQLite rename path is therefore
+    /// engine/test-only today (see `ir_apply::apply_bundle_ir_sqlite`'s PRODUCTION-
+    /// WIRING TODO); it is NOT the production peer of the PG deploy path's live
+    /// introspection for renames. The SQLite `renameColumn` rebuild needs the SDK schema `Value`
     /// to render the post-rename `CREATE TABLE`, and that `Value` is NOT recoverable
     /// from a raw SQLite-catalog introspection (masks/encryption/ref facets are not
     /// in `sqlite_master`); the descriptor set IS the authoritative source, so the
@@ -1332,10 +1341,20 @@ impl IrAuthor {
         // dual-write/rebuild is authored. The live `from` column structure is
         // mandatory for a rename on either dialect — absent ⇒ fail closed (never
         // lower a rename from an IR type alone).
-        let live_from_type = live
-            .table_snapshots
-            .get(table)
-            .and_then(|t| t.columns.iter().find(|c| c.name == from))
+        //
+        // The live table snapshot is fetched ONCE here and bound for BOTH the
+        // type reconciliation (this block) and the to-collision guard (next block).
+        // Absent ⇒ fail closed. Reusing the single binding means the collision guard
+        // is UNCONDITIONAL — there is no `if let Some(..)`-shaped path that could
+        // silently skip the `to`-check if this from-check is ever refactored/reordered
+        // (the collision check cannot become a no-op on a missing snapshot).
+        let live_snapshot = live.table_snapshots.get(table).ok_or_else(|| {
+            IrLowerError::RenameNeedsLiveColumn(table.to_string(), from.to_string())
+        })?;
+        let live_from_type = live_snapshot
+            .columns
+            .iter()
+            .find(|c| c.name == from)
             .map(|c| c.data_type.clone())
             .ok_or_else(|| {
                 IrLowerError::RenameNeedsLiveColumn(table.to_string(), from.to_string())
@@ -1358,18 +1377,18 @@ impl IrAuthor {
         // exists", or (SQLite) silently OVERWRITE the existing `to` field def when the
         // rebuild renames the `from` key onto it — a data-loss-class silent mis-build.
         // We reject it BEFORE either destination author runs, mirroring the
-        // declarative differ's hint-unmatched fail-closed stance. The live `from`
-        // column is already confirmed present (above), so `table_snapshots[table]` is
-        // in hand.
-        if let Some(snap) = live.table_snapshots.get(table) {
-            if snap.columns.iter().any(|c| c.name == to) {
-                return Err(IrLowerError::RenameLower(format!(
-                    "renameColumn {table:?}.{from:?} → {to:?}: the target column {to:?} \
-                     already exists on the live table — a rename cannot collide with an \
-                     existing column (refusing to author a duplicate ADD COLUMN / a \
-                     silent rebuild overwrite)"
-                )));
-            }
+        // declarative differ's hint-unmatched fail-closed stance. The guard runs
+        // UNCONDITIONALLY against the `live_snapshot` already bound above (no second
+        // `.get()`, no `if let Some` arm): if the from-check is ever moved/removed, a
+        // missing snapshot still fails closed at that bind, never silently skipping
+        // this collision check.
+        if live_snapshot.columns.iter().any(|c| c.name == to) {
+            return Err(IrLowerError::RenameLower(format!(
+                "renameColumn {table:?}.{from:?} → {to:?}: the target column {to:?} \
+                 already exists on the live table — a rename cannot collide with an \
+                 existing column (refusing to author a duplicate ADD COLUMN / a \
+                 silent rebuild overwrite)"
+            )));
         }
 
         match self.dialect {
@@ -2558,6 +2577,50 @@ mod tests {
             m.flags.destructive && m.flags.requires_approval,
             "an understated drop of a descriptor-unique index must STILL be gated on SQLite \
              via the authoritative unique_indexes set"
+        );
+    }
+
+    // PR7 code-critic LOW (collision-guard redundancy, ir_author.rs lower_rename):
+    // the rename-to-EXISTING-column collision guard must run UNCONDITIONALLY against
+    // the live snapshot bound by the from-check — NOT inside a second `if let Some`
+    // wrapper around a fresh fallible `table_snapshots` lookup, whose None arm implies
+    // (and could silently take) a path that skips the guard. Pre-fix the guard was
+    // wrapped in exactly that conditional; if the preceding from-check were ever
+    // reordered/removed, a missing snapshot would silently SKIP the collision check (a
+    // data-loss-class gap on the SQLite rebuild).
+    //
+    // RED before the fix: this source-shape assertion FAILS against the pre-fix code
+    // (an `if let Some` wrapper around a fresh `table_snapshots` lookup around the
+    // collision check). Post-fix the guard reuses the single fail-closed
+    // `live_snapshot` binding, so no such conditional exists. Pairs with the behavioral
+    // collision tests
+    // (`ir_renamecolumn_pg_rejects_rename_to_existing_column` /
+    // `renamecolumn_sqlite_rejects_rename_to_existing_column`).
+    #[test]
+    fn rename_collision_guard_is_unconditional_not_if_let_some_snapshot() {
+        let src = include_str!("ir_author.rs");
+        // The pre-fix shape wrapped the to-collision check in a SECOND fallible lookup
+        // whose None arm could silently skip the guard. Assembled from fragments so this
+        // test's own source does not self-trip the scan.
+        let prohibited =
+            format!("if let Some(snap) = live.{}.get", "table_snapshots");
+        // The implementation of `lower_rename` is the only place this shape could live;
+        // the guard now reuses the fail-closed `live_snapshot` binding instead. The scan
+        // is over the whole module (the impl + tests); the only `if let Some(.. =
+        // live.table_snapshots.get` occurrence pre-fix was the guard, which is gone.
+        let hits = src.matches(prohibited.as_str()).count();
+        assert_eq!(
+            hits, 0,
+            "the rename to-collision guard must NOT be wrapped in an \
+             `if let Some(..) = live.table_snapshots.get(..)` arm (a None path that could \
+             silently skip the check); reuse the fail-closed `live_snapshot` binding so \
+             the guard is unconditional (found {hits} occurrence(s))"
+        );
+        // …and the guard now keys off the single already-bound snapshot.
+        assert!(
+            src.contains("live_snapshot.columns.iter().any(|c| c.name == to)"),
+            "the to-collision guard must check the already-bound `live_snapshot` \
+             (unconditional), proving the from-check fail-closed bind is reused"
         );
     }
 
