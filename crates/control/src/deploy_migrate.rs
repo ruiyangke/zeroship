@@ -598,9 +598,15 @@ async fn apply_bundle_ir_migrations(
         // `Approval::None`, so a destructive op is refused at deploy exactly like the
         // `.sql` path. For PR1's pure-DDL ops every step is `Ddl` (coalesced into one
         // batch — byte-identical journaling to the pre-fix `engine.apply` path).
+        // §2.0.3 — thread the artifact's full op-list touched-set into the engine's
+        // cross-deploy pending-contract interlock. The read-back inside the held
+        // project lock fail-closed refuses ANY op (DDL or DML) touching a table with
+        // an outstanding online-rename contract from a prior deploy (mapped to a
+        // deploy error → the creator's 4xx).
         let outcome = engine
-            .apply_plan(
+            .apply_plan_with_touched(
                 &lowered.plan.steps,
+                &lowered.touched_tables,
                 approval,
                 backend,
                 exec_cfg,

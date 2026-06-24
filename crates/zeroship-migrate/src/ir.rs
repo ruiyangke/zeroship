@@ -722,6 +722,57 @@ pub enum Op {
     },
 }
 
+impl Op {
+    /// The table this op TARGETS — for the §2.0.3 cross-deploy pending-contract
+    /// interlock's touched-set. EXHAUSTIVE over the closed [`Op`] set so a new op
+    /// variant must consciously declare its table here (a missing arm is a compile
+    /// error, not a silent un-gate). `DropIndex`'s table is an OPTIONAL dialect
+    /// hint, so it contributes only when present.
+    ///
+    /// Both DDL and DML ops contribute (§2.0.3 item 2: "any op (DDL or DML)"). This
+    /// is the authoritative DDL/DML touched-set the deploy loop threads into
+    /// [`apply_plan_with_touched`](crate::engine::MigrationEngine::apply_plan_with_touched)
+    /// — the interlock does NOT parse tables from rendered SQL.
+    #[must_use]
+    pub fn touched_table(&self) -> Option<&str> {
+        match self {
+            Op::CreateTable { name, .. } => Some(name.as_str()),
+            Op::DropTable { table, .. }
+            | Op::AddColumn { table, .. }
+            | Op::DropColumn { table, .. }
+            | Op::CreateIndex { table, .. }
+            | Op::AlterColumnType { table, .. }
+            | Op::AlterColumnNullability { table, .. }
+            | Op::RenameColumn { table, .. }
+            | Op::AddConstraint { table, .. }
+            | Op::DropConstraint { table, .. }
+            | Op::Insert { table, .. }
+            | Op::Update { table, .. }
+            | Op::Delete { table, .. }
+            | Op::Backfill { table, .. } => Some(table.as_str()),
+            // The owning table is an optional dialect hint on a DROP INDEX; when
+            // present it is the touched table, otherwise the op names only the
+            // index (resolved against the live schema downstream).
+            Op::DropIndex { table, .. } => table.as_deref(),
+        }
+    }
+}
+
+impl MigrationIr {
+    /// The set of tables this migration's op list TOUCHES (§2.0.3 interlock) — the
+    /// union of every op's [`Op::touched_table`]. This is the authoritative DDL/DML
+    /// touched-set the production deploy path threads into the engine's
+    /// pending-contract read-back, so the refusal catches ANY op touching a table
+    /// with an outstanding pending contract — not just the structurally-typed
+    /// `OnlineRename` plan steps.
+    #[must_use]
+    pub fn touched_tables(&self) -> Vec<String> {
+        let set: std::collections::BTreeSet<&str> =
+            self.ops.iter().filter_map(Op::touched_table).collect();
+        set.into_iter().map(str::to_string).collect()
+    }
+}
+
 /// A constrained scalar in the IR's typed-bind / row domain (§2.5).
 ///
 /// The numeric domain is the security-relevant part: on DESERIALIZE this type

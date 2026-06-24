@@ -153,6 +153,24 @@ pub enum RunReport {
     Rollback(RollbackOutcome),
     /// `load` (a.k.a. `db:setup`) restored a dumped schema + reconstructed the journal.
     Load(LoadOutcome),
+    /// `resolve-pending` discharged a cross-deploy online-rename pending contract
+    /// (§2.0.3) — applied (C1/C2) or aborted (drop trigger + shadow column).
+    ResolvePending(ResolveOutcome),
+}
+
+/// What `resolve-pending` did to a cross-deploy online-rename obligation (§2.0.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveOutcome {
+    /// The obligation key resolved (the E2 trigger / `pending_version`).
+    pub pending_version: String,
+    /// The table whose rename was resolved.
+    pub table: String,
+    /// `applied` ⇒ the contract (drop trigger + drop old column) was applied;
+    /// `aborted` ⇒ the shadow column + dual-write trigger were dropped.
+    pub resolution: crate::journal::Resolution,
+    /// The migration versions actually applied this run (the C1/C2 ids for
+    /// `--apply`; the C1 + drop-shadow-column ids for `--abort`).
+    pub applied: Vec<String>,
 }
 
 /// The result of `validate`: the dry-run report on a shadow DB + checksum drift +
@@ -249,6 +267,13 @@ pub enum RunError {
     /// `load` must not clobber an existing DB), or restoring the dump DDL failed.
     #[error("load: {0}")]
     LoadCmd(String),
+    /// `resolve-pending` was refused or failed (§2.0.3): the obligation version is
+    /// not outstanding, both/neither of `--apply`/`--abort` were given, `--yes` was
+    /// missing (both paths are destructive — the human checkpoint), the engine is
+    /// not Postgres (SQLite has no pending partition), or re-authoring/applying the
+    /// contract failed.
+    #[error("resolve-pending: {0}")]
+    ResolvePending(String),
     /// A loaded migration plan was not a single-step DDL plan (`op.*` DSL §5.2):
     /// the platform Flyway-mode runner consumes plans through the thin
     /// `AppliedPlan::single_step_migration()` facade, which fails closed on a
@@ -685,6 +710,209 @@ pub async fn run_status(cfg: &RunConfig) -> Result<RunReport, RunError> {
         Engine::Unsupported => return Err(RunError::UnsupportedEngine),
     };
     Ok(RunReport::Status(Box::new(st)))
+}
+
+/// `resolve-pending --apply|--abort <version>` — discharge a cross-deploy
+/// online-rename pending contract (§2.0.3 item 3 / §2.0.4). The human checkpoint
+/// for the deferred destructive contract.
+///
+/// - `--apply`: re-author the rename's contract (C1 drop trigger + C2 drop old
+///   column) DETERMINISTICALLY from the obligation's stored intent facts and apply
+///   it under [`Approval::Approved`] (the real gate — no bypass; C2 is
+///   destructive). The rename completes.
+/// - `--abort`: drop the dual-write trigger (C1) + the shadow (`to`) column,
+///   returning the table to its pre-rename shape (the `from` column was never
+///   dropped). A deliberate, approval-gated, journaled destructive step.
+///
+/// Both then APPEND a `resolved` row to the obligation log (append-only — the
+/// `pending` row is never edited). PG-only: SQLite has no pending-contract
+/// partition (Deliverable 7), so this command refuses on a SQLite DSN.
+///
+/// Approval-gated by `--yes` (`cfg.yes`): both paths are destructive.
+///
+/// # Errors
+/// [`RunError::ResolvePending`] on a bad/absent version, missing `--yes`,
+/// both/neither flag, a non-PG engine, or a re-author/apply failure;
+/// [`RunError`] sub-arms on connect/apply/journal failure.
+pub async fn run_resolve_pending(
+    cfg: &RunConfig,
+    version: &str,
+    apply: bool,
+    abort: bool,
+) -> Result<RunReport, RunError> {
+    // Exactly one of --apply / --abort.
+    if apply == abort {
+        return Err(RunError::ResolvePending(
+            "exactly one of --apply or --abort is required".to_string(),
+        ));
+    }
+    // Both paths are destructive (C2 drops a column; --abort drops the shadow
+    // column + trigger) — the human checkpoint. No approval bypass.
+    if !cfg.yes {
+        return Err(RunError::ResolvePending(
+            "resolve-pending is destructive (the deferred online-rename contract / abort \
+             drops a column + trigger); re-run with --yes to confirm"
+                .to_string(),
+        ));
+    }
+    // PG-only: a SQLite rename has no pending-contract partition (§2.0.2 / D7).
+    match cfg.resolve_engine()? {
+        Engine::Postgres => {}
+        Engine::Sqlite(_) => {
+            return Err(RunError::ResolvePending(
+                "resolve-pending applies only to Postgres online renames; a SQLite rename is \
+                 atomic and has no pending-contract partition"
+                    .to_string(),
+            ))
+        }
+        Engine::Unsupported => return Err(RunError::UnsupportedEngine),
+    }
+
+    let conn = connect(&cfg.database_url).await?;
+    let exec_cfg = build_exec_cfg(cfg);
+    let backend = PostgresBackend::new(&conn);
+    let engine = MigrationEngine::new();
+
+    // Bootstrap the journal so the obligation table exists, then read the
+    // OUTSTANDING set and find the obligation for `version`. The whole sequence
+    // runs under the project lock acquired by `apply_plan(LockMode::Acquire)` below
+    // for the contract apply; the obligation read here is consistent because the
+    // command is single-actor and the obligation table is admin-only.
+    backend.ensure_journal(&exec_cfg).await?;
+    let outstanding = backend.outstanding_pending_contracts(&exec_cfg).await?;
+    let Some(pc) = outstanding
+        .iter()
+        .find(|pc| pc.pending_version == version)
+        .cloned()
+    else {
+        return Err(RunError::ResolvePending(format!(
+            "no OUTSTANDING pending contract for version `{version}` (already resolved, or \
+             never opened)"
+        )));
+    };
+
+    // Re-author the rename's full expand-contract sequence DETERMINISTICALLY from
+    // the obligation's stored identity facts. The author is byte-stable, so the
+    // re-derived C1/C2 carry the SAME version ids the obligation recorded.
+    // The author is bound to the project schema; `owner_app` only folds into the
+    // re-authored C1/C2 checksums (never applied before, so no journaled checksum
+    // to match) — a stable platform string is correct.
+    let author = crate::expand_contract::ExpandContractAuthor::new(
+        exec_cfg.project_schema.clone(),
+        "resolve-pending",
+    );
+    let plan = author
+        .author(&crate::expand_contract::OnlineIntent::RenameColumn {
+            table: pc.table.clone(),
+            from: pc.from_col.clone(),
+            to: pc.to_col.clone(),
+            ty: pc.ty.clone(),
+        })
+        .map_err(|e| RunError::ResolvePending(format!("re-author contract: {e}")))?;
+
+    // Build the steps to apply.
+    // --apply: C1 (drop trigger+fn) then C2 (drop old column) — the full contract.
+    // --abort: C1 (drop trigger+fn) then drop the SHADOW (`to`) column (E1's down),
+    //          leaving `from` intact (pre-rename shape).
+    let (steps, resolution): (Vec<crate::plan::PlanStep>, crate::journal::Resolution) = if apply {
+        let steps = plan
+            .contract
+            .iter()
+            .cloned()
+            .map(crate::plan::PlanStep::Ddl)
+            .collect();
+        (steps, crate::journal::Resolution::Applied)
+    } else {
+        // C1 is the first contract migration (drop trigger + function).
+        let c1 = plan
+            .contract
+            .first()
+            .cloned()
+            .ok_or_else(|| RunError::ResolvePending("contract has no C1 step".to_string()))?;
+        // The shadow-column drop is E1's down (`ALTER TABLE … DROP COLUMN <to>`),
+        // authored as its own destructive, approval-gated migration so it routes
+        // through the same gate.
+        let drop_shadow = build_abort_drop_shadow(&plan, &pc).ok_or_else(|| {
+            RunError::ResolvePending("could not derive shadow-column drop for abort".to_string())
+        })?;
+        (
+            vec![
+                crate::plan::PlanStep::Ddl(c1),
+                crate::plan::PlanStep::Ddl(drop_shadow),
+            ],
+            crate::journal::Resolution::Aborted,
+        )
+    };
+
+    // Apply under the REAL Approval::Approved gate (no bypass) — `apply_plan`
+    // acquires the project lock, serializing against concurrent deploys.
+    let outcome = engine
+        .apply_plan(
+            &steps,
+            Approval::Approved,
+            &backend,
+            &exec_cfg,
+            "resolve-pending",
+            crate::executor::LockMode::Acquire,
+        )
+        .await
+        .map_err(|e| match e {
+            crate::engine::DeclarativeApplyError::Plain(inner) => RunError::Apply(inner),
+            crate::engine::DeclarativeApplyError::Expand(inner) => {
+                RunError::ResolvePending(format!("online: {inner}"))
+            }
+        })?;
+
+    // APPEND the `resolved` discharge row (append-only — never a delete).
+    //
+    // The `--apply` path applies the FULL contract (C1+C2) as Ddl steps, which
+    // `apply_plan` ALREADY recognizes as the contract-apply and auto-discharges
+    // (`resolved='applied'`) — so we must NOT append a second row here (it would be
+    // a redundant duplicate `resolved`). The `--abort` path applies C1 + a fresh
+    // drop-shadow step whose versions do NOT match `contract_versions`, so the
+    // engine does NOT auto-discharge it — the runner appends the `resolved='aborted'`
+    // row explicitly.
+    if resolution == crate::journal::Resolution::Aborted {
+        backend
+            .resolve_pending_contract(&exec_cfg, &pc, resolution, "resolve-pending")
+            .await?;
+    }
+
+    Ok(RunReport::ResolvePending(ResolveOutcome {
+        pending_version: pc.pending_version,
+        table: pc.table,
+        resolution,
+        applied: outcome.applied.applied,
+    }))
+}
+
+/// Author the `--abort` shadow-column drop (`ALTER TABLE <table> DROP COLUMN
+/// <to>`) as a destructive, approval-gated [`Migration`](crate::migration::Migration),
+/// reusing E1's structural `down` (which is exactly that DROP COLUMN). Returns
+/// `None` only if E1 carries no `down` (it always does — the just-added shadow
+/// column is cleanly droppable).
+fn build_abort_drop_shadow(
+    plan: &crate::expand_contract::ExpandContractPlan,
+    pc: &crate::journal::PendingContract,
+) -> Option<crate::migration::Migration> {
+    use crate::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
+    // E1 is the first expand migration (ADD COLUMN <to>); its `down` is exactly the
+    // DROP COLUMN <to> we want for the abort. Clone E1 to inherit its owner_app +
+    // search-path-safe shape, swap `up` ← its `down`, and re-mint id + checksum so
+    // it is a distinct, fresh, destructive+approval-gated journal entry.
+    let mut m = plan.expand.first()?.clone();
+    let drop_sql = m.down.clone()?;
+    m.version = MigrationId::generate();
+    m.name = format!("abort_drop_shadow_{}_{}", pc.table, pc.to_col);
+    m.up = drop_sql;
+    m.down = None;
+    m.flags = MigrationFlags {
+        destructive: true,
+        requires_approval: true,
+        ..MigrationFlags::default()
+    };
+    m.checksum = Checksum::of(&ChecksumInput::from_migration(&m));
+    Some(m)
 }
 
 /// `validate` — dry-run every file on a SHADOW DB + report checksum drift against

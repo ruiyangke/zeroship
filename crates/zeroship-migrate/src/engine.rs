@@ -104,6 +104,15 @@ pub enum EngineError {
     /// [`ManifestError`](crate::manifest::ManifestError) diagnostic.
     #[error(transparent)]
     Manifest(#[from] ManifestError),
+    /// **Fail-closed cross-deploy pending-contract refusal (§2.0.3 item 2).** The
+    /// deploy's op list touches a table with an OUTSTANDING online-rename contract
+    /// from a prior deploy. The read-back runs inside the held project lock (so it
+    /// is not a TOCTOU, §2.0.3 item 4); the deploy applies NOTHING. Carries the
+    /// structured [`PendingContractRefusal`](crate::pending::PendingContractRefusal)
+    /// (§8.8) whose `apply_action` names the exact `migrate resolve-pending --apply`
+    /// remedy. The human message is the projection of the payload.
+    #[error("{0}")]
+    PendingContract(crate::pending::PendingContractRefusal),
 }
 
 /// A failure from [`MigrationEngine::rollback`].
@@ -572,6 +581,48 @@ impl MigrationEngine {
         applied_by: &str,
         lock_mode: LockMode,
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
+        // The DDL/DML touched-set is derived from the structured plan steps
+        // (`OnlineRename` carries its intent table; `Ddl`/`Dml` carry no structured
+        // table, so a bare `.sql`/declarative-shaped plan contributes only what the
+        // steps expose). The IR production path, which is the ONLY producer of a
+        // pending contract, threads its op-list touched-set via
+        // [`apply_plan_with_touched`](Self::apply_plan_with_touched). The plain
+        // entry point uses the step-derived set, which is sufficient for the
+        // refusal of a second renameColumn on the pending table (its EXPAND step
+        // names the table) and never under-fires for the SQLite leg (always empty
+        // outstanding set). See §2.0.3 item 2.
+        let touched: Vec<String> = crate::plan::tables_touched_by(steps).into_iter().collect();
+        self.apply_plan_with_touched(
+            steps, &touched, approval, backend, exec_cfg, applied_by, lock_mode,
+        )
+        .await
+    }
+
+    /// As [`apply_plan`](Self::apply_plan), but with the caller-supplied
+    /// **touched-table set** for the §2.0.3 cross-deploy pending-contract
+    /// interlock. The IR deploy path passes its op-list touched-set
+    /// ([`LoweredArtifact::touched_tables`](crate::ir_author::LoweredArtifact)) so
+    /// the refusal catches ANY op (DDL or DML) touching a table with an
+    /// outstanding pending contract — not just the structurally-typed
+    /// `OnlineRename` steps. The step-derived set (the `OnlineRename` intent
+    /// tables) is UNIONed in regardless, so a caller that passes an empty slice
+    /// still gets rename-step coverage.
+    ///
+    /// # Errors
+    /// Same as [`apply_plan`](Self::apply_plan), plus
+    /// [`EngineError::PendingContract`] (wrapped in [`DeclarativeApplyError::Plain`])
+    /// when the touched-set intersects an outstanding pending contract.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn apply_plan_with_touched<B: MigrationBackend>(
+        &self,
+        steps: &[PlanStep],
+        touched_tables: &[String],
+        approval: Approval,
+        backend: &B,
+        exec_cfg: &ExecutorConfig,
+        applied_by: &str,
+        lock_mode: LockMode,
+    ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
         // **Whole-plan project-lock acquisition (§2.0.3(1)).** When the caller asks
         // us to `Acquire`, take the project advisory lock ONCE up front for the
         // ENTIRE plan and thread `AlreadyHeld` into every sub-step — regardless of
@@ -593,7 +644,7 @@ impl MigrationEngine {
         // Run the plan body in a helper so we can release the lock we acquired on
         // EVERY exit path (success or error) before returning.
         let result = self
-            .apply_plan_locked(steps, approval, backend, exec_cfg, applied_by)
+            .apply_plan_locked(steps, touched_tables, approval, backend, exec_cfg, applied_by)
             .await;
         if we_hold_lock {
             // Release the lock we own, surfacing the body's error first. The lock
@@ -617,6 +668,7 @@ impl MigrationEngine {
     async fn apply_plan_locked<B: MigrationBackend>(
         &self,
         steps: &[PlanStep],
+        touched_tables: &[String],
         approval: Approval,
         backend: &B,
         exec_cfg: &ExecutorConfig,
@@ -641,6 +693,73 @@ impl MigrationEngine {
             .ensure_journal(exec_cfg)
             .await
             .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
+
+        // **§2.0.3 cross-deploy pending-contract READ-BACK + FAIL-CLOSED REFUSE.**
+        //
+        // The obligation table is bootstrapped (above), and the project advisory
+        // lock is ALREADY HELD (acquired by `apply_plan` at `Acquire`, or owned by
+        // the declarative caller) — so this read → act runs INSIDE the held lock
+        // and is NOT a TOCTOU (§2.0.3 item 4 / §2.0.3.4): a concurrent deploy of
+        // the same project blocks at the project lock acquire until we commit and
+        // release, so it always observes the committed obligation set. We do NOT
+        // add any finer-grained lock.
+        //
+        // SQLite returns an empty outstanding set unconditionally (no pending
+        // partition, Deliverable 7), so this never false-gates a SQLite deploy.
+        //
+        // **Fail closed on ANY doubt — EXCEPT this deploy IS the contract-apply.**
+        // If any outstanding obligation's table is in this deploy's touched-set, the
+        // deploy applies NOTHING and returns the structured
+        // `TABLE_HAS_PENDING_CONTRACT` payload (§8.8) — UNLESS the deploy is the
+        // legitimate contract-apply for that obligation (§2.0.2/§2.0.3.4): deploy
+        // N+1 applies C1/C2 as `Ddl` steps to complete the rename. We recognize the
+        // contract-apply structurally: the deploy's `Ddl` step versions cover the
+        // obligation's recorded `contract_versions`. Such an obligation is DISCHARGED
+        // after the steps apply (a `resolved='applied'` row appended, §2.0.3 item 1),
+        // not refused — applying the contract is exactly how the table becomes clear.
+        let outstanding = backend
+            .outstanding_pending_contracts(exec_cfg)
+            .await
+            .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
+        // The set of versions this plan's `Ddl` steps carry — the structural key for
+        // "is this deploy the contract-apply for an outstanding obligation?".
+        let ddl_versions: std::collections::BTreeSet<&str> = steps
+            .iter()
+            .filter_map(|s| match s {
+                PlanStep::Ddl(m) => Some(m.version.as_str()),
+                _ => None,
+            })
+            .collect();
+        // Obligations this deploy DISCHARGES by applying their contract (all C1/C2
+        // ids present among the Ddl steps). Resolved AFTER the step loop succeeds.
+        let mut discharging: Vec<crate::journal::PendingContract> = Vec::new();
+        if !outstanding.is_empty() {
+            // Union the caller-supplied op-list touched-set (IR path) with the
+            // step-derived rename-intent tables, so a second renameColumn on the
+            // pending table is caught even when the caller passes an empty slice.
+            let mut touched: std::collections::BTreeSet<String> =
+                touched_tables.iter().cloned().collect();
+            touched.extend(crate::plan::tables_touched_by(steps));
+            for pc in &outstanding {
+                let is_contract_apply = !pc.contract_versions.is_empty()
+                    && pc
+                        .contract_versions
+                        .iter()
+                        .all(|v| ddl_versions.contains(v.as_str()));
+                if is_contract_apply {
+                    discharging.push(pc.clone());
+                    continue;
+                }
+                if touched.contains(&pc.table) {
+                    return Err(DeclarativeApplyError::Plain(EngineError::PendingContract(
+                        crate::pending::PendingContractRefusal::new(
+                            pc.table.clone(),
+                            pc.pending_version.clone(),
+                        ),
+                    )));
+                }
+            }
+        }
 
         let mut applied = ApplyOutcome {
             applied: Vec::new(),
@@ -752,6 +871,54 @@ impl MigrationEngine {
                     applied.skipped.extend(outcome.skipped);
                     applied.recovered.extend(outcome.recovered);
                     pending_contract.extend(rename.contract.iter().cloned());
+
+                    // **§2.0.3 item 1 — write the DURABLE pending-contract
+                    // obligation.** The transient `pending_contract` return value is
+                    // back-compat shape; the obligation table is now the SOURCE OF
+                    // TRUTH for the cross-deploy interlock — it survives process
+                    // restart and is read back by a later deploy.
+                    //
+                    // **Idempotent (Deliverable 5).** Keyed by `pending_version` (the
+                    // E2 trigger id, deterministic per intent). If it is ALREADY in
+                    // the outstanding set we read at the top of this function (under
+                    // the held lock, so race-free), an idempotent re-run of deploy N
+                    // — where the EXPAND net-applied-skipped — does NOT append a
+                    // duplicate `pending` row, yet the obligation stays outstanding.
+                    //
+                    // The `pending_version` and the `RenameColumn` identity facts come
+                    // straight from the lowered rename (`trigger_version` is the E2
+                    // id; the intent carries table/from/to/ty). Admin-written via the
+                    // backend (the migrator has no meta-schema grant) so a creator
+                    // migration cannot forge or suppress it.
+                    let crate::expand_contract::OnlineIntent::RenameColumn {
+                        table, from, to, ty,
+                    } = &rename.intent;
+                    let pending_version = rename.trigger_version.as_str().to_string();
+                    let already_outstanding = outstanding
+                        .iter()
+                        .any(|pc| pc.pending_version == pending_version);
+                    if !already_outstanding {
+                        let contract_versions: Vec<String> = rename
+                            .contract
+                            .iter()
+                            .map(|m| m.version.as_str().to_string())
+                            .collect();
+                        backend
+                            .record_pending_contract(
+                                exec_cfg,
+                                crate::journal::PendingContractRecord {
+                                    table,
+                                    from_col: from,
+                                    to_col: to,
+                                    ty,
+                                    pending_version: &pending_version,
+                                    contract_versions: &contract_versions,
+                                    by: applied_by,
+                                },
+                            )
+                            .await
+                            .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
+                    }
                     i += 1;
                 }
                 PlanStep::Backfill(spec) => {
@@ -804,6 +971,25 @@ impl MigrationEngine {
                     i += 1;
                 }
             }
+        }
+
+        // **§2.0.3 item 1 — DISCHARGE the obligations this deploy's contract-apply
+        // completed.** All steps applied successfully, so for every obligation whose
+        // C1/C2 this deploy carried (recognized in the read-back above), APPEND a
+        // `resolved='applied'` row (append-only — the `pending` row is never edited),
+        // so a later deploy reads the obligation as discharged and no longer refuses
+        // the table. This is the routine deploy-N+1 contract-apply path (§2.0.2); the
+        // `resolve-pending --apply` CLI is the operator's manual equivalent.
+        for pc in &discharging {
+            backend
+                .resolve_pending_contract(
+                    exec_cfg,
+                    pc,
+                    crate::journal::Resolution::Applied,
+                    applied_by,
+                )
+                .await
+                .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
         }
 
         Ok(DeclarativeDeployOutcome {

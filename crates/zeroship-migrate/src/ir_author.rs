@@ -489,6 +489,15 @@ pub struct LoweredArtifact {
     /// The tables this artifact creates (its `createTable` op names), for the
     /// deploy loop to fold into the cross-file registry + live-set.
     pub created_tables: Vec<String>,
+    /// **§2.0.3** — the set of ALL tables this artifact's op list TOUCHES (DDL or
+    /// DML), the authoritative touched-set the deploy loop threads into the engine's
+    /// cross-deploy pending-contract interlock
+    /// ([`MigrationEngine::apply_plan_with_touched`](crate::engine::MigrationEngine::apply_plan_with_touched)).
+    /// Unlike `created_tables` (only `createTable` names), this is the union over
+    /// EVERY op variant ([`MigrationIr::touched_tables`]), so a deploy that e.g.
+    /// `addColumn`s or `update`s a table with an outstanding pending contract is
+    /// fail-closed refused.
+    pub touched_tables: Vec<String>,
 }
 
 impl LoweredArtifact {
@@ -628,8 +637,11 @@ impl IrAuthor {
         // the SAME `.ir.json` on EITHER backend re-derives the SAME anchor (no
         // false drift), while editing the authoring `.ts` (⇒ a different op list)
         // shifts the anchor and the executor's net-applied drift gate aborts.
+        // §2.0.3 — the authoritative DDL/DML touched-set over EVERY op variant,
+        // threaded into the engine's pending-contract interlock by the deploy loop.
+        let touched_tables = ir.touched_tables();
         let plan = self.assemble_plan(&ir, steps);
-        Ok(LoweredArtifact { plan, fragments, created_tables })
+        Ok(LoweredArtifact { plan, fragments, created_tables, touched_tables })
     }
 
     /// Assemble the lowered [`PlanStep`]s into ONE [`AppliedPlan`] (§2.0 / §5.2),

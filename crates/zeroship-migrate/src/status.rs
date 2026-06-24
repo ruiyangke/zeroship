@@ -42,6 +42,47 @@ pub struct MigrationStatus {
     /// Versions whose latest event is a rollback (net rolled-back), with the
     /// rollback event's detail.
     pub rolled_back: Vec<RolledBackEntry>,
+    /// **Cross-deploy online-rename pending contracts (§2.0.3).** Each outstanding
+    /// obligation (EXPAND applied, contract C1/C2 not yet applied), flagged
+    /// `orphaned` when the supplied migration set no longer carries the rename
+    /// whose contract is pending. A distinct surfaced state — the operator must
+    /// `resolve-pending` (or re-add the rename op for an orphan). Always empty on
+    /// SQLite (no pending partition).
+    pub pending_contracts: Vec<PendingContractStatus>,
+    /// **Plans blocked on a pending-contract dependency (§2.0.4).** A plan B with
+    /// `depends_on: [A]` where A is an online rename whose contract is still
+    /// pending is NOT applied yet but is a DISTINCT, retained
+    /// `blocked-awaiting-approval` state (NOT failed); it unblocks once A's
+    /// contract applies. Always empty on SQLite.
+    pub blocked: Vec<BlockedPlan>,
+}
+
+/// One cross-deploy online-rename pending-contract obligation surfaced by
+/// [`status`] (§2.0.3). `orphaned` is computed against the supplied migration set:
+/// an obligation whose `pending_version` is NOT among the supplied set's versions
+/// is orphaned (the rename was removed after its EXPAND applied) and emits the
+/// [`OrphanedPendingContract`](crate::pending::OrphanedPendingContract) payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingContractStatus {
+    /// The table whose online-rename contract is outstanding.
+    pub table: String,
+    /// The obligation key — the E2 trigger version of the pending rename.
+    pub pending_version: String,
+    /// `true` ⇒ the supplied set no longer carries this rename (orphaned, §2.0.3
+    /// item 3); `false` ⇒ a routine outstanding obligation awaiting its contract.
+    pub orphaned: bool,
+}
+
+/// One plan blocked on a pending-contract dependency (§2.0.4) surfaced by
+/// [`status`] — a retained `blocked-awaiting-approval` state, not a failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockedPlan {
+    /// The blocked plan's version (B).
+    pub blocked: MigrationId,
+    /// The dependency plan's version (A) whose contract is pending.
+    pub dependency: MigrationId,
+    /// The dependency's outstanding pending-contract version (the E2 trigger id).
+    pub pending_version: String,
 }
 
 /// Error from the status/history read API.
@@ -156,6 +197,14 @@ pub async fn status_via_backend<B: crate::backend::MigrationBackend>(
         order_pending(migrations, &completed, &superseded).map_err(StatusError::Ordering)?;
     let pending: Vec<MigrationId> = ordered.iter().map(|m| m.version.clone()).collect();
 
+    // §2.0.3 / §2.0.4 — outstanding pending contracts + blocked plans, read
+    // through the neutral trait. On SQLite this is ALWAYS empty (no pending
+    // partition, Deliverable 7), so the interlock can never false-gate a SQLite
+    // deploy; the helper still runs so any PG-backed caller of this generic path
+    // gets the same surfacing.
+    let outstanding = backend.outstanding_pending_contracts(cfg).await?;
+    let (pending_contracts, blocked) = derive_pending_contract_status(&outstanding, migrations);
+
     Ok(MigrationStatus {
         current_version,
         applied,
@@ -164,6 +213,8 @@ pub async fn status_via_backend<B: crate::backend::MigrationBackend>(
         // version is already dropped from `applied` net-state (it reappears in
         // `pending`), so an empty list here is honest, not lossy.
         rolled_back: Vec::new(),
+        pending_contracts,
+        blocked,
     })
 }
 
@@ -209,12 +260,68 @@ async fn read_status_snapshot(
 
     let rolled_back = journal::net_rolled_back(conn, cfg).await?;
 
+    // §2.0.3 / §2.0.4 — surface the outstanding cross-deploy pending contracts
+    // (with orphan detection) + the plans blocked on a pending-contract
+    // dependency. Read inside this same REPEATABLE READ READ ONLY snapshot so the
+    // obligation view is consistent with the applied/rolled-back buckets.
+    let outstanding = journal::outstanding_pending_contracts(conn, cfg).await?;
+    let (pending_contracts, blocked) = derive_pending_contract_status(&outstanding, migrations);
+
     Ok(MigrationStatus {
         current_version,
         applied,
         pending,
         rolled_back,
+        pending_contracts,
+        blocked,
     })
+}
+
+/// Derive the [`MigrationStatus::pending_contracts`] + [`MigrationStatus::blocked`]
+/// fields from the OUTSTANDING obligation set and the supplied migration set
+/// (§2.0.3 item 3 / §2.0.4). Pure — shared by the PG snapshot path and any
+/// backend path that can read the obligation set.
+///
+/// - **Orphan (§2.0.3 item 3):** an obligation whose `pending_version` is NOT
+///   among the supplied set's versions is orphaned (the rename op was removed
+///   after its EXPAND applied). Fail-closed: it is surfaced as a distinct state,
+///   never silently dropped.
+/// - **Blocked (§2.0.4):** a supplied migration B whose `depends_on` references an
+///   outstanding `pending_version` (the dependency A's E2 trigger id) is blocked
+///   until A's contract applies — a retained `blocked-awaiting-approval` state.
+fn derive_pending_contract_status(
+    outstanding: &[journal::PendingContract],
+    migrations: &[Migration],
+) -> (Vec<PendingContractStatus>, Vec<BlockedPlan>) {
+    let supplied: std::collections::HashSet<&str> =
+        migrations.iter().map(|m| m.version.as_str()).collect();
+
+    let pending_contracts: Vec<PendingContractStatus> = outstanding
+        .iter()
+        .map(|pc| PendingContractStatus {
+            table: pc.table.clone(),
+            pending_version: pc.pending_version.clone(),
+            // Orphaned when the supplied set no longer carries this rename's
+            // expand id (§2.0.3 item 3).
+            orphaned: !supplied.contains(pc.pending_version.as_str()),
+        })
+        .collect();
+
+    let outstanding_versions: std::collections::HashSet<&str> =
+        outstanding.iter().map(|pc| pc.pending_version.as_str()).collect();
+    let mut blocked = Vec::new();
+    for m in migrations {
+        for dep in &m.depends_on {
+            if outstanding_versions.contains(dep.as_str()) {
+                blocked.push(BlockedPlan {
+                    blocked: m.version.clone(),
+                    dependency: dep.clone(),
+                    pending_version: dep.as_str().to_string(),
+                });
+            }
+        }
+    }
+    (pending_contracts, blocked)
 }
 
 /// Read the FULL append-only event log (every apply + rollback event) in

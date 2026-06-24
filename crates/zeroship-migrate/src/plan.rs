@@ -168,6 +168,49 @@ impl PlanStep {
             PlanStep::Dml { .. } | PlanStep::Backfill(_) | PlanStep::OnlineRename(_) => false,
         }
     }
+
+    /// The table this step STRUCTURALLY targets, when known (§2.0.3 interlock
+    /// touched-set). Only the variants that carry a typed table contribute:
+    ///
+    /// - `OnlineRename(PgExpandContract)` → the rename's intent table — the
+    ///   load-bearing case, so a SECOND `renameColumn` on a pending table is
+    ///   refused (§2.0.3 item 2 / test (c)).
+    /// - `OnlineRename(SqliteRebuild)` → the rebuild spec's table (for completeness;
+    ///   SQLite never has an outstanding pending contract, so it never gates).
+    ///
+    /// `Ddl` and `Dml` steps carry only `up: String` / `template: String` SQL with
+    /// no structured table, so they return `None` here. The IR production path —
+    /// the ONLY producer of a pending contract — supplies the authoritative DDL/DML
+    /// touched-set out-of-band via
+    /// [`MigrationEngine::apply_plan_with_touched`](crate::engine::MigrationEngine::apply_plan_with_touched)
+    /// (from the lowered op list), so the interlock does NOT rely on fragile
+    /// SQL-string table parsing.
+    #[must_use]
+    pub fn touched_table(&self) -> Option<&str> {
+        match self {
+            PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => match &ec.intent {
+                crate::expand_contract::OnlineIntent::RenameColumn { table, .. } => {
+                    Some(table.as_str())
+                }
+            },
+            PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => Some(rb.spec.table.as_str()),
+            PlanStep::Ddl(_) | PlanStep::Dml { .. } | PlanStep::Backfill(_) => None,
+        }
+    }
+}
+
+/// The set of tables a plan's steps STRUCTURALLY touch (§2.0.3 interlock) — the
+/// union of each step's [`PlanStep::touched_table`]. This is the step-derived
+/// touched-set the engine UNIONs with the IR caller's op-list touched-set; on its
+/// own it suffices to refuse a second online rename on a pending table (the rename
+/// step names its table) and never under-fires for SQLite (no pending contract
+/// ever outstanding there).
+#[must_use]
+pub fn tables_touched_by(steps: &[PlanStep]) -> std::collections::BTreeSet<String> {
+    steps
+        .iter()
+        .filter_map(|s| s.touched_table().map(str::to_string))
+        .collect()
 }
 
 /// What one authored artifact (`.sql` today; `.ir.json` after PR1) becomes after

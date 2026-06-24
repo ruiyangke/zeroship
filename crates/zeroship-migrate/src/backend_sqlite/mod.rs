@@ -503,6 +503,39 @@ impl MigrationBackend for SqliteBackend {
             .map_err(journal_err)
     }
 
+    // -- cross-deploy pending-contract obligations (§2.0.3) -----------------
+    //
+    // SQLite has NO pending-contract partition (Deliverable 7): a `SqliteRebuild`
+    // rename is one atomic offline step, fully applied in its own deploy (§2.0.2),
+    // so SQLite never OPENS an obligation. The read-back is therefore always empty
+    // and the write paths are no-ops — the §2.0.3 interlock can never false-gate a
+    // SQLite deploy, and `resolve-pending` is structurally a PG-only command.
+
+    async fn outstanding_pending_contracts(
+        &self,
+        _cfg: &ExecutorConfig,
+    ) -> Result<Vec<crate::journal::PendingContract>, JournalError> {
+        Ok(Vec::new())
+    }
+
+    async fn record_pending_contract(
+        &self,
+        _cfg: &ExecutorConfig,
+        _rec: crate::journal::PendingContractRecord<'_>,
+    ) -> Result<(), JournalError> {
+        Ok(())
+    }
+
+    async fn resolve_pending_contract(
+        &self,
+        _cfg: &ExecutorConfig,
+        _pc: &crate::journal::PendingContract,
+        _resolution: crate::journal::Resolution,
+        _by: &str,
+    ) -> Result<(), JournalError> {
+        Ok(())
+    }
+
     // -- DB-coupled validation / introspection ------------------------------
 
     async fn check_checksum_drift(

@@ -155,6 +155,124 @@ impl EventKind {
     }
 }
 
+/// The lifecycle state of a cross-deploy online-rename pending-contract
+/// obligation (§2.0.3). An obligation is born `pending` when a `PgExpandContract`
+/// EXPAND completes (its C1/C2 contract is deferred to a later deploy); it is
+/// discharged by appending a `resolved` row (history is append-only — a discharge
+/// is NEVER a DELETE, exactly like the journal of record). The NET state of an
+/// obligation is the latest event for its `pending_version` key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingState {
+    /// The obligation is outstanding: the EXPAND ran, the contract (drop trigger
+    /// + drop old column) has not yet been applied. Any new op touching the
+    /// rename's table is fail-closed refused (§2.0.3 item 2).
+    Pending,
+    /// The obligation is discharged: the contract was applied (`--apply`) or the
+    /// shadow column + trigger were dropped (`--abort`). Carries a [`Resolution`].
+    Resolved,
+}
+
+impl PendingState {
+    /// The wire string stored in the `state` column.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Resolved => "resolved",
+        }
+    }
+
+    /// Parse a state from its wire string.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(Self::Pending),
+            "resolved" => Some(Self::Resolved),
+            _ => None,
+        }
+    }
+}
+
+/// How a `resolved` pending-contract obligation was discharged (§2.0.3 item 3 /
+/// the `resolve-pending` CLI).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolution {
+    /// The deferred contract (C1 drop trigger + C2 drop old column) was applied
+    /// under [`Approval::Approved`](crate::executor::Approval) — the rename
+    /// completed.
+    Applied,
+    /// The pending contract was aborted: the shadow (`to`) column + the dual-write
+    /// trigger were dropped, returning the table to its pre-rename shape. The
+    /// destructive checkpoint is approval-gated, journaled, and append-only.
+    Aborted,
+}
+
+impl Resolution {
+    /// The wire string stored in the `resolution` column.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Aborted => "aborted",
+        }
+    }
+
+    /// Parse a resolution from its wire string.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "applied" => Some(Self::Applied),
+            "aborted" => Some(Self::Aborted),
+            _ => None,
+        }
+    }
+}
+
+/// An OUTSTANDING cross-deploy pending-contract obligation (§2.0.3), as read back
+/// by [`outstanding_pending_contracts`]. Its net state is `pending` (no later
+/// `resolved` row discharges it). The read-back is the source of truth for the
+/// apply-time interlock and the `status` orphan/blocked surfacing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingContract {
+    /// The table the rename targets (bare name; from the rename intent).
+    pub table: String,
+    /// The existing column being renamed away from.
+    pub from_col: String,
+    /// The new (shadow) column being renamed to.
+    pub to_col: String,
+    /// The Postgres type of the column (carried so an `--abort` can reconstruct
+    /// the drop, and an `--apply` can re-author C1/C2 if needed).
+    pub ty: String,
+    /// The obligation key: the E2 trigger migration version (the "expand" id the
+    /// §2.0.2 partition keys on). A `depends_on` on this version is unsatisfied
+    /// while the obligation is outstanding (§2.0.4).
+    pub pending_version: String,
+    /// The C1/C2 contract migration versions (so resolve can journal them and the
+    /// status/orphan surfacing can name them).
+    pub contract_versions: Vec<String>,
+}
+
+/// The fields of a `pending` pending-contract obligation row, bundled so
+/// [`record_pending_contract`] takes one descriptor (keeping the arg count down).
+#[derive(Debug, Clone, Copy)]
+pub struct PendingContractRecord<'a> {
+    /// The table the rename targets (bare name).
+    pub table: &'a str,
+    /// The existing column name (`from`).
+    pub from_col: &'a str,
+    /// The new column name (`to`).
+    pub to_col: &'a str,
+    /// The Postgres type of the column.
+    pub ty: &'a str,
+    /// The obligation key — the E2 trigger version.
+    pub pending_version: &'a str,
+    /// The C1/C2 contract version ids, comma-separated-free (serialized as a JSON
+    /// array on write; carried here as a slice).
+    pub contract_versions: &'a [String],
+    /// The actor recorded as opening the obligation.
+    pub by: &'a str,
+}
+
 /// One journal entry (completed) or inflight marker (started), as read back for
 /// the drift check + pending computation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,6 +429,56 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
     ))
     .await?;
 
+    // 2a-ter. The append-only CROSS-DEPLOY PENDING-CONTRACT obligation log
+    //     (§2.0.3 / §2.0.4). A `PgExpandContract` online rename applies its EXPAND
+    //     (E1..E3 + backfill) in deploy N and DEFERS its contract (C1 drop trigger
+    //     + C2 drop old column) to a later deploy (§2.0.2). The deferred contract
+    //     is a DURABLE OBLIGATION — not a transient return value — so a later deploy
+    //     (or a restarted process) can READ IT BACK and fail closed on any op that
+    //     touches the rename's table while the contract is still outstanding.
+    //
+    //     **Append-only + immutable (trigger below), exactly like
+    //     `schema_migrations`.** An obligation is born `pending`; it is discharged
+    //     by APPENDING a `resolved` row (never a DELETE/UPDATE). The NET state per
+    //     `pending_version` is the latest `event_seq` row (DISTINCT-ON-latest, the
+    //     same pattern `applied()` uses). A `pending` row with no later `resolved`
+    //     row is OUTSTANDING.
+    //
+    //     **Unforgeable by the migrator (deny-by-absence).** It lives in the meta
+    //     schema, which the migrator role has NO grant on (`role.rs` REVOKE +
+    //     search_path exclusion). All writes are by the ADMIN role on the executor
+    //     path, mirroring the journal-forgery defense for `schema_migrations`: a
+    //     creator migration's `up` (running as the migrator) can neither plant a
+    //     bogus `resolved` row (suppressing the interlock) nor a bogus `pending`
+    //     row (wedging an unrelated table).
+    //
+    //     `state` ∈ {`pending`,`resolved`}; `resolution` ∈ {`applied`,`aborted`}
+    //     and is NULL iff `state='pending'` (the per-state shape CHECK). `table` is
+    //     the rename's bare target table (the interlock's match key);
+    //     `pending_version` is the obligation key (the E2 trigger id);
+    //     `contract_versions` is the JSON array of C1/C2 ids.
+    conn.batch_execute(&format!(
+        "CREATE TABLE IF NOT EXISTS {meta}.schema_pending_contracts (
+            event_seq         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            state             TEXT NOT NULL CHECK (state IN ('pending','resolved')),
+            \"table\"           TEXT NOT NULL,
+            from_col          TEXT NOT NULL,
+            to_col            TEXT NOT NULL,
+            ty                TEXT NOT NULL,
+            pending_version   TEXT NOT NULL,
+            contract_versions TEXT NOT NULL,
+            resolution        TEXT CHECK (resolution IS NULL OR resolution IN ('applied','aborted')),
+            \"by\"              TEXT NOT NULL,
+            \"at\"              TIMESTAMPTZ NOT NULL DEFAULT now(),
+            CONSTRAINT schema_pending_contracts_state_shape CHECK (
+                (state = 'pending'  AND resolution IS NULL)
+                OR
+                (state = 'resolved' AND resolution IS NOT NULL)
+            )
+        )"
+    ))
+    .await?;
+
     // 2b. The MUTABLE inflight side-table for two-phase non-txn markers. NOT
     //     guarded by the immutability trigger — the marker is deleted on
     //     completion / recovery.
@@ -365,7 +533,11 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
     //    fixed names sidestep all of that. They are still quoted as identifiers
     //    (`trg_q`) for uniformity, and the existence check compares the raw name
     //    as a string literal (`trg_lit`).
-    for tbl in ["schema_migrations", "schema_migrations_supersedes"] {
+    for tbl in [
+        "schema_migrations",
+        "schema_migrations_supersedes",
+        "schema_pending_contracts",
+    ] {
         for (trg, level, events) in [
             ("zs_immutable_trg", "FOR EACH ROW", "UPDATE OR DELETE"),
             (
@@ -771,6 +943,165 @@ pub async fn record_completed(
     Ok(())
 }
 
+/// Read the OUTSTANDING cross-deploy pending-contract obligations (§2.0.3).
+///
+/// The net state per `pending_version` is its **latest event** on the
+/// `event_seq` IDENTITY scale (the same DISTINCT-ON-latest pattern [`applied`]
+/// uses). An obligation is OUTSTANDING iff its latest row is `state='pending'`
+/// (no later `resolved` row discharges it). This is the source of truth for the
+/// apply-time interlock read-back and the `status` orphan/blocked surfacing.
+///
+/// Admin-run (the whole helper family is — the migrator has no meta-schema
+/// grant), so a creator migration's `up` can neither read nor forge this set.
+///
+/// # Errors
+/// [`JournalError::Db`] on query failure.
+pub async fn outstanding_pending_contracts(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+) -> Result<Vec<PendingContract>, JournalError> {
+    let meta = quote_ident(&cfg.pg.meta_schema);
+    let rows = conn
+        .query(
+            &format!(
+                "WITH latest AS (
+                     SELECT DISTINCT ON (pending_version)
+                            pending_version, state, \"table\", from_col, to_col, ty,
+                            contract_versions
+                       FROM {meta}.schema_pending_contracts
+                      ORDER BY pending_version, event_seq DESC
+                 )
+                 SELECT pending_version, \"table\", from_col, to_col, ty, contract_versions
+                   FROM latest
+                  WHERE state = '{pending}'
+                  ORDER BY pending_version",
+                pending = PendingState::Pending.as_str()
+            ),
+            &[],
+        )
+        .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let cv_json: String = row.get("contract_versions");
+        // The contract_versions column is a JSON array of version-id strings. A
+        // parse failure is a corrupted/out-of-band-mutated row — fail closed by
+        // surfacing it as a Db-class error rather than silently dropping the
+        // obligation (which would un-gate the table).
+        let contract_versions: Vec<String> = serde_json::from_str(&cv_json).map_err(|e| {
+            JournalError::Backend(format!(
+                "pending-contract row has un-parseable contract_versions JSON \
+                 (corrupted / out-of-band mutation): {e}"
+            ))
+        })?;
+        out.push(PendingContract {
+            table: row.get("table"),
+            from_col: row.get("from_col"),
+            to_col: row.get("to_col"),
+            ty: row.get("ty"),
+            pending_version: row.get("pending_version"),
+            contract_versions,
+        });
+    }
+    Ok(out)
+}
+
+/// Open a cross-deploy pending-contract obligation: INSERT a `state='pending'`
+/// row (§2.0.3 item 1). Called once per `PgExpandContract` whose EXPAND completed.
+///
+/// **Idempotent by membership-guard (Deliverable 5).** The caller checks the
+/// outstanding set under the held project lock and only records if this
+/// `pending_version` is NOT already outstanding, so an idempotent re-run of deploy
+/// N (EXPAND net-applied-skipped) does NOT append a duplicate `pending` row — yet
+/// the obligation stays outstanding. The append-only history is preserved (a
+/// re-open after a resolve would legitimately append a new `pending` row, but the
+/// rename id is deterministic so that never happens in practice).
+///
+/// Admin-run; the migrator cannot reach this table.
+///
+/// # Errors
+/// [`JournalError::Db`] on insert failure.
+pub async fn record_pending_contract(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    rec: PendingContractRecord<'_>,
+) -> Result<(), JournalError> {
+    let meta = quote_ident(&cfg.pg.meta_schema);
+    let cv_json = serde_json::to_string(rec.contract_versions).map_err(|e| {
+        JournalError::Backend(format!("failed to serialize contract_versions JSON: {e}"))
+    })?;
+    let n = conn
+        .execute(
+            &format!(
+                "INSERT INTO {meta}.schema_pending_contracts
+                     (state, \"table\", from_col, to_col, ty, pending_version,
+                      contract_versions, \"by\")
+                 VALUES ('{pending}', $1, $2, $3, $4, $5, $6, $7)",
+                pending = PendingState::Pending.as_str()
+            ),
+            &[
+                &rec.table,
+                &rec.from_col,
+                &rec.to_col,
+                &rec.ty,
+                &rec.pending_version,
+                &cv_json,
+                &rec.by,
+            ],
+        )
+        .await?;
+    debug_assert_eq!(n, 1, "record_pending_contract must insert exactly one row");
+    Ok(())
+}
+
+/// Discharge a cross-deploy pending-contract obligation: APPEND a
+/// `state='resolved'` row (§2.0.3 item 1 / the `resolve-pending` CLI). History is
+/// append-only — the `pending` row is never edited or deleted.
+///
+/// The obligation's identity fields (`table`/`from_col`/`to_col`/`ty`/
+/// `contract_versions`) are carried forward onto the `resolved` row from the
+/// supplied descriptor so the row is self-describing for forensics (the shape
+/// CHECK only requires `resolution IS NOT NULL`).
+///
+/// Admin-run; the migrator cannot reach this table.
+///
+/// # Errors
+/// [`JournalError::Db`] on insert failure.
+pub async fn resolve_pending_contract(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    pc: &PendingContract,
+    resolution: Resolution,
+    by: &str,
+) -> Result<(), JournalError> {
+    let meta = quote_ident(&cfg.pg.meta_schema);
+    let cv_json = serde_json::to_string(&pc.contract_versions).map_err(|e| {
+        JournalError::Backend(format!("failed to serialize contract_versions JSON: {e}"))
+    })?;
+    let n = conn
+        .execute(
+            &format!(
+                "INSERT INTO {meta}.schema_pending_contracts
+                     (state, \"table\", from_col, to_col, ty, pending_version,
+                      contract_versions, resolution, \"by\")
+                 VALUES ('{resolved}', $1, $2, $3, $4, $5, $6, $7, $8)",
+                resolved = PendingState::Resolved.as_str()
+            ),
+            &[
+                &pc.table,
+                &pc.from_col,
+                &pc.to_col,
+                &pc.ty,
+                &pc.pending_version,
+                &cv_json,
+                &resolution.as_str(),
+                &by,
+            ],
+        )
+        .await?;
+    debug_assert_eq!(n, 1, "resolve_pending_contract must insert exactly one row");
+    Ok(())
+}
+
 /// Count the number of versions the journal currently records as **net-applied**
 /// (latest event per version is `completed`) — the first-entry test for
 /// [`crate::baseline`].
@@ -1027,7 +1358,7 @@ pub async fn clear_inflight(
 
 #[cfg(test)]
 mod tests {
-    use super::{EventKind, JournalError};
+    use super::{EventKind, JournalError, PendingState, Resolution};
 
     /// The `event_kind` wire contract is byte-exact: every INSERT/SELECT in the
     /// journal (PG + SQLite) now interpolates these literals from this single
@@ -1062,5 +1393,36 @@ mod tests {
             .ok_or(JournalError::BadEventKind(raw))
             .unwrap_err();
         assert!(matches!(err, JournalError::BadEventKind(s) if s == "garbage"));
+    }
+
+    /// The cross-deploy pending-contract `state`/`resolution` wire contract is
+    /// byte-exact: the `schema_pending_contracts` CHECK constraints, the writers
+    /// (`record_pending_contract`/`resolve_pending_contract`), and the
+    /// net-state reader (`outstanding_pending_contracts`) all interpolate these
+    /// literals from this single typed source (§2.0.3). A drift here would
+    /// silently un-gate the interlock (a `pending` row never read back). Pin them.
+    #[test]
+    fn pending_contract_wire_literals_are_exact() {
+        assert_eq!(PendingState::Pending.as_str(), "pending");
+        assert_eq!(PendingState::Resolved.as_str(), "resolved");
+        assert_eq!(Resolution::Applied.as_str(), "applied");
+        assert_eq!(Resolution::Aborted.as_str(), "aborted");
+    }
+
+    /// `parse` is the exact inverse of `as_str` for both enums, and rejects
+    /// anything else, so a read-back can never silently mis-classify an
+    /// obligation's net state (which would un-gate or wrongly-gate the interlock).
+    #[test]
+    fn pending_contract_parse_round_trips_and_rejects_garbage() {
+        for s in [PendingState::Pending, PendingState::Resolved] {
+            assert_eq!(PendingState::parse(s.as_str()), Some(s));
+        }
+        for r in [Resolution::Applied, Resolution::Aborted] {
+            assert_eq!(Resolution::parse(r.as_str()), Some(r));
+        }
+        assert_eq!(PendingState::parse("Pending"), None);
+        assert_eq!(PendingState::parse(""), None);
+        assert_eq!(Resolution::parse("abort"), None);
+        assert_eq!(Resolution::parse(""), None);
     }
 }
