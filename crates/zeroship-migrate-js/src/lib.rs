@@ -33,6 +33,7 @@
 //!   anti-drift gate — the single-source-of-truth byte/value-equality the golden
 //!   `.ir.json` corpus + the `Checksum::of_ir` round-trip test pin.
 
+pub mod build;
 pub mod eval;
 pub mod generate;
 pub mod record;
@@ -40,9 +41,18 @@ pub mod recorder_http;
 pub mod recorder_protocol;
 pub mod recorder_service;
 pub mod sandbox;
+pub mod scaffold;
 
+pub use build::{
+    assert_packed_hash_matches_committed, build_migrations, discover_migrations,
+    recheck_not_yet_applied, BuildError, BuildOutcome, BuiltMigration, DiscoveredMigration,
+    RecordPath, RecordVia, RecorderClient,
+};
 pub use eval::{eval_schema_to_ir, EvalError};
 pub use generate::{generate_migration, GenerateError, GenerateOutcome};
+pub use scaffold::{
+    generate_ops, scaffold_new_ts, timestamp_14, GeneratedMigration, ScaffoldError,
+};
 pub use record::{
     lint_migration_determinism, record_migration_to_ir, record_migration_to_ir_with_warnings,
     record_migration_to_json, DeterminismFinding, RecordError, RecordOutcome,

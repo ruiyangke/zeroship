@@ -34,6 +34,13 @@ compio = { workspace = true }
 v8 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# PR4 build step: the deploy-bundle manifest entry type (`MigrationFileEntry`) +
+# the canonical content-addressed `sha256_hex` / `validate_hash_format` the packer
+# hashes blobs with. The build lib emits `MigrationFileEntry { name, hash }` over
+# the COMMITTED `.ir.json` bytes (consumed verbatim — never re-emitted), using the
+# SAME sha256 convention the `.zship` packer uses.
+zeroship-bundle = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 clap = { workspace = true }
@@ -53,6 +60,11 @@ landlock = { workspace = true }
 
 [dev-dependencies]
 compio = { workspace = true }
+# PR4 e2e: temp migration dirs + temp-file SQLite backends.
+tempfile = { workspace = true }
+# PR4 e2e: apply the committed `.ir.json` through the real engine (IrAuthor +
+# MigrationEngine + SqliteBackend) on the SQLite + PG legs.
+zeroship-migrate = { workspace = true }
 
 # The full-build CLI: `zeroship-migrate-js generate --schema schema.js …`.
 # A THIN arg-parser that delegates to the library. The lean core's own

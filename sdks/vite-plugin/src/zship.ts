@@ -27,6 +27,8 @@ import { promisify } from "node:util";
 import { create as tarCreate } from "tar";
 import mime from "mime";
 
+import { discoverMigrations } from "./migrations.js";
+
 const brotliCompressAsync = promisify(brotliCompress);
 
 // ── Types matching crates/core/src/types.rs ────────────────────────────────
@@ -88,6 +90,22 @@ interface Manifest {
   resources?: Record<string, Record<string, unknown>>;
   /** Wire transformer: `"json"` (default) or `"superjson"`. */
   transformer?: "superjson" | "json";
+  /**
+   * The op.* DSL migrations carried by the bundle (PR4 A4). Each entry's `name`
+   * is the committed `<14-digit>_<desc>.ir.json` filename; `hash` is the sha256 of
+   * the committed bytes (consumed VERBATIM by the packer — never re-emitted). The
+   * control plane hands these to `zeroship-migrate` before go-live (§5.1).
+   */
+  migrations?: MigrationFileEntry[];
+}
+
+/** One migration file carried by the `.zship` (`manifest.migrations[i]`). Mirrors
+ *  the Rust `bundle::manifest::MigrationFileEntry`. */
+interface MigrationFileEntry {
+  /** The committed `.ir.json` filename (bare; no path separators). */
+  name: string;
+  /** sha256 (lowercase, 64 hex) of the committed `.ir.json` blob. */
+  hash: Sha256Hex;
 }
 
 // ── Public configuration ───────────────────────────────────────────────────
@@ -160,6 +178,27 @@ export interface ZshipOptions {
     resources: Record<string, Record<string, unknown>>;
     transformer: "superjson" | "json";
   };
+  /**
+   * The op.* DSL migrations dir relative to `root` (default `migrations`). The
+   * packer discovers `migrations/*.ts`, records each one lacking a committed
+   * `<name>.ir.json` via the PR4a recorder (the vite-plugin is a thin client of the
+   * SAME recorder — it shells the `zeroship-migrate-js` CLI; never an in-process
+   * eval of untrusted `.ts`), reads each committed `.ir.json` VERBATIM, and
+   * contributes `{ name, hash }` entries into `manifest.migrations` + stages the
+   * blob. Set `migrations: false` to disable discovery.
+   */
+  migrations?:
+    | false
+    | {
+        /** Migrations dir relative to root (default `migrations`). */
+        dir?: string;
+        /** The declaring/deploying app (`app_…`). */
+        ownerApp?: string;
+        /** The hosted recorder URL (falls back to `ZEROSHIP_RECORDER_URL`). */
+        recorderUrl?: string;
+        /** Path to the `zeroship-migrate-js` CLI (default on PATH). */
+        cliPath?: string;
+      };
 }
 
 export interface ZshipResult {
@@ -389,6 +428,28 @@ export async function emitZship(
     manifest.resources = mergedResources;
   }
   manifest.transformer = transformer;
+
+  // 8b. Discover + bundle op.* migrations (PR4 A4). The committed `.ir.json`
+  //     bytes are staged as content blobs (deduped by hash, exactly like assets)
+  //     and contributed to `manifest.migrations` — consumed VERBATIM, never
+  //     re-emitted. The packer COPIES; the bundle entry hash is the sha256 of the
+  //     on-disk committed bytes.
+  if (options.migrations !== false) {
+    const migEntries = await discoverMigrations({
+      root,
+      migrationsDir: options.migrations?.dir,
+      ownerApp: options.migrations?.ownerApp,
+      recorderUrl: options.migrations?.recorderUrl,
+      cliPath: options.migrations?.cliPath,
+    });
+    if (migEntries.length > 0) {
+      manifest.migrations = migEntries.map((m) => ({ name: m.name, hash: m.hash }));
+      for (const m of migEntries) {
+        if (!blobsByHash.has(m.hash)) blobsByHash.set(m.hash, m.bytes);
+      }
+      log(`bundled ${migEntries.length} op.* migration(s)`);
+    }
+  }
 
   // Stage 5c: `manifest.exports.schema` is no longer written. The
   // runtime reads `user.default.schema` off the loaded entry directly
@@ -746,6 +807,21 @@ function validateManifest(
           `zship: resource ${JSON.stringify(key)}: static.try references ${t} but it's not in assets`
         );
       }
+    }
+  }
+  // Every migration entry's hash must be valid sha256 hex AND have a blob (the
+  // committed `.ir.json` bytes staged verbatim — the packer copies, never
+  // re-emits). Mirrors the Rust `crates/bundle/src/unpack.rs` migration check.
+  for (const mig of m.migrations ?? []) {
+    if (!isSha256Hex(mig.hash)) {
+      throw new Error(
+        `zship: migration ${mig.name} hash ${mig.hash} is not lowercase 64-char sha256 hex`
+      );
+    }
+    if (!blobsByHash.has(mig.hash)) {
+      throw new Error(
+        `zship: migration ${mig.name} hash ${mig.hash} has no corresponding blob`
+      );
     }
   }
 }

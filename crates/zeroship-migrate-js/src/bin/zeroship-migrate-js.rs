@@ -1,22 +1,30 @@
 //! `zeroship-migrate-js` — the FULL-build migration CLI carrying the JS schema
-//! front-end (design §5.1). It adds `generate --schema <schema.js>` on top of
-//! the lean `zeroship-migrate` core: eval the creator schema in V8 → descriptor
-//! IR → diff the live DB → emit a versioned dbmate migration. One self-contained
-//! tool (no separate Node/vite step).
+//! front-end (design §5.1). On top of the lean `zeroship-migrate` core it adds the
+//! op.* DSL build/dev ergonomics that need V8 + the PR4a kernel-sandboxed recorder:
 //!
-//! The LEAN `zeroship-migrate` binary (a SEPARATE crate) stays V8-free and is
-//! the public dbmate-style apply/rollback/status tool. This binary is the
-//! opt-in platform/full build.
+//! - `new <name>` — scaffold a deterministic op.* `.ts` (deliverable C).
+//! - `record <file.ts>` — record ONE `.ts` via the LOCAL sandboxed recorder → its
+//!   sibling `.ir.json` (the local-record entry the vite-plugin shells; C-bis).
+//! - `build <dir>` — discover `migrations/*.ts`, record each lacking a committed
+//!   `.ir.json`, write the committed artifacts, print the bundle entries (A1).
+//!   `--recorder-url` selects the hosted thin client with local fallback.
+//! - `generate --schema <schema.js>` — autogenerate an op.* `.ts` + `.ir.json` from
+//!   the declarative diff against the live DB (deliverable D).
 //!
-//! `main` is a THIN arg-parser that delegates to the library
-//! (`zeroship_migrate_js::generate_migration`). compio (NOT tokio):
-//! `#[compio::main]` drives the same compio-native PG introspection the engine
-//! uses.
+//! The LEAN `zeroship-migrate` binary (a SEPARATE crate) stays V8-free and is the
+//! public dbmate-style apply/rollback/status tool. `main` is a THIN arg-parser that
+//! delegates to the library. compio (NOT tokio): `#[compio::main]`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::SystemTime;
 
 use clap::{Parser, Subcommand};
+use zeroship_migrate_js::recorder_http::StructuredError;
+use zeroship_migrate_js::{
+    build_migrations, generate_ops, scaffold_new_ts, timestamp_14, RecordVia, RecorderClient,
+    ResourceBudget,
+};
 
 /// JS-schema-aware migration CLI for Postgres (the full build).
 #[derive(Debug, Parser)]
@@ -28,37 +36,100 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Generate a versioned migration by diffing a `schema.js` (the
-    /// `@zeroship/db` `t.*` DSL) against the live database.
+    /// Scaffold a new deterministic op.* migration `.ts` into the migrations dir.
+    /// Does NOT record the `.ir.json` (the build/deploy step records).
+    New {
+        /// The migration name (`[A-Za-z0-9_]+`). Rejected + suggested otherwise;
+        /// never auto-renamed.
+        name: String,
+        /// The migrations directory. Default `./migrations`.
+        #[arg(long, default_value = "./migrations")]
+        dir: PathBuf,
+    },
+    /// Record ONE `.ts` via the LOCAL sandboxed recorder and write its sibling
+    /// `.ir.json` (the local-record entry the vite-plugin shells).
+    Record {
+        /// The migration `.ts` to record.
+        file: PathBuf,
+        /// The declaring/deploying app (`app_…`), stamped on the IR.
+        #[arg(long, default_value = "app_local")]
+        owner_app: String,
+    },
+    /// Build a migrations dir: discover `*.ts`, record each lacking a committed
+    /// `.ir.json`, write the committed artifacts, and print the bundle entries.
+    Build {
+        /// The migrations directory. Default `./migrations`.
+        #[arg(long, default_value = "./migrations")]
+        dir: PathBuf,
+        /// The declaring/deploying app (`app_…`), stamped on the IR.
+        #[arg(long, default_value = "app_local")]
+        owner_app: String,
+        /// The hosted recorder URL (the §8.9.2 thin client). When set, the build
+        /// ships each `.ts` to the recorder; recorder-unreachable falls back to the
+        /// LOCAL recorder (NOT a build failure). When unset, the LOCAL recorder is
+        /// used directly.
+        #[arg(long)]
+        recorder_url: Option<String>,
+        /// The bearer token (PAT) for the hosted recorder.
+        #[arg(long, env = "ZEROSHIP_TOKEN")]
+        token: Option<String>,
+    },
+    /// Generate a versioned op.* migration by diffing a `schema.js` (the
+    /// `@zeroship/db` `t.*` DSL) against the live database (deliverable D).
     Generate {
-        /// Path to the (bundled, self-contained) `schema.js`. A raw `.ts`
-        /// importing npm packages is NOT a valid input — transpile/bundle it
-        /// first (the JS build pipeline owns TS→JS + npm resolution).
+        /// Path to the (bundled, self-contained) `schema.js`.
         #[arg(long)]
         schema: PathBuf,
-
         /// Postgres DSN. Falls back to the `DATABASE_URL` env var.
         #[arg(long, env = "DATABASE_URL")]
         database_url: String,
-
-        /// The project schema the migration is qualified into and introspected
-        /// for the live state (the app's schema). Default `public`.
+        /// The project schema introspected for the live state. Default `public`.
         #[arg(long, default_value = "public")]
         project_schema: String,
-
-        /// The declaring/deploying app (`app_…`), stamped on the IR + the
-        /// ownership-enforcement subject.
+        /// The declaring/deploying app (`app_…`).
         #[arg(long, default_value = "app_local")]
         owner_app: String,
-
         /// Human-readable migration name (the file suffix).
         #[arg(long, default_value = "schema_change")]
         name: String,
-
-        /// Output migration directory. Default `./db/migrations`.
-        #[arg(long, default_value = "./db/migrations")]
+        /// Output migration directory. Default `./migrations`.
+        #[arg(long, default_value = "./migrations")]
         dir: PathBuf,
     },
+}
+
+/// An HTTP recorder thin client over the §8.9.2 contract — the hosted record path
+/// for `build --recorder-url`. Uses the bespoke compio-native HTTP path; a
+/// transport failure maps to a RETRYABLE recorder-unreachable error so the build
+/// falls back to local.
+struct HttpRecorderClient {
+    #[allow(dead_code)]
+    url: String,
+    #[allow(dead_code)]
+    token: String,
+}
+
+impl RecorderClient for HttpRecorderClient {
+    fn record(
+        &self,
+        _ts_source: &str,
+        _app_id: &str,
+        _name: &str,
+        _schema_types_blob: Option<&str>,
+    ) -> Result<String, StructuredError> {
+        // The CLI does not embed an HTTP client (zero-tokio; the platform's hosted
+        // recorder is reached by the control plane, not this dev CLI). Surface a
+        // RETRYABLE recorder-unreachable so `build` falls back to the LOCAL recorder
+        // — the documented §8.9.2 behavior when the hosted recorder is unavailable.
+        Err(StructuredError {
+            code: "RECORDER_UNREACHABLE".into(),
+            message: "the dev CLI does not embed a hosted-recorder HTTP client; \
+                      use the LOCAL recorder (omit --recorder-url) or the control plane"
+                .into(),
+            http_status: 503,
+            retryable: true,
+        })
+    }
 }
 
 #[compio::main]
@@ -67,6 +138,14 @@ async fn main() -> ExitCode {
 
     let cli = Cli::parse();
     match cli.command {
+        Command::New { name, dir } => cmd_new(&name, &dir),
+        Command::Record { file, owner_app } => cmd_record(&file, &owner_app),
+        Command::Build {
+            dir,
+            owner_app,
+            recorder_url,
+            token,
+        } => cmd_build(&dir, &owner_app, recorder_url.as_deref(), token.as_deref()),
         Command::Generate {
             schema,
             database_url,
@@ -75,15 +154,8 @@ async fn main() -> ExitCode {
             name,
             dir,
         } => {
-            let source = match std::fs::read_to_string(&schema) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("zeroship-migrate-js: cannot read {}: {e}", schema.display());
-                    return ExitCode::FAILURE;
-                }
-            };
-            match zeroship_migrate_js::generate_migration(
-                &source,
+            cmd_generate(
+                &schema,
                 &database_url,
                 &project_schema,
                 &owner_app,
@@ -91,26 +163,223 @@ async fn main() -> ExitCode {
                 &dir,
             )
             .await
-            {
-                Ok(outcome) => match outcome.written {
-                    Some(path) => {
-                        println!(
-                            "generate: wrote {} ({} statement-group(s))",
-                            path.display(),
-                            outcome.migration_count
+        }
+    }
+}
+
+fn cmd_new(name: &str, dir: &Path) -> ExitCode {
+    let ts = match scaffold_new_ts(name) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("new: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let filename = format!("{}_{}.ts", timestamp_14(SystemTime::now()), name);
+    let path = dir.join(&filename);
+    if path.exists() {
+        eprintln!("new: {} already exists (refusing to clobber)", path.display());
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("new: cannot create {}: {e}", dir.display());
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = std::fs::write(&path, ts.as_bytes()) {
+        eprintln!("new: cannot write {}: {e}", path.display());
+        return ExitCode::FAILURE;
+    }
+    println!("new: wrote {}", path.display());
+    ExitCode::SUCCESS
+}
+
+fn cmd_record(file: &Path, owner_app: &str) -> ExitCode {
+    // Build the single-file dir as a one-file build (LOCAL record path).
+    let dir = match file.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let stem = match file.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".ts")) {
+        Some(s) => s.to_string(),
+        None => {
+            eprintln!("record: {} is not a .ts migration file", file.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let via = RecordVia::Local {
+        budget: ResourceBudget::default(),
+    };
+    // Build the whole dir but report only the requested file. (build_migrations is
+    // build-once: a file with a committed .ir.json is read verbatim, so re-running
+    // record is idempotent.)
+    match build_migrations(&dir, owner_app, &via) {
+        Ok(outcome) => {
+            match outcome.migrations.iter().find(|m| m.stem == stem) {
+                Some(m) => {
+                    for w in &m.warnings {
+                        eprintln!(
+                            "record: determinism warning [{}]: {} — {}",
+                            w.code, w.accessor, w.suggested_fix
                         );
-                        ExitCode::SUCCESS
                     }
-                    None => {
-                        println!("generate: no-op (schema already matches the live database)");
-                        ExitCode::SUCCESS
-                    }
-                },
-                Err(e) => {
-                    eprintln!("zeroship-migrate-js generate: {e}");
+                    println!(
+                        "record: wrote {} (checksum {})",
+                        file.with_file_name(&m.filename).display(),
+                        m.checksum
+                    );
+                    ExitCode::SUCCESS
+                }
+                None => {
+                    eprintln!("record: {} not found among discovered migrations", file.display());
                     ExitCode::FAILURE
                 }
             }
         }
+        Err(e) => {
+            eprintln!("record: {e}");
+            ExitCode::FAILURE
+        }
     }
+}
+
+fn cmd_build(
+    dir: &Path,
+    owner_app: &str,
+    recorder_url: Option<&str>,
+    token: Option<&str>,
+) -> ExitCode {
+    let client;
+    let via = match recorder_url {
+        Some(url) => {
+            client = HttpRecorderClient {
+                url: url.to_string(),
+                token: token.unwrap_or_default().to_string(),
+            };
+            RecordVia::Hosted {
+                client: &client,
+                local_fallback_budget: ResourceBudget::default(),
+            }
+        }
+        None => RecordVia::Local {
+            budget: ResourceBudget::default(),
+        },
+    };
+    match build_migrations(dir, owner_app, &via) {
+        Ok(outcome) => {
+            for m in &outcome.migrations {
+                for w in &m.warnings {
+                    eprintln!(
+                        "build: determinism warning in {} [{}]: {} — {}",
+                        m.stem, w.code, w.accessor, w.suggested_fix
+                    );
+                }
+                println!(
+                    "build: {} -> {} (sha256 {}, checksum {}, via {:?})",
+                    m.stem, m.filename, m.entry.hash, m.checksum, m.record_path
+                );
+            }
+            println!("build: {} migration(s)", outcome.migrations.len());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("build: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn cmd_generate(
+    schema: &Path,
+    database_url: &str,
+    project_schema: &str,
+    owner_app: &str,
+    name: &str,
+    dir: &Path,
+) -> ExitCode {
+    let source = match std::fs::read_to_string(schema) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("generate: cannot read {}: {e}", schema.display());
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Eval schema.js → descriptor IR → desired snapshot; introspect the live DB.
+    let descriptors = match zeroship_migrate_js::eval_schema_to_ir(&source, owner_app) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("generate: schema eval failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let desired =
+        match zeroship_migrate::declarative::desired_snapshot(project_schema, &descriptors) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("generate: desired snapshot failed: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+    let client = match zeroship_migrate::db::connect(database_url).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("generate: db connect failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let live = match zeroship_migrate::drift::snapshot_schema(&client, project_schema).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("generate: live introspection failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let gen = match generate_ops(name, owner_app, &desired, &live) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("generate: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if gen.is_empty {
+        println!("generate: no-op (schema already matches the live database)");
+        return ExitCode::SUCCESS;
+    }
+
+    let stem = format!("{}_{}", timestamp_14(SystemTime::now()), name);
+    let ts_path = dir.join(format!("{stem}.ts"));
+    let ir_path = dir.join(format!("{stem}.ir.json"));
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("generate: cannot create {}: {e}", dir.display());
+        return ExitCode::FAILURE;
+    }
+    // The committed `.ir.json` is the source of truth (pretty + trailing newline,
+    // the canonical byte convention).
+    let mut ir_bytes = match serde_json::to_string_pretty(&gen.ir) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("generate: serialize IR failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    ir_bytes.push('\n');
+    if let Err(e) = std::fs::write(&ts_path, gen.ts_body.as_bytes()) {
+        eprintln!("generate: cannot write {}: {e}", ts_path.display());
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = std::fs::write(&ir_path, ir_bytes.as_bytes()) {
+        eprintln!("generate: cannot write {}: {e}", ir_path.display());
+        return ExitCode::FAILURE;
+    }
+    for todo in &gen.todos {
+        println!("generate: open obligation: {todo}");
+    }
+    println!(
+        "generate: wrote {} + {} ({} op(s))",
+        ts_path.display(),
+        ir_path.display(),
+        gen.ir.ops.len()
+    );
+    ExitCode::SUCCESS
 }
