@@ -461,6 +461,35 @@ fn field_to_sdk_def(f: &FieldDescriptor) -> serde_json::Value {
 /// NOTE: this is descriptor-diff-generated DDL ONLY — there is NO untrusted raw SQL
 /// string; the descriptor field/type names were validated at the author boundary
 /// (`validate_desired`) before this runs (§2.5.3 trust model).
+/// **PR2** — produce the post-rename SDK schema `Value` for a SQLite
+/// `renameColumn` rebuild by renaming ONE top-level field key `from`→`to`,
+/// preserving its definition object verbatim (`{ <field>: { type, … } }`). The
+/// shared SQLite CREATE emitter renders the per-column type/affinity + sentinels
+/// from this object, so carrying the field def unchanged under the new key yields
+/// a post-rename column byte-identical to a `t.*`-diff rename's. Returns `None` if
+/// the live schema is not an object or has no `from` field (the caller fails
+/// closed). The field-insertion ORDER is preserved (the renamed field keeps its
+/// position) so the emitted column order matches the live table's.
+fn rename_sdk_schema_field(
+    live: &serde_json::Value,
+    from: &str,
+    to: &str,
+) -> Option<serde_json::Value> {
+    let obj = live.as_object()?;
+    if !obj.contains_key(from) {
+        return None;
+    }
+    let mut out = serde_json::Map::new();
+    for (k, v) in obj {
+        if k == from {
+            out.insert(to.to_string(), v.clone());
+        } else {
+            out.insert(k.clone(), v.clone());
+        }
+    }
+    Some(serde_json::Value::Object(out))
+}
+
 pub(crate) fn descriptor_to_sdk_schema(d: &CollectionDescriptor) -> serde_json::Value {
     let mut schema = serde_json::Map::new();
     for f in &d.fields {
@@ -3588,6 +3617,166 @@ impl DeclarativeAuthor {
         Ok(SqliteRebuild { migration, spec })
     }
 
+    /// **PR2 — the cross-subsystem `renameColumn` bridge (§2.6 / §2.6.1 / §2.6.2).**
+    /// Lower ONE IR `renameColumn` op into its dialect-chosen
+    /// [`RenameStep`](crate::plan::RenameStep), REUSING the existing destination
+    /// authors verbatim so the IR path inherits their version-stable ids:
+    ///
+    /// - **Postgres** ⇒ build the [`OnlineIntent::RenameColumn`] with the PG type
+    ///   string `pg_ty` (the IR's dialect-neutral column type, already mapped to its
+    ///   PG `data_type` and `ddl_type`-spelled by the caller, §2.6) and run it
+    ///   through [`ExpandContractAuthor::author`] — the SAME author the declarative
+    ///   diff path calls, so the E1..C2 ids + intra-chain `depends_on` are authored
+    ///   identically (§2.6.1). The returned [`ExpandContractPlan`] is wrapped
+    ///   verbatim into [`RenameStep::PgExpandContract`].
+    ///
+    /// - **SQLite** ⇒ synthesize the DESIRED post-rename inputs the differ's
+    ///   12-step rebuild planner consumes — the live `TableSnapshot` with the
+    ///   `from`→`to` column renamed (its `data_type` carried across UNCHANGED: a
+    ///   pure rename never changes type, and the rebuild's rendered CREATE takes its
+    ///   per-column SQLite affinity from the SDK schema `Value`'s field token, not
+    ///   from this snapshot `data_type`), the live SDK schema `Value` with the same
+    ///   field-key rename, and a [`RenameHint`] — and route them through
+    ///   [`Self::diff`]. The diff yields exactly ONE [`SqliteRebuild`] (a rename
+    ///   always needs a rebuild on SQLite), wrapped into
+    ///   [`RenameStep::SqliteRebuild`]. NO PG type string is ever passed to this leg
+    ///   — the affinity comes from the SDK Value, which the caller built from the
+    ///   dialect-neutral `ColType`.
+    ///
+    /// `live_snapshot` / `live_sqlite_schema` are this table's full introspected
+    /// structure (the SQLite leg needs the whole shape, not just the column being
+    /// renamed). `pg_ty` is used only on the PG leg.
+    ///
+    /// # Errors
+    /// [`DeclarativeError`] if the expand-contract author rejects the intent (empty/
+    /// identical names) or the differ cannot resolve the rebuild (un-matchable hint,
+    /// emitter shape mismatch).
+    pub fn lower_ir_rename(
+        &self,
+        table: &str,
+        from: &str,
+        to: &str,
+        pg_ty: &str,
+        live_snapshot: &TableSnapshot,
+        live_sqlite_schema: &serde_json::Value,
+    ) -> Result<crate::plan::RenameStep, DeclarativeError> {
+        match self.dialect {
+            SqlDialect::Postgres => {
+                // The PG expand-contract author IS the id authority (§2.6.1): the
+                // declarative path calls the SAME `ExpandContractAuthor::author` with
+                // the SAME `OnlineIntent` fields, so the authored E1..C2 ids +
+                // intra-chain `depends_on` match by construction.
+                let ec = ExpandContractAuthor::new(&self.project_schema, &self.owner_app);
+                let plan = ec
+                    .author(&OnlineIntent::RenameColumn {
+                        table: table.to_string(),
+                        from: from.to_string(),
+                        to: to.to_string(),
+                        ty: pg_ty.to_string(),
+                    })
+                    .map_err(|e| {
+                        DeclarativeError::Invalid(format!(
+                            "renameColumn expand-contract author rejected '{table}.{from}→{to}': {e}"
+                        ))
+                    })?;
+                Ok(crate::plan::RenameStep::PgExpandContract(plan))
+            }
+            SqlDialect::Sqlite => {
+                let rebuild =
+                    self.sqlite_rename_rebuild(table, from, to, live_snapshot, live_sqlite_schema)?;
+                Ok(crate::plan::RenameStep::SqliteRebuild(rebuild))
+            }
+        }
+    }
+
+    /// **PR2** — the SQLite arm of [`Self::lower_ir_rename`]: synthesize the desired
+    /// post-rename snapshot + SDK schema + [`RenameHint`] from the live table facts
+    /// and route them through [`Self::diff`], returning the SINGLE [`SqliteRebuild`]
+    /// it produces. Factored out so the dialect router stays readable.
+    ///
+    /// The desired snapshot is the live snapshot with `from` renamed to `to` (the
+    /// `data_type` carried across UNCHANGED — a rename never changes type, and the
+    /// rename-hint resolver requires `live_from.data_type == desired_to.data_type`);
+    /// the desired SDK schema is the live `Value` with the same field-key rename; the
+    /// `RenameHint` lets the differ resolve the drop+add pair as a rename rather than
+    /// a destructive column swap. Ownership is the deploying app (the diff's
+    /// ownership-enforcement subject); `live_ownership` maps the one table to the
+    /// same app so the diff never trips the cross-app drop guard.
+    fn sqlite_rename_rebuild(
+        &self,
+        table: &str,
+        from: &str,
+        to: &str,
+        live_snapshot: &TableSnapshot,
+        live_sqlite_schema: &serde_json::Value,
+    ) -> Result<SqliteRebuild, DeclarativeError> {
+        // ---- desired snapshot: live with `from`→`to` renamed (type unchanged) ----
+        let mut desired_table = live_snapshot.clone();
+        let mut found = false;
+        for c in &mut desired_table.columns {
+            if c.name == from {
+                c.name = to.to_string();
+                found = true;
+            }
+        }
+        if !found {
+            return Err(DeclarativeError::Invalid(format!(
+                "renameColumn: live table '{table}' has no column '{from}' to rename \
+                 (the rebuild needs the live structure to carry the value across)"
+            )));
+        }
+
+        // ---- desired SDK schema `Value`: live with the field key renamed ----
+        // The shared SQLite emitter renders the new-table CREATE from this Value, so
+        // renaming the field KEY (preserving its facets verbatim) is exactly the
+        // post-rename column shape — byte-identical to a `t.*`-diff rename.
+        let desired_schema_value =
+            rename_sdk_schema_field(live_sqlite_schema, from, to).ok_or_else(|| {
+                DeclarativeError::Invalid(format!(
+                    "renameColumn: live SDK schema for '{table}' has no field '{from}' \
+                     (cannot author the post-rename CREATE)"
+                ))
+            })?;
+
+        // ---- assemble the one-table DesiredSchema + live snapshot ----
+        let mut desired_tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
+        desired_tables.insert(table.to_string(), desired_table);
+        let mut ownership: BTreeMap<String, String> = BTreeMap::new();
+        ownership.insert(table.to_string(), self.owner_app.clone());
+        let mut sqlite_schemas: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        sqlite_schemas.insert(table.to_string(), desired_schema_value);
+        let desired = DesiredSchema {
+            snapshot: SchemaSnapshot { tables: desired_tables },
+            ownership,
+            sqlite_schemas,
+        };
+
+        let mut live_tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
+        live_tables.insert(table.to_string(), live_snapshot.clone());
+        let live = SchemaSnapshot { tables: live_tables };
+        let mut live_ownership: HashMap<String, String> = HashMap::new();
+        live_ownership.insert(table.to_string(), self.owner_app.clone());
+
+        let hint = RenameHint {
+            table: table.to_string(),
+            from: from.to_string(),
+            to: to.to_string(),
+        };
+
+        let plan = self.diff(&desired, &live, &live_ownership, std::slice::from_ref(&hint))?;
+        // A rename on SQLite is ALWAYS a rebuild (no native online rename); the diff
+        // emits exactly one, and NO PG expand-contract.
+        let mut rebuilds = plan.rebuilds;
+        match (rebuilds.len(), plan.renames.is_empty()) {
+            (1, true) => Ok(rebuilds.remove(0)),
+            (n, renames_empty) => Err(DeclarativeError::Invalid(format!(
+                "renameColumn SQLite lowering of '{table}.{from}→{to}' expected exactly \
+                 one rebuild and no PG expand-contract, got {n} rebuild(s) / \
+                 renames_empty={renames_empty} (internal rebuild-planner invariant)"
+            ))),
+        }
+    }
+
     /// Render `CREATE TABLE <schema>.<table> (<cols…>, <pk>, <inline fks…>)`.
     fn render_create_table(
         &self,
@@ -4543,7 +4732,12 @@ fn destructive_flags() -> MigrationFlags {
 /// emission. `snapshot_schema` reports `timestamp with time zone`, but the DDL
 /// is written `TIMESTAMPTZ` (both round-trip to the same `information_schema`
 /// type). All others are spelled identically (lowercased is valid DDL).
-fn ddl_type(data_type: &str) -> &str {
+///
+/// `pub(crate)` so [`crate::ir_author::IrAuthor`] derives the IR `renameColumn`'s
+/// PG `OnlineIntent` column type the SAME way the declarative rename path does
+/// (live `data_type` → `ddl_type`), preserving E1's `ADD COLUMN <to> <ty>`
+/// byte-equality between the two paths (§2.6.1).
+pub(crate) fn ddl_type(data_type: &str) -> &str {
     match data_type {
         "timestamp with time zone" => "timestamptz",
         "double precision" => "double precision",

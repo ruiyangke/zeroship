@@ -38,8 +38,29 @@ use crate::ir::{
     ColType, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IndexMethod, MigrationIr, Op,
 };
 use crate::migration::Migration;
-use crate::plan::{AppliedPlan, PlanStep};
+use crate::plan::{AppliedPlan, PlanStep, RenameStep};
 use zeroship_schema::query::SqlDialect;
+
+/// The result of lowering ONE IR op (§2.0 / §2.6.1). A DDL op lowers to a list of
+/// [`LoweredUnit`]s (a `Migration` + its structural statement list); an online
+/// `renameColumn` lowers to ONE [`PlanStep::OnlineRename`] carrying the
+/// dialect-chosen [`RenameStep`] (PG expand-contract or SQLite rebuild). Keeping
+/// them as one return type lets `lower`/`lower_guarded` build the ordered
+/// `Vec<PlanStep>` an [`AppliedPlan`] needs while still guarding each DDL fragment.
+enum LoweredOp {
+    /// DDL units (createTable / addColumn / alter* / addConstraint / …) — each a
+    /// `Migration` + its structural per-statement list (for guard-per-fragment).
+    Ddl(Vec<LoweredUnit>),
+    /// An online `renameColumn` — ONE plan step, dialect-chosen (§2.6.1/§2.6.2).
+    /// The variant's `Migration`s (PG E1..C2, or the SQLite rebuild journal mig)
+    /// already carry their own version-stable ids; the IR plan does NOT re-mint
+    /// them. Not guarded per-fragment: the expand-contract author / the differ are
+    /// the trusted, descriptor-/intent-driven producers (no untrusted raw SQL),
+    /// exactly like the declarative path that produces the same shapes. Boxed: a
+    /// `RenameStep::PgExpandContract` is large (the full E1..C2 plan), so boxing it
+    /// keeps the common `Ddl` arm cheap (`clippy::large_enum_variant`).
+    Rename(Box<RenameStep>),
+}
 
 /// The LIVE-schema facts the IR-path Lower phase consults — the IR-path peer of
 /// the full [`crate::drift::SchemaSnapshot`] the differ diffs against.
@@ -69,6 +90,25 @@ pub struct LiveSchema {
     /// Index NAMES the live catalog reports as UNIQUE (drop-gating, OR-ed with the
     /// IR's advisory `unique` hint — the live fact is authoritative).
     pub unique_indexes: BTreeSet<String>,
+    /// **PR2 — the SQLite `renameColumn` rebuild facts.** The full introspected
+    /// per-table column structure (`table → TableSnapshot`), needed ONLY on the
+    /// SQLite leg of an online `renameColumn`: SQLite has no native online rename,
+    /// so the rename is reconciled by the 12-step table REBUILD, which needs the
+    /// whole live table shape (not just its name) to author the post-rename CREATE
+    /// and the value-copy mapping. The PG leg never reads this map (it lowers the
+    /// rename to an expand-contract sequence that needs only `{table, from, to,
+    /// ty}`). Empty ⇒ a SQLite `renameColumn` whose table's structure is absent
+    /// fails closed ([`IrLowerError::SqliteRenameNeedsLiveTable`]), never silently
+    /// emitting a wrong rebuild.
+    pub table_snapshots: std::collections::BTreeMap<String, crate::drift::TableSnapshot>,
+    /// **PR2 — the SQLite `renameColumn` rebuild facts.** The live per-table SDK
+    /// schema `Value` (`table → registerModel-shaped JSON`), the SAME shape
+    /// [`crate::declarative::DesiredSchema`]'s `sqlite_schemas` carries. The SQLite
+    /// rebuild author renders the post-rename `CREATE TABLE` from this Value (with
+    /// the renamed field key) through the shared `zeroship_schema::query` emitter,
+    /// so the rebuilt table is byte-identical to what the declarative diff would
+    /// emit. Only read on the SQLite `renameColumn` leg (see `table_snapshots`).
+    pub sqlite_schemas: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl LiveSchema {
@@ -78,7 +118,12 @@ impl LiveSchema {
     /// LESS strict than the hint).
     #[must_use]
     pub fn from_tables(tables: BTreeSet<String>) -> Self {
-        Self { tables, unique_indexes: BTreeSet::new() }
+        Self {
+            tables,
+            unique_indexes: BTreeSet::new(),
+            table_snapshots: std::collections::BTreeMap::new(),
+            sqlite_schemas: std::collections::BTreeMap::new(),
+        }
     }
 }
 
@@ -134,6 +179,29 @@ pub enum IrLowerError {
          declarative diff rebuild seam (the 12-step table rebuild)"
     )]
     SqliteRebuildOnly(&'static str),
+    /// **PR2** — a SQLite `renameColumn` whose table's full live structure is not
+    /// in [`LiveSchema::table_snapshots`] / [`LiveSchema::sqlite_schemas`]. SQLite
+    /// has no native online rename, so the rename is reconciled by the 12-step
+    /// table REBUILD, which needs the WHOLE live table shape (every column + the
+    /// live SDK schema `Value`) to author the post-rename CREATE + value-copy. The
+    /// PG leg never needs this (it lowers to expand-contract from `{from,to,ty}`).
+    /// Carries the table name. Fail-closed: never emit a rebuild from a partial
+    /// view of the table.
+    #[error(
+        "IrAuthor::lower of a SQLite renameColumn on table {0:?} needs the table's \
+         full live structure (LiveSchema::table_snapshots + sqlite_schemas) to \
+         author the 12-step rebuild; it is absent — refusing to emit a rebuild from \
+         a partial view"
+    )]
+    SqliteRenameNeedsLiveTable(String),
+    /// **PR2** — the cross-subsystem `OnlineIntent` bridge or the SQLite rebuild
+    /// planner rejected a `renameColumn` lowering (an empty/identical name, an
+    /// un-resolvable rename hint, an emitter shape mismatch). Carries the
+    /// underlying error text. Distinct from [`Self::Snapshot`] because it crosses
+    /// into the expand-contract author / the differ, not the shared snapshot
+    /// builder.
+    #[error("IrAuthor::lower of renameColumn failed: {0}")]
+    RenameLower(String),
 }
 
 /// One rendered SQL FRAGMENT of a lowered op, carrying its attribution (§6.1.1):
@@ -252,19 +320,33 @@ pub struct LoweredArtifact {
 }
 
 impl LoweredArtifact {
-    /// The lowered `Ddl` migrations, in plan-step order — the flat view the
-    /// deploy-side traceability manifest + diagnostics consume. (PR1 steps are all
-    /// `Ddl`; a non-`Ddl` step would simply not appear here.)
+    /// The lowered migrations, in plan-step order — the flat view the deploy-side
+    /// set-integrity manifest + diagnostics consume. A `Ddl` step contributes its
+    /// migration; an `OnlineRename` step contributes its journaled sub-migrations so
+    /// the manifest tally records the rename's full id set (§2.6.1: the IR-path
+    /// rename ids the manifest records are identical to the equivalent
+    /// `t.*`-diff-authored rename's) — PG: E1..E3 **and** the deferred contract
+    /// C1/C2 (the whole authored sequence, mirroring the declarative manifest which
+    /// folds the rename's expand + deferred contract, `engine.rs` manifest doc);
+    /// SQLite: the single rebuild journal migration. `Dml`/`Backfill` steps carry no
+    /// `Migration` here and do not appear.
     #[must_use]
     pub fn migrations(&self) -> Vec<Migration> {
-        self.plan
-            .steps
-            .iter()
-            .filter_map(|s| match s {
-                PlanStep::Ddl(m) => Some(m.clone()),
-                _ => None,
-            })
-            .collect()
+        let mut out: Vec<Migration> = Vec::new();
+        for s in &self.plan.steps {
+            match s {
+                PlanStep::Ddl(m) => out.push(m.clone()),
+                PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => {
+                    out.extend(ec.expand.iter().cloned());
+                    out.extend(ec.contract.iter().cloned());
+                }
+                PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => {
+                    out.push(rb.migration.clone());
+                }
+                PlanStep::Dml { .. } | PlanStep::Backfill(_) => {}
+            }
+        }
+        out
     }
 }
 
@@ -363,26 +445,26 @@ impl IrAuthor {
                 _ => None,
             })
             .collect();
-        let (migrations, fragments) = self
+        let (steps, fragments) = self
             .lower_guarded(&ir, guard_cfg, live)
             .map_err(LoadAndLowerGuardedError::Lower)?;
-        // Wrap the lowered DDL steps as ONE AppliedPlan whose checksum is the
+        // Wrap the lowered steps as ONE AppliedPlan whose checksum is the
         // dialect-neutral `Checksum::of_ir` over the op list (§2.0 / §5.2), and
-        // STAMP that same anchor onto every step's journaled `Migration.checksum`
+        // STAMP that same anchor onto every DDL step's journaled `Migration.checksum`
         // (§5.3 / §2.6.1): the drift anchor that enters the journal is the
         // canonical op list, NOT the per-dialect rendered SQL. So a re-deploy of
         // the SAME `.ir.json` on EITHER backend re-derives the SAME anchor (no
         // false drift), while editing the authoring `.ts` (⇒ a different op list)
         // shifts the anchor and the executor's net-applied drift gate aborts.
-        let plan = self.assemble_plan(&ir, migrations);
+        let plan = self.assemble_plan(&ir, steps);
         Ok(LoweredArtifact { plan, fragments, created_tables })
     }
 
-    /// Assemble the lowered DDL `Migration`s into ONE [`AppliedPlan`] (§2.0 / §5.2),
+    /// Assemble the lowered [`PlanStep`]s into ONE [`AppliedPlan`] (§2.0 / §5.2),
     /// stamping the dialect-neutral [`Checksum::of_ir`] anchor (§5.3) onto BOTH the
-    /// plan and every step's journaled `Migration.checksum`.
+    /// plan and every `Ddl` step's journaled `Migration.checksum`.
     ///
-    /// **Why stamp the op-list `of_ir` onto each step's checksum.** The journal
+    /// **Why stamp the op-list `of_ir` onto each DDL step's checksum.** The journal
     /// records `Migration.checksum` and the executor's net-applied drift gate
     /// (`drift.rs`) compares the journaled value to the lowered `Migration.checksum`
     /// on re-deploy. Stamping the canonical-op-list `of_ir` there makes the
@@ -392,20 +474,28 @@ impl IrAuthor {
     /// `.ts` edit (a changed op list) is detected as drift regardless of dialect.
     /// The per-dialect rendered `up`/`down` still applies; only the IDENTITY anchor
     /// is the neutral op list.
-    fn assemble_plan(&self, ir: &MigrationIr, mut migrations: Vec<Migration>) -> AppliedPlan {
+    ///
+    /// An [`PlanStep::OnlineRename`] step's sub-migrations (PG E1..C2 / the SQLite
+    /// rebuild journal migration) keep their OWN author-stamped checksums and
+    /// version-stable ids — `ExpandContractAuthor` / the rebuild planner are the id
+    /// authority (§2.6.1), the IR plan does NOT re-mint or re-anchor them. The
+    /// neutral op-list anchor is the PLAN's identity (`AppliedPlan.checksum`); the
+    /// per-DDL-step checksum stamp is the existing PR1 drift seam for plain DDL.
+    fn assemble_plan(&self, ir: &MigrationIr, mut steps: Vec<PlanStep>) -> AppliedPlan {
         let anchor = crate::ir_load::authoritative_ir_checksum(ir);
-        for m in &mut migrations {
-            m.checksum = anchor.clone();
+        for s in &mut steps {
+            if let PlanStep::Ddl(m) = s {
+                m.checksum = anchor.clone();
+            }
         }
-        // The plan-group identity (§2.0.1): for PR1 the steps keep their own
-        // per-op journal versions, so the plan `version` is a marker — the first
-        // step's version (deterministic within a deploy), or a fresh id for the
-        // degenerate empty plan (a no-op IR).
-        let version = migrations
+        // The plan-group identity (§2.0.1): the steps keep their own per-op journal
+        // versions, so the plan `version` is a marker — the first step's version
+        // (deterministic within a deploy), or a fresh id for the degenerate empty
+        // plan (a no-op IR).
+        let version = steps
             .first()
-            .map(|m| m.version.clone())
+            .map(plan_step_version)
             .unwrap_or_else(crate::migration::MigrationId::generate);
-        let steps: Vec<PlanStep> = migrations.into_iter().map(PlanStep::Ddl).collect();
         let rollbackable = AppliedPlan::compute_rollbackable(&steps);
         AppliedPlan {
             version,
@@ -425,73 +515,123 @@ impl IrAuthor {
         }
     }
 
-    /// Lower a validated [`MigrationIr`]'s DDL ops to ONE [`AppliedPlan`] (§2.0 /
+    /// Lower a validated [`MigrationIr`]'s ops to ONE [`AppliedPlan`] (§2.0 /
     /// §5.2) — the named-contract peer of [`lower`](Self::lower) (which returns the
     /// flat `Vec<Migration>` the §6.4 byte-identity goldens compare). The plan's
     /// `checksum` is the dialect-neutral [`Checksum::of_ir`] anchor and each `Ddl`
     /// step's journaled checksum is stamped with it (§5.3 — see
-    /// [`assemble_plan`](Self::assemble_plan)).
+    /// [`assemble_plan`](Self::assemble_plan)). A `renameColumn` op lowers to a
+    /// [`PlanStep::OnlineRename`] step (PR2), carried verbatim into the plan.
     ///
     /// # Errors
-    /// Same as [`lower`](Self::lower).
+    /// Same as [`lower_steps`](Self::lower_steps).
     pub fn lower_plan(
         &self,
         ir: &MigrationIr,
         live: &LiveSchema,
     ) -> Result<AppliedPlan, IrLowerError> {
-        let migrations = self.lower(ir, live)?;
-        Ok(self.assemble_plan(ir, migrations))
+        let steps = self.lower_steps(ir, live)?;
+        Ok(self.assemble_plan(ir, steps))
     }
 
-    /// Lower a validated [`MigrationIr`]'s DDL ops to [`Migration`]s.
+    /// Lower a validated [`MigrationIr`]'s DDL ops to their flat [`Migration`]
+    /// list — the §6.4 byte-identity parity leg (compared against the differ, which
+    /// also returns `Vec<Migration>`). DDL ops only: a `renameColumn` lowers to a
+    /// [`PlanStep::OnlineRename`] (no plain `Migration` in this flat view), so it is
+    /// **not** represented here — use [`lower_steps`](Self::lower_steps) /
+    /// [`lower_plan`](Self::lower_plan) for the full ordered plan including online
+    /// renames. The §6.4 goldens never include a rename, so this projection is
+    /// exact for them.
+    ///
+    /// `live` carries the introspected [`LiveSchema`] facts (see
+    /// [`lower_steps`](Self::lower_steps)).
+    ///
+    /// # Errors
+    /// - [`IrLowerError::Snapshot`] — the shared builder rejected an op's fields.
+    /// - [`IrLowerError::UnsupportedOp`] — a non-DDL op (DML).
+    pub fn lower(
+        &self,
+        ir: &MigrationIr,
+        live: &LiveSchema,
+    ) -> Result<Vec<Migration>, IrLowerError> {
+        Ok(self
+            .lower_steps(ir, live)?
+            .into_iter()
+            .filter_map(|s| match s {
+                PlanStep::Ddl(m) => Some(m),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// Lower a validated [`MigrationIr`]'s ops to their ordered [`PlanStep`] list
+    /// (§2.0). This is the full lowering: DDL ops become [`PlanStep::Ddl`]; an
+    /// online `renameColumn` becomes ONE [`PlanStep::OnlineRename`] carrying the
+    /// dialect-chosen [`RenameStep`] (PG expand-contract / SQLite rebuild, §2.6.2).
     ///
     /// `live` carries the introspected [`LiveSchema`] facts: `live.tables` is the
     /// set of tables already present in the project (so an FK to a live target
     /// inlines, and a non-live target defers on PG / errors on SQLite — mirroring
     /// `diff`); `live.unique_indexes` is the authoritative set of live UNIQUE-index
     /// names that drives the `dropIndex` destructive/approval gate (OR-ed with the
-    /// IR's advisory `unique` hint). Tables created EARLIER in the same IR are added
-    /// to the working live-table set as lowering proceeds, so an intra-migration FK
-    /// inlines correctly.
+    /// IR's advisory `unique` hint); `live.table_snapshots` + `live.sqlite_schemas`
+    /// carry the full live table structure the SQLite `renameColumn` rebuild needs.
+    /// Tables created EARLIER in the same IR are added to the working live-table set
+    /// as lowering proceeds, so an intra-migration FK inlines correctly.
     ///
     /// # Errors
     /// - [`IrLowerError::Snapshot`] — the shared builder rejected an op's fields.
-    /// - [`IrLowerError::UnsupportedOp`] — a non-DDL op (DML / online intent).
-    pub fn lower(
+    /// - [`IrLowerError::UnsupportedOp`] — a non-DDL op (DML).
+    /// - [`IrLowerError::SqliteRenameNeedsLiveTable`] / [`IrLowerError::RenameLower`]
+    ///   — a `renameColumn` could not lower (missing live structure / bridge error).
+    pub fn lower_steps(
         &self,
         ir: &MigrationIr,
         live: &LiveSchema,
-    ) -> Result<Vec<Migration>, IrLowerError> {
-        let mut out: Vec<Migration> = Vec::new();
+    ) -> Result<Vec<PlanStep>, IrLowerError> {
+        let mut out: Vec<PlanStep> = Vec::new();
         let mut live_tables: BTreeSet<String> = live.tables.clone();
         for op in &ir.ops {
-            // The whole-up `lower` discards the structural statement list (it is the
-            // §6.4 parity leg, which only compares the joined `up`); the guarded
-            // path ([`lower_guarded`]) consumes the list to guard true statements.
-            out.extend(
-                self.lower_one_op(op, &mut live_tables, &live.unique_indexes)?
-                    .into_iter()
-                    .map(|(mig, _statements)| mig),
-            );
+            // The whole-up step lowering discards the structural statement list (it
+            // is the §6.4 parity leg, which only compares the joined `up`); the
+            // guarded path ([`lower_guarded`]) consumes the list to guard true
+            // statements.
+            match self.lower_one_op(op, &mut live_tables, live)? {
+                LoweredOp::Ddl(units) => {
+                    out.extend(units.into_iter().map(|(mig, _statements)| PlanStep::Ddl(mig)));
+                }
+                LoweredOp::Rename(step) => out.push(PlanStep::OnlineRename(*step)),
+            }
         }
         Ok(out)
     }
 
-    /// Lower a SINGLE op to its migration(s), advancing the working `live` set
-    /// when the op creates a table (so a later intra-IR FK inlines). Factored out
-    /// of [`lower`] so the guard-per-fragment path ([`lower_guarded`]) can attribute
-    /// each op's rendered fragments to its op index (§6.1.1).
+    /// Lower a SINGLE op, advancing the working `live` table set when the op creates
+    /// a table (so a later intra-IR FK inlines). Factored out of
+    /// [`lower_steps`](Self::lower_steps) so the guard-per-fragment path
+    /// ([`lower_guarded`]) can attribute each op's rendered fragments to its op
+    /// index (§6.1.1). Returns a [`LoweredOp`] — DDL units OR a single online-rename
+    /// step (§2.6.1).
+    ///
+    /// `live` is the full [`LiveSchema`]: `live_tables` is the MUTABLE working
+    /// table set (advanced as createTable ops lower); the SQLite `renameColumn` leg
+    /// also reads `live.table_snapshots` / `live.sqlite_schemas`.
     ///
     /// # Errors
     /// - [`IrLowerError::Snapshot`] — the shared builder rejected the op's fields.
-    /// - [`IrLowerError::UnsupportedOp`] — a non-DDL op (DML / online intent).
+    /// - [`IrLowerError::UnsupportedOp`] — a non-DDL op (DML).
+    /// - rename-lowering errors (see [`lower_steps`](Self::lower_steps)).
     fn lower_one_op(
         &self,
         op: &Op,
-        live: &mut BTreeSet<String>,
-        live_unique_indexes: &BTreeSet<String>,
-    ) -> Result<Vec<LoweredUnit>, IrLowerError> {
-        let migs = match op {
+        live_tables: &mut BTreeSet<String>,
+        live_schema: &LiveSchema,
+    ) -> Result<LoweredOp, IrLowerError> {
+        let live_unique_indexes = &live_schema.unique_indexes;
+        // The DDL arms advance / read the working table set under the short name
+        // `live` (the name the §6.1.1 fragment logic already uses).
+        let live = live_tables;
+        let migs: Vec<LoweredUnit> = match op {
             Op::CreateTable { name, columns, .. } => {
                 // A column carrying a SYNTH default (`now()`/`genRandomUuid()`) must
                 // FAIL CLOSED, not silently lower with NO default. `ir_default_to_value`
@@ -580,7 +720,16 @@ impl IrAuthor {
                 self.require_pg_for("alterColumnNullability")?;
                 vec![self.decl.lower_alter_column_nullability(table, column, *nullable)]
             }
-            Op::RenameColumn { .. } => return Err(IrLowerError::UnsupportedOp("renameColumn")),
+            Op::RenameColumn { table, from, to, ty } => {
+                // §2.6.1 — ONE online-rename plan step, dialect-chosen at lower
+                // (§2.6.2). The neutral→PG / neutral→SQLite-affinity translation
+                // lives in `lower_rename`; the destination authors (the
+                // expand-contract author on PG, the rebuild planner on SQLite) are
+                // REUSED verbatim, so the IR path inherits their version-stable ids
+                // (§2.6.1). A rename never advances the working live-table set.
+                let step = self.lower_rename(table, from, to, ty, live_schema)?;
+                return Ok(LoweredOp::Rename(Box::new(step)));
+            }
             Op::AddConstraint { table, constraint } => self.lower_add_constraint(table, constraint)?,
             Op::DropConstraint { table, name } => {
                 // SQLite has no `ALTER TABLE … DROP CONSTRAINT` (rebuild-only); PG only.
@@ -592,7 +741,7 @@ impl IrAuthor {
             Op::Delete { .. } => return Err(IrLowerError::UnsupportedOp("delete")),
             Op::Backfill { .. } => return Err(IrLowerError::UnsupportedOp("backfill")),
         };
-        Ok(migs)
+        Ok(LoweredOp::Ddl(migs))
     }
 
     /// **Guard-per-fragment + reassembly (§6.1.1).** Lower the IR's DDL ops and,
@@ -606,11 +755,17 @@ impl IrAuthor {
     /// ([`FragmentGuardDenied`]) and applies NOTHING — there is no partial plan.
     ///
     /// Returns the per-op guarded fragments (for status/DX attribution) alongside
-    /// the lowered migrations whose `up` is provably the reassembly of those exact
-    /// fragments. The SQLite leg's guard ([`crate::guard::SqliteDescriptorGuard`])
-    /// trusts descriptor-/IR-generated DDL (no string deny-list), so it never
-    /// denies — but the fragment split + reassembly invariant still runs, so the
-    /// `up`↔fragment correspondence holds on both dialects.
+    /// the lowered ordered [`PlanStep`] list whose `Ddl` steps' `up` are provably the
+    /// reassembly of those exact fragments. An online `renameColumn` lowers to ONE
+    /// [`PlanStep::OnlineRename`] (§2.6.1) — it is NOT fragment-guarded: the
+    /// expand-contract author (PG) / the differ's rebuild planner (SQLite) are the
+    /// trusted descriptor-/intent-driven producers (no untrusted raw SQL), exactly
+    /// like the declarative path that emits the same shapes, and `apply_plan`
+    /// re-runs the Confined guard on every rendered statement at execution time.
+    /// The SQLite leg's guard ([`crate::guard::SqliteDescriptorGuard`]) trusts
+    /// descriptor-/IR-generated DDL (no string deny-list), so it never denies — but
+    /// the fragment split + reassembly invariant still runs, so the `up`↔fragment
+    /// correspondence holds on both dialects.
     ///
     /// # Errors
     /// - [`IrGuardedLowerError::Lower`] — an op failed to lower.
@@ -622,9 +777,9 @@ impl IrAuthor {
         ir: &MigrationIr,
         guard_cfg: &GuardConfig,
         live: &LiveSchema,
-    ) -> Result<(Vec<Migration>, Vec<GuardedFragment>), IrGuardedLowerError> {
+    ) -> Result<(Vec<PlanStep>, Vec<GuardedFragment>), IrGuardedLowerError> {
         let guard = guard_for(guard_cfg);
-        let mut migrations: Vec<Migration> = Vec::new();
+        let mut steps: Vec<PlanStep> = Vec::new();
         let mut fragments: Vec<GuardedFragment> = Vec::new();
         let mut live_tables: BTreeSet<String> = live.tables.clone();
 
@@ -634,7 +789,16 @@ impl IrAuthor {
             // lower failure aborts before any guarding — nothing applied. Each unit
             // carries its STRUCTURAL per-statement list (the exact statements the
             // renderer built, NOT a textual re-split of `up`).
-            let op_units = self.lower_one_op(op, &mut live_tables, &live.unique_indexes)?;
+            let op_units = match self.lower_one_op(op, &mut live_tables, live)? {
+                LoweredOp::Ddl(units) => units,
+                LoweredOp::Rename(step) => {
+                    // §2.6.1 — one online-rename plan step, carried verbatim. NOT
+                    // fragment-guarded (the producer is trusted; `apply_plan`
+                    // re-guards at execution). It produces no `GuardedFragment` row.
+                    steps.push(PlanStep::OnlineRename(*step));
+                    continue;
+                }
+            };
 
             for (mig, statements) in op_units {
                 // Guard EACH true statement individually so a denial is attributed
@@ -668,10 +832,10 @@ impl IrAuthor {
                         name: mig.name.clone(),
                     });
                 }
-                migrations.push(mig);
+                steps.push(PlanStep::Ddl(mig));
             }
         }
-        Ok((migrations, fragments))
+        Ok((steps, fragments))
     }
 
     /// Map an IR `createTable` op to the [`CollectionDescriptor`] the shared
@@ -716,6 +880,86 @@ impl IrAuthor {
             .into_iter()
             .find(|c| c.name == column)
             .ok_or(IrLowerError::UnsupportedOp("addColumn (column folded away)"))
+    }
+
+    /// **PR2 — lower an online `renameColumn` op (§2.6 / §2.6.1 / §2.6.2).** Map the
+    /// dialect-neutral [`ColType`] to the per-dialect type representation BEFORE
+    /// handing it to the dialect-specific destination author, then route to the
+    /// cross-subsystem bridge ([`DeclarativeAuthor::lower_ir_rename`]):
+    ///
+    /// - **Neutral→PG type.** Build the column's `ColumnSnapshot` via the SHARED
+    ///   snapshot builder (the SAME builder `addColumn` uses, §6.5) to get its
+    ///   `information_schema` `data_type`, then `ddl_type`-spell it — exactly how the
+    ///   declarative rename path derives the `OnlineIntent` type (`ddl_type(&r.ty)`),
+    ///   so E1's `ADD COLUMN <to> <ty>` is byte-equal across the two paths (§2.6.1).
+    ///   This is the ONLY type representation the PG leg uses.
+    /// - **Neutral→SQLite affinity.** The SQLite leg never receives the PG type
+    ///   string. The rebuild's post-rename CREATE is rendered from the live SDK
+    ///   schema `Value` (with the field key renamed) through the shared SQLite
+    ///   emitter, whose per-column affinity comes from the field's type token — the
+    ///   token the live schema already carries for the dialect-neutral `ColType`.
+    ///   The bridge needs the table's full live structure
+    ///   ([`LiveSchema::table_snapshots`] + [`LiveSchema::sqlite_schemas`]); absent ⇒
+    ///   [`IrLowerError::SqliteRenameNeedsLiveTable`] (fail-closed).
+    ///
+    /// The destination authors (the PG expand-contract author / the SQLite rebuild
+    /// planner) are REUSED verbatim, so the IR path inherits their version-stable ids
+    /// (§2.6.1) — the IR plan never re-mints them.
+    ///
+    /// # Errors
+    /// - [`IrLowerError::Snapshot`] — the shared builder rejected the column type.
+    /// - [`IrLowerError::SqliteRenameNeedsLiveTable`] — SQLite leg missing live facts.
+    /// - [`IrLowerError::RenameLower`] — the bridge (author / differ) rejected it.
+    fn lower_rename(
+        &self,
+        table: &str,
+        from: &str,
+        to: &str,
+        ty: &ColType,
+        live: &LiveSchema,
+    ) -> Result<RenameStep, IrLowerError> {
+        // Neutral→PG type: the column's `information_schema` data_type via the SHARED
+        // builder, then `ddl_type`-spelled — byte-equal to the declarative path's
+        // `ddl_type(&r.ty)` (§2.6.1). Used only on the PG leg.
+        let col = self.add_column_snapshot(table, to, ty, None, None)?;
+        let pg_ty = crate::declarative::ddl_type(&col.data_type).to_string();
+
+        match self.dialect {
+            SqlDialect::Postgres => {
+                // The PG leg needs no live table structure — the expand-contract
+                // author derives everything from `{table, from, to, ty}`. A live
+                // snapshot/schema is irrelevant here; pass empties.
+                let empty_snapshot = crate::drift::TableSnapshot {
+                    columns: Vec::new(),
+                    indexes: Vec::new(),
+                    constraints: Vec::new(),
+                    stored_create_sql: None,
+                };
+                self.decl
+                    .lower_ir_rename(
+                        table,
+                        from,
+                        to,
+                        &pg_ty,
+                        &empty_snapshot,
+                        &serde_json::Value::Null,
+                    )
+                    .map_err(|e| IrLowerError::RenameLower(e.to_string()))
+            }
+            SqlDialect::Sqlite => {
+                // The SQLite rebuild needs the WHOLE live table shape (every column +
+                // the live SDK schema Value). Absent ⇒ fail closed.
+                let live_snapshot = live.table_snapshots.get(table).ok_or_else(|| {
+                    IrLowerError::SqliteRenameNeedsLiveTable(table.to_string())
+                })?;
+                let live_schema_value = live.sqlite_schemas.get(table).ok_or_else(|| {
+                    IrLowerError::SqliteRenameNeedsLiveTable(table.to_string())
+                })?;
+                self.decl
+                    .lower_ir_rename(table, from, to, &pg_ty, live_snapshot, live_schema_value)
+                    .map_err(|e| IrLowerError::RenameLower(e.to_string()))
+            }
+        }
     }
 
     /// Fail closed unless the target dialect is Postgres — the stand-alone
@@ -803,6 +1047,26 @@ impl IrAuthor {
 #[cfg(test)]
 fn split_up_fragments(up: &str) -> Vec<&str> {
     up.split(";\n").collect()
+}
+
+/// The journal version of a plan step — the deterministic marker the plan's
+/// outer `version` borrows from its FIRST step (§2.0.1). A `Ddl` uses its
+/// migration version; an `OnlineRename` uses its first sub-migration's version
+/// (PG: E1; SQLite: the rebuild journal migration); a `Dml` uses its own version;
+/// a `Backfill` mints a fresh marker (it has no `Migration` of its own at this
+/// seam — PR1/PR2 never emit a standalone Backfill step from `IrAuthor`, so this
+/// arm is unreached here, present for totality).
+fn plan_step_version(step: &PlanStep) -> crate::migration::MigrationId {
+    match step {
+        PlanStep::Ddl(m) => m.version.clone(),
+        PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => ec
+            .expand
+            .first()
+            .map_or_else(crate::migration::MigrationId::generate, |m| m.version.clone()),
+        PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => rb.migration.version.clone(),
+        PlanStep::Dml { version, .. } => version.clone(),
+        PlanStep::Backfill(_) => crate::migration::MigrationId::generate(),
+    }
 }
 
 /// The op kind tag for §6.1.1 attribution — the human-facing name the guard
@@ -1001,6 +1265,19 @@ mod tests {
         pairs.iter().map(|(t, o)| (t.to_string(), o.to_string())).collect()
     }
 
+    /// Extract the `Ddl` migrations from a lowered step list — the flat
+    /// `Vec<Migration>` the pre-PR2 `lower_guarded` returned, for the §6.1.1
+    /// fragment/reassembly tests (all `Ddl`, no online rename).
+    fn ddl_migs(steps: &[PlanStep]) -> Vec<Migration> {
+        steps
+            .iter()
+            .filter_map(|s| match s {
+                PlanStep::Ddl(m) => Some(m.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     use crate::ir::{IrColumn as TIrColumn, IrFlagsOverride};
 
     /// Build a one-op `createTable` IR for the guard-per-fragment tests.
@@ -1041,9 +1318,10 @@ mod tests {
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let guard_cfg = GuardConfig::confined("app".to_string());
-        let (migs, frags) = author
+        let (steps, frags) = author
             .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
             .expect("guarded lower of a clean createTable passes");
+        let migs = ddl_migs(&steps);
 
         // The createTable emits a multi-statement `up` (CREATE + COMMENT sentinel),
         // so MORE THAN ONE fragment is guarded for op #0.
@@ -1120,9 +1398,10 @@ mod tests {
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Sqlite);
         let guard_cfg = GuardConfig::confined_sqlite("app".to_string());
-        let (migs, frags) = author
+        let (steps, frags) = author
             .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
             .expect("SQLite guarded lower passes (descriptor guard trusts IR DDL)");
+        let migs = ddl_migs(&steps);
         assert!(!frags.is_empty(), "fragments are still attributed on SQLite");
         for m in &migs {
             let reassembled = split_up_fragments(&m.up).join(";\n");
@@ -1177,9 +1456,10 @@ mod tests {
 
         // The PRODUCTION guarded path must NOT trip ReassemblyMismatch / deny the
         // valid default.
-        let (migs, frags) = author
+        let (steps, frags) = author
             .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
             .expect("guarded lower of a portable ;\\n string default must succeed");
+        let migs = ddl_migs(&steps);
 
         // The guarded createTable `up` is byte-identical to the whole-up reference.
         let guarded_create = migs

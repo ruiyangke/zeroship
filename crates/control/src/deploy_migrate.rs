@@ -373,6 +373,12 @@ async fn apply_bundle_ir_migrations(
             .filter(|idx| idx.unique)
             .map(|idx| idx.name.clone())
             .collect(),
+        // PR2 — the SQLite `renameColumn` rebuild facts are unused on this
+        // PG-targeted deploy path (a PG rename lowers to expand-contract, which
+        // needs only `{table, from, to, ty}`); the SQLite rebuild leg of an IR
+        // rename runs on the dev/CLI path. Empty here.
+        table_snapshots: std::collections::BTreeMap::new(),
+        sqlite_schemas: std::collections::BTreeMap::new(),
     };
 
     let engine = MigrationEngine::new();
