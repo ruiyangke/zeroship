@@ -250,6 +250,22 @@ pub async fn apply_bundle_migrations(
 /// change). A destructive DDL op also applies here (approval covers the whole set),
 /// so callers MUST gate access to this surface on a real approval decision.
 ///
+/// WIRING PRECONDITIONS (HARD — do NOT wire this surface into a production deploy
+/// handler until BOTH are satisfied; the regression test
+/// `production_deploy_handler_never_wires_the_unguarded_approved_go_live_surface`
+/// fails RED the instant it is wired):
+///
+/// 1. §2.0.3 CROSS-DEPLOY PENDING-CONTRACT INTERLOCK. The [`MigrateOutcome::
+///    pending_contract`] this surface returns when a PG EXPAND completes is a TRANSIENT
+///    value only — it is NOT journaled as an outstanding obligation and no later deploy
+///    reads it back. Before a production caller exists, the owed contract MUST be
+///    persisted (a Pending phase keyed by table+version) AND the §2.0.3(2) fail-closed
+///    refusal implemented (refuse a subsequent deploy whose ops touch a table with an
+///    OUTSTANDING pending contract) together with §2.0.3(3) orphan handling. Without
+///    this, a completed EXPAND whose follow-up contract deploy never runs leaves the old
+///    column behind a forever-pending dual-write trigger with no engine-level guard.
+/// 2. PER-VERSION APPROVAL SCOPING (the SCOPE WARNING below).
+///
 /// SCOPE WARNING (deferred to the approval-workflow wiring wave): this is a COARSE,
 /// bundle-wide [`Approval::Approved`] — approving an online-rename also green-lights
 /// any UNRELATED destructive op (e.g. a `dropTable`) co-bundled in the same

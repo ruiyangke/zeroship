@@ -600,17 +600,82 @@ async fn deploy_migrate_applies_sql_and_ir_together() {
         .expect("both the .sql and .ir.json must apply");
     assert!(table_exists(&conn, &app_id, "legacy").await, ".sql table must exist");
     assert!(table_exists(&conn, &app_id, "modern").await, ".ir.json table must exist");
-    // ONE ordered timeline: the .sql (Flyway loader) and the .ir.json (IR gate) both
-    // applied in this single deploy — the platform `.sql` set and the creator IR set
-    // load + apply together, not as two disjoint passes. `applied` is non-empty (the
-    // deploy did real work), and BOTH tables exist (asserted above).
+    // BOTH SETS in one deploy: the `.sql` (historical platform set, Flyway loader) and
+    // the `.ir.json` (creator IR set, the fail-closed IR gate) both apply in this single
+    // deploy. This is a TWO-PASS model — all `.sql` first (via `apply_verified`), then
+    // all `.ir.json` (via `apply_bundle_ir_migrations`) — NOT a single version-merged
+    // ordered timeline: a `.sql` file numbered to fall BETWEEN two `.ir.json` versions
+    // would NOT interleave by version. That is correct for the only supported mixed case
+    // (legacy platform `.sql` PRECEDES creator `.ir.json`), which is what this exercises.
+    // `applied` is non-empty (the deploy did real work), and BOTH tables exist (above).
     assert!(
         !outcome.applied.is_empty(),
-        "the mixed-history deploy applied the .sql and .ir.json set in one timeline"
+        "the mixed-history deploy applied the .sql (historical platform) set and the \
+         .ir.json (creator) set together in one deploy (.sql pass before .ir.json pass)"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
     cleanup_app(&conn, &app_id).await;
+}
+
+// PR7 code-critic MED (§2.0.3 cross-deploy pending-contract interlock) — ENFORCED
+// no-production-caller invariant.
+//
+// The completed-EXPAND `pending_contract` is a transient return value: it is NOT
+// journaled as an outstanding obligation, and no later deploy reads it back, so the
+// spec-mandated §2.0.3 fail-closed interlock (refuse a subsequent deploy whose ops
+// touch a table with an OUTSTANDING pending contract; handle the orphan case) is NOT
+// implemented yet. Until it IS, the `apply_bundle_migrations_approved` go-live surface
+// MUST NOT be wired into a production deploy handler — otherwise a completed EXPAND
+// whose follow-up contract deploy never runs leaves the old column behind a
+// forever-pending dual-write trigger with NO engine-level guard, and a second op on
+// that table would NOT be refused.
+//
+// This is the SAFETY pin: the ONLY production deploy entry point
+// (`api.rs::run_deploy_migrations`) uses the ROUTINE `apply_bundle_migrations`
+// (`Approval::None`, which refuses the EXPAND before it can complete + owe a contract),
+// and NEVER the approved surface. The instant someone wires the approved surface into
+// the production deploy path without first persisting+enforcing the §2.0.3 interlock,
+// this test goes RED — converting the doc-only "no production caller" guarantee into a
+// regression-pinned invariant. The approved/SQLite-go-live surfaces stay test-only by
+// construction, not by promise.
+#[test]
+fn production_deploy_handler_never_wires_the_unguarded_approved_go_live_surface() {
+    let api_src = include_str!("../src/api.rs");
+
+    // The production deploy handler exists and routes migrations through the ROUTINE
+    // surface (Approval::None) — the one that refuses a destructive/online EXPAND.
+    assert!(
+        api_src.contains("fn run_deploy_migrations"),
+        "the production deploy handler `run_deploy_migrations` must exist in api.rs — if it \
+         was renamed, update this §2.0.3 interlock pin to track the new production entry point"
+    );
+    assert!(
+        api_src.contains("apply_bundle_migrations(provision_dsn"),
+        "the production deploy handler must call the ROUTINE `apply_bundle_migrations` \
+         (Approval::None), which refuses an online-rename EXPAND before it can complete and \
+         owe an un-enforced pending contract"
+    );
+
+    // The APPROVED go-live surface (coarse bundle-wide Approval::Approved, which
+    // COMPLETES an EXPAND and owes a NOT-yet-enforced §2.0.3 pending contract, and also
+    // green-lights co-bundled destructive DDL — the LOW scope warning) MUST NOT appear
+    // anywhere in the production control-plane code. Wiring it before the §2.0.3
+    // interlock is persisted+enforced opens exactly the multi-deploy partition hazard.
+    assert!(
+        !api_src.contains("apply_bundle_migrations_approved"),
+        "the approved go-live surface `apply_bundle_migrations_approved` MUST NOT be wired \
+         into a production deploy handler until the §2.0.3 pending-contract interlock is \
+         persisted (a Pending phase keyed by table+version) AND enforced (fail-closed \
+         refusal of a follow-up deploy touching a table with an outstanding pending \
+         contract, plus orphan handling). Wiring it earlier opens the cross-deploy \
+         expand-contract hazard the deduction flags."
+    );
+    assert!(
+        !api_src.contains("apply_bundle_ir_sqlite"),
+        "the SQLite IR go-live surface `apply_bundle_ir_sqlite` is likewise test-only until \
+         the SQLite wiring wave; it MUST NOT be wired into a production deploy handler yet"
+    );
 }
 
 // PR7 EVIDENCE (PG leg) — the headline "op.* replaces raw-SQL authoring" proof: a
