@@ -237,6 +237,25 @@ pub enum BackfillError {
         #[source]
         source: compio_postgres::Error,
     },
+    /// The SQLite analog of [`BackfillError::BatchFailed`] (PR6b): a batch's
+    /// `UPDATE … RETURNING` failed on the SQLite backfill executor. The batch
+    /// transaction was rolled back (progress NOT advanced), so the backfill is left
+    /// at the last committed cursor and is safely resumable. Carries a neutral
+    /// `String` message (the SQLite actor error is dialect-neutral, never a
+    /// `compio_postgres::Error`).
+    #[error("sqlite backfill batch failed at cursor {at_cursor:?}: {source_msg}")]
+    SqliteBatchFailed {
+        /// The last committed cursor when the failing batch started.
+        at_cursor: Option<String>,
+        /// The SQLite error message from the failed batch.
+        source_msg: String,
+    },
+    /// The SQLite migration connection wedged during a batch (a failed batch left a
+    /// transaction open — ROLLBACK errored or autocommit could not be re-confirmed,
+    /// H1). The connection can no longer be safely reused; the caller must tear it
+    /// down before the next apply. Distinct from a resumable batch failure.
+    #[error("sqlite backfill connection poisoned: {0}")]
+    SqlitePoisoned(String),
 }
 
 /// Validate a bare SQL identifier: non-empty, starts with a letter/underscore,

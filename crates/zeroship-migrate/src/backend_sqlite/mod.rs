@@ -19,6 +19,7 @@
 
 pub mod actor;
 pub mod authorizer;
+mod backfill_sql;
 mod drift_sql;
 mod dump_sql;
 mod journal_sql;
@@ -105,6 +106,37 @@ impl SqliteBackend {
     /// logical shape (§2.2) — window-function net-state over the native event_seq PK.
     pub async fn applied_sqlite(&self) -> Result<Vec<AppliedEntry>, SqliteActorError> {
         journal_sql::applied(&self.actor).await
+    }
+
+    /// Run (or resume) a SQLite **batched backfill** directly (the SQLite analog of
+    /// [`crate::backfill::run_backfill_bounded`], §2.3.1) — the checkpointed /
+    /// crash-fuzz seam tests drive. `set_clause` / `filter` are the inline SQL the
+    /// shared assembler ([`crate::dml::assemble_backfill_clauses`]) renders; the
+    /// executor-internal direct seam has NO approval gate (the generic executor
+    /// gates approval before reaching the backend's `run_backfill_step`). Stops after
+    /// at most `max_batches` committed batches (`None` = run to completion).
+    ///
+    /// # Errors
+    /// [`crate::backfill::BackfillError`] on a malformed spec, an unsafe cursor
+    /// column, a cursor-column mutation, a resumable batch failure, or a poisoned
+    /// connection.
+    pub async fn run_backfill_bounded_sqlite(
+        &self,
+        spec: &crate::backfill::BackfillSpec,
+        set_clause: &str,
+        filter: Option<&str>,
+        applied_by: &str,
+        max_batches: Option<u64>,
+    ) -> Result<crate::backfill::BackfillOutcome, crate::backfill::BackfillError> {
+        backfill_sql::run_backfill_bounded(
+            &self.actor,
+            spec,
+            set_clause,
+            filter,
+            applied_by,
+            max_batches,
+        )
+        .await
     }
 
     /// Roll back ONE migration's `down` ADDITIVELY (§2.7, P5) + append a
@@ -568,22 +600,47 @@ impl MigrationBackend for SqliteBackend {
         &self,
         _cfg: &ExecutorConfig,
         spec: &crate::backfill::BackfillSpec,
-        _approval: crate::approval::Approval,
-        _applied_by: &str,
+        approval: crate::approval::Approval,
+        applied_by: &str,
         _lock_mode: crate::executor::LockMode,
     ) -> Result<crate::executor::ApplyOutcome, ApplyError> {
-        // The SQLite BATCHED-backfill executor is net-new and COMMITTED for PR6b
-        // (§2.3.1 — the bi-dialect "one script, both backends, DDL+DML" headline).
-        // Until it lands, a SQLite-targeted batched backfill is a HARD error — never
-        // a silent skip of the data transform (§10 PR6a: "a plan whose only data
-        // step is a batched backfill against a SQLite target surfaces as a hard
-        // error on a SQLite deploy, never silent — until PR6b lands").
-        Err(ApplyError::Backend(format!(
-            "sqlite backend: batched backfill '{}' is not yet supported (the SQLite \
-             backfill executor lands in PR6b); a SQLite-targeted batched backfill is a \
-             hard error, never a silent skip",
-            spec.name
-        )))
+        // PR6b — the SQLite batched/resumable backfill executor (§2.3.1), the SQLite
+        // analog of the PG writable-CTE windowed UPDATE. Completes the §1.1 "one
+        // script, both backends, DDL+DML" headline: a batched backfill is now
+        // PORTABLE on BOTH backends. Each batch is its own committed
+        // `BEGIN IMMEDIATE … COMMIT` on the single hardened connection, resumable
+        // from the committed progress cursor in `_mig`.
+        //
+        // Gate — approval (defense-in-depth; design §1.6), mirroring the PG
+        // `run_backfill`'s own Gate 1: a backfill mutates table data, so it requires
+        // Approval::Approved. Refuse BEFORE any batch runs. `_lock_mode` is moot on
+        // SQLite (the single actor serializes every statement structurally; there is
+        // no project advisory lock to re-apply).
+        if approval != crate::approval::Approval::Approved {
+            return Err(ApplyError::ApprovalRequired);
+        }
+        let outcome = backfill_sql::run_backfill_bounded(
+            &self.actor,
+            spec,
+            &spec.set_clause,
+            spec.filter.as_deref(),
+            applied_by,
+            None,
+        )
+        .await
+        .map_err(|e| ApplyError::Backend(format!("sqlite backfill step failed: {e}")))?;
+        // Surface the backfill's name as an applied version only on completion
+        // (a resumed-but-incomplete backfill reports nothing applied), mirroring PG.
+        let applied = if outcome.complete {
+            vec![spec.name.clone()]
+        } else {
+            Vec::new()
+        };
+        Ok(crate::executor::ApplyOutcome {
+            applied,
+            skipped: Vec::new(),
+            recovered: Vec::new(),
+        })
     }
 
     async fn run_dml_step(

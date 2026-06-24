@@ -1,0 +1,83 @@
+//! PR6b — the two-list separation (§9): `instr` is added to the SQLite AUTHORIZER
+//! allow-list ONLY (for the engine's pinned `splitPart` lowering), NOT to the
+//! portable-expression grammar a creator authors against. So a creator-authored
+//! raw `instr` / `substr` / `split_part` named function is REJECTED at IR load
+//! (the closed `ScalarFn` enum has no such variant — there is no raw escape,
+//! property A), while the engine-synthesized in-envelope `c.fn.splitPart`
+//! (`FnSynth(splitPart)`) is accepted. The boundary is precise: the authorizer
+//! gates which builtins the migrator role may EXECUTE; the grammar gates which
+//! functions an author may BUILD; they are distinct lists.
+
+use zeroship_migrate::ir_load::load_ir_document;
+use zeroship_migrate::validate::Dialect;
+
+const APP: &str = "app_grammar";
+
+fn registry() -> std::collections::BTreeMap<String, String> {
+    [("t".to_string(), APP.to_string())].into_iter().collect()
+}
+
+/// A raw author-named `instr` / `substr` / `split_part` `fnCall` is NOT in the
+/// portable-expression grammar (the closed `ScalarFn` enum) — it fails to load on
+/// EITHER dialect. There is no raw escape: an author cannot name `instr` even
+/// though the engine's own lowering uses it (the two lists are distinct).
+#[test]
+fn raw_split_funcs_rejected_at_load_both_dialects() {
+    for raw_fn in ["instr", "substr", "split_part", "replace"] {
+        let ir = format!(
+            r#"{{"ir_version":1,"name":"raw","ops":[
+                {{"op":"update","table":"t",
+                  "set":{{"x":{{"node":"fnCall","fn":"{raw_fn}","args":[
+                      {{"node":"colRef","name":"v"}},{{"node":"literal","value":","}}]}}}}}}
+            ]}}"#
+        );
+        for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+            let err = load_ir_document(&ir, APP, dialect, &registry())
+                .expect_err(&format!("raw `{raw_fn}` must be rejected at load on {dialect:?}"));
+            // The closed ScalarFn enum has no such variant → a deserialize/contract
+            // rejection. (Never a silent acceptance that would later mis-apply.)
+            let msg = err.to_string();
+            assert!(
+                !msg.is_empty(),
+                "raw `{raw_fn}` on {dialect:?} must surface a structured load error"
+            );
+        }
+    }
+}
+
+/// The engine-synthesized in-envelope `c.fn.splitPart` (`FnSynth(splitPart)`) IS
+/// accepted — it loads on both dialects (the SQLite leg is PG-renderable + in the
+/// pinned envelope). This is the ONLY split surface; it contrasts with the raw
+/// rejection above.
+#[test]
+fn in_envelope_split_part_helper_accepted() {
+    let ir = r#"{"ir_version":1,"name":"ok","ops":[
+        {"op":"update","table":"t",
+         "set":{"x":{"node":"fnSynth","fn":"splitPart","args":[
+             {"node":"colRef","name":"v"},{"node":"literal","value":","},{"node":"literal","value":1}]}}}
+    ]}"#;
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        load_ir_document(ir, APP, dialect, &registry())
+            .unwrap_or_else(|e| panic!("in-envelope c.fn.splitPart must load on {dialect:?}: {e}"));
+    }
+}
+
+/// An OUT-of-envelope `FnSynth(splitPart)` is rejected on the SQLite leg
+/// (EXPR_NOT_PORTABLE) but loads on PG — the §2.4.1 dialect-gated verdict, now at
+/// its expression level for splitPart (multi-char delim).
+#[test]
+fn out_of_envelope_split_part_pg_loads_sqlite_rejected() {
+    let ir = r#"{"ir_version":1,"name":"oob","ops":[
+        {"op":"update","table":"t",
+         "set":{"x":{"node":"fnSynth","fn":"splitPart","args":[
+             {"node":"colRef","name":"v"},{"node":"literal","value":", "},{"node":"literal","value":1}]}}}
+    ]}"#;
+    load_ir_document(ir, APP, Dialect::Postgres, &registry())
+        .expect("out-of-envelope splitPart is PG-renderable → loads on PG");
+    let err = load_ir_document(ir, APP, Dialect::Sqlite, &registry())
+        .expect_err("out-of-envelope splitPart must reject on SQLite");
+    assert!(
+        err.to_string().contains("EXPR_NOT_PORTABLE") || err.to_string().to_lowercase().contains("portable"),
+        "the SQLite leg must reject with EXPR_NOT_PORTABLE; got: {err}"
+    );
+}
