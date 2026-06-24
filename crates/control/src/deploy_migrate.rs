@@ -238,8 +238,12 @@ pub async fn apply_bundle_migrations(
     apply_bundle_migrations_with_approval(migrate_dsn, app_id, migrations_dir, Approval::None).await
 }
 
-/// **PR7 online-rename go-live** — the APPROVED out-of-band apply surface (§2.6.2 /
-/// §2.0.2). Identical to [`apply_bundle_migrations`] except it carries
+/// **PR7 online-rename go-live SEAM (engine-wired, deploy-handler deferred)** — the
+/// APPROVED out-of-band apply surface (§2.6.2 / §2.0.2). This is a library SEAM, NOT
+/// an end-to-end deployable rename: it has NO production caller (the routine deploy at
+/// `api.rs` uses [`Approval::None`]), and that test-only status is LOAD-BEARING and
+/// pinned (see WIRING PRECONDITIONS below). Identical to [`apply_bundle_migrations`]
+/// except it carries
 /// [`Approval::Approved`] into the engine, so an approval-gated step **completes**:
 /// a PG online `renameColumn`'s EXPAND (E1..E3 + the dual-write backfill) is applied
 /// under the held project lock and its CONTRACT (C1/C2) is surfaced as

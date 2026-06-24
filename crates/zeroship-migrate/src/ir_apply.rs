@@ -1,13 +1,28 @@
-//! **PR7 online-rename go-live (SQLite leg).** The deploy/dev entry point that
+//! **PR7 online-rename go-live SEAM — SQLite leg (engine-wired, deploy-handler
+//! deferred; NOT an end-to-end production path).** The library entry point that
 //! applies a bundle's `.ir.json` creator artifacts against a **SQLite** backend —
 //! the SQLite peer of control's PG `apply_bundle_ir_migrations`
 //! (`crates/control/src/deploy_migrate.rs`).
+//!
+//! TRUTH-IN-LABELING (code-critic Q3). This is engine/library-level wiring, NOT a
+//! deployable rename. There is NO production caller: the SQLite rename path is
+//! **structurally test-only** — a production caller derives descriptors from
+//! `registerModel` = the POST-deploy desired schema, in which the rename's PRE-rename
+//! `from` column no longer exists, so the rebuild author fails CLOSED (zero data
+//! loss) but cannot run. The GREEN SQLite tests pass only because they hand-feed a
+//! PRE-rename / INTERMEDIATE descriptor shape no production caller possesses (see the
+//! PRODUCTION-WIRING TODO below). The test-only status is LOAD-BEARING and pinned by
+//! the control interlock regression
+//! (`production_deploy_handler_never_wires_the_unguarded_approved_go_live_surface`):
+//! wiring this before the §2.0.3 cross-deploy pending-contract interlock is
+//! persisted/enforced would open a real hazard.
 //!
 //! Before PR7 there was NO production/dev path that built a SQLite-dialect
 //! [`LiveSchema`] (the `table_snapshots` + `sqlite_schemas` SDK-`Value` facts a
 //! SQLite `renameColumn` rebuild needs), so a SQLite-targeted IR rename was
 //! engine-proven (PR2 unit + temp-file e2e) but never go-live-wired: it failed
-//! closed before lowering. This module wires it.
+//! closed before lowering. This module wires the SEAM (engine library surface); the
+//! deploy-handler call site is deferred to the SQLite go-live wave (TODO below).
 //!
 //! The SDK schema `Value` the SQLite rebuild renders the post-rename `CREATE TABLE`
 //! from is NOT recoverable from a raw `sqlite_master` introspection (the
