@@ -878,8 +878,10 @@ impl IrAuthor {
     ///
     /// Portability boundaries (§9), all HARD errors (never silent):
     /// - `insert { onConflict }` on **SQLite** → [`crate::dml::DmlError::OnConflictNotPortable`].
-    /// - a **batched** `backfill` / `update { batch }` on **SQLite** → PR6b
-    ///   ([`crate::dml::DmlError::BatchedBackfillNotPortable`]).
+    ///
+    /// A **batched** `backfill` / `update { batch }` is PORTABLE on BOTH backends
+    /// since PR6b (PG `backfill.rs`, SQLite `backend_sqlite::backfill_sql`) — it is
+    /// no longer a SQLite hard error.
     ///
     /// # Errors
     /// - [`IrLowerError::DmlValidate`] — the structural validator (a)/(b)/(d) OR the
@@ -1014,9 +1016,15 @@ impl IrAuthor {
 
     /// Lower a `backfill` (or batched `update`) into a [`PlanStep::Backfill`]. The
     /// `set`/`filter` render to INLINE SQL strings ([`crate::dml::assemble_backfill_clauses`])
-    /// the existing [`crate::backfill::BackfillSpec`] executor consumes (it
-    /// guard-checks the assembled `UPDATE` before any batch). **PG-only**: a SQLite
-    /// target hits the PR6b boundary fail-closed.
+    /// the [`crate::backfill::BackfillSpec`] executor consumes (it guard-checks /
+    /// authorizer-vets the assembled `UPDATE` before any batch).
+    ///
+    /// **PORTABLE on BOTH backends** since PR6b: PG via the writable-CTE windowed
+    /// `UPDATE` executor (`backfill.rs`), SQLite via the batched per-batch-txn
+    /// executor (`backend_sqlite::backfill_sql`, §2.3.1). The inline `set`/`filter`
+    /// are dialect-rendered (the §9 `c.fn.splitPart` lowering, NULL-skipping
+    /// `concatWs`, etc. differ per dialect) — but both legs consume the same
+    /// `BackfillSpec` shape, so the plan step is uniform.
     fn lower_backfill(
         &self,
         table: &str,
@@ -1026,14 +1034,6 @@ impl IrAuthor {
         filter: Option<&crate::expr::Expr>,
         name: &str,
     ) -> Result<PlanStep, IrLowerError> {
-        if self.dialect == SqlDialect::Sqlite {
-            return Err(IrLowerError::DmlAssemble(
-                crate::dml::DmlError::BatchedBackfillNotPortable {
-                    name: name.to_string(),
-                    table: table.to_string(),
-                },
-            ));
-        }
         let clauses =
             crate::dml::assemble_backfill_clauses(self.dialect, table, set, filter)
                 .map_err(IrLowerError::DmlAssemble)?;

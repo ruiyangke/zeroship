@@ -196,4 +196,79 @@ export const e = {
   fnCall: (fn, args) => ({ node: "fnCall", fn, args }),
   fnSynth: (fn, args) => ({ node: "fnSynth", fn, args }),
   cast: (operand, target) => ({ node: "cast", operand, target }),
+  // The engine-synthesized portable split helper (§9). `delim` is a single-ASCII
+  // character literal; `n` is a positive integer literal in 1..8. Builds a
+  // `fnSynth(splitPart, …)` node (NEVER SQL text) and LINTS the envelope at record
+  // time so the AI loop gets the structured EXPR_NOT_PORTABLE feedback EARLY (the
+  // peer of the Rust validator's authoritative gate; the boundary is enforced on
+  // BOTH sides). Out of envelope ⇒ throw EXPR_NOT_PORTABLE.
+  splitPart: (col, delim, n) => {
+    splitPartEnvelopeLint(delim, n);
+    return {
+      node: "fnSynth",
+      fn: "splitPart",
+      args: [normalizeExprArg(col), { node: "literal", value: delim }, { node: "literal", value: n }],
+    };
+  },
 };
+
+/// The `c.fn` namespace — the scalar-function helpers reached off the fluent column
+/// builder (§3.1 / §9). The ONLY split surface (`c.fn.splitPart`); there is no
+/// author-named `split_part`/`substr`/`instr`, and no raw escape — an exotic split
+/// is simply not expressible (property A). Mirrors the `e.*` helper set; kept here
+/// so the §3.1 hero `c.fn.splitPart(c("name"), " ", 1)` shape is authorable.
+export const cFn = {
+  splitPart: e.splitPart,
+  concatWs: (delim, ...values) => e.fnSynth("concatWs", [normalizeExprArg(delim), ...values.map(normalizeExprArg)]),
+  coalesce: (...args) => e.fnCall("coalesce", args.map(normalizeExprArg)),
+};
+
+/// The max literal part index `c.fn.splitPart` admits — the O(2ⁿ) inline-unroll
+/// bound (§9). MUST equal the Rust `SPLIT_PART_MAX_N` (and `dml::SPLIT_PART_MAX_N`);
+/// the cross-side envelope is gated on both.
+const SPLIT_PART_MAX_N = 8;
+
+/// LINT the `c.fn.splitPart` envelope (§9): the delimiter must be a single ASCII
+/// character (one byte, code point < 0x80), and `n` a positive integer literal in
+/// 1..=SPLIT_PART_MAX_N. Out of envelope ⇒ throw a structured EXPR_NOT_PORTABLE
+/// error (the §8.8 machine-readable rejection the AI loop self-corrects on). This
+/// is the JS peer of the Rust `validate::check_split_part` gate — the boundary is
+/// enforced on BOTH sides so the AI loop is told at record time, not only at load.
+function splitPartEnvelopeLint(delim, n) {
+  const fail = (reason) => {
+    const err = new Error(reason);
+    err.code = "EXPR_NOT_PORTABLE";
+    err.suggested_fix =
+      "use a single-ASCII delimiter with 1<=n<=8, restructure to stay in-envelope " +
+      "(split into <=8 parts), or mark the migration PG-only (dialect_scope=PgOnly)";
+    throw err;
+  };
+  if (typeof delim !== "string") {
+    fail(`c.fn.splitPart delimiter must be a single-ASCII string literal; got ${typeof delim}`);
+  }
+  // A single ASCII BYTE: exactly one UTF-16 code unit AND code point < 0x80.
+  if (delim.length !== 1 || delim.charCodeAt(0) >= 0x80) {
+    fail(`c.fn.splitPart delimiter must be a single ASCII character (one byte, code point < 0x80); got ${JSON.stringify(delim)}`);
+  }
+  if (typeof n !== "number" || !Number.isInteger(n)) {
+    fail(`c.fn.splitPart part index n must be a positive integer literal; got ${JSON.stringify(n)}`);
+  }
+  if (n < 1) {
+    fail(`c.fn.splitPart part index n must be a positive integer; got ${n}`);
+  }
+  if (n > SPLIT_PART_MAX_N) {
+    fail(`c.fn.splitPart part index n must be <= ${SPLIT_PART_MAX_N} (the proven inline-unroll bound); got ${n}`);
+  }
+}
+
+/// Coerce a `splitPart`/`concatWs` argument: a bare string is a ColRef shorthand
+/// (`c("name")` ⇒ a colRef node); an already-built `{node:…}` passes through.
+function normalizeExprArg(arg) {
+  if (arg && typeof arg === "object" && typeof arg.node === "string") {
+    return arg;
+  }
+  if (typeof arg === "string") {
+    return { node: "colRef", name: arg };
+  }
+  return { node: "literal", value: arg };
+}

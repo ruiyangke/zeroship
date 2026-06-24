@@ -13,8 +13,8 @@
 //!   alter the statement shape — the table and its rows survive intact.
 //! - **`onConflict` is a HARD error on SQLite** (`DmlError::OnConflictNotPortable`,
 //!   `dialect_scope = PgOnly`) — rejected at lower, never silently applied.
-//! - **a batched `backfill` is a HARD error on SQLite** (PR6b boundary) — rejected
-//!   at lower, never silently downgraded.
+//! - **a batched `backfill` is PORTABLE on SQLite** (PR6b) — lowers to a
+//!   `PlanStep::Backfill` the SQLite batched executor consumes (§2.3.1).
 //! - **column-scoping (rule (c), §3.3.1.1(c))**: a `ColRef` to a column not on the
 //!   LIVE target table is rejected with the structured `UNSUPPORTED { kind: "expr" }`
 //!   AuthoringError at the resolved apply/render seam (`validate_op_resolved`,
@@ -389,10 +389,14 @@ async fn on_conflict_rejected_on_sqlite() {
     );
 }
 
-/// A batched `backfill` is a HARD error on SQLite (the SQLite batched executor is
-/// PR6b). Rejected at lower — never silently downgraded to a one-shot UPDATE.
+/// A batched `backfill` is PORTABLE on SQLite since PR6b — it lowers cleanly to a
+/// `PlanStep::Backfill` (the SQLite batched executor consumes it, §2.3.1), no
+/// longer a hard error. (The `BatchedBackfillNotPortable` error variant was
+/// removed with the SQLite executor landing.) Regression: PRE-PR6b this op was
+/// rejected at lower; it must now succeed.
 #[compio::test]
-async fn batched_backfill_rejected_on_sqlite() {
+async fn batched_backfill_portable_on_sqlite() {
+    use zeroship_migrate::plan::PlanStep;
     let ir = r#"{"ir_version":1,"name":"bf","ops":[
         {"op":"backfill","table":"codes","cursorColumn":"code","batchSize":100,
          "set":{"label":{"node":"literal","value":"x"}},"name":"fill_labels"}
@@ -405,12 +409,13 @@ async fn batched_backfill_rejected_on_sqlite() {
         &registry(&[("codes", APP)]),
     )
     .expect("load gate");
-    let err = author
+    let plan = author
         .lower_plan(&document, &LiveSchema::default())
-        .expect_err("a SQLite-targeted batched backfill must be rejected (PR6b)");
+        .expect("a SQLite-targeted batched backfill now lowers (PR6b)");
     assert!(
-        matches!(err, IrLowerError::DmlAssemble(zeroship_migrate::dml::DmlError::BatchedBackfillNotPortable { .. })),
-        "expected BatchedBackfillNotPortable, got {err:?}"
+        plan.steps.iter().any(|s| matches!(s, PlanStep::Backfill(spec) if spec.name == "fill_labels")),
+        "the backfill lowers to a PlanStep::Backfill on SQLite; got {:?}",
+        plan.steps
     );
 }
 

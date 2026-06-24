@@ -128,6 +128,18 @@ enum Command {
         params: Vec<SqliteBind>,
         reply: flume::Sender<Result<(), SqliteActorError>>,
     },
+    /// **PR6b** — run ONE parameterized statement that returns rows (a windowed
+    /// backfill `UPDATE … RETURNING <cursor>`, or a parameterized SELECT), binding
+    /// `params` NATIVELY to its `?n` placeholders. The single source the SQLite
+    /// batched-backfill executor uses to run a batch's `UPDATE … RETURNING` and read
+    /// back the touched cursor values (§2.3.1) — never string-interpolated, so a
+    /// bind value can never alter the statement shape. Prepared + stepped under the
+    /// current authorizer mode, exactly like [`Command::Query`].
+    QueryParams {
+        sql: String,
+        params: Vec<SqliteBind>,
+        reply: flume::Sender<Result<Vec<Vec<Option<String>>>, SqliteActorError>>,
+    },
     /// Flip the authorizer mode (§2.2.2). A plain atomic store on the worker side,
     /// between (never inside) statement prepares.
     SetMode {
@@ -238,6 +250,9 @@ impl MigrationActor {
                         Command::ExecParams { sql, params, reply } => {
                             let _ = reply.send(run_exec_params(&conn, &sql, &params));
                         }
+                        Command::QueryParams { sql, params, reply } => {
+                            let _ = reply.send(run_query_params(&conn, &sql, &params));
+                        }
                         Command::SetMode { mode, reply } => {
                             // The authorizer mode flag is owned by the closure; we
                             // flip it through the shared AuthMode handle stashed on
@@ -300,6 +315,29 @@ impl MigrationActor {
     ) -> Result<(), SqliteActorError> {
         let (reply, rx) = flume::bounded(1);
         self.send(Command::ExecParams {
+            sql: sql.to_string(),
+            params: params.to_vec(),
+            reply,
+        })
+        .await?;
+        recv(rx).await?
+    }
+
+    /// **PR6b** — run ONE parameterized statement that returns rows (a windowed
+    /// backfill `UPDATE … RETURNING <cursor>`, or a parameterized SELECT), binding
+    /// `params` natively to its `?n` placeholders. The batched-backfill executor's
+    /// per-batch primitive — the binds can never alter the statement shape (§2.3.1).
+    ///
+    /// # Errors
+    /// [`SqliteActorError::Exec`] on a prepare/step failure (an authorizer DENY
+    /// surfaces here too); [`SqliteActorError::Unavailable`] if the actor died.
+    pub async fn query_params(
+        &self,
+        sql: &str,
+        params: &[SqliteBind],
+    ) -> Result<Vec<Vec<Option<String>>>, SqliteActorError> {
+        let (reply, rx) = flume::bounded(1);
+        self.send(Command::QueryParams {
             sql: sql.to_string(),
             params: params.to_vec(),
             reply,
@@ -479,6 +517,47 @@ fn run_exec_params(
     conn.execute(sql, refs.as_slice())
         .map(|_| ())
         .map_err(|e| SqliteActorError::Exec(e.to_string()))
+}
+
+/// **PR6b** — run ONE parameterized statement that returns rows, binding `params`
+/// natively to its `?n` placeholders, stringifying every cell for transport.
+/// Prepared under the current authorizer mode (a DENY surfaces as
+/// [`SqliteActorError::Exec`]). MUST be a single statement.
+fn run_query_params(
+    conn: &Connection,
+    sql: &str,
+    params: &[SqliteBind],
+) -> Result<Vec<Vec<Option<String>>>, SqliteActorError> {
+    let values: Vec<rusqlite::types::Value> = params.iter().map(SqliteBind::to_sql_value).collect();
+    let refs: Vec<&dyn rusqlite::ToSql> =
+        values.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| SqliteActorError::Exec(e.to_string()))?;
+    let col_count = stmt.column_count();
+    let rows = stmt
+        .query_map(refs.as_slice(), |row| {
+            let mut out = Vec::with_capacity(col_count);
+            for i in 0..col_count {
+                let cell: Option<String> = match row.get_ref(i)? {
+                    rusqlite::types::ValueRef::Null => None,
+                    rusqlite::types::ValueRef::Integer(n) => Some(n.to_string()),
+                    rusqlite::types::ValueRef::Real(f) => Some(f.to_string()),
+                    rusqlite::types::ValueRef::Text(t) => {
+                        Some(String::from_utf8_lossy(t).into_owned())
+                    }
+                    rusqlite::types::ValueRef::Blob(b) => Some(hex::encode(b)),
+                };
+                out.push(cell);
+            }
+            Ok(out)
+        })
+        .map_err(|e| SqliteActorError::Exec(e.to_string()))?;
+    let mut materialized = Vec::new();
+    for r in rows {
+        materialized.push(r.map_err(|e| SqliteActorError::Exec(e.to_string()))?);
+    }
+    Ok(materialized)
 }
 
 /// Run one query, stringifying every cell so the reply crosses the actor boundary.

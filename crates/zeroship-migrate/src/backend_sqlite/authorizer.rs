@@ -142,6 +142,24 @@ const FUNCTION_ALLOWLIST: &[&str] = &[
     "ltrim",
     "rtrim",
     "substr",
+    // `instr` — added in PR6b for the ENGINE's pinned `c.fn.splitPart` SQLite
+    // lowering (§9). `split_part` cannot be expressed with `substr` alone:
+    // locating the k-th delimiter is a POSITION search, which `substr` (numeric
+    // start/len) cannot do — so the engine-synthesized split unrolls
+    // `substr(cur, instr(cur, d) + 1)` to literal depth n (proven byte-identical
+    // to PG `split_part` over the single-ASCII-delimiter + positive-literal-n
+    // (1..8) envelope against SQLite 3.51.2). `instr` is a deterministic,
+    // sandboxed, side-effect-free scalar (no extension load, no fs/network, no
+    // tenant escape — the same property `substr`/`length`/`coalesce` already on
+    // this list have), so it grants no new capability: it is a pure scalar over
+    // data the role can already read. It is added to the AUTHORIZER allow-list
+    // ONLY — NOT to the portable-expression grammar (`c.fn` exposes no `instr`,
+    // and there is no raw escape), so a creator can never name it; only the
+    // engine's pinned lowering emits it. Kept in lockstep with the emitter's
+    // `FnSynth(splitPart)` SQLite render (`dml.rs`) per this list's standing
+    // "MUST be kept in lockstep" rule. `replace` is deliberately NOT added — the
+    // allow-list grows by exactly one deterministic scalar (§9).
+    "instr",
     "typeof",
     "hex",
     "quote",
@@ -568,6 +586,42 @@ mod tests {
                 Authorization::Deny
             );
         }
+    }
+
+    /// PR6b — `instr` is allow-listed (the engine's pinned `c.fn.splitPart` SQLite
+    /// lowering uses it) in BOTH modes; `replace` is deliberately NOT added (the
+    /// allow-list grows by exactly one deterministic scalar, §9). `load_extension`
+    /// stays denied (fail-closed).
+    #[test]
+    fn instr_allow_listed_replace_still_denied() {
+        let m = AuthMode::new();
+        for mode in [Mode::CreatorUp, Mode::EngineJournal] {
+            m.store(mode);
+            assert_eq!(
+                authorize(&m, &ctx(AuthAction::Function { function_name: "instr" }, None, None)),
+                Authorization::Allow,
+                "instr must be allow-listed in {mode:?} (PR6b splitPart lowering)"
+            );
+            assert_eq!(
+                authorize(&m, &ctx(AuthAction::Function { function_name: "replace" }, None, None)),
+                Authorization::Deny,
+                "replace must NOT be allow-listed in {mode:?} (only +1 scalar, §9)"
+            );
+            assert_eq!(
+                authorize(
+                    &m,
+                    &ctx(AuthAction::Function { function_name: "load_extension" }, None, None)
+                ),
+                Authorization::Deny,
+                "load_extension stays denied"
+            );
+        }
+        // `instr` is matched case-insensitively, like the rest of the allow-list.
+        m.store(Mode::CreatorUp);
+        assert_eq!(
+            authorize(&m, &ctx(AuthAction::Function { function_name: "INSTR" }, None, None)),
+            Authorization::Allow
+        );
     }
 
     #[test]
