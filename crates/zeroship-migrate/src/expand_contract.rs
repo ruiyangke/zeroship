@@ -726,6 +726,16 @@ pub trait OnlineSchemaChange {
     /// carried for a non-PG engine that lowers the intent to its own native DDL
     /// instead of running PG's authored steps.
     ///
+    /// **PR9b — per-version approval scope (executor-layer defense in depth).** A PG
+    /// online rename's EXPAND mutates data (the dual-write backfill mirrors every
+    /// pre-existing row into the new column), so it is approval-gated AND scope-gated:
+    /// under `ApprovalScope::Versions` it runs ONLY if `scope` admits the rename's
+    /// PLAN-GROUP version (E1's deterministic id, the SAME anchor the engine's EXPAND
+    /// scope gate and `PlanStep::approval_scope_version` key on, falling back to E2's
+    /// `trigger_version` if the expand chain is empty). The engine's `apply_plan` gate
+    /// runs first; this is the independent executor-layer check so a direct seam caller
+    /// driving `run_online` cannot bypass the per-version scope.
+    ///
     /// Returned as a boxed future so the trait is `dyn`-dispatchable
     /// (`Option<&dyn OnlineSchemaChange>`); the online path runs at deploy time on
     /// a rename only, never the apply hot path, so the box allocation is irrelevant.
@@ -736,6 +746,7 @@ pub trait OnlineSchemaChange {
         expand: &'a [Migration],
         backfill: &'a BackfillSpec,
         approval: crate::approval::Approval,
+        scope: &'a crate::approval::ApprovalScope,
         cfg: &'a crate::db::ExecutorConfig,
         applied_by: &'a str,
         lock_mode: crate::executor::LockMode,
@@ -768,6 +779,7 @@ pub(crate) async fn run_expand_pg(
     expand: &[Migration],
     backfill: &BackfillSpec,
     approval: crate::approval::Approval,
+    scope: &crate::approval::ApprovalScope,
     cfg: &crate::db::ExecutorConfig,
     applied_by: &str,
     lock_mode: crate::executor::LockMode,
@@ -775,6 +787,22 @@ pub(crate) async fn run_expand_pg(
     use crate::executor::{self, ApplyOutcome};
     if approval != crate::approval::Approval::Approved {
         return Err(crate::engine::OnlineError::Approval);
+    }
+    // **PR9b per-version scope (executor-layer defense in depth).** The EXPAND's
+    // dual-write backfill mirrors every pre-existing row, so under
+    // `ApprovalScope::Versions` it runs ONLY if the operator individually reviewed
+    // THIS rename — keyed on the rename's PLAN-GROUP version (E1's deterministic id,
+    // the same anchor the engine's EXPAND scope gate and
+    // `PlanStep::approval_scope_version` key on), falling back to E2's version if the
+    // expand chain is somehow shorter. So a direct seam caller driving `run_online` /
+    // `run_expand_pg` cannot bypass the per-version scope. Fail-closed: refuse BEFORE
+    // applying E1/E2 or mirroring any row, so a non-scoped EXPAND mutates NOTHING.
+    if let Some(v) = expand.first().or_else(|| expand.get(1)) {
+        if !scope.admits(v.version.as_str()) {
+            return Err(crate::engine::OnlineError::ApprovalNotScoped {
+                version: v.version.as_str().to_string(),
+            });
+        }
     }
     // The expand sequence is E1, E2, E3 (the marker) in order. Split off E3: it is
     // journaled LAST, after the real backfill, never as part of the structural apply.
@@ -842,6 +870,7 @@ impl OnlineSchemaChange for PgOnline<'_> {
         expand: &'a [Migration],
         backfill: &'a BackfillSpec,
         approval: crate::approval::Approval,
+        scope: &'a crate::approval::ApprovalScope,
         cfg: &'a crate::db::ExecutorConfig,
         applied_by: &'a str,
         lock_mode: crate::executor::LockMode,
@@ -857,7 +886,7 @@ impl OnlineSchemaChange for PgOnline<'_> {
         // stamped manifest). A future engine with native online DDL would instead
         // lower `_intent` to its own online-rename DDL.
         Box::pin(run_expand_pg(
-            self.conn, expand, backfill, approval, cfg, applied_by, lock_mode,
+            self.conn, expand, backfill, approval, scope, cfg, applied_by, lock_mode,
         ))
     }
 }

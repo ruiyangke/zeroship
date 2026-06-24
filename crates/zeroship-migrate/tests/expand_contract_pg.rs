@@ -15,7 +15,7 @@ use compio_postgres::Client;
 use zeroship_migrate::executor::{ApplyError, LockMode, RollbackRequest, RollbackTarget};
 use zeroship_migrate::{
     apply, migrator_role_name, provision_migrator, rollback, role::deprovision_migrator,
-    run_backfill, Approval, BackfillSpec, Checksum, ExecutorConfig, ExpandContractAuthor,
+    run_backfill, Approval, ApprovalScope, BackfillSpec, Checksum, ExecutorConfig, ExpandContractAuthor,
     ExpandContractPlan, GuardConfig, Migration, MigrationBackend, MigrationFlags, MigrationId,
     MigrationEngine, OnlineIntent, OnlinePhase, PostgresBackend, RawSqlAuthor, SqlGuard,
 };
@@ -495,6 +495,7 @@ async fn expand_drives_through_online_capability_seam_byte_identical() {
             &plan.expand,
             &plan.backfill,
             Approval::Approved,
+            &ApprovalScope::All,
             &cfg,
             "tester",
             LockMode::Acquire,

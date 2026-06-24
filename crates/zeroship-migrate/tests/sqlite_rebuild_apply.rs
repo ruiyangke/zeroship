@@ -1597,6 +1597,124 @@ fn simple_migration(name: &str, up: &str) -> Migration {
     }
 }
 
+// ---------------------------------------------------------------------------
+// REGRESSION (PR9b MED): the executor seam `MigrationBackend::rebuild_one`
+// enforces the PER-VERSION approval SCOPE as a TRUE second gate.
+//
+// Pre-PR9b-fix, the trait `rebuild_one` took NO `scope` — so a direct seam
+// caller driving `MigrationBackend::rebuild_one(be, .., Approval::Approved-equiv)`
+// could rebuild a destructive table the operator never individually reviewed,
+// bypassing the engine's per-version scope gate. This test drives the SEAM
+// DIRECTLY with an EMPTY `Versions` scope (admits nothing) and asserts
+// `ApprovalNotScoped` + that the live table is UNCHANGED (no rebuild ran). It
+// fails RED on the pre-fix seam (no scope param ⇒ the rebuild ran).
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn rebuild_one_seam_refuses_destructive_rebuild_outside_version_scope() {
+    use zeroship_migrate::{ApplyError, ApprovalScope, MigrationBackend};
+
+    // A genuine type-change rebuild (destructive=true by construction).
+    let v1 = vec![CollectionDescriptor {
+        name: "events".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "n".into(),
+            ty: "number".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    }];
+    let mut v2 = v1.clone();
+    v2[0].fields[0].ty = "string".into();
+
+    let p = paths("rebuild_scope");
+    let be = backend(&p);
+    apply_first_deploy(&be, &v1).await;
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .exec("INSERT INTO main.events (id, n) VALUES ('e1', 1)")
+        .await
+        .expect("seed row");
+
+    let rb = one_rebuild(&v1, &v2);
+    assert!(
+        rb.migration.flags.destructive,
+        "a SQLite rebuild migration is destructive by construction"
+    );
+
+    // Drive the TRAIT seam DIRECTLY with an EMPTY Versions scope (admits NO
+    // version). The executor-layer scope gate must refuse the destructive rebuild.
+    let refused = MigrationBackend::rebuild_one(
+        &be,
+        &rb.spec,
+        &rb.migration,
+        &ApprovalScope::Versions(std::collections::BTreeSet::new()),
+        "deployer",
+    )
+    .await;
+    assert!(
+        matches!(
+            refused,
+            Err(ApplyError::ApprovalNotScoped { ref version })
+                if version == rb.migration.version.as_str()
+        ),
+        "the rebuild_one seam must refuse a destructive rebuild whose version is \
+         outside the approved scope (executor-layer per-version gate), got {refused:?}"
+    );
+
+    // NOTHING rebuilt: the live `n` column still has its ORIGINAL (REAL) affinity,
+    // and the rebuild version is NOT journaled.
+    let info = be
+        .actor()
+        .query("PRAGMA main.table_info(events)")
+        .await
+        .expect("table_info");
+    let n_type = info
+        .iter()
+        .find(|r| r[1].as_deref() == Some("n"))
+        .and_then(|r| r[2].clone())
+        .expect("n column present");
+    assert_eq!(
+        n_type.to_ascii_uppercase(),
+        "REAL",
+        "a scope-refused rebuild leaves the original column type intact, got {n_type}"
+    );
+    let net = be.applied_sqlite().await.expect("read journal");
+    assert!(
+        !net.iter().any(|e| e.version == rb.migration.version.as_str()),
+        "a scope-refused rebuild is not journaled"
+    );
+
+    // The SAME rebuild through the seam with a scope that ADMITS its version applies.
+    let mut admitted = std::collections::BTreeSet::new();
+    admitted.insert(rb.migration.version.as_str().to_string());
+    MigrationBackend::rebuild_one(
+        &be,
+        &rb.spec,
+        &rb.migration,
+        &ApprovalScope::Versions(admitted),
+        "deployer",
+    )
+    .await
+    .expect("the in-scope destructive rebuild applies");
+    let info2 = be
+        .actor()
+        .query("PRAGMA main.table_info(events)")
+        .await
+        .expect("table_info post-rebuild");
+    let n_type2 = info2
+        .iter()
+        .find(|r| r[1].as_deref() == Some("n"))
+        .and_then(|r| r[2].clone())
+        .expect("n column present");
+    assert_eq!(
+        n_type2.to_ascii_uppercase(),
+        "TEXT",
+        "the in-scope rebuild applied the type change, got {n_type2}"
+    );
+}
+
 /// A destructive journal migration for a directly-constructed rebuild spec.
 fn rebuild_migration(table: &str, spec: &SqliteRebuildSpec) -> Migration {
     use zeroship_migrate::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};

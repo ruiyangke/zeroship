@@ -287,15 +287,27 @@ pub trait MigrationBackend {
     /// reaching the PG backend is a routing bug, surfaced as a clear error rather than
     /// a silent pass.
     ///
+    /// **PR9b — per-version approval scope (executor-layer defense in depth).** A
+    /// rebuild on a populated table is destructive (drop + recreate + copy), so when
+    /// `m.flags.destructive` (always true for a `SqliteRebuild` by construction,
+    /// [`crate::declarative`]) the `scope` must admit `m.version` — mirroring
+    /// [`PlanStep::approval_scope_version`](crate::plan::PlanStep::approval_scope_version)'s
+    /// rule. The engine's `apply_plan` gate runs first; this is the independent
+    /// executor-layer check so a direct seam caller (driving `rebuild_one` without the
+    /// engine) cannot bypass the per-version scope. Refused with
+    /// [`ApplyError::ApprovalNotScoped`] BEFORE the rebuild touches the table.
+    ///
     /// # Errors
-    /// The dialect-neutral [`ApplyError::Backend`] on a rebuild failure (FK-check
-    /// abort, confinement denial, DDL failure, or a poisoned connection — the SQLite
-    /// transaction is rolled back, leaving the original table intact), or — on the PG
-    /// backend — the unreachable-routing reject.
+    /// [`ApplyError::ApprovalNotScoped`] for a destructive rebuild whose version the
+    /// `scope` does not admit; the dialect-neutral [`ApplyError::Backend`] on a rebuild
+    /// failure (FK-check abort, confinement denial, DDL failure, or a poisoned
+    /// connection — the SQLite transaction is rolled back, leaving the original table
+    /// intact), or — on the PG backend — the unreachable-routing reject.
     async fn rebuild_one(
         &self,
         spec: &SqliteRebuildSpec,
         m: &Migration,
+        scope: &crate::approval::ApprovalScope,
         applied_by: &str,
     ) -> Result<(), ApplyError>;
 
@@ -318,11 +330,22 @@ pub trait MigrationBackend {
     /// [`ApplyError::Backend`] on a backfill failure or the SQLite-unsupported
     /// arm (PR0/PR6a); the failure is resumable from the last committed cursor on
     /// PG.
+    ///
+    /// **PR9b — per-version approval scope (executor-layer defense in depth).** A
+    /// standalone batched backfill is a NON-destructive data transform
+    /// ([`PlanStep::approval_scope_version`](crate::plan::PlanStep::approval_scope_version)
+    /// returns `None` for `Backfill`), so the per-version scope never refuses it — the
+    /// `scope` is threaded for seam-signature symmetry with the destructive seam
+    /// methods (and forward-proofing) and consulted only if a backfill ever becomes
+    /// scope-gated. The data-mutating EXPAND backfill rides
+    /// [`OnlineSchemaChange::run_online`](crate::expand_contract::OnlineSchemaChange::run_online),
+    /// NOT this method.
     async fn run_backfill_step(
         &self,
         cfg: &ExecutorConfig,
         spec: &crate::backfill::BackfillSpec,
         approval: crate::approval::Approval,
+        scope: &crate::approval::ApprovalScope,
         applied_by: &str,
         lock_mode: crate::executor::LockMode,
     ) -> Result<crate::executor::ApplyOutcome, ApplyError>;
@@ -350,6 +373,15 @@ pub trait MigrationBackend {
     /// first; this is the independent executor-layer check so a direct seam caller
     /// cannot bypass it.
     ///
+    /// **PR9b — per-version approval scope (executor-layer defense in depth).** On top
+    /// of the coarse approval gate, a destructive DML runs ONLY if `scope` admits its
+    /// `version` — mirroring
+    /// [`PlanStep::approval_scope_version`](crate::plan::PlanStep::approval_scope_version)'s
+    /// rule for `Dml`. So a direct seam caller driving `run_dml_step` with blanket
+    /// [`Approval::Approved`] but an [`ApprovalScope::Versions`] set that omits this
+    /// `version` is refused with [`ApplyError::ApprovalNotScoped`] BEFORE the template
+    /// executes — the executor-layer mirror of the engine's per-version scope gate.
+    ///
     /// `owner_app` is the declaring app's identity — it is folded into the journal
     /// [`ChecksumInput`](crate::migration::ChecksumInput) so two DML steps with an
     /// identical `(template, binds)` authored by DIFFERENT apps hash to DIFFERENT
@@ -361,7 +393,9 @@ pub trait MigrationBackend {
     ///
     /// # Errors
     /// [`ApplyError::ApprovalRequired`] for a destructive DML without approval;
-    /// [`ApplyError`] on a DML/journal failure or the SQLite-unsupported arm.
+    /// [`ApplyError::ApprovalNotScoped`] for a destructive DML whose `version` the
+    /// `scope` does not admit; [`ApplyError`] on a DML/journal failure or the
+    /// SQLite-unsupported arm.
     #[allow(clippy::too_many_arguments)]
     async fn run_dml_step(
         &self,
@@ -373,6 +407,7 @@ pub trait MigrationBackend {
         destructive: bool,
         owner_app: &str,
         approval: crate::approval::Approval,
+        scope: &crate::approval::ApprovalScope,
         applied_by: &str,
         lock_mode: crate::executor::LockMode,
     ) -> Result<bool, ApplyError>;
@@ -695,6 +730,7 @@ impl MigrationBackend for PostgresBackend<'_> {
         &self,
         spec: &SqliteRebuildSpec,
         _m: &Migration,
+        _scope: &crate::approval::ApprovalScope,
         _applied_by: &str,
     ) -> Result<(), ApplyError> {
         // PG never produces a `SqliteRebuild` (its declarative differ uses native
@@ -713,6 +749,7 @@ impl MigrationBackend for PostgresBackend<'_> {
         cfg: &ExecutorConfig,
         spec: &crate::backfill::BackfillSpec,
         approval: crate::approval::Approval,
+        _scope: &crate::approval::ApprovalScope,
         applied_by: &str,
         _lock_mode: crate::executor::LockMode,
     ) -> Result<crate::executor::ApplyOutcome, ApplyError> {
@@ -749,6 +786,7 @@ impl MigrationBackend for PostgresBackend<'_> {
         destructive: bool,
         owner_app: &str,
         approval: crate::approval::Approval,
+        scope: &crate::approval::ApprovalScope,
         applied_by: &str,
         _lock_mode: crate::executor::LockMode,
     ) -> Result<bool, ApplyError> {
@@ -759,6 +797,18 @@ impl MigrationBackend for PostgresBackend<'_> {
         // or the template, so a refused destructive DML applies NOTHING.
         if destructive && approval != crate::approval::Approval::Approved {
             return Err(ApplyError::ApprovalRequired);
+        }
+        // **PR9b per-version scope (executor-layer defense in depth).** Even under
+        // blanket `Approval::Approved`, a destructive DML runs ONLY if `scope` admits
+        // its `version` — the executor-layer mirror of the engine's per-version scope
+        // gate, keyed on the same rule as `PlanStep::approval_scope_version` for `Dml`.
+        // So a direct seam caller cannot bypass the per-version scope by driving this
+        // method with an empty/omitting `Versions` set. Fail-closed: refuse BEFORE the
+        // journal or the template, so a non-scoped destructive DML applies NOTHING.
+        if destructive && !scope.admits(version.as_str()) {
+            return Err(ApplyError::ApprovalNotScoped {
+                version: version.as_str().to_string(),
+            });
         }
         // Net-applied-skip: if this sub-version is already journaled `completed`,
         // the re-run is a no-op (idempotency, §2.0.1).

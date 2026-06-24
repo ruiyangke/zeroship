@@ -3803,14 +3803,41 @@ impl DeclarativeAuthor {
         {
             // (1) pre-rename Value → rename the field key to the post-rename shape.
             v
-        } else if live_sqlite_schema
+        } else if let Some(to_def) = live_sqlite_schema
             .as_object()
-            .is_some_and(|o| o.contains_key(to))
+            .and_then(|o| o.get(to))
         {
-            // (2) post-rename desired Value (already keyed `to`) → use as-is. The live
-            // `from` column (confirmed present in `live_snapshot`) maps to this `to`
-            // field by the RenameHint below, so the value-copy is correct and no facet
-            // is lost.
+            // (2) post-rename desired Value (already keyed `to`) → use as-is, BUT
+            // ONLY after asserting its column AFFINITY equals the live `from` column's
+            // (PR9b LOW fix). The new-table CREATE renders from THIS descriptor-sourced
+            // `to` def, while the value-copy carries the old `from` bytes across
+            // un-transformed; a `rename` preserves facets by contract, so a descriptor
+            // whose `to` field diverges in affinity from the live `from` (e.g. a rename
+            // bundled with an encryption/affinity change in the SAME descriptor) would
+            // silently rebuild the column under a different affinity. Enforce the SAME
+            // equality the snapshot-path `RenameHintTypeMismatch` guard enforces
+            // (SQLite collapses `data_type` to affinity), failing closed on divergence
+            // instead of emitting a silent shape skew.
+            use zeroship_schema::query::{def_to_column_type_for_dialect, SqlDialect};
+            let Some(live_from) = live_snapshot.columns.iter().find(|c| c.name == from) else {
+                // `found` above already proved `from` is present; defensive.
+                return Err(DeclarativeError::Invalid(format!(
+                    "renameColumn: live table '{table}' lost column '{from}' between the \
+                     rename-field check and the affinity guard (internal invariant)"
+                )));
+            };
+            let to_affinity =
+                sqlite_canonical_type(&def_to_column_type_for_dialect(to_def, SqlDialect::Postgres));
+            let from_affinity = sqlite_canonical_type(&live_from.data_type);
+            if to_affinity != from_affinity {
+                return Err(DeclarativeError::RenameHintTypeMismatch {
+                    table: table.to_string(),
+                    from: from.to_string(),
+                    to: to.to_string(),
+                    from_type: live_from.data_type.clone(),
+                    to_type: def_to_column_type_for_dialect(to_def, SqlDialect::Postgres),
+                });
+            }
             live_sqlite_schema.clone()
         } else {
             return Err(DeclarativeError::Invalid(format!(

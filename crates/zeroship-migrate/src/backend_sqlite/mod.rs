@@ -616,8 +616,22 @@ impl MigrationBackend for SqliteBackend {
         &self,
         spec: &SqliteRebuildSpec,
         m: &Migration,
+        scope: &crate::approval::ApprovalScope,
         applied_by: &str,
     ) -> Result<(), ApplyError> {
+        // **PR9b per-version scope (executor-layer defense in depth).** A rebuild on a
+        // populated table is destructive (drop + recreate + copy; `m.flags.destructive`
+        // is true for a `SqliteRebuild` by construction), so under
+        // `ApprovalScope::Versions` it runs ONLY if the operator individually reviewed
+        // THIS rebuild's version — mirroring the engine's per-version gate and keyed on
+        // the same rule as `PlanStep::approval_scope_version`. So a direct seam caller
+        // driving `rebuild_one` cannot bypass the per-version scope. Refuse BEFORE
+        // touching the table, so a non-scoped rebuild rebuilds NOTHING.
+        if m.flags.destructive && !scope.admits(m.version.as_str()) {
+            return Err(ApplyError::ApprovalNotScoped {
+                version: m.version.as_str().to_string(),
+            });
+        }
         // Drive the built, tested 12-step rebuild engine (the inherent
         // `SqliteBackend::rebuild_one`). The `RebuildError` is mapped onto the
         // dialect-neutral `Backend` arm so it flows through the generic engine's
@@ -634,6 +648,7 @@ impl MigrationBackend for SqliteBackend {
         _cfg: &ExecutorConfig,
         spec: &crate::backfill::BackfillSpec,
         approval: crate::approval::Approval,
+        _scope: &crate::approval::ApprovalScope,
         applied_by: &str,
         _lock_mode: crate::executor::LockMode,
     ) -> Result<crate::executor::ApplyOutcome, ApplyError> {
@@ -686,6 +701,7 @@ impl MigrationBackend for SqliteBackend {
         destructive: bool,
         owner_app: &str,
         approval: crate::approval::Approval,
+        scope: &crate::approval::ApprovalScope,
         applied_by: &str,
         _lock_mode: crate::executor::LockMode,
     ) -> Result<bool, ApplyError> {
@@ -698,6 +714,16 @@ impl MigrationBackend for SqliteBackend {
         // DML applies NOTHING.
         if destructive && approval != crate::approval::Approval::Approved {
             return Err(ApplyError::ApprovalRequired);
+        }
+        // **PR9b per-version scope (executor-layer defense in depth).** Mirrors the PG
+        // `run_dml_step`: even under blanket `Approval::Approved`, a destructive DML
+        // runs ONLY if `scope` admits its `version`, keyed on the same rule as
+        // `PlanStep::approval_scope_version`. So a direct seam caller cannot bypass the
+        // per-version scope. Fail-closed: refuse BEFORE the journal or the statement.
+        if destructive && !scope.admits(version.as_str()) {
+            return Err(ApplyError::ApprovalNotScoped {
+                version: version.as_str().to_string(),
+            });
         }
         // Net-applied-skip: if this sub-version is already journaled `completed`,
         // the re-run is a no-op (idempotency, §2.0.1).
