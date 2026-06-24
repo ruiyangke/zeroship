@@ -31,7 +31,8 @@ use std::sync::{Condvar, Mutex};
 
 use zeroship_migrate_js::recorder_protocol::{ChildRequest, ChildResponse};
 use zeroship_migrate_js::sandbox::{
-    apply_landlock, apply_seccomp, init_recorder_v8, SandboxPosture, SandboxReport,
+    apply_landlock, apply_seccomp, assert_recorder_single_threaded, init_recorder_v8,
+    SandboxPosture, SandboxReport,
 };
 
 use zeroship_runtime::{ModuleEntry, Runtime};
@@ -49,40 +50,87 @@ use zeroship_runtime::{ModuleEntry, Runtime};
 /// exists), the kernel must KILL THE WHOLE PROCESS (`KillProcess`/SIGSYS) — not just
 /// return an fd on an unfiltered thread.
 struct PrelockThread {
-    /// 0 = idle, 1 = "issue socket() now". Set by the main thread post-lockdown.
+    /// 0 = idle, 1 = "issue socket() now" (seccomp TSYNC probe), 2 = "open
+    /// /etc/hostname O_RDONLY now" (landlock thread-scope probe). Set by the main thread
+    /// post-lockdown.
     cmd: Mutex<i32>,
     cv: Condvar,
-    /// The fd the worker thread's `socket()` returned (>=0 means it SUCCEEDED on an
-    /// unfiltered thread — the bug). -1 means it failed/never set. If seccomp
-    /// TSYNC'd onto this thread, the call is SIGSYS-killed and we never read this.
+    /// For cmd=1: the fd `socket()` returned (>=0 means it SUCCEEDED on an unfiltered
+    /// thread — the seccomp bug). -1 means it failed/never set. If seccomp TSYNC'd onto
+    /// this thread, the call is SIGSYS-killed and we never read this.
     result_fd: AtomicI32,
+    /// For cmd=2 (landlock read probe): the errno the worker thread's
+    /// `open("/etc/hostname", O_RDONLY)` returned. This pins the LANDLOCK half of the
+    /// CRITICAL invariant by GROUND-TRUTH observation: landlock's `restrict_self` has NO
+    /// TSYNC, so it covers ONLY the calling (main) thread. A thread created BEFORE the
+    /// lockdown (this one) is therefore NOT under landlock, and its out-of-dir read
+    /// SUCCEEDS (errno 0). That is precisely WHY the landlock layer's whole-process
+    /// coverage rests ENTIRELY on the single-threaded-V8 invariant (only the main thread
+    /// may exist at `restrict_self` time) PLUS the fail-closed single-threaded assertion
+    /// (which REFUSES to run if a pre-lockdown thread is ever present). `i32::MIN` = not
+    /// yet set; `EACCES` would mean landlock unexpectedly covered the sibling.
+    result_read_errno: AtomicI32,
 }
 
 static PRELOCK: Mutex<Option<&'static PrelockThread>> = Mutex::new(None);
 
 /// Spawn the pre-lockdown worker thread (test-only). It parks on the condvar until
-/// the main thread (post-lockdown) signals it to call `socket()`.
+/// the main thread (post-lockdown) signals it to issue a denied syscall:
+///   cmd=1 → `socket()` (seccomp TSYNC probe)
+///   cmd=2 → `open("/etc/hostname", O_RDONLY)` (landlock thread-scope probe)
 fn spawn_prelock_thread() {
     let handle: &'static PrelockThread = Box::leak(Box::new(PrelockThread {
         cmd: Mutex::new(0),
         cv: Condvar::new(),
         result_fd: AtomicI32::new(-1),
+        result_read_errno: AtomicI32::new(i32::MIN),
     }));
     *PRELOCK.lock().unwrap() = Some(handle);
     std::thread::Builder::new()
         .name("zs-prelock-worker".into())
         .spawn(move || {
-            let mut g = handle.cmd.lock().unwrap();
-            while *g != 1 {
-                g = handle.cv.wait(g).unwrap();
+            let cmd = {
+                let mut g = handle.cmd.lock().unwrap();
+                while *g == 0 {
+                    g = handle.cv.wait(g).unwrap();
+                }
+                *g
+            };
+            match cmd {
+                1 => {
+                    // SECCOMP probe: issue socket() FROM THIS (pre-lockdown) thread. If
+                    // the filter is thread-scoped to main, this SUCCEEDS here (fd>=0) —
+                    // the bug. With TSYNC, the kernel KillProcess-es the whole process
+                    // before this returns.
+                    #[allow(unsafe_code)]
+                    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+                    handle.result_fd.store(fd, Ordering::SeqCst);
+                }
+                2 => {
+                    // LANDLOCK probe: open an out-of-allow-list path O_RDONLY FROM THIS
+                    // thread. A read-only open passes the seccomp openat arg-filter, so
+                    // whether it is DENIED is purely the landlock layer's doing. landlock
+                    // has NO TSYNC — its whole-process coverage rests on the
+                    // single-threaded-V8 invariant. We record the errno (0 = the read
+                    // SUCCEEDED → landlock did NOT cover this thread → the gap is open).
+                    let path = b"/etc/hostname\0";
+                    #[allow(unsafe_code)]
+                    let fd = unsafe {
+                        libc::open(path.as_ptr() as *const libc::c_char, libc::O_RDONLY, 0)
+                    };
+                    let errno = if fd < 0 {
+                        std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+                    } else {
+                        #[allow(unsafe_code)]
+                        unsafe {
+                            libc::close(fd);
+                        }
+                        0
+                    };
+                    handle.result_read_errno.store(errno, Ordering::SeqCst);
+                }
+                _ => {}
             }
-            drop(g);
-            // Issue the denied syscall FROM THIS (pre-lockdown) thread. If the filter
-            // is thread-scoped to main, this SUCCEEDS here (fd>=0) — the bug. With
-            // TSYNC, the kernel KillProcess-es the whole process before this returns.
-            #[allow(unsafe_code)]
-            let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
-            handle.result_fd.store(fd, Ordering::SeqCst);
         })
         .expect("spawn prelock worker thread");
 }
@@ -136,6 +184,32 @@ fn run(req: ChildRequest) -> Result<ChildResponse, ChildResponse> {
     // GC/compilation inline on the calling thread, so no unfiltered background thread
     // exists for a resolver-bypassing escape to schedule onto (design §8.9).
     init_recorder_v8();
+
+    // ---- FAIL-CLOSED single-threaded assertion (PR4a code-critic LOW) ----
+    // The recorder's whole-process landlock coverage depends ENTIRELY on the
+    // single-threaded-V8 invariant (landlock's restrict_self has no TSYNC — it binds
+    // only the calling thread). `init_v8`/`init_v8_single_threaded` share one
+    // process-global `Once`; if any future code path installed the MULTI-THREADED
+    // platform first, the recorder would silently come up multi-threaded with NO error,
+    // re-opening the thread-scope gap. We REFUSE TO RUN (fail closed) here rather than
+    // degrade silently — verifying both the committed platform flavor AND that exactly
+    // one OS thread exists before lockdown.
+    //
+    // `ZS_RECORDER_FORCE_MULTITHREAD` (test-only) spawns a parked thread before this
+    // check so the regression e2e can prove the assertion FIRES. The thread-scope PROBE
+    // seam `ZS_RECORDER_PRELOCK_THREAD` deliberately injects a thread to exercise the
+    // KERNEL layer's process-wide kill, so it bypasses this userland refuse-to-run guard
+    // (the kernel — not this assertion — is what that probe tests).
+    if std::env::var_os("ZS_RECORDER_FORCE_MULTITHREAD").is_some() {
+        spawn_prelock_thread();
+        // Give the worker thread a moment to actually appear in /proc/self/task.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if std::env::var_os("ZS_RECORDER_PRELOCK_THREAD").is_none() {
+        if let Err(reason) = assert_recorder_single_threaded() {
+            return Err(ChildResponse::refused(reason, SandboxReport::default()));
+        }
+    }
 
     let mut report = SandboxReport {
         // netns + rlimits are applied by the parent's pre_exec; the parent passes
@@ -489,6 +563,58 @@ fn run_syscall_probe(which: &str) {
                 if waited_ms >= 5_000 {
                     // Worker neither succeeded nor was killed within the window. Exit a
                     // distinct non-42/non-0 code so the test fails loudly.
+                    std::process::exit(11);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                waited_ms += 10;
+            }
+        }
+        // --- LANDLOCK thread-scope proof (PR4a code-critic MED): issue an out-of-dir
+        //     READ on the PRE-LOCKDOWN worker thread (mirrors a V8 background thread).
+        //     landlock's `restrict_self` has NO TSYNC — it binds ONLY the calling (main)
+        //     thread. So a thread that already existed when `restrict_self` ran is NOT
+        //     under landlock, and its read SUCCEEDS (errno 0). This is the GROUND-TRUTH
+        //     demonstration that the landlock layer's whole-process coverage rests
+        //     ENTIRELY on the single-threaded-V8 invariant: there must be NO pre-lockdown
+        //     sibling thread, which the single-threaded V8 platform guarantees and the
+        //     fail-closed `assert_recorder_single_threaded` enforces. The seccomp
+        //     `thread_socket` probe does NOT cover this leg (it rides seccomp TSYNC,
+        //     which landlock lacks). Exit codes: 0 = the sibling's read SUCCEEDED (the
+        //     EXPECTED ground truth — landlock does not cover a pre-lockdown thread);
+        //     42 = EACCES (landlock unexpectedly covered the sibling); 13 = other errno
+        //     (e.g. landlock absent). Requires ZS_RECORDER_PRELOCK_THREAD. ---
+        "thread_read_outside" => {
+            let handle = PRELOCK
+                .lock()
+                .unwrap()
+                .expect("ZS_RECORDER_PRELOCK_THREAD must be set for the thread_read_outside probe");
+            // Signal the parked pre-lockdown thread to open /etc/hostname O_RDONLY.
+            {
+                let mut g = handle.cmd.lock().unwrap();
+                *g = 2;
+                handle.cv.notify_all();
+            }
+            let mut waited_ms = 0u64;
+            loop {
+                let errno = handle.result_read_errno.load(Ordering::SeqCst);
+                if errno != i32::MIN {
+                    if errno == 0 {
+                        // The out-of-dir read SUCCEEDED on the pre-lockdown thread ->
+                        // landlock did NOT cover it (no TSYNC). This is the expected
+                        // ground truth; the test asserts exit 0 and reads it as the
+                        // load-bearing proof that single-threaded-V8 is required.
+                        std::process::exit(0);
+                    }
+                    if errno == libc::EACCES {
+                        // landlock unexpectedly DENIED the pre-lockdown sibling's read.
+                        // (Not expected given landlock has no TSYNC.) Distinct code 42.
+                        std::process::exit(42);
+                    }
+                    // Some other errno (e.g. landlock absent on this host). Distinct
+                    // code so the test fails loudly rather than silently passing.
+                    std::process::exit(13);
+                }
+                if waited_ms >= 5_000 {
                     std::process::exit(11);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));

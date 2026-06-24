@@ -22,9 +22,37 @@ use crate::state::TimerCallback;
 // than a second `initialize_platform` that panics with "Invalid global state").
 static V8_INIT: std::sync::Once = std::sync::Once::new();
 
+/// Records WHICH platform flavor the `V8_INIT` `Once` actually committed, so a later
+/// caller can verify the flavor it needs is the one that won (the `Once` is
+/// first-caller-wins; a second call of EITHER variant no-ops silently). `0` = not yet
+/// initialized, `1` = multi-threaded default platform, `2` = single-threaded platform.
+///
+/// This exists for the build-time recorder child's FAIL-CLOSED single-threaded check:
+/// the recorder's whole-process landlock coverage depends on the single-threaded
+/// platform being the one installed (landlock has no TSYNC). If any future code path
+/// in the recorder process called the multi-threaded `init_v8` before
+/// `init_v8_single_threaded`, the recorder would otherwise come up MULTI-THREADED with
+/// NO error, silently re-opening the thread-scope gap. [`v8_platform_flavor`] lets the
+/// recorder detect that and REFUSE TO RUN rather than silently degrade.
+static V8_FLAVOR: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The committed V8 platform flavor (see [`V8_FLAVOR`]): `0` = uninitialized, `1` =
+/// multi-threaded default platform, `2` = single-threaded platform. Used by the
+/// recorder child to fail closed if the multi-threaded platform won the `Once` race.
+pub fn v8_platform_flavor() -> u8 {
+    V8_FLAVOR.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Shared one-time V8 setup. `single_threaded` selects the platform flavor.
 fn init_v8_platform(single_threaded: bool) {
     V8_INIT.call_once(|| {
+        // Record the flavor the FIRST caller committed (first-caller-wins). Stored
+        // inside `call_once` so it reflects the platform actually installed, not a
+        // later no-op call's argument.
+        V8_FLAVOR.store(
+            if single_threaded { 2 } else { 1 },
+            std::sync::atomic::Ordering::SeqCst,
+        );
         // Install the TLS crypto provider (rustls needs this for HTTPS fetch).
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 

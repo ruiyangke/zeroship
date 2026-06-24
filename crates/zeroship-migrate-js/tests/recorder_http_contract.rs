@@ -158,6 +158,61 @@ fn up_throw_surfaces_real_error_not_success() {
 }
 
 #[test]
+fn oversized_app_id_is_rejected_before_spawn() {
+    // app_id is client-controlled; bound it symmetrically with ts_source/name (PR4a
+    // code-critic LOW). A hostile oversized app_id must be 413'd at the HTTP boundary
+    // BEFORE svc.record() reaches the authorizer / spawns a child.
+    let huge_id = "a".repeat(zeroship_migrate_js::recorder_http::MAX_APP_ID_BYTES + 1);
+    let req = RecordHttpRequest {
+        ts_source: MIGRATION.to_string(),
+        app_id: huge_id,
+        schema_types_blob: None,
+        name: None,
+    };
+    match handle_record(&svc(), Some("pat_x"), &req) {
+        RecordHttpOutcome::Err(e) => {
+            assert_eq!(e.http_status, 413, "oversized app_id must be 413; got {e:?}");
+            assert_eq!(e.code, "RECORDER_REQUEST_TOO_LARGE", "got {e:?}");
+            assert!(!e.retryable);
+            assert!(e.message.contains("app_id"), "message: {}", e.message);
+        }
+        RecordHttpOutcome::Ok(_) => panic!("oversized app_id must be rejected, not recorded"),
+    }
+}
+
+#[test]
+fn oversized_schema_types_blob_is_rejected_before_spawn() {
+    // schema_types_blob is delivered in-memory to the child and reaches v8::String::new
+    // (a panic vector above V8's max string length). Bound it at the HTTP boundary
+    // symmetric with ts_source (PR4a code-critic LOW) -> 413 before a child is spawned.
+    let huge_blob = "a".repeat(zeroship_migrate_js::recorder_http::MAX_SCHEMA_TYPES_BYTES + 1);
+    let req = RecordHttpRequest {
+        ts_source: MIGRATION.to_string(),
+        app_id: "app_x".into(),
+        schema_types_blob: Some(huge_blob),
+        name: None,
+    };
+    match handle_record(&svc(), Some("pat_x"), &req) {
+        RecordHttpOutcome::Err(e) => {
+            assert_eq!(
+                e.http_status, 413,
+                "oversized schema_types_blob must be 413; got {e:?}"
+            );
+            assert_eq!(e.code, "RECORDER_REQUEST_TOO_LARGE", "got {e:?}");
+            assert!(!e.retryable);
+            assert!(
+                e.message.contains("schema_types_blob"),
+                "message: {}",
+                e.message
+            );
+        }
+        RecordHttpOutcome::Ok(_) => {
+            panic!("oversized schema_types_blob must be rejected, not recorded")
+        }
+    }
+}
+
+#[test]
 fn oversized_ts_source_is_rejected_before_spawn() {
     // A hostile >max-bytes ts_source must be rejected at the HTTP boundary (413) BEFORE
     // spawning a child / reaching v8::String::new (which panics above V8's max string

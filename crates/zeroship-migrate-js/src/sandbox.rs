@@ -92,6 +92,76 @@ pub fn init_recorder_v8() {
     zeroship_runtime::init_v8_single_threaded();
 }
 
+/// FAIL-CLOSED assertion that the recorder process is genuinely single-threaded BEFORE
+/// the in-process lockdown (PR4a code-critic LOW — runtime assertion that the recorder
+/// V8 is single-threaded).
+///
+/// WHY THIS IS LOAD-BEARING: landlock's `restrict_self` has NO TSYNC — it binds only
+/// the calling thread — so the recorder's WHOLE-PROCESS landlock coverage depends
+/// ENTIRELY on the single-threaded-V8 invariant (only ONE thread exists when
+/// `restrict_self` runs). [`init_v8_single_threaded`] and [`init_v8`] share ONE
+/// process-global `Once` (first-caller-wins; a later call of EITHER no-ops). If any
+/// future code path in the recorder child called the multi-threaded `init_v8` before
+/// [`init_recorder_v8`], the recorder would silently come up MULTI-THREADED with NO
+/// error, re-opening the landlock thread-scope gap.
+///
+/// We fail closed two independent ways:
+///   1. **Platform flavor**: verify the `Once` committed the SINGLE-THREADED platform
+///      (`v8_platform_flavor() == 2`). A `1` means the multi-threaded platform won the
+///      race — refuse.
+///   2. **Live thread count**: read `/proc/self/task` and require EXACTLY ONE thread.
+///      Even a single-threaded V8 platform cannot mask a stray thread spawned by some
+///      other init path; this catches it directly.
+///
+/// Returns `Err(reason)` (the caller refuses to run) rather than silently degrading.
+/// `ZS_RECORDER_FORCE_MULTITHREAD` is a TEST-ONLY seam that spawns a parked thread
+/// before this check so the regression test can prove the assertion FIRES (we cannot
+/// un-commit the single-threaded platform once a prior test installed it process-wide).
+pub fn assert_recorder_single_threaded() -> Result<(), String> {
+    // (1) The committed platform flavor must be single-threaded (2), not multi (1).
+    let flavor = zeroship_runtime::v8_platform_flavor();
+    if flavor == 1 {
+        return Err(format!(
+            "recorder refuses to run: the MULTI-THREADED V8 platform was installed \
+             (v8_platform_flavor={flavor}); landlock's restrict_self has no TSYNC, so a \
+             multi-threaded recorder re-opens the thread-scope gap. init_recorder_v8() \
+             must win the V8_INIT Once."
+        ));
+    }
+    // flavor == 0 (uninitialized) is also wrong here — init_recorder_v8() must have run.
+    if flavor == 0 {
+        return Err(
+            "recorder refuses to run: V8 platform not initialized before the \
+             single-threaded assertion (init_recorder_v8() must run first)"
+                .to_string(),
+        );
+    }
+
+    // (2) Exactly one OS thread must exist. /proc/self/task has one entry per thread.
+    let n = count_self_threads()?;
+    if n != 1 {
+        return Err(format!(
+            "recorder refuses to run: {n} threads exist before lockdown, but landlock \
+             restrict_self covers only the calling thread (no TSYNC) — the recorder MUST \
+             be single-threaded so every thread is under landlock. A background thread \
+             would stay UNFILTERED for out-of-dir reads (thread-scope gap)."
+        ));
+    }
+    Ok(())
+}
+
+/// Count this process's OS threads via `/proc/self/task` (one dir entry per thread).
+fn count_self_threads() -> Result<usize, String> {
+    let mut n = 0usize;
+    let entries = std::fs::read_dir("/proc/self/task")
+        .map_err(|e| format!("recorder single-threaded check: read /proc/self/task: {e}"))?;
+    for e in entries {
+        e.map_err(|e| format!("recorder single-threaded check: task entry: {e}"))?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 /// Which trust posture the recorder runs under (design §8.9 / §8.9.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxPosture {
@@ -225,11 +295,19 @@ pub unsafe fn pre_exec_rlimits(budget: ResourceBudget) -> std::io::Result<()> {
     if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    // RLIMIT_CPU — CPU-seconds hard cap. The kernel sends SIGXCPU at the soft limit
-    // and SIGKILL at the hard limit; we set both equal so an infinite loop dies.
+    // RLIMIT_CPU — CPU-seconds cap. The kernel sends SIGXCPU at the SOFT limit and a
+    // bare SIGKILL at the HARD limit. We deliberately set the hard limit ONE SECOND
+    // ABOVE the soft so SIGXCPU (default action: terminate) fires FIRST and is the
+    // terminating signal — making a genuine cpu-budget overrun observably `SIGXCPU`
+    // (classified as the cpu budget, a non-retryable 422) rather than an ambiguous bare
+    // SIGKILL. A bare SIGKILL is then reserved for true environment events (operator
+    // kill / unrelated-cgroup OOM / node shutdown), which classify as the RETRYABLE
+    // environment-event outcome (PR4a code-critic LOW — bare SIGKILL is an environment
+    // event, not an authoring reject). The +1s hard headroom is a backstop: if the
+    // process somehow ignored SIGXCPU, the hard SIGKILL still bounds it.
     let cpu = libc::rlimit {
         rlim_cur: budget.cpu_seconds,
-        rlim_max: budget.cpu_seconds,
+        rlim_max: budget.cpu_seconds.saturating_add(1),
     };
     if unsafe { libc::setrlimit(libc::RLIMIT_CPU, &cpu) } != 0 {
         return Err(std::io::Error::last_os_error());

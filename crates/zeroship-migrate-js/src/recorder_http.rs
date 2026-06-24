@@ -36,6 +36,20 @@ pub const MAX_TS_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 /// child's `v8::String::new` (which returns None / would otherwise be a panic vector).
 pub const MAX_NAME_BYTES: usize = 4 * 1024;
 
+/// Max accepted client-controlled `app_id` (PR4a code-critic LOW — bound app_id at the
+/// HTTP boundary, symmetric with the existing `ts_source`/`name` guards). A typed_id
+/// (`app_…` base62 UUIDv7) is a few dozen bytes; cap it small so a hostile oversized
+/// id is rejected with 413 BEFORE `svc.record()` spawns a child or it reaches the
+/// authorizer / `v8::String` paths.
+pub const MAX_APP_ID_BYTES: usize = 256;
+
+/// Max accepted type-only `schema_types_blob` (PR4a code-critic LOW — bound the blob at
+/// the HTTP boundary). It is delivered IN-MEMORY to the child and exposed as a read-only
+/// `globalThis.__zsSchemaTypes` via `v8::String::new` (a panic vector above V8's ~512MB
+/// limit). A type-only `.d.ts`-style blob is small; we cap at 8 MiB (same generous
+/// ceiling as `ts_source`), rejecting a hostile blob with 413 before a child is spawned.
+pub const MAX_SCHEMA_TYPES_BYTES: usize = 8 * 1024 * 1024;
+
 /// The `POST /v1/recorder/record` request body (design §8.9.2).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RecordHttpRequest {
@@ -91,6 +105,7 @@ impl From<&RecorderError> for StructuredError {
             RecorderError::BudgetExceeded { .. } => (422, false), // bounded build
             RecorderError::KilledBySeccomp => (422, false), // the migration tried something denied
             RecorderError::SandboxRefused(_) => (503, true), // environment refusal
+            RecorderError::EnvironmentKilled(_) => (503, true), // ambiguous bare SIGKILL -> retry/fallback-to-local
             RecorderError::Overloaded => (429, true),        // backpressure -> retry/queue
             RecorderError::Spawn(_) => (503, true),          // recorder-unreachable -> fallback-to-local
         };
@@ -158,6 +173,36 @@ pub fn handle_record(
                     "name is {} bytes; the recorder accepts at most {} bytes",
                     n.len(),
                     MAX_NAME_BYTES
+                ),
+                http_status: 413,
+                retryable: false,
+            });
+        }
+    }
+    // app_id + schema_types_blob are ALSO client-controlled; bound them symmetrically
+    // with ts_source/name (PR4a code-critic LOW). Reject with 413 BEFORE svc.record()
+    // spawns a child (app_id reaches the authorizer; the blob reaches the child's
+    // `v8::String::new`, a panic vector above V8's max string length).
+    if req.app_id.len() > MAX_APP_ID_BYTES {
+        return RecordHttpOutcome::Err(StructuredError {
+            code: "RECORDER_REQUEST_TOO_LARGE".into(),
+            message: format!(
+                "app_id is {} bytes; the recorder accepts at most {} bytes",
+                req.app_id.len(),
+                MAX_APP_ID_BYTES
+            ),
+            http_status: 413,
+            retryable: false,
+        });
+    }
+    if let Some(blob) = req.schema_types_blob.as_deref() {
+        if blob.len() > MAX_SCHEMA_TYPES_BYTES {
+            return RecordHttpOutcome::Err(StructuredError {
+                code: "RECORDER_REQUEST_TOO_LARGE".into(),
+                message: format!(
+                    "schema_types_blob is {} bytes; the recorder accepts at most {} bytes",
+                    blob.len(),
+                    MAX_SCHEMA_TYPES_BYTES
                 ),
                 http_status: 413,
                 retryable: false,

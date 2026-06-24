@@ -740,6 +740,210 @@ fn seccomp_kills_socket_from_a_pre_lockdown_thread_process_wide() {
     );
 }
 
+// ===========================================================================
+// 8b. LANDLOCK thread-scope: the landlock half of the CRITICAL invariant.
+//     (PR4a code-critic MED — pin the landlock half of the thread-scope invariant.)
+//
+//     seccomp's `thread_socket` (test 8) rides TSYNC, so a PRE-LOCKDOWN thread's
+//     denied syscall is killed PROCESS-WIDE. landlock has NO TSYNC: `restrict_self`
+//     binds ONLY the calling (main) thread. So landlock's whole-process coverage rests
+//     ENTIRELY on the single-threaded-V8 invariant — only ONE thread may exist when
+//     `restrict_self` runs. These two tests pin that half FAITHFULLY:
+//
+//       (a) On the MAIN (only) thread, an out-of-dir read IS landlock-denied (EACCES)
+//           — `landlock_denies_out_of_dir_read` (test 1) already proves this.
+//       (b) A PRE-LOCKDOWN sibling thread is NOT covered by landlock (its out-of-dir
+//           read SUCCEEDS) — proving landlock alone canNOT contain a stray thread, which
+//           is EXACTLY why (i) V8 must be single-threaded so no such thread exists, and
+//           (ii) the fail-closed single-threaded assertion (test 9) REFUSES to run if
+//           one ever does. If V8 ever silently went multi-threaded again, test 9 fires.
+// ===========================================================================
+
+#[test]
+fn landlock_does_not_cover_a_pre_lockdown_thread_so_single_threaded_is_load_bearing() {
+    // Ground-truth pin of the landlock no-TSYNC property. We spawn a sibling thread
+    // BEFORE the lockdown (modeling a V8 background thread), then post-lockdown signal
+    // IT to read an out-of-allow-list path. Because landlock's restrict_self covered
+    // only the MAIN thread, the sibling's read is NOT denied (it succeeds, exit 0). This
+    // is not a vulnerability in the shipped recorder — V8 is single-threaded so the
+    // sibling never exists, and the fail-closed assertion (test 9) refuses to run if it
+    // did. This test exists so that the LANDLOCK HALF of the invariant is asserted by a
+    // live kernel observation, not prose: it documents WHY single-threaded-V8 is
+    // load-bearing for the landlock layer (a pre-existing thread escapes it).
+    if !landlock_available() {
+        eprintln!("landlock not available — the read fs boundary is the resolver (degraded floor)");
+        return;
+    }
+    if !seccomp_available() {
+        panic!("CAPABILITY PRESENT BUT TEST WOULD SKIP: seccomp is available — fix the gate");
+    }
+    let bin = recorder_child_path();
+    assert!(bin.exists(), "recorder child missing at {}", bin.display());
+    let mut child = Command::new(&bin)
+        .env("ZS_RECORDER_PRELOCK_THREAD", "1")
+        .env("ZS_RECORDER_PROBE", "thread_read_outside")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn recorder child");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(child_request(HAPPY_MIGRATION, false, false, false).as_bytes())
+        .ok();
+    let status = child.wait().expect("wait child");
+    // The sibling thread's read is a READ-only open (passes the seccomp openat
+    // arg-filter), so it is NOT signal-killed; landlock would be the only thing that
+    // could deny it, and landlock does NOT cover the pre-lockdown sibling -> exit 0.
+    assert_eq!(
+        term_signal(&status),
+        None,
+        "a read-only open must not be signal-killed (seccomp permits read opens); got {status:?}"
+    );
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the PRE-LOCKDOWN sibling thread's out-of-dir read must SUCCEED (exit 0): landlock \
+         has no TSYNC and covered only the main thread. This is the ground-truth proof that \
+         the landlock half relies on the single-threaded invariant — NOT on landlock \
+         covering extra threads. (exit 42 would mean landlock unexpectedly covered the \
+         sibling; exit 11/13 a probe error.) The fail-closed assertion (test 9) is what \
+         prevents this sibling from ever existing in the shipped recorder."
+    );
+}
+
+// ===========================================================================
+// 9. FAIL-CLOSED: the recorder REFUSES to run if it is not single-threaded.
+//    (PR4a code-critic LOW — runtime assertion that the recorder V8 is
+//    single-threaded; the landlock half of the CRITICAL invariant has NO TSYNC.)
+// ===========================================================================
+
+#[test]
+fn recorder_refuses_to_run_if_not_single_threaded() {
+    // The recorder's whole-process landlock coverage depends on the single-threaded-V8
+    // invariant (landlock restrict_self binds only the calling thread). If a stray
+    // thread exists before lockdown, an out-of-dir read on it would stay UNFILTERED.
+    // The fail-closed guard (assert_recorder_single_threaded) must REFUSE TO RUN rather
+    // than silently degrade. We force a second thread via the ZS_RECORDER_FORCE_MULTITHREAD
+    // test seam and assert the child refuses with a SandboxRefused error that names the
+    // single-threaded invariant.
+    let bin = recorder_child_path();
+    assert!(bin.exists(), "recorder child missing at {}", bin.display());
+    let mut child = Command::new(&bin)
+        .env("ZS_RECORDER_FORCE_MULTITHREAD", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn recorder child");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        // LOCAL posture so the refusal is purely the single-threaded guard, not the
+        // hosted floor.
+        .write_all(child_request(HAPPY_MIGRATION, false, false, false).as_bytes())
+        .ok();
+    let out = {
+        use std::io::Read;
+        let mut s = String::new();
+        child.stdout.take().unwrap().read_to_string(&mut s).ok();
+        s
+    };
+    let status = child.wait().expect("wait child");
+    // It must not have been signal-killed — it refuses cleanly via the structured error.
+    assert_eq!(
+        term_signal(&status),
+        None,
+        "the single-threaded guard must refuse via a structured error, not a signal kill; got {status:?}"
+    );
+    let resp: zeroship_migrate_js::recorder_protocol::ChildResponse =
+        serde_json::from_str(out.trim()).unwrap_or_else(|e| panic!("parse resp: {e}; raw={out}"));
+    assert!(
+        !resp.ok,
+        "a multi-threaded recorder must FAIL CLOSED (refuse), got ok response: {out}"
+    );
+    match resp.error {
+        Some(zeroship_migrate_js::recorder_protocol::ChildError::SandboxRefused(reason)) => {
+            assert!(
+                reason.contains("single-threaded") || reason.contains("threads exist"),
+                "the refusal must name the single-threaded invariant, got: {reason}"
+            );
+        }
+        other => panic!("expected SandboxRefused (single-threaded fail-closed), got {other:?}"),
+    }
+}
+
+// ===========================================================================
+// 10. The `process` stub invariants the recorder relies on are PINNED.
+//     (PR4a code-critic LOW — pin the `process` stub invariants.)
+//
+//     setup_globals exposes a `process` object to the untrusted migration JS. It is
+//     benign TODAY: `process.env` is empty (the recorder injects no env vars),
+//     `process.exit` is undefined (so untrusted up() cannot terminate the child early /
+//     short-circuit recording), and there are no Node fs/net/child_process bindings.
+//     A future runtime enrichment of the process stub (e.g. adding process.exit, or
+//     populating process.env, or wiring node bindings) would silently widen the
+//     untrusted surface. This test makes such a change FAIL LOUDLY at the recorder.
+// ===========================================================================
+
+#[test]
+fn recorder_process_stub_invariants_are_pinned() {
+    // up() probes the process stub and encodes each invariant into a created-table name,
+    // so the recorded IR carries the observed state. We assert the IR shows the safe
+    // values. A regression (e.g. process.exit becomes a function) flips a flag and the
+    // assertion fails. (We avoid calling process.exit even if present — we only read
+    // `typeof`.)
+    let probe_src = r#"
+        import { createTable } from "@zeroship/migrate";
+        export function up() {
+          const p = globalThis.process;
+          const envIsEmpty = !!p && typeof p.env === "object" && p.env !== null
+              && Object.keys(p.env).length === 0;
+          const exitUndefined = !p || typeof p.exit === "undefined";
+          // No Node-only host bindings leaked onto globalThis.
+          const noNodeBindings =
+              typeof globalThis.require === "undefined" &&
+              typeof globalThis.module === "undefined" &&
+              typeof globalThis.__dirname === "undefined" &&
+              typeof globalThis.Buffer === "undefined";
+          createTable("env_empty_" + envIsEmpty, [{ name: "id", type: "int", nullable: false }]);
+          createTable("exit_undef_" + exitUndefined, [{ name: "id", type: "int", nullable: false }]);
+          createTable("no_node_" + noNodeBindings, [{ name: "id", type: "int", nullable: false }]);
+        }
+    "#;
+    let req = RecordRequest {
+        ts_source: probe_src.to_string(),
+        owner_app: "app_proc".into(),
+        name: "proc_probe".into(),
+        posture: SandboxPosture::Hosted,
+        budget: ResourceBudget::default(),
+        allow_read_paths: vec![],
+        schema_types_blob: None,
+    };
+    let res = spawn_sandboxed_record(&req).expect("process-stub probe migration records");
+    assert!(
+        res.ir_json.contains("env_empty_true"),
+        "process.env must be EMPTY ({{}}) in the recorder — a future enrichment that \
+         populates it widens the untrusted surface; IR: {}",
+        res.ir_json
+    );
+    assert!(
+        res.ir_json.contains("exit_undef_true"),
+        "process.exit must be UNDEFINED in the recorder (untrusted up() must not be able \
+         to terminate the child / short-circuit recording); IR: {}",
+        res.ir_json
+    );
+    assert!(
+        res.ir_json.contains("no_node_true"),
+        "no Node fs/net/require/Buffer bindings may leak onto globalThis in the recorder; \
+         IR: {}",
+        res.ir_json
+    );
+}
+
 // A static assertion that the child binary path resolves — a missing child binary is
 // a hard failure, never a skip.
 #[test]

@@ -49,6 +49,15 @@ pub enum RecorderError {
     /// The hosted recorder refused to run (kernel floor not met — neither seccomp
     /// nor netns). Maps to a 503/environment refusal, NOT an authoring reject.
     SandboxRefused(String),
+    /// The child was killed by a BARE `SIGKILL` whose origin is AMBIGUOUS — it could
+    /// be an ENVIRONMENT event (operator kill, an unrelated-cgroup OOM, node shutdown)
+    /// rather than the migration's own resource budget. We do NOT assert an authoring
+    /// reject for it: it maps to a RETRYABLE 503-class outcome (recorder-unreachable /
+    /// environment → the client falls back to local recording), NOT a 422
+    /// (PR4a code-critic LOW — bare SIGKILL is an environment event, not a reject).
+    /// The genuinely migration-caused budget kills (cpu/wall/memory + SIGSEGV/
+    /// SIGABRT/SIGBUS) stay [`RecorderError::BudgetExceeded`] (non-retryable 422).
+    EnvironmentKilled(String),
     /// The token/app ownership check failed (§8.6) — fail-closed.
     Unauthorized(String),
     /// A burst exceeded the global concurrency cap (after the queue) — backpressure.
@@ -66,6 +75,7 @@ impl RecorderError {
             RecorderError::KilledBySeccomp => "BUILD_RECORDER_SANDBOX_VIOLATION",
             RecorderError::EvalError(_) => "RECORD_EVAL_ERROR",
             RecorderError::SandboxRefused(_) => "RECORDER_SANDBOX_UNAVAILABLE",
+            RecorderError::EnvironmentKilled(_) => "RECORDER_UNREACHABLE",
             RecorderError::Unauthorized(_) => "RECORDER_UNAUTHORIZED",
             RecorderError::Overloaded => "RECORDER_OVERLOADED",
             RecorderError::Spawn(_) => "RECORDER_UNREACHABLE",
@@ -84,6 +94,9 @@ impl std::fmt::Display for RecorderError {
             }
             RecorderError::EvalError(m) => write!(f, "migration evaluation failed: {m}"),
             RecorderError::SandboxRefused(m) => write!(f, "recorder refused to run: {m}"),
+            RecorderError::EnvironmentKilled(m) => {
+                write!(f, "recorder child killed by an environment event: {m}")
+            }
             RecorderError::Unauthorized(m) => write!(f, "unauthorized: {m}"),
             RecorderError::Overloaded => write!(f, "recorder overloaded"),
             RecorderError::Spawn(m) => write!(f, "recorder unreachable: {m}"),
@@ -326,23 +339,30 @@ pub fn spawn_sandboxed_record(req: &RecordRequest) -> Result<RecordResult, Recor
 ///   (subprocess spawn / network socket). This is the FAITHFUL kernel-level signal.
 /// - `SIGXCPU` (24) ⇒ `RLIMIT_CPU` tripped (infinite loop) → budget (cpu).
 /// - `SIGKILL` (9) ⇒ a BARE kill not attributable to OUR wall watchdog (that path is
-///   handled before this via `wall_killed`). It could be the kernel OOM-killer
-///   reacting to this child's own allocation, OR an EXTERNAL event (operator kill,
-///   an unrelated cgroup OOM, node shutdown). We do NOT assert it was the migration's
-///   MEMORY budget — that would mis-emit a 422 authoring-class signal for an
-///   environment event (PR4a code-critic MED #6). We classify it as the ambiguous
-///   `unknown-kill` the doc comment anticipates.
+///   handled before this via `wall_killed`). Its origin is AMBIGUOUS — it could be the
+///   kernel OOM-killer reacting to this child's own allocation, OR an EXTERNAL/
+///   ENVIRONMENT event (operator kill, an unrelated cgroup's OOM victim selection,
+///   node shutdown). We do NOT assert it was the migration's MEMORY budget — that
+///   would mis-emit a 422 authoring-class signal for an environment event
+///   (PR4a code-critic MED #6). Crucially we ALSO do not leave it as a non-retryable
+///   `BudgetExceeded`: an ambiguous bare SIGKILL maps to [`RecorderError::EnvironmentKilled`]
+///   — a RETRYABLE 503-class outcome (recorder-unreachable → the client retries /
+///   falls back to LOCAL recording) rather than a 422 authoring reject (PR4a
+///   code-critic LOW — bare SIGKILL is an environment event, not an authoring reject).
 /// - `SIGSEGV`/`SIGABRT`/`SIGBUS` ⇒ a V8 crash (e.g. RLIMIT_AS made an allocation
-///   fail hard) → budget (memory): this IS attributable to the child's own execution.
+///   fail hard) → budget (memory): this IS attributable to the child's own execution,
+///   so it STAYS a non-retryable `BudgetExceeded` (a genuinely migration-caused kill).
 fn classify_signal(sig: i32, _stdout_empty: bool) -> RecorderError {
     match sig {
         libc::SIGSYS => RecorderError::KilledBySeccomp,
         libc::SIGXCPU => RecorderError::BudgetExceeded { which: "cpu".into() },
-        // Bare SIGKILL: ambiguous origin. Surface as `unknown-kill` rather than
-        // asserting the memory budget tripped.
-        libc::SIGKILL => RecorderError::BudgetExceeded {
-            which: "unknown-kill".into(),
-        },
+        // Bare SIGKILL: ambiguous origin (operator/cgroup-OOM/node-shutdown vs the
+        // child's own overrun). Route to the RETRYABLE environment-event class rather
+        // than a non-retryable authoring reject — the client falls back to local.
+        libc::SIGKILL => RecorderError::EnvironmentKilled(
+            "bare SIGKILL (ambiguous: operator kill / unrelated-cgroup OOM / node shutdown)"
+                .into(),
+        ),
         libc::SIGSEGV | libc::SIGABRT | libc::SIGBUS => RecorderError::BudgetExceeded {
             which: "memory".into(),
         },
@@ -516,6 +536,69 @@ mod tests {
         fn authorize(&self, _token: &str, _app_id: &str) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    /// PR4a code-critic LOW (SIGKILL classification): a BARE `SIGKILL` is AMBIGUOUS
+    /// (operator kill / unrelated-cgroup OOM / node shutdown) and must map to a
+    /// RETRYABLE environment-event outcome — NOT a non-retryable 422 authoring reject.
+    /// The genuinely migration-caused signals stay non-retryable `BudgetExceeded`.
+    #[test]
+    fn bare_sigkill_is_retryable_environment_event_not_authoring_reject() {
+        use crate::recorder_http::StructuredError;
+
+        // Bare SIGKILL -> EnvironmentKilled -> retryable 503 (recorder-unreachable class).
+        let killed = classify_signal(libc::SIGKILL, true);
+        assert!(
+            matches!(killed, RecorderError::EnvironmentKilled(_)),
+            "bare SIGKILL must classify as EnvironmentKilled, got {killed:?}"
+        );
+        let se: StructuredError = (&killed).into();
+        assert_eq!(se.http_status, 503, "bare SIGKILL must be a 503-class outcome");
+        assert!(
+            se.retryable,
+            "bare SIGKILL must be RETRYABLE (client falls back to local)"
+        );
+        assert_eq!(se.code, "RECORDER_UNREACHABLE");
+    }
+
+    /// The genuinely migration-caused kills (cpu / wall via watchdog / memory crash)
+    /// stay NON-retryable 422 authoring/bounded-build rejects — they are attributable
+    /// to the child's own execution, NOT an environment event.
+    #[test]
+    fn migration_caused_kills_stay_non_retryable_422() {
+        use crate::recorder_http::StructuredError;
+
+        for (sig, which) in [
+            (libc::SIGXCPU, "cpu"),
+            (libc::SIGSEGV, "memory"),
+            (libc::SIGABRT, "memory"),
+            (libc::SIGBUS, "memory"),
+        ] {
+            let e = classify_signal(sig, false);
+            match &e {
+                RecorderError::BudgetExceeded { which: w } => {
+                    assert_eq!(w, which, "signal {sig} must classify as budget '{which}'")
+                }
+                other => panic!("signal {sig} must be BudgetExceeded, got {other:?}"),
+            }
+            let se: StructuredError = (&e).into();
+            assert_eq!(
+                se.http_status, 422,
+                "migration-caused kill (signal {sig}) must be a 422 reject"
+            );
+            assert!(
+                !se.retryable,
+                "migration-caused kill (signal {sig}) must NOT be retryable"
+            );
+        }
+
+        // A seccomp-denied syscall (SIGSYS) is a sandbox violation — also non-retryable
+        // 422 (the migration tried something denied), distinct from an environment kill.
+        let sys = classify_signal(libc::SIGSYS, false);
+        assert!(matches!(sys, RecorderError::KilledBySeccomp), "got {sys:?}");
+        let se: StructuredError = (&sys).into();
+        assert_eq!(se.http_status, 422);
+        assert!(!se.retryable);
     }
 
     /// PR4a code-critic LOW #2: a POISONED `inflight` mutex must NOT abort the service.
