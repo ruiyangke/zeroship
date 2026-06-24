@@ -47,7 +47,14 @@ export interface DiscoverMigrationsOptions {
   ownerApp?: string;
   /** The hosted recorder URL (the §8.9.2 thin client). Falls back to
    *  `ZEROSHIP_RECORDER_URL`. When set, the CLI ships each `.ts` to the recorder;
-   *  recorder-unreachable falls back to the LOCAL recorder (NOT a build failure). */
+   *  recorder-unreachable falls back to the LOCAL recorder (NOT a build failure).
+   *
+   *  NOTE: the dev `zeroship-migrate-js` CLI does NOT embed a hosted-recorder HTTP
+   *  client — setting this makes the CLI's `build --recorder-url` ALWAYS fall back to
+   *  LOCAL recording (it prints a loud per-file warning). Hosted, canonical
+   *  kernel-sandboxed recording happens on the platform via the control plane at
+   *  deploy (the §5.1 provenance re-record), not from this dev tool. Security is
+   *  preserved either way; this option exists for forward-compat + parity. */
   recorderUrl?: string;
   /** Path to the `zeroship-migrate-js` CLI binary (default `zeroship-migrate-js`
    *  on PATH; override for tests / packaged installs). */

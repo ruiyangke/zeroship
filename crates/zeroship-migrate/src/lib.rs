@@ -183,7 +183,8 @@ pub use ir::{
 // compare. The loader's IR branch ([`ir_author::IrAuthor::load_and_lower`]) runs
 // this gate and then lowers the validated, owned IR to migrations (§7.2).
 pub use ir_load::{
-    enforce_ir_ownership, load_ir_document, recompute_hint_domain_checksum, IrLoadError,
+    enforce_ir_ownership, hint_domain_uncomputable_field, load_ir_document,
+    recompute_hint_domain_checksum, IrLoadError,
 };
 // The IR-path DDL Lower phase (§6/§6.4/§6.5): compiles a validated, ownership-
 // checked `MigrationIr` to migrations, reusing the SHARED snapshot-builder +

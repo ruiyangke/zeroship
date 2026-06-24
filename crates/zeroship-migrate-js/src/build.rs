@@ -128,6 +128,28 @@ pub enum BuildError {
         /// The parse error.
         message: String,
     },
+    /// The IR carries a §2.4 hint-domain field (non-default `flags` / non-empty
+    /// `depends_on` / `supersedes`) this engine build cannot yet FOLD into the
+    /// typed-value checksum. The build refuses to anchor a PARTIAL checksum (the
+    /// `IrFlagsOverride`→`MigrationFlags` / `String`→`MigrationId` merges are a
+    /// later wave) — mirroring the engine's load gate
+    /// ([`zeroship_migrate::hint_domain_uncomputable_field`]) rather than emitting an
+    /// artifact whose build-time checksum and the engine's authoritative checksum
+    /// disagree on the unfolded fields. Fail-closed: a partial fold both lets a
+    /// tampered unfolded field slip past the CI re-record gate AND commits an
+    /// artifact the engine's load gate would refuse at deploy.
+    #[error(
+        "{stem}.ir.json carries a not-yet-foldable {field} domain ({detail}) — the build \
+         cannot anchor a partial typed-value checksum (flags/deps/supersedes merge is a later wave)"
+    )]
+    UnfoldableDomain {
+        /// The migration stem.
+        stem: String,
+        /// The §2.4 hint-domain field that is not yet foldable.
+        field: &'static str,
+        /// The offending value (debug-rendered).
+        detail: String,
+    },
     /// The CI re-record gate (B2) found a divergence between the committed
     /// `.ir.json`'s typed-value checksum and the freshly re-recorded `.ts`'s.
     #[error(
@@ -339,14 +361,33 @@ fn checksum_of_committed(bytes: &[u8], stem: &str) -> Result<String, BuildError>
             stem: stem.to_string(),
             message: e.to_string(),
         })?;
-    Ok(typed_checksum(&ir))
+    typed_checksum(&ir, stem)
 }
 
 /// The single authoritative typed-value checksum fold (the §2.5 anchor): op list +
 /// default flags + owner + preconditions, dialect-neutral. Identical to the
 /// `op_round_trip` gate + `recorder_http::checksum_of_ir_envelope`.
-fn typed_checksum(ir: &MigrationIr) -> String {
-    Checksum::of_ir(
+///
+/// GATES on the engine's [`zeroship_migrate::hint_domain_uncomputable_field`] FIRST
+/// (symmetric with `authoritative_ir_checksum`/`recompute_hint_domain_checksum`):
+/// PR1 folds only the DEFAULT flags + EMPTY deps/supersedes, so anchoring an IR that
+/// carries a non-default flags / deps / supersedes domain would silently fold a
+/// PARTIAL checksum — which the CI re-record gate would PASS (both sides fold the
+/// same partial domain) while the engine's load gate REFUSES it at deploy. Rather
+/// than emit such an undeployable, tamper-permeable artifact, fail closed with
+/// [`BuildError::UnfoldableDomain`]. When the `IrFlagsOverride`→`MigrationFlags` /
+/// `String`→`MigrationId` merges land, this fold widens to the real
+/// flags/deps/supersedes so the build anchor stays identical to
+/// `authoritative_ir_checksum`.
+fn typed_checksum(ir: &MigrationIr, stem: &str) -> Result<String, BuildError> {
+    if let Some((field, detail)) = zeroship_migrate::hint_domain_uncomputable_field(ir) {
+        return Err(BuildError::UnfoldableDomain {
+            stem: stem.to_string(),
+            field,
+            detail,
+        });
+    }
+    Ok(Checksum::of_ir(
         &CanonicalOpList(&ir.ops),
         &MigrationFlags::default(),
         &ir.owner_app,
@@ -355,7 +396,7 @@ fn typed_checksum(ir: &MigrationIr) -> String {
         &ir.preconditions,
     )
     .as_str()
-    .to_string()
+    .to_string())
 }
 
 /// Canonicalize a recorder ENVELOPE `ir_json` string (`{ ok, ir: {...} }`) into the
@@ -535,7 +576,7 @@ pub fn build_migrations(
         } else {
             // Record fresh, write the committed artifact, surface determinism warnings.
             let (bytes, ir, path) = record_one(m, owner_app, via)?;
-            let checksum = typed_checksum(&ir);
+            let checksum = typed_checksum(&ir, &m.stem)?;
             // §4.3 determinism warnings (best-effort, non-blocking) over the source.
             let ts_source = std::fs::read_to_string(&m.ts_path).map_err(|source| {
                 BuildError::ReadCommitted {
@@ -640,7 +681,7 @@ pub fn recheck_not_yet_applied(
         let committed_checksum = checksum_of_committed(&committed, &m.stem)?;
         // RE-RECORD the .ts through the canonical recorder.
         let (_bytes, ir, _path) = record_one(m, owner_app, via)?;
-        let recorded_checksum = typed_checksum(&ir);
+        let recorded_checksum = typed_checksum(&ir, &m.stem)?;
         if recorded_checksum != committed_checksum {
             return Err(BuildError::ChecksumMismatch {
                 stem: m.stem.clone(),

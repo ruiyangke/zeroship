@@ -154,3 +154,134 @@ describe("op.* migration discovery + bundling (A4)", () => {
     }
   });
 });
+
+// LOW #2 — exercise the recordViaCli CLI-shelling path: a `.ts` with NO committed
+// `.ir.json` must shell the (stub) CLI, which produces the committed artifact. Also
+// asserts (a) the LOCAL-vs-hosted arg fork and (b) a non-zero CLI exit surfaces as a
+// thrown Error carrying the stderr. The stub stands in for the real Rust
+// `zeroship-migrate-js` (kept hermetic + fast; no V8/no kernel sandbox here).
+describe("recordViaCli CLI-shelling (A4 record path)", () => {
+  const STUB_STEM = "20240617123000_notes";
+
+  // A node stub CLI. `record <file.ts> --owner-app X` writes a sibling `.ir.json`
+  // and logs the args to `$ARGS_LOG` so the test can assert the arg fork. `build
+  // ... --recorder-url URL` writes the `.ir.json` for every `.ts` in `--dir` (the
+  // hosted-fork shape). `ZSTUB_FAIL=1` makes it exit non-zero with a stderr message.
+  const STUB_BODY = [
+    "#!/usr/bin/env node",
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    "const args = process.argv.slice(2);",
+    "if (process.env.ARGS_LOG) fs.writeFileSync(process.env.ARGS_LOG, JSON.stringify(args));",
+    "if (process.env.ZSTUB_FAIL === '1') { process.stderr.write('stub: synthetic record failure\\n'); process.exit(3); }",
+    "const ir = JSON.parse(process.env.ZSTUB_IR);",
+    "const irText = JSON.stringify(ir, null, 2) + '\\n';",
+    "function writeFor(tsPath) {",
+    "  const dir = path.dirname(tsPath);",
+    "  const base = path.basename(tsPath).replace(/\\.ts$/, '');",
+    "  fs.writeFileSync(path.join(dir, base + '.ir.json'), irText);",
+    "}",
+    "if (args[0] === 'record') { writeFor(args[1]); }",
+    "else if (args[0] === 'build') {",
+    "  const di = args.indexOf('--dir'); const dir = args[di + 1];",
+    "  for (const n of fs.readdirSync(dir)) if (n.endsWith('.ts')) writeFor(path.join(dir, n));",
+    "} else { process.stderr.write('stub: unknown cmd ' + args[0] + '\\n'); process.exit(2); }",
+    "",
+  ].join("\n");
+
+  const STUB_IR = {
+    ir_version: 1,
+    name: "notes",
+    ops: [{ op: "createTable", name: "notes", columns: [{ name: "title", type: "text" }] }],
+  };
+
+  async function withStub(
+    extraEnv: Record<string, string>,
+    fn: (ctx: {
+      root: string;
+      cliPath: string;
+      argsLog: string;
+    }) => Promise<void>
+  ): Promise<void> {
+    const fx = await makeFixture({
+      [`migrations/${STUB_STEM}.ts`]: "export function up() {}\n",
+      "stub-cli.js": STUB_BODY,
+    });
+    const cliPath = join(fx.root, "stub-cli.js");
+    await fs.chmod(cliPath, 0o755);
+    const argsLog = join(fx.root, "args.json");
+    const saved: Record<string, string | undefined> = {};
+    const env = { ZSTUB_IR: JSON.stringify(STUB_IR), ARGS_LOG: argsLog, ...extraEnv };
+    for (const [k, v] of Object.entries(env)) {
+      saved[k] = process.env[k];
+      process.env[k] = v;
+    }
+    try {
+      await fn({ root: fx.root, cliPath, argsLog });
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      await fx.cleanup();
+    }
+  }
+
+  test("records via the CLI when no committed .ir.json exists (LOCAL `record` fork)", async () => {
+    await withStub({}, async ({ root, cliPath, argsLog }) => {
+      const entries = await discoverMigrations({ root, cliPath });
+      assert.equal(entries.length, 1, "the recorded artifact is discovered + bundled");
+      const onDisk = await fs.readFile(
+        join(root, "migrations", `${STUB_STEM}.ir.json`)
+      );
+      assert.equal(entries[0].hash, sha256Hex(onDisk));
+      // LOCAL fork: `record <file.ts> --owner-app …` (no --recorder-url).
+      const args = JSON.parse(await fs.readFile(argsLog, "utf8")) as string[];
+      assert.equal(args[0], "record", "LOCAL fork shells `record`");
+      assert.ok(args.includes("--owner-app"));
+      assert.ok(!args.includes("--recorder-url"), "LOCAL fork has no --recorder-url");
+    });
+  });
+
+  test("hosted fork: a recorderUrl shells `build --recorder-url`", async () => {
+    await withStub({}, async ({ root, cliPath, argsLog }) => {
+      await discoverMigrations({
+        root,
+        cliPath,
+        recorderUrl: "https://recorder.example/v1",
+      });
+      const args = JSON.parse(await fs.readFile(argsLog, "utf8")) as string[];
+      assert.equal(args[0], "build", "hosted fork shells `build`");
+      const ri = args.indexOf("--recorder-url");
+      assert.ok(ri >= 0, "hosted fork passes --recorder-url");
+      assert.equal(args[ri + 1], "https://recorder.example/v1");
+      assert.ok(args.includes("--dir"), "hosted fork passes --dir");
+    });
+  });
+
+  test("a non-zero CLI exit surfaces as a thrown Error with the stderr", async () => {
+    await withStub({ ZSTUB_FAIL: "1" }, async ({ root, cliPath }) => {
+      await assert.rejects(
+        () => discoverMigrations({ root, cliPath }),
+        (err: Error) => {
+          assert.match(err.message, /exited 3/);
+          assert.match(err.message, /synthetic record failure/);
+          return true;
+        }
+      );
+    });
+  });
+
+  test("a missing CLI binary surfaces as a thrown Error (res.error)", async () => {
+    await withStub({}, async ({ root }) => {
+      await assert.rejects(
+        () =>
+          discoverMigrations({
+            root,
+            cliPath: join(root, "does-not-exist-cli"),
+          }),
+        /failed to invoke the recorder CLI/
+      );
+    });
+  });
+});

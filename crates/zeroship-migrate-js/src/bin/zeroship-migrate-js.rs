@@ -98,10 +98,17 @@ enum Command {
     },
 }
 
-/// An HTTP recorder thin client over the §8.9.2 contract — the hosted record path
-/// for `build --recorder-url`. Uses the bespoke compio-native HTTP path; a
-/// transport failure maps to a RETRYABLE recorder-unreachable error so the build
-/// falls back to local.
+/// The hosted record path for `build --recorder-url` (the §8.9.2 thin-client seam).
+///
+/// **The dev CLI does NOT embed a hosted-recorder HTTP client.** Hosted, canonical
+/// kernel-sandboxed recording happens on the platform via the CONTROL PLANE at
+/// deploy (the §5.1 provenance re-record), NOT from this dev tool. So `record`
+/// here unconditionally returns a RETRYABLE `RECORDER_UNREACHABLE`, and `build
+/// --recorder-url` therefore ALWAYS falls back to the LOCAL recorder
+/// (`RecordPath::HostedFellBackToLocal`). `cmd_build` makes that downgrade LOUD
+/// (a warning per file) rather than silently substituting local for the requested
+/// hosted path. Security is preserved either way — the deploy-time provenance gate
+/// re-records under the platform sandbox.
 struct HttpRecorderClient {
     #[allow(dead_code)]
     url: String,
@@ -266,6 +273,24 @@ fn cmd_build(
     };
     match build_migrations(dir, owner_app, &via) {
         Ok(outcome) => {
+            // LOW #1 honesty: a `--recorder-url` was requested but the dev CLI has no
+            // embedded hosted client, so the build fell back to LOCAL recording. Make
+            // that downgrade LOUD (per file) rather than silently substituting local
+            // for the requested hosted path.
+            if recorder_url.is_some() {
+                for m in &outcome.migrations {
+                    if m.record_path
+                        == zeroship_migrate_js::RecordPath::HostedFellBackToLocal
+                    {
+                        eprintln!(
+                            "build: WARNING: --recorder-url was set but the dev CLI does not \
+                             embed a hosted-recorder client; {} was recorded LOCALLY (fell back). \
+                             Hosted, canonical recording happens via the control plane at deploy.",
+                            m.stem
+                        );
+                    }
+                }
+            }
             for m in &outcome.migrations {
                 for w in &m.warnings {
                     eprintln!(
