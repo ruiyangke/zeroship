@@ -24,6 +24,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::recorder_service::{RecorderError, RecorderService};
 
+/// Max accepted `ts_source` size at the HTTP boundary (PR4a code-critic MED #5).
+/// A migration `.ts` is human/AI-authored source; even a generated 4000-op migration
+/// is well under a MiB. We cap at 8 MiB — generous for any legitimate migration, far
+/// below V8's ~512MB max-string limit, and a cheap DoS-amplification guard that
+/// rejects a hostile blob BEFORE spawning a sandbox child.
+pub const MAX_TS_SOURCE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Max accepted client-controlled migration `name` (PR4a code-critic MED #5). A
+/// filename-derived label is short; cap it so an oversized name cannot reach the
+/// child's `v8::String::new` (which returns None / would otherwise be a panic vector).
+pub const MAX_NAME_BYTES: usize = 4 * 1024;
+
 /// The `POST /v1/recorder/record` request body (design §8.9.2).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RecordHttpRequest {
@@ -32,8 +44,10 @@ pub struct RecordHttpRequest {
     /// The claimed owner app — cross-checked against the token server-side (§8.6).
     pub app_id: String,
     /// The optional type-only schema-types blob (read-only context for the recorder).
-    /// Carried for parity with the §8.9.2 contract; the in-memory recorder needs no
-    /// fs read for it (it is passed inline), so it is currently advisory.
+    /// Delivered IN-MEMORY to the sandbox child and exposed to the recorder scope as a
+    /// read-only `globalThis.__zsSchemaTypes` (no fs read needed). The wire DTO and the
+    /// actual recorder input are in lock-step — no contract drift (PR4a code-critic
+    /// LOW #7).
     #[serde(default)]
     pub schema_types_blob: Option<String>,
     /// The filename-derived migration name (optional; the module's own `name` wins).
@@ -120,8 +134,45 @@ pub fn handle_record(
         }
     };
 
+    // ---- Input bounds (PR4a code-critic MED #5) ----
+    // Reject hostile oversized client-controlled inputs BEFORE spawning a sandbox
+    // child / reaching the child's `v8::String::new` (a >512MB string is a panic
+    // vector; an unbounded blob is DoS amplification). 413 Payload Too Large.
+    if req.ts_source.len() > MAX_TS_SOURCE_BYTES {
+        return RecordHttpOutcome::Err(StructuredError {
+            code: "RECORDER_REQUEST_TOO_LARGE".into(),
+            message: format!(
+                "ts_source is {} bytes; the recorder accepts at most {} bytes",
+                req.ts_source.len(),
+                MAX_TS_SOURCE_BYTES
+            ),
+            http_status: 413,
+            retryable: false,
+        });
+    }
+    if let Some(n) = req.name.as_deref() {
+        if n.len() > MAX_NAME_BYTES {
+            return RecordHttpOutcome::Err(StructuredError {
+                code: "RECORDER_REQUEST_TOO_LARGE".into(),
+                message: format!(
+                    "name is {} bytes; the recorder accepts at most {} bytes",
+                    n.len(),
+                    MAX_NAME_BYTES
+                ),
+                http_status: 413,
+                retryable: false,
+            });
+        }
+    }
+
     let name = req.name.as_deref().unwrap_or("migration");
-    match svc.record(token, &req.app_id, &req.ts_source, name) {
+    match svc.record(
+        token,
+        &req.app_id,
+        &req.ts_source,
+        name,
+        req.schema_types_blob.as_deref(),
+    ) {
         Ok(result) => {
             // Fold the single authoritative typed-value checksum over the recorded IR
             // (§2.4 point 2: the JS side emits ops; Rust folds the one checksum).

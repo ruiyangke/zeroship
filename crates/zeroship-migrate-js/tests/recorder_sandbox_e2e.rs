@@ -28,6 +28,7 @@
 //! seccomp + landlock + netns are present, so every assertion runs LIVE.
 
 #![cfg(target_os = "linux")]
+#![allow(unsafe_code)] // the netns-alone degraded-floor probe needs Command::pre_exec
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -95,6 +96,7 @@ fn child_request(src: &str, hosted: bool, netns: bool, rlimit: bool) -> String {
         rlimit_engaged: rlimit,
         heap_limit_mb: 256,
         allow_read_paths: vec![],
+        schema_types_blob: None,
     };
     serde_json::to_string(&req).unwrap()
 }
@@ -145,6 +147,7 @@ fn happy_path_records_under_full_sandbox() {
         posture: SandboxPosture::Hosted,
         budget: ResourceBudget::default(),
         allow_read_paths: vec![],
+        schema_types_blob: None,
     };
     let res = spawn_sandboxed_record(&req).expect("happy recording under sandbox");
     assert!(
@@ -269,6 +272,7 @@ fn rlimit_cpu_or_wall_bounds_an_infinite_loop() {
             wall_ms: 4_000,
         },
         allow_read_paths: vec![],
+        schema_types_blob: None,
     };
     let err = spawn_sandboxed_record(&req).expect_err("infinite loop must be bounded");
     match err {
@@ -309,6 +313,7 @@ fn memory_budget_bounds_an_allocation_bomb() {
             wall_ms: 5_000,
         },
         allow_read_paths: vec![],
+        schema_types_blob: None,
     };
     let start = std::time::Instant::now();
     let err = spawn_sandboxed_record(&req).expect_err("alloc bomb must be bounded");
@@ -348,6 +353,7 @@ fn wall_watchdog_bounds_a_cpu_idle_hang() {
             wall_ms: 1_000, // tight wall — the watchdog must fire first
         },
         allow_read_paths: vec![],
+        schema_types_blob: None,
     };
     let start = std::time::Instant::now();
     let err = spawn_sandboxed_record(&req).expect_err("wall hang must be bounded");
@@ -478,6 +484,7 @@ fn concurrent_records_get_separate_sandbox_children() {
                 posture: SandboxPosture::Hosted,
                 budget: ResourceBudget::default(),
                 allow_read_paths: vec![],
+                schema_types_blob: None,
             };
             spawn_sandboxed_record(&req).expect("record")
         })
@@ -496,6 +503,158 @@ fn concurrent_records_get_separate_sandbox_children() {
     assert!(
         !rb.ir_json.contains("alpha_tbl"),
         "tenant bleed: beta's child saw alpha's ops"
+    );
+}
+
+// ===========================================================================
+// 5. owner_app is server-stamped in Rust — untrusted up() CANNOT forge it.
+//    (PR4a code-critic HIGH #1.)
+// ===========================================================================
+
+#[test]
+fn untrusted_up_cannot_forge_owner_app() {
+    // The attacker's migration tries to overwrite the server-injected owner via the
+    // shared global the recorder used to read back. The emitted IR MUST still carry
+    // the server's owner_app (app_attacker), NOT the forged app_VICTIM — because the
+    // owner is stamped in Rust on the parsed IR after eval, not read from a global the
+    // untrusted scope can reach.
+    let forge_src = r#"
+        import { createTable } from "@zeroship/migrate";
+        export function up() {
+          // Attempt to forge the tenant-identifying owner via every reachable name.
+          try { globalThis.__zsOwnerApp = "app_VICTIM"; } catch (_) {}
+          try { __zsOwnerApp = "app_VICTIM"; } catch (_) {}
+          createTable("t", [{ name: "id", type: "int", nullable: false }]);
+        }
+    "#;
+    let req = RecordRequest {
+        ts_source: forge_src.to_string(),
+        owner_app: "app_attacker".into(),
+        name: "forge".into(),
+        posture: SandboxPosture::Hosted,
+        budget: ResourceBudget::default(),
+        allow_read_paths: vec![],
+        schema_types_blob: None,
+    };
+    let res = spawn_sandboxed_record(&req).expect("forge migration still records");
+    assert!(
+        res.ir_json.contains("app_attacker"),
+        "IR must carry the SERVER owner_app (app_attacker), got: {}",
+        res.ir_json
+    );
+    assert!(
+        !res.ir_json.contains("app_VICTIM"),
+        "untrusted up() forged owner_app into the IR: {}",
+        res.ir_json
+    );
+    // The authoritative owner_app field, parsed structurally, must equal the server's.
+    let env: serde_json::Value = serde_json::from_str(&res.ir_json).expect("ir envelope json");
+    let owner = env
+        .get("ir")
+        .and_then(|ir| ir.get("owner_app"))
+        .and_then(|v| v.as_str());
+    assert_eq!(
+        owner,
+        Some("app_attacker"),
+        "the structural owner_app must be the server-stamped value, got {owner:?}"
+    );
+}
+
+// ===========================================================================
+// 6. A large migration whose IR exceeds the OS pipe buffer must record (no
+//    stdout deadlock). (PR4a code-critic HIGH #2.)
+// ===========================================================================
+
+#[test]
+fn large_migration_ir_exceeding_pipe_buffer_records() {
+    // Emit an IR envelope well past the ~64KB OS pipe buffer (and past 128KB). If the
+    // parent waited-then-read, the child would block on write, never exit, and be
+    // wall-killed as a SPURIOUS BUILD_RECORDER_BUDGET_EXCEEDED. With concurrent
+    // draining the legitimate large migration records cleanly.
+    let big_src = r#"
+        import { createTable } from "@zeroship/migrate";
+        export function up() {
+          for (let i = 0; i < 4000; i++) {
+            createTable("tbl_" + i, [
+              { name: "id", type: "int", nullable: false },
+              { name: "label", type: "text", nullable: true },
+            ]);
+          }
+        }
+    "#;
+    let req = RecordRequest {
+        ts_source: big_src.to_string(),
+        owner_app: "app_big".into(),
+        name: "big".into(),
+        posture: SandboxPosture::Hosted,
+        budget: ResourceBudget::default(),
+        allow_read_paths: vec![],
+        schema_types_blob: None,
+    };
+    let res = spawn_sandboxed_record(&req)
+        .expect("large migration must record (not spurious BudgetExceeded)");
+    assert!(
+        res.ir_json.len() > 128 * 1024,
+        "this test must exercise an IR larger than 128KB (got {} bytes) — \
+         otherwise it does not prove the pipe-drain fix",
+        res.ir_json.len()
+    );
+    assert!(res.ir_json.contains("tbl_0") && res.ir_json.contains("tbl_3999"));
+}
+
+// ===========================================================================
+// 7. netns ALONE contains the network on the degraded floor (seccomp off,
+//    netns the sole network boundary). (PR4a code-critic MED #4.)
+// ===========================================================================
+
+#[test]
+fn netns_alone_contains_network_with_seccomp_disabled() {
+    if !netns_available() {
+        panic!(
+            "CAPABILITY PRESENT BUT TEST WOULD SKIP: unprivileged netns is available — fix the gate"
+        );
+    }
+    // Drive the child binary directly with seccomp DISABLED + the pre_exec netns
+    // engaged, and a connect probe that — because seccomp is off so socket()/connect()
+    // are NOT SIGSYS-killed — attempts a REAL outbound connect and exits with sentinel
+    // 42 iff it could not reach the network (ENETUNREACH/EHOSTUNREACH/ETIMEDOUT). This
+    // proves netns ALONE is a load-bearing network boundary, not merely a /proc config.
+    let bin = recorder_child_path();
+    assert!(bin.exists(), "recorder child missing at {}", bin.display());
+
+    use std::os::unix::process::CommandExt;
+    let mut cmd = Command::new(&bin);
+    cmd.env("ZS_RECORDER_DISABLE_SECCOMP", "1")
+        .env("ZS_RECORDER_PROBE", "net_connect")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: pre_exec closure issues only unshare (async-signal-safe).
+    unsafe {
+        cmd.pre_exec(|| {
+            // netns only — no rlimits needed for this probe.
+            zeroship_migrate_js::sandbox::pre_exec_netns()
+        });
+    }
+    let mut child = cmd.spawn().expect("spawn child for netns probe");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(child_request(HAPPY_MIGRATION, false, true, false).as_bytes())
+        .ok();
+    let status = child.wait().expect("wait netns probe child");
+    // Not signal-killed (seccomp is OFF, so no SIGSYS); contained => sentinel 42.
+    assert_eq!(
+        term_signal(&status),
+        None,
+        "with seccomp disabled the connect must NOT be signal-killed; got {status:?}"
+    );
+    assert_eq!(
+        status.code(),
+        Some(42),
+        "netns ALONE must contain the outbound connect (ENETUNREACH) -> exit 42; \
+         got {status:?} — code 0 means the connect REACHED the network (netns did not contain)"
     );
 }
 

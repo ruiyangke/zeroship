@@ -159,15 +159,16 @@ pub fn record_migration_to_ir_with_warnings(
         zeroship_runtime::init::setup_globals(scope);
         zeroship_runtime::init::install_text_encoding_streams(scope);
 
-        // Stamp the owner-app hint + the filename-derived name on the globals the
-        // adapter reads.
+        // Expose ONLY the filename-derived name to the adapter. owner_app is
+        // DELIBERATELY NOT a global: it is a tenant-identifying field folded into the
+        // authoritative Checksum::of_ir, so untrusted up() must have no JS-reachable
+        // handle to it — the engine stamps owner_app in Rust below (PR4a code-critic
+        // HIGH #1; symmetric with the sandboxed recorder child).
         {
             let global = scope.get_current_context().global(scope);
-            for (key, val) in [("__zsOwnerApp", owner_app), ("__zsMigrationName", name)] {
-                let k = v8::String::new(scope, key).unwrap();
-                let v = v8::String::new(scope, val).unwrap();
-                global.set(scope, k.into(), v.into());
-            }
+            let k = v8::String::new(scope, "__zsMigrationName").ok_or(RecordError::NoIr)?;
+            let v = v8::String::new(scope, name).ok_or(RecordError::NoIr)?;
+            global.set(scope, k.into(), v.into());
         }
 
         zeroship_runtime::modules::load_modules(scope, &modules).map_err(RecordError::V8)?;
@@ -191,7 +192,21 @@ pub fn record_migration_to_ir_with_warnings(
             envelope.error.unwrap_or_else(|| "unknown".into()),
         ));
     }
-    let ir_value = envelope.ir.ok_or(RecordError::NoIr)?;
+    let mut ir_value = envelope.ir.ok_or(RecordError::NoIr)?;
+    // Rust-stamp the AUTHORITATIVE owner_app onto the recorded IR (HIGH #1): the JS
+    // recorder emits ONLY ops, never the tenant-identifying owner. We set it here from
+    // the trusted, server-supplied owner_app — overwriting any value untrusted code
+    // could have produced. An empty owner leaves the field unset (prior shape).
+    if let Some(obj) = ir_value.as_object_mut() {
+        if owner_app.is_empty() {
+            obj.remove("owner_app");
+        } else {
+            obj.insert(
+                "owner_app".to_string(),
+                serde_json::Value::String(owner_app.to_string()),
+            );
+        }
+    }
     // Re-serialize the recorded envelope to canonical JSON bytes, then deserialize
     // through the REAL `MigrationIr` — so the recorded ops pass the SAME frozen
     // wire contract (camelCase op fields, closed Op/Expr AST, the `< 2^53` numeric

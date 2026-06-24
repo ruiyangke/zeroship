@@ -67,13 +67,16 @@ try {
   const mod = userMod;
   const { up } = resolveMigration(mod);
   const ops = recordPhase(up);
-  const ownerApp = (globalThis.__zsOwnerApp && String(globalThis.__zsOwnerApp)) || "";
+  // SECURITY (PR4a code-critic HIGH #1): the recorder does NOT read owner_app from
+  // any JS-reachable global. `owner_app` is a tenant-identifying field folded into
+  // the authoritative Checksum::of_ir provenance — untrusted up() must not be able to
+  // influence it. The Rust child STAMPS owner_app onto this envelope after eval, from
+  // the server-injected, ownership-cross-checked app_id. The JS half only emits ops.
   const envelope = {
     ir_version: 1,
     name: resolveName(mod),
     ops,
   };
-  if (ownerApp) envelope.owner_app = ownerApp;
   globalThis.__zsOpIR = JSON.stringify({ ok: true, ir: envelope });
 } catch (e) {
   globalThis.__zsOpIR = JSON.stringify({

@@ -187,14 +187,36 @@ fn run(req: ChildRequest) -> Result<ChildResponse, ChildResponse> {
         zeroship_runtime::init::install_text_encoding_streams(scope);
 
         {
+            // Only the filename-derived NAME is exposed to JS (a benign fallback for
+            // `resolveName`). owner_app is DELIBERATELY NOT exposed: it is a
+            // tenant-identifying field folded into the authoritative Checksum::of_ir,
+            // and the recorder stamps it in Rust below — untrusted up() must have no
+            // JS-reachable handle to influence it (PR4a code-critic HIGH #1).
+            //
+            // `v8::String::new` returns None above V8's max string length (~512MB),
+            // so a hostile oversized name must NOT `.unwrap()`-panic the child (PR4a
+            // code-critic MED #5). The HTTP boundary caps name length; this is the
+            // last-ditch in-child guard for the direct-spawn path.
             let global = scope.get_current_context().global(scope);
-            for (key, val) in [
-                ("__zsOwnerApp", req.owner_app.as_str()),
-                ("__zsMigrationName", req.name.as_str()),
-            ] {
-                let k = v8::String::new(scope, key).unwrap();
-                let v = v8::String::new(scope, val).unwrap();
-                global.set(scope, k.into(), v.into());
+            let k = v8::String::new(scope, "__zsMigrationName")
+                .ok_or_else(|| "recorder child: __zsMigrationName key alloc failed".to_string())?;
+            let v = v8::String::new(scope, req.name.as_str()).ok_or_else(|| {
+                "recorder child: migration name too large for a V8 string".to_string()
+            })?;
+            global.set(scope, k.into(), v.into());
+
+            // The §8.9.2 type-only schema-types blob, delivered in-memory as a
+            // read-only recorder context global so the wire DTO's promised input is
+            // actually available to the recorder (PR4a code-critic LOW #7). Bounded by
+            // the same checked alloc (no panic on a hostile-sized blob).
+            if let Some(blob) = req.schema_types_blob.as_deref() {
+                let bk = v8::String::new(scope, "__zsSchemaTypes").ok_or_else(|| {
+                    "recorder child: __zsSchemaTypes key alloc failed".to_string()
+                })?;
+                let bv = v8::String::new(scope, blob).ok_or_else(|| {
+                    "recorder child: schema-types blob too large for a V8 string".to_string()
+                })?;
+                global.set(scope, bk.into(), bv.into());
             }
         }
 
@@ -202,7 +224,8 @@ fn run(req: ChildRequest) -> Result<ChildResponse, ChildResponse> {
         scope.perform_microtask_checkpoint();
 
         let global = scope.get_current_context().global(scope);
-        let k = v8::String::new(scope, "__zsOpIR").unwrap();
+        let k = v8::String::new(scope, "__zsOpIR")
+            .ok_or_else(|| "recorder child: __zsOpIR key alloc failed".to_string())?;
         let v = global
             .get(scope, k.into())
             .filter(|v| v.is_string())
@@ -210,12 +233,69 @@ fn run(req: ChildRequest) -> Result<ChildResponse, ChildResponse> {
         Ok(v.to_rust_string_lossy(scope))
     });
 
-    let ir_json = match ir_json {
+    let raw_envelope = match ir_json {
+        Ok(s) => s,
+        Err(e) => return Err(ChildResponse::eval_error(e, report)),
+    };
+
+    // ---- Inspect the inner envelope + Rust-stamp owner_app ----
+    // op_recorder.js emits `{ ok, ir?, error? }`. An inner `ok:false` (a throwing /
+    // out-of-recorder up()) MUST surface as a FAILURE at the service boundary carrying
+    // the real error — not an outer ok:true wrapping an inner failure (PR4a code-critic
+    // MED #3). On inner success we stamp the AUTHORITATIVE owner_app from the
+    // server-injected, ownership-cross-checked `req.owner_app` (HIGH #1) — overwriting
+    // whatever the untrusted code may have produced.
+    let ir_json = match finalize_envelope(&raw_envelope, &req.owner_app) {
         Ok(s) => s,
         Err(e) => return Err(ChildResponse::eval_error(e, report)),
     };
 
     Ok(ChildResponse::ok(ir_json, report))
+}
+
+/// Inspect the `op_recorder.js` `{ ok, ir?, error? }` envelope and produce the final
+/// `{ ok:true, ir }` string the parent reads back — or an `Err(message)` carrying the
+/// REAL recorder/throw error on an inner failure.
+///
+/// SECURITY: the authoritative `owner_app` is STAMPED here in Rust from the
+/// server-injected, ownership-cross-checked `owner_app` — never read from a
+/// JS-reachable global the untrusted `up()` body shares (PR4a code-critic HIGH #1).
+fn finalize_envelope(raw: &str, owner_app: &str) -> Result<String, String> {
+    let mut env: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("recorder produced invalid envelope: {e}"))?;
+
+    let ok = env.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !ok {
+        // Surface the inner error verbatim so the service boundary reports the REAL
+        // authoring failure (e.g. OP_OUTSIDE_RECORDER / the throw text), not a
+        // downstream "did not re-parse for checksum" misdirection (MED #3).
+        let msg = env
+            .get("error")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "recorder reported failure with no error message".to_string());
+        return Err(msg);
+    }
+
+    let ir = env
+        .get_mut("ir")
+        .ok_or_else(|| "recorder envelope ok:true but missing `ir`".to_string())?;
+    let ir_obj = ir
+        .as_object_mut()
+        .ok_or_else(|| "recorder envelope `ir` is not an object".to_string())?;
+    // Stamp (or overwrite) the authoritative server owner. An empty owner (local
+    // single-tenant with no app context) leaves the field unset, matching the prior
+    // "omit owner_app when empty" shape.
+    if owner_app.is_empty() {
+        ir_obj.remove("owner_app");
+    } else {
+        ir_obj.insert(
+            "owner_app".to_string(),
+            serde_json::Value::String(owner_app.to_string()),
+        );
+    }
+
+    serde_json::to_string(&env).map_err(|e| format!("re-serialize stamped envelope: {e}"))
 }
 
 /// DEBUG seam (paired with `ZS_RECORDER_SECCOMP_TRAP`): install a SIGSYS handler
@@ -316,6 +396,49 @@ fn run_syscall_probe(which: &str) {
                     params.as_mut_ptr() as *mut libc::c_void,
                 )
             };
+        }
+        // --- netns: a REAL outbound connect with seccomp OFF — proves netns ALONE
+        //     contains the network (the degraded-floor posture where netns is the SOLE
+        //     network boundary). Only meaningful when seccomp is DISABLED (else
+        //     socket()/connect() are SIGSYS-killed first). The interface-less netns has
+        //     no route, so connect() fails with ENETUNREACH/EHOSTUNREACH/ENETDOWN; we
+        //     exit 42 iff it was contained, 0 iff it REACHED the network (PR4a
+        //     code-critic MED #4). 198.51.100.1 is TEST-NET-2 (RFC 5737) — never routed.
+        "net_connect" => {
+            let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+            if fd < 0 {
+                // socket() itself failed (e.g. seccomp on after all) — not a clean netns
+                // proof; exit non-42 so the test fails loudly rather than false-passing.
+                std::process::exit(8);
+            }
+            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            addr.sin_family = libc::AF_INET as libc::sa_family_t;
+            addr.sin_port = 80u16.to_be();
+            // 198.51.100.1 (TEST-NET-2) in network byte order.
+            addr.sin_addr.s_addr = u32::from_be_bytes([198, 51, 100, 1]).to_be();
+            let rc = unsafe {
+                libc::connect(
+                    fd,
+                    &addr as *const _ as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in>() as u32,
+                )
+            };
+            let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            unsafe { libc::close(fd) };
+            if rc < 0 {
+                // Contained by the interface-less netns: no route to the host.
+                match err {
+                    libc::ENETUNREACH | libc::EHOSTUNREACH | libc::ENETDOWN | libc::EADDRNOTAVAIL => {
+                        std::process::exit(42)
+                    }
+                    // Any OTHER failure (e.g. ECONNREFUSED/ETIMEDOUT) means the packet
+                    // could LEAVE — netns did not contain. Fail loudly.
+                    _ => std::process::exit(9),
+                }
+            } else {
+                // connect succeeded -> the network was reachable -> netns did NOT contain.
+                std::process::exit(0);
+            }
         }
         // --- landlock: open a file for WRITE outside the (empty) allow-list ---
         // Writes are denied by landlock (EACCES), NOT seccomp (openat is allowed for

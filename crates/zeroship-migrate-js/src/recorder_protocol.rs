@@ -38,6 +38,12 @@ pub struct ChildRequest {
     /// migration dir + the schema-types blob path, if any). Empty = deny all fs
     /// reads (landlock) — fine because the source is piped in-memory.
     pub allow_read_paths: Vec<String>,
+    /// The optional type-only schema-types blob (§8.9.2 recorder context). Travels
+    /// IN-MEMORY over this pipe (never via an fs read) and is exposed to the recorder
+    /// scope as a read-only `globalThis.__zsSchemaTypes`, so the wire DTO's promised
+    /// input is actually delivered (no contract drift — PR4a code-critic LOW #7).
+    #[serde(default)]
+    pub schema_types_blob: Option<String>,
 }
 
 /// The result the child writes to its stdout.

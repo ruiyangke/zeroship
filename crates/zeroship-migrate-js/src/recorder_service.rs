@@ -112,6 +112,8 @@ pub struct RecordRequest {
     pub budget: ResourceBudget,
     /// The landlock read-only allow-list (migration dir + schema-types blob path).
     pub allow_read_paths: Vec<PathBuf>,
+    /// The optional §8.9.2 type-only schema-types blob (in-memory recorder context).
+    pub schema_types_blob: Option<String>,
 }
 
 /// Locate the recorder-child binary next to the current executable (the standard
@@ -185,6 +187,22 @@ pub fn spawn_sandboxed_record(req: &RecordRequest) -> Result<RecordResult, Recor
         .spawn()
         .map_err(|e| RecorderError::Spawn(format!("spawn recorder child: {e}")))?;
 
+    // ---- Drain stdout CONCURRENTLY (PR4a code-critic HIGH #2) ----
+    // The child's IR envelope can exceed the ~64KB OS pipe buffer (a 4000-op migration
+    // emits >500KB). If the parent waited-then-read, the child would block on write,
+    // never exit, and be SIGKILLed by the wall watchdog -> a SPURIOUS
+    // BUILD_RECORDER_BUDGET_EXCEEDED for a legitimate large migration. So we read
+    // stdout to EOF on a dedicated thread in parallel with the try_wait/watchdog loop,
+    // and join it after the child exits/is killed.
+    let stdout_handle = child.stdout.take().map(|mut out| {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut s = String::new();
+            let _ = out.read_to_string(&mut s);
+            s
+        })
+    });
+
     // Pipe the request envelope in-memory.
     let child_req = ChildRequest {
         ts_source: req.ts_source.clone(),
@@ -201,6 +219,7 @@ pub fn spawn_sandboxed_record(req: &RecordRequest) -> Result<RecordResult, Recor
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect(),
+        schema_types_blob: req.schema_types_blob.clone(),
     };
     let req_json = serde_json::to_string(&child_req)
         .map_err(|e| RecorderError::Spawn(format!("serialize child request: {e}")))?;
@@ -235,15 +254,12 @@ pub fn spawn_sandboxed_record(req: &RecordRequest) -> Result<RecordResult, Recor
         }
     };
 
-    // Read whatever the child wrote to stdout BEFORE classifying — a successful
-    // recording writes its envelope then exits 0.
-    let stdout = {
-        use std::io::Read;
-        let mut s = String::new();
-        if let Some(mut out) = child.stdout.take() {
-            let _ = out.read_to_string(&mut s);
-        }
-        s
+    // Join the concurrent stdout drain — it has read everything the child wrote
+    // (to EOF, since the child has now exited / been killed and closed its stdout).
+    // A successful recording wrote its envelope before exiting 0.
+    let stdout = match stdout_handle {
+        Some(h) => h.join().unwrap_or_default(),
+        None => String::new(),
     };
 
     // ---- Classify the termination cause (faithful kernel-level signal) ----
@@ -253,7 +269,7 @@ pub fn spawn_sandboxed_record(req: &RecordRequest) -> Result<RecordResult, Recor
         });
     }
     if let Some(sig) = status.signal() {
-        return Err(classify_signal(sig));
+        return Err(classify_signal(sig, stdout.trim().is_empty()));
     }
 
     // Exited normally (code 0/non-0). Parse the response envelope.
@@ -291,17 +307,24 @@ pub fn spawn_sandboxed_record(req: &RecordRequest) -> Result<RecordResult, Recor
 ///
 /// - `SIGSYS` (31) ⇒ the seccomp default-deny filter killed it for a denied syscall
 ///   (subprocess spawn / network socket). This is the FAITHFUL kernel-level signal.
-/// - `SIGXCPU` (24) ⇒ `RLIMIT_CPU` tripped (infinite loop) → budget.
-/// - `SIGKILL` (9) ⇒ the kernel OOM-killer or RLIMIT_AS-driven abort, or a
-///   late watchdog; treated as budget (memory/unknown).
-/// - `SIGSEGV`/`SIGABRT` ⇒ V8 crash (e.g. RLIMIT_AS made an allocation fail
-///   hard) → budget (memory).
-fn classify_signal(sig: i32) -> RecorderError {
+/// - `SIGXCPU` (24) ⇒ `RLIMIT_CPU` tripped (infinite loop) → budget (cpu).
+/// - `SIGKILL` (9) ⇒ a BARE kill not attributable to OUR wall watchdog (that path is
+///   handled before this via `wall_killed`). It could be the kernel OOM-killer
+///   reacting to this child's own allocation, OR an EXTERNAL event (operator kill,
+///   an unrelated cgroup OOM, node shutdown). We do NOT assert it was the migration's
+///   MEMORY budget — that would mis-emit a 422 authoring-class signal for an
+///   environment event (PR4a code-critic MED #6). We classify it as the ambiguous
+///   `unknown-kill` the doc comment anticipates.
+/// - `SIGSEGV`/`SIGABRT`/`SIGBUS` ⇒ a V8 crash (e.g. RLIMIT_AS made an allocation
+///   fail hard) → budget (memory): this IS attributable to the child's own execution.
+fn classify_signal(sig: i32, _stdout_empty: bool) -> RecorderError {
     match sig {
         libc::SIGSYS => RecorderError::KilledBySeccomp,
         libc::SIGXCPU => RecorderError::BudgetExceeded { which: "cpu".into() },
+        // Bare SIGKILL: ambiguous origin. Surface as `unknown-kill` rather than
+        // asserting the memory budget tripped.
         libc::SIGKILL => RecorderError::BudgetExceeded {
-            which: "memory".into(),
+            which: "unknown-kill".into(),
         },
         libc::SIGSEGV | libc::SIGABRT | libc::SIGBUS => RecorderError::BudgetExceeded {
             which: "memory".into(),
@@ -425,6 +448,7 @@ impl RecorderService {
         app_id: &str,
         ts_source: &str,
         name: &str,
+        schema_types_blob: Option<&str>,
     ) -> Result<RecordResult, RecorderError> {
         // §8.6 ownership cross-check — fail-closed.
         self.authorizer
@@ -440,6 +464,7 @@ impl RecorderService {
             posture: SandboxPosture::Hosted, // hosted multi-tenant: kernel sandbox mandatory
             budget: self.budget,
             allow_read_paths: vec![], // source is in-memory; deny all fs reads
+            schema_types_blob: schema_types_blob.map(|s| s.to_string()),
         };
         spawn_sandboxed_record(&req)
         // _guard drops here → slot released.
