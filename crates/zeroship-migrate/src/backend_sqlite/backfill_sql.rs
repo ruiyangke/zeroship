@@ -250,13 +250,30 @@ async fn read_progress(
     }
 }
 
+/// The shared window predicate the per-batch `UPDATE` and the high-water-mark
+/// `SELECT max(…)` BOTH page over — the SINGLE source of truth so the mutation and
+/// the resume cursor never page over divergent windows. With a prior cursor the
+/// window is `cursor_col > ?1 [AND (filter)]`; on the first batch it is
+/// `1=1 [AND (filter)]` (no cursor bind). `''`-escaped filter SQL comes from the
+/// shared assembler.
+fn window_predicate(cursor_q: &str, filter_sql: &str, have_cursor: bool) -> String {
+    if have_cursor {
+        let cursor_ph = sqlite_placeholder(1);
+        format!("{cursor_q} > {cursor_ph}{filter_sql}")
+    } else {
+        format!("1=1{filter_sql}")
+    }
+}
+
 /// Build the per-batch `UPDATE … RETURNING` statement. `have_cursor` selects the
 /// shape: with a prior cursor the window is `cursor_col > ?1 [AND (filter)]` and the
 /// limit binds at `?2`; on the first batch there is no cursor bind and the limit
 /// binds at `?1`. The authored `set` / `filter` are inline SQL strings from the
 /// shared assembler (`assemble_backfill_clauses`), `''`-escaped; the cursor + limit
 /// are NATIVE `?n` binds (`sqlite_placeholder`). RETURNING the cursor column yields
-/// the touched cursors so the loop derives the next window's lower bound.
+/// the touched cursors so the loop derives a count (and a non-empty signal); the
+/// next window's lower bound is computed by [`build_window_max_sql`] in SQL under the
+/// column collation (see its docs for why the Rust-side max is collation-unsafe).
 fn build_batch_sql(
     table_q: &str,
     cursor_q: &str,
@@ -265,28 +282,48 @@ fn build_batch_sql(
     have_cursor: bool,
 ) -> String {
     let filter_sql = filter.map(|f| format!(" AND ({f})")).unwrap_or_default();
-    if have_cursor {
-        let cursor_ph = sqlite_placeholder(1);
-        let limit_ph = sqlite_placeholder(2);
-        format!(
-            "UPDATE {table_q} SET {set_clause} \
-             WHERE rowid IN ( \
-                SELECT rowid FROM {table_q} \
-                 WHERE {cursor_q} > {cursor_ph}{filter_sql} \
-                 ORDER BY {cursor_q} ASC LIMIT {limit_ph} \
-             ) RETURNING {cursor_q}"
-        )
-    } else {
-        let limit_ph = sqlite_placeholder(1);
-        format!(
-            "UPDATE {table_q} SET {set_clause} \
-             WHERE rowid IN ( \
-                SELECT rowid FROM {table_q} \
-                 WHERE 1=1{filter_sql} \
-                 ORDER BY {cursor_q} ASC LIMIT {limit_ph} \
-             ) RETURNING {cursor_q}"
-        )
-    }
+    let limit_ph = if have_cursor { sqlite_placeholder(2) } else { sqlite_placeholder(1) };
+    let pred = window_predicate(cursor_q, &filter_sql, have_cursor);
+    format!(
+        "UPDATE {table_q} SET {set_clause} \
+         WHERE rowid IN ( \
+            SELECT rowid FROM {table_q} \
+             WHERE {pred} \
+             ORDER BY {cursor_q} ASC LIMIT {limit_ph} \
+         ) RETURNING {cursor_q}"
+    )
+}
+
+/// Build the high-water-mark statement: `SELECT max(<cursor>) FROM (<the SAME
+/// window the UPDATE pages>)`. This is the SQLite analog of the PG executor's
+/// `(SELECT max(_bf_key)::text FROM _bf_window)` (backfill.rs) — the resume cursor
+/// is computed in SQL under the cursor COLUMN's declared collation, exactly as the
+/// `ORDER BY <cursor> ASC` / `<cursor> > ?1` paging does. A Rust-side `cells.max()`
+/// would use BINARY (byte) ordering, which for a non-BINARY-collated TEXT cursor
+/// (e.g. `COLLATE NOCASE`) can differ from the column's collation-max of the touched
+/// window — so the next `cursor > last_cursor` (collation-compared) would re-include
+/// or skip rows, breaking the headline exactly-once guarantee. Because the cursor
+/// column is never mutated (Gate 3: `assert_cursor_not_mutated`) and runs on the
+/// single exclusive migration connection inside the batch's `BEGIN IMMEDIATE`, this
+/// SELECT and the UPDATE page the identical pre-mutation window. The cursor + limit
+/// bind through the SAME native `?n` slots as the UPDATE (`have_cursor` selects the
+/// `?1`/`?2` shape), so the two never fork a divergent bind protocol.
+fn build_window_max_sql(
+    table_q: &str,
+    cursor_q: &str,
+    filter: Option<&str>,
+    have_cursor: bool,
+) -> String {
+    let filter_sql = filter.map(|f| format!(" AND ({f})")).unwrap_or_default();
+    let limit_ph = if have_cursor { sqlite_placeholder(2) } else { sqlite_placeholder(1) };
+    let pred = window_predicate(cursor_q, &filter_sql, have_cursor);
+    format!(
+        "SELECT max({cursor_q}) FROM ( \
+            SELECT {cursor_q} FROM {table_q} \
+             WHERE {pred} \
+             ORDER BY {cursor_q} ASC LIMIT {limit_ph} \
+         )"
+    )
 }
 
 /// Run (or resume) a SQLite batched backfill, the SQLite analog of
@@ -567,6 +604,7 @@ async fn run_one_batch(
 
     let have_cursor = last_cursor.is_some();
     let batch_sql = build_batch_sql(table_q, cursor_q, set_clause, filter, have_cursor);
+    let window_max_sql = build_window_max_sql(table_q, cursor_q, filter, have_cursor);
 
     // The cursor bind takes the column's affinity so `cursor > ?` uses NATURAL
     // (numeric) order, not lexical — the SQLite analog of the PG `::cursor_type`
@@ -594,19 +632,32 @@ async fn run_one_batch(
     actor.exec("BEGIN IMMEDIATE").await.map_err(batch_infra_err)?;
 
     let result = async {
-        // 2. Run the batch UPDATE … RETURNING under the confined CreatorUp mode
+        // 2. Compute the high-water mark IN SQL, under the cursor column's collation,
+        //    over the SAME pre-mutation window the UPDATE pages — the SQLite analog
+        //    of the PG `max(_bf_key)::text`. This MUST run BEFORE the UPDATE: the
+        //    authored transform can mutate a filter column (e.g. `done = 1` against a
+        //    `done = 0` filter), so post-UPDATE the window predicate would no longer
+        //    match the just-touched rows. The cursor column itself is never mutated
+        //    (Gate 3), and the single exclusive connection inside this BEGIN IMMEDIATE
+        //    sees a stable snapshot, so the SELECT's window == the UPDATE's window.
+        //    Computing the max in SQL (not Rust `cells.max()`) makes the resume cursor
+        //    collation-consistent with the `ORDER BY <cursor>` / `<cursor> > ?1` paging
+        //    (a Rust BINARY max diverges for a non-BINARY-collated TEXT cursor).
+        actor.set_mode(Mode::CreatorUp).await?;
+        let max_rows = actor.query_params(&window_max_sql, &binds).await?;
+        let max_cursor =
+            max_rows.first().and_then(|r| r.first()).and_then(|c| c.clone());
+
+        // 3. Run the batch UPDATE … RETURNING under the confined CreatorUp mode
         //    (denied from `_mig`, PRAGMA, txn boundaries, vtables). The cursor +
         //    limit are positional `?n` binds; the authored set/filter are inline.
-        actor.set_mode(Mode::CreatorUp).await?;
+        //    RETURNING the cursor yields the touched-row count (the loop's non-empty /
+        //    tail signal); the resume cursor came from the SQL max above.
         let returned = actor.query_params(&batch_sql, &binds).await?;
         let n = returned.len() as u64;
-        // The new high-water mark = the NATURAL-order max of the touched cursors.
-        // Compute it in Rust over the returned cursor cells (typed by affinity), so
-        // a numeric cursor is not lexically mis-maxed.
-        let max_cursor = max_returned_cursor(&returned, cursor_numeric);
 
         if n > 0 {
-            // 3. Advance progress IN THE SAME TRANSACTION (both-or-neither),
+            // 4. Advance progress IN THE SAME TRANSACTION (both-or-neither),
             //    under EngineJournal.
             actor.set_mode(Mode::EngineJournal).await?;
             let mc_lit = match &max_cursor {
@@ -661,41 +712,6 @@ async fn run_one_batch(
                 ))),
             }
         }
-    }
-}
-
-/// The NATURAL-order max of the RETURNING'd cursor cells. For a numeric-affinity
-/// cursor, take the numeric max; for a textual cursor, the lexical max. NULLs are
-/// impossible (the cursor is NOT NULL).
-///
-/// The numeric branch parses each cell as `f64` (which subsumes integers AND the
-/// non-integral REAL keys / scientific notation `run_query_params` emits via
-/// `Real(f).to_string()`), so a touched cursor is NEVER silently dropped — the
-/// symmetric peer of the BIND side's text fallback for a non-i64 REAL cursor. A
-/// cell that is somehow non-numeric (should not occur for a numeric-affinity
-/// column) falls through to a lexical comparison rather than vanishing, so the
-/// high-water mark always reflects an actually-touched row: dropping it would write
-/// `last_cursor=NULL` and re-scan from the start, breaking exactly-once.
-fn max_returned_cursor(rows: &[Vec<Option<String>>], numeric: bool) -> Option<String> {
-    let cells = rows.iter().filter_map(|r| r.first().and_then(|c| c.clone()));
-    if numeric {
-        // Keyed by f64 when parseable (the natural numeric order), with a lexical
-        // tiebreak/fallback so a non-numeric cell is still considered (never dropped).
-        cells
-            .max_by(|a, b| {
-                match (a.parse::<f64>(), b.parse::<f64>()) {
-                    (Ok(fa), Ok(fb)) => {
-                        fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.cmp(b))
-                    }
-                    // A numeric cell always outranks a non-numeric one (keep the real
-                    // high-water mark); two non-numerics compare lexically.
-                    (Ok(_), Err(_)) => std::cmp::Ordering::Greater,
-                    (Err(_), Ok(_)) => std::cmp::Ordering::Less,
-                    (Err(_), Err(_)) => a.cmp(b),
-                }
-            })
-    } else {
-        cells.max()
     }
 }
 
@@ -768,51 +784,56 @@ mod tests {
         );
     }
 
+    /// MED (PR6b code-critic): the high-water mark is computed IN SQL —
+    /// `SELECT max(<cursor>) FROM (<same window>)` — so it honors the cursor column's
+    /// declared collation (mirroring the PG `max(_bf_key)::text`), NOT a Rust BINARY
+    /// `cells.max()`. This pins the statement shape (collation-correctness over real
+    /// data is proven by the e2e `sqlite_backfill_nocase_cursor_exactly_once` +
+    /// `sqlite_backfill_real_cursor_*` against temp-file SQLite). The window
+    /// predicate/ordering/limit MUST match `build_batch_sql` byte-for-byte so the two
+    /// page the identical window.
     #[test]
-    fn max_returned_numeric_vs_text() {
-        let rows = vec![
-            vec![Some("9".to_string())],
-            vec![Some("100".to_string())],
-            vec![Some("11".to_string())],
-        ];
-        assert_eq!(max_returned_cursor(&rows, true).as_deref(), Some("100"));
-        // lexical max of the same cells is "9"
-        assert_eq!(max_returned_cursor(&rows, false).as_deref(), Some("9"));
-    }
-
-    /// MED (PR6b code-critic): a numeric-affinity REAL cursor — NON-integral cells
-    /// like "1.5" — must NOT be silently dropped (the old `parse::<i64>()` returned
-    /// None for ALL of them, yielding a NULL high-water mark and a re-scan loop).
-    /// f64 parse takes the natural numeric max; the touched cursor is preserved.
-    #[test]
-    fn max_returned_real_cursor_not_dropped() {
-        let rows = vec![
-            vec![Some("1.5".to_string())],
-            vec![Some("10.5".to_string())], // numeric max; lexical max would be "9.5"
-            vec![Some("9.5".to_string())],
-        ];
+    fn window_max_first_vs_resume_shape() {
+        let first = build_window_max_sql("\"t\"", "\"id\"", None, false);
         assert_eq!(
-            max_returned_cursor(&rows, true).as_deref(),
-            Some("10.5"),
-            "REAL cells must be numerically maxed, never dropped"
+            first,
+            "SELECT max(\"id\") FROM ( \
+                SELECT \"id\" FROM \"t\" \
+                 WHERE 1=1 \
+                 ORDER BY \"id\" ASC LIMIT ?1 \
+             )",
+            "{first}"
         );
-        // scientific notation (as run_query_params' Real(f).to_string() can emit).
-        let sci = vec![
-            vec![Some("1e2".to_string())], // 100.0 — the numeric max
-            vec![Some("9.5".to_string())],
-        ];
-        assert_eq!(max_returned_cursor(&sci, true).as_deref(), Some("1e2"));
+        let resume = build_window_max_sql("\"t\"", "\"id\"", Some("\"a\" IS NULL"), true);
+        assert_eq!(
+            resume,
+            "SELECT max(\"id\") FROM ( \
+                SELECT \"id\" FROM \"t\" \
+                 WHERE \"id\" > ?1 AND (\"a\" IS NULL) \
+                 ORDER BY \"id\" ASC LIMIT ?2 \
+             )",
+            "{resume}"
+        );
     }
 
-    /// A mix of integral and non-integral numeric cells maxes correctly (the bind
-    /// side already coerces via affinity; the max side now matches).
+    /// The window-max SELECT and the batch UPDATE MUST page the IDENTICAL window
+    /// (same predicate, same ORDER BY, same `?n` limit slot) — otherwise the resume
+    /// cursor and the mutation diverge. Assert the shared predicate/order/limit
+    /// substring appears verbatim in both renderings.
     #[test]
-    fn max_returned_mixed_int_and_real() {
-        let rows = vec![
-            vec![Some("3".to_string())],
-            vec![Some("2.5".to_string())],
-            vec![Some("3.5".to_string())], // numeric max
-        ];
-        assert_eq!(max_returned_cursor(&rows, true).as_deref(), Some("3.5"));
+    fn window_max_and_batch_share_the_window() {
+        for (filter, have_cursor) in
+            [(None, false), (Some("\"a\" IS NULL"), true), (None, true)]
+        {
+            let batch = build_batch_sql("\"t\"", "\"id\"", "\"v\" = 1", filter, have_cursor);
+            let wmax = build_window_max_sql("\"t\"", "\"id\"", filter, have_cursor);
+            let filter_sql = filter.map(|f| format!(" AND ({f})")).unwrap_or_default();
+            let limit_ph = if have_cursor { "?2" } else { "?1" };
+            let pred = window_predicate("\"id\"", &filter_sql, have_cursor);
+            let shared =
+                format!("WHERE {pred} ORDER BY \"id\" ASC LIMIT {limit_ph}");
+            assert!(batch.contains(&shared), "batch missing shared window: {batch}");
+            assert!(wmax.contains(&shared), "window-max missing shared window: {wmax}");
+        }
     }
 }
