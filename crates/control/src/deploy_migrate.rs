@@ -75,6 +75,22 @@
 //! deploy in PR2 — the PG leg is type-reconciliation-wired but approval-gate-refused;
 //! the SQLite leg is unwired. Wiring an approved IR-apply surface (and the SQLite
 //! IR-deploy entry point) is the out-of-band / CLI-rewire wave (gated on this PR).
+//!
+//! ## FOLLOW-UP (named wave): approved IR-apply surface + SQLite-dialect LiveSchema
+//!
+//! Tracked, intentionally NOT in PR2's scope (spec §2.6.2 lines 1278/1281 scope the
+//! PR2 e2e to engine-level dual-leg proof; an approved IR-apply surface is a later
+//! CLI-rewire wave). To make an online IR `renameColumn` actually *shippable* a
+//! follow-up wave must land TWO things:
+//!   1. **Approved IR-apply surface** — an out-of-band entry (mirroring the `.sql`
+//!      `submit_migration` surface) that drives `apply_bundle_ir_migrations` under
+//!      [`Approval::Approved`] so the PG expand backfill (`run_expand_pg`) is no
+//!      longer refused at the gate. Routine `.zship` deploy stays `Approval::None`.
+//!   2. **SQLite-dialect `LiveSchema` construction** — a SQLite IR-deploy entry that
+//!      populates `sqlite_schemas` from the live SDK `Value`s (the SQLite analogue of
+//!      this PG `table_snapshots` introspection), so the SQLite rebuild leg has a
+//!      production/dev entry point instead of failing closed before lowering.
+//! Until both land, an online rename is engine-proven (PR2) but not go-live-wired.
 
 use std::collections::BTreeMap;
 use std::path::Path;

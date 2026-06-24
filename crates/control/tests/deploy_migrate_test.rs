@@ -1013,7 +1013,10 @@ async fn deploy_migrate_renamecolumn_type_mismatch_refused_at_lower_gate() {
 // type. If the round-trip canonicalisation were asymmetric the rename would instead
 // false-reject at the LOWER gate (`DeployMigrateError::Ir`/`RenameTypeMismatch`), so
 // observing `OnlineExpand(Approval)` PROVES the gate passed on a live `USER-DEFINED`
-// extension column. Skips cleanly when the test DB has no `vector` extension.
+// extension column. Skips cleanly when the test DB has no `vector` extension —
+// UNLESS `MIGRATE_REQUIRE_VECTOR` is set, in which case a missing `vector`
+// extension is a HARD FAILURE (CI hard-gate, mirroring `MIGRATE_REQUIRE_DB`): the
+// production-layer vector reconciliation MUST be exercised, not vacuously skipped.
 #[compio::test]
 async fn deploy_migrate_renamecolumn_vector_type_gate_round_trips_on_production_path() {
     let Some(conn) = admin_conn().await else {
@@ -1026,9 +1029,16 @@ async fn deploy_migrate_renamecolumn_vector_type_gate_round_trips_on_production_
         .map(|rows| !rows.is_empty())
         .unwrap_or(false);
     if !has_vector {
+        assert!(
+            std::env::var("MIGRATE_REQUIRE_VECTOR").is_err(),
+            "MIGRATE_REQUIRE_VECTOR is set but the test DB has no `vector` extension; \
+             the production-path vector type-gate round-trip must NOT silently skip in CI \
+             — use a pgvector image (pgvector/pgvector:pg17) so the reconciliation is \
+             actually exercised, not vacuously green"
+        );
         eprintln!(
             "SKIP deploy_migrate_renamecolumn_vector_type_gate_round_trips_on_production_path: \
-             no `vector` extension on the test DB (use pgvector/pgvector:pg16)"
+             no `vector` extension on the test DB (use pgvector/pgvector:pg17)"
         );
         return;
     }

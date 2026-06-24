@@ -201,6 +201,18 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
         other => panic!("expected an OnlineRename step, got {other:?}"),
     };
 
+    // Snapshot the journal's completed-version set BEFORE the rename applies (it
+    // already carries the first_deploy createTable). The rename's exact journal
+    // footprint is the set-difference after vs. before.
+    let before: std::collections::BTreeSet<String> = be
+        .applied(&exec_cfg())
+        .await
+        .expect("journal before rename")
+        .into_iter()
+        .filter(|e| matches!(e.phase, zeroship_migrate::journal::Phase::Completed))
+        .map(|e| e.version.as_str().to_string())
+        .collect();
+
     // Apply THROUGH the single shared apply_plan (a rebuild on a populated table is
     // destructive ⇒ Approval::Approved).
     let engine = MigrationEngine::new();
@@ -248,12 +260,24 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
             && matches!(e.phase, zeroship_migrate::journal::Phase::Completed)),
         "the rebuild migration is journaled completed (rebuild_one path)"
     );
-    // And NO `expand_*` / `contract_*`-named online sub-step ever journaled (the
-    // run_online path was never taken).
-    assert!(
-        applied.iter().all(|e| !e.version.starts_with("expand_")
-            && !e.version.starts_with("contract_")),
-        "no PG expand-contract sub-step journaled on the SQLite leg"
+    // And NO PG expand-contract sub-step ever journaled (the run_online path was
+    // never taken). `version` is a UUIDv7 (MigrationId::generate), NOT the human
+    // "expand_*"/"contract_*" name — so a name-prefix check is vacuous. Instead
+    // prove it by VERSION-SET DIFFERENCE: the rename added EXACTLY the one rebuild
+    // version to the journal. run_online would journal the E1..C2 expand sub-steps
+    // as *additional, distinct* versions; their absence is the load-bearing proof.
+    let after: std::collections::BTreeSet<String> = applied
+        .iter()
+        .filter(|e| matches!(e.phase, zeroship_migrate::journal::Phase::Completed))
+        .map(|e| e.version.as_str().to_string())
+        .collect();
+    let added: std::collections::BTreeSet<String> =
+        after.difference(&before).cloned().collect();
+    assert_eq!(
+        added,
+        std::collections::BTreeSet::from([rebuild_version.clone()]),
+        "the SQLite rename adds EXACTLY the one rebuild version to the journal — \
+         no extra expand/contract sub-step versions (run_online was never taken)"
     );
 }
 
