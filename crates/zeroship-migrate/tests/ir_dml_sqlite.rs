@@ -105,7 +105,7 @@ async fn lower_plan_and_apply(
     ir: &str,
     reg: &BTreeMap<String, String>,
     approval: Approval,
-) {
+) -> zeroship_migrate::engine::DeclarativeDeployOutcome {
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let document = zeroship_migrate::ir_load::load_ir_document(
         ir,
@@ -121,7 +121,7 @@ async fn lower_plan_and_apply(
     engine
         .apply_plan(&plan.steps, approval, be, &exec_cfg(), "deploy", LockMode::Acquire)
         .await
-        .expect("apply the DML plan on SQLite");
+        .expect("apply the DML plan on SQLite")
 }
 
 fn create_codes_table() -> &'static str {
@@ -193,6 +193,143 @@ async fn one_shot_insert_update_delete_apply_on_sqlite() {
     let rows = be.actor().query("SELECT code FROM codes ORDER BY code").await.expect("probe");
     assert_eq!(rows.len(), 1, "one row pruned");
     assert_eq!(rows[0], vec![Some("404".into())]);
+}
+
+/// HIGH — `op.del(table, where, {limit})` must apply on SQLite. The bundled
+/// rusqlite (features=["bundled"]) does NOT compile `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`,
+/// so a literal `DELETE … WHERE … LIMIT ?1` is a HARD syntax error at apply. The
+/// portable lowering is the `rowid IN (SELECT rowid … WHERE … LIMIT ?1)` subquery
+/// form (the SQLite analog of the PG ctid form). This proves a `del` with a limit
+/// LOWER than the number of matching rows deletes EXACTLY `limit` rows on a real
+/// SQLite file — pre-fix it failed with `near "LIMIT": syntax error`.
+#[compio::test]
+async fn del_with_limit_deletes_exactly_n_on_sqlite() {
+    let p = paths("del_limit");
+    let be = backend(&p);
+    lower_and_apply(&be, create_codes_table(), &registry(&[]), Approval::None).await;
+
+    // Seed FIVE rows that all match the WHERE (code >= 0) so the limit truly bites.
+    let seed = r#"{"ir_version":1,"name":"seed","ops":[
+        {"op":"insert","table":"codes",
+         "columns":["id","created_at","updated_at","version","code","label"],
+         "rows":[
+            ["c1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,1,"a"],
+            ["c2","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,2,"b"],
+            ["c3","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,3,"c"],
+            ["c4","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,4,"d"],
+            ["c5","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,5,"e"]
+         ]}
+    ]}"#;
+    lower_plan_and_apply(&be, seed, &registry(&[("codes", APP)]), Approval::None).await;
+
+    // DELETE WHERE code >= 1 LIMIT 2 — all five rows match, but only 2 may go.
+    let delete_ir = r#"{"ir_version":1,"name":"prune_limited","ops":[
+        {"op":"delete","table":"codes",
+         "where":{"node":"binOp","op":"ge",
+             "lhs":{"node":"colRef","name":"code"},
+             "rhs":{"node":"literal","value":1}},
+         "limit":2}
+    ]}"#;
+    lower_plan_and_apply(&be, delete_ir, &registry(&[("codes", APP)]), Approval::Approved).await;
+
+    let rows = be.actor().query("SELECT code FROM codes ORDER BY code").await.expect("probe");
+    assert_eq!(rows.len(), 3, "del{{limit:2}} must remove EXACTLY 2 of 5 matching rows on SQLite");
+}
+
+/// MED — two BYTE-IDENTICAL DML ops in the SAME migration must each apply. The
+/// per-step journal version is derived from the step content; if the op's plan
+/// position is NOT folded in, two identical ops collide to ONE version and the
+/// second is net-applied-skipped (silent data-intent loss). Two byte-identical
+/// `id`-bearing inserts can't both land (the TEXT PK would conflict), so the
+/// observable proof uses two BYTE-IDENTICAL increment UPDATEs (same template +
+/// same binds): each bumps `code` by 1 on the single seed row. Pre-fix the second
+/// op collides to the first's version and is silently skipped (code = 1); post-fix
+/// the distinct plan positions mint distinct versions and BOTH run (code = 2).
+#[compio::test]
+async fn duplicate_identical_dml_ops_both_apply_on_sqlite() {
+    let p = paths("dup_dml");
+    let be = backend(&p);
+    lower_and_apply(&be, create_codes_table(), &registry(&[]), Approval::None).await;
+
+    // Seed one row with code = 0.
+    let seed = r#"{"ir_version":1,"name":"seed","ops":[
+        {"op":"insert","table":"codes",
+         "columns":["id","created_at","updated_at","version","code","label"],
+         "rows":[["c1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,0,"counter"]]}
+    ]}"#;
+    lower_plan_and_apply(&be, seed, &registry(&[("codes", APP)]), Approval::None).await;
+
+    // TWO byte-identical increment UPDATEs (same SET expr + same WHERE ⇒ same
+    // assembled template AND same binds). Distinct plan positions must mint distinct
+    // versions so BOTH net-apply rather than the second being skipped as a re-deploy.
+    let dup_ir = r#"{"ir_version":1,"name":"double_bump","ops":[
+        {"op":"update","table":"codes",
+         "set":{"code":{"node":"binOp","op":"add",
+             "lhs":{"node":"colRef","name":"code"},
+             "rhs":{"node":"literal","value":1}}},
+         "where":{"node":"binOp","op":"eq",
+             "lhs":{"node":"colRef","name":"label"},
+             "rhs":{"node":"literal","value":"counter"}}},
+        {"op":"update","table":"codes",
+         "set":{"code":{"node":"binOp","op":"add",
+             "lhs":{"node":"colRef","name":"code"},
+             "rhs":{"node":"literal","value":1}}},
+         "where":{"node":"binOp","op":"eq",
+             "lhs":{"node":"colRef","name":"label"},
+             "rhs":{"node":"literal","value":"counter"}}}
+    ]}"#;
+    lower_plan_and_apply(&be, dup_ir, &registry(&[("codes", APP)]), Approval::None).await;
+
+    let rows = be.actor().query("SELECT code FROM codes WHERE label = 'counter'").await.expect("probe");
+    assert_eq!(
+        rows[0],
+        vec![Some("2".into())],
+        "two byte-identical increment UPDATEs must BOTH run (distinct plan-position versions), code = 2"
+    );
+}
+
+/// LOW — idempotent re-deploy on SQLite. Lower + apply a one-shot DML plan, then
+/// re-apply the IDENTICAL plan: the executor must report the DML step(s) SKIPPED
+/// (net-applied in the journal) and the row state must be UNCHANGED — the insert
+/// did not double and the increment update did not re-run.
+#[compio::test]
+async fn idempotent_redeploy_of_dml_plan_on_sqlite() {
+    let p = paths("idem");
+    let be = backend(&p);
+    lower_and_apply(&be, create_codes_table(), &registry(&[]), Approval::None).await;
+
+    // A one-shot plan: insert one row (code = 0) + bump it by 1 (code = 1).
+    let dml_ir = r#"{"ir_version":1,"name":"seed_and_bump","ops":[
+        {"op":"insert","table":"codes",
+         "columns":["id","created_at","updated_at","version","code","label"],
+         "rows":[["c1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,0,"idem"]]},
+        {"op":"update","table":"codes",
+         "set":{"code":{"node":"binOp","op":"add",
+             "lhs":{"node":"colRef","name":"code"},
+             "rhs":{"node":"literal","value":1}}},
+         "where":{"node":"binOp","op":"eq",
+             "lhs":{"node":"colRef","name":"label"},
+             "rhs":{"node":"literal","value":"idem"}}}
+    ]}"#;
+
+    // First deploy: both steps net-apply.
+    let first = lower_plan_and_apply(&be, dml_ir, &registry(&[("codes", APP)]), Approval::None).await;
+    assert_eq!(first.applied.applied.len(), 2, "first deploy applies both DML steps");
+    assert!(first.applied.skipped.is_empty(), "nothing skipped on the first deploy");
+    let rows = be.actor().query("SELECT code FROM codes WHERE label = 'idem'").await.expect("probe");
+    assert_eq!(rows, vec![vec![Some("1".into())]], "one row, bumped once after first deploy");
+
+    // Re-deploy the IDENTICAL plan: every DML step is net-applied already ⇒ all
+    // SKIPPED, nothing re-applied, row state unchanged (no double-insert, no re-bump).
+    let second = lower_plan_and_apply(&be, dml_ir, &registry(&[("codes", APP)]), Approval::None).await;
+    assert!(second.applied.applied.is_empty(), "re-deploy applies NOTHING");
+    assert_eq!(second.applied.skipped.len(), 2, "re-deploy skips both already-applied DML steps");
+    let rows = be.actor().query("SELECT code FROM codes WHERE label = 'idem'").await.expect("probe");
+    assert_eq!(
+        rows,
+        vec![vec![Some("1".into())]],
+        "idempotent re-deploy: still exactly one row, still code = 1 (no double-insert, no re-bump)"
+    );
 }
 
 /// Bind-safety on SQLite: a value full of SQL metacharacters is stored VERBATIM as
