@@ -40,6 +40,10 @@ import type {
   UpdateArgs,
 } from "./types.js";
 
+import { TypeBuilder as DbTypeBuilder } from "@zeroship/db";
+
+import { colTypeFromDbField, type DbSchemaField } from "./db-lexicon.js";
+
 type Node = Record<string, unknown>;
 
 // ── The ambient recorder (§3.1) ──
@@ -234,6 +238,32 @@ export const t: TypeLexicon = {
 function colTypeOf(typeArg: ColumnDefType | ColType): ColType {
   if (isColumnDef(typeArg)) return typeArg._type;
   return typeArg as ColType;
+}
+
+// ── (A) The shared `@zeroship/db` lexicon bridge (PR5) ──
+
+/**
+ * Lift a `@zeroship/db` schema field (a `t.*` `TypeBuilder` or its `FieldDef`)
+ * into a migration `ColumnDef`, so a column declared in the live `@zeroship/db`
+ * schema lowers through the IDENTICAL `ColType` path a hand-written migration
+ * column does (PR5 goal A — one shared lexicon). The TYPE is bridged via the
+ * single-source {@link colTypeFromDbField} reduction; the column's NULLABILITY is
+ * carried over (`@zeroship/db` `.required()` → migration `.notNull()`; otherwise
+ * nullable, matching the migration DSL default). Table/column NAMES are NEVER
+ * bound to the live schema — a `t.ref(target)` keeps its target as a plain string
+ * (§3.3). Returns a chainable `ColumnDef`, so a caller can still layer migration
+ * modifiers (`.default(...)`, `.primaryKey()`, …) on top.
+ */
+export function fromDb(field: DbSchemaField): ColumnDefType {
+  const def = new ColumnDefImpl(colTypeFromDbField(field));
+  const fd = field instanceof DbTypeBuilder ? field.toFieldDef() : field;
+  if (fd && typeof fd === "object" && (fd as { required?: boolean }).required === true) {
+    def.notNull();
+  }
+  if (fd && typeof fd === "object" && (fd as { unique?: boolean }).unique === true) {
+    def.unique();
+  }
+  return def;
 }
 
 // ── (B) The fluent `(c) => Expr` builder ──

@@ -41,9 +41,19 @@ export {
   batchAlterTable,
   // the fluent column-type lexicon
   t,
+  // the shared `@zeroship/db` lexicon bridge (PR5 goal A): lift a live-schema
+  // `t.*` field into a migration ColumnDef through the one shared ColType lexicon
+  fromDb,
   // the §4.3 determinism lint (best-effort source scan)
   lintDeterminism,
 } from "./ops.js";
+
+// The single-source `@zeroship/db` field → migration `ColType` reduction (PR5
+// goal A) + its structured boundary error. The JS inverse of the engine's Rust
+// `col_type_to_token`; the proof the migration DSL and the runtime schema share
+// ONE type lexicon.
+export { colTypeFromDbField, UnsupportedColTypeError } from "./db-lexicon.js";
+export type { DbSchemaField, DbFieldType } from "./db-lexicon.js";
 
 export type {
   // authoring types

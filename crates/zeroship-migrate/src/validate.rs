@@ -1771,4 +1771,64 @@ mod tests {
         let err = validate_ir(&ir, Dialect::Sqlite, &[]).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
     }
+
+    // ── PR5 — the names-stay-strings BINDING corollary (§3.3) ───────────────
+    //
+    // This is the apply-time HALF of the PR5 guarantee. The OTHER half lives in
+    // the JS type-level suite (`sdks/migrate/tests/types/type-tests.ts`): a
+    // migration whose table/column NAMES are plain strings type-checks cleanly
+    // EVEN WHEN those names are not in the current `@zeroship/db` schema (the
+    // anti-rot guarantee — names are NOT live-schema-bound, so an immutable
+    // historical migration never rots as the schema evolves).
+    //
+    // The corollary this test pins: because tsc CANNOT see the name (it is a
+    // plain string), a migration that references a NON-EXISTENT column must fail
+    // at APPLY — never silently mis-apply — with the STRUCTURED error. Load is
+    // structural-only (the name is accepted, mirroring tsc accepting the string),
+    // and the resolved apply seam is the SOLE place a bad name is caught.
+    #[test]
+    fn pr5_nonexistent_column_name_fails_at_apply_not_at_load_with_structured_error() {
+        use std::collections::BTreeMap;
+
+        // A migration whose `where` and `set` reference `column_that_was_dropped`
+        // — a plain-string name the JS DSL type-checks (it is NOT live-schema-
+        // bound) and that does NOT exist on the live `users` table.
+        let ir = ir_with(vec![Op::Update {
+            table: "users".into(),
+            set: [("name".to_string(), Expr::col("column_that_was_dropped"))]
+                .into_iter()
+                .collect(),
+            r#where: Some(Expr::BinOp {
+                op: BinaryOp::Eq,
+                lhs: Box::new(Expr::col("column_that_was_dropped")),
+                rhs: Box::new(Expr::lit(IrScalar::Int(1))),
+            }),
+            batch: None,
+        }]);
+
+        // LOAD-time (the tsc-analog): structural-only — the plain-string name is
+        // ACCEPTED, exactly as tsc accepts the string literal. NOT rejected here.
+        assert!(
+            validate_ir(&ir, Dialect::Postgres, &[]).is_ok(),
+            "a plain-string column name is accepted at load (the tsc-analog), never name-bound"
+        );
+
+        // APPLY-time (resolved against the REAL live columns): the missing name is
+        // the SOLE place it is caught — with the STRUCTURED `UNSUPPORTED { expr }`
+        // error, not a raw DB \"column does not exist\" surprise.
+        let mut live: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        live.insert("users".to_string(), vec!["id".to_string(), "name".to_string()]);
+        let err = validate_ir_resolved(&ir, Dialect::Postgres, &live, &[])
+            .expect_err("a non-existent column name must FAIL at the resolved apply seam");
+        assert_eq!(
+            err.code, CODE_UNSUPPORTED,
+            "the apply-time name reject is structured (the §8.8 envelope), not a raw DB error"
+        );
+        assert_eq!(
+            err.kind,
+            Some(UnsupportedKind::Expr),
+            "an unknown column is a rule-(c) expr-kind capability-boundary reject"
+        );
+        assert_eq!(err.op_index, 0, "the structured error attributes the failing op");
+    }
 }

@@ -17,7 +17,11 @@
     "gen:ir-types": "node scripts/gen-ir-types.mjs",
     "build": "tsup",
     "typecheck": "tsc --noEmit",
+    "typecheck:types": "tsc --noEmit -p tsconfig.types.json",
     "test": "NODE_ENV=test node --import tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@zeroship/db": "workspace:*"
   },
   "devDependencies": {
     "json-schema-to-typescript": "^15.0.4",
