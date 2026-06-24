@@ -81,12 +81,22 @@ struct OpIrEnvelope {
     ir: Option<serde_json::Value>,
 }
 
+/// **UNSANDBOXED, in-process — NOT the build path. Hidden from the public API.**
+///
 /// Record a self-contained migration module's `up()` op list into a typed
 /// [`MigrationIr`] (§2.5 — the JS half of the anti-drift gate).
 ///
-/// `migration_source` is the bundled JS — it may
-/// `import { createTable, addColumn, … } from "@zeroship/migrate"` (resolved to
-/// the embedded DSL) and `export function up()` (or `export default { up }`).
+/// # Safety — runs untrusted `.ts` in-process (the §8.9 threat)
+///
+/// This evaluates `migration_source` (untrusted creator / AI-authored JS) in an
+/// IN-PROCESS V8 isolate with **no seccomp / landlock / network namespace** — the
+/// exact §8.9 threat the kernel-sandboxed recorder child closes. The PR4 build/CLI
+/// path NEVER calls this: it records via [`crate::recorder_service::spawn_sandboxed_record`]
+/// (the kernel-isolated child). This twin exists ONLY as the in-crate golden /
+/// round-trip test oracle (`op_round_trip`, `full_surface`) and is therefore
+/// `#[doc(hidden)]` + crate-`pub(crate)`-equivalent in intent — a library consumer
+/// must record through the sandboxed child, never here.
+///
 /// `owner_app` stamps the recorded `owner_app` HINT (the engine server-stamps the
 /// authoritative one at deploy, §8.6). `name` is the filename-derived label used
 /// when the module omits an explicit `name`.
@@ -98,6 +108,7 @@ struct OpIrEnvelope {
 ///
 /// # Errors
 /// See [`RecordError`].
+#[doc(hidden)]
 pub fn record_migration_to_ir(
     migration_source: &str,
     owner_app: &str,
@@ -106,6 +117,10 @@ pub fn record_migration_to_ir(
     Ok(record_migration_to_ir_with_warnings(migration_source, owner_app, name)?.ir)
 }
 
+/// **UNSANDBOXED, in-process — NOT the build path. Hidden from the public API.**
+/// See [`record_migration_to_ir`]'s safety note (the §8.9 in-process-eval threat):
+/// the PR4 build/CLI path records via the kernel-sandboxed child, never here.
+///
 /// Record a migration's `up()` into a typed [`MigrationIr`] AND surface the §4.3
 /// determinism warnings on it (the wired pre-commit catch — §4.3/§8.8).
 ///
@@ -120,6 +135,7 @@ pub fn record_migration_to_ir(
 ///
 /// # Errors
 /// See [`RecordError`]. A determinism finding is a WARNING, not an error.
+#[doc(hidden)]
 pub fn record_migration_to_ir_with_warnings(
     migration_source: &str,
     owner_app: &str,
@@ -218,12 +234,17 @@ pub fn record_migration_to_ir_with_warnings(
     Ok(RecordOutcome { ir, warnings })
 }
 
+/// **UNSANDBOXED, in-process — NOT the build path. Hidden from the public API.**
+/// See [`record_migration_to_ir`]'s safety note (the §8.9 in-process-eval threat):
+/// the PR4 build/CLI path records via the kernel-sandboxed child, never here.
+///
 /// Record a migration module and emit its canonical `.ir.json` STRING (the
 /// committed-corpus form). Pretty-printed with a trailing newline (POSIX-clean),
 /// matching the golden-file convention used by `op-ir.schema.json`.
 ///
 /// # Errors
 /// See [`RecordError`].
+#[doc(hidden)]
 pub fn record_migration_to_json(
     migration_source: &str,
     owner_app: &str,

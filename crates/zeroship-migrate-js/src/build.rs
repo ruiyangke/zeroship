@@ -91,6 +91,14 @@ pub enum BuildError {
         /// A normalized suggestion (may be empty = no suggestion).
         suggestion: String,
     },
+    /// [`build_one_migration`] was asked to build a specific `<stem>.ts` that is not
+    /// among the discovered migrations in its directory (e.g. the file was removed
+    /// between the caller naming it and discovery).
+    #[error("migration {stem}.ts not found among the discovered migrations")]
+    NotFound {
+        /// The requested stem.
+        stem: String,
+    },
     /// Recording a `.ts` failed with a NON-retryable authoring reject (the
     /// migration is wrong: an op outside the recorder, a throw, a budget overrun,
     /// a seccomp violation). This is surfaced as a hard build error — NO fallback.
@@ -562,8 +570,60 @@ pub fn build_migrations(
     via: &RecordVia<'_>,
 ) -> Result<BuildOutcome, BuildError> {
     let discovered = discover_migrations(dir)?;
+    build_discovered(&discovered, owner_app, via)
+}
+
+/// Build EXACTLY ONE migration `.ts` by path (the CLI `record <file.ts>` surface):
+/// discover the file's dir, select only the requested stem, and build that single
+/// migration. Unlike [`build_migrations`] (a whole-dir operation), this never
+/// records an unrelated in-progress sibling `.ts` that happens to lack a committed
+/// `.ir.json` — `record half_finished.ts` touches only `half_finished`.
+///
+/// Build-once authority still holds: if the requested file already has a committed
+/// `.ir.json`, it is read verbatim (no re-record), so re-running is idempotent.
+///
+/// # Errors
+/// [`BuildError::InvalidName`] if `file` is not a `<14-digit>_<desc>.ts` migration,
+/// [`BuildError::NotFound`] if no such `.ts` is discovered in its dir; otherwise the
+/// same record / io / checksum errors as [`build_migrations`].
+pub fn build_one_migration(
+    file: &Path,
+    owner_app: &str,
+    via: &RecordVia<'_>,
+) -> Result<BuildOutcome, BuildError> {
+    let stem = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_suffix(".ts"))
+        .ok_or_else(|| BuildError::InvalidName {
+            name: file.display().to_string(),
+            reason: "not a .ts migration file".to_string(),
+            suggestion: String::new(),
+        })?
+        .to_string();
+    let dir = match file.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let discovered = discover_migrations(&dir)?;
+    let only: Vec<DiscoveredMigration> =
+        discovered.into_iter().filter(|m| m.stem == stem).collect();
+    if only.is_empty() {
+        return Err(BuildError::NotFound { stem });
+    }
+    build_discovered(&only, owner_app, via)
+}
+
+/// The shared per-migration build loop behind [`build_migrations`] (whole dir) and
+/// [`build_one_migration`] (a single discovered file) — identical build-once
+/// semantics over whatever set of [`DiscoveredMigration`]s the caller selected.
+fn build_discovered(
+    discovered: &[DiscoveredMigration],
+    owner_app: &str,
+    via: &RecordVia<'_>,
+) -> Result<BuildOutcome, BuildError> {
     let mut out = Vec::with_capacity(discovered.len());
-    for m in &discovered {
+    for m in discovered {
         let ir_path = m.ir_json_path();
         let (committed_bytes, checksum, record_path, warnings) = if ir_path.exists() {
             // §5.1: read the committed artifact VERBATIM. Do NOT re-evaluate the .ts.

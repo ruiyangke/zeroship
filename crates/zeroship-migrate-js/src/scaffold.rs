@@ -7,8 +7,12 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use zeroship_migrate::declarative::{DesiredSchema, SYSTEM_FIELD_NAMES};
-use zeroship_migrate::drift::{ColumnSnapshot, SchemaSnapshot};
+use zeroship_migrate::declarative::{
+    is_system_managed_constraint, is_system_managed_index, DesiredSchema, SYSTEM_FIELD_NAMES,
+};
+use zeroship_migrate::drift::{
+    ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot,
+};
 use zeroship_migrate::ir::{ColType, IrColumn, IrDefault, Op, SynthDefaultFn};
 use zeroship_migrate::loader::{is_valid_migration_name, suggest_migration_name};
 use zeroship_migrate::MigrationIr;
@@ -37,6 +41,33 @@ pub enum ScaffoldError {
         column: String,
         /// The unmapped data_type.
         data_type: String,
+    },
+    /// A desired USER index is not synthesizable as a portable `createIndex` op
+    /// (a non-`btree` access method — vector ANN / GIN / GiST / FTS5 — or an
+    /// expression / partial index). Rather than SILENTLY drop it (breaking
+    /// re-diff-to-zero), `generate` FAILS CLOSED — author the index by hand.
+    #[error("index {table}.{name} ({reason}) cannot be synthesized as a portable createIndex op (author it by hand)")]
+    UnsupportedIndex {
+        /// The owning table.
+        table: String,
+        /// The index name.
+        name: String,
+        /// Why it is not synthesizable (the non-btree method / expression).
+        reason: String,
+    },
+    /// A desired USER constraint (FOREIGN KEY / CHECK / standalone UNIQUE) carries
+    /// only its `pg_get_constraintdef` definition TEXT, not structured operands, so
+    /// `generate` cannot reverse it into a portable `addConstraint` op without an
+    /// unsound text parse-back. Rather than SILENTLY drop it (breaking
+    /// re-diff-to-zero), `generate` FAILS CLOSED — author the constraint by hand.
+    #[error("constraint {table}.{name} (kind {kind:?}) cannot be synthesized as a portable addConstraint op (author it by hand)")]
+    UnsupportedConstraint {
+        /// The owning table.
+        table: String,
+        /// The constraint name.
+        name: String,
+        /// The constraint kind (`FOREIGN KEY` / `CHECK` / `UNIQUE`).
+        kind: String,
     },
 }
 
@@ -99,20 +130,21 @@ pub fn scaffold_new_ts(name: &str) -> Result<String, ScaffoldError> {
 // clock or RNG: a host-side timestamp/random would bake a frozen value into the
 // committed artifact and diverge across replays. The determinism lint flags those
 // host accessors as a warning the AI loop self-corrects on.
-import {{ createTable, dropTable, t }} from "@zeroship/migrate";
+import {{ createTable, dropTable, addColumn, t }} from "@zeroship/migrate";
 
 export function up() {{
-  // Example — replace with your schema change.
-  //
-  // Determinism-correct seed defaults (the pattern to follow when you DO need a
-  // seeded id/timestamp column): use the DB-evaluated synth scalars, e.g.
-  //   id: t.uuid().notNull().primaryKey().default({{ fn: "genRandomUuid" }}),
-  //   created_at: t.timestamp().notNull().default({{ fn: "now" }}),
-  // (the platform also injects the system id/created_at/updated_at columns for you).
+  // Replace this createTable with your schema change. The platform injects the
+  // system id/created_at/updated_at columns for you, so the example needs none.
   createTable("{name}", {{
-    id: t.uuid().notNull().primaryKey(),
     title: t.text().notNull(),
   }});
+
+  // When you DO need a SEEDED uuid/timestamp column, default it to the DB-evaluated
+  // synth scalar so the value is computed at apply time — deterministic by
+  // construction, NEVER a host clock / RNG (those bake a frozen value into the
+  // committed artifact and diverge across replays). Uncomment to use:
+  //   addColumn("{name}", "token", t.uuid().notNull().default({{ fn: "genRandomUuid" }}));
+  //   addColumn("{name}", "expires_at", t.timestamp().notNull().default({{ fn: "now" }}));
 }}
 
 export function down() {{
@@ -171,6 +203,97 @@ fn system_default_for(_col_name: &str, _ty: &ColType) -> Option<IrDefault> {
     None
 }
 
+/// Synthesize a standalone `Op::CreateIndex` from a desired USER index, or FAIL
+/// CLOSED if it is not a portable plain index. Only a `btree` access-method,
+/// column-list, non-partial / non-expression index is synthesizable; a non-btree
+/// method (vector ANN / GIN / GiST / FTS5) or an expression / partial index carries
+/// shape (`access_method` / `expression`) the portable `createIndex` op cannot
+/// reproduce — so rather than drop it silently (breaking re-diff-to-zero), reject.
+fn synth_index_op(table: &str, idx: &IndexSnapshot) -> Result<Op, ScaffoldError> {
+    let method = idx.access_method.trim().to_ascii_lowercase();
+    if method != "btree" {
+        return Err(ScaffoldError::UnsupportedIndex {
+            table: table.to_string(),
+            name: idx.name.clone(),
+            reason: format!("non-btree access method {:?}", idx.access_method),
+        });
+    }
+    if idx.expression.is_some() {
+        return Err(ScaffoldError::UnsupportedIndex {
+            table: table.to_string(),
+            name: idx.name.clone(),
+            reason: "expression / partial index".to_string(),
+        });
+    }
+    if idx.columns.is_empty() {
+        // A btree index with no key columns is an expression index in disguise.
+        return Err(ScaffoldError::UnsupportedIndex {
+            table: table.to_string(),
+            name: idx.name.clone(),
+            reason: "no key columns".to_string(),
+        });
+    }
+    Ok(Op::CreateIndex {
+        table: table.to_string(),
+        columns: idx.columns.clone(),
+        name: Some(idx.name.clone()),
+        unique: if idx.unique { Some(true) } else { None },
+        using: None,
+        r#where: None,
+        concurrently: None,
+    })
+}
+
+/// A USER constraint (FK / CHECK / standalone UNIQUE) carries only its
+/// `pg_get_constraintdef` definition TEXT, not the structured operands an
+/// `addConstraint` op needs — reversing the text would be an unsound parse-back. So
+/// `generate` FAILS CLOSED on any user constraint rather than silently dropping it
+/// (which would break re-diff-to-zero). Author such a constraint by hand.
+fn reject_user_constraint(table: &str, c: &ConstraintSnapshot) -> ScaffoldError {
+    ScaffoldError::UnsupportedConstraint {
+        table: table.to_string(),
+        name: c.name.clone(),
+        kind: c.kind.clone(),
+    }
+}
+
+/// Append the synthesized standalone index/constraint ops for `table`'s desired
+/// snapshot that the CREATE-TABLE lowering does NOT auto-inject. Each
+/// platform-managed object (pkey + system-field indexes, pkey constraint) is
+/// SKIPPED; each not-already-live USER index is synthesized as a `createIndex`;
+/// each not-already-live USER constraint FAILS CLOSED (no silent drop). `live_table`
+/// is `Some` for an existing table (skip objects already present) / `None` for a
+/// fresh table.
+fn append_table_index_constraint_ops(
+    ops: &mut Vec<SynthOp>,
+    table: &str,
+    want: &TableSnapshot,
+    live_table: Option<&TableSnapshot>,
+) -> Result<(), ScaffoldError> {
+    for idx in &want.indexes {
+        if is_system_managed_index(table, &idx.name) {
+            continue; // injected by lower_create_table — never re-emit.
+        }
+        if live_table.is_some_and(|h| h.indexes.iter().any(|i| i.name == idx.name)) {
+            continue; // already live — no delta.
+        }
+        ops.push(SynthOp {
+            op: synth_index_op(table, idx)?,
+            todo: None,
+        });
+    }
+    for c in &want.constraints {
+        if is_system_managed_constraint(table, &c.name) {
+            continue; // the implicit PK — injected by lower_create_table.
+        }
+        if live_table.is_some_and(|h| h.constraints.iter().any(|x| x.name == c.name)) {
+            continue; // already live — no delta.
+        }
+        return Err(reject_user_constraint(table, c));
+    }
+    Ok(())
+}
+
 /// One synthesized op with its open-obligation marker (if any).
 struct SynthOp {
     op: Op,
@@ -224,6 +347,11 @@ fn synth_delta_ops(
                     },
                     todo: None,
                 });
+                // The CREATE-TABLE op carries USER columns only (constraints/indexes
+                // are emitted as standalone ops so each lowers through the gated
+                // createIndex/addConstraint path). Synthesize the USER indexes +
+                // fail-closed on USER constraints — NEVER silently dropped.
+                append_table_index_constraint_ops(&mut ops, table, want, None)?;
             }
             Some(have) => {
                 // New columns on an existing table.
@@ -256,6 +384,10 @@ fn synth_delta_ops(
                         todo,
                     });
                 }
+                // Additive indexes/constraints on an existing table: synthesize new
+                // USER indexes, fail-closed on new USER constraints, skip what is
+                // already live or platform-managed. NEVER silently dropped.
+                append_table_index_constraint_ops(&mut ops, table, want, Some(have))?;
             }
         }
     }
@@ -376,7 +508,7 @@ fn render_ts(name: &str, synth: &[SynthOp]) -> String {
 // Autogenerated from the declarative schema diff (op.* DSL). The committed
 // `.ir.json` is the source of truth; this `.ts` is its human-readable mirror.
 // Determinism (§4.3): all defaults are DB-evaluated synth scalars (c.fn.*).
-import {{ createTable, dropTable, addColumn, dropColumn, t }} from "@zeroship/migrate";
+import {{ createTable, dropTable, addColumn, dropColumn, createIndex, t }} from "@zeroship/migrate";
 
 export function up() {{
 {up}}}
@@ -413,6 +545,17 @@ fn render_op_call(op: &Op) -> String {
         }
         Op::DropColumn { table, column, .. } => {
             format!("dropColumn({}, {});", js_str(table), js_str(column))
+        }
+        Op::CreateIndex { table, columns, name, unique, .. } => {
+            let cols: Vec<String> = columns.iter().map(|c| js_str(c)).collect();
+            let mut spec = format!("columns: [{}]", cols.join(", "));
+            if let Some(n) = name {
+                spec.push_str(&format!(", name: {}", js_str(n)));
+            }
+            if *unique == Some(true) {
+                spec.push_str(", unique: true");
+            }
+            format!("createIndex({}, {{ {} }});", js_str(table), spec)
         }
         Op::DropTable { table, .. } => format!("dropTable({});", js_str(table)),
         // generate only synthesizes the structural-delta op subset above; any other
@@ -512,16 +655,33 @@ mod tests {
     #[test]
     fn scaffold_is_deterministic_by_construction() {
         let ts = scaffold_new_ts("add_widgets").unwrap();
-        // Determinism-correct synth defaults present.
+        // The recommended synth-default pattern is documented in the scaffold.
         assert!(ts.contains("c.fn.now()") || ts.contains(r#"{ fn: "now" }"#));
         assert!(
             ts.contains("c.fn.genRandomUuid()") || ts.contains(r#"{ fn: "genRandomUuid" }"#)
         );
-        // No host clock / RNG accessors.
-        assert!(!ts.contains("Date.now()"));
-        assert!(!ts.contains("Math.random()"));
-        assert!(!ts.contains("crypto.randomUUID()"));
-        assert!(!ts.contains("new Date("));
+        // Tighten the guarantee (LOW-fix): scan ONLY the EXECUTABLE op body (line
+        // comments stripped) for host clock / RNG accessors — so the test genuinely
+        // proves the EMITTED ops are deterministic, not that a determinism note
+        // happens to live in a comment.
+        let code = strip_line_comments(&ts);
+        assert!(!code.contains("Date.now()"), "executable body must not call Date.now(); body:\n{code}");
+        assert!(!code.contains("Math.random()"), "executable body must not call Math.random(); body:\n{code}");
+        assert!(!code.contains("crypto.randomUUID()"), "executable body must not call crypto.randomUUID(); body:\n{code}");
+        assert!(!code.contains("new Date("), "executable body must not construct new Date(); body:\n{code}");
+    }
+
+    /// Strip `//` line comments from `src` (best-effort, scaffold-shaped: no string
+    /// literals contain `//`), leaving only the executable code — so a determinism
+    /// assertion scans the emitted ops, not a comment that merely mentions a pattern.
+    fn strip_line_comments(src: &str) -> String {
+        src.lines()
+            .map(|line| match line.find("//") {
+                Some(i) => &line[..i],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]

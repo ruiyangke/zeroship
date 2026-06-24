@@ -80,13 +80,23 @@ fn scaffold_is_deterministic_by_construction_and_records_zero_warnings() {
 
     // `new` scaffolds the `.ts` (NO `.ir.json` at new time).
     let ts = scaffold_new_ts("seed_table").expect("scaffold a valid name");
-    // Determinism-correct synth defaults, no host clock / RNG.
+    // Determinism-correct synth defaults documented.
     assert!(ts.contains(r#"{ fn: "genRandomUuid" }"#) || ts.contains("c.fn.genRandomUuid()"));
     assert!(ts.contains(r#"{ fn: "now" }"#) || ts.contains("c.fn.now()"));
-    assert!(!ts.contains("Date.now()"));
-    assert!(!ts.contains("Math.random()"));
-    assert!(!ts.contains("crypto.randomUUID()"));
-    assert!(!ts.contains("new Date("));
+    // Scan ONLY the executable body (comments stripped) for host clock / RNG — so
+    // the guarantee is about the EMITTED ops, not comment text (LOW-fix).
+    let code: String = ts
+        .lines()
+        .map(|line| match line.find("//") {
+            Some(i) => &line[..i],
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!code.contains("Date.now()"), "body:\n{code}");
+    assert!(!code.contains("Math.random()"), "body:\n{code}");
+    assert!(!code.contains("crypto.randomUUID()"), "body:\n{code}");
+    assert!(!code.contains("new Date("), "body:\n{code}");
 
     // Recording the SCAFFOLD surfaces ZERO determinism warnings (the scaffold is
     // deterministic by construction).

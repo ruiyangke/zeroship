@@ -19,6 +19,30 @@
 //! runs in zeroship-runtime's V8 sandbox (untrusted creator schema, same
 //! security model as app code); the diff + render reuse the lean engine's
 //! declarative differ + dbmate loader verbatim.
+//!
+//! ## Which generate surface to use (NOT redundant with `generate_ops`)
+//!
+//! There are TWO generate-from-schema-diff surfaces; pick by artifact shape:
+//!
+//! - **`generate_migration` (THIS module)** — the PLATFORM schema-authority path.
+//!   Renders a deployable `.sql` (dbmate) migration via the declarative differ,
+//!   covering the FULL goodie surface (`vector(N)` ANN indexes, PostGIS GiST
+//!   spatial indexes, FOREIGN KEY / CHECK constraints, FTS). The control-plane
+//!   deploy seam (`zeroship_control::deploy_migrate::apply_bundle_migrations`)
+//!   consumes these `.sql` files, and the schema-authority capstone e2e exercises
+//!   the whole `schema.js → generate → pack → deploy-apply → data-plane` pipeline
+//!   through it. It is the only generate path that emits a goodie/constraint-bearing
+//!   schema end-to-end. NOT a creator hand-authoring surface — property A's raw-SQL
+//!   ban governs what a CREATOR writes by hand, not platform-emitted deploy `.sql`.
+//!
+//! - **`crate::scaffold::generate_ops`** — the CREATOR-FACING PORTABLE autogenerate
+//!   path (PR4). Emits the op.* DSL (`.ts` + committed `.ir.json`) for the portable
+//!   structural subset (tables, columns, plain btree indexes) and FAILS CLOSED on
+//!   goodies (vector/postgis/FK/CHECK — author those by hand) so its output always
+//!   re-diffs to zero.
+//!
+//! Reach for `generate_ops` to produce committed creator op.* artifacts; reach for
+//! `generate_migration` for the platform `.sql` schema-authority deploy path.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};

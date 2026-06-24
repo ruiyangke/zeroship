@@ -25,13 +25,20 @@
 //! ## Public surfaces
 //!
 //! - [`eval::eval_schema_to_ir`] — eval a `schema.js` → `Vec<CollectionDescriptor>`.
-//! - [`generate::generate_migration`] — full `generate --schema` flow:
-//!   eval → IR → diff against the live DB → render a dbmate migration file.
-//! - [`record::record_migration_to_ir`] — the op.* recorder (design §2.5 / PR1):
-//!   eval a migration module's `op.*` `up()` → the typed `.ir.json`
-//!   [`MigrationIr`](zeroship_migrate::MigrationIr). This is the JS half of the
-//!   anti-drift gate — the single-source-of-truth byte/value-equality the golden
-//!   `.ir.json` corpus + the `Checksum::of_ir` round-trip test pin.
+//! - [`build::build_migrations`] / [`build::build_one_migration`] — the PR4 build
+//!   path: record each `.ts` via the KERNEL-SANDBOXED recorder child
+//!   ([`recorder_service::spawn_sandboxed_record`]) → committed `.ir.json`. This is
+//!   the ONLY surface that evaluates untrusted migration `.ts`.
+//! - [`generate::generate_migration`] — the PLATFORM schema-authority generate path:
+//!   eval → IR → diff against the live DB → render a deployable `.sql` migration
+//!   (covers the full goodie surface — vector/postgis/FK/CHECK — that the portable
+//!   op.* `generate_ops` fail-closes on); distinct from [`scaffold::generate_ops`]
+//!   (the creator-facing portable op.* autogenerate → `.ts`/`.ir.json`).
+//!
+//! The in-process `record::record_migration_to_*` functions (design §2.5 / PR1) run
+//! UNSANDBOXED V8 in-process and are `#[doc(hidden)]` test-only oracles — see their
+//! safety notes. They are NOT a public recording surface; record via the sandboxed
+//! build path above.
 
 pub mod build;
 pub mod eval;
@@ -44,9 +51,9 @@ pub mod sandbox;
 pub mod scaffold;
 
 pub use build::{
-    assert_packed_hash_matches_committed, build_migrations, discover_migrations,
-    recheck_not_yet_applied, BuildError, BuildOutcome, BuiltMigration, DiscoveredMigration,
-    RecordPath, RecordVia, RecorderClient,
+    assert_packed_hash_matches_committed, build_migrations, build_one_migration,
+    discover_migrations, recheck_not_yet_applied, BuildError, BuildOutcome, BuiltMigration,
+    DiscoveredMigration, RecordPath, RecordVia, RecorderClient,
 };
 pub use eval::{eval_schema_to_ir, EvalError};
 pub use generate::{generate_migration, GenerateError, GenerateOutcome};

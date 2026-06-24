@@ -22,7 +22,8 @@ use std::time::SystemTime;
 use clap::{Parser, Subcommand};
 use zeroship_migrate_js::recorder_http::StructuredError;
 use zeroship_migrate_js::{
-    build_migrations, generate_ops, scaffold_new_ts, timestamp_14, RecordVia, RecorderClient,
+    build_migrations, build_one_migration, generate_ops, scaffold_new_ts, timestamp_14, RecordVia,
+    RecorderClient,
     ResourceBudget,
 };
 
@@ -201,47 +202,34 @@ fn cmd_new(name: &str, dir: &Path) -> ExitCode {
 }
 
 fn cmd_record(file: &Path, owner_app: &str) -> ExitCode {
-    // Build the single-file dir as a one-file build (LOCAL record path).
-    let dir = match file.parent() {
-        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
-        _ => PathBuf::from("."),
-    };
-    let stem = match file.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".ts")) {
-        Some(s) => s.to_string(),
-        None => {
-            eprintln!("record: {} is not a .ts migration file", file.display());
-            return ExitCode::FAILURE;
-        }
-    };
     let via = RecordVia::Local {
         budget: ResourceBudget::default(),
     };
-    // Build the whole dir but report only the requested file. (build_migrations is
-    // build-once: a file with a committed .ir.json is read verbatim, so re-running
-    // record is idempotent.)
-    match build_migrations(&dir, owner_app, &via) {
-        Ok(outcome) => {
-            match outcome.migrations.iter().find(|m| m.stem == stem) {
-                Some(m) => {
-                    for w in &m.warnings {
-                        eprintln!(
-                            "record: determinism warning [{}]: {} — {}",
-                            w.code, w.accessor, w.suggested_fix
-                        );
-                    }
-                    println!(
-                        "record: wrote {} (checksum {})",
-                        file.with_file_name(&m.filename).display(),
-                        m.checksum
+    // Record ONLY the requested file (a single-discovered-migration build), NOT the
+    // whole dir — `record half_finished.ts` must never inadvertently record an
+    // unrelated in-progress sibling. build_one_migration is still build-once: a file
+    // with a committed .ir.json is read verbatim, so re-running record is idempotent.
+    match build_one_migration(file, owner_app, &via) {
+        Ok(outcome) => match outcome.migrations.first() {
+            Some(m) => {
+                for w in &m.warnings {
+                    eprintln!(
+                        "record: determinism warning [{}]: {} — {}",
+                        w.code, w.accessor, w.suggested_fix
                     );
-                    ExitCode::SUCCESS
                 }
-                None => {
-                    eprintln!("record: {} not found among discovered migrations", file.display());
-                    ExitCode::FAILURE
-                }
+                println!(
+                    "record: wrote {} (checksum {})",
+                    file.with_file_name(&m.filename).display(),
+                    m.checksum
+                );
+                ExitCode::SUCCESS
             }
-        }
+            None => {
+                eprintln!("record: {} produced no migration", file.display());
+                ExitCode::FAILURE
+            }
+        },
         Err(e) => {
             eprintln!("record: {e}");
             ExitCode::FAILURE

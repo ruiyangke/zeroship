@@ -234,6 +234,86 @@ async fn generate_redifs_to_zero_and_parity_and_todo_marker() {
         .ok();
 }
 
+// A schema carrying a UNIQUE field → a unique INDEX (the MED-1 surface): generate
+// must SYNTHESIZE the index as a standalone createIndex op so the migration
+// re-diffs to ZERO. Pre-fix the index was silently dropped and the re-diff churned.
+const INDEXED_SCHEMA: &str = r#"
+import { t } from "@zeroship/db";
+const accounts = {
+  email: t.string().required().unique(),
+  handle: t.string(),
+};
+export default { schema: { accounts } };
+"#;
+
+// ---------------------------------------------------------------------------
+// MED-1: generate of an INDEX-bearing schema re-diffs to ZERO on real PG (the
+// synthesized createIndex actually applies; the desired index is not dropped).
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn generate_index_bearing_schema_redifs_to_zero_on_pg() {
+    assert_child_built();
+    let conn = pg().await;
+    let schema = unique_schema("genidx");
+    conn.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\""))
+        .await
+        .expect("create schema");
+
+    let descriptors = eval_schema_to_ir(INDEXED_SCHEMA, APP).expect("eval schema");
+    let desired = desired_snapshot(&schema, &descriptors).expect("desired snapshot");
+    let live0 = snapshot_schema(&conn, &schema).await.expect("introspect live (empty)");
+
+    let gen = generate_ops("create_accounts", APP, &desired, &live0).expect("generate ops");
+    assert!(!gen.is_empty);
+    // The unique index over `email` MUST be synthesized as a standalone createIndex.
+    use zeroship_migrate::ir::Op;
+    assert!(
+        gen.ir.ops.iter().any(|o| matches!(o, Op::CreateIndex { columns, .. } if columns == &vec!["email".to_string()])),
+        "the unique-field index must be synthesized as a createIndex op; ops: {:?}",
+        gen.ir.ops
+    );
+
+    // Apply the generated IR on PG.
+    let mut ir_bytes = serde_json::to_string_pretty(&gen.ir).unwrap();
+    ir_bytes.push('\n');
+    let author = IrAuthor::new(&schema, APP, SqlDialect::Postgres);
+    let migrations = author
+        .load_and_lower(&ir_bytes, APP, &BTreeMap::new(), &LiveSchema::default())
+        .expect("generated IR lowers on PG");
+    let engine = MigrationEngine::new();
+    let plan = engine.plan(&migrations, &GuardConfig::confined(schema.clone()));
+    assert!(plan.denied.is_empty(), "no denials: {:?}", plan.denied);
+    engine
+        .apply(
+            &plan,
+            Approval::None,
+            &zeroship_migrate::PostgresBackend::new(&conn),
+            &ExecutorConfig::new(&schema, &schema),
+            "genidx",
+        )
+        .await
+        .expect("apply generated IR on PG");
+
+    // RE-DIFF to zero: the synthesized index made the live schema match desired.
+    let live1 = snapshot_schema(&conn, &schema).await.expect("introspect live (applied)");
+    let ownership: std::collections::HashMap<String, String> = live1
+        .tables
+        .keys()
+        .map(|t| (t.clone(), APP.to_string()))
+        .collect();
+    let differ = DeclarativeAuthor::new(&schema, APP);
+    let replan = differ.diff(&desired, &live1, &ownership, &[]).expect("re-diff");
+    assert!(
+        replan.all_migrations().is_empty(),
+        "the index-bearing generated migration must re-diff to ZERO; residual: {:?}",
+        replan.all_migrations().iter().map(|m| &m.up).collect::<Vec<_>>()
+    );
+
+    conn.batch_execute(&format!("DROP SCHEMA \"{schema}\" CASCADE"))
+        .await
+        .ok();
+}
+
 /// The TODO-backfill marker is emitted for a NON-NULL column add with no default.
 #[compio::test]
 async fn generate_emits_machine_readable_backfill_todo() {
