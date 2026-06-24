@@ -286,7 +286,7 @@ createTable(
 );
 ```
 
-The scoped builder methods (`sdks/migrate/src/types.ts:245-251`):
+The scoped builder methods (`sdks/migrate/src/types.ts:251-257`):
 `b.index(columns, opts?)`, `b.unique(columns, opts?)`, `b.primaryKey(columns)`,
 `b.check(expr, opts?)`, `b.foreignKey(spec)`.
 
@@ -358,6 +358,12 @@ insert("plans", {
   ],
 });
 
+// PG-only upsert: on a conflicting `id`, update the listed columns.
+insert("plans", {
+  rows: [{ id: "pro", price_cents: 3900 }],
+  onConflict: { columns: ["id"], doUpdate: { price_cents: 3900 } },
+});
+
 update("orders", {
   set: { status: (c) => c.fn.upper(c("status")) },
   where: (c) => c("status").eq("pending"),
@@ -401,7 +407,7 @@ batchAlterTable(table, (b) => void); // ops.ts:642
 A SQLite ALTER that SQLite cannot do in place (drop a column on an old SQLite,
 re-type, etc.) is lowered to the 12-step table rebuild. `batchAlterTable` groups
 several column/constraint changes against one table so they share one rebuild
-(`sdks/migrate/src/types.ts:253-261`): `b.addColumn`, `b.dropColumn`,
+(`sdks/migrate/src/types.ts:260-267`): `b.addColumn`, `b.dropColumn`,
 `b.renameColumn`, `b.alterColumn`, `b.addForeignKey`, `b.addCheck`.
 
 ## The fluent expression surface
@@ -503,7 +509,7 @@ This envelope is enforced across **two layers**, not one:
   *dialect-neutral, clearly-malformed* shapes — a non-string or empty `delim`,
   and a non-integer or non-positive `n`. It does **not** check single-ASCII,
   multi-character, or the `1 ≤ n ≤ 8` bound (the recorder twin's own comment is
-  explicit, `migrate_ops.js:1101-1103`).
+  explicit, `migrate_ops.js:1097-1104`).
 - The single-ASCII delimiter and the SQLite-leg `1 ≤ n ≤ 8` bound are enforced
   by the **Rust validator**: a multi-character / non-ASCII delimiter or `n > 8`
   is *admitted on Postgres* (`dialect_scope = PgOnly`) and is a hard
@@ -667,8 +673,10 @@ apply.
 
 **What the doc-example gates do and do not prove.** Two gates keep this doc
 honest. The TS leg (`sdks/migrate/tests/doc-examples.test.ts`) compiles every
-typed snippet against the real `@zeroship/migrate` types, so a renamed op or a
-changed signature fails CI — but it only proves **type-correctness**; the
+runnable typed snippet against the real `@zeroship/migrate` types (the
+signature-listing blocks, which use bare param names, are excepted), so a
+renamed op or a changed signature fails CI — but it only proves
+**type-correctness**; the
 snippets compile inside never-executed function bodies, so it does **not**
 exercise record-time runtime checks (the `splitPartGrammarLint` throw, `del`'s
 mandatory-`where` reject). Those runtime invariants are covered separately by
