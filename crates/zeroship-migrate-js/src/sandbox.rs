@@ -10,6 +10,20 @@
 //! thread-create syscalls a post-lockdown default-deny filter forbids; the untrusted
 //! `up()` body does not).
 //!
+//! ## Thread scope (CRITICAL — PR4a code-critic #1)
+//!
+//! seccomp's `apply_filter` (flags=0) and landlock's `restrict_self` BOTH bind the
+//! CALLING THREAD only. If V8's multi-threaded default platform had already spun up its
+//! GC/compiler/platform worker pool when the lockdown ran, those PRE-EXISTING threads
+//! would stay UNFILTERED at the kernel level — a resolver-bypassing escape scheduled
+//! onto one could `socket()`/`fork()`/write freely. We close this two ways,
+//! defense-in-depth: the recorder child initializes V8 with a SINGLE-THREADED platform
+//! ([`init_recorder_v8`] → `zeroship_runtime::init_v8_single_threaded`) so NO background
+//! worker thread exists, AND [`apply_seccomp`] installs the BPF filter via
+//! `apply_filter_all_threads` (TSYNC) so it synchronizes across every thread that does
+//! exist. landlock has no TSYNC equivalent, so the single-threaded platform is what
+//! gives IT full coverage.
+//!
 //! ## The ruleset (design §8.9)
 //!
 //! Full kernel baseline = **seccomp-bpf default-deny + landlock read-only + an
@@ -28,9 +42,11 @@
 //!   faithful e2e observes). See [`SandboxPosture`] + [`apply_seccomp`].
 //! - **landlock**: a read-only ruleset over the migration dir + the schema-types
 //!   blob path; ANY write, and any read outside the allow-list, is an `EACCES` the
-//!   kernel returns (Linux ≥ 5.13). On a landlock-less host this layer is replaced
-//!   by the userland module-allow-list resolver as the fs boundary (the degraded
-//!   floor).
+//!   kernel returns (Linux ≥ 5.13). On a landlock-less host the seccomp `openat`
+//!   arg-filter still SIGSYS-kills any WRITE/create open (so fs-WRITE containment
+//!   against a resolver-bypassing escape survives the degraded floor, MED #2); only
+//!   out-of-allow-list READ restriction is lost, with the userland module-allow-list
+//!   resolver as the remaining read boundary.
 //! - **rlimits**: `RLIMIT_CPU` (seconds of CPU) + `RLIMIT_AS` (address-space bytes),
 //!   applied in `pre_exec`. The wall-clock watchdog is the parent's responsibility
 //!   (see `recorder_service`) — it `SIGKILL`s a child that overruns the wall budget.
@@ -47,6 +63,34 @@
 #![allow(unsafe_code)] // raw syscalls (setrlimit/unshare/prctl), mirroring sandbox-agent::dropuser
 
 use std::path::PathBuf;
+
+/// Initialize V8 for the recorder child with a **single-threaded** platform — the
+/// keystone of the CRITICAL thread-scope fix (PR4a code-critic #1).
+///
+/// The shared [`zeroship_runtime::init_v8`] installs a *multi-threaded* default
+/// platform (`new_default_platform(0, …)`), which spawns a GC/compiler/platform
+/// worker-thread pool the instant it initializes. seccomp's `apply_filter` (flags=0)
+/// is calling-thread-only and landlock's `restrict_self` likewise restricts only the
+/// calling thread — so any thread that ALREADY EXISTS when the in-process lockdown
+/// runs stays UNFILTERED at the kernel level. A resolver-bypassing escape (native
+/// addon / V8 0-day / FFI) scheduled onto such a thread could then `socket()` /
+/// `fork()` / write the filesystem with no kernel filter — empirically proven in the
+/// regression e2e (a pre-lockdown thread's `socket()` succeeded under the old code).
+///
+/// We close that gap two ways, defense-in-depth:
+///   1. a **single-threaded** V8 platform here, so V8 runs GC/compilation INLINE on
+///      the calling thread and spawns NO background worker pool — there is no
+///      pre-existing unfiltered thread for landlock (which has no TSYNC) to miss; and
+///   2. seccomp installed via `apply_filter_all_threads` (TSYNC) in [`apply_seccomp`],
+///      so the BPF filter synchronizes across every thread that exists at install
+///      time regardless.
+///
+/// Delegates to [`zeroship_runtime::init_v8_single_threaded`], which installs V8's
+/// single-threaded platform + flags (one-time, process-global). Used by the recorder
+/// child INSTEAD of the shared multi-threaded `init_v8`.
+pub fn init_recorder_v8() {
+    zeroship_runtime::init_v8_single_threaded();
+}
 
 /// Which trust posture the recorder runs under (design §8.9 / §8.9.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -298,9 +342,10 @@ pub fn apply_seccomp() -> Result<(), String> {
     // tests/recorder_sandbox_e2e.rs::seccomp_allowlist_is_sufficient) and pinned
     // here. CRITICALLY ABSENT: socket/connect/sendto/recvfrom (network),
     // execve/execveat/fork/vfork (subprocess), clone/clone3 with CLONE_VM-for-process
-    // are gated by absence of execve anyway, ptrace, bpf, mount, open(O_WRONLY) is
-    // gated by landlock not seccomp (we allow openat for read but landlock denies
-    // writes; on the degraded floor the resolver is the boundary).
+    // are gated by absence of execve anyway, ptrace, bpf, mount. `openat` is NOT
+    // unconditional either — it is added below with an arg-filter that permits only
+    // READ-only opens, so a WRITE/create open is SIGSYS-killed at the SECCOMP layer
+    // (fs-write containment holds even on the landlock-less degraded floor, MED #2).
     let allowed: &[libc::c_long] = &[
         // --- memory ---
         libc::SYS_brk,
@@ -321,10 +366,11 @@ pub fn apply_seccomp() -> Result<(), String> {
         libc::SYS_statx,
         libc::SYS_pread64,
         libc::SYS_pwrite64,
-        // openat is allowed (V8/glibc touch locale/tz/std fds); WRITES are denied by
-        // landlock (kernel) or the resolver (degraded floor), and there is no
-        // network fd to open. Without openat, glibc/V8 init residue post-fork fails.
-        libc::SYS_openat,
+        // NOTE: `openat` is NOT on this unconditional allow-list — it is added below
+        // with an ARG FILTER that permits ONLY read-only opens (flags arg with no
+        // O_WRONLY/O_RDWR/O_CREAT). A WRITE/create open is SIGSYS-killed at the seccomp
+        // layer, so fs-WRITE containment against a resolver-bypassing escape holds even
+        // on the DEGRADED FLOOR (landlock-less host) — closing PR4a code-critic MED #2.
         // --- futex / scheduling / signals (V8 GC threads, compio) ---
         libc::SYS_futex,
         libc::SYS_sched_yield,
@@ -393,6 +439,28 @@ pub fn apply_seccomp() -> Result<(), String> {
         .map_err(|e| format!("seccomp clone rule: {e}"))?],
     );
 
+    // `openat` — allow ONLY read-only opens. `openat(dirfd, path, flags, mode)`: flags
+    // is arg2. A read-only open has `(flags & (O_ACCMODE | O_CREAT)) == 0`
+    // (O_RDONLY == 0, and no create). Any O_WRONLY/O_RDWR/O_CREAT bit makes the masked
+    // value non-zero, so the rule does NOT match and the call falls through to the
+    // default KillProcess (SIGSYS). This makes a raw WRITE/create open SIGSYS-killed at
+    // the seccomp layer — so fs-WRITE containment against a resolver-bypassing native
+    // escape holds EVEN on the degraded floor where landlock is absent (PR4a
+    // code-critic MED #2). V8/glibc only ever open locale/tz/std fds read-only post
+    // init, so legitimate recording is unaffected (the happy-path e2e proves this).
+    let write_or_create = (libc::O_ACCMODE | libc::O_CREAT) as u64;
+    rules.insert(
+        libc::SYS_openat,
+        vec![SeccompRule::new(vec![SeccompCondition::new(
+            2, // arg2 = open flags
+            SeccompCmpArgLen::Qword,
+            SeccompCmpOp::MaskedEq(write_or_create),
+            0, // (flags & (O_ACCMODE|O_CREAT)) == 0  =>  pure read-only open
+        )
+        .map_err(|e| format!("seccomp openat condition: {e}"))?])
+        .map_err(|e| format!("seccomp openat rule: {e}"))?],
+    );
+
     // DEFAULT-DENY: any syscall not in `rules` -> KillProcess (SIGSYS). The faithful
     // e2e observes WTERMSIG==SIGSYS for socket/connect/execve attempts.
     //
@@ -416,7 +484,16 @@ pub fn apply_seccomp() -> Result<(), String> {
     let prog: BpfProgram = filter
         .try_into()
         .map_err(|e| format!("seccomp compile: {e}"))?;
-    seccompiler::apply_filter(&prog).map_err(|e| format!("seccomp apply: {e}"))?;
+    // `apply_filter_all_threads` issues `seccomp(2)` with `SECCOMP_FILTER_FLAG_TSYNC`,
+    // so the BPF filter SYNCHRONIZES across EVERY thread in the process at install
+    // time — not just the calling thread (the calling-thread-only `apply_filter`,
+    // flags=0, was the CRITICAL PR4a code-critic gap: a V8 background thread that
+    // already existed stayed unfiltered and could `socket()`/`fork()`). Combined with
+    // the single-threaded V8 platform (`init_recorder_v8`), the recorder has no
+    // unfiltered thread for a resolver-bypassing escape to schedule onto: TSYNC covers
+    // any thread that does exist, and the single-threaded platform means none do.
+    seccompiler::apply_filter_all_threads(&prog)
+        .map_err(|e| format!("seccomp apply (TSYNC, all threads): {e}"))?;
     Ok(())
 }
 

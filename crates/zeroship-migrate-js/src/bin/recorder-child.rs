@@ -26,11 +26,66 @@
 
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Condvar, Mutex};
 
 use zeroship_migrate_js::recorder_protocol::{ChildRequest, ChildResponse};
-use zeroship_migrate_js::sandbox::{apply_landlock, apply_seccomp, SandboxPosture, SandboxReport};
+use zeroship_migrate_js::sandbox::{
+    apply_landlock, apply_seccomp, init_recorder_v8, SandboxPosture, SandboxReport,
+};
 
 use zeroship_runtime::{ModuleEntry, Runtime};
+
+/// A worker thread created BEFORE the in-process lockdown — the test analogue of a
+/// V8 background (GC/compiler/platform) worker thread that already exists when
+/// `apply_seccomp`/`apply_landlock` run. The CRITICAL PR4a code-critic finding was
+/// that a thread-scoped filter (seccomp `apply_filter` flags=0 / landlock
+/// `restrict_self`) leaves such a pre-existing thread UNFILTERED, so a
+/// resolver-bypassing escape scheduled onto it could `socket()`/`fork()`/write
+/// freely. This is reached ONLY under `ZS_RECORDER_PRELOCK_THREAD` (a test-only
+/// seam): we spawn a parked thread before lockdown, then `thread_socket` signals it
+/// to issue the denied syscall from THAT thread. With the fix (seccomp TSYNC across
+/// all threads + a single-threaded V8 platform so no unfiltered background thread
+/// exists), the kernel must KILL THE WHOLE PROCESS (`KillProcess`/SIGSYS) — not just
+/// return an fd on an unfiltered thread.
+struct PrelockThread {
+    /// 0 = idle, 1 = "issue socket() now". Set by the main thread post-lockdown.
+    cmd: Mutex<i32>,
+    cv: Condvar,
+    /// The fd the worker thread's `socket()` returned (>=0 means it SUCCEEDED on an
+    /// unfiltered thread — the bug). -1 means it failed/never set. If seccomp
+    /// TSYNC'd onto this thread, the call is SIGSYS-killed and we never read this.
+    result_fd: AtomicI32,
+}
+
+static PRELOCK: Mutex<Option<&'static PrelockThread>> = Mutex::new(None);
+
+/// Spawn the pre-lockdown worker thread (test-only). It parks on the condvar until
+/// the main thread (post-lockdown) signals it to call `socket()`.
+fn spawn_prelock_thread() {
+    let handle: &'static PrelockThread = Box::leak(Box::new(PrelockThread {
+        cmd: Mutex::new(0),
+        cv: Condvar::new(),
+        result_fd: AtomicI32::new(-1),
+    }));
+    *PRELOCK.lock().unwrap() = Some(handle);
+    std::thread::Builder::new()
+        .name("zs-prelock-worker".into())
+        .spawn(move || {
+            let mut g = handle.cmd.lock().unwrap();
+            while *g != 1 {
+                g = handle.cv.wait(g).unwrap();
+            }
+            drop(g);
+            // Issue the denied syscall FROM THIS (pre-lockdown) thread. If the filter
+            // is thread-scoped to main, this SUCCEEDS here (fd>=0) — the bug. With
+            // TSYNC, the kernel KillProcess-es the whole process before this returns.
+            #[allow(unsafe_code)]
+            let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+            handle.result_fd.store(fd, Ordering::SeqCst);
+        })
+        .expect("spawn prelock worker thread");
+}
 
 const OP_RECORDER_JS: &str = include_str!("../op_recorder.js");
 const MIGRATE_OPS_JS: &str = include_str!("../migrate_ops.js");
@@ -65,7 +120,22 @@ fn run(req: ChildRequest) -> Result<ChildResponse, ChildResponse> {
         SandboxPosture::Local
     };
 
-    zeroship_runtime::init_v8();
+    // TEST-ONLY: spawn a worker thread BEFORE the lockdown to model a V8 background
+    // thread that already exists when the in-process filter is installed (the CRITICAL
+    // PR4a code-critic finding). Done before init/lockdown so the regression e2e can
+    // prove the filter reaches a pre-existing thread (process-wide kill), not just main.
+    if std::env::var_os("ZS_RECORDER_PRELOCK_THREAD").is_some() {
+        spawn_prelock_thread();
+    }
+
+    // Initialize V8 with a SINGLE-THREADED platform (no GC/compiler/platform worker
+    // thread pool). This is the keystone of the CRITICAL thread-scope fix: landlock's
+    // `restrict_self` and seccomp both ultimately bind threads, and landlock has no
+    // TSYNC, so the only sound way to cover every thread with landlock is to ensure
+    // the ONLY thread is the one calling `restrict_self`. A single-threaded V8 runs
+    // GC/compilation inline on the calling thread, so no unfiltered background thread
+    // exists for a resolver-bypassing escape to schedule onto (design §8.9).
+    init_recorder_v8();
 
     let mut report = SandboxReport {
         // netns + rlimits are applied by the parent's pre_exec; the parent passes
@@ -79,18 +149,23 @@ fn run(req: ChildRequest) -> Result<ChildResponse, ChildResponse> {
         landlock: false,
     };
 
-    // Confirm the netns actually took (the child can read its own net namespace).
-    // If the parent requested it but it did not engage, correct the report so the
-    // hosted floor check is honest.
-    report.netns = report.netns && netns_is_isolated();
+    // Confirm the netns actually took. PRIMARY check: compare our own net-ns inode
+    // against the parent's (passed in `req.parent_netns_inode`) — a DIFFERENT inode is
+    // robust proof the `unshare(CLONE_NEWNET)` moved us into a fresh namespace (LOW #1).
+    // Fall back to the interface-count heuristic only when the parent could not read
+    // its inode (parent_netns_inode == 0). If the parent requested netns but it did not
+    // engage, correct the report so the hosted floor check stays honest.
+    report.netns = report.netns && netns_is_isolated(req.parent_netns_inode);
 
     let allow_read: Vec<PathBuf> = req.allow_read_paths.iter().map(PathBuf::from).collect();
 
     // ---- Build the runtime (pre-untrusted-eval, pre-lockdown) ----
-    // `Runtime::builder().build()` + `init_v8()` have spun V8's platform threads;
-    // the seccomp allow-list below covers V8's steady-state compute syscalls
-    // (mmap/mprotect/futex/clone-for-threads). The untrusted module is NOT loaded
-    // until AFTER the sandbox is applied.
+    // `Runtime::builder().build()` runs under the SINGLE-THREADED V8 platform installed
+    // by `init_recorder_v8()` above — so V8 spawns NO background worker thread pool, and
+    // the seccomp filter (installed via TSYNC below) + landlock cover the only thread.
+    // The seccomp allow-list covers V8's steady-state compute syscalls
+    // (mmap/mprotect/futex/clone-for-threads). The untrusted module is NOT loaded until
+    // AFTER the sandbox is applied.
     //
     // The V8 HEAP LIMIT is the authoritative memory bound (RLIMIT_AS is too coarse
     // for V8's huge sparse virtual reservation): V8 enforces it and the runtime's
@@ -380,6 +455,46 @@ fn run_syscall_probe(which: &str) {
         "fork" => {
             let _ = unsafe { libc::fork() };
         }
+        // --- CRITICAL thread-scope proof: issue socket() on a thread that was
+        //     created BEFORE the lockdown (mirrors a V8 background thread). With a
+        //     thread-scoped filter that thread is UNFILTERED and socket() returns an
+        //     fd (the bug); with the TSYNC fix + single-threaded V8 the kernel
+        //     KillProcess-es the WHOLE process (SIGSYS) before the call returns. The
+        //     test observes the process termination cause. Requires
+        //     ZS_RECORDER_PRELOCK_THREAD to have spawned the worker. ---
+        "thread_socket" => {
+            let handle = PRELOCK
+                .lock()
+                .unwrap()
+                .expect("ZS_RECORDER_PRELOCK_THREAD must be set for the thread_socket probe");
+            // Signal the parked pre-lockdown thread to call socket().
+            {
+                let mut g = handle.cmd.lock().unwrap();
+                *g = 1;
+                handle.cv.notify_all();
+            }
+            // Wait (bounded) for the worker to report its fd. If the kernel TSYNC-killed
+            // the process, we never get here. If it returns an fd>=0 on the unfiltered
+            // thread, the bug is live -> exit 0 (test asserts process death instead).
+            let mut waited_ms = 0u64;
+            loop {
+                let fd = handle.result_fd.load(Ordering::SeqCst);
+                if fd >= 0 {
+                    // socket() SUCCEEDED on the pre-lockdown thread -> the filter did
+                    // NOT reach it. The test asserts the process was SIGSYS-killed, so
+                    // reaching here (no kill) FAILS the test.
+                    unsafe { libc::close(fd) };
+                    std::process::exit(0);
+                }
+                if waited_ms >= 5_000 {
+                    // Worker neither succeeded nor was killed within the window. Exit a
+                    // distinct non-42/non-0 code so the test fails loudly.
+                    std::process::exit(11);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                waited_ms += 10;
+            }
+        }
         // --- seccomp: io_uring_setup — the known seccomp-BYPASS vector. io_uring
         //     lets a process submit network/fs ops via a ring, sidestepping the
         //     per-syscall filter. It is NOT on the allow-list, so the setup syscall
@@ -484,16 +599,37 @@ fn run_syscall_probe(which: &str) {
     }
 }
 
-/// Check that the child is in a fresh, interface-less network namespace.
+/// Check that the child is in a fresh network namespace.
 ///
-/// We read **`/proc/net/dev`** (NOT `/sys/class/net`): `/proc/net/dev` is
-/// netns-scoped and lists only the interfaces in the CURRENT namespace, whereas
-/// sysfs reflects the host's netns unless remounted. In a fresh `CLONE_NEWNET`
-/// namespace `/proc/net/dev` shows exactly one interface — `lo` (DOWN, no routes).
-/// The host shows `eth*`/`docker0`/`veth*`/etc. Read happens early in `run()`,
-/// before landlock/seccomp narrow us. If the read fails, we conservatively report
-/// NOT isolated (so the hosted floor leans on seccomp rather than over-claiming).
-fn netns_is_isolated() -> bool {
+/// PRIMARY (robust) check: compare our `/proc/self/ns/net` inode against the parent's
+/// (`parent_netns_inode`, captured pre-spawn). A DIFFERENT inode proves the
+/// `unshare(CLONE_NEWNET)` actually moved us into a fresh namespace — this does NOT
+/// false-positive on a host whose only interface is already `lo` (the interface-count
+/// heuristic's blind spot, PR4a code-critic LOW #1). We only treat EQUAL-or-unreadable
+/// inodes as the fallback case.
+///
+/// FALLBACK (only when `parent_netns_inode == 0`, i.e. the parent could not read its
+/// own inode): the legacy `/proc/net/dev` interface-count heuristic. `/proc/net/dev`
+/// is netns-scoped; a fresh `CLONE_NEWNET` namespace shows exactly one interface (`lo`,
+/// DOWN, no routes) while the host shows `eth*`/`docker0`/`veth*`/etc.
+///
+/// If both checks are inconclusive we conservatively report NOT isolated (so the hosted
+/// floor leans on seccomp rather than over-claiming containment).
+fn netns_is_isolated(parent_netns_inode: u64) -> bool {
+    if parent_netns_inode != 0 {
+        if let Ok(meta) = std::fs::metadata("/proc/self/ns/net") {
+            let own = std::os::unix::fs::MetadataExt::ino(&meta);
+            // A different inode == we are in a DIFFERENT (fresh) netns than the parent.
+            // Equal inode == the unshare did not move us; report not-isolated.
+            return own != parent_netns_inode;
+        }
+        // Could not read our own inode — fall through to the heuristic.
+    }
+    netns_is_isolated_by_interface_count()
+}
+
+/// Fallback netns heuristic by interface count (see `netns_is_isolated`).
+fn netns_is_isolated_by_interface_count() -> bool {
     match std::fs::read_to_string("/proc/net/dev") {
         Ok(contents) => {
             // The first two lines are headers; each subsequent line is

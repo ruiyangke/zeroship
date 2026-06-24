@@ -230,7 +230,7 @@ pub use clamp::{
 pub use enforce_range::{EnforceRangeU32, EnforceRangeU64, read_enforce_range_u32, read_enforce_range_u64};
 pub use convert::{DictOrBool, WebIdlConvertible, read_record, read_sequence};
 pub use url_native::helpers::USVString;
-pub use init::{init_v8, RequestResult, HttpResult};
+pub use init::{init_v8, init_v8_single_threaded, RequestResult, HttpResult};
 pub use modules::ModuleEntry;
 pub use state::{SharedState, RuntimeState, OpResult, SpawnedTimer, WebSocketState, WsMessage};
 pub use storage::AppStorage;

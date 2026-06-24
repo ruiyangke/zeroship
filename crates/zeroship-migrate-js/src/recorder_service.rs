@@ -116,6 +116,18 @@ pub struct RecordRequest {
     pub schema_types_blob: Option<String>,
 }
 
+/// Read the calling process's network-namespace inode
+/// (`stat("/proc/self/ns/net").st_ino`). Used by the parent to capture its OWN netns
+/// inode pre-spawn so the child can prove (by inode INEQUALITY) that its
+/// `unshare(CLONE_NEWNET)` moved it into a FRESH namespace — robust where the
+/// interface-count heuristic false-positives (a host whose only interface is `lo`,
+/// PR4a code-critic LOW #1). Returns `None` if `/proc` is unreadable.
+pub fn read_netns_inode() -> Option<u64> {
+    std::fs::metadata("/proc/self/ns/net")
+        .ok()
+        .map(|m| std::os::unix::fs::MetadataExt::ino(&m))
+}
+
 /// Locate the recorder-child binary next to the current executable (the standard
 /// cargo layout: sibling in `target/<profile>/`). Overridable via
 /// `ZEROSHIP_RECORDER_CHILD` for packaged installs / tests.
@@ -210,8 +222,13 @@ pub fn spawn_sandboxed_record(req: &RecordRequest) -> Result<RecordResult, Recor
         name: req.name.clone(),
         hosted: posture == SandboxPosture::Hosted,
         // We requested netns (best-effort) + rlimits (mandatory). The child confirms
-        // netns via /proc and ANDs it into its report.
+        // netns by comparing its own net-ns inode against the parent's (below) and
+        // ANDs the result into its report.
         netns_engaged: true,
+        // The parent's net-ns inode, captured pre-spawn. The child compares this to its
+        // own /proc/self/ns/net inode — a different inode is robust proof the unshare
+        // took (vs the false-positive-prone interface-count check) (LOW #1).
+        parent_netns_inode: read_netns_inode().unwrap_or(0),
         rlimit_engaged: true,
         heap_limit_mb: req.budget.heap_limit_mb,
         allow_read_paths: req
@@ -390,7 +407,15 @@ struct InflightGuard<'a> {
 }
 impl Drop for InflightGuard<'_> {
     fn drop(&mut self) {
-        let mut st = self.svc.inflight.lock().unwrap();
+        // Recover from a poisoned mutex instead of double-panicking in `drop` (which
+        // would ABORT the whole multi-tenant service). A poisoned `inflight` lock just
+        // means some prior holder panicked; the counter state is still usable for the
+        // saturating decrement here (PR4a code-critic LOW #2).
+        let mut st = self
+            .svc
+            .inflight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         st.global = st.global.saturating_sub(1);
         if let Some(c) = st.per_token.get_mut(&self.token) {
             *c = c.saturating_sub(1);
@@ -419,7 +444,9 @@ impl RecorderService {
     /// Try to acquire an in-flight slot for `token` (per-token + global caps). The
     /// HTTP layer queues on `Overloaded`. Returns a guard that releases on drop.
     fn acquire(&self, token: &str) -> Result<InflightGuard<'_>, RecorderError> {
-        let mut st = self.inflight.lock().unwrap();
+        // Recover from poisoning rather than propagate a panic into the request path
+        // (LOW #2): a prior panic-while-held must not wedge the whole service.
+        let mut st = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
         if st.global >= self.limits.global_max {
             return Err(RecorderError::Overloaded);
         }
@@ -473,6 +500,61 @@ impl RecorderService {
     /// Inspection helper: current global in-flight count (used by the isolation e2e
     /// + ops metrics).
     pub fn inflight_global(&self) -> usize {
-        self.inflight.lock().unwrap().global
+        self.inflight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .global
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct YesAuthorizer;
+    impl Authorizer for YesAuthorizer {
+        fn authorize(&self, _token: &str, _app_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// PR4a code-critic LOW #2: a POISONED `inflight` mutex must NOT abort the service.
+    /// We poison the lock (panic while holding it inside `catch_unwind`), then exercise
+    /// EVERY path that touches the lock — `inflight_global`, `acquire`, and the
+    /// `InflightGuard::drop` that runs when the acquired guard is dropped. Under the old
+    /// `lock().unwrap()` the guard's Drop would double-panic and ABORT the process; with
+    /// `unwrap_or_else(|e| e.into_inner())` they all recover.
+    #[test]
+    fn poisoned_inflight_mutex_does_not_abort_service() {
+        let svc = RecorderService::new(Box::new(YesAuthorizer));
+
+        // Poison the mutex: panic while the lock is held.
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = svc.inflight.lock().unwrap();
+            panic!("intentional poison while holding the inflight lock");
+        }));
+        assert!(r.is_err(), "the poisoning closure must have panicked");
+        assert!(
+            svc.inflight.is_poisoned(),
+            "the inflight mutex must now be poisoned"
+        );
+
+        // 1. inflight_global recovers (no panic).
+        let _ = svc.inflight_global();
+
+        // 2. acquire recovers AND the returned guard's Drop recovers (the LOW #2 abort
+        //    path) — drop happens at end of this block.
+        {
+            let _guard = svc
+                .acquire("pat_x")
+                .expect("acquire must succeed despite poisoning");
+            assert_eq!(svc.inflight_global(), 1, "slot acquired under poison");
+        } // InflightGuard::drop runs here — must NOT double-panic/abort.
+
+        assert_eq!(
+            svc.inflight_global(),
+            0,
+            "guard drop must release the slot even under a poisoned mutex"
+        );
     }
 }

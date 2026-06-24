@@ -26,8 +26,17 @@ pub struct ChildRequest {
     /// vs LOCAL single-tenant (userland floor, kernel layers opportunistic).
     pub hosted: bool,
     /// Whether the parent's `pre_exec` requested + the netns engaged (the child
-    /// re-confirms via `/proc` where it can).
+    /// re-confirms by comparing namespace inodes — see `parent_netns_inode`).
     pub netns_engaged: bool,
+    /// The PARENT's network-namespace inode (`stat("/proc/self/ns/net").st_ino`),
+    /// captured before the spawn. The child compares it against its OWN
+    /// `/proc/self/ns/net` inode: a DIFFERENT inode proves the `unshare(CLONE_NEWNET)`
+    /// actually moved the child into a fresh netns, robustly (an interface-count check
+    /// false-positives on a host whose only interface is already `lo` — PR4a
+    /// code-critic LOW #1). `0` = the parent could not read its own inode; the child
+    /// then falls back to the interface-count heuristic.
+    #[serde(default)]
+    pub parent_netns_inode: u64,
     /// Whether the parent's `pre_exec` applied the rlimit budget.
     pub rlimit_engaged: bool,
     /// The V8 heap cap (MiB) the child installs on its runtime — the authoritative

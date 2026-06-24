@@ -97,6 +97,11 @@ fn child_request(src: &str, hosted: bool, netns: bool, rlimit: bool) -> String {
         heap_limit_mb: 256,
         allow_read_paths: vec![],
         schema_types_blob: None,
+        // The test's own (parent) net-ns inode, so the child's inode-inequality check
+        // (LOW #1) has a baseline to compare against when this request drives a netns
+        // probe. 0 when unreadable -> child falls back to the interface heuristic.
+        parent_netns_inode: zeroship_migrate_js::recorder_service::read_netns_inode()
+            .unwrap_or(0),
     };
     serde_json::to_string(&req).unwrap()
 }
@@ -224,28 +229,50 @@ fn seccomp_kills_io_uring_setup_the_known_bypass_vector() {
 }
 
 #[test]
-fn landlock_denies_write_and_out_of_dir_read() {
+fn seccomp_kills_write_open_even_without_landlock() {
+    // PR4a code-critic MED #2: a WRITE/create open must be denied at the SECCOMP layer
+    // (an arg-filter on `openat` flags permits only read-only opens), so fs-WRITE
+    // containment against a resolver-bypassing native escape holds EVEN on the degraded
+    // floor (landlock absent). The `write_open` probe issues `open(O_WRONLY|O_CREAT)`
+    // directly from native code post-lockdown; with the seccomp openat arg-filter it is
+    // SIGSYS-killed (NOT an EACCES return) regardless of whether landlock is present.
+    if !seccomp_available() {
+        panic!("CAPABILITY PRESENT BUT TEST WOULD SKIP: seccomp is available — fix the gate");
+    }
+    let status = run_probe("write_open");
+    assert_eq!(
+        term_signal(&status),
+        Some(libc::SIGSYS),
+        "a write/create open must be SIGSYS-killed by the seccomp openat arg-filter \
+         (fs-write containment holds without landlock); got {status:?} — a non-SIGSYS \
+         exit means the write open was NOT denied at the seccomp layer (MED #2 regressed)"
+    );
+}
+
+#[test]
+fn landlock_denies_out_of_dir_read() {
     if !landlock_available() {
-        // Degraded floor: the resolver is the fs boundary. This is the only fs
-        // assertion legitimately gated — but it must HARD-FAIL if landlock IS here.
-        eprintln!("landlock not available — fs boundary is the resolver (degraded floor)");
+        // Degraded floor: the resolver is the fs boundary for READS. This is the only
+        // fs assertion legitimately gated — but it must HARD-FAIL if landlock IS here.
+        eprintln!("landlock not available — read fs boundary is the resolver (degraded floor)");
         return;
     }
-    // landlock-denied ops return EACCES (no signal); the probe exits with sentinel 42.
-    for probe in ["write_open", "read_outside"] {
-        let status = run_probe(probe);
-        assert_eq!(
-            term_signal(&status),
-            None,
-            "landlock probe '{probe}' must NOT be signal-killed (it returns EACCES); got {status:?}"
-        );
-        assert_eq!(
-            status.code(),
-            Some(42),
-            "landlock probe '{probe}' must hit the EACCES denial (exit 42); got {status:?} — \
-             a code 0 means the fs write/out-of-dir-read SUCCEEDED (landlock did NOT fire)"
-        );
-    }
+    // A READ-only open of an out-of-allow-list path is permitted by seccomp (read-only
+    // openat passes the arg-filter) but DENIED by landlock with EACCES (no signal); the
+    // probe exits with sentinel 42. (The WRITE case is now SIGSYS-killed at the seccomp
+    // layer — see `seccomp_kills_write_open_even_without_landlock`.)
+    let status = run_probe("read_outside");
+    assert_eq!(
+        term_signal(&status),
+        None,
+        "landlock read probe must NOT be signal-killed (it returns EACCES); got {status:?}"
+    );
+    assert_eq!(
+        status.code(),
+        Some(42),
+        "landlock read probe must hit the EACCES denial (exit 42); got {status:?} — \
+         a code 0 means the out-of-dir read SUCCEEDED (landlock did NOT fire)"
+    );
 }
 
 // ===========================================================================
@@ -655,6 +682,61 @@ fn netns_alone_contains_network_with_seccomp_disabled() {
         Some(42),
         "netns ALONE must contain the outbound connect (ENETUNREACH) -> exit 42; \
          got {status:?} — code 0 means the connect REACHED the network (netns did not contain)"
+    );
+}
+
+// ===========================================================================
+// 8. CRITICAL thread-scope: a denied syscall on a thread created BEFORE the
+//    lockdown is contained PROCESS-WIDE (SIGSYS), not just on main.
+//    (PR4a code-critic CRITICAL #1.)
+// ===========================================================================
+
+#[test]
+fn seccomp_kills_socket_from_a_pre_lockdown_thread_process_wide() {
+    // The CRITICAL finding: seccomp `apply_filter` (flags=0) and landlock
+    // `restrict_self` are CALLING-THREAD-ONLY, and they ran AFTER V8 spawned its
+    // background (GC/compiler/platform) worker threads — so those pre-existing threads
+    // stayed UNFILTERED. A resolver-bypassing escape scheduled onto one could
+    // `socket()`/`fork()`/write freely. Empirically: a thread created before
+    // `apply_seccomp()` called `socket()` successfully post-lockdown ("WORKER-THREAD
+    // socket() SUCCEEDED fd=3").
+    //
+    // The fix: seccomp via `apply_filter_all_threads` (TSYNC) so the filter
+    // synchronizes across EVERY existing thread, AND a single-threaded V8 platform so
+    // no unfiltered background thread exists in the first place.
+    //
+    // This test models a pre-existing background thread with
+    // `ZS_RECORDER_PRELOCK_THREAD` (spawns a parked worker thread BEFORE init/lockdown)
+    // and the `thread_socket` probe (post-lockdown, signals THAT thread to issue
+    // `socket()`). The assertion observes the CHILD TERMINATION CAUSE: the WHOLE
+    // process must be SIGSYS-killed (KillProcess via TSYNC). A clean exit 0 means the
+    // pre-lockdown thread's `socket()` SUCCEEDED on an unfiltered thread — the bug.
+    if !seccomp_available() {
+        panic!("CAPABILITY PRESENT BUT TEST WOULD SKIP: seccomp is available — fix the gate");
+    }
+    let bin = recorder_child_path();
+    assert!(bin.exists(), "recorder child missing at {}", bin.display());
+    let mut child = Command::new(&bin)
+        .env("ZS_RECORDER_PRELOCK_THREAD", "1")
+        .env("ZS_RECORDER_PROBE", "thread_socket")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn recorder child");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(child_request(HAPPY_MIGRATION, false, false, false).as_bytes())
+        .ok();
+    let status = child.wait().expect("wait child");
+    assert_eq!(
+        term_signal(&status),
+        Some(libc::SIGSYS),
+        "socket() from a PRE-LOCKDOWN thread must be SIGSYS-killed PROCESS-WIDE \
+         (seccomp TSYNC across all threads); got {status:?} — exit 0 means the \
+         pre-lockdown thread issued socket() on an UNFILTERED thread (the CRITICAL bug)"
     );
 }
 

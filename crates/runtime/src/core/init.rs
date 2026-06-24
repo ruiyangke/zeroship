@@ -15,11 +15,16 @@ use crate::state::TimerCallback;
 // V8 platform init
 // ===========================================================================
 
-/// Initialize V8 (safe to call multiple times).
-pub fn init_v8() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
+// V8's platform is a PROCESS-GLOBAL installed exactly once. `init_v8` (multi-threaded
+// default platform) and `init_v8_single_threaded` (single-threaded platform) are
+// mutually exclusive — a process commits to ONE. They share this single `Once` so the
+// FIRST caller's choice wins and any later call of EITHER variant is a no-op (rather
+// than a second `initialize_platform` that panics with "Invalid global state").
+static V8_INIT: std::sync::Once = std::sync::Once::new();
+
+/// Shared one-time V8 setup. `single_threaded` selects the platform flavor.
+fn init_v8_platform(single_threaded: bool) {
+    V8_INIT.call_once(|| {
         // Install the TLS crypto provider (rustls needs this for HTTPS fetch).
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -30,17 +35,52 @@ pub fn init_v8() {
         v8::icu::set_common_data_77(deno_core_icudata::ICU_DATA)
             .expect("failed to load ICU data");
 
-        // `--expose-gc` makes `request_garbage_collection_for_testing`
-        // available so memory-pressure tests can force a GC pass
-        // mid-run instead of waiting for isolate teardown. The flag
-        // only enables a test entry point — it doesn't affect
-        // production behavior.
-        v8::V8::set_flags_from_string("--expose-gc");
-
-        let platform = v8::new_default_platform(0, false).make_shared();
-        v8::V8::initialize_platform(platform);
+        if single_threaded {
+            // `--single_threaded` keeps V8's GC/compiler work on the calling thread;
+            // the single-threaded platform spawns NO worker-thread pool. `--expose-gc`
+            // mirrors the multi-threaded init so memory-pressure handling is identical.
+            v8::V8::set_flags_from_string("--single_threaded --expose-gc");
+            let platform = v8::new_single_threaded_default_platform(false).make_shared();
+            v8::V8::initialize_platform(platform);
+        } else {
+            // `--expose-gc` makes `request_garbage_collection_for_testing`
+            // available so memory-pressure tests can force a GC pass
+            // mid-run instead of waiting for isolate teardown. The flag
+            // only enables a test entry point — it doesn't affect
+            // production behavior.
+            v8::V8::set_flags_from_string("--expose-gc");
+            let platform = v8::new_default_platform(0, false).make_shared();
+            v8::V8::initialize_platform(platform);
+        }
         v8::V8::initialize();
     });
+}
+
+/// Initialize V8 with the multi-threaded default platform (safe to call multiple
+/// times). The standard worker/gateway/dev init.
+pub fn init_v8() {
+    init_v8_platform(false);
+}
+
+/// Initialize V8 with a **single-threaded** platform (no GC/compiler/platform
+/// worker-thread pool). Same one-time setup as [`init_v8`] (rustls provider, ICU data,
+/// `--expose-gc`) plus `--single_threaded` and `new_single_threaded_default_platform`,
+/// so V8 runs all of its own background work inline on the calling thread.
+///
+/// This exists for the build-time kernel-sandboxed recorder child
+/// (`zeroship-migrate-js`): seccomp's calling-thread-only `apply_filter` and
+/// landlock's calling-thread-only `restrict_self` cannot reach a thread that already
+/// exists when the lockdown runs. The multi-threaded default platform spawns such
+/// threads at init; a single-threaded platform spawns NONE, so the in-process
+/// lockdown covers the only thread (landlock has no TSYNC equivalent, so this is the
+/// sound way to give it full coverage). See `zeroship-migrate-js/src/sandbox.rs`.
+///
+/// MUST be chosen INSTEAD of [`init_v8`] for the whole process: both share one `Once`,
+/// so a process must call this BEFORE any path that calls `init_v8` (e.g.
+/// `Runtime::build`) for the single-threaded platform to win. Safe to call multiple
+/// times; a no-op once either variant has run.
+pub fn init_v8_single_threaded() {
+    init_v8_platform(true);
 }
 
 // ===========================================================================
