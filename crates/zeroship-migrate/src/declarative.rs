@@ -134,6 +134,24 @@ fn default_clause(default: Option<&str>) -> String {
     }
 }
 
+/// A lowered migration paired with its STRUCTURAL per-statement list — the exact
+/// statements whose `join(";\n")` is the migration's `up`. The IR guard-per-
+/// statement lower ([`crate::ir_author::IrAuthor::lower_guarded`]) guards each TRUE
+/// statement and asserts the reassembly invariant `join(statements) == up`
+/// STRUCTURALLY, so it never re-splits the `up` on a textual `;\n` — a string-
+/// literal column DEFAULT whose value itself contains `;\n` (e.g. `DEFAULT 'a;\nb'`)
+/// stays inside its one statement. Single-statement migrations carry `[up]`.
+pub(crate) type LoweredUnit = (Migration, Vec<String>);
+
+/// Wrap a single-statement migration as a [`LoweredUnit`]: the statement list is
+/// exactly `[up]` (the canonical `up` is one indivisible statement). Used by every
+/// `lower_*` that renders a lone `CREATE` / `ALTER` / `DROP` with no follow-on
+/// statement.
+pub(crate) fn single_stmt(mig: Migration) -> LoweredUnit {
+    let up = mig.up.clone();
+    (mig, vec![up])
+}
+
 // ---------------------------------------------------------------------------
 // Input contract — the per-collection declared-schema descriptor.
 // ---------------------------------------------------------------------------
@@ -3203,10 +3221,23 @@ impl DeclarativeAuthor {
         table: &str,
         schema: &serde_json::Value,
     ) -> Result<String, DeclarativeError> {
+        Ok(self.render_create_table_sqlite_value_statements(table, schema)?.join(";\n"))
+    }
+
+    /// **Structural** form of [`render_create_table_sqlite_value`]: the SQLite
+    /// CREATE payload as its per-statement list (the CREATE plus the implicit
+    /// system-field `CREATE INDEX`es). `join(";\n")` is byte-identical to the
+    /// joined form. The IR lower path consumes this list so a string-literal column
+    /// DEFAULT carrying an interior `;\n` is never re-split mid-statement.
+    pub(crate) fn render_create_table_sqlite_value_statements(
+        &self,
+        table: &str,
+        schema: &serde_json::Value,
+    ) -> Result<Vec<String>, DeclarativeError> {
         // `app_id` here is the project schema; on the `MainUnqualified` SQLite arm it
         // is NOT emitted (the qualifier is dropped), but it is still validated by the
         // shared emitter, so pass the real project schema.
-        zeroship_schema::query::build_create_table_with_fks_for_dialect_scoped(
+        zeroship_schema::query::build_create_table_with_fks_for_dialect_scoped_statements(
             &self.project_schema,
             table,
             schema,
@@ -3564,6 +3595,22 @@ impl DeclarativeAuthor {
         t: &TableSnapshot,
         inline_fks: &[&ConstraintSnapshot],
     ) -> String {
+        // `join(";\n")` over the structural statement list reproduces the canonical
+        // multi-statement `up` byte-for-byte. The `diff` path takes this joined
+        // form; the IR lower path takes the structural list directly (so a
+        // string-literal DEFAULT carrying an interior `;\n` is never re-split).
+        self.render_create_table_statements(table, t, inline_fks).join(";\n")
+    }
+
+    /// **Structural** form of [`render_create_table`]: the CREATE statement plus
+    /// every follow-on `COMMENT ON COLUMN` sentinel, as a per-statement `Vec`.
+    /// `join(";\n")` is byte-identical to [`render_create_table`].
+    fn render_create_table_statements(
+        &self,
+        table: &str,
+        t: &TableSnapshot,
+        inline_fks: &[&ConstraintSnapshot],
+    ) -> Vec<String> {
         let mut parts: Vec<String> = Vec::new();
         for c in &t.columns {
             let null = if c.nullable { "" } else { " NOT NULL" };
@@ -3602,24 +3649,26 @@ impl DeclarativeAuthor {
                 parts.push(format!("CONSTRAINT {} {}", quote_ident(&c.name), c.definition));
             }
         }
-        let mut up = format!(
+        let create = format!(
             "CREATE TABLE {} ({})",
             self.qualified(table),
             parts.join(", ")
         );
+        let mut statements: Vec<String> = vec![create];
         // **P4 HALF A** — append `COMMENT ON COLUMN … '<sentinel>'` for every
         // column carrying a comment sentinel (`__zsmask:…` on a masked sibling,
         // `zsenc:…` on an encrypted column), so the runtime sentinel is part of
         // the same migration as the table create (an interrupted apply never
         // leaves a column without its sentinel). The comment body is built by
-        // the shared codecs; we only quote it into the statement here.
+        // the shared codecs; we only quote it into the statement here. Each
+        // COMMENT is its OWN structural statement (a guard-per-statement unit),
+        // not a textual `;\n` split of the joined `up`.
         for c in &t.columns {
             if let Some(stmt) = self.comment_stmt(table, c) {
-                up.push_str(";\n");
-                up.push_str(&stmt);
+                statements.push(stmt);
             }
         }
-        up
+        statements
     }
 
     /// **P4 HALF A** — render the `COMMENT ON COLUMN <schema>.<table>.<col> IS
@@ -3701,17 +3750,32 @@ impl DeclarativeAuthor {
     /// `diff.rs:15-26` reasoning (it never emits a volatile default either). The
     /// classifier therefore correctly classifies it additive, not destructive.
     fn render_add_column(&self, table: &str, c: &ColumnSnapshot) -> Migration {
+        self.render_add_column_with_statements(table, c).0
+    }
+
+    /// **Structural** form of [`render_add_column`]: the migration plus its
+    /// per-statement list (`ADD COLUMN` + optional follow-on `COMMENT ON COLUMN`).
+    /// `join(";\n")` over the statements is byte-identical to the migration's `up`.
+    /// The IR lower path consumes the statement list so a string-literal DEFAULT
+    /// carrying an interior `;\n` is never re-split mid-statement.
+    fn render_add_column_with_statements(
+        &self,
+        table: &str,
+        c: &ColumnSnapshot,
+    ) -> (Migration, Vec<String>) {
         // P1 — emission delegated to the per-dialect `DdlEmitter` (the mask /
         // encrypted sentinel spelling + qualification differ by dialect). This
         // method owns only the migration identity / flags.
-        let (up, down) = self.emitter().add_column(table, c);
-        self.make(
+        let (statements, down) = self.emitter().add_column(table, c);
+        let up = statements.join(";\n");
+        let mig = self.make(
             &format!("add_column_{table}_{}", c.name),
             up,
             down,
             MigrationFlags::default(),
             Vec::new(),
-        )
+        );
+        (mig, statements)
     }
 
     /// Render a GATED `ALTER TABLE … ALTER COLUMN … TYPE …` (P3 type change).
@@ -3928,7 +3992,7 @@ impl DeclarativeAuthor {
         snapshot: &TableSnapshot,
         sqlite_schema: &serde_json::Value,
         live_tables: &std::collections::BTreeSet<String>,
-    ) -> Result<Vec<Migration>, DeclarativeError> {
+    ) -> Result<Vec<LoweredUnit>, DeclarativeError> {
         let is_sqlite = matches!(self.dialect, SqlDialect::Sqlite);
         let mut inline_fks: Vec<&ConstraintSnapshot> = Vec::new();
         let mut deferred: Vec<&ConstraintSnapshot> = Vec::new();
@@ -3954,8 +4018,11 @@ impl DeclarativeAuthor {
             }
         }
 
-        let mut out: Vec<Migration> = Vec::new();
-        let (up, down) = if is_sqlite {
+        let mut out: Vec<LoweredUnit> = Vec::new();
+        // The STRUCTURAL statement list for the create (CREATE + follow-on COMMENT
+        // sentinels on PG; CREATE + implicit system-field indexes on SQLite). The
+        // `up` is `join(";\n")` over it — byte-identical to the differ's render.
+        let (statements, down) = if is_sqlite {
             // The Confined SQLite path routes the CREATE through the SHARED
             // `zeroship_schema::query` emitter — the SAME call the differ's
             // `render_create_table_sqlite` makes — fed the SDK schema `Value`
@@ -3965,15 +4032,16 @@ impl DeclarativeAuthor {
             // unqualified `DROP TABLE` (main IS the app file), byte-identical to
             // the differ's SQLite create-table down.
             (
-                self.render_create_table_sqlite_value(table, sqlite_schema)?,
+                self.render_create_table_sqlite_value_statements(table, sqlite_schema)?,
                 format!("DROP TABLE {}", quote_ident(table)),
             )
         } else {
             (
-                self.render_create_table(table, snapshot, &inline_fks),
+                self.render_create_table_statements(table, snapshot, &inline_fks),
                 format!("DROP TABLE {}", self.qualified(table)),
             )
         };
+        let up = statements.join(";\n");
         let mig = self.make(
             &format!("create_table_{table}"),
             up,
@@ -3982,11 +4050,11 @@ impl DeclarativeAuthor {
             Vec::new(),
         );
         let table_version = mig.version.clone();
-        out.push(mig);
+        out.push((mig, statements));
 
         // The table's own indexes (skip the implicit PK index; skip the SQLite
         // system-field indexes the shared CREATE emits inline) — identical to
-        // `diff`'s per-table index emission.
+        // `diff`'s per-table index emission. A `CREATE INDEX` is a single statement.
         for idx in &snapshot.indexes {
             if is_pk_index(table, &idx.name) {
                 continue;
@@ -3994,37 +4062,42 @@ impl DeclarativeAuthor {
             if is_sqlite && is_system_field_index(table, &idx.name) {
                 continue;
             }
-            out.push(self.render_create_index(table, idx, vec![table_version.clone()]));
+            let idx_mig = self.render_create_index(table, idx, vec![table_version.clone()]);
+            out.push(single_stmt(idx_mig));
         }
 
-        // Deferred FKs (PG only) as follow-on ALTER TABLE ADD CONSTRAINT.
+        // Deferred FKs (PG only) as follow-on ALTER TABLE ADD CONSTRAINT — each a
+        // single statement.
         for fk in deferred {
-            out.push(self.render_add_fk(table, fk, vec![table_version.clone()]));
+            out.push(single_stmt(self.render_add_fk(table, fk, vec![table_version.clone()])));
         }
         Ok(out)
     }
 
     /// §6.4 — render an `addColumn` the SAME way `diff` does, from a
-    /// shared-builder [`ColumnSnapshot`].
-    pub(crate) fn lower_add_column(&self, table: &str, col: &ColumnSnapshot) -> Migration {
-        self.render_add_column(table, col)
+    /// shared-builder [`ColumnSnapshot`]. Returns the migration plus its structural
+    /// statement list (`ADD COLUMN` + optional `COMMENT ON COLUMN`) so the
+    /// guard-per-statement lower never re-splits a `;\n`-bearing string DEFAULT.
+    pub(crate) fn lower_add_column(&self, table: &str, col: &ColumnSnapshot) -> LoweredUnit {
+        self.render_add_column_with_statements(table, col)
     }
 
     /// §6.4 — render a `createIndex` the SAME way `diff` does, from an
-    /// [`IndexSnapshot`].
-    pub(crate) fn lower_create_index(&self, table: &str, idx: &IndexSnapshot) -> Migration {
-        self.render_create_index(table, idx, Vec::new())
+    /// [`IndexSnapshot`]. A `CREATE INDEX` is a single statement.
+    pub(crate) fn lower_create_index(&self, table: &str, idx: &IndexSnapshot) -> LoweredUnit {
+        single_stmt(self.render_create_index(table, idx, Vec::new()))
     }
 
     /// §6.4 — the drop ops pass an identifier through the SAME emitter methods.
-    pub(crate) fn lower_drop_table(&self, table: &str) -> Migration {
-        self.render_drop_table(table)
+    /// Each is a single statement.
+    pub(crate) fn lower_drop_table(&self, table: &str) -> LoweredUnit {
+        single_stmt(self.render_drop_table(table))
     }
-    pub(crate) fn lower_drop_column(&self, table: &str, col: &str) -> Migration {
-        self.render_drop_column(table, col)
+    pub(crate) fn lower_drop_column(&self, table: &str, col: &str) -> LoweredUnit {
+        single_stmt(self.render_drop_column(table, col))
     }
-    pub(crate) fn lower_drop_index(&self, idx: &IndexSnapshot) -> Migration {
-        self.render_drop_index(idx)
+    pub(crate) fn lower_drop_index(&self, idx: &IndexSnapshot) -> LoweredUnit {
+        single_stmt(self.render_drop_index(idx))
     }
 
     /// §6.4 — render a stand-alone `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY …`
@@ -4032,8 +4105,8 @@ impl DeclarativeAuthor {
     /// [`ConstraintSnapshot`] whose `definition` is the canonical
     /// `pg_get_constraintdef`-shaped FK body. Byte-identical to the differ's
     /// deferred-FK render by construction (it IS the differ's render method).
-    pub(crate) fn lower_add_fk(&self, table: &str, fk: &ConstraintSnapshot) -> Migration {
-        self.render_add_fk(table, fk, Vec::new())
+    pub(crate) fn lower_add_fk(&self, table: &str, fk: &ConstraintSnapshot) -> LoweredUnit {
+        single_stmt(self.render_add_fk(table, fk, Vec::new()))
     }
 
     /// §6.4 — render a stand-alone `ALTER TABLE … ADD CONSTRAINT <name> <body>`
@@ -4054,7 +4127,7 @@ impl DeclarativeAuthor {
         name: &str,
         body: &str,
         gated: bool,
-    ) -> Migration {
+    ) -> LoweredUnit {
         let up = format!(
             "ALTER TABLE {} ADD CONSTRAINT {} {}",
             self.qualified(table),
@@ -4071,7 +4144,13 @@ impl DeclarativeAuthor {
         } else {
             MigrationFlags::default()
         };
-        self.make(&format!("add_constraint_{table}_{name}"), up, Some(down), flags, Vec::new())
+        single_stmt(self.make(
+            &format!("add_constraint_{table}_{name}"),
+            up,
+            Some(down),
+            flags,
+            Vec::new(),
+        ))
     }
 
     /// §6.4 — render a stand-alone `ALTER TABLE … DROP CONSTRAINT <name>`.
@@ -4082,19 +4161,19 @@ impl DeclarativeAuthor {
     /// `DROP COLUMN`. `down` is `None`: the engine cannot reconstruct the dropped
     /// constraint's body from a bare name (the IR carries no body on a drop), so
     /// there is no structural reverse; a re-declaration re-adds it.
-    pub(crate) fn lower_drop_constraint(&self, table: &str, name: &str) -> Migration {
+    pub(crate) fn lower_drop_constraint(&self, table: &str, name: &str) -> LoweredUnit {
         let up = format!(
             "ALTER TABLE {} DROP CONSTRAINT {}",
             self.qualified(table),
             quote_ident(name),
         );
-        self.make(
+        single_stmt(self.make(
             &format!("drop_constraint_{table}_{name}"),
             up,
             None,
             destructive_flags(),
             Vec::new(),
-        )
+        ))
     }
 
     /// §6.4 — render a stand-alone `ALTER TABLE … ALTER COLUMN … TYPE …` the SAME
@@ -4102,8 +4181,8 @@ impl DeclarativeAuthor {
     /// carrying the desired `data_type`. Byte-identical to the differ by
     /// construction (it IS the differ's render method); gated/destructive with
     /// `down: None` (lossy cast).
-    pub(crate) fn lower_alter_column_type(&self, table: &str, col: &ColumnSnapshot) -> Migration {
-        self.render_alter_column_type(table, col)
+    pub(crate) fn lower_alter_column_type(&self, table: &str, col: &ColumnSnapshot) -> LoweredUnit {
+        single_stmt(self.render_alter_column_type(table, col))
     }
 
     /// §6.4 — render a stand-alone `ALTER TABLE … ALTER COLUMN … {SET|DROP} NOT
@@ -4115,8 +4194,8 @@ impl DeclarativeAuthor {
         table: &str,
         col: &str,
         nullable: bool,
-    ) -> Migration {
-        self.render_alter_column_nullability(table, col, nullable)
+    ) -> LoweredUnit {
+        single_stmt(self.render_alter_column_nullability(table, col, nullable))
     }
 }
 
@@ -4142,10 +4221,14 @@ impl DeclarativeAuthor {
 // snapshot-rendered) and `render_create_table_sqlite` (routes to the shared
 // `zeroship_schema` emitter) — different input shapes, no shared byte bar.
 trait DdlEmitter {
-    /// Render an `ALTER TABLE … ADD COLUMN …` as `(up, down)`. The mask / encrypted
-    /// sentinel spelling differs by dialect: PG appends a trailing
-    /// `COMMENT ON COLUMN`; `SQLite` rides the sentinel inline in the column clause.
-    fn add_column(&self, table: &str, c: &ColumnSnapshot) -> (String, Option<String>);
+    /// Render an `ALTER TABLE … ADD COLUMN …` as `(up_statements, down)`. The mask
+    /// / encrypted sentinel spelling differs by dialect: PG appends a trailing
+    /// `COMMENT ON COLUMN` as a SEPARATE structural statement; `SQLite` rides the
+    /// sentinel inline in the column clause (a single statement). Returning the
+    /// per-statement list (not a `;\n`-joined string) keeps the guard-per-statement
+    /// lower from re-splitting a string-literal DEFAULT that itself contains `;\n`.
+    /// `join(";\n")` over the list is the canonical `up`.
+    fn add_column(&self, table: &str, c: &ColumnSnapshot) -> (Vec<String>, Option<String>);
 
     /// Render a `CREATE … INDEX …` as `(up, down)`. PG emits the access-method
     /// (`USING …`), the `WITH (lists=…)` storage param, and qualifies; `SQLite`
@@ -4196,7 +4279,7 @@ impl PgEmitter {
 }
 
 impl DdlEmitter for PgEmitter {
-    fn add_column(&self, table: &str, c: &ColumnSnapshot) -> (String, Option<String>) {
+    fn add_column(&self, table: &str, c: &ColumnSnapshot) -> (Vec<String>, Option<String>) {
         let null = if c.nullable { "" } else { " NOT NULL" };
         let default = default_clause(c.default.as_deref());
         let enc = c
@@ -4205,7 +4288,7 @@ impl DdlEmitter for PgEmitter {
             .map(|s| format!(" {s}"))
             .unwrap_or_default();
         let table_ref = self.qualified(table);
-        let mut up = format!(
+        let add = format!(
             "ALTER TABLE {} ADD COLUMN {} {}{}{}{}",
             table_ref,
             quote_ident(&c.name),
@@ -4214,12 +4297,13 @@ impl DdlEmitter for PgEmitter {
             null,
             default,
         );
+        let mut up: Vec<String> = vec![add];
         // **P4 HALF A** (PG only) — a column added via ADD COLUMN carries its comment
         // sentinel (`__zsmask:…` for a masked sibling, `zsenc:…` for an
-        // encrypted column) in the same migration (atomic with the column).
+        // encrypted column) in the same migration (atomic with the column), as its
+        // OWN structural statement.
         if let Some(stmt) = self.comment_stmt(table, c) {
-            up.push_str(";\n");
-            up.push_str(&stmt);
+            up.push(stmt);
         }
         let down = format!(
             "ALTER TABLE {} DROP COLUMN {}",
@@ -4331,7 +4415,7 @@ fn sqlite_fts5_create_teardown(table: &str, source_columns: &[String]) -> (Strin
 struct SqliteEmitter;
 
 impl DdlEmitter for SqliteEmitter {
-    fn add_column(&self, table: &str, c: &ColumnSnapshot) -> (String, Option<String>) {
+    fn add_column(&self, table: &str, c: &ColumnSnapshot) -> (Vec<String>, Option<String>) {
         let null = if c.nullable { "" } else { " NOT NULL" };
         let default = default_clause(c.default.as_deref());
         // **P4 HALF A** — inline `/* zsenc:… */` for an encrypted column added
@@ -4380,7 +4464,9 @@ impl DdlEmitter for SqliteEmitter {
             table_ref,
             quote_ident(&c.name)
         );
-        (up, Some(down))
+        // SQLite ADD COLUMN is a SINGLE statement (the sentinel rides inline); the
+        // structural list therefore has exactly one element.
+        (vec![up], Some(down))
     }
 
     fn create_index(&self, table: &str, idx: &IndexSnapshot) -> (String, String) {
