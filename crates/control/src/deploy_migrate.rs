@@ -626,10 +626,16 @@ async fn apply_bundle_ir_migrations(
         // 4xx). Because the lock is held for the WHOLE loop, that read-back sees a
         // consistent committed obligation set across all files, never a mid-deploy
         // interleave from a racing same-project deploy.
+        // §2.0.4 — ALSO thread the artifact's plan-level `depends_on`, so a
+        // dependent plan whose dependency's online-rename contract is still pending
+        // is fail-closed refused at APPLY (with `DEPENDENCY_PENDING_CONTRACT`),
+        // EVEN when this file touches a DIFFERENT table than the pending one (the
+        // case the touched-table refusal does not cover — the §2.0.4 double-bind).
         let outcome = engine
-            .apply_plan_with_touched(
+            .apply_plan_with_touched_and_depends(
                 &lowered.plan.steps,
                 &lowered.touched_tables,
+                &lowered.depends_on,
                 approval,
                 backend,
                 exec_cfg,

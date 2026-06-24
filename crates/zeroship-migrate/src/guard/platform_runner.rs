@@ -883,6 +883,10 @@ pub async fn run_resolve_pending(
         .apply_plan_resolving(
             &steps,
             &[],
+            // No plan-level `depends_on` on the resolve-pending path: this deploy's
+            // sole job is to discharge the named obligation, not to apply a
+            // dependent plan (§2.0.4 is irrelevant here).
+            &[],
             std::slice::from_ref(&(pc.clone(), resolution)),
             Approval::Approved,
             &backend,
