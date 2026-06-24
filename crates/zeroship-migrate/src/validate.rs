@@ -657,20 +657,28 @@ impl Ctx<'_> {
     fn check_synth(&self, f: SynthFn, args: &[Expr], depth: u32) -> Result<(), AuthoringError> {
         match f {
             SynthFn::SplitPart => {
-                self.check_split_part(args)?;
-                // Structurally walk EVERY arg, regardless of target_dialect. The
-                // envelope checks in `check_split_part` return early on a Postgres
-                // target (the delim/n LITERAL shape is a SQLite-only envelope), but
-                // rule (c) — `ColRef` resolution — and the structural backstop are
-                // dialect-NEUTRAL and must cover all three slots on BOTH dialects.
-                // Recursing only `args.first()` (the column) let a `ColRef` to a
-                // nonexistent column — or a malformed nested synth — hide in the
-                // delim/n slot and slip past on PG, deferring the failure to
-                // render/execute (item-4). A `Literal` slot recurses to a no-op,
-                // so this is idempotent with the envelope literal checks.
+                // (1) ARITY first — the grammar/envelope checks index args[1]/args[2].
+                //     Wrong arity is malformed on BOTH dialects → CODE_UNSUPPORTED.
+                if args.len() != 3 {
+                    return Err(self.malformed_synth_err(format!(
+                        "c.fn.splitPart takes exactly (column, delim, n); got {} args",
+                        args.len()
+                    )));
+                }
+                // (2) Structurally walk EVERY arg FIRST, regardless of target_dialect:
+                //     rule (c) `ColRef` resolution + the nested-synth backstop are
+                //     dialect-NEUTRAL and must cover all three slots on BOTH dialects.
+                //     This runs BEFORE the grammar check so an UNRESOLVED ColRef / a
+                //     malformed nested synth in the delim/n slot surfaces as the precise
+                //     CODE_UNSUPPORTED (item-4), rather than being masked by the
+                //     grammar's CODE_EXPR_NOT_PORTABLE. (A ColRef to an EXISTENT column
+                //     resolves here, then the grammar check below rejects it as a
+                //     non-literal delim/n.)
                 for a in args {
                     self.walk_depth(a, depth)?;
                 }
+                // (3) GRAMMAR (dialect-neutral) + ENVELOPE (SQLite-only).
+                self.check_split_part(args)?;
                 Ok(())
             }
             // now()/gen_random_uuid() are NULLARY apply-time scalars: no args.
@@ -775,6 +783,28 @@ impl Ctx<'_> {
         )
     }
 
+    /// A splitPart **grammar** reject: the call's argument SHAPE is broken on EVERY
+    /// dialect — the delimiter is not a string literal, or the part index is not a
+    /// positive integer literal. Unlike [`Self::split_part_envelope_err`] (the
+    /// PG-renderable-but-SQLite-out-of-envelope verdict, SQLite-only), the renderer
+    /// enforces this same grammar fail-closed on BOTH dialects, so the validator
+    /// rejects it regardless of `target_dialect` — and stamps the *current* target so
+    /// the payload's `dialect` is faithful to the deploy. CODE_EXPR_NOT_PORTABLE (the
+    /// §8.8 structured envelope), the AI loop's primary structured-feedback signal.
+    fn split_part_grammar_err(&self, reason: String) -> AuthoringError {
+        self.err(
+            CODE_EXPR_NOT_PORTABLE,
+            None,
+            self.target_dialect,
+            reason,
+            Some(
+                "pass a single-ASCII string LITERAL delimiter and a positive integer \
+                 LITERAL part index (a runtime/computed delim or n is not portable)"
+                    .to_string(),
+            ),
+        )
+    }
+
     /// A concatWs **portability-boundary** reject: the call is well-formed and
     /// PG-renderable (`concat_ws` takes any expression delimiter), but the SQLite
     /// lowering's literal-delimiter head-trim assumption is violated by a
@@ -799,75 +829,80 @@ impl Ctx<'_> {
         // Shape: splitPart(col, delim, n) — exactly three args. The WRONG ARITY is
         // broken on BOTH dialects (`split_part` is ternary on PG too), so it is an
         // unconditional CODE_UNSUPPORTED, NOT a dialect-gated envelope reject
-        // (MED-1). This is checked first, regardless of target_dialect.
+        // (MED-1). The caller (`check_synth`) already checks arity before the arg
+        // walk; this is a defensive guard so the args[1]/args[2] indexing below
+        // cannot panic if `check_split_part` is ever reached on a non-ternary call.
         if args.len() != 3 {
             return Err(self.malformed_synth_err(format!(
                 "c.fn.splitPart takes exactly (column, delim, n); got {} args",
                 args.len()
             )));
         }
-        // The remaining checks are the PORTABILITY ENVELOPE: a multi-char/non-ASCII
-        // delim, n outside 1..=8, or a non-literal delim/n is renderable on
-        // Postgres but out of the pinned SQLite envelope (§9). On a POSTGRES
-        // target the node loads fine; only a SQLITE target rejects it (§2.4.1).
-        if self.target_dialect == Dialect::Postgres {
-            return Ok(());
-        }
-        // delim — a single-ASCII-character string Literal (SQLite envelope).
-        match &args[1] {
-            Expr::Literal { value } => match value {
-                crate::ir::IrScalar::Str(s) => {
-                    let bytes = s.as_bytes();
-                    if bytes.len() != 1 || bytes[0] >= 0x80 {
-                        return Err(self.split_part_envelope_err(format!(
-                            "c.fn.splitPart delimiter must be a single ASCII character \
-                             (one byte, code point < 0x80); got {s:?}"
-                        )));
-                    }
-                }
-                other => {
-                    return Err(self.split_part_envelope_err(format!(
-                        "c.fn.splitPart delimiter must be a single-ASCII string literal; \
-                         got {other:?}"
-                    )));
-                }
-            },
+        // ── GRAMMAR (dialect-NEUTRAL) — enforced on EVERY target, BEFORE the
+        //    dialect early-return. The renderer (dml.rs render_split_part) requires a
+        //    STRING-LITERAL delim and a POSITIVE-INTEGER-LITERAL n fail-closed on BOTH
+        //    dialects, so a grammar-broken node is renderable on neither; the
+        //    validator (the AI loop's structured-feedback signal, §3.3.1.1) rejects it
+        //    here rather than deferring to render time. We capture the validated
+        //    string/int so the SQLite ENVELOPE checks below need not re-match.
+        let delim = match &args[1] {
+            Expr::Literal { value: crate::ir::IrScalar::Str(s) } => s,
+            Expr::Literal { value: other } => {
+                return Err(self.split_part_grammar_err(format!(
+                    "c.fn.splitPart delimiter must be a string literal; got {other:?}"
+                )));
+            }
             other => {
-                return Err(self.split_part_envelope_err(format!(
+                return Err(self.split_part_grammar_err(format!(
                     "c.fn.splitPart delimiter must be a literal (a runtime/computed \
                      delimiter is not portable); got {other:?}"
                 )));
             }
-        }
-        // n — a positive integer Literal in 1..=8 (SQLite envelope).
-        match &args[2] {
-            Expr::Literal { value } => match value {
-                crate::ir::IrScalar::Int(n) => {
-                    if *n < 1 {
-                        return Err(self.split_part_envelope_err(format!(
-                            "c.fn.splitPart part index n must be a positive integer; got {n}"
-                        )));
-                    }
-                    if *n > SPLIT_PART_MAX_N {
-                        return Err(self.split_part_envelope_err(format!(
-                            "c.fn.splitPart part index n must be <= {SPLIT_PART_MAX_N} \
-                             (the proven inline-unroll bound); got {n}"
-                        )));
-                    }
-                }
-                other => {
-                    return Err(self.split_part_envelope_err(format!(
-                        "c.fn.splitPart part index n must be a positive integer literal; \
-                         got {other:?}"
+        };
+        let n = match &args[2] {
+            Expr::Literal { value: crate::ir::IrScalar::Int(n) } => {
+                if *n < 1 {
+                    return Err(self.split_part_grammar_err(format!(
+                        "c.fn.splitPart part index n must be a positive integer; got {n}"
                     )));
                 }
-            },
+                *n
+            }
+            Expr::Literal { value: other } => {
+                return Err(self.split_part_grammar_err(format!(
+                    "c.fn.splitPart part index n must be a positive integer literal; \
+                     got {other:?}"
+                )));
+            }
             other => {
-                return Err(self.split_part_envelope_err(format!(
+                return Err(self.split_part_grammar_err(format!(
                     "c.fn.splitPart part index n must be a literal positive integer \
                      (a runtime n is not portable); got {other:?}"
                 )));
             }
+        };
+
+        // ── ENVELOPE (SQLite-only) — the grammar-valid node is renderable on
+        //    Postgres but a multi-char/non-ASCII delim or n>8 is out of the pinned
+        //    SQLite envelope (§9). On a POSTGRES target the node loads fine; only a
+        //    SQLITE target rejects it (§2.4.1).
+        if self.target_dialect == Dialect::Postgres {
+            return Ok(());
+        }
+        // delim — a single ASCII character (one byte, code point < 0x80).
+        let bytes = delim.as_bytes();
+        if bytes.len() != 1 || bytes[0] >= 0x80 {
+            return Err(self.split_part_envelope_err(format!(
+                "c.fn.splitPart delimiter must be a single ASCII character \
+                 (one byte, code point < 0x80); got {delim:?}"
+            )));
+        }
+        // n — within the proven inline-unroll bound.
+        if n > SPLIT_PART_MAX_N {
+            return Err(self.split_part_envelope_err(format!(
+                "c.fn.splitPart part index n must be <= {SPLIT_PART_MAX_N} \
+                 (the proven inline-unroll bound); got {n}"
+            )));
         }
         Ok(())
     }
@@ -1056,6 +1091,84 @@ mod tests {
                 CODE_EXPR_NOT_PORTABLE
             );
         }
+    }
+
+    // ── LOW (PR6b code-critic): the GRAMMAR is dialect-NEUTRAL ──────────────
+    // A grammar-broken splitPart — a NON-literal / non-string delim, or a
+    // non-literal / non-positive-int n — is not renderable on EITHER dialect (the
+    // renderer enforces the same grammar fail-closed on PG and SQLite). The
+    // validator (the AI loop's primary structured-feedback signal, §3.3.1.1) must
+    // therefore reject it on a Postgres target too, BEFORE the dialect early-return —
+    // not defer the only rejection to render time. RED before check_split_part lifts
+    // the grammar checks above the `if Postgres { return Ok(()) }`.
+    #[test]
+    fn grammar_broken_split_part_rejected_on_pg_too() {
+        let c = cols();
+        let sc = scope("users", &c);
+
+        // (1) delim is a COLUMN REFERENCE (a runtime/computed delimiter) — not a
+        //     string literal. Grammar-broken on BOTH dialects.
+        let runtime_delim = Expr::FnSynth {
+            r#fn: SynthFn::SplitPart,
+            args: vec![Expr::col("name"), Expr::col("first"), Expr::lit(IrScalar::Int(1))],
+        };
+        for d in [Dialect::Postgres, Dialect::Sqlite] {
+            let err = validate_expr(&runtime_delim, d, &sc, 0, None).unwrap_err();
+            assert_eq!(
+                err.code, CODE_EXPR_NOT_PORTABLE,
+                "a non-literal delim must reject on {d:?} (grammar is dialect-neutral)"
+            );
+        }
+
+        // (2) delim is a NON-STRING literal (an integer). Grammar-broken on both.
+        let int_delim = Expr::FnSynth {
+            r#fn: SynthFn::SplitPart,
+            args: vec![
+                Expr::col("name"),
+                Expr::lit(IrScalar::Int(7)),
+                Expr::lit(IrScalar::Int(1)),
+            ],
+        };
+        for d in [Dialect::Postgres, Dialect::Sqlite] {
+            assert_eq!(
+                validate_expr(&int_delim, d, &sc, 0, None).unwrap_err().code,
+                CODE_EXPR_NOT_PORTABLE,
+                "a non-string-literal delim must reject on {d:?}"
+            );
+        }
+
+        // (3) n is a COLUMN REFERENCE (a runtime n) — not a literal. Both dialects.
+        let runtime_n = Expr::FnSynth {
+            r#fn: SynthFn::SplitPart,
+            args: vec![Expr::col("name"), Expr::lit(IrScalar::Str(",".into())), Expr::col("total")],
+        };
+        for d in [Dialect::Postgres, Dialect::Sqlite] {
+            assert_eq!(
+                validate_expr(&runtime_n, d, &sc, 0, None).unwrap_err().code,
+                CODE_EXPR_NOT_PORTABLE,
+                "a non-literal n must reject on {d:?}"
+            );
+        }
+
+        // (4) n is a non-POSITIVE integer literal (n<1) — grammar-broken on both.
+        for d in [Dialect::Postgres, Dialect::Sqlite] {
+            assert_eq!(
+                validate_expr(&split(",", 0), d, &sc, 0, None).unwrap_err().code,
+                CODE_EXPR_NOT_PORTABLE,
+                "n<1 must reject on {d:?}"
+            );
+        }
+
+        // GUARD: a grammar-VALID but out-of-ENVELOPE node (multi-char string-literal
+        // delim, or n>8) is still PG-renderable — the envelope stays SQLite-gated.
+        assert!(
+            validate_expr(&split(", ", 1), Dialect::Postgres, &sc, 0, None).is_ok(),
+            "a multi-char STRING-LITERAL delim is grammar-valid → still loads on PG"
+        );
+        assert!(
+            validate_expr(&split(",", 9), Dialect::Postgres, &sc, 0, None).is_ok(),
+            "n>8 is grammar-valid (positive int literal) → still loads on PG"
+        );
     }
 
     #[test]

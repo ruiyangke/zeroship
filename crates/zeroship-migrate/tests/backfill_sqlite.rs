@@ -366,6 +366,78 @@ async fn sqlite_backfill_real_cursor_resumes_exactly_once_after_crash() {
     assert_eq!(mismatches, 0, "every row incremented EXACTLY once across the crash (REAL cursor)");
 }
 
+// ── non-BINARY (NOCASE) collation cursor: collation-consistent resume ────────
+// MED (PR6b code-critic): the window is paged with `ORDER BY <cursor> ASC` +
+// `<cursor> > ?1`, which honor the cursor COLUMN's declared SQLite collation
+// (NOCASE here). But the high-water mark was computed Rust-side with
+// `cells.max()` = BINARY ordering. For a NOCASE TEXT cursor whose BINARY-max ≠
+// NOCASE-max within a touched window, the Rust BINARY-max is NOT the column's
+// collation-max, so the next batch's `cursor > last_cursor` (compared under
+// NOCASE) re-includes an already-touched row — a double-apply, violating the
+// headline exactly-once. The PG leg maxes in SQL (`max(_bf_key)::text`) under
+// the column's collation and is self-consistent; this proves the SQLite leg now
+// matches.
+//
+// Construction: keys 'a' and 'B'. NOCASE order is ['a','B'] (a<B). BINARY order
+// is ['B','a'] ('B'=0x42 < 'a'=0x61). With batch_size=2 the first window touches
+// BOTH; the collation-max is 'B', but the BINARY-max is 'a'. A BINARY high-water
+// 'a' makes the next window `cursor > 'a'` (NOCASE) re-select 'B' (B>a NOCASE) →
+// a SECOND increment of row 'B'. The transform is `val = val + 1` with NO filter
+// so a double-apply is directly visible (val lands at the base + 2).
+
+/// Seed `ci(k TEXT COLLATE NOCASE NOT NULL UNIQUE, val INTEGER NOT NULL)` with the
+/// two adversarial keys 'a','B' (val=0). The NOCASE collation on the cursor column
+/// is the crux: paging honors it but Rust `cells.max()` does not.
+async fn seed_nocase_cursor(be: &SqliteBackend) {
+    let actor = be.actor();
+    actor.set_mode(Mode::CreatorUp).await.unwrap();
+    actor
+        .exec(
+            "CREATE TABLE ci (\
+               k   TEXT COLLATE NOCASE NOT NULL UNIQUE, \
+               val INTEGER NOT NULL)",
+        )
+        .await
+        .expect("create ci");
+    // 'a' (0x61) and 'B' (0x42): NOCASE order a<B, BINARY order B<a.
+    actor
+        .exec("INSERT INTO ci (k, val) VALUES ('a', 0), ('B', 0)")
+        .await
+        .expect("seed ci");
+}
+
+#[compio::test]
+async fn sqlite_backfill_nocase_cursor_exactly_once() {
+    let _g = serial();
+    let p = paths("bf_nocase");
+    let be = backend(&p);
+    seed_nocase_cursor(&be).await;
+
+    // batch_size=2 so the first window touches BOTH 'a' and 'B'; NO filter so a
+    // re-applied increment is visible. `val = val + 1` is non-idempotent.
+    let s = BackfillSpec {
+        table: "ci".to_string(),
+        cursor_column: "k".to_string(),
+        batch_size: 2,
+        set_clause: "\"val\" = (\"val\" + 1)".to_string(),
+        filter: None,
+        name: "inc_nocase".to_string(),
+    };
+
+    let out = be
+        .run_backfill_bounded_sqlite(&s, &s.set_clause, s.filter.as_deref(), "tester", None)
+        .await
+        .expect("nocase backfill runs");
+    assert!(out.complete, "backfill completed");
+    // Every row touched EXACTLY once: val == 1. A collation-blind BINARY max
+    // re-includes 'B' on the next window, landing it at val=2.
+    let two = scalar_i64(&be, "SELECT count(*) FROM ci WHERE val = 2").await;
+    assert_eq!(two, 0, "no row double-applied (collation-consistent resume cursor)");
+    let ones = scalar_i64(&be, "SELECT count(*) FROM ci WHERE val = 1").await;
+    assert_eq!(ones, 2, "every row incremented exactly once under a NOCASE cursor");
+    assert_eq!(out.rows_updated, 2, "exactly 2 row-updates total (no re-touch)");
+}
+
 // ── cursor-safety + identifier gates (defense-in-depth) ──────────────────────
 
 #[compio::test]

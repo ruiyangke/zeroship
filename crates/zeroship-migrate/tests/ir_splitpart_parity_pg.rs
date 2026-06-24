@@ -284,6 +284,13 @@ async fn split_part_envelope_byte_identical_pg_sqlite() {
         ("r12", Some("héllo,wörld"), 1), // UTF-8 value, ASCII delim → "héllo"
         ("r13", Some("héllo,wörld"), 2), // → "wörld"
         ("r14", Some("t1,t2,t3,t4,t5,t6,t7,t8,t9"), 8), // n=8 boundary → "t8"
+        // §9 fixture (i): the ASCII delimiter byte DIRECTLY adjacent to multibyte
+        // content on BOTH sides — proves the byte-wise instr/substr scan never lands
+        // inside a UTF-8 continuation byte (each of é/ä/ö is a 2-byte sequence, and
+        // ',' sits immediately between them with no ASCII filler).
+        ("rADJ1", Some("é,ä,ö"), 1), // → "é"
+        ("rADJ2", Some("é,ä,ö"), 2), // → "ä" (delim adjacent to multibyte both sides)
+        ("rADJ3", Some("é,ä,ö"), 3), // → "ö"
         ("rNULL", None, 1),         // NULL input → NULL
     ];
 
@@ -357,6 +364,12 @@ async fn split_part_envelope_byte_identical_pg_sqlite() {
     assert_eq!(by_id("r9").as_deref(), Some("b"), "leading delim, n=2 → b");
     assert_eq!(by_id("r12").as_deref(), Some("héllo"), "UTF-8 value, ASCII delim");
     assert_eq!(by_id("r14").as_deref(), Some("t8"), "n=8 boundary");
+    // §9 fixture (i): delimiter adjacent to multibyte content on both sides — the
+    // byte-wise scan splits cleanly on the ASCII ',' without straddling a UTF-8
+    // continuation byte of the surrounding 2-byte code points.
+    assert_eq!(by_id("rADJ1").as_deref(), Some("é"), "multibyte-adjacent delim, n=1");
+    assert_eq!(by_id("rADJ2").as_deref(), Some("ä"), "multibyte-adjacent delim on both sides, n=2");
+    assert_eq!(by_id("rADJ3").as_deref(), Some("ö"), "multibyte-adjacent delim, n=3");
     assert_eq!(by_id("rNULL"), None, "NULL input → NULL");
 
     pg_teardown(&conn, &cfg).await;
