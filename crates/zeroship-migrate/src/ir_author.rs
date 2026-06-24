@@ -692,12 +692,13 @@ impl IrAuthor {
     ) -> Result<Vec<PlanStep>, IrLowerError> {
         let mut out: Vec<PlanStep> = Vec::new();
         let mut live_tables: BTreeSet<String> = live.tables.clone();
-        for op in &ir.ops {
+        for (op_index, op) in ir.ops.iter().enumerate() {
             // The whole-up step lowering discards the structural statement list (it
             // is the §6.4 parity leg, which only compares the joined `up`); the
             // guarded path ([`lower_guarded`]) consumes the list to guard true
-            // statements.
-            match self.lower_one_op(op, &mut live_tables, live)? {
+            // statements. `op_index` is the plan position the DML-step version folds
+            // in (so two byte-identical DML ops get distinct journal ids).
+            match self.lower_one_op(op_index, op, &mut live_tables, live)? {
                 LoweredOp::Ddl(units) => {
                     out.extend(units.into_iter().map(|(mig, _statements)| PlanStep::Ddl(mig)));
                 }
@@ -725,6 +726,7 @@ impl IrAuthor {
     /// - rename-lowering errors (see [`lower_steps`](Self::lower_steps)).
     fn lower_one_op(
         &self,
+        op_index: usize,
         op: &Op,
         live_tables: &mut BTreeSet<String>,
         live_schema: &LiveSchema,
@@ -845,7 +847,7 @@ impl IrAuthor {
             | Op::Update { .. }
             | Op::Delete { .. }
             | Op::Backfill { .. } => {
-                return Ok(LoweredOp::Dml(self.lower_dml_op(op, live_schema)?));
+                return Ok(LoweredOp::Dml(self.lower_dml_op(op_index, op, live_schema)?));
             }
         };
         Ok(LoweredOp::Ddl(migs))
@@ -884,7 +886,12 @@ impl IrAuthor {
     ///   resolved rule-(c) `ColRef` check rejected an embedded expression.
     /// - [`IrLowerError::DmlAssemble`] — the assembler rejected the op (malformed
     ///   identifier / empty insert / SQLite `onConflict` / SQLite batched backfill).
-    fn lower_dml_op(&self, op: &Op, live_schema: &LiveSchema) -> Result<PlanStep, IrLowerError> {
+    fn lower_dml_op(
+        &self,
+        op_index: usize,
+        op: &Op,
+        live_schema: &LiveSchema,
+    ) -> Result<PlanStep, IrLowerError> {
         use crate::ir::Op;
         let dialect = self.dialect;
         let target = match dialect {
@@ -923,7 +930,7 @@ impl IrAuthor {
                     oc.as_ref(),
                 )
                 .map_err(IrLowerError::DmlAssemble)?;
-                Ok(self.dml_step(table, "insert", asm, false))
+                Ok(self.dml_step(op_index, table, "insert", asm, false))
             }
             Op::Update { table, set, r#where, batch } => {
                 if batch.is_some() {
@@ -949,7 +956,7 @@ impl IrAuthor {
                     r#where.as_ref(),
                 )
                 .map_err(IrLowerError::DmlAssemble)?;
-                Ok(self.dml_step(table, "update", asm, false))
+                Ok(self.dml_step(op_index, table, "update", asm, false))
             }
             Op::Delete { table, r#where, limit } => {
                 let asm = crate::dml::assemble_delete(
@@ -962,7 +969,7 @@ impl IrAuthor {
                 .map_err(IrLowerError::DmlAssemble)?;
                 // A delete is DESTRUCTIVE (data loss) — the executor's approval gate
                 // refuses it without `Approval::Approved`.
-                Ok(self.dml_step(table, "delete", asm, true))
+                Ok(self.dml_step(op_index, table, "delete", asm, true))
             }
             Op::Backfill { table, cursor_column, batch_size, set, filter, name } => self
                 .lower_backfill(
@@ -979,19 +986,21 @@ impl IrAuthor {
     }
 
     /// Build a [`PlanStep::Dml`] from an assembled one-shot statement, minting a
-    /// deterministic sub-version id from the owner + table + template + binds so a
-    /// re-deploy of the SAME op is idempotent (the journal net-applied-skip keys on
-    /// this version) and a re-authored op (a changed template/binds) gets a fresh
-    /// id (no false resume).
+    /// deterministic sub-version id from the `op_index` + owner + kind + template +
+    /// binds so a re-deploy of the SAME op is idempotent (the journal net-applied-skip
+    /// keys on this version) and a re-authored op (a changed template/binds) gets a
+    /// fresh id (no false resume). The `op_index` is what keeps two byte-identical
+    /// DML ops in the SAME migration distinct (see [`dml_step_version`]).
     fn dml_step(
         &self,
+        op_index: usize,
         table: &str,
         kind: &str,
         asm: crate::dml::AssembledDml,
         destructive: bool,
     ) -> PlanStep {
         let owner = self.decl.owner_app().to_string();
-        let version = dml_step_version(&owner, kind, &asm.template, &asm.binds);
+        let version = dml_step_version(op_index, &owner, kind, &asm.template, &asm.binds);
         PlanStep::Dml {
             version,
             name: format!("{kind} {table}"),
@@ -1085,7 +1094,7 @@ impl IrAuthor {
             // lower failure aborts before any guarding — nothing applied. Each unit
             // carries its STRUCTURAL per-statement list (the exact statements the
             // renderer built, NOT a textual re-split of `up`).
-            let op_units = match self.lower_one_op(op, &mut live_tables, live)? {
+            let op_units = match self.lower_one_op(op_index, op, &mut live_tables, live)? {
                 LoweredOp::Ddl(units) => units,
                 LoweredOp::Rename(step) => {
                     // §2.6.1 — one online-rename plan step, carried verbatim. NOT
@@ -1465,11 +1474,18 @@ fn plan_step_version(step: &PlanStep) -> crate::migration::MigrationId {
 /// (§PR6a / §2.0.1). A DML step has no `Migration` of its own, but it still needs
 /// a journal identity for the net-applied-skip (idempotent re-deploy) and the
 /// per-step journal row. Deriving it from the step's content (owner + kind +
-/// template + binds) makes a re-deploy of the SAME op map to the SAME id (skipped
-/// when net-applied) and a re-authored op (a changed template/binds) get a FRESH
-/// id (no false resume) — the same property `repeatable_id_for_name` /
-/// `BackfillSpec::backfill_id` give their respective steps.
+/// template + binds) PLUS its `op_index` (the op's position in the migration's op
+/// list) makes a re-deploy of the SAME migration file map each op to the SAME id
+/// (skipped when net-applied) and a re-authored op (a changed template/binds) get
+/// a FRESH id (no false resume) — the same property `repeatable_id_for_name` /
+/// `BackfillSpec::backfill_id` give their respective steps. The `op_index` fold is
+/// what keeps two BYTE-IDENTICAL DML ops in the SAME migration (e.g. two intentional
+/// identical increment updates) DISTINCT: without it they would collide to one
+/// version and the second would be silently net-applied-skipped (MED — data-intent
+/// loss). The index is the plan position, so it is deterministic across re-deploys
+/// of the same file and stable per-op.
 fn dml_step_version(
+    op_index: usize,
     owner: &str,
     kind: &str,
     template: &str,
@@ -1477,6 +1493,9 @@ fn dml_step_version(
 ) -> crate::migration::MigrationId {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
+    // Fold the op's plan position FIRST so two byte-identical ops at different
+    // positions seed distinct digests (deterministic per file, fresh on re-author).
+    h.update((op_index as u64).to_be_bytes());
     for field in [owner, kind, template] {
         h.update((field.len() as u64).to_be_bytes());
         h.update(field.as_bytes());
@@ -2570,5 +2589,26 @@ mod tests {
             ),
             "got: {err}"
         );
+    }
+
+    // MED — the DML-step version folds the op's plan position so two BYTE-IDENTICAL
+    // DML ops in one migration mint DISTINCT ids (no silent net-applied-skip of the
+    // second), WHILE staying deterministic per (op_index, content) so re-lowering the
+    // SAME file yields the SAME ids (idempotent re-deploy).
+    #[test]
+    fn dml_step_version_folds_op_index_yet_stays_deterministic() {
+        use crate::plan::BindValue;
+        let binds = [BindValue::Int(7), BindValue::Text("dup".into())];
+        let v0 = dml_step_version(0, "app_a", "update", "UPDATE t SET …", &binds);
+        let v0_again = dml_step_version(0, "app_a", "update", "UPDATE t SET …", &binds);
+        let v1 = dml_step_version(1, "app_a", "update", "UPDATE t SET …", &binds);
+
+        // Deterministic: re-lowering the identical (op_index, content) is the SAME id.
+        assert_eq!(v0, v0_again, "same op_index + content must be deterministic (idempotent re-deploy)");
+        // Distinct: two byte-identical ops at positions 0 and 1 must NOT collide.
+        assert_ne!(v0, v1, "distinct plan positions must mint distinct versions");
+        // A re-authored op (changed binds) at the same position is still a fresh id.
+        let v0_diff = dml_step_version(0, "app_a", "update", "UPDATE t SET …", &[BindValue::Int(8)]);
+        assert_ne!(v0, v0_diff, "changed binds must mint a fresh id (no false resume)");
     }
 }

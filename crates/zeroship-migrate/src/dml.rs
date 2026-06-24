@@ -664,10 +664,12 @@ pub fn assemble_update(
 }
 
 /// Assemble a `del` op into a parameterized `DELETE`. The mandatory `where`
-/// renders through [`render_expr_bound`]; an optional `limit` is appended (PG/
-/// SQLite both accept `DELETE … WHERE … ` and the limit is enforced via a
-/// subquery on PG / `LIMIT` on SQLite — for portability we emit the limit only
-/// when present, using the dialect form).
+/// renders through [`render_expr_bound`]. An optional `limit` is enforced via a
+/// primary-rowid subquery on BOTH backends (`ctid` on PG, `rowid` on SQLite):
+/// PG never supported `DELETE … LIMIT n`, and the bundled rusqlite is built
+/// WITHOUT `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`, so a bare `DELETE … LIMIT ?n`
+/// is a hard syntax error there too. The limit-free form is a plain `DELETE …
+/// WHERE …`.
 ///
 /// # Errors
 /// [`DmlError`] on a malformed identifier / an unrenderable predicate.
@@ -683,12 +685,18 @@ pub fn assemble_delete(
     let w = render_expr_bound(r#where, &mut ctx)?;
     let template = match (dialect, limit) {
         (_, None) => format!("DELETE FROM {qtable} WHERE {w}"),
-        // SQLite supports `DELETE … WHERE … LIMIT n` (with the compile option,
-        // on by default in the bundled lib); PG does not, so PG uses a
-        // ctid-subquery. Bind the limit natively.
+        // Neither backend can take a bare `DELETE … WHERE … LIMIT n` portably:
+        // the bundled rusqlite (features=["bundled"]) does NOT compile
+        // `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`, so `DELETE … LIMIT ?n` is a hard
+        // syntax error at apply; PG never supported the form. Both therefore lower
+        // to a primary-rowid subquery (`rowid` on SQLite, `ctid` on PG) that picks
+        // exactly `limit` matching rows. The limit binds natively.
         (SqlDialect::Sqlite, Some(n)) => {
             let ph = ctx.push_bind(BindValue::Int(i64::try_from(n).unwrap_or(i64::MAX)));
-            format!("DELETE FROM {qtable} WHERE {w} LIMIT {ph}")
+            format!(
+                "DELETE FROM {qtable} WHERE rowid IN \
+                 (SELECT rowid FROM {qtable} WHERE {w} LIMIT {ph})"
+            )
         }
         (SqlDialect::Postgres, Some(n)) => {
             let ph = ctx.push_bind(BindValue::Int(i64::try_from(n).unwrap_or(i64::MAX)));
@@ -987,7 +995,32 @@ mod tests {
             rhs: Box::new(lit_int(0)),
         };
         let a = assemble_delete(SCHEMA, SqlDialect::Sqlite, "t", &pred, Some(100)).unwrap();
-        assert_eq!(a.template, "DELETE FROM \"t\" WHERE (\"code\" < ?1) LIMIT ?2");
+        // The bundled rusqlite is built WITHOUT SQLITE_ENABLE_UPDATE_DELETE_LIMIT,
+        // so `DELETE … LIMIT ?n` is a syntax error; the portable form is the
+        // rowid subquery (the SQLite analog of the PG ctid form).
+        assert_eq!(
+            a.template,
+            "DELETE FROM \"t\" WHERE rowid IN \
+             (SELECT rowid FROM \"t\" WHERE (\"code\" < ?1) LIMIT ?2)"
+        );
+        assert_eq!(a.binds, vec![BindValue::Int(0), BindValue::Int(100)]);
+    }
+
+    #[test]
+    fn delete_with_limit_pg() {
+        // The PG ctid-subquery form is unchanged; pin it alongside the SQLite form
+        // so the two portable lowerings stay structurally parallel.
+        let pred = Expr::BinOp {
+            op: BinaryOp::Lt,
+            lhs: Box::new(Expr::col("code")),
+            rhs: Box::new(lit_int(0)),
+        };
+        let a = assemble_delete(SCHEMA, SqlDialect::Postgres, "t", &pred, Some(100)).unwrap();
+        assert_eq!(
+            a.template,
+            "DELETE FROM \"app_proj\".\"t\" WHERE ctid IN \
+             (SELECT ctid FROM \"app_proj\".\"t\" WHERE (\"code\" < $1) LIMIT $2)"
+        );
         assert_eq!(a.binds, vec![BindValue::Int(0), BindValue::Int(100)]);
     }
 

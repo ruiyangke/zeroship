@@ -97,7 +97,7 @@ async fn author_and_apply(
     ir: &str,
     reg: &std::collections::BTreeMap<String, String>,
     approval: Approval,
-) {
+) -> zeroship_migrate::engine::DeclarativeDeployOutcome {
     let author = IrAuthor::new(cfg.project_schema.clone(), APP, SqlDialect::Postgres);
     let document = zeroship_migrate::ir_load::load_ir_document(
         ir,
@@ -118,7 +118,7 @@ async fn author_and_apply(
             LockMode::Acquire,
         )
         .await
-        .expect("apply the authored DML plan on PG");
+        .expect("apply the authored DML plan on PG")
 }
 
 #[compio::test]
@@ -465,6 +465,120 @@ async fn ir_unresolved_colref_rejected_at_apply_seam_on_pg() {
         }
         other => panic!("expected DmlValidate UNSUPPORTED expr, got {other:?}"),
     }
+
+    teardown(&conn, &cfg).await;
+}
+
+/// HIGH (PG side) — `op.del(table, where, {limit})` deletes EXACTLY `limit`
+/// matching rows on real PG via the ctid-subquery form (PG never supported a bare
+/// `DELETE … LIMIT n`). Pins the PG leg of the portable del+limit lowering green
+/// alongside the SQLite rowid-subquery fix.
+#[compio::test]
+async fn ir_del_with_limit_deletes_exactly_n_on_pg() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let s = q(&cfg.project_schema);
+
+    // No UNIQUE on code here — five rows all match the WHERE so the limit bites.
+    let create = r#"{"ir_version":1,"name":"create_codes","ops":[
+        {"op":"createTable","name":"codes","columns":[
+            {"name":"code","type":"int","nullable":false},
+            {"name":"label","type":"text"}
+        ]}
+    ]}"#;
+    author_and_apply(&conn, &cfg, create, &registry(&[]), Approval::None).await;
+
+    let seed = r#"{"ir_version":1,"name":"seed","ops":[
+        {"op":"insert","table":"codes",
+         "columns":["id","created_at","updated_at","version","code","label"],
+         "rows":[
+            ["c1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,1,"a"],
+            ["c2","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,2,"b"],
+            ["c3","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,3,"c"],
+            ["c4","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,4,"d"],
+            ["c5","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,5,"e"]
+         ]}
+    ]}"#;
+    author_and_apply(&conn, &cfg, seed, &registry(&[("codes", APP)]), Approval::None).await;
+
+    let delete = r#"{"ir_version":1,"name":"prune_limited","ops":[
+        {"op":"delete","table":"codes",
+         "where":{"node":"binOp","op":"ge",
+             "lhs":{"node":"colRef","name":"code"},
+             "rhs":{"node":"literal","value":1}},
+         "limit":2}
+    ]}"#;
+    author_and_apply(&conn, &cfg, delete, &registry(&[("codes", APP)]), Approval::Approved).await;
+
+    let n = conn
+        .query_one(&format!("SELECT count(*)::bigint FROM {s}.codes"), &[])
+        .await
+        .unwrap()
+        .get::<_, i64>(0);
+    assert_eq!(n, 3, "del{{limit:2}} via the ctid subquery removes EXACTLY 2 of 5 matching rows on PG");
+
+    teardown(&conn, &cfg).await;
+}
+
+/// LOW — idempotent re-deploy on real PG. Apply a one-shot DML plan (insert + an
+/// increment update), then re-apply the IDENTICAL plan: the executor must report
+/// the DML steps SKIPPED (net-applied) and the row state unchanged (no
+/// double-insert, no re-bump).
+#[compio::test]
+async fn ir_idempotent_redeploy_of_dml_plan_on_pg() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let s = q(&cfg.project_schema);
+
+    let create = r#"{"ir_version":1,"name":"create_codes","ops":[
+        {"op":"createTable","name":"codes","columns":[
+            {"name":"code","type":"int","nullable":false},
+            {"name":"label","type":"text"}
+        ]}
+    ]}"#;
+    author_and_apply(&conn, &cfg, create, &registry(&[]), Approval::None).await;
+
+    let dml = r#"{"ir_version":1,"name":"seed_and_bump","ops":[
+        {"op":"insert","table":"codes",
+         "columns":["id","created_at","updated_at","version","code","label"],
+         "rows":[["c1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,0,"idem"]]},
+        {"op":"update","table":"codes",
+         "set":{"code":{"node":"binOp","op":"add",
+             "lhs":{"node":"colRef","name":"code"},
+             "rhs":{"node":"literal","value":1}}},
+         "where":{"node":"binOp","op":"eq",
+             "lhs":{"node":"colRef","name":"label"},
+             "rhs":{"node":"literal","value":"idem"}}}
+    ]}"#;
+
+    let first = author_and_apply(&conn, &cfg, dml, &registry(&[("codes", APP)]), Approval::None).await;
+    assert_eq!(first.applied.applied.len(), 2, "first deploy applies both DML steps");
+    assert!(first.applied.skipped.is_empty(), "nothing skipped on the first deploy");
+    let code1: i32 = conn
+        .query_one(&format!("SELECT code FROM {s}.codes WHERE label = 'idem'"), &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(code1, 1, "one row, bumped once after first deploy");
+
+    // Re-deploy the identical plan: all DML steps net-applied ⇒ all skipped.
+    let second = author_and_apply(&conn, &cfg, dml, &registry(&[("codes", APP)]), Approval::None).await;
+    assert!(second.applied.applied.is_empty(), "re-deploy applies NOTHING on PG");
+    assert_eq!(second.applied.skipped.len(), 2, "re-deploy skips both already-applied DML steps");
+    let n = conn
+        .query_one(&format!("SELECT count(*)::bigint FROM {s}.codes WHERE label = 'idem'"), &[])
+        .await
+        .unwrap()
+        .get::<_, i64>(0);
+    assert_eq!(n, 1, "idempotent re-deploy: still exactly one row (no double-insert)");
+    let code2: i32 = conn
+        .query_one(&format!("SELECT code FROM {s}.codes WHERE label = 'idem'"), &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(code2, 1, "idempotent re-deploy: still code = 1 (the increment did not re-run)");
 
     teardown(&conn, &cfg).await;
 }

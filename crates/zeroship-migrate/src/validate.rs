@@ -702,6 +702,27 @@ impl Ctx<'_> {
                         args.len()
                     )));
                 }
+                // The SQLite render lowers concatWs to a NULL-skipping `||`-fold with
+                // a `substr(fold, length(delim)+1)` head-trim that strips the leading
+                // delimiter (`render_concat_ws`). That head-trim is only correct when
+                // the delimiter is a FIXED Literal; a computed/runtime delimiter (a
+                // ColRef, a nested synth, …) would make the prefix length unknowable
+                // and silently corrupt the result. PG's `concat_ws` takes any
+                // expression delimiter, so — exactly like the splitPart delim gate —
+                // a non-literal delimiter loads on PG and is a HARD reject only on a
+                // SQLite target. Mirror the splitPart structural gate so a hand-crafted
+                // IR cannot slip a non-literal delimiter past and defer the corruption
+                // to render.
+                if self.target_dialect == Dialect::Sqlite
+                    && !matches!(args[0], Expr::Literal { .. })
+                {
+                    return Err(self.concat_ws_delim_envelope_err(format!(
+                        "c.fn.concatWs delimiter must be a literal on SQLite (a \
+                         runtime/computed delimiter is not portable — the NULL-skip \
+                         head-trim needs a fixed delimiter length); got {:?}",
+                        args[0]
+                    )));
+                }
                 for a in args {
                     self.walk_depth(a, depth)?;
                 }
@@ -749,6 +770,26 @@ impl Ctx<'_> {
                 "use a single-ASCII delimiter with 1<=n<=8, restructure to stay \
                  in-envelope (split into <=8 parts), or mark the migration PG-only \
                  (dialect_scope=PgOnly)"
+                    .to_string(),
+            ),
+        )
+    }
+
+    /// A concatWs **portability-boundary** reject: the call is well-formed and
+    /// PG-renderable (`concat_ws` takes any expression delimiter), but the SQLite
+    /// lowering's literal-delimiter head-trim assumption is violated by a
+    /// non-literal delimiter. Like [`Self::split_part_envelope_err`], it is a hard
+    /// error ONLY on the SQLite leg; the caller only reaches it when
+    /// `target_dialect == Sqlite`.
+    fn concat_ws_delim_envelope_err(&self, reason: String) -> AuthoringError {
+        self.err(
+            CODE_EXPR_NOT_PORTABLE,
+            None,
+            Dialect::Sqlite,
+            reason,
+            Some(
+                "pass a string literal as the concatWs delimiter, or mark the \
+                 migration PG-only (dialect_scope=PgOnly)"
                     .to_string(),
             ),
         )
@@ -1118,6 +1159,33 @@ mod tests {
             vec![Expr::lit(IrScalar::Str(",".into())), Expr::col("name")],
         );
         assert!(validate_expr(&ok, Dialect::Sqlite, &sc, 0, None).is_ok());
+    }
+
+    #[test]
+    fn concat_ws_non_literal_delim_rejected_on_sqlite_loads_on_pg() {
+        // LOW — the SQLite render's NULL-skip head-trim (`substr(fold,
+        // length(delim)+1)`) is only correct for a FIXED literal delimiter. A
+        // non-literal delimiter (here a ColRef to an existing column, so rule (c)
+        // is satisfied and the ONLY objection is the literal-delim gate) must be a
+        // HARD reject on SQLite and load fine on PG (`concat_ws` takes any expr),
+        // mirroring the splitPart delim-literal gate.
+        let c = cols();
+        let sc = scope("users", &c);
+        let e = synth(
+            SynthFn::ConcatWs,
+            vec![Expr::col("name"), Expr::col("first")],
+        );
+        // PG: a non-literal delimiter is fine.
+        assert!(
+            validate_expr(&e, Dialect::Postgres, &sc, 0, None).is_ok(),
+            "a non-literal concatWs delimiter must LOAD on a Postgres target"
+        );
+        // SQLite: the structural literal-delim gate rejects it.
+        let err = validate_expr(&e, Dialect::Sqlite, &sc, 0, None).unwrap_err();
+        assert_eq!(
+            err.code, CODE_EXPR_NOT_PORTABLE,
+            "a non-literal concatWs delimiter must reject on SQLite (literal-delim gate); got: {err}"
+        );
     }
 
     #[test]
