@@ -31,6 +31,15 @@ fn admin_dsn() -> String {
 
 /// Open a raw admin connection for the assert side, or `None` when the DB is
 /// unreachable (⇒ the test skips).
+///
+/// **CI hard-gate (F-LOW, code-critic).** When `MIGRATE_REQUIRE_DB` is set
+/// (CI MUST set it), an unreachable `:5440` is a HARD test FAILURE, not a silent
+/// green skip. Otherwise a misconfigured CI Postgres would let the whole
+/// faithful-deploy security suite (the bare-name `dropIndex` refusal, the
+/// understated-unique refusal, the cross-tenant ownership refusal) vacuously
+/// PASS — masking a real regression. Locally (`MIGRATE_REQUIRE_DB` unset) the
+/// skip is retained so a dev without the test DB can still run the rest of the
+/// workspace.
 async fn admin_conn() -> Option<compio_postgres::Client> {
     match compio_postgres::connect(&admin_dsn(), NoTls).await {
         Ok((client, conn)) => {
@@ -40,7 +49,15 @@ async fn admin_conn() -> Option<compio_postgres::Client> {
             .detach();
             Some(client)
         }
-        Err(_) => None,
+        Err(e) => {
+            assert!(
+                std::env::var("MIGRATE_REQUIRE_DB").is_err(),
+                "MIGRATE_REQUIRE_DB is set but zeroship_migrate_test on :5440 is unreachable \
+                 ({e}); the faithful-deploy security suite must NOT silently skip in CI — \
+                 a missing test DB is a hard failure, not a vacuous green pass"
+            );
+            None
+        }
     }
 }
 

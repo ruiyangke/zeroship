@@ -22,14 +22,21 @@
 //! `zeroship-runtime` depends on neither `zeroship-migrate` nor
 //! `zeroship-schema`.
 //!
-//! ## Two public surfaces
+//! ## Public surfaces
 //!
 //! - [`eval::eval_schema_to_ir`] — eval a `schema.js` → `Vec<CollectionDescriptor>`.
 //! - [`generate::generate_migration`] — full `generate --schema` flow:
 //!   eval → IR → diff against the live DB → render a dbmate migration file.
+//! - [`record::record_migration_to_ir`] — the op.* recorder (design §2.5 / PR1):
+//!   eval a migration module's `op.*` `up()` → the typed `.ir.json`
+//!   [`MigrationIr`](zeroship_migrate::MigrationIr). This is the JS half of the
+//!   anti-drift gate — the single-source-of-truth byte/value-equality the golden
+//!   `.ir.json` corpus + the `Checksum::of_ir` round-trip test pin.
 
 pub mod eval;
 pub mod generate;
+pub mod record;
 
 pub use eval::{eval_schema_to_ir, EvalError};
 pub use generate::{generate_migration, GenerateError, GenerateOutcome};
+pub use record::{record_migration_to_ir, record_migration_to_json, RecordError};

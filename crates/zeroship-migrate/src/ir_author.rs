@@ -38,6 +38,7 @@ use crate::ir::{
     ColType, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IndexMethod, MigrationIr, Op,
 };
 use crate::migration::Migration;
+use crate::plan::{AppliedPlan, PlanStep};
 use zeroship_schema::query::SqlDialect;
 
 /// The LIVE-schema facts the IR-path Lower phase consults — the IR-path peer of
@@ -234,14 +235,37 @@ pub enum LoadAndLowerGuardedError {
 /// table resolves ownership / inlines FKs correctly (cross-file correctness).
 #[derive(Debug)]
 pub struct LoweredArtifact {
-    /// The lowered, guard-checked migrations (their `up` is provably the
-    /// reassembly of the guarded fragments, §6.1.1).
-    pub migrations: Vec<Migration>,
+    /// The lowered artifact as a single ordered [`AppliedPlan`] (§2.0 / §5.2):
+    /// one `.ir.json` → ONE plan, whose `Ddl` steps are the lowered, guard-checked
+    /// migrations (their `up` is provably the reassembly of the guarded fragments,
+    /// §6.1.1) and whose `checksum` is the dialect-neutral [`Checksum::of_ir`] over
+    /// the op list (§2.4). The deploy path routes this plan's steps through
+    /// `MigrationEngine::apply_plan` (§5.2). For PR1's pure-DDL ops every step is a
+    /// `PlanStep::Ddl`; richer step kinds (Backfill/Dml/OnlineRename) arrive in
+    /// PR2/PR6a.
+    pub plan: AppliedPlan,
     /// The per-op guarded fragments (op-index + kind attribution).
     pub fragments: Vec<GuardedFragment>,
     /// The tables this artifact creates (its `createTable` op names), for the
     /// deploy loop to fold into the cross-file registry + live-set.
     pub created_tables: Vec<String>,
+}
+
+impl LoweredArtifact {
+    /// The lowered `Ddl` migrations, in plan-step order — the flat view the
+    /// deploy-side traceability manifest + diagnostics consume. (PR1 steps are all
+    /// `Ddl`; a non-`Ddl` step would simply not appear here.)
+    #[must_use]
+    pub fn migrations(&self) -> Vec<Migration> {
+        self.plan
+            .steps
+            .iter()
+            .filter_map(|s| match s {
+                PlanStep::Ddl(m) => Some(m.clone()),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 impl IrAuthor {
@@ -342,7 +366,81 @@ impl IrAuthor {
         let (migrations, fragments) = self
             .lower_guarded(&ir, guard_cfg, live)
             .map_err(LoadAndLowerGuardedError::Lower)?;
-        Ok(LoweredArtifact { migrations, fragments, created_tables })
+        // Wrap the lowered DDL steps as ONE AppliedPlan whose checksum is the
+        // dialect-neutral `Checksum::of_ir` over the op list (§2.0 / §5.2), and
+        // STAMP that same anchor onto every step's journaled `Migration.checksum`
+        // (§5.3 / §2.6.1): the drift anchor that enters the journal is the
+        // canonical op list, NOT the per-dialect rendered SQL. So a re-deploy of
+        // the SAME `.ir.json` on EITHER backend re-derives the SAME anchor (no
+        // false drift), while editing the authoring `.ts` (⇒ a different op list)
+        // shifts the anchor and the executor's net-applied drift gate aborts.
+        let plan = self.assemble_plan(&ir, migrations);
+        Ok(LoweredArtifact { plan, fragments, created_tables })
+    }
+
+    /// Assemble the lowered DDL `Migration`s into ONE [`AppliedPlan`] (§2.0 / §5.2),
+    /// stamping the dialect-neutral [`Checksum::of_ir`] anchor (§5.3) onto BOTH the
+    /// plan and every step's journaled `Migration.checksum`.
+    ///
+    /// **Why stamp the op-list `of_ir` onto each step's checksum.** The journal
+    /// records `Migration.checksum` and the executor's net-applied drift gate
+    /// (`drift.rs`) compares the journaled value to the lowered `Migration.checksum`
+    /// on re-deploy. Stamping the canonical-op-list `of_ir` there makes the
+    /// journaled drift anchor the DIALECT-NEUTRAL op list (§2.6.1's "one plan
+    /// checksum over the canonical op list, not the rendered SQL"), so the anchor is
+    /// the SAME on a PG re-deploy and a SQLite re-deploy of the same artifact — and a
+    /// `.ts` edit (a changed op list) is detected as drift regardless of dialect.
+    /// The per-dialect rendered `up`/`down` still applies; only the IDENTITY anchor
+    /// is the neutral op list.
+    fn assemble_plan(&self, ir: &MigrationIr, mut migrations: Vec<Migration>) -> AppliedPlan {
+        let anchor = crate::ir_load::authoritative_ir_checksum(ir);
+        for m in &mut migrations {
+            m.checksum = anchor.clone();
+        }
+        // The plan-group identity (§2.0.1): for PR1 the steps keep their own
+        // per-op journal versions, so the plan `version` is a marker — the first
+        // step's version (deterministic within a deploy), or a fresh id for the
+        // degenerate empty plan (a no-op IR).
+        let version = migrations
+            .first()
+            .map(|m| m.version.clone())
+            .unwrap_or_else(crate::migration::MigrationId::generate);
+        let steps: Vec<PlanStep> = migrations.into_iter().map(PlanStep::Ddl).collect();
+        let rollbackable = AppliedPlan::compute_rollbackable(&steps);
+        AppliedPlan {
+            version,
+            name: ir.name.clone(),
+            steps,
+            checksum: anchor,
+            // PR1 lowers DDL with default-derived flags; the dialect-neutral
+            // identity flags are the default set (the per-dialect transactional/
+            // concurrently divergence is a render concern, NOT the identity — §2.4).
+            flags: crate::migration::MigrationFlags::default(),
+            dialect_scope: crate::plan::DialectScope::Both,
+            rollbackable,
+            owner_app: ir.owner_app.clone(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: ir.preconditions.clone(),
+        }
+    }
+
+    /// Lower a validated [`MigrationIr`]'s DDL ops to ONE [`AppliedPlan`] (§2.0 /
+    /// §5.2) — the named-contract peer of [`lower`](Self::lower) (which returns the
+    /// flat `Vec<Migration>` the §6.4 byte-identity goldens compare). The plan's
+    /// `checksum` is the dialect-neutral [`Checksum::of_ir`] anchor and each `Ddl`
+    /// step's journaled checksum is stamped with it (§5.3 — see
+    /// [`assemble_plan`](Self::assemble_plan)).
+    ///
+    /// # Errors
+    /// Same as [`lower`](Self::lower).
+    pub fn lower_plan(
+        &self,
+        ir: &MigrationIr,
+        live: &LiveSchema,
+    ) -> Result<AppliedPlan, IrLowerError> {
+        let migrations = self.lower(ir, live)?;
+        Ok(self.assemble_plan(ir, migrations))
     }
 
     /// Lower a validated [`MigrationIr`]'s DDL ops to [`Migration`]s.
@@ -1491,8 +1589,129 @@ mod tests {
             .load_and_lower_guarded(bytes, "app_a", &registry(&[]), &LiveSchema::default(), &guard_cfg)
             .expect("a clean createTable loads + guarded-lowers");
         assert_eq!(out.created_tables, vec!["fresh".to_string()], "the createTable is reported");
-        assert!(out.migrations.iter().any(|m| m.up.contains("CREATE TABLE \"app\".\"fresh\"")));
+        assert!(out.migrations().iter().any(|m| m.up.contains("CREATE TABLE \"app\".\"fresh\"")));
         assert!(!out.fragments.is_empty(), "fragments are attributed");
+    }
+
+    // F-MED (code-critic, #92/#93): the drift anchor on the IR path is the
+    // DIALECT-NEUTRAL `Checksum::of_ir` over the canonical op list (§5.3 / §2.6.1),
+    // NOT the per-statement rendered-SQL `Checksum::of`. `lower_plan` stamps that
+    // anchor onto BOTH the AppliedPlan and every `Ddl` step's journaled
+    // `Migration.checksum` — so the journal records the op-list anchor and a
+    // re-deploy compares against it. This test would FAIL pre-fix (the lowered
+    // Migrations carried `Checksum::of(up,down)` — a PG-specific rendered-SQL hash).
+    #[test]
+    fn ir_plan_anchor_is_of_ir_not_rendered_sql() {
+        let ir = create_table_ir("widgets", vec![TIrColumn {
+            name: "title".into(),
+            ty: ColType::Text,
+            nullable: Some(false),
+            default: None,
+            unique: None,
+        }]);
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        let plan = author.lower_plan(&ir, &LiveSchema::default()).expect("lower_plan");
+
+        // The authoritative op-list anchor (server-stamped owner already on `ir`).
+        let expected = crate::migration::Checksum::of_ir(
+            &crate::ir::CanonicalOpList(&ir.ops),
+            &crate::migration::MigrationFlags::default(),
+            &ir.owner_app,
+            &[],
+            &[],
+            &ir.preconditions,
+        );
+
+        // (a) the PLAN checksum is the op-list anchor.
+        assert_eq!(
+            plan.checksum.as_str(),
+            expected.as_str(),
+            "the AppliedPlan checksum must be Checksum::of_ir over the op list"
+        );
+
+        // (b) EVERY journaled `Ddl` step checksum is the op-list anchor — the value
+        //     the journal records + the executor's drift gate compares.
+        let mut steps = 0;
+        for s in &plan.steps {
+            if let PlanStep::Ddl(m) = s {
+                steps += 1;
+                assert_eq!(
+                    m.checksum.as_str(),
+                    expected.as_str(),
+                    "each Ddl step's journaled checksum must be the op-list anchor, not rendered SQL"
+                );
+                // It must NOT equal the rendered-SQL `Checksum::of` (the pre-fix value).
+                let rendered = crate::migration::Checksum::of(
+                    &crate::migration::ChecksumInput::from_migration(m),
+                );
+                assert_ne!(
+                    m.checksum.as_str(),
+                    rendered.as_str(),
+                    "the journaled anchor must be the dialect-neutral op-list checksum, \
+                     NOT the rendered-SQL Checksum::of"
+                );
+            }
+        }
+        assert!(steps >= 1, "the createTable lowers to at least one Ddl step");
+    }
+
+    // F-MED (#92): the op-list drift anchor is DIALECT-NEUTRAL — the SAME `.ir.json`
+    // lowered for PG and for SQLite journals the SAME checksum (so a re-deploy on
+    // either backend compares against one anchor; §2.6.1's single-checksum
+    // invariant). Pre-fix the anchor was the per-dialect rendered SQL, which
+    // DIVERGES (PG `CREATE TABLE app.widgets` vs SQLite `CREATE TABLE "widgets"`).
+    #[test]
+    fn ir_plan_anchor_is_dialect_neutral_pg_eq_sqlite() {
+        let ir = create_table_ir("widgets", vec![TIrColumn {
+            name: "title".into(),
+            ty: ColType::Text,
+            nullable: Some(false),
+            default: None,
+            unique: None,
+        }]);
+        let pg = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
+            .lower_plan(&ir, &LiveSchema::default())
+            .expect("pg lower_plan");
+        let sqlite = IrAuthor::new("app", "app_a", SqlDialect::Sqlite)
+            .lower_plan(&ir, &LiveSchema::default())
+            .expect("sqlite lower_plan");
+        assert_eq!(
+            pg.checksum.as_str(),
+            sqlite.checksum.as_str(),
+            "the op-list anchor must be identical across PG and SQLite renders"
+        );
+        // And the rendered `up` MUST differ (proving the anchor is NOT the SQL).
+        let pg_up = match &pg.steps[0] {
+            PlanStep::Ddl(m) => m.up.clone(),
+            _ => unreachable!(),
+        };
+        let sqlite_up = match &sqlite.steps[0] {
+            PlanStep::Ddl(m) => m.up.clone(),
+            _ => unreachable!(),
+        };
+        assert_ne!(pg_up, sqlite_up, "the rendered SQL DOES diverge per dialect — only the anchor is shared");
+    }
+
+    // F-MED (#92): editing the authoring op list (a `.ts` edit) changes the op list
+    // ⇒ changes the journaled anchor ⇒ the executor's net-applied drift gate would
+    // abort on re-deploy. Two IRs differing only in a column type produce different
+    // plan anchors.
+    #[test]
+    fn ir_plan_anchor_changes_when_op_list_changes() {
+        let a = create_table_ir("t", vec![TIrColumn {
+            name: "c".into(), ty: ColType::Text, nullable: None, default: None, unique: None,
+        }]);
+        let b = create_table_ir("t", vec![TIrColumn {
+            name: "c".into(), ty: ColType::Int, nullable: None, default: None, unique: None,
+        }]);
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        let pa = author.lower_plan(&a, &LiveSchema::default()).expect("lower a");
+        let pb = author.lower_plan(&b, &LiveSchema::default()).expect("lower b");
+        assert_ne!(
+            pa.checksum.as_str(),
+            pb.checksum.as_str(),
+            "a changed op list must move the drift anchor (text vs int column)"
+        );
     }
 
     // An op on ANOTHER app's table is refused by the load gate (ownership) before

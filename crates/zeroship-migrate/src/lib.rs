@@ -131,8 +131,8 @@ pub use drift::{
     OrphanJournal, SchemaSnapshot, StructuralDrift, TableSnapshot,
 };
 pub use executor::{
-    apply, rollback, ApplyError, ApplyOutcome, PreconditionVerdict, RollbackError, RollbackOptions,
-    RollbackOutcome, RollbackRequest, RollbackTarget,
+    apply, rollback, ApplyError, ApplyOutcome, LockMode, PreconditionVerdict, RollbackError,
+    RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,
 };
 pub use guard::{
     flags_for, guard_for, GuardConfig, GuardError, GuardOutcome, GuardReport, MigrationGuard,

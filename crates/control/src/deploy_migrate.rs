@@ -56,8 +56,9 @@ use std::path::Path;
 use uuid::Uuid;
 use zeroship_migrate::{
     compute_manifest, connect, load_dir_migrations, provision_migrator, Approval, ConnectError,
-    DriftError, EngineError, ExecutorConfig, IrAuthor, LiveSchema, LoadAndLowerGuardedError,
-    LoaderError, MigrationBackend, MigrationEngine, PostgresBackend, RoleError, SqlDialect,
+    DeclarativeApplyError, DriftError, EngineError, ExecutorConfig, IrAuthor, LiveSchema,
+    LoadAndLowerGuardedError, LoaderError, LockMode, MigrationBackend, MigrationEngine,
+    PostgresBackend, RoleError, SqlDialect,
 };
 
 /// What a successful deploy-migrate produced (for logging / the deploy log).
@@ -118,6 +119,29 @@ pub enum DeployMigrateError {
     /// FK-inline live-table set) failed.
     #[error("deploy-migrate live snapshot: {0}")]
     Snapshot(#[from] DriftError),
+    /// A rename's online expand/backfill failed while applying an IR plan via
+    /// `apply_plan`. Unreachable on the PR1 pure-DDL IR path (no `OnlineRename`
+    /// step is lowered yet) — present so the `DeclarativeApplyError::Expand` arm is
+    /// faithfully surfaced when PR2 lands online renames on the IR path.
+    #[error("deploy-migrate IR online expand: {0}")]
+    OnlineExpand(#[from] zeroship_migrate::OnlineError),
+}
+
+/// Map the plan orchestrator's [`DeclarativeApplyError`] onto the deploy error.
+///
+/// The IR deploy path routes through `MigrationEngine::apply_plan` (§5.2), which
+/// returns [`DeclarativeApplyError`]: its `Plain` arm wraps the SAME
+/// [`EngineError`] the prior `engine.apply` path returned (so a destructive-without-
+/// approval refusal, a guard denial, or checksum drift stays a
+/// [`DeployMigrateError::Apply`] — the tests' match arm is unchanged), and its
+/// `Expand` arm (unreachable on PR1 pure-DDL) maps to [`DeployMigrateError::OnlineExpand`].
+impl From<DeclarativeApplyError> for DeployMigrateError {
+    fn from(e: DeclarativeApplyError) -> Self {
+        match e {
+            DeclarativeApplyError::Plain(inner) => DeployMigrateError::Apply(inner),
+            DeclarativeApplyError::Expand(inner) => DeployMigrateError::OnlineExpand(inner),
+        }
+    }
 }
 
 /// Quote a SQL identifier (double embedded quotes, wrap in `"`). Mirrors the
@@ -354,6 +378,10 @@ async fn apply_bundle_ir_migrations(
     let engine = MigrationEngine::new();
     let mut applied: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
+    // The lowered DDL `Migration`s across ALL `.ir.json` files this deploy — folded
+    // into a SET-LEVEL integrity manifest (below) so the IR path has the SAME
+    // traceability/anti-tamper seam the `.sql` path has (H2 follow-up, §8 point 5).
+    let mut ir_lowered_all: Vec<zeroship_migrate::Migration> = Vec::new();
 
     for path in &ir_files {
         let file = path
@@ -369,20 +397,40 @@ async fn apply_bundle_ir_migrations(
         // The FAIL-CLOSED gate + GUARD-PER-FRAGMENT lower (§6.1.1), with the
         // deploy-target dialect (Postgres). Routing through `load_and_lower_guarded`
         // (not plain `load_and_lower`) means a guard denial reaches the creator with
-        // the exact op-index + kind attribution, not a bare whole-`up` denial.
+        // the exact op-index + kind attribution, not a bare whole-`up` denial. It
+        // returns ONE `AppliedPlan` per file (§2.0 / §5.2) whose `checksum` is the
+        // dialect-neutral `Checksum::of_ir` over the op list and whose `Ddl` steps'
+        // journaled checksums are stamped with that SAME op-list anchor (§5.3 drift
+        // anchor — NOT the per-dialect rendered SQL).
         let author = IrAuthor::new(app.clone(), app.clone(), SqlDialect::Postgres);
         let lowered = author
             .load_and_lower_guarded(&bytes, &app, &registry, &live_schema, guard_cfg)
             .map_err(|source| DeployMigrateError::Ir { file: file.clone(), source })?;
 
-        // Plan (Confined guard re-run as line-1) + apply under Approval::None — a
-        // destructive op is refused at deploy, exactly like the `.sql` path.
-        let plan = engine.plan(&lowered.migrations, guard_cfg);
+        // Fold this file's lowered migrations into the set-level manifest tally.
+        ir_lowered_all.extend(lowered.migrations());
+
+        // Route the file's plan through the SINGLE shared plan orchestrator
+        // `apply_plan` (§5.2 — realizing the PR0 AppliedPlan/apply_plan plumbing on
+        // the IR path), NOT the flat `engine.apply`. `LockMode::Acquire` takes the
+        // project advisory lock once for the whole plan; `apply_with_lock_backend`
+        // inside re-runs the Confined guard + the destructive/approval gate under
+        // `Approval::None`, so a destructive op is refused at deploy exactly like the
+        // `.sql` path. For PR1's pure-DDL ops every step is `Ddl` (coalesced into one
+        // batch — byte-identical journaling to the pre-fix `engine.apply` path).
         let outcome = engine
-            .apply(&plan, Approval::None, backend, exec_cfg, "deploy-ir")
-            .await?;
-        applied.extend(outcome.applied);
-        skipped.extend(outcome.skipped);
+            .apply_plan(
+                &lowered.plan.steps,
+                Approval::None,
+                backend,
+                exec_cfg,
+                "deploy-ir",
+                LockMode::Acquire,
+            )
+            .await
+            .map_err(DeployMigrateError::from)?;
+        applied.extend(outcome.applied.applied);
+        skipped.extend(outcome.applied.skipped);
 
         // ADVANCE the cross-file registry + live-set with THIS file's freshly-
         // created tables (now applied), so the NEXT `.ir.json` sees them as
@@ -391,6 +439,26 @@ async fn apply_bundle_ir_migrations(
             registry.entry(t.clone()).or_insert_with(|| app.clone());
             live_schema.tables.insert(t);
         }
+    }
+
+    // SET-LEVEL integrity manifest over the discovered+lowered `.ir.json` set
+    // (§8 point 5). Mirrors the `.sql` path's `compute_manifest` traceability log:
+    // the IR path is the higher-risk creator/AI-authored surface, so it must emit
+    // an equivalent set-level record (a reorder/insert/remove of IR files moves
+    // this hash) for incident forensics — and so the H2 trusted-stamp follow-up has
+    // an IR-side seam to thread an out-of-band expected hash through (see the
+    // `apply_bundle_migrations` H2 note). Traceability only today: there is no
+    // trusted build-side stamp to verify against yet, so we never pass an `expected`.
+    if !ir_lowered_all.is_empty() {
+        let ir_manifest = compute_manifest(&ir_lowered_all);
+        tracing::info!(
+            app_id = %app_id,
+            ir_file_count = ir_files.len(),
+            ir_migration_count = ir_lowered_all.len(),
+            ir_manifest = %ir_manifest.as_str(),
+            "deploy-migrate: computed .ir.json-set integrity manifest (traceability only — \
+             no trusted build-side stamp to verify against yet; see H2 follow-up)"
+        );
     }
 
     Ok(MigrateOutcome { applied, skipped })

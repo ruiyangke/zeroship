@@ -62,6 +62,32 @@ with **no separate codegen step** and independent of whether `default.schema`
 is consumed at runtime (its removal is P5). Encrypted/masked/vector facets
 reflect in the inferred types. **No gap to build this phase.**
 
+## The `op.*` recorder + the anti-drift corpus (PR1, design §2.5)
+
+Besides the declarative `t.*` schema front-end, this crate carries the **skeletal
+`op.*` migration recorder** — the JS half of the PR1 single-source-of-truth gate.
+A creator authors a migration as `import { createTable, addColumn, … } from
+"@zeroship/migrate"` + a parameterless `up()`; the recorder
+(`record::record_migration_to_ir`) evaluates that module in the same V8 sandbox and
+records the emitted op list into the typed `MigrationIr` — the SAME `.ir.json` the
+lean engine's loader deserializes. The JS side NEVER computes the checksum: it emits
+ops; the Rust engine folds the single authoritative `Checksum::of_ir` (§2.4).
+
+- `src/migrate_ops.js` — the minimal `@zeroship/migrate` op.* DSL (named-import
+  op-functions for all 15 `Op` variants + the `e.*` closed-Expr-node helpers + the
+  recording buffer). NOT the full fluent `(c) => Expr` builder (§3.3.1) — that lands
+  with the DML waves; here an Expr slot is authored as the closed-AST node directly.
+- `src/op_recorder.js` — the adapter: import the migration, run `up()`, drain the
+  ops, emit the `.ir.json` envelope on `globalThis.__zsOpIR`.
+- `tests/op_fixtures/<name>.mig.js` + `<name>.ir.json` — the **golden corpus**.
+- `tests/op_round_trip.rs` — the three §2.5 gates: (1) the JS recorder's `.ir.json`
+  is byte-stable against the committed golden; (2) `Checksum::of_ir(JS-emitted) ==
+  Checksum::of_ir(Rust-recanonicalized golden)` per fixture (value equality, the
+  authoritative anti-drift check); (3) every `Op` discriminant in
+  `op-ir.schema.json` appears in ≥1 fixture (variant-exhaustiveness). Regenerate the
+  corpus after an intentional shape change with
+  `UPDATE_CORPUS=1 cargo test -p zeroship-migrate-js --test op_round_trip`.
+
 ## Known gaps (flagged for the pilot)
 
 1. **No Rust-side TS transpiler.** The runtime's module loader compiles raw

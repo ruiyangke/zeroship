@@ -728,7 +728,7 @@ async fn run_deploy_migrations(
                 // OR a `.ir.json` the fail-closed gate refused (malformed / future
                 // ir_version / structural reject / ownership / checksum) or that
                 // could not lower. The creator can act on all of these → 422.
-                DME::Load(_) | DME::Apply(_) | DME::Ir { .. } => {
+                DME::Load(_) | DME::Apply(_) | DME::OnlineExpand(_) | DME::Ir { .. } => {
                     (StatusCode::UNPROCESSABLE_ENTITY, "migration_failed")
                 }
                 // Infra-fault: connect / provision / live-introspection / IR file
