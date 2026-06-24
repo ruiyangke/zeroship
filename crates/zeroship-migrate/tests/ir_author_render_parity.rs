@@ -393,6 +393,303 @@ fn create_index_render_is_byte_identical_pg() {
 // CONSTRUCTION, exactly as the PG leg is.
 // ===========================================================================
 
+// ===========================================================================
+// §6.4 stand-alone constraint + alterColumn* render coverage (§1260/§1270).
+//
+// The spec places stand-alone constraint + `alterColumn*` render coverage in
+// PR1, with a cross-path parity golden for each. These ops are PG-native (SQLite
+// reconciles them via the 12-step rebuild in the differ, which needs full live
+// structure — out of this pure-render lower's scope); the SQLite leg of the
+// stand-alone IR lower fails closed (asserted below).
+// ===========================================================================
+
+/// Lower a single IR op on the given dialect, returning the migration list.
+fn ir_lower_one(op: Op, live: &BTreeSet<String>, dialect: SqlDialect) -> Vec<zeroship_migrate::Migration> {
+    let ir = MigrationIr {
+        ir_version: 1,
+        name: "m".into(),
+        owner_app: OWNER.into(),
+        ops: vec![op],
+        flags: Default::default(),
+        depends_on: vec![],
+        supersedes: vec![],
+        preconditions: vec![],
+        checksum: None,
+    };
+    IrAuthor::new(SCHEMA, OWNER, dialect)
+        .lower(&ir, live)
+        .expect("ir lower")
+}
+
+#[test]
+fn alter_column_type_render_is_byte_identical_pg() {
+    use zeroship_migrate::ir::{ColType, Op};
+    // The differ emits an `ALTER COLUMN … TYPE` when a same-name column's type
+    // changed live→desired. Live `qty` is `int`; desired is `number` (double
+    // precision). Diff that one-column change.
+    let desired_desc = CollectionDescriptor {
+        name: "widgets".into(),
+        owner_app: OWNER.into(),
+        fields: vec![FieldDescriptor { name: "qty".into(), ty: "number".into(), ..Default::default() }],
+        indexes: vec![],
+    };
+    let live_desc = CollectionDescriptor {
+        name: "widgets".into(),
+        owner_app: OWNER.into(),
+        fields: vec![FieldDescriptor { name: "qty".into(), ty: "int".into(), ..Default::default() }],
+        indexes: vec![],
+    };
+    let desired = zeroship_migrate::declarative::desired_snapshot(SCHEMA, &[desired_desc]).expect("desired");
+    let live = zeroship_migrate::declarative::desired_snapshot(SCHEMA, &[live_desc]).expect("live");
+    let mut own = HashMap::new();
+    own.insert("widgets".to_string(), OWNER.to_string());
+    let plan = DeclarativeAuthor::new(SCHEMA, OWNER)
+        .diff(&desired, &live.snapshot, &own, &[])
+        .expect("diff");
+    let decl: Vec<_> = sql_pairs(&plan.migrations)
+        .into_iter()
+        .filter(|(up, _)| up.contains("ALTER COLUMN"))
+        .collect();
+
+    let mut live_set = BTreeSet::new();
+    live_set.insert("widgets".to_string());
+    let ir = sql_pairs(&ir_lower_one(
+        Op::AlterColumnType {
+            table: "widgets".into(),
+            column: "qty".into(),
+            ty: ColType::Float,
+            using: None,
+        },
+        &live_set,
+        SqlDialect::Postgres,
+    ));
+    assert_eq!(decl, ir, "alterColumnType render must be byte-identical across paths");
+    assert!(decl.iter().any(|(up, _)| up.contains("ALTER COLUMN \"qty\" TYPE")));
+}
+
+#[test]
+fn alter_column_nullability_render_is_byte_identical_pg() {
+    use zeroship_migrate::ir::Op;
+    // SET NOT NULL: live `name` nullable, desired required. The differ emits
+    // `ALTER COLUMN … SET NOT NULL`.
+    let desired_desc = CollectionDescriptor {
+        name: "people".into(),
+        owner_app: OWNER.into(),
+        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: true, ..Default::default() }],
+        indexes: vec![],
+    };
+    let live_desc = CollectionDescriptor {
+        name: "people".into(),
+        owner_app: OWNER.into(),
+        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, ..Default::default() }],
+        indexes: vec![],
+    };
+    let desired = zeroship_migrate::declarative::desired_snapshot(SCHEMA, &[desired_desc]).expect("desired");
+    let live = zeroship_migrate::declarative::desired_snapshot(SCHEMA, &[live_desc]).expect("live");
+    let mut own = HashMap::new();
+    own.insert("people".to_string(), OWNER.to_string());
+    let plan = DeclarativeAuthor::new(SCHEMA, OWNER)
+        .diff(&desired, &live.snapshot, &own, &[])
+        .expect("diff");
+    let decl: Vec<_> = sql_pairs(&plan.migrations)
+        .into_iter()
+        .filter(|(up, _)| up.contains("NOT NULL"))
+        .collect();
+
+    let mut live_set = BTreeSet::new();
+    live_set.insert("people".to_string());
+    let ir = sql_pairs(&ir_lower_one(
+        Op::AlterColumnNullability { table: "people".into(), column: "name".into(), nullable: false },
+        &live_set,
+        SqlDialect::Postgres,
+    ));
+    assert_eq!(decl, ir, "alterColumnNullability (SET NOT NULL) render must be byte-identical");
+    assert!(decl.iter().any(|(up, _)| up.contains("SET NOT NULL")));
+}
+
+#[test]
+fn add_constraint_fk_render_is_byte_identical_pg() {
+    use zeroship_migrate::ir::{IrConstraint, IrConstraintKind, Op};
+    // A mutual-reference CYCLE (posts→authors, authors→posts) forces the differ
+    // to DEFER the cycle-closing FK to a stand-alone `ALTER TABLE … ADD CONSTRAINT
+    // … FOREIGN KEY` (it cannot inline both at CREATE). We compare the differ's
+    // deferred FK for `posts.author → authors` to the equivalent stand-alone IR
+    // addConstraint(fk) — two REAL render paths, byte-identical.
+    let posts = CollectionDescriptor {
+        name: "posts".into(),
+        owner_app: OWNER.into(),
+        fields: vec![FieldDescriptor {
+            name: "author".into(),
+            ty: "ref".into(),
+            references: Some("authors".into()),
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let authors = CollectionDescriptor {
+        name: "authors".into(),
+        owner_app: OWNER.into(),
+        fields: vec![FieldDescriptor {
+            name: "pinned".into(),
+            ty: "ref".into(),
+            references: Some("posts".into()),
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let desired = zeroship_migrate::declarative::desired_snapshot(SCHEMA, &[posts, authors]).expect("desired");
+    let plan = DeclarativeAuthor::new(SCHEMA, OWNER)
+        .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .expect("diff");
+    // The differ inlines `author_fkey` at the `posts` CREATE and DEFERS the
+    // cycle-closing `pinned_fkey` (authors→posts) to a stand-alone ADD CONSTRAINT.
+    // Isolate that deferred FK.
+    let decl: Vec<_> = sql_pairs(&plan.migrations)
+        .into_iter()
+        .filter(|(up, _)| {
+            up.contains("ADD CONSTRAINT \"pinned_fkey\"") && up.contains("FOREIGN KEY")
+        })
+        .collect();
+    assert!(!decl.is_empty(), "the differ must defer the authors.pinned FK to a stand-alone ADD CONSTRAINT");
+
+    // Stand-alone IR addConstraint(fk) on `authors.pinned` → posts(id) — the SAME
+    // single-column FK shape the differ deferred.
+    let mut live_set = BTreeSet::new();
+    live_set.insert("posts".to_string());
+    live_set.insert("authors".to_string());
+    let ir = sql_pairs(&ir_lower_one(
+        Op::AddConstraint {
+            table: "authors".into(),
+            constraint: IrConstraint {
+                name: None,
+                kind: IrConstraintKind::Fk {
+                    columns: vec!["pinned".into()],
+                    references_table: "posts".into(),
+                    references_columns: vec!["id".into()],
+                },
+            },
+        },
+        &live_set,
+        SqlDialect::Postgres,
+    ));
+    assert_eq!(decl, ir, "addConstraint(fk) render must be byte-identical to the differ's deferred FK");
+    assert!(ir.iter().any(|(up, _)| up.contains("FOREIGN KEY")));
+}
+
+#[test]
+fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
+    use zeroship_migrate::ir::{IrConstraint, IrConstraintKind, Op};
+    // UNIQUE/PK have no stand-alone differ counterpart (the differ inlines them at
+    // CREATE / renders single-col UNIQUE as an index), so these compare the IR
+    // lower against the shared `lower_add_constraint` render seam directly — the
+    // SAME render method, byte-stable. We pin the exact emitted SQL.
+    let mut live = BTreeSet::new();
+    live.insert("widgets".to_string());
+
+    let uniq = sql_pairs(&ir_lower_one(
+        Op::AddConstraint {
+            table: "widgets".into(),
+            constraint: IrConstraint {
+                name: Some("widgets_slug_key".into()),
+                kind: IrConstraintKind::Unique { columns: vec!["slug".into()] },
+            },
+        },
+        &live,
+        SqlDialect::Postgres,
+    ));
+    assert_eq!(
+        uniq,
+        vec![(
+            "ALTER TABLE \"app\".\"widgets\" ADD CONSTRAINT \"widgets_slug_key\" UNIQUE (\"slug\")".to_string(),
+            Some("ALTER TABLE \"app\".\"widgets\" DROP CONSTRAINT \"widgets_slug_key\"".to_string()),
+        )],
+        "stand-alone UNIQUE add renders the canonical ADD CONSTRAINT"
+    );
+
+    let pk = sql_pairs(&ir_lower_one(
+        Op::AddConstraint {
+            table: "widgets".into(),
+            constraint: IrConstraint {
+                name: Some("widgets_pkey".into()),
+                kind: IrConstraintKind::Pk { columns: vec!["a".into(), "b".into()] },
+            },
+        },
+        &live,
+        SqlDialect::Postgres,
+    ));
+    assert_eq!(
+        pk,
+        vec![(
+            "ALTER TABLE \"app\".\"widgets\" ADD CONSTRAINT \"widgets_pkey\" PRIMARY KEY (\"a\", \"b\")".to_string(),
+            Some("ALTER TABLE \"app\".\"widgets\" DROP CONSTRAINT \"widgets_pkey\"".to_string()),
+        )],
+        "stand-alone PK add renders the canonical ADD CONSTRAINT"
+    );
+
+    let drop = sql_pairs(&ir_lower_one(
+        Op::DropConstraint { table: "widgets".into(), name: "widgets_slug_key".into() },
+        &live,
+        SqlDialect::Postgres,
+    ));
+    assert_eq!(
+        drop,
+        vec![(
+            "ALTER TABLE \"app\".\"widgets\" DROP CONSTRAINT \"widgets_slug_key\"".to_string(),
+            None,
+        )],
+        "stand-alone DROP CONSTRAINT renders the canonical drop (down: None)"
+    );
+}
+
+#[test]
+fn standalone_alter_and_constraint_are_sqlite_rebuild_only() {
+    use zeroship_migrate::ir::{ColType, IrConstraint, IrConstraintKind, Op};
+    use zeroship_migrate::ir_author::IrLowerError;
+    // SQLite has no native ALTER COLUMN / ADD|DROP CONSTRAINT — the stand-alone IR
+    // lower fails closed (the differ reconciles these via the 12-step rebuild,
+    // which is not this pure-render lower's path). Assert each op family.
+    let mut live = BTreeSet::new();
+    live.insert("widgets".to_string());
+    let author = IrAuthor::new(SCHEMA, OWNER, SqlDialect::Sqlite);
+    let one = |op: Op| {
+        let ir = MigrationIr {
+            ir_version: 1,
+            name: "m".into(),
+            owner_app: OWNER.into(),
+            ops: vec![op],
+            flags: Default::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+        author.lower(&ir, &live)
+    };
+    for (op, tag) in [
+        (
+            Op::AlterColumnType { table: "widgets".into(), column: "qty".into(), ty: ColType::Float, using: None },
+            "alterColumnType",
+        ),
+        (
+            Op::AlterColumnNullability { table: "widgets".into(), column: "qty".into(), nullable: false },
+            "alterColumnNullability",
+        ),
+        (
+            Op::AddConstraint {
+                table: "widgets".into(),
+                constraint: IrConstraint { name: None, kind: IrConstraintKind::Unique { columns: vec!["slug".into()] } },
+            },
+            "addConstraint",
+        ),
+        (Op::DropConstraint { table: "widgets".into(), name: "x".into() }, "dropConstraint"),
+    ] {
+        match one(op).unwrap_err() {
+            IrLowerError::SqliteRebuildOnly(got) => assert_eq!(got, tag),
+            other => panic!("expected SqliteRebuildOnly({tag}), got: {other}"),
+        }
+    }
+}
+
 #[test]
 fn create_table_render_is_byte_identical_sqlite() {
     let desc = CollectionDescriptor {

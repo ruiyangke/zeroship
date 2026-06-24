@@ -312,6 +312,13 @@
                 "null"
               ]
             },
+            "unique": {
+              "description": "Whether the dropped index is UNIQUE.\n\n**Drives the destructive/approval gating at lower** (§drop-index gating):\ndropping a plain index is reversible (re-`CREATE INDEX`), but dropping a\nUNIQUE index silently removes a data-integrity guarantee — duplicate rows\nbecome possible and a later re-add fails on the dirtied data. So a\n`unique: true` drop lowers `destructive + requires_approval` (refused\nunder `Approval::None`), matching the declarative differ's\n`render_drop_index`. The JS `op.dropIndex` builder stamps this from the\nauthored index's declared uniqueness; absent/false ⇒ a plain drop.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "ifExists": {
               "description": "`IF EXISTS`.",
               "type": [

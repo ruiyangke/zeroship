@@ -1490,6 +1490,40 @@ fn fk_constraint_name(field: &str) -> String {
     format!("{field}_fkey")
 }
 
+/// §6.4 — build the [`ConstraintSnapshot`] for a stand-alone IR `addConstraint`
+/// FK, in the EXACT shape the differ's deferred-FK path carries: the canonical
+/// `pg_get_constraintdef`-shaped `definition` (via [`fk_definition_pg`]) + the
+/// deterministic `<field>_fkey` name (or an explicit name). `IrAuthor` calls this
+/// so the FK body is built by the SAME helper the differ uses — never re-spelled —
+/// and `lower_add_fk` then renders it byte-identically to a deferred FK.
+///
+/// Single-column FK only in PR1 (the `t.*`/`op.*` `ref` shape is single-column,
+/// referencing the target's `id`); a multi-column FK is a later wave.
+pub(crate) fn ir_fk_constraint_snapshot(
+    project_schema: &str,
+    explicit_name: Option<&str>,
+    local_column: &str,
+    references_table: &str,
+) -> ConstraintSnapshot {
+    let name = explicit_name
+        .map(ToString::to_string)
+        .unwrap_or_else(|| fk_constraint_name(local_column));
+    // Match the differ's `ref` FK defaults byte-for-byte (`declarative.rs:1325`):
+    // NO ACTION on_delete/on_update (rendered RESTRICT by the shared
+    // `normalize_fk_action`) + `deferrable = true` (the ref default), so a
+    // stand-alone IR FK is byte-identical to the FK the differ builds for the same
+    // single-column reference.
+    let definition = fk_definition_pg(
+        local_column,
+        project_schema,
+        references_table,
+        None,
+        None,
+        true,
+    );
+    ConstraintSnapshot { name, kind: "FOREIGN KEY".to_string(), definition }
+}
+
 // ---------------------------------------------------------------------------
 // T12 — vector-ANN + full-text search index modeling.
 //
@@ -3992,6 +4026,98 @@ impl DeclarativeAuthor {
     pub(crate) fn lower_drop_index(&self, idx: &IndexSnapshot) -> Migration {
         self.render_drop_index(idx)
     }
+
+    /// §6.4 — render a stand-alone `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY …`
+    /// the SAME way `diff` renders a DEFERRED FK (`render_add_fk`), from a
+    /// [`ConstraintSnapshot`] whose `definition` is the canonical
+    /// `pg_get_constraintdef`-shaped FK body. Byte-identical to the differ's
+    /// deferred-FK render by construction (it IS the differ's render method).
+    pub(crate) fn lower_add_fk(&self, table: &str, fk: &ConstraintSnapshot) -> Migration {
+        self.render_add_fk(table, fk, Vec::new())
+    }
+
+    /// §6.4 — render a stand-alone `ALTER TABLE … ADD CONSTRAINT <name> <body>`
+    /// for a column-list constraint (`UNIQUE (…)` / `PRIMARY KEY (…)`). `body` is
+    /// the constraint body the caller built from the IR (no embedded `Expr`, so
+    /// no Wave-C expression renderer is needed). The PG dialect is the only one
+    /// with native `ALTER TABLE ADD CONSTRAINT`; the SQLite leg routes these
+    /// through the 12-step table rebuild in `diff` (no stand-alone SQLite render).
+    ///
+    /// `gated` ⇒ `requires_approval` (a PRIMARY KEY add scans + locks the whole
+    /// table under `ACCESS EXCLUSIVE` and fails on a NULL/duplicate key, so it is
+    /// gated like an `ALTER COLUMN … SET NOT NULL`; a UNIQUE add is likewise
+    /// lock-heavy and may fail on existing duplicates). `down` drops the named
+    /// constraint.
+    pub(crate) fn lower_add_constraint(
+        &self,
+        table: &str,
+        name: &str,
+        body: &str,
+        gated: bool,
+    ) -> Migration {
+        let up = format!(
+            "ALTER TABLE {} ADD CONSTRAINT {} {}",
+            self.qualified(table),
+            quote_ident(name),
+            body,
+        );
+        let down = format!(
+            "ALTER TABLE {} DROP CONSTRAINT {}",
+            self.qualified(table),
+            quote_ident(name),
+        );
+        let flags = if gated {
+            MigrationFlags { requires_approval: true, ..MigrationFlags::default() }
+        } else {
+            MigrationFlags::default()
+        };
+        self.make(&format!("add_constraint_{table}_{name}"), up, Some(down), flags, Vec::new())
+    }
+
+    /// §6.4 — render a stand-alone `ALTER TABLE … DROP CONSTRAINT <name>`.
+    ///
+    /// Dropping a constraint silently removes a data-integrity guarantee the
+    /// creator declared (a FK/UNIQUE/PK/CHECK), so it is `destructive +
+    /// requires_approval` — refused under `Approval::None`, exactly like a
+    /// `DROP COLUMN`. `down` is `None`: the engine cannot reconstruct the dropped
+    /// constraint's body from a bare name (the IR carries no body on a drop), so
+    /// there is no structural reverse; a re-declaration re-adds it.
+    pub(crate) fn lower_drop_constraint(&self, table: &str, name: &str) -> Migration {
+        let up = format!(
+            "ALTER TABLE {} DROP CONSTRAINT {}",
+            self.qualified(table),
+            quote_ident(name),
+        );
+        self.make(
+            &format!("drop_constraint_{table}_{name}"),
+            up,
+            None,
+            destructive_flags(),
+            Vec::new(),
+        )
+    }
+
+    /// §6.4 — render a stand-alone `ALTER TABLE … ALTER COLUMN … TYPE …` the SAME
+    /// way `diff` does (`render_alter_column_type`), from a [`ColumnSnapshot`]
+    /// carrying the desired `data_type`. Byte-identical to the differ by
+    /// construction (it IS the differ's render method); gated/destructive with
+    /// `down: None` (lossy cast).
+    pub(crate) fn lower_alter_column_type(&self, table: &str, col: &ColumnSnapshot) -> Migration {
+        self.render_alter_column_type(table, col)
+    }
+
+    /// §6.4 — render a stand-alone `ALTER TABLE … ALTER COLUMN … {SET|DROP} NOT
+    /// NULL` the SAME way `diff` does (`render_alter_column_nullability`). A
+    /// `SET NOT NULL` (tightening) is gated; a `DROP NOT NULL` (relaxing) is
+    /// additive. Byte-identical to the differ by construction.
+    pub(crate) fn lower_alter_column_nullability(
+        &self,
+        table: &str,
+        col: &str,
+        nullable: bool,
+    ) -> Migration {
+        self.render_alter_column_nullability(table, col, nullable)
+    }
 }
 
 // ===========================================================================
@@ -4508,16 +4634,29 @@ fn fk_local_column(definition: &str) -> Option<String> {
 
 #[cfg(test)]
 mod snapshot_builder_refactor_safety_tests {
-    //! §6.5 #3 — the refactor-safety fixture. The per-column / per-index snapshot
-    //! construction was LIFTED out of `desired_snapshot_for_dialect`'s inline loop
-    //! into the shared, dialect-parameterized [`super::build_table_snapshot`]. The
-    //! lift is BYTE-PRESERVING: the snapshot the differ derives must be identical
-    //! before and after. This freezes the `{:#?}` of a RICH table snapshot (system
-    //! fields + a unique field + a ref/FK + an encrypted+masked column + an FTS
-    //! field + a named index) on BOTH dialects, so any accidental change to the
-    //! shared builder that perturbs a single byte of the snapshot — including the
-    //! emission-only `default` / `encryption_sentinel` / `comment_sentinel` /
-    //! `opclass` fields the drift-`PartialEq` deliberately ignores — fails here.
+    //! §6.5 #3 — the snapshot-builder regression-pin fixture. The per-column /
+    //! per-index snapshot construction was LIFTED out of
+    //! `desired_snapshot_for_dialect`'s inline loop into the shared,
+    //! dialect-parameterized [`super::build_table_snapshot`].
+    //!
+    //! **What this golden proves — and what it does NOT.** The golden `.txt` files
+    //! were captured (via `UPDATE_SNAPSHOT_GOLDENS=1`) from the POST-extraction
+    //! `build_table_snapshot`, so they pin the post-extraction output against
+    //! ITSELF — a FORWARD REGRESSION PIN, not a literal pre/post byte-diff. The
+    //! actual pre/post byte-preservation guarantee of the extraction rests on the
+    //! pre-existing declarative RENDER goldens (`declarative_pg` 91 /
+    //! `declarative_sqlite` 15 / `golden_trace` 6) staying unchanged-green across
+    //! the lift: those render the differ's output END-TO-END, so an
+    //! extraction that perturbed any snapshot byte that reaches the SQL would have
+    //! broken them. This fixture then freezes the snapshot SHAPE going forward — so
+    //! any FUTURE change to the shared builder that perturbs a single byte of the
+    //! snapshot (including the emission-only `default` / `encryption_sentinel` /
+    //! `comment_sentinel` / `opclass` fields the drift-`PartialEq` deliberately
+    //! ignores) fails here.
+    //!
+    //! It freezes the `{:#?}` of a RICH table snapshot (system fields + a unique
+    //! field + a ref/FK + an encrypted+masked column + an FTS field + a named
+    //! index) on BOTH dialects.
     use super::{build_table_snapshot, CollectionDescriptor, FieldDescriptor, IndexDescriptor};
     use zeroship_schema::query::SqlDialect;
 

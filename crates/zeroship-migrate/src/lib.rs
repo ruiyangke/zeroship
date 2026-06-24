@@ -189,7 +189,7 @@ pub use ir_load::{
 // declarative render seam so its SQL is byte-identical to the differ's path.
 pub use ir_author::{
     FragmentGuardDenied, GuardedFragment, IrAuthor, IrGuardedLowerError, IrLowerError,
-    LoadAndLowerError,
+    LoadAndLowerError, LoadAndLowerGuardedError, LoweredArtifact,
 };
 // The closed expression AST (§3.3.1) the IR's transform/predicate positions
 // carry. Constructed in JS, serialized as data, NEVER parsed from text.

@@ -572,6 +572,18 @@ pub enum Op {
         /// Owning table (dialect hint).
         #[serde(skip_serializing_if = "Option::is_none")]
         table: Option<String>,
+        /// Whether the dropped index is UNIQUE.
+        ///
+        /// **Drives the destructive/approval gating at lower** (§drop-index gating):
+        /// dropping a plain index is reversible (re-`CREATE INDEX`), but dropping a
+        /// UNIQUE index silently removes a data-integrity guarantee — duplicate rows
+        /// become possible and a later re-add fails on the dirtied data. So a
+        /// `unique: true` drop lowers `destructive + requires_approval` (refused
+        /// under `Approval::None`), matching the declarative differ's
+        /// `render_drop_index`. The JS `op.dropIndex` builder stamps this from the
+        /// authored index's declared uniqueness; absent/false ⇒ a plain drop.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        unique: Option<bool>,
         /// `IF EXISTS`.
         #[serde(skip_serializing_if = "Option::is_none")]
         if_exists: Option<bool>,
