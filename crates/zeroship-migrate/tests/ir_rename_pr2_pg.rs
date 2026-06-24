@@ -292,6 +292,134 @@ async fn ir_renamecolumn_applies_as_pg_online_dual_write_through_apply_plan() {
     teardown(&conn, &cfg).await;
 }
 
+// PR2-LOW — EXECUTE the reversal of a FULLY-APPLIED online rename (contract→expand
+// reversal, §2.6.1). A pure rename's auto-derived `down` is a FRESH online rename
+// `to`→`from`; this test proves that round-trip executes on a real DB. Apply rename
+// `email → email_address` (EXPAND under approval), then APPLY the deferred CONTRACT
+// (drop `email`) so the rename is fully applied (only `email_address` remains), then
+// apply the REVERSE rename `email_address → email` (the auto-derived down shape) and
+// assert `email` is back with the mirrored data. This is the engine-level
+// counterpart to a `down()` that calls `renameColumn(to, from)`.
+#[compio::test]
+async fn ir_renamecolumn_pg_fully_applied_rename_reverses_via_inverse_rename() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let s = q(&cfg.project_schema);
+    let engine = MigrationEngine::new();
+    let pg_be = PostgresBackend::new(&conn);
+
+    // create members(id, email) + seed.
+    engine
+        .apply_plan(
+            &[PlanStep::Ddl(zeroship_migrate::migration::Migration {
+                version: zeroship_migrate::migration::MigrationId::generate(),
+                name: "create_members".into(),
+                up: format!(
+                    "CREATE TABLE {s}.members (id bigint PRIMARY KEY, email text); \
+                     INSERT INTO {s}.members (id, email) VALUES (1,'ada@x.test'),(2,'gr@x.test')"
+                ),
+                down: None,
+                checksum: zeroship_migrate::migration::Checksum::of(
+                    &zeroship_migrate::migration::ChecksumInput {
+                        up: "create_members",
+                        down: None,
+                        flags: &zeroship_migrate::migration::MigrationFlags::default(),
+                        owner_app: "app_test",
+                        depends_on: &[],
+                        supersedes: &[],
+                        preconditions: &[],
+                    },
+                ),
+                flags: zeroship_migrate::migration::MigrationFlags::default(),
+                owner_app: "app_test".into(),
+                depends_on: vec![],
+                supersedes: vec![],
+                preconditions: vec![],
+            })],
+            Approval::None,
+            &pg_be,
+            &cfg,
+            "app_test",
+            zeroship_migrate::executor::LockMode::Acquire,
+        )
+        .await
+        .expect("create members");
+
+    // 1) EXPAND: rename email → email_address.
+    let live1 = live_with_column("members", "email", "text");
+    let ec = lower_pg_rename(&cfg, "members", "email", "email_address", ColType::Text, &live1);
+    let contract = ec.contract.clone();
+    let expand_steps = vec![PlanStep::OnlineRename(RenameStep::PgExpandContract(ec))];
+    engine
+        .apply_plan(&expand_steps, Approval::Approved, &pg_be, &cfg, "app_test",
+            zeroship_migrate::executor::LockMode::Acquire)
+        .await
+        .expect("expand applies");
+
+    // 2) CONTRACT (deploy N+1): apply C1/C2 (drop trigger + drop old `email`) so the
+    //    rename is FULLY applied. The contract migrations are plain DDL with the
+    //    expand dep already satisfied (journaled), so apply them as Ddl steps.
+    let contract_steps: Vec<PlanStep> =
+        contract.into_iter().map(PlanStep::Ddl).collect();
+    engine
+        .apply_plan(&contract_steps, Approval::Approved, &pg_be, &cfg, "app_test",
+            zeroship_migrate::executor::LockMode::Acquire)
+        .await
+        .expect("contract applies (fully-applied rename)");
+    assert!(
+        !column_exists(&conn, &cfg.project_schema, "members", "email").await,
+        "after the contract, the old `email` column is gone (fully-applied rename)"
+    );
+    assert!(
+        column_exists(&conn, &cfg.project_schema, "members", "email_address").await,
+        "only the new `email_address` column remains"
+    );
+
+    // 3) REVERSAL — the auto-derived down: a FRESH online rename email_address →
+    //    email. EXPAND it under approval.
+    let live2 = live_with_column("members", "email_address", "text");
+    let rev = lower_pg_rename(&cfg, "members", "email_address", "email", ColType::Text, &live2);
+    let rev_contract = rev.contract.clone();
+    let rev_steps = vec![PlanStep::OnlineRename(RenameStep::PgExpandContract(rev))];
+    engine
+        .apply_plan(&rev_steps, Approval::Approved, &pg_be, &cfg, "app_test",
+            zeroship_migrate::executor::LockMode::Acquire)
+        .await
+        .expect("reverse rename expand applies");
+    // Complete the reverse contract (drop email_address).
+    let rev_contract_steps: Vec<PlanStep> =
+        rev_contract.into_iter().map(PlanStep::Ddl).collect();
+    engine
+        .apply_plan(&rev_contract_steps, Approval::Approved, &pg_be, &cfg, "app_test",
+            zeroship_migrate::executor::LockMode::Acquire)
+        .await
+        .expect("reverse contract applies");
+
+    // The reversal restored `email` with the original data, and `email_address` is
+    // gone — the fully-applied rename round-tripped via the inverse rename.
+    assert!(
+        column_exists(&conn, &cfg.project_schema, "members", "email").await,
+        "the reversal restored the original `email` column"
+    );
+    assert!(
+        !column_exists(&conn, &cfg.project_schema, "members", "email_address").await,
+        "the reversal dropped the renamed `email_address` column"
+    );
+    let rows = conn
+        .query(&format!("SELECT email FROM {s}.members ORDER BY id"), &[])
+        .await
+        .expect("read restored email");
+    let vals: Vec<Option<String>> = rows.iter().map(|r| r.get(0)).collect();
+    assert_eq!(
+        vals,
+        vec![Some("ada@x.test".to_string()), Some("gr@x.test".to_string())],
+        "the original data survived the rename round-trip"
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
 // §2.6.2 — mid-sequence crash on the IR PG rename RESUMES roll-forward. This arms
 // the REAL fault seam (`EXPAND_BETWEEN_E2_AND_BACKFILL`) on the IR-LOWERED rename
 // plan (NOT a hand-built ExpandContractPlan): the first apply CRASHES between the
@@ -415,12 +543,33 @@ async fn ir_renamecolumn_pg_crash_resumes_roll_forward() {
         "the resume re-applied the crash-skipped E3 backfill (roll-forward), not a \
          pure no-op replay"
     );
-    // The converged expand journal has NO duplicate completed version (a resume
-    // must not double-journal a step — an illegal state-machine transition).
-    let mut seen = expand_versions.clone();
-    seen.sort();
-    seen.dedup();
-    assert_eq!(seen.len(), expand_versions.len(), "no duplicate expand versions");
+    // PR2-LOW — the converged expand journal has NO duplicate `completed` row per
+    // version (a resume must not DOUBLE-JOURNAL a step — an illegal state-machine
+    // transition). The prior assertion dedup'd a STATICALLY-built `Vec` (the lowered
+    // plan's version list), which can NEVER have duplicates and so proved nothing
+    // about the journal. This QUERIES the real append-only journal: for each expand
+    // version, COUNT(*) of `completed` rows must be EXACTLY 1 — total == distinct.
+    // A double-journal (the bug this guards) would insert a second `completed` row
+    // and make the count 2.
+    let meta = q(&cfg.pg.meta_schema);
+    for v in &expand_versions {
+        let rows = conn
+            .query(
+                &format!(
+                    "SELECT count(*) FROM {meta}.schema_migrations \
+                     WHERE version=$1 AND phase='completed'"
+                ),
+                &[v],
+            )
+            .await
+            .expect("count completed journal rows for the expand version");
+        let count: i64 = rows[0].get(0);
+        assert_eq!(
+            count, 1,
+            "expand version {v} must have EXACTLY ONE completed journal row after the \
+             crash+resume (a double-journal would make this 2)"
+        );
+    }
 
     assert!(
         column_exists(&conn, &cfg.project_schema, "acct", "username").await,
@@ -473,6 +622,42 @@ fn ir_renamecolumn_pg_renders_neutral_type_as_pg_string_in_online_intent() {
     );
 }
 
+// PR2-LOW — an IN-FLIGHT OnlineRename makes the PLAN non-rollbackable and the
+// plan-level rollback driver hard-stops. A PG expand-contract is a multi-phase
+// online change with a dual-write trigger and a cross-deploy partition: mid-flight
+// it has no single-statement inverse, so recovery is roll-FORWARD, not roll-back
+// (§2.6.1). The contract is expressed at the PLAN level: `PlanStep::has_down` is
+// `false` for an `OnlineRename` step regardless of the inner E1..E3 migrations'
+// individual `down`s (those are sub-step DDLs of an atomically-driven sequence, not
+// independently rollbackable phases), so `AppliedPlan::compute_rollbackable` over a
+// plan containing the OnlineRename step is `false` — the plan-level rollback driver
+// hard-stops at it rather than fabricating a partial reverse. A pure-lowering fact
+// (no DB).
+#[test]
+fn ir_renamecolumn_pg_in_flight_rename_is_not_rollbackable() {
+    use zeroship_migrate::plan::AppliedPlan;
+    let cfg = cfg_for("inflight_rollback_pg");
+    let live = live_with_column("users", "email", "text");
+    let ec = lower_pg_rename(&cfg, "users", "email", "email_address", ColType::Text, &live);
+
+    let step = PlanStep::OnlineRename(RenameStep::PgExpandContract(ec));
+    // The OnlineRename STEP has no plan-level `down` — the rollback driver treats it
+    // as irreversible-in-place (roll-forward only).
+    assert!(
+        !step.has_down(),
+        "an OnlineRename plan step must report has_down() == false (no plan-level \
+         single-statement inverse mid-flight)"
+    );
+
+    // A plan containing the OnlineRename step is therefore NON-rollbackable.
+    let steps = vec![step];
+    assert!(
+        !AppliedPlan::compute_rollbackable(&steps),
+        "a plan with an in-flight OnlineRename step must be rollbackable:false (the \
+         rollback driver hard-stops at it)"
+    );
+}
+
 // HIGH (code-critic) — IR-vs-live type reconciliation on the PG leg. A
 // `renameColumn` whose IR-carried `ColType` DISAGREES with the live `from`
 // column's actual type MUST fail closed (`RenameTypeMismatch`) — the IR-path
@@ -502,6 +687,60 @@ fn ir_renamecolumn_pg_rejects_ir_type_disagreeing_with_live_column() {
             assert_eq!(live_type, "text", "the live `from` type is the authority");
         }
         other => panic!("expected RenameTypeMismatch, got: {other}"),
+    }
+}
+
+// PR2-LOW — rename-to-EXISTING-column collision (PG leg). A `renameColumn` whose
+// `to` equals a column that ALREADY exists on the live table must fail closed at the
+// LOWER gate (`RenameLower`), NOT lower to an `ADD COLUMN <to>` that fails late at
+// apply with an opaque "column already exists". The type reconciliation only checks
+// `from`; this guard checks `to`. Pre-fix the PG leg never consulted `to` against the
+// live columns, so the collision lowered successfully and failed only at apply.
+#[test]
+fn ir_renamecolumn_pg_rejects_rename_to_existing_column() {
+    let cfg = cfg_for("rename_to_existing_pg");
+    // The live `accounts` table has BOTH `email` (the from) and `addr` (the to)
+    // columns — both `text`.
+    let snap = TableSnapshot {
+        columns: vec![
+            ColumnSnapshot {
+                name: "email".into(),
+                data_type: "text".into(),
+                nullable: true,
+                default: None,
+                encryption_sentinel: None,
+                comment_sentinel: None,
+            },
+            ColumnSnapshot {
+                name: "addr".into(),
+                data_type: "text".into(),
+                nullable: true,
+                default: None,
+                encryption_sentinel: None,
+                comment_sentinel: None,
+            },
+        ],
+        indexes: vec![],
+        constraints: vec![],
+        stored_create_sql: None,
+    };
+    let mut live = LiveSchema::default();
+    live.tables.insert("accounts".into());
+    live.table_snapshots.insert("accounts".into(), snap);
+
+    let author = IrAuthor::new(cfg.project_schema.clone(), "app_test", SqlDialect::Postgres);
+    let ir = rename_ir("accounts", "email", "addr", ColType::Text);
+    let err = author
+        .lower_steps(&ir, &live)
+        .expect_err("a rename whose `to` collides with an existing live column must fail closed");
+    match err {
+        IrLowerError::RenameLower(msg) => {
+            assert!(
+                msg.contains("addr") && msg.contains("already exists"),
+                "the collision error must name the offending `to` column: {msg}"
+            );
+        }
+        other => panic!("expected RenameLower (to-collision), got: {other}"),
     }
 }
 

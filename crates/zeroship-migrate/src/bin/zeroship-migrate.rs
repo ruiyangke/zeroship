@@ -229,8 +229,18 @@ impl EngineArg {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Generate a new dbmate-format migration file (`<14-digit-ts>_<name>.sql`) in
-    /// `--dir`, with empty `-- migrate:up`/`down` sections. Prints the created path.
+    /// Generate a new dbmate-format raw-`.sql` migration file
+    /// (`<14-digit-ts>_<name>.sql`) in `--dir`, with empty `-- migrate:up`/`down`
+    /// sections. Prints the created path.
+    ///
+    /// NOTE (PR7 raw-SQL demotion): this raw-`.sql` authoring path is **RETAINED for
+    /// the dbmate-style operator CLI and the platform Flyway-mode** — it is NOT the
+    /// recommended creator authoring path. Creators author portable, bi-dialect
+    /// (PG + SQLite) migrations as op.* `@zeroship/migrate` `.ts` modules (compiled to
+    /// `.ir.json`) via `zeroship-migrate-js new`/`generate` — the DSL expresses the
+    /// full DDL + DML + online surface and never drops to raw SQL (`docs/proposals/
+    /// 2026-06-23-js-op-dsl-migration-design-normative.md` §PR7). Use this raw-`.sql`
+    /// `new` only for the operator/platform path.
     New {
         /// The migration description (`[A-Za-z0-9_]+` by convention).
         name: String,
