@@ -490,3 +490,43 @@ fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
         other => panic!("expected SqliteRenameNeedsLiveTable, got: {other}"),
     }
 }
+
+/// A two-text-field-collection descriptor (`<a>: string, <b>: string`, required) —
+/// for the rename-to-existing-column collision case (both `from` and `to` are live).
+fn descriptor2(table: &str, a: &str, b: &str) -> CollectionDescriptor {
+    CollectionDescriptor {
+        name: table.into(),
+        owner_app: APP.into(),
+        fields: vec![
+            FieldDescriptor { name: a.into(), ty: "string".into(), required: true, ..Default::default() },
+            FieldDescriptor { name: b.into(), ty: "string".into(), required: true, ..Default::default() },
+        ],
+        indexes: vec![],
+    }
+}
+
+// PR2-LOW — rename-to-EXISTING-column collision (SQLite leg). A `renameColumn` whose
+// `to` equals a column that ALREADY exists on the live table must fail closed at the
+// LOWER gate (`RenameLower`), NOT silently OVERWRITE the existing `to` field def when
+// the rebuild renames the `from` key onto it (a data-loss-class silent mis-build).
+// The live table carries BOTH `nickname` (the from) and `handle` (the to).
+#[test]
+fn renamecolumn_sqlite_rejects_rename_to_existing_column() {
+    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+    // Live `people(nickname, handle)` — both real columns + SDK schema entries.
+    let live = live_schema_for(&[descriptor2("people", "nickname", "handle")]);
+    // Rename nickname → handle, but `handle` ALREADY exists.
+    let ir = rename_ir("people", "nickname", "handle", ColType::Text);
+    let err = author
+        .lower_steps(&ir, &live)
+        .expect_err("a SQLite rename whose `to` collides with an existing live column must fail closed");
+    match err {
+        IrLowerError::RenameLower(msg) => {
+            assert!(
+                msg.contains("handle") && msg.contains("already exists"),
+                "the collision error must name the offending `to` column: {msg}"
+            );
+        }
+        other => panic!("expected RenameLower (to-collision), got: {other}"),
+    }
+}

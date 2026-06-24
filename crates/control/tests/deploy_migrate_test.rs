@@ -18,7 +18,9 @@ use std::path::{Path, PathBuf};
 use compio_postgres::NoTls;
 use uuid::Uuid;
 
-use zeroship_control::deploy_migrate::{apply_bundle_migrations, DeployMigrateError};
+use zeroship_control::deploy_migrate::{
+    apply_bundle_migrations, apply_bundle_migrations_approved, DeployMigrateError,
+};
 
 /// Admin DSN with CREATEROLE + CREATE SCHEMA (the `postgres` superuser), the
 /// same DB the migrate crate's own integration tests use.
@@ -593,13 +595,122 @@ async fn deploy_migrate_applies_sql_and_ir_together() {
         ("0002_create_modern.ir.json", ir),
     ]);
 
-    apply_bundle_migrations(&admin_dsn(), &app_id, &dir)
+    let outcome = apply_bundle_migrations(&admin_dsn(), &app_id, &dir)
         .await
         .expect("both the .sql and .ir.json must apply");
     assert!(table_exists(&conn, &app_id, "legacy").await, ".sql table must exist");
     assert!(table_exists(&conn, &app_id, "modern").await, ".ir.json table must exist");
+    // ONE ordered timeline: the .sql (Flyway loader) and the .ir.json (IR gate) both
+    // applied in this single deploy — the platform `.sql` set and the creator IR set
+    // load + apply together, not as two disjoint passes. `applied` is non-empty (the
+    // deploy did real work), and BOTH tables exist (asserted above).
+    assert!(
+        !outcome.applied.is_empty(),
+        "the mixed-history deploy applied the .sql and .ir.json set in one timeline"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
+    cleanup_app(&conn, &app_id).await;
+}
+
+// PR7 EVIDENCE (PG leg) — the headline "op.* replaces raw-SQL authoring" proof: a
+// DDL+backfill migration authored ENTIRELY as op.* `.ir.json` (the §3.1 hero shape —
+// addColumn first_name/last_name + a splitPart backfill + dropColumn name) applies
+// through the REAL deploy entry point `apply_bundle_migrations` with NO raw `.sql`
+// anywhere in the bundle. The migrations dir contains only `.ir.json` files; the test
+// ASSERTS that (no `.sql`), then applies and verifies the split transform — the
+// concrete evidence a portable bi-dialect data migration needs no hand-written SQL.
+#[compio::test]
+async fn deploy_migrate_no_raw_sql_hero_ddl_backfill_applies_pg() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    let create = r#"{"ir_version":1,"name":"create_people","ops":[
+        {"op":"createTable","name":"people","columns":[{"name":"name","type":"text"}]}
+    ]}"#;
+    // The hero DDL+backfill, op.*-authored: add first_name/last_name, splitPart-backfill
+    // from `name`, drop `name`. The backfill needs approval (mutates data), so this is
+    // deployed through the approved surface — but it carries NO raw SQL.
+    let hero = r#"{"ir_version":1,"name":"split_name","ops":[
+        {"op":"addColumn","table":"people","column":"first_name","type":"text"},
+        {"op":"addColumn","table":"people","column":"last_name","type":"text"},
+        {"op":"backfill","table":"people","cursorColumn":"id","batchSize":50,
+         "set":{
+            "first_name":{"node":"fnSynth","fn":"splitPart","args":[
+                {"node":"colRef","name":"name"},{"node":"literal","value":" "},{"node":"literal","value":1}]},
+            "last_name":{"node":"fnSynth","fn":"splitPart","args":[
+                {"node":"colRef","name":"name"},{"node":"literal","value":" "},{"node":"literal","value":2}]}
+         },"name":"split_name_bf"},
+        {"op":"dropColumn","table":"people","column":"name"}
+    ]}"#;
+
+    // Deploy #1 (routine): createTable + seed (the seed is op.* `insert` — still no SQL).
+    let seed = r#"{"ir_version":1,"name":"seed","ops":[
+        {"op":"insert","table":"people",
+         "columns":["id","created_at","updated_at","version","name"],"rows":[
+            ["p1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,"Ada Lovelace"],
+            ["p2","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,"Grace Hopper"]
+        ]}
+    ]}"#;
+    let dir1 = migrations_dir(&[
+        ("0001_create_people.ir.json", create),
+        ("0002_seed.ir.json", seed),
+    ]);
+    // EVIDENCE: the bundle contains NO raw `.sql` file.
+    assert!(
+        std::fs::read_dir(&dir1)
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|e| !e.file_name().to_string_lossy().ends_with(".sql")),
+        "the op.*-authored bundle must contain NO raw .sql file"
+    );
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir1)
+        .await
+        .expect("create+seed (op.* only) must apply");
+
+    // Deploy #2 (approved): the hero DDL+backfill, op.* only.
+    let dir2 = migrations_dir(&[("0003_split_name.ir.json", hero)]);
+    assert!(
+        std::fs::read_dir(&dir2)
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|e| !e.file_name().to_string_lossy().ends_with(".sql")),
+        "the hero bundle must contain NO raw .sql file"
+    );
+    apply_bundle_migrations_approved(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect("the op.*-authored DDL+backfill hero must apply with no raw SQL");
+
+    // The split transform ran and `name` is gone — proof the op.* path replaced raw SQL.
+    let schema = app_id.to_string();
+    let rows = conn
+        .query(
+            &format!("SELECT first_name, last_name FROM \"{schema}\".people ORDER BY id"),
+            &[],
+        )
+        .await
+        .expect("read split columns");
+    let got: Vec<(Option<String>, Option<String>)> =
+        rows.iter().map(|r| (r.get(0), r.get(1))).collect();
+    assert_eq!(
+        got,
+        vec![
+            (Some("Ada".to_string()), Some("Lovelace".to_string())),
+            (Some("Grace".to_string()), Some("Hopper".to_string())),
+        ],
+        "the op.* splitPart backfill split the names on the real deploy path"
+    );
+    assert!(
+        !column_exists(&conn, &app_id, "people", "name").await,
+        "the op.* dropColumn removed `name`"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir1);
+    let _ = std::fs::remove_dir_all(&dir2);
     cleanup_app(&conn, &app_id).await;
 }
 
@@ -948,6 +1059,106 @@ async fn deploy_migrate_renamecolumn_refused_at_approval_gate_on_routine_deploy(
     assert!(
         !column_exists(&conn, &app_id, "accounts", "email_address").await,
         "the new `email_address` column must NOT exist — the rename was refused before any DDL"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir1);
+    let _ = std::fs::remove_dir_all(&dir2);
+    cleanup_app(&conn, &app_id).await;
+}
+
+// PR7 ONLINE-RENAME GO-LIVE (PG leg) — a `renameColumn` deploy COMPLETES the EXPAND
+// through the REAL approved-apply entry point `apply_bundle_migrations_approved`
+// (NOT engine-level lowering): the new column is created + dual-written (the EXPAND
+// E1..E3 + backfill applies under `Approval::Approved` and the held project lock),
+// existing rows are MIRRORED into the new column, and the CONTRACT (drop the old
+// column) is surfaced as `pending_contract` for a later approved deploy — NOT applied
+// now (the cross-deploy expand-contract partition, §2.0.2). The OLD column is still
+// present (the contract has not run), so app code can migrate from `<from>` to `<to>`
+// between the two deploys with zero downtime. This is the deploy-path proof the
+// engine's online expand is now go-live-wired, the peer of the routine-deploy refusal
+// above.
+#[compio::test]
+async fn deploy_migrate_renamecolumn_approved_completes_expand_and_surfaces_pending_contract() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    // Deploy #1 (routine): create `members(handle text)` and seed two rows.
+    let create = r#"{"ir_version":1,"name":"create_members","ops":[
+        {"op":"createTable","name":"members","columns":[
+            {"name":"handle","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    let dir1 = migrations_dir(&[("0001_create_members.ir.json", create)]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir1)
+        .await
+        .expect("createTable deploy must succeed");
+    assert!(column_exists(&conn, &app_id, "members", "handle").await, "handle created");
+
+    // Seed rows BEFORE the rename — the EXPAND backfill must mirror them into the
+    // new column.
+    // The IR `createTable` emits the platform system fields; the NOT-NULL ones
+    // (`created_at`/`updated_at`/`version`) have no DB-side default (the runtime
+    // stamps them), so seed them explicitly.
+    let schema = app_id.to_string();
+    conn.batch_execute(&format!(
+        "INSERT INTO \"{schema}\".members (id, handle, created_at, updated_at, version) VALUES \
+         ('m1','ada',  now(), now(), 1), \
+         ('m2','grace',now(), now(), 1)"
+    ))
+    .await
+    .expect("seed members");
+
+    // Deploy #2 (APPROVED go-live): renameColumn handle → username. Through the
+    // approved-apply surface the EXPAND completes and the CONTRACT is surfaced as
+    // pending.
+    let rename = r#"{"ir_version":1,"name":"rename_handle","ops":[
+        {"op":"renameColumn","table":"members","from":"handle","to":"username","type":"text"}
+    ]}"#;
+    let dir2 = migrations_dir(&[("0002_rename_handle.ir.json", rename)]);
+    let outcome = apply_bundle_migrations_approved(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect("an APPROVED renameColumn deploy must COMPLETE the expand");
+
+    // The CONTRACT (C1/C2 drop old column) is surfaced as pending — NOT applied now.
+    assert!(
+        !outcome.pending_contract.is_empty(),
+        "the completed online-rename EXPAND must surface a pending CONTRACT (the C1/C2 \
+         drop-old-column owed to a later approved deploy), got {outcome:?}"
+    );
+
+    // The NEW column EXISTS (E1 ADD COLUMN applied) and the OLD column is STILL
+    // present (the contract has NOT run — the cross-deploy partition).
+    assert!(
+        column_exists(&conn, &app_id, "members", "username").await,
+        "the new `username` column was created by the completed EXPAND"
+    );
+    assert!(
+        column_exists(&conn, &app_id, "members", "handle").await,
+        "the old `handle` column is still present — the CONTRACT is pending, not applied"
+    );
+
+    // The EXISTING rows were MIRRORED into the new column by the EXPAND backfill.
+    let rows = conn
+        .query(
+            &format!(
+                "SELECT username FROM \"{schema}\".members ORDER BY id"
+            ),
+            &[],
+        )
+        .await
+        .expect("read username");
+    let names: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r.get::<_, Option<String>>(0))
+        .collect();
+    assert_eq!(
+        names,
+        vec!["ada".to_string(), "grace".to_string()],
+        "the EXPAND backfill mirrored the existing rows into the new column"
     );
 
     let _ = std::fs::remove_dir_all(&dir1);

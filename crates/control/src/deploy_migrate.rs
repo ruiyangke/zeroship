@@ -104,12 +104,22 @@ use zeroship_migrate::{
 };
 
 /// What a successful deploy-migrate produced (for logging / the deploy log).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MigrateOutcome {
     /// Migration version ids applied this deploy (empty ⇒ already up to date).
     pub applied: Vec<String>,
     /// Migration version ids skipped because already journaled.
     pub skipped: Vec<String>,
+    /// **PR7 online-rename go-live.** The CONTRACT (C1/C2) migrations of any PG
+    /// online `renameColumn` whose EXPAND completed this deploy, surfaced as
+    /// *pending* — they are NOT applied in this deploy (the cross-deploy
+    /// expand-contract partition, §2.0.2): the new column is live + dual-written,
+    /// app code migrates from `<from>` to `<to>`, and a SUBSEQUENT approved deploy
+    /// applies the contract to drop the old column. Empty on the routine
+    /// (`Approval::None`) path — an online expand is refused there before it can
+    /// produce a pending contract. The deploy log records these version ids so the
+    /// operator/control plane knows a follow-up contract deploy is owed.
+    pub pending_contract: Vec<String>,
 }
 
 /// A deploy-time migration failure. The deploy handler maps this to an HTTP
@@ -222,6 +232,42 @@ pub async fn apply_bundle_migrations(
     app_id: &Uuid,
     migrations_dir: &Path,
 ) -> Result<MigrateOutcome, DeployMigrateError> {
+    // The routine `.zship` deploy is NEVER auto-approved: a destructive op or an
+    // online expand is refused at the approval gate (no go-live). The AI/creator
+    // never auto-applies a gated migration.
+    apply_bundle_migrations_with_approval(migrate_dsn, app_id, migrations_dir, Approval::None).await
+}
+
+/// **PR7 online-rename go-live** — the APPROVED out-of-band apply surface (§2.6.2 /
+/// §2.0.2). Identical to [`apply_bundle_migrations`] except it carries
+/// [`Approval::Approved`] into the engine, so an approval-gated step **completes**:
+/// a PG online `renameColumn`'s EXPAND (E1..E3 + the dual-write backfill) is applied
+/// under the held project lock and its CONTRACT (C1/C2) is surfaced as
+/// [`MigrateOutcome::pending_contract`] for a later approved contract deploy. This is
+/// the deliberate, reviewed approval seam the routine deploy refuses — it is the
+/// entry point the control plane drives ONLY after an explicit operator/AI approval
+/// of the gated migration set (design §1.6: the AI never auto-rolls-forward a gated
+/// change). A destructive DDL op also applies here (approval covers the whole set),
+/// so callers MUST gate access to this surface on a real approval decision.
+///
+/// # Errors
+/// [`DeployMigrateError`] on connect / provision / load / apply failure (incl. a
+/// genuine mid-expand `OnlineExpand` failure that is NOT the approval refusal).
+pub async fn apply_bundle_migrations_approved(
+    migrate_dsn: &str,
+    app_id: &Uuid,
+    migrations_dir: &Path,
+) -> Result<MigrateOutcome, DeployMigrateError> {
+    apply_bundle_migrations_with_approval(migrate_dsn, app_id, migrations_dir, Approval::Approved)
+        .await
+}
+
+async fn apply_bundle_migrations_with_approval(
+    migrate_dsn: &str,
+    app_id: &Uuid,
+    migrations_dir: &Path,
+    approval: Approval,
+) -> Result<MigrateOutcome, DeployMigrateError> {
     // The per-app schema + project id are the trusted path id. The plugin-db
     // model maps app_id → schema "<app_id>"; the engine uses the same id to seed
     // the advisory lock, journal, and the migrator_<app_id> role name.
@@ -314,7 +360,10 @@ pub async fn apply_bundle_migrations(
             // No trusted expectation available (see the H2 note above). NEVER pass a
             // bundle-derived hash here — it would be a vacuous self-check.
             None,
-            Approval::None,
+            // PR7: the approval threads from the entry point — `Approval::None` on the
+            // routine `.zship` deploy (a destructive `.sql` migration is refused), and
+            // `Approval::Approved` on the out-of-band approved-apply surface.
+            approval,
             &backend,
             &exec_cfg,
             "deploy",
@@ -329,15 +378,25 @@ pub async fn apply_bundle_migrations(
     //     (Postgres here) threaded in, then LOWERED + applied under the SAME
     //     Confined guard + migrator role. This is the production caller of the IR
     //     gate (previously the gate was exported but unreached).
-    let ir_outcome =
-        apply_bundle_ir_migrations(&backend, app_id, migrations_dir, &exec_cfg, &guard_cfg)
-            .await?;
+    let ir_outcome = apply_bundle_ir_migrations(
+        &backend,
+        app_id,
+        migrations_dir,
+        &exec_cfg,
+        &guard_cfg,
+        approval,
+    )
+    .await?;
 
     let mut applied = outcome.applied;
     applied.extend(ir_outcome.applied);
     let mut skipped = outcome.skipped;
     skipped.extend(ir_outcome.skipped);
-    Ok(MigrateOutcome { applied, skipped })
+    Ok(MigrateOutcome {
+        applied,
+        skipped,
+        pending_contract: ir_outcome.pending_contract,
+    })
 }
 
 /// Discover + apply the bundle's `.ir.json` creator artifacts (§5.2/§8.6).
@@ -363,6 +422,7 @@ async fn apply_bundle_ir_migrations(
     migrations_dir: &Path,
     exec_cfg: &ExecutorConfig,
     guard_cfg: &zeroship_migrate::GuardConfig,
+    approval: Approval,
 ) -> Result<MigrateOutcome, DeployMigrateError> {
     // Discover `*.ir.json` files, version-ordered by filename (deterministic).
     let mut ir_files: Vec<std::path::PathBuf> = Vec::new();
@@ -386,7 +446,7 @@ async fn apply_bundle_ir_migrations(
         }
     }
     if ir_files.is_empty() {
-        return Ok(MigrateOutcome { applied: vec![], skipped: vec![] });
+        return Ok(MigrateOutcome::default());
     }
     ir_files.sort();
 
@@ -464,6 +524,10 @@ async fn apply_bundle_ir_migrations(
     let engine = MigrationEngine::new();
     let mut applied: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
+    // PR7: the CONTRACT migrations of any online rename whose EXPAND completed this
+    // deploy (PG leg only; the cross-deploy expand-contract partition, §2.0.2). Empty
+    // on the routine `Approval::None` path (the expand is refused before producing one).
+    let mut pending_contract: Vec<String> = Vec::new();
     // The lowered DDL `Migration`s across ALL `.ir.json` files this deploy — folded
     // into a SET-LEVEL integrity manifest (below) so the IR path has the SAME
     // traceability/anti-tamper seam the `.sql` path has (H2 follow-up, §8 point 5).
@@ -507,7 +571,7 @@ async fn apply_bundle_ir_migrations(
         let outcome = engine
             .apply_plan(
                 &lowered.plan.steps,
-                Approval::None,
+                approval,
                 backend,
                 exec_cfg,
                 "deploy-ir",
@@ -517,6 +581,14 @@ async fn apply_bundle_ir_migrations(
             .map_err(DeployMigrateError::from)?;
         applied.extend(outcome.applied.applied);
         skipped.extend(outcome.applied.skipped);
+        // PR7 go-live: a completed online-rename EXPAND surfaces its CONTRACT (C1/C2)
+        // as pending — applied in a SUBSEQUENT approved deploy, not this one (§2.0.2).
+        pending_contract.extend(
+            outcome
+                .pending_contract
+                .iter()
+                .map(|m| m.version.as_str().to_string()),
+        );
 
         // ADVANCE the cross-file registry + live-set with THIS file's freshly-
         // created tables (now applied), so the NEXT `.ir.json` sees them as
@@ -547,5 +619,14 @@ async fn apply_bundle_ir_migrations(
         );
     }
 
-    Ok(MigrateOutcome { applied, skipped })
+    if !pending_contract.is_empty() {
+        tracing::info!(
+            app_id = %app_id,
+            pending_contract = ?pending_contract,
+            "deploy-migrate: online-rename EXPAND completed; CONTRACT (drop old column) is \
+             pending a subsequent approved deploy (§2.0.2 cross-deploy expand-contract)"
+        );
+    }
+
+    Ok(MigrateOutcome { applied, skipped, pending_contract })
 }

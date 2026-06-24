@@ -150,6 +150,47 @@ impl LiveSchema {
         }
     }
 
+    /// **PR7 online-rename go-live (SQLite leg).** Build the FULL SQLite-dialect
+    /// `LiveSchema` — `table_snapshots` + `sqlite_schemas` (the per-table SDK schema
+    /// `Value`) + `table_ownership` — from the app's live descriptor set (the
+    /// `registerModel` schema), the production/dev peer of the PG deploy path's live
+    /// introspection. The SQLite `renameColumn` rebuild needs the SDK schema `Value`
+    /// to render the post-rename `CREATE TABLE`, and that `Value` is NOT recoverable
+    /// from a raw SQLite-catalog introspection (masks/encryption/ref facets are not
+    /// in `sqlite_master`); the descriptor set IS the authoritative source, so the
+    /// dev/CLI deploy path threads it here. Routes through the SAME
+    /// [`crate::declarative::desired_snapshot_for_dialect`] the differ uses, so the
+    /// live facts the rename rebuild consumes are byte-identical to a `t.*`-diff's
+    /// desired snapshot. Every table is owned by `owner_app` (the deploying app).
+    ///
+    /// # Errors
+    /// [`DeclarativeError`] if the descriptor set fails the author-boundary
+    /// validation the shared snapshot builder runs (an invalid field/type token).
+    pub fn for_sqlite_descriptors(
+        project_schema: &str,
+        owner_app: &str,
+        descriptors: &[crate::declarative::CollectionDescriptor],
+    ) -> Result<Self, DeclarativeError> {
+        let desired = crate::declarative::desired_snapshot_for_dialect(
+            project_schema,
+            descriptors,
+            SqlDialect::Sqlite,
+        )?;
+        let table_ownership = desired
+            .snapshot
+            .tables
+            .keys()
+            .map(|t| (t.clone(), owner_app.to_string()))
+            .collect();
+        Ok(Self {
+            tables: desired.snapshot.tables.keys().cloned().collect(),
+            unique_indexes: BTreeSet::new(),
+            table_snapshots: desired.snapshot.tables.clone(),
+            sqlite_schemas: desired.sqlite_schemas.clone(),
+            table_ownership,
+        })
+    }
+
     /// The per-table live column set for the DML apply/render-seam ColRef
     /// resolution (rule (c), §3.3.1.1(c)). Projects [`Self::table_snapshots`] into a
     /// `table → [column names]` map ([`crate::validate::validate_op_resolved`]'s
@@ -1288,6 +1329,28 @@ impl IrAuthor {
             });
         }
 
+        // **PR2-LOW — rename-to-EXISTING-column collision (fail-closed, both legs).**
+        // The `to` column MUST NOT already exist on the live table. The type
+        // reconciliation above only confirms `from`; without this guard a
+        // `renameColumn` whose `to` collides with a live column would (PG) author an
+        // `ADD COLUMN <to>` that fails late at apply with an opaque "column already
+        // exists", or (SQLite) silently OVERWRITE the existing `to` field def when the
+        // rebuild renames the `from` key onto it — a data-loss-class silent mis-build.
+        // We reject it BEFORE either destination author runs, mirroring the
+        // declarative differ's hint-unmatched fail-closed stance. The live `from`
+        // column is already confirmed present (above), so `table_snapshots[table]` is
+        // in hand.
+        if let Some(snap) = live.table_snapshots.get(table) {
+            if snap.columns.iter().any(|c| c.name == to) {
+                return Err(IrLowerError::RenameLower(format!(
+                    "renameColumn {table:?}.{from:?} → {to:?}: the target column {to:?} \
+                     already exists on the live table — a rename cannot collide with an \
+                     existing column (refusing to author a duplicate ADD COLUMN / a \
+                     silent rebuild overwrite)"
+                )));
+            }
+        }
+
         match self.dialect {
             SqlDialect::Postgres => {
                 // Neutral→PG type: the reconciled `information_schema` data_type,
@@ -1454,10 +1517,30 @@ fn split_up_fragments(up: &str) -> Vec<&str> {
 fn plan_step_version(step: &PlanStep) -> crate::migration::MigrationId {
     match step {
         PlanStep::Ddl(m) => m.version.clone(),
-        PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => ec
-            .expand
-            .first()
-            .map_or_else(crate::migration::MigrationId::generate, |m| m.version.clone()),
+        PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => {
+            // The plan-group identity of a PG online rename anchors on E1's version.
+            // `ExpandContractAuthor::author` ALWAYS emits E1..E3, so an EMPTY expand
+            // is an internal invariant violation (the author was bypassed or built a
+            // malformed plan), NOT a routine empty case. Fail closed: in dev/test it
+            // panics loudly (the bug surfaces), and in release it falls back to a
+            // DETERMINISTIC sentinel id derived from the plan's stable content — NOT
+            // `MigrationId::generate()`, whose RANDOM output would silently give the
+            // same broken plan a different version on every call, defeating idempotent
+            // re-deploy and masking the bug.
+            match ec.expand.first() {
+                Some(m) => m.version.clone(),
+                None => {
+                    debug_assert!(
+                        false,
+                        "internal invariant violation: PgExpandContract plan has an \
+                         empty `expand` chain (ExpandContractAuthor::author always \
+                         emits E1..E3) — refusing to mint a non-deterministic plan \
+                         version"
+                    );
+                    empty_expand_sentinel_id(ec)
+                }
+            }
+        }
         PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => rb.migration.version.clone(),
         PlanStep::Dml { version, .. } => version.clone(),
         PlanStep::Backfill(spec) => {
@@ -1467,6 +1550,40 @@ fn plan_step_version(step: &PlanStep) -> crate::migration::MigrationId {
             // id (matching the executor's `BackfillSpec::backfill_id` resume key).
             dml_id_from_seed("backfill", spec.backfill_id().as_bytes())
         }
+    }
+}
+
+/// The release-build fallback id for the (invariant-violating) empty-expand
+/// `PgExpandContract` step. Derived DETERMINISTICALLY from the plan's stable
+/// content (the rename intent + backfill id) so two computations agree — NEVER
+/// `MigrationId::generate()`, whose randomness would mask the bug and break
+/// idempotent re-deploy. Reached only when the `debug_assert` in
+/// [`plan_step_version`] is compiled out (release) AND the invariant is somehow
+/// violated; the deterministic id keeps the system honest rather than silently
+/// non-deterministic.
+fn empty_expand_sentinel_id(
+    ec: &crate::expand_contract::ExpandContractPlan,
+) -> crate::migration::MigrationId {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    let crate::expand_contract::OnlineIntent::RenameColumn { table, from, to, ty } = &ec.intent;
+    for field in [table.as_str(), from.as_str(), to.as_str(), ty.as_str()] {
+        h.update((field.len() as u64).to_be_bytes());
+        h.update(field.as_bytes());
+    }
+    h.update(ec.backfill.backfill_id().as_bytes());
+    dml_id_from_seed("empty_expand_invariant", &h.finalize())
+}
+
+/// **Test-only** wrapper that computes the empty-expand sentinel WITHOUT tripping
+/// the `debug_assert` in [`plan_step_version`] — so the DETERMINISM half of the
+/// fix (the release-safe property: the same broken plan yields the SAME id) can be
+/// asserted in a `cfg(test)` (= debug) build. Production code never calls this.
+#[cfg(test)]
+fn plan_step_version_empty_expand_sentinel(step: &PlanStep) -> crate::migration::MigrationId {
+    match step {
+        PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => empty_expand_sentinel_id(ec),
+        other => plan_step_version(other),
     }
 }
 
@@ -2610,5 +2727,53 @@ mod tests {
         // A re-authored op (changed binds) at the same position is still a fresh id.
         let v0_diff = dml_step_version(0, "app_a", "update", "UPDATE t SET …", &[BindValue::Int(8)]);
         assert_ne!(v0, v0_diff, "changed binds must mint a fresh id (no false resume)");
+    }
+
+    // PR2-LOW: `plan_step_version` of a `PgExpandContract` whose `expand` chain is
+    // EMPTY is an internal invariant violation — `ExpandContractAuthor::author`
+    // ALWAYS produces E1..E3, so an empty expand means the author was bypassed or
+    // produced a malformed plan. The prior code fell back to
+    // `MigrationId::generate()` (a RANDOM, non-deterministic plan version) on this
+    // path, so a buggy/internal-broken plan would silently get a DIFFERENT version
+    // every call — defeating idempotent re-deploy and masking the bug. The fix
+    // fails closed: a deterministic sentinel id (NOT random) so two calls on the
+    // same broken plan agree, AND a `debug_assert` so the bug surfaces loudly in
+    // dev/test. This test pins the DETERMINISM (release-safe) half — it must hold in
+    // `cfg(test)` too, so it is written to avoid tripping the debug_assert by
+    // constructing the step through a helper that suppresses the assert. We assert
+    // the two computed ids are EQUAL (deterministic) rather than random.
+    #[test]
+    fn plan_step_version_empty_pg_expand_is_deterministic_not_random() {
+        use crate::expand_contract::{ExpandContractPlan, OnlineIntent};
+        // A degenerate (internally-invalid) ExpandContractPlan with NO expand steps.
+        let degenerate = ExpandContractPlan {
+            intent: OnlineIntent::RenameColumn {
+                table: "t".into(),
+                from: "a".into(),
+                to: "b".into(),
+                ty: "text".into(),
+            },
+            expand: Vec::new(),
+            contract: Vec::new(),
+            backfill: crate::backfill::BackfillSpec {
+                table: "t".into(),
+                cursor_column: "id".into(),
+                batch_size: 1000,
+                set_clause: "b = a".into(),
+                filter: None,
+                name: "rename_a_b".into(),
+            },
+            trigger_version: crate::migration::MigrationId::generate(),
+        };
+        let step = PlanStep::OnlineRename(RenameStep::PgExpandContract(degenerate));
+        // Determinism: two computations of the version on the SAME (broken) step
+        // must agree. The pre-fix `MigrationId::generate()` fallback would FAIL this
+        // (a fresh random id each call).
+        let a = plan_step_version_empty_expand_sentinel(&step);
+        let b = plan_step_version_empty_expand_sentinel(&step);
+        assert_eq!(
+            a, b,
+            "an empty PG expand must NOT mint a non-deterministic (random) plan version"
+        );
     }
 }

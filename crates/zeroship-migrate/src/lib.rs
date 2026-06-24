@@ -77,6 +77,7 @@ pub mod expr;
 pub mod fault;
 pub mod guard;
 pub mod ir;
+pub mod ir_apply;
 pub mod ir_author;
 pub mod ir_load;
 pub mod journal;
@@ -185,6 +186,13 @@ pub use ir::{
 pub use ir_load::{
     enforce_ir_ownership, hint_domain_uncomputable_field, load_ir_document,
     recompute_hint_domain_checksum, IrLoadError,
+};
+// PR7 online-rename go-live (SQLite leg): the deploy/dev entry point that applies a
+// bundle's `.ir.json` set against a SQLite backend, building the SQLite-dialect
+// LiveSchema from the app's descriptor set so an IR `renameColumn` lowers + applies
+// via `rebuild_one` end-to-end.
+pub use ir_apply::{
+    apply_bundle_ir_sqlite, SqliteIrApplyError, SqliteIrApplyOutcome,
 };
 // The IR-path DDL Lower phase (§6/§6.4/§6.5): compiles a validated, ownership-
 // checked `MigrationIr` to migrations, reusing the SHARED snapshot-builder +
