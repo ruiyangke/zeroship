@@ -298,8 +298,14 @@ pub fn authoritative_ir_checksum(ir: &MigrationIr) -> Checksum {
 /// or `None` when the hint domain IS fully computable (flags at default + no
 /// deps/supersedes). Used to fail closed on a hint over a not-yet-foldable
 /// domain (the `IrFlagsOverride`/`MigrationId` merges are a later wave).
+///
+/// Public so the build-time checksum fold (`zeroship-migrate-js`'s
+/// `typed_checksum`/`checksum_of_committed`) can gate on the SAME domain as the
+/// engine's load gate — refusing to anchor a partial checksum over an IR carrying
+/// non-default flags/deps/supersedes rather than silently folding a partial domain
+/// the engine's load gate would later refuse.
 #[must_use]
-fn hint_domain_uncomputable_field(ir: &MigrationIr) -> Option<(&'static str, String)> {
+pub fn hint_domain_uncomputable_field(ir: &MigrationIr) -> Option<(&'static str, String)> {
     if !ir.depends_on.is_empty() {
         return Some(("depends_on", format!("{:?}", ir.depends_on)));
     }
