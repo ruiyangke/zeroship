@@ -117,6 +117,17 @@ enum Command {
         sql: String,
         reply: flume::Sender<Result<Vec<Vec<Option<String>>>, SqliteActorError>>,
     },
+    /// **PR6a** — run ONE parameterized DML statement, binding `params` NATIVELY
+    /// to the `?n` placeholders (never string-interpolated). The single source of
+    /// the creator one-shot DML SQLite executor (`run_dml_step`): the assembler
+    /// renders the `?n` template + the typed binds, and they are bound here so a
+    /// bind value can never alter the statement shape (§2.3.2 bind-safety). Prepared
+    /// + stepped under the current authorizer mode, exactly like [`Command::Exec`].
+    ExecParams {
+        sql: String,
+        params: Vec<SqliteBind>,
+        reply: flume::Sender<Result<(), SqliteActorError>>,
+    },
     /// Flip the authorizer mode (§2.2.2). A plain atomic store on the worker side,
     /// between (never inside) statement prepares.
     SetMode {
@@ -130,6 +141,48 @@ enum Command {
     },
     /// Stop the worker (drops the connection, WAL-checkpoints on close).
     Shutdown,
+}
+
+/// **PR6a** — a typed value bound NATIVELY to a `?n` placeholder of a one-shot
+/// DML statement. A transport-safe (`Send`) mirror of [`crate::plan::BindValue`]
+/// the actor binds via rusqlite's parameter API — never interpolated, so a bind
+/// value can never alter the statement shape (§2.3.2). `Decimal`/`Text` are bound
+/// as TEXT (the column affinity coerces; the IR numeric domain is i64 +
+/// decimal-string).
+#[derive(Debug, Clone)]
+pub enum SqliteBind {
+    /// SQL `NULL`.
+    Null,
+    /// A boolean (bound as the integer 0/1, SQLite's boolean representation).
+    Bool(bool),
+    /// An exact 64-bit integer.
+    Int(i64),
+    /// A decimal/text value bound as TEXT (affinity coerces).
+    Text(String),
+}
+
+impl SqliteBind {
+    /// Map a plan [`BindValue`](crate::plan::BindValue) to its transport mirror.
+    #[must_use]
+    pub fn from_bind(b: &crate::plan::BindValue) -> Self {
+        match b {
+            crate::plan::BindValue::Null => SqliteBind::Null,
+            crate::plan::BindValue::Bool(v) => SqliteBind::Bool(*v),
+            crate::plan::BindValue::Int(v) => SqliteBind::Int(*v),
+            crate::plan::BindValue::Decimal(s) => SqliteBind::Text(s.clone()),
+            crate::plan::BindValue::Text(s) => SqliteBind::Text(s.clone()),
+        }
+    }
+
+    fn to_sql_value(&self) -> rusqlite::types::Value {
+        use rusqlite::types::Value;
+        match self {
+            SqliteBind::Null => Value::Null,
+            SqliteBind::Bool(b) => Value::Integer(i64::from(*b)),
+            SqliteBind::Int(i) => Value::Integer(*i),
+            SqliteBind::Text(s) => Value::Text(s.clone()),
+        }
+    }
 }
 
 /// The migration actor handle. Cloneable-free (one owner): the backend holds it.
@@ -182,6 +235,9 @@ impl MigrationActor {
                         Command::Query { sql, reply } => {
                             let _ = reply.send(run_query(&conn, &sql));
                         }
+                        Command::ExecParams { sql, params, reply } => {
+                            let _ = reply.send(run_exec_params(&conn, &sql, &params));
+                        }
                         Command::SetMode { mode, reply } => {
                             // The authorizer mode flag is owned by the closure; we
                             // flip it through the shared AuthMode handle stashed on
@@ -224,6 +280,28 @@ impl MigrationActor {
         let (reply, rx) = flume::bounded(1);
         self.send(Command::Exec {
             sql: sql.to_string(),
+            reply,
+        })
+        .await?;
+        recv(rx).await?
+    }
+
+    /// **PR6a** — run ONE parameterized DML statement, binding `params` natively to
+    /// its `?n` placeholders. The creator one-shot DML SQLite executor — the binds
+    /// can never alter the statement shape (§2.3.2).
+    ///
+    /// # Errors
+    /// [`SqliteActorError::Exec`] on a prepare/step failure (an authorizer DENY
+    /// surfaces here too); [`SqliteActorError::Unavailable`] if the actor died.
+    pub async fn exec_params(
+        &self,
+        sql: &str,
+        params: &[SqliteBind],
+    ) -> Result<(), SqliteActorError> {
+        let (reply, rx) = flume::bounded(1);
+        self.send(Command::ExecParams {
+            sql: sql.to_string(),
+            params: params.to_vec(),
             reply,
         })
         .await?;
@@ -383,6 +461,23 @@ fn path_str(p: &Path) -> Result<String, SqliteActorError> {
 /// single statement (a mode-spanning batch would be prepared under one mode).
 fn run_exec(conn: &Connection, sql: &str) -> Result<(), SqliteActorError> {
     conn.execute_batch(sql)
+        .map_err(|e| SqliteActorError::Exec(e.to_string()))
+}
+
+/// **PR6a** — run ONE parameterized statement, binding `params` natively to its
+/// `?n` placeholders (rusqlite `execute` with positional params). Prepared under
+/// the current authorizer mode (a DENY surfaces as [`SqliteActorError::Exec`]).
+/// MUST be a single statement (the mode is read at prepare).
+fn run_exec_params(
+    conn: &Connection,
+    sql: &str,
+    params: &[SqliteBind],
+) -> Result<(), SqliteActorError> {
+    let values: Vec<rusqlite::types::Value> = params.iter().map(SqliteBind::to_sql_value).collect();
+    let refs: Vec<&dyn rusqlite::ToSql> =
+        values.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+    conn.execute(sql, refs.as_slice())
+        .map(|_| ())
         .map_err(|e| SqliteActorError::Exec(e.to_string()))
 }
 

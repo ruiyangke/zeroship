@@ -373,6 +373,100 @@ pub(crate) async fn record_loaded_versions(
     }
 }
 
+/// **PR6a** — apply a single parameterized one-shot DML step on SQLite (`insert`/
+/// `update`/`del`), the SQLite peer of the PG `apply_dml_transactional`
+/// (`executor.rs`). The `template` carries `?n` placeholders and `binds` the typed
+/// values; they are bound NATIVELY (never interpolated) so a bind value cannot
+/// alter the statement shape (§2.3.2). The DML runs under the confined
+/// **CreatorUp** authorizer mode (denied from `_mig`, from PRAGMA / transaction
+/// boundaries / vtables), then the `completed` journal row is written under
+/// **EngineJournal** — DML + journal atomic in one `BEGIN IMMEDIATE`.
+///
+/// The journal checksum binds the DECLARING app's identity (`owner_app`, §2.0.1),
+/// the SAME `Checksum::of(template, owner_app)` discipline the PG path uses — so
+/// two DML steps with an identical `(template, binds)` authored by different apps
+/// hash to different checksums.
+///
+/// # Errors
+/// [`SqliteActorError`] on a DML / journal-write failure (rolled back, nothing
+/// journaled); [`SqliteActorError::Poisoned`] if the connection cannot be returned
+/// to autocommit after a rollback.
+pub(crate) async fn run_dml(
+    actor: &MigrationActor,
+    version: &str,
+    name: &str,
+    template: &str,
+    binds: &[crate::backend_sqlite::actor::SqliteBind],
+    owner_app: &str,
+    applied_by: &str,
+) -> Result<(), SqliteActorError> {
+    ensure_journal(actor).await?;
+
+    // 1. BEGIN IMMEDIATE under engine mode (the authorizer allows
+    //    SQLITE_TRANSACTION only in EngineJournal — the engine owns txn boundaries).
+    actor.set_mode(Mode::EngineJournal).await?;
+    actor.exec("BEGIN IMMEDIATE").await?;
+
+    let result = async {
+        // 2. Run the DML under the confined CreatorUp mode (denied from `_mig`,
+        //    PRAGMA, transaction boundaries, vtables) — exactly the confinement a
+        //    creator `up` runs under. The binds are positional `?n` params.
+        actor.set_mode(Mode::CreatorUp).await?;
+        actor.exec_params(template, binds).await?;
+
+        // 3. EngineJournal — INSERT the `completed` row. SEPARATE prepares from the
+        //    DML, with the mode flip strictly between (§2.2.2).
+        actor.set_mode(Mode::EngineJournal).await?;
+        let checksum = crate::migration::Checksum::of(&crate::migration::ChecksumInput {
+            up: template,
+            down: None,
+            flags: &crate::migration::MigrationFlags::default(),
+            owner_app,
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        });
+        let name_lit = sql_lit(name);
+        let checksum_lit = sql_lit(checksum.as_str());
+        let applied_by_lit = sql_lit(applied_by);
+        let version_lit = sql_lit(version);
+        actor
+            .exec(&format!(
+                "INSERT INTO \"_mig\".schema_migrations \
+                 (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
+                 VALUES ('{applied}', {version_lit}, {name_lit}, {checksum_lit}, {applied_by_lit}, \
+                         'completed', 'success', 'apply')",
+                applied = EventKind::Applied.as_str()
+            ))
+            .await?;
+        Ok::<(), SqliteActorError>(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => {
+            actor.set_mode(Mode::EngineJournal).await?;
+            actor.exec("COMMIT").await?;
+            Ok(())
+        }
+        Err(e) => {
+            actor.set_mode(Mode::EngineJournal).await?;
+            let rb = actor.exec("ROLLBACK").await;
+            match actor.is_autocommit().await {
+                Ok(true) => Err(e),
+                Ok(false) => Err(SqliteActorError::Poisoned(format!(
+                    "transaction still open after ROLLBACK (rollback result: {rb:?}); \
+                     original DML error: {e}"
+                ))),
+                Err(probe) => Err(SqliteActorError::Poisoned(format!(
+                    "could not confirm autocommit after ROLLBACK: {probe}; \
+                     original DML error: {e}"
+                ))),
+            }
+        }
+    }
+}
+
 /// The transactional body, factored so a failure path can ROLLBACK cleanly.
 async fn run_apply_txn(
     actor: &MigrationActor,

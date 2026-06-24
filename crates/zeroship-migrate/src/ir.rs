@@ -477,6 +477,25 @@ pub struct IrIndex {
     pub r#where: Option<Expr>,
 }
 
+/// **PR6a** — the optional `insert { onConflict }` upsert clause (§3.4 / §9). A
+/// CLOSED carrier: the conflict-target columns + an optional `doUpdate` map of
+/// `column → typed scalar` assignment (absent `doUpdate` ⇒ `DO NOTHING`). NEVER a
+/// raw SQL string (property A). **PostgreSQL-only** — the lowering renders it on
+/// PG and HARD-REJECTS it on SQLite (`dialect_scope = PgOnly`). Modelled as a
+/// distinct IR type so the wire shape is closed + schemars-expressible and a
+/// hand-crafted `.ir.json` cannot smuggle an arbitrary clause.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IrOnConflict {
+    /// The conflict-target columns (`ON CONFLICT (cols)`).
+    pub columns: Vec<String>,
+    /// `Some` ⇒ `DO UPDATE SET <col = scalar, …>`; absent ⇒ `DO NOTHING`. The
+    /// assignment values are typed scalars (the §2.5 numeric domain), bound
+    /// natively at assembly — never inlined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub do_update: Option<BTreeMap<String, IrScalar>>,
+}
+
 /// A batched-backfill / batched-update knob.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -647,6 +666,13 @@ pub enum Op {
         columns: Vec<String>,
         /// Rows, each a positional list of typed scalars.
         rows: Vec<Vec<IrScalar>>,
+        /// **PR6a** — the optional upsert clause (`ON CONFLICT …`). PostgreSQL-only:
+        /// PG renders it natively; on a SQLite target it is a hard authoring error
+        /// (`dialect_scope = PgOnly` / `UNSUPPORTED { kind: "op" }`, §9) — there is
+        /// no portable SQLite upsert and no raw route (property A). Absent ⇒ a plain
+        /// insert (portable on both backends).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        on_conflict: Option<IrOnConflict>,
     },
     /// `UPDATE … SET … WHERE …` (optionally batched).
     Update {
