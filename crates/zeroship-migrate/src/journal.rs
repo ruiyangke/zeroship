@@ -243,10 +243,19 @@ pub struct PendingContract {
     /// The Postgres type of the column (carried so an `--abort` can reconstruct
     /// the drop, and an `--apply` can re-author C1/C2 if needed).
     pub ty: String,
-    /// The obligation key: the E2 trigger migration version (the "expand" id the
-    /// §2.0.2 partition keys on). A `depends_on` on this version is unsatisfied
-    /// while the obligation is outstanding (§2.0.4).
+    /// The APPLY-TIME obligation key: the E2 trigger migration version (the
+    /// "expand" id the §2.0.2 partition keys on), deterministic per rename
+    /// (§2.0.1). The engine interlock's idempotent-skip + self-EXPAND exemption +
+    /// the `resolve-pending` lookup key on this. It is a deep sub-step id that the
+    /// plan-level supplied set never exposes — so orphan/blocked do NOT key on it.
     pub pending_version: String,
+    /// The rename's PLAN-GROUP version (the `PgExpandContract` plan's E1-anchored
+    /// id, `ir_author::plan_step_version`). This is the STABLE identity the SUPPLIED
+    /// migration set carries (a re-lowered IR's `lower_plan().version`) and an
+    /// author's `depends_on` references, so `status`'s orphan (§2.0.3 item 3) and
+    /// blocked (§2.0.4) surfacing keys on THIS — not the deep E2 `pending_version`
+    /// no plan-level set ever exposes (PR9a HIGH).
+    pub plan_version: String,
     /// The C1/C2 contract migration versions (so resolve can journal them and the
     /// status/orphan surfacing can name them).
     pub contract_versions: Vec<String>,
@@ -264,8 +273,11 @@ pub struct PendingContractRecord<'a> {
     pub to_col: &'a str,
     /// The Postgres type of the column.
     pub ty: &'a str,
-    /// The obligation key — the E2 trigger version.
+    /// The apply-time obligation key — the E2 trigger version.
     pub pending_version: &'a str,
+    /// The rename's plan-group version (E1-anchored) — the stable identity the
+    /// supplied set / `depends_on` key on for orphan/blocked (PR9a HIGH).
+    pub plan_version: &'a str,
     /// The C1/C2 contract version ids, comma-separated-free (serialized as a JSON
     /// array on write; carried here as a slice).
     pub contract_versions: &'a [String],
@@ -455,7 +467,15 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
     //     `state` ∈ {`pending`,`resolved`}; `resolution` ∈ {`applied`,`aborted`}
     //     and is NULL iff `state='pending'` (the per-state shape CHECK). `table` is
     //     the rename's bare target table (the interlock's match key);
-    //     `pending_version` is the obligation key (the E2 trigger id);
+    //     `pending_version` is the APPLY-TIME obligation key (the E2 trigger id) —
+    //     deterministic per rename (§2.0.1), used by the engine interlock's
+    //     idempotent-skip + self-EXPAND exemption + the `resolve-pending` lookup;
+    //     `plan_version` is the rename's PLAN-GROUP version (the PgExpandContract
+    //     plan's E1-anchored id, `ir_author::plan_step_version`) — the STABLE
+    //     identity the SUPPLIED migration set carries (a re-lowered IR's
+    //     `lower_plan().version`) and an author's `depends_on` references, so
+    //     `status`'s orphan/blocked surfacing keys on THIS, not the deep E2
+    //     sub-version that no plan-level set ever exposes (PR9a HIGH);
     //     `contract_versions` is the JSON array of C1/C2 ids.
     conn.batch_execute(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_pending_contracts (
@@ -466,6 +486,7 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
             to_col            TEXT NOT NULL,
             ty                TEXT NOT NULL,
             pending_version   TEXT NOT NULL,
+            plan_version      TEXT NOT NULL,
             contract_versions TEXT NOT NULL,
             resolution        TEXT CHECK (resolution IS NULL OR resolution IN ('applied','aborted')),
             \"by\"              TEXT NOT NULL,
@@ -966,12 +987,13 @@ pub async fn outstanding_pending_contracts(
             &format!(
                 "WITH latest AS (
                      SELECT DISTINCT ON (pending_version)
-                            pending_version, state, \"table\", from_col, to_col, ty,
-                            contract_versions
+                            pending_version, plan_version, state, \"table\", from_col,
+                            to_col, ty, contract_versions
                        FROM {meta}.schema_pending_contracts
                       ORDER BY pending_version, event_seq DESC
                  )
-                 SELECT pending_version, \"table\", from_col, to_col, ty, contract_versions
+                 SELECT pending_version, plan_version, \"table\", from_col, to_col, ty,
+                        contract_versions
                    FROM latest
                   WHERE state = '{pending}'
                   ORDER BY pending_version",
@@ -999,6 +1021,7 @@ pub async fn outstanding_pending_contracts(
             to_col: row.get("to_col"),
             ty: row.get("ty"),
             pending_version: row.get("pending_version"),
+            plan_version: row.get("plan_version"),
             contract_versions,
         });
     }
@@ -1034,8 +1057,8 @@ pub async fn record_pending_contract(
             &format!(
                 "INSERT INTO {meta}.schema_pending_contracts
                      (state, \"table\", from_col, to_col, ty, pending_version,
-                      contract_versions, \"by\")
-                 VALUES ('{pending}', $1, $2, $3, $4, $5, $6, $7)",
+                      plan_version, contract_versions, \"by\")
+                 VALUES ('{pending}', $1, $2, $3, $4, $5, $6, $7, $8)",
                 pending = PendingState::Pending.as_str()
             ),
             &[
@@ -1044,6 +1067,7 @@ pub async fn record_pending_contract(
                 &rec.to_col,
                 &rec.ty,
                 &rec.pending_version,
+                &rec.plan_version,
                 &cv_json,
                 &rec.by,
             ],
@@ -1082,8 +1106,8 @@ pub async fn resolve_pending_contract(
             &format!(
                 "INSERT INTO {meta}.schema_pending_contracts
                      (state, \"table\", from_col, to_col, ty, pending_version,
-                      contract_versions, resolution, \"by\")
-                 VALUES ('{resolved}', $1, $2, $3, $4, $5, $6, $7, $8)",
+                      plan_version, contract_versions, resolution, \"by\")
+                 VALUES ('{resolved}', $1, $2, $3, $4, $5, $6, $7, $8, $9)",
                 resolved = PendingState::Resolved.as_str()
             ),
             &[
@@ -1092,6 +1116,7 @@ pub async fn resolve_pending_contract(
                 &pc.to_col,
                 &pc.ty,
                 &pc.pending_version,
+                &pc.plan_version,
                 &cv_json,
                 &resolution.as_str(),
                 &by,

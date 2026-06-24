@@ -160,6 +160,26 @@ fn lower_pg_rename(
     }
 }
 
+/// Re-lower the SAME rename IR through the REAL load/lower path and return the
+/// rename's PLAN-GROUP version (the `AppliedPlan.version` — E1-anchored), the
+/// stable identity the obligation's `plan_version` keys on and that a supplied
+/// status set / `depends_on` references. PR9a HIGH: because the sub-step ids are
+/// deterministic (§2.0.1), a re-lower reproduces the SAME plan version — proving
+/// the obligation key survives the re-lower the production deploy path does on
+/// EVERY deploy (`deploy_migrate.rs`).
+fn relower_plan_version(
+    cfg: &ExecutorConfig,
+    table: &str,
+    from: &str,
+    to: &str,
+    ty: ColType,
+    live: &LiveSchema,
+) -> zeroship_migrate::migration::MigrationId {
+    let author = IrAuthor::new(cfg.project_schema.clone(), "app_test", SqlDialect::Postgres);
+    let ir = rename_ir(table, from, to, ty);
+    author.lower_plan(&ir, live).expect("PG rename re-lowers").version
+}
+
 /// Build the `members(id, email)` table + seed, via a plain Ddl plan.
 async fn create_members(engine: &MigrationEngine, be: &PostgresBackend<'_>, cfg: &ExecutorConfig) {
     let s = q(&cfg.project_schema);
@@ -402,9 +422,23 @@ async fn re_running_expand_is_a_noop_no_duplicate_obligation() {
     create_members(&engine, &be, &cfg).await;
     let ec = expand_email_rename(&engine, &be, &cfg).await;
 
-    // Re-run the SAME expand (deploy N retried). It must net-applied-skip and NOT
-    // append a second `pending` row.
-    let steps = vec![PlanStep::OnlineRename(RenameStep::PgExpandContract(ec.clone()))];
+    // Re-run the SAME expand (deploy N retried) — but RE-LOWER it from the IR
+    // instead of reusing the in-memory `ec`, faithfully reproducing the production
+    // path (`deploy_migrate.rs` re-lowers `.ir.json` on EVERY deploy). PR9a HIGH:
+    // because the sub-step ids are deterministic (§2.0.1), the re-lowered EXPAND
+    // carries the SAME E1..E3 + obligation key, so it net-applied-skips and does
+    // NOT append a duplicate `pending` row. Pre-fix the re-lower minted FRESH random
+    // ids ⇒ a second obligation + re-run ADD COLUMN.
+    let live = live_with_column("members", "email", "text");
+    let ec_relowered =
+        lower_pg_rename(&cfg, "members", "email", "email_address", ColType::Text, &live);
+    assert_eq!(
+        ec_relowered.trigger_version.as_str(),
+        ec.trigger_version.as_str(),
+        "re-lower reproduces the SAME obligation key (determinism §2.0.1)"
+    );
+    let steps =
+        vec![PlanStep::OnlineRename(RenameStep::PgExpandContract(ec_relowered))];
     engine
         .apply_plan(
             &steps,
@@ -439,6 +473,45 @@ async fn re_running_expand_is_a_noop_no_duplicate_obligation() {
     assert_eq!(n, 1, "re-run must NOT append a duplicate `pending` row");
 
     teardown(&conn, &cfg).await;
+}
+
+/// PR9a HIGH §2.0.1 — DETERMINISM across re-lower from IR BYTES. Lowering the SAME
+/// `.ir.json` bytes TWICE (two separate `IrAuthor` instances, two `serde` loads)
+/// reproduces byte-identical E1..C2 sub-step ids, the obligation key
+/// (`trigger_version`), the contract versions, AND the plan version. This is the
+/// property the production deploy path (`deploy_migrate.rs` re-lowers every file on
+/// EVERY deploy) depends on — pre-fix each lower minted FRESH random ids, so a
+/// retried deploy recorded a SECOND obligation + re-ran ADD COLUMN. No DB needed.
+#[compio::test]
+async fn lowering_same_ir_bytes_twice_is_byte_identical() {
+    let cfg = cfg_for(&token());
+    let live = live_with_column("members", "email", "text");
+    let ir = rename_ir("members", "email", "email_address", ColType::Text);
+    // Serialize to bytes, then load + lower TWICE from those SAME bytes.
+    let bytes = serde_json::to_string(&ir).expect("serialize IR");
+
+    let load_lower = |b: &str| -> (
+        zeroship_migrate::migration::MigrationId,
+        Vec<String>,
+        zeroship_migrate::migration::MigrationId,
+    ) {
+        let ir: MigrationIr = serde_json::from_str(b).expect("load IR");
+        let author = IrAuthor::new(cfg.project_schema.clone(), "app_test", SqlDialect::Postgres);
+        let plan = author.lower_plan(&ir, &live).expect("lowers");
+        let ec = match &plan.steps[0] {
+            PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => ec.clone(),
+            other => panic!("expected PgExpandContract, got {other:?}"),
+        };
+        let cv: Vec<String> =
+            ec.contract.iter().map(|m| m.version.as_str().to_string()).collect();
+        (ec.trigger_version.clone(), cv, plan.version.clone())
+    };
+
+    let (tv1, cv1, pv1) = load_lower(&bytes);
+    let (tv2, cv2, pv2) = load_lower(&bytes);
+    assert_eq!(tv1, tv2, "obligation key (E2 trigger version) is identical across re-lower");
+    assert_eq!(cv1, cv2, "contract versions (C1/C2) are identical across re-lower");
+    assert_eq!(pv1, pv2, "plan version is identical across re-lower");
 }
 
 /// APPLY/DISCHARGE: the deploy-N+1 contract-apply (C1/C2 as Ddl steps) discharges
@@ -531,8 +604,21 @@ async fn orphaned_pending_contract_is_surfaced_by_status_as_distinct_state() {
     create_members(&engine, &be, &cfg).await;
     let ec = expand_email_rename(&engine, &be, &cfg).await;
 
-    // status() against a migration set that DOES NOT carry the rename's expand id
-    // ⇒ the obligation is ORPHANED (the rename was removed after its EXPAND).
+    // PR9a HIGH — the obligation's stable identity for orphan/blocked is the
+    // rename's PLAN version (E1-anchored), NOT the deep E2 `trigger_version` no
+    // plan-level set ever exposes. Re-lower the SAME rename through the real
+    // load/lower path to get the plan version a supplied status set would carry.
+    let live = live_with_column("members", "email", "text");
+    let plan_version =
+        relower_plan_version(&cfg, "members", "email", "email_address", ColType::Text, &live);
+    assert_eq!(
+        plan_version.as_str(),
+        ec.expand[0].version.as_str(),
+        "re-lower reproduces E1's id (the plan version) — determinism (§2.0.1)"
+    );
+
+    // status() against a migration set that DOES NOT carry the rename's PLAN
+    // version ⇒ the obligation is ORPHANED (the rename was removed after EXPAND).
     let st = zeroship_migrate::status(&conn, &cfg, &[])
         .await
         .expect("status reads the obligation");
@@ -549,11 +635,16 @@ async fn orphaned_pending_contract_is_surfaced_by_status_as_distinct_state() {
     assert_eq!(payload.abort_action.command, "migrate resolve-pending --abort");
     assert_eq!(payload.abort_action.version, ec.trigger_version.as_str());
 
-    // And when the rename's expand id IS present in the supplied set, the same
-    // obligation is NOT orphaned (a routine outstanding contract).
-    let still_present = zeroship_migrate::migration::Migration {
-        version: ec.trigger_version.clone(),
-        name: "expand".into(),
+    // And when the rename's PLAN version IS present in the supplied set (the shape
+    // a real loaded IR-rename plan has — keyed on the plan/file version, NOT the
+    // interior E2 sub-version), the SAME obligation is NOT orphaned. Pre-fix this
+    // was FALSELY orphaned because orphan keyed on the E2 sub-version (which the
+    // plan-level set never carries) — every healthy in-flight rename looked
+    // orphaned. We assert with the re-lowered plan version (a faithful supplied
+    // entry), proving the fix keys on the identity the real set exposes.
+    let present = zeroship_migrate::migration::Migration {
+        version: plan_version.clone(),
+        name: "rename_email_to_email_address".into(),
         up: "SELECT 1".into(),
         down: None,
         checksum: zeroship_migrate::migration::Checksum::of(
@@ -573,13 +664,13 @@ async fn orphaned_pending_contract_is_surfaced_by_status_as_distinct_state() {
         supersedes: vec![],
         preconditions: vec![],
     };
-    let st2 = zeroship_migrate::status(&conn, &cfg, std::slice::from_ref(&still_present))
+    let st2 = zeroship_migrate::status(&conn, &cfg, std::slice::from_ref(&present))
         .await
         .expect("status with the rename present");
     assert_eq!(st2.pending_contracts.len(), 1);
     assert!(
         !st2.pending_contracts[0].orphaned,
-        "the rename is present in the set ⇒ NOT orphaned"
+        "the rename's PLAN version is present in the set ⇒ NOT orphaned"
     );
 
     teardown(&conn, &cfg).await;
@@ -600,7 +691,15 @@ async fn dependent_plan_blocks_on_a_pending_contract_dependency() {
     create_members(&engine, &be, &cfg).await;
     let ec = expand_email_rename(&engine, &be, &cfg).await;
 
-    // Plan B declares depends_on: [A's expand id] (A = the pending online rename).
+    // PR9a HIGH — an author/AI declares `depends_on` on plan A's PLAN version (the
+    // file/plan-group id), NOT on A's interior E2 sub-version. Re-lower to obtain
+    // it (deterministic, §2.0.1). Pre-fix `blocked` keyed on the E2 sub-version, so
+    // a real `depends_on: [A's plan version]` NEVER fired the blocked state.
+    let live = live_with_column("members", "email", "text");
+    let a_plan_version =
+        relower_plan_version(&cfg, "members", "email", "email_address", ColType::Text, &live);
+
+    // Plan B declares depends_on: [A's PLAN version] (A = the pending online rename).
     let b = zeroship_migrate::migration::Migration {
         version: zeroship_migrate::migration::MigrationId::generate(),
         name: "plan_b".into(),
@@ -612,14 +711,14 @@ async fn dependent_plan_blocks_on_a_pending_contract_dependency() {
                 down: None,
                 flags: &zeroship_migrate::migration::MigrationFlags::default(),
                 owner_app: "app_test",
-                depends_on: std::slice::from_ref(&ec.trigger_version),
+                depends_on: std::slice::from_ref(&a_plan_version),
                 supersedes: &[],
                 preconditions: &[],
             },
         ),
         flags: zeroship_migrate::migration::MigrationFlags::default(),
         owner_app: "app_test".into(),
-        depends_on: vec![ec.trigger_version.clone()],
+        depends_on: vec![a_plan_version.clone()],
         supersedes: vec![],
         preconditions: vec![],
     };
@@ -630,7 +729,9 @@ async fn dependent_plan_blocks_on_a_pending_contract_dependency() {
     assert_eq!(st.blocked.len(), 1, "B is recorded as blocked, NOT failed");
     let blk = &st.blocked[0];
     assert_eq!(blk.blocked.as_str(), b.version.as_str());
-    assert_eq!(blk.dependency.as_str(), ec.trigger_version.as_str());
+    // The dependency edge is A's PLAN version; the reported pending_version (the
+    // operator's `resolve-pending` key) is A's E2 obligation id.
+    assert_eq!(blk.dependency.as_str(), a_plan_version.as_str());
     assert_eq!(blk.pending_version, ec.trigger_version.as_str());
 
     // The structured DEPENDENCY_PENDING_CONTRACT payload names B, A, and the

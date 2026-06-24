@@ -282,13 +282,26 @@ async fn read_status_snapshot(
 /// (§2.0.3 item 3 / §2.0.4). Pure — shared by the PG snapshot path and any
 /// backend path that can read the obligation set.
 ///
-/// - **Orphan (§2.0.3 item 3):** an obligation whose `pending_version` is NOT
+/// - **Orphan (§2.0.3 item 3):** an obligation whose **`plan_version`** is NOT
 ///   among the supplied set's versions is orphaned (the rename op was removed
 ///   after its EXPAND applied). Fail-closed: it is surfaced as a distinct state,
 ///   never silently dropped.
 /// - **Blocked (§2.0.4):** a supplied migration B whose `depends_on` references an
-///   outstanding `pending_version` (the dependency A's E2 trigger id) is blocked
-///   until A's contract applies — a retained `blocked-awaiting-approval` state.
+///   outstanding obligation's **`plan_version`** (the dependency A's plan-group
+///   version) is blocked until A's contract applies — a retained
+///   `blocked-awaiting-approval` state.
+///
+/// **Why `plan_version`, not `pending_version` (PR9a HIGH).** The obligation key
+/// `pending_version` is the E2 trigger SUB-step id — a deep id that no plan-level
+/// migration set ever exposes (`load_dir_flat` produces ONE `Migration` per file,
+/// keyed on the file/plan version, never on a rename's interior sub-step). Keying
+/// orphan on `pending_version` made EVERY outstanding obligation falsely
+/// `orphaned`, and keying `blocked` on it made the blocked state NEVER fire (an
+/// author declares `depends_on` on plan A's PLAN version, not A's E2 sub-version).
+/// `plan_version` is the rename's plan-group version (E1-anchored, deterministic
+/// per §2.0.1), which a re-lowered IR's `lower_plan().version` reproduces and a
+/// `depends_on: [A]` references — so both checks key on the identity the supplied
+/// set actually carries.
 fn derive_pending_contract_status(
     outstanding: &[journal::PendingContract],
     migrations: &[Migration],
@@ -302,21 +315,27 @@ fn derive_pending_contract_status(
             table: pc.table.clone(),
             pending_version: pc.pending_version.clone(),
             // Orphaned when the supplied set no longer carries this rename's
-            // expand id (§2.0.3 item 3).
-            orphaned: !supplied.contains(pc.pending_version.as_str()),
+            // PLAN version (§2.0.3 item 3) — the stable identity the loaded set
+            // exposes, NOT the interior E2 sub-version.
+            orphaned: !supplied.contains(pc.plan_version.as_str()),
         })
         .collect();
 
-    let outstanding_versions: std::collections::HashSet<&str> =
-        outstanding.iter().map(|pc| pc.pending_version.as_str()).collect();
+    // Map every outstanding obligation's PLAN version → its E2 obligation key, so a
+    // `depends_on: [A's plan version]` resolves to the pending_version the blocked
+    // payload reports (the operator runs `resolve-pending` against pending_version).
+    let outstanding_by_plan: std::collections::HashMap<&str, &str> = outstanding
+        .iter()
+        .map(|pc| (pc.plan_version.as_str(), pc.pending_version.as_str()))
+        .collect();
     let mut blocked = Vec::new();
     for m in migrations {
         for dep in &m.depends_on {
-            if outstanding_versions.contains(dep.as_str()) {
+            if let Some(pending_version) = outstanding_by_plan.get(dep.as_str()) {
                 blocked.push(BlockedPlan {
                     blocked: m.version.clone(),
                     dependency: dep.clone(),
-                    pending_version: dep.as_str().to_string(),
+                    pending_version: (*pending_version).to_string(),
                 });
             }
         }
