@@ -18,7 +18,7 @@
 // serializers (§2.5).
 
 import * as userMod from "./__migration__.js";
-import { __drain } from "@zeroship/migrate";
+import { __begin, __drain } from "@zeroship/migrate";
 
 // Resolve the migration's `up()` (mandatory) + `down()` (optional). Two accepted
 // shapes, mirroring the deploy contract's discovery order:
@@ -51,11 +51,14 @@ function resolveName(mod) {
   return (globalThis.__zsMigrationName && String(globalThis.__zsMigrationName)) || "migration";
 }
 
-// Record one phase's op list: drain any stale ops, call the phase, drain the
-// freshly-recorded ops. Returns `[]` for an absent phase.
+// Record one phase's op list: install a FRESH ambient recorder (§3.1), call the
+// phase so the op-functions record into it, then drain. Returns `[]` for an
+// absent phase. Installing the recorder per-phase is what makes calling an
+// op-function OUTSIDE a phase (module top level / after the phase returns) a
+// structured `OP_OUTSIDE_RECORDER` error rather than a silently-lost op.
 function recordPhase(phase) {
-  __drain(); // clear any ops left from a prior phase (defensive)
   if (typeof phase !== "function") return [];
+  __begin();
   phase();
   return __drain();
 }

@@ -164,3 +164,99 @@ pub fn record_migration_to_json(
     s.push('\n');
     Ok(s)
 }
+
+/// One §4.3 determinism-lint finding (the machine-readable envelope the AI loop
+/// self-corrects on). Mirrors the JS `lintDeterminism` finding shape.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DeterminismFinding {
+    /// The structured error code (`NONDETERMINISTIC_OP_ARG`).
+    pub code: String,
+    /// The flagged accessor (`Date.now()`, `Math.random()`, …).
+    pub accessor: String,
+    /// The human-facing steer to the DB-evaluated `c.fn.*` scalar.
+    pub suggested_fix: String,
+    /// Why the accessor is a non-determinism hazard.
+    pub reason: String,
+}
+
+/// The determinism-lint glue: import `lintDeterminism` from `@zeroship/migrate`,
+/// run it over the migration source the host stamps on `globalThis.__zsLintSrc`,
+/// and stash the JSON findings on `globalThis.__zsLintOut`.
+const DETERMINISM_LINT_JS: &str = r#"
+import { lintDeterminism } from "@zeroship/migrate";
+try {
+  const findings = lintDeterminism(globalThis.__zsLintSrc || "");
+  globalThis.__zsLintOut = JSON.stringify({ ok: true, findings });
+} catch (e) {
+  globalThis.__zsLintOut = JSON.stringify({ ok: false, error: (e && e.message) ? e.message : String(e) });
+}
+export default {};
+"#;
+
+/// Run the §4.3 determinism lint over a migration's SOURCE through the REAL V8
+/// `@zeroship/migrate` `lintDeterminism` (NOT a Rust re-implementation) — the
+/// faithful path the build/CLI uses to flag a non-deterministic accessor
+/// (`Date.now()` / `Math.random()` / `crypto.randomUUID()` / `new Date()`) in an
+/// op argument before commit.
+///
+/// # Errors
+/// See [`RecordError`].
+pub fn lint_migration_determinism(
+    migration_source: &str,
+) -> Result<Vec<DeterminismFinding>, RecordError> {
+    zeroship_runtime::init_v8();
+
+    let modules = vec![
+        ModuleEntry {
+            specifier: "determinism_lint.js".into(),
+            source: DETERMINISM_LINT_JS.to_string(),
+        },
+        ModuleEntry {
+            specifier: "@zeroship/migrate".into(),
+            source: MIGRATE_OPS_JS.to_string(),
+        },
+    ];
+
+    let runtime = Runtime::builder().build();
+
+    let out_json: Result<String, RecordError> = runtime.with_scope(|scope| {
+        zeroship_runtime::init::setup_globals(scope);
+        zeroship_runtime::init::install_text_encoding_streams(scope);
+
+        {
+            let global = scope.get_current_context().global(scope);
+            let k = v8::String::new(scope, "__zsLintSrc").unwrap();
+            let v = v8::String::new(scope, migration_source).unwrap();
+            global.set(scope, k.into(), v.into());
+        }
+
+        zeroship_runtime::modules::load_modules(scope, &modules).map_err(RecordError::V8)?;
+        scope.perform_microtask_checkpoint();
+
+        let global = scope.get_current_context().global(scope);
+        let k = v8::String::new(scope, "__zsLintOut").unwrap();
+        let v = global
+            .get(scope, k.into())
+            .filter(|v| v.is_string())
+            .ok_or(RecordError::NoIr)?;
+        Ok(v.to_rust_string_lossy(scope))
+    });
+
+    #[derive(serde::Deserialize)]
+    struct LintEnvelope {
+        ok: bool,
+        #[serde(default)]
+        error: Option<String>,
+        #[serde(default)]
+        findings: Vec<DeterminismFinding>,
+    }
+
+    let env: LintEnvelope = serde_json::from_str(&out_json?)
+        .map_err(|e| RecordError::Recording(e.to_string()))?;
+    if !env.ok {
+        return Err(RecordError::Recording(
+            env.error.unwrap_or_else(|| "lint failed".into()),
+        ));
+    }
+    Ok(env.findings)
+}

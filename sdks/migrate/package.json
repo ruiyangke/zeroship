@@ -1,0 +1,28 @@
+{
+  "name": "@zeroship/migrate",
+  "version": "0.0.0",
+  "description": "No-raw-SQL, fully-structured, named-ESM-import op builder for portable bi-dialect (Postgres + SQLite) zeroship migrations.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "src"],
+  "scripts": {
+    "gen:ir-types": "node scripts/gen-ir-types.mjs",
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "NODE_ENV=test node --import tsx --test tests/*.test.ts"
+  },
+  "devDependencies": {
+    "json-schema-to-typescript": "^15.0.4",
+    "tsup": "^8.5.1",
+    "tsx": "catalog:",
+    "typescript": "catalog:"
+  }
+}

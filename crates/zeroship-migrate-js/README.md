@@ -73,10 +73,16 @@ records the emitted op list into the typed `MigrationIr` — the SAME `.ir.json`
 lean engine's loader deserializes. The JS side NEVER computes the checksum: it emits
 ops; the Rust engine folds the single authoritative `Checksum::of_ir` (§2.4).
 
-- `src/migrate_ops.js` — the minimal `@zeroship/migrate` op.* DSL (named-import
-  op-functions for all 15 `Op` variants + the `e.*` closed-Expr-node helpers + the
-  recording buffer). NOT the full fluent `(c) => Expr` builder (§3.3.1) — that lands
-  with the DML waves; here an Expr slot is authored as the closed-AST node directly.
+- `src/migrate_ops.js` — the **FULL `@zeroship/migrate` op-builder DSL** (PR3,
+  §3.2/§3.3.1): the chainable `t.*` column-type lexicon, the `(table, spec)`
+  constraint/index adders, the `verb(table, { … })` DML, the single-handle fluent
+  `(c) => Expr` builder (`c("name")` + `c.fn.*`), `batchAlterTable`, the
+  `OP_OUTSIDE_RECORDER` ambient-recorder guard (`__begin`/`__drain`), and the §4.3
+  determinism lint (`lintDeterminism`). Each op-function records the EXACT frozen
+  op JSON the closed Rust `Op` enum deserializes. The PR1 positional/`e.*`
+  authoring forms are retained (back-compat-free pre-launch, but the golden corpus
+  + `split_part_lint.rs` author in them) and emit the identical wire ops. The npm
+  package `sdks/migrate` is the typed authoring peer of this embedded recorder.
 - `src/op_recorder.js` — the adapter: import the migration, run `up()`, drain the
   ops, emit the `.ir.json` envelope on `globalThis.__zsOpIR`.
 - `tests/op_fixtures/<name>.mig.js` + `<name>.ir.json` — the **golden corpus**.

@@ -1,36 +1,99 @@
-// The minimal `@zeroship/migrate` op.* recorder DSL (design §2.1 / §2.5 / PR1
-// "skeletal JS builder").
+// The `@zeroship/migrate` op-builder DSL — the FULL §3.2/§3.3.1 surface
+// (PR3). This is the recorder the runtime evaluates in V8 to turn a creator's
+// `import { createTable, addColumn, … } from "@zeroship/migrate"` migration into
+// the canonical `.ir.json` the lean engine deserializes.
 //
-// This is the SKELETAL builder the PR1 anti-drift gate hinges on: it is "just
-// enough to emit the golden corpus — so the byte-equality gate exists at the
-// moment the IR shape is frozen" (PR1 bullet, normative §2.5). It is NOT the full
-// fluent-column-accessor expression builder (§3.3.1) — that lands with the DML
-// waves (PR6a). Here every op-function records the SAME dialect-neutral op object
-// the Rust `Op` enum deserializes, and an Expr slot is authored as the closed-AST
-// node object directly (the `e.*` helpers below), so a fixture can carry a `where`
-// / `set` without the full fluent surface.
+// HISTORY: PR1 shipped a SKELETAL subset of this builder (just enough to emit the
+// golden corpus at IR-freeze time) with POSITIONAL op signatures and an `e.*`
+// closed-AST node helper. PR3 fleshes it to the COMPLETE locked surface
+// (normative §3.2/§3.3.1):
 //
-// CONTRACT: each named import is an op-function that PUSHES one canonical op
-// object onto the module-local recording buffer (`__ops`). A migration module
-// calls these inside `up()` (and optionally `down()`); the adapter
-// (`op_recorder.js`) drains the buffer after invoking `up()` and emits the
-// `.ir.json` envelope. The JS side does NOT compute the checksum — the Rust engine
-// is the single checksum authority (§2.4 point 2 / §2.5); the JS emits ops, Rust
-// folds `Checksum::of_ir`.
+//   - named ESM imports, no `op` object/prefix; `export default { name?, up, down? }`
+//     (the recorder adapter `op_recorder.js` resolves either shape);
+//   - the chainable `t.*` column-type lexicon (`t.text().notNull().default(…)`,
+//     nullable-by-default, plus an options-bag overload), one `ColumnDef`
+//     representation everywhere;
+//   - `createTable(name, { col: t.text() })` (object literal — no thunk) plus the
+//     `(b) => { … }` scoped-builder overload for table-scoped constraints/indexes;
+//   - `(table, spec)` constraint/index adders with `name` always in the spec and
+//     named `references.{table,columns}` (no transposable positionals);
+//   - `verb(table, { … })` DML with one `where` keyword across `update`/`del`/
+//     `backfill`, and `insert(table, { rows, onConflict? })`;
+//   - the single-handle fluent `(c) => Expr` builder: `c("name")` → `ColRef`, the
+//     chainable operator methods, and the `c.fn.*` scalar-function namespace (no
+//     importable `fn`, no second callback arg);
+//   - `batchAlterTable(table, build)` (SQLite-safe-rebuild scoped builder).
+//
+// BACK-COMPAT NOTE: PR3 ships pre-launch (no published users — AGENTS.md). The
+// PR1 POSITIONAL/`e.*` authoring style is NOT a public contract, but the existing
+// golden corpus + `split_part_lint.rs` author in it, so the op-functions accept
+// BOTH the new fluent forms and the legacy forms. Both authoring styles emit the
+// IDENTICAL wire op object — the `.ir.json` shape is frozen and dialect-neutral.
+// The two styles are disambiguated structurally (an array `columns` arg is the
+// legacy `createTable`; an object is the fluent map; a `ColumnDef` vs a bare
+// ColType string for `addColumn`'s type; etc.).
+//
+// CONTRACT: each named import RECORDS one canonical op object onto the
+// module-local recording buffer (`__ops`), synchronously, returning void. A
+// migration calls these inside `up()`/`down()`; the adapter drains the buffer per
+// phase and emits the `.ir.json` envelope. Calling an op-function OUTSIDE an
+// active recorder (module top level, or after `up()` returns) throws a structured
+// `OP_OUTSIDE_RECORDER` (§3.1) — the op cannot be silently lost.
+//
+// CHECKSUM: the JS side NEVER computes the checksum (§2.4 point 2 / §2.5); the
+// Rust engine is the single `Checksum::of_ir` authority. JS emits ops; Rust folds.
 //
 // WIRE SHAPE: the op-region fields are camelCase (`ifExists`, `cursorColumn`,
-// `batchSize`, `referencesTable`), matching the frozen `op-ir.schema.json` (the
-// `ir_wire_contract.rs` casing pins). An absent optional is OMITTED (never
-// `field: undefined`/`null`) so the JCS image matches the Rust `skip_serializing_if`
-// omitted-key image (§2.5 cross-impl determinism).
+// `batchSize`, `referencesTable`), matching the frozen `op-ir.schema.json`. An
+// absent optional is OMITTED (never `field: undefined`/`null`) so the JCS image
+// matches the Rust `skip_serializing_if` omitted-key image (§2.5).
 
-const __ops = [];
+// ---------------------------------------------------------------------------
+// The ambient per-migration recorder (§3.1). A migration's `up()`/`down()` is
+// parameterless; the op-functions append onto the ACTIVE recorder. The adapter
+// installs a fresh recorder before each phase. Recording OUTSIDE an active
+// recorder (top level / after the phase returns) is a structured error.
+// ---------------------------------------------------------------------------
 
-/** Drain + return the recorded op list (the adapter calls this). */
+let __active = null;
+
+/** Structured error helper — mirrors the §8.8 machine-readable envelope. */
+function structuredError(code, message, extra) {
+  const err = new Error(message);
+  err.code = code;
+  if (extra) Object.assign(err, extra);
+  return err;
+}
+
+/** Begin a fresh recording buffer (called by the adapter before a phase). */
+export function __begin() {
+  __active = [];
+}
+
+/** Drain + return the recorded op list, clearing the active recorder (the
+ *  adapter calls this after a phase). Returns `[]` if no recorder is active. */
 export function __drain() {
-  const out = __ops.slice();
-  __ops.length = 0;
+  if (__active === null) return [];
+  const out = __active;
+  __active = null;
   return out;
+}
+
+function push(op) {
+  if (__active === null) {
+    throw structuredError(
+      "OP_OUTSIDE_RECORDER",
+      `op-function "${op.op}" called outside an active migration recorder; ` +
+        "op-functions may only be called synchronously inside up()/down() " +
+        "(not at module top level or after the phase returns)",
+      {
+        suggested_fix:
+          "move the op-function call inside the migration's up()/down() body",
+      },
+    );
+  }
+  __active.push(op);
+  return op;
 }
 
 /** Drop keys whose value is `undefined` so an absent optional is OMITTED on the
@@ -42,151 +105,865 @@ function compact(obj) {
   return obj;
 }
 
-function push(op) {
-  __ops.push(op);
-  return op;
+// ===========================================================================
+// (B) The chainable `t.*` column-type lexicon (§3.2). Every factory returns a
+// CHAINABLE ColumnDef mirroring the expression chain — NULLABLE BY DEFAULT;
+// `.notNull()` / `.default(x)` / `.ref(target)` / `.primaryKey()` / `.unique()`
+// opt in. An options-bag overload is also accepted (`t.text({ notNull: true })`).
+// There is ONE column-type representation (`ColumnDef`) everywhere — `addColumn`
+// /`renameColumn`/`createTable`/`alterColumn` all consume it.
+// ===========================================================================
+
+class ColumnDef {
+  /** @param {object} colType the dialect-neutral ColType wire value (§3.2). */
+  constructor(colType) {
+    this._type = colType;
+    this._nullable = true; // nullable by default (§3.2)
+    this._default = undefined; // an IrDefault wire value, or undefined
+    this._primaryKey = false;
+    this._unique = false;
+  }
+
+  notNull() {
+    this._nullable = false;
+    return this;
+  }
+
+  /** `.default(value | { fn: "now" | "genRandomUuid" })` → a structured IrDefault
+   *  (typed literal OR nullary synth scalar) — NEVER raw SQL (property A). */
+  default(value) {
+    this._default = toIrDefault(value);
+    return this;
+  }
+
+  /** Re-target a column as a foreign-key reference (`t.text().ref("users")` or
+   *  `t.uuid().ref("users")`): rewrites the ColType to the `{ref:{references}}`
+   *  wire form. */
+  ref(targetTable) {
+    requireString(targetTable, "t.*.ref(target)");
+    this._type = { ref: { references: targetTable } };
+    return this;
+  }
+
+  primaryKey() {
+    this._primaryKey = true;
+    this._nullable = false; // a PK column is implicitly NOT NULL
+    return this;
+  }
+
+  unique() {
+    this._unique = true;
+    return this;
+  }
+
+  /** Reduce to an `IrColumn` (the `createTable` columns[] / shape). `name` is the
+   *  map key. `nullable`/`default`/`unique` omitted when at their defaults so the
+   *  wire image matches the Rust `skip_serializing_if`. */
+  __toIrColumn(name) {
+    return compact({
+      name,
+      type: this._type,
+      nullable: this._nullable === false ? false : undefined,
+      default: this._default,
+      unique: this._unique ? true : undefined,
+    });
+  }
+
+  /** Reduce to the `addColumn` op tail (`{ type, nullable?, default? }`). */
+  __toAddColumnTail() {
+    return compact({
+      type: this._type,
+      nullable: this._nullable === false ? false : undefined,
+      default: this._default,
+    });
+  }
 }
 
-// ---------------------------------------------------------------------------
-// DDL op-functions (PR1 scope).
-// ---------------------------------------------------------------------------
+/** Marker the op-functions use to tell a fluent `ColumnDef` from a legacy bare
+ *  ColType string / wire object. */
+function isColumnDef(x) {
+  return x instanceof ColumnDef;
+}
 
-export function createTable(name, columns, opts = {}) {
-  return push(compact({
-    op: "createTable",
-    name,
-    columns,
-    constraints: opts.constraints,
-    indexes: opts.indexes,
-  }));
+/** Apply the options-bag overload (`t.text({ notNull, default, primaryKey,
+ *  unique, ref })`) onto a fresh ColumnDef. */
+function applyOpts(def, opts) {
+  if (opts === undefined || opts === null) return def;
+  if (typeof opts !== "object") {
+    throw structuredError("OP_INVALID", "t.* options bag must be an object");
+  }
+  if (opts.notNull) def.notNull();
+  if (opts.primaryKey) def.primaryKey();
+  if (opts.unique) def.unique();
+  if (opts.ref !== undefined) def.ref(opts.ref);
+  if (opts.default !== undefined) def.default(opts.default);
+  return def;
+}
+
+/** Coerce a `.default(value)` arg into the closed `IrDefault` carrier:
+ *   - `{ fn: "now" | "genRandomUuid" }` → a nullary synth default;
+ *   - any other typed scalar → a `{ literal: { value } }` literal default. */
+function toIrDefault(value) {
+  if (value && typeof value === "object" && typeof value.fn === "string") {
+    return { fn: { fn: value.fn } };
+  }
+  return { literal: { value } };
+}
+
+/** The fluent column-type lexicon (§3.2). Shared in shape with `@zeroship/db`'s
+ *  `t` (PR5 wires the actual shared lexicon); here it is migrate's own, emitting
+ *  the dialect-neutral ColType wire forms `op-ir.schema.json` enumerates. */
+export const t = {
+  // The headline §3.2 set.
+  /** A conventional primary-key id: a non-null UUID PK defaulting to a DB-evaluated
+   *  `gen_random_uuid()` (the structured FnSynth default, never a frozen literal). */
+  id: () => {
+    const d = new ColumnDef("uuid");
+    d.primaryKey();
+    d.default({ fn: "genRandomUuid" });
+    return d;
+  },
+  text: (opts) => applyOpts(new ColumnDef("text"), opts),
+  /** Fixed-precision decimal (§3.2 `numeric`). Defaults to (38, 9); pass
+   *  `t.numeric(precision, scale)` to size it. */
+  numeric: (precision = 38, scale = 9, opts) =>
+    applyOpts(new ColumnDef({ decimal: { precision, scale } }), opts),
+  timestamp: (opts) => applyOpts(new ColumnDef("timestamp"), opts),
+  uuid: (opts) => applyOpts(new ColumnDef("uuid"), opts),
+  bytes: (opts) => applyOpts(new ColumnDef("bytea"), opts),
+  boolean: (opts) => applyOpts(new ColumnDef("bool"), opts),
+  json: (opts) => applyOpts(new ColumnDef("json"), opts),
+  /** A foreign-key reference column carrying a plain-string target table name
+   *  (NOT live-schema-bound — §3.3). */
+  ref: (targetTable, opts) => {
+    requireString(targetTable, "t.ref(target)");
+    return applyOpts(new ColumnDef({ ref: { references: targetTable } }), opts);
+  },
+  vector: (n, opts) => {
+    if (typeof n !== "number" || !Number.isInteger(n) || n <= 0) {
+      throw structuredError("OP_INVALID", `t.vector(n): n must be a positive integer, got ${n}`);
+    }
+    return applyOpts(new ColumnDef({ vector: { vector: n } }), opts);
+  },
+  geoPoint: (opts) => applyOpts(new ColumnDef("geoPoint"), opts),
+
+  // The remaining closed ColType set so the `t.*` lexicon can express ANY column
+  // type the IR supports (the task's "author any op the Rust IR supports").
+  string: (opts) => applyOpts(new ColumnDef("string"), opts),
+  int: (opts) => applyOpts(new ColumnDef("int"), opts),
+  integer: (opts) => applyOpts(new ColumnDef("int"), opts),
+  bigInt: (opts) => applyOpts(new ColumnDef("bigInt"), opts),
+  float: (opts) => applyOpts(new ColumnDef("float"), opts),
+  /** An application-level encrypted column wrapping an inner `t.*` type
+   *  (`t.encrypted({ of: t.text() })`). */
+  encrypted: (arg, opts) => {
+    const inner = arg && arg.of !== undefined ? arg.of : arg;
+    const innerType = isColumnDef(inner) ? inner._type : inner;
+    if (innerType === undefined) {
+      throw structuredError("OP_INVALID", "t.encrypted({ of }): of must be a ColumnDef or ColType");
+    }
+    return applyOpts(new ColumnDef({ encrypted: { of: innerType } }), opts);
+  },
+};
+
+/** Resolve a column-type argument to its ColType wire value. Accepts a fluent
+ *  `ColumnDef` (the §3.2 form) OR a bare ColType string/object (legacy/wire). */
+function colTypeOf(typeArg) {
+  if (isColumnDef(typeArg)) return typeArg._type;
+  return typeArg;
+}
+
+function requireString(v, what) {
+  if (typeof v !== "string") {
+    throw structuredError("OP_INVALID", `${what} must be a string; got ${typeof v}`);
+  }
+}
+
+// ===========================================================================
+// (B continued) The single-handle fluent `(c) => Expr` builder (§3.3.1). `c` is
+// BOTH a column-accessor function (`c("name")` → a chainable ColRef) and the
+// `c.fn.*` scalar-function namespace. The chain auto-wraps bare JS values to
+// `Literal`. Every method builds exactly one closed-AST node; the recorder
+// captures it as data — the engine owns all per-dialect rendering.
+// ===========================================================================
+
+/** Wrap a closed-AST node object in a chainable `ExprChain` so operator methods
+ *  hang off any sub-expression (a ColRef, a literal, a fn result, …). */
+function chain(node) {
+  return new ExprChain(node);
+}
+
+/** Auto-wrap a bare JS value to a `Literal` node; pass a chain/node through. */
+function exprArg(x) {
+  if (x instanceof ExprChain) return x.__node;
+  if (x && typeof x === "object" && typeof x.node === "string") return x; // a raw AST node
+  return { node: "literal", value: x };
+}
+
+class ExprChain {
+  constructor(node) {
+    this.__node = node;
+  }
+
+  // ── comparison ──
+  eq(x) { return chain({ node: "binOp", op: "eq", lhs: this.__node, rhs: exprArg(x) }); }
+  ne(x) { return chain({ node: "binOp", op: "ne", lhs: this.__node, rhs: exprArg(x) }); }
+  lt(x) { return chain({ node: "binOp", op: "lt", lhs: this.__node, rhs: exprArg(x) }); }
+  le(x) { return chain({ node: "binOp", op: "le", lhs: this.__node, rhs: exprArg(x) }); }
+  gt(x) { return chain({ node: "binOp", op: "gt", lhs: this.__node, rhs: exprArg(x) }); }
+  ge(x) { return chain({ node: "binOp", op: "ge", lhs: this.__node, rhs: exprArg(x) }); }
+
+  // ── boolean ──
+  and(e) { return chain({ node: "binOp", op: "and", lhs: this.__node, rhs: exprArg(e) }); }
+  or(e) { return chain({ node: "binOp", op: "or", lhs: this.__node, rhs: exprArg(e) }); }
+  not() { return chain({ node: "unaryOp", op: "not", operand: this.__node }); }
+
+  // ── arithmetic ──
+  add(x) { return chain({ node: "binOp", op: "add", lhs: this.__node, rhs: exprArg(x) }); }
+  sub(x) { return chain({ node: "binOp", op: "sub", lhs: this.__node, rhs: exprArg(x) }); }
+  mul(x) { return chain({ node: "binOp", op: "mul", lhs: this.__node, rhs: exprArg(x) }); }
+  div(x) { return chain({ node: "binOp", op: "div", lhs: this.__node, rhs: exprArg(x) }); }
+
+  // ── string/value ──
+  /** Raw `||` concatenation (NULL-propagating on BOTH backends), folded over the
+   *  receiver + every part. For NULL-skipping joins use `c.fn.concatWs` (§3.3.1). */
+  concat(...parts) {
+    let acc = this.__node;
+    for (const p of parts) {
+      acc = { node: "binOp", op: "concat", lhs: acc, rhs: exprArg(p) };
+    }
+    return chain(acc);
+  }
+  concatWs(sep, ...parts) {
+    return chain({
+      node: "fnSynth",
+      fn: "concatWs",
+      args: [exprArg(sep), this.__node, ...parts.map(exprArg)],
+    });
+  }
+  coalesce(...args) {
+    return chain({ node: "fnCall", fn: "coalesce", args: [this.__node, ...args.map(exprArg)] });
+  }
+
+  // ── null/bool tests ──
+  isNull() { return chain({ node: "unaryOp", op: "isNull", operand: this.__node }); }
+  isNotNull() { return chain({ node: "unaryOp", op: "isNotNull", operand: this.__node }); }
+  isTrue() { return chain({ node: "unaryOp", op: "isTrue", operand: this.__node }); }
+  isFalse() { return chain({ node: "unaryOp", op: "isFalse", operand: this.__node }); }
+
+  // ── cast ──
+  /** `.cast("integer" | "text" | "real" | "boolean" | "blob")` — the closed
+   *  portable target set (§3.3.1); a non-portable target is rejected by the Rust
+   *  validator (`UNSUPPORTED { kind:"expr" }`). */
+  cast(target) {
+    return chain({ node: "cast", operand: this.__node, target });
+  }
+}
+
+/** Build the single fluent handle `c`: a column-accessor function carrying the
+ *  `c.fn.*` namespace. `c("name")` → a chainable ColRef (a plain-string name —
+ *  NOT live-schema-bound, §3.3). */
+function makeBuilder() {
+  const c = (name) => {
+    requireString(name, 'c("name")');
+    return chain({ node: "colRef", name });
+  };
+  c.fn = cFn; // the scalar-function namespace (§3.3.1)
+  return c;
+}
+
+/** Resolve an expression slot: an `ExprFn` callback `(c) => Expr` (the §3.3.1
+ *  fluent form), a chainable `ExprChain`, or a raw closed-AST node object
+ *  (legacy/`e.*`). Returns the closed-AST node the wire op carries. */
+function resolveExpr(slot) {
+  if (slot === undefined || slot === null) return undefined;
+  if (typeof slot === "function") {
+    const built = slot(makeBuilder());
+    return exprArg(built);
+  }
+  if (slot instanceof ExprChain) return slot.__node;
+  if (slot && typeof slot === "object" && typeof slot.node === "string") return slot;
+  throw structuredError(
+    "OP_INVALID",
+    "expression slot must be a (c) => Expr callback, a built expression, or a closed-AST node",
+  );
+}
+
+/** Resolve a `set: { col: ExprFn }` map into a `{ col: node }` wire map. */
+function resolveSet(set) {
+  if (!set || typeof set !== "object") {
+    throw structuredError("OP_INVALID", "`set` must be an object of column → expression");
+  }
+  const out = {};
+  for (const col of Object.keys(set)) {
+    out[col] = resolveExpr(set[col]);
+  }
+  return out;
+}
+
+// ===========================================================================
+// (B continued) `c.fn.*` — the scalar-function namespace, reached off the single
+// builder handle (no importable `fn`, no second callback arg — §3.3.1). Each
+// member builds exactly one closed-AST node and returns a chain so the result is
+// further composable. Args auto-wrap bare values to `Literal`.
+// ===========================================================================
+
+export const cFn = {
+  lower: (e) => chain({ node: "fnCall", fn: "lower", args: [exprArg(e)] }),
+  upper: (e) => chain({ node: "fnCall", fn: "upper", args: [exprArg(e)] }),
+  trim: (e) => chain({ node: "fnCall", fn: "trim", args: [exprArg(e)] }),
+  length: (e) => chain({ node: "fnCall", fn: "length", args: [exprArg(e)] }),
+  abs: (e) => chain({ node: "fnCall", fn: "abs", args: [exprArg(e)] }),
+  coalesce: (...args) => chain({ node: "fnCall", fn: "coalesce", args: args.map(exprArg) }),
+  nullif: (a, b) => chain({ node: "fnCall", fn: "nullif", args: [exprArg(a), exprArg(b)] }),
+
+  /** NULL-skipping `concat_ws` (PG) / `coalesce`-folded `||` (SQLite) — the safe
+   *  join helper (§3.3.1). `sep` is a literal. */
+  concatWs: (sep, ...parts) =>
+    chain({ node: "fnSynth", fn: "concatWs", args: [exprArg(sep), ...parts.map(exprArg)] }),
+
+  /** The searched `CASE` form (`c.fn.case([[cond, val], …], elseVal)`). Each
+   *  branch half + the else are themselves closed-AST nodes. */
+  case: (branches, elseVal) => {
+    if (!Array.isArray(branches)) {
+      throw structuredError("OP_INVALID", "c.fn.case(branches, else?): branches must be an array of [cond, result]");
+    }
+    const node = {
+      node: "case",
+      branches: branches.map((b) => {
+        if (!Array.isArray(b) || b.length !== 2) {
+          throw structuredError("OP_INVALID", "c.fn.case branch must be a [condition, result] pair");
+        }
+        return { condition: exprArg(b[0]), result: exprArg(b[1]) };
+      }),
+    };
+    if (elseVal !== undefined) node.else = exprArg(elseVal);
+    return chain(node);
+  },
+
+  /** The engine-synthesized portable split helper (§9). `delim` is a string
+   *  literal; `n` a positive integer literal. LINTS the dialect-NEUTRAL grammar
+   *  at record time (a non-string/empty delim, a non-positive-int n — broken on
+   *  BOTH backends). The portability ENVELOPE (single-ASCII delim, 1<=n<=8) is
+   *  DIALECT-gated and is deferred to the Rust `validate::check_split_part`
+   *  (admit on PG via dialect_scope=PgOnly, reject on SQLite); enforcing it here
+   *  would make the documented PgOnly escape non-constructible. */
+  splitPart: (col, delim, n) => {
+    splitPartGrammarLint(delim, n);
+    return chain({
+      node: "fnSynth",
+      fn: "splitPart",
+      args: [exprArg(col), { node: "literal", value: delim }, { node: "literal", value: n }],
+    });
+  },
+
+  /** DB-evaluated apply-time scalars (the structured replacement for a frozen
+   *  `Date.now()` / UUID literal, §4.3). Render to `now()` / `gen_random_uuid()`
+   *  per dialect. */
+  now: () => chain({ node: "fnSynth", fn: "now", args: [] }),
+  genRandomUuid: () => chain({ node: "fnSynth", fn: "genRandomUuid", args: [] }),
+};
+
+// ===========================================================================
+// (A) The full named-export op set (§3.2). Each records the EXACT op JSON the
+// Rust closed `Op` enum / `op-ir.schema.json` deserializes (the `del` →
+// `op:"delete"` wire-tag mapping, the internally-tagged `op` field, the nested
+// IrDefault/IrConstraint shapes). Each accepts the fluent §3.2 form AND the
+// legacy positional form, emitting the identical wire op.
+// ===========================================================================
+
+// ── DDL: tables ──
+
+/**
+ * `createTable(name, columns, opts?)` — `columns` is an object literal map
+ * `{ colName: t.* }` (the fluent §3.2 form), OR the legacy `IrColumn[]` array.
+ * The optional third arg is either:
+ *   - a `(b) => { … }` scoped-builder callback for table-scoped constraints/
+ *     indexes (the §3.2 second overload, parallel to `batchAlterTable`); OR
+ *   - the legacy `{ constraints, indexes }` options bag.
+ */
+export function createTable(name, columns, opts) {
+  requireString(name, "createTable(name, …)");
+
+  let cols;
+  const constraints = [];
+  const indexes = [];
+
+  if (Array.isArray(columns)) {
+    // Legacy: a pre-built IrColumn[] array (carried verbatim).
+    cols = columns;
+  } else if (columns && typeof columns === "object") {
+    // Fluent: a { colName: t.* } map. Reduce each ColumnDef to an IrColumn, and
+    // hoist a `.primaryKey()` column into a table-level `pk` constraint.
+    cols = [];
+    const pkCols = [];
+    for (const colName of Object.keys(columns)) {
+      const def = columns[colName];
+      if (!isColumnDef(def)) {
+        throw structuredError(
+          "OP_INVALID",
+          `createTable column "${colName}" must be a t.* ColumnDef (got ${typeof def})`,
+        );
+      }
+      cols.push(def.__toIrColumn(colName));
+      if (def._primaryKey) pkCols.push(colName);
+    }
+    if (pkCols.length > 0) {
+      constraints.push({ kind: { kind: "pk", columns: pkCols } });
+    }
+  } else {
+    throw structuredError("OP_INVALID", "createTable columns must be a { col: t.* } map or an IrColumn[]");
+  }
+
+  if (typeof opts === "function") {
+    // The scoped-builder overload: collect b.index(...) / b.unique(...) / etc.
+    const b = makeTableBuilder(constraints, indexes);
+    opts(b);
+  } else if (opts && typeof opts === "object") {
+    // Legacy options bag.
+    if (Array.isArray(opts.constraints)) constraints.push(...opts.constraints);
+    if (Array.isArray(opts.indexes)) indexes.push(...opts.indexes);
+  }
+
+  return push(
+    compact({
+      op: "createTable",
+      name,
+      columns: cols,
+      constraints: constraints.length ? constraints : undefined,
+      indexes: indexes.length ? indexes : undefined,
+    }),
+  );
+}
+
+/** The `(b) => …` scoped builder createTable's second overload passes — collects
+ *  table-scoped constraints + indexes (the rare case). */
+function makeTableBuilder(constraints, indexes) {
+  return {
+    index(columns, opts = {}) {
+      indexes.push(
+        compact({
+          name: opts.name,
+          columns,
+          unique: opts.unique,
+          using: opts.using,
+          where: resolveExpr(opts.where),
+        }),
+      );
+    },
+    unique(columns, opts = {}) {
+      constraints.push(compact({ name: opts.name, kind: { kind: "unique", columns } }));
+    },
+    primaryKey(columns) {
+      constraints.push({ kind: { kind: "pk", columns } });
+    },
+    check(expr, opts = {}) {
+      constraints.push(compact({ name: opts.name, kind: { kind: "check", expr: resolveExpr(expr) } }));
+    },
+    foreignKey(spec) {
+      constraints.push(fkConstraintFromSpec(spec));
+    },
+  };
 }
 
 export function dropTable(table, opts = {}) {
-  return push(compact({
-    op: "dropTable",
-    table,
-    ifExists: opts.ifExists,
-    cascade: opts.cascade,
-  }));
+  requireString(table, "dropTable(table)");
+  return push(compact({ op: "dropTable", table, ifExists: opts.ifExists, cascade: opts.cascade }));
 }
 
-export function addColumn(table, column, type, opts = {}) {
-  return push(compact({
-    op: "addColumn",
-    table,
-    column,
-    type,
-    nullable: opts.nullable,
-    default: opts.default,
-  }));
+// ── DDL: columns ──
+
+/**
+ * `addColumn(table, name, type, opts?)`. `type` is a `t.*` ColumnDef (the §3.2
+ * fluent form — its `.notNull()`/`.default()` ride along), OR a legacy bare
+ * ColType string/object with the nullability/default in `opts`.
+ */
+export function addColumn(table, name, type, opts = {}) {
+  requireString(table, "addColumn(table, …)");
+  requireString(name, "addColumn(table, name, …)");
+  if (isColumnDef(type)) {
+    return push(compact({ op: "addColumn", table, column: name, ...type.__toAddColumnTail() }));
+  }
+  return push(
+    compact({
+      op: "addColumn",
+      table,
+      column: name,
+      type: colTypeOf(type),
+      nullable: opts.nullable,
+      default: opts.default,
+    }),
+  );
 }
 
 export function dropColumn(table, column, opts = {}) {
-  return push(compact({
-    op: "dropColumn",
-    table,
-    column,
-    ifExists: opts.ifExists,
-  }));
+  requireString(table, "dropColumn(table, …)");
+  requireString(column, "dropColumn(table, column)");
+  return push(compact({ op: "dropColumn", table, column, ifExists: opts.ifExists }));
 }
 
-export function createIndex(table, columns, opts = {}) {
-  return push(compact({
-    op: "createIndex",
-    table,
-    columns,
-    name: opts.name,
-    unique: opts.unique,
-    using: opts.using,
-    where: opts.where,
-    concurrently: opts.concurrently,
-  }));
+/**
+ * `renameColumn(table, from, to, type)` — `type` is a `t.*` ColumnDef (the
+ * column type after rename, carried for re-derivation) or a legacy bare ColType.
+ */
+export function renameColumn(table, from, to, type) {
+  requireString(table, "renameColumn(table, …)");
+  requireString(from, "renameColumn(table, from, …)");
+  requireString(to, "renameColumn(table, from, to, …)");
+  return push({ op: "renameColumn", table, from, to, type: colTypeOf(type) });
 }
 
-export function dropIndex(name, opts = {}) {
-  return push(compact({
-    op: "dropIndex",
-    name,
-    table: opts.table,
-    unique: opts.unique,
-    ifExists: opts.ifExists,
-    concurrently: opts.concurrently,
-  }));
+/**
+ * `alterColumn(table, name, change)` — the §3.2 single change descriptor:
+ *   - `{ type: t.* | ColType, using?: ExprFn }` → `alterColumnType`;
+ *   - `{ nullable: bool }` → `alterColumnNullability`.
+ * (The legacy `alterColumnType` / `alterColumnNullability` named exports remain
+ * for the existing corpus.)
+ */
+export function alterColumn(table, name, change) {
+  requireString(table, "alterColumn(table, …)");
+  requireString(name, "alterColumn(table, name, …)");
+  if (!change || typeof change !== "object") {
+    throw structuredError("OP_INVALID", "alterColumn(table, name, change): change must be an object");
+  }
+  if (change.type !== undefined) {
+    return alterColumnType(table, name, change.type, { using: change.using });
+  }
+  if (change.nullable !== undefined) {
+    return alterColumnNullability(table, name, change.nullable);
+  }
+  throw structuredError("OP_INVALID", "alterColumn change must carry `type` or `nullable`");
 }
 
 export function alterColumnType(table, column, type, opts = {}) {
-  return push(compact({
-    op: "alterColumnType",
-    table,
-    column,
-    type,
-    using: opts.using,
-  }));
+  requireString(table, "alterColumnType(table, …)");
+  requireString(column, "alterColumnType(table, column, …)");
+  return push(
+    compact({
+      op: "alterColumnType",
+      table,
+      column,
+      type: colTypeOf(type),
+      using: resolveExpr(opts.using),
+    }),
+  );
 }
 
 export function alterColumnNullability(table, column, nullable) {
+  requireString(table, "alterColumnNullability(table, …)");
+  requireString(column, "alterColumnNullability(table, column, …)");
+  if (typeof nullable !== "boolean") {
+    throw structuredError("OP_INVALID", "alterColumnNullability nullable must be a boolean");
+  }
   return push({ op: "alterColumnNullability", table, column, nullable });
 }
 
-export function renameColumn(table, from, to, type) {
-  return push({ op: "renameColumn", table, from, to, type });
+// ── DDL: constraints / indexes — every adder is (table, spec); `name` in spec ──
+
+/** Build an `IrConstraint` of kind `fk` from a `{ columns, references:{ table,
+ *  columns }, onDelete?, onUpdate?, name? }` spec — order-independent named
+ *  fields (NOT transposable positionals). `onDelete`/`onUpdate` are not part of
+ *  the frozen IrConstraintKind::fk shape, so they are dropped here (a follow-up
+ *  PR can carry FK actions); the columns/referencesTable/referencesColumns are
+ *  the frozen wire fields. */
+function fkConstraintFromSpec(spec) {
+  if (!spec || typeof spec !== "object" || !spec.references) {
+    throw structuredError("OP_INVALID", "addForeignKey spec needs { columns, references:{ table, columns } }");
+  }
+  return compact({
+    name: spec.name,
+    kind: {
+      kind: "fk",
+      columns: spec.columns,
+      referencesTable: spec.references.table,
+      referencesColumns: spec.references.columns,
+    },
+  });
 }
 
+export function addForeignKey(table, spec) {
+  requireString(table, "addForeignKey(table, …)");
+  return push({ op: "addConstraint", table, constraint: fkConstraintFromSpec(spec) });
+}
+
+export function addUnique(table, spec) {
+  requireString(table, "addUnique(table, …)");
+  if (!spec || !Array.isArray(spec.columns)) {
+    throw structuredError("OP_INVALID", "addUnique spec needs { columns: string[], name? }");
+  }
+  return push({
+    op: "addConstraint",
+    table,
+    constraint: compact({ name: spec.name, kind: { kind: "unique", columns: spec.columns } }),
+  });
+}
+
+/** Legacy: the PR1 `addConstraint(table, constraint)` form, taking a pre-built
+ *  `IrConstraint` wire object directly. Retained for the existing corpus; new
+ *  authoring uses the typed `addForeignKey`/`addUnique`/`addCheck` adders. */
 export function addConstraint(table, constraint) {
+  requireString(table, "addConstraint(table, …)");
   return push({ op: "addConstraint", table, constraint });
 }
 
-export function dropConstraint(table, name) {
+export function addCheck(table, spec) {
+  requireString(table, "addCheck(table, …)");
+  if (!spec || spec.expr === undefined) {
+    throw structuredError("OP_INVALID", "addCheck spec needs { expr: (c) => Expr, name? }");
+  }
+  return push({
+    op: "addConstraint",
+    table,
+    constraint: compact({ name: spec.name, kind: { kind: "check", expr: resolveExpr(spec.expr) } }),
+  });
+}
+
+/**
+ * `dropConstraint(table, spec)` — spec is `{ name, type?, ifExists? }` (the §3.2
+ * form), OR the legacy bare `name` string. The frozen `dropConstraint` op
+ * carries only `{ table, name }` (the `type`/`ifExists` hints are validator
+ * niceties not in the frozen wire shape, so they are not recorded).
+ */
+export function dropConstraint(table, spec) {
+  requireString(table, "dropConstraint(table, …)");
+  const name = typeof spec === "string" ? spec : spec && spec.name;
+  requireString(name, "dropConstraint name");
   return push({ op: "dropConstraint", table, name });
 }
 
-// ---------------------------------------------------------------------------
-// DML op-functions (the OP SHAPE is frozen in PR1 so the corpus + exhaustiveness
-// gate cover every variant; the executors land in PR6a/PR6b).
-// ---------------------------------------------------------------------------
-
-export function insert(table, columns, rows, opts = {}) {
-  // §PR6a — the optional `onConflict` upsert facet. PostgreSQL-ONLY: it renders
-  // natively on PG and is a hard authoring error on SQLite (dialect_scope=PgOnly,
-  // §9). The wire shape is `{ columns: string[], doUpdate?: { col: scalar } }`;
-  // absent `doUpdate` ⇒ `DO NOTHING`. Omitted entirely ⇒ a plain (portable) insert.
-  return push(compact({ op: "insert", table, columns, rows, onConflict: opts.onConflict }));
+/**
+ * `createIndex(table, spec)` — spec `{ columns, name?, unique?, using?, where?,
+ * concurrently? }` (the §3.2 form). `where` is an `ExprFn`. The legacy
+ * `createIndex(table, columns, opts)` positional form is also accepted.
+ */
+export function createIndex(table, specOrColumns, legacyOpts) {
+  requireString(table, "createIndex(table, …)");
+  let spec;
+  if (Array.isArray(specOrColumns)) {
+    // Legacy positional: (table, columns[], opts).
+    spec = { columns: specOrColumns, ...(legacyOpts || {}) };
+  } else {
+    spec = specOrColumns || {};
+  }
+  if (!Array.isArray(spec.columns)) {
+    throw structuredError("OP_INVALID", "createIndex spec needs { columns: string[], … }");
+  }
+  return push(
+    compact({
+      op: "createIndex",
+      table,
+      columns: spec.columns,
+      name: spec.name,
+      unique: spec.unique,
+      using: spec.using,
+      where: resolveExpr(spec.where),
+      concurrently: spec.concurrently,
+    }),
+  );
 }
 
-export function update(table, set, opts = {}) {
-  return push(compact({
-    op: "update",
-    table,
-    set,
-    where: opts.where,
-    batch: opts.batch,
-  }));
+export function dropIndex(name, opts = {}) {
+  requireString(name, "dropIndex(name, …)");
+  return push(
+    compact({
+      op: "dropIndex",
+      name,
+      table: opts.table,
+      unique: opts.unique,
+      ifExists: opts.ifExists,
+      concurrently: opts.concurrently,
+    }),
+  );
 }
 
-// `del` (not `delete` — the JS reserved word); records the `"delete"` discriminant
-// per the ADR (`docs/decisions/2026-06-23-op-ir-serde-repr.md`).
-export function del(table, where, opts = {}) {
-  return push(compact({ op: "delete", table, where, limit: opts.limit }));
+// ── DML: insert / update / del / backfill (verb(table, { … })) ──
+
+/**
+ * `insert(table, { rows, onConflict? })` — the §3.2 form, with `rows` a row
+ * object `{ col: scalar }` or an array of them. The legacy positional form
+ * `insert(table, columns[], rows[][], { onConflict })` is also accepted (rows as
+ * positional scalar arrays).
+ *
+ * The wire op carries `{ columns: string[], rows: scalar[][] }`; the fluent
+ * row-object form is normalized into the columns + positional-rows shape (column
+ * order = first row's key order, deterministic).
+ */
+export function insert(table, arg2, arg3, arg4) {
+  requireString(table, "insert(table, …)");
+
+  // Legacy positional: (table, columns[], rows[][], opts).
+  if (Array.isArray(arg2)) {
+    return push(
+      compact({
+        op: "insert",
+        table,
+        columns: arg2,
+        rows: arg3,
+        onConflict: arg4 && arg4.onConflict,
+      }),
+    );
+  }
+
+  // Fluent: (table, { rows, onConflict? }).
+  const args = arg2 || {};
+  let rows = args.rows;
+  if (rows === undefined) {
+    throw structuredError("OP_INVALID", "insert(table, { rows }): rows is required");
+  }
+  if (!Array.isArray(rows)) rows = [rows];
+
+  // Already in positional `scalar[][]` form? (a legacy caller passing rows as
+  // arrays inside the bag). Otherwise normalize the row OBJECTS into columns +
+  // positional rows, with column order from the first row's keys.
+  if (rows.length > 0 && Array.isArray(rows[0])) {
+    if (!args.columns) {
+      throw structuredError("OP_INVALID", "insert rows given as arrays needs a `columns` list");
+    }
+    return push(compact({ op: "insert", table, columns: args.columns, rows, onConflict: args.onConflict }));
+  }
+
+  const columns = rows.length > 0 ? Object.keys(rows[0]) : args.columns || [];
+  const positional = rows.map((r) =>
+    columns.map((col) => (Object.prototype.hasOwnProperty.call(r, col) ? r[col] : null)),
+  );
+  return push(compact({ op: "insert", table, columns, rows: positional, onConflict: args.onConflict }));
 }
 
-export function backfill(table, cursorColumn, batchSize, set, name, opts = {}) {
-  return push(compact({
-    op: "backfill",
-    table,
-    cursorColumn,
-    batchSize,
-    set,
-    filter: opts.filter,
-    name,
-  }));
+/**
+ * `update(table, { set, where? })` — `set` is `{ col: ExprFn }`, `where` an
+ * `ExprFn`. The legacy positional `update(table, setMap, { where, batch })` is
+ * also accepted.
+ */
+export function update(table, arg2, arg3) {
+  requireString(table, "update(table, …)");
+  // Disambiguate: the §3.2 form is `{ set, where? }` (a `set` key); the legacy
+  // form is `(table, setMap, { where, batch })`.
+  let set;
+  let where;
+  let batch;
+  if (arg2 && typeof arg2 === "object" && arg2.set !== undefined) {
+    set = arg2.set;
+    where = arg2.where;
+    batch = arg2.batch;
+  } else {
+    set = arg2;
+    where = arg3 && arg3.where;
+    batch = arg3 && arg3.batch;
+  }
+  return push(
+    compact({
+      op: "update",
+      table,
+      set: resolveSet(set),
+      where: resolveExpr(where),
+      batch,
+    }),
+  );
 }
 
-// ---------------------------------------------------------------------------
-// Closed expression-AST node helpers (`e.*`) — the SKELETAL stand-in for the
-// fluent `(c) => Expr` builder (§3.3.1), enough for a fixture to carry a closed
-// `where`/`set`/partial-index predicate. Each returns the SAME `{"node":…}` object
-// the Rust `Expr` enum deserializes (camelCase, internally tagged on `"node"`).
-// ---------------------------------------------------------------------------
+/**
+ * `del(table, { where, limit? })` — `where` is MANDATORY (no unfiltered delete).
+ * `del` not `delete` (the JS reserved word); the recorded discriminant is the
+ * full `"delete"` (the wire-tag mapping pinned in the ADR). The legacy positional
+ * `del(table, whereExpr, { limit })` is also accepted.
+ */
+export function del(table, arg2, arg3) {
+  requireString(table, "del(table, …)");
+  let where;
+  let limit;
+  if (arg2 && typeof arg2 === "object" && !(arg2 instanceof ExprChain) && arg2.where !== undefined) {
+    where = arg2.where;
+    limit = arg2.limit;
+  } else {
+    where = arg2;
+    limit = arg3 && arg3.limit;
+  }
+  if (where === undefined || where === null) {
+    throw structuredError("OP_INVALID", "del(table, { where }): where is mandatory (no unfiltered delete)");
+  }
+  return push(compact({ op: "delete", table, where: resolveExpr(where), limit }));
+}
+
+/**
+ * `backfill(table, { set, where?, cursorColumn?, batchSize? })` — the §3.2 form.
+ * `cursorColumn` defaults to `"id"` (the single-column PK convention), `batchSize`
+ * to an engine default (1000) when omitted. The legacy positional
+ * `backfill(table, cursorColumn, batchSize, set, name, { filter })` is also
+ * accepted. The predicate keyword is `where` everywhere (the wire field is
+ * `filter`).
+ */
+const DEFAULT_BACKFILL_CURSOR = "id";
+const DEFAULT_BACKFILL_BATCH = 1000;
+
+export function backfill(table, arg2, arg3, arg4, arg5, arg6) {
+  requireString(table, "backfill(table, …)");
+
+  // Legacy positional: (table, cursorColumn, batchSize, set, name, { filter }).
+  if (typeof arg2 === "string") {
+    return push(
+      compact({
+        op: "backfill",
+        table,
+        cursorColumn: arg2,
+        batchSize: arg3,
+        set: resolveSet(arg4),
+        filter: resolveExpr(arg6 && arg6.filter),
+        name: arg5,
+      }),
+    );
+  }
+
+  // Fluent: (table, { set, where?, cursorColumn?, batchSize?, name? }).
+  const args = arg2 || {};
+  if (args.set === undefined) {
+    throw structuredError("OP_INVALID", "backfill(table, { set }): set is required");
+  }
+  const cursorColumn = args.cursorColumn || DEFAULT_BACKFILL_CURSOR;
+  const batchSize = args.batchSize !== undefined ? args.batchSize : DEFAULT_BACKFILL_BATCH;
+  // The journaled progress key defaults to a stable per-table label.
+  const name = args.name || `backfill_${table}`;
+  return push(
+    compact({
+      op: "backfill",
+      table,
+      cursorColumn,
+      batchSize,
+      set: resolveSet(args.set),
+      filter: resolveExpr(args.where),
+      name,
+    }),
+  );
+}
+
+/**
+ * `batchAlterTable(table, build)` — the SQLite-safe rebuild (Alembic
+ * `batch_alter_table` analog, §3.2). `build` receives a scoped subset of the
+ * column/constraint op-functions pre-bound to `table`, recording into the same
+ * ambient recorder.
+ */
+export function batchAlterTable(table, build) {
+  requireString(table, "batchAlterTable(table, …)");
+  if (typeof build !== "function") {
+    throw structuredError("OP_INVALID", "batchAlterTable(table, build): build must be a callback");
+  }
+  const scoped = {
+    addColumn: (name, type, opts) => addColumn(table, name, type, opts),
+    dropColumn: (name, opts) => dropColumn(table, name, opts),
+    renameColumn: (from, to, type) => renameColumn(table, from, to, type),
+    alterColumn: (name, change) => alterColumn(table, name, change),
+    addForeignKey: (spec) => addForeignKey(table, spec),
+    addCheck: (spec) => addCheck(table, spec),
+  };
+  build(scoped);
+}
+
+// ===========================================================================
+// LEGACY: the PR1 `e.*` closed-AST node helper. NOT the public §3.3.1 surface
+// (the fluent `(c) => Expr` builder above is), but retained so the PR1 golden
+// corpus + `split_part_lint.rs` (which author Expr nodes directly via `e.*`)
+// keep recording the IDENTICAL wire op. New authoring should use the `(c) => Expr`
+// callback; `e.*` is the structural node form the recorder ultimately captures.
+// ===========================================================================
 
 export const e = {
   col: (name) => ({ node: "colRef", name }),
@@ -196,18 +973,6 @@ export const e = {
   fnCall: (fn, args) => ({ node: "fnCall", fn, args }),
   fnSynth: (fn, args) => ({ node: "fnSynth", fn, args }),
   cast: (operand, target) => ({ node: "cast", operand, target }),
-  // The engine-synthesized portable split helper (§9). `delim` is a string literal;
-  // `n` is a positive integer literal. Builds a `fnSynth(splitPart, …)` node (NEVER
-  // SQL text) and LINTS the GRAMMAR at record time so the AI loop gets structured
-  // feedback EARLY for a genuinely-malformed node (a non-string/empty delim, a
-  // non-positive-int n) — broken on BOTH dialects. The portability ENVELOPE
-  // (single-ASCII delim, 1<=n<=8) is NOT enforced here: it is DIALECT-GATED and the
-  // record-time JS recorder is dialect-neutral, so an out-of-envelope splitPart is
-  // a VALID node on a Postgres target (`dialect_scope=PgOnly`, §2.4.1/§9 — PG's
-  // native split_part is multi-char/any-n capable). The authoritative dialect-aware
-  // verdict belongs to the Rust `validate::check_split_part` (which admits it on PG,
-  // rejects it on SQLite); forcing an unconditional throw here would make the
-  // documented PgOnly escape non-constructible. So the builder defers the envelope.
   splitPart: (col, delim, n) => {
     splitPartGrammarLint(delim, n);
     return {
@@ -218,38 +983,71 @@ export const e = {
   },
 };
 
-/// The `c.fn` namespace — the scalar-function helpers reached off the fluent column
-/// builder (§3.1 / §9). The ONLY split surface (`c.fn.splitPart`); there is no
-/// author-named `split_part`/`substr`/`instr`, and no raw escape — an exotic split
-/// is simply not expressible (property A). Mirrors the `e.*` helper set; kept here
-/// so the §3.1 hero `c.fn.splitPart(c("name"), " ", 1)` shape is authorable.
-export const cFn = {
-  splitPart: e.splitPart,
-  concatWs: (delim, ...values) => e.fnSynth("concatWs", [normalizeExprArg(delim), ...values.map(normalizeExprArg)]),
-  coalesce: (...args) => e.fnCall("coalesce", args.map(normalizeExprArg)),
-};
+// ===========================================================================
+// (C) Determinism lint (§4.3). Flag the JS nondeterminism accessors — the
+// current-wall-clock accessor (`Date.now()`), the RNG accessor (`Math.random()`),
+// the UUID accessor (`crypto.randomUUID()`), and the `new Date()` clock
+// constructor — when they appear in an op argument, steering authors to the
+// DB-evaluated `c.fn.now()` / `c.fn.genRandomUuid()` (`FnSynth`) scalars.
+//
+// The recorder captures only the RESULT of a JS expression, so a `Date.now()`
+// already collapsed to a number is indistinguishable from a hand-typed literal at
+// record time. This lint is therefore a BEST-EFFORT, AST-free SOURCE scan over
+// the migration text (the §4.3 "ESLint/DSL lint … syntactically appearing inside
+// an op-function argument" mechanism). The authoritative determinism guarantee is
+// the build-once committed artifact (§5.1); this is the pre-commit catch.
+// ===========================================================================
 
-/// LINT the `c.fn.splitPart` GRAMMAR (§9) — the dialect-NEUTRAL subset that is
-/// broken on BOTH backends, so it is safe (and correct) to reject at record time:
-/// the delimiter must be a NON-EMPTY string literal, and `n` a POSITIVE integer
-/// literal. A violation throws a structured EXPR_NOT_PORTABLE error (the §8.8
-/// machine-readable rejection the AI loop self-corrects on).
-///
-/// The portability ENVELOPE (single-ASCII delimiter, `1 <= n <= 8`) is NOT checked
-/// here — it is dialect-gated, and the record-time recorder is dialect-neutral. An
-/// out-of-envelope splitPart is a valid node on a Postgres target (the documented
-/// `dialect_scope=PgOnly` escape, §2.4.1/§9); the authoritative dialect-aware
-/// verdict is the Rust `validate::check_split_part` (admit on PG, reject on SQLite).
-/// Enforcing the envelope here would make the PgOnly escape non-constructible.
+/** The nondeterminism accessors the §4.3 lint flags, with the steer to the
+ *  DB-evaluated synth scalar. */
+const NONDETERMINISM_PATTERNS = [
+  { re: /\bDate\s*\.\s*now\s*\(/, name: "Date.now()", steer: "c.fn.now()" },
+  { re: /\bMath\s*\.\s*random\s*\(/, name: "Math.random()", steer: "c.fn.genRandomUuid() (for an id) or a DB-evaluated value" },
+  { re: /\bcrypto\s*\.\s*randomUUID\s*\(/, name: "crypto.randomUUID()", steer: "c.fn.genRandomUuid()" },
+  { re: /\bnew\s+Date\s*\(/, name: "new Date(...)", steer: "c.fn.now()" },
+];
+
+/**
+ * Lint a migration's SOURCE TEXT for the §4.3 nondeterminism accessors. Returns
+ * an array of `{ code, accessor, suggested_fix, reason }` findings (empty ⇒
+ * clean). Exposed so the build/CLI path can surface findings on changed
+ * migrations before commit (§4.3 mechanism (a)).
+ */
+export function lintDeterminism(source) {
+  if (typeof source !== "string") return [];
+  const findings = [];
+  for (const { re, name, steer } of NONDETERMINISM_PATTERNS) {
+    if (re.test(source)) {
+      findings.push({
+        code: "NONDETERMINISTIC_OP_ARG",
+        accessor: name,
+        suggested_fix: `replace ${name} with the DB-evaluated ${steer}`,
+        reason:
+          `${name} bakes a build-time value into the migration artifact; for a value that ` +
+          "must be computed at apply time use the structured FnSynth scalar (§4.3)",
+      });
+    }
+  }
+  return findings;
+}
+
+// ---------------------------------------------------------------------------
+// `c.fn.splitPart` grammar lint (§9) — the dialect-NEUTRAL subset broken on BOTH
+// backends (a non-string/empty delimiter, a non-positive-int n). A violation
+// throws a structured EXPR_NOT_PORTABLE error (the §8.8 machine-readable
+// rejection the AI loop self-corrects on). The portability ENVELOPE (single-ASCII
+// delimiter, 1<=n<=8) is NOT checked here — it is dialect-gated and deferred to
+// the Rust validator (admit on PG via dialect_scope=PgOnly, reject on SQLite).
+// ---------------------------------------------------------------------------
+
 function splitPartGrammarLint(delim, n) {
   const fail = (reason) => {
-    const err = new Error(reason);
-    err.code = "EXPR_NOT_PORTABLE";
-    err.suggested_fix =
-      "pass a non-empty string-literal delimiter and a positive-integer n; to target " +
-      "SQLite too, stay in-envelope (single-ASCII delimiter, 1<=n<=8) — a multi-char/" +
-      "non-ASCII delimiter or n>8 renders only on Postgres (dialect_scope=PgOnly)";
-    throw err;
+    throw structuredError("EXPR_NOT_PORTABLE", reason, {
+      suggested_fix:
+        "pass a non-empty string-literal delimiter and a positive-integer n; to target " +
+        "SQLite too, stay in-envelope (single-ASCII delimiter, 1<=n<=8) — a multi-char/" +
+        "non-ASCII delimiter or n>8 renders only on Postgres (dialect_scope=PgOnly)",
+    });
   };
   if (typeof delim !== "string") {
     fail(`c.fn.splitPart delimiter must be a string literal; got ${typeof delim}`);
@@ -265,8 +1063,8 @@ function splitPartGrammarLint(delim, n) {
   }
 }
 
-/// Coerce a `splitPart`/`concatWs` argument: a bare string is a ColRef shorthand
-/// (`c("name")` ⇒ a colRef node); an already-built `{node:…}` passes through.
+/** Coerce a legacy `e.*` arg: a bare string is a ColRef shorthand; an already-
+ *  built `{node:…}` passes through; anything else is a literal. */
 function normalizeExprArg(arg) {
   if (arg && typeof arg === "object" && typeof arg.node === "string") {
     return arg;
