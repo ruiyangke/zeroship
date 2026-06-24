@@ -338,12 +338,6 @@ fn render_concat_ws(rendered: &[String], dialect: SqlDialect) -> String {
     }
 }
 
-/// Output of a parameterized expression render: the SQL fragment (with `$n`/`?n`
-/// placeholders) and the ordered binds appended for this fragment.
-struct RenderOut {
-    sql: String,
-}
-
 /// A bind accumulator carried through the parameterized render walk: it owns the
 /// running placeholder counter (1-based, dialect-specific) and the ordered
 /// [`BindValue`] list.
@@ -369,28 +363,28 @@ impl BindCtx {
 /// renders to its quoted identifier; a `Literal` to a placeholder; operators /
 /// functions / casts to their SQL spelling. The bind safety property:
 /// statement structure is fixed by the AST shape, never by a literal's content.
-fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<RenderOut, DmlError> {
-    let sql = match expr {
+fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError> {
+    Ok(match expr {
         Expr::ColRef { name } => quote_ident("column", name)?,
         Expr::Literal { value } => ctx.push_bind(scalar_to_bind(value)),
         Expr::BinOp { op, lhs, rhs } => {
-            let l = render_expr_bound(lhs, ctx)?.sql;
-            let r = render_expr_bound(rhs, ctx)?.sql;
+            let l = render_expr_bound(lhs, ctx)?;
+            let r = render_expr_bound(rhs, ctx)?;
             format!("({} {} {})", l, binary_op_sql(*op), r)
         }
         Expr::UnaryOp { op, operand } => {
-            let o = render_expr_bound(operand, ctx)?.sql;
+            let o = render_expr_bound(operand, ctx)?;
             render_unary(*op, &o)
         }
         Expr::Case { branches, r#else } => {
             let mut s = String::from("CASE");
             for b in branches {
-                let c = render_expr_bound(&b.condition, ctx)?.sql;
-                let r = render_expr_bound(&b.result, ctx)?.sql;
+                let c = render_expr_bound(&b.condition, ctx)?;
+                let r = render_expr_bound(&b.result, ctx)?;
                 s.push_str(&format!(" WHEN {c} THEN {r}"));
             }
             if let Some(e) = r#else {
-                let e = render_expr_bound(e, ctx)?.sql;
+                let e = render_expr_bound(e, ctx)?;
                 s.push_str(&format!(" ELSE {e}"));
             }
             s.push_str(" END");
@@ -399,17 +393,16 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<RenderOut, DmlErr
         Expr::FnCall { r#fn, args } => {
             let mut rs = Vec::with_capacity(args.len());
             for a in args {
-                rs.push(render_expr_bound(a, ctx)?.sql);
+                rs.push(render_expr_bound(a, ctx)?);
             }
             format!("{}({})", scalar_fn_sql(*r#fn), rs.join(", "))
         }
         Expr::FnSynth { r#fn, args } => render_synth_bound(*r#fn, args, ctx)?,
         Expr::Cast { operand, target } => {
-            let o = render_expr_bound(operand, ctx)?.sql;
+            let o = render_expr_bound(operand, ctx)?;
             format!("CAST({o} AS {})", cast_target_sql(*target, ctx.dialect))
         }
-    };
-    Ok(RenderOut { sql })
+    })
 }
 
 /// Render a `FnSynth` in the parameterized path. `concatWs` lowers per dialect;
@@ -421,7 +414,7 @@ fn render_synth_bound(f: SynthFn, args: &[Expr], ctx: &mut BindCtx) -> Result<St
         SynthFn::ConcatWs => {
             let mut rs = Vec::with_capacity(args.len());
             for a in args {
-                rs.push(render_expr_bound(a, ctx)?.sql);
+                rs.push(render_expr_bound(a, ctx)?);
             }
             Ok(render_concat_ws(&rs, ctx.dialect))
         }
@@ -659,12 +652,12 @@ pub fn assemble_update(
     let mut assigns = Vec::with_capacity(set.len());
     for (col, rhs) in set {
         let qc = quote_ident("column", col)?;
-        let r = render_expr_bound(rhs, &mut ctx)?.sql;
+        let r = render_expr_bound(rhs, &mut ctx)?;
         assigns.push(format!("{qc} = {r}"));
     }
     let mut template = format!("UPDATE {qtable} SET {}", assigns.join(", "));
     if let Some(pred) = r#where {
-        let w = render_expr_bound(pred, &mut ctx)?.sql;
+        let w = render_expr_bound(pred, &mut ctx)?;
         template.push_str(&format!(" WHERE {w}"));
     }
     Ok(AssembledDml { template, binds: ctx.binds })
@@ -687,7 +680,7 @@ pub fn assemble_delete(
 ) -> Result<AssembledDml, DmlError> {
     let qtable = qualify_table(project_schema, dialect, table)?;
     let mut ctx = BindCtx::new(dialect);
-    let w = render_expr_bound(r#where, &mut ctx)?.sql;
+    let w = render_expr_bound(r#where, &mut ctx)?;
     let template = match (dialect, limit) {
         (_, None) => format!("DELETE FROM {qtable} WHERE {w}"),
         // SQLite supports `DELETE … WHERE … LIMIT n` (with the compile option,

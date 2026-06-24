@@ -15,8 +15,11 @@
 //!   `dialect_scope = PgOnly`) — rejected at lower, never silently applied.
 //! - **a batched `backfill` is a HARD error on SQLite** (PR6b boundary) — rejected
 //!   at lower, never silently downgraded.
-//! - **column-scoping**: a `ColRef` to a column not on the target table is rejected
-//!   by the structural validator BEFORE assembly.
+//! - **column-scoping (rule (c), §3.3.1.1(c))**: a `ColRef` to a column not on the
+//!   LIVE target table is rejected with the structured `UNSUPPORTED { kind: "expr" }`
+//!   AuthoringError at the resolved apply/render seam (`validate_op_resolved`,
+//!   driven from the introspected `LiveSchema::table_snapshots`) BEFORE the template
+//!   is assembled — never baked in to surface as a raw "no such column" DB error.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -303,11 +306,133 @@ async fn portable_cast_and_concat_apply_on_sqlite() {
     assert_eq!(rows[0], vec![None], "concat with a NULL operand propagates NULL on SQLite");
 }
 
+/// **PR6a `c.fn.concatWs` SQLite lowering — faithful apply coverage (§9).** SQLite
+/// has no native `concat_ws`, so the assembler lowers `concatWs(delim, a, b, …)` to
+/// a pinned NULL-skipping `||`-fold + head-trim. PG's `concat_ws` SKIPS NULL
+/// arguments; the SQLite fold must produce a BYTE-IDENTICAL result. This drives the
+/// SQLite NULL-skip lowering end-to-end on a real backend over a NULL operand: an
+/// `update` sets `label = concatWs('-', cast(code as text), label)` on a row whose
+/// `label` IS NULL — PG would yield `'1'` (the NULL `label` is skipped, no trailing
+/// delimiter), so the SQLite head-trim lowering must yield exactly `'1'` too. (The
+/// PG render leg is covered by the assembler unit tests + the PG e2e; this pins the
+/// SQLite head-trim before any creator can reach it.)
+#[compio::test]
+async fn concat_ws_null_skip_applies_byte_identical_on_sqlite() {
+    let p = paths("concat_ws");
+    let be = backend(&p);
+    lower_and_apply(&be, create_codes_table(), &registry(&[]), Approval::None).await;
+
+    // Seed a single row: code=1, label=NULL.
+    let seed = r#"{"ir_version":1,"name":"seed","ops":[
+        {"op":"insert","table":"codes",
+         "columns":["id","created_at","updated_at","version","code","label"],
+         "rows":[["c1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,1,null]]}
+    ]}"#;
+    lower_plan_and_apply(&be, seed, &registry(&[("codes", APP)]), Approval::None).await;
+
+    // UPDATE: label = concatWs('-', cast(code as text), label)  where code = 1.
+    // label IS NULL ⇒ concat_ws skips it ⇒ result is just '1' (no trailing '-').
+    let ir = r#"{"ir_version":1,"name":"cws","ops":[
+        {"op":"update","table":"codes",
+         "set":{"label":{"node":"fnSynth","fn":"concatWs","args":[
+             {"node":"literal","value":"-"},
+             {"node":"cast","operand":{"node":"colRef","name":"code"},"target":"text"},
+             {"node":"colRef","name":"label"}]}},
+         "where":{"node":"binOp","op":"eq",
+             "lhs":{"node":"colRef","name":"code"},
+             "rhs":{"node":"literal","value":1}}}
+    ]}"#;
+    lower_plan_and_apply(&be, ir, &registry(&[("codes", APP)]), Approval::None).await;
+    let rows = be.actor().query("SELECT label FROM codes WHERE code = 1").await.expect("probe");
+    assert_eq!(
+        rows[0],
+        vec![Some("1".to_string())],
+        "concatWs NULL-skip on SQLite must match PG concat_ws('-', '1', NULL) = '1' (no trailing delimiter)"
+    );
+}
+
+/// **PR6a rule-(c) column-scoping at the apply/render seam (§3.3.1.1(c)) on the
+/// real SQLite leg.** An `update` whose SET RHS references a column NOT on the live
+/// target table must be rejected with the STRUCTURED `UNSUPPORTED { kind: "expr" }`
+/// AuthoringError at lower/apply — BEFORE the template is assembled — NOT surface as
+/// a raw SQLite "no such column" error at execution. The live `LiveSchema` is built
+/// from REAL temp-file introspection (`snapshot_schema_sqlite`), then the authoring
+/// path (`lower_plan`) is driven with it. A NOTHING-applied reject (the SQLite peer
+/// of the PG `ir_unresolved_colref_rejected_at_apply_seam_on_pg`).
+#[compio::test]
+async fn unresolved_colref_rejected_at_apply_seam_on_sqlite() {
+    let p = paths("colref_scope");
+    let be = backend(&p);
+
+    // DDL: create `codes` (code, label).
+    lower_and_apply(&be, create_codes_table(), &registry(&[]), Approval::None).await;
+
+    // Introspect the LIVE schema so the lower sees the real live columns of `codes`
+    // (system fields + code/label).
+    let live = be.snapshot_schema_sqlite().await.expect("introspect live SQLite schema");
+    let live_schema = LiveSchema {
+        tables: live.tables.keys().cloned().collect(),
+        table_snapshots: live.tables.clone(),
+        ..LiveSchema::default()
+    };
+    let codes_cols: Vec<String> = live_schema.table_snapshots["codes"]
+        .columns
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
+    // The resolution must be ACTIVE (not skipped on an empty snapshot): the live
+    // `codes` table really carries `code`/`label` (and the system fields), and NOT
+    // `ghost` — so the reject below is a true rule-(c) failure, not a vacuous pass.
+    assert!(
+        codes_cols.iter().any(|c| c == "code") && codes_cols.iter().any(|c| c == "label"),
+        "live `codes` snapshot must surface its real columns (got {codes_cols:?})"
+    );
+    assert!(
+        !codes_cols.iter().any(|c| c == "ghost"),
+        "the live `codes` table must NOT carry `ghost` (got {codes_cols:?})"
+    );
+
+    // An update whose SET RHS names `ghost` — a column NOT on the live `codes`
+    // table. Loads clean (load is structural-only for DML), but the resolved
+    // apply/render seam must reject it.
+    let bad = r#"{"ir_version":1,"name":"bad","ops":[
+        {"op":"update","table":"codes",
+         "set":{"label":{"node":"colRef","name":"ghost"}},
+         "where":{"node":"binOp","op":"eq",
+             "lhs":{"node":"colRef","name":"code"},
+             "rhs":{"node":"literal","value":1}}}
+    ]}"#;
+    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+    let document = zeroship_migrate::ir_load::load_ir_document(
+        bad,
+        APP,
+        zeroship_migrate::validate::Dialect::Sqlite,
+        &registry(&[("codes", APP)]),
+    )
+    .expect("load gate (DML ColRef resolution is an apply-seam reject, not a load reject)");
+    let err = author
+        .lower_plan(&document, &live_schema)
+        .expect_err("an unresolved ColRef must be rejected at the resolved apply seam, pre-assembly");
+    match err {
+        IrLowerError::DmlValidate(e) => {
+            assert_eq!(e.code, zeroship_migrate::CODE_UNSUPPORTED, "structured (c) reject");
+            assert_eq!(
+                e.kind,
+                Some(zeroship_migrate::UnsupportedKind::Expr),
+                "rule (c) is an expr-kind capability-boundary reject"
+            );
+        }
+        other => panic!("expected DmlValidate UNSUPPORTED expr, got {other:?}"),
+    }
+}
+
 /// Identifier safety at assembly: a malformed `set`-column identifier (carrying SQL
 /// metacharacters) is rejected by the assembler's identifier gate BEFORE any SQL is
 /// emitted — the injection cannot reach the database through an identifier slot.
-/// (The rule-(c) `ColRef`-resolution against the live target table is covered by the
-/// `validate_ir_resolved` validator unit tests.)
+/// (The rule-(c) `ColRef`-resolution against the live target table is exercised
+/// end-to-end on this real SQLite backend by
+/// `unresolved_colref_rejected_at_apply_seam_on_sqlite` above, and on PG by
+/// `ir_unresolved_colref_rejected_at_apply_seam_on_pg`.)
 #[compio::test]
 async fn malformed_set_identifier_rejected_on_sqlite() {
     let bad_ident_ir = r#"{"ir_version":1,"name":"bad","ops":[
