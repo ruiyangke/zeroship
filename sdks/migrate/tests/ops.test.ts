@@ -93,6 +93,56 @@ test("insert row-object normalizes to columns + positional rows", () => {
   assert.deepEqual(ops[0].rows, [[1, "a"], [2, "b"]]);
 });
 
+test("insert normalizes a bigint to {decimal} and Uint8Array to {bytes:base64}", () => {
+  const ops = record(() =>
+    insert("t", {
+      rows: [{ big: 9007199254740993n, raw: new Uint8Array([1, 2, 3]) }],
+    }),
+  );
+  // bigint -> {decimal:"…"} (the IrScalar large-int carrier; a bare bigint THROWS at
+  // JSON.stringify), Uint8Array -> {bytes: base64} (Rust IrScalar hard-rejects the
+  // {"0":…} array-index spelling).
+  assert.deepEqual(ops[0].rows, [[{ decimal: "9007199254740993" }, { bytes: "AQID" }]]);
+  // The recorded op must be JSON-serializable (a raw bigint would throw here).
+  assert.doesNotThrow(() => JSON.stringify(ops[0]));
+});
+
+test("a column default carries a bigint/Uint8Array through the same IrScalar carrier", () => {
+  const ops = record(() =>
+    createTable("t", {
+      big: t.numeric(38, 0).default(9007199254740993n),
+      raw: t.bytes().default(new Uint8Array([255, 0])),
+    }),
+  );
+  const cols = ops[0].columns;
+  assert.deepEqual(cols[0].default, { literal: { value: { decimal: "9007199254740993" } } });
+  assert.deepEqual(cols[1].default, { literal: { value: { bytes: "/wA=" } } });
+});
+
+test("onConflict.doUpdate normalizes bigint/Uint8Array scalar assignments", () => {
+  const ops = record(() =>
+    insert("t", {
+      rows: [{ id: 1 }],
+      onConflict: { columns: ["id"], doUpdate: { big: 9007199254740993n, raw: new Uint8Array([7]) } as any },
+    }),
+  );
+  assert.deepEqual(ops[0].onConflict.doUpdate, {
+    big: { decimal: "9007199254740993" },
+    raw: { bytes: "Bw==" },
+  });
+});
+
+test("update accepts a batch knob (parity with the engine recorder)", () => {
+  const ops = record(() =>
+    update("t", {
+      set: { x: (c) => c.fn.now() },
+      where: (c) => c("id").isNotNull(),
+      batch: { cursorColumn: "id", batchSize: 500 },
+    }),
+  );
+  assert.deepEqual(ops[0].batch, { cursorColumn: "id", batchSize: 500 });
+});
+
 test("del records the 'delete' wire tag and requires where", () => {
   const ops = record(() => del("t", { where: (c) => c("code").isNull(), limit: 5 }));
   assert.equal(ops[0].op, "delete");
@@ -154,4 +204,21 @@ test("determinism lint flags Date.now()/Math.random()/new Date(); clean source i
     assert.equal(findings[0].code, "NONDETERMINISTIC_OP_ARG");
   }
   assert.deepEqual(lintDeterminism(`backfill("t", { set: { v: c => c.fn.now() } });`), []);
+});
+
+test("determinism lint is a coarse whole-source scan: a clock accessor outside any op arg is (intentionally) flagged", () => {
+  // §4.3 specifies "syntactically appearing inside an op-function argument", but the
+  // shipped lint is a deliberate fail-SAFE whole-source regex scan (over-flags, never
+  // under-flags). Pin that chosen behavior: a `new Date()` in a comment / a non-op
+  // helper still trips the lint. This is the contract, not a bug.
+  const inComment = lintDeterminism(`// audited at new Date()\ncreateTable("t", { id: t.id() });`);
+  assert.ok(
+    inComment.some((f) => f.accessor.includes("new Date")),
+    "the coarse scan flags a clock accessor even in a comment (fail-safe over-flag)",
+  );
+  const inHelper = lintDeterminism(`function audit() { return Date.now(); }\ninsert("t", { rows: [{ a: 1 }] });`);
+  assert.ok(
+    inHelper.some((f) => f.accessor.includes("Date.now")),
+    "the coarse scan flags a clock accessor in a non-op helper (fail-safe over-flag)",
+  );
 });

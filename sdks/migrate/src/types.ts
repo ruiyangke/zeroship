@@ -10,9 +10,9 @@
 // truth (§4.3 / PR3). This module imports the generated wire types where a manual
 // type wants to reference the exact serde shape.
 
-import type { ColType, Expr, IrScalar } from "./generated/ir.js";
+import type { ColType, Expr, IrBatch, IrScalar } from "./generated/ir.js";
 
-export type { ColType, Expr, IrScalar };
+export type { ColType, Expr, IrBatch, IrScalar };
 
 // ── The fluent column-type lexicon (`t.*`) → a chainable ColumnDef ──
 
@@ -73,9 +73,12 @@ export interface TypeLexicon {
 
 // ── Scalars / rows ──
 
-/** A typed scalar value an `insert` row / default may carry (§2.5 numeric
- *  domain). A bigint / fractional value is carried as `{ decimal }`; raw bytes as
- *  `Uint8Array`. */
+/** A typed scalar value an `insert` row / default / `onConflict.doUpdate` may
+ *  carry (§2.5/§3.2 numeric domain). The builder normalizes a JS `bigint` into the
+ *  `{ decimal }` carrier (integers beyond 2^53) and a `Uint8Array` into the
+ *  `{ bytes: base64 }` carrier before recording — both are accepted here for
+ *  authoring ergonomics; you MAY also pass the explicit `{ decimal }` carrier (e.g.
+ *  for a fractional value). */
 export type ScalarValue =
   | string
   | number
@@ -215,6 +218,11 @@ export interface InsertArgs<R extends Row = Row> {
 export interface UpdateArgs {
   set: Record<string, ExprFn>;
   where?: ExprFn;
+  /** Page a large one-shot UPDATE over a cursor column (`Op::Update.batch`, §2.3.1):
+   *  the engine lowers it to the same windowed/batched executor a `backfill` uses
+   *  (PG writable-CTE windowed UPDATE / SQLite per-batch-txn). Absent ⇒ a single
+   *  unbatched UPDATE. Parity with the engine recorder. */
+  batch?: IrBatch;
 }
 
 export interface DelArgs {

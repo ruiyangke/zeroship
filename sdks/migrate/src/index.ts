@@ -76,6 +76,7 @@ export type {
   // re-exported generated IR wire types (ergonomics; goldens are the contract)
   ColType,
   Expr,
+  IrBatch,
   IrScalar,
 } from "./types.js";
 

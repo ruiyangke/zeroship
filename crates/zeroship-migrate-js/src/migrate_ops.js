@@ -200,14 +200,37 @@ function applyOpts(def, opts) {
   return def;
 }
 
+/** Base64-encode raw bytes (the `IrScalar::Bytes` wire carrier) without a Node
+ *  `Buffer` — `btoa` is a WHATWG global present in the V8 record host + Node. */
+function bytesToBase64(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+/** Normalize a JS scalar into the closed `IrScalar` WIRE carrier so the recorded
+ *  shape is exactly what Rust's `IrScalar` deserializer accepts (§2.5/§3.2):
+ *   - a JS `bigint` → `{ decimal: "<v>" }` (a bare bigint THROWS at JSON.stringify;
+ *     `{decimal}` is the integers-beyond-2^53 carrier);
+ *   - a `Uint8Array` → `{ bytes: "<base64>" }` (the raw-bytes carrier; the default
+ *     JSON spelling `{"0":…}` is HARD-REJECTED by the Rust deserializer);
+ *   - everything else (string / safe number / boolean / null / the explicit
+ *     `{decimal}` / `{bytes}` carriers) passes through verbatim. */
+function toIrScalar(value) {
+  if (typeof value === "bigint") return { decimal: value.toString() };
+  if (value instanceof Uint8Array) return { bytes: bytesToBase64(value) };
+  return value;
+}
+
 /** Coerce a `.default(value)` arg into the closed `IrDefault` carrier:
  *   - `{ fn: "now" | "genRandomUuid" }` → a nullary synth default;
- *   - any other typed scalar → a `{ literal: { value } }` literal default. */
+ *   - any other typed scalar → a `{ literal: { value } }` literal default (the
+ *     value carried through the `IrScalar` wire normalizer). */
 function toIrDefault(value) {
   if (value && typeof value === "object" && typeof value.fn === "string") {
     return { fn: { fn: value.fn } };
   }
-  return { literal: { value } };
+  return { literal: { value: toIrScalar(value) } };
 }
 
 /** The fluent column-type lexicon (§3.2). Shared in shape with `@zeroship/db`'s
@@ -798,8 +821,8 @@ export function insert(table, arg2, arg3, arg4) {
         op: "insert",
         table,
         columns: arg2,
-        rows: arg3,
-        onConflict: arg4 && arg4.onConflict,
+        rows: normalizeRows(arg3),
+        onConflict: normalizeOnConflict(arg4 && arg4.onConflict),
       }),
     );
   }
@@ -819,14 +842,42 @@ export function insert(table, arg2, arg3, arg4) {
     if (!args.columns) {
       throw structuredError("OP_INVALID", "insert rows given as arrays needs a `columns` list");
     }
-    return push(compact({ op: "insert", table, columns: args.columns, rows, onConflict: args.onConflict }));
+    return push(
+      compact({
+        op: "insert",
+        table,
+        columns: args.columns,
+        rows: normalizeRows(rows),
+        onConflict: normalizeOnConflict(args.onConflict),
+      }),
+    );
   }
 
   const columns = rows.length > 0 ? Object.keys(rows[0]) : args.columns || [];
   const positional = rows.map((r) =>
-    columns.map((col) => (Object.prototype.hasOwnProperty.call(r, col) ? r[col] : null)),
+    columns.map((col) => (Object.prototype.hasOwnProperty.call(r, col) ? toIrScalar(r[col]) : null)),
   );
-  return push(compact({ op: "insert", table, columns, rows: positional, onConflict: args.onConflict }));
+  return push(
+    compact({ op: "insert", table, columns, rows: positional, onConflict: normalizeOnConflict(args.onConflict) }),
+  );
+}
+
+/** Normalize each positional row cell through the `IrScalar` wire carrier (a
+ *  bigint/Uint8Array author value → its `{decimal}`/`{bytes}` carrier). */
+function normalizeRows(rows) {
+  if (!Array.isArray(rows)) return rows;
+  return rows.map((row) => (Array.isArray(row) ? row.map(toIrScalar) : row));
+}
+
+/** Normalize an `onConflict.doUpdate` `column → scalar` map through the IrScalar
+ *  carrier so a bigint/Uint8Array assignment matches the Rust `IrOnConflict`
+ *  `BTreeMap<String, IrScalar>` shape (§2.4.1). */
+function normalizeOnConflict(oc) {
+  if (oc === undefined || oc === null) return undefined;
+  if (oc.doUpdate === undefined) return { columns: oc.columns };
+  const doUpdate = {};
+  for (const col of Object.keys(oc.doUpdate)) doUpdate[col] = toIrScalar(oc.doUpdate[col]);
+  return { columns: oc.columns, doUpdate };
 }
 
 /**
@@ -1010,8 +1061,20 @@ const NONDETERMINISM_PATTERNS = [
 /**
  * Lint a migration's SOURCE TEXT for the §4.3 nondeterminism accessors. Returns
  * an array of `{ code, accessor, suggested_fix, reason }` findings (empty ⇒
- * clean). Exposed so the build/CLI path can surface findings on changed
+ * clean). Exposed so the build/CLI/record path can surface findings on changed
  * migrations before commit (§4.3 mechanism (a)).
+ *
+ * SCOPE — intentional coarse whole-source scan. §4.3 specifies "syntactically
+ * appearing inside an op-function argument", but this lint is a deliberate
+ * fail-SAFE whole-source regex scan: it OVER-flags (a clock accessor in a comment
+ * or a non-op helper trips it) and NEVER under-flags. That is the chosen contract,
+ * not a bug — the build-once committed artifact (§5.1) already neutralizes
+ * post-deploy non-determinism, so the lint's only job is a best-effort pre-commit
+ * STEER (§8.8), where a false positive is cheap (rephrase) and a false negative
+ * (a baked build-time value slipping through) is the real hazard. The record path
+ * (`record_migration_to_ir_with_warnings`) surfaces these as WARNINGS, never a hard
+ * reject. Narrowing to true op-arg spans is a possible future precision
+ * improvement; the over-flag behavior is pinned by test.
  */
 export function lintDeterminism(source) {
   if (typeof source !== "string") return [];

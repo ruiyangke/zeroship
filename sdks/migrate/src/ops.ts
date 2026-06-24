@@ -158,11 +158,36 @@ function applyOpts(def: ColumnDefImpl, opts?: ColumnOpts): ColumnDefImpl {
   return def;
 }
 
+/** Base64-encode raw bytes (the `IrScalar::Bytes` wire carrier) without a Node
+ *  `Buffer` dependency — runs identically in the V8 record host and Node. */
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]!);
+  // `btoa` is a WHATWG global present in V8 + Node ≥16.
+  return btoa(bin);
+}
+
+/**
+ * Normalize a JS scalar into the closed `IrScalar` WIRE carrier so the recorded
+ * shape is exactly what Rust's `IrScalar` deserializer accepts (§2.5/§3.2):
+ *  - a JS `bigint` → `{ decimal: "<v>" }` (a bare bigint THROWS at JSON.stringify;
+ *    `{decimal}` is the integers-beyond-2^53 carrier);
+ *  - a `Uint8Array` → `{ bytes: "<base64>" }` (the raw-bytes carrier; the default
+ *    JSON spelling `{"0":…}` is HARD-REJECTED by the Rust deserializer);
+ *  - everything else (string / safe number / boolean / null / the explicit
+ *    `{decimal}` / `{bytes}` carriers) passes through verbatim.
+ */
+function toIrScalar(value: unknown): unknown {
+  if (typeof value === "bigint") return { decimal: value.toString() };
+  if (value instanceof Uint8Array) return { bytes: bytesToBase64(value) };
+  return value;
+}
+
 function toIrDefault(value: ScalarValue | { fn: "now" | "genRandomUuid" }): Node {
   if (value && typeof value === "object" && "fn" in value && typeof value.fn === "string") {
     return { fn: { fn: value.fn } };
   }
-  return { literal: { value } };
+  return { literal: { value: toIrScalar(value) } };
 }
 
 export const t: TypeLexicon = {
@@ -524,14 +549,37 @@ export function insert<R extends Row = Row>(table: string, args: InsertArgs<R>):
   const arr = rows as R[];
   const columns = arr.length > 0 ? Object.keys(arr[0]) : [];
   const positional = arr.map((r) =>
-    columns.map((col) => (Object.prototype.hasOwnProperty.call(r, col) ? (r as Row)[col] : null)),
+    columns.map((col) =>
+      Object.prototype.hasOwnProperty.call(r, col) ? toIrScalar((r as Row)[col]) : null,
+    ),
   );
-  push(compact({ op: "insert", table, columns, rows: positional, onConflict: args.onConflict }));
+  push(compact({ op: "insert", table, columns, rows: positional, onConflict: normalizeOnConflict(args.onConflict) }));
+}
+
+/** Normalize an `onConflict.doUpdate` `column → scalar` map through the IrScalar
+ *  carrier so a bigint/Uint8Array assignment matches the Rust `IrOnConflict`
+ *  `BTreeMap<String, IrScalar>` shape (§2.4.1). */
+function normalizeOnConflict(
+  oc: { columns: string[]; doUpdate?: Record<string, unknown> } | undefined,
+): Node | undefined {
+  if (oc === undefined) return undefined;
+  if (oc.doUpdate === undefined) return { columns: oc.columns } as Node;
+  const doUpdate: Record<string, unknown> = {};
+  for (const col of Object.keys(oc.doUpdate)) doUpdate[col] = toIrScalar(oc.doUpdate[col]);
+  return { columns: oc.columns, doUpdate } as Node;
 }
 
 export function update(table: string, args: UpdateArgs): void {
   requireString(table, "update(table, …)");
-  push(compact({ op: "update", table, set: resolveSet(args.set), where: resolveExpr(args.where) }));
+  push(
+    compact({
+      op: "update",
+      table,
+      set: resolveSet(args.set),
+      where: resolveExpr(args.where),
+      batch: args.batch,
+    }),
+  );
 }
 
 export function del(table: string, args: DelArgs): void {
@@ -585,7 +633,22 @@ const NONDETERMINISM_PATTERNS: { re: RegExp; name: string; steer: string }[] = [
   { re: /\bnew\s+Date\s*\(/, name: "new Date(...)", steer: "c.fn.now()" },
 ];
 
-/** Lint a migration's SOURCE for the §4.3 nondeterminism accessors. */
+/**
+ * Lint a migration's SOURCE for the §4.3 nondeterminism accessors (`Date.now()` /
+ * `Math.random()` / `crypto.randomUUID()` / `new Date()`).
+ *
+ * SCOPE — intentional coarse whole-source scan. §4.3 specifies "syntactically
+ * appearing inside an op-function argument", but this lint is a deliberate
+ * fail-SAFE whole-source regex scan: it OVER-flags (a clock accessor in a comment
+ * or a non-op helper trips it) and NEVER under-flags. That is the chosen contract,
+ * not a bug — the build-once committed artifact (§5.1) already neutralizes
+ * post-deploy non-determinism, so the lint's only job is a best-effort pre-commit
+ * STEER (§8.8), where a false positive is cheap (rephrase) and a false negative
+ * (a baked build-time value slipping through) is the real hazard. Findings are
+ * surfaced as WARNINGS on the record path, never a hard reject (see
+ * `record_migration_to_ir_with_warnings`). Narrowing to true op-arg spans is a
+ * possible future precision improvement; the over-flag behavior is pinned by test.
+ */
 export function lintDeterminism(source: string): DeterminismFinding[] {
   if (typeof source !== "string") return [];
   const findings: DeterminismFinding[] = [];

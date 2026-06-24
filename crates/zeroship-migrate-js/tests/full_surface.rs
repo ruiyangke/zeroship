@@ -330,3 +330,107 @@ fn fluent_expr_builder_constructs_closed_ast() {
     assert_eq!(w.get("lhs").unwrap().get("op").unwrap(), "gt");
     assert_eq!(w.get("rhs").unwrap().get("op").unwrap(), "le");
 }
+
+/// A spec-blessed `bigint` / `Uint8Array` author value passed through the FLUENT
+/// insert + column default records the closed `IrScalar` WIRE carriers
+/// (`{decimal}` / `{bytes:base64}`), so the RECORD path produces a shape Rust
+/// accepts value-equal — the previously promised-but-broken §3.2/§2.3.2 path. A
+/// pre-fix recorder either THROWS on the bigint (JSON.stringify) or emits the
+/// `{"0":…}` array-index spelling Rust HARD-REJECTS, so `record` would fail.
+#[test]
+fn fluent_insert_normalizes_bigint_and_bytes_scalars() {
+    let src = r#"
+        import { createTable, insert, t } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            createTable("t", {
+                id: t.id(),
+                seq: t.numeric(38, 0).notNull().default(9007199254740993n),
+                salt: t.bytes().default(new Uint8Array([1, 2, 3, 255])),
+            });
+            insert("t", { rows: [ { seq: 9007199254740993n, salt: new Uint8Array([0, 255]) } ] });
+        }};
+    "#;
+    // Recording succeeds (the typed `MigrationIr` deserialize is the gate) — the
+    // scalars came through as the accepted carriers.
+    let ir = record(src, "scalars");
+    let cols = ops(&ir)[0].get("columns").and_then(|c| c.as_array()).unwrap();
+    // seq default -> {literal:{value:{decimal:"9007199254740993"}}}
+    let seq_default = cols[1].get("default").unwrap().get("literal").unwrap().get("value").unwrap();
+    assert_eq!(seq_default.get("decimal").unwrap(), "9007199254740993");
+    // salt default -> {literal:{value:{bytes:"AQID/w=="}}}
+    let salt_default = cols[2].get("default").unwrap().get("literal").unwrap().get("value").unwrap();
+    assert_eq!(salt_default.get("bytes").unwrap(), "AQID/w==");
+    // insert row carriers
+    let row = &ops(&ir)[1].get("rows").unwrap().as_array().unwrap()[0];
+    assert_eq!(row[0].get("decimal").unwrap(), "9007199254740993");
+    assert_eq!(row[1].get("bytes").unwrap(), "AP8="); // base64([0,255])
+}
+
+/// `update { batch }` is authorable through the engine recorder AND deserializes
+/// into `Op::Update.batch` (parity with the npm DSL, which now also exposes
+/// `batch`). The two JS impls expose ONE surface.
+#[test]
+fn update_carries_a_batch_knob() {
+    let src = r#"
+        import { update } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            update("t", {
+                set: { x: (c) => c.fn.now() },
+                where: (c) => c("id").isNotNull(),
+                batch: { cursorColumn: "id", batchSize: 500 },
+            });
+        }};
+    "#;
+    let ir = record(src, "ubatch");
+    let batch = ops(&ir)[0].get("batch").expect("update records the batch knob");
+    assert_eq!(batch.get("cursorColumn").unwrap(), "id");
+    assert_eq!(batch.get("batchSize").unwrap(), 500);
+}
+
+/// The §4.3 determinism lint is WIRED into the record/build path (not just an inert
+/// standalone function): recording a migration whose op argument carries a
+/// non-deterministic accessor SURFACES the finding on the record outcome's
+/// `warnings` — the pre-commit catch the AI loop self-corrects on (§8.8). Per §4.3
+/// it is a WARNING, not a hard reject (the build-once committed artifact already
+/// neutralizes post-deploy non-determinism, so the IR is still produced). A
+/// pre-wiring recorder would record the `Date.now()` migration with ZERO warnings
+/// (the lint never fired on the record path).
+#[test]
+fn record_path_surfaces_determinism_warnings() {
+    use zeroship_migrate_js::record_migration_to_ir_with_warnings;
+
+    let dirty = r#"
+        import { insert } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            insert("t", { rows: [ { created_at: Date.now() } ] });
+        }};
+    "#;
+    // Recording still SUCCEEDS (warn, don't fail-closed) — the IR is produced …
+    let outcome = record_migration_to_ir_with_warnings(dirty, OWNER, "dirty")
+        .expect("recording a non-deterministic migration still produces an IR (warn, not reject)");
+    // … and the wired lint surfaces the structured finding the AI loop steers on.
+    assert!(
+        !outcome.warnings.is_empty(),
+        "the wired record path must surface a determinism warning (pre-wiring it was empty)"
+    );
+    assert!(outcome.warnings.iter().any(|f| f.accessor.contains("Date.now")));
+    assert!(outcome.warnings.iter().all(|f| f.code == "NONDETERMINISTIC_OP_ARG"));
+    // The op is actually recorded — recording is not blocked.
+    let ir = serde_json::to_value(&outcome.ir).unwrap();
+    assert_eq!(ops(&ir)[0].get("op").unwrap(), "insert");
+
+    // The structured `c.fn.now()` replacement records cleanly — NO warnings.
+    let clean = r#"
+        import { insert } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            insert("t", { rows: [ { v: 1 } ] });
+        }};
+    "#;
+    let clean_outcome = record_migration_to_ir_with_warnings(clean, OWNER, "clean")
+        .expect("clean migration records");
+    assert!(
+        clean_outcome.warnings.is_empty(),
+        "a clean migration surfaces no determinism warnings: {:?}",
+        clean_outcome.warnings
+    );
+}

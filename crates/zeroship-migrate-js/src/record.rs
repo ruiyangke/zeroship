@@ -51,6 +51,25 @@ pub enum RecordError {
     Contract(String),
 }
 
+/// A recorded migration plus the §4.3 determinism WARNINGS surfaced on it.
+///
+/// Per §4.3 the syntactic clock/RNG lint is a **best-effort pre-commit catch**,
+/// NOT a hard reject: a non-deterministic accessor (`Date.now()`/`Math.random()`/
+/// `crypto.randomUUID()`/`new Date()`) is surfaced as a structured warning the AI
+/// loop self-corrects on (§8.8) — recording still succeeds (a build-once committed
+/// artifact already neutralizes post-deploy non-determinism, so blanket-rejecting
+/// would only raise iteration cost, §4.3). The strict *reject* the design reserves
+/// is the narrower type-aware check (a non-literal bound to a time/uuid column),
+/// not this whole-source scan. Callers (the build/CLI/recorder service) render the
+/// `warnings` alongside the produced `.ir.json`.
+#[derive(Debug, Clone)]
+pub struct RecordOutcome {
+    /// The recorded, frozen-contract-validated migration IR.
+    pub ir: MigrationIr,
+    /// The §4.3 determinism findings surfaced on the migration source (may be empty).
+    pub warnings: Vec<DeterminismFinding>,
+}
+
 /// The deserialized adapter result mirroring the JSON the glue emits on
 /// `globalThis.__zsOpIR`.
 #[derive(serde::Deserialize)]
@@ -74,6 +93,8 @@ struct OpIrEnvelope {
 ///
 /// Returns the recorded `MigrationIr` (already validated against the frozen wire
 /// contract by `serde` — an out-of-contract op fails [`RecordError::Contract`]).
+/// The §4.3 determinism warnings (if any) are DISCARDED on this surface; use
+/// [`record_migration_to_ir_with_warnings`] to receive them.
 ///
 /// # Errors
 /// See [`RecordError`].
@@ -82,7 +103,40 @@ pub fn record_migration_to_ir(
     owner_app: &str,
     name: &str,
 ) -> Result<MigrationIr, RecordError> {
+    Ok(record_migration_to_ir_with_warnings(migration_source, owner_app, name)?.ir)
+}
+
+/// Record a migration's `up()` into a typed [`MigrationIr`] AND surface the §4.3
+/// determinism warnings on it (the wired pre-commit catch — §4.3/§8.8).
+///
+/// This is the same record path as [`record_migration_to_ir`], but it runs the REAL
+/// V8 `lintDeterminism` over the migration SOURCE and returns its findings as
+/// [`RecordOutcome::warnings`] alongside the produced IR. Recording is NOT
+/// fail-closed on a finding: per §4.3 the syntactic clock/RNG lint is a best-effort
+/// flag the AI loop self-corrects on (the build-once committed artifact already
+/// makes post-deploy non-determinism unreachable, §5.1), so a `Date.now()` is
+/// surfaced as a warning rather than blocking the artifact. The build/CLI/recorder
+/// service render these warnings next to the committed `.ir.json` (§8.8).
+///
+/// # Errors
+/// See [`RecordError`]. A determinism finding is a WARNING, not an error.
+pub fn record_migration_to_ir_with_warnings(
+    migration_source: &str,
+    owner_app: &str,
+    name: &str,
+) -> Result<RecordOutcome, RecordError> {
     zeroship_runtime::init_v8();
+
+    // §4.3 pre-commit catch — the WIRED determinism lint. The record/build path runs
+    // the REAL V8 `lintDeterminism` over the migration SOURCE and surfaces a
+    // non-deterministic accessor (`Date.now()`/`Math.random()`/`crypto.randomUUID()`/
+    // `new Date()`) as a structured warning the AI loop self-corrects on (steer to
+    // `c.fn.now()`/`c.fn.genRandomUuid()`). It is intentionally NOT fail-closed:
+    // §4.3 reserves the hard reject for the narrower type-aware check (a non-literal
+    // bound to a time/uuid column), since the build-once committed artifact (§5.1)
+    // already neutralizes post-deploy non-determinism and blanket-rejecting would
+    // only raise the AI loop's iteration cost.
+    let warnings = lint_migration_determinism(migration_source)?;
 
     let modules = vec![
         ModuleEntry {
@@ -144,7 +198,9 @@ pub fn record_migration_to_ir(
     // domain) every deployed `.ir.json` passes. An out-of-contract op fails HERE.
     let bytes = serde_json::to_string(&ir_value)
         .map_err(|e| RecordError::Recording(e.to_string()))?;
-    serde_json::from_str::<MigrationIr>(&bytes).map_err(|e| RecordError::Contract(e.to_string()))
+    let ir = serde_json::from_str::<MigrationIr>(&bytes)
+        .map_err(|e| RecordError::Contract(e.to_string()))?;
+    Ok(RecordOutcome { ir, warnings })
 }
 
 /// Record a migration module and emit its canonical `.ir.json` STRING (the

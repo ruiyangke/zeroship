@@ -40,6 +40,6 @@ pub mod record;
 pub use eval::{eval_schema_to_ir, EvalError};
 pub use generate::{generate_migration, GenerateError, GenerateOutcome};
 pub use record::{
-    lint_migration_determinism, record_migration_to_ir, record_migration_to_json,
-    DeterminismFinding, RecordError,
+    lint_migration_determinism, record_migration_to_ir, record_migration_to_ir_with_warnings,
+    record_migration_to_json, DeterminismFinding, RecordError, RecordOutcome,
 };
