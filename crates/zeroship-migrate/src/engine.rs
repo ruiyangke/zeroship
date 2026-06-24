@@ -904,29 +904,95 @@ impl MigrationEngine {
         // SQLite returns an empty outstanding set unconditionally (no pending
         // partition, Deliverable 7), so this never false-gates a SQLite deploy.
         //
+        // **L2 (PR9b) — SCOPE OF THIS READ-BACK: CROSS-deploy only.** This obligation
+        // read-back is the CROSS-deploy snapshot — the set of obligations OUTSTANDING
+        // from a PRIOR committed deploy, read once at the start of THIS deploy under
+        // the held lock. An INTRA-deploy EXPAND-then-touch on the SAME table within ONE
+        // deploy (a deploy whose own EXPAND opens an obligation that a LATER step in the
+        // same deploy then touches) is intentionally OUT OF SCOPE here: it is covered by
+        // the expand/contract gate (`check_expand_contract_gate`), which gates on the
+        // journaled E-phase versions within the deploy. This read-back never re-reads
+        // mid-loop, so an obligation opened by this deploy's own EXPAND is not in
+        // `outstanding` and does not self-refuse (the §2.0.3 item-4 self-expand
+        // exemption + the gate handle the intra-deploy case).
+        //
         // **Fail closed on ANY doubt — EXCEPT this deploy IS the contract-apply.**
         // If any outstanding obligation's table is in this deploy's touched-set, the
         // deploy applies NOTHING and returns the structured
         // `TABLE_HAS_PENDING_CONTRACT` payload (§8.8) — UNLESS the deploy is the
         // legitimate contract-apply for that obligation (§2.0.2/§2.0.3.4): deploy
-        // N+1 applies C1/C2 as `Ddl` steps to complete the rename. We recognize the
-        // contract-apply structurally: the deploy's `Ddl` step versions cover the
-        // obligation's recorded `contract_versions`. Such an obligation is DISCHARGED
-        // after the steps apply (a `resolved='applied'` row appended, §2.0.3 item 1),
-        // not refused — applying the contract is exactly how the table becomes clear.
+        // N+1 applies C1/C2 as `Ddl` steps to complete the rename. **PR9b L1** — we
+        // recognize the contract-apply by RE-AUTHOR-COMPARE: the deploy's `Ddl` steps
+        // must carry the obligation's recorded `contract_versions` AND match the
+        // re-authored C1/C2 `up` SQL (not a version-id match alone — a forged plan
+        // carrying the ids with innocuous SQL is NOT recognized and stays gated). Such
+        // an obligation is DISCHARGED after the steps apply (a `resolved='applied'` row
+        // appended, §2.0.3 item 1), not refused — applying the REAL contract is exactly
+        // how the table becomes clear.
         let outstanding = backend
             .outstanding_pending_contracts(exec_cfg)
             .await
             .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
-        // The set of versions this plan's `Ddl` steps carry — the structural key for
-        // "is this deploy the contract-apply for an outstanding obligation?".
-        let ddl_versions: std::collections::BTreeSet<&str> = steps
+        // **PR9b L1 — discharge hardening: re-author-compare, not version-id alone.**
+        // The `up` SQL each `Ddl` step carries, keyed by version. The contract-apply
+        // recognition below re-authors the obligation's C1/C2 from its stored identity
+        // facts and requires the discharging Ddl steps to SEMANTICALLY MATCH (the
+        // re-authored `up` SQL), not merely carry the recorded contract version-ids. A
+        // forged plan that carries the obligation's `contract_versions` but innocuous
+        // `up` SQL (a `SELECT 1` / a harmless `COMMENT ON`) therefore does NOT
+        // discharge: the obligation stays outstanding, the dual-write trigger + `from`
+        // column stay live, and the touched-table refusal still fires. Only a deploy
+        // whose Ddl steps actually RUN the real C1 (drop trigger+fn) + C2 (drop column)
+        // un-gates the table. The author's `up` text is byte-stable and independent of
+        // `owner_app` (it names table/trigger/column only), so an exact string compare
+        // is sound (it mirrors `platform_runner.rs`'s deterministic re-author).
+        let ddl_up_by_version: std::collections::BTreeMap<&str, &str> = steps
             .iter()
             .filter_map(|s| match s {
-                PlanStep::Ddl(m) => Some(m.version.as_str()),
+                PlanStep::Ddl(m) => Some((m.version.as_str(), m.up.as_str())),
                 _ => None,
             })
             .collect();
+        // Re-author an outstanding obligation's contract C1/C2 and decide whether THIS
+        // deploy's `Ddl` steps both carry the recorded `contract_versions` AND match
+        // the re-authored contract `up` SQL for each. Fail-CLOSED: an empty
+        // `contract_versions`, a missing matching Ddl step, an SQL mismatch, or an
+        // author error all return `false` (NOT a contract-apply ⇒ the obligation is
+        // NOT discharged and the table stays gated).
+        let recognizes_contract_apply = |pc: &crate::journal::PendingContract| -> bool {
+            if pc.contract_versions.is_empty() {
+                return false;
+            }
+            // Re-author deterministically from the obligation's stored identity facts
+            // (the SAME re-author `platform_runner.rs` does at `resolve-pending`). The
+            // `owner_app` does not affect the contract `up` text, so any stable value
+            // is fine for the comparison.
+            let author = crate::expand_contract::ExpandContractAuthor::new(
+                exec_cfg.project_schema.clone(),
+                "discharge-recognize",
+            );
+            let Ok(plan) = author.author(&crate::expand_contract::OnlineIntent::RenameColumn {
+                table: pc.table.clone(),
+                from: pc.from_col.clone(),
+                to: pc.to_col.clone(),
+                ty: pc.ty.clone(),
+            }) else {
+                return false;
+            };
+            // The recorded `contract_versions` are the rename's C1/C2 ids in order, the
+            // SAME order `plan.contract` re-authors. Require one discharging Ddl step
+            // per recorded contract version whose `up` matches the re-authored step's
+            // `up` exactly. A length mismatch (the recorded set is not the full C1/C2)
+            // also fails closed.
+            if pc.contract_versions.len() != plan.contract.len() {
+                return false;
+            }
+            pc.contract_versions.iter().zip(plan.contract.iter()).all(|(v, authored)| {
+                ddl_up_by_version
+                    .get(v.as_str())
+                    .is_some_and(|up| *up == authored.up.as_str())
+            })
+        };
         // The set of EXPAND trigger versions this plan RE-PRESENTS — a
         // `PgExpandContract` step whose `pending_version` matches an outstanding
         // obligation is the SAME rename re-running idempotently (deploy N retried,
@@ -967,11 +1033,10 @@ impl MigrationEngine {
                 .map(|(pc, _)| pc.pending_version.as_str())
                 .collect();
             for pc in &outstanding {
-                let is_contract_apply = !pc.contract_versions.is_empty()
-                    && pc
-                        .contract_versions
-                        .iter()
-                        .all(|v| ddl_versions.contains(v.as_str()));
+                // **PR9b L1** — recognized as a contract-apply ONLY if the discharging
+                // Ddl steps both carry the recorded `contract_versions` AND match the
+                // re-authored C1/C2 `up` SQL (re-author-compare, not version-id alone).
+                let is_contract_apply = recognizes_contract_apply(pc);
                 // **Exemption scope (LOW — table-wide, by design and bounded).** A
                 // contract-apply deploy exempts the obligation's TABLE for the whole
                 // deploy, so a bundle that carries C1/C2 AND an unrelated touching op
@@ -1036,14 +1101,14 @@ impl MigrationEngine {
             // *that* obligation via a self-referential `depends_on` (applying the
             // contract is exactly how the dependency becomes satisfied). Such
             // obligations are keyed by `plan_version` here.
+            // PR9b L1 — the contract-apply exemption here uses the SAME hardened
+            // re-author-compare recognizer (not version-id alone), so a forged plan
+            // carrying the contract version-ids with innocuous SQL is NOT exempted from
+            // the §2.0.4 dependency block either.
             let exempt_plan_versions: std::collections::BTreeSet<&str> = outstanding
                 .iter()
                 .filter(|pc| {
-                    (!pc.contract_versions.is_empty()
-                        && pc
-                            .contract_versions
-                            .iter()
-                            .all(|v| ddl_versions.contains(v.as_str())))
+                    recognizes_contract_apply(pc)
                         || self_expand_versions.contains(pc.pending_version.as_str())
                         || explicit_versions.contains(pc.pending_version.as_str())
                 })
