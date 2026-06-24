@@ -1210,19 +1210,11 @@ impl MigrationEngine {
                             EngineError::ApprovalRequired,
                         ));
                     }
-                    // **PR9b per-version scope (anti-bypass).** A SQLite rebuild on a
-                    // populated table is destructive (it drops + recreates + copies),
-                    // so under `ApprovalScope::Versions` it runs ONLY if the operator
-                    // individually reviewed THIS rebuild's version. Under
-                    // `ApprovalScope::All` (every existing caller) this is vacuously
-                    // true. Fail-closed: an un-scoped rebuild applies nothing.
-                    if !scope.admits(rebuild.migration.version.as_str()) {
-                        return Err(DeclarativeApplyError::Plain(
-                            EngineError::ApprovalNotScoped {
-                                version: rebuild.migration.version.as_str().to_string(),
-                            },
-                        ));
-                    }
+                    // Read the net-applied set FIRST, so an already-applied rebuild
+                    // idempotently no-ops BEFORE the scope gate (PR9b LOW fix): an
+                    // idempotent re-deploy of an already-applied rebuild under a
+                    // `Versions` scope that omits it must skip as a no-op, never be
+                    // refused — the scope only ever gates work that would actually run.
                     if rebuild_already.is_none() {
                         rebuild_already = Some(
                             backend
@@ -1241,13 +1233,32 @@ impl MigrationEngine {
                         .is_some_and(|set| set.contains(&version))
                     {
                         applied.skipped.push(version);
-                    } else {
-                        backend
-                            .rebuild_one(&rebuild.spec, &rebuild.migration, applied_by)
-                            .await
-                            .map_err(EngineError::Apply)?;
-                        applied.applied.push(version);
+                        i += 1;
+                        continue;
                     }
+                    // **PR9b per-version scope (anti-bypass).** A SQLite rebuild on a
+                    // populated table is destructive (it drops + recreates + copies),
+                    // so under `ApprovalScope::Versions` it runs ONLY if the operator
+                    // individually reviewed THIS rebuild's version. The scope version
+                    // comes from the SINGLE source of truth
+                    // [`PlanStep::approval_scope_version`] (which returns the rebuild
+                    // version iff `rb.migration.flags.destructive`) so the gate and the
+                    // reviewer-facing "what needs approval" list never drift. Under
+                    // `ApprovalScope::All` (every existing caller) this is vacuously
+                    // true. Fail-closed: an un-scoped rebuild applies nothing. The
+                    // executor seam (`rebuild_one`) re-checks this as defense in depth.
+                    if let Some(v) = steps[i].approval_scope_version() {
+                        if !scope.admits(v) {
+                            return Err(DeclarativeApplyError::Plain(
+                                EngineError::ApprovalNotScoped { version: v.to_string() },
+                            ));
+                        }
+                    }
+                    backend
+                        .rebuild_one(&rebuild.spec, &rebuild.migration, scope, applied_by)
+                        .await
+                        .map_err(EngineError::Apply)?;
+                    applied.applied.push(version);
                     i += 1;
                 }
                 PlanStep::OnlineRename(RenameStep::PgExpandContract(rename)) => {
@@ -1293,6 +1304,7 @@ impl MigrationEngine {
                             &rename.expand,
                             &rename.backfill,
                             approval,
+                            scope,
                             exec_cfg,
                             applied_by,
                             LockMode::AlreadyHeld,
@@ -1376,7 +1388,7 @@ impl MigrationEngine {
                 }
                 PlanStep::Backfill(spec) => {
                     let outcome = backend
-                        .run_backfill_step(exec_cfg, spec, approval, applied_by, next_lock)
+                        .run_backfill_step(exec_cfg, spec, approval, scope, applied_by, next_lock)
                         .await
                         .map_err(EngineError::Apply)?;
                     applied.applied.extend(outcome.applied);
@@ -1423,7 +1435,7 @@ impl MigrationEngine {
                     let ran = backend
                         .run_dml_step(
                             exec_cfg, version, name, template, binds, *destructive, owner_app,
-                            approval, applied_by, next_lock,
+                            approval, scope, applied_by, next_lock,
                         )
                         .await
                         .map_err(EngineError::Apply)?;
@@ -1933,11 +1945,17 @@ impl MigrationEngine {
         // ([`run_expand_pg`](crate::expand_contract::run_expand_pg)) so the public
         // `&Client` API here and the [`PgOnline`](crate::expand_contract::PgOnline)
         // capability seam share byte-identical behavior (M3).
+        // The standalone `run_expand` is a TRUSTED single-actor surface (the same
+        // posture as the dev CLI `--yes` / rollback), so it passes
+        // [`ApprovalScope::All`] — the EXPAND's per-version scope is enforced
+        // (fail-closed) only on the new out-of-band approved-apply path, which drives
+        // the engine's declarative spine with an explicit `Versions` scope (PR9b).
         crate::expand_contract::run_expand_pg(
             conn,
             &plan.expand,
             &plan.backfill,
             approval,
+            &crate::approval::ApprovalScope::All,
             exec_cfg,
             applied_by,
             lock_mode,
@@ -2085,6 +2103,21 @@ pub enum OnlineError {
     /// mutates data). Nothing was applied.
     #[error("online expand requires approval (the backfill mutates data) but none was given")]
     Approval,
+    /// **PR9b — per-version approval scope (executor-layer defense in depth).** The
+    /// expand is approved ([`Approval::Approved`]) but the rename's PLAN-GROUP
+    /// version is NOT in the operator's reviewed
+    /// [`ApprovalScope::Versions`](crate::ApprovalScope::Versions) set — the
+    /// executor-layer mirror of the engine's EXPAND scope gate, so a direct
+    /// `run_online` / `run_expand_pg` caller cannot mirror data for a rename the
+    /// operator never individually reviewed. Nothing was applied.
+    #[error(
+        "online expand for version '{version}' is not in the approved version scope \
+         (per-version approval required)"
+    )]
+    ApprovalNotScoped {
+        /// The rename's PLAN-GROUP version the scope refused.
+        version: String,
+    },
     /// Applying E1/E2 or the E3 backfill marker failed.
     #[error(transparent)]
     Apply(#[from] ApplyError),

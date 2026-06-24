@@ -22,7 +22,7 @@ use tempfile::TempDir;
 use zeroship_migrate::backend_sqlite::Mode;
 use zeroship_migrate::journal::Phase;
 use zeroship_migrate::{
-    desired_snapshot, drift::SchemaSnapshot, Approval, CollectionDescriptor, DeclarativeApplyError,
+    desired_snapshot, drift::SchemaSnapshot, Approval, ApprovalScope, CollectionDescriptor, DeclarativeApplyError,
     DeclarativeAuthor, DeclarativeDeployOutcome, DeclarativeDeployPlan, EngineError, ExecutorConfig,
     FieldDescriptor, GuardConfig, MigrationBackend, MigrationEngine, RenameHint, SqliteBackend,
 };
@@ -159,7 +159,7 @@ async fn oracle_apply(
     for rebuild in &plan.rebuilds {
         // The trait method (returns ApplyError), matching the engine's seam — not
         // the inherent `SqliteBackend::rebuild_one` (which returns RebuildError).
-        MigrationBackend::rebuild_one(be, &rebuild.spec, &rebuild.migration, "deployer")
+        MigrationBackend::rebuild_one(be, &rebuild.spec, &rebuild.migration, &ApprovalScope::All, "deployer")
             .await
             .map_err(|e| DeclarativeApplyError::Plain(EngineError::Apply(e)))?;
         applied.applied.push(rebuild.migration.version.as_str().to_string());

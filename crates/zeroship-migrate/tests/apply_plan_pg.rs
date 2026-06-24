@@ -1180,6 +1180,7 @@ async fn run_dml_step_seam_refuses_destructive_dml_without_approval() {
             true, // destructive
             "app_test",
             Approval::None,
+            &zeroship_migrate::ApprovalScope::All,
             "app_test",
             zeroship_migrate::executor::LockMode::AlreadyHeld,
         )
@@ -1213,6 +1214,7 @@ async fn run_dml_step_seam_refuses_destructive_dml_without_approval() {
             true,
             "app_test",
             Approval::Approved,
+            &zeroship_migrate::ApprovalScope::All,
             "app_test",
             zeroship_migrate::executor::LockMode::AlreadyHeld,
         )
@@ -1229,6 +1231,133 @@ async fn run_dml_step_seam_refuses_destructive_dml_without_approval() {
         journaled(&conn, &cfg, del_version.as_str()).await,
         "the approved destructive DML is journaled"
     );
+    teardown(&conn, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// REGRESSION (PR9b MED): the executor-layer `run_dml_step` enforces the
+// PER-VERSION approval SCOPE as a TRUE second gate, not only the coarse approval.
+//
+// Pre-PR9b-fix, `run_dml_step` re-checked `Approval::Approved` but took NO
+// `scope` — so a direct seam caller driving `backend.run_dml_step(..,
+// Approval::Approved, ..)` could run a destructive DELETE the operator never
+// individually reviewed, bypassing the engine's per-version scope gate (which is
+// the only layer that consulted the scope for DML). This test drives the seam
+// DIRECTLY with blanket `Approved` but an EMPTY `Versions` scope (admits nothing)
+// and asserts `ApprovalNotScoped` + that NOTHING is applied. It fails RED on the
+// pre-fix seam (no scope param ⇒ the DELETE applied).
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn run_dml_step_seam_refuses_destructive_dml_outside_version_scope() {
+    use zeroship_migrate::{ApplyError, ApprovalScope, MigrationBackend};
+
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let s = q(&cfg.project_schema);
+
+    // Bootstrap the table + a seed row through apply_plan (migrator-owned, journal
+    // exists for the seam's net-applied read).
+    let create = PlanStep::Ddl(ddl(
+        1,
+        "create_seam_scope_d",
+        &cfg.project_schema,
+        &format!(
+            "CREATE TABLE {s}.seam_scope_d (id bigint PRIMARY KEY); \
+             INSERT INTO {s}.seam_scope_d (id) VALUES (1)"
+        ),
+        None,
+    ));
+    let engine = MigrationEngine::new();
+    engine
+        .apply_plan(
+            &[create],
+            Approval::None,
+            &zeroship_migrate::PostgresBackend::new(&conn),
+            &cfg,
+            "app_test",
+            zeroship_migrate::executor::LockMode::Acquire,
+        )
+        .await
+        .expect("additive create applies");
+
+    let backend = zeroship_migrate::PostgresBackend::new(&conn);
+    let del_version = zeroship_migrate::migration_id_for_version(961);
+    let template = format!("DELETE FROM {s}.seam_scope_d WHERE id = $1");
+
+    // Call the SEAM DIRECTLY with blanket Approval::Approved but an EMPTY Versions
+    // scope (admits NO version). The executor-layer scope gate must refuse the
+    // destructive DML — a direct seam caller cannot bypass the per-version scope.
+    let refused = backend
+        .run_dml_step(
+            &cfg,
+            &del_version,
+            "wipe_seam_scope_d",
+            &template,
+            &[BindValue::Int(1)],
+            true, // destructive
+            "app_test",
+            Approval::Approved,
+            &ApprovalScope::Versions(std::collections::BTreeSet::new()),
+            "app_test",
+            zeroship_migrate::executor::LockMode::AlreadyHeld,
+        )
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(ApplyError::ApprovalNotScoped { ref version })
+                if version == del_version.as_str()
+        ),
+        "the run_dml_step seam must refuse a destructive DML whose version is outside \
+         the approved scope (executor-layer per-version gate), got {refused:?}"
+    );
+
+    // NOTHING applied: the row survives, the version is NOT journaled.
+    let count = conn
+        .query_one(
+            &format!("SELECT count(*)::bigint FROM {s}.seam_scope_d"),
+            &[],
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0);
+    assert_eq!(count, 1, "a scope-refused destructive DML applies nothing");
+    assert!(
+        !journaled(&conn, &cfg, del_version.as_str()).await,
+        "a scope-refused destructive DML is not journaled"
+    );
+
+    // The SAME step through the seam with a scope that ADMITS its version applies.
+    let mut admitted = std::collections::BTreeSet::new();
+    admitted.insert(del_version.as_str().to_string());
+    let ran = backend
+        .run_dml_step(
+            &cfg,
+            &del_version,
+            "wipe_seam_scope_d",
+            &template,
+            &[BindValue::Int(1)],
+            true,
+            "app_test",
+            Approval::Approved,
+            &ApprovalScope::Versions(admitted),
+            "app_test",
+            zeroship_migrate::executor::LockMode::AlreadyHeld,
+        )
+        .await
+        .expect("the seam applies a destructive DML whose version is in scope");
+    assert!(ran, "the in-scope destructive DML applied this run");
+    let count = conn
+        .query_one(
+            &format!("SELECT count(*)::bigint FROM {s}.seam_scope_d"),
+            &[],
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0);
+    assert_eq!(count, 0, "the in-scope destructive DML deletes the row");
     teardown(&conn, &cfg).await;
 }
 

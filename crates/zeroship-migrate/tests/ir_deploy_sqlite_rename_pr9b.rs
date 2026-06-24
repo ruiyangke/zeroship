@@ -222,6 +222,100 @@ async fn renamecolumn_runs_in_production_via_catalog_without_prerename_descripto
     );
 }
 
+// REGRESSION (PR9b LOW): the catalog entry rebuilds the new table's CREATE from the
+// descriptor-sourced `to` field, while the value-copy carries the live `from` bytes
+// across un-transformed. A rename PRESERVES facets by contract — so a descriptor whose
+// `to` field DIVERGES in affinity from the live `from` (e.g. a rename bundled with an
+// encryption/affinity change in the SAME descriptor) must FAIL CLOSED, not silently
+// rebuild the column under a different affinity with the old bytes copied across.
+//
+// Here deploy #1 creates `users(name TEXT)`; deploy #2 renames `name → full_name`, but
+// the post-rename descriptor declares `full_name` as an ENCRYPTED field (BLOB affinity).
+// Pre-fix, option (2) accepted the descriptor `to` Value as-is and rebuilt `full_name`
+// with BLOB affinity while value-copying the old TEXT bytes — a silent shape skew. The
+// fix asserts the descriptor `to` affinity equals the live `from` affinity and refuses.
+// Fails RED pre-fix (the rebuild ran with the divergent affinity).
+#[compio::test]
+async fn catalog_entry_fails_closed_when_descriptor_to_affinity_diverges_from_live_from() {
+    let p = paths("catalog_affinity_skew");
+    let be = backend(&p);
+
+    // Deploy #1: createTable users(name TEXT). Seed a row.
+    let v1 = [descriptor("users", vec![text_field("name")])];
+    let create = r#"{"ir_version":1,"name":"create_users","ops":[
+        {"op":"createTable","name":"users","columns":[
+            {"name":"name","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    write_ir(&p, "0001_create_users.ir.json", create);
+    apply_bundle_ir_sqlite(
+        &be, PROJECT, APP, &v1, &p.migrations, &exec_cfg(),
+        &GuardConfig::confined(PROJECT), Approval::None,
+    )
+    .await
+    .expect("createTable users(name TEXT) must succeed");
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .exec("INSERT INTO main.users (id, name) VALUES ('u1','Ada')")
+        .await
+        .expect("seed");
+
+    // Deploy #2: renameColumn name → full_name, BUT the post-rename descriptor declares
+    // `full_name` as an ENCRYPTED field (BLOB affinity) — diverging from the live `name`
+    // (TEXT affinity). The descriptor-sourced `to` CREATE would render BLOB while the
+    // value-copy carries the old TEXT bytes: a silent affinity skew. Must FAIL CLOSED.
+    clear_migrations(&p);
+    let rename = r#"{"ir_version":1,"name":"rename_name","ops":[
+        {"op":"renameColumn","table":"users","from":"name","to":"full_name","type":"text"}
+    ]}"#;
+    write_ir(&p, "0002_rename_name.ir.json", rename);
+    let divergent_desired =
+        [descriptor("users", vec![encrypted_field("full_name")])];
+
+    let err = apply_bundle_ir_sqlite_catalog(
+        &be, PROJECT, APP, &divergent_desired, &p.migrations, &exec_cfg(),
+        &GuardConfig::confined(PROJECT), Approval::Approved,
+    )
+    .await
+    .expect_err(
+        "a rename whose descriptor `to` affinity diverges from the live `from` affinity \
+         must FAIL CLOSED rather than silently rebuild under a different affinity",
+    );
+    assert!(
+        matches!(err, SqliteIrApplyError::Ir { .. }),
+        "expected a fail-closed IR lower error on the affinity divergence, got {err:?}"
+    );
+    // The refusal names a type mismatch (the same equality the snapshot-path
+    // RenameHintTypeMismatch guard enforces).
+    assert!(
+        err.to_string().to_lowercase().contains("type")
+            || err.to_string().to_lowercase().contains("affinit"),
+        "the fail-closed error should describe a type/affinity mismatch, got: {err}"
+    );
+
+    // NO DATA LOSS / NO SKEW: the live table is untouched — still `name` TEXT, row intact.
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    let info = be.actor().query("PRAGMA main.table_info(users)").await.expect("table_info");
+    assert!(
+        info.iter().any(|r| r[1].as_deref() == Some("name")),
+        "the original `name` column is intact (no rebuild ran)"
+    );
+    assert!(
+        info.iter().all(|r| r[1].as_deref() != Some("full_name")),
+        "no `full_name` column was created (the rebuild was refused)"
+    );
+    let vals = be
+        .actor()
+        .query("SELECT name FROM main.users ORDER BY id")
+        .await
+        .expect("read name");
+    assert_eq!(
+        vals.iter().filter_map(|r| r[0].clone()).collect::<Vec<_>>(),
+        vec!["Ada"],
+        "the seeded row is intact — fail-closed means zero data loss / no affinity skew"
+    );
+}
+
 // The genuinely-unsourceable case STILL fails closed through the catalog entry: a
 // rename whose `from` column is absent from the LIVE catalog (a post-rename live DB)
 // cannot be sourced from any read, so the rebuild author refuses — no wrong rebuild,

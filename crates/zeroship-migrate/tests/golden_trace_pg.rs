@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use compio_postgres::Client;
 use zeroship_migrate::{
     desired_snapshot, drift::SchemaSnapshot, provision_migrator, role::deprovision_migrator,
-    snapshot_schema, Approval, CollectionDescriptor, DeclarativeApplyError, DeclarativeAuthor,
+    snapshot_schema, Approval, ApprovalScope, CollectionDescriptor, DeclarativeApplyError, DeclarativeAuthor,
     DeclarativeDeployOutcome, DesiredSchema, EngineError, ExecutorConfig, FieldDescriptor,
     GuardConfig, MigrationEngine, RenameHint,
 };
@@ -252,7 +252,7 @@ async fn oracle_apply(
     }
     for rebuild in &plan.rebuilds {
         backend
-            .rebuild_one(&rebuild.spec, &rebuild.migration, "app_test")
+            .rebuild_one(&rebuild.spec, &rebuild.migration, &ApprovalScope::All, "app_test")
             .await
             .map_err(|e| DeclarativeApplyError::Plain(EngineError::Apply(e)))?;
         applied.applied.push(rebuild.migration.version.as_str().to_string());
