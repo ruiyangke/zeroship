@@ -250,6 +250,50 @@ pub fn recompute_hint_domain_checksum(ir: &MigrationIr) -> Checksum {
     )
 }
 
+/// The **authoritative, dialect-neutral plan checksum** over a loaded
+/// [`MigrationIr`] — the drift anchor the deploy path journals (§5.3 / §2.6.1).
+///
+/// This is `Checksum::of_ir` over the canonical op list (§2.4 point 2) + the
+/// derived-then-overridden flags + the SERVER-STAMPED `owner_app`. It differs
+/// from [`recompute_hint_domain_checksum`] in exactly one way: it INCLUDES
+/// `owner_app` (the hint domain excludes it because the builder can't predict the
+/// server stamp; the authoritative journal anchor includes it, `migration.rs:330`).
+///
+/// **Why this is the drift anchor and the rendered SQL is NOT.** §5.3 names "the
+/// checksum over the canonical op list" as the anchor and §2.6.1 says "one plan
+/// checksum over the canonical op list, not the rendered SQL." Because the op list
+/// is dialect-NEUTRAL, the SAME `.ir.json` re-deployed on PG or SQLite re-derives
+/// the SAME anchor — so a re-deploy detects drift against the logical artifact, not
+/// a PG-specific SQL spelling. Editing the authoring `.ts` changes the op list ⇒
+/// changes this checksum ⇒ the executor's net-applied drift gate aborts
+/// (`drift.rs` compares the journaled checksum to the lowered `Migration.checksum`,
+/// which the IR Lower stamps with THIS value — see [`crate::ir_author::IrAuthor::lower_plan`]).
+///
+/// **PR1 flags scope.** The [`IrFlagsOverride`](crate::ir::IrFlagsOverride)→
+/// [`MigrationFlags`] and `String`→`MigrationId` merges are a later wave, so this
+/// folds the DEFAULT flags + EMPTY deps/supersedes — IDENTICAL to the hint domain
+/// (so the hint compare and the journaled anchor never disagree on a default-flags
+/// IR). The caller MUST gate on [`hint_domain_uncomputable_field`] returning `None`
+/// (the load gate already refuses an IR whose flags/deps/supersedes are non-default
+/// AND carry a hint; a non-default IR with NO hint is out of PR1 scope and the
+/// deploy path does not reach this helper for one).
+#[must_use]
+pub fn authoritative_ir_checksum(ir: &MigrationIr) -> Checksum {
+    debug_assert!(
+        hint_domain_uncomputable_field(ir).is_none(),
+        "authoritative_ir_checksum called on an IR with a not-yet-foldable \
+         flags/deps/supersedes domain — PR1 folds default flags + empty deps only"
+    );
+    Checksum::of_ir(
+        &crate::ir::CanonicalOpList(&ir.ops),
+        &MigrationFlags::default(),
+        &ir.owner_app, // server-stamped by load_ir_document; the AUTHORITATIVE anchor includes it
+        &[],
+        &[],
+        &ir.preconditions,
+    )
+}
+
 /// Return the §2.4 hint-domain field this engine build cannot yet fold for `ir`,
 /// or `None` when the hint domain IS fully computable (flags at default + no
 /// deps/supersedes). Used to fail closed on a hint over a not-yet-foldable
