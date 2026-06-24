@@ -724,10 +724,20 @@ async fn run_deploy_migrations(
             // checksum drift) is a 422 the creator can act on; an infra fault
             // (connect / provision) is a 503. Either way: NO go-live.
             let (status, kind) = match &e {
-                DME::Load(_) | DME::Apply(_) => {
+                // Creator-fault: bad `.sql` grammar / denied / destructive / drift,
+                // OR a `.ir.json` the fail-closed gate refused (malformed / future
+                // ir_version / structural reject / ownership / checksum) or that
+                // could not lower. The creator can act on all of these → 422.
+                DME::Load(_) | DME::Apply(_) | DME::Ir { .. } => {
                     (StatusCode::UNPROCESSABLE_ENTITY, "migration_failed")
                 }
-                DME::Connect(_) | DME::ProvisionSchema(_) | DME::ProvisionRole(_) => {
+                // Infra-fault: connect / provision / live-introspection / IR file
+                // read — not the creator's migration content → 503.
+                DME::Connect(_)
+                | DME::ProvisionSchema(_)
+                | DME::ProvisionRole(_)
+                | DME::Snapshot(_)
+                | DME::IrRead { .. } => {
                     (StatusCode::SERVICE_UNAVAILABLE, "migration_infrastructure")
                 }
             };

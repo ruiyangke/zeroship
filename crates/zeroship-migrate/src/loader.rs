@@ -671,6 +671,15 @@ fn classify_filenames(paths: &[PathBuf]) -> Result<Classified, LoaderError> {
 
     for path in paths {
         let name = file_name_of(path);
+        // `.ir.json` creator artifacts are a SEPARATE seam (the op.* DSL IR-load
+        // gate + `IrAuthor::lower`, routed by `apply_bundle_ir_migrations`), NOT
+        // Flyway `.sql`. The platform/Flyway loader skips them so a `.zship`
+        // carrying BOTH `.sql` and `.ir.json` loads its `.sql` set cleanly and the
+        // IR files flow through their own gated entry. (`load_ir_document` is the
+        // peer loader; this Flyway path never routes IR.)
+        if name.ends_with(".ir.json") {
+            continue;
+        }
         match parse_filename(&name) {
             Some(ParsedName::VersionedUp {
                 version,
@@ -1515,6 +1524,26 @@ mod tests {
         let secs = parse_dbmate_sections(&filename, &contents).expect("emitted body has an up section");
         assert_eq!(secs.up, "", "the scaffold up body is empty");
         assert_eq!(secs.down.as_deref(), Some(""), "the scaffold down marker is present but empty");
+    }
+
+    #[test]
+    fn loader_skips_ir_json_artifacts() {
+        // A `.zship` may carry BOTH `.sql` and `.ir.json`. The Flyway loader must
+        // SKIP the `.ir.json` (a SEPARATE seam) — not hard-error UnrecognizedFile —
+        // so the `.sql` set loads cleanly and the IR file flows through its own
+        // gated entry (`apply_bundle_ir_migrations`). A regression that would fail
+        // pre-fix (when any non-`.sql` filename was a hard LoaderError).
+        let dir = tempdir();
+        write_file(&dir, "V0001__create_t.sql", "CREATE TABLE t (id int);");
+        write_file(
+            &dir,
+            "0002_create_u.ir.json",
+            r#"{"ir_version":1,"name":"m","ops":[]}"#,
+        );
+        let migs = load_dir_migrations(&dir).expect("the .sql loads; the .ir.json is skipped");
+        assert_eq!(migs.len(), 1, "only the .sql migration is loaded by the Flyway path");
+        assert!(migs[0].up.contains("CREATE TABLE t"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -138,6 +138,9 @@ pub use guard::{
     flags_for, guard_for, GuardConfig, GuardError, GuardOutcome, GuardReport, MigrationGuard,
     PgGuard, SchemaScope, SqlGuard, SqliteDescriptorGuard, TrustProfile,
 };
+// The deploy-target dialect (§2.4.1) — re-exported so the control-plane deploy
+// path can thread it into `IrAuthor::new` without depending on `zeroship-schema`.
+pub use zeroship_schema::query::SqlDialect;
 // `OperatorCapability` the TYPE is re-exported crate-wide so the `platform(...)`
 // and `trusted(...)` constructors can name it in their signatures; its `new()`
 // mint stays private to `guard::platform_runner` (design §4.1 / §5).
@@ -184,16 +187,19 @@ pub use ir_load::{
 // The IR-path DDL Lower phase (§6/§6.4/§6.5): compiles a validated, ownership-
 // checked `MigrationIr` to migrations, reusing the SHARED snapshot-builder +
 // declarative render seam so its SQL is byte-identical to the differ's path.
-pub use ir_author::{IrAuthor, IrLowerError, LoadAndLowerError};
+pub use ir_author::{
+    FragmentGuardDenied, GuardedFragment, IrAuthor, IrGuardedLowerError, IrLowerError,
+    LoadAndLowerError,
+};
 // The closed expression AST (§3.3.1) the IR's transform/predicate positions
 // carry. Constructed in JS, serialized as data, NEVER parsed from text.
 pub use expr::{BinaryOp, CaseBranch, CastTarget, Expr, ScalarFn, SynthFn, UnaryOp};
 // The STRUCTURAL expression-AST validator + the structured-error envelope
 // (§3.3.1.1 / §8.8). No parser, no fuzzer — a pure allow-list walk.
 pub use validate::{
-    validate_expr, validate_ir, validate_op, AuthoringError, Dialect as ValidatorDialect,
-    TargetScope, UnsupportedKind, CODE_DIALECT_SCOPE_PGONLY, CODE_EXPR_NOT_PORTABLE,
-    CODE_OP_OUTSIDE_RECORDER, CODE_UNSUPPORTED, SPLIT_PART_MAX_N,
+    validate_expr, validate_ir, validate_ir_resolved, validate_op, AuthoringError,
+    Dialect as ValidatorDialect, TargetScope, UnsupportedKind, CODE_DIALECT_SCOPE_PGONLY,
+    CODE_EXPR_NOT_PORTABLE, CODE_OP_OUTSIDE_RECORDER, CODE_UNSUPPORTED, SPLIT_PART_MAX_N,
 };
 // The `op.*` DSL plan model (§2.0). Distinct from the dry-run `MigrationPlan`
 // (re-exported from `engine`, unchanged): these are the net-new ordered

@@ -33,6 +33,7 @@ use crate::declarative::{
     FieldDescriptor,
 };
 use crate::drift::{ColumnSnapshot, IndexSnapshot};
+use crate::guard::{guard_for, GuardConfig, GuardError};
 use crate::ir::{ColType, IrColumn, IrDefault, IndexMethod, MigrationIr, Op};
 use crate::migration::Migration;
 use zeroship_schema::query::SqlDialect;
@@ -58,6 +59,67 @@ pub enum IrLowerError {
     /// later wave; this Lower phase covers the DDL ops). Carries the op tag.
     #[error("IrAuthor::lower does not yet compile op {0:?} (DDL ops only in this wave)")]
     UnsupportedOp(&'static str),
+}
+
+/// One rendered SQL FRAGMENT of a lowered op, carrying its attribution (§6.1.1):
+/// the originating op INDEX (its position in `MigrationIr::ops`) and the op's kind.
+/// A single op can render multiple fragments (`createTable` emits the table + an
+/// inline `COMMENT ON COLUMN` side output + per-table indexes), and each is
+/// guarded INDIVIDUALLY so a denial is attributable to the exact op — not buried
+/// in a concatenated `up` blob.
+#[derive(Debug, Clone)]
+pub struct GuardedFragment {
+    /// The originating op's 0-based index in `MigrationIr::ops`.
+    pub op_index: usize,
+    /// The op's kind tag (e.g. `"createTable"`) — the human-facing attribution.
+    /// (The `.ts` source-map location threads through the §5.1 provenance blob in
+    /// a later wave; the op-index + kind is the attribution available at lower.)
+    pub op_kind: &'static str,
+    /// The single rendered SQL statement (NO trailing `;`), guarded as-is.
+    pub sql: String,
+}
+
+/// A guard DENIAL attributed to the exact op that produced the denied fragment
+/// (§6.1.1). The human message leads with the op-index + kind so an author/AI
+/// sees *which* op the guard refused, not a bare "statement denied".
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "op #{op_index} ({op_kind}): rendered statement denied by guard: {source}"
+)]
+pub struct FragmentGuardDenied {
+    /// The op whose rendered fragment the guard denied.
+    pub op_index: usize,
+    /// The op's kind tag.
+    pub op_kind: &'static str,
+    /// The underlying guard error.
+    #[source]
+    pub source: GuardError,
+}
+
+/// A failure of the guard-per-fragment lower ([`IrAuthor::lower_guarded`]):
+/// lowering failed, OR a rendered fragment was denied by the guard (attributed to
+/// its op, §6.1.1), OR the fragment-reassembly byte-identity invariant broke.
+#[derive(Debug, thiserror::Error)]
+pub enum IrGuardedLowerError {
+    /// Lowering a validated op to SQL failed.
+    #[error(transparent)]
+    Lower(#[from] IrLowerError),
+    /// A rendered fragment was denied by the guard, attributed to its op.
+    #[error(transparent)]
+    Denied(#[from] FragmentGuardDenied),
+    /// The reassembly invariant `applied_up == join(guarded_fragments, ";\n")`
+    /// broke for a lowered migration — an engine bug (fragment splitting that does
+    /// not round-trip). Fail closed rather than apply a `up` that diverges from
+    /// what was guarded.
+    #[error(
+        "fragment-reassembly invariant broke for migration {name:?}: the join of the \
+         individually-guarded fragments is not byte-identical to the lowered `up` \
+         (guard/render seam bug)"
+    )]
+    ReassemblyMismatch {
+        /// The migration whose reassembly diverged.
+        name: String,
+    },
 }
 
 /// A failure in the loader's IR branch ([`IrAuthor::load_and_lower`]): either the
@@ -145,63 +207,155 @@ impl IrAuthor {
         let mut out: Vec<Migration> = Vec::new();
         let mut live: BTreeSet<String> = live_tables.clone();
         for op in &ir.ops {
-            match op {
-                Op::CreateTable { name, columns, .. } => {
-                    let desc = self.create_table_descriptor(name, columns);
-                    let snap = build_table_snapshot(&self.project_schema, &desc, self.dialect)?;
-                    out.extend(self.decl.lower_create_table(name, &snap, &live)?);
-                    // The just-created table is now live for any later intra-IR FK.
-                    live.insert(name.clone());
-                }
-                Op::AddColumn { table, column, ty, nullable, default } => {
-                    let col =
-                        self.add_column_snapshot(table, column, ty, *nullable, default.as_ref())?;
-                    out.push(self.decl.lower_add_column(table, &col));
-                }
-                Op::CreateIndex { table, columns, name, unique, using, .. } => {
-                    let idx =
-                        create_index_snapshot(table, columns, name.as_deref(), *unique, *using);
-                    out.push(self.decl.lower_create_index(table, &idx));
-                }
-                Op::DropTable { table, .. } => {
-                    out.push(self.decl.lower_drop_table(table));
-                }
-                Op::DropColumn { table, column, .. } => {
-                    out.push(self.decl.lower_drop_column(table, column));
-                }
-                Op::DropIndex { name, .. } => {
-                    // A bare-name DropIndex is rejected fail-closed UPSTREAM by the
-                    // validator (§8.6); a table-hinted one reaches here. The IR
-                    // DropIndex carries no unique hint, so the drop takes the plain
-                    // (non-destructive) gating — matching the differ, which classes
-                    // a unique-index drop destructive only when the DESIRED snapshot
-                    // proves the dropped index was unique. The render is the same
-                    // `DROP INDEX` regardless of the gating flag.
-                    let idx = IndexSnapshot::btree(name.clone(), false, Vec::new());
-                    out.push(self.decl.lower_drop_index(&idx));
-                }
-                Op::AlterColumnType { .. } => {
-                    return Err(IrLowerError::UnsupportedOp("alterColumnType"))
-                }
-                Op::AlterColumnNullability { .. } => {
-                    return Err(IrLowerError::UnsupportedOp("alterColumnNullability"))
-                }
-                Op::RenameColumn { .. } => {
-                    return Err(IrLowerError::UnsupportedOp("renameColumn"))
-                }
-                Op::AddConstraint { .. } => {
-                    return Err(IrLowerError::UnsupportedOp("addConstraint"))
-                }
-                Op::DropConstraint { .. } => {
-                    return Err(IrLowerError::UnsupportedOp("dropConstraint"))
-                }
-                Op::Insert { .. } => return Err(IrLowerError::UnsupportedOp("insert")),
-                Op::Update { .. } => return Err(IrLowerError::UnsupportedOp("update")),
-                Op::Delete { .. } => return Err(IrLowerError::UnsupportedOp("delete")),
-                Op::Backfill { .. } => return Err(IrLowerError::UnsupportedOp("backfill")),
-            }
+            out.extend(self.lower_one_op(op, &mut live)?);
         }
         Ok(out)
+    }
+
+    /// Lower a SINGLE op to its migration(s), advancing the working `live` set
+    /// when the op creates a table (so a later intra-IR FK inlines). Factored out
+    /// of [`lower`] so the guard-per-fragment path ([`lower_guarded`]) can attribute
+    /// each op's rendered fragments to its op index (§6.1.1).
+    ///
+    /// # Errors
+    /// - [`IrLowerError::Snapshot`] — the shared builder rejected the op's fields.
+    /// - [`IrLowerError::UnsupportedOp`] — a non-DDL op (DML / online intent).
+    fn lower_one_op(
+        &self,
+        op: &Op,
+        live: &mut BTreeSet<String>,
+    ) -> Result<Vec<Migration>, IrLowerError> {
+        let migs = match op {
+            Op::CreateTable { name, columns, .. } => {
+                let desc = self.create_table_descriptor(name, columns);
+                let snap = build_table_snapshot(&self.project_schema, &desc, self.dialect)?;
+                // The SQLite CREATE routes through the shared `zeroship_schema`
+                // emitter, which consumes the SDK schema `Value` — built here from
+                // the SAME descriptor bridge (`descriptor_to_sdk_schema`) the
+                // differ's `desired_snapshot_for_dialect` uses, so the §6.4
+                // byte-identity holds on the SQLite leg (the PG leg ignores it).
+                let sqlite_schema = crate::declarative::descriptor_to_sdk_schema(&desc);
+                let migs = self.decl.lower_create_table(name, &snap, &sqlite_schema, live)?;
+                // The just-created table is now live for any later intra-IR FK.
+                live.insert(name.clone());
+                migs
+            }
+            Op::AddColumn { table, column, ty, nullable, default } => {
+                let col =
+                    self.add_column_snapshot(table, column, ty, *nullable, default.as_ref())?;
+                vec![self.decl.lower_add_column(table, &col)]
+            }
+            Op::CreateIndex { table, columns, name, unique, using, .. } => {
+                let idx = create_index_snapshot(table, columns, name.as_deref(), *unique, *using);
+                vec![self.decl.lower_create_index(table, &idx)]
+            }
+            Op::DropTable { table, .. } => vec![self.decl.lower_drop_table(table)],
+            Op::DropColumn { table, column, .. } => {
+                vec![self.decl.lower_drop_column(table, column)]
+            }
+            Op::DropIndex { name, .. } => {
+                // A bare-name DropIndex is rejected fail-closed UPSTREAM by the
+                // validator (§8.6); a table-hinted one reaches here. The IR
+                // DropIndex carries no unique hint, so the drop takes the plain
+                // (non-destructive) gating — matching the differ, which classes
+                // a unique-index drop destructive only when the DESIRED snapshot
+                // proves the dropped index was unique. The render is the same
+                // `DROP INDEX` regardless of the gating flag.
+                let idx = IndexSnapshot::btree(name.clone(), false, Vec::new());
+                vec![self.decl.lower_drop_index(&idx)]
+            }
+            Op::AlterColumnType { .. } => {
+                return Err(IrLowerError::UnsupportedOp("alterColumnType"))
+            }
+            Op::AlterColumnNullability { .. } => {
+                return Err(IrLowerError::UnsupportedOp("alterColumnNullability"))
+            }
+            Op::RenameColumn { .. } => return Err(IrLowerError::UnsupportedOp("renameColumn")),
+            Op::AddConstraint { .. } => return Err(IrLowerError::UnsupportedOp("addConstraint")),
+            Op::DropConstraint { .. } => {
+                return Err(IrLowerError::UnsupportedOp("dropConstraint"))
+            }
+            Op::Insert { .. } => return Err(IrLowerError::UnsupportedOp("insert")),
+            Op::Update { .. } => return Err(IrLowerError::UnsupportedOp("update")),
+            Op::Delete { .. } => return Err(IrLowerError::UnsupportedOp("delete")),
+            Op::Backfill { .. } => return Err(IrLowerError::UnsupportedOp("backfill")),
+        };
+        Ok(migs)
+    }
+
+    /// **Guard-per-fragment + reassembly (§6.1.1).** Lower the IR's DDL ops and,
+    /// for EACH op, guard every rendered SQL FRAGMENT individually — carrying the
+    /// op index + kind — BEFORE the step's `up` is assembled. Only after all of an
+    /// op's fragments pass the guard is the `up` reassembled by joining exactly
+    /// those guarded fragments with the canonical `;\n` separator, and the
+    /// byte-identity invariant `applied_up == join(guarded_fragments)` is asserted.
+    ///
+    /// A DENIED fragment aborts the WHOLE lower with the op-index attribution
+    /// ([`FragmentGuardDenied`]) and applies NOTHING — there is no partial plan.
+    ///
+    /// Returns the per-op guarded fragments (for status/DX attribution) alongside
+    /// the lowered migrations whose `up` is provably the reassembly of those exact
+    /// fragments. The SQLite leg's guard ([`crate::guard::SqliteDescriptorGuard`])
+    /// trusts descriptor-/IR-generated DDL (no string deny-list), so it never
+    /// denies — but the fragment split + reassembly invariant still runs, so the
+    /// `up`↔fragment correspondence holds on both dialects.
+    ///
+    /// # Errors
+    /// - [`IrGuardedLowerError::Lower`] — an op failed to lower.
+    /// - [`IrGuardedLowerError::Denied`] — a rendered fragment was guard-denied.
+    /// - [`IrGuardedLowerError::ReassemblyMismatch`] — the fragment split did not
+    ///   round-trip (engine bug; fail closed).
+    pub fn lower_guarded(
+        &self,
+        ir: &MigrationIr,
+        guard_cfg: &GuardConfig,
+        live_tables: &BTreeSet<String>,
+    ) -> Result<(Vec<Migration>, Vec<GuardedFragment>), IrGuardedLowerError> {
+        let guard = guard_for(guard_cfg);
+        let mut migrations: Vec<Migration> = Vec::new();
+        let mut fragments: Vec<GuardedFragment> = Vec::new();
+        let mut live: BTreeSet<String> = live_tables.clone();
+
+        for (op_index, op) in ir.ops.iter().enumerate() {
+            let op_kind = op_kind_tag(op);
+            // Lower this op (advancing `live` for intra-IR FK inlining). A lower
+            // failure aborts before any guarding — nothing applied.
+            let op_migs = self.lower_one_op(op, &mut live)?;
+
+            for mig in op_migs {
+                // Split the rendered `up` into its individual statement FRAGMENTS on
+                // the canonical `;\n` separator the renderers emit between a
+                // statement and its `COMMENT ON COLUMN` side output / follow-on
+                // index. Guard EACH fragment individually so a denial is attributed
+                // to THIS op (§6.1.1) — not buried in a concatenated blob.
+                let frags = split_up_fragments(&mig.up);
+                let mut guarded_for_mig: Vec<String> = Vec::with_capacity(frags.len());
+                for frag in frags {
+                    guard.check(frag).map_err(|source| FragmentGuardDenied {
+                        op_index,
+                        op_kind,
+                        source,
+                    })?;
+                    fragments.push(GuardedFragment {
+                        op_index,
+                        op_kind,
+                        sql: frag.to_string(),
+                    });
+                    guarded_for_mig.push(frag.to_string());
+                }
+                // Byte-identity invariant: the step's `up` MUST be exactly the join
+                // of the fragments we just guarded — nothing inserted, rewritten, or
+                // re-quoted between guarding and concatenation (§6.1.1).
+                let reassembled = guarded_for_mig.join(";\n");
+                if reassembled != mig.up {
+                    return Err(IrGuardedLowerError::ReassemblyMismatch {
+                        name: mig.name.clone(),
+                    });
+                }
+                migrations.push(mig);
+            }
+        }
+        Ok((migrations, fragments))
     }
 
     /// Map an IR `createTable` op to the [`CollectionDescriptor`] the shared
@@ -248,6 +402,43 @@ impl IrAuthor {
             .ok_or(IrLowerError::UnsupportedOp("addColumn (column folded away)"))
     }
 
+}
+
+/// Split a lowered migration's `up` into its individual statement FRAGMENTS on
+/// the canonical `;\n` separator the renderers emit between statements (§6.1.1).
+/// `join(";\n")` over the result reproduces the input byte-for-byte (the
+/// reassembly invariant `lower_guarded` asserts), so a fragment is exactly one
+/// guardable statement with NO trailing `;`.
+///
+/// The renderers ALWAYS separate statements with the literal `;\n` and never emit
+/// a `;\n` inside a statement (the only multi-statement ups are
+/// `<stmt>;\n COMMENT ON COLUMN …` and `<create>;\n<index>` follow-ons — all
+/// emitter-controlled, never carrying user free-text with an embedded `;\n`). A
+/// single-statement `up` yields one fragment.
+fn split_up_fragments(up: &str) -> Vec<&str> {
+    up.split(";\n").collect()
+}
+
+/// The op kind tag for §6.1.1 attribution — the human-facing name the guard
+/// denial / status surface leads with.
+const fn op_kind_tag(op: &Op) -> &'static str {
+    match op {
+        Op::CreateTable { .. } => "createTable",
+        Op::AddColumn { .. } => "addColumn",
+        Op::CreateIndex { .. } => "createIndex",
+        Op::DropTable { .. } => "dropTable",
+        Op::DropColumn { .. } => "dropColumn",
+        Op::DropIndex { .. } => "dropIndex",
+        Op::AlterColumnType { .. } => "alterColumnType",
+        Op::AlterColumnNullability { .. } => "alterColumnNullability",
+        Op::RenameColumn { .. } => "renameColumn",
+        Op::AddConstraint { .. } => "addConstraint",
+        Op::DropConstraint { .. } => "dropConstraint",
+        Op::Insert { .. } => "insert",
+        Op::Update { .. } => "update",
+        Op::Delete { .. } => "delete",
+        Op::Backfill { .. } => "backfill",
+    }
 }
 
 /// Build the [`IndexSnapshot`] for a `createIndex` op. A plain B-tree index is
@@ -377,6 +568,135 @@ mod tests {
 
     fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs.iter().map(|(t, o)| (t.to_string(), o.to_string())).collect()
+    }
+
+    use crate::ir::{IrColumn as TIrColumn, IrFlagsOverride};
+
+    /// Build a one-op `createTable` IR for the guard-per-fragment tests.
+    fn create_table_ir(table: &str, cols: Vec<TIrColumn>) -> MigrationIr {
+        MigrationIr {
+            ir_version: 1,
+            name: "m".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::CreateTable {
+                name: table.into(),
+                columns: cols,
+                constraints: vec![],
+                indexes: vec![],
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        }
+    }
+
+    // §6.1.1 — the byte-identity invariant: for a MULTI-statement op (a
+    // createTable with an encrypted column → `CREATE TABLE …;\nCOMMENT ON COLUMN
+    // …`), the lowered `up` is byte-identical to the join of the individually
+    // guarded fragments, and >1 fragment is actually guarded.
+    #[test]
+    fn guard_per_fragment_reassembly_is_byte_identical_pg() {
+        let ir = create_table_ir(
+            "vault",
+            vec![TIrColumn {
+                name: "secret".into(),
+                ty: ColType::Encrypted { of: Box::new(ColType::String) },
+                nullable: None,
+                default: None,
+                unique: None,
+            }],
+        );
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        let guard_cfg = GuardConfig::confined("app".to_string());
+        let (migs, frags) = author
+            .lower_guarded(&ir, &guard_cfg, &BTreeSet::new())
+            .expect("guarded lower of a clean createTable passes");
+
+        // The createTable emits a multi-statement `up` (CREATE + COMMENT sentinel),
+        // so MORE THAN ONE fragment is guarded for op #0.
+        let op0_frags: Vec<_> = frags.iter().filter(|f| f.op_index == 0).collect();
+        assert!(
+            op0_frags.len() >= 2,
+            "an encrypted-column createTable renders >1 fragment (CREATE + COMMENT); got {}",
+            op0_frags.len()
+        );
+        assert!(op0_frags.iter().all(|f| f.op_kind == "createTable"));
+        assert!(
+            op0_frags.iter().any(|f| f.sql.contains("COMMENT ON COLUMN")),
+            "the COMMENT sentinel is a SEPARATELY-guarded fragment"
+        );
+
+        // Reassembly: each migration's `up` == join of THAT migration's guarded
+        // fragments with `;\n` (the invariant `lower_guarded` enforces). Verify it
+        // independently here over the createTable migration.
+        let create_mig = migs
+            .iter()
+            .find(|m| m.up.contains("CREATE TABLE"))
+            .expect("a CREATE migration");
+        let reassembled = split_up_fragments(&create_mig.up).join(";\n");
+        assert_eq!(reassembled, create_mig.up, "reassembly must be byte-identical");
+    }
+
+    // §6.1.1 — a DENIED fragment aborts the WHOLE lower with the op-index
+    // attribution, and NOTHING is applied. We force a denial by guarding the
+    // rendered `"app".…` DDL under a guard CONFINED to a DIFFERENT schema, so the
+    // qualified reference is a cross-schema construct the guard refuses — the same
+    // refusal a hostile cross-tenant fragment would trigger.
+    #[test]
+    fn guard_per_fragment_denied_aborts_with_op_index_pg() {
+        let ir = create_table_ir(
+            "widgets",
+            vec![TIrColumn {
+                name: "title".into(),
+                ty: ColType::String,
+                nullable: None,
+                default: None,
+                unique: None,
+            }],
+        );
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        // Guard confined to "other" — the rendered `CREATE TABLE "app".…` is then a
+        // cross-schema reference the Confined guard denies.
+        let guard_cfg = GuardConfig::confined("other".to_string());
+        let err = author
+            .lower_guarded(&ir, &guard_cfg, &BTreeSet::new())
+            .expect_err("a fragment outside the confined schema must be denied");
+        match err {
+            IrGuardedLowerError::Denied(d) => {
+                assert_eq!(d.op_index, 0, "the denial attributes to op #0");
+                assert_eq!(d.op_kind, "createTable");
+            }
+            other => panic!("expected a per-fragment Denied, got: {other}"),
+        }
+    }
+
+    // §6.1.1 — the SQLite leg: the descriptor guard trusts IR-generated DDL (no
+    // string deny-list), so it never denies, but the fragment split + reassembly
+    // invariant still runs and holds on SQLite.
+    #[test]
+    fn guard_per_fragment_reassembly_holds_sqlite() {
+        let ir = create_table_ir(
+            "widgets",
+            vec![TIrColumn {
+                name: "title".into(),
+                ty: ColType::String,
+                nullable: Some(false),
+                default: None,
+                unique: None,
+            }],
+        );
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Sqlite);
+        let guard_cfg = GuardConfig::confined_sqlite("app".to_string());
+        let (migs, frags) = author
+            .lower_guarded(&ir, &guard_cfg, &BTreeSet::new())
+            .expect("SQLite guarded lower passes (descriptor guard trusts IR DDL)");
+        assert!(!frags.is_empty(), "fragments are still attributed on SQLite");
+        for m in &migs {
+            let reassembled = split_up_fragments(&m.up).join(";\n");
+            assert_eq!(reassembled, m.up, "SQLite reassembly must be byte-identical");
+        }
     }
 
     // The loader's IR branch end-to-end (§7.2): a well-formed `.ir.json`

@@ -407,6 +407,95 @@ pub fn validate_op(
     }
 }
 
+/// **Apply/render-seam ColRef resolution (rule (c), MED).** Re-run the
+/// expression-AST walk for the ops whose live-schema column set was NOT known at
+/// IR-load time — the DML ops (`update`/`delete`/`backfill`) and `alterColumnType`
+/// — now that the render/apply seam HAS the live columns. For each such op whose
+/// target table appears in `live_columns`, the embedded predicates / set RHS /
+/// cast are re-validated with a **RESOLVING** [`TargetScope`], so an unresolved
+/// `ColRef` is rejected with the structured [`AuthoringError`] (rule (c)) at apply
+/// — NOT as an opaque raw DB error mid-statement.
+///
+/// `live_columns` maps a target table → its live column names (system fields
+/// included). An op whose table is absent from the map keeps the structural-only
+/// scope (the (c) check is skipped — the caller could not resolve that table).
+/// Non-DML / non-`alterColumnType` ops are revalidated structurally (a),(b),(d)
+/// — harmless and keeps the walk total.
+///
+/// This is the seam the design (`validate_ir` doc, "the apply/render seam re-runs
+/// the walk with a resolved column set to enforce (c)") names. In PR1 the DML /
+/// `alterColumnType` LOWER is still deferred (`IrAuthor::lower` returns
+/// `UnsupportedOp`), so this resolution is exercised as a stand-alone seam +
+/// regression; once DML lowering lands (PR6a) the apply path calls this BEFORE
+/// rendering the DML statement.
+///
+/// # Errors
+/// The first [`AuthoringError`] any embedded expression produces — incl. a rule
+/// (c) `ColRef`-resolution failure now that the column set is known.
+pub fn validate_ir_resolved(
+    ir: &crate::ir::MigrationIr,
+    target_dialect: Dialect,
+    live_columns: &std::collections::BTreeMap<String, Vec<String>>,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    use crate::ir::Op;
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        let ts = ts_locations.get(op_index).and_then(Option::as_deref);
+        // The op's target table (for the DML / alterColumnType ops we resolve).
+        let resolved_scope = |table: &str| -> Option<Vec<String>> {
+            live_columns.get(table).cloned()
+        };
+        match op {
+            Op::Update { table, set, r#where, .. } => {
+                if let Some(cols) = resolved_scope(table) {
+                    let scope = TargetScope::new(table, &cols);
+                    for rhs in set.values() {
+                        validate_expr(rhs, target_dialect, &scope, op_index, ts)?;
+                    }
+                    if let Some(pred) = r#where {
+                        validate_expr(pred, target_dialect, &scope, op_index, ts)?;
+                    }
+                } else {
+                    validate_op(op, target_dialect, op_index, ts)?;
+                }
+            }
+            Op::Delete { table, r#where, .. } => {
+                if let Some(cols) = resolved_scope(table) {
+                    let scope = TargetScope::new(table, &cols);
+                    validate_expr(r#where, target_dialect, &scope, op_index, ts)?;
+                } else {
+                    validate_op(op, target_dialect, op_index, ts)?;
+                }
+            }
+            Op::Backfill { table, set, filter, .. } => {
+                if let Some(cols) = resolved_scope(table) {
+                    let scope = TargetScope::new(table, &cols);
+                    for rhs in set.values() {
+                        validate_expr(rhs, target_dialect, &scope, op_index, ts)?;
+                    }
+                    if let Some(pred) = filter {
+                        validate_expr(pred, target_dialect, &scope, op_index, ts)?;
+                    }
+                } else {
+                    validate_op(op, target_dialect, op_index, ts)?;
+                }
+            }
+            Op::AlterColumnType { table, using, .. } => {
+                if let (Some(cols), Some(cast)) = (resolved_scope(table), using) {
+                    let scope = TargetScope::new(table, &cols);
+                    validate_expr(cast, target_dialect, &scope, op_index, ts)?;
+                } else {
+                    validate_op(op, target_dialect, op_index, ts)?;
+                }
+            }
+            // Every other op: revalidate structurally (its own scope is already
+            // resolved or has no Expr slot).
+            other => validate_op(other, target_dialect, op_index, ts)?,
+        }
+    }
+    Ok(())
+}
+
 struct Ctx<'a> {
     target_dialect: Dialect,
     scope: &'a TargetScope<'a>,
@@ -1205,6 +1294,56 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         }
+    }
+
+    // (E) MED — ColRef resolution at the apply/render seam. At LOAD the DML scope
+    // is structural-only (the live column set is unknown), so an unresolved ColRef
+    // PASSES the load walk. At APPLY, `validate_ir_resolved` re-runs the walk with
+    // the resolved live columns and REJECTS a ColRef that does not resolve — with
+    // the structured (c) error, NOT a raw DB error.
+    #[test]
+    fn validate_ir_resolved_rejects_unresolved_colref_in_update_set() {
+        use std::collections::BTreeMap;
+        // An update whose SET RHS references `ghost` — a column that does NOT exist
+        // on the live `users` table.
+        let ir = ir_with(vec![Op::Update {
+            table: "users".into(),
+            set: [("name".to_string(), Expr::col("ghost"))].into_iter().collect(),
+            r#where: None,
+            batch: None,
+        }]);
+
+        // At LOAD: structural-only scope ⇒ the unresolved ColRef is NOT caught.
+        assert!(
+            validate_ir(&ir, Dialect::Postgres, &[]).is_ok(),
+            "load-time validation is structural-only for DML (column set unknown)"
+        );
+
+        // At APPLY: resolve against the live columns of `users` (no `ghost`).
+        let mut live: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        live.insert("users".to_string(), vec!["id".to_string(), "name".to_string()]);
+        let err = validate_ir_resolved(&ir, Dialect::Postgres, &live, &[])
+            .expect_err("an unresolved ColRef must be rejected at the resolved apply seam");
+        assert_eq!(err.code, CODE_UNSUPPORTED, "rule (c) failure is structured, not a raw DB error");
+        assert_eq!(err.op_index, 0);
+    }
+
+    #[test]
+    fn validate_ir_resolved_accepts_resolvable_colref_in_update_set() {
+        use std::collections::BTreeMap;
+        // The SAME shape but the ColRef references a column that DOES exist.
+        let ir = ir_with(vec![Op::Update {
+            table: "users".into(),
+            set: [("name".to_string(), Expr::col("name"))].into_iter().collect(),
+            r#where: None,
+            batch: None,
+        }]);
+        let mut live: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        live.insert("users".to_string(), vec!["id".to_string(), "name".to_string()]);
+        assert!(
+            validate_ir_resolved(&ir, Dialect::Postgres, &live, &[]).is_ok(),
+            "a ColRef that resolves to a live column passes the apply-seam (c) check"
+        );
     }
 
     #[test]

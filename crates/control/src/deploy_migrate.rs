@@ -50,13 +50,14 @@
 //! surface / expand-contract across deploys (schema-authority §8.4), not a
 //! creator's routine deploy.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use uuid::Uuid;
 use zeroship_migrate::{
     compute_manifest, connect, load_dir_migrations, provision_migrator, Approval, ConnectError,
-    EngineError,
-    ExecutorConfig, LoaderError, MigrationEngine, PostgresBackend, RoleError,
+    DriftError, EngineError, ExecutorConfig, IrAuthor, LoadAndLowerError, LoaderError,
+    MigrationBackend, MigrationEngine, PostgresBackend, RoleError, SqlDialect,
 };
 
 /// What a successful deploy-migrate produced (for logging / the deploy log).
@@ -90,6 +91,30 @@ pub enum DeployMigrateError {
     /// mid-apply DB error.
     #[error("deploy-migrate apply: {0}")]
     Apply(#[from] EngineError),
+    /// A creator `.ir.json` failed the fail-closed LOAD GATE (malformed, future
+    /// `ir_version`, structural reject incl. the bare-name DropIndex, ownership
+    /// violation, checksum-hint mismatch) or its lowering failed (§5.2/§8.6). A
+    /// creator-fault — the deploy handler maps this to a 422; no go-live.
+    #[error("deploy-migrate IR load/lower ({file}): {source}")]
+    Ir {
+        /// The `.ir.json` filename the gate refused.
+        file: String,
+        /// The fail-closed gate / lower error.
+        #[source]
+        source: LoadAndLowerError,
+    },
+    /// Reading the `.ir.json` file from the reconstructed migrations dir failed.
+    #[error("deploy-migrate read IR file ({file}): {message}")]
+    IrRead {
+        /// The `.ir.json` filename.
+        file: String,
+        /// The I/O error.
+        message: String,
+    },
+    /// Introspecting the live schema (to build the IR ownership registry + the
+    /// FK-inline live-table set) failed.
+    #[error("deploy-migrate live snapshot: {0}")]
+    Snapshot(#[from] DriftError),
 }
 
 /// Quote a SQL identifier (double embedded quotes, wrap in `"`). Mirrors the
@@ -222,8 +247,115 @@ pub async fn apply_bundle_migrations(
         )
         .await?;
 
-    Ok(MigrateOutcome {
-        applied: outcome.applied,
-        skipped: outcome.skipped,
-    })
+    // (d) CREATOR `.ir.json` PATH (§5.2/§6/§8.6). A `.zship` may ship `.ir.json`
+    //     artifacts (the op.* DSL output) alongside / instead of `.sql`. Each is
+    //     routed through the fail-closed IR LOAD GATE
+    //     (`IrAuthor::load_and_lower`: deserialize → ir_version → validate_ir →
+    //     server-stamped ownership → checksum-hint), with the deploy-target dialect
+    //     (Postgres here) threaded in, then LOWERED + applied under the SAME
+    //     Confined guard + migrator role. This is the production caller of the IR
+    //     gate (previously the gate was exported but unreached).
+    let ir_outcome =
+        apply_bundle_ir_migrations(&backend, app_id, migrations_dir, &exec_cfg, &guard_cfg)
+            .await?;
+
+    let mut applied = outcome.applied;
+    applied.extend(ir_outcome.applied);
+    let mut skipped = outcome.skipped;
+    skipped.extend(ir_outcome.skipped);
+    Ok(MigrateOutcome { applied, skipped })
+}
+
+/// Discover + apply the bundle's `.ir.json` creator artifacts (§5.2/§8.6).
+///
+/// For each `*.ir.json` file in `migrations_dir` (version-ordered by filename),
+/// the fail-closed IR LOAD GATE runs ([`IrAuthor::load_and_lower`]: deserialize →
+/// `ir_version` → `validate_ir` → server-stamped ownership → advisory checksum
+/// hint), with the deploy-target dialect (Postgres) threaded in (§2.4.1), then
+/// the validated, owned ops are LOWERED to migrations and applied under the SAME
+/// Confined guard + least-priv migrator role as the `.sql` path. The ownership
+/// registry + the FK-inline live-table set are introspected from the LIVE schema
+/// (the per-app schema `"<app_id>"`, all tables owned by `app_id`).
+///
+/// An empty / IR-free directory is a clean no-op.
+///
+/// # Errors
+/// [`DeployMigrateError::Ir`] on a fail-closed gate refusal / lower failure (a
+/// creator fault → 422); [`DeployMigrateError::Snapshot`] / [`DeployMigrateError::IrRead`]
+/// / [`DeployMigrateError::Apply`] on introspection / I/O / apply failure.
+async fn apply_bundle_ir_migrations(
+    backend: &PostgresBackend<'_>,
+    app_id: &Uuid,
+    migrations_dir: &Path,
+    exec_cfg: &ExecutorConfig,
+    guard_cfg: &zeroship_migrate::GuardConfig,
+) -> Result<MigrateOutcome, DeployMigrateError> {
+    // Discover `*.ir.json` files, version-ordered by filename (deterministic).
+    let mut ir_files: Vec<std::path::PathBuf> = Vec::new();
+    let read = std::fs::read_dir(migrations_dir).map_err(|e| DeployMigrateError::IrRead {
+        file: migrations_dir.display().to_string(),
+        message: e.to_string(),
+    })?;
+    for entry in read {
+        let entry = entry.map_err(|e| DeployMigrateError::IrRead {
+            file: migrations_dir.display().to_string(),
+            message: e.to_string(),
+        })?;
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".ir.json"))
+        {
+            ir_files.push(path);
+        }
+    }
+    if ir_files.is_empty() {
+        return Ok(MigrateOutcome { applied: vec![], skipped: vec![] });
+    }
+    ir_files.sort();
+
+    let app = app_id.to_string();
+
+    // Introspect the LIVE schema once: every live table in the per-app schema is
+    // owned by the deploying app, so the IR ownership registry maps each live
+    // table → `app_id`. The same key-set is the FK-inline live-table set.
+    let live = backend.snapshot_schema(exec_cfg).await?;
+    let registry: BTreeMap<String, String> =
+        live.tables.keys().map(|t| (t.clone(), app.clone())).collect();
+    let live_tables: BTreeSet<String> = live.tables.keys().cloned().collect();
+
+    let engine = MigrationEngine::new();
+    let mut applied: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+
+    for path in &ir_files {
+        let file = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("<unknown>")
+            .to_string();
+        let bytes = std::fs::read_to_string(path).map_err(|e| DeployMigrateError::IrRead {
+            file: file.clone(),
+            message: e.to_string(),
+        })?;
+
+        // The FAIL-CLOSED gate + lower, with the deploy-target dialect (Postgres).
+        let author = IrAuthor::new(app.clone(), app.clone(), SqlDialect::Postgres);
+        let migrations = author
+            .load_and_lower(&bytes, &app, &registry, &live_tables)
+            .map_err(|source| DeployMigrateError::Ir { file: file.clone(), source })?;
+
+        // Plan (Confined guard re-run as line-1) + apply under Approval::None — a
+        // destructive op is refused at deploy, exactly like the `.sql` path.
+        let plan = engine.plan(&migrations, guard_cfg);
+        let outcome = engine
+            .apply(&plan, Approval::None, backend, exec_cfg, "deploy-ir")
+            .await?;
+        applied.extend(outcome.applied);
+        skipped.extend(outcome.skipped);
+    }
+
+    Ok(MigrateOutcome { applied, skipped })
 }

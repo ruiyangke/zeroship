@@ -46,19 +46,33 @@ fn sql_pairs(migs: &[zeroship_migrate::Migration]) -> Vec<(String, Option<String
 }
 
 /// Run the declarative path: descriptors → `desired_snapshot` → `diff` against an
-/// empty live schema → the emitted migrations.
-fn declarative_pairs(descs: &[CollectionDescriptor]) -> Vec<(String, Option<String>)> {
+/// empty live schema → the emitted migrations, on the given dialect.
+fn declarative_pairs_for(
+    descs: &[CollectionDescriptor],
+    dialect: SqlDialect,
+) -> Vec<(String, Option<String>)> {
     let desired: DesiredSchema =
-        zeroship_migrate::declarative::desired_snapshot(SCHEMA, descs).expect("desired snapshot");
-    let author = DeclarativeAuthor::new(SCHEMA, OWNER);
+        zeroship_migrate::declarative::desired_snapshot_for_dialect(SCHEMA, descs, dialect)
+            .expect("desired snapshot");
+    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, dialect);
     let plan = author
         .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
         .expect("declarative diff");
     sql_pairs(&plan.migrations)
 }
 
-/// Run the IR path: ops → `IrAuthor::lower` against the given live tables.
-fn ir_pairs(ops: Vec<Op>, live: &BTreeSet<String>) -> Vec<(String, Option<String>)> {
+/// Run the declarative path on Postgres (the historical helper).
+fn declarative_pairs(descs: &[CollectionDescriptor]) -> Vec<(String, Option<String>)> {
+    declarative_pairs_for(descs, SqlDialect::Postgres)
+}
+
+/// Run the IR path: ops → `IrAuthor::lower` against the given live tables, on the
+/// given dialect.
+fn ir_pairs_for(
+    ops: Vec<Op>,
+    live: &BTreeSet<String>,
+    dialect: SqlDialect,
+) -> Vec<(String, Option<String>)> {
     let ir = MigrationIr {
         ir_version: 1,
         name: "m".into(),
@@ -70,9 +84,14 @@ fn ir_pairs(ops: Vec<Op>, live: &BTreeSet<String>) -> Vec<(String, Option<String
         preconditions: vec![],
         checksum: None,
     };
-    let author = IrAuthor::new(SCHEMA, OWNER, SqlDialect::Postgres);
+    let author = IrAuthor::new(SCHEMA, OWNER, dialect);
     let migs = author.lower(&ir, live).expect("ir lower");
     sql_pairs(&migs)
+}
+
+/// Run the IR path on Postgres (the historical helper).
+fn ir_pairs(ops: Vec<Op>, live: &BTreeSet<String>) -> Vec<(String, Option<String>)> {
+    ir_pairs_for(ops, live, SqlDialect::Postgres)
 }
 
 #[test]
@@ -361,4 +380,214 @@ fn create_index_render_is_byte_identical_pg() {
     // Silence the unused-import lint for IrIndex (reserved for a future
     // createTable-with-inline-index parity case).
     let _ = std::any::type_name::<IrIndex>();
+}
+
+// ===========================================================================
+// §6.4 SQLite leg — the SAME byte-identity gate on the SQLite dialect.
+//
+// The task mandates the cross-path byte-identity golden on BOTH PG and SQLite.
+// The SQLite createTable routes through the SHARED `zeroship_schema::query`
+// emitter (the same call the differ's `render_create_table_sqlite` makes), fed
+// the SDK schema `Value` IrAuthor builds from the op descriptor via the same
+// `descriptor_to_sdk_schema` bridge. So the SQLite leg is byte-identical BY
+// CONSTRUCTION, exactly as the PG leg is.
+// ===========================================================================
+
+#[test]
+fn create_table_render_is_byte_identical_sqlite() {
+    let desc = CollectionDescriptor {
+        name: "widgets".into(),
+        owner_app: OWNER.into(),
+        fields: vec![
+            FieldDescriptor {
+                name: "title".into(),
+                ty: "string".into(),
+                required: true,
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "slug".into(),
+                ty: "string".into(),
+                unique: true,
+                ..Default::default()
+            },
+            FieldDescriptor { name: "qty".into(), ty: "int".into(), ..Default::default() },
+        ],
+        indexes: vec![],
+    };
+    let ops = vec![Op::CreateTable {
+        name: "widgets".into(),
+        columns: vec![
+            IrColumn {
+                name: "title".into(),
+                ty: ColType::String,
+                nullable: Some(false),
+                default: None,
+                unique: None,
+            },
+            IrColumn {
+                name: "slug".into(),
+                ty: ColType::String,
+                nullable: None,
+                default: None,
+                unique: Some(true),
+            },
+            IrColumn {
+                name: "qty".into(),
+                ty: ColType::Int,
+                nullable: None,
+                default: None,
+                unique: None,
+            },
+        ],
+        constraints: vec![],
+        indexes: vec![],
+    }];
+
+    let decl = declarative_pairs_for(&[desc], SqlDialect::Sqlite);
+    let ir = ir_pairs_for(ops, &BTreeSet::new(), SqlDialect::Sqlite);
+    assert_eq!(
+        decl, ir,
+        "createTable render must be byte-identical across paths on SQLite"
+    );
+    assert!(
+        decl.iter().any(|(up, _)| up.contains("CREATE TABLE")),
+        "the SQLite CREATE TABLE must be emitted on both paths"
+    );
+    assert!(
+        decl.iter().any(|(up, _)| up.contains("CREATE UNIQUE INDEX")),
+        "the unique index must be emitted on both paths (SQLite)"
+    );
+}
+
+#[test]
+fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
+    let desc = CollectionDescriptor {
+        name: "vault".into(),
+        owner_app: OWNER.into(),
+        fields: vec![FieldDescriptor {
+            name: "secret".into(),
+            ty: "string".into(),
+            encrypted: Some(serde_json::json!({})),
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let ops = vec![Op::CreateTable {
+        name: "vault".into(),
+        columns: vec![IrColumn {
+            name: "secret".into(),
+            ty: ColType::Encrypted { of: Box::new(ColType::String) },
+            nullable: None,
+            default: None,
+            unique: None,
+        }],
+        constraints: vec![],
+        indexes: vec![],
+    }];
+    let decl = declarative_pairs_for(&[desc], SqlDialect::Sqlite);
+    let ir = ir_pairs_for(ops, &BTreeSet::new(), SqlDialect::Sqlite);
+    assert_eq!(
+        decl, ir,
+        "encrypted-column createTable render must be byte-identical across paths on SQLite"
+    );
+    assert!(
+        decl.iter().any(|(up, _)| up.contains("zsenc:")),
+        "the encryption sentinel must be emitted on the SQLite leg too (shared-kernel source)"
+    );
+}
+
+#[test]
+fn add_column_render_is_byte_identical_sqlite() {
+    let desc = CollectionDescriptor {
+        name: "people".into(),
+        owner_app: OWNER.into(),
+        fields: vec![FieldDescriptor {
+            name: "nickname".into(),
+            ty: "string".into(),
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let desired =
+        zeroship_migrate::declarative::desired_snapshot_for_dialect(SCHEMA, &[desc], SqlDialect::Sqlite)
+            .expect("desired snapshot");
+    let live_desc = CollectionDescriptor {
+        name: "people".into(),
+        owner_app: OWNER.into(),
+        fields: vec![],
+        indexes: vec![],
+    };
+    let live_full =
+        zeroship_migrate::declarative::desired_snapshot_for_dialect(SCHEMA, &[live_desc], SqlDialect::Sqlite)
+            .expect("live snapshot");
+    let mut live_ownership = HashMap::new();
+    live_ownership.insert("people".to_string(), OWNER.to_string());
+    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, SqlDialect::Sqlite);
+    let plan = author
+        .diff(&desired, &live_full.snapshot, &live_ownership, &[])
+        .expect("declarative diff");
+    let decl = sql_pairs(&plan.migrations);
+
+    let ops = vec![Op::AddColumn {
+        table: "people".into(),
+        column: "nickname".into(),
+        ty: ColType::String,
+        nullable: None,
+        default: None,
+    }];
+    let mut live = BTreeSet::new();
+    live.insert("people".to_string());
+    let ir = ir_pairs_for(ops, &live, SqlDialect::Sqlite);
+
+    assert_eq!(decl, ir, "addColumn render must be byte-identical across paths on SQLite");
+    assert!(decl.iter().any(|(up, _)| up.contains("ADD COLUMN")));
+}
+
+#[test]
+fn create_index_render_is_byte_identical_sqlite() {
+    let desc = CollectionDescriptor {
+        name: "events".into(),
+        owner_app: OWNER.into(),
+        fields: vec![
+            FieldDescriptor { name: "kind".into(), ty: "string".into(), ..Default::default() },
+            FieldDescriptor { name: "at".into(), ty: "date".into(), ..Default::default() },
+        ],
+        indexes: vec![IndexDescriptor {
+            name: "events_kind_at_idx".into(),
+            columns: vec!["kind".into(), "at".into()],
+            unique: false,
+        }],
+    };
+    let desired =
+        zeroship_migrate::declarative::desired_snapshot_for_dialect(SCHEMA, &[desc.clone()], SqlDialect::Sqlite)
+            .expect("desired");
+    let mut live_desc = desc.clone();
+    live_desc.indexes = vec![];
+    let live_full =
+        zeroship_migrate::declarative::desired_snapshot_for_dialect(SCHEMA, &[live_desc], SqlDialect::Sqlite)
+            .expect("live");
+    let mut live_ownership = HashMap::new();
+    live_ownership.insert("events".to_string(), OWNER.to_string());
+    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, SqlDialect::Sqlite);
+    let plan = author
+        .diff(&desired, &live_full.snapshot, &live_ownership, &[])
+        .expect("diff");
+    let decl = sql_pairs(&plan.migrations);
+
+    let ops = vec![Op::CreateIndex {
+        table: "events".into(),
+        columns: vec!["kind".into(), "at".into()],
+        name: Some("events_kind_at_idx".into()),
+        unique: None,
+        using: None,
+        r#where: None,
+        concurrently: None,
+    }];
+    let mut live = BTreeSet::new();
+    live.insert("events".to_string());
+    let ir = ir_pairs_for(ops, &live, SqlDialect::Sqlite);
+
+    assert_eq!(decl, ir, "createIndex render must be byte-identical across paths on SQLite");
+    assert!(decl.iter().any(|(up, _)| up.contains("CREATE INDEX")));
 }

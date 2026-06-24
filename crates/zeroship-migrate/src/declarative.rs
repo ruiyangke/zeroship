@@ -443,7 +443,7 @@ fn field_to_sdk_def(f: &FieldDescriptor) -> serde_json::Value {
 /// NOTE: this is descriptor-diff-generated DDL ONLY — there is NO untrusted raw SQL
 /// string; the descriptor field/type names were validated at the author boundary
 /// (`validate_desired`) before this runs (§2.5.3 trust model).
-fn descriptor_to_sdk_schema(d: &CollectionDescriptor) -> serde_json::Value {
+pub(crate) fn descriptor_to_sdk_schema(d: &CollectionDescriptor) -> serde_json::Value {
     let mut schema = serde_json::Map::new();
     for f in &d.fields {
         // Start from the goodies bridge (`type`, vector*, encrypted, mask,
@@ -3154,6 +3154,21 @@ impl DeclarativeAuthor {
                  desired_snapshot must populate sqlite_schemas for every union table)"
             ))
         })?;
+        self.render_create_table_sqlite_value(table, schema)
+    }
+
+    /// The SQLite `CREATE TABLE` emission, parameterized by the SDK schema `Value`
+    /// directly (§6.4/§6.5). The differ's [`render_create_table_sqlite`] pulls the
+    /// `Value` from the precomputed `desired.sqlite_schemas` side-map; `IrAuthor`'s
+    /// `lower_create_table` builds the SAME `Value` from the op's descriptor via
+    /// [`descriptor_to_sdk_schema`] (the same call `desired_snapshot_for_dialect`
+    /// makes) and routes here — so BOTH paths render through the identical shared
+    /// `zeroship_schema::query` emitter and the §6.4 byte-identity holds on SQLite.
+    pub(crate) fn render_create_table_sqlite_value(
+        &self,
+        table: &str,
+        schema: &serde_json::Value,
+    ) -> Result<String, DeclarativeError> {
         // `app_id` here is the project schema; on the `MainUnqualified` SQLite arm it
         // is NOT emitted (the qualifier is dropped), but it is still validated by the
         // shared emitter, so pass the real project schema.
@@ -3877,6 +3892,7 @@ impl DeclarativeAuthor {
         &self,
         table: &str,
         snapshot: &TableSnapshot,
+        sqlite_schema: &serde_json::Value,
         live_tables: &std::collections::BTreeSet<String>,
     ) -> Result<Vec<Migration>, DeclarativeError> {
         let is_sqlite = matches!(self.dialect, SqlDialect::Sqlite);
@@ -3906,18 +3922,18 @@ impl DeclarativeAuthor {
 
         let mut out: Vec<Migration> = Vec::new();
         let (up, down) = if is_sqlite {
-            // The Confined SQLite path routes the CREATE through the shared
-            // `zeroship_schema::query` emitter — IrAuthor reconstructs the SDK
-            // schema `Value` for the table from the snapshot's source descriptor.
-            // (Wave C wires the SQLite Value path; for now the PG leg is the §6.4
-            // byte-identity anchor, and SQLite createTable lowering is exercised by
-            // the differ's own SQLite golden.)
-            return Err(DeclarativeError::Invalid(
-                "IrAuthor SQLite createTable lowering routes through the shared \
-                 Value emitter (Wave C); use the PG leg for the §6.4 byte-identity \
-                 anchor"
-                    .into(),
-            ));
+            // The Confined SQLite path routes the CREATE through the SHARED
+            // `zeroship_schema::query` emitter — the SAME call the differ's
+            // `render_create_table_sqlite` makes — fed the SDK schema `Value`
+            // `IrAuthor` built from the op's descriptor via `descriptor_to_sdk_schema`
+            // (the identical bridge `desired_snapshot_for_dialect` uses). So the
+            // §6.4 byte-identity holds on the SQLite leg too. The `down` is the
+            // unqualified `DROP TABLE` (main IS the app file), byte-identical to
+            // the differ's SQLite create-table down.
+            (
+                self.render_create_table_sqlite_value(table, sqlite_schema)?,
+                format!("DROP TABLE {}", quote_ident(table)),
+            )
         } else {
             (
                 self.render_create_table(table, snapshot, &inline_fks),

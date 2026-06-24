@@ -396,6 +396,184 @@ async fn h2_deploy_routes_through_verified_seam_and_manifest_is_tamper_sensitive
     cleanup_app(&conn, &app_id).await;
 }
 
+// ===========================================================================
+// CREATOR `.ir.json` PATH — driven through the REAL deploy entrypoint
+// (`apply_bundle_migrations`), the production caller of the fail-closed IR LOAD
+// GATE (`IrAuthor::load_and_lower`: ir_version → validate_ir → ownership →
+// checksum → lower) + the per-dialect lower. NOT a unit test of the gate; the
+// `.ir.json` is discovered in the migrations dir + gated + lowered + applied by
+// the same code the control deploy handler runs.
+// ===========================================================================
+
+// Happy path: a valid creator `.ir.json` createTable is gated, lowered (PG), and
+// APPLIED — the table exists + the migration is journaled.
+#[compio::test]
+async fn deploy_migrate_applies_valid_ir_json() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    // A `.ir.json` whose declarer is the deploying app (the gate's owner_app is
+    // server-stamped from app_id by the deploy path, so we pass owner_app="" — the
+    // gate stamps it). A fresh createTable is owned by the deployer (auto).
+    let ir = r#"{"ir_version":1,"name":"create_notes","ops":[
+        {"op":"createTable","name":"notes","columns":[
+            {"name":"title","type":"text","nullable":false},
+            {"name":"body","type":"text"}
+        ]}
+    ]}"#;
+    let dir = migrations_dir(&[("0001_create_notes.ir.json", ir)]);
+
+    let outcome = apply_bundle_migrations(&admin_dsn(), &app_id, &dir)
+        .await
+        .expect("a valid .ir.json must lower + apply on the real deploy path");
+    assert!(
+        !outcome.applied.is_empty(),
+        "the lowered IR migration(s) must apply, got {:?}",
+        outcome.applied
+    );
+    assert!(
+        table_exists(&conn, &app_id, "notes").await,
+        "the IR-created 'notes' table must exist in schema {app_id}"
+    );
+    assert!(
+        journaled_count(&conn, &app_id).await >= 1,
+        "the IR migration must be journaled"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    cleanup_app(&conn, &app_id).await;
+}
+
+// A `.sql` and a `.ir.json` ship together: BOTH apply (the Flyway loader skips
+// the IR file; the IR seam handles it). Proves the discovery branch coexists with
+// the platform `.sql` path.
+#[compio::test]
+async fn deploy_migrate_applies_sql_and_ir_together() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    let sql = "CREATE TABLE legacy (id bigint PRIMARY KEY);";
+    let ir = r#"{"ir_version":1,"name":"create_modern","ops":[
+        {"op":"createTable","name":"modern","columns":[{"name":"label","type":"text"}]}
+    ]}"#;
+    let dir = migrations_dir(&[
+        ("V0001__create_legacy.sql", sql),
+        ("0002_create_modern.ir.json", ir),
+    ]);
+
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir)
+        .await
+        .expect("both the .sql and .ir.json must apply");
+    assert!(table_exists(&conn, &app_id, "legacy").await, ".sql table must exist");
+    assert!(table_exists(&conn, &app_id, "modern").await, ".ir.json table must exist");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    cleanup_app(&conn, &app_id).await;
+}
+
+// HOSTILE #1 — a FUTURE `ir_version` is refused by the load gate (an older engine
+// never mis-applies a newer artifact). Fires `DeployMigrateError::Ir`; nothing
+// applied.
+#[compio::test]
+async fn deploy_migrate_refuses_future_ir_version() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    let ir = r#"{"ir_version":999999,"name":"from_the_future","ops":[
+        {"op":"createTable","name":"x","columns":[{"name":"a","type":"text"}]}
+    ]}"#;
+    let dir = migrations_dir(&[("0001_future.ir.json", ir)]);
+
+    let err = apply_bundle_migrations(&admin_dsn(), &app_id, &dir)
+        .await
+        .expect_err("a future ir_version must be refused by the load gate");
+    assert!(
+        matches!(err, DeployMigrateError::Ir { .. }),
+        "expected a fail-closed Ir gate error, got {err:?}"
+    );
+    assert!(!table_exists(&conn, &app_id, "x").await, "nothing applied on a refused gate");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    cleanup_app(&conn, &app_id).await;
+}
+
+// HOSTILE #2 — a bare-name `dropIndex` (no table hint) is the cross-tenant
+// ownership BYPASS the §8.6 fail-close closes: no name→owner resolver exists, so
+// it is refused fail-closed at validate time. Driven through the real deploy
+// entrypoint.
+#[compio::test]
+async fn deploy_migrate_refuses_bare_name_drop_index() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    // No `table` hint ⇒ the gate cannot resolve the index's owner ⇒ fail-closed.
+    let ir = r#"{"ir_version":1,"name":"sneaky","ops":[
+        {"op":"dropIndex","name":"some_other_apps_index"}
+    ]}"#;
+    let dir = migrations_dir(&[("0001_sneaky.ir.json", ir)]);
+
+    let err = apply_bundle_migrations(&admin_dsn(), &app_id, &dir)
+        .await
+        .expect_err("a bare-name dropIndex must be refused fail-closed");
+    assert!(
+        matches!(err, DeployMigrateError::Ir { .. }),
+        "expected a fail-closed Ir gate error, got {err:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    cleanup_app(&conn, &app_id).await;
+}
+
+// HOSTILE #3 — an op targeting a table OWNED BY ANOTHER APP is refused by the
+// ownership gate. We first create `victim` (owned by app_id), then a SECOND app
+// deploys an `.ir.json` dropping a column on `victim` — but it is deployed under a
+// DIFFERENT app schema, so `victim` is NOT in its live registry → UNKNOWN_OWNER →
+// refused. (Same-schema, a creator owns all its tables; the cross-tenant guarantee
+// is the schema boundary + this fail-closed registry check.)
+#[compio::test]
+async fn deploy_migrate_refuses_op_on_unregistered_table() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    // The deploying app's schema is EMPTY (no `victim` table), so an op targeting
+    // `victim` finds no registry entry → UNKNOWN_OWNER → fail-closed refusal.
+    let ir = r#"{"ir_version":1,"name":"steal","ops":[
+        {"op":"dropColumn","table":"victim","column":"secret"}
+    ]}"#;
+    let dir = migrations_dir(&[("0001_steal.ir.json", ir)]);
+
+    let err = apply_bundle_migrations(&admin_dsn(), &app_id, &dir)
+        .await
+        .expect_err("an op on an unregistered/unowned table must be refused");
+    assert!(
+        matches!(err, DeployMigrateError::Ir { .. }),
+        "expected a fail-closed Ir ownership error, got {err:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    cleanup_app(&conn, &app_id).await;
+}
+
 // A path-only reference so an unused-import lint never fires if a test is
 // cfg'd out in a future refactor.
 #[allow(dead_code)]
