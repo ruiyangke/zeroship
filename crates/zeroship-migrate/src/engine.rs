@@ -623,6 +623,47 @@ impl MigrationEngine {
         applied_by: &str,
         lock_mode: LockMode,
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
+        self.apply_plan_resolving(
+            steps,
+            touched_tables,
+            &[],
+            approval,
+            backend,
+            exec_cfg,
+            applied_by,
+            lock_mode,
+        )
+        .await
+    }
+
+    /// As [`apply_plan_with_touched`](Self::apply_plan_with_touched), but with an
+    /// EXPLICIT obligation-resolution list (§2.0.3 the `resolve-pending` path). Each
+    /// `(pc, resolution)` names an outstanding obligation this plan is RESOLVING:
+    ///
+    /// - its table is EXEMPTED from the touched-table refusal (these drops ARE the
+    ///   resolution of that obligation, not a new op fighting it);
+    /// - on SUCCESS only, the obligation is discharged by APPENDING a `resolved`
+    ///   row with the supplied [`Resolution`](crate::journal::Resolution)
+    ///   (`applied`/`aborted`) — fail-closed: an apply failure leaves the
+    ///   obligation OUTSTANDING (never resolved-but-not-applied).
+    ///
+    /// The resolve runs inside the SAME held project lock as the apply, so it is
+    /// race-free against concurrent deploys.
+    ///
+    /// # Errors
+    /// Same as [`apply_plan_with_touched`](Self::apply_plan_with_touched).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn apply_plan_resolving<B: MigrationBackend>(
+        &self,
+        steps: &[PlanStep],
+        touched_tables: &[String],
+        resolve: &[(crate::journal::PendingContract, crate::journal::Resolution)],
+        approval: Approval,
+        backend: &B,
+        exec_cfg: &ExecutorConfig,
+        applied_by: &str,
+        lock_mode: LockMode,
+    ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
         // **Whole-plan project-lock acquisition (§2.0.3(1)).** When the caller asks
         // us to `Acquire`, take the project advisory lock ONCE up front for the
         // ENTIRE plan and thread `AlreadyHeld` into every sub-step — regardless of
@@ -644,7 +685,7 @@ impl MigrationEngine {
         // Run the plan body in a helper so we can release the lock we acquired on
         // EVERY exit path (success or error) before returning.
         let result = self
-            .apply_plan_locked(steps, touched_tables, approval, backend, exec_cfg, applied_by)
+            .apply_plan_locked(steps, touched_tables, resolve, approval, backend, exec_cfg, applied_by)
             .await;
         if we_hold_lock {
             // Release the lock we own, surfacing the body's error first. The lock
@@ -665,10 +706,12 @@ impl MigrationEngine {
     /// outer declarative caller owns it, or because [`apply_plan`](Self::apply_plan)
     /// acquired it up front for an `Acquire`-mode standalone call). Every sub-step
     /// therefore runs with [`LockMode::AlreadyHeld`].
+    #[allow(clippy::too_many_arguments)]
     async fn apply_plan_locked<B: MigrationBackend>(
         &self,
         steps: &[PlanStep],
         touched_tables: &[String],
+        explicit_resolve: &[(crate::journal::PendingContract, crate::journal::Resolution)],
         approval: Approval,
         backend: &B,
         exec_cfg: &ExecutorConfig,
@@ -730,6 +773,21 @@ impl MigrationEngine {
                 _ => None,
             })
             .collect();
+        // The set of EXPAND trigger versions this plan RE-PRESENTS — a
+        // `PgExpandContract` step whose `pending_version` matches an outstanding
+        // obligation is the SAME rename re-running idempotently (deploy N retried,
+        // §2.0.3 item 4), NOT a new op touching the pending table. Such a self
+        // re-run must NOT be refused by its OWN obligation (the EXPAND
+        // net-applied-skips and re-surfaces the same pending contract — a no-op).
+        let self_expand_versions: std::collections::BTreeSet<&str> = steps
+            .iter()
+            .filter_map(|s| match s {
+                PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => {
+                    Some(ec.trigger_version.as_str())
+                }
+                _ => None,
+            })
+            .collect();
         // Obligations this deploy DISCHARGES by applying their contract (all C1/C2
         // ids present among the Ddl steps). Resolved AFTER the step loop succeeds.
         let mut discharging: Vec<crate::journal::PendingContract> = Vec::new();
@@ -740,6 +798,13 @@ impl MigrationEngine {
             let mut touched: std::collections::BTreeSet<String> =
                 touched_tables.iter().cloned().collect();
             touched.extend(crate::plan::tables_touched_by(steps));
+            // Obligations the caller EXPLICITLY resolves this deploy (the
+            // `resolve-pending` path): exempt from refusal, discharged with the
+            // caller's resolution after the loop.
+            let explicit_versions: std::collections::BTreeSet<&str> = explicit_resolve
+                .iter()
+                .map(|(pc, _)| pc.pending_version.as_str())
+                .collect();
             for pc in &outstanding {
                 let is_contract_apply = !pc.contract_versions.is_empty()
                     && pc
@@ -748,6 +813,17 @@ impl MigrationEngine {
                         .all(|v| ddl_versions.contains(v.as_str()));
                 if is_contract_apply {
                     discharging.push(pc.clone());
+                    continue;
+                }
+                // The SAME rename re-running idempotently (deploy N retried) — its
+                // EXPAND re-presents this obligation's `pending_version`. Not a new
+                // op; the EXPAND net-applied-skips and re-surfaces the obligation.
+                if self_expand_versions.contains(pc.pending_version.as_str()) {
+                    continue;
+                }
+                // An obligation the caller is EXPLICITLY resolving — its drops ARE
+                // the resolution, not a new op fighting it. Exempt from refusal.
+                if explicit_versions.contains(pc.pending_version.as_str()) {
                     continue;
                 }
                 if touched.contains(&pc.table) {
@@ -988,6 +1064,18 @@ impl MigrationEngine {
                     crate::journal::Resolution::Applied,
                     applied_by,
                 )
+                .await
+                .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
+        }
+
+        // **§2.0.3 — EXPLICIT resolution (the `resolve-pending` path).** All steps
+        // applied successfully, so discharge each caller-named obligation with its
+        // chosen resolution (`applied`/`aborted`). Resolve-AFTER-apply (inside the
+        // held lock) is fail-closed: an apply failure above returned early, leaving
+        // the obligation OUTSTANDING — never a resolved-but-not-applied fail-open.
+        for (pc, resolution) in explicit_resolve {
+            backend
+                .resolve_pending_contract(exec_cfg, pc, *resolution, applied_by)
                 .await
                 .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
         }
