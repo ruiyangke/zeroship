@@ -41,7 +41,7 @@
 //! migrator role) is the defense. A future revision MAY add an optional
 //! `--admin-db` (CREATEDB) config and run the shadow when present; v1 does not.
 //!
-//! # Destructive migrations
+//! # Destructive + approval-gated migrations (incl. online `renameColumn`)
 //!
 //! The deploy path passes [`Approval::None`]. A destructive migration (DROP /
 //! TRUNCATE / lossy type change) is therefore **refused** at deploy (the engine
@@ -49,6 +49,32 @@
 //! destructive schema change goes through the out-of-band `submit_migration`
 //! surface / expand-contract across deploys (schema-authority §8.4), not a
 //! creator's routine deploy.
+//!
+//! An online `renameColumn` lowered on the IR path (§2.6) is in the SAME
+//! approval-gated class — and this is symmetric across BOTH dialects:
+//!
+//! - **PG leg (deploy-wired, but refused here):** a PG `renameColumn` lowers to a
+//!   `PlanStep::OnlineRename(PgExpandContract)`. Its EXPAND's backfill MUTATES data,
+//!   so `run_expand_pg` requires [`Approval::Approved`] and returns
+//!   [`zeroship_migrate::OnlineError::Approval`] otherwise. Because
+//!   `apply_bundle_ir_migrations` applies under [`Approval::None`] (like every
+//!   routine deploy), a `renameColumn` shipped in a `.zship` lowers successfully —
+//!   the live-fact type-gate (the `table_snapshots` populated below) runs and
+//!   reconciles the IR type against the live column — then is **refused at the
+//!   approval gate** ([`DeployMigrateError::OnlineExpand`]); no go-live. So while
+//!   the PG rename is type-reconciliation-wired, it is NOT completable through a
+//!   routine deploy: like any approval-gated op it must go through the out-of-band
+//!   APPROVED-apply surface, which PR2 does NOT wire. (Pinned by
+//!   `deploy_migrate_renamecolumn_refused_at_approval_gate_on_routine_deploy`.)
+//! - **SQLite leg (not deploy-wired at all):** the SQLite IR-rename rebuild leg is
+//!   engine-proven but has no production/dev deploy entry point constructing a
+//!   SQLite-dialect `LiveSchema` (see the `sqlite_schemas` note below); a
+//!   SQLite-targeted IR rename fails closed before lowering.
+//!
+//! NEITHER leg of an IR `renameColumn` therefore COMPLETES through a routine wired
+//! deploy in PR2 — the PG leg is type-reconciliation-wired but approval-gate-refused;
+//! the SQLite leg is unwired. Wiring an approved IR-apply surface (and the SQLite
+//! IR-deploy entry point) is the out-of-band / CLI-rewire wave (gated on this PR).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -120,9 +146,14 @@ pub enum DeployMigrateError {
     #[error("deploy-migrate live snapshot: {0}")]
     Snapshot(#[from] DriftError),
     /// A rename's online expand/backfill failed while applying an IR plan via
-    /// `apply_plan`. Unreachable on the PR1 pure-DDL IR path (no `OnlineRename`
-    /// step is lowered yet) — present so the `DeclarativeApplyError::Expand` arm is
-    /// faithfully surfaced when PR2 lands online renames on the IR path.
+    /// `apply_plan`. REACHABLE since PR2: an IR `renameColumn` lowers to a
+    /// `PlanStep::OnlineRename(PgExpandContract)`, whose EXPAND backfill is
+    /// approval-gated. Because the routine deploy applies under [`Approval::None`],
+    /// the dominant occurrence is [`zeroship_migrate::OnlineError::Approval`] — a
+    /// `renameColumn` shipped in a `.zship` is REFUSED at this gate (no go-live) and
+    /// must go through the out-of-band approved-apply surface (PR2 does not wire it;
+    /// see the module-level "Destructive + approval-gated migrations" doc). Other
+    /// `OnlineError` variants surface a genuine mid-expand failure.
     #[error("deploy-migrate IR online expand: {0}")]
     OnlineExpand(#[from] zeroship_migrate::OnlineError),
 }
@@ -382,6 +413,18 @@ async fn apply_bundle_ir_migrations(
         // the IR type alone. The whole live snapshot is already in hand, so this is
         // free; the PG expand-contract author still needs only `{from,to,ty}` to
         // author the sequence — the snapshot is consulted ONLY for the type gate.
+        //
+        // DEPLOY-WIRING HONESTY (PG leg): populating this makes the type-gate REACH
+        // the live column on the production path — but a PG `renameColumn` still does
+        // NOT COMPLETE through this routine deploy. Its expand-contract EXPAND backfill
+        // is approval-gated; this path applies under `Approval::None` (see the loop
+        // below), so a lowered rename is REFUSED at the approval gate
+        // (`DeployMigrateError::OnlineExpand` ⇐ `OnlineError::Approval`), exactly like a
+        // destructive op. The type reconciliation is wired; the APPROVED apply is the
+        // out-of-band wave (gated on this PR). This is symmetric with the SQLite leg's
+        // not-deploy-wired note below — see the module-level "Destructive +
+        // approval-gated migrations" doc. Pinned by the control-plane e2e
+        // `deploy_migrate_renamecolumn_refused_at_approval_gate_on_routine_deploy`.
         table_snapshots: live.tables.clone(),
         // Every live table in this per-app schema is owned by the deploying app
         // (the registry is seeded from exactly this set, below). Carried for

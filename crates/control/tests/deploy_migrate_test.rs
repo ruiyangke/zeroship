@@ -850,6 +850,230 @@ async fn deploy_migrate_ir_string_default_with_embedded_semicolon_newline_pg() {
     cleanup_app(&conn, &app_id).await;
 }
 
+// ===========================================================================
+// renameColumn `.ir.json` THROUGH THE PRODUCTION DEPLOY PATH (MED, code-critic)
+// ===========================================================================
+//
+// The PR2 rename e2e proof lived entirely in direct `IrAuthor::lower_steps` +
+// `engine.apply_plan(Approval::Approved)` integration tests, which BYPASS the
+// production entry point (`apply_bundle_migrations` → `apply_bundle_ir_migrations`,
+// which hard-codes `Approval::None`). Per `feedback_faithful_e2e_tests.md` an e2e
+// that never runs the REAL wired path can mask an integration failure — here the
+// approval-gate unreachability of an IR rename. These tests drive a `renameColumn`
+// `.ir.json` through the SAME code the control deploy handler runs and PIN the
+// actual observed contract: a rename — like any approval-gated op — is REFUSED at a
+// routine deploy (the PG online expand's backfill needs `Approval::Approved`, which
+// the routine path never passes), with NOTHING applied. The out-of-band
+// approved-apply surface (not wired in PR2) is the place an approved rename runs;
+// this contract test is what would fail RED if a future change wired it.
+
+/// Does column `col` on `<app_id>.<table>` introspect to `data_type` `dt`?
+async fn column_has_data_type(
+    conn: &compio_postgres::Client,
+    app_id: &Uuid,
+    table: &str,
+    col: &str,
+    dt: &str,
+) -> bool {
+    let schema = app_id.to_string();
+    let rows = conn
+        .query(
+            "SELECT 1 FROM information_schema.columns \
+             WHERE table_schema = $1 AND table_name = $2 AND column_name = $3 AND data_type = $4",
+            &[&schema, &table, &col, &dt],
+        )
+        .await
+        .expect("query information_schema.columns data_type");
+    !rows.is_empty()
+}
+
+// MED — a `renameColumn` `.ir.json` is lowered (its IR-vs-live type-gate PASSES
+// against the real introspected live `from` column — the deploy-wired
+// `table_snapshots` benefit the fix commit added) but is then REFUSED at the
+// approval gate of the routine deploy: the production path passes `Approval::None`,
+// and the PG online expand's backfill needs `Approval::Approved`. The error is
+// `DeployMigrateError::OnlineExpand(OnlineError::Approval)` and NOTHING about the
+// rename is applied (the old column is intact, the new column is NOT created — the
+// whole expand was refused before any DDL). The rename is deployed as a SEPARATE
+// deploy after the createTable so the live snapshot (introspected before the IR
+// loop) carries the `from` column — the same shape a real "rename in deploy N+1"
+// takes.
+#[compio::test]
+async fn deploy_migrate_renamecolumn_refused_at_approval_gate_on_routine_deploy() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    // Deploy #1: create `accounts(email text)`. (A separate deploy so #2's live
+    // snapshot includes the `email` column the rename's type-gate reconciles.)
+    let create = r#"{"ir_version":1,"name":"create_accounts","ops":[
+        {"op":"createTable","name":"accounts","columns":[
+            {"name":"email","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    let dir1 = migrations_dir(&[("0001_create_accounts.ir.json", create)]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir1)
+        .await
+        .expect("createTable deploy must succeed");
+    assert!(column_exists(&conn, &app_id, "accounts", "email").await, "email created");
+
+    // Deploy #2: renameColumn email → email_address (ty text, matching the live
+    // column). The type-gate PASSES (live `text` == IR-derived `text`); the rename
+    // lowers to a PG expand-contract; the routine deploy then REFUSES it at the
+    // approval gate.
+    let rename = r#"{"ir_version":1,"name":"rename_email","ops":[
+        {"op":"renameColumn","table":"accounts","from":"email","to":"email_address","type":"text"}
+    ]}"#;
+    let dir2 = migrations_dir(&[("0002_rename_email.ir.json", rename)]);
+    let err = apply_bundle_migrations(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect_err("a renameColumn must be refused at the routine deploy's approval gate");
+    match err {
+        DeployMigrateError::OnlineExpand(zeroship_migrate::OnlineError::Approval) => {}
+        other => panic!(
+            "expected OnlineExpand(OnlineError::Approval) — the rename's backfill needs \
+             Approval::Approved, which the routine deploy never passes; got {other:?}"
+        ),
+    }
+
+    // NOTHING about the rename was applied: the new column was NOT created and the
+    // old column is intact (the whole expand was refused before any DDL).
+    assert!(
+        column_exists(&conn, &app_id, "accounts", "email").await,
+        "the old `email` column is intact — the refused rename touched nothing"
+    );
+    assert!(
+        !column_exists(&conn, &app_id, "accounts", "email_address").await,
+        "the new `email_address` column must NOT exist — the rename was refused before any DDL"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir1);
+    let _ = std::fs::remove_dir_all(&dir2);
+    cleanup_app(&conn, &app_id).await;
+}
+
+// MED — a rename whose IR `type` DISAGREES with the live `from` column's actual
+// type is refused EARLIER, at the fail-closed LOWER gate (`DeployMigrateError::Ir`
+// wrapping `RenameTypeMismatch`), NOT at the approval gate — proving the deploy-
+// wired `table_snapshots` reconciliation runs on the production path (the fix
+// commit's stated production benefit, previously verified only in direct
+// lower_steps tests). The IR claims the renamed column is `int` over a live `text`
+// column — a data-corruption-class mismatch that must never lower.
+#[compio::test]
+async fn deploy_migrate_renamecolumn_type_mismatch_refused_at_lower_gate() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    let create = r#"{"ir_version":1,"name":"create_people","ops":[
+        {"op":"createTable","name":"people","columns":[
+            {"name":"name","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    let dir1 = migrations_dir(&[("0001_create_people.ir.json", create)]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir1)
+        .await
+        .expect("createTable deploy must succeed");
+
+    // The live `name` is `text`; the IR claims the renamed column is `int`.
+    let rename = r#"{"ir_version":1,"name":"rename_name","ops":[
+        {"op":"renameColumn","table":"people","from":"name","to":"full_name","type":"int"}
+    ]}"#;
+    let dir2 = migrations_dir(&[("0002_rename_name.ir.json", rename)]);
+    let err = apply_bundle_migrations(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect_err("a rename whose IR type disagrees with the live column must fail closed");
+    match err {
+        DeployMigrateError::Ir { .. } => {}
+        other => panic!(
+            "expected a fail-closed Ir lower error (RenameTypeMismatch) before any apply, \
+             got {other:?}"
+        ),
+    }
+    assert!(
+        !column_exists(&conn, &app_id, "people", "full_name").await,
+        "nothing applied — the mismatched rename was refused at the lower gate"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir1);
+    let _ = std::fs::remove_dir_all(&dir2);
+    cleanup_app(&conn, &app_id).await;
+}
+
+// LOW — the extension-type round-trip pinned through the PRODUCTION path: a
+// `renameColumn` of a `vector(N)` column lowers cleanly (its type-gate reconciles
+// the REAL introspected `vector(N)` against the IR-derived `vector(N)` — the
+// dimension carried through) and reaches the SAME approval-gate refusal as a base
+// type. If the round-trip canonicalisation were asymmetric the rename would instead
+// false-reject at the LOWER gate (`DeployMigrateError::Ir`/`RenameTypeMismatch`), so
+// observing `OnlineExpand(Approval)` PROVES the gate passed on a live `USER-DEFINED`
+// extension column. Skips cleanly when the test DB has no `vector` extension.
+#[compio::test]
+async fn deploy_migrate_renamecolumn_vector_type_gate_round_trips_on_production_path() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let has_vector = conn
+        .query("SELECT 1 FROM pg_extension WHERE extname = 'vector'", &[])
+        .await
+        .map(|rows| !rows.is_empty())
+        .unwrap_or(false);
+    if !has_vector {
+        eprintln!(
+            "SKIP deploy_migrate_renamecolumn_vector_type_gate_round_trips_on_production_path: \
+             no `vector` extension on the test DB (use pgvector/pgvector:pg16)"
+        );
+        return;
+    }
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    // Deploy #1: a table with a `vector(3)` column.
+    let create = r#"{"ir_version":1,"name":"create_docs","ops":[
+        {"op":"createTable","name":"docs","columns":[
+            {"name":"embedding","type":{"vector":3},"nullable":false}
+        ]}
+    ]}"#;
+    let dir1 = migrations_dir(&[("0001_create_docs.ir.json", create)]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir1)
+        .await
+        .expect("createTable with a vector(3) column must succeed");
+    assert!(
+        column_has_data_type(&conn, &app_id, "docs", "embedding", "USER-DEFINED").await,
+        "the vector column introspects as USER-DEFINED (extension type)"
+    );
+
+    // Deploy #2: renameColumn embedding → vec (ty vector:3, matching live). The
+    // type-gate must reconcile the live `vector(3)` against the IR-derived
+    // `vector(3)` — round-trip symmetric — then reach the approval gate.
+    let rename = r#"{"ir_version":1,"name":"rename_embedding","ops":[
+        {"op":"renameColumn","table":"docs","from":"embedding","to":"vec","type":{"vector":3}}
+    ]}"#;
+    let dir2 = migrations_dir(&[("0002_rename_embedding.ir.json", rename)]);
+    let err = apply_bundle_migrations(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect_err("the vector rename reaches the approval gate (the type-gate passed)");
+    match err {
+        DeployMigrateError::OnlineExpand(zeroship_migrate::OnlineError::Approval) => {}
+        DeployMigrateError::Ir { source, .. } => panic!(
+            "the vector rename FALSE-REJECTED at the lower type-gate (round-trip asymmetry): \
+             {source}"
+        ),
+        other => panic!("expected OnlineExpand(Approval) after a passing type-gate, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&dir1);
+    let _ = std::fs::remove_dir_all(&dir2);
+    cleanup_app(&conn, &app_id).await;
+}
+
 // A path-only reference so an unused-import lint never fires if a test is
 // cfg'd out in a future refactor.
 #[allow(dead_code)]
