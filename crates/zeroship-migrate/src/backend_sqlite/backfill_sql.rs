@@ -428,26 +428,71 @@ pub(crate) async fn run_backfill_bounded(
 
 /// Reject an authored `set_clause` that assigns the cursor column. The assembler
 /// renders each assignment as `"<col>" = <expr>`, comma-joined; a `"<cursor>" =`
-/// assignment token is the illegal mutation. We split on top-level commas is
-/// unsafe (a CASE/function arg may contain commas), so instead we look for the
-/// quoted cursor identifier immediately followed by `=` at an assignment position —
-/// the assignment LHS is always the very start of the clause or right after a
-/// top-level comma. The conservative, fail-closed check: does the SET clause
-/// contain `"<cursor>" =` as an assignment LHS? We detect the quoted-ident `=` form
-/// the assembler always emits.
+/// token at an ASSIGNMENT BOUNDARY is the illegal mutation. Splitting on top-level
+/// commas is unsafe (a CASE/function arg may contain commas), so instead we scan
+/// the clause for the cursor-assignment LHS at a boundary — the very start of the
+/// clause, or right after a top-level comma — while SKIPPING single-quoted string
+/// literals (with `''` escaping). Skipping literals is what makes the check
+/// correct AND precise: a string literal that embeds the `, "<cursor>" =` byte
+/// sequence is RHS data, not an assignment, so it is NOT a false-positive reject
+/// (the over-rejection the prior `contains`-based heuristic produced). Fail-closed:
+/// any boundary occurrence of the cursor LHS rejects; a genuine later-position
+/// cursor mutation is still caught.
 fn assert_cursor_not_mutated(set_clause: &str, cursor_column: &str) -> Result<(), BackfillError> {
     let needle = format!("{} =", quote_ident(cursor_column));
-    // The assembler emits `"<col>" = <expr>` for every assignment, so the cursor is
-    // mutated iff the SET clause starts with the cursor assignment OR a top-level
-    // `, "<cursor>" =` appears. A literal/identifier never contains a quoted
-    // identifier followed by ` =` except as an assignment LHS (column refs in
-    // expressions are not followed by ` =`). Fail-closed on any occurrence.
-    let starts = set_clause.trim_start().starts_with(&needle);
-    let mid = set_clause.contains(&format!(", {needle}"));
-    if starts || mid {
-        return Err(BackfillError::CursorColumnMutated {
-            cursor_column: cursor_column.to_string(),
-        });
+    // The assembler emits `"<col>" = <expr>` for every assignment, comma-joined, so
+    // the cursor is mutated iff the cursor-assignment LHS appears at an assignment
+    // BOUNDARY: the very start of the clause, or right after a top-level (outside any
+    // string literal) comma. We scan the clause OUTSIDE single-quoted string
+    // literals only, so a literal that happens to embed `, "id" =` is RHS data, not a
+    // mutation (the over-rejection the prior `contains` heuristic produced). SQLite
+    // single-quote escaping is `''`; the scanner treats a doubled quote inside a
+    // literal as an escaped quote, not a close, so it never desyncs. Fail-closed: any
+    // boundary occurrence of the cursor-assignment LHS rejects.
+    let bytes = set_clause.as_bytes();
+    let mut i = 0usize;
+    let mut in_str = false;
+    // `at_boundary` is true at the start and immediately after a top-level comma
+    // (skipping leading whitespace), i.e. exactly where an assignment LHS begins.
+    let mut at_boundary = true;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            if b == b'\'' {
+                // `''` is an escaped quote (stay in the literal); a lone `'` closes it.
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' => {
+                in_str = true;
+                at_boundary = false;
+                i += 1;
+            }
+            b' ' | b'\t' | b'\n' | b'\r' => {
+                // whitespace does not end an assignment boundary (allows `,  "id" =`).
+                i += 1;
+            }
+            b',' => {
+                at_boundary = true;
+                i += 1;
+            }
+            _ => {
+                if at_boundary && set_clause[i..].starts_with(&needle) {
+                    return Err(BackfillError::CursorColumnMutated {
+                        cursor_column: cursor_column.to_string(),
+                    });
+                }
+                at_boundary = false;
+                i += 1;
+            }
+        }
     }
     Ok(())
 }
@@ -620,19 +665,37 @@ async fn run_one_batch(
 }
 
 /// The NATURAL-order max of the RETURNING'd cursor cells. For a numeric-affinity
-/// cursor, parse each cell to i64 and take the numeric max; for a textual cursor,
-/// take the lexical max. NULLs are impossible (the cursor is NOT NULL).
+/// cursor, take the numeric max; for a textual cursor, the lexical max. NULLs are
+/// impossible (the cursor is NOT NULL).
+///
+/// The numeric branch parses each cell as `f64` (which subsumes integers AND the
+/// non-integral REAL keys / scientific notation `run_query_params` emits via
+/// `Real(f).to_string()`), so a touched cursor is NEVER silently dropped — the
+/// symmetric peer of the BIND side's text fallback for a non-i64 REAL cursor. A
+/// cell that is somehow non-numeric (should not occur for a numeric-affinity
+/// column) falls through to a lexical comparison rather than vanishing, so the
+/// high-water mark always reflects an actually-touched row: dropping it would write
+/// `last_cursor=NULL` and re-scan from the start, breaking exactly-once.
 fn max_returned_cursor(rows: &[Vec<Option<String>>], numeric: bool) -> Option<String> {
+    let cells = rows.iter().filter_map(|r| r.first().and_then(|c| c.clone()));
     if numeric {
-        rows.iter()
-            .filter_map(|r| r.first().and_then(|c| c.clone()))
-            .filter_map(|s| s.parse::<i64>().ok().map(|i| (i, s)))
-            .max_by_key(|(i, _)| *i)
-            .map(|(_, s)| s)
+        // Keyed by f64 when parseable (the natural numeric order), with a lexical
+        // tiebreak/fallback so a non-numeric cell is still considered (never dropped).
+        cells
+            .max_by(|a, b| {
+                match (a.parse::<f64>(), b.parse::<f64>()) {
+                    (Ok(fa), Ok(fb)) => {
+                        fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.cmp(b))
+                    }
+                    // A numeric cell always outranks a non-numeric one (keep the real
+                    // high-water mark); two non-numerics compare lexically.
+                    (Ok(_), Err(_)) => std::cmp::Ordering::Greater,
+                    (Err(_), Ok(_)) => std::cmp::Ordering::Less,
+                    (Err(_), Err(_)) => a.cmp(b),
+                }
+            })
     } else {
-        rows.iter()
-            .filter_map(|r| r.first().and_then(|c| c.clone()))
-            .max()
+        cells.max()
     }
 }
 
@@ -677,6 +740,34 @@ mod tests {
         assert!(assert_cursor_not_mutated("\"a\" = (\"id\" + 1)", "id").is_ok());
     }
 
+    /// LOW (PR6b code-critic): a SAFE backfill whose STRING LITERAL happens to embed
+    /// the `, "<cursor>" =` byte sequence must NOT be a false-positive mutation
+    /// reject — the literal is RHS data, not an assignment LHS. The scan now skips
+    /// over single-quoted string literals, so the needle inside a literal is ignored.
+    #[test]
+    fn cursor_mutation_ignores_string_literal_needle() {
+        // a non-mutating assignment whose literal contains `, "id" =`
+        assert!(
+            assert_cursor_not_mutated("\"a\" = ', \"id\" = x'", "id").is_ok(),
+            "a string literal containing the needle is not a cursor mutation"
+        );
+        // leading-position literal that LOOKS like a cursor assignment but is RHS data
+        assert!(
+            assert_cursor_not_mutated("\"note\" = '\"id\" = 9'", "id").is_ok(),
+            "a quoted-ident-looking string literal on the RHS is not a mutation"
+        );
+        // a `''`-escaped quote inside the literal does not desync the scanner
+        assert!(
+            assert_cursor_not_mutated("\"a\" = 'it''s, \"id\" = 1', \"b\" = 2", "id").is_ok(),
+            "an escaped quote inside the literal is handled"
+        );
+        // …but a REAL cursor mutation AFTER a literal is still caught.
+        assert!(
+            assert_cursor_not_mutated("\"a\" = 'x', \"id\" = 5", "id").is_err(),
+            "a genuine later-position cursor mutation is still detected"
+        );
+    }
+
     #[test]
     fn max_returned_numeric_vs_text() {
         let rows = vec![
@@ -687,5 +778,41 @@ mod tests {
         assert_eq!(max_returned_cursor(&rows, true).as_deref(), Some("100"));
         // lexical max of the same cells is "9"
         assert_eq!(max_returned_cursor(&rows, false).as_deref(), Some("9"));
+    }
+
+    /// MED (PR6b code-critic): a numeric-affinity REAL cursor — NON-integral cells
+    /// like "1.5" — must NOT be silently dropped (the old `parse::<i64>()` returned
+    /// None for ALL of them, yielding a NULL high-water mark and a re-scan loop).
+    /// f64 parse takes the natural numeric max; the touched cursor is preserved.
+    #[test]
+    fn max_returned_real_cursor_not_dropped() {
+        let rows = vec![
+            vec![Some("1.5".to_string())],
+            vec![Some("10.5".to_string())], // numeric max; lexical max would be "9.5"
+            vec![Some("9.5".to_string())],
+        ];
+        assert_eq!(
+            max_returned_cursor(&rows, true).as_deref(),
+            Some("10.5"),
+            "REAL cells must be numerically maxed, never dropped"
+        );
+        // scientific notation (as run_query_params' Real(f).to_string() can emit).
+        let sci = vec![
+            vec![Some("1e2".to_string())], // 100.0 — the numeric max
+            vec![Some("9.5".to_string())],
+        ];
+        assert_eq!(max_returned_cursor(&sci, true).as_deref(), Some("1e2"));
+    }
+
+    /// A mix of integral and non-integral numeric cells maxes correctly (the bind
+    /// side already coerces via affinity; the max side now matches).
+    #[test]
+    fn max_returned_mixed_int_and_real() {
+        let rows = vec![
+            vec![Some("3".to_string())],
+            vec![Some("2.5".to_string())],
+            vec![Some("3.5".to_string())], // numeric max
+        ];
+        assert_eq!(max_returned_cursor(&rows, true).as_deref(), Some("3.5"));
     }
 }

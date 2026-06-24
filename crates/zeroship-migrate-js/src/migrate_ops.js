@@ -196,14 +196,20 @@ export const e = {
   fnCall: (fn, args) => ({ node: "fnCall", fn, args }),
   fnSynth: (fn, args) => ({ node: "fnSynth", fn, args }),
   cast: (operand, target) => ({ node: "cast", operand, target }),
-  // The engine-synthesized portable split helper (§9). `delim` is a single-ASCII
-  // character literal; `n` is a positive integer literal in 1..8. Builds a
-  // `fnSynth(splitPart, …)` node (NEVER SQL text) and LINTS the envelope at record
-  // time so the AI loop gets the structured EXPR_NOT_PORTABLE feedback EARLY (the
-  // peer of the Rust validator's authoritative gate; the boundary is enforced on
-  // BOTH sides). Out of envelope ⇒ throw EXPR_NOT_PORTABLE.
+  // The engine-synthesized portable split helper (§9). `delim` is a string literal;
+  // `n` is a positive integer literal. Builds a `fnSynth(splitPart, …)` node (NEVER
+  // SQL text) and LINTS the GRAMMAR at record time so the AI loop gets structured
+  // feedback EARLY for a genuinely-malformed node (a non-string/empty delim, a
+  // non-positive-int n) — broken on BOTH dialects. The portability ENVELOPE
+  // (single-ASCII delim, 1<=n<=8) is NOT enforced here: it is DIALECT-GATED and the
+  // record-time JS recorder is dialect-neutral, so an out-of-envelope splitPart is
+  // a VALID node on a Postgres target (`dialect_scope=PgOnly`, §2.4.1/§9 — PG's
+  // native split_part is multi-char/any-n capable). The authoritative dialect-aware
+  // verdict belongs to the Rust `validate::check_split_part` (which admits it on PG,
+  // rejects it on SQLite); forcing an unconditional throw here would make the
+  // documented PgOnly escape non-constructible. So the builder defers the envelope.
   splitPart: (col, delim, n) => {
-    splitPartEnvelopeLint(delim, n);
+    splitPartGrammarLint(delim, n);
     return {
       node: "fnSynth",
       fn: "splitPart",
@@ -223,41 +229,39 @@ export const cFn = {
   coalesce: (...args) => e.fnCall("coalesce", args.map(normalizeExprArg)),
 };
 
-/// The max literal part index `c.fn.splitPart` admits — the O(2ⁿ) inline-unroll
-/// bound (§9). MUST equal the Rust `SPLIT_PART_MAX_N` (and `dml::SPLIT_PART_MAX_N`);
-/// the cross-side envelope is gated on both.
-const SPLIT_PART_MAX_N = 8;
-
-/// LINT the `c.fn.splitPart` envelope (§9): the delimiter must be a single ASCII
-/// character (one byte, code point < 0x80), and `n` a positive integer literal in
-/// 1..=SPLIT_PART_MAX_N. Out of envelope ⇒ throw a structured EXPR_NOT_PORTABLE
-/// error (the §8.8 machine-readable rejection the AI loop self-corrects on). This
-/// is the JS peer of the Rust `validate::check_split_part` gate — the boundary is
-/// enforced on BOTH sides so the AI loop is told at record time, not only at load.
-function splitPartEnvelopeLint(delim, n) {
+/// LINT the `c.fn.splitPart` GRAMMAR (§9) — the dialect-NEUTRAL subset that is
+/// broken on BOTH backends, so it is safe (and correct) to reject at record time:
+/// the delimiter must be a NON-EMPTY string literal, and `n` a POSITIVE integer
+/// literal. A violation throws a structured EXPR_NOT_PORTABLE error (the §8.8
+/// machine-readable rejection the AI loop self-corrects on).
+///
+/// The portability ENVELOPE (single-ASCII delimiter, `1 <= n <= 8`) is NOT checked
+/// here — it is dialect-gated, and the record-time recorder is dialect-neutral. An
+/// out-of-envelope splitPart is a valid node on a Postgres target (the documented
+/// `dialect_scope=PgOnly` escape, §2.4.1/§9); the authoritative dialect-aware
+/// verdict is the Rust `validate::check_split_part` (admit on PG, reject on SQLite).
+/// Enforcing the envelope here would make the PgOnly escape non-constructible.
+function splitPartGrammarLint(delim, n) {
   const fail = (reason) => {
     const err = new Error(reason);
     err.code = "EXPR_NOT_PORTABLE";
     err.suggested_fix =
-      "use a single-ASCII delimiter with 1<=n<=8, restructure to stay in-envelope " +
-      "(split into <=8 parts), or mark the migration PG-only (dialect_scope=PgOnly)";
+      "pass a non-empty string-literal delimiter and a positive-integer n; to target " +
+      "SQLite too, stay in-envelope (single-ASCII delimiter, 1<=n<=8) — a multi-char/" +
+      "non-ASCII delimiter or n>8 renders only on Postgres (dialect_scope=PgOnly)";
     throw err;
   };
   if (typeof delim !== "string") {
-    fail(`c.fn.splitPart delimiter must be a single-ASCII string literal; got ${typeof delim}`);
+    fail(`c.fn.splitPart delimiter must be a string literal; got ${typeof delim}`);
   }
-  // A single ASCII BYTE: exactly one UTF-16 code unit AND code point < 0x80.
-  if (delim.length !== 1 || delim.charCodeAt(0) >= 0x80) {
-    fail(`c.fn.splitPart delimiter must be a single ASCII character (one byte, code point < 0x80); got ${JSON.stringify(delim)}`);
+  if (delim.length === 0) {
+    fail("c.fn.splitPart delimiter must be a non-empty string literal");
   }
   if (typeof n !== "number" || !Number.isInteger(n)) {
     fail(`c.fn.splitPart part index n must be a positive integer literal; got ${JSON.stringify(n)}`);
   }
   if (n < 1) {
     fail(`c.fn.splitPart part index n must be a positive integer; got ${n}`);
-  }
-  if (n > SPLIT_PART_MAX_N) {
-    fail(`c.fn.splitPart part index n must be <= ${SPLIT_PART_MAX_N} (the proven inline-unroll bound); got ${n}`);
   }
 }
 

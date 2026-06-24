@@ -330,45 +330,66 @@ fn render_concat_ws(rendered: &[String], dialect: SqlDialect) -> String {
 /// this renderer assumes it; a fixture pins their equality.
 const SPLIT_PART_MAX_N: i64 = crate::validate::SPLIT_PART_MAX_N;
 
-/// Extract the pinned `c.fn.splitPart` envelope (§9) from its three args: the
-/// already-rendered column/operand fragment, the single-ASCII delimiter literal,
-/// and the positive literal `n` (`1 ≤ n ≤ SPLIT_PART_MAX_N`).
+/// Render the PINNED `c.fn.splitPart(col, d, n)` per dialect (§9), given the
+/// already-rendered `col_sql` fragment and the raw delimiter + `n` IR args. The
+/// renderer is **dialect-aware** because the portability ENVELOPE is dialect-gated
+/// (mirroring `validate::check_split_part`, which returns early on a Postgres
+/// target): PG's native `split_part` is multi-char-delimiter-capable and takes any
+/// positive `n`, so on a Postgres target a `dialect_scope=PgOnly` out-of-envelope
+/// splitPart (§2.4.1/§9) is a first-class, renderable node — NOT a hard error.
 ///
-/// This is the renderer's fail-closed backstop: the structural validator
-/// (`validate::check_split_part`) gates the envelope BEFORE assembly, so a
-/// well-formed plan never reaches here out of envelope — but the renderer
-/// re-checks rather than trust, so a hand-crafted IR that slipped past cannot
-/// produce a mis-built (or unbounded) SQLite expression. The delimiter is required
-/// to be a single ASCII byte precisely because UTF-8 never embeds an ASCII byte
-/// inside a multibyte sequence, so the byte-wise `instr` scan finds exactly the
-/// boundaries PG's character-wise `split_part` does (§9 byte-identity proof).
-fn split_part_envelope(col_sql: &str, delim_arg: &Expr, n_arg: &Expr) -> Result<(String, char, i64), DmlError> {
+/// On BOTH dialects the GRAMMAR is enforced (the renderer's fail-closed backstop):
+/// the delimiter must be a non-empty string literal and `n` a positive integer
+/// literal — a non-literal delim/n, a non-string delim, an empty delim, or `n ≤ 0`
+/// is unrenderable everywhere. The widening on PG is of the envelope (multi-char /
+/// non-ASCII delim, `n > SPLIT_PART_MAX_N`), never the grammar.
+///
+/// - **Postgres:** `split_part(<col>, '<d>', n)` — verbatim for ANY literal
+///   delimiter (single-quotes `''`-escaped) and any positive literal `n`. Returns
+///   `''` past the token count.
+/// - **SQLite:** restricted to the proven envelope — a SINGLE-ASCII-byte delimiter
+///   and `1 ≤ n ≤ SPLIT_PART_MAX_N` — then the engine-owned `instr`/`substr`
+///   unroll, byte-identical to PG `split_part` against SQLite 3.51.2. The delimiter
+///   is required to be a single ASCII byte precisely because UTF-8 never embeds an
+///   ASCII byte inside a multibyte sequence, so the byte-wise `instr` scan finds
+///   exactly the boundaries PG's character-wise `split_part` does (§9 byte-identity
+///   proof). Append a sentinel delimiter (`cur₀ = col || 'd'`) so every token is
+///   delimiter-terminated, then walk the boundary to literal depth `n`:
+///   `curᵢ = substr(curᵢ₋₁, instr(curᵢ₋₁, 'd') + 1)` for `i = 1 … n−1`, and the
+///   result is `substr(cur_{n-1}, 1, instr(cur_{n-1}, 'd') − 1)`. The unroll
+///   references `curᵢ₋₁` twice per level, so it grows O(2ⁿ) (~17 KB at `n=8`) — the
+///   reason `n` is capped at 8. The delimiter is emitted as a single-quoted SQL
+///   literal (`''`-escaped), NOT a bind: it is an engine-pinned constant of the
+///   pinned expression, and the authorizer (with `instr` allow-listed, §9) vets the
+///   whole statement.
+fn render_split_part(
+    col_sql: &str,
+    delim_arg: &Expr,
+    n_arg: &Expr,
+    dialect: SqlDialect,
+) -> Result<String, DmlError> {
+    // GRAMMAR (both dialects): a string-literal delimiter, a positive integer
+    // literal n. These are unrenderable on EITHER backend.
     let delim = match delim_arg {
-        Expr::Literal { value: IrScalar::Str(s) } => {
-            let bytes = s.as_bytes();
-            if bytes.len() != 1 || bytes[0] >= 0x80 {
-                return Err(DmlError::UnrenderableExpr(format!(
-                    "c.fn.splitPart delimiter must be a single ASCII character (one byte, \
-                     code point < 0x80) to lower portably on SQLite; got {s:?}"
-                )));
-            }
-            char::from(bytes[0])
+        Expr::Literal { value: IrScalar::Str(s) } if !s.is_empty() => s.as_str(),
+        Expr::Literal { value: IrScalar::Str(_) } => {
+            return Err(DmlError::UnrenderableExpr(
+                "c.fn.splitPart delimiter must be a non-empty string literal".to_string(),
+            ));
         }
         other => {
             return Err(DmlError::UnrenderableExpr(format!(
-                "c.fn.splitPart delimiter must be a single-ASCII string literal; got {other:?}"
+                "c.fn.splitPart delimiter must be a string literal \
+                 (a runtime/computed delimiter is not renderable); got {other:?}"
             )));
         }
     };
     let n = match n_arg {
+        Expr::Literal { value: IrScalar::Int(n) } if *n >= 1 => *n,
         Expr::Literal { value: IrScalar::Int(n) } => {
-            if *n < 1 || *n > SPLIT_PART_MAX_N {
-                return Err(DmlError::UnrenderableExpr(format!(
-                    "c.fn.splitPart part index n must be a positive literal in 1..={SPLIT_PART_MAX_N} \
-                     (the proven inline-unroll bound); got {n}"
-                )));
-            }
-            *n
+            return Err(DmlError::UnrenderableExpr(format!(
+                "c.fn.splitPart part index n must be a positive integer literal; got {n}"
+            )));
         }
         other => {
             return Err(DmlError::UnrenderableExpr(format!(
@@ -376,36 +397,33 @@ fn split_part_envelope(col_sql: &str, delim_arg: &Expr, n_arg: &Expr) -> Result<
             )));
         }
     };
-    Ok((col_sql.to_string(), delim, n))
-}
 
-/// Render the PINNED, exhibited `c.fn.splitPart(col, d, n)` per dialect (§9), given
-/// the already-rendered `col_sql` fragment, a single-ASCII delimiter `d`, and the
-/// positive literal part index `n` (`1 ≤ n ≤ SPLIT_PART_MAX_N`).
-///
-/// - **Postgres:** `split_part(<col>, '<d>', n)` — verbatim; returns `''` past the
-///   token count.
-/// - **SQLite:** the engine-owned `instr`/`substr` unroll, proven byte-identical to
-///   PG `split_part` against SQLite 3.51.2 over the single-ASCII-delimiter +
-///   positive-literal-`n` envelope. Append a sentinel delimiter (`cur₀ = col || 'd'`)
-///   so every token is delimiter-terminated, then walk the boundary to literal depth
-///   `n`: `curᵢ = substr(curᵢ₋₁, instr(curᵢ₋₁, 'd') + 1)` for `i = 1 … n−1`, and the
-///   result is `substr(cur_{n-1}, 1, instr(cur_{n-1}, 'd') − 1)`. The unroll
-///   references `curᵢ₋₁` twice per level, so it grows O(2ⁿ) (~17 KB at `n=8`) — the
-///   reason `n` is capped at 8. The delimiter is emitted as a single-quoted SQL
-///   literal (`''`-escaped — a single quote is the only ASCII char needing it), NOT
-///   a bind: it is an engine-pinned constant, the part of the pinned expression, and
-///   the authorizer (with `instr` newly allow-listed, §9) vets the whole statement.
-fn render_split_part(col_sql: &str, delim: char, n: i64, dialect: SqlDialect) -> String {
-    // Single-ASCII delimiter as an inline SQL string literal (`'` → `''`).
-    let d = if delim == '\'' {
-        "''''".to_string()
-    } else {
-        format!("'{delim}'")
-    };
     match dialect {
-        SqlDialect::Postgres => format!("split_part({col_sql}, {d}, {n})"),
+        SqlDialect::Postgres => {
+            // PG's split_part is multi-char-capable and takes any positive n — the
+            // full delimiter string, '-escaped, rendered verbatim. This is the
+            // dialect_scope=PgOnly escape (§2.4.1/§9): the envelope does NOT apply.
+            let d = format!("'{}'", delim.replace('\'', "''"));
+            Ok(format!("split_part({col_sql}, {d}, {n})"))
+        }
         SqlDialect::Sqlite => {
+            // ENVELOPE (SQLite only): single-ASCII-byte delim, 1 ≤ n ≤ MAX_N.
+            let bytes = delim.as_bytes();
+            if bytes.len() != 1 || bytes[0] >= 0x80 {
+                return Err(DmlError::UnrenderableExpr(format!(
+                    "c.fn.splitPart delimiter must be a single ASCII character (one byte, \
+                     code point < 0x80) to lower portably on SQLite; got {delim:?}"
+                )));
+            }
+            if n > SPLIT_PART_MAX_N {
+                return Err(DmlError::UnrenderableExpr(format!(
+                    "c.fn.splitPart part index n must be in 1..={SPLIT_PART_MAX_N} \
+                     (the proven inline-unroll bound) to lower portably on SQLite; got {n}"
+                )));
+            }
+            let dc = char::from(bytes[0]);
+            // Single-ASCII delimiter as an inline SQL string literal (`'` → `''`).
+            let d = if dc == '\'' { "''''".to_string() } else { format!("'{dc}'") };
             // cur₀ = (col || 'd') — the sentinel-terminated string.
             let mut cur = format!("({col_sql} || {d})");
             // curᵢ = substr(curᵢ₋₁, instr(curᵢ₋₁, 'd') + 1), i = 1 … n−1.
@@ -413,7 +431,7 @@ fn render_split_part(col_sql: &str, delim: char, n: i64, dialect: SqlDialect) ->
                 cur = format!("substr({cur}, instr({cur}, {d}) + 1)");
             }
             // result = substr(cur_{n-1}, 1, instr(cur_{n-1}, 'd') − 1).
-            format!("substr({cur}, 1, instr({cur}, {d}) - 1)")
+            Ok(format!("substr({cur}, 1, instr({cur}, {d}) - 1)"))
         }
     }
 }
@@ -520,8 +538,7 @@ fn render_synth_bound(f: SynthFn, args: &[Expr], ctx: &mut BindCtx) -> Result<St
                 )));
             }
             let col_sql = render_expr_bound(&args[0], ctx)?;
-            let (col_sql, delim, n) = split_part_envelope(&col_sql, &args[1], &args[2])?;
-            Ok(render_split_part(&col_sql, delim, n, ctx.dialect))
+            render_split_part(&col_sql, &args[1], &args[2], ctx.dialect)
         }
     }
 }
@@ -585,8 +602,7 @@ fn render_expr_inline(expr: &Expr, dialect: SqlDialect) -> Result<String, DmlErr
                     )));
                 }
                 let col_sql = render_expr_inline(&args[0], dialect)?;
-                let (col_sql, delim, n) = split_part_envelope(&col_sql, &args[1], &args[2])?;
-                render_split_part(&col_sql, delim, n, dialect)
+                render_split_part(&col_sql, &args[1], &args[2], dialect)?
             }
             SynthFn::ConcatWs => {
                 let rs: Result<Vec<_>, _> =
@@ -1228,7 +1244,8 @@ mod tests {
     }
 
     /// Renderer fail-closed backstop: an out-of-envelope splitPart (multi-char
-    /// delim) that somehow reached the renderer is rejected, never mis-built.
+    /// delim) that somehow reached the renderer is rejected ON SQLITE, never
+    /// mis-built.
     #[test]
     fn split_part_renderer_rejects_out_of_envelope() {
         let set = BTreeMap::from([("a".to_string(), split("name", ", ", 1))]);
@@ -1236,6 +1253,66 @@ mod tests {
         assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
         let set = BTreeMap::from([("a".to_string(), split("name", ",", 9))]);
         let err = assemble_backfill_clauses(SqlDialect::Sqlite, "t", &set, None).unwrap_err();
+        assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
+    }
+
+    /// HIGH (PR6b code-critic): the documented `dialect_scope=PgOnly` escape for an
+    /// out-of-envelope `c.fn.splitPart` (§2.4.1/§9). The validator ADMITS a
+    /// multi-char delimiter and `n > 8` on a Postgres target; the renderer MUST
+    /// therefore lower it to native `split_part(col, 'delim', n)` on PG, not
+    /// hard-error. This is the missing companion to the load-only grammar test
+    /// `out_of_envelope_split_part_pg_loads_sqlite_rejected`.
+    #[test]
+    fn split_part_out_of_envelope_renders_native_on_pg() {
+        // multi-char delimiter — PG's split_part is multi-char-capable.
+        let set = BTreeMap::from([("a".to_string(), split("name", ", ", 1))]);
+        let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap();
+        assert_eq!(c.set_clause, "\"a\" = split_part(\"name\", ', ', 1)");
+
+        // n beyond the SQLite unroll bound (9) — PG takes any positive n.
+        let set = BTreeMap::from([("a".to_string(), split("name", ",", 9))]);
+        let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap();
+        assert_eq!(c.set_clause, "\"a\" = split_part(\"name\", ',', 9)");
+
+        // and the one-shot (bound) PG path too — delim/n stay pinned constants.
+        let set = BTreeMap::from([("a".to_string(), split("name", ", ", 1))]);
+        let a = assemble_update(SCHEMA, SqlDialect::Postgres, "t", &set, None).unwrap();
+        assert_eq!(a.template, "UPDATE \"app_proj\".\"t\" SET \"a\" = split_part(\"name\", ', ', 1)");
+        assert!(a.binds.is_empty(), "delim/n are pinned constants, not binds");
+    }
+
+    /// A non-ASCII (multibyte) delimiter is still PG-renderable (PG splits on the
+    /// literal string); the single-ASCII byte gate is a SQLite-only envelope.
+    #[test]
+    fn split_part_non_ascii_delim_renders_on_pg() {
+        let set = BTreeMap::from([("a".to_string(), split("name", "→", 2))]);
+        let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap();
+        assert_eq!(c.set_clause, "\"a\" = split_part(\"name\", '→', 2)");
+        // …but rejected on the SQLite leg (out of the byte-wise envelope).
+        let err = assemble_backfill_clauses(SqlDialect::Sqlite, "t", &set, None).unwrap_err();
+        assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
+    }
+
+    /// PG still rejects a structurally-malformed splitPart (non-literal delim, a
+    /// non-positive n, a non-string delim) — the PG path widens the ENVELOPE, not
+    /// the grammar. These remain unrenderable on both dialects.
+    #[test]
+    fn split_part_pg_still_rejects_malformed() {
+        // n = 0 (not a positive part index) — invalid on PG too.
+        let set = BTreeMap::from([("a".to_string(), split("name", ",", 0))]);
+        let err = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap_err();
+        assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
+        // non-literal delim (a ColRef) — never renderable.
+        let bad = Expr::FnSynth {
+            r#fn: SynthFn::SplitPart,
+            args: vec![
+                Expr::ColRef { name: "name".into() },
+                Expr::ColRef { name: "name".into() },
+                lit_int(1),
+            ],
+        };
+        let set = BTreeMap::from([("a".to_string(), bad)]);
+        let err = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap_err();
         assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
     }
 
