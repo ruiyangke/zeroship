@@ -19,8 +19,8 @@ use compio_postgres::NoTls;
 use uuid::Uuid;
 
 use zeroship_control::deploy_migrate::{
-    apply_bundle_migrations, apply_bundle_migrations_approved, plan_reviewed_versions,
-    DeployMigrateError,
+    apply_bundle_migrations, apply_bundle_migrations_approved, apply_bundle_migrations_routed,
+    plan_reviewed_versions, DeployMigrateError,
 };
 
 /// PR9b test helper: approve the WHOLE reviewed bundle. Runs the read-only reviewer
@@ -637,75 +637,102 @@ async fn deploy_migrate_applies_sql_and_ir_together() {
     cleanup_app(&conn, &app_id).await;
 }
 
-// §2.0.3 cross-deploy pending-contract interlock — ENFORCED no-production-caller
-// invariant.
+// §2.0.3 / PR9b / PR9c — the GUARDED online-rename go-live invariant.
 //
-// POST-PR9a STATE (this comment updated): the §2.0.3 interlock IS implemented,
-// persisted, and enforced. A completed EXPAND journals a DURABLE obligation
-// (keyed on a deterministic, re-lower-stable version, §2.0.1); a later deploy
-// whose ops touch the pending table IS fail-closed refused with
-// `TABLE_HAS_PENDING_CONTRACT` (the `apply_bundle_ir_migrations` loop reads the
-// obligation back under the WHOLE-deploy project lock); an orphan IS surfaced by
-// `status`; and `resolve-pending --apply|--abort` discharges it. So the OLD reason
-// for this gate ("the interlock is not implemented yet, the obligation is not
-// journaled / read back") is NO LONGER why the approved go-live surface stays
-// test-only.
+// PR9c ACTIVATED the go-live: the production deploy handler now ROUTES through the
+// SCOPED approved surface (`apply_bundle_migrations_approved`) when the operator passes
+// a non-empty reviewed version-id set, while keeping the ROUTINE fail-closed apply
+// (`apply_bundle_migrations`, `Approval::None`) for the empty-scope (default) path. The
+// §2.0.3 cross-deploy pending-contract interlock + the PR9b per-version scope are
+// INHERITED by routing through the approved surface → `apply_plan_with_touched_and_…`
+// under the held project lock (PR9a/PR9b); the e2e tests below verify that on the wired
+// path, not by assumption.
 //
-// PR9b status (this PR): PER-VERSION APPROVAL SCOPING is now IMPLEMENTED — the
-// approved surface takes the operator's reviewed `reviewed_versions` and fail-closed
-// refuses any destructive op outside that set (`ApprovalNotScoped`), so approving one
-// reviewed rename no longer green-lights a co-bundled `dropTable`. BOTH wiring
-// preconditions (§2.0.3 interlock + per-version scoping) are now satisfied.
+// This test was previously
+// `production_deploy_handler_never_wires_the_unguarded_approved_go_live_surface`, which
+// asserted the approved surface was ABSENT. It is now RE-AIMED at the GUARDED contract:
+// the handler may wire the approved surface ONLY in its scoped form, ONLY alongside the
+// fail-closed routine default, and NEVER as a blanket bundle-wide approval, an
+// all-versions scope, or the un-interlocked raw SQLite go-live seam. It still FAILS RED
+// the instant someone wires an UNGUARDED shape — it just pins the guarded invariant now
+// instead of total absence.
 //
-// The surface nonetheless remains LIBRARY-ONLY until PR9c performs the deliberate
-// deploy-handler wiring (constructing the operator's reviewed set from the
-// control-plane approval endpoint + flipping this pin). Keeping the wiring a separate,
-// explicitly-reviewed step — rather than letting it ride in on the scoping PR — is the
-// safety discipline: PR9b adds the mechanism; PR9c (and only PR9c) connects it.
-//
-// This is the SAFETY pin: the ONLY production deploy entry point
-// (`api.rs::run_deploy_migrations`) uses the ROUTINE `apply_bundle_migrations`
-// (`Approval::None`, which refuses the EXPAND before it can complete + owe a contract),
-// and NEVER the approved surface. The instant someone wires the approved surface into
-// the production deploy path before the deliberate PR9c wiring lands, this test goes
-// RED — keeping the test-only status of the approved/SQLite-go-live surfaces a
-// regression-pinned invariant, not a promise.
+// FAILS RED if someone (a) wires a blanket bundle-wide approval constant, (b) hands an
+// all-versions scope to the approved apply, (c) drops the routine
+// `apply_bundle_migrations(provision_dsn` fail-closed default (so the empty-scope path
+// would no longer refuse online/destructive ops), or (d) wires the un-interlocked raw
+// SQLite go-live seam. (It greps `api.rs`, which names the handler shape but not the
+// interlock function — the interlock's presence on this path is pinned directly by the
+// e2e proofs below.)
 #[test]
-fn production_deploy_handler_never_wires_the_unguarded_approved_go_live_surface() {
+fn production_deploy_handler_wires_only_the_guarded_scoped_approved_surface() {
     let api_src = include_str!("../src/api.rs");
+    let routing_src = include_str!("../src/deploy_migrate.rs");
 
-    // The production deploy handler exists and routes migrations through the ROUTINE
-    // surface (Approval::None) — the one that refuses a destructive/online EXPAND.
+    // ── ASSERT PRESENT (the guarded invariant) ──────────────────────────────────────
+    // (1) the production deploy entry point still exists.
     assert!(
         api_src.contains("fn run_deploy_migrations"),
         "the production deploy handler `run_deploy_migrations` must exist in api.rs — if it \
-         was renamed, update this §2.0.3 interlock pin to track the new production entry point"
+         was renamed, update this PR9c go-live pin to track the new production entry point"
+    );
+    // (2) THE FLIP: the handler routes through the GO-LIVE routing seam, passing the
+    //     operator's `approved_versions` (was asserted ABSENT pre-PR9c — the approved surface
+    //     was wired NOWHERE). The seam — NOT the handler — chooses routine-vs-approved.
+    assert!(
+        api_src.contains("apply_bundle_migrations_routed")
+            && api_src.contains("approved_versions"),
+        "PR9c: the production deploy handler MUST route through `apply_bundle_migrations_routed` \
+         with the operator's `approved_versions`, so an operator-approved online-rename EXPAND \
+         completes while an empty set stays fail-closed"
+    );
+    // (3) the routing seam is GUARDED: it branches on the EMPTY set to the ROUTINE
+    //     fail-closed `apply_bundle_migrations` (Approval::None) AND on a non-empty set to the
+    //     SCOPED `apply_bundle_migrations_approved` (Versions). BOTH surfaces present + the
+    //     empty-set branch ⇒ the fail-closed default is structurally pinned.
+    assert!(
+        routing_src.contains("pub async fn apply_bundle_migrations_routed"),
+        "the go-live routing seam `apply_bundle_migrations_routed` must exist in deploy_migrate.rs"
     );
     assert!(
-        api_src.contains("apply_bundle_migrations(provision_dsn"),
-        "the production deploy handler must call the ROUTINE `apply_bundle_migrations` \
-         (Approval::None), which refuses an online-rename EXPAND before it can complete and \
-         owe an un-enforced pending contract"
+        routing_src.contains("approved_versions.is_empty()"),
+        "the routing seam must branch on the EMPTY approved-version set — proving the default \
+         (no operator approval) routes to the routine fail-closed apply that refuses \
+         online/destructive ops"
+    );
+    assert!(
+        routing_src.contains("apply_bundle_migrations(migrate_dsn"),
+        "the routing seam's empty-set branch must call the ROUTINE `apply_bundle_migrations` \
+         (Approval::None) — the fail-closed default. Dropping it would let an UNAPPROVED deploy \
+         complete an EXPAND."
+    );
+    assert!(
+        routing_src.contains("apply_bundle_migrations_approved(migrate_dsn"),
+        "the routing seam's non-empty branch must call the SCOPED `apply_bundle_migrations_approved` \
+         (which builds `ApprovalScope::Versions` from the reviewed set)"
     );
 
-    // The APPROVED go-live surface (coarse bundle-wide Approval::Approved, which
-    // COMPLETES an EXPAND and owes a NOT-yet-enforced §2.0.3 pending contract, and also
-    // green-lights co-bundled destructive DDL — the LOW scope warning) MUST NOT appear
-    // anywhere in the production control-plane code. Wiring it before the §2.0.3
-    // interlock is persisted+enforced opens exactly the multi-deploy partition hazard.
+    // ── ASSERT ABSENT (unguarded shapes must never reappear in the handler) ──────────
+    // (4) NO blanket bundle-wide approval constant in the production handler. Only the scoped
+    //     surface (which builds `Versions` INTERNALLY) is allowed; a literal blanket
+    //     `Approved` constant in api.rs would mean someone inlined an un-scoped approval.
     assert!(
-        !api_src.contains("apply_bundle_migrations_approved"),
-        "the approved go-live surface `apply_bundle_migrations_approved` MUST NOT be wired \
-         into a production deploy handler until the §2.0.3 pending-contract interlock is \
-         persisted (a Pending phase keyed by table+version) AND enforced (fail-closed \
-         refusal of a follow-up deploy touching a table with an outstanding pending \
-         contract, plus orphan handling). Wiring it earlier opens the cross-deploy \
-         expand-contract hazard the deduction flags."
+        !api_src.contains("Approval::Approved"),
+        "the production handler must NOT name a blanket bundle-wide approval constant — PR9b \
+         scoping forbids it; route through the scoped approved surface only"
     );
+    // (5) the handler must never construct an ALL scope (which would admit every destructive op).
+    assert!(
+        !api_src.contains("ApprovalScope::All"),
+        "the production handler must NOT construct an all-versions approval scope — that would \
+         blanket-authorize every co-bundled destructive op; only `Versions(reviewed)` is allowed"
+    );
+    // (6) the raw SQLite go-live seam stays UN-wired at the handler (a separate follow-up; the
+    //     approved SQLite rebuild is proven at its catalog surface, not the production handler).
     assert!(
         !api_src.contains("apply_bundle_ir_sqlite"),
-        "the SQLite IR go-live surface `apply_bundle_ir_sqlite` is likewise test-only until \
-         the SQLite wiring wave; it MUST NOT be wired into a production deploy handler yet"
+        "the raw SQLite IR go-live seam `apply_bundle_ir_sqlite` MUST NOT be wired into the \
+         production deploy handler yet (SQLite handler dispatch is a deferred follow-up)"
     );
 }
 
@@ -1746,6 +1773,268 @@ async fn deploy_migrate_renamecolumn_vector_type_gate_round_trips_on_production_
     }
 
     let _ = std::fs::remove_dir_all(&dir1);
+    let _ = std::fs::remove_dir_all(&dir2);
+    cleanup_app(&conn, &app_id).await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// PR9c GO-LIVE e2e — the HEADLINE proof, through the REAL production routing seam
+// `apply_bundle_migrations_routed` (the EXACT code `api.rs::run_deploy_migrations` calls;
+// NOT a test copy of the branch). The handler's only extra layer over this seam is
+// reconstructing the bundle's migration files from blobs into a tmp dir — a thin file
+// write the existing suite already treats as out-of-scope (see this file's header). These
+// tests drive the seam with a hand-authored migration directory, exactly as the handler
+// drives it with the reconstructed one.
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+// (A) An operator-APPROVED renameColumn deploy COMPLETES the EXPAND through the routing
+// seam: the seam sees a NON-EMPTY approved set (the bundle's real reviewed version-ids,
+// from `plan_reviewed_versions` — never a blanket pass) and routes to the scoped approved
+// apply. The new column is created + dual-written, the seeded row is mirrored, the old
+// column survives (the CONTRACT is pending), and the owed CONTRACT is surfaced. The peer
+// NON-approved deploy (empty set) through the SAME seam is fail-closed REFUSED. This is the
+// go-live activation proof: the production-wired path now completes an approved rename.
+#[compio::test]
+async fn deploy_migrate_routed_approved_rename_completes_expand_pg() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    // Deploy #1 (ROUTINE, empty approved set via the seam): create users(name) + seed Ada.
+    let create = r#"{"ir_version":1,"name":"create_users","ops":[
+        {"op":"createTable","name":"users","columns":[
+            {"name":"name","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    let dir1 = migrations_dir(&[("0001_create_users.ir.json", create)]);
+    apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir1, &[])
+        .await
+        .expect("routine create deploy (empty approved set) must apply");
+    assert!(column_exists(&conn, &app_id, "users", "name").await, "name created");
+
+    let schema = app_id.to_string();
+    conn.batch_execute(&format!(
+        "INSERT INTO \"{schema}\".users (id, name, created_at, updated_at, version) \
+         VALUES ('u1','Ada', now(), now(), 1)"
+    ))
+    .await
+    .expect("seed Ada");
+
+    // The rename bundle (name → full_name).
+    let rename = r#"{"ir_version":1,"name":"rename_name","ops":[
+        {"op":"renameColumn","table":"users","from":"name","to":"full_name","type":"text"}
+    ]}"#;
+    let dir2 = migrations_dir(&[("0002_rename_name.ir.json", rename)]);
+
+    // The operator's reviewed set — the bundle's REAL destructive scope-versions (never a
+    // blanket pass). This is the source of truth the control-plane approval endpoint would
+    // surface to the reviewer.
+    let reviewed = plan_reviewed_versions(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect("reviewer plan enumerates the rename's scope-versions");
+    assert!(
+        !reviewed.is_empty(),
+        "an online rename must require approval of at least its plan-group version"
+    );
+
+    // (A1) NON-APPROVED through the SAME seam (empty set) ⇒ FAIL-CLOSED: the EXPAND is
+    // refused, no go-live, the column is still `name`, the seeded row is untouched.
+    let refused = apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir2, &[])
+        .await
+        .expect_err("an UNAPPROVED rename through the routing seam must be refused");
+    match refused {
+        DeployMigrateError::OnlineExpand(zeroship_migrate::OnlineError::Approval) => {}
+        other => panic!("expected OnlineExpand(Approval) on the empty-set routine path, got {other:?}"),
+    }
+    assert!(
+        column_exists(&conn, &app_id, "users", "name").await
+            && !column_exists(&conn, &app_id, "users", "full_name").await,
+        "the refused unapproved rename applied NOTHING (still `name`, no `full_name`)"
+    );
+
+    // (A2) APPROVED through the seam (the reviewed set) ⇒ the EXPAND COMPLETES.
+    let outcome = apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir2, &reviewed)
+        .await
+        .expect("the operator-approved rename through the routing seam must COMPLETE the expand");
+    assert!(!outcome.applied.is_empty(), "the approved EXPAND applied migrations");
+    assert!(
+        !outcome.pending_contract.is_empty(),
+        "the completed EXPAND surfaces the owed CONTRACT (C2 drop-old-column) for a later \
+         approved deploy, got {outcome:?}"
+    );
+
+    // The new column is live + dual-written; the old column survives (CONTRACT pending).
+    assert!(
+        column_exists(&conn, &app_id, "users", "full_name").await,
+        "the EXPAND created the new `full_name` column"
+    );
+    assert!(
+        column_exists(&conn, &app_id, "users", "name").await,
+        "the old `name` column is still present — the CONTRACT is pending, not applied"
+    );
+
+    // The seeded row was MIRRORED into the renamed column by the backfill.
+    let rows = conn
+        .query(&format!("SELECT full_name FROM \"{schema}\".users ORDER BY id"), &[])
+        .await
+        .expect("read full_name");
+    let names: Vec<String> = rows.iter().filter_map(|r| r.get::<_, Option<String>>(0)).collect();
+    assert_eq!(names, vec!["Ada".to_string()], "the backfill mirrored the seeded row");
+
+    let _ = std::fs::remove_dir_all(&dir1);
+    let _ = std::fs::remove_dir_all(&dir2);
+    cleanup_app(&conn, &app_id).await;
+}
+
+// (B) INTERLOCK INHERITED on the production-wired (routed) path + the §2.0.3 obligation is
+// DURABLY JOURNALED. After (A)'s approved EXPAND opens a pending contract on `users`, a
+// SUBSEQUENT routine deploy (empty set, through the SAME seam) whose op TOUCHES `users` is
+// fail-closed REFUSED with `TABLE_HAS_PENDING_CONTRACT`. The refusal can ONLY come from the
+// interlock reading the journaled obligation back — so this is the behavioral proof the
+// obligation was journaled (not just `warn!`d) AND that the interlock bites on the
+// production routing seam, not merely the library `apply_bundle_migrations_approved`.
+#[compio::test]
+async fn deploy_migrate_routed_interlock_inherited_refuses_touch_of_pending_table_pg() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    // Deploy #1 (routine): create members(handle).
+    let create = r#"{"ir_version":1,"name":"create_members","ops":[
+        {"op":"createTable","name":"members","columns":[
+            {"name":"handle","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    let dir1 = migrations_dir(&[("0001_create_members.ir.json", create)]);
+    apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir1, &[])
+        .await
+        .expect("routine create deploy must apply");
+
+    // Deploy #2 (APPROVED via the seam): renameColumn handle → username opens the durable
+    // pending contract on `members`.
+    let rename = r#"{"ir_version":1,"name":"rename_handle","ops":[
+        {"op":"renameColumn","table":"members","from":"handle","to":"username","type":"text"}
+    ]}"#;
+    let dir2 = migrations_dir(&[("0002_rename_handle.ir.json", rename)]);
+    let reviewed = plan_reviewed_versions(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect("reviewer plan");
+    apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir2, &reviewed)
+        .await
+        .expect("approved rename completes EXPAND + journals the obligation");
+
+    // Deploy #3 (routine, empty set via the seam): an addColumn TOUCHING `members`. The
+    // interlock reads the journaled obligation back under the held lock ⇒ refuse.
+    let touch = r#"{"ir_version":1,"name":"add_nickname","ops":[
+        {"op":"addColumn","table":"members","column":"nickname","type":"text","nullable":true}
+    ]}"#;
+    let dir3 = migrations_dir(&[("0003_add_nickname.ir.json", touch)]);
+    let err = apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir3, &[])
+        .await
+        .expect_err("a deploy touching the pending table must be refused on the routed path");
+    match err {
+        DeployMigrateError::Apply(zeroship_migrate::EngineError::PendingContract(payload)) => {
+            assert_eq!(payload.code, zeroship_migrate::CODE_TABLE_HAS_PENDING_CONTRACT);
+            assert_eq!(payload.table, "members");
+        }
+        other => panic!("expected TABLE_HAS_PENDING_CONTRACT on the routed path, got {other:?}"),
+    }
+    assert!(
+        !column_exists(&conn, &app_id, "members", "nickname").await,
+        "the refused deploy applied NOTHING (interlock fail-closed)"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir1);
+    let _ = std::fs::remove_dir_all(&dir2);
+    let _ = std::fs::remove_dir_all(&dir3);
+    cleanup_app(&conn, &app_id).await;
+}
+
+// (C) SCOPE bites on the routed path — a co-bundled destructive op OUTSIDE the approved
+// scope is REFUSED even inside an approved deploy. The bundle ships the rename (reviewed,
+// on `accounts`) PLUS an unrelated destructive `dropColumn` on a DIFFERENT table
+// (`audit`) whose version is NOT in the approved set. The different table is deliberate:
+// were the drop on the SAME table as the rename, the §2.0.3 pending-contract interlock
+// would pre-empt with `TABLE_HAS_PENDING_CONTRACT` (a different, also-fail-closed
+// refusal) — here we isolate the per-version SCOPE gate (`ApprovalNotScoped`). Routed
+// through the seam with the rename-only reviewed set, the unreviewed drop is fail-closed
+// refused — approving one reviewed rename can NOT blanket-authorize an unrelated
+// co-bundled destruction.
+#[compio::test]
+async fn deploy_migrate_routed_co_bundled_unreviewed_destructive_is_refused_pg() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    // Deploy #1 (routine): create accounts(email) + a SEPARATE audit(note, legacy).
+    let create = r#"{"ir_version":1,"name":"create_tables","ops":[
+        {"op":"createTable","name":"accounts","columns":[
+            {"name":"email","type":"text","nullable":false}
+        ]},
+        {"op":"createTable","name":"audit","columns":[
+            {"name":"note","type":"text","nullable":false},
+            {"name":"legacy","type":"text","nullable":true}
+        ]}
+    ]}"#;
+    let dir1 = migrations_dir(&[("0001_create_tables.ir.json", create)]);
+    apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir1, &[])
+        .await
+        .expect("routine create deploy must apply");
+
+    // Deploy #2 bundles: 0002 = renameColumn accounts.email → email_address (reviewed),
+    // 0003 = an unrelated destructive dropColumn audit.legacy on a DIFFERENT table (NOT
+    // reviewed, and NOT the rename's table, so the interlock does not pre-empt the scope gate).
+    let rename = r#"{"ir_version":1,"name":"rename_email","ops":[
+        {"op":"renameColumn","table":"accounts","from":"email","to":"email_address","type":"text"}
+    ]}"#;
+    let drop = r#"{"ir_version":1,"name":"drop_legacy","ops":[
+        {"op":"dropColumn","table":"audit","column":"legacy"}
+    ]}"#;
+    // Reviewer plan over the rename FILE ONLY — the operator approved exactly the rename.
+    let dir_rename_only = migrations_dir(&[("0002_rename_email.ir.json", rename)]);
+    let reviewed_rename_only = plan_reviewed_versions(&admin_dsn(), &app_id, &dir_rename_only)
+        .await
+        .expect("reviewer plan for the rename only");
+
+    // The ACTUAL deploy bundles BOTH files, but the approved set covers only the rename.
+    let dir2 = migrations_dir(&[
+        ("0002_rename_email.ir.json", rename),
+        ("0003_drop_legacy.ir.json", drop),
+    ]);
+    let err = apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir2, &reviewed_rename_only)
+        .await
+        .expect_err(
+            "an unreviewed co-bundled destructive dropColumn (different table) must be refused \
+             even in an approved deploy (scope only authorizes the reviewed rename)",
+        );
+    // The refusal is the per-version SCOPE gate (ApprovalNotScoped), surfaced as an Apply error.
+    match err {
+        DeployMigrateError::Apply(zeroship_migrate::EngineError::ApprovalNotScoped { .. }) => {}
+        DeployMigrateError::Apply(zeroship_migrate::EngineError::Apply(
+            zeroship_migrate::ApplyError::ApprovalNotScoped { .. },
+        )) => {}
+        other => panic!(
+            "expected an ApprovalNotScoped refusal for the unreviewed co-bundled drop, got {other:?}"
+        ),
+    }
+
+    // FAIL CLOSED: `audit.legacy` is still present (the unreviewed drop did not run).
+    assert!(
+        column_exists(&conn, &app_id, "audit", "legacy").await,
+        "the unreviewed dropColumn applied NOTHING — `audit.legacy` survives"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir1);
+    let _ = std::fs::remove_dir_all(&dir_rename_only);
     let _ = std::fs::remove_dir_all(&dir2);
     cleanup_app(&conn, &app_id).await;
 }

@@ -396,6 +396,8 @@ pub async fn deploy(
     id: Path<String>,
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
+    // PR9c: the operator-approval seam. Absent/empty ⇒ fail-closed routine deploy.
+    approval_query: web::types::Query<DeployApprovalQuery>,
     mut body: web::types::Payload,
 ) -> web::HttpResponse {
     // Authz + uuid + content-type rejections happen BEFORE any body byte
@@ -609,7 +611,13 @@ pub async fn deploy(
             // go-live commits. If migrate succeeds but the go-live UPDATE below
             // fails, the schema is ahead of the live code (additive-forward =
             // safe); the next deploy's roll-forward reconciles. No verify gate.
-            if let Err(resp) = run_deploy_migrations(&uid, &success.manifest_json, &state).await {
+            // PR9c: thread the operator's approved version-id set. Empty (the default)
+            // keeps the routine fail-closed apply; a non-empty set routes to the SCOPED
+            // approved apply so the reviewed online-rename/destructive ops complete.
+            let approved_versions = approval_query.approved_version_ids();
+            if let Err(resp) =
+                run_deploy_migrations(&uid, &success.manifest_json, &approved_versions, &state).await
+            {
                 return resp;
             }
 
@@ -648,6 +656,12 @@ pub async fn deploy(
 async fn run_deploy_migrations(
     app_id: &Uuid,
     manifest_json: &str,
+    // PR9c: the operator's individually-reviewed version-ids approved for THIS deploy.
+    // EMPTY ⇒ the routine fail-closed apply (`Approval::None`): an online-rename EXPAND
+    // / any destructive op is refused before go-live. NON-EMPTY ⇒ the SCOPED approved
+    // apply (`ApprovalScope::Versions`): only the listed versions' destructive/online
+    // ops run; everything else stays refused. NEVER a blanket bundle-wide approval.
+    approved_versions: &[String],
     state: &AppState,
 ) -> Result<(), web::HttpResponse> {
     // Re-parse the (already-validated) ingested manifest for its migrations.
@@ -699,7 +713,28 @@ async fn run_deploy_migrations(
     let write_result = reconstruct_migration_files(&manifest, app_id, state, &mig_dir).await;
     let outcome = match write_result {
         Ok(()) => {
-            crate::deploy_migrate::apply_bundle_migrations(provision_dsn, app_id, &mig_dir).await
+            // PR9c GO-LIVE ROUTING — `apply_bundle_migrations_routed` is the SINGLE seam
+            // that maps `approved_versions` to one of the two apply surfaces (the e2e drives
+            // this EXACT code, no test copy):
+            //   • EMPTY  ⇒ ROUTINE `apply_bundle_migrations` (`Approval::None`) — an
+            //     online-rename EXPAND / any destructive op is FAIL-CLOSED refused before
+            //     go-live (byte-identical to pre-PR9c behavior).
+            //   • NON-EMPTY ⇒ SCOPED `apply_bundle_migrations_approved`
+            //     (`ApprovalScope::Versions(approved)` built internally) — ONLY the operator-
+            //     reviewed versions' online/destructive ops complete; everything outside the
+            //     set stays refused (`ApprovalNotScoped`). NEVER a blanket bundle-wide
+            //     approval / all-versions scope. The §2.0.3 cross-deploy pending-contract
+            //     interlock read-back AND the per-version scope are INHERITED on this exact
+            //     path (the scoped surface routes through
+            //     `apply_plan_with_touched_and_depends_scoped` under the held project lock —
+            //     see deploy_migrate.rs); verified by the go-live e2e, not assumed.
+            crate::deploy_migrate::apply_bundle_migrations_routed(
+                provision_dsn,
+                app_id,
+                &mig_dir,
+                approved_versions,
+            )
+            .await
         }
         Err(resp) => {
             let _ = std::fs::remove_dir_all(&mig_dir);
@@ -716,15 +751,19 @@ async fn run_deploy_migrations(
                 skipped = report.skipped.len(),
                 "control: deploy-migrate applied"
             );
-            // PR7 (§2.0.2): the routine deploy applies under `Approval::None`, so
-            // `pending_contract` is ALWAYS empty here (an online-rename EXPAND is
-            // refused before it can complete + surface a pending contract). The
-            // approved out-of-band apply surface is the only producer. We still
-            // surface the signal at this boundary — never silently drop it — so that
-            // when the approved surface is wired through a deploy handler the owed
-            // CONTRACT (the C2 drop-old-column that, if lost, leaves a forever-pending
-            // dual-write trigger + orphaned old column) is recorded for the control
-            // plane to schedule the follow-up approved deploy, not dropped.
+            // PR9c (§2.0.2/§2.0.3): `pending_contract` is EMPTY on the routine
+            // (`Approval::None`) path — an online-rename EXPAND is refused before it can
+            // complete + owe a contract — and POPULATED on the approved path where the
+            // EXPAND completed. CRITICAL: this `warn!` is the OPERATOR-FACING SURFACING of
+            // an obligation that is ALREADY DURABLY JOURNALED engine-side
+            // (`record_pending_contract`, written inside the approved apply's EXPAND under
+            // the held project lock — see deploy_migrate.rs / backend.rs). It is NOT the
+            // obligation itself: even if this log were dropped, the durable journal still
+            // fail-closed refuses a later deploy touching the pending table
+            // (`TABLE_HAS_PENDING_CONTRACT`). We log at WARN so the owed follow-up CONTRACT
+            // (the C2 drop-old-column whose loss would orphan the old column behind a
+            // forever-pending dual-write trigger) is operator-visible for scheduling the
+            // approved contract deploy.
             if !report.pending_contract.is_empty() {
                 tracing::warn!(
                     app_id = %app_id,
@@ -1179,6 +1218,52 @@ pub struct InvoiceListQuery {
 pub struct CreatorScopeQuery {
     #[serde(default)]
     pub creator_id: Option<Uuid>,
+}
+
+/// **PR9c — the operator-approval seam for online/destructive go-live.** The
+/// optional `?approved_versions=` query on `POST /api/apps/{id}/deploy` carries the
+/// operator's individually-reviewed migration version-ids (comma-joined) that this
+/// deploy is approved to apply.
+///
+/// **Fail-closed default.** Absent / empty ⇒ an empty set ⇒ the deploy routes to the
+/// ROUTINE apply (`Approval::None`): an online-rename EXPAND or any destructive op is
+/// REFUSED before go-live, byte-identical to today. A NON-empty set routes to the
+/// SCOPED approved apply (`ApprovalScope::Versions`), where ONLY the listed versions
+/// may run their destructive/online ops; everything outside the set stays refused
+/// (`ApprovalNotScoped`). There is no blanket bundle-wide approval — `Versions({})`
+/// admits nothing.
+///
+/// The approval does NOT travel inside the creator-authored `.zship` (an operator
+/// decision must not be forgeable by the bundle author — the anti-bypass point of the
+/// PR9b scoping); it rides the request as a separate, authz-gated channel (only an
+/// `AppsDeploy`-authorized caller can pass it at all). The version-ids an operator
+/// approves are the ones `deploy_migrate::plan_reviewed_versions` enumerates for the
+/// bundle. A richer persisted approval-record workflow (an endpoint that stores the
+/// reviewed set keyed by app+bundle-hash and re-validates the deploy's set against it)
+/// is a deferred follow-up; PR9c threads + enforces the scope.
+#[derive(Deserialize, Default)]
+pub struct DeployApprovalQuery {
+    #[serde(default)]
+    pub approved_versions: Option<String>,
+}
+
+impl DeployApprovalQuery {
+    /// Parse the comma-joined `approved_versions` into a de-duplicated, trimmed
+    /// version-id list. Absent / empty / all-blank ⇒ an EMPTY vec (the fail-closed
+    /// routine path). Never errors: an unparseable spelling simply yields fewer
+    /// approved versions, which can only narrow (never widen) what may run.
+    fn approved_version_ids(&self) -> Vec<String> {
+        self.approved_versions
+            .as_deref()
+            .map(|s| {
+                s.split(',')
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    }
 }
 
 /// Resolve the OWNING creator (`app_members.role='owner'`) for an app, or `None`

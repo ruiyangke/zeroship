@@ -321,6 +321,33 @@ pub async fn apply_bundle_migrations_approved(
     .await
 }
 
+/// **PR9c — the production deploy-handler routing seam.** The SINGLE place that maps an
+/// operator-approved version-id set to one of the two apply surfaces, so the HTTP deploy
+/// handler (`api.rs::run_deploy_migrations`) and the go-live e2e drive the EXACT SAME
+/// routing code (no test-only copy of the branch).
+///
+/// **Fail-closed by the empty set.** An EMPTY `approved_versions` ⇒ the ROUTINE
+/// [`apply_bundle_migrations`] (`Approval::None`): an online-rename EXPAND / any
+/// destructive op is refused before go-live. A NON-EMPTY set ⇒ the SCOPED
+/// [`apply_bundle_migrations_approved`] (`ApprovalScope::Versions`), where ONLY the
+/// listed versions may run their online/destructive ops and everything outside the set
+/// stays refused (`ApprovalNotScoped`). NEVER a blanket bundle-wide approval — the
+/// scoped surface builds `Versions` internally, and the §2.0.3 cross-deploy interlock +
+/// the per-version scope are inherited from the apply-plan path it routes through.
+pub async fn apply_bundle_migrations_routed(
+    migrate_dsn: &str,
+    app_id: &Uuid,
+    migrations_dir: &Path,
+    approved_versions: &[String],
+) -> Result<MigrateOutcome, DeployMigrateError> {
+    if approved_versions.is_empty() {
+        apply_bundle_migrations(migrate_dsn, app_id, migrations_dir).await
+    } else {
+        apply_bundle_migrations_approved(migrate_dsn, app_id, migrations_dir, approved_versions)
+            .await
+    }
+}
+
 async fn apply_bundle_migrations_with_approval(
     migrate_dsn: &str,
     app_id: &Uuid,
