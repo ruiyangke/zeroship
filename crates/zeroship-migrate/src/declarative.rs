@@ -3775,17 +3775,50 @@ impl DeclarativeAuthor {
             )));
         }
 
-        // ---- desired SDK schema `Value`: live with the field key renamed ----
-        // The shared SQLite emitter renders the new-table CREATE from this Value, so
-        // renaming the field KEY (preserving its facets verbatim) is exactly the
-        // post-rename column shape — byte-identical to a `t.*`-diff rename.
-        let desired_schema_value =
-            rename_sdk_schema_field(live_sqlite_schema, from, to).ok_or_else(|| {
-                DeclarativeError::Invalid(format!(
-                    "renameColumn: live SDK schema for '{table}' has no field '{from}' \
-                     (cannot author the post-rename CREATE)"
-                ))
-            })?;
+        // ---- desired (post-rename) SDK schema `Value` ----
+        // The shared SQLite emitter renders the new-table CREATE from this Value.
+        //
+        // TWO faithful sources for the SDK `Value`, distinguished by which field key it
+        // carries (the live `from` or the post-rename `to`):
+        //
+        //  (1) **PRE-rename Value** (the field is keyed `from`) — the descriptor-set
+        //      path (`apply_bundle_ir_sqlite`) supplies the PRE-rename SDK `Value`. We
+        //      rename the field KEY `from`→`to` (facets preserved verbatim) to get the
+        //      post-rename shape — byte-identical to a `t.*`-diff rename.
+        //
+        //  (2) **POST-rename Value** (the field is already keyed `to`) — **PR9b** the
+        //      production catalog-sourced path (`LiveSchema::from_sqlite_catalog`)
+        //      supplies the POST-deploy DESIRED descriptor `Value` (the field is already
+        //      `to`, with its FULL facets — encryption/mask/FK/enum/default/… — none
+        //      dropped, because they come straight from the descriptor, NOT a lossy
+        //      catalog reconstruction). The live `from` column's facets are identical to
+        //      the desired `to` column's (a rename preserves facets), so the desired
+        //      post-rename `Value` IS the correct post-rename CREATE source as-is.
+        //
+        // We require the live `from` column to be present in `live_snapshot` (checked
+        // above) so the value-copy mapping is authoritative; the SDK `Value` may then be
+        // sourced from EITHER shape. If it carries NEITHER `from` nor `to`, fail closed.
+        let desired_schema_value = if let Some(v) =
+            rename_sdk_schema_field(live_sqlite_schema, from, to)
+        {
+            // (1) pre-rename Value → rename the field key to the post-rename shape.
+            v
+        } else if live_sqlite_schema
+            .as_object()
+            .is_some_and(|o| o.contains_key(to))
+        {
+            // (2) post-rename desired Value (already keyed `to`) → use as-is. The live
+            // `from` column (confirmed present in `live_snapshot`) maps to this `to`
+            // field by the RenameHint below, so the value-copy is correct and no facet
+            // is lost.
+            live_sqlite_schema.clone()
+        } else {
+            return Err(DeclarativeError::Invalid(format!(
+                "renameColumn: SDK schema for '{table}' has neither the pre-rename field \
+                 '{from}' nor the post-rename field '{to}' (cannot author the post-rename \
+                 CREATE) — refusing to emit a rebuild from a partial view"
+            )));
+        };
 
         // ---- assemble the one-table DesiredSchema + live snapshot ----
         // **Cross-app guard correctness (MED).** The diff's `enforce_ownership`
