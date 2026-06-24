@@ -8,10 +8,27 @@
 //! gates which builtins the migrator role may EXECUTE; the grammar gates which
 //! functions an author may BUILD; they are distinct lists.
 
+use std::collections::BTreeMap;
+use zeroship_migrate::dml::assemble_backfill_clauses;
+use zeroship_migrate::expr::{Expr, SynthFn};
+use zeroship_migrate::ir::IrScalar;
 use zeroship_migrate::ir_load::load_ir_document;
 use zeroship_migrate::validate::Dialect;
+use zeroship_migrate::SqlDialect;
 
 const APP: &str = "app_grammar";
+
+/// A `c.fn.splitPart(col, delim, n)` synth node for the render-path probes.
+fn split(col: &str, delim: &str, n: i64) -> Expr {
+    Expr::FnSynth {
+        r#fn: SynthFn::SplitPart,
+        args: vec![
+            Expr::ColRef { name: col.into() },
+            Expr::Literal { value: IrScalar::Str(delim.into()) },
+            Expr::Literal { value: IrScalar::Int(n) },
+        ],
+    }
+}
 
 fn registry() -> std::collections::BTreeMap<String, String> {
     [("t".to_string(), APP.to_string())].into_iter().collect()
@@ -79,5 +96,28 @@ fn out_of_envelope_split_part_pg_loads_sqlite_rejected() {
     assert!(
         err.to_string().contains("EXPR_NOT_PORTABLE") || err.to_string().to_lowercase().contains("portable"),
         "the SQLite leg must reject with EXPR_NOT_PORTABLE; got: {err}"
+    );
+}
+
+/// HIGH (PR6b code-critic): the RENDER-path companion to the load-only test above.
+/// The grammar test proved an out-of-envelope splitPart LOADS on PG; this proves it
+/// actually LOWERS to native `split_part(col, 'delim', n)` on a Postgres target
+/// (the `dialect_scope=PgOnly` escape, §2.4.1/§9) instead of hard-erroring at
+/// render — and that the SAME node still rejects at lower on a SQLite target.
+#[test]
+fn out_of_envelope_split_part_lowers_native_on_pg_rejects_on_sqlite() {
+    // multi-char delimiter, the §9 grammar-boundary example.
+    let set = BTreeMap::from([("x".to_string(), split("v", ", ", 1))]);
+    let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None)
+        .expect("out-of-envelope splitPart must LOWER to native split_part on PG");
+    assert_eq!(c.set_clause, "\"x\" = split_part(\"v\", ', ', 1)");
+
+    // the same node is unrenderable on the SQLite leg (out of the byte-wise envelope).
+    let err = assemble_backfill_clauses(SqlDialect::Sqlite, "t", &set, None)
+        .expect_err("out-of-envelope splitPart must reject at lower on SQLite");
+    assert!(
+        err.to_string().to_lowercase().contains("sqlite")
+            || err.to_string().to_lowercase().contains("ascii"),
+        "the SQLite leg rejects out-of-envelope; got: {err}"
     );
 }

@@ -261,6 +261,111 @@ async fn sqlite_backfill_complete_rerun_is_noop() {
     assert_eq!(mismatches, 0, "no double-apply on re-run");
 }
 
+// ── REAL (numeric-affinity, non-integral) unique cursor, exactly-once ────────
+// MED (PR6b code-critic): `max_returned_cursor` parsed each RETURNING'd cell with
+// `parse::<i64>()` and SILENTLY DROPPED any non-i64 value — so a UNIQUE NOT NULL
+// REAL cursor (legal, just unusual) yielded max_cursor=None even with n>0 rows
+// touched, writing last_cursor=NULL, re-scanning from the start (WHERE 1=1), and
+// re-applying the non-idempotent transform. The bind side already had a text
+// fallback; the max side did not. This faithful e2e proves exactly-once over a REAL
+// cursor with actual non-integral data, which a re-apply loop would fail (val=id+2
+// somewhere) and a premature-stop would fail (a row left at val=id).
+
+/// Seed `rnums(rk REAL UNIQUE NOT NULL, id INTEGER PRIMARY KEY, val INTEGER, done
+/// INTEGER)` with `n` rows whose REAL cursor `rk = i + 0.5` is NON-integral (so the
+/// `parse::<i64>()` path would drop EVERY cell). `val = id`, `done = 0`.
+async fn seed_real_cursor(be: &SqliteBackend, n: i64) {
+    let actor = be.actor();
+    actor.set_mode(Mode::CreatorUp).await.unwrap();
+    actor
+        .exec(
+            "CREATE TABLE rnums (\
+               rk REAL NOT NULL UNIQUE, \
+               id INTEGER PRIMARY KEY, \
+               val INTEGER NOT NULL, \
+               done INTEGER NOT NULL DEFAULT 0)",
+        )
+        .await
+        .expect("create rnums");
+    let mut vals = Vec::with_capacity(n as usize);
+    for i in 1..=n {
+        // rk = i + 0.5 — distinct, NON-integral, numeric-order = id-order.
+        vals.push(format!("({i}.5, {i}, {i}, 0)"));
+    }
+    actor
+        .exec(&format!("INSERT INTO rnums (rk, id, val, done) VALUES {}", vals.join(", ")))
+        .await
+        .expect("seed rnums");
+}
+
+fn real_spec(batch: u32) -> BackfillSpec {
+    BackfillSpec {
+        table: "rnums".to_string(),
+        cursor_column: "rk".to_string(),
+        batch_size: batch,
+        set_clause: "\"val\" = (\"val\" + 1), \"done\" = 1".to_string(),
+        filter: Some("\"done\" = 0".to_string()),
+        name: "increment_real".to_string(),
+    }
+}
+
+#[compio::test]
+async fn sqlite_backfill_real_cursor_advances_exactly_once() {
+    let _g = serial();
+    let p = paths("bf_real");
+    let be = backend(&p);
+    seed_real_cursor(&be, 50).await;
+    let s = real_spec(10); // 5 batches; each must advance the REAL cursor, not reset
+
+    let out = be
+        .run_backfill_bounded_sqlite(&s, &s.set_clause, s.filter.as_deref(), "tester", None)
+        .await
+        .expect("REAL-cursor backfill runs to completion");
+    assert!(out.complete, "backfill completed");
+    assert_eq!(out.batches, 5, "50 rows / 10 per batch = 5 batches (cursor advanced, not reset)");
+    assert_eq!(out.rows_updated, 50, "every row touched ONCE (a reset loop would touch more)");
+
+    // Exactly-once: every row val == id + 1. A dropped-cursor re-scan would push some
+    // row to id+2 (double-apply) before the `done=0` filter caught up, or leave a row
+    // at id (premature complete) — both surface here.
+    let mismatches = scalar_i64(&be, "SELECT count(*) FROM rnums WHERE val <> id + 1").await;
+    assert_eq!(mismatches, 0, "REAL-cursor backfill is exactly-once");
+    let undone = scalar_i64(&be, "SELECT count(*) FROM rnums WHERE done <> 1").await;
+    assert_eq!(undone, 0, "every row marked done");
+}
+
+#[compio::test]
+async fn sqlite_backfill_real_cursor_resumes_exactly_once_after_crash() {
+    let _g = serial();
+    let p = paths("bf_real_crash");
+    let be = backend(&p);
+    seed_real_cursor(&be, 50).await;
+    let s = real_spec(10);
+
+    // Phase 1 — exactly 2 committed batches (rows 1..20), then "crash". With the bug,
+    // last_cursor was written NULL, so the resume below would re-scan from rk>nothing.
+    let out1 = be
+        .run_backfill_bounded_sqlite(&s, &s.set_clause, s.filter.as_deref(), "tester", Some(2))
+        .await
+        .expect("bounded REAL run");
+    assert_eq!(out1.batches, 2, "exactly 2 batches before the crash");
+    assert_eq!(out1.rows_updated, 20);
+    assert!(!out1.complete);
+
+    // Phase 2 — resume. MUST resume from the committed REAL cursor (rk≈20.5), NOT
+    // restart from the beginning (the dropped-cursor bug would re-touch rows 1..20).
+    let out2 = be
+        .run_backfill_bounded_sqlite(&s, &s.set_clause, s.filter.as_deref(), "tester", None)
+        .await
+        .expect("resumed REAL run");
+    assert!(out2.resumed, "the re-run resumed from a committed REAL cursor");
+    assert_eq!(out2.rows_updated, 30, "only the remaining 30 rows touched (no re-touch)");
+    assert!(out2.complete);
+
+    let mismatches = scalar_i64(&be, "SELECT count(*) FROM rnums WHERE val <> id + 1").await;
+    assert_eq!(mismatches, 0, "every row incremented EXACTLY once across the crash (REAL cursor)");
+}
+
 // ── cursor-safety + identifier gates (defense-in-depth) ──────────────────────
 
 #[compio::test]
