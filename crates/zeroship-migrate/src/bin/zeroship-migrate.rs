@@ -290,6 +290,26 @@ enum Command {
     /// schema file is the global `--schema-file` (default `./db/schema.sql`).
     #[command(visible_alias = "setup")]
     Load,
+    /// Resolve a cross-deploy online-rename PENDING CONTRACT (§2.0.3). After an
+    /// online `renameColumn` EXPAND applies, its contract (drop dual-write trigger
+    /// + drop old column) is deferred to a later deploy and held as a durable
+    /// obligation that fail-closed refuses further changes to the table. This
+    /// command discharges it. GATED on `--yes` (both paths are destructive). PG
+    /// only — a SQLite rename is atomic and has no pending partition.
+    ResolvePending {
+        /// Apply the deferred contract (drop trigger + drop old column) — the
+        /// rename completes. Destructive (C2). Mutually exclusive with `--abort`.
+        #[arg(long, conflicts_with = "abort")]
+        apply: bool,
+        /// Abort the rename: drop the shadow column + dual-write trigger, returning
+        /// the table to its pre-rename shape. Destructive. Mutually exclusive with
+        /// `--apply`.
+        #[arg(long)]
+        abort: bool,
+        /// The pending contract's version (the EXPAND/`pending_version` reported by
+        /// `status`).
+        version: String,
+    },
 }
 
 /// The effective migration directory under the precedence rule (CLI flag > env >
@@ -550,6 +570,15 @@ fn print_report(report: &RunReport) {
                 outcome.versions
             );
         }
+        RunReport::ResolvePending(outcome) => {
+            println!(
+                "resolve-pending: {} contract for table `{}` (version {}); applied {:?}",
+                outcome.resolution.as_str(),
+                outcome.table,
+                outcome.pending_version,
+                outcome.applied
+            );
+        }
     }
 }
 
@@ -766,6 +795,9 @@ async fn main() -> ExitCode {
         Command::Validate => platform_runner::run_validate(&cfg).await,
         Command::Rollback { to, steps } => {
             platform_runner::run_rollback(&cfg, *to, *steps).await
+        }
+        Command::ResolvePending { apply, abort, version } => {
+            platform_runner::run_resolve_pending(&cfg, version, *apply, *abort).await
         }
         // Handled above (offline / non-plan commands).
         Command::New { .. } | Command::Wait { .. } | Command::Dump | Command::Load => {

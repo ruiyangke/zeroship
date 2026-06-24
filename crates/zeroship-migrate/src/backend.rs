@@ -184,6 +184,39 @@ pub trait MigrationBackend {
         cfg: &ExecutorConfig,
     ) -> Result<std::collections::HashMap<String, String>, JournalError>;
 
+    // -- cross-deploy pending-contract obligations (§2.0.3) -----------------
+
+    /// Read the OUTSTANDING cross-deploy pending-contract obligations (§2.0.3) —
+    /// the apply-time interlock read-back + the `status` orphan/blocked source.
+    ///
+    /// **SQLite returns an empty set unconditionally.** A `SqliteRebuild` rename
+    /// is one atomic offline step with NO `pending_contract` partition (§2.0.2),
+    /// so SQLite never opens an obligation; the interlock therefore can never
+    /// false-gate a SQLite deploy (Deliverable 7).
+    async fn outstanding_pending_contracts(
+        &self,
+        cfg: &ExecutorConfig,
+    ) -> Result<Vec<journal::PendingContract>, JournalError>;
+
+    /// Open a `pending` cross-deploy obligation (§2.0.3 item 1). Admin-written; the
+    /// migrator cannot reach the meta schema (deny-by-absence). SQLite no-ops (it
+    /// has no pending partition).
+    async fn record_pending_contract(
+        &self,
+        cfg: &ExecutorConfig,
+        rec: journal::PendingContractRecord<'_>,
+    ) -> Result<(), JournalError>;
+
+    /// Discharge an obligation by APPENDING a `resolved` row (never a delete —
+    /// history is append-only). Admin-written. SQLite no-ops.
+    async fn resolve_pending_contract(
+        &self,
+        cfg: &ExecutorConfig,
+        pc: &journal::PendingContract,
+        resolution: journal::Resolution,
+        by: &str,
+    ) -> Result<(), JournalError>;
+
     // -- DB-coupled validation / introspection ------------------------------
 
     /// The checksum/tamper drift report over the journal (dialect-agnostic
@@ -577,6 +610,31 @@ impl MigrationBackend for PostgresBackend<'_> {
         cfg: &ExecutorConfig,
     ) -> Result<std::collections::HashMap<String, String>, JournalError> {
         journal::latest_completed_checksums(self.conn, cfg).await
+    }
+
+    async fn outstanding_pending_contracts(
+        &self,
+        cfg: &ExecutorConfig,
+    ) -> Result<Vec<journal::PendingContract>, JournalError> {
+        journal::outstanding_pending_contracts(self.conn, cfg).await
+    }
+
+    async fn record_pending_contract(
+        &self,
+        cfg: &ExecutorConfig,
+        rec: journal::PendingContractRecord<'_>,
+    ) -> Result<(), JournalError> {
+        journal::record_pending_contract(self.conn, cfg, rec).await
+    }
+
+    async fn resolve_pending_contract(
+        &self,
+        cfg: &ExecutorConfig,
+        pc: &journal::PendingContract,
+        resolution: journal::Resolution,
+        by: &str,
+    ) -> Result<(), JournalError> {
+        journal::resolve_pending_contract(self.conn, cfg, pc, resolution, by).await
     }
 
     async fn check_checksum_drift(

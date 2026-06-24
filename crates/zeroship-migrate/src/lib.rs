@@ -84,6 +84,7 @@ pub mod journal;
 pub mod loader;
 pub mod manifest;
 pub mod migration;
+pub mod pending;
 pub mod plan;
 pub mod precondition;
 pub mod role;
@@ -150,16 +151,26 @@ pub use zeroship_schema::query::SqlDialect;
 pub(crate) use guard::OperatorCapability;
 pub use journal::{
     applied, applied_count, ensure_journal, history as journal_history,
-    latest_completed_checksums, net_rolled_back, record_baseline, record_completed,
-    record_rolled_back, record_started, superseded_versions, AppliedEntry, HistoryEvent,
-    HistoryKind, JournalError, JournaledKind, Phase, RolledBackEntry,
+    latest_completed_checksums, net_rolled_back, outstanding_pending_contracts,
+    record_baseline, record_completed, record_pending_contract, record_rolled_back,
+    record_started, resolve_pending_contract, superseded_versions, AppliedEntry, HistoryEvent,
+    HistoryKind, JournalError, JournaledKind, PendingContract, PendingContractRecord,
+    PendingState, Phase, Resolution, RolledBackEntry,
+};
+// The §8.8 structured pending-contract interlock payloads (§2.0.3 / §2.0.4).
+pub use pending::{
+    ActionPayload, DependencyPendingContract, OrphanedPendingContract, PendingContractRefusal,
+    CODE_DEPENDENCY_PENDING_CONTRACT, CODE_ORPHANED_PENDING_CONTRACT,
+    CODE_TABLE_HAS_PENDING_CONTRACT,
 };
 pub use loader::{
     load_dir, load_dir_migrations, migration_id_for_version, new_dbmate_migration,
     repeatable_id_for_name, LoaderError, PLATFORM_OWNER_APP,
 };
 pub use squash::{squash, SquashError, SquashOutcome};
-pub use status::{history, status, MigrationStatus, StatusError};
+pub use status::{
+    history, status, BlockedPlan, MigrationStatus, PendingContractStatus, StatusError,
+};
 pub use submit::{
     submit_migration, Submission, SubmissionOutcome, SubmitError,
 };
