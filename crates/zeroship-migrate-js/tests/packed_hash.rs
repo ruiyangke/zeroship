@@ -9,7 +9,20 @@
 use std::fs;
 use std::path::Path;
 
-use zeroship_migrate_js::{assert_packed_hash_matches_committed, discover_migrations};
+use zeroship_migrate_js::{
+    assert_packed_hash_matches_committed, discover_migrations, RecordVia, ResourceBudget,
+};
+
+const OWNER: &str = "app_packed";
+
+/// The LOCAL record path — never actually invoked for committed-verbatim files (the
+/// only files `assert_packed_hash_matches_committed` inspects), but required by the
+/// signature.
+fn via() -> RecordVia<'static> {
+    RecordVia::Local {
+        budget: ResourceBudget::default(),
+    }
+}
 
 /// A minimal, valid committed `.ir.json` (the bare `MigrationIr` document, pretty +
 /// trailing newline — the canonical byte convention).
@@ -57,20 +70,18 @@ fn packed_entry_hash_equals_on_disk_sha256_and_packer_copies_not_reemits() {
     let expect_hash = zeroship_bundle::sha256_hex(&disk_bytes);
 
     // The CI invariant holds on the clean committed bytes.
-    assert_packed_hash_matches_committed(dir.path())
+    assert_packed_hash_matches_committed(dir.path(), OWNER, &via())
         .expect("packed hash must match committed on clean bytes");
 
-    // Now MUTATE one byte of the committed `.ir.json` on disk (simulate a tampered
-    // / hand-edited artifact). The packer must hash the NEW on-disk bytes — i.e. the
-    // entry hash TRACKS the disk, proving the packer copies (never re-records from
-    // the .ts). A re-emit-from-.ts packer would ignore the disk mutation.
-    let mut tampered = disk_bytes.clone();
-    // Flip a byte inside the JSON body (the first '{' stays; change a 'n' in "name").
-    let pos = tampered
-        .windows(6)
-        .position(|w| w == b"\"name\"")
-        .expect("the committed json has a name field");
-    tampered[pos + 2] ^= 0x20; // 'a' -> 'A' inside "name"
+    // Now MUTATE the committed `.ir.json` on disk to DIFFERENT-BUT-STILL-VALID bytes
+    // (rename the column "title" → "titlz" — a real, parseable ops change). The
+    // packer must hash the NEW on-disk bytes — i.e. the entry hash TRACKS the disk,
+    // proving the packer copies (never re-records from the .ts). A re-emit-from-.ts
+    // packer would ignore the disk mutation and the meaningful guard would trip.
+    let tampered_str =
+        String::from_utf8(disk_bytes.clone()).unwrap().replace("\"title\"", "\"titlz\"");
+    let tampered = tampered_str.into_bytes();
+    assert_ne!(disk_bytes, tampered, "the rename must change the committed bytes");
     fs::write(dir.path().join(format!("{stem}.ir.json")), &tampered).unwrap();
 
     let new_disk = fs::read(dir.path().join(format!("{stem}.ir.json"))).unwrap();
@@ -92,7 +103,7 @@ fn packed_entry_hash_equals_on_disk_sha256_and_packer_copies_not_reemits() {
 
     // And the CI invariant still passes against the tampered bytes (it asserts
     // entry-hash == disk-sha256, which holds because the packer copies).
-    assert_packed_hash_matches_committed(dir.path())
+    assert_packed_hash_matches_committed(dir.path(), OWNER, &via())
         .expect("packed hash invariant holds for the tampered-but-copied bytes");
 }
 

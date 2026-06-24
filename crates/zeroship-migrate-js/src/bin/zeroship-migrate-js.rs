@@ -15,6 +15,7 @@
 //! public dbmate-style apply/rollback/status tool. `main` is a THIN arg-parser that
 //! delegates to the library. compio (NOT tokio): `#[compio::main]`.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::SystemTime;
@@ -22,8 +23,8 @@ use std::time::SystemTime;
 use clap::{Parser, Subcommand};
 use zeroship_migrate_js::recorder_http::StructuredError;
 use zeroship_migrate_js::{
-    build_migrations, build_one_migration, generate_ops, scaffold_new_ts, timestamp_14, RecordVia,
-    RecorderClient,
+    assert_packed_hash_matches_committed, build_migrations, build_one_migration, generate_ops,
+    recheck_not_yet_applied, scaffold_new_ts, timestamp_14, RecordVia, RecorderClient,
     ResourceBudget,
 };
 
@@ -75,6 +76,25 @@ enum Command {
         #[arg(long, env = "ZEROSHIP_TOKEN")]
         token: Option<String>,
     },
+    /// CI gate (§8.9.1): for every NOT-YET-APPLIED committed `.ir.json` in `dir`,
+    /// (1) re-record its sibling `.ts` through the canonical recorder and assert the
+    /// typed-value checksum matches the committed blob, and (2) assert the packed
+    /// bundle entry hash tracks the on-disk committed bytes (the packer copies, never
+    /// re-emits). Exits non-zero on ANY divergence — wire this into CI. Does NOT touch
+    /// the control-plane deploy path (that provenance wiring is PR7).
+    Verify {
+        /// The migrations directory. Default `./migrations`.
+        #[arg(long, default_value = "./migrations")]
+        dir: PathBuf,
+        /// The ALREADY-APPLIED version set (comma-separated 14-digit versions).
+        /// Applied migrations are frozen — skipped by the re-record gate. Omit (or
+        /// empty) to treat every committed migration as not-yet-applied (re-check all).
+        #[arg(long, default_value = "")]
+        applied: String,
+        /// The declaring/deploying app (`app_…`), stamped on the re-recorded IR.
+        #[arg(long, default_value = "app_local")]
+        owner_app: String,
+    },
     /// Generate a versioned op.* migration by diffing a `schema.js` (the
     /// `@zeroship/db` `t.*` DSL) against the live database (deliverable D).
     Generate {
@@ -96,6 +116,12 @@ enum Command {
         /// Output migration directory. Default `./migrations`.
         #[arg(long, default_value = "./migrations")]
         dir: PathBuf,
+        /// Overwrite an existing same-stem `.ts`/`.ir.json` draft (§5.4). Without
+        /// `--force`, generate REFUSES to clobber an existing not-yet-applied draft
+        /// (mirroring `new`'s refuse-to-clobber). The AI non-interactive path passes
+        /// `--force` to keep overwrite semantics.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -154,6 +180,11 @@ async fn main() -> ExitCode {
             recorder_url,
             token,
         } => cmd_build(&dir, &owner_app, recorder_url.as_deref(), token.as_deref()),
+        Command::Verify {
+            dir,
+            applied,
+            owner_app,
+        } => cmd_verify(&dir, &applied, &owner_app),
         Command::Generate {
             schema,
             database_url,
@@ -161,6 +192,7 @@ async fn main() -> ExitCode {
             owner_app,
             name,
             dir,
+            force,
         } => {
             cmd_generate(
                 &schema,
@@ -169,6 +201,7 @@ async fn main() -> ExitCode {
                 &owner_app,
                 &name,
                 &dir,
+                force,
             )
             .await
         }
@@ -301,6 +334,50 @@ fn cmd_build(
     }
 }
 
+fn cmd_verify(dir: &Path, applied: &str, owner_app: &str) -> ExitCode {
+    let applied_set: BTreeSet<String> = applied
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    let via = RecordVia::Local {
+        budget: ResourceBudget::default(),
+    };
+    // Gate 1 (§8.9.1): re-record each not-yet-applied `.ts` and assert the typed-value
+    // checksum matches the committed blob.
+    if let Err(e) = recheck_not_yet_applied(dir, &applied_set, owner_app, &via) {
+        eprintln!("verify: re-record checksum gate FAILED: {e}");
+        return ExitCode::FAILURE;
+    }
+    // Gate 2 (A2): assert the packed bundle entry hash tracks the on-disk committed
+    // bytes (the packer copies, never re-emits).
+    if let Err(e) = assert_packed_hash_matches_committed(dir, owner_app, &via) {
+        eprintln!("verify: packed-hash invariant FAILED: {e}");
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "verify: OK ({} applied version(s) skipped) — checksum + packed-hash gates passed",
+        applied_set.len()
+    );
+    ExitCode::SUCCESS
+}
+
+/// §5.4 collision guard (shared by `generate`): without `--force`, refuse to clobber
+/// any of `targets` that already exists, returning the first existing path as `Err`.
+/// With `force = true`, never refuses (the AI non-interactive overwrite path).
+fn refuse_clobber<'a>(targets: &[&'a Path], force: bool) -> Result<(), &'a Path> {
+    if force {
+        return Ok(());
+    }
+    for p in targets {
+        if p.exists() {
+            return Err(p);
+        }
+    }
+    Ok(())
+}
+
 async fn cmd_generate(
     schema: &Path,
     database_url: &str,
@@ -308,6 +385,7 @@ async fn cmd_generate(
     owner_app: &str,
     name: &str,
     dir: &Path,
+    force: bool,
 ) -> ExitCode {
     let source = match std::fs::read_to_string(schema) {
         Ok(s) => s,
@@ -367,6 +445,16 @@ async fn cmd_generate(
         eprintln!("generate: cannot create {}: {e}", dir.display());
         return ExitCode::FAILURE;
     }
+    // §5.4 collision guard: refuse to clobber an existing same-stem draft unless
+    // `--force` (mirroring `new`'s refuse-to-clobber). The AI non-interactive path
+    // passes `--force` to keep overwrite semantics.
+    if let Err(existing) = refuse_clobber(&[&ts_path, &ir_path], force) {
+        eprintln!(
+            "generate: {} already exists (refusing to clobber; pass --force to overwrite)",
+            existing.display()
+        );
+        return ExitCode::FAILURE;
+    }
     // The committed `.ir.json` is the source of truth (pretty + trailing newline,
     // the canonical byte convention).
     let mut ir_bytes = match serde_json::to_string_pretty(&gen.ir) {
@@ -395,4 +483,35 @@ async fn cmd_generate(
         gen.ir.ops.len()
     );
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refuse_clobber_blocks_existing_then_force_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let ts = dir.path().join("20240617160000_x.ts");
+        let ir = dir.path().join("20240617160000_x.ir.json");
+
+        // Clean: nothing exists → no refusal.
+        refuse_clobber(&[&ts, &ir], false).expect("no existing targets → ok");
+
+        // Pre-create the `.ts` draft (a not-yet-applied same-stem draft).
+        std::fs::write(&ts, b"// draft\n").unwrap();
+
+        // Without --force: REFUSE, naming the existing path.
+        let blocked = refuse_clobber(&[&ts, &ir], false).expect_err("must refuse to clobber");
+        assert_eq!(blocked, ts.as_path(), "the refusal names the existing draft");
+
+        // With --force: never refuses (overwrite semantics for the AI path).
+        refuse_clobber(&[&ts, &ir], true).expect("--force overwrites");
+
+        // The guard also catches the `.ir.json` side of the pair.
+        std::fs::remove_file(&ts).unwrap();
+        std::fs::write(&ir, b"{}\n").unwrap();
+        let blocked = refuse_clobber(&[&ts, &ir], false).expect_err("must refuse on .ir.json too");
+        assert_eq!(blocked, ir.as_path());
+    }
 }

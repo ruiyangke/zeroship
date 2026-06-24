@@ -285,3 +285,95 @@ describe("recordViaCli CLI-shelling (A4 record path)", () => {
     });
   });
 });
+
+// MED-3 (faithful-e2e) — the stub tests above cover the arg-fork unit behaviour, but
+// per the faithful-e2e mandate at least ONE test must shell the ACTUALLY-BUILT Rust
+// `zeroship-migrate-js` binary (which drives the REAL kernel-sandboxed recorder
+// child) over a real `.ts`, asserting a committed `.ir.json` is produced + bundled.
+//
+// Gated on `ZEROSHIP_MIGRATE_JS_BIN` (or the cargo default-target path). When the env
+// var is set the test HARD-FAILS rather than silent-skipping (faithful-e2e rule). CI
+// sets `ZEROSHIP_MIGRATE_JS_BIN=<repo>/target/debug/zeroship-migrate-js` after
+// `cargo build -p zeroship-migrate-js --bins`; the sibling
+// `zeroship-migrate-recorder-child` must live next to it (standard cargo layout).
+describe("recordViaCli against the REAL zeroship-migrate-js binary (faithful e2e)", () => {
+  const REAL_STEM = "20240617123000_real_notes";
+  // A real op.* migration `.ts` (the recorder resolves `@zeroship/migrate`).
+  const REAL_TS = [
+    'import { createTable, t } from "@zeroship/migrate";',
+    "export function up() {",
+    '  createTable("real_notes", {',
+    "    title: t.text().notNull(),",
+    "  });",
+    "}",
+    "",
+  ].join("\n");
+
+  // Resolve the built binary: explicit env override, else the cargo default-target
+  // path relative to this test file (sdks/vite-plugin/test → repo root → target).
+  function realCliPath(): string | null {
+    const fromEnv = process.env.ZEROSHIP_MIGRATE_JS_BIN;
+    if (fromEnv) return fromEnv;
+    // sdks/vite-plugin/test/migrations.test.ts → up 3 = repo root.
+    const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
+    return join(repoRoot, "target", "debug", "zeroship-migrate-js");
+  }
+
+  test("shells the built CLI over a real .ts → committed .ir.json produced + bundled", async () => {
+    const cliPath = realCliPath();
+    const explicit = !!process.env.ZEROSHIP_MIGRATE_JS_BIN;
+    let cliExists = false;
+    if (cliPath) {
+      try {
+        await fs.access(cliPath);
+        cliExists = true;
+      } catch {
+        cliExists = false;
+      }
+    }
+    if (!cliExists) {
+      // Faithful-e2e: HARD-FAIL when the env var is set but the binary is missing
+      // (a misconfigured CI must not silently pass). Otherwise (local dev without the
+      // built binary) note + skip.
+      if (explicit) {
+        throw new Error(
+          `ZEROSHIP_MIGRATE_JS_BIN is set (${cliPath}) but the binary does not exist — ` +
+            "build it: cargo build -p zeroship-migrate-js --bins"
+        );
+      }
+      console.warn(
+        `[skip] real-binary migration e2e: ${cliPath} not built ` +
+          "(build it: cargo build -p zeroship-migrate-js --bins, or set ZEROSHIP_MIGRATE_JS_BIN)"
+      );
+      return;
+    }
+
+    const fx = await makeFixture({
+      [`migrations/${REAL_STEM}.ts`]: REAL_TS,
+    });
+    try {
+      const entries = await discoverMigrations({
+        root: fx.root,
+        cliPath: cliPath!,
+        ownerApp: "app_e2e",
+      });
+      assert.equal(entries.length, 1, "the recorded artifact is discovered + bundled");
+      assert.equal(entries[0].name, `${REAL_STEM}.ir.json`);
+
+      // The committed `.ir.json` really landed on disk and the entry hash tracks it.
+      const irPath = join(fx.root, "migrations", `${REAL_STEM}.ir.json`);
+      const onDisk = await fs.readFile(irPath);
+      assert.equal(entries[0].hash, sha256Hex(onDisk));
+      // It is a real recorded IR carrying the createTable op (not an empty stub).
+      const doc = JSON.parse(onDisk.toString("utf8")) as {
+        ops?: Array<{ op?: string; name?: string }>;
+      };
+      assert.ok(
+        (doc.ops ?? []).some((o) => o.op === "createTable" && o.name === "real_notes"),
+        `the recorded IR must carry the createTable op; got: ${onDisk.toString("utf8")}`
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
+});

@@ -505,7 +505,7 @@ fn record_one(
     m: &DiscoveredMigration,
     owner_app: &str,
     via: &RecordVia<'_>,
-) -> Result<(Vec<u8>, MigrationIr, RecordPath), BuildError> {
+) -> Result<(Vec<u8>, MigrationIr, RecordPath, String), BuildError> {
     let ts_source = std::fs::read_to_string(&m.ts_path).map_err(|source| {
         BuildError::ReadCommitted {
             path: m.ts_path.clone(),
@@ -513,11 +513,13 @@ fn record_one(
         }
     })?;
     let ts_dir = m.ts_path.parent().unwrap_or_else(|| Path::new("."));
+    // The `.ts` source is read ONCE here and threaded back to the caller so the §4.3
+    // determinism lint reuses it (no second `read_to_string` of the same file).
     match via {
         RecordVia::Local { budget } => {
             let (bytes, ir) =
                 record_local(&ts_source, owner_app, &m.desc, &m.stem, ts_dir, *budget)?;
-            Ok((bytes, ir, RecordPath::Local))
+            Ok((bytes, ir, RecordPath::Local, ts_source))
         }
         RecordVia::Hosted {
             client,
@@ -525,7 +527,7 @@ fn record_one(
         } => match client.record(&ts_source, owner_app, &m.desc, None) {
             Ok(envelope) => {
                 let (bytes, ir) = canonicalize_envelope(&envelope, owner_app, &m.stem)?;
-                Ok((bytes, ir, RecordPath::Hosted))
+                Ok((bytes, ir, RecordPath::Hosted, ts_source))
             }
             Err(se) if se.retryable => {
                 // §8.9.2: recorder-unreachable / 503-class → fall back to LOCAL,
@@ -538,7 +540,7 @@ fn record_one(
                     ts_dir,
                     *local_fallback_budget,
                 )?;
-                Ok((bytes, ir, RecordPath::HostedFellBackToLocal))
+                Ok((bytes, ir, RecordPath::HostedFellBackToLocal, ts_source))
             }
             Err(se) => {
                 // A NON-retryable authoring reject (422/403) — hard build error.
@@ -635,15 +637,10 @@ fn build_discovered(
             (bytes, checksum, RecordPath::CommittedVerbatim, Vec::new())
         } else {
             // Record fresh, write the committed artifact, surface determinism warnings.
-            let (bytes, ir, path) = record_one(m, owner_app, via)?;
+            let (bytes, ir, path, ts_source) = record_one(m, owner_app, via)?;
             let checksum = typed_checksum(&ir, &m.stem)?;
-            // §4.3 determinism warnings (best-effort, non-blocking) over the source.
-            let ts_source = std::fs::read_to_string(&m.ts_path).map_err(|source| {
-                BuildError::ReadCommitted {
-                    path: m.ts_path.clone(),
-                    source,
-                }
-            })?;
+            // §4.3 determinism warnings (best-effort, non-blocking) over the source
+            // `record_one` already read (no second read of the same `.ts`).
             let warnings = crate::record::lint_migration_determinism(&ts_source)
                 .unwrap_or_default();
             std::fs::write(&ir_path, &bytes).map_err(|source| BuildError::Write {
@@ -672,39 +669,80 @@ fn build_discovered(
 }
 
 /// CI invariant (deliverable A2): for every committed `.ir.json` in `dir`, assert
-/// the bundle entry's `hash` equals the sha256 of the on-disk committed bytes — the
-/// packer COPIES the committed bytes verbatim, it NEVER re-emits a serialization.
+/// the bundle entry's `hash` (as the REAL packer surface emits it) equals an
+/// INDEPENDENTLY-computed sha256 of the on-disk committed bytes — the packer COPIES
+/// the committed bytes verbatim, it NEVER re-emits a serialization.
 ///
-/// This is the build invariant the packer must satisfy; a test mutates a committed
-/// `.ir.json` byte and asserts the entry hash still tracks the on-disk bytes.
+/// The entry is NOT hand-built here (that would be tautological — comparing a value
+/// to itself). It is produced by [`build_discovered`] over the already-committed
+/// files, which is the SAME code path the bundle packer uses: it reads the committed
+/// `.ir.json` VERBATIM and stamps `entry.hash = sha256(committed_bytes)`. The
+/// comparison is against a sha256 of the on-disk bytes read by a SEPARATE
+/// `std::fs::read`. A packer that re-emitted from the `.ts` (or otherwise produced
+/// different bytes than what is on disk) would yield an `entry.hash` that diverges
+/// from the on-disk sha256 → [`BuildError::PackedHashMismatch`].
+///
+/// Only files that ALREADY have a committed `.ir.json` are checked (the
+/// build-once / verbatim path), so the recorder is never invoked — `via` is supplied
+/// only to satisfy [`build_discovered`]'s signature and is never used for these
+/// files. A not-yet-built `.ts` (no committed `.ir.json`) is skipped here; the build
+/// step records it.
 ///
 /// # Errors
 /// [`BuildError::PackedHashMismatch`] if any entry hash diverges from the on-disk
 /// sha256; io / parse errors otherwise.
-pub fn assert_packed_hash_matches_committed(dir: &Path) -> Result<(), BuildError> {
+pub fn assert_packed_hash_matches_committed(
+    dir: &Path,
+    owner_app: &str,
+    via: &RecordVia<'_>,
+) -> Result<(), BuildError> {
     let discovered = discover_migrations(dir)?;
-    for m in &discovered {
-        let ir_path = m.ir_json_path();
-        if !ir_path.exists() {
-            continue; // not-yet-built; the build step records it
-        }
-        let bytes = std::fs::read(&ir_path).map_err(|source| BuildError::ReadCommitted {
+    // Only the already-committed files (verbatim path — no recording).
+    let committed: Vec<DiscoveredMigration> = discovered
+        .into_iter()
+        .filter(|m| m.ir_json_path().exists())
+        .collect();
+    if committed.is_empty() {
+        return Ok(());
+    }
+    // Run the REAL packer surface: build_discovered reads each committed `.ir.json`
+    // verbatim and stamps the bundle entry (`hash = sha256(committed_bytes)`).
+    let outcome = build_discovered(&committed, owner_app, via)?;
+    for built in &outcome.migrations {
+        let ir_path = dir.join(&built.filename);
+        // Independently re-read the on-disk bytes and hash them ourselves.
+        let disk_bytes = std::fs::read(&ir_path).map_err(|source| BuildError::ReadCommitted {
             path: ir_path.clone(),
             source,
         })?;
-        let disk_hash = zeroship_bundle::sha256_hex(&bytes);
-        // The packer's entry is built FROM the on-disk bytes (copy, never re-emit).
-        let entry = MigrationFileEntry {
-            name: format!("{}.ir.json", m.stem),
-            hash: disk_hash.clone(),
-        };
-        if entry.hash != disk_hash {
-            return Err(BuildError::PackedHashMismatch {
-                stem: m.stem.clone(),
-                entry_hash: entry.hash,
-                disk_hash,
-            });
-        }
+        // Compare the PACKER-derived entry against the independently-hashed disk
+        // bytes. A re-emit packer (different bytes than on disk) trips this.
+        assert_entry_tracks_disk(&built.stem, &built.entry, &disk_bytes)?;
+    }
+    Ok(())
+}
+
+/// The pure packed-hash comparison behind [`assert_packed_hash_matches_committed`]:
+/// a bundle `entry.hash` must equal the sha256 of the on-disk committed `bytes`. A
+/// packer that re-emitted (produced bytes other than what is on disk) yields an
+/// `entry.hash` that diverges → [`BuildError::PackedHashMismatch`]. Extracted so a
+/// test can feed a deliberately re-emitted (divergent-byte) entry and confirm the
+/// guard trips — proving the check is meaningful, not tautological.
+///
+/// # Errors
+/// [`BuildError::PackedHashMismatch`] on divergence.
+fn assert_entry_tracks_disk(
+    stem: &str,
+    entry: &MigrationFileEntry,
+    disk_bytes: &[u8],
+) -> Result<(), BuildError> {
+    let disk_hash = zeroship_bundle::sha256_hex(disk_bytes);
+    if entry.hash != disk_hash {
+        return Err(BuildError::PackedHashMismatch {
+            stem: stem.to_string(),
+            entry_hash: entry.hash.clone(),
+            disk_hash,
+        });
     }
     Ok(())
 }
@@ -740,7 +778,7 @@ pub fn recheck_not_yet_applied(
         })?;
         let committed_checksum = checksum_of_committed(&committed, &m.stem)?;
         // RE-RECORD the .ts through the canonical recorder.
-        let (_bytes, ir, _path) = record_one(m, owner_app, via)?;
+        let (_bytes, ir, _path, _src) = record_one(m, owner_app, via)?;
         let recorded_checksum = typed_checksum(&ir, &m.stem)?;
         if recorded_checksum != committed_checksum {
             return Err(BuildError::ChecksumMismatch {
@@ -771,6 +809,40 @@ mod tests {
         assert_eq!(parse_stem("20240617123000_"), None);
         // no underscore separator — rejected.
         assert_eq!(parse_stem("20240617123000create"), None);
+    }
+
+    #[test]
+    fn packed_hash_guard_is_meaningful_not_tautological() {
+        // The committed on-disk bytes (pretty + trailing newline — the canonical
+        // verbatim shape).
+        let disk_bytes = b"{\n  \"ir_version\": 1\n}\n".to_vec();
+
+        // VERBATIM-COPY packer: entry hash == sha256 of EXACTLY the on-disk bytes.
+        let copy_entry = MigrationFileEntry {
+            name: "20240617123000_x.ir.json".to_string(),
+            hash: zeroship_bundle::sha256_hex(&disk_bytes),
+        };
+        assert_entry_tracks_disk("20240617123000_x", &copy_entry, &disk_bytes)
+            .expect("verbatim-copy entry must track the on-disk bytes (PASS)");
+
+        // RE-EMIT packer: re-serialized the SAME logical IR to DIFFERENT bytes
+        // (compact, no trailing newline) — what a regression that re-emits instead
+        // of copying would produce. Its hash diverges from the on-disk bytes.
+        let reemit_bytes = b"{\"ir_version\":1}".to_vec();
+        assert_ne!(
+            disk_bytes, reemit_bytes,
+            "the re-emit must differ from the committed on-disk bytes"
+        );
+        let reemit_entry = MigrationFileEntry {
+            name: "20240617123000_x.ir.json".to_string(),
+            hash: zeroship_bundle::sha256_hex(&reemit_bytes),
+        };
+        let err = assert_entry_tracks_disk("20240617123000_x", &reemit_entry, &disk_bytes)
+            .expect_err("a re-emitted entry whose bytes differ from disk must TRIP");
+        assert!(
+            matches!(err, BuildError::PackedHashMismatch { .. }),
+            "must be PackedHashMismatch; got: {err}"
+        );
     }
 
     #[test]
