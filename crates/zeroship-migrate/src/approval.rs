@@ -25,3 +25,52 @@ pub enum Approval {
     /// Explicitly approved — a destructive batch may run.
     Approved,
 }
+
+/// **PR9b — per-version approval scoping (anti-bypass).** An orthogonal,
+/// fail-closed restriction layered on top of [`Approval::Approved`]: it answers
+/// "WHICH destructive ops did the operator individually review?" so approving one
+/// reviewed online rename can NEVER blanket-authorize an *unrelated* co-bundled
+/// destructive op (a `dropColumn`/`dropTable`) the operator never saw.
+///
+/// The coarse [`Approval`] enum stays a plain "is destruction permitted at all"
+/// gate threaded through every call site; this is a separate, narrow refinement
+/// carried only on the gated apply paths. The two compose: a destructive op runs
+/// iff `Approval::Approved` AND the scope admits its version-id. A NON-destructive
+/// op is never affected — scope only ever *further restricts* destruction, never
+/// widens it.
+///
+/// **Fail-closed by construction.** [`ApprovalScope::Versions`] authorizes ONLY
+/// the listed version-ids; an empty set authorizes NOTHING destructive even under
+/// `Approval::Approved`. There is no "unrecognized scope ⇒ allow" arm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApprovalScope {
+    /// Blanket: any destructive op may run (today's behavior for the trusted
+    /// single-actor surfaces — dev CLI `--yes`, rollback, shadow dry-run,
+    /// resolve-pending). Fail-OPEN by *explicit operator intent* at a trusted
+    /// vector; it is the default for every existing caller, preserving
+    /// byte-identical behavior.
+    All,
+    /// Fail-CLOSED: a destructive op runs only if its plan/step version-id is in
+    /// this set. Any destructive op whose version is NOT in the set is refused
+    /// even under [`Approval::Approved`]. The new out-of-band approved-apply
+    /// surface constructs this from the operator's reviewed version-id set.
+    Versions(std::collections::BTreeSet<String>),
+}
+
+impl ApprovalScope {
+    /// Does this scope admit a DESTRUCTIVE op stamped with `version`?
+    ///
+    /// [`ApprovalScope::All`] admits every version (vacuously true — today's
+    /// blanket behavior). [`ApprovalScope::Versions`] admits ONLY a version
+    /// present in the reviewed set (fail-closed: an empty set admits nothing).
+    ///
+    /// This is consulted ONLY for destructive ops; a non-destructive op never
+    /// reaches it (scope cannot block additive work).
+    #[must_use]
+    pub fn admits(&self, version: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Versions(set) => set.contains(version),
+        }
+    }
+}

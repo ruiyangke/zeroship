@@ -889,6 +889,15 @@ pub async fn run_resolve_pending(
             &[],
             std::slice::from_ref(&(pc.clone(), resolution)),
             Approval::Approved,
+            // The resolve-pending path is the operator's explicit, single-obligation
+            // discharge of an ALREADY-reviewed pending contract (the C1/C2 drops the
+            // operator confirmed via `resolve-pending --apply|--abort`). It carries
+            // the BLANKET scope — there is no co-bundling of distinct reviewed
+            // version-ids here, and the obligation it discharges was itself reviewed
+            // at the `resolve-pending` boundary (PR9b applies its anti-bypass scope to
+            // the routine out-of-band approved DEPLOY surface, not this hand-driven
+            // single-obligation resolve).
+            &crate::approval::ApprovalScope::All,
             &backend,
             &exec_cfg,
             "resolve-pending",

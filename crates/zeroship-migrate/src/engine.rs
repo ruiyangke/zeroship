@@ -103,6 +103,25 @@ pub enum EngineError {
     /// [`Approval::Approved`] was not given. Nothing was applied.
     #[error("plan requires approval (destructive) but none was given")]
     ApprovalRequired,
+    /// **PR9b per-version approval scoping (anti-bypass).** The plan is approved
+    /// ([`Approval::Approved`]) but it carries a DESTRUCTIVE op whose version-id is
+    /// NOT in the operator's reviewed [`ApprovalScope::Versions`] set — so approving
+    /// one reviewed op (e.g. an online rename) did NOT authorize this unrelated
+    /// destructive op (a `dropColumn`/`dropTable`). Fail-closed: nothing was
+    /// applied. Carries the refused version so the operator message + the test
+    /// assertion can name the exact op that needs individual review.
+    ///
+    /// [`ApprovalScope`]: crate::ApprovalScope
+    /// [`ApprovalScope::Versions`]: crate::ApprovalScope::Versions
+    #[error(
+        "destructive migration '{version}' is not in the approved version scope \
+         (approving one reviewed op does not authorize a co-bundled destructive op; \
+         review and approve '{version}' individually)"
+    )]
+    ApprovalNotScoped {
+        /// The destructive migration version-id the scope refused.
+        version: String,
+    },
     /// The executor failed (DB error, checksum drift, mid-apply failure, or the
     /// executor's own re-run of the guard denied a migration — defense in depth).
     #[error(transparent)]
@@ -653,6 +672,7 @@ impl MigrationEngine {
             &[],
             &[],
             approval,
+            &crate::approval::ApprovalScope::All,
             backend,
             exec_cfg,
             applied_by,
@@ -690,12 +710,56 @@ impl MigrationEngine {
         applied_by: &str,
         lock_mode: LockMode,
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
+        self.apply_plan_with_touched_and_depends_scoped(
+            steps,
+            touched_tables,
+            depends_on,
+            approval,
+            &crate::approval::ApprovalScope::All,
+            backend,
+            exec_cfg,
+            applied_by,
+            lock_mode,
+        )
+        .await
+    }
+
+    /// **PR9b** — as
+    /// [`apply_plan_with_touched_and_depends`](Self::apply_plan_with_touched_and_depends),
+    /// but ALSO threads a per-version [`ApprovalScope`](crate::ApprovalScope) so the
+    /// out-of-band approved IR-deploy path can fail-closed REFUSE a destructive op
+    /// whose version-id the operator did not individually review — even under
+    /// [`Approval::Approved`]. Existing callers' signatures are unchanged: they route
+    /// through the non-`_scoped` wrapper which passes
+    /// [`ApprovalScope::All`](crate::ApprovalScope::All) (byte-identical blanket
+    /// behavior). Only the deploy-IR scoped surface opts in.
+    ///
+    /// # Errors
+    /// Same as
+    /// [`apply_plan_with_touched_and_depends`](Self::apply_plan_with_touched_and_depends),
+    /// plus [`EngineError::ApprovalNotScoped`] (wrapped in
+    /// [`DeclarativeApplyError::Plain`]) when a destructive step's version is outside
+    /// the scope.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn apply_plan_with_touched_and_depends_scoped<B: MigrationBackend>(
+        &self,
+        steps: &[PlanStep],
+        touched_tables: &[String],
+        depends_on: &[String],
+        approval: Approval,
+        scope: &crate::approval::ApprovalScope,
+        backend: &B,
+        exec_cfg: &ExecutorConfig,
+        applied_by: &str,
+        lock_mode: LockMode,
+    ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
         self.apply_plan_resolving(
             steps,
             touched_tables,
             depends_on,
             &[],
             approval,
+            scope,
             backend,
             exec_cfg,
             applied_by,
@@ -722,10 +786,19 @@ impl MigrationEngine {
     /// §2.0.4 cross-plan block (see
     /// [`apply_plan_with_touched_and_depends`](Self::apply_plan_with_touched_and_depends)).
     ///
+    /// `scope` is the PR9b per-version [`ApprovalScope`](crate::ApprovalScope): every
+    /// destructive step (DDL drop/truncate/lossy, destructive DML, SQLite rebuild, PG
+    /// online-rename EXPAND backfill) is admitted only if `scope.admits(version)`.
+    /// Existing callers pass [`ApprovalScope::All`](crate::ApprovalScope::All) for
+    /// byte-identical blanket behavior; the out-of-band approved IR-deploy surface
+    /// passes [`ApprovalScope::Versions`](crate::ApprovalScope::Versions).
+    ///
     /// # Errors
     /// Same as [`apply_plan_with_touched`](Self::apply_plan_with_touched), plus
     /// [`EngineError::DependencyPendingContract`] when a `depends_on` references an
-    /// outstanding obligation's `plan_version`.
+    /// outstanding obligation's `plan_version`, plus
+    /// [`EngineError::ApprovalNotScoped`] when a destructive step's version is outside
+    /// `scope`.
     #[allow(clippy::too_many_arguments)]
     pub async fn apply_plan_resolving<B: MigrationBackend>(
         &self,
@@ -734,6 +807,7 @@ impl MigrationEngine {
         depends_on: &[String],
         resolve: &[(crate::journal::PendingContract, crate::journal::Resolution)],
         approval: Approval,
+        scope: &crate::approval::ApprovalScope,
         backend: &B,
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
@@ -761,7 +835,7 @@ impl MigrationEngine {
         // EVERY exit path (success or error) before returning.
         let result = self
             .apply_plan_locked(
-                steps, touched_tables, depends_on, resolve, approval, backend, exec_cfg,
+                steps, touched_tables, depends_on, resolve, approval, scope, backend, exec_cfg,
                 applied_by,
             )
             .await;
@@ -792,6 +866,7 @@ impl MigrationEngine {
         depends_on: &[String],
         explicit_resolve: &[(crate::journal::PendingContract, crate::journal::Resolution)],
         approval: Approval,
+        scope: &crate::approval::ApprovalScope,
         backend: &B,
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
@@ -1053,7 +1128,7 @@ impl MigrationEngine {
                         })
                         .collect();
                     let outcome = crate::executor::apply_with_lock_backend(
-                        backend, exec_cfg, &batch, approval, applied_by, next_lock,
+                        backend, exec_cfg, &batch, approval, scope, applied_by, next_lock,
                     )
                     .await
                     .map_err(EngineError::Apply)?;
@@ -1068,6 +1143,19 @@ impl MigrationEngine {
                     if approval != Approval::Approved {
                         return Err(DeclarativeApplyError::Plain(
                             EngineError::ApprovalRequired,
+                        ));
+                    }
+                    // **PR9b per-version scope (anti-bypass).** A SQLite rebuild on a
+                    // populated table is destructive (it drops + recreates + copies),
+                    // so under `ApprovalScope::Versions` it runs ONLY if the operator
+                    // individually reviewed THIS rebuild's version. Under
+                    // `ApprovalScope::All` (every existing caller) this is vacuously
+                    // true. Fail-closed: an un-scoped rebuild applies nothing.
+                    if !scope.admits(rebuild.migration.version.as_str()) {
+                        return Err(DeclarativeApplyError::Plain(
+                            EngineError::ApprovalNotScoped {
+                                version: rebuild.migration.version.as_str().to_string(),
+                            },
                         ));
                     }
                     if rebuild_already.is_none() {
@@ -1112,6 +1200,28 @@ impl MigrationEngine {
                             ),
                         )));
                     };
+                    // **PR9b per-version scope (anti-bypass).** A PG online rename's
+                    // EXPAND mutates data (the dual-write backfill mirrors every
+                    // pre-existing row into the new column), so it is an
+                    // approval-gated op (`run_expand_pg` already requires
+                    // `Approval::Approved`). Under `ApprovalScope::Versions` it runs
+                    // ONLY if the operator individually reviewed THIS rename — keyed on
+                    // the rename's PLAN-GROUP version (E1's deterministic id, the same
+                    // anchor the obligation's `plan_version` records and the operator
+                    // reviews), falling back to the E2 `trigger_version` if the expand
+                    // chain is somehow empty (an internal invariant violation). Under
+                    // `ApprovalScope::All` (every existing caller) this is vacuously
+                    // true. Fail-closed: an un-scoped rename's EXPAND mirrors no data.
+                    // The scope version comes from the SINGLE source of truth
+                    // [`PlanStep::approval_scope_version`] so the gate and the
+                    // reviewer-facing "what needs approval" list never drift.
+                    if let Some(v) = steps[i].approval_scope_version() {
+                        if !scope.admits(v) {
+                            return Err(DeclarativeApplyError::Plain(
+                                EngineError::ApprovalNotScoped { version: v.to_string() },
+                            ));
+                        }
+                    }
                     let outcome = online
                         .run_online(
                             &rename.intent,
@@ -1234,6 +1344,17 @@ impl MigrationEngine {
                             EngineError::ApprovalRequired,
                         ));
                     }
+                    // **PR9b per-version scope (anti-bypass).** A destructive DML (a
+                    // `delete`) under `ApprovalScope::Versions` runs ONLY if the
+                    // operator individually reviewed its version-id. `All` ⇒ vacuously
+                    // true (byte-identical to pre-PR9b). Fail-closed.
+                    if steps[i].is_destructive() && !scope.admits(version.as_str()) {
+                        return Err(DeclarativeApplyError::Plain(
+                            EngineError::ApprovalNotScoped {
+                                version: version.as_str().to_string(),
+                            },
+                        ));
+                    }
                     let ran = backend
                         .run_dml_step(
                             exec_cfg, version, name, template, binds, *destructive, owner_app,
@@ -1316,8 +1437,18 @@ impl MigrationEngine {
         applied_by: &str,
     ) -> Result<ApplyOutcome, EngineError> {
         // Standalone caller: the executor acquires + releases the project lock.
-        self.apply_inner(plan, approval, backend, exec_cfg, applied_by, LockMode::Acquire)
-            .await
+        // PR9b: blanket scope — the routine `apply` surface has no per-version review
+        // set; the scoped surface is `apply_verified_scoped`.
+        self.apply_inner(
+            plan,
+            approval,
+            &crate::approval::ApprovalScope::All,
+            backend,
+            exec_cfg,
+            applied_by,
+            LockMode::Acquire,
+        )
+        .await
     }
 
     /// [`apply`](Self::apply) with an explicit [`LockMode`] (H10 mechanism).
@@ -1342,8 +1473,16 @@ impl MigrationEngine {
         applied_by: &str,
         lock_mode: LockMode,
     ) -> Result<ApplyOutcome, EngineError> {
-        self.apply_inner(plan, approval, backend, exec_cfg, applied_by, lock_mode)
-            .await
+        self.apply_inner(
+            plan,
+            approval,
+            &crate::approval::ApprovalScope::All,
+            backend,
+            exec_cfg,
+            applied_by,
+            lock_mode,
+        )
+        .await
     }
 
     /// [`apply`](Self::apply) with an explicit [`LockMode`] (H10).
@@ -1360,6 +1499,7 @@ impl MigrationEngine {
         &self,
         plan: &MigrationPlan,
         approval: Approval,
+        scope: &crate::approval::ApprovalScope,
         backend: &B,
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
@@ -1389,8 +1529,19 @@ impl MigrationEngine {
         // and calls `apply_with_lock_backend`, so going straight through the backend
         // is the same code path (the guard re-run, least-privilege role, GUC hygiene,
         // and the H10 lock-mode discipline are all inside `apply_with_lock_backend`).
+        // PR9b: thread the caller's per-version `scope` into the executor gate. The
+        // routine flat `apply`/`apply_with_lock` callers pass `ApprovalScope::All`
+        // (byte-identical to pre-PR9b); the out-of-band approved `.sql` deploy surface
+        // (`apply_verified_scoped`) passes the operator's reviewed version set so a
+        // co-bundled destructive `.sql` migration outside the set is refused.
         let outcome = executor::apply_with_lock_backend(
-            backend, exec_cfg, &migrations, approval, applied_by, lock_mode,
+            backend,
+            exec_cfg,
+            &migrations,
+            approval,
+            scope,
+            applied_by,
+            lock_mode,
         )
         .await?;
         Ok(outcome)
@@ -1490,6 +1641,46 @@ impl MigrationEngine {
         // only ever taken AFTER the manifest passes.
         let plan = self.plan(migrations, guard_cfg);
         self.apply(&plan, approval, backend, exec_cfg, applied_by).await
+    }
+
+    /// **PR9b** — as [`apply_verified`](Self::apply_verified), but threads a
+    /// per-version [`ApprovalScope`](crate::ApprovalScope) so the out-of-band approved
+    /// `.sql` deploy surface fail-closed REFUSES a co-bundled destructive `.sql`
+    /// migration whose version-id the operator did not individually review, even under
+    /// [`Approval::Approved`]. `apply_verified` itself stays blanket
+    /// ([`ApprovalScope::All`](crate::ApprovalScope::All)) for its existing trusted
+    /// callers.
+    ///
+    /// # Errors
+    /// Same as [`apply_verified`](Self::apply_verified), plus
+    /// [`EngineError::ApprovalNotScoped`] when a destructive migration's version is
+    /// outside `scope`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn apply_verified_scoped<B: MigrationBackend>(
+        &self,
+        migrations: &[Migration],
+        guard_cfg: &GuardConfig,
+        expected: Option<&ManifestHash>,
+        approval: Approval,
+        scope: &crate::approval::ApprovalScope,
+        backend: &B,
+        exec_cfg: &ExecutorConfig,
+        applied_by: &str,
+    ) -> Result<ApplyOutcome, EngineError> {
+        if let Some(expected) = expected {
+            verify_manifest(migrations, expected)?;
+        }
+        let plan = self.plan(migrations, guard_cfg);
+        self.apply_inner(
+            &plan,
+            approval,
+            scope,
+            backend,
+            exec_cfg,
+            applied_by,
+            LockMode::Acquire,
+        )
+        .await
     }
 
     /// Dry-run a migration batch against a throwaway **shadow DATABASE** clone

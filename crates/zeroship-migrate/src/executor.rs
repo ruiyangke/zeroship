@@ -148,6 +148,22 @@ pub enum ApplyError {
     /// destructive batch without explicit approval. Nothing was applied.
     #[error("apply contains a destructive migration but Approval::Approved was not given")]
     ApprovalRequired,
+    /// **PR9b per-version approval scoping (anti-bypass).** The batch is approved
+    /// ([`crate::Approval::Approved`]) but it carries a DESTRUCTIVE migration whose
+    /// version-id is NOT in the operator's reviewed
+    /// [`ApprovalScope::Versions`](crate::ApprovalScope::Versions) set. The
+    /// executor's OWN defense-in-depth scope gate (mirrors
+    /// [`ApprovalRequired`](Self::ApprovalRequired)): a direct caller cannot run a
+    /// co-bundled destructive op the operator never individually reviewed, even with
+    /// blanket [`Approved`](crate::Approval::Approved). Nothing was applied.
+    #[error(
+        "apply contains destructive migration '{version}' that is not in the approved \
+         version scope (per-version approval required)"
+    )]
+    ApprovalNotScoped {
+        /// The destructive migration version-id the scope refused.
+        version: String,
+    },
     /// The SQL guard denied a pending migration's `up` SQL — the whole apply is
     /// aborted and the migration never executed.
     #[error("migration {version} denied by guard: {source}")]
@@ -672,8 +688,23 @@ pub async fn apply_with_lock(
     // defense-in-depth approval gate now lives in `apply_with_lock_backend` so it
     // runs IDENTICALLY for both the PG entry here and the generic engine path (P6a) —
     // a single source of the executor-layer gate.
+    //
+    // PR9b: this PG entry keeps the BLANKET scope ([`ApprovalScope::All`]) — its
+    // callers (the expand-contract EXPAND apply, the flat `engine.apply` path) carry
+    // their own scope check at the engine layer when one is in play. A direct caller
+    // of `apply_with_lock` is the trusted single-actor `.sql` surface (no co-bundling
+    // of distinct reviewed version-ids), so `All` preserves byte-identical behavior.
     let backend = PostgresBackend::new(conn);
-    apply_with_lock_backend(&backend, cfg, migrations, approval, applied_by, lock_mode).await
+    apply_with_lock_backend(
+        &backend,
+        cfg,
+        migrations,
+        approval,
+        &crate::approval::ApprovalScope::All,
+        applied_by,
+        lock_mode,
+    )
+    .await
 }
 
 /// The lock + session-hygiene shell around [`apply_locked`], generic over the
@@ -685,6 +716,7 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
     cfg: &ExecutorConfig,
     migrations: &[Migration],
     approval: Approval,
+    scope: &crate::approval::ApprovalScope,
     applied_by: &str,
     lock_mode: LockMode,
 ) -> Result<ApplyOutcome, ApplyError> {
@@ -698,6 +730,26 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
         && migrations.iter().any(|m| m.flags.destructive)
     {
         return Err(ApplyError::ApprovalRequired);
+    }
+    // **PR9b per-version approval scope (anti-bypass), defense in depth.** Even
+    // under blanket `Approval::Approved`, a destructive migration runs ONLY if its
+    // version-id is admitted by the operator's reviewed scope. Under
+    // `ApprovalScope::All` (the default for every existing caller) this is vacuously
+    // true — byte-identical to pre-PR9b. Under `ApprovalScope::Versions`, a
+    // co-bundled destructive op the operator did NOT individually review is refused
+    // here too, so a direct executor caller cannot bypass the engine-layer scope
+    // check. Checked per-element (a coalesced DDL batch carries per-`Migration`
+    // versions). Fail-closed: the FIRST un-scoped destructive migration aborts the
+    // whole batch before the lock or any DDL.
+    if approval == Approval::Approved {
+        if let Some(m) = migrations
+            .iter()
+            .find(|m| m.flags.destructive && !scope.admits(m.version.as_str()))
+        {
+            return Err(ApplyError::ApprovalNotScoped {
+                version: m.version.as_str().to_string(),
+            });
+        }
     }
     // H10: acquire the project advisory lock only when WE own it. Under
     // `AlreadyHeld` the outer `apply_declarative` already holds it for the whole

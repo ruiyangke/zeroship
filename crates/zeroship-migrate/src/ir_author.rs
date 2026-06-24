@@ -889,7 +889,7 @@ impl IrAuthor {
         // The DDL arms advance / read the working table set under the short name
         // `live` (the name the §6.1.1 fragment logic already uses).
         let live = live_tables;
-        let migs: Vec<LoweredUnit> = match op {
+        let mut migs: Vec<LoweredUnit> = match op {
             Op::CreateTable { name, columns, .. } => {
                 // A column carrying a SYNTH default (`now()`/`genRandomUuid()`) must
                 // FAIL CLOSED, not silently lower with NO default. `ir_default_to_value`
@@ -1004,6 +1004,23 @@ impl IrAuthor {
                 return Ok(LoweredOp::Dml(self.lower_dml_op(op_index, op, live_schema)?));
             }
         };
+        // **PR9b — deterministic, reviewable version for a SCOPE-GATED destructive
+        // DDL step.** The declarative `make()` builder stamped these with a RANDOM
+        // `MigrationId::generate()`. A per-version `ApprovalScope` keys on the
+        // version-id, so a destructive DDL op (`dropColumn` / unique-index `dropIndex`)
+        // MUST carry a STABLE id the operator can review and the apply enforces
+        // identically across lowerings. Re-stamp each destructive DDL migration's
+        // version with the deterministic `ddl_step_version` (op_index + kind + up SQL).
+        // Additive DDL keeps its random id (the scope never gates it; the journal drift
+        // anchor is the op-list `Checksum::of_ir`, unaffected by this version). The
+        // op-kind tag distinguishes two same-`up` ops at the same index in different
+        // op kinds (defensive — the up SQL already differs).
+        let kind = op_kind_tag(op);
+        for (mig, _statements) in &mut migs {
+            if mig.flags.destructive {
+                mig.version = ddl_step_version(op_index, kind, &mig.up);
+            }
+        }
         Ok(LoweredOp::Ddl(migs))
     }
 
@@ -1757,6 +1774,34 @@ fn dml_step_version(
         h.update(&body);
     }
     dml_id_from_seed("dml", &h.finalize())
+}
+
+/// **PR9b** — a DETERMINISTIC version id for an IR-lowered DESTRUCTIVE DDL step
+/// (`dropColumn`, a unique-index `dropIndex`, …), derived from the op's plan
+/// position + kind + rendered `up` SQL.
+///
+/// The declarative `make()` builder mints DDL migration versions with
+/// `MigrationId::generate()` (random) — fine for an additive op (the scope never
+/// gates it, and the journal drift anchor is the op-list `Checksum::of_ir`, not this
+/// version). But a per-version [`ApprovalScope`](crate::ApprovalScope) keys on the
+/// version-id, so a SCOPE-GATED destructive DDL op MUST carry a STABLE, reviewable id
+/// — otherwise the reviewer's plan and the apply would mint DIFFERENT random ids and
+/// the scope could never match (and the operator could never name the op to approve).
+/// So [`IrAuthor::lower_one_op`] re-stamps each destructive DDL step's version with
+/// this deterministic id. Re-deploying the SAME op file reproduces the SAME id (a
+/// correctness improvement: idempotent net-applied-skip for destructive IR DDL too),
+/// and a re-authored op (changed `up`) gets a fresh id (no false resume). Uses the
+/// same `0xFF…` high-48-bit derived-marker layout as [`dml_id_from_seed`], so it can
+/// never collide with a numbered file migration.
+fn ddl_step_version(op_index: usize, kind: &str, up: &str) -> crate::migration::MigrationId {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update((op_index as u64).to_be_bytes());
+    for field in [kind, up] {
+        h.update((field.len() as u64).to_be_bytes());
+        h.update(field.as_bytes());
+    }
+    dml_id_from_seed("ddl", &h.finalize())
 }
 
 /// Build a deterministic [`MigrationId`] from a domain tag + a seed digest, using

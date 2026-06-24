@@ -156,6 +156,44 @@ impl PlanStep {
         }
     }
 
+    /// **PR9b** — the version-id the per-version
+    /// [`ApprovalScope`](crate::ApprovalScope) gate consults for this step, when the
+    /// step is SCOPE-GATED, else `None`.
+    ///
+    /// A step is scope-gated iff its apply does data loss / data mutation that the
+    /// operator must individually review:
+    /// - a destructive `Ddl` → its migration version;
+    /// - a destructive `Dml` (a `delete`) → its step version;
+    /// - a `SqliteRebuild` (destructive on a populated table) → its migration version;
+    /// - a PG `PgExpandContract` EXPAND (the dual-write BACKFILL mutates every
+    ///   pre-existing row) → the rename's PLAN-GROUP version (E1's deterministic id),
+    ///   the SAME anchor the obligation's `plan_version` records and the engine's
+    ///   EXPAND scope check keys on, falling back to the E2 `trigger_version` if the
+    ///   expand chain is empty.
+    ///
+    /// A non-mutating step (additive `Ddl`, `Backfill`, `Dml` insert/update) returns
+    /// `None` — the scope never blocks it. This is the SINGLE source of truth shared
+    /// by the engine's scope gate and the reviewer-facing "what needs approval" list
+    /// (so the two never drift).
+    #[must_use]
+    pub fn approval_scope_version(&self) -> Option<&str> {
+        match self {
+            PlanStep::Ddl(m) if m.flags.destructive => Some(m.version.as_str()),
+            PlanStep::Dml { version, destructive, .. } if *destructive => Some(version.as_str()),
+            PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb))
+                if rb.migration.flags.destructive =>
+            {
+                Some(rb.migration.version.as_str())
+            }
+            PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => Some(
+                ec.expand
+                    .first()
+                    .map_or_else(|| ec.trigger_version.as_str(), |e1| e1.version.as_str()),
+            ),
+            _ => None,
+        }
+    }
+
     /// Whether this step has a defined `down` for plan-level rollback (§2.1.2).
     /// A `Backfill`, a `Dml`, and an in-flight `OnlineRename` are `down: None`;
     /// a `Ddl` is rollbackable iff its migration carries a `down`.
