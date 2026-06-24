@@ -1521,6 +1521,30 @@ fn is_system_field_index(table: &str, index_name: &str) -> bool {
         .any(|col| index_name == non_unique_index_name(table, col))
 }
 
+/// True if `index_name` is an index the platform's CREATE-TABLE lowering injects
+/// for `table` automatically — the implicit PRIMARY-KEY index (`<table>_pkey`) or
+/// one of the three system-field indexes (`deleted_at`/`updated_at`/`created_by`).
+///
+/// The op.* `generate` synthesizer (`zeroship-migrate-js`) uses this to know which
+/// desired-snapshot indexes it must NOT re-emit as standalone `createIndex` ops:
+/// they are already materialised by `lower_create_table`, so emitting them again
+/// would churn (a duplicate CREATE) and break re-diff-to-zero. Every OTHER
+/// (user-authored) index must be synthesized — never silently dropped.
+#[must_use]
+pub fn is_system_managed_index(table: &str, index_name: &str) -> bool {
+    is_pk_index(table, index_name) || is_system_field_index(table, index_name)
+}
+
+/// True if `constraint_name` is a constraint the platform's CREATE-TABLE lowering
+/// injects for `table` automatically — currently just the implicit `id` PRIMARY KEY
+/// (`<table>_pkey`). The op.* `generate` synthesizer uses this to know which
+/// desired-snapshot constraints are platform-managed (skip) vs user-authored
+/// (FK / CHECK — must be synthesized or fail-closed, never silently dropped).
+#[must_use]
+pub fn is_system_managed_constraint(table: &str, constraint_name: &str) -> bool {
+    constraint_name == format!("{table}_pkey")
+}
+
 /// Deterministic name for a per-field unique index (`<table>_<field>_key`,
 /// matching the Postgres convention so the desired snapshot round-trips to the
 /// live one a `CREATE UNIQUE INDEX` of this name produces). Capped to ≤63 bytes
