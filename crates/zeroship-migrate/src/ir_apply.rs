@@ -12,10 +12,25 @@
 //! The SDK schema `Value` the SQLite rebuild renders the post-rename `CREATE TABLE`
 //! from is NOT recoverable from a raw `sqlite_master` introspection (the
 //! mask/encryption/ref facets live only in the SDK schema, not the catalog). The
-//! authoritative source is the app's live descriptor set (the `registerModel`
-//! schema), so the caller threads it in; [`LiveSchema::for_sqlite_descriptors`]
-//! routes it through the SAME `desired_snapshot_for_dialect` the differ uses, so
-//! the live facts the rename rebuild consumes are byte-identical to a `t.*`-diff's.
+//! authoritative source is a descriptor set, threaded in by the caller;
+//! [`LiveSchema::for_sqlite_descriptors`] routes it through the SAME
+//! `desired_snapshot_for_dialect` the differ uses, so the live facts the rename
+//! rebuild consumes are byte-identical to a `t.*`-diff's.
+//!
+//! TWO ROLES, OPPOSITE STATE (see the DESCRIPTOR-SET CONTRACT note in
+//! [`apply_bundle_ir_sqlite`]): the descriptor set is the union END-STATE for the
+//! ownership/FK-inline registry, but a `renameColumn` rebuild needs the PRE-rename
+//! LIVE column facts (the `from` column must be present). A descriptor set derived
+//! from the app's registerModel = the POST-deploy DESIRED schema (post-rename `from`
+//! is gone) makes a rename FAIL CLOSED (no data loss) but un-runnable.
+//!
+//! PRODUCTION-WIRING TODO (the SQLite go-live wave): a production caller naturally
+//! derives descriptors from registerModel (the post-deploy desired schema), so it
+//! MUST source the rename's PRE-rename column facts from a real pre-deploy
+//! SQLite-catalog/snapshot read (the SDK-`Value` facets reconstructed at deploy
+//! start), OR carry the pre-rename column in the IR — NOT from the post-deploy
+//! desired descriptor set. Until wired, this surface is test-only (no production
+//! caller; pinned by the control interlock regression test).
 //!
 //! Every `.ir.json` runs through the SAME fail-closed load + guard-per-fragment
 //! lower gate (`IrAuthor::load_and_lower_guarded`) the PG path uses, then is applied
@@ -138,21 +153,40 @@ pub async fn apply_bundle_ir_sqlite(
     // analogue of the PG path's live introspection — the SDK schema `Value`s the
     // rename rebuild needs come from the descriptor set, not a raw catalog read.
     //
-    // DESCRIPTOR-SET CONTRACT (the SQLite live-facts model): unlike the PG path,
+    // DESCRIPTOR-SET CONTRACT (the SQLite live-facts model). Unlike the PG path,
     // which introspects the REAL catalog (`backend.snapshot_schema`) and so naturally
     // observes intermediate states, the SQLite leg cannot re-introspect the structural
     // rebuild facts (`table_snapshots`/`sqlite_schemas` — the SDK-`Value` facets a
-    // `sqlite_master` read can't recover). So the caller MUST pass the descriptor set
-    // describing the LIVE shape the FIRST structural op in this directory observes
-    // (typically the pre-deploy end-state for a single-structural-op deploy), and a
-    // multi-file deploy whose later file depends on an INTERMEDIATE structural state
-    // produced by an earlier file in the SAME directory is NOT supported: the rename
-    // type-gate / rebuild author would see the descriptor shape, not the post-earlier-
-    // op shape, and FAILS CLOSED (`RenameNeedsLiveColumn` / `SqliteRenameNeedsLiveTable`)
-    // rather than emit a wrong rebuild. The descriptor set is the union END-STATE, so
-    // the ownership/FK-inline registry already holds every table any file references
-    // (no per-file advance is needed, unlike the PG path). (Pinned fail-closed by the
-    // e2e `deploy_multi_file_intermediate_rename_fails_closed_on_real_sqlite`.)
+    // `sqlite_master` read can't recover). The descriptor set plays TWO DISTINCT roles
+    // here, and they have OPPOSITE state requirements — do not conflate them:
+    //
+    //   (A) OWNERSHIP / FK-INLINE REGISTRY — the union END-STATE. Every table any file
+    //       in this directory creates or references is present in the descriptor set
+    //       (the union of all member apps' registerModel schemas), so the ownership +
+    //       inline-FK registry is complete from the start and needs NO per-file advance
+    //       (unlike the PG path, which discovers tables per file from a live catalog).
+    //
+    //   (B) RENAME COLUMN FACTS — the PRE-rename LIVE shape. A SQLite `renameColumn`
+    //       lowers to a 12-step REBUILD that reads the live `from` column off
+    //       `table_snapshots`/`sqlite_schemas` to author the post-rename CREATE +
+    //       value-copy. So for a rename, the descriptor set MUST carry the table's
+    //       PRE-rename column facts (the `from` column must be PRESENT). A descriptor
+    //       set derived from the app's registerModel = the POST-deploy DESIRED schema
+    //       (post-rename: only `to` exists, `from` is gone) makes the rebuild author
+    //       FAIL CLOSED (`RenameNeedsLiveColumn` / `SqliteRenameNeedsLiveTable`) — no
+    //       data loss, but the rename is un-runnable from a post-rename descriptor set.
+    //       The production SQLite wiring wave (see the module-level TODO) MUST source
+    //       these PRE-rename column facts from a real pre-deploy SQLite-catalog/snapshot
+    //       read (the SDK-Value facets reconstructed at deploy start), OR carry the
+    //       pre-rename column in the IR — NOT from the post-deploy desired descriptor set.
+    //
+    // Consequently a multi-file deploy whose LATER file depends on an INTERMEDIATE
+    // structural state produced by an EARLIER file in the SAME directory is NOT
+    // supported: the rebuild author sees the (single, fixed) descriptor shape, not the
+    // post-earlier-op shape, and FAILS CLOSED rather than emit a wrong rebuild. (Pinned
+    // fail-closed by the e2e tests
+    // `deploy_multi_file_intermediate_rename_fails_closed_on_real_sqlite` and
+    // `deploy_post_rename_descriptor_set_fails_closed_on_real_sqlite`.)
     let live_schema =
         LiveSchema::for_sqlite_descriptors(project_schema, owner_app, descriptors)
             .map_err(SqliteIrApplyError::LiveSchema)?;

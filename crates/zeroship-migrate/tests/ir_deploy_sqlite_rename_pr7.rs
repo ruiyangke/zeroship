@@ -176,6 +176,93 @@ async fn deploy_renamecolumn_completes_as_rebuild_on_real_sqlite() {
     );
 }
 
+// PR7 code-critic MED (SQLite go-live descriptor semantics) — a `renameColumn`
+// deployed with a descriptor set derived from the app's registerModel = the POST-deploy
+// DESIRED schema (post-rename: only `handle` exists, `nickname` is GONE) FAILS CLOSED,
+// with NO data loss. This is the production-NATURAL descriptor set: a real caller
+// derives `for_sqlite_descriptors` from registerModel (the end-state), in which the
+// rename's `from` column no longer exists — so the rebuild author cannot find the live
+// `from` column facts and refuses (`RenameNeedsLiveColumn` / `SqliteRenameNeedsLiveTable`)
+// rather than emit a wrong rebuild. This pins the DESCRIPTOR-SET CONTRACT (role B in
+// ir_apply.rs): a SQLite rename needs the PRE-rename column facts; the post-rename
+// desired descriptor set is the WRONG source, and the leg fails closed (no data loss)
+// until the production wiring wave sources the pre-rename facts from a real pre-deploy
+// catalog/snapshot read. (Distinct from the multi-file intermediate test: here it is a
+// SINGLE rename file applied against a live table, with a post-rename descriptor set.)
+#[compio::test]
+async fn deploy_post_rename_descriptor_set_fails_closed_on_real_sqlite() {
+    let p = paths("post_rename_descriptors");
+    let be = backend(&p);
+
+    // Deploy #1: createTable people(nickname) with the v1 (pre-rename) descriptor set —
+    // a real live table with seeded rows.
+    let v1 = [descriptor("people", "nickname")];
+    let create = r#"{"ir_version":1,"name":"create_people","ops":[
+        {"op":"createTable","name":"people","columns":[
+            {"name":"nickname","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    write_ir(&p, "0001_create_people.ir.json", create);
+    apply_bundle_ir_sqlite(
+        &be, PROJECT, APP, &v1, &p.migrations, &exec_cfg(),
+        &GuardConfig::confined(PROJECT), Approval::None,
+    )
+    .await
+    .expect("createTable deploy must succeed");
+
+    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .exec("INSERT INTO main.people (id, nickname) VALUES ('p1','ada'),('p2','grace')")
+        .await
+        .expect("seed");
+
+    // Deploy #2: renameColumn nickname → handle, but the descriptor set is the
+    // registerModel-derived POST-rename DESIRED schema — the field is ALREADY `handle`,
+    // and `nickname` (the rename's `from`) is GONE. This is what a production caller
+    // would naturally pass; it must FAIL CLOSED.
+    clear_migrations(&p);
+    let rename = r#"{"ir_version":1,"name":"rename_nickname","ops":[
+        {"op":"renameColumn","table":"people","from":"nickname","to":"handle","type":"text"}
+    ]}"#;
+    write_ir(&p, "0002_rename_nickname.ir.json", rename);
+    let post_rename_desired = [descriptor("people", "handle")];
+    let err = apply_bundle_ir_sqlite(
+        &be, PROJECT, APP, &post_rename_desired, &p.migrations, &exec_cfg(),
+        &GuardConfig::confined(PROJECT), Approval::Approved,
+    )
+    .await
+    .expect_err(
+        "a rename deployed from the POST-rename (registerModel-derived) descriptor set must \
+         FAIL CLOSED — the rebuild author cannot find the live `from` column to copy",
+    );
+    assert!(
+        matches!(err, SqliteIrApplyError::Ir { .. }),
+        "expected a fail-closed IR lower error (rename needs the PRE-rename live `from` \
+         column facts; the post-rename desired descriptor set lacks them), got {err:?}"
+    );
+
+    // NO DATA LOSS: the live table is UNTOUCHED — still `nickname`, both rows intact.
+    let info = be.actor().query("PRAGMA main.table_info(people)").await.expect("table_info");
+    assert!(
+        info.iter().any(|r| r[1].as_deref() == Some("nickname")),
+        "the live `nickname` column is untouched — the fail-closed rename did no DDL"
+    );
+    assert!(
+        info.iter().all(|r| r[1].as_deref() != Some("handle")),
+        "no wrong rebuild: `handle` must NOT exist (the rename was refused)"
+    );
+    let vals = be
+        .actor()
+        .query("SELECT nickname FROM main.people ORDER BY id")
+        .await
+        .expect("read nickname");
+    assert_eq!(
+        vals.iter().filter_map(|r| r[0].clone()).collect::<Vec<_>>(),
+        vec!["ada", "grace"],
+        "the seeded rows are intact — fail-closed means zero data loss"
+    );
+}
+
 // A SQLite rename through the REAL entry point under Approval::None is REFUSED
 // (the rebuild on a populated table is destructive) — no go-live, the old column is
 // intact. This is the SQLite peer of the PG routine-deploy refusal.
