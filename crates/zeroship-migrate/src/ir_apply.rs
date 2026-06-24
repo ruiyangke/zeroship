@@ -134,14 +134,36 @@ pub async fn apply_bundle_ir_sqlite(
     ir_files.sort();
 
     // Build the SQLite-dialect live facts (table_snapshots + sqlite_schemas +
-    // ownership) from the app's descriptor set. This is the SQLite analogue of the
-    // PG path's live introspection — the SDK schema `Value`s the rename rebuild
-    // needs come from the descriptor set, not a raw catalog read.
+    // unique_indexes + ownership) from the app's descriptor set. This is the SQLite
+    // analogue of the PG path's live introspection — the SDK schema `Value`s the
+    // rename rebuild needs come from the descriptor set, not a raw catalog read.
+    //
+    // DESCRIPTOR-SET CONTRACT (the SQLite live-facts model): unlike the PG path,
+    // which introspects the REAL catalog (`backend.snapshot_schema`) and so naturally
+    // observes intermediate states, the SQLite leg cannot re-introspect the structural
+    // rebuild facts (`table_snapshots`/`sqlite_schemas` — the SDK-`Value` facets a
+    // `sqlite_master` read can't recover). So the caller MUST pass the descriptor set
+    // describing the LIVE shape the FIRST structural op in this directory observes
+    // (typically the pre-deploy end-state for a single-structural-op deploy), and a
+    // multi-file deploy whose later file depends on an INTERMEDIATE structural state
+    // produced by an earlier file in the SAME directory is NOT supported: the rename
+    // type-gate / rebuild author would see the descriptor shape, not the post-earlier-
+    // op shape, and FAILS CLOSED (`RenameNeedsLiveColumn` / `SqliteRenameNeedsLiveTable`)
+    // rather than emit a wrong rebuild. The descriptor set is the union END-STATE, so
+    // the ownership/FK-inline registry already holds every table any file references
+    // (no per-file advance is needed, unlike the PG path). (Pinned fail-closed by the
+    // e2e `deploy_multi_file_intermediate_rename_fails_closed_on_real_sqlite`.)
     let live_schema =
         LiveSchema::for_sqlite_descriptors(project_schema, owner_app, descriptors)
             .map_err(SqliteIrApplyError::LiveSchema)?;
-    // The ownership registry the IR-load gate enforces: every descriptor table is
-    // owned by the deploying app.
+    // The ownership registry the IR-load gate enforces: every table in the app's
+    // descriptor set (the END-STATE union of all member apps' schemas) is owned by the
+    // deploying app. Because the descriptor set IS the union end-state, every table any
+    // file in this directory creates or references is ALREADY present here — there is
+    // nothing to advance per file (unlike the PG path, which starts from a live catalog
+    // introspection and discovers per-file). A file that creates a table absent from
+    // the descriptor set therefore has no owner here and fails closed at the IR-load
+    // ownership gate — the descriptor set is the single authoritative ownership source.
     let registry: BTreeMap<String, String> = descriptors
         .iter()
         .map(|d| (d.name.clone(), owner_app.to_string()))
@@ -180,6 +202,11 @@ pub async fn apply_bundle_ir_sqlite(
             .map_err(SqliteIrApplyError::Apply)?;
         applied.extend(outcome.applied.applied);
         skipped.extend(outcome.applied.skipped);
+        // No per-file registry/live-set advance (unlike the PG path): the descriptor
+        // set is the END-STATE union, so all tables are present from the start. See the
+        // DESCRIPTOR-SET CONTRACT note above — the structural rebuild facts are
+        // descriptor-pinned and a deploy needing an intermediate structural state
+        // produced by an earlier file FAILS CLOSED, never silently emits a wrong rebuild.
     }
 
     Ok(SqliteIrApplyOutcome { applied, skipped })

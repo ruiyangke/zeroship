@@ -152,7 +152,10 @@ impl LiveSchema {
 
     /// **PR7 online-rename go-live (SQLite leg).** Build the FULL SQLite-dialect
     /// `LiveSchema` — `table_snapshots` + `sqlite_schemas` (the per-table SDK schema
-    /// `Value`) + `table_ownership` — from the app's live descriptor set (the
+    /// `Value`) + `table_ownership` + `unique_indexes` (the descriptor-derived UNIQUE
+    /// index names that drive the `dropIndex` destructive/approval gate, the
+    /// author-independent authoritative source mirroring the PG path) — from the app's
+    /// live descriptor set (the
     /// `registerModel` schema), the production/dev peer of the PG deploy path's live
     /// introspection. The SQLite `renameColumn` rebuild needs the SDK schema `Value`
     /// to render the post-rename `CREATE TABLE`, and that `Value` is NOT recoverable
@@ -182,9 +185,27 @@ impl LiveSchema {
             .keys()
             .map(|t| (t.clone(), owner_app.to_string()))
             .collect();
+        // The AUTHORITATIVE set of UNIQUE-index NAMES the SQLite `dropIndex`
+        // destructive/approval gate consults — derived from the SAME descriptor-built
+        // desired snapshot the PG leg introspects from the live catalog
+        // (`deploy_migrate.rs`), NOT discarded. A `unique:true` field/index becomes a
+        // unique index in the snapshot, and the snapshot's per-table `indexes` carry
+        // `.unique`; we collect every unique index name so a `dropIndex` of one lowers
+        // `destructive + requires_approval` regardless of the IR's advisory `unique`
+        // hint. Leaving this empty (the pre-fix shape) reintroduced exactly the hole
+        // the PG path closes: a hostile/buggy author could under-declare `unique:false`
+        // on a drop of an actually-unique index to slip past the gate on SQLite.
+        let unique_indexes = desired
+            .snapshot
+            .tables
+            .values()
+            .flat_map(|t| t.indexes.iter())
+            .filter(|idx| idx.unique)
+            .map(|idx| idx.name.clone())
+            .collect();
         Ok(Self {
             tables: desired.snapshot.tables.keys().cloned().collect(),
-            unique_indexes: BTreeSet::new(),
+            unique_indexes,
             table_snapshots: desired.snapshot.tables.clone(),
             sqlite_schemas: desired.sqlite_schemas.clone(),
             table_ownership,
@@ -2471,6 +2492,72 @@ mod tests {
         assert!(
             m.flags.destructive && m.flags.requires_approval,
             "a drop of a LIVE-unique index with no hint must STILL be gated by the live fact"
+        );
+    }
+
+    // PR7 code-critic MED-3 (this fix): the SQLite go-live `LiveSchema`
+    // (`for_sqlite_descriptors`) must carry the AUTHORITATIVE descriptor-derived
+    // UNIQUE-index set in `unique_indexes`, so the SQLite `dropIndex`
+    // destructive/approval gate has the same author-independent source as the PG leg
+    // (which populates it from live introspection). Pre-fix this was
+    // `BTreeSet::new()`, discarding the descriptor's `.unique` facts — so a
+    // `dropIndex` understating `unique:false` on an actually-unique index lowered
+    // UNGATED on SQLite, reopening exactly the approval-gate hole the PG path closes.
+    //
+    // RED before the fix: `for_sqlite_descriptors(...).unique_indexes` was EMPTY, so
+    // the understated drop's lowered migration was NOT destructive/approval-gated.
+    #[test]
+    fn for_sqlite_descriptors_carries_unique_index_set_for_drop_gate() {
+        // A descriptor with a UNIQUE index on its declared field.
+        let desc = CollectionDescriptor {
+            name: "users".into(),
+            owner_app: "app_a".into(),
+            fields: vec![FieldDescriptor {
+                name: "email".into(),
+                ty: "string".into(),
+                required: true,
+                ..Default::default()
+            }],
+            indexes: vec![crate::declarative::IndexDescriptor {
+                name: "users_email_uniq".into(),
+                columns: vec!["email".into()],
+                unique: true,
+            }],
+        };
+        let live = LiveSchema::for_sqlite_descriptors("prj", "app_a", &[desc])
+            .expect("build SQLite live schema from descriptors");
+        assert!(
+            live.unique_indexes.contains("users_email_uniq"),
+            "for_sqlite_descriptors must carry the descriptor's UNIQUE index name so the \
+             SQLite dropIndex gate has the authoritative source (was discarded pre-fix)"
+        );
+
+        // …and that authoritative set OVERRIDES an understated IR `unique:false` drop
+        // hint, lowering destructive + approval-gated on the SQLite dialect.
+        let author = IrAuthor::new("prj", "app_a", SqlDialect::Sqlite);
+        let understated = MigrationIr {
+            ir_version: 1,
+            name: "drop_uniq".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::DropIndex {
+                name: "users_email_uniq".into(),
+                table: Some("users".into()),
+                unique: Some(false),
+                if_exists: None,
+                concurrently: None,
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+        let migs = author.lower(&understated, &live).expect("lower");
+        let m = migs.iter().find(|m| m.up.contains("DROP INDEX")).expect("a DROP INDEX");
+        assert!(
+            m.flags.destructive && m.flags.requires_approval,
+            "an understated drop of a descriptor-unique index must STILL be gated on SQLite \
+             via the authoritative unique_indexes set"
         );
     }
 
