@@ -373,11 +373,32 @@ async fn apply_bundle_ir_migrations(
             .filter(|idx| idx.unique)
             .map(|idx| idx.name.clone())
             .collect(),
-        // PR2 — the SQLite `renameColumn` rebuild facts are unused on this
-        // PG-targeted deploy path (a PG rename lowers to expand-contract, which
-        // needs only `{table, from, to, ty}`); the SQLite rebuild leg of an IR
-        // rename runs on the dev/CLI path. Empty here.
-        table_snapshots: std::collections::BTreeMap::new(),
+        // PR2 — carry the FULL introspected per-table column structure so the PG
+        // `renameColumn` leg can reconcile the IR-carried column type against the
+        // LIVE `from` column's actual `data_type` (the IR-path mirror of the
+        // declarative `RenameHintTypeMismatch`): a rename whose IR `ty` disagrees
+        // with the live column fails closed BEFORE any dual-write is authored, and a
+        // rename whose live `from` column is absent fails closed rather than trust
+        // the IR type alone. The whole live snapshot is already in hand, so this is
+        // free; the PG expand-contract author still needs only `{from,to,ty}` to
+        // author the sequence — the snapshot is consulted ONLY for the type gate.
+        table_snapshots: live.tables.clone(),
+        // Every live table in this per-app schema is owned by the deploying app
+        // (the registry is seeded from exactly this set, below). Carried for
+        // completeness; the PG rename leg does not consult it (cross-app authority
+        // is enforced upstream by the IR-load gate's registry check), but populating
+        // it keeps the live-facts bundle honest rather than fabricating ownership.
+        table_ownership: live.tables.keys().map(|t| (t.clone(), app.clone())).collect(),
+        // The SQLite SDK-schema `Value`s (`sqlite_schemas`) are NOT introspectable
+        // from a PG catalog and are unused on this PG-targeted deploy path (a PG
+        // rename lowers to expand-contract, never the SQLite 12-step rebuild). The
+        // SQLite IR-rename rebuild leg is ENGINE-PROVEN (the `IrAuthor`/differ unit +
+        // temp-file e2e in `ir_rename_pr2_sqlite.rs`) but is NOT YET DEPLOY-WIRED:
+        // no production or dev/CLI path constructs a SQLite-dialect `LiveSchema` with
+        // these facts today. Wiring a SQLite IR-deploy entry point (the dev-tier peer
+        // of this PG introspection) is the CLI-rewire wave (gated on this PR). Until
+        // then a SQLite-targeted IR rename would fail closed (no `table_snapshots`/
+        // `sqlite_schemas`), never silently emit a wrong rebuild.
         sqlite_schemas: std::collections::BTreeMap::new(),
     };
 

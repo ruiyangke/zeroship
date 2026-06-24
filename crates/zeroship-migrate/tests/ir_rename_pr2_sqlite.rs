@@ -81,11 +81,19 @@ fn descriptor(table: &str, field: &str, ty: &str) -> CollectionDescriptor {
 fn live_schema_for(descriptors: &[CollectionDescriptor]) -> LiveSchema {
     let desired = desired_snapshot_for_dialect(PROJECT, descriptors, SchemaDialect::Sqlite)
         .expect("desired snapshot");
+    // Every table is owned by the deploying app (`APP`) — the same-app rename case.
+    let table_ownership = desired
+        .snapshot
+        .tables
+        .keys()
+        .map(|t| (t.clone(), APP.to_string()))
+        .collect();
     LiveSchema {
         tables: desired.snapshot.tables.keys().cloned().collect(),
         unique_indexes: BTreeSet::new(),
         table_snapshots: desired.snapshot.tables.clone(),
         sqlite_schemas: desired.sqlite_schemas.clone(),
+        table_ownership,
     }
 }
 
@@ -321,20 +329,138 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
     );
 }
 
+// MED (code-critic) — IR-vs-live type reconciliation is SYMMETRIC across the two
+// legs: the SQLite leg must reject a wrong IR `ty` IDENTICALLY to the PG leg
+// (`RenameTypeMismatch`), not silently ignore the IR type and use the live type.
+// Pre-fix the SQLite leg carried the live `data_type` across UNCHANGED and renamed
+// only the SDK field KEY, so the neutral `ColType` was decorative — a wrong `ty`
+// (here `Int` over a live `string`/text column) lowered with NO rejection. The
+// reconciliation now runs BEFORE the dialect dispatch, so both legs fail closed on
+// the same mismatch (proving the two cannot diverge-detect a wrong `ty`).
+#[test]
+fn renamecolumn_sqlite_rejects_ir_type_disagreeing_with_live_column() {
+    // v1: people(nickname:string) — the live column is text-affinity.
+    let v1 = vec![descriptor("people", "nickname", "string")];
+    let live = live_schema_for(&v1);
+    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+    // The IR claims the renamed column is `Int` — disagreeing with the live text type.
+    let ir = rename_ir("people", "nickname", "handle", ColType::Int);
+    let err = author
+        .lower_steps(&ir, &live)
+        .expect_err("the SQLite leg must reject a wrong IR type identically to PG");
+    match err {
+        IrLowerError::RenameTypeMismatch { table, from, to, .. } => {
+            assert_eq!(table, "people");
+            assert_eq!(from, "nickname");
+            assert_eq!(to, "handle");
+        }
+        other => panic!("expected RenameTypeMismatch on the SQLite leg, got: {other}"),
+    }
+}
+
+// MED (code-critic) — cross-app guard on the SQLite rebuild leg. The rebuild
+// routes through the declarative differ, whose `enforce_ownership` refuses a
+// structural change to a FOREIGN table. Pre-fix `sqlite_rename_rebuild` fabricated
+// BOTH ownership maps as the deploying app, so app B could silently rebuild app
+// A's table. Post-fix the REAL introspected owner is carried in
+// `LiveSchema::table_ownership`; a rename by a non-owner is rejected. Here the
+// table is owned by `app_other` but the IrAuthor deploys as `APP`.
+#[test]
+fn renamecolumn_sqlite_rejects_cross_app_rename() {
+    let v1 = vec![descriptor("people", "nickname", "string")];
+    // Build the live facts, then OVERWRITE the owner to a different app.
+    let mut live = live_schema_for(&v1);
+    live.table_ownership.insert("people".into(), "app_other".into());
+
+    // The IrAuthor deploys as `APP` (≠ app_other) — a non-owner rename.
+    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+    let ir = rename_ir("people", "nickname", "handle", ColType::Text);
+    let err = author
+        .lower_steps(&ir, &live)
+        .expect_err("a non-owner SQLite rename must be refused by the cross-app guard");
+    // The differ's NotTableOwner surfaces as a RenameLower (the bridge error). The
+    // message names the foreign owner.
+    match err {
+        IrLowerError::RenameLower(msg) => {
+            assert!(
+                msg.contains("app_other") || msg.to_lowercase().contains("owner"),
+                "the refusal must reference the foreign ownership: {msg}"
+            );
+        }
+        other => panic!("expected RenameLower (cross-app refusal), got: {other}"),
+    }
+}
+
 // §2.6.2 fail-closed: a SQLite renameColumn whose table's full live structure is
 // NOT in the LiveSchema cannot lower — it refuses rather than emit a rebuild from
-// a partial view of the table.
+// a partial view of the table. With the IR-vs-live type reconciliation now gating
+// the lowering BEFORE the dialect dispatch, the absence of the live `from` column
+// trips that gate first (`RenameNeedsLiveColumn`): a strictly-earlier, equally
+// fail-closed refusal that ALSO needs the live column. Either refusal is correct
+// (both are fail-closed and emit NO rebuild); the type-reconciliation gate is the
+// outermost, so it is the one observed. The deeper `SqliteRenameNeedsLiveTable`
+// arm still guards the case where the live `from` column type IS known but the
+// full rebuild shape (sqlite_schemas) is not — exercised by
+// `renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema`.
 #[test]
 fn renamecolumn_sqlite_fails_closed_without_live_table_structure() {
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let ir = rename_ir("ghost", "a", "b", ColType::Text);
     // LiveSchema knows the table NAME but not its structure (table_snapshots /
-    // sqlite_schemas empty) — the rebuild needs the whole shape.
+    // sqlite_schemas empty) — there is no live `from` column to reconcile against.
     let mut live = LiveSchema::default();
     live.tables.insert("ghost".into());
     let err = author
         .lower_steps(&ir, &live)
         .expect_err("a SQLite rename with no live table structure must fail closed");
+    match err {
+        IrLowerError::RenameNeedsLiveColumn(t, c) => {
+            assert_eq!(t, "ghost");
+            assert_eq!(c, "a");
+        }
+        other => panic!("expected RenameNeedsLiveColumn (the outermost fail-closed gate), got: {other}"),
+    }
+}
+
+// §2.6.2 fail-closed (deeper arm): the live `from` column TYPE is known (so the
+// type reconciliation passes), but the full rebuild shape — the live SDK schema
+// `Value` in `sqlite_schemas` — is absent. The SQLite leg then refuses with
+// `SqliteRenameNeedsLiveTable` rather than emit a rebuild from a partial view.
+// This keeps the rebuild-needs-whole-shape guard exercised after the type gate.
+#[test]
+fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
+    use zeroship_migrate::drift::{ColumnSnapshot, TableSnapshot};
+    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+    let ir = rename_ir("ghost", "a", "b", ColType::Text);
+    // Carry the live `from` column TYPE (so the type gate passes — text == text),
+    // but DO NOT populate `sqlite_schemas` (the rebuild's SDK Value is missing).
+    let a_type = {
+        // Derive the live `data_type` for a text column the SAME way the builder
+        // does, so the reconciliation passes (live == IR-derived).
+        let v1 = vec![descriptor("ghost", "a", "string")];
+        live_schema_for(&v1).table_snapshots["ghost"].columns[0].data_type.clone()
+    };
+    let mut live = LiveSchema::default();
+    live.tables.insert("ghost".into());
+    live.table_snapshots.insert(
+        "ghost".into(),
+        TableSnapshot {
+            columns: vec![ColumnSnapshot {
+                name: "a".into(),
+                data_type: a_type,
+                nullable: true,
+                default: None,
+                encryption_sentinel: None,
+                comment_sentinel: None,
+            }],
+            indexes: vec![],
+            constraints: vec![],
+            stored_create_sql: None,
+        },
+    );
+    let err = author
+        .lower_steps(&ir, &live)
+        .expect_err("a SQLite rename with the column type but no SDK schema must fail closed");
     match err {
         IrLowerError::SqliteRenameNeedsLiveTable(t) => assert_eq!(t, "ghost"),
         other => panic!("expected SqliteRenameNeedsLiveTable, got: {other}"),

@@ -109,6 +109,19 @@ pub struct LiveSchema {
     /// so the rebuilt table is byte-identical to what the declarative diff would
     /// emit. Only read on the SQLite `renameColumn` leg (see `table_snapshots`).
     pub sqlite_schemas: std::collections::BTreeMap<String, serde_json::Value>,
+    /// **PR2 — the live per-table OWNER (`table → owning app`).** The SQLite
+    /// `renameColumn` rebuild routes through the declarative differ, whose
+    /// `enforce_ownership` REFUSES a structural change to a table the deploying app
+    /// does not own ([`crate::declarative::DeclarativeError::NotTableOwner`]). That
+    /// guard is only sound if it sees the REAL introspected owner — so the rebuild
+    /// stamps the differ's ownership map from THIS map, NOT from the deploying app.
+    /// A table whose owner is absent here is treated as foreign on a rename (fail
+    /// closed): the differ will not author a rebuild on a table whose ownership it
+    /// cannot confirm. The PG leg never reads this (its expand-contract author has
+    /// no diff-ownership step; cross-app authority is enforced upstream by the
+    /// IR-load gate's registry check). Empty ⇒ a SQLite rename fails closed on the
+    /// ownership confirmation.
+    pub table_ownership: std::collections::BTreeMap<String, String>,
 }
 
 impl LiveSchema {
@@ -123,6 +136,7 @@ impl LiveSchema {
             unique_indexes: BTreeSet::new(),
             table_snapshots: std::collections::BTreeMap::new(),
             sqlite_schemas: std::collections::BTreeMap::new(),
+            table_ownership: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -202,6 +216,51 @@ pub enum IrLowerError {
     /// builder.
     #[error("IrAuthor::lower of renameColumn failed: {0}")]
     RenameLower(String),
+    /// **PR2** — a `renameColumn` whose IR-carried [`ColType`] does not match the
+    /// LIVE `from` column's actual `data_type`. A pure online rename mirrors values
+    /// across the two columns (PG dual-write `NEW.<to> := NEW.<from>`; the SQLite
+    /// rebuild copies the column across) and CANNOT also change the type — a
+    /// simultaneous rename + retype is two distinct intents. The IR path is the
+    /// higher-risk AI/creator-authored surface, so it must NOT silently trust an
+    /// IR-carried type that disagrees with the live column: a wrong `ty` (e.g.
+    /// `Int` over a live `text` column) would otherwise author a mismatched
+    /// `ADD COLUMN` + a cross-type dual-write copy with no rejection. This is the
+    /// IR-path mirror of the declarative differ's
+    /// [`crate::declarative::DeclarativeError::RenameHintTypeMismatch`] — enforced
+    /// IDENTICALLY on BOTH dialects (the single authoritative type source is the
+    /// LIVE column, reconciled against the IR `ty`; neither leg silently uses one
+    /// over the other). Carries the table, the column, and the two `data_type`s.
+    #[error(
+        "IrAuthor::lower of renameColumn {table:?}.{from:?} → {to:?}: the IR-carried \
+         type ({ir_type}) does not match the live `{from}` column's type \
+         ({live_type}); a rename requires type identity (rename + type change is two \
+         separate intents) — refusing to author a cross-type dual-write/rebuild"
+    )]
+    RenameTypeMismatch {
+        /// The table the rename targets.
+        table: String,
+        /// The `from` column (the live column whose type is authoritative).
+        from: String,
+        /// The `to` column.
+        to: String,
+        /// The `information_schema` `data_type` the IR-carried `ColType` derives.
+        ir_type: String,
+        /// The live `from` column's actual `information_schema` `data_type`.
+        live_type: String,
+    },
+    /// **PR2** — a `renameColumn` whose LIVE `from` column structure is absent from
+    /// [`LiveSchema::table_snapshots`], so the authoritative IR-vs-live type
+    /// reconciliation (see [`Self::RenameTypeMismatch`]) cannot run. A rename must
+    /// NEVER lower from an IR-carried type alone — the live column type is the
+    /// authority on BOTH dialects — so an absent live `from` column fails closed
+    /// rather than trusting the IR `ty`. Carries the table + column.
+    #[error(
+        "IrAuthor::lower of renameColumn on {0:?}.{1:?} needs the live `{1}` column's \
+         type (LiveSchema::table_snapshots) to reconcile the IR-carried type against \
+         the live column; it is absent — refusing to lower a rename from an IR type \
+         alone"
+    )]
+    RenameNeedsLiveColumn(String, String),
 }
 
 /// One rendered SQL FRAGMENT of a lowered op, carrying its attribution (§6.1.1):
@@ -902,12 +961,28 @@ impl IrAuthor {
     ///   ([`LiveSchema::table_snapshots`] + [`LiveSchema::sqlite_schemas`]); absent ⇒
     ///   [`IrLowerError::SqliteRenameNeedsLiveTable`] (fail-closed).
     ///
+    /// **Authoritative IR-vs-live type reconciliation (BOTH legs).** Before EITHER
+    /// destination author runs, the IR-carried [`ColType`] is resolved to its
+    /// `information_schema` `data_type` and reconciled against the LIVE `from`
+    /// column's actual type ([`LiveSchema::table_snapshots`]). A mismatch is rejected
+    /// ([`IrLowerError::RenameTypeMismatch`]) — the IR-path mirror of the declarative
+    /// differ's [`crate::declarative::DeclarativeError::RenameHintTypeMismatch`]. A
+    /// pure rename mirrors values across the two columns and cannot also change the
+    /// type, so the live column is the single authoritative type source on BOTH
+    /// dialects (neither leg silently trusts the IR `ty`). The live `from` column is
+    /// MANDATORY: absent ⇒ [`IrLowerError::RenameNeedsLiveColumn`] (never lower a
+    /// rename from an IR type alone).
+    ///
     /// The destination authors (the PG expand-contract author / the SQLite rebuild
     /// planner) are REUSED verbatim, so the IR path inherits their version-stable ids
     /// (§2.6.1) — the IR plan never re-mints them.
     ///
     /// # Errors
     /// - [`IrLowerError::Snapshot`] — the shared builder rejected the column type.
+    /// - [`IrLowerError::RenameNeedsLiveColumn`] — the live `from` column type is
+    ///   absent, so the type reconciliation cannot run (fail-closed, both legs).
+    /// - [`IrLowerError::RenameTypeMismatch`] — the IR-carried type disagrees with
+    ///   the live `from` column's type (both legs).
     /// - [`IrLowerError::SqliteRenameNeedsLiveTable`] — SQLite leg missing live facts.
     /// - [`IrLowerError::RenameLower`] — the bridge (author / differ) rejected it.
     fn lower_rename(
@@ -918,17 +993,53 @@ impl IrAuthor {
         ty: &ColType,
         live: &LiveSchema,
     ) -> Result<RenameStep, IrLowerError> {
-        // Neutral→PG type: the column's `information_schema` data_type via the SHARED
-        // builder, then `ddl_type`-spelled — byte-equal to the declarative path's
-        // `ddl_type(&r.ty)` (§2.6.1). Used only on the PG leg.
+        // The IR-carried column type, resolved to its `information_schema`
+        // `data_type` via the SHARED builder (the SAME spelling the differ's
+        // `field_data_type` produces and the live introspection records). This is
+        // the type the IR ASSERTS the column has.
         let col = self.add_column_snapshot(table, to, ty, None, None)?;
-        let pg_ty = crate::declarative::ddl_type(&col.data_type).to_string();
+        let ir_data_type = col.data_type.clone();
+
+        // **AUTHORITATIVE IR-vs-live type reconciliation (HIGH/MED — both legs).**
+        // A pure online rename mirrors values across the two columns and CANNOT also
+        // change the type; the LIVE column is the single source of truth. Look up the
+        // live `from` column's actual `data_type` and REJECT if the IR-carried type
+        // disagrees — the IR-path mirror of the declarative differ's
+        // `RenameHintTypeMismatch`. This runs IDENTICALLY on BOTH dialects (neither
+        // leg silently trusts the IR `ty` over the live column): a wrong-type IR
+        // (e.g. `Int` over a live `text` column) fails closed here BEFORE any
+        // dual-write/rebuild is authored. The live `from` column structure is
+        // mandatory for a rename on either dialect — absent ⇒ fail closed (never
+        // lower a rename from an IR type alone).
+        let live_from_type = live
+            .table_snapshots
+            .get(table)
+            .and_then(|t| t.columns.iter().find(|c| c.name == from))
+            .map(|c| c.data_type.clone())
+            .ok_or_else(|| {
+                IrLowerError::RenameNeedsLiveColumn(table.to_string(), from.to_string())
+            })?;
+        if live_from_type != ir_data_type {
+            return Err(IrLowerError::RenameTypeMismatch {
+                table: table.to_string(),
+                from: from.to_string(),
+                to: to.to_string(),
+                ir_type: ir_data_type,
+                live_type: live_from_type,
+            });
+        }
 
         match self.dialect {
             SqlDialect::Postgres => {
-                // The PG leg needs no live table structure — the expand-contract
-                // author derives everything from `{table, from, to, ty}`. A live
-                // snapshot/schema is irrelevant here; pass empties.
+                // Neutral→PG type: the reconciled `information_schema` data_type,
+                // `ddl_type`-spelled — byte-equal to the declarative path's
+                // `ddl_type(&r.ty)` (§2.6.1). Computed ONLY on the PG leg (the SQLite
+                // leg takes affinity from the live SDK Value, never a PG string).
+                let pg_ty = crate::declarative::ddl_type(&ir_data_type).to_string();
+                // The PG expand-contract author derives the dual-write from
+                // `{table, from, to, ty}` and needs no live table SHAPE; the type was
+                // already reconciled above, so pass empties for the unused snapshot/
+                // schema slots.
                 let empty_snapshot = crate::drift::TableSnapshot {
                     columns: Vec::new(),
                     indexes: Vec::new(),
@@ -943,20 +1054,47 @@ impl IrAuthor {
                         &pg_ty,
                         &empty_snapshot,
                         &serde_json::Value::Null,
+                        // The PG expand-contract author has no diff-ownership step
+                        // (cross-app authority is enforced upstream by the IR-load
+                        // gate's registry check), so `live_owner` is unused on this
+                        // leg; pass the deploying app for signature completeness.
+                        self.decl.owner_app(),
                     )
                     .map_err(|e| IrLowerError::RenameLower(e.to_string()))
             }
             SqlDialect::Sqlite => {
                 // The SQLite rebuild needs the WHOLE live table shape (every column +
-                // the live SDK schema Value). Absent ⇒ fail closed.
+                // the live SDK schema Value). Absent ⇒ fail closed. `pg_ty` is unused
+                // on this leg (the rebuild's affinity comes from the SDK Value), so it
+                // is not computed here — only the live shape drives the rebuild.
                 let live_snapshot = live.table_snapshots.get(table).ok_or_else(|| {
                     IrLowerError::SqliteRenameNeedsLiveTable(table.to_string())
                 })?;
                 let live_schema_value = live.sqlite_schemas.get(table).ok_or_else(|| {
                     IrLowerError::SqliteRenameNeedsLiveTable(table.to_string())
                 })?;
+                // The REAL introspected owner of the live table — the subject of the
+                // differ's cross-app drop/ALTER guard. Absent ⇒ fail closed (the
+                // rebuild must NOT fabricate ownership as the deploying app, which
+                // would let app B silently rebuild app A's table). A foreign owner
+                // here makes the differ refuse with `NotTableOwner`.
+                let live_owner = live.table_ownership.get(table).ok_or_else(|| {
+                    IrLowerError::RenameLower(format!(
+                        "renameColumn on SQLite table '{table}' has no introspected owner \
+                         in LiveSchema::table_ownership — refusing to author a rebuild on a \
+                         table whose ownership cannot be confirmed (cross-app drop guard)"
+                    ))
+                })?;
                 self.decl
-                    .lower_ir_rename(table, from, to, &pg_ty, live_snapshot, live_schema_value)
+                    .lower_ir_rename(
+                        table,
+                        from,
+                        to,
+                        "",
+                        live_snapshot,
+                        live_schema_value,
+                        live_owner,
+                    )
                     .map_err(|e| IrLowerError::RenameLower(e.to_string()))
             }
         }
