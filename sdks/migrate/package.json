@@ -18,6 +18,7 @@
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "typecheck:types": "tsc --noEmit -p tsconfig.types.json",
+    "check": "tsc --noEmit && tsc --noEmit -p tsconfig.types.json",
     "test": "NODE_ENV=test node --import tsx --test tests/*.test.ts"
   },
   "dependencies": {

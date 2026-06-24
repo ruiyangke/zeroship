@@ -30,6 +30,7 @@ import {
   t,
   update,
   type ColumnDef,
+  type DbFieldType,
 } from "../../src/index.js";
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -187,4 +188,47 @@ export function lexiconBridgeShapes(): void {
 
   // @ts-expect-error — `fromDb` takes a @zeroship/db field, not a bare string.
   fromDb("text");
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 7. EXHAUSTIVENESS — the bridge handles EVERY `@zeroship/db` `FieldDef.type`.
+//
+//    The db `TypeName` union (sdks/db/src/types.ts) is the single source. The
+//    db-lexicon switch must cover it whole: a portable arm OR an explicit
+//    UnsupportedColTypeError arm. If @zeroship/db adds a NEW storage-backed
+//    TypeName, the un-cased token is no longer `never` at the `default` arm and
+//    BOTH this type-level guard and the source-level `const _exhaustive: never`
+//    in db-lexicon.ts FAIL tsc — turning silent bridge drift into a build error.
+//
+//    RED proof: delete any `case` below (e.g. `case "vector":`) and tsc reports
+//    `Type '"vector"' is not assignable to type 'never'` at the default arm.
+// ───────────────────────────────────────────────────────────────────────────
+
+export function dbFieldTypeExhaustiveness(token: DbFieldType): void {
+  switch (token) {
+    // Storage-backed tokens reduced to a portable ColType by the bridge.
+    case "string":
+    case "number":
+    case "boolean":
+    case "date":
+    case "json":
+    case "bytes":
+    case "geoPoint":
+    case "id":
+    case "ref":
+    case "vector":
+    // Type-only / non-storage tokens that are a hard UnsupportedColTypeError.
+    case "object":
+    case "union":
+    case "literal":
+    case "array":
+    case "actor":
+    case "calendarDate":
+      return;
+    default: {
+      // If a NEW db TypeName appears, `token` is no longer `never` here.
+      const _exhaustive: never = token;
+      return _exhaustive;
+    }
+  }
 }

@@ -10,11 +10,20 @@
 // We REUSE the `@zeroship/db` type machinery rather than duplicate the lexicon:
 // the db `t.*` factories return a `TypeBuilder` whose `.toFieldDef()` yields a
 // `FieldDef` carrying the canonical `TypeName` discriminant (`"string"`,
-// `"ref"`, `"vector"`, …). This module is the SINGLE source for the
-// `FieldDef.type` → migrate `ColType` reduction — the JS inverse of the engine's
-// Rust `col_type_to_token` (`crates/zeroship-migrate/src/ir_author.rs`), which
-// maps an IR `ColType` back to the same `FieldDef` type token. There is exactly
-// one mapping, defined once here.
+// `"ref"`, `"vector"`, …). This module is the SINGLE source for the bridge from
+// the `@zeroship/db` `FieldDef.type` (`TypeName`) space INTO the migrate
+// `ColType` space. There is exactly one mapping, defined once here.
+//
+// NOTE: this is NOT the inverse of the engine's Rust `col_type_to_token`
+// (`crates/zeroship-migrate/src/ir_author.rs`). That function emits engine-
+// internal masked-sibling descriptor tokens (`"int"` for `Int|BigInt`,
+// `"number"` for `Float|Decimal`, `"string"` for `Uuid|Text`, …) — a different,
+// overlapping token set from the `@zeroship/db` `FieldDef` discriminants this
+// bridge consumes (the db `FieldDef` union emits `"number"`/`"id"`/… and never
+// emits `"int"`). The two are NOT round-trip inverses; the only invariant they
+// share is that migrate `ColType` is generated from the engine IR schema, so a
+// db `t.ref("users")` and a migrate `t.ref("users")` reduce to the byte-
+// identical `{ ref: { references: "users" } }` ColType.
 //
 // BINDING (§3.3): this bridge converts a column's TYPE only. It never binds
 // table/column NAMES to the live schema — a `t.ref(target)` carries the target
@@ -66,11 +75,14 @@ function toFieldDef(field: DbSchemaField): FieldDef {
 /**
  * Map a `@zeroship/db` schema field to the dialect-neutral migration {@link ColType}.
  *
- * This is the ONE place the db `TypeName` lexicon is bridged into the migration
- * lexicon — the JS inverse of the engine's `col_type_to_token`. It is the proof
- * the two surfaces share one lexicon: a `t.ref("users")` from `@zeroship/db`
- * yields `{ ref: { references: "users" } }`, byte-identical to the migration
- * DSL's own `t.ref("users")._type` (verified by test).
+ * This is the ONE place the db `FieldDef.type` (`TypeName`) space is bridged into
+ * the migration `ColType` space. It is the proof the two surfaces share one
+ * lexicon: a `t.ref("users")` from `@zeroship/db` yields
+ * `{ ref: { references: "users" } }`, byte-identical to the migration DSL's own
+ * `t.ref("users")._type` (verified by test). (This is a one-way bridge over the
+ * db type space, NOT the inverse of the engine's `col_type_to_token`, whose
+ * `"int"`/`"number"` outputs are engine-internal descriptors — see the module
+ * header.)
  *
  * Type-only / non-storage db field shapes (`object`/`union`/`literal`/`array`/
  * `actor`/`calendarDate`) that have no single portable column type throw
@@ -127,9 +139,11 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
       }
       return { vector: { vector: dims } };
     }
-    // An encrypted column wraps an inner primitive (`string`/`number`/`bytes`);
-    // the neutral `encrypted` arm recurses on the inner token — the same shape
-    // the engine's `ColType::Encrypted { of }` carries.
+    // Non-storage / type-only db field shapes that have no single portable
+    // column type are a hard structured boundary (property A): they reduce to
+    // `UnsupportedColTypeError`, never a silent fallback. These ARE part of the
+    // `@zeroship/db` `FieldDef.type` space, so they must be enumerated explicitly
+    // — the `default` arm below is the exhaustiveness guard, not a catch-all.
     case "object":
     case "union":
     case "literal":
@@ -137,7 +151,16 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
     case "actor":
     case "calendarDate":
       throw new UnsupportedColTypeError(def.type);
-    default:
-      throw new UnsupportedColTypeError(def.type);
+    default: {
+      // Exhaustiveness guard: every member of `DbFieldType` (= the @zeroship/db
+      // `TypeName` single source) must be handled by an arm above. If
+      // @zeroship/db adds a NEW storage-backed `TypeName`, `def.type` is no
+      // longer `never` here and THIS LINE FAILS tsc — turning silent bridge
+      // drift into a build error instead of a fail-closed runtime surprise. The
+      // throw remains for the untyped/at-runtime path (a hand-built FieldDef
+      // carrying an out-of-union token).
+      const _exhaustive: never = def.type;
+      throw new UnsupportedColTypeError(_exhaustive);
+    }
   }
 }
