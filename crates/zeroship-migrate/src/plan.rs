@@ -177,6 +177,12 @@ impl PlanStep {
     ///   refused (§2.0.3 item 2 / test (c)).
     /// - `OnlineRename(SqliteRebuild)` → the rebuild spec's table (for completeness;
     ///   SQLite never has an outstanding pending contract, so it never gates).
+    /// - `Backfill` → the backfill spec's table, so a standalone `apply_plan`
+    ///   caller passing a `Backfill` step with an EMPTY `touched_tables` slice still
+    ///   gates a backfill targeting a pending table (symmetry with `Op::Backfill`,
+    ///   which contributes its table on the IR path). The production IR deploy path
+    ///   is already safe (`ir.touched_tables()` covers `Op::Backfill`); this closes
+    ///   the non-production standalone-caller consistency gap.
     ///
     /// `Ddl` and `Dml` steps carry only `up: String` / `template: String` SQL with
     /// no structured table, so they return `None` here. The IR production path —
@@ -194,7 +200,8 @@ impl PlanStep {
                 }
             },
             PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => Some(rb.spec.table.as_str()),
-            PlanStep::Ddl(_) | PlanStep::Dml { .. } | PlanStep::Backfill(_) => None,
+            PlanStep::Backfill(spec) => Some(spec.table.as_str()),
+            PlanStep::Ddl(_) | PlanStep::Dml { .. } => None,
         }
     }
 }
@@ -211,6 +218,32 @@ pub fn tables_touched_by(steps: &[PlanStep]) -> std::collections::BTreeSet<Strin
         .iter()
         .filter_map(|s| s.touched_table().map(str::to_string))
         .collect()
+}
+
+#[cfg(test)]
+mod touched_table_tests {
+    use super::*;
+    use crate::backfill::BackfillSpec;
+
+    /// LOW (standalone Backfill touched-set symmetry): a `PlanStep::Backfill`
+    /// exposes its spec's table, so a standalone `apply_plan` caller passing a
+    /// Backfill step with an EMPTY `touched_tables` slice still gates a backfill
+    /// targeting a pending table (parity with `Op::Backfill` on the IR path).
+    /// Pre-fix this returned `None`.
+    #[test]
+    fn backfill_step_contributes_its_table() {
+        let spec = BackfillSpec {
+            table: "members".into(),
+            cursor_column: "id".into(),
+            batch_size: 100,
+            set_clause: "x = 1".into(),
+            filter: None,
+            name: "bf".into(),
+        };
+        let step = PlanStep::Backfill(spec);
+        assert_eq!(step.touched_table(), Some("members"));
+        assert!(tables_touched_by(std::slice::from_ref(&step)).contains("members"));
+    }
 }
 
 /// What one authored artifact (`.sql` today; `.ir.json` after PR1) becomes after

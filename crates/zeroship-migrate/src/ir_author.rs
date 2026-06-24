@@ -498,6 +498,15 @@ pub struct LoweredArtifact {
     /// `addColumn`s or `update`s a table with an outstanding pending contract is
     /// fail-closed refused.
     pub touched_tables: Vec<String>,
+    /// **§2.0.4** — the artifact's plan-level `depends_on` versions (the `.ir.json`
+    /// `depends_on`, each a dependency PLAN's plan-group version). The deploy loop
+    /// threads these into the engine's cross-plan dependency block
+    /// ([`MigrationEngine::apply_plan_with_touched_and_depends`](crate::engine::MigrationEngine::apply_plan_with_touched_and_depends)):
+    /// if any referenced dependency is an online rename whose contract is still
+    /// OUTSTANDING, the deploy is fail-closed refused — EVEN when this artifact
+    /// touches a different table than the pending one (the case `touched_tables`
+    /// does not cover).
+    pub depends_on: Vec<String>,
 }
 
 impl LoweredArtifact {
@@ -639,9 +648,71 @@ impl IrAuthor {
         // shifts the anchor and the executor's net-applied drift gate aborts.
         // §2.0.3 — the authoritative DDL/DML touched-set over EVERY op variant,
         // threaded into the engine's pending-contract interlock by the deploy loop.
-        let touched_tables = ir.touched_tables();
+        // For a `dropIndex` whose owning-table hint is ABSENT, resolve the owner
+        // from the LIVE schema (the same `table_snapshots` introspection the
+        // unique-gate uses) so the index's table still enters the touched-set — a
+        // bare-name `dropIndex` on a table with an outstanding pending contract must
+        // NOT slip the §2.0.3(2) refusal. FAIL CLOSED: if the owner cannot be
+        // resolved, fold in a sentinel that can never be a real table name so the
+        // engine treats the op as touching SOMETHING (and the deploy is refused if
+        // ANY obligation is outstanding) rather than silently un-gating. (On the
+        // production path a bare-name `dropIndex` is already rejected at validate —
+        // §8.6 — so this is defense-in-depth for that gate plus correctness for any
+        // caller that lowers a bare-name drop without the validator.)
+        let touched_tables = Self::resolved_touched_tables(&ir, live);
+        // §2.0.4 — carry the artifact's plan-level `depends_on` so the deploy loop
+        // can fail-closed block a dependent plan whose dependency's online-rename
+        // contract is still pending, even when this artifact touches a different
+        // table than the pending one.
+        let depends_on = ir.depends_on.clone();
         let plan = self.assemble_plan(&ir, steps);
-        Ok(LoweredArtifact { plan, fragments, created_tables, touched_tables })
+        Ok(LoweredArtifact { plan, fragments, created_tables, touched_tables, depends_on })
+    }
+
+    /// The §2.0.3 touched-set for an IR, with a `dropIndex`'s owning TABLE resolved
+    /// from the LIVE schema when the op omits the owning-table hint.
+    ///
+    /// `MigrationIr::touched_tables` under-reports a bare-name `dropIndex` (it has
+    /// no structured table — [`Op::touched_table`](crate::ir::Op::touched_table)
+    /// returns `None`), which would let a `op.dropIndex("idx_on_pending_table")`
+    /// with no hint slip the §2.0.3(2) refusal (fail-OPEN). Here we union in the
+    /// owner resolved from `live.table_snapshots` (the same introspection the
+    /// unique-gate uses) so the index's table enters the touched-set.
+    ///
+    /// FAIL CLOSED on an unresolvable owner: fold in [`TOUCHES_UNKNOWN`] so the
+    /// engine refuses the deploy if ANY obligation is outstanding (the obligation
+    /// set lives in the engine, so the "refuse-if-any-outstanding" decision is made
+    /// there). On the production path a bare-name `dropIndex` is already rejected at
+    /// validate (§8.6), so the sentinel arm is defense-in-depth for any caller that
+    /// lowers a bare-name drop without the validator.
+    ///
+    /// [`TOUCHES_UNKNOWN`]: crate::engine::TOUCHES_UNKNOWN
+    #[must_use]
+    pub fn resolved_touched_tables(ir: &MigrationIr, live: &LiveSchema) -> Vec<String> {
+        let mut touched_tables = ir.touched_tables();
+        for op in &ir.ops {
+            if let Op::DropIndex { name, table: None, .. } = op {
+                let entry = Self::resolve_index_owner(name, live)
+                    .unwrap_or_else(|| crate::engine::TOUCHES_UNKNOWN.to_string());
+                if !touched_tables.contains(&entry) {
+                    touched_tables.push(entry);
+                }
+            }
+        }
+        touched_tables
+    }
+
+    /// Resolve a `dropIndex`'s owning TABLE from the LIVE schema by index name,
+    /// for the §2.0.3 touched-set when the IR omits the owning-table hint. Scans
+    /// the introspected `table_snapshots` (the same live catalog the unique-gate
+    /// reads) for the table whose `indexes` contain `name`. `None` when the index
+    /// is not in the live schema (e.g. it was never created, or the snapshot is
+    /// empty), in which case the caller fails closed.
+    fn resolve_index_owner(name: &str, live: &LiveSchema) -> Option<String> {
+        live.table_snapshots
+            .iter()
+            .find(|(_, snap)| snap.indexes.iter().any(|idx| idx.name == name))
+            .map(|(table, _)| table.clone())
     }
 
     /// Assemble the lowered [`PlanStep`]s into ONE [`AppliedPlan`] (§2.0 / §5.2),

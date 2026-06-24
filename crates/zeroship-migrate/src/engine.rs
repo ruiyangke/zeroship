@@ -36,6 +36,17 @@ use crate::manifest::{compute_manifest, verify_manifest, ManifestError, Manifest
 use crate::migration::Migration;
 use crate::plan::{PlanStep, RenameStep};
 
+/// Sentinel touched-set entry meaning "this deploy touches a table I cannot
+/// NAME" (§2.0.3). The lowering folds it in when a `dropIndex` omits its
+/// owning-table hint AND the live schema cannot resolve the index's owner
+/// (`IrAuthor::resolve_index_owner` returned `None`). The engine's
+/// pending-contract read-back treats its presence as a fail-closed signal: a
+/// deploy carrying it is REFUSED if ANY obligation is outstanding (the engine
+/// owns the obligation set, so the "refuse-if-any-outstanding" decision is made
+/// here, not at lower-time). It contains a NUL byte so it can never equal a real
+/// (parseable) table identifier.
+pub const TOUCHES_UNKNOWN: &str = "\0__zeroship_touches_unknown__";
+
 /// One linted migration in a [`MigrationPlan`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedMigration {
@@ -113,6 +124,19 @@ pub enum EngineError {
     /// remedy. The human message is the projection of the payload.
     #[error("{0}")]
     PendingContract(crate::pending::PendingContractRefusal),
+    /// **Fail-closed cross-plan `depends_on` block (§2.0.4).** A step (or the
+    /// plan) declares `depends_on: [A]` where A is an online rename whose contract
+    /// is still OUTSTANDING from a prior deploy — so A is NOT fully satisfied and
+    /// the dependent plan B MUST NOT apply against a half-applied A, **even when B
+    /// touches a DIFFERENT table** (the case the §2.0.3 touched-table refusal does
+    /// not cover — the §2.0.4 "double-bind"). The read-back runs inside the held
+    /// project lock (so it is not a TOCTOU, §2.0.3 item 4); the deploy applies
+    /// NOTHING. Carries the structured
+    /// [`DependencyPendingContract`](crate::pending::DependencyPendingContract)
+    /// (§8.8) whose `remediation` is `apply_dependency_contract`. Roll-forward (not
+    /// deadlock): applying A's contract unblocks B.
+    #[error("{0}")]
+    DependencyPendingContract(crate::pending::DependencyPendingContract),
 }
 
 /// A failure from [`MigrationEngine::rollback`].
@@ -627,6 +651,50 @@ impl MigrationEngine {
             steps,
             touched_tables,
             &[],
+            &[],
+            approval,
+            backend,
+            exec_cfg,
+            applied_by,
+            lock_mode,
+        )
+        .await
+    }
+
+    /// As [`apply_plan_with_touched`](Self::apply_plan_with_touched), but ALSO
+    /// threads the artifact's plan-level **`depends_on`** versions so the §2.0.4
+    /// cross-plan dependency block fires at APPLY (not only in `status`). The IR
+    /// deploy path passes its `.ir.json` `depends_on` here: if any referenced
+    /// dependency is an online rename whose contract is still OUTSTANDING, the
+    /// deploy is fail-closed refused with `DEPENDENCY_PENDING_CONTRACT` — even when
+    /// the dependent plan touches a DIFFERENT table than the pending one (the case
+    /// the touched-table refusal does not cover). The step-derived `Migration`
+    /// `depends_on` (e.g. the EXPAND chain's interior edges) is UNIONed in
+    /// regardless, so a caller that passes an empty `depends_on` slice still gets
+    /// step-level coverage.
+    ///
+    /// # Errors
+    /// Same as [`apply_plan_with_touched`](Self::apply_plan_with_touched), plus
+    /// [`EngineError::DependencyPendingContract`] (wrapped in
+    /// [`DeclarativeApplyError::Plain`]) when a `depends_on` references an
+    /// outstanding obligation's `plan_version`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn apply_plan_with_touched_and_depends<B: MigrationBackend>(
+        &self,
+        steps: &[PlanStep],
+        touched_tables: &[String],
+        depends_on: &[String],
+        approval: Approval,
+        backend: &B,
+        exec_cfg: &ExecutorConfig,
+        applied_by: &str,
+        lock_mode: LockMode,
+    ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
+        self.apply_plan_resolving(
+            steps,
+            touched_tables,
+            depends_on,
+            &[],
             approval,
             backend,
             exec_cfg,
@@ -650,13 +718,20 @@ impl MigrationEngine {
     /// The resolve runs inside the SAME held project lock as the apply, so it is
     /// race-free against concurrent deploys.
     ///
+    /// `depends_on` carries the artifact's plan-level dependency versions for the
+    /// §2.0.4 cross-plan block (see
+    /// [`apply_plan_with_touched_and_depends`](Self::apply_plan_with_touched_and_depends)).
+    ///
     /// # Errors
-    /// Same as [`apply_plan_with_touched`](Self::apply_plan_with_touched).
+    /// Same as [`apply_plan_with_touched`](Self::apply_plan_with_touched), plus
+    /// [`EngineError::DependencyPendingContract`] when a `depends_on` references an
+    /// outstanding obligation's `plan_version`.
     #[allow(clippy::too_many_arguments)]
     pub async fn apply_plan_resolving<B: MigrationBackend>(
         &self,
         steps: &[PlanStep],
         touched_tables: &[String],
+        depends_on: &[String],
         resolve: &[(crate::journal::PendingContract, crate::journal::Resolution)],
         approval: Approval,
         backend: &B,
@@ -685,7 +760,10 @@ impl MigrationEngine {
         // Run the plan body in a helper so we can release the lock we acquired on
         // EVERY exit path (success or error) before returning.
         let result = self
-            .apply_plan_locked(steps, touched_tables, resolve, approval, backend, exec_cfg, applied_by)
+            .apply_plan_locked(
+                steps, touched_tables, depends_on, resolve, approval, backend, exec_cfg,
+                applied_by,
+            )
             .await;
         if we_hold_lock {
             // Release the lock we own, surfacing the body's error first. The lock
@@ -711,6 +789,7 @@ impl MigrationEngine {
         &self,
         steps: &[PlanStep],
         touched_tables: &[String],
+        depends_on: &[String],
         explicit_resolve: &[(crate::journal::PendingContract, crate::journal::Resolution)],
         approval: Approval,
         backend: &B,
@@ -798,6 +877,13 @@ impl MigrationEngine {
             let mut touched: std::collections::BTreeSet<String> =
                 touched_tables.iter().cloned().collect();
             touched.extend(crate::plan::tables_touched_by(steps));
+            // The lowering folds in [`TOUCHES_UNKNOWN`] when a `dropIndex` omits its
+            // owning-table hint AND the live schema cannot resolve the index's owner
+            // — meaning this deploy touches a table the lowering could not name. Fail
+            // CLOSED: treat it as touching EVERY non-exempt outstanding obligation's
+            // table, so a deploy carrying an unresolved drop is refused whenever ANY
+            // obligation is outstanding rather than silently un-gated.
+            let touches_unknown = touched.contains(TOUCHES_UNKNOWN);
             // Obligations the caller EXPLICITLY resolves this deploy (the
             // `resolve-pending` path): exempt from refusal, discharged with the
             // caller's resolution after the loop.
@@ -811,6 +897,18 @@ impl MigrationEngine {
                         .contract_versions
                         .iter()
                         .all(|v| ddl_versions.contains(v.as_str()));
+                // **Exemption scope (LOW — table-wide, by design and bounded).** A
+                // contract-apply deploy exempts the obligation's TABLE for the whole
+                // deploy, so a bundle that carries C1/C2 AND an unrelated touching op
+                // on the same table would apply both. This is NOT exploitable: the
+                // exemption keys on the obligation's recorded `contract_versions`,
+                // which are the rename's DETERMINISTIC, server-stamped C1/C2 ids
+                // (§2.0.1) — a creator cannot forge them, and re-authoring the same
+                // rename's contract IS the only legitimate way to discharge it
+                // (§2.0.2). The accepted DX contract is therefore: a contract-apply
+                // deploy SHOULD carry only the contract steps; co-bundling an
+                // unrelated op on the same table is discouraged but bounded (it
+                // applies under the SAME approval the destructive C2 already forces).
                 if is_contract_apply {
                     discharging.push(pc.clone());
                     continue;
@@ -826,13 +924,87 @@ impl MigrationEngine {
                 if explicit_versions.contains(pc.pending_version.as_str()) {
                     continue;
                 }
-                if touched.contains(&pc.table) {
+                if touched.contains(&pc.table) || touches_unknown {
                     return Err(DeclarativeApplyError::Plain(EngineError::PendingContract(
                         crate::pending::PendingContractRefusal::new(
                             pc.table.clone(),
                             pc.pending_version.clone(),
                         ),
                     )));
+                }
+            }
+
+            // **§2.0.4 cross-plan `depends_on` BLOCK — fail-closed at APPLY, not
+            // only in `status`.** A plan B with `depends_on: [A]` MUST NOT apply
+            // while A's online-rename contract is still OUTSTANDING: A is not fully
+            // satisfied (its C1/C2 are not net-applied), so B would run against a
+            // half-applied A. This fires even when B touches a DIFFERENT table than
+            // A's pending one — the case the touched-table refusal above does NOT
+            // cover (the §2.0.4 "double-bind": when B *also* touches A's table both
+            // refusals fire; when it touches a different table ONLY this one does).
+            // Mirror `status::derive_pending_contract_status`: a `depends_on` edge
+            // references the dependency's PLAN version (the rename's E1-anchored
+            // plan-group id, the obligation's `plan_version`), NOT the interior E2
+            // `pending_version`. The reported `pending_version` is the operator's
+            // `resolve-pending` key.
+            //
+            // The `depends_on` set is the UNION of the caller-supplied plan-level
+            // `depends_on` (the `.ir.json` `depends_on`, threaded via
+            // `apply_plan_with_touched_and_depends`) and every step `Migration`'s
+            // own `depends_on` (e.g. the EXPAND chain's interior edges), so the
+            // block holds whether the dependency is declared at the artifact level
+            // or carried on a step.
+            //
+            // EXEMPTIONS match the touched-table loop: a deploy that IS discharging
+            // an obligation (contract-apply) or re-running its own EXPAND
+            // (`self_expand`) or explicitly resolving it must NOT be blocked by
+            // *that* obligation via a self-referential `depends_on` (applying the
+            // contract is exactly how the dependency becomes satisfied). Such
+            // obligations are keyed by `plan_version` here.
+            let exempt_plan_versions: std::collections::BTreeSet<&str> = outstanding
+                .iter()
+                .filter(|pc| {
+                    (!pc.contract_versions.is_empty()
+                        && pc
+                            .contract_versions
+                            .iter()
+                            .all(|v| ddl_versions.contains(v.as_str())))
+                        || self_expand_versions.contains(pc.pending_version.as_str())
+                        || explicit_versions.contains(pc.pending_version.as_str())
+                })
+                .map(|pc| pc.plan_version.as_str())
+                .collect();
+            let mut declared_deps: std::collections::BTreeSet<&str> =
+                depends_on.iter().map(String::as_str).collect();
+            for s in steps {
+                if let PlanStep::Ddl(m) = s {
+                    declared_deps.extend(m.depends_on.iter().map(crate::migration::MigrationId::as_str));
+                }
+            }
+            for pc in &outstanding {
+                if exempt_plan_versions.contains(pc.plan_version.as_str()) {
+                    continue;
+                }
+                if declared_deps.contains(pc.plan_version.as_str()) {
+                    return Err(DeclarativeApplyError::Plain(
+                        EngineError::DependencyPendingContract(
+                            crate::pending::DependencyPendingContract::new(
+                                // The blocked plan's identity: the outer plan-group
+                                // version if the steps carry one, else the deploy
+                                // actor — best-effort identity for the payload, the
+                                // refusal itself keys only on the dependency edge.
+                                steps
+                                    .iter()
+                                    .find_map(|s| match s {
+                                        PlanStep::Ddl(m) => Some(m.version.as_str().to_string()),
+                                        _ => None,
+                                    })
+                                    .unwrap_or_else(|| applied_by.to_string()),
+                                pc.plan_version.clone(),
+                                pc.pending_version.clone(),
+                            ),
+                        ),
+                    ));
                 }
             }
         }
@@ -843,6 +1015,14 @@ impl MigrationEngine {
             recovered: Vec::new(),
         };
         let mut pending_contract: Vec<Migration> = Vec::new();
+        // Pending versions this loop has ALREADY recorded a `pending` row for, so a
+        // second `PgExpandContract` step in the SAME deploy sharing the same
+        // deterministic `pending_version` does NOT append a duplicate `pending` row
+        // (LOW). `outstanding_pending_contracts` collapses by pending_version
+        // (DISTINCT ON), so net state was always correct; this keeps the append-only
+        // history clean too.
+        let mut recorded_this_deploy: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
         // The project lock is held for the whole plan (acquired by `apply_plan` or
         // owned by the outer declarative caller), so every sub-batch re-enters it
         // with `AlreadyHeld` — never re-acquiring (which would pop a re-entrant level
@@ -987,7 +1167,12 @@ impl MigrationEngine {
                         .map_or_else(|| pending_version.clone(), |e1| e1.version.as_str().to_string());
                     let already_outstanding = outstanding
                         .iter()
-                        .any(|pc| pc.pending_version == pending_version);
+                        .any(|pc| pc.pending_version == pending_version)
+                        // Also skip if an EARLIER step in THIS deploy already recorded
+                        // the same deterministic pending_version (LOW — avoid a
+                        // duplicate `pending` row from two same-version EXPAND steps in
+                        // one deploy; net state was already correct via DISTINCT ON).
+                        || recorded_this_deploy.contains(&pending_version);
                     if !already_outstanding {
                         let contract_versions: Vec<String> = rename
                             .contract
@@ -1010,6 +1195,7 @@ impl MigrationEngine {
                             )
                             .await
                             .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
+                        recorded_this_deploy.insert(pending_version.clone());
                     }
                     i += 1;
                 }

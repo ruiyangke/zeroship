@@ -802,3 +802,231 @@ async fn deploy_touching_unrelated_table_proceeds() {
 
     teardown(&conn, &cfg).await;
 }
+
+/// **HIGH (§2.0.4 — depends_on enforced at APPLY, not only status).** A plan B
+/// that `depends_on: [A]` while A's online-rename contract is OUTSTANDING is
+/// fail-closed REFUSED at `apply_plan` — EVEN when B touches a DIFFERENT table
+/// than A's pending one (the case the touched-table refusal does not cover). This
+/// drives `apply_plan_with_touched_and_depends` (the production deploy entry, the
+/// peer of `apply_plan_with_touched` + the IR `depends_on`), NOT `status` — so it
+/// pins the enforcement at the apply path the deploy actually runs. Pre-fix the
+/// §2.0.4 block lived ONLY in `status::derive_pending_contract_status`, so this
+/// deploy APPLIED instead of refusing (the fail-OPEN the critique flagged).
+#[compio::test]
+async fn dependent_plan_on_different_table_is_refused_at_apply() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let s = q(&cfg.project_schema);
+    let engine = MigrationEngine::new();
+    let be = PostgresBackend::new(&conn);
+
+    // members (the pending rename's table) + a SEPARATE `widgets` table B touches.
+    create_members(&engine, &be, &cfg).await;
+    conn.batch_execute(&format!("CREATE TABLE {s}.widgets (id bigint PRIMARY KEY)"))
+        .await
+        .expect("create widgets");
+    let ec = expand_email_rename(&engine, &be, &cfg).await;
+
+    // A = the pending online rename; its PLAN-GROUP version is the `depends_on`
+    // edge an author/AI declares (NOT the interior E2 sub-version).
+    let live = live_with_column("members", "email", "text");
+    let a_plan_version =
+        relower_plan_version(&cfg, "members", "email", "email_address", ColType::Text, &live);
+
+    // Plan B: a plain addColumn on `widgets` (a DIFFERENT table than `members`),
+    // declaring depends_on: [A's plan version]. Its touched-set is `widgets` only —
+    // so the §2.0.3 touched-table refusal does NOT fire; ONLY the §2.0.4 depends_on
+    // block can refuse it.
+    let (b_step, b_touched) = addcolumn_step(&cfg, "widgets", "label");
+    let b_depends_on = vec![a_plan_version.as_str().to_string()];
+    let err = engine
+        .apply_plan_with_touched_and_depends(
+            std::slice::from_ref(&b_step),
+            &b_touched,
+            &b_depends_on,
+            Approval::None,
+            &be,
+            &cfg,
+            "app_test",
+            zeroship_migrate::executor::LockMode::Acquire,
+        )
+        .await
+        .expect_err("B depends_on A (pending) must be REFUSED at apply, even on a different table");
+
+    match err {
+        zeroship_migrate::DeclarativeApplyError::Plain(
+            zeroship_migrate::EngineError::DependencyPendingContract(payload),
+        ) => {
+            assert_eq!(payload.code, zeroship_migrate::CODE_DEPENDENCY_PENDING_CONTRACT);
+            assert_eq!(payload.dependency, a_plan_version.as_str());
+            assert_eq!(payload.pending_version, ec.trigger_version.as_str());
+        }
+        other => panic!("expected a DependencyPendingContract refusal, got {other:?}"),
+    }
+
+    // FAIL CLOSED: B applied NOTHING — `widgets.label` was not added.
+    assert!(
+        !column_exists(&conn, &cfg.project_schema, "widgets", "label").await,
+        "the refused dependent deploy applied NOTHING"
+    );
+
+    // ROLL-FORWARD: after A's contract applies (discharging the obligation), the
+    // SAME B deploy succeeds — no deadlock.
+    let contract_steps: Vec<PlanStep> =
+        ec.contract.iter().cloned().map(PlanStep::Ddl).collect();
+    engine
+        .apply_plan(
+            &contract_steps,
+            Approval::Approved,
+            &be,
+            &cfg,
+            "app_test",
+            zeroship_migrate::executor::LockMode::Acquire,
+        )
+        .await
+        .expect("A's contract applies");
+    engine
+        .apply_plan_with_touched_and_depends(
+            std::slice::from_ref(&b_step),
+            &b_touched,
+            &b_depends_on,
+            Approval::None,
+            &be,
+            &cfg,
+            "app_test",
+            zeroship_migrate::executor::LockMode::Acquire,
+        )
+        .await
+        .expect("after A's contract, B unblocks and applies (roll-forward)");
+    assert!(
+        column_exists(&conn, &cfg.project_schema, "widgets", "label").await,
+        "B applied once its dependency was satisfied"
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
+/// **MED (touched-set under-reporting — bare-name dropIndex fail-OPEN).** A
+/// `dropIndex` with NO owning-table hint omits its table from
+/// `MigrationIr::touched_tables` (`Op::touched_table` → `None`), which would let it
+/// slip the §2.0.3(2) refusal on a pending table. `IrAuthor::resolved_touched_tables`
+/// resolves the owning table from the LIVE schema (the same introspection the
+/// unique-gate uses), so the engine refuses the bare-name drop on the pending
+/// table. Pre-fix the resolved set omitted `members`, the refusal never fired, and
+/// the drop applied despite the outstanding contract.
+#[compio::test]
+async fn bare_name_dropindex_on_pending_table_is_refused() {
+    use zeroship_migrate::drift::IndexSnapshot;
+
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let s = q(&cfg.project_schema);
+    let engine = MigrationEngine::new();
+    let be = PostgresBackend::new(&conn);
+
+    create_members(&engine, &be, &cfg).await;
+    // A real index on members so the drop targets something live.
+    conn.batch_execute(&format!(
+        "CREATE INDEX idx_members_email ON {s}.members (email)"
+    ))
+    .await
+    .expect("create index");
+    let ec = expand_email_rename(&engine, &be, &cfg).await;
+
+    // A bundle dropping `idx_members_email` with NO table hint. Its IR-level
+    // `touched_tables()` is EMPTY (bare-name drop under-reports); the resolved set
+    // must recover `members` from the live snapshot carrying that index.
+    let drop_ir = MigrationIr {
+        ir_version: 1,
+        name: "drop_idx".into(),
+        owner_app: "app_test".into(),
+        ops: vec![Op::DropIndex {
+            name: "idx_members_email".into(),
+            table: None,
+            unique: None,
+            if_exists: None,
+            concurrently: None,
+        }],
+        flags: IrFlagsOverride::default(),
+        depends_on: vec![],
+        supersedes: vec![],
+        preconditions: vec![],
+        checksum: None,
+    };
+    // The bare-name drop under-reports at the IR level (proves the gap exists).
+    assert!(
+        drop_ir.touched_tables().is_empty(),
+        "a bare-name dropIndex contributes NO table at the IR level — the under-report"
+    );
+
+    // Live snapshot carrying the index on `members` so the owner resolves.
+    let mut live = live_with_column("members", "email", "text");
+    if let Some(snap) = live.table_snapshots.get_mut("members") {
+        snap.indexes.push(IndexSnapshot {
+            name: "idx_members_email".into(),
+            columns: vec!["email".into()],
+            unique: false,
+            access_method: "btree".into(),
+            expression: None,
+            opclass: None,
+        });
+    }
+    let resolved = IrAuthor::resolved_touched_tables(&drop_ir, &live);
+    assert!(
+        resolved.iter().any(|t| t == "members"),
+        "the resolved touched-set must recover `members` from the live index owner, got {resolved:?}"
+    );
+
+    // The drop step (a plain Ddl; the actual SQL is irrelevant — the refusal fires
+    // on the touched-set before any apply). Feed the RESOLVED touched-set.
+    let drop_step = {
+        let m = zeroship_migrate::migration::Migration {
+            version: zeroship_migrate::migration::MigrationId::generate(),
+            name: "drop_idx".into(),
+            up: format!("DROP INDEX {s}.idx_members_email"),
+            down: None,
+            checksum: zeroship_migrate::migration::Checksum::of(
+                &zeroship_migrate::migration::ChecksumInput {
+                    up: "dropidx",
+                    down: None,
+                    flags: &zeroship_migrate::migration::MigrationFlags::default(),
+                    owner_app: "app_test",
+                    depends_on: &[],
+                    supersedes: &[],
+                    preconditions: &[],
+                },
+            ),
+            flags: zeroship_migrate::migration::MigrationFlags::default(),
+            owner_app: "app_test".into(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+        };
+        PlanStep::Ddl(m)
+    };
+    let err = engine
+        .apply_plan_with_touched(
+            std::slice::from_ref(&drop_step),
+            &resolved,
+            Approval::None,
+            &be,
+            &cfg,
+            "app_test",
+            zeroship_migrate::executor::LockMode::Acquire,
+        )
+        .await
+        .expect_err("a bare-name dropIndex on the pending table must be refused");
+    match err {
+        zeroship_migrate::DeclarativeApplyError::Plain(
+            zeroship_migrate::EngineError::PendingContract(payload),
+        ) => {
+            assert_eq!(payload.table, "members");
+            assert_eq!(payload.pending_version, ec.trigger_version.as_str());
+        }
+        other => panic!("expected a PendingContract refusal, got {other:?}"),
+    }
+
+    teardown(&conn, &cfg).await;
+}
