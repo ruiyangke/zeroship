@@ -682,6 +682,40 @@ pub fn build_create_table_with_fks_for_dialect_scoped(
     dialect: SqlDialect,
     sqlite_scope: SqliteEmitScope,
 ) -> Result<String, QueryError> {
+    // The canonical multi-statement payload is `;\n`-joined here; the STRUCTURAL
+    // per-statement list (the migrate engine's guard-per-statement seam consumes
+    // it directly, never re-splitting on a textual `;\n`) is exposed unchanged by
+    // [`build_create_table_with_fks_for_dialect_scoped_statements`]. `join(";\n")`
+    // over that list reproduces this string byte-for-byte.
+    Ok(build_create_table_with_fks_for_dialect_scoped_statements(
+        app_id,
+        collection,
+        schema,
+        fk_emit,
+        dialect,
+        sqlite_scope,
+    )?
+    .join(";\n"))
+}
+
+/// **Structural** peer of [`build_create_table_with_fks_for_dialect_scoped`]:
+/// returns the CREATE-TABLE payload as its individual statement list (the CREATE,
+/// the implicit system-field `CREATE INDEX`es, and — on PG — the `COMMENT ON
+/// COLUMN` mask/encryption sentinels) instead of the `;\n`-joined string.
+///
+/// `join(";\n")` over the returned vector is byte-identical to the joined form, so
+/// the two entry points never diverge. The migrate engine's guard-per-statement
+/// lower ([`zeroship_migrate`]) consumes this list so a string-literal column
+/// DEFAULT whose value itself contains `;\n` (e.g. `DEFAULT 'a;\nb'`) is NEVER
+/// split mid-statement — the split is structural, not a textual `;\n` heuristic.
+pub fn build_create_table_with_fks_for_dialect_scoped_statements(
+    app_id: &str,
+    collection: &str,
+    schema: &serde_json::Value,
+    fk_emit: &FkEmission<'_>,
+    dialect: SqlDialect,
+    sqlite_scope: SqliteEmitScope,
+) -> Result<Vec<String>, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
 
@@ -921,7 +955,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped(
         statements.extend(enc_comment_stmts);
     }
 
-    Ok(statements.join(";\n"))
+    Ok(statements)
 }
 
 /// **P4 HALF B** — render the `COMMENT ON COLUMN … 'zsenc:<mode>:<keyId>:<wraps>'`

@@ -30,7 +30,7 @@ use std::collections::BTreeSet;
 
 use crate::declarative::{
     build_table_snapshot, CollectionDescriptor, DeclarativeAuthor, DeclarativeError,
-    FieldDescriptor,
+    FieldDescriptor, LoweredUnit,
 };
 use crate::drift::{ColumnSnapshot, IndexSnapshot};
 use crate::guard::{guard_for, GuardConfig, GuardError};
@@ -465,7 +465,14 @@ impl IrAuthor {
         let mut out: Vec<Migration> = Vec::new();
         let mut live_tables: BTreeSet<String> = live.tables.clone();
         for op in &ir.ops {
-            out.extend(self.lower_one_op(op, &mut live_tables, &live.unique_indexes)?);
+            // The whole-up `lower` discards the structural statement list (it is the
+            // §6.4 parity leg, which only compares the joined `up`); the guarded
+            // path ([`lower_guarded`]) consumes the list to guard true statements.
+            out.extend(
+                self.lower_one_op(op, &mut live_tables, &live.unique_indexes)?
+                    .into_iter()
+                    .map(|(mig, _statements)| mig),
+            );
         }
         Ok(out)
     }
@@ -483,7 +490,7 @@ impl IrAuthor {
         op: &Op,
         live: &mut BTreeSet<String>,
         live_unique_indexes: &BTreeSet<String>,
-    ) -> Result<Vec<Migration>, IrLowerError> {
+    ) -> Result<Vec<LoweredUnit>, IrLowerError> {
         let migs = match op {
             Op::CreateTable { name, columns, .. } => {
                 // A column carrying a SYNTH default (`now()`/`genRandomUuid()`) must
@@ -624,19 +631,21 @@ impl IrAuthor {
         for (op_index, op) in ir.ops.iter().enumerate() {
             let op_kind = op_kind_tag(op);
             // Lower this op (advancing `live_tables` for intra-IR FK inlining). A
-            // lower failure aborts before any guarding — nothing applied.
-            let op_migs = self.lower_one_op(op, &mut live_tables, &live.unique_indexes)?;
+            // lower failure aborts before any guarding — nothing applied. Each unit
+            // carries its STRUCTURAL per-statement list (the exact statements the
+            // renderer built, NOT a textual re-split of `up`).
+            let op_units = self.lower_one_op(op, &mut live_tables, &live.unique_indexes)?;
 
-            for mig in op_migs {
-                // Split the rendered `up` into its individual statement FRAGMENTS on
-                // the canonical `;\n` separator the renderers emit between a
-                // statement and its `COMMENT ON COLUMN` side output / follow-on
-                // index. Guard EACH fragment individually so a denial is attributed
-                // to THIS op (§6.1.1) — not buried in a concatenated blob.
-                let frags = split_up_fragments(&mig.up);
-                let mut guarded_for_mig: Vec<String> = Vec::with_capacity(frags.len());
-                for frag in frags {
-                    guard.check(frag).map_err(|source| FragmentGuardDenied {
+            for (mig, statements) in op_units {
+                // Guard EACH true statement individually so a denial is attributed
+                // to THIS op (§6.1.1) — not buried in a concatenated blob. The
+                // statements come STRUCTURALLY from the renderer (the CREATE/ALTER,
+                // its `COMMENT ON COLUMN` side output, follow-on system indexes),
+                // never from a textual `;\n` split — so a string-literal column
+                // DEFAULT whose value itself contains `;\n` (e.g. `DEFAULT 'a;\nb'`)
+                // is one whole statement, never broken mid-literal.
+                for stmt in &statements {
+                    guard.check(stmt).map_err(|source| FragmentGuardDenied {
                         op_index,
                         op_kind,
                         source,
@@ -644,14 +653,16 @@ impl IrAuthor {
                     fragments.push(GuardedFragment {
                         op_index,
                         op_kind,
-                        sql: frag.to_string(),
+                        sql: stmt.clone(),
                     });
-                    guarded_for_mig.push(frag.to_string());
                 }
                 // Byte-identity invariant: the step's `up` MUST be exactly the join
-                // of the fragments we just guarded — nothing inserted, rewritten, or
-                // re-quoted between guarding and concatenation (§6.1.1).
-                let reassembled = guarded_for_mig.join(";\n");
+                // of the structural statements we just guarded — nothing inserted,
+                // rewritten, or re-quoted between guarding and concatenation
+                // (§6.1.1). With structural fragments this is the renderer's own
+                // `join(";\n")` round-tripping, so it holds by construction; the
+                // assertion remains a fail-closed engine-bug tripwire.
+                let reassembled = statements.join(";\n");
                 if reassembled != mig.up {
                     return Err(IrGuardedLowerError::ReassemblyMismatch {
                         name: mig.name.clone(),
@@ -730,7 +741,7 @@ impl IrAuthor {
         &self,
         table: &str,
         constraint: &IrConstraint,
-    ) -> Result<Vec<Migration>, IrLowerError> {
+    ) -> Result<Vec<LoweredUnit>, IrLowerError> {
         self.require_pg_for("addConstraint")?;
         let name = constraint.name.as_deref();
         let mig = match &constraint.kind {
@@ -780,17 +791,16 @@ impl IrAuthor {
 
 }
 
-/// Split a lowered migration's `up` into its individual statement FRAGMENTS on
-/// the canonical `;\n` separator the renderers emit between statements (§6.1.1).
-/// `join(";\n")` over the result reproduces the input byte-for-byte (the
-/// reassembly invariant `lower_guarded` asserts), so a fragment is exactly one
-/// guardable statement with NO trailing `;`.
-///
-/// The renderers ALWAYS separate statements with the literal `;\n` and never emit
-/// a `;\n` inside a statement (the only multi-statement ups are
-/// `<stmt>;\n COMMENT ON COLUMN …` and `<create>;\n<index>` follow-ons — all
-/// emitter-controlled, never carrying user free-text with an embedded `;\n`). A
-/// single-statement `up` yields one fragment.
+/// **Test-only** textual `;\n` split, retained for the reassembly assertions in
+/// migrations whose `up` carries NO interior `;\n` (a plain column, an encrypted
+/// column → `CREATE;\nCOMMENT`). The PRODUCTION guarded path
+/// ([`IrAuthor::lower_guarded`]) NO LONGER splits textually — it carries the
+/// renderer's STRUCTURAL per-statement list ([`crate::declarative::LoweredUnit`])
+/// instead, so a string-literal column DEFAULT whose value itself contains `;\n`
+/// (e.g. `DEFAULT 'a;\nb'`) is never broken mid-statement. This helper would
+/// over-split such an `up`; it is kept only for tests that do not exercise that
+/// case.
+#[cfg(test)]
 fn split_up_fragments(up: &str) -> Vec<&str> {
     up.split(";\n").collect()
 }
@@ -1118,6 +1128,82 @@ mod tests {
             let reassembled = split_up_fragments(&m.up).join(";\n");
             assert_eq!(reassembled, m.up, "SQLite reassembly must be byte-identical");
         }
+    }
+
+    // MED (code-critic): a LEGITIMATE portable string-literal column DEFAULT whose
+    // value CONTAINS the substring `;\n` must lower CLEANLY through the production
+    // `lower_guarded` path — the fragment split MUST NOT break the single
+    // CREATE/ADD statement on the interior `;\n` of the quoted literal. `sql_str`
+    // escapes ONLY `'` (never a newline/semicolon), so `DEFAULT 'a;\nb'` renders an
+    // `up` with an interior `;\n`. Pre-fix the TEXTUAL `split_up_fragments(";\n")`
+    // over-split this single statement into two malformed fragments, tripping
+    // `ReassemblyMismatch` (or a guard denial on a syntactically-broken half) — so a
+    // valid default was non-deployable via the IR deploy path. Post-fix the
+    // fragments are carried STRUCTURALLY (one fragment per TRUE statement), the
+    // interior `;\n` stays inside its statement, and `join(";\n") == up` holds.
+    #[test]
+    fn string_default_with_embedded_semicolon_newline_lowers_clean_pg() {
+        // The portable default value literally contains `;\n` (and a bare `;`).
+        let nasty = "a;\nb;c";
+        let ir = create_table_ir(
+            "docs",
+            vec![TIrColumn {
+                name: "note".into(),
+                ty: ColType::String,
+                nullable: Some(false),
+                default: Some(IrDefault::Literal {
+                    value: crate::ir::IrScalar::Str(nasty.into()),
+                }),
+                unique: None,
+            }],
+        );
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        let guard_cfg = GuardConfig::confined("app".to_string());
+
+        // The whole-up `lower` is the canonical reference (the §6.4 parity leg).
+        let whole = author
+            .lower(&ir, &LiveSchema::default())
+            .expect("whole-up lower of a string default succeeds");
+        let whole_create = whole
+            .iter()
+            .find(|m| m.up.contains("CREATE TABLE"))
+            .expect("a CREATE migration");
+        // Sanity: the rendered `up` REALLY carries the interior `;\n` (the trap).
+        assert!(
+            whole_create.up.contains("DEFAULT 'a;\nb;c'"),
+            "the string default must render with its embedded ;\\n verbatim; up = {:?}",
+            whole_create.up
+        );
+
+        // The PRODUCTION guarded path must NOT trip ReassemblyMismatch / deny the
+        // valid default.
+        let (migs, frags) = author
+            .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
+            .expect("guarded lower of a portable ;\\n string default must succeed");
+
+        // The guarded createTable `up` is byte-identical to the whole-up reference.
+        let guarded_create = migs
+            .iter()
+            .find(|m| m.up.contains("CREATE TABLE"))
+            .expect("a guarded CREATE migration");
+        assert_eq!(
+            guarded_create.up, whole_create.up,
+            "the guarded create `up` must be byte-identical to the whole-up lower"
+        );
+
+        // The CREATE TABLE is exactly ONE structural fragment for op #0 (the
+        // interior `;\n` of the literal did NOT split it). The DEFAULT lives whole
+        // inside that single fragment.
+        let create_frag = frags
+            .iter()
+            .find(|f| f.op_index == 0 && f.sql.contains("CREATE TABLE"))
+            .expect("a CREATE TABLE fragment attributed to op #0");
+        assert_eq!(create_frag.op_kind, "createTable");
+        assert!(
+            create_frag.sql.contains("DEFAULT 'a;\nb;c'"),
+            "the whole string default (incl. its ;\\n) stays inside ONE fragment; got {:?}",
+            create_frag.sql
+        );
     }
 
     // MED (code-critic): an IR dropIndex of a UNIQUE index must lower

@@ -13,8 +13,8 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zeroship_migrate::{
-    Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LoadAndLowerError,
-    MigrationEngine, SqlDialect, SqliteBackend,
+    executor::LockMode, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
+    LoadAndLowerError, MigrationEngine, SqlDialect, SqliteBackend,
 };
 
 const PROJECT: &str = "prj_ir";
@@ -84,6 +84,91 @@ async fn ir_json_lowers_and_applies_on_sqlite() {
         .await
         .expect("sqlite_master probe");
     assert_eq!(rows.len(), 1, "the IR-created 'notes' table must exist on SQLite");
+}
+
+// MED (code-critic): a LEGITIMATE portable string-literal column DEFAULT whose
+// value contains the substring `;\n` (and a bare `;`) must lower CLEANLY through
+// the PRODUCTION guarded path (`load_and_lower_guarded`) and APPLY on a real
+// SQLite backend — the renderer's interior `;\n` (from `DEFAULT 'a;\nb'`) must NOT
+// split the single CREATE statement. Pre-fix the textual fragment split broke the
+// CREATE on the literal's `;\n`, tripping a guard denial / ReassemblyMismatch on
+// a valid default. Post-fix the structural per-statement fragments keep the
+// literal whole; the table materialises and a default-driven INSERT round-trips
+// the embedded `;\n`. Driven through `apply_plan` (the shared orchestrator) over
+// the guarded artifact's plan steps — the real deploy shape.
+#[compio::test]
+async fn ir_json_string_default_with_embedded_semicolon_newline_applies_on_sqlite() {
+    let p = paths("ir_semicolon_default");
+    let be = backend(&p);
+
+    // The JSON `\n` escape yields the literal three-byte run `a ; \n b ; c`.
+    let ir = r#"{"ir_version":1,"name":"create_docs","ops":[
+        {"op":"createTable","name":"docs","columns":[
+            {"name":"note","type":"text","nullable":false,
+             "default":{"literal":{"value":"a;\nb;c"}}}
+        ]}
+    ]}"#;
+
+    // The REAL fail-closed gate + GUARDED lower (the production deploy entry).
+    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+    let guard_cfg = GuardConfig::confined_sqlite(PROJECT.to_string());
+    let artifact = author
+        .load_and_lower_guarded(ir, APP, &registry(&[]), &LiveSchema::default(), &guard_cfg)
+        .expect("a portable ;\\n string default must lower through the guarded path on SQLite");
+
+    // Per-statement attribution survived: the createTable's CREATE is ONE fragment
+    // carrying the whole default (the interior `;\n` did NOT split it).
+    let create_frag = artifact
+        .fragments
+        .iter()
+        .find(|f| f.op_index == 0 && f.sql.contains("CREATE TABLE"))
+        .expect("a CREATE TABLE fragment for op #0");
+    assert_eq!(create_frag.op_kind, "createTable");
+    assert!(
+        create_frag.sql.contains("DEFAULT 'a;\nb;c'"),
+        "the whole string default (incl. its ;\\n) stays inside one fragment; got {:?}",
+        create_frag.sql
+    );
+
+    // Apply the guarded artifact's plan on the real SQLite backend.
+    let engine = MigrationEngine::new();
+    let outcome = engine
+        .apply_plan(
+            &artifact.plan.steps,
+            Approval::None,
+            &be,
+            &exec_cfg(),
+            "deploy-ir",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("apply the guarded ;\\n-default IR on SQLite");
+    assert!(!outcome.applied.applied.is_empty(), "the IR migration must apply");
+
+    // The table exists and the stored CREATE SQL preserved the embedded `;\n`.
+    let create_sql = be
+        .actor()
+        .query("SELECT sql FROM sqlite_master WHERE type='table' AND name='docs'")
+        .await
+        .expect("sqlite_master probe");
+    assert_eq!(create_sql.len(), 1, "the IR-created 'docs' table must exist on SQLite");
+
+    // The default really drives an INSERT: a row that omits `note` gets `a;\nb;c`.
+    be.actor()
+        .exec("INSERT INTO docs (id) VALUES ('doc_1')")
+        .await
+        .expect("insert a row relying on the column default");
+    let rows = be
+        .actor()
+        .query("SELECT note FROM docs WHERE id = 'doc_1'")
+        .await
+        .expect("read back the defaulted row");
+    assert_eq!(rows.len(), 1, "one row inserted");
+    let note = rows[0][0].as_deref().expect("note is non-null").to_string();
+    assert_eq!(
+        note, "a;\nb;c",
+        "the column default with its embedded ;\\n must apply verbatim"
+    );
 }
 
 // HOSTILE (SQLite-specific) — an out-of-envelope `c.fn.splitPart` in a backfill

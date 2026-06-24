@@ -756,6 +756,100 @@ async fn deploy_migrate_refuses_op_on_unregistered_table() {
     cleanup_app(&conn, &app_id).await;
 }
 
+/// The stored `column_default` for `<app_id>.<table>.<col>`, or `None` when the
+/// column has no default. PG normalises a string-literal default to
+/// `'<value>'::text` (the embedded `;\n` is preserved verbatim inside the literal).
+async fn column_default(
+    conn: &compio_postgres::Client,
+    app_id: &Uuid,
+    table: &str,
+    col: &str,
+) -> Option<String> {
+    let schema = app_id.to_string();
+    let rows = conn
+        .query(
+            "SELECT column_default FROM information_schema.columns \
+             WHERE table_schema = $1 AND table_name = $2 AND column_name = $3",
+            &[&schema, &table, &col],
+        )
+        .await
+        .expect("query information_schema.columns default");
+    rows.first().and_then(|r| r.get::<_, Option<String>>("column_default"))
+}
+
+// MED (code-critic): a LEGITIMATE portable string-literal column DEFAULT whose
+// value CONTAINS the substring `;\n` (and a bare `;`) must deploy CLEANLY through
+// the PRODUCTION `.ir.json` guarded deploy path (`apply_bundle_ir_migrations` →
+// `load_and_lower_guarded`) on real PG — for BOTH a `createTable` column default
+// and an `addColumn` default. Pre-fix the textual `;\n` fragment split broke the
+// single CREATE/ADD statement on the literal's interior `;\n`, so the guard denied
+// a syntactically-broken half (or `ReassemblyMismatch` tripped) and the valid
+// default was non-deployable — a misleading "engine bug". Post-fix the structural
+// per-statement fragments keep the literal whole, so the table+column deploy and
+// the stored default round-trips with its embedded `;\n` intact. The §6.4 parity
+// gate exercises only `lower` (whole-up), never `lower_guarded`, so this fork was
+// untested before this case.
+#[compio::test]
+async fn deploy_migrate_ir_string_default_with_embedded_semicolon_newline_pg() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    // 0001 createTable with a string default carrying `;\n` (and a bare `;`);
+    // 0002 addColumn on the SAME table, also with a `;\n`-bearing string default.
+    // The JSON string escapes the newline as `\n`; the value the engine renders is
+    // the literal three-byte run `a ; \n b ; c`.
+    let create = r#"{"ir_version":1,"name":"create_docs","ops":[
+        {"op":"createTable","name":"docs","columns":[
+            {"name":"note","type":"text","nullable":false,
+             "default":{"literal":{"value":"a;\nb;c"}}}
+        ]}
+    ]}"#;
+    let add = r#"{"ir_version":1,"name":"add_tag","ops":[
+        {"op":"addColumn","table":"docs","column":"tag","type":"text",
+         "default":{"literal":{"value":"x;\ny"}}}
+    ]}"#;
+    let dir = migrations_dir(&[
+        ("0001_create_docs.ir.json", create),
+        ("0002_add_tag.ir.json", add),
+    ]);
+
+    let outcome = apply_bundle_migrations(&admin_dsn(), &app_id, &dir)
+        .await
+        .expect("a portable ;\\n string default must lower + apply on the real deploy path");
+    assert!(
+        !outcome.applied.is_empty(),
+        "the lowered IR migration(s) must apply, got {:?}",
+        outcome.applied
+    );
+
+    // The table + both columns exist.
+    assert!(table_exists(&conn, &app_id, "docs").await, "'docs' must exist");
+    assert!(column_exists(&conn, &app_id, "docs", "note").await, "'note' must exist");
+    assert!(column_exists(&conn, &app_id, "docs", "tag").await, "'tag' must exist");
+
+    // The stored defaults round-trip with the embedded `;\n` intact (PG renders
+    // the literal as `'a;\nb;c'::text`).
+    let note_default = column_default(&conn, &app_id, "docs", "note").await;
+    assert_eq!(
+        note_default.as_deref(),
+        Some("'a;\nb;c'::text"),
+        "the createTable string default must store its embedded ;\\n verbatim"
+    );
+    let tag_default = column_default(&conn, &app_id, "docs", "tag").await;
+    assert_eq!(
+        tag_default.as_deref(),
+        Some("'x;\ny'::text"),
+        "the addColumn string default must store its embedded ;\\n verbatim"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    cleanup_app(&conn, &app_id).await;
+}
+
 // A path-only reference so an unused-import lint never fires if a test is
 // cfg'd out in a future refactor.
 #[allow(dead_code)]
