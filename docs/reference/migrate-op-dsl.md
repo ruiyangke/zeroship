@@ -1,11 +1,15 @@
 # `@zeroship/migrate` — the op DSL
 
 `@zeroship/migrate` is the no-raw-SQL, fully-structured authoring surface for
-zeroship database migrations. A migration is a `.ts` module that imports the
-op-functions it needs and exports a single `default { name?, up, down? }`
-object. You describe schema changes (DDL) and data migrations (DML) once; the
-engine lowers them per-dialect and applies them faithfully to **both Postgres
-and SQLite** from one script.
+zeroship database migrations. A migration is a `.ts` module that imports
+`{ table, t }` and exports a single `default { name?, up, down? }` object. You
+describe schema changes (DDL) and data migrations (DML) once through the fluent
+`table()` handle; the engine lowers them per-dialect and applies them faithfully
+to **both Postgres and SQLite** from one script.
+
+`table(name, { schema? })` is the **sole** authoring entry. There is no flat
+`createTable`/`addColumn`/… vocabulary — every operation is a method (or a
+selector terminal) on the handle `table()` returns.
 
 There is **no raw SQL** anywhere on this surface — no `Raw` type, no `sql\`\``
 escape, no string fragments. Every transform and predicate is a fluent
@@ -23,32 +27,34 @@ contract.
 
 ```ts
 // migrations/0007_split_name.ts
-import { addColumn, dropColumn, backfill, t } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 
 export default {
   name: "split_name_column", // optional; defaults to the filename label
 
   up() {
-    addColumn("users", "first_name", t.text()); // nullable by default
-    addColumn("users", "last_name", t.text());
-    backfill("users", {
+    const users = table("users");
+    users.column("first_name").add({ type: t.text() }); // nullable by default
+    users.column("last_name").add({ type: t.text() });
+    users.backfill({
       set: {
         first_name: (c) => c.fn.splitPart(c("name"), " ", 1),
         last_name: (c) => c.fn.splitPart(c("name"), " ", 2),
       },
       where: (c) => c("first_name").isNull(),
     });
-    dropColumn("users", "name");
+    users.column("name").drop();
   },
 
   down() {
-    addColumn("users", "name", t.text());
-    backfill("users", {
+    const users = table("users");
+    users.column("name").add({ type: t.text() });
+    users.backfill({
       // c.fn.concatWs is NULL-skipping — the safe join; copy this, not `.concat`
       set: { name: (c) => c.fn.concatWs(" ", c("first_name"), c("last_name")) },
     });
-    dropColumn("users", "first_name");
-    dropColumn("users", "last_name");
+    users.column("first_name").drop();
+    users.column("last_name").drop();
   },
 };
 ```
@@ -67,15 +73,19 @@ export interface Migration {
 
 - `up()` is **required**; `down()` is optional.
 - `up()`/`down()` are **parameterless and return `void`**. They do not execute
-  SQL — the imported op-functions *record* a plain-data op onto an ambient
+  SQL — the `table()` handle's terminals *record* a plain-data op onto an ambient
   per-migration recorder, synchronously (no `await`). This is the
-  vitest/jest/Playwright pattern: `import { test }` then call it. The
+  vitest/jest/Playwright pattern: `import { table }` then call it. The
   build/dev evaluator installs a fresh recorder before calling `up()` (and
   again before `down()`), drains the recorded op list, and renders it to the
   checksummed `.ir.json` artifact.
-- Calling an op-function **outside an active recorder** — at module top level,
-  or after `up()` returns (e.g. from a stray `setTimeout`) — throws a
-  structured `OP_OUTSIDE_RECORDER` error. The op cannot be silently lost.
+- Authoring **outside an active recorder** — at module top level, or after
+  `up()` returns (e.g. from a stray `setTimeout`) — throws a structured
+  `OP_OUTSIDE_RECORDER` error. The op cannot be silently lost.
+- A **selector that is never terminated** (`table("u").column("email")` with no
+  `.add()`/`.drop()`/`.rename()`/`.alter()`) is a hard `SELECTOR_NOT_TERMINATED`
+  build error at drain — never a silent no-op (see
+  [Selectors must be terminated](#selectors-must-be-terminated)).
 
 The shape mirrors the platform's `export default { schema, fetch, rpc }` deploy
 idiom (see [zeroship-standard](./zeroship-standard.md)); one typed object, never
@@ -93,27 +103,28 @@ example above hand-writes `down()` for exactly this reason: it contains a
 DML or lossy DDL — an author-supplied `down()` is itself a structured migration
 (its own op calls), never a raw-SQL string.
 
-## Named imports, no prefix
+## The `table()` entry point
 
-Every op is a **top-level named export** of `@zeroship/migrate` — there is no
-`op.` object and no prefix. You import exactly the ops you use:
+The **entire** authoring surface is reached through one import: `table` (plus the
+`t` column-type lexicon). There is no flat op vocabulary and no `op.` prefix.
 
 ```ts
-import { createTable, addColumn, backfill, t } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 ```
 
-The complete exported vocabulary (`sdks/migrate/src/index.ts:19-49`):
+The complete exported vocabulary (`sdks/migrate/src/index.ts`):
 
-| Category | Exports |
+| Export | Purpose |
 | --- | --- |
-| Tables | `createTable`, `dropTable` |
-| Columns | `addColumn`, `dropColumn`, `renameColumn`, `alterColumn` |
-| Constraints / indexes | `addForeignKey`, `addUnique`, `addCheck`, `dropConstraint`, `createIndex`, `dropIndex` |
-| DML | `insert`, `update`, `del` (not `delete` — JS reserved word), `backfill` |
-| SQLite-safe rebuild | `batchAlterTable` |
-| Column-type lexicon | `t` |
-| `@zeroship/db` bridge | `fromDb` |
-| Determinism lint | `lintDeterminism` |
+| `table` | the sole authoring entry — returns the reusable `TableHandle` |
+| `t` | the immutable column-type lexicon |
+| `fromDb` | the `@zeroship/db` field → migration `ColumnDef` bridge |
+| `lintDeterminism` | the best-effort determinism source scan |
+
+`table(name, { schema? })` returns a handle whose methods are the whole DDL+DML
+surface (see [The `table()` surface](#the-table-surface)). The handle's terminals
+record eagerly and return the handle, so calls chain and a handle is reusable
+across statements ([Var-assign + reuse](#var-assign--reuse)).
 
 There is **no importable `fn`**: the scalar-function namespace is reached
 through the single expression-builder handle as `c.fn.*` (see
@@ -135,8 +146,8 @@ module header, `sdks/migrate/src/types.ts:1-11`, "§3.3 — names are plain
 This is deliberate, and it is the single most important typing rule of the DSL.
 
 **Why binding names to the live schema is wrong (the rot bug).** Migration files
-are immutable historical artifacts. If `addColumn`/`update` typed their names
-against the *current* schema, a migration that referenced `users.lastSeen` would
+are immutable historical artifacts. If `.column().add()`/`.update()` typed their
+names against the *current* schema, a migration that referenced `users.lastSeen` would
 **stop compiling** after a *later* migration dropped that column — the whole
 history would become un-compilable as the schema evolves, and authors would be
 tempted to edit committed migrations to make them compile, changing the op list,
@@ -150,14 +161,15 @@ No mature migration tool binds migration files to the live schema:
 - **Kysely** deliberately uses `Kysely<any>` inside migrations — its docs state
   migrations should not be typed against the current schema, precisely because
   the schema changes over time.
-- **Alembic** uses string names: `op.add_column("users", …)`.
+- **Alembic** uses string names: `op.add_column("users", …)`. zeroship's
+  `table("users").column(…)` likewise carries plain-string names.
 - **Drizzle** migrations are generated SQL, not type-checked against the live
   schema.
 
 **What IS type-checked (structural safety, preserved):**
 
-- **Op-function argument shapes** — you cannot pass a number where a `ColumnDef`
-  is expected, or omit a required argument.
+- **Op argument shapes** — you cannot pass a number where a `ColumnDef`
+  is expected, or omit a required field on a terminal's args object.
 - **The `t` column-type lexicon** — `t.text()` / `t.numeric()` and their
   chainable modifiers (`.notNull()` / `.default()` / `.ref()`) are typed.
 - **The fluent-expression node shapes** — `c`'s methods (`.eq` / `.concat` /
@@ -177,33 +189,40 @@ the shadow-DB dry-run.
 
 ## The column-type lexicon (`t.*`)
 
-Every column-type position (`createTable`, `addColumn`, `renameColumn`,
-`alterColumn`) takes a chainable `ColumnDef` produced by the fluent `t.*`
-lexicon. **Columns are nullable by default**; `.notNull()` is the rarer, riskier
-opt-in.
+Every column-type position (`create`'s `columns`, `.column().add()`,
+`.column().rename()`, `.column().alter()`) takes a chainable `ColumnDef` produced
+by the fluent `t.*` lexicon. **Columns are nullable by default**; `.notNull()` is
+the rarer, riskier opt-in.
 
-The shipped factories (`sdks/migrate/src/ops.ts:197-236`):
+The `t.*` chain is **immutable**: every modifier returns a **fresh** `ColumnDef`
+rather than mutating the receiver, so a hoisted type var is safe to reuse across
+columns without aliasing (see [Var-assign + reuse](#var-assign--reuse)).
+
+The shipped factories (`sdks/migrate/src/ops.ts`):
 
 | Factory | Column type |
 | --- | --- |
 | `t.id()` | a non-null `uuid` PK defaulting to `gen_random_uuid()` |
-| `t.text(opts?)` | text |
-| `t.string(opts?)` | string |
-| `t.int(opts?)` / `t.integer(opts?)` | 32-bit integer |
-| `t.bigInt(opts?)` | 64-bit integer |
-| `t.float(opts?)` | floating point |
-| `t.numeric(precision?, scale?, opts?)` | fixed-precision decimal (default `(38, 9)`) |
-| `t.boolean(opts?)` | boolean |
-| `t.timestamp(opts?)` | timestamp |
-| `t.uuid(opts?)` | uuid |
-| `t.bytes(opts?)` | byte array |
-| `t.json(opts?)` | json |
-| `t.vector(n, opts?)` | a pgvector column of dimensionality `n` |
-| `t.geoPoint(opts?)` | a geo point |
-| `t.ref(targetTable, opts?)` | a foreign-key reference (plain-string target) |
-| `t.encrypted({ of }, opts?)` | an application-level encrypted column wrapping an inner type |
+| `t.text()` | text |
+| `t.integer()` | 32-bit integer |
+| `t.bigInt()` | 64-bit integer |
+| `t.float()` | floating point |
+| `t.numeric(precision?, scale?)` | fixed-precision decimal (default `(38, 9)`) |
+| `t.boolean()` | boolean |
+| `t.timestamp()` | timestamp |
+| `t.uuid()` | uuid |
+| `t.bytes()` | byte array |
+| `t.json()` | json |
+| `t.vector(n)` | a pgvector column of dimensionality `n` |
+| `t.geoPoint()` | a geo point |
+| `t.ref(targetTable)` | a foreign-key reference (plain-string target) |
+| `t.encrypted({ of })` | an application-level encrypted column wrapping an inner type |
 
-Chainable modifiers (`sdks/migrate/src/ops.ts:101-149`):
+> The `string`/`int` aliases and the `t.X({ notNull, default })` options-bag
+> overload are **removed**. Use the canonical `t.text()`/`t.integer()` and the
+> chain (`t.text().notNull().default("pending")`).
+
+Chainable modifiers (`sdks/migrate/src/ops.ts`), each returning a fresh `ColumnDef`:
 
 | Modifier | Effect |
 | --- | --- |
@@ -213,19 +232,18 @@ Chainable modifiers (`sdks/migrate/src/ops.ts:101-149`):
 | `.unique()` | add a single-column `UNIQUE` |
 | `.ref(targetTable)` | re-target the column as a foreign-key reference (plain-string target) |
 
-Each factory also takes an options-bag overload, so the modifiers above are
-equally expressible inline:
-
 ```ts
-import { createTable, t } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 
 export default {
   up() {
-    createTable("orders", {
-      id: t.id(),
-      total: t.numeric(12, 2).notNull().default(0),
-      status: t.text({ notNull: true, default: "pending" }),
-      customer_id: t.ref("customers", { notNull: true }),
+    table("orders").create({
+      columns: {
+        id: t.id(),
+        total: t.numeric(12, 2).notNull().default(0),
+        status: t.text().notNull().default("pending"),
+        customer_id: t.ref("customers").notNull(),
+      },
     });
   },
 };
@@ -239,7 +257,7 @@ to the live schema (existence is validated at apply time).
 The migration DSL and the runtime `@zeroship/db` schema share **one** type
 lexicon. `fromDb(field)` lifts a live-schema `@zeroship/db` `t.*` field into a
 migration `ColumnDef` through the identical `ColType` path
-(`sdks/migrate/src/ops.ts:257-267`), so a `t.ref("users")` declared in your app
+(`sdks/migrate/src/ops.ts` `fromDb`), so a `t.ref("users")` declared in your app
 schema lowers to the byte-identical neutral type a hand-written migration column
 produces. It carries the field's nullability (`.required()` → `.notNull()`) and
 uniqueness, and returns a chainable `ColumnDef` so you can still layer migration
@@ -249,113 +267,102 @@ plain string. A non-storage `@zeroship/db` field (a json `array`, a nested
 `UnsupportedColTypeError` (`sdks/migrate/src/db-lexicon.ts:51-61`) — a hard
 boundary, never a silent fallback.
 
-## The op surface
+## The `table()` surface
 
-Below is the full shipped op surface. Every signature is the one exported by
-`sdks/migrate/src/ops.ts`.
+`table(name, { schema? })` returns a `TableHandle`. Everything — DDL and DML — is
+a method (or a selector terminal) on that handle. Every terminal takes **exactly
+one named-object** argument (identity — the table name and a selector name — is
+positional; payload + options are a named object), records eagerly, and **returns
+the handle** so calls chain.
 
-### DDL — tables
-
-```ts
-createTable(name, columns, build?, { schema?, ifNotExists? }?); // ops.ts:387
-dropTable(table, { schema?, ifExists?, cascade? }?); // ops.ts:443
-```
-
-Every table-targeting op also accepts an optional `schema` qualifier and (where
-applicable) an existence guard — see "The `schema` qualifier" and "Existence
-guards" below.
-
-`createTable` takes a column map and an optional `(b) => void` scoped builder
-for table-level constraints and indexes:
+### The table itself
 
 ```ts
-createTable(
-  "members",
-  {
+table("audit_log").create({
+  columns: {
     id: t.id(),
     org_id: t.ref("orgs").notNull(),
     email: t.text().notNull(),
     role: t.text().notNull().default("member"),
   },
-  (b) => {
-    b.unique(["org_id", "email"], { name: "members_org_email_uq" });
-    b.index(["org_id"]);
-    b.check((c) => c("role").ne(""), { name: "members_role_nonempty" });
-    b.foreignKey({
+  primaryKey: ["org_id", "email"], // composite PK (else a single PK via t.id()/.primaryKey())
+  uniques: [{ name: "members_org_email_uq", columns: ["org_id", "email"] }],
+  checks: [{ name: "members_role_nonempty", expr: (c) => c("role").ne("") }],
+  foreignKeys: [
+    {
+      name: "members_org_fk",
       columns: ["org_id"],
       references: { table: "orgs", columns: ["id"] },
       onDelete: "cascade",
-    });
-  },
-);
-```
-
-The scoped builder methods (`sdks/migrate/src/types.ts:251-257`):
-`b.index(columns, opts?)`, `b.unique(columns, opts?)`, `b.primaryKey(columns)`,
-`b.check(expr, opts?)`, `b.foreignKey(spec)`.
-
-### DDL — columns
-
-```ts
-addColumn(table, name, type); // ops.ts:448 — type is a t.* ColumnDef
-dropColumn(table, column, { ifExists? }?); // ops.ts:457
-renameColumn(table, from, to, type); // ops.ts:463 — see "Online rename" below
-alterColumn(table, name, change); // ops.ts:470
-```
-
-`alterColumn`'s `change` carries either a new `type` (with an optional `using`
-transform) **or** a `nullable` flip (`sdks/migrate/src/types.ts:201-205`):
-
-```ts
-alterColumn("orders", "total", {
-  type: t.numeric(14, 2),
-  using: (c) => c("total").cast("real"),
+    },
+  ],
+  indexes: [{ name: "members_org_idx", columns: ["org_id"] }],
 });
-alterColumn("orders", "note", { nullable: true });
+
+table("scratch").drop({ ifExists: true, cascade: true });
 ```
 
-### DDL — constraints and indexes
+`create({...})` is the one all-object form (no `build` callback): table-level
+constraints and indexes are **fields**, and each carries a **required `name`**
+(name-first, so a later migration can deterministically drop it). Foreign-key
+actions are `cascade | restrict | setNull | setDefault | noAction` (the index
+method set is `btree | gin | gist | ivfflat | hnsw | fts5`).
+
+> A table-level `.rename({ to })` is **not** available: there is no `renameTable`
+> op in the IR and no executor support for it (column rename is `.column().rename()`,
+> see [Online rename](#online-rename)).
+
+### Columns — the `.column(name)` selector
 
 ```ts
-addForeignKey(table, spec); // ops.ts:510
-addUnique(table, spec); // ops.ts:515
-addCheck(table, spec); // ops.ts:523 — spec.expr is a (c) => Expr
-dropConstraint(table, specOrName); // ops.ts:531
-createIndex(table, spec); // ops.ts:538
-dropIndex(name, { table?, unique?, ifExists?, concurrently? }?); // ops.ts:557
+const orders = table("orders");
+orders.column("status").add({ type: t.text().notNull().default("new") });
+orders.column("legacy").drop({ ifExists: true });
+orders.column("label").rename({ to: "display_label", type: t.text() }); // named ⇒ no swap
+orders.column("total").alter({ type: t.numeric(14, 2), using: (c) => c("total").cast("real") });
+orders.column("note").alter({ nullable: true });
 ```
 
+`.column(name).add({ type })` honors **all** modifiers on `type`, including
+`.unique()` (which emits a follow-on `UNIQUE` constraint) and `.primaryKey()` —
+they are not silently dropped.
+
+### Constraints — per-kind `.add`, name-keyed `.drop`
+
 ```ts
-addForeignKey("members", {
+const members = table("members");
+members.foreignKey("members_org_fk").add({
   columns: ["org_id"],
   references: { table: "orgs", columns: ["id"] },
   onDelete: "cascade",
 });
-addUnique("members", { columns: ["org_id", "email"], name: "members_org_email_uq" });
-addCheck("orders", { expr: (c) => c("total").ge(0), name: "orders_total_nonneg" });
-createIndex("members", { columns: ["email"], unique: true, using: "btree" });
-dropIndex("members_email_idx", { table: "members", unique: true });
-dropConstraint("orders", "orders_total_nonneg");
+members.unique("members_org_email_uq").add({ columns: ["org_id", "email"] });
+table("orders").check("orders_total_nonneg").add({ expr: (c) => c("total").ge(0) });
+table("orders").constraint("orders_total_nonneg").drop({ ifExists: true }); // kind-agnostic drop
 ```
 
-A constraint adder is always `(table, spec)` with `name` inside the spec and
-`columns` / `references.columns` as named fields — never a transposable trailing
-positional. The index method set is `btree | gin | gist | ivfflat | hnsw | fts5`
-(`sdks/migrate/src/types.ts:190`). Foreign-key actions are
-`cascade | restrict | setNull | setDefault | noAction`
-(`sdks/migrate/src/types.ts:164`).
+`.foreignKey/.unique/.check(name)` each have one terminal, `.add(...)`;
+`.constraint(name)` has one terminal, `.drop(...)` (kind-agnostic, by name).
 
-### DML
+### Indexes — the `.index(name)` selector
 
 ```ts
-insert(table, { rows, onConflict? }); // ops.ts:574
-update(table, { set, where?, batch? }); // ops.ts:602
-del(table, { where, limit? }); // ops.ts:615 — where is mandatory
-backfill(table, { set, where?, cursorColumn?, batchSize?, name? }); // ops.ts:626
+const members = table("members");
+members.index("members_email_idx").add({ columns: ["email"], unique: true, using: "btree" });
+members.index("members_email_idx").drop({ unique: true });
 ```
 
+Indexes are **name-first** (the selector name), so a later migration can drop them
+deterministically. `.index().drop({ unique: true })` carries `unique` because the
+engine gates a UNIQUE-index drop as destructive (it silently removes a
+data-integrity guarantee) — omit it for a plain, reversible drop.
+
+### Table data — direct named DML
+
 ```ts
-insert("plans", {
+const plans = table("plans");
+
+plans.insert({
   rows: [
     { id: "free", price_cents: 0 },
     { id: "pro", price_cents: 2900 },
@@ -363,19 +370,19 @@ insert("plans", {
 });
 
 // PG-only upsert: on a conflicting `id`, update the listed columns.
-insert("plans", {
+plans.insert({
   rows: [{ id: "pro", price_cents: 3900 }],
   onConflict: { columns: ["id"], doUpdate: { price_cents: 3900 } },
 });
 
-update("orders", {
+table("orders").update({
   set: { status: (c) => c.fn.upper(c("status")) },
   where: (c) => c("status").eq("pending"),
 });
 
-del("sessions", { where: (c) => c("expires_at").lt("2026-01-01T00:00:00Z") });
+table("sessions").del({ where: (c) => c("expires_at").lt("2026-01-01T00:00:00Z") });
 
-backfill("orders", {
+table("orders").backfill({
   set: { total_norm: (c) => c.fn.coalesce(c("total"), 0) },
   cursorColumn: "id", // defaults to the single-column PK ("id")
   batchSize: 1000, // defaults to the engine's chosen size
@@ -384,9 +391,9 @@ backfill("orders", {
 
 - The predicate keyword is **`where` everywhere** — there is no `filter`
   synonym.
-- `del`'s `where` is **mandatory** — an unguarded full-table delete is rejected
+- `.del`'s `where` is **mandatory** — an unguarded full-table delete is rejected
   at record time.
-- `backfill` (and `update { batch }`) is a batched, per-batch-transactional,
+- `.backfill` (and `.update({ batch })`) is a batched, per-batch-transactional,
   resumable loop that persists crash-safe cursor progress under the project
   lock. It runs on **both backends** (PG via the existing windowed executor;
   SQLite via the committed batched executor).
@@ -394,13 +401,13 @@ backfill("orders", {
   `Uint8Array` / `{ decimal: "…" }`. A `bigint` (integers beyond 2^53) is
   normalized to the `{ decimal }` carrier and a `Uint8Array` to a base64
   `{ bytes }` carrier before recording, so the wire shape matches the engine's
-  scalar deserializer (`sdks/migrate/src/types.ts:82-89`,
-  `sdks/migrate/src/ops.ts:184-188`).
+  scalar deserializer.
+- DML carries **no existence guard** (it is not guardable); `schema` rides on the
+  args object.
 
-`insert`'s `onConflict` (upsert) is **Postgres-only**. There is no portable
+`.insert`'s `onConflict` (upsert) is **Postgres-only**. There is no portable
 SQLite upsert and no raw route; a SQLite-targeted `onConflict` is a hard build
-error (`dialect_scope = PgOnly`), surfaced at build, never at runtime
-(`sdks/migrate/src/types.ts:207-222`).
+error (`dialect_scope = PgOnly`), surfaced at build, never at runtime.
 
 ## The `schema` qualifier (profile-gated)
 
@@ -470,20 +477,21 @@ non-empty, alpha/`_`-leading bare identifier of `[A-Za-z0-9_]` — an injection-
 value (`"; DROP …`, an embedded quote) is rejected on every profile.
 
 ```ts
-// Trusted CLI: render into a non-default schema.
-createTable("audit_log", { id: t.id() }, undefined, { schema: "reporting" });
-insert("widgets", { rows: { id: 1 }, schema: "reporting" });
+// Trusted CLI: render into a non-default schema — set once on the handle.
+const reporting = table("audit_log", { schema: "reporting" });
+reporting.create({ columns: { id: t.id() } });
+table("widgets", { schema: "reporting" }).insert({ rows: { id: 1 } });
 // Confined creator deploy: a cross-schema op is refused fail-closed.
-dropTable("other_app_table", { schema: "some_other_app" }); // → CROSS_SCHEMA
+table("other_app_table", { schema: "some_other_app" }).drop(); // → CROSS_SCHEMA
 ```
 
 ## Existence guards (`ifExists` / `ifNotExists`)
 
-The create/add family (`createTable`, `addColumn`, `createIndex`,
-`addForeignKey`/`addUnique`/`addCheck`) carries an `ifNotExists` option; the
-drop/rename/alter family (`dropTable`, `dropColumn`, `dropIndex`,
-`dropConstraint`, `renameColumn`, `alterColumn`) carries an `ifExists` option. A
-guard on the wrong family is a `GUARD_DIRECTION` authoring error.
+The create/add family (`.create`, `.column().add`, `.index().add`,
+`.foreignKey/.unique/.check().add`) carries an `ifNotExists` option; the
+drop/alter family (`.drop`, `.column().drop`, `.index().drop`,
+`.constraint().drop`, `.column().alter`) carries an `ifExists` option. A guard on
+the wrong family is a `GUARD_DIRECTION` authoring error.
 
 > **Supported as of op.* PR10 Part B** (executor-side catalog probe). The option
 > types are plain `boolean`; the guard is honored at apply time by a probe under the
@@ -556,128 +564,127 @@ it. The default semantic is **shape-verify-or-fail**, never a bare skip:
 > family; `dropTable`/`dropColumn`/`dropIndex`/`dropConstraint`;
 > `alterColumnType`/`alterColumnNullability`) is honored by the probe.
 
-### SQLite-safe rebuild (`batchAlterTable`)
+### SQLite-safe rebuild (automatic)
 
-```ts
-batchAlterTable(table, (b) => void); // ops.ts:642
-```
+A SQLite `ALTER` that SQLite cannot do in place (drop a column on an old SQLite,
+re-type, a stand-alone constraint add/drop) is lowered by the engine to the
+12-step table rebuild automatically — there is no author-facing `batchAlterTable`
+grouping. Author the column/constraint changes as ordinary `.column()` /
+`.constraint()` terminals; the engine groups the rebuild per table at lower time.
 
-A SQLite ALTER that SQLite cannot do in place (drop a column on an old SQLite,
-re-type, etc.) is lowered to the 12-step table rebuild. `batchAlterTable` groups
-several column/constraint changes against one table so they share one rebuild
-(`sdks/migrate/src/types.ts:260-267`): `b.addColumn`, `b.dropColumn`,
-`b.renameColumn`, `b.alterColumn`, `b.addForeignKey`, `b.addCheck`.
+## Selectors must be terminated
 
-## The fluent `table()` surface
+A selector (`.column(x)` / `.foreignKey(x)` / `.unique(x)` / `.check(x)` /
+`.constraint(x)` / `.index(x)`) returns a sub-builder that records **only** when
+its terminal (`.add` / `.drop` / `.rename` / `.alter`) is called. A forgotten
+terminal would otherwise silently record nothing — so the recorder makes it a
+**hard, structured error**: at `up()`/`down()` drain, any selector handed out but
+never terminated throws `{ code: "SELECTOR_NOT_TERMINATED", selector, name }`.
+Terminating the same selector twice throws `SELECTOR_ALREADY_TERMINATED`.
 
-`table(name, opts?)` returns a **recorder-bound handle** whose methods mirror the
-flat ops above, **scoped to one table**. It is an *additive* ergonomic
-alternative to the flat named imports — both surfaces coexist, and a
-`table()`-authored migration lowers to **byte-identical IR** as the equivalent
-flat-op migration (the facade is pure sugar: every method delegates to the same
-flat recorder, `sdks/migrate/src/ops.ts` `table()`).
-
-```ts
-import { table, t } from "@zeroship/migrate";
-
-export default {
-  up() {
-    const users = table("users");
-    users.create({ id: t.id(), email: t.text().notNull().unique() });
-    users.addColumn("status", t.text().notNull().default("new"));
-    users.createIndex({ columns: ["email"], name: "users_email_idx", unique: true });
-    users.backfill({ set: { status: (c) => c.fn.coalesce(c("status"), "new") } });
-  },
-};
-```
-
-The handle covers the full per-table surface: `.create(columns, build?, opts?)`,
-`.drop(opts?)`, `.addColumn`, `.dropColumn`, `.renameColumn`, `.alterColumn`,
-`.addForeignKey`, `.addUnique`, `.addCheck`, `.dropConstraint`, `.createIndex`,
-`.dropIndex`, and the DML `.insert` / `.update` / `.del` / `.backfill`. Each is
-the flat op with the leading `table` argument bound — `table("users").addColumn(…)`
-is exactly `addColumn("users", …)`.
-
-### Eager, one level — there is no terminal to forget
-
-**Every method records EAGERLY: the call IS the recording.** There is no `build`
-callback and no terminal `.commit()`/`.done()` step. We deliberately rejected a
-two-level `table("users").column("email").drop()` form: a forgotten terminal
-(`table("users").column("email")` with nothing after it) would silently record
-*nothing* — a dropped op with no error. The one-level eager model makes that
-failure mode unconstructible; if you call a method, the op is recorded.
-
-A handle is also reusable and order-preserving — each call appends one op:
+The check runs **at drain, not eagerly**, so a selector held in a variable and
+terminated on a later line is fine:
 
 ```ts
 import { table, t } from "@zeroship/migrate";
 
 export default {
   up() {
-    const u = table("users");
-    u.addColumn("first_name", t.text()); // recorded
-    u.addColumn("last_name", t.text());  // recorded, after the first
-    u.dropColumn("full_name");           // recorded, last
+    // FINE — terminated on a later line (the guard checks at drain).
+    const email = table("users").column("email");
+    table("users").insert({ rows: [{ id: "u1" }] });
+    email.add({ type: t.text().notNull() });
+    // ERROR — `table("users").column("nickname")` with no terminal is a hard
+    // SELECTOR_NOT_TERMINATED build error.
   },
 };
 ```
 
-### `{ schema }` propagation and per-method override
+## Var-assign + reuse
+
+Both authoring styles are first-class — pick per readability. Every terminal
+**returns the handle**, so calls chain; and the handle is a reusable value
+(carrying only `{ name, schemaDefault }`), so it can be assigned once and reused
+across statements with `{ schema }` set a single time:
+
+```ts
+import { table, t } from "@zeroship/migrate";
+
+export default {
+  up() {
+    // chained
+    table("users")
+      .column("a").add({ type: t.text() })
+      .column("b").drop({ ifExists: true });
+
+    // var-assigned (DRY; { schema } set once)
+    const users = table("users", { schema: "app" });
+    users.column("email").add({ type: t.text().notNull() });
+    users.unique("uq_email").add({ columns: ["email"] });
+    users.insert({ rows: [{ id: "u1", email: "a@b.co" }] });
+  },
+};
+```
 
 The `{ schema }` passed to `table()` is the **default schema** stamped onto every
-op the handle records. A **per-method `schema`** (on the method's opts/spec/args
-bag) **overrides** the table default for that one call; an opts bag that omits
-`schema` keeps the default (an absent key never wipes it).
+op the handle records; a per-op `schema` (on the terminal's args) **overrides** it
+for that one call, and an args bag that omits `schema` keeps the default (an absent
+key never wipes it). `table("users")` with no schema records ops with **no**
+`schema` key.
+
+Because the `t.*` chain is **immutable** (every modifier returns a fresh
+`ColumnDef`), a hoisted type var is safe to reuse across columns:
 
 ```ts
 import { table, t } from "@zeroship/migrate";
 
 export default {
   up() {
-    const u = table("users", { schema: "tenant" });
-    u.addColumn("a", t.int());                       // op.schema === "tenant"
-    u.addColumn("b", t.int(), { ifNotExists: true }); // still "tenant" (guard-only bag)
-    u.addColumn("c", t.int(), { schema: "other" });   // overridden → "other"
+    const reqText = t.text().notNull(); // hoisted, reusable
+    table("users")
+      .column("email").add({ type: reqText.unique() }) // email is UNIQUE
+      .column("name").add({ type: reqText }); // name is NOT unique — reqText untouched
   },
 };
 ```
 
-`table("users")` with no schema records ops with **no** `schema` key — identical
-to the flat `addColumn("users", …)`. (Schema qualifiers are profile-gated; see
-[The `schema` qualifier](#the-schema-qualifier-profile-gated).)
+## C1 — foreign-key referential actions
 
-### Guard pass-through
+A `.foreignKey(name).add({...})` (and a `create({ foreignKeys: [...] })` entry)
+takes optional `onDelete` / `onUpdate` of `cascade | restrict | setNull |
+setDefault | noAction`, and they are **actually rendered** (`ON DELETE CASCADE`,
+…). An action-free FK records byte-identically to before:
 
-The existence guards pass through per-method exactly as the flat ops accept them —
-`{ ifNotExists }` on the create/add family, `{ ifExists }` on the drop/alter
-family (see [Existence guards](#existence-guards-ifexists--ifnotexists)):
+```ts
+import { table } from "@zeroship/migrate";
+
+export default {
+  up() {
+    table("orders").foreignKey("orders_customer_fk").add({
+      columns: ["customer_id"],
+      references: { table: "customers", columns: ["id"] },
+      onDelete: "cascade",
+    });
+  },
+};
+```
+
+## C2 — `.column().add()` honors `.unique()` / `.primaryKey()`
+
+`.column(name).add({ type })` honors **every** modifier on `type`. An ADD COLUMN
+has no inline `UNIQUE`, so a `t.*.unique()` / `t.*.primaryKey()` on an added column
+records the column **plus** a follow-on constraint (it is not silently dropped):
 
 ```ts
 import { table, t } from "@zeroship/migrate";
 
 export default {
   up() {
-    const u = table("users");
-    u.addColumn("nickname", t.text(), { ifNotExists: true });
-    u.dropColumn("legacy", { ifExists: true });
+    // records an addColumn AND a follow-on UNIQUE constraint on "email".
+    table("users").column("email").add({ type: t.text().notNull().unique() });
   },
 };
 ```
-
-### The three flat-op asymmetries the handle smooths over
-
-- **`createIndex` carries schema/guard on the SPEC**, not a separate opts bag, so
-  `.createIndex(spec)` injects the table default into `spec.schema` (a per-call
-  `spec.schema` still wins). There is no second `opts` argument.
-- **`dropIndex` is name-keyed, not table-keyed.** The flat `dropIndex(name, opts)`
-  takes the owning `table` *inside* opts. The handle **stamps this table** onto the
-  drop — `table("users").dropIndex("ix_email")` means "drop index `ix_email` that
-  belongs to `users`" and records `{ op: "dropIndex", name: "ix_email", table:
-  "users" }`. (The byte-identical flat equivalent is `dropIndex("ix_email",
-  { table: "users" })`.)
-- **DML carries `schema` on the ARGS object** and has **no** existence guard, so
-  `.insert/.update/.del/.backfill` inject the table default into the args' `schema`
-  and accept no guard.
 
 ## The fluent expression surface
 
@@ -701,8 +708,9 @@ interpolated):
 - comparison: `.eq(x)`, `.ne(x)`, `.lt(x)`, `.le(x)`, `.gt(x)`, `.ge(x)`
 - boolean: `.and(e)`, `.or(e)`, `.not()`
 - arithmetic: `.add(x)`, `.sub(x)`, `.mul(x)`, `.div(x)`
-- string/value: `.concat(...parts)` (raw `||`, NULL-propagating),
-  `.concatWs(sep, ...parts)` (NULL-skipping), `.coalesce(...)`
+- string/value: `.concat(...parts)` (raw `||`, NULL-propagating). The
+  NULL-skipping `concatWs` and `coalesce` live on `c.fn.*` only (they are not
+  chain methods).
 - null/bool tests: `.isNull()`, `.isNotNull()`, `.isTrue()`, `.isFalse()`
 - cast: `.cast("text" | "integer" | "real" | "boolean" | "blob")` (the closed
   portable target set only)
@@ -845,8 +853,8 @@ time, not silently at runtime on one backend.
 > dev/CLI and tests. The production control-plane deploy handler does **not**
 > apply online renames today — see below.
 
-`renameColumn(table, from, to, type)` records a single op that the engine lowers
-to a dual-dialect online change:
+`table(t).column(from).rename({ to, type })` records a single op that the engine
+lowers to a dual-dialect online change:
 
 - **Postgres** — an expand-contract online flow: add the new column, install a
   dual-write trigger, backfill, then (in a later phase) drop the old column. The
