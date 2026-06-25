@@ -274,19 +274,33 @@ pub fn fold_ops(
                 //     so neither false-matches a non-`id` user column. Collect the
                 //     dropped constraint names first to cascade their implicit unique
                 //     indexes (mirror the DropConstraint index-cascade below).
-                let dropped_constraints: Vec<String> = snap
+                //
+                //     Capture (name, kind) so the implicit-index cascade can
+                //     discriminate by kind: only UNIQUE / PRIMARY KEY back a same-named
+                //     index PG cascades; a FOREIGN KEY backs none. Cascading the index
+                //     by a FK's name would wrongly phantom-drop an INDEPENDENT user
+                //     index that merely shares the FK's name (PG allows a FK and an
+                //     index to share a name — see the DropConstraint arm), so the
+                //     implicit-index retain below is kind-gated for safety.
+                let dropped_constraints: Vec<(String, String)> = snap
                     .constraints
                     .iter()
                     .filter(|c| constraint_local_columns_contain(&c.definition, column))
-                    .map(|c| c.name.clone())
+                    .map(|c| (c.name.clone(), c.kind.clone()))
                     .collect();
                 snap.constraints
-                    .retain(|c| !dropped_constraints.contains(&c.name));
+                    .retain(|c| !dropped_constraints.iter().any(|(n, _)| n == &c.name));
                 // A UNIQUE/PK constraint backs an implicit unique index of the SAME
                 // name (a FK backs none), which PG cascades with the constraint —
-                // remove it identically to the DropConstraint arm.
+                // remove it identically to the DropConstraint arm, kind-gated so a
+                // same-named independent user index behind a FK is NOT phantom-dropped.
+                let implicit_index_names: Vec<&String> = dropped_constraints
+                    .iter()
+                    .filter(|(_, kind)| matches!(kind.as_str(), "UNIQUE" | "PRIMARY KEY"))
+                    .map(|(n, _)| n)
+                    .collect();
                 snap.indexes
-                    .retain(|i| !dropped_constraints.contains(&i.name));
+                    .retain(|i| !implicit_index_names.contains(&&i.name));
             }
             Op::RenameColumn { table, from, to, .. } => {
                 let snap = table_mut(&mut tables, table)?;
@@ -296,6 +310,19 @@ pub fn fold_ops(
                 // column's type — a pure rename cannot change type, the same stance
                 // `lower_rename` takes: "the live column is the single authoritative
                 // type source"). So we do NOT re-derive from `ty`.
+                //
+                // P2 gen-types BOUNDARY (review LOW finding — tracked, no P1 change):
+                // the IR rename lowers to an online expand-contract whose CONTRACT
+                // (drop the `from` column) is a SEPARATE later deploy. Between expand
+                // and contract, live PG carries BOTH the `from` and `to` columns while
+                // this fold (which collapses the rename to the final `to` name) shows
+                // only `to`. That divergence is correctly EXCLUDED from the fold==live
+                // equality oracle and is acceptable for gen-types (the `to` column
+                // exists post-expand), but in the migration-first model the fold is the
+                // SOLE source of truth for gen-types — so generated types over a
+                // mid-expand migration set reflect the POST-EXPAND logical shape (final
+                // `to` name). P2 must add an e2e running gen-types against a live
+                // mid-expand DB to confirm reads/writes resolve. No action here.
                 if snap.columns.iter().any(|c| &c.name == to) {
                     return Err(FoldError::RenameCollision {
                         table: table.clone(),
@@ -385,6 +412,21 @@ pub fn fold_ops(
             }
             Op::DropConstraint { table, name, .. } => {
                 let snap = table_mut(&mut tables, table)?;
+                // Capture the dropped constraint's KIND before the retain so the
+                // index-cascade below can discriminate. Only UNIQUE / PRIMARY KEY
+                // constraints back an implicit same-named index that PG cascades on
+                // drop; a FOREIGN KEY has NO backing index. PG lets a FK constraint
+                // and an independent user INDEX share a name (verified live on :5440:
+                // `ADD CONSTRAINT shared FOREIGN KEY …` + `CREATE INDEX shared …`
+                // coexist, and `DROP CONSTRAINT shared` leaves the index intact), and
+                // validate.rs does not forbid the coexistence — so an unconditional
+                // `retain(|i| &i.name != name)` would WRONGLY phantom-drop the user
+                // index here, breaking `fold_ops == snapshot_schema(live)`.
+                let dropped_kind = snap
+                    .constraints
+                    .iter()
+                    .find(|c| &c.name == name)
+                    .map(|c| c.kind.clone());
                 let before = snap.constraints.len();
                 snap.constraints.retain(|c| &c.name != name);
                 if snap.constraints.len() == before {
@@ -393,10 +435,12 @@ pub fn fold_ops(
                         name: name.clone(),
                     });
                 }
-                // Dropping a UNIQUE/PK constraint ALSO drops its implicit unique index
-                // of the same name (PG cascades the index with the constraint); a FK
-                // has no index, so this retain is a no-op for it.
-                snap.indexes.retain(|i| &i.name != name);
+                // Cascade the implicit index ONLY for UNIQUE / PRIMARY KEY (the kinds
+                // that materialize a same-named index). For a FK this is skipped, so a
+                // same-named user index survives — matching live introspection.
+                if matches!(dropped_kind.as_deref(), Some("UNIQUE" | "PRIMARY KEY")) {
+                    snap.indexes.retain(|i| &i.name != name);
+                }
             }
             Op::CreateIndex { table, columns, name, unique, using, .. } => {
                 let idx = create_index_snapshot(table, columns, name.as_deref(), *unique, *using);

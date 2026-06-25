@@ -1959,6 +1959,18 @@ fn fk_definition_pg(
     // the live catalog byte-for-byte (over-quoting would phantom-diff a normal
     // lowercase `parent`) AND a reserved-word/mixed-case schema or target resolves
     // correctly instead of being emitted as a bare keyword.
+    //
+    // **mig-first P1 review (LOW — BACKLOG, not P1)**: the LOCAL FK column `field` is
+    // interpolated RAW (unlike the schema/target, and unlike the UNIQUE/PK body which
+    // routes through `constraintdef_cols`). For a reserved-word/mixed-case local FK
+    // column, `pg_get_constraintdef` would render `FOREIGN KEY ("order")` while this
+    // emits `FOREIGN KEY (order)`, phantom-diffing the FK `definition` (which the fold
+    // reuses, and `ConstraintSnapshot` has FULL Eq including `definition`). This is a
+    // PRE-EXISTING differ concern the fold merely inherits — the P1 corpus uses only
+    // safe lowercase FK columns so it never trips. BACKLOG: wrap `field` in
+    // `quote_ident_if_needed(field)` here and add a differ+fold round-trip case with a
+    // reserved-word FK column (e.g. a column named `order`). No change required to land
+    // P1.
     let mut def = format!(
         "FOREIGN KEY ({field}) REFERENCES {}.{}(id)",
         quote_ident_if_needed(project_schema),

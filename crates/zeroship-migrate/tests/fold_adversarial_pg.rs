@@ -260,3 +260,85 @@ async fn add_then_alter_same_column_chained() {
     );
     teardown(&conn, &cfg).await;
 }
+
+/// ADVERSARIAL #D — a FOREIGN KEY constraint and an INDEPENDENT user index SHARE a
+/// name, then the FK constraint is dropped. PG allows the coexistence (a FK backs no
+/// index, so the name is free for a real index) and `DROP CONSTRAINT <shared>` leaves
+/// the index intact. The fold's `DropConstraint` arm must therefore NOT cascade-drop
+/// the same-named index for a FK — only for UNIQUE / PRIMARY KEY (whose implicit
+/// same-named index PG really does cascade).
+///
+/// REVIEW FINDING (MED) — FIXED: `DropConstraint` now captures the dropped
+/// constraint's KIND and gates the implicit-index `retain` on UNIQUE / PRIMARY KEY.
+/// Pre-fix the unconditional `retain(|i| &i.name != name)` phantom-dropped the user
+/// index `shared_name`, making `fold_ops != snapshot_schema(live)`; this test FAILED
+/// before the fix and passes after.
+#[compio::test]
+async fn drop_fk_constraint_keeps_same_named_user_index() {
+    if !require_db() {
+        eprintln!("SKIP drop_fk_constraint_keeps_same_named_user_index (MIGRATE_REQUIRE_DB unset)");
+        return;
+    }
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let mut all: Vec<Op> = Vec::new();
+
+    // Parent table the FK references (its system `id`).
+    let parent = r#"{"ir_version":1,"name":"mkparent","ops":[
+        {"op":"createTable","name":"parent","columns":[
+            {"name":"label","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    all.extend(apply_doc(&conn, &cfg, parent, &registry(&[]), Approval::None).await);
+
+    // Child table with the FK local column.
+    let child = r#"{"ir_version":1,"name":"mkchild","ops":[
+        {"op":"createTable","name":"child","columns":[
+            {"name":"parent_id","type":"text","nullable":false},
+            {"name":"note","type":"text","nullable":true}
+        ]}
+    ]}"#;
+    all.extend(apply_doc(&conn, &cfg, child, &registry(&[("parent", APP)]), Approval::None).await);
+
+    let reg = registry(&[("parent", APP), ("child", APP)]);
+
+    // Add a FOREIGN KEY constraint named `shared_name` (FK backs no index).
+    let add_fk = r#"{"ir_version":1,"name":"addfk","ops":[
+        {"op":"addConstraint","table":"child",
+            "constraint":{"name":"shared_name","kind":{"kind":"fk","columns":["parent_id"],
+                "referencesTable":"parent","referencesColumns":["id"]}}}
+    ]}"#;
+    all.extend(apply_doc(&conn, &cfg, add_fk, &reg, Approval::Approved).await);
+
+    // Create an INDEPENDENT user index that SHARES the FK's name (PG allows this).
+    let mk_idx = r#"{"ir_version":1,"name":"mkidx","ops":[
+        {"op":"createIndex","table":"child","columns":["note"],"name":"shared_name"}
+    ]}"#;
+    all.extend(apply_doc(&conn, &cfg, mk_idx, &reg, Approval::None).await);
+
+    // Drop the FK constraint. The same-named user index MUST survive.
+    let drop_fk = r#"{"ir_version":1,"name":"dropfk","ops":[
+        {"op":"dropConstraint","table":"child","name":"shared_name"}
+    ]}"#;
+    all.extend(apply_doc(&conn, &cfg, drop_fk, &reg, Approval::Approved).await);
+
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.unwrap();
+    // Live-PG oracle: the index `shared_name` survives the FK drop.
+    assert!(
+        live.tables["child"].indexes.iter().any(|i| i.name == "shared_name"),
+        "live PG must still carry the user index `shared_name` after dropping the same-named FK"
+    );
+
+    let folded = fold_ops(&all, SqlDialect::Postgres, &cfg.project_schema).expect("fold");
+    assert!(
+        folded.tables["child"].indexes.iter().any(|i| i.name == "shared_name"),
+        "fold must NOT phantom-drop the same-named user index when a FK constraint is dropped"
+    );
+    assert_eq!(
+        canonicalize(folded),
+        canonicalize(live),
+        "fold must match introspection: dropping a FK leaves an independent same-named index intact"
+    );
+    teardown(&conn, &cfg).await;
+}
