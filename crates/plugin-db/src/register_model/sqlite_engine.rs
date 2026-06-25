@@ -309,6 +309,7 @@ async fn maybe_baseline(
         depends_on: vec![],
         supersedes: vec![],
         preconditions: vec![],
+        existence_guard: None,
     };
     m.recompute_checksum();
     backend_b

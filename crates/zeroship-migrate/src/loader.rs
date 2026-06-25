@@ -857,6 +857,7 @@ fn load_dbmate_files(paths: &[PathBuf]) -> Result<Vec<Migration>, LoaderError> {
             depends_on: Vec::new(),
             supersedes: Vec::new(),
             preconditions: Vec::new(),
+            existence_guard: None,
         });
     }
 
@@ -902,6 +903,7 @@ fn load_flyway_files(paths: &[PathBuf]) -> Result<Vec<Migration>, LoaderError> {
             depends_on: Vec::new(),
             supersedes: Vec::new(),
             preconditions: Vec::new(),
+            existence_guard: None,
         });
     }
 
@@ -939,6 +941,7 @@ fn load_flyway_files(paths: &[PathBuf]) -> Result<Vec<Migration>, LoaderError> {
             depends_on: Vec::new(),
             supersedes: Vec::new(),
             preconditions: Vec::new(),
+            existence_guard: None,
         });
     }
 

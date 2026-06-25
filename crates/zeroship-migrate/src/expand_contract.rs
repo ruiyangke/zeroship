@@ -594,6 +594,7 @@ impl ExpandContractAuthor {
             depends_on,
             supersedes: Vec::new(),
             preconditions: Vec::new(),
+            existence_guard: None,
         }
     }
 }
@@ -693,6 +694,7 @@ fn abort_plain_ddl(name: &str, up: String, destructive: bool) -> Migration {
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     };
     m.checksum = Checksum::of(&ChecksumInput::from_migration(&m));
     m

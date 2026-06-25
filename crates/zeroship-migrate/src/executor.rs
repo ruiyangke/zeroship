@@ -354,6 +354,33 @@ pub enum ApplyError {
         #[source]
         source: compio_postgres::Error,
     },
+    /// **PR10 Part B** — a guarded migration's `ifNotExists` existence guard found
+    /// the target object ALREADY PRESENT with a shape that DIVERGES from (or cannot
+    /// be proven equal to) the declared one. This is a fail-closed drift error — the
+    /// catalog probe ran under the held advisory lock + open txn and
+    /// [`decide`](crate::guard_probe::decide) returned
+    /// [`FailDrift`](crate::guard_probe::GuardVerdict::FailDrift); the transaction
+    /// was rolled back and NOTHING was applied or journaled. Never a silent skip
+    /// over a divergence (the whole point of the guard). Surfaces to the deploy
+    /// path's creator-facing error like any other [`ApplyError`].
+    #[error(
+        "existence-guard drift on migration {version}: {object} field `{field}` \
+         declared {expected} but the live database has {actual} — the guarded op \
+         was refused fail-closed (an `ifNotExists` op never silently runs over, nor \
+         skips, a divergent existing object)"
+    )]
+    ExistenceGuardDrift {
+        /// The guarded migration's version.
+        version: String,
+        /// The diverging object (e.g. `column users.email`).
+        object: String,
+        /// The attribute that diverged (`data_type`, `nullable`, `kind`, …).
+        field: String,
+        /// The DECLARED value.
+        expected: String,
+        /// The LIVE value.
+        actual: String,
+    },
 }
 
 /// A stable i64 advisory-lock key from the project id, mirroring the
@@ -1946,6 +1973,57 @@ pub(crate) async fn apply_transactional(
         return Err(ApplyError::Db(e));
     }
 
+    // **PR10 Part B — existence-guard catalog probe (no TOCTOU).** If this migration
+    // carries an existence-guard probe, read the LIVE catalog as the ADMIN
+    // (`snapshot_schema` is a privileged catalog read; the migrator role is assumed
+    // only AFTER the decision) inside THIS already-open transaction, under the
+    // project advisory lock the whole plan already holds — so no lock is acquired or
+    // released across probe→decide→act and there is no window for the catalog to
+    // change between the verdict and the action. `decide` is pure Rust over the
+    // snapshot — never a SQL-level conditional.
+    //
+    // - `RunBare`       → fall through: SET LOCAL ROLE + run `up` + journal (normal).
+    // - `SatisfiedNoop` → SKIP the `up` AND the role switch, but STILL journal the
+    //                     `completed` row so the version LANDS (a re-deploy sees it
+    //                     net-applied and skips it via pending computation).
+    // - `FailDrift`     → ROLLBACK + a typed `ExistenceGuardDrift` error (never a
+    //                     silent skip over a divergence).
+    let mut skip_up = false;
+    if let Some(probe) = &m.existence_guard {
+        let live = match crate::drift::snapshot_schema(conn, probe.schema()).await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = conn.batch_execute("ROLLBACK").await;
+                // Reuse the same DriftError → ApplyError mapping `apply_locked` uses.
+                return Err(match e {
+                    crate::drift::DriftError::Db(db) => ApplyError::Db(db),
+                    crate::drift::DriftError::Journal(j) => ApplyError::Journal(j),
+                    crate::drift::DriftError::Backend(b) => ApplyError::Backend(b),
+                });
+            }
+        };
+        match crate::guard_probe::decide(probe, &live) {
+            crate::guard_probe::GuardVerdict::RunBare => { /* fall through */ }
+            crate::guard_probe::GuardVerdict::SatisfiedNoop => {
+                // Skip the `up` + the role switch; the journal block below still runs
+                // so the version lands as net-applied.
+                skip_up = true;
+            }
+            crate::guard_probe::GuardVerdict::FailDrift(d) => {
+                if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+                    tracing::warn!(error = %rb, version = %m.version.as_str(), "zeroship-migrate: ROLLBACK failed after an existence-guard drift (M4)");
+                }
+                return Err(ApplyError::ExistenceGuardDrift {
+                    version: m.version.as_str().to_string(),
+                    object: d.object,
+                    field: d.field,
+                    expected: d.expected,
+                    actual: d.actual,
+                });
+            }
+        }
+    }
+
     // C1: drop to the least-privilege migrator role for the duration of the
     // `<up>` ONLY. `SET LOCAL ROLE` is transaction-scoped, so the role switch is
     // confined to this txn; we explicitly `RESET ROLE` (below) before the journal
@@ -1953,33 +2031,39 @@ pub(crate) async fn apply_transactional(
     // grant is revoked (role.rs), so it could not write the journal even if it
     // tried. The up's DDL is thereby confined to line-2 privileges (design §1.3)
     // while the journal stays unforgeable by the migration.
-    if let Some(set_role) = set_local_role_sql(cfg) {
-        if let Err(e) = conn.batch_execute(&set_role).await {
-            let _ = conn.batch_execute("ROLLBACK").await;
-            return Err(ApplyError::Db(e));
+    // On a `SatisfiedNoop` verdict (`skip_up`) the role switch + `<up>` + RESET ROLE
+    // are all skipped — the object already has the declared shape (ifNotExists) or is
+    // already absent (ifExists), so there is nothing to run; only the journal row
+    // below lands so the version is recorded net-applied.
+    if !skip_up {
+        if let Some(set_role) = set_local_role_sql(cfg) {
+            if let Err(e) = conn.batch_execute(&set_role).await {
+                let _ = conn.batch_execute("ROLLBACK").await;
+                return Err(ApplyError::Db(e));
+            }
         }
-    }
 
-    // Run the migration's up SQL (as the migrator, if a role is configured).
-    if let Err(e) = conn.batch_execute(&m.up).await {
-        // Roll back; report the failure. No journal row was written.
-        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
-            tracing::warn!(error = %rb, version = %m.version.as_str(), "zeroship-migrate: ROLLBACK failed after a migration error (M4)");
+        // Run the migration's up SQL (as the migrator, if a role is configured).
+        if let Err(e) = conn.batch_execute(&m.up).await {
+            // Roll back; report the failure. No journal row was written.
+            if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+                tracing::warn!(error = %rb, version = %m.version.as_str(), "zeroship-migrate: ROLLBACK failed after a migration error (M4)");
+            }
+            return Err(ApplyError::MigrationFailed {
+                version: m.version.as_str().to_string(),
+                source: e,
+            });
         }
-        return Err(ApplyError::MigrationFailed {
-            version: m.version.as_str().to_string(),
-            source: e,
-        });
-    }
 
-    // C1: RESET ROLE back to the admin — still INSIDE the transaction — so the
-    // journal INSERT below runs as the admin (the migrator cannot write the
-    // journal). `RESET ROLE` mid-transaction is supported and does not end the
-    // txn, so atomicity of `<up>` + journal is preserved.
-    if cfg.pg.migrator_role.is_some() {
-        if let Err(e) = conn.batch_execute("RESET ROLE").await {
-            let _ = conn.batch_execute("ROLLBACK").await;
-            return Err(ApplyError::Db(e));
+        // C1: RESET ROLE back to the admin — still INSIDE the transaction — so the
+        // journal INSERT below runs as the admin (the migrator cannot write the
+        // journal). `RESET ROLE` mid-transaction is supported and does not end the
+        // txn, so atomicity of `<up>` + journal is preserved.
+        if cfg.pg.migrator_role.is_some() {
+            if let Err(e) = conn.batch_execute("RESET ROLE").await {
+                let _ = conn.batch_execute("ROLLBACK").await;
+                return Err(ApplyError::Db(e));
+            }
         }
     }
 
@@ -2218,6 +2302,25 @@ pub(crate) async fn apply_non_transactional(
     supersedes: &[&str],
 ) -> Result<bool, ApplyError> {
     let version = m.version.as_str();
+
+    // **PR10 Part B — guarded ops never reach the non-txn path (fail-closed).** The
+    // existence-guard probe is wired ONLY into the transactional apply (the probe
+    // must read the catalog inside the same txn that runs the `up`, under the held
+    // lock, for no-TOCTOU). Guarded ops are pure DDL with `flags.transactional=true`
+    // (the guarded IR `createIndex` arm never emits CONCURRENTLY), so they always
+    // route through `apply_transactional`. If one ever reaches here, refuse rather
+    // than apply the bare op with its guard unhonored.
+    debug_assert!(
+        m.existence_guard.is_none(),
+        "a guarded migration must not reach the non-transactional apply path"
+    );
+    if m.existence_guard.is_some() {
+        return Err(ApplyError::Backend(format!(
+            "migration {version} carries an existence guard but reached the \
+             non-transactional apply path, where the guard probe is not wired \
+             (refused fail-closed — the guard is never silently dropped)"
+        )));
+    }
 
     // Journal / inflight I/O runs as the ADMIN (C1): the migrator's grant on the
     // meta schema is revoked, so `record_started` / `recover_non_transactional`
@@ -3248,6 +3351,7 @@ mod pg_confinement_shape_tests {
             depends_on: Vec::new(),
             supersedes: Vec::new(),
             preconditions: Vec::new(),
+            existence_guard: None,
         }
     }
 
@@ -3331,6 +3435,7 @@ mod non_txn_idempotency_tests {
             depends_on: Vec::new(),
             supersedes: Vec::new(),
             preconditions: Vec::new(),
+            existence_guard: None,
         }
     }
 
@@ -3419,6 +3524,7 @@ mod order_tests {
             depends_on,
             supersedes: Vec::new(),
             preconditions: Vec::new(),
+            existence_guard: None,
         }
     }
 
@@ -3600,6 +3706,7 @@ mod trusted_apply_pg {
             depends_on: Vec::new(),
             supersedes: Vec::new(),
             preconditions: Vec::new(),
+            existence_guard: None,
         };
         m.recompute_checksum();
         m

@@ -390,26 +390,18 @@ pub enum IrLowerError {
          declarative diff rebuild seam (the 12-step table rebuild)"
     )]
     SqliteRebuildOnly(&'static str),
-    /// **PR10** — an op carrying an `existence_guard` (`ifExists`/`ifNotExists`).
-    /// The guard is engine-SYNTHESIZED via an executor-side catalog probe
-    /// (probe → shape-verify-or-fail → run/skip under the held advisory lock), NOT a
-    /// native `IF [NOT] EXISTS` clause. That probe-bearing plan step + executor flow
-    /// is the next slice; until it lands, lowering REFUSES a guarded op fail-closed
-    /// rather than silently dropping the guard (which would apply the bare op
-    /// unconditionally — a fail-OPEN that could clobber a divergent existing object).
-    /// Carries the op tag. (The schema-qualifier half of PR10 is complete; the
-    /// guard half waits on the executor probe.)
+    /// **PR10 Part B** — a guarded op (`ifNotExists` on the `addConstraint` family)
+    /// whose constraint shape cannot produce a verifiable [`GuardProbe`] because the
+    /// CHECK body is a deferred-render closed-AST `Expr` (handled separately by
+    /// [`ExprRenderDeferred`](Self::ExprRenderDeferred) before this is reached). This
+    /// variant is reserved for any future guarded shape that lowers but cannot build
+    /// a probe; lowering REFUSES fail-closed rather than stamping a probe that could
+    /// not verify the declared shape. Carries the op tag.
     #[error(
-        "the `ifNotExists`/`ifExists` existence guard is NOT YET SUPPORTED by this \
-         platform (op {0:?}) — it is a deferred capability, not an error in your \
-         migration. Honoring it needs the engine-synthesized catalog probe \
-         (probe → shape-verify-or-fail → run/skip under the held advisory lock), \
-         which is a later slice (op.* PR10 Part B); until then the guard is refused \
-         fail-closed rather than silently dropped (a dropped guard would apply the \
-         bare op unconditionally — a fail-OPEN over a possibly-divergent existing \
-         object). Remove the `ifNotExists`/`ifExists` option to deploy now."
+        "IrAuthor::lower cannot build an existence-guard probe for op {0:?} \
+         (the declared shape is not catalog-verifiable); refused fail-closed"
     )]
-    ExistenceGuardNotYetSupported(&'static str),
+    GuardProbeUnbuildable(&'static str),
     /// **PR10 review F3** — a SQLite-targeted op whose EFFECTIVE schema (§2.7) is a
     /// NON-`main` schema (i.e. neither the bound project schema nor the implicit
     /// `main` target). The SQLite emitter renders UNqualified `main` DDL and carries
@@ -1232,15 +1224,20 @@ impl IrAuthor {
             return Err(IrLowerError::SqliteSchemaUnsupported(eff_schema));
         }
         let decl = self.decl.with_project_schema(&eff_schema);
-        // **PR10** — fail-closed on an existence guard until the executor-side probe
-        // lands (see [`IrLowerError::ExistenceGuardNotYetSupported`]). The guard is
-        // accepted + direction-checked at validate-time; honoring it requires the
-        // probe → shape-verify-or-fail → run/skip executor flow. Refusing here is
-        // strictly safer than silently dropping the guard (which would apply the bare
-        // op unconditionally — a fail-OPEN over a possibly-divergent existing object).
-        if op.existence_guard().is_some() {
-            return Err(IrLowerError::ExistenceGuardNotYetSupported(op_kind_tag(op)));
-        }
+        // **PR10 Part B** — the existence guard is HONORED via an executor-side
+        // catalog probe (probe → shape-verify-or-fail → run/skip under the held
+        // advisory lock), not a native `IF [NOT] EXISTS` clause. The guard's
+        // DIRECTION was already checked legal at validate-time. Here we build a
+        // dialect-neutral [`crate::guard_probe::GuardProbe`] from the op (the arms
+        // below have the columns/type/nullable in hand via the SAME shared snapshot
+        // builders the lowering uses) and STAMP it onto each lowered `Migration`
+        // unit; the executor reads the live catalog and `decide`s. A guard whose
+        // shape cannot be built into a verifiable probe is refused fail-closed (never
+        // a silent drop, which would apply the bare op over a possibly-divergent
+        // existing object). `probe` is filled by the arms; the renameColumn / DML
+        // early-returns build + stamp it inline before returning.
+        let guard = op.existence_guard();
+        let mut probe: Option<crate::guard_probe::GuardProbe> = None;
         let mut migs: Vec<LoweredUnit> = match op {
             Op::CreateTable { name, columns, .. } => {
                 // A column carrying a SYNTH default (`now()`/`genRandomUuid()`) must
@@ -1253,6 +1250,22 @@ impl IrAuthor {
                 reject_synth_default(columns.iter().map(|c| (c.name.as_str(), c.default.as_ref())))?;
                 let desc = self.create_table_descriptor(name, columns);
                 let snap = build_table_snapshot(&eff_schema, &desc, self.dialect)?;
+                // **PR10 Part B** — stamp the createTable ifNotExists probe from the
+                // SAME shared-builder snapshot the CREATE renders from, so the
+                // expected `(name, data_type, nullable)` strings are byte-comparable
+                // against introspection. createTable only carries `ifNotExists`.
+                if let Some(g) = guard {
+                    probe = Some(crate::guard_probe::GuardProbe::Table {
+                        schema: eff_schema.clone(),
+                        table: name.clone(),
+                        direction: g.into(),
+                        expect_columns: snap
+                            .columns
+                            .iter()
+                            .map(|c| (c.name.clone(), c.data_type.clone(), c.nullable))
+                            .collect(),
+                    });
+                }
                 // The SQLite CREATE routes through the shared `zeroship_schema`
                 // emitter, which consumes the SDK schema `Value` — built here from
                 // the SAME descriptor bridge (`descriptor_to_sdk_schema`) the
@@ -1270,14 +1283,57 @@ impl IrAuthor {
                 reject_synth_default(std::iter::once((column.as_str(), default.as_ref())))?;
                 let col =
                     self.add_column_snapshot(table, column, ty, *nullable, default.as_ref())?;
+                // **PR10 Part B** — addColumn ifNotExists: verify (data_type, nullable)
+                // from the SAME shared-builder column snapshot the ADD renders from.
+                if let Some(g) = guard {
+                    probe = Some(crate::guard_probe::GuardProbe::Column {
+                        schema: eff_schema.clone(),
+                        table: table.clone(),
+                        column: column.clone(),
+                        direction: g.into(),
+                        expect: Some((col.data_type.clone(), col.nullable)),
+                    });
+                }
                 vec![decl.lower_add_column(table, &col)]
             }
             Op::CreateIndex { table, columns, name, unique, using, .. } => {
                 let idx = create_index_snapshot(table, columns, name.as_deref(), *unique, *using);
+                // **PR10 Part B** — createIndex ifNotExists: verify (unique, columns)
+                // from the SAME index snapshot the CREATE renders from.
+                if let Some(g) = guard {
+                    probe = Some(crate::guard_probe::GuardProbe::Index {
+                        schema: eff_schema.clone(),
+                        table: table.clone(),
+                        name: idx.name.clone(),
+                        direction: g.into(),
+                        expect: Some((idx.unique, idx.columns.clone())),
+                    });
+                }
                 vec![decl.lower_create_index(table, &idx)]
             }
-            Op::DropTable { table, .. } => vec![decl.lower_drop_table(table)],
+            Op::DropTable { table, .. } => {
+                // **PR10 Part B** — dropTable ifExists: presence-only (empty columns).
+                if let Some(g) = guard {
+                    probe = Some(crate::guard_probe::GuardProbe::Table {
+                        schema: eff_schema.clone(),
+                        table: table.clone(),
+                        direction: g.into(),
+                        expect_columns: Vec::new(),
+                    });
+                }
+                vec![decl.lower_drop_table(table)]
+            }
             Op::DropColumn { table, column, .. } => {
+                // **PR10 Part B** — dropColumn ifExists: presence-only on the column.
+                if let Some(g) = guard {
+                    probe = Some(crate::guard_probe::GuardProbe::Column {
+                        schema: eff_schema.clone(),
+                        table: table.clone(),
+                        column: column.clone(),
+                        direction: g.into(),
+                        expect: None,
+                    });
+                }
                 vec![decl.lower_drop_column(table, column)]
             }
             Op::DropIndex { name, unique, .. } => {
@@ -1304,6 +1360,26 @@ impl IrAuthor {
                 // and gating falls back to the hint — never LESS strict than before.
                 let is_unique = unique.unwrap_or(false) || live_unique_indexes.contains(name);
                 let idx = IndexSnapshot::btree(name.clone(), is_unique, Vec::new());
+                // **PR10 Part B** — dropIndex ifExists: presence-only on the index
+                // NAME. The table hint may be absent (a table-hinted drop reaches
+                // here; a bare-name one is rejected upstream by the validator §8.6),
+                // so the probe carries the hint when present (empty otherwise) and the
+                // executor `decide` scans all tables for the index name on the
+                // presence-only `ifExists` path.
+                if let Some(g) = guard {
+                    let table_hint = if let Op::DropIndex { table, .. } = op {
+                        table.clone().unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    probe = Some(crate::guard_probe::GuardProbe::Index {
+                        schema: eff_schema.clone(),
+                        table: table_hint,
+                        name: name.clone(),
+                        direction: g.into(),
+                        expect: None,
+                    });
+                }
                 vec![decl.lower_drop_index(&idx)]
             }
             Op::AlterColumnType { table, column, ty, using, .. } => {
@@ -1323,11 +1399,31 @@ impl IrAuthor {
                 // one-field descriptor) so the emitted `data_type` is byte-identical
                 // to the differ's type mapping — never re-spelled (§6.5).
                 let col = self.add_column_snapshot(table, column, ty, None, None)?;
+                // **PR10 Part B** — alterColumnType ifExists: the SOURCE column must
+                // EXIST (presence-only — an alter intentionally CHANGES the shape, so
+                // there is nothing to shape-verify).
+                if let Some(g) = guard {
+                    probe = Some(crate::guard_probe::GuardProbe::ColumnPresence {
+                        schema: eff_schema.clone(),
+                        table: table.clone(),
+                        column: column.clone(),
+                        direction: g.into(),
+                    });
+                }
                 vec![decl.lower_alter_column_type(table, &col)]
             }
             Op::AlterColumnNullability { table, column, nullable, .. } => {
                 // Same SQLite rebuild constraint as alterColumnType.
                 self.require_pg_for("alterColumnNullability")?;
+                // **PR10 Part B** — alterColumnNullability ifExists: presence-only.
+                if let Some(g) = guard {
+                    probe = Some(crate::guard_probe::GuardProbe::ColumnPresence {
+                        schema: eff_schema.clone(),
+                        table: table.clone(),
+                        column: column.clone(),
+                        direction: g.into(),
+                    });
+                }
                 vec![decl.lower_alter_column_nullability(table, column, *nullable)]
             }
             Op::RenameColumn { table, from, to, ty, .. } => {
@@ -1337,15 +1433,63 @@ impl IrAuthor {
                 // expand-contract author on PG, the rebuild planner on SQLite) are
                 // REUSED verbatim, so the IR path inherits their version-stable ids
                 // (§2.6.1). A rename never advances the working live-table set.
+                //
+                // **PR10 Part B — renameColumn `ifExists` is REFUSED fail-closed.**
+                // The online-rename plan step is a MULTI-migration shape (PG
+                // expand-contract E1..C2; an SQLite rebuild) authored by the trusted
+                // expand-contract author / differ, with no single Migration the
+                // executor probe can attribute the ColumnPresence verdict to. More
+                // importantly, `lower_rename` ALREADY MANDATES the live `from` column
+                // exist (`RenameNeedsLiveColumn`) — an absent source is a HARD error
+                // today, which is STRICTER (fail-closed) than the guard's `ifExists`
+                // "absent → SatisfiedNoop". Honoring the noop semantics would require
+                // threading the probe through the whole online-rename executor, which
+                // this slice does not do. Rather than SILENTLY drop the guard (apply
+                // the rename unconditionally), refuse it here so the contract is
+                // explicit — the un-guarded `renameColumn` already fails closed on an
+                // absent column, so authors lose nothing.
+                if guard.is_some() {
+                    return Err(IrLowerError::GuardProbeUnbuildable("renameColumn"));
+                }
                 let step = self.lower_rename(table, from, to, ty, live_schema)?;
                 return Ok(LoweredOp::Rename(Box::new(step)));
             }
             Op::AddConstraint { table, constraint, .. } => {
-                self.lower_add_constraint(&decl, &eff_schema, table, constraint)?
+                let units = self.lower_add_constraint(&decl, &eff_schema, table, constraint)?;
+                // **PR10 Part B** — addConstraint ifNotExists: the probe compares the
+                // catalog KIND, and (MED finding) a PRESENT same-name + same-kind
+                // constraint is FailDrift NOT SatisfiedNoop — the live
+                // `pg_get_constraintdef` body cannot be proven equal to the IR's
+                // un-normalized constraint, so a possibly-divergent CHECK/FK is
+                // refused rather than skipped. The probe carries the declared kind so
+                // a kind clash yields the clearer `kind` divergence message. The
+                // constraint NAME must match what the executor will see in the live
+                // catalog — derive it the SAME way `lower_add_constraint` does.
+                if let Some(g) = guard {
+                    let (cname, ckind) = ir_constraint_name_and_kind(table, constraint);
+                    probe = Some(crate::guard_probe::GuardProbe::Constraint {
+                        schema: eff_schema.clone(),
+                        table: table.clone(),
+                        name: cname,
+                        direction: g.into(),
+                        expect_kind: Some(ckind),
+                    });
+                }
+                units
             }
             Op::DropConstraint { table, name, .. } => {
                 // SQLite has no `ALTER TABLE … DROP CONSTRAINT` (rebuild-only); PG only.
                 self.require_pg_for("dropConstraint")?;
+                // **PR10 Part B** — dropConstraint ifExists: presence-only on the name.
+                if let Some(g) = guard {
+                    probe = Some(crate::guard_probe::GuardProbe::Constraint {
+                        schema: eff_schema.clone(),
+                        table: table.clone(),
+                        name: name.clone(),
+                        direction: g.into(),
+                        expect_kind: None,
+                    });
+                }
                 vec![decl.lower_drop_constraint(table, name)]
             }
             // §PR6a — the DML ops lower through the creator-DML assembler
@@ -1378,6 +1522,24 @@ impl IrAuthor {
         for (mig, _statements) in &mut migs {
             if mig.flags.destructive {
                 mig.version = ddl_step_version(op_index, kind, &mig.up);
+            }
+        }
+        // **PR10 Part B** — stamp the existence-guard probe onto EACH lowered unit. A
+        // multi-unit op (createTable CREATE + COMMENT side-statements; addColumn
+        // similar) gets the SAME probe on every unit: the executor's per-probe
+        // decision is idempotent under one txn (a satisfied table no-op skips its
+        // CREATE and its COMMENTs alike — each unit re-probes the live catalog under
+        // the same held lock and gets the same verdict), so no cross-unit grouping key
+        // is needed. If `guard` was set but no arm built a probe (an internal
+        // invariant violation — every guard-legal DDL arm above either builds a probe
+        // or returns fail-closed before this point), refuse rather than apply the bare
+        // op with a silently-dropped guard.
+        if guard.is_some() {
+            let Some(probe) = probe else {
+                return Err(IrLowerError::GuardProbeUnbuildable(op_kind_tag(op)));
+            };
+            for (mig, _statements) in &mut migs {
+                mig.existence_guard = Some(probe.clone());
             }
         }
         Ok(LoweredOp::Ddl(migs))
@@ -2405,6 +2567,40 @@ fn derived_constraint_name(table: &str, cols: &[String], suffix: &str) -> String
     crate::author::cap_ident_name(&format!("{table}_{}_{suffix}", cols.join("_")))
 }
 
+/// **PR10 Part B** — the catalog `(name, kind)` an `addConstraint` op will create,
+/// derived the SAME way [`IrAuthor::lower_add_constraint`] derives them, so the
+/// stamped [`crate::guard_probe::GuardProbe::Constraint`] names the constraint the
+/// executor will see in the live `information_schema` / `pg_get_constraintdef`.
+/// `kind` is the PG catalog spelling (`information_schema.table_constraints`):
+/// `PRIMARY KEY` / `FOREIGN KEY` / `UNIQUE` / `CHECK`. A CHECK constraint never
+/// reaches this helper — `lower_add_constraint` returns `ExprRenderDeferred` before
+/// the probe is built — but it is handled for totality.
+fn ir_constraint_name_and_kind(table: &str, constraint: &IrConstraint) -> (String, String) {
+    let explicit = constraint.name.as_deref();
+    match &constraint.kind {
+        IrConstraintKind::Fk { columns, references_table, .. } => {
+            // Reuse the shared FK snapshot so the name derivation is byte-identical
+            // to `lower_add_constraint`'s `ir_fk_constraint_snapshot` call (the
+            // single-column FK names off the local column as `<col>_fkey`).
+            let local = columns.first().map_or("", String::as_str);
+            let snap = crate::declarative::ir_fk_constraint_snapshot("", explicit, local, references_table);
+            (snap.name, "FOREIGN KEY".to_string())
+        }
+        IrConstraintKind::Unique { columns } => (
+            explicit.map_or_else(|| derived_constraint_name(table, columns, "key"), str::to_string),
+            "UNIQUE".to_string(),
+        ),
+        IrConstraintKind::Pk { columns } => (
+            explicit.map_or_else(|| derived_constraint_name(table, columns, "pkey"), str::to_string),
+            "PRIMARY KEY".to_string(),
+        ),
+        IrConstraintKind::Check { .. } => (
+            explicit.unwrap_or("").to_string(),
+            "CHECK".to_string(),
+        ),
+    }
+}
+
 /// The access-method string for a closed [`IndexMethod`] — matches the spellings
 /// the snapshot's `access_method` carries (and `render_create_index` emits).
 fn index_method_access(m: IndexMethod) -> &'static str {
@@ -2839,12 +3035,12 @@ mod tests {
         );
     }
 
-    /// **PR10** — an op carrying an `existence_guard` is REFUSED fail-closed at lower
-    /// (the executor-side probe is a later slice), NOT silently lowered with the
-    /// guard dropped (which would apply the bare op unconditionally — fail-OPEN over a
-    /// possibly-divergent existing object). RED would be a silent success.
+    /// **PR10 Part B (deferral-removal)** — a guarded op now LOWERS (the executor
+    /// probe is implemented), and the resulting `Migration` carries the stamped
+    /// `existence_guard` probe with the right variant/fields. RED on the pre-Part-B
+    /// code, which REFUSED the lower with `ExistenceGuardNotYetSupported`.
     #[test]
-    fn existence_guard_is_refused_fail_closed_at_lower() {
+    fn existence_guard_lowers_and_stamps_probe() {
         let mut ir = create_table_ir(
             "t",
             vec![TIrColumn {
@@ -2859,11 +3055,24 @@ mod tests {
             *existence_guard = Some(crate::ir::ExistenceGuard::IfNotExists);
         }
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
-        let err = author.lower(&ir, &LiveSchema::default()).unwrap_err();
-        assert!(
-            matches!(err, IrLowerError::ExistenceGuardNotYetSupported(_)),
-            "a guarded op must be refused fail-closed at lower, got: {err:?}"
-        );
+        let migs = author.lower(&ir, &LiveSchema::default()).expect("guarded op now lowers");
+        // The createTable lowers to (at least) one DDL Migration; a unit must carry
+        // the stamped Table probe with the right schema/table/direction.
+        let probe = migs
+            .iter()
+            .find_map(|m| m.existence_guard.clone())
+            .expect("a guarded createTable must stamp a probe on its Migration");
+        match probe {
+            crate::guard_probe::GuardProbe::Table { table, direction, expect_columns, .. } => {
+                assert_eq!(table, "t");
+                assert_eq!(direction, crate::guard_probe::GuardDir::IfNotExists);
+                assert!(
+                    expect_columns.iter().any(|(n, _, _)| n == "x"),
+                    "the table probe must carry the declared column shape, got {expect_columns:?}"
+                );
+            }
+            other => panic!("expected a Table probe, got {other:?}"),
+        }
     }
 
     // §6.1.1 — the byte-identity invariant: for a MULTI-statement op (a

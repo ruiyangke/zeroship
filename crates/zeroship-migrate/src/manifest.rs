@@ -321,6 +321,7 @@ mod tests {
             depends_on,
             supersedes: Vec::new(),
             preconditions: Vec::new(),
+            existence_guard: None,
         }
     }
 

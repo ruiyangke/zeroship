@@ -487,6 +487,7 @@ pub async fn submit_migration(
         depends_on: submission.depends_on.clone(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     };
 
     // ---- 3. LINT (advisories carried through; never gate) ----
