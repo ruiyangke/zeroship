@@ -195,7 +195,7 @@ async fn apply(
 }
 
 fn col(name: &str, ty: ColType) -> IrColumn {
-    IrColumn { name: name.into(), ty, nullable: Some(true), default: None, unique: None }
+    IrColumn { name: name.into(), ty, nullable: Some(true), default: None, unique: None, id_prefix: None, vector_metric: None }
 }
 
 /// Extract the `ExistenceGuardDrift` from a deep `EngineError`, or panic.
@@ -391,8 +391,7 @@ async fn create_table_ifnotexists_fresh_creates_all_secondary_indexes_and_reruns
             ty: ColType::String,
             nullable: Some(true),
             default: None,
-            unique: Some(true),
-        }],
+            unique: Some(true), id_prefix: None, vector_metric: None }],
         constraints: vec![],
         indexes: vec![],
         schema: None,
@@ -588,8 +587,7 @@ async fn create_table_ifnotexists_deferred_fk_reruns_idempotent() {
             ty: ColType::Ref { references: "people".into() },
             nullable: Some(true),
             default: None,
-            unique: None,
-        }],
+            unique: None, id_prefix: None, vector_metric: None }],
         constraints: vec![],
         indexes: vec![],
         schema: None,

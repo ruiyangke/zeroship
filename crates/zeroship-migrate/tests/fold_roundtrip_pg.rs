@@ -407,3 +407,70 @@ async fn fold_equals_introspect_pg() {
 
     teardown(&conn, &cfg).await;
 }
+
+/// **Migration-first P2a — the fold-and-RECOVER seam over REAL PG.** Apply a
+/// createTable that authors an explicit `t.id({ prefix })` PK (the §2b
+/// declared-only facet), then assert:
+///   (1) `fold_ops` STILL agrees with live introspection (the `id`→descriptor-`"id"`
+///       mapping FOLDS into the system PK — it does NOT create a phantom second
+///       column, so the structural round-trip stays clean on real PG); and
+///   (2) `fold_to_field_defs` RECOVERS the prefix from the applied shape (the §2b
+///       carried IR field).
+///
+/// This is the faithful (real-runtime + real-PG) regression for the P2a `id_prefix`
+/// carry: it is RED pre-change — the carried IR field did not exist, and the
+/// explicit `id` createTable would have been REJECTED as a second `id` column by
+/// the shared builder before the §2b descriptor mapping. (The CHECK-lift
+/// enum/min/max recovery is covered by the NO-DB fold unit tests: a CHECK
+/// constraint's Expr→SQL lowering is a deferred wave, so a CHECK-bearing createTable
+/// cannot yet be APPLIED through the real PG pipeline.)
+#[compio::test]
+async fn fold_recovers_facets_pg() {
+    if !require_db() {
+        eprintln!("SKIP fold_recovers_facets_pg (MIGRATE_REQUIRE_DB unset)");
+        return;
+    }
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+
+    // A createTable authoring an explicit `t.id({prefix})` PK. (No vector column —
+    // pgvector is not guaranteed in the bare test DB; the vector_metric recovery is
+    // covered by the NO-DB fold unit test.)
+    let posts = r#"{"ir_version":1,"name":"create_posts","ops":[
+        {"op":"createTable","name":"posts","columns":[
+            {"name":"id","type":"uuid","nullable":false,"id_prefix":"post"},
+            {"name":"title","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    let ops = apply_doc(&conn, &cfg, posts, &registry(&[]), Approval::None).await;
+
+    // (1) `fold_ops` still agrees with live introspection — the explicit `id`
+    //     createTable FOLDED into the system PK (no phantom second column).
+    let live = snapshot_schema(&conn, &cfg.project_schema)
+        .await
+        .expect("introspect posts");
+    let folded =
+        fold_ops(&ops, SqlDialect::Postgres, &cfg.project_schema).expect("fold posts offline");
+    // The live table really did get a single `id` PK column (not two) — checked
+    // BEFORE the canonicalize move consumes `live`.
+    let id_cols = live.tables["posts"].columns.iter().filter(|c| c.name == "id").count();
+    assert_eq!(id_cols, 1, "exactly ONE id column (the prefix folds into the system PK)");
+    assert_eq!(
+        canonicalize(folded),
+        canonicalize(live),
+        "an explicit t.id({{prefix}}) createTable folds into the system PK and round-trips"
+    );
+
+    // (2) The recovery seam lifts the declared-only prefix from the applied shape.
+    let defs = zeroship_migrate::fold_to_field_defs(&ops, SqlDialect::Postgres, &cfg.project_schema)
+        .expect("reconstruct posts FieldDefs");
+    let posts_def = &defs["posts"];
+    assert_eq!(
+        posts_def["id"].get("idPrefix").and_then(|v| v.as_str()),
+        Some("post"),
+        "the typed-id prefix is recovered onto the reconstructed FieldDef: {posts_def}"
+    );
+
+    teardown(&conn, &cfg).await;
+}

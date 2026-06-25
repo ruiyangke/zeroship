@@ -517,8 +517,7 @@ fn nested_ir_column_index_constraint_omit_absent_optionals() {
         ty: ColType::Uuid,
         nullable: None,
         default: None,
-        unique: None,
-    };
+        unique: None, id_prefix: None, vector_metric: None };
     let cv = serde_json::to_value(&col).unwrap();
     let cobj = cv.as_object().unwrap();
     for absent in ["nullable", "default", "unique"] {

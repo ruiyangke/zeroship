@@ -367,6 +367,44 @@ pub enum IrDefault {
     },
 }
 
+/// The CLOSED pgvector distance-metric lexicon (P2a §4). A `t.vector(n, { metric })`
+/// column carries one of these; it drives the ivfflat/hnsw operator class
+/// (`vector_cosine_ops` / `vector_l2_ops` / `vector_ip_ops`). A CLOSED enum — like
+/// every other IR token-set — so serde REJECTS an out-of-set metric at DESERIALIZE
+/// (a hand-crafted `.ir.json` cannot smuggle an arbitrary metric string into the
+/// opclass render seam). Camel-cased on the wire (`"cosine"`, `"l2"`,
+/// `"innerProduct"`), matching the SDK `vectorMetric` spelling
+/// (`declarative::vector_opclass`).
+///
+/// **Migration-first P2a (§2b):** the search metric is a DECLARED-ONLY hint DB
+/// introspection cannot recover (pgvector encodes dims, not the search metric; the
+/// opclass is an index choice not reliably reversible to the declared metric), so
+/// — unlike every recoverable facet — it is CARRIED on the column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum VectorMetric {
+    /// Cosine distance (`vector_cosine_ops`).
+    Cosine,
+    /// L2 / Euclidean distance (`vector_l2_ops`).
+    L2,
+    /// Inner product (`vector_ip_ops`).
+    InnerProduct,
+}
+
+impl VectorMetric {
+    /// The SDK `vectorMetric` token (the camelCase spelling
+    /// [`crate::declarative::vector_opclass`] maps to the ivfflat/hnsw opclass).
+    /// Kept in lock-step with the `serde(rename_all = "camelCase")` wire image.
+    #[must_use]
+    pub fn as_token(self) -> &'static str {
+        match self {
+            VectorMetric::Cosine => "cosine",
+            VectorMetric::L2 => "l2",
+            VectorMetric::InnerProduct => "innerProduct",
+        }
+    }
+}
+
 /// A column definition inside a `createTable` / `addColumn` op.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -385,6 +423,25 @@ pub struct IrColumn {
     /// Whether the column carries a single-column UNIQUE.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unique: Option<bool>,
+    /// **Migration-first P2a (§2b)** — the `t.id({ prefix })` typed-id prefix, a
+    /// DECLARED-ONLY hint DB introspection cannot recover (the minted
+    /// `usr_<base62>` id is opaque text in the catalog; the prefix is a mint-time
+    /// input, not a stored column attribute). Carried so gen-types — and the
+    /// runtime, once P5 deletes the declared-schema cache — keep the typed-id brand.
+    /// Default-absent + `skip_serializing_if` so a column that declares no prefix is
+    /// BYTE-IDENTICAL on the wire and in the checksum to the pre-P2a image. Bounded
+    /// at validate-time ([`crate::validate`]) to the typed_id charset/length + the
+    /// reserved-prefix deny-list (a hand-crafted `.ir.json` is the threat model).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id_prefix: Option<String>,
+    /// **Migration-first P2a (§2b)** — the `t.vector(n, { metric })` distance
+    /// metric, the other DECLARED-ONLY hint introspection cannot recover. Bounded
+    /// STRUCTURALLY by the closed [`VectorMetric`] enum (serde rejects an out-of-set
+    /// metric at deserialize); the validator additionally asserts it co-occurs only
+    /// with a [`ColType::Vector`] column. Default-absent + `skip_serializing_if`, so
+    /// checksum-neutral for a non-vector / metric-less column.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_metric: Option<VectorMetric>,
 }
 
 /// The CLOSED referential-action lexicon for a FOREIGN KEY's `ON DELETE` /
@@ -1692,6 +1749,89 @@ mod tests {
             of_ir_for(&with_hint).as_str(),
             of_ir_for(&without_hint).as_str(),
             "the advisory `.checksum` hint must NOT participate in Checksum::of_ir"
+        );
+    }
+
+    // ── Migration-first P2a — the new optional IrColumn facets are checksum-NEUTRAL
+    //    for a column that declares neither (§4). An absent `id_prefix` /
+    //    `vector_metric` must contribute ZERO bytes (`skip_serializing_if`), so a
+    //    plain `t.text()` column's canonical bytes + of_ir are BYTE-IDENTICAL to the
+    //    pre-P2a image. This test FAILS the day the fields lose `skip_serializing_if`
+    //    (they would then serialize as `"idPrefix":null`, perturbing every checksum).
+
+    fn text_create_table_op() -> Op {
+        Op::CreateTable {
+            name: "notes".into(),
+            columns: vec![IrColumn {
+                name: "body".into(),
+                ty: ColType::Text,
+                nullable: None,
+                default: None,
+                unique: None,
+                // The new P2a facets, both ABSENT (a plain `t.text()` column).
+                id_prefix: None,
+                vector_metric: None,
+            }],
+            constraints: vec![],
+            indexes: vec![],
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    #[test]
+    fn p2a_absent_facets_serialize_to_zero_bytes() {
+        // The serialized column carries NEITHER key — an absent optional is OMITTED
+        // (not `null`), the precondition the byte-identity rests on.
+        let op = text_create_table_op();
+        let json = serde_json::to_string(&op).unwrap();
+        assert!(
+            !json.contains("idPrefix"),
+            "an absent id_prefix must NOT appear on the wire: {json}"
+        );
+        assert!(
+            !json.contains("vectorMetric"),
+            "an absent vector_metric must NOT appear on the wire: {json}"
+        );
+    }
+
+    #[test]
+    fn p2a_text_column_canonical_bytes_byte_identical_to_pre_p2a() {
+        use crate::migration::{Checksum, MigrationFlags};
+        // BYTE-IDENTITY: the canonical image of the typed `IrColumn`-with-None-facets
+        // createTable must equal the canonical image of an INDEPENDENTLY hand-built
+        // JSON Op that has NO idPrefix/vectorMetric keys at all — the "pre-P2a" wire
+        // shape. Because each new field is `skip_serializing_if`, the two serialize
+        // identically; this fails the day the fields lose that attribute (they would
+        // then add `"idPrefix":null`, breaking byte-identity).
+        let ops = vec![text_create_table_op()];
+        let typed_bytes = CanonicalOpList(&ops).canonical_bytes();
+
+        // The pre-P2a wire image: a createTable whose column object has exactly
+        // `{ name, type }` — no facet keys. Round-trip it through the SAME serde Op
+        // so the JCS encoding path is identical.
+        let pre_p2a_op: Op = serde_json::from_value(serde_json::json!({
+            "op": "createTable",
+            "name": "notes",
+            "columns": [ { "name": "body", "type": "text" } ],
+        }))
+        .unwrap();
+        let pre_bytes = CanonicalOpList(std::slice::from_ref(&pre_p2a_op)).canonical_bytes();
+
+        assert_eq!(
+            typed_bytes, pre_bytes,
+            "an absent id_prefix/vector_metric must contribute ZERO bytes — the typed \
+             column and the pre-P2a wire image must be canonical-byte-identical"
+        );
+        let csum = |o: &[Op]| {
+            Checksum::of_ir(&CanonicalOpList(o), &MigrationFlags::default(), "", &[], &[], &[])
+                .as_str()
+                .to_string()
+        };
+        assert_eq!(
+            csum(&ops),
+            csum(std::slice::from_ref(&pre_p2a_op)),
+            "Checksum::of_ir is therefore byte-identical to the pre-P2a image too"
         );
     }
 

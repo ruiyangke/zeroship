@@ -134,8 +134,7 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
                 ty: ColType::Text, // the e2e tables use text fields
                 nullable: Some(!f.required),
                 default: None,
-                unique: None,
-            })
+                unique: None, id_prefix: None, vector_metric: None })
             .collect();
         let ir = MigrationIr {
             ir_version: 1,
@@ -311,8 +310,7 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
                     ty: ColType::Int,
                     nullable: Some(false),
                     default: None,
-                    unique: None,
-                }],
+                    unique: None, id_prefix: None, vector_metric: None }],
                 constraints: vec![],
                 indexes: vec![],
                 schema: None,
