@@ -597,7 +597,7 @@ fn data_transforming_facet(def: &serde_json::Value) -> Option<&'static str> {
     None
 }
 
-pub(crate) fn descriptor_to_sdk_schema(d: &CollectionDescriptor) -> serde_json::Value {
+pub fn descriptor_to_sdk_schema(d: &CollectionDescriptor) -> serde_json::Value {
     let mut schema = serde_json::Map::new();
     for f in &d.fields {
         // Start from the goodies bridge (`type`, vector*, encrypted, mask,

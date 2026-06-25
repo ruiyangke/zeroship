@@ -95,6 +95,27 @@ enum Command {
         #[arg(long, default_value = "app_local")]
         owner_app: String,
     },
+    /// **Migration-first P2b** — emit the typed `env.db` surface FROM the migration
+    /// set (migrations are the source of truth; types are generated from the fold).
+    /// Writes `schema.runtime.json` (the RuntimeSchemaDescriptor) + `env.db.d.ts`
+    /// (a generated ambient `@zeroship/db` `t.*()` schema) into `--out`.
+    GenTypes {
+        /// The migrations directory holding the committed `.ir.json` set.
+        #[arg(long, default_value = "./migrations")]
+        dir: PathBuf,
+        /// The output directory for the generated artifacts.
+        #[arg(long, default_value = "./generated")]
+        out: PathBuf,
+        /// CI gate: regenerate in-memory and DIFF against the committed artifacts;
+        /// exit non-zero on drift. No file is written.
+        #[arg(long)]
+        check: bool,
+        /// Treat the migration set as owner-app-scoped (reserved; the fold is
+        /// owner-agnostic today, so this flag is accepted for forward-compatibility
+        /// with the project-union phase and does not change the output).
+        #[arg(long)]
+        owner_app: bool,
+    },
     /// Generate a versioned op.* migration by diffing a `schema.js` (the
     /// `@zeroship/db` `t.*` DSL) against the live database (deliverable D).
     Generate {
@@ -185,6 +206,12 @@ async fn main() -> ExitCode {
             applied,
             owner_app,
         } => cmd_verify(&dir, &applied, &owner_app),
+        Command::GenTypes {
+            dir,
+            out,
+            check,
+            owner_app,
+        } => cmd_gen_types(&dir, &out, check, owner_app),
         Command::Generate {
             schema,
             database_url,
@@ -361,6 +388,54 @@ fn cmd_verify(dir: &Path, applied: &str, owner_app: &str) -> ExitCode {
         applied_set.len()
     );
     ExitCode::SUCCESS
+}
+
+/// **Migration-first P2b** — `gen-types`: emit (or `--check`) the typed `env.db`
+/// surface from the committed `.ir.json` migration set. The `--project-schema` the
+/// fold embeds in FK definitions is irrelevant to the recovered FieldDef map, so a
+/// constant `public` is used (gen-types is dialect/schema-neutral for type recovery).
+fn cmd_gen_types(dir: &Path, out: &Path, check: bool, _owner_app: bool) -> ExitCode {
+    let ops = match zeroship_migrate_js::load_dir_ops(dir) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let artifacts = match zeroship_migrate_js::render_artifacts(&ops, "public") {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if check {
+        match zeroship_migrate_js::check_artifacts(out, &artifacts) {
+            Ok(()) => {
+                println!("gen-types --check: OK (env.db.d.ts + schema.runtime.json track the migrations)");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            }
+        }
+    } else {
+        match zeroship_migrate_js::write_artifacts(out, &artifacts) {
+            Ok(()) => {
+                println!(
+                    "gen-types: wrote {} + {}",
+                    out.join(zeroship_migrate_js::RUNTIME_DESCRIPTOR_FILE).display(),
+                    out.join(zeroship_migrate_js::ENV_DTS_FILE).display()
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            }
+        }
+    }
 }
 
 /// §5.4 collision guard (shared by `generate`): without `--force`, refuse to clobber

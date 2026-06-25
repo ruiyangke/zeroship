@@ -6928,6 +6928,7 @@ dependencies = [
  "flume 0.11.1",
  "futures",
  "hex",
+ "indexmap 2.14.0",
  "pg_query",
  "rusqlite",
  "schemars 1.2.1",

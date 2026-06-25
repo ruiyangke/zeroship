@@ -1,0 +1,186 @@
+//! **Migration-first P2b §6(a) — the `.d.ts` golden over the FULL type matrix.**
+//!
+//! Mirrors `generate_all_types_parity.rs`: author an op stream covering the full
+//! portable type/facet matrix (text/int/bigInt/float/bool/json/timestamp/uuid/bytes/
+//! numeric + ref + vector + encrypted + id-with-prefix + an enum CHECK + min/max),
+//! generate the `env.db.d.ts`, and assert the emitted file contains the expected
+//! `@zeroship/db` `t.*()` builder chain per column. The richer reverse renderer
+//! (vs `scaffold.rs::render_t_for`, which TODO-stubs goodies) is the thing under test.
+//!
+//! WHY this is RED pre-P2b: the gen-types emitter + the `t.*()` reverse renderer did
+//! not exist before P2b — there was no `.d.ts` artifact to assert over, and the
+//! lossy scaffold renderer emits `t.text() /* TODO */` for every goodie.
+//!
+//! FAITHFUL: the op stream is folded through the REAL `fold_to_field_defs` seam and
+//! the REAL `render_artifacts` emitter — no stubs.
+
+use zeroship_migrate::expr::{BinaryOp, Expr};
+use zeroship_migrate::ir::{
+    ColType, IrColumn, IrConstraint, IrConstraintKind, IrScalar, Op, RefAction, VectorMetric,
+};
+use zeroship_migrate_js::render_artifacts;
+
+/// A non-required column of the given type (the `t.*` default-nullable image).
+fn col(name: &str, ty: ColType) -> IrColumn {
+    IrColumn {
+        name: name.into(),
+        ty,
+        nullable: None,
+        default: None,
+        unique: None,
+        id_prefix: None,
+        vector_metric: None,
+    }
+}
+
+/// The op stream covering the full type/facet matrix in one `gadgets` table.
+fn all_types_ops() -> Vec<Op> {
+    let id = IrColumn {
+        name: "id".into(),
+        ty: ColType::Uuid,
+        nullable: Some(false),
+        default: None,
+        unique: None,
+        id_prefix: Some("gdt".into()),
+        vector_metric: None,
+    };
+    let embedding = IrColumn {
+        name: "embedding".into(),
+        ty: ColType::Vector { vector: 768 },
+        nullable: Some(true),
+        default: None,
+        unique: None,
+        id_prefix: None,
+        vector_metric: Some(VectorMetric::L2),
+    };
+    let columns = vec![
+        id,
+        col("c_text", ColType::Text),
+        col("c_int", ColType::Int),
+        col("c_bigint", ColType::BigInt),
+        col("c_float", ColType::Float),
+        col("c_bool", ColType::Bool),
+        col("c_json", ColType::Json),
+        col("c_ts", ColType::Timestamp),
+        col("c_bytes", ColType::Bytea),
+        col("c_num", ColType::Decimal { precision: 38, scale: 9 }),
+        col("owner", ColType::Ref { references: "users".into() }),
+        col("secret", ColType::Encrypted { of: Box::new(ColType::Text) }),
+        embedding,
+        col("age", ColType::Int),
+        col("status", ColType::Text),
+    ];
+    // age >= 0 AND age <= 120  → .min(0).max(120)
+    let age_range = Expr::BinOp {
+        op: BinaryOp::And,
+        lhs: Box::new(Expr::BinOp {
+            op: BinaryOp::Ge,
+            lhs: Box::new(Expr::col("age")),
+            rhs: Box::new(Expr::lit(IrScalar::Int(0))),
+        }),
+        rhs: Box::new(Expr::BinOp {
+            op: BinaryOp::Le,
+            lhs: Box::new(Expr::col("age")),
+            rhs: Box::new(Expr::lit(IrScalar::Int(120))),
+        }),
+    };
+    // status = 'on' OR status = 'off'  → .enum("on", "off")
+    let status_enum = Expr::BinOp {
+        op: BinaryOp::Or,
+        lhs: Box::new(Expr::BinOp {
+            op: BinaryOp::Eq,
+            lhs: Box::new(Expr::col("status")),
+            rhs: Box::new(Expr::lit(IrScalar::Str("on".into()))),
+        }),
+        rhs: Box::new(Expr::BinOp {
+            op: BinaryOp::Eq,
+            lhs: Box::new(Expr::col("status")),
+            rhs: Box::new(Expr::lit(IrScalar::Str("off".into()))),
+        }),
+    };
+    // The FK constraint carrying the ref POLICY (so onDelete round-trips).
+    let fk = IrConstraint {
+        name: Some("gadgets_owner_fkey".into()),
+        kind: IrConstraintKind::Fk {
+            columns: vec!["owner".into()],
+            references_table: "users".into(),
+            references_columns: vec!["id".into()],
+            on_delete: Some(RefAction::Cascade),
+            on_update: None,
+        },
+    };
+    vec![Op::CreateTable {
+        name: "gadgets".into(),
+        columns,
+        constraints: vec![
+            fk,
+            IrConstraint { name: Some("gadgets_age_range_check".into()), kind: IrConstraintKind::Check { expr: age_range } },
+            IrConstraint { name: Some("gadgets_status_enum_check".into()), kind: IrConstraintKind::Check { expr: status_enum } },
+        ],
+        indexes: Vec::new(),
+        schema: None,
+        existence_guard: None,
+    }]
+}
+
+#[test]
+fn env_dts_golden_covers_full_type_matrix() {
+    let ops = all_types_ops();
+    let artifacts = render_artifacts(&ops, "public").expect("render gen-types artifacts");
+    let dts = &artifacts.env_dts;
+
+    // The generated file imports the SDK `t` + `Db` and binds the `zeroship`
+    // module's `Env.db` to `Db<typeof schema>` (reusing the inference chain).
+    assert!(dts.contains("import { t, type Db } from \"@zeroship/db\";"), "imports the SDK t + Db: {dts}");
+    assert!(dts.contains("const schema = {"), "emits a const schema object");
+    assert!(dts.contains("as const;"), "the schema is `as const` (narrows enums to unions)");
+    assert!(
+        dts.contains("declare module \"zeroship\" {") && dts.contains("db: Db<typeof schema>;"),
+        "augments the zeroship Env with Db<typeof schema>: {dts}"
+    );
+
+    // Each column's expected `t.*()` chain. These are RICHER than the lossy scaffold
+    // renderer (which TODO-stubs every goodie).
+    for chain in [
+        "id: t.id(\"gdt\")",                          // typed-id + prefix
+        "c_text: t.string()",
+        "c_int: t.number()",                          // op.* int → SDK numeric builder
+        "c_bigint: t.number()",
+        "c_float: t.number()",
+        "c_bool: t.boolean()",
+        "c_json: t.json()",
+        "c_ts: t.timestamp()",
+        "c_bytes: t.bytes()",
+        "c_num: t.number()",
+        "owner: t.ref(\"users\", { onDelete: \"cascade\"",  // ref + recovered FK policy
+        "secret: t.encrypted()",                      // encrypted (default mode)
+        "embedding: t.vector(768, { metric: \"l2\" })", // vector + recovered metric
+        "age: t.number().min(0).max(120)",            // min/max lifted from the CHECK
+        "status: t.string().enum(\"on\", \"off\")",   // enum lifted from the CHECK
+    ] {
+        assert!(
+            dts.contains(chain),
+            "the emitted env.db.d.ts must render the `{chain}` chain; got:\n{dts}"
+        );
+    }
+}
+
+#[test]
+fn runtime_descriptor_is_the_wire_fielddef_map() {
+    let ops = all_types_ops();
+    let artifacts = render_artifacts(&ops, "public").expect("render");
+    let value: serde_json::Value =
+        serde_json::from_str(&artifacts.runtime_descriptor).expect("runtime descriptor is JSON");
+    let gadgets = value.get("gadgets").expect("gadgets collection present");
+    // A spot-check that the RuntimeSchemaDescriptor is the per-column wire-FieldDef
+    // map (the same shape `normalizeSchema` produces at runtime).
+    assert_eq!(gadgets["id"]["type"], "id");
+    assert_eq!(gadgets["id"]["idPrefix"], "gdt");
+    assert_eq!(gadgets["owner"]["refTarget"], "users");
+    assert_eq!(gadgets["owner"]["onDelete"], "cascade");
+    assert_eq!(gadgets["embedding"]["vectorDims"], 768);
+    assert_eq!(gadgets["embedding"]["vectorMetric"], "l2");
+    assert_eq!(gadgets["age"]["min"], 0.0);
+    assert_eq!(gadgets["age"]["max"], 120.0);
+    assert_eq!(gadgets["status"]["enum"], serde_json::json!(["on", "off"]));
+}

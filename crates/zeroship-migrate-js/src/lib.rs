@@ -42,6 +42,7 @@
 
 pub mod build;
 pub mod eval;
+pub mod gen_types;
 pub mod generate;
 pub mod record;
 pub mod recorder_http;
@@ -56,6 +57,10 @@ pub use build::{
     DiscoveredMigration, RecordPath, RecordVia, RecorderClient,
 };
 pub use eval::{eval_schema_to_ir, EvalError};
+pub use gen_types::{
+    check_artifacts, load_dir_ops, render_artifacts, write_artifacts, GenTypesError,
+    GeneratedArtifacts, ENV_DTS_FILE, RUNTIME_DESCRIPTOR_FILE,
+};
 pub use generate::{generate_migration, GenerateError, GenerateOutcome};
 pub use scaffold::{
     generate_ops, scaffold_new_ts, timestamp_14, GeneratedMigration, ScaffoldError,

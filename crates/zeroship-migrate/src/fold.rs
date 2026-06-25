@@ -1022,6 +1022,39 @@ fn recover_enum_chain(expr: &crate::expr::Expr) -> Option<(String, Vec<serde_jso
     column.map(|c| (c, values))
 }
 
+/// FK policy recovered from a single-column `IrConstraintKind::Fk` constraint, to
+/// lift onto the matching `ref` column's descriptor (§2a "recover from the applied
+/// FK constraint"). `on_delete`/`on_update` are the camelCase SDK tokens; the
+/// `deferrable` bit is not carried on the Fk constraint, so it is reconstructed as
+/// the op.* applied default (`true`) at lift time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecoveredFk {
+    /// The single referencing column the policy attaches to.
+    column: String,
+    /// `ON DELETE` policy token (`restrict`/`cascade`/…), if set.
+    on_delete: Option<String>,
+    /// `ON UPDATE` policy token, if set.
+    on_update: Option<String>,
+}
+
+/// Lift the FK policy from a single-column FK constraint. Multi-column FKs (which the
+/// platform never authors for a `t.ref()` — it is always a single `(col) → (id)` FK)
+/// are not projected onto a column descriptor (`None`).
+fn recover_fk_policy(
+    columns: &[String],
+    on_delete: Option<RefAction>,
+    on_update: Option<RefAction>,
+) -> Option<RecoveredFk> {
+    if columns.len() != 1 {
+        return None;
+    }
+    Some(RecoveredFk {
+        column: columns[0].clone(),
+        on_delete: on_delete.map(|a| a.as_token().to_string()),
+        on_update: on_update.map(|a| a.as_token().to_string()),
+    })
+}
+
 /// **Migration-first P2a (§5.1) — the FieldDef reconstruction seam.**
 ///
 /// Replay `ops` into the coherent folded state (fail-closed via [`fold_ops`]),
@@ -1071,33 +1104,55 @@ pub fn fold_to_field_defs(
     //    the recoverable facets (encrypted/vector*/ref/id_prefix) the snapshot
     //    flattens to a `data_type` string. Drops/renames keep it in lock-step with
     //    the folded state — this replay IS the live column set (no snapshot needed).
-    let mut tables: BTreeMap<String, BTreeMap<String, crate::declarative::FieldDescriptor>> =
+    //
+    //    COLUMN ORDER is preserved with `IndexMap` so the reconstructed FieldDef map
+    //    matches the createTable column order (the SAME order `descriptor_to_sdk_schema`
+    //    emits from `descriptor.fields`) — the keystone parity (§6b) compares the
+    //    serialized maps, so a sorted-vs-declared order would false-mismatch.
+    let mut tables: BTreeMap<String, indexmap::IndexMap<String, crate::declarative::FieldDescriptor>> =
         BTreeMap::new();
     // Per-table CHECK facets to lift onto the matching column at the end. A CHECK
     // over an unrecognized shape is left unprojected (the column types as its base
     // scalar) — NOT an error, per §4(a).
     let mut checks: BTreeMap<String, Vec<RecoveredCheck>> = BTreeMap::new();
+    // Per-table recovered FK policy (`onDelete`/`onUpdate`) to lift onto the ref
+    // column at the end. The op.* model carries the FK target on the `ColType::Ref`
+    // column AND the FK POLICY on a separate `IrConstraintKind::Fk` constraint
+    // (mirroring how the lower/differ emit both); the column-only `ir_column_to_field`
+    // recovers the `ref` brand but not the policy, so we lift policy from the Fk
+    // constraint here — the §2a "recover from the applied FK constraint" path.
+    let mut fks: BTreeMap<String, Vec<RecoveredFk>> = BTreeMap::new();
 
     for op in ops {
         match op {
             Op::CreateTable { name, columns, constraints, .. } => {
-                let mut cols: BTreeMap<String, crate::declarative::FieldDescriptor> =
-                    BTreeMap::new();
+                let mut cols: indexmap::IndexMap<String, crate::declarative::FieldDescriptor> =
+                    indexmap::IndexMap::new();
                 for c in columns {
                     cols.insert(c.name.clone(), ir_column_to_field(c));
                 }
                 tables.insert(name.clone(), cols);
                 for c in constraints {
-                    if let IrConstraintKind::Check { expr } = &c.kind {
-                        if let Some(facet) = recover_check_facet(expr) {
-                            checks.entry(name.clone()).or_default().push(facet);
+                    match &c.kind {
+                        IrConstraintKind::Check { expr } => {
+                            if let Some(facet) = recover_check_facet(expr) {
+                                checks.entry(name.clone()).or_default().push(facet);
+                            }
                         }
+                        IrConstraintKind::Fk { columns, on_delete, on_update, .. } => {
+                            if let Some(recovered) = recover_fk_policy(columns, *on_delete, *on_update)
+                            {
+                                fks.entry(name.clone()).or_default().push(recovered);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
             Op::DropTable { table, .. } => {
                 tables.remove(table);
                 checks.remove(table);
+                fks.remove(table);
             }
             Op::AddColumn { table, column, ty, nullable, default, .. } => {
                 if let Some(cols) = tables.get_mut(table) {
@@ -1119,18 +1174,29 @@ pub fn fold_to_field_defs(
             }
             Op::DropColumn { table, column, .. } => {
                 if let Some(cols) = tables.get_mut(table) {
-                    cols.remove(column);
+                    // `shift_remove` preserves the relative order of the surviving
+                    // columns (vs `swap_remove`, which would reorder).
+                    cols.shift_remove(column);
                 }
             }
             Op::RenameColumn { table, from, to, .. } => {
                 if let Some(cols) = tables.get_mut(table) {
-                    if let Some(mut field) = cols.remove(from) {
-                        field.name = to.clone();
-                        cols.insert(to.clone(), field);
+                    // Preserve the renamed column's POSITION: find its index, remove,
+                    // re-insert at the same slot under the new key.
+                    if let Some(idx) = cols.get_index_of(from) {
+                        if let Some((_, mut field)) = cols.shift_remove_index(idx) {
+                            field.name = to.clone();
+                            cols.shift_insert(idx, to.clone(), field);
+                        }
                     }
                 }
             }
             Op::AddConstraint { table, constraint, .. } => {
+                if let IrConstraintKind::Fk { columns, on_delete, on_update, .. } = &constraint.kind {
+                    if let Some(recovered) = recover_fk_policy(columns, *on_delete, *on_update) {
+                        fks.entry(table.clone()).or_default().push(recovered);
+                    }
+                }
                 if let IrConstraintKind::Check { expr } = &constraint.kind {
                     if let Some(facet) = recover_check_facet(expr) {
                         checks.entry(table.clone()).or_default().push(facet);
@@ -1169,6 +1235,20 @@ pub fn fold_to_field_defs(
                 }
             }
         }
+        // Lift the recovered FK policy onto the ref column. `on_delete`/`on_update`
+        // come from the Fk constraint; `deferrable` is recovered as the op.* applied
+        // default (the lower always emits `DEFERRABLE INITIALLY DEFERRED`, so a
+        // folded FK is deferrable-by-construction — `declarative.rs` `f.deferrable
+        // .unwrap_or(true)`), matching the SDK `t.ref()` default.
+        for fk in fks.remove(&table).unwrap_or_default() {
+            if let Some(f) = cols.get_mut(&fk.column) {
+                if f.ty == "ref" {
+                    f.on_delete = fk.on_delete;
+                    f.on_update = fk.on_update;
+                    f.deferrable = Some(true);
+                }
+            }
+        }
         let desc = CollectionDescriptor {
             name: table.clone(),
             owner_app: FOLD_OWNER_APP.to_string(),
@@ -1178,6 +1258,368 @@ pub fn fold_to_field_defs(
         out.insert(table, crate::declarative::descriptor_to_sdk_schema(&desc));
     }
     Ok(out)
+}
+
+// ===========================================================================
+// Migration-first P2b — the KEYSTONE producer: descriptor → op.* `createTable`.
+//
+// `fold_to_field_defs` (above) is the RECOVERY direction (ops → FieldDef map);
+// this is its faithful INVERSE over the authoring surface (descriptor → ops),
+// the structural inverse of `ir_column_to_field` + `recover_check_facet`. It is
+// the producer the §6(b) keystone parity test threads:
+//
+//   author (declarative)         descriptor_to_sdk_schema(descriptor)   ─┐
+//        │                                                               ├─ MUST be byte-identical
+//   descriptors_to_create_ops  → ops → fold_to_field_defs(ops)         ─┘
+//
+// WHY a NEW producer (closing the §6(b) producer gap): the existing
+// `generate_ops` (`scaffold.rs`) derives ops from a `SchemaSnapshot`, whose
+// `ColumnSnapshot.data_type` has already FLATTENED away the declared-only facets
+// (`idPrefix`/`vectorMetric`) and the CHECK-borne facets (`enum`/`min`/`max`) — it
+// even fail-closes on vector/encrypted goodies (`col_type_for_data_type` →
+// `UnsupportedColumnType`) and pins `id_prefix: None`. A snapshot-sourced producer
+// therefore CANNOT round-trip the rich facets; the chain would be lossy. This
+// descriptor-sourced producer threads every facet through, so the author→generate→
+// fold chain is lossless for exactly the facets the SDK type inference consumes.
+// ===========================================================================
+
+/// A structured error from the [`descriptors_to_create_ops`] producer. The only
+/// failure modes are an unmappable type token and an unrepresentable CHECK facet
+/// value (a non-numeric `min`/`max`, an unscalar `enum` member) — fail closed
+/// rather than emit an op whose fold would silently drop the facet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProduceError {
+    /// A descriptor field carried a `type` token with no closed [`ColType`].
+    UnknownType {
+        /// The table.
+        table: String,
+        /// The column.
+        column: String,
+        /// The unmapped token.
+        token: String,
+    },
+    /// A `min`/`max`/`enum` facet value could not be represented as a closed-AST
+    /// `Literal` (e.g. a non-numeric `min`, a `null`/object `enum` member) — the
+    /// CHECK could not be authored faithfully, so the producer refuses rather than
+    /// drop the bound.
+    UnrepresentableFacet {
+        /// The table.
+        table: String,
+        /// The column.
+        column: String,
+        /// Which facet (`min`/`max`/`enum`).
+        facet: &'static str,
+    },
+}
+
+impl std::fmt::Display for ProduceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProduceError::UnknownType { table, column, token } => write!(
+                f,
+                "produce: `{table}.{column}` has unmappable type token `{token}`"
+            ),
+            ProduceError::UnrepresentableFacet { table, column, facet } => write!(
+                f,
+                "produce: `{table}.{column}` has an unrepresentable `{facet}` facet value"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProduceError {}
+
+/// Map a descriptor `(type_token, references?)` back to the closed [`ColType`] — the
+/// structural inverse of [`col_type_to_token`](crate::ir_author). The token-set is the
+/// SDK `FieldDef` spelling the descriptor carries (`ir_column_to_field` produces it).
+///
+/// Canonicalisation note (keystone fidelity): the forward map is many-to-one
+/// (`Int`/`BigInt`→`"int"`, `String`/`Text`/`Uuid`→`"string"`, `Float`/`Decimal`→
+/// `"number"`). This inverse picks the canonical `ColType` whose forward token is the
+/// SAME token, so a descriptor authored with token `t` round-trips to token `t`
+/// (`"int"`→`Int`→`"int"`, `"string"`→`Text`→`"string"`, `"number"`→`Float`→
+/// `"number"`). The fold compares FieldDef maps by these TOKENS, so the round-trip is
+/// byte-identical for the type field.
+fn token_to_col_type(f: &crate::declarative::FieldDescriptor) -> Option<ColType> {
+    let inner = |token: &str| -> Option<ColType> {
+        Some(match token {
+            "string" => ColType::Text,
+            "int" | "integer" => ColType::Int,
+            "bigInt" => ColType::BigInt,
+            "number" | "float" => ColType::Float,
+            "boolean" => ColType::Bool,
+            "json" | "object" | "array" => ColType::Json,
+            "date" | "timestamp" => ColType::Timestamp,
+            "bytes" => ColType::Bytea,
+            "geoPoint" => ColType::GeoPoint,
+            _ => return None,
+        })
+    };
+    match f.ty.as_str() {
+        // `t.id({prefix})` re-declares the system `id` PK as a `uuid` carrying the
+        // prefix; the inverse of `ir_column_to_field`'s `name=="id" && Uuid → "id"`.
+        "id" => Some(ColType::Uuid),
+        // A `ref` column carries the FK target on `references`.
+        "ref" => f.references.clone().map(|references| ColType::Ref { references }),
+        // A `vector(N)` column carries dims on `vector_dims`.
+        "vector" => f.vector_dims.map(|d| ColType::Vector { vector: d as u32 }),
+        other => {
+            let base = inner(other)?;
+            // An encrypted column carries the `encrypted` facet PLUS the inner token
+            // as `ty`; wrap the inner ColType (the inverse of `col_type_to_token`'s
+            // `Encrypted{of}` → inner token).
+            if f.encrypted.is_some() {
+                Some(ColType::Encrypted { of: Box::new(base) })
+            } else {
+                Some(base)
+            }
+        }
+    }
+}
+
+/// Build a closed-AST `Literal` from a descriptor's JSON facet value (`enum` member /
+/// `min`/`max` bound), or `None` if the value has no [`crate::ir::IrScalar`] image.
+/// The inverse of [`ir_scalar_to_json`].
+fn json_to_ir_scalar(v: &serde_json::Value) -> Option<crate::ir::IrScalar> {
+    use crate::ir::IrScalar;
+    match v {
+        serde_json::Value::Bool(b) => Some(IrScalar::Bool(*b)),
+        serde_json::Value::String(s) => Some(IrScalar::Str(s.clone())),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Some(IrScalar::Int(i))
+            } else {
+                // A non-integer number is carried as its canonical decimal string,
+                // matching `ir_scalar_as_f64` / `ir_scalar_to_json`'s Decimal arm.
+                n.as_f64().map(|f| IrScalar::Decimal(f.to_string()))
+            }
+        }
+        // `null` / array / object are not scalar facet members.
+        _ => None,
+    }
+}
+
+/// A numeric bound (`min`/`max`) as a closed-AST `Literal`, or `None` for a value
+/// `recover_check_facet` would not lift back (non-numeric). Mirrors
+/// [`ir_scalar_as_f64`]'s numeric-only domain so the CHECK round-trips.
+fn f64_to_ir_literal(n: f64) -> crate::ir::IrScalar {
+    use crate::ir::IrScalar;
+    // Prefer the exact integer image (the `Int` arm `recover_check_facet` lifts
+    // losslessly) when the bound is integral and JS-safe; else carry the decimal.
+    if n.fract() == 0.0 && n.abs() < 9.007_199_254_740_992e15 {
+        IrScalar::Int(n as i64)
+    } else {
+        IrScalar::Decimal(n.to_string())
+    }
+}
+
+/// Build the per-column CHECK constraints (`enum` membership + `min`/`max` range) a
+/// descriptor field declares, as closed-AST `Expr`s in EXACTLY the shapes
+/// [`recover_check_facet`] recognises:
+/// - `min`+`max` → `col >= min AND col <= max`;
+/// - `min`-only → `col >= min`;  `max`-only → `col <= max`;
+/// - `enum` → `col = v` (singleton) / left-folded `col = v1 OR col = v2 OR …`.
+///
+/// Returns the constraints in a stable order (range before enum) so the produced op
+/// is deterministic.
+fn facet_check_constraints(
+    table: &str,
+    f: &crate::declarative::FieldDescriptor,
+) -> Result<Vec<IrConstraint>, ProduceError> {
+    use crate::expr::{BinaryOp, Expr};
+    let mut out = Vec::new();
+    let col = || Expr::col(f.name.clone());
+
+    // Range: min/max → `col >= min [AND col <= max]`.
+    let range_expr = match (f.min, f.max) {
+        (Some(min), Some(max)) => Some(Expr::BinOp {
+            op: BinaryOp::And,
+            lhs: Box::new(Expr::BinOp {
+                op: BinaryOp::Ge,
+                lhs: Box::new(col()),
+                rhs: Box::new(Expr::lit(f64_to_ir_literal(min))),
+            }),
+            rhs: Box::new(Expr::BinOp {
+                op: BinaryOp::Le,
+                lhs: Box::new(col()),
+                rhs: Box::new(Expr::lit(f64_to_ir_literal(max))),
+            }),
+        }),
+        (Some(min), None) => Some(Expr::BinOp {
+            op: BinaryOp::Ge,
+            lhs: Box::new(col()),
+            rhs: Box::new(Expr::lit(f64_to_ir_literal(min))),
+        }),
+        (None, Some(max)) => Some(Expr::BinOp {
+            op: BinaryOp::Le,
+            lhs: Box::new(col()),
+            rhs: Box::new(Expr::lit(f64_to_ir_literal(max))),
+        }),
+        (None, None) => None,
+    };
+    if let Some(expr) = range_expr {
+        out.push(IrConstraint {
+            name: Some(format!("{table}_{}_range_check", f.name)),
+            kind: IrConstraintKind::Check { expr },
+        });
+    }
+
+    // Enum: `col = v` singleton / left-folded `col = v1 OR col = v2 OR …`.
+    if let Some(values) = &f.enum_values {
+        if !values.is_empty() {
+            let mut leaves = Vec::with_capacity(values.len());
+            for v in values {
+                let scalar = json_to_ir_scalar(v).ok_or(ProduceError::UnrepresentableFacet {
+                    table: table.to_string(),
+                    column: f.name.clone(),
+                    facet: "enum",
+                })?;
+                leaves.push(Expr::BinOp {
+                    op: BinaryOp::Eq,
+                    lhs: Box::new(col()),
+                    rhs: Box::new(Expr::lit(scalar)),
+                });
+            }
+            // Left-fold the leaves into the OR chain `recover_enum_chain` walks.
+            let mut iter = leaves.into_iter();
+            let mut expr = iter.next().expect("non-empty (values not empty)");
+            for leaf in iter {
+                expr = Expr::BinOp {
+                    op: BinaryOp::Or,
+                    lhs: Box::new(expr),
+                    rhs: Box::new(leaf),
+                };
+            }
+            out.push(IrConstraint {
+                name: Some(format!("{table}_{}_enum_check", f.name)),
+                kind: IrConstraintKind::Check { expr },
+            });
+        }
+    }
+
+    Ok(out)
+}
+
+/// **Migration-first P2b (§6b) — the KEYSTONE producer.** Build the op.*
+/// `createTable` ops a `Vec<CollectionDescriptor>` (the declarative authoring shape)
+/// generates, threading EVERY facet the SDK type inference consumes:
+///
+/// - **type / ref / vector dims / encrypted** — onto the [`IrColumn`]'s [`ColType`]
+///   (the inverse of [`col_type_to_token`](crate::ir_author));
+/// - **idPrefix / vectorMetric** — onto the §2b carried [`IrColumn`] fields;
+/// - **required / unique** — onto `nullable` / `unique`;
+/// - **default** — onto `default` (a typed literal);
+/// - **enum / min / max** — as CHECK constraints in the closed-AST shapes
+///   [`recover_check_facet`] lifts back ([`facet_check_constraints`]).
+///
+/// One `Op::CreateTable` per descriptor, in descriptor order. The columns are the
+/// descriptor's USER fields ONLY — matching what `fold_to_field_defs` reconstructs
+/// (no system-field injection on either side), so the §6(b) keystone compares the
+/// SAME column set on both sides.
+///
+/// # Errors
+/// [`ProduceError`] for an unmappable type token or an unrepresentable CHECK facet
+/// value — fail closed, never an op whose fold would silently drop the facet.
+pub fn descriptors_to_create_ops(
+    descriptors: &[crate::declarative::CollectionDescriptor],
+) -> Result<Vec<Op>, ProduceError> {
+    let mut ops = Vec::with_capacity(descriptors.len());
+    for d in descriptors {
+        let mut columns = Vec::with_capacity(d.fields.len());
+        let mut constraints = Vec::new();
+        for f in &d.fields {
+            let ty = token_to_col_type(f).ok_or_else(|| ProduceError::UnknownType {
+                table: d.name.clone(),
+                column: f.name.clone(),
+                token: f.ty.clone(),
+            })?;
+            // `required` ⇒ `nullable: Some(false)`; the descriptor models the
+            // inverse of `nullable`, matching `ir_column_to_field`'s
+            // `required = !nullable.unwrap_or(true)`. A non-required field stays
+            // `None` (the `t.*` default-nullable image), so the wire bytes match.
+            let nullable = if f.required { Some(false) } else { None };
+            let default = f.default.as_ref().map(|v| crate::ir::IrDefault::Literal {
+                value: json_value_to_ir_scalar_default(v),
+            });
+            let vector_metric = f
+                .vector_metric
+                .as_deref()
+                .and_then(parse_vector_metric_token);
+            columns.push(IrColumn {
+                name: f.name.clone(),
+                ty,
+                nullable,
+                default,
+                unique: if f.unique { Some(true) } else { None },
+                id_prefix: f.id_prefix.clone(),
+                vector_metric,
+            });
+            // A `ref` column carries the FK target on its `ColType::Ref` (the brand)
+            // AND its POLICY on a separate `Fk` constraint — the SAME split the
+            // lower/differ emit, and the shape `fold_to_field_defs` recovers policy
+            // from (`recover_fk_policy`). Emit it so onDelete/onUpdate round-trip.
+            if f.ty == "ref" {
+                if let Some(target) = &f.references {
+                    constraints.push(IrConstraint {
+                        name: Some(format!("{}_{}_fkey", d.name, f.name)),
+                        kind: IrConstraintKind::Fk {
+                            columns: vec![f.name.clone()],
+                            references_table: target.clone(),
+                            references_columns: vec!["id".to_string()],
+                            on_delete: f.on_delete.as_deref().and_then(parse_ref_action),
+                            on_update: f.on_update.as_deref().and_then(parse_ref_action),
+                        },
+                    });
+                }
+            }
+            constraints.extend(facet_check_constraints(&d.name, f)?);
+        }
+        ops.push(Op::CreateTable {
+            name: d.name.clone(),
+            columns,
+            constraints,
+            indexes: Vec::new(),
+            schema: None,
+            existence_guard: None,
+        });
+    }
+    Ok(ops)
+}
+
+/// Parse a descriptor FK-action token (`cascade`/`restrict`/`setNull`/`setDefault`/
+/// `noAction`) back to the closed [`RefAction`]. An out-of-set token yields `None`
+/// (no action emitted — checksum-neutral, the SQL default). Mirrors the SDK's
+/// camelCase `FkAction` spelling.
+fn parse_ref_action(token: &str) -> Option<RefAction> {
+    match token {
+        "cascade" => Some(RefAction::Cascade),
+        "restrict" => Some(RefAction::Restrict),
+        "setNull" => Some(RefAction::SetNull),
+        "setDefault" => Some(RefAction::SetDefault),
+        "noAction" => Some(RefAction::NoAction),
+        _ => None,
+    }
+}
+
+/// Parse a descriptor `vector_metric` token (`cosine`/`l2`/`innerProduct`) back to
+/// the closed [`crate::ir::VectorMetric`] enum. An out-of-set token yields `None`
+/// (the column then carries no metric — the kernel default), never a panic.
+fn parse_vector_metric_token(token: &str) -> Option<crate::ir::VectorMetric> {
+    use crate::ir::VectorMetric;
+    match token {
+        "cosine" => Some(VectorMetric::Cosine),
+        "l2" => Some(VectorMetric::L2),
+        "innerProduct" => Some(VectorMetric::InnerProduct),
+        _ => None,
+    }
+}
+
+/// Map a descriptor `default` JSON value to a closed-AST [`crate::ir::IrScalar`] for an
+/// `IrDefault::Literal`. The inverse of `ir_default_to_value`; a non-scalar default
+/// (array/object/null) maps to `IrScalar::Null` (the SDK never authors those as a
+/// column default, and the keystone fixtures use scalar defaults).
+fn json_value_to_ir_scalar_default(v: &serde_json::Value) -> crate::ir::IrScalar {
+    json_to_ir_scalar(v).unwrap_or(crate::ir::IrScalar::Null)
 }
 
 #[cfg(test)]
@@ -2638,5 +3080,129 @@ mod tests {
              mode is unrepresentable in ColType::Encrypted, so the path is fail-closed by \
              construction, never a wrong-mode sentinel"
         );
+    }
+
+    // ===================================================================
+    // Migration-first P2b — the KEYSTONE producer (`descriptors_to_create_ops`).
+    // RED pre-P2b: the producer did not exist; the FK-constraint + closed-AST CHECK
+    // emission it threads is what makes the author→generate→fold chain lossless.
+    // ===================================================================
+
+    use crate::declarative::{CollectionDescriptor, FieldDescriptor};
+
+    fn descriptor(name: &str, fields: Vec<FieldDescriptor>) -> CollectionDescriptor {
+        CollectionDescriptor {
+            name: name.into(),
+            owner_app: "app_test".into(),
+            fields,
+            indexes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn producer_emits_fk_constraint_with_policy_for_ref_columns() {
+        let d = descriptor(
+            "teams",
+            vec![FieldDescriptor {
+                name: "owner".into(),
+                ty: "ref".into(),
+                references: Some("orgs".into()),
+                on_delete: Some("cascade".into()),
+                on_update: Some("restrict".into()),
+                ..Default::default()
+            }],
+        );
+        let ops = descriptors_to_create_ops(&[d]).unwrap();
+        let Op::CreateTable { constraints, .. } = &ops[0] else {
+            panic!("expected a createTable")
+        };
+        let fk = constraints
+            .iter()
+            .find_map(|c| match &c.kind {
+                IrConstraintKind::Fk { columns, on_delete, on_update, references_table, .. } => {
+                    Some((columns.clone(), *on_delete, *on_update, references_table.clone()))
+                }
+                _ => None,
+            })
+            .expect("the ref column emits an Fk constraint carrying the policy");
+        assert_eq!(fk.0, vec!["owner".to_string()]);
+        assert_eq!(fk.1, Some(RefAction::Cascade));
+        assert_eq!(fk.2, Some(RefAction::Restrict));
+        assert_eq!(fk.3, "orgs");
+    }
+
+    #[test]
+    fn producer_emits_recoverable_check_shapes_for_enum_and_range() {
+        let d = descriptor(
+            "users",
+            vec![
+                FieldDescriptor {
+                    name: "age".into(),
+                    ty: "number".into(),
+                    min: Some(0.0),
+                    max: Some(120.0),
+                    ..Default::default()
+                },
+                FieldDescriptor {
+                    name: "role".into(),
+                    ty: "string".into(),
+                    enum_values: Some(vec!["a".into(), "b".into()]),
+                    ..Default::default()
+                },
+            ],
+        );
+        let ops = descriptors_to_create_ops(&[d]).unwrap();
+        let Op::CreateTable { constraints, .. } = &ops[0] else {
+            panic!("createTable")
+        };
+        // Each emitted CHECK must round-trip through `recover_check_facet` to the
+        // facet that authored it (the keystone bound, asserted at the unit level).
+        let mut recovered_range = false;
+        let mut recovered_enum = false;
+        for c in constraints {
+            if let IrConstraintKind::Check { expr } = &c.kind {
+                match recover_check_facet(expr) {
+                    Some(RecoveredCheck::Range { column, min, max }) if column == "age" => {
+                        assert_eq!(min, Some(0.0));
+                        assert_eq!(max, Some(120.0));
+                        recovered_range = true;
+                    }
+                    Some(RecoveredCheck::Enum { column, values }) if column == "role" => {
+                        assert_eq!(values, vec![serde_json::json!("a"), serde_json::json!("b")]);
+                        recovered_enum = true;
+                    }
+                    other => panic!("unexpected CHECK recovery: {other:?}"),
+                }
+            }
+        }
+        assert!(recovered_range && recovered_enum, "both CHECK shapes round-trip via recover_check_facet");
+    }
+
+    #[test]
+    fn producer_preserves_column_order_through_fold() {
+        // The reconstructed FieldDef map must preserve the descriptor's declared
+        // column order (the keystone compares serialized maps).
+        let d = descriptor(
+            "t",
+            vec![
+                FieldDescriptor { name: "zeta".into(), ty: "string".into(), ..Default::default() },
+                FieldDescriptor { name: "alpha".into(), ty: "string".into(), ..Default::default() },
+                FieldDescriptor { name: "mid".into(), ty: "string".into(), ..Default::default() },
+            ],
+        );
+        let ops = descriptors_to_create_ops(&[d]).unwrap();
+        let defs = fold_to_field_defs(&ops, SqlDialect::Postgres, SCHEMA).unwrap();
+        let keys: Vec<&str> = defs["t"].as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["zeta", "alpha", "mid"], "declared order preserved, not sorted");
+    }
+
+    #[test]
+    fn producer_rejects_unmappable_type_token() {
+        let d = descriptor(
+            "t",
+            vec![FieldDescriptor { name: "x".into(), ty: "no_such_type".into(), ..Default::default() }],
+        );
+        let err = descriptors_to_create_ops(&[d]).unwrap_err();
+        assert!(matches!(err, ProduceError::UnknownType { .. }), "unmappable token fails closed");
     }
 }
