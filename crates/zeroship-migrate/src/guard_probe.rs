@@ -350,15 +350,15 @@ fn decide_table(
                         );
                     }
                     Some(live_col) => {
-                        if let Some(v) = column_shape_divergence(
+                        if let Some(v) = column_shape_divergence(&ExpectColumnShape {
                             table,
-                            &ec.name,
-                            &ec.data_type,
-                            ec.nullable,
-                            &live_col.data_type,
-                            live_col.nullable,
+                            column: &ec.name,
+                            expect_dtype: &ec.data_type,
+                            expect_nullable: ec.nullable,
+                            live_dtype: &live_col.data_type,
+                            live_nullable: live_col.nullable,
                             dialect,
-                        ) {
+                        }) {
                             return v;
                         }
                     }
@@ -422,18 +422,34 @@ fn decide_column(
                     "<absent>",
                 );
             };
-            column_shape_divergence(
+            column_shape_divergence(&ExpectColumnShape {
                 table,
                 column,
-                dtype,
-                *nullable,
-                &live_col.data_type,
-                live_col.nullable,
+                expect_dtype: dtype,
+                expect_nullable: *nullable,
+                live_dtype: &live_col.data_type,
+                live_nullable: live_col.nullable,
                 dialect,
-            )
+            })
             .unwrap_or(GuardVerdict::SatisfiedNoop)
         }
     }
+}
+
+/// The declared-vs-live column shape compare inputs, bundled so the comparison
+/// seam takes one argument instead of eight positional scalars (the two callers —
+/// `decide_table` per declared column, `decide_column` for the stand-alone
+/// addColumn — build it inline). `expect_*` is the declared shape; `live_*` is the
+/// introspected catalog shape; `dialect` selects the compare (raw on PG, canonical
+/// affinity-fold on SQLite).
+struct ExpectColumnShape<'a> {
+    table: &'a str,
+    column: &'a str,
+    expect_dtype: &'a str,
+    expect_nullable: bool,
+    live_dtype: &'a str,
+    live_nullable: bool,
+    dialect: SqlDialect,
 }
 
 /// Compare a declared column shape against the live one. Returns a `FailDrift`
@@ -468,15 +484,16 @@ fn decide_column(
 /// (string→number, `text` vs `real`) still maps to two distinct canonical tokens and
 /// IS a divergence. On PG both sides are the `information_schema` spelling and the raw
 /// compare is exact.
-fn column_shape_divergence(
-    table: &str,
-    column: &str,
-    expect_dtype: &str,
-    expect_nullable: bool,
-    live_dtype: &str,
-    live_nullable: bool,
-    dialect: SqlDialect,
-) -> Option<GuardVerdict> {
+fn column_shape_divergence(shape: &ExpectColumnShape<'_>) -> Option<GuardVerdict> {
+    let ExpectColumnShape {
+        table,
+        column,
+        expect_dtype,
+        expect_nullable,
+        live_dtype,
+        live_nullable,
+        dialect,
+    } = *shape;
     // **F1** — on SQLite, compare the canonical AFFINITY (PG-spelled snapshot folded
     // to the SQLite affinity the emitter would have written, AND the already-SQLite
     // live token folded to the same canonical form). On PG, compare the raw
