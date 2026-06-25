@@ -4550,6 +4550,7 @@ impl DeclarativeAuthor {
         // for ITS object), and a partially-created table (crash between units)
         // re-runs the missing units correctly.
         if let Some(dir) = guard {
+            let sqlite = matches!(self.dialect, SqlDialect::Sqlite);
             mig.existence_guard = Some(crate::guard_probe::GuardProbe::Table {
                 schema: self.project_schema.clone(),
                 table: table.to_string(),
@@ -4557,7 +4558,21 @@ impl DeclarativeAuthor {
                 expect_columns: snapshot
                     .columns
                     .iter()
-                    .map(|c| (c.name.clone(), c.data_type.clone(), c.nullable))
+                    .map(|c| crate::guard_probe::ExpectColumn {
+                        name: c.name.clone(),
+                        data_type: c.data_type.clone(),
+                        nullable: c.nullable,
+                        // **H1** — on SQLite a `text`-affinity column's true SDK facet
+                        // is NOT introspectable (string/date/json/ref all read back as
+                        // `text`), so a TEXT-affinity column cannot be proven equal from
+                        // the catalog. Flag it so the decider fails CLOSED rather than an
+                        // affinity-only noop. The snapshot stores the SQLite affinity
+                        // lowercased (`drift_sql.rs`), so `== "text"` IS the TEXT-affinity
+                        // test; non-TEXT affinities (integer/real/blob) stay provable.
+                        sqlite_text_facet: (sqlite
+                            && c.data_type.eq_ignore_ascii_case("text"))
+                        .then(|| c.data_type.clone()),
+                    })
                     .collect(),
             });
         }

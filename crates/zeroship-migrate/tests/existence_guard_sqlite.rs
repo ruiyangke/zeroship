@@ -149,10 +149,15 @@ async fn add_column_ifnotexists_absent_runs() {
 }
 
 #[compio::test]
-async fn add_column_ifnotexists_present_matching_is_noop() {
-    let p = paths("sq_add_match");
+async fn add_column_ifnotexists_present_text_affinity_match_fails_closed() {
+    // **H1 fail-closed contract** — on SQLite a present TEXT-affinity column's true
+    // SDK facet is NOT introspectable (string/date/json/ref all read back as `text`),
+    // so even a same-token `string`-over-`string` add CANNOT be PROVEN equal from the
+    // catalog. Per the module docstring it fails CLOSED (FailDrift naming data_type)
+    // rather than an affinity-only SatisfiedNoop. (Non-TEXT affinities are provable —
+    // see the integer test below.)
+    let p = paths("sq_add_text_match");
     let be = backend(&p);
-    // Create base table + the column with the SAME shape via an unguarded apply.
     for m in lower(Op::CreateTable {
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
@@ -175,8 +180,6 @@ async fn add_column_ifnotexists_present_matching_is_noop() {
         apply_one(&be, &m).await.expect("add the column unguarded");
     }
 
-    // Guarded addColumn over the MATCHING existing column → SatisfiedNoop (a bare
-    // ADD COLUMN would error "duplicate column name").
     let migs = lower(Op::AddColumn {
         table: "t".into(),
         column: "email".into(),
@@ -187,10 +190,124 @@ async fn add_column_ifnotexists_present_matching_is_noop() {
         existence_guard: Some(ExistenceGuard::IfNotExists),
     });
     let v = migs[0].version.as_str().to_string();
+    let err = apply_one(&be, &migs[0])
+        .await
+        .expect_err("a present TEXT-affinity column fails closed (unprovable facet)");
+    let (object, field) = expect_drift(err);
+    assert_eq!(field, "data_type", "TEXT-affinity fail-closed names data_type");
+    assert!(object.contains("email"), "names the column: {object}");
+    assert!(!journaled(&be, &v).await, "fail-closed journals nothing");
+}
+
+#[compio::test]
+async fn add_column_ifnotexists_present_integer_affinity_match_is_noop() {
+    // The genuine SatisfiedNoop case on SQLite: a NON-TEXT (INTEGER) affinity is
+    // UNAMBIGUOUS — a present `int` column over a declared `int` add is provably
+    // equal, so it is a satisfied no-op (no fail-closed, version journaled).
+    let p = paths("sq_add_int_match");
+    let be = backend(&p);
+    for m in lower(Op::CreateTable {
+        name: "t".into(),
+        columns: vec![col("n", ColType::Int)],
+        constraints: vec![],
+        indexes: vec![],
+        schema: None,
+        existence_guard: None,
+    }) {
+        apply_one(&be, &m).await.expect("create base table");
+    }
+    for m in lower(Op::AddColumn {
+        table: "t".into(),
+        column: "count".into(),
+        ty: ColType::Int,
+        nullable: Some(true),
+        default: None,
+        schema: None,
+        existence_guard: None,
+    }) {
+        apply_one(&be, &m).await.expect("add the integer column unguarded");
+    }
+
+    let migs = lower(Op::AddColumn {
+        table: "t".into(),
+        column: "count".into(),
+        ty: ColType::Int,
+        nullable: Some(true),
+        default: None,
+        schema: None,
+        existence_guard: Some(ExistenceGuard::IfNotExists),
+    });
+    let v = migs[0].version.as_str().to_string();
     for m in &migs {
-        apply_one(&be, m).await.expect("guarded addColumn is a satisfied no-op");
+        apply_one(&be, m)
+            .await
+            .expect("INTEGER-affinity match is a provable satisfied no-op");
     }
     assert!(journaled(&be, &v).await, "satisfied no-op STILL journals");
+}
+
+#[compio::test]
+async fn add_column_ifnotexists_sqlite_ref_over_live_string_fails_closed() {
+    // **H1 regression (the headline within-TEXT-affinity facet change)** — addColumn
+    // ifNotExists declaring a `ref` over a column the live DB authored as `string`.
+    //
+    // In this engine the declared snapshot data_type is the PG spelling
+    // (`field_data_type` always maps via the PG dialect), and BOTH `string` AND `ref`
+    // collapse to the literal PG `text`. On the SQLite leg the live catalog stores
+    // ONLY the `text` affinity, so a plain compare (`text` == `text`) would
+    // SatisfiedNoop and SILENTLY SKIP the add over a DIVERGENT column (live `string`
+    // vs declared `ref` — a real facet change the catalog cannot disprove). The probe
+    // now carries the un-collapsed declared facet (`ref`), so the decider fails
+    // CLOSED before any FK DDL runs.
+    //
+    // RED pre-fix: the plain `text` == `text` compare returns SatisfiedNoop (no
+    // error, version journaled) — masking the divergence.
+    let p = paths("sq_add_ref_over_string");
+    let be = backend(&p);
+    for m in lower(Op::CreateTable {
+        name: "t".into(),
+        columns: vec![col("n", ColType::Int)],
+        constraints: vec![],
+        indexes: vec![],
+        schema: None,
+        existence_guard: None,
+    }) {
+        apply_one(&be, &m).await.expect("create base table");
+    }
+    // The live column is authored as a plain STRING (→ snapshot `text` → SQLite TEXT
+    // affinity).
+    for m in lower(Op::AddColumn {
+        table: "t".into(),
+        column: "owner".into(),
+        ty: ColType::String,
+        nullable: Some(true),
+        default: None,
+        schema: None,
+        existence_guard: None,
+    }) {
+        apply_one(&be, &m).await.expect("add the live string column unguarded");
+    }
+
+    // Guarded add declaring a REF (a different SDK facet that ALSO maps to snapshot
+    // `text`, same TEXT affinity) → the blind spot. The probe short-circuits to
+    // FailDrift before any FK SQL is attempted.
+    let migs = lower(Op::AddColumn {
+        table: "t".into(),
+        column: "owner".into(),
+        ty: ColType::Ref { references: "people".into() },
+        nullable: Some(true),
+        default: None,
+        schema: None,
+        existence_guard: Some(ExistenceGuard::IfNotExists),
+    });
+    let v = migs[0].version.as_str().to_string();
+    let err = apply_one(&be, &migs[0])
+        .await
+        .expect_err("a within-TEXT-affinity facet change must fail closed, not noop");
+    let (object, field) = expect_drift(err);
+    assert_eq!(field, "data_type", "H1: within-affinity facet change names data_type");
+    assert!(object.contains("owner"), "names the column: {object}");
+    assert!(!journaled(&be, &v).await, "fail-closed journals nothing (no silent skip)");
 }
 
 #[compio::test]

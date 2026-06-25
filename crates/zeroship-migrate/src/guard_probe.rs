@@ -41,13 +41,23 @@
 //!   naming `expression`: the live index carries a non-empty `pg_get_expr`
 //!   predicate the IR `createIndex` (a column-list AST) cannot render to a
 //!   byte-comparable form, so equivalence cannot be proven.
-//! - **SQLite type-affinity collision** — SQLite stores TEXT affinity for
-//!   string/date/json/ref alike, so a same-name column whose SDK facet changed
-//!   WITHIN one affinity is invisible to the catalog. On the SQLite leg an
-//!   `ifNotExists` column/table verify therefore CANNOT prove full-shape equality
-//!   for a TEXT-affinity column; it fails CLOSED (`FailDrift` naming `data_type`)
-//!   rather than `SatisfiedNoop` on an affinity-only match. Non-TEXT affinities
-//!   (INTEGER/REAL/BLOB) are unambiguous and compare exactly.
+//! - **SQLite TEXT-affinity collision (H1)** — SQLite stores only the TEXT
+//!   affinity for a `text`-family column, and the engine's declared snapshot
+//!   data_type is the PG spelling (`field_data_type` maps via the PG dialect), so
+//!   the facets that collapse to the literal `text` in BOTH the snapshot and the
+//!   SQLite live catalog (`string`/`ref`/`actor`/`id` + a string `literal`) become
+//!   indistinguishable on the SQLite leg: a same-name column whose true SDK facet
+//!   changed within that group (live authored `string` vs declared `ref`) is
+//!   INVISIBLE to a plain affinity compare. On the SQLite leg an `ifNotExists`
+//!   column/table verify therefore CANNOT prove full-shape equality for a
+//!   `text`-affinity column; it fails CLOSED (`FailDrift` naming `data_type`)
+//!   rather than `SatisfiedNoop` on an affinity-only match. The probe carries the
+//!   un-collapsed declared facet token ([`ExpectColumn::sqlite_text_facet`] /
+//!   `GuardProbe::Column::sqlite_text_facet`), set ONLY on the SQLite leg when the
+//!   declared snapshot data_type is `text`, to drive this. Facets whose snapshot
+//!   spelling is DISTINCT (`json`→`jsonb`, `date`→`timestamp with time zone`) and
+//!   the non-TEXT affinities (INTEGER/REAL/BLOB) are unambiguous and compare
+//!   exactly (the flag is `None`).
 //!
 //! The expected `data_type`/`nullable`/`unique`/`columns`/`kind` values are built
 //! by the SAME shared snapshot builders the lowering arms call
@@ -57,6 +67,37 @@
 
 use crate::drift::SchemaSnapshot;
 use crate::ir::ExistenceGuard;
+
+/// One declared column's verifiable shape for a `createTable ifNotExists`
+/// [`GuardProbe::Table`] probe. Built from the SAME shared snapshot the CREATE
+/// renders from, so the `data_type`/`nullable` strings are byte-comparable against
+/// introspection.
+///
+/// `sqlite_text_facet` carries the **un-collapsed SDK facet token** (e.g. `date`,
+/// `json`, `ref`) and is `Some` ONLY when the authoring dialect is SQLite AND this
+/// column collapses to the ambiguous **TEXT affinity** (string/date/json/ref → the
+/// literal `TEXT`). The SQLite catalog stores only the affinity (`text`), so a
+/// same-name column whose SDK facet changed WITHIN the TEXT affinity (live `string`
+/// vs declared `date`) is INVISIBLE to a plain affinity compare. When this is
+/// `Some`, [`column_shape_divergence`] fails CLOSED (`FailDrift` naming
+/// `data_type`) on a TEXT-affinity column rather than optimistically
+/// `SatisfiedNoop`-ing — matching the module's documented fail-closed contract. On
+/// PG (and for non-TEXT SQLite affinities — INTEGER/REAL/BLOB, which are
+/// unambiguous) it is `None` and the plain affinity compare is already
+/// facet-precise.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExpectColumn {
+    /// Column name.
+    pub name: String,
+    /// The introspectable data-type spelling (PG type / SQLite affinity).
+    pub data_type: String,
+    /// Declared nullability.
+    pub nullable: bool,
+    /// The un-collapsed SDK facet token for a SQLite TEXT-affinity column; `None`
+    /// otherwise (see the type docs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sqlite_text_facet: Option<String>,
+}
 
 /// The guard DIRECTION carried on a probe (a 1:1 copy of [`ExistenceGuard`], kept
 /// local so the probe module owns its decision vocabulary; `ExistenceGuard` is
@@ -103,7 +144,7 @@ pub enum GuardProbe {
         direction: GuardDir,
         /// The declared columns to shape-verify (`ifNotExists`); empty for the
         /// presence-only `ifExists` drop.
-        expect_columns: Vec<(String, String, bool)>,
+        expect_columns: Vec<ExpectColumn>,
     },
     /// `addColumn ifNotExists` (`expect` = `Some((data_type, nullable))`) or
     /// `dropColumn ifExists` (`expect` = `None`, presence-only).
@@ -119,6 +160,12 @@ pub enum GuardProbe {
         /// The declared `(data_type, nullable)` to verify (`ifNotExists`); `None`
         /// for the presence-only `ifExists` drop.
         expect: Option<(String, bool)>,
+        /// The un-collapsed SDK facet token for a SQLite TEXT-affinity column (see
+        /// [`ExpectColumn::sqlite_text_facet`]); `None` on PG / non-TEXT affinity /
+        /// the presence-only `ifExists` drop. When `Some`, a present TEXT-affinity
+        /// column fails CLOSED rather than `SatisfiedNoop` (H1 fail-closed).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sqlite_text_facet: Option<String>,
     },
     /// `createIndex ifNotExists` (`expect` = `Some((unique, columns))`) or
     /// `dropIndex ifExists` (`expect` = `None`, presence-only).
@@ -223,8 +270,15 @@ pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot) -> GuardVerdict {
         GuardProbe::Table { table, direction, expect_columns, .. } => {
             decide_table(table, *direction, expect_columns, live)
         }
-        GuardProbe::Column { table, column, direction, expect, .. } => {
-            decide_column(table, column, *direction, expect.as_ref(), live)
+        GuardProbe::Column { table, column, direction, expect, sqlite_text_facet, .. } => {
+            decide_column(
+                table,
+                column,
+                *direction,
+                expect.as_ref(),
+                sqlite_text_facet.as_deref(),
+                live,
+            )
         }
         GuardProbe::Index { table, name, direction, expect, .. } => {
             decide_index(table, name, *direction, expect.as_ref(), live)
@@ -246,7 +300,7 @@ pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot) -> GuardVerdict {
 fn decide_table(
     table: &str,
     direction: GuardDir,
-    expect_columns: &[(String, String, bool)],
+    expect_columns: &[ExpectColumn],
     live: &SchemaSnapshot,
 ) -> GuardVerdict {
     let present = live.tables.contains_key(table);
@@ -263,19 +317,25 @@ fn decide_table(
             // declared column, a `(data_type, nullable)` divergence, OR any EXTRA
             // live column not in the declared set → FailDrift (a wider live table is
             // not the declared shape — fail closed).
-            for (name, dtype, nullable) in expect_columns {
-                match t.columns.iter().find(|c| &c.name == name) {
+            for ec in expect_columns {
+                match t.columns.iter().find(|c| c.name == ec.name) {
                     None => {
                         return drift(
                             &format!("table {table}"),
                             "data_type",
-                            &format!("{name}: {dtype}"),
-                            &format!("{name}: <absent>"),
+                            &format!("{}: {}", ec.name, ec.data_type),
+                            &format!("{}: <absent>", ec.name),
                         );
                     }
                     Some(live_col) => {
                         if let Some(v) = column_shape_divergence(
-                            table, name, dtype, *nullable, &live_col.data_type, live_col.nullable,
+                            table,
+                            &ec.name,
+                            &ec.data_type,
+                            ec.nullable,
+                            ec.sqlite_text_facet.as_deref(),
+                            &live_col.data_type,
+                            live_col.nullable,
                         ) {
                             return v;
                         }
@@ -284,7 +344,7 @@ fn decide_table(
             }
             // Extra live column → FailDrift (the live table is wider than declared).
             for live_col in &t.columns {
-                if !expect_columns.iter().any(|(n, _, _)| n == &live_col.name) {
+                if !expect_columns.iter().any(|ec| ec.name == live_col.name) {
                     return drift(
                         &format!("table {table}"),
                         "columns",
@@ -303,6 +363,7 @@ fn decide_column(
     column: &str,
     direction: GuardDir,
     expect: Option<&(String, bool)>,
+    sqlite_text_facet: Option<&str>,
     live: &SchemaSnapshot,
 ) -> GuardVerdict {
     let present = column_present(live, table, column);
@@ -340,7 +401,13 @@ fn decide_column(
                 );
             };
             column_shape_divergence(
-                table, column, dtype, *nullable, &live_col.data_type, live_col.nullable,
+                table,
+                column,
+                dtype,
+                *nullable,
+                sqlite_text_facet,
+                &live_col.data_type,
+                live_col.nullable,
             )
             .unwrap_or(GuardVerdict::SatisfiedNoop)
         }
@@ -350,21 +417,33 @@ fn decide_column(
 /// Compare a declared column shape against the live one. Returns a `FailDrift`
 /// verdict on a divergence, or `None` if they match exactly.
 ///
-/// **SQLite affinity fail-closed**: SQLite stores TEXT affinity for
-/// string/date/json/ref alike, so a same-name column whose SDK facet changed
-/// WITHIN the TEXT affinity is invisible to the catalog. When BOTH the declared
-/// and live types are TEXT affinity (`text` family) we cannot PROVE the full SDK
-/// shape is equal, so we refuse rather than optimistically match — UNLESS the
-/// strings are byte-identical (an exact `text` == `text` declared/live pair on PG
-/// is provably equal; on SQLite the introspected token is also `text`, and a
-/// genuine within-affinity change would show a DIFFERENT declared token, tripping
-/// the plain inequality branch). The TEXT-affinity refusal only fires when the
-/// tokens DIFFER but both reduce to TEXT affinity — the precise blind spot.
+/// **SQLite TEXT-affinity fail-closed (H1)**: the engine's declared snapshot
+/// data_type is the PG spelling, and the facets that collapse to the literal `text`
+/// in BOTH the snapshot and the SQLite live catalog (`string`/`ref`/`actor`/`id` +
+/// a string `literal`) are indistinguishable on SQLite — the live catalog stores
+/// only the affinity (`text`), the un-collapsed SDK facet is NOT recoverable. So a
+/// same-name column whose SDK facet changed within that group (live authored
+/// `string` vs declared `ref`) is INVISIBLE to a plain affinity compare: both spell
+/// `text`, the plain `expect_dtype != live_dtype` branch passes, and we would
+/// SILENTLY `SatisfiedNoop` over a divergent column.
+///
+/// `sqlite_text_facet` is `Some(<declared SDK facet>)` ONLY when the authoring
+/// dialect is SQLite AND this column's declared snapshot data_type is `text`. When
+/// it is `Some` and the affinity tokens MATCH (`text` == `text`), we CANNOT prove
+/// the full SDK facet is equal from the catalog, so we fail CLOSED (`FailDrift`
+/// naming `data_type`, carrying the declared facet as `expected`) rather than
+/// optimistically matching — exactly the module's documented contract. On PG (the
+/// live type IS the distinct facet), for facets whose snapshot spelling is distinct
+/// (`json`→`jsonb`, `date`→`timestamp with time zone`), and for non-TEXT SQLite
+/// affinities (INTEGER/REAL/BLOB — unambiguous), `sqlite_text_facet` is `None` and
+/// the plain affinity compare is already facet-precise. A genuine `text` != `text`
+/// mismatch still trips the plain inequality branch above regardless.
 fn column_shape_divergence(
     table: &str,
     column: &str,
     expect_dtype: &str,
     expect_nullable: bool,
+    sqlite_text_facet: Option<&str>,
     live_dtype: &str,
     live_nullable: bool,
 ) -> Option<GuardVerdict> {
@@ -374,6 +453,20 @@ fn column_shape_divergence(
             "data_type",
             expect_dtype,
             live_dtype,
+        ));
+    }
+    // **H1** — the affinity tokens MATCH, but on the SQLite leg a TEXT-affinity
+    // column's true SDK facet is NOT introspectable: a live `string` and a declared
+    // `date` BOTH read back as `text`. We cannot PROVE the facet is equal from the
+    // catalog, so fail closed (matching the module-doc contract) rather than noop.
+    if let Some(facet) = sqlite_text_facet {
+        return Some(drift(
+            &format!("column {table}.{column}"),
+            "data_type",
+            // The declared facet (un-collapsed) makes the message precise; the live
+            // side is the affinity the catalog reports — the full facet is unprovable.
+            &format!("{facet} (TEXT affinity — SDK facet unprovable from SQLite catalog)"),
+            &format!("{live_dtype} (affinity only)"),
         ));
     }
     if expect_nullable != live_nullable {
@@ -536,6 +629,15 @@ mod tests {
         }
     }
 
+    fn ec(name: &str, dtype: &str, nullable: bool) -> ExpectColumn {
+        ExpectColumn {
+            name: name.to_string(),
+            data_type: dtype.to_string(),
+            nullable,
+            sqlite_text_facet: None,
+        }
+    }
+
     fn snapshot_with(table: &str, t: TableSnapshot) -> SchemaSnapshot {
         let mut tables = BTreeMap::new();
         tables.insert(table.to_string(), t);
@@ -561,6 +663,7 @@ mod tests {
             column: "email".into(),
             direction: GuardDir::IfNotExists,
             expect: Some(("text".into(), true)),
+            sqlite_text_facet: None,
         };
         let live = SchemaSnapshot::default();
         assert_eq!(decide(&probe, &live), GuardVerdict::RunBare);
@@ -574,6 +677,7 @@ mod tests {
             column: "email".into(),
             direction: GuardDir::IfNotExists,
             expect: Some(("text".into(), true)),
+            sqlite_text_facet: None,
         };
         let mut t = empty_table();
         t.columns.push(col("email", "text", true));
@@ -589,6 +693,7 @@ mod tests {
             column: "email".into(),
             direction: GuardDir::IfNotExists,
             expect: Some(("text".into(), true)),
+            sqlite_text_facet: None,
         };
         let mut t = empty_table();
         t.columns.push(col("email", "integer", true));
@@ -607,6 +712,7 @@ mod tests {
             column: "email".into(),
             direction: GuardDir::IfNotExists,
             expect: Some(("text".into(), true)),
+            sqlite_text_facet: None,
         };
         let mut t = empty_table();
         t.columns.push(col("email", "text", false));
@@ -614,6 +720,80 @@ mod tests {
         match decide(&probe, &live) {
             GuardVerdict::FailDrift(d) => assert_eq!(d.field, "nullable"),
             v => panic!("expected FailDrift(nullable), got {v:?}"),
+        }
+    }
+
+    // -- H1: SQLite TEXT-affinity facet fail-closed ------------------------
+
+    #[test]
+    fn column_ifnotexists_sqlite_text_affinity_facet_change_fails_closed() {
+        // H1: on SQLite the live column reads back as the `text` affinity for a
+        // string column; the guard declares `date` (also TEXT affinity). A plain
+        // affinity compare (`text` == `text`) would SatisfiedNoop and silently skip
+        // the add over a divergent column. With the un-collapsed declared facet
+        // carried in the probe, the decider fails CLOSED instead.
+        let probe = GuardProbe::Column {
+            schema: "app".into(),
+            table: "users".into(),
+            column: "happened".into(),
+            direction: GuardDir::IfNotExists,
+            // declared `date` collapses to the `text` affinity on SQLite.
+            expect: Some(("text".into(), true)),
+            sqlite_text_facet: Some("date".into()),
+        };
+        let mut t = empty_table();
+        // live column authored as `string` → introspected affinity `text`.
+        t.columns.push(col("happened", "text", true));
+        match decide(&probe, &snapshot_with("users", t)) {
+            GuardVerdict::FailDrift(d) => {
+                assert_eq!(d.field, "data_type");
+                assert!(
+                    d.expected.contains("date"),
+                    "names the declared facet, got {}",
+                    d.expected
+                );
+            }
+            v => panic!("expected FailDrift(data_type) on a SQLite TEXT-affinity facet, got {v:?}"),
+        }
+    }
+
+    #[test]
+    fn column_ifnotexists_no_facet_text_match_is_noop() {
+        // The PG / non-TEXT-affinity path: `sqlite_text_facet` is None, so a `text`
+        // == `text` match is a legitimate SatisfiedNoop (the live type IS the facet).
+        let probe = GuardProbe::Column {
+            schema: "app".into(),
+            table: "users".into(),
+            column: "email".into(),
+            direction: GuardDir::IfNotExists,
+            expect: Some(("text".into(), true)),
+            sqlite_text_facet: None,
+        };
+        let mut t = empty_table();
+        t.columns.push(col("email", "text", true));
+        assert_eq!(decide(&probe, &snapshot_with("users", t)), GuardVerdict::SatisfiedNoop);
+    }
+
+    #[test]
+    fn table_ifnotexists_sqlite_text_affinity_facet_fails_closed() {
+        // The Table (createTable) leg of H1: a per-column `sqlite_text_facet` flag on
+        // a present TEXT-affinity column fails the whole-table verify closed.
+        let probe = GuardProbe::Table {
+            schema: "app".into(),
+            table: "events".into(),
+            direction: GuardDir::IfNotExists,
+            expect_columns: vec![ExpectColumn {
+                name: "at".into(),
+                data_type: "text".into(),
+                nullable: true,
+                sqlite_text_facet: Some("date".into()),
+            }],
+        };
+        let mut t = empty_table();
+        t.columns.push(col("at", "text", true));
+        match decide(&probe, &snapshot_with("events", t)) {
+            GuardVerdict::FailDrift(d) => assert_eq!(d.field, "data_type"),
+            v => panic!("expected FailDrift(data_type) for a SQLite TEXT-affinity table column, got {v:?}"),
         }
     }
 
@@ -627,6 +807,7 @@ mod tests {
             column: "legacy".into(),
             direction: GuardDir::IfExists,
             expect: None,
+            sqlite_text_facet: None,
         };
         let mut t = empty_table();
         t.columns.push(col("legacy", "text", true));
@@ -642,7 +823,7 @@ mod tests {
             schema: "app".into(),
             table: "users".into(),
             direction: GuardDir::IfNotExists,
-            expect_columns: vec![("id".into(), "integer".into(), false)],
+            expect_columns: vec![ec("id", "integer", false)],
         };
         let mut t = empty_table();
         t.columns.push(col("id", "integer", false));
@@ -659,7 +840,7 @@ mod tests {
             schema: "app".into(),
             table: "users".into(),
             direction: GuardDir::IfNotExists,
-            expect_columns: vec![("id".into(), "integer".into(), false)],
+            expect_columns: vec![ec("id", "integer", false)],
         };
         let mut t = empty_table();
         t.columns.push(col("id", "integer", false));
