@@ -312,6 +312,50 @@ async fn operator_resolve_pending_apply(conn: &compio_postgres::Client, app_id: 
     .expect("operator resolve-pending --apply: append resolved rows");
 }
 
+/// Faithfully model the operator's `resolve-pending --abort` clearance: APPEND a
+/// `resolved` row with `resolution='aborted'` for every outstanding obligation,
+/// discharging it (append-only). The CLI's `--abort` ALSO runs the rollback DDL
+/// (drop the dual-write trigger + shadow column), so this helper drops them too,
+/// leaving the pre-rename column intact — the same net schema state the CLI commits.
+/// The load-bearing fact this models is the obligation net-discharge (which un-fences
+/// the table for the prior-deploy interlock) plus the physical rollback.
+async fn operator_resolve_pending_abort(
+    conn: &compio_postgres::Client,
+    app_id: &Uuid,
+    table: &str,
+    trg: &str,
+    shadow_col: &str,
+) {
+    let meta = format!("{}_migrations", app_id);
+    let q = format!("\"{}\".schema_pending_contracts", meta.replace('"', "\"\""));
+    conn.batch_execute(&format!(
+        "INSERT INTO {q}
+             (state, \"table\", from_col, to_col, ty, pending_version, plan_version,
+              contract_versions, resolution, \"by\")
+         SELECT 'resolved', \"table\", from_col, to_col, ty, pending_version, plan_version,
+                contract_versions, 'aborted', 'test-operator-resolve-abort'
+           FROM (
+               SELECT DISTINCT ON (pending_version)
+                      pending_version, plan_version, state, \"table\", from_col,
+                      to_col, ty, contract_versions
+                 FROM {q}
+                ORDER BY pending_version, event_seq DESC
+           ) latest
+          WHERE latest.state = 'pending'"
+    ))
+    .await
+    .expect("operator resolve-pending --abort: append resolved(aborted) rows");
+    // The `--abort` rollback DDL: drop the dual-write trigger + shadow column,
+    // idempotently (IF EXISTS), preserving the pre-rename column.
+    let schema = app_id.to_string();
+    conn.batch_execute(&format!(
+        "DROP TRIGGER IF EXISTS \"{trg}\" ON \"{schema}\".\"{table}\";
+         ALTER TABLE \"{schema}\".\"{table}\" DROP COLUMN IF EXISTS \"{shadow_col}\""
+    ))
+    .await
+    .expect("operator resolve-pending --abort: rollback DDL");
+}
+
 /// Does a trigger named `trg` exist on `<app_id>.<table>`? The online-rename EXPAND
 /// installs a dual-write trigger; a clean abort must DROP it (no half-renamed table).
 async fn trigger_exists(
@@ -2969,6 +3013,196 @@ async fn deploy_migrate_pr9d_phase1_stamp_failure_residual_and_operator_clearanc
     let _ = std::fs::remove_dir_all(&dir1);
     let _ = std::fs::remove_dir_all(&dir2);
     let _ = std::fs::remove_dir_all(&dir3);
+    cleanup_app(&conn, &app_id).await;
+}
+
+// PR9d-rev finding 1 MED — the OBLIGATION-WITHOUT-MARKER crash residual, characterized.
+//
+// The journaled pending-contract obligation (`record_pending_contract`, committed
+// inside the engine's `apply_plan`) and its `open` recovery marker
+// (`record_deploy_recovery_open`, written by the control loop) are TWO separate
+// statements, NOT one transaction — the marker keys on the control-plane `deploy_id`
+// the migrate engine does not carry. A process death in that window (simulated by the
+// new `DEPLOY_AFTER_OBLIGATION_BEFORE_MARKER` fault) leaves the obligation OUTSTANDING
+// with NO recovery marker.
+//
+// This residual is DISTINCT from the crash-before-abort residual
+// (`…crash_before_abort_is_recovered…`): there a marker WAS written, so the next
+// deploy's auto crash-recovery leg (which JOINs `outstanding_deploy_recoveries` on the
+// marker table) converges it. HERE there is no marker, so the auto leg finds nothing
+// and does NOT auto-abort it. It is nonetheless FAIL-CLOSED: the outstanding obligation
+// fences `members` via the §2.0.3 prior-deploy interlock, and the operator clears it
+// with `resolve-pending --abort` (or `--apply`). This is residue 2 in
+// docs/runbooks/db-migrations.md.
+//
+// This test pins all four facts:
+//   1. the crash leaves an outstanding obligation with NO recovery marker (net-state None);
+//   2. the table is FENCED — a touching deploy is refused (fail-closed, not fail-open);
+//   3. the auto crash-recovery leg does NOT clear it — an UNRELATED next deploy proceeds
+//      yet the obligation + trigger SURVIVE (the auto leg never sees the marker-less obligation);
+//   4. `resolve-pending --abort` clears it — obligation discharged, half-rename rolled back,
+//      the table un-fenced so a later touching deploy applies.
+//
+// RED PRE-FIX (before this fault point existed) the window was UNDOCUMENTED and untested;
+// there was no way to even reach the marker-less state to assert its fail-closed posture.
+#[compio::test]
+async fn deploy_migrate_pr9d_obligation_without_marker_residual_is_fenced_and_operator_clearable() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    // Deploy #1 (routine): create `members(handle)` + seed Ada.
+    let create = r#"{"ir_version":1,"name":"create_members","ops":[
+        {"op":"createTable","name":"members","columns":[
+            {"name":"handle","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    let dir1 = migrations_dir(&[("0001_create_members.ir.json", create)]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir1)
+        .await
+        .expect("createTable deploy must succeed");
+    let schema = app_id.to_string();
+    conn.batch_execute(&format!(
+        "INSERT INTO \"{schema}\".members (id, handle, created_at, updated_at, version) VALUES \
+         ('m1','ada', now(), now(), 1)"
+    ))
+    .await
+    .expect("seed members");
+
+    // Deploy #2 (APPROVED): single-EXPAND online rename handle → username. The EXPAND
+    // commits go-live and the engine records the obligation; ARM the new fault so the
+    // control loop "crashes" AFTER that obligation commit but BEFORE writing the `open`
+    // recovery marker. The deploy returns a HARD error and the marker is never written.
+    zeroship_migrate::fault::arm(
+        zeroship_migrate::fault::points::DEPLOY_AFTER_OBLIGATION_BEFORE_MARKER,
+        0,
+    );
+    let rename = r#"{"ir_version":1,"name":"rename_handle","ops":[
+        {"op":"renameColumn","table":"members","from":"handle","to":"username","type":"text"}
+    ]}"#;
+    let dir2 = migrations_dir(&[("0002_rename_handle.ir.json", rename)]);
+    let err = approve_whole_bundle(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect_err("a crash between the obligation commit and the marker write surfaces a HARD error");
+    zeroship_migrate::fault::disarm_all();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("after_obligation") || msg.contains("before_marker") || msg.contains("Apply"),
+        "the surfaced error must be the obligation-before-marker crash, got {msg}"
+    );
+
+    // FACT 1 — the obligation is OUTSTANDING (the EXPAND committed) but there is NO
+    // recovery marker (net-state None, not `open`). This is the residue's distinguishing
+    // shape vs. the crash-before-abort residue (which leaves a net-`open` marker).
+    assert!(
+        trigger_exists(&conn, &app_id, "members", "zsdw_members_handle_username_trg").await,
+        "the EXPAND's dual-write trigger is LIVE (the go-live committed before the crash)"
+    );
+    assert_eq!(
+        net_outstanding_contract_count(&conn, &app_id).await,
+        1,
+        "the obligation is OUTSTANDING (committed by the engine before the marker-write crash)"
+    );
+    assert_eq!(
+        recovery_marker_net_state(&conn, &app_id).await,
+        None,
+        "PR9d-rev finding 1: the crash window leaves NO recovery marker at all (net-state None, \
+         NOT `open`) — the auto crash-recovery leg cannot see this residue"
+    );
+
+    // FACT 2 — FAIL-CLOSED fencing: a deploy TOUCHING `members` is refused by the §2.0.3
+    // prior-deploy interlock (the outstanding obligation fences the table). Not fail-open.
+    let touch = r#"{"ir_version":1,"name":"add_nickname","ops":[
+        {"op":"addColumn","table":"members","column":"nickname","type":"text","nullable":true}
+    ]}"#;
+    let dir_touch = migrations_dir(&[("0003_add_nickname.ir.json", touch)]);
+    let touch_err = apply_bundle_migrations(&admin_dsn(), &app_id, &dir_touch)
+        .await
+        .expect_err("the fenced table must refuse a touching deploy (fail-closed)");
+    match touch_err {
+        DeployMigrateError::Apply(zeroship_migrate::EngineError::PendingContract(payload)) => {
+            assert_eq!(payload.table, "members", "the interlock fences the half-renamed table");
+        }
+        other => panic!("expected a TABLE_HAS_PENDING_CONTRACT refusal, got {other:?}"),
+    }
+    assert!(
+        !column_exists(&conn, &app_id, "members", "nickname").await,
+        "the refused touching deploy applied NOTHING"
+    );
+
+    // FACT 3 — the AUTO crash-recovery leg does NOT clear this residue. An UNRELATED next
+    // deploy (does not touch `members`) proceeds to the always-on recovery leg, which
+    // JOINs the marker table and finds NOTHING (no marker was ever written) — so it does
+    // NOT abort the marker-less obligation. The obligation + trigger SURVIVE.
+    let benign = r#"{"ir_version":1,"name":"create_widgets","ops":[
+        {"op":"createTable","name":"widgets","columns":[{"name":"label","type":"text"}]}
+    ]}"#;
+    let dir3 = migrations_dir(&[("0004_create_widgets.ir.json", benign)]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir3)
+        .await
+        .expect("the unrelated deploy proceeds (the recovery leg finds no marker to act on)");
+    assert!(
+        table_exists(&conn, &app_id, "widgets").await,
+        "the unrelated deploy's own table is created"
+    );
+    assert_eq!(
+        net_outstanding_contract_count(&conn, &app_id).await,
+        1,
+        "PR9d-rev finding 1: the auto crash-recovery leg does NOT clear a marker-less obligation \
+         — it stays OUTSTANDING after an unrelated deploy (it is not auto-recovered, only fenced)"
+    );
+    assert!(
+        trigger_exists(&conn, &app_id, "members", "zsdw_members_handle_username_trg").await,
+        "the half-renamed trigger SURVIVES the unrelated deploy (no auto-abort without a marker)"
+    );
+
+    // FACT 4 — the DOCUMENTED CLEARANCE: operator `resolve-pending --abort` discharges the
+    // obligation and rolls back the half-rename (drop trigger + shadow column, preserve
+    // `handle`). After it, the table is UN-FENCED and a touching deploy applies.
+    operator_resolve_pending_abort(
+        &conn,
+        &app_id,
+        "members",
+        "zsdw_members_handle_username_trg",
+        "username",
+    )
+    .await;
+    assert_eq!(
+        net_outstanding_contract_count(&conn, &app_id).await,
+        0,
+        "resolve-pending --abort discharges the obligation (net-outstanding → 0)"
+    );
+    assert!(
+        !trigger_exists(&conn, &app_id, "members", "zsdw_members_handle_username_trg").await,
+        "resolve-pending --abort drops the dual-write trigger (rolls back the half-rename)"
+    );
+    assert!(
+        !column_exists(&conn, &app_id, "members", "username").await,
+        "resolve-pending --abort drops the shadow `username` column"
+    );
+    assert!(
+        column_exists(&conn, &app_id, "members", "handle").await,
+        "resolve-pending --abort preserves the pre-rename `handle` column"
+    );
+
+    // The table is now UN-FENCED: a touching deploy applies cleanly.
+    let dir_touch2 = migrations_dir(&[("0005_add_nickname.ir.json", touch)]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir_touch2)
+        .await
+        .expect("after the operator clearance, a touching deploy is no longer fenced");
+    assert!(
+        column_exists(&conn, &app_id, "members", "nickname").await,
+        "the post-clearance touching deploy applies (the obligation no longer fences the table)"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir1);
+    let _ = std::fs::remove_dir_all(&dir2);
+    let _ = std::fs::remove_dir_all(&dir_touch);
+    let _ = std::fs::remove_dir_all(&dir3);
+    let _ = std::fs::remove_dir_all(&dir_touch2);
     cleanup_app(&conn, &app_id).await;
 }
 

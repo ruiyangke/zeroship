@@ -1333,6 +1333,23 @@ async fn apply_bundle_ir_migrations(
                 .map(|m| m.version.as_str().to_string()),
         );
 
+        // PR9d-rev finding 1 — CRASH WINDOW between the engine committing the
+        // obligation row (above, inside `apply_plan` → `record_pending_contract`) and
+        // the control loop writing its `open` recovery marker (below). These are two
+        // separate statements, NOT one transaction (the marker keys on the
+        // control-plane `deploy_id` the migrate engine does not carry). A process
+        // death here leaves the obligation OUTSTANDING with no marker — a fail-closed
+        // residual the auto crash-recovery leg does NOT cover (it JOINs the marker
+        // table), cleared only by `resolve-pending`. Documented in db-migrations.md
+        // (residue 2) and pinned by the obligation-without-marker characterization
+        // test. The trip is a no-op unless that test arms it.
+        if !outcome.opened_obligations.is_empty() {
+            zeroship_migrate::fault::trip(
+                zeroship_migrate::fault::points::DEPLOY_AFTER_OBLIGATION_BEFORE_MARKER,
+            )
+            .map_err(|e| DeployMigrateError::Apply(EngineError::Apply(e)))?;
+        }
+
         // PR9d MED — record an `open` deploy-recovery marker for every obligation
         // THIS file's EXPAND just opened (keyed on this deploy's `deploy_id`), and
         // accumulate the obligation so a LATER file's failure can abort exactly

@@ -145,19 +145,45 @@ itself:
 >    leaving the pre-rename column intact, and discharges the just-opened
 >    obligation `aborted`) **before** surfacing the creator's 4xx. The recovery is
 >    journaled (a per-deploy recovery marker) and **crash-safe**: if the process
->    dies between the EXPAND commit and the abort, the **next** same-app deploy
->    reconciles the leftover marker first (the abort's `DROP … IF EXISTS` is
->    idempotent on resume). So a refused multi-file bundle leaves **no**
->    half-renamed table regardless of the failure cause.
+>    dies *after* the `open` marker is written but before the abort, the **next**
+>    same-app deploy reconciles the leftover marker first (the abort's
+>    `DROP … IF EXISTS` is idempotent on resume). The one window the auto leg does
+>    NOT cover — a crash *between* the obligation row and the marker write, leaving
+>    an outstanding obligation with no marker — is **residue 2** below: still
+>    fail-closed (the table stays fenced), cleared by `resolve-pending`. So a refused
+>    multi-file bundle leaves **no silently-half-open** renamed table regardless of
+>    the failure cause.
 >
-> **The one irreducible residue.** If the **abort DDL itself** fails (the DB went
-> unreachable mid-recovery), the obligation stays outstanding and its recovery
-> marker stays `open`. This is **fail-closed**, not fail-open: the next same-app
-> deploy re-attempts the abort, and the prior-deploy interlock (case 2) refuses any
-> new bundle touching the half-renamed table until it is cleared. The operator can
-> also clear it manually with the `resolve-pending --apply | --abort` CLI command
-> (`--apply` completes the rename; `--abort` rolls it back, dropping the shadow
-> column).
+> **The irreducible residues — there are TWO.** Both are **fail-closed** (the
+> prior-deploy interlock fences the half-renamed table until cleared), never
+> fail-open, and both are cleared by the operator with the
+> `resolve-pending --apply | --abort` CLI command (`--apply` completes the rename;
+> `--abort` rolls it back, dropping the shadow column):
+>
+> 1. **Abort-DDL failure.** If the **abort DDL itself** fails (the DB went
+>    unreachable mid-recovery), the obligation stays outstanding and its recovery
+>    marker stays `open`. The next same-app deploy's crash-recovery leg re-attempts
+>    the abort (the abort's `DROP … IF EXISTS` is idempotent), and the prior-deploy
+>    interlock (case 2) refuses any new bundle touching the half-renamed table until
+>    it is cleared.
+> 2. **Obligation-recorded-but-marker-not-yet-written crash.** The journaled
+>    pending-contract obligation and its `open` recovery marker are written by
+>    **two separate statements** (the engine commits the EXPAND DDL + the obligation
+>    row; the control loop then writes the `open` marker — they are NOT in one
+>    transaction, because the per-deploy `deploy_id` the marker keys on is a
+>    control-plane value the migrate engine does not carry). A process death in that
+>    narrow window leaves the obligation **outstanding but with NO recovery marker**.
+>    Because the auto crash-recovery leg JOINs `outstanding_deploy_recoveries` on the
+>    marker table, it finds nothing to abort — so this residue is **NOT
+>    auto-recovered** by the next deploy (unlike residue 1). It is still
+>    **fail-closed**: the obligation is outstanding, so the prior-deploy interlock
+>    (case 2) fences the table against any new bundle, and the **only** clearance is
+>    the operator running `resolve-pending --abort` (roll back the half-rename) or
+>    `--apply` (complete it). The posture is identical to residue 1 (fenced + manual
+>    resolve), it just does not self-heal via the auto leg. Closing this window
+>    entirely would require folding the marker write into the same transaction as the
+>    obligation row — i.e. threading the control-plane `deploy_id` into the migrate
+>    engine's apply path (a future hardening, not in PR9d).
 >
 > **A legit go-live is never mistaken for a crash (PR9d HIGH).** A *successful*
 > online-rename go-live legitimately leaves its EXPAND pending (the §2.0.2
