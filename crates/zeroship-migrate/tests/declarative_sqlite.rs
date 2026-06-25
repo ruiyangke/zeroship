@@ -1108,3 +1108,151 @@ async fn golden_sqlite_drops() {
     assert_eq!(dt.up, r#"DROP TABLE "gone""#);
     assert_eq!(dt.down, None);
 }
+
+/// **PR10b H1 — the DIFFER half of the within-TEXT-affinity facet contract.**
+///
+/// Twin of the existence-guard probe's
+/// `add_column_ifnotexists_sqlite_ref_over_live_string_is_noop`
+/// (`tests/existence_guard_sqlite.rs`): the guard SatisfiedNoop's a `ref` declared
+/// over a live `string` column because both fold to the SQLite `text` affinity. This
+/// test pins the EXACT boundary of that consistency on the FAITHFUL introspected path,
+/// so the corrected H1 report can state it honestly rather than over-claim:
+///
+/// 1. **COLUMN TYPE/AFFINITY — consistent, a no-op in BOTH.** The differ folds the
+///    PG-spelled desired and the SQLite-introspected live column types through the SAME
+///    `sqlite_canonical_type` the guard uses, so the `string`→`ref` facet change emits
+///    NO `add_column`/`alter_column`/`drop_column` migration. A later `diff` does NOT
+///    phantom-drift the COLUMN the guard skipped. (RED before the fold landed — the raw
+///    spelling compare would have seen a change; GREEN after.)
+///
+/// 2. **FOREIGN KEY — a LEGITIMATE differ-only rebuild, NOT a column drift.** A `ref`
+///    also declares a deferred FK. SQLite has no `ALTER TABLE ADD CONSTRAINT`, so the
+///    full declarative differ reconciles the new FK via a 12-step table REBUILD
+///    (`add foreign key accounts.owner_fkey`). The `ifNotExists` existence-guard
+///    DELIBERATELY does NOT add this FK (a present column is a SatisfiedNoop; a `ref`
+///    adds no FK via `ALTER`). So the guard and the full differ AGREE on the column and
+///    DIVERGE on the FK — by design. This is the honest contour the report must state:
+///    the affinity blind spot is real and bounded to the column shape; the FK is the
+///    differ's job, not the guard's.
+///
+/// See `docs/reference/sqlite-divergences.md` (the within-text-affinity row).
+#[compio::test]
+async fn second_deploy_string_to_ref_within_text_affinity_column_is_differ_noop_fk_is_rebuild() {
+    let users = CollectionDescriptor {
+        name: "users".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "handle".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    // v1: `owner` is a plain STRING (→ snapshot `text` → SQLite TEXT affinity).
+    let accounts_v1 = CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "owner".into(),
+            ty: "string".into(),
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+
+    let p = paths("differ_string_to_ref_noop");
+    let be = backend(&p);
+    let first = desired_snapshot(PROJECT, &[users.clone(), accounts_v1])
+        .expect("v1 desired (users + accounts.owner:string)");
+    let first_plan = sqlite_author()
+        .diff(&first, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .expect("v1 diff");
+    for m in &first_plan.all_migrations() {
+        be.apply_one_additive(m, "deployer")
+            .await
+            .unwrap_or_else(|e| panic!("v1 apply {} must succeed: {e:?}", m.name));
+    }
+
+    // The FAITHFUL live snapshot: REAL introspection, so `accounts.owner` reads back
+    // as the SQLite `text` affinity (not the desired-side PG spelling).
+    let live = be
+        .snapshot_schema_sqlite()
+        .await
+        .expect("real introspected live snapshot");
+    let owner_live_type = live
+        .tables
+        .get("accounts")
+        .and_then(|t| t.columns.iter().find(|c| c.name == "owner"))
+        .map(|c| c.data_type.as_str())
+        .expect("accounts.owner in live snapshot");
+    assert_eq!(
+        owner_live_type, "text",
+        "the live `owner` column introspects as the SQLite text affinity (faithful path)"
+    );
+    let ownership: HashMap<String, String> =
+        first.ownership.iter().map(|(t, a)| (t.clone(), a.clone())).collect();
+
+    // v2: re-declare `owner` as a `ref` to `users` — a within-TEXT-affinity facet
+    // change (string → ref). On SQLite this adds no FK via ALTER and is physically the
+    // SAME `text` column, so the differ must treat it as NO CHANGE.
+    let accounts_v2 = CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "owner".into(),
+            ty: "ref".into(),
+            references: Some("users".into()),
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let desired2 = desired_snapshot(PROJECT, &[users, accounts_v2]).expect("v2 desired");
+    let plan = sqlite_author()
+        .diff(&desired2, &live, &ownership, &[])
+        .expect(
+            "a within-TEXT-affinity facet change (string→ref) against the REAL introspected \
+             live snapshot must NOT drift — the differ folds both sides through \
+             sqlite_canonical_type, exactly as the existence-guard probe does",
+        );
+
+    // (1) COLUMN affinity is consistent with the guard: ZERO column ADD/ALTER/DROP
+    //     migrations — the `string`→`ref` facet change folds to the same `text`
+    //     affinity on both sides, so a later `diff` does NOT phantom-drift the COLUMN.
+    let spurious_cols: Vec<String> = plan
+        .all_migrations()
+        .iter()
+        .map(|m| m.name.clone())
+        .filter(|n| {
+            n.contains("alter_column") || n.contains("add_column") || n.contains("drop_column")
+        })
+        .collect();
+    assert!(
+        spurious_cols.is_empty(),
+        "string→ref within-text-affinity facet change must emit no COLUMN migration \
+         (the guard SatisfiedNoop's it; the differ folds the same way and agrees): \
+         {spurious_cols:?}"
+    );
+
+    // (2) The FK is a LEGITIMATE differ-only rebuild — exactly one, and its reason is
+    //     the FK ADD, NOT a phantom column type/affinity change. This is the precise
+    //     contour the report must state: the guard skips the FK by design; the full
+    //     declarative differ adds it via rebuild (SQLite has no ALTER ADD CONSTRAINT).
+    assert_eq!(
+        plan.rebuilds.len(),
+        1,
+        "string→ref yields exactly one rebuild (the FK add), got: {:?}",
+        plan.rebuilds.iter().map(|r| &r.spec.reason).collect::<Vec<_>>()
+    );
+    let reason = &plan.rebuilds[0].spec.reason;
+    assert!(
+        reason.contains("foreign key") && reason.contains("owner_fkey"),
+        "the single rebuild is the FK add, not a phantom type change: {reason:?}"
+    );
+    assert!(
+        !reason.contains("alter column") || !reason.contains("type"),
+        "the rebuild must NOT be driven by a column type/affinity change \
+         (string and ref both fold to text): {reason:?}"
+    );
+    assert_eq!(plan.rebuilds[0].spec.table, "accounts");
+}
