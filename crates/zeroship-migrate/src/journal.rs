@@ -523,10 +523,13 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
     //     as the §2.0.2 cross-deploy partition — NOT a half-state).
     //
     //     **Strictly same-deploy-scoped.** Both legs operate only over rows whose
-    //     `deploy_id` is THIS deploy's (in-process) or an `open` prior-deploy row whose
-    //     obligation is still `outstanding` (crash leg). A legitimately-pending
-    //     prior-deploy contract whose deploy went go-live has its recovery row already
-    //     `reconciled`, so neither leg ever touches it.
+    //     `deploy_id` is THIS deploy's (in-process) or a net-`open` prior-deploy row
+    //     whose obligation is still `outstanding` (crash leg). PR9d HIGH — the success
+    //     arm stamps the marker `reached_success` BEFORE appending `reconciled`, and the
+    //     crash leg's resume query (`outstanding_deploy_recoveries`) only returns
+    //     net-`open` markers. So a legitimately-pending prior-deploy go-live is excluded
+    //     EVEN if its `reconciled` append failed (its marker is net-`reached_success`,
+    //     not `open`): the crash leg can never false-abort a live contract.
     //
     //     **Append-only + immutable + admin-only** (same posture as
     //     `schema_pending_contracts`): `state` transitions open→reconciled by
@@ -539,7 +542,7 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
             event_seq        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             deploy_id        TEXT NOT NULL,
             pending_version  TEXT NOT NULL,
-            state            TEXT NOT NULL CHECK (state IN ('open','reconciled')),
+            state            TEXT NOT NULL CHECK (state IN ('open','reached_success','reconciled')),
             \"by\"             TEXT NOT NULL,
             \"at\"             TIMESTAMPTZ NOT NULL DEFAULT now()
         )"
@@ -1217,6 +1220,50 @@ pub async fn record_deploy_recovery_open(
     Ok(())
 }
 
+/// Stamp a deploy-scoped recovery marker `reached_success` (PR9d HIGH): APPEND a
+/// `reached_success` row keyed on `(deploy_id, pending_version)`. Written as the
+/// FIRST action of the deploy SUCCESS arm, BEFORE the `reconciled` append.
+///
+/// This is the crash-vs-legit-pending DISCRIMINATOR. A net-`reached_success` marker
+/// means the deploy that opened the EXPAND reached its success arm — i.e. the
+/// online-rename went go-live and the obligation is LEGITIMATELY pending (the
+/// §2.0.2 cross-deploy partition), NOT a crashed half-state. A net-`open` marker
+/// means the success arm NEVER ran (a later same-deploy file failed and the process
+/// died before the in-process abort) — a genuine crash half-state. The
+/// crash-recovery leg ([`outstanding_deploy_recoveries`]) only treats net-`open`
+/// markers as recoverable, so it can never false-abort a legitimately-pending
+/// go-live whose subsequent `reconciled` append happened to fail (the HIGH window):
+/// that marker is net-`reached_success`, not `open`.
+///
+/// Admin-written, append-only, under the immutability trigger.
+///
+/// # Errors
+/// [`JournalError::Db`] on insert failure.
+pub async fn mark_deploy_recovery_reached_success(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    deploy_id: &str,
+    pending_version: &str,
+    by: &str,
+) -> Result<(), JournalError> {
+    let meta = quote_ident(&cfg.pg.meta_schema);
+    let n = conn
+        .execute(
+            &format!(
+                "INSERT INTO {meta}.schema_deploy_recovery
+                     (deploy_id, pending_version, state, \"by\")
+                 VALUES ($1, $2, 'reached_success', $3)"
+            ),
+            &[&deploy_id, &pending_version, &by],
+        )
+        .await?;
+    debug_assert_eq!(
+        n, 1,
+        "mark_deploy_recovery_reached_success must insert exactly one row"
+    );
+    Ok(())
+}
+
 /// Mark a deploy-scoped recovery obligation `reconciled` (PR9d MED): APPEND a
 /// `reconciled` row (append-only — the `open` row is never edited). Called on the
 /// deploy SUCCESS path (the EXPAND legitimately stays pending), after a same-deploy
@@ -1258,6 +1305,16 @@ pub async fn mark_deploy_recovery_reconciled(
 /// recovery row whose obligation was already discharged (aborted by an earlier
 /// resume attempt, or applied by a go-live) is NOT re-driven. Ordered by
 /// `(deploy_id, pending_version)` for determinism.
+///
+/// **The crash-vs-legit discriminator (PR9d HIGH).** The `r.state = 'open'`
+/// predicate is load-bearing: a deploy that reached its SUCCESS arm stamps the
+/// marker `reached_success` BEFORE attempting `reconciled`
+/// ([`mark_deploy_recovery_reached_success`]). A net-`reached_success` marker is
+/// therefore EXCLUDED here — so a legitimately-pending go-live whose subsequent
+/// `reconciled` append failed (the HIGH window: EXPAND committed, obligation
+/// pending, marker-reconcile errored) is NEVER returned to the crash-recovery leg
+/// and thus NEVER false-aborted. Only a net-`open` marker (success arm never ran ⇒
+/// a genuine crashed half-state) is recoverable.
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure.

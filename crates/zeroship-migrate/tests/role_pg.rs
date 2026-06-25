@@ -285,6 +285,32 @@ async fn provision_creates_locked_down_role_and_is_idempotent() {
         );
     }
 
+    // PR9d LOW — make the unforgeable-MARKER claim EXPLICIT per table. The migrator
+    // has no USAGE on the whole meta schema (asserted above), which already protects
+    // these tables; but a per-table assertion also fences a future GRANT-on-table
+    // regression (a table-level grant can bypass schema-USAGE in some configs). The
+    // online-rename obligation log (`schema_pending_contracts`) and its deploy-scoped
+    // recovery marker log (`schema_deploy_recovery`) must be just as unforgeable as
+    // `schema_migrations`: a creator migration can neither forge nor suppress a
+    // pending contract or a recovery marker.
+    for table in ["schema_pending_contracts", "schema_deploy_recovery"] {
+        for (verb, ok) in [("INSERT", false), ("SELECT", false), ("UPDATE", false)] {
+            let priv_str = format!("{}.{table}", cfg.pg.meta_schema);
+            let has: bool = conn
+                .query_one(
+                    "SELECT has_table_privilege($1, $2, $3) AS p",
+                    &[&role, &priv_str, &verb],
+                )
+                .await
+                .expect("has_table_privilege marker-log")
+                .get("p");
+            assert_eq!(
+                has, ok,
+                "migrator {verb} on {table} must be {ok} (PR9d unforgeable-marker)"
+            );
+        }
+    }
+
     // The migrator's search_path is the PROJECT schema only — the meta schema is
     // off the migration-time path (defense-in-depth).
     let sp: String = conn
