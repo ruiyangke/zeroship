@@ -1056,7 +1056,7 @@ impl Serialize for IrScalar {
 /// single fractional part)? No exponent, no whitespace, at least one digit.
 /// (Arbitrary precision is the whole point of the decimal-string carrier, so we
 /// do not parse it into a float — we only shape-check it.)
-fn is_decimal_string(s: &str) -> bool {
+pub(crate) fn is_decimal_string(s: &str) -> bool {
     let body = s.strip_prefix('-').or_else(|| s.strip_prefix('+')).unwrap_or(s);
     if body.is_empty() {
         return false;

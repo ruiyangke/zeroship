@@ -1909,6 +1909,17 @@ mod tests {
                     default: Some(IrDefault::Literal { value: IrScalar::Str("beta".to_string()) }),
                     unique: None,
                 },
+                // An `int` column with a literal default — the snapshot's
+                // emission-only `default` IS what P2 gen-types reads, so it MUST
+                // render (regression: int defaults were silently dropped — the
+                // shared `field_default_expr` had no `int` arm).
+                IrColumn {
+                    name: "rank".to_string(),
+                    ty: ColType::Int,
+                    nullable: Some(false),
+                    default: Some(IrDefault::Literal { value: IrScalar::Int(7) }),
+                    unique: None,
+                },
                 // A `json` column always carries the `'{}'::jsonb` default (even with
                 // no explicit default) — a second independent emission-only golden.
                 col("meta", ColType::Json, true),
@@ -1943,6 +1954,21 @@ mod tests {
         );
         assert_eq!(tier.default, want_tier.default, "fold's emitted string default matches the shared builder");
         assert!(want_tier.default.is_some(), "the string default golden is non-trivial");
+
+        let rank = t.columns.iter().find(|c| c.name == "rank").unwrap();
+        let want_rank = builder_column(
+            "g",
+            "rank",
+            ColType::Int,
+            false,
+            Some(IrDefault::Literal { value: IrScalar::Int(7) }),
+        );
+        assert_eq!(rank.default, want_rank.default, "fold's emitted int default matches the shared builder");
+        assert_eq!(
+            want_rank.default.as_deref(),
+            Some("7"),
+            "an int column's default DOES render into the snapshot (regression: it was dropped)"
+        );
 
         let meta = t.columns.iter().find(|c| c.name == "meta").unwrap();
         let want_meta = builder_column("g", "meta", ColType::Json, true, None);

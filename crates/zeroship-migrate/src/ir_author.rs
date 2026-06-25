@@ -3029,6 +3029,75 @@ mod tests {
         );
     }
 
+    /// REGRESSION (mig-first P1, int/decimal DEFAULT drop): an integer column's
+    /// `DEFAULT n`, an out-of-f64-range bigint default, and a decimal column's
+    /// `DEFAULT 0.5` MUST all appear in the rendered CREATE TABLE DDL.
+    /// `field_default_expr` had only a `"number"` arm matching via `as_f64()`:
+    ///   - an `int`-token column (`t.integer()`/`t.bigInt()`) fell through to
+    ///     `None` → its `DEFAULT` was silently dropped;
+    ///   - a decimal default is carried as a validated numeric STRING by
+    ///     `IrScalar::Decimal` (and a bigint default ≥ 2^53 likewise, since a
+    ///     fractional/large JSON number is rejected at parse) — `as_f64()`
+    ///     returns `None` for a JSON string, so those fell through too.
+    /// So render_create_table emitted NO `DEFAULT` clause for any of them (a real
+    /// apply bug, losing the creator's default). RED before the unified
+    /// precision-preserving numeric-default helper in field_default_expr.
+    #[test]
+    fn create_table_int_bigint_and_decimal_column_defaults_render_pg() {
+        use crate::ir::IrScalar;
+        let ir = create_table_ir(
+            "t",
+            vec![
+                TIrColumn {
+                    name: "rank".into(),
+                    ty: ColType::Int,
+                    nullable: Some(false),
+                    default: Some(IrDefault::Literal { value: IrScalar::Int(5) }),
+                    unique: None,
+                },
+                // A bigint default beyond 2^53 — carried as a decimal STRING (the IR
+                // rejects a fractional/oversized JSON number), and `as_f64` would
+                // corrupt it; the verbatim string keeps it exact.
+                TIrColumn {
+                    name: "big".into(),
+                    ty: ColType::BigInt,
+                    nullable: Some(false),
+                    default: Some(IrDefault::Literal {
+                        value: IrScalar::Decimal("9007199254740993".into()),
+                    }),
+                    unique: None,
+                },
+                TIrColumn {
+                    name: "ratio".into(),
+                    ty: ColType::Float,
+                    nullable: Some(false),
+                    default: Some(IrDefault::Literal {
+                        value: IrScalar::Decimal("0.5".into()),
+                    }),
+                    unique: None,
+                },
+            ],
+        );
+        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
+        let migs = author.lower(&ir, &LiveSchema::default()).expect("lower");
+        let create = migs.iter().find(|m| m.up.contains("CREATE TABLE")).expect("create");
+        assert!(
+            create.up.contains("DEFAULT 5"),
+            "an integer column's DEFAULT must render; up = {:?}",
+            create.up
+        );
+        assert!(
+            create.up.contains("DEFAULT 9007199254740993"),
+            "a >2^53 bigint DEFAULT (decimal-string carrier) must render exactly; up = {:?}",
+            create.up
+        );
+        assert!(
+            create.up.contains("DEFAULT 0.5"),
+            "a decimal column's DEFAULT (numeric-string carrier) must render; up = {:?}",
+            create.up
+        );
+    }
+
     /// **PR10** — the connection DEFAULT schema applies when an op omits its own
     /// qualifier (§2.7). RED before `with_default_schema`/`effective_schema`. The
     /// default scope is now the Confined `Single(project_schema)`, so a foreign
