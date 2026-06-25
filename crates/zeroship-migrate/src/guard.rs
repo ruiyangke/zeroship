@@ -305,6 +305,27 @@ impl GuardConfig {
     pub(crate) fn trust(&self) -> TrustProfile {
         self.trust
     }
+
+    /// **PR10** — the schema-confinement scope this guard config enforces, for the
+    /// validate-time cross-schema gate (§2.7). Returns:
+    /// - `Some(SchemaScope)` for **Confined** (the `Single(project_schema)` pin) and
+    ///   **Platform** (the configured `Allowlist`) — an op's explicit `schema` must
+    ///   be permitted by it.
+    /// - `None` for **Trusted** (the public dbmate-like posture) — NO cross-schema
+    ///   confinement; the operator owns the DB.
+    ///
+    /// This is the SINGLE source of truth that maps the guard's trust posture to the
+    /// validator's confinement scope, so the parse-guard cross-schema denial (line 1)
+    /// and the friendlier validate-time refusal (PR10) agree on the permitted set.
+    #[must_use]
+    pub fn schema_scope(&self) -> Option<SchemaScope> {
+        match self.trust {
+            TrustProfile::Trusted => None,
+            // Confined ⇒ Single(project_schema); Platform ⇒ Allowlist — both carried
+            // verbatim in `self.schemas`.
+            TrustProfile::Confined | TrustProfile::Platform => Some(self.schemas.clone()),
+        }
+    }
 }
 
 impl Default for GuardConfig {

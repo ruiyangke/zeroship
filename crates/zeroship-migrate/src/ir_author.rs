@@ -329,6 +329,13 @@ pub struct IrAuthor {
     project_schema: String,
     decl: DeclarativeAuthor,
     dialect: SqlDialect,
+    /// **PR10** — the connection/CLI-level DEFAULT schema (search_path-like), used
+    /// when an op omits its own `schema` qualifier (§2.7). `None` ⇒ the dialect
+    /// default (the `project_schema`). A `deployment` fact (mirrors how
+    /// `project_schema`/`search_path` live on [`crate::db::ExecutorConfig`], not on
+    /// the authored `.ir.json`), threaded in by the CLI/connection via
+    /// [`IrAuthor::with_default_schema`].
+    default_schema: Option<String>,
 }
 
 /// A failure lowering an IR op to SQL.
@@ -365,6 +372,22 @@ pub enum IrLowerError {
          declarative diff rebuild seam (the 12-step table rebuild)"
     )]
     SqliteRebuildOnly(&'static str),
+    /// **PR10** — an op carrying an `existence_guard` (`ifExists`/`ifNotExists`).
+    /// The guard is engine-SYNTHESIZED via an executor-side catalog probe
+    /// (probe → shape-verify-or-fail → run/skip under the held advisory lock), NOT a
+    /// native `IF [NOT] EXISTS` clause. That probe-bearing plan step + executor flow
+    /// is the next slice; until it lands, lowering REFUSES a guarded op fail-closed
+    /// rather than silently dropping the guard (which would apply the bare op
+    /// unconditionally — a fail-OPEN that could clobber a divergent existing object).
+    /// Carries the op tag. (The schema-qualifier half of PR10 is complete; the
+    /// guard half waits on the executor probe.)
+    #[error(
+        "IrAuthor::lower cannot yet honor the existence guard on op {0:?} — the \
+         engine-synthesized catalog probe (probe → shape-verify-or-fail → run/skip) \
+         is the executor-side slice; the guard is refused fail-closed rather than \
+         silently dropped"
+    )]
+    ExistenceGuardNotYetSupported(&'static str),
     /// **PR2** — a SQLite `renameColumn` whose table's full live structure is not
     /// in [`LiveSchema::table_snapshots`] / [`LiveSchema::sqlite_schemas`]. SQLite
     /// has no native online rename, so the rename is reconciled by the 12-step
@@ -632,7 +655,32 @@ impl IrAuthor {
             ),
             project_schema,
             dialect,
+            default_schema: None,
         }
+    }
+
+    /// **PR10** — bind a connection/CLI-level DEFAULT schema (§2.7). Applied as the
+    /// effective schema for any op that omits its own `schema` qualifier. The
+    /// general/Trusted CLI sets this from a `--schema`/search-path flag; the
+    /// Confined platform path leaves it `None` (lowering pins `project_schema`).
+    #[must_use]
+    pub fn with_default_schema(mut self, schema: Option<String>) -> Self {
+        self.default_schema = schema;
+        self
+    }
+
+    /// **PR10** — the EFFECTIVE schema an op renders into (§2.7): the op's own
+    /// `schema` qualifier → else the connection [`default_schema`](Self::default_schema)
+    /// → else the dialect default (`project_schema`). The Confined cross-schema
+    /// VALIDATE gate has already refused a `schema != project_schema` before lower,
+    /// so under Confined this resolves to `project_schema` for every op (the op's
+    /// schema is absent or equals it; `default_schema` is `None`) — defense in
+    /// depth, byte-identical to the pre-PR10 render.
+    #[must_use]
+    fn effective_schema<'a>(&'a self, op: &'a Op) -> &'a str {
+        op.schema()
+            .or(self.default_schema.as_deref())
+            .unwrap_or(&self.project_schema)
     }
 
     /// The loader's IR branch (§7.2): run the fail-closed `.ir.json` LOAD GATE
@@ -663,8 +711,14 @@ impl IrAuthor {
             SqlDialect::Postgres => crate::validate::Dialect::Postgres,
             SqlDialect::Sqlite => crate::validate::Dialect::Sqlite,
         };
-        let ir = crate::ir_load::load_ir_document(bytes, deploying_app, target, registry)
-            .map_err(LoadAndLowerError::Load)?;
+        // **PR10** — the non-guarded `load_and_lower` is the Confined creator entry;
+        // pin the schema-confinement scope to the bound project schema (§2.7), so a
+        // cross-schema op is refused at validate-time here too (defense in depth for
+        // any caller that does not go through `load_and_lower_guarded`).
+        let scope = crate::guard::SchemaScope::Single(self.project_schema.clone());
+        let ir =
+            crate::ir_load::load_ir_document(bytes, deploying_app, target, registry, Some(&scope))
+                .map_err(LoadAndLowerError::Load)?;
         self.lower(&ir, live).map_err(LoadAndLowerError::Lower)
     }
 
@@ -696,8 +750,20 @@ impl IrAuthor {
             SqlDialect::Postgres => crate::validate::Dialect::Postgres,
             SqlDialect::Sqlite => crate::validate::Dialect::Sqlite,
         };
-        let ir = crate::ir_load::load_ir_document(bytes, deploying_app, target, registry)
-            .map_err(LoadAndLowerGuardedError::Load)?;
+        // **PR10** — derive the schema-confinement scope from the guard config's
+        // trust posture (§2.7): Confined ⇒ pin the project schema (refuse
+        // cross-schema), Platform ⇒ its allow-list, Trusted ⇒ no confinement. This
+        // is the single source of truth (`GuardConfig::schema_scope`) shared with the
+        // parse-guard cross-schema line-1 denial.
+        let scope = guard_cfg.schema_scope();
+        let ir = crate::ir_load::load_ir_document(
+            bytes,
+            deploying_app,
+            target,
+            registry,
+            scope.as_ref(),
+        )
+        .map_err(LoadAndLowerGuardedError::Load)?;
         // The tables this artifact creates — folded by the caller into the
         // cross-file registry + live-set before the next `.ir.json`.
         let created_tables: Vec<String> = ir
@@ -962,6 +1028,23 @@ impl IrAuthor {
         // The DDL arms advance / read the working table set under the short name
         // `live` (the name the §6.1.1 fragment logic already uses).
         let live = live_tables;
+        // **PR10** — the EFFECTIVE schema this op renders into (§2.7): op.schema →
+        // default_schema → project_schema. The render seam (`PgEmitter`/`qualified`)
+        // reads `project_schema`, so we lower this op through a `DeclarativeAuthor`
+        // clone bound to `eff_schema`. The Confined cross-schema gate already refused
+        // a `schema != project_schema` at validate-time, so under Confined this is
+        // `project_schema` for every op and the clone renders byte-identically.
+        let eff_schema = self.effective_schema(op).to_string();
+        let decl = self.decl.with_project_schema(&eff_schema);
+        // **PR10** — fail-closed on an existence guard until the executor-side probe
+        // lands (see [`IrLowerError::ExistenceGuardNotYetSupported`]). The guard is
+        // accepted + direction-checked at validate-time; honoring it requires the
+        // probe → shape-verify-or-fail → run/skip executor flow. Refusing here is
+        // strictly safer than silently dropping the guard (which would apply the bare
+        // op unconditionally — a fail-OPEN over a possibly-divergent existing object).
+        if op.existence_guard().is_some() {
+            return Err(IrLowerError::ExistenceGuardNotYetSupported(op_kind_tag(op)));
+        }
         let mut migs: Vec<LoweredUnit> = match op {
             Op::CreateTable { name, columns, .. } => {
                 // A column carrying a SYNTH default (`now()`/`genRandomUuid()`) must
@@ -973,33 +1056,33 @@ impl IrAuthor {
                 // author-supplied synth default is refused here rather than lost.
                 reject_synth_default(columns.iter().map(|c| (c.name.as_str(), c.default.as_ref())))?;
                 let desc = self.create_table_descriptor(name, columns);
-                let snap = build_table_snapshot(&self.project_schema, &desc, self.dialect)?;
+                let snap = build_table_snapshot(&eff_schema, &desc, self.dialect)?;
                 // The SQLite CREATE routes through the shared `zeroship_schema`
                 // emitter, which consumes the SDK schema `Value` — built here from
                 // the SAME descriptor bridge (`descriptor_to_sdk_schema`) the
                 // differ's `desired_snapshot_for_dialect` uses, so the §6.4
                 // byte-identity holds on the SQLite leg (the PG leg ignores it).
                 let sqlite_schema = crate::declarative::descriptor_to_sdk_schema(&desc);
-                let migs = self.decl.lower_create_table(name, &snap, &sqlite_schema, live)?;
+                let migs = decl.lower_create_table(name, &snap, &sqlite_schema, live)?;
                 // The just-created table is now live for any later intra-IR FK.
                 live.insert(name.clone());
                 migs
             }
-            Op::AddColumn { table, column, ty, nullable, default } => {
+            Op::AddColumn { table, column, ty, nullable, default, .. } => {
                 // Fail-closed on a synth default (see the createTable arm): a
                 // user-authored `now()`/`genRandomUuid()` must NOT be silently dropped.
                 reject_synth_default(std::iter::once((column.as_str(), default.as_ref())))?;
                 let col =
                     self.add_column_snapshot(table, column, ty, *nullable, default.as_ref())?;
-                vec![self.decl.lower_add_column(table, &col)]
+                vec![decl.lower_add_column(table, &col)]
             }
             Op::CreateIndex { table, columns, name, unique, using, .. } => {
                 let idx = create_index_snapshot(table, columns, name.as_deref(), *unique, *using);
-                vec![self.decl.lower_create_index(table, &idx)]
+                vec![decl.lower_create_index(table, &idx)]
             }
-            Op::DropTable { table, .. } => vec![self.decl.lower_drop_table(table)],
+            Op::DropTable { table, .. } => vec![decl.lower_drop_table(table)],
             Op::DropColumn { table, column, .. } => {
-                vec![self.decl.lower_drop_column(table, column)]
+                vec![decl.lower_drop_column(table, column)]
             }
             Op::DropIndex { name, unique, .. } => {
                 // A bare-name DropIndex is rejected fail-closed UPSTREAM by the
@@ -1025,9 +1108,9 @@ impl IrAuthor {
                 // and gating falls back to the hint — never LESS strict than before.
                 let is_unique = unique.unwrap_or(false) || live_unique_indexes.contains(name);
                 let idx = IndexSnapshot::btree(name.clone(), is_unique, Vec::new());
-                vec![self.decl.lower_drop_index(&idx)]
+                vec![decl.lower_drop_index(&idx)]
             }
-            Op::AlterColumnType { table, column, ty, using } => {
+            Op::AlterColumnType { table, column, ty, using, .. } => {
                 // SQLite has NO `ALTER COLUMN` — a type change is reconciled by the
                 // differ's 12-step table REBUILD, which needs the full live table
                 // structure (not available in this pure-render lower). So stand-alone
@@ -1044,14 +1127,14 @@ impl IrAuthor {
                 // one-field descriptor) so the emitted `data_type` is byte-identical
                 // to the differ's type mapping — never re-spelled (§6.5).
                 let col = self.add_column_snapshot(table, column, ty, None, None)?;
-                vec![self.decl.lower_alter_column_type(table, &col)]
+                vec![decl.lower_alter_column_type(table, &col)]
             }
-            Op::AlterColumnNullability { table, column, nullable } => {
+            Op::AlterColumnNullability { table, column, nullable, .. } => {
                 // Same SQLite rebuild constraint as alterColumnType.
                 self.require_pg_for("alterColumnNullability")?;
-                vec![self.decl.lower_alter_column_nullability(table, column, *nullable)]
+                vec![decl.lower_alter_column_nullability(table, column, *nullable)]
             }
-            Op::RenameColumn { table, from, to, ty } => {
+            Op::RenameColumn { table, from, to, ty, .. } => {
                 // §2.6.1 — ONE online-rename plan step, dialect-chosen at lower
                 // (§2.6.2). The neutral→PG / neutral→SQLite-affinity translation
                 // lives in `lower_rename`; the destination authors (the
@@ -1061,11 +1144,13 @@ impl IrAuthor {
                 let step = self.lower_rename(table, from, to, ty, live_schema)?;
                 return Ok(LoweredOp::Rename(Box::new(step)));
             }
-            Op::AddConstraint { table, constraint } => self.lower_add_constraint(table, constraint)?,
-            Op::DropConstraint { table, name } => {
+            Op::AddConstraint { table, constraint, .. } => {
+                self.lower_add_constraint(&decl, &eff_schema, table, constraint)?
+            }
+            Op::DropConstraint { table, name, .. } => {
                 // SQLite has no `ALTER TABLE … DROP CONSTRAINT` (rebuild-only); PG only.
                 self.require_pg_for("dropConstraint")?;
-                vec![self.decl.lower_drop_constraint(table, name)]
+                vec![decl.lower_drop_constraint(table, name)]
             }
             // §PR6a — the DML ops lower through the creator-DML assembler
             // (`crate::dml`) into a `PlanStep::Dml`/`PlanStep::Backfill`, NOT a DDL
@@ -1074,7 +1159,12 @@ impl IrAuthor {
             | Op::Update { .. }
             | Op::Delete { .. }
             | Op::Backfill { .. } => {
-                return Ok(LoweredOp::Dml(self.lower_dml_op(op_index, op, live_schema)?));
+                return Ok(LoweredOp::Dml(self.lower_dml_op(
+                    op_index,
+                    op,
+                    &eff_schema,
+                    live_schema,
+                )?));
             }
         };
         // **PR9b — deterministic, reviewable version for a SCOPE-GATED destructive
@@ -1136,6 +1226,7 @@ impl IrAuthor {
         &self,
         op_index: usize,
         op: &Op,
+        eff_schema: &str,
         live_schema: &LiveSchema,
     ) -> Result<PlanStep, IrLowerError> {
         use crate::ir::Op;
@@ -1162,13 +1253,14 @@ impl IrAuthor {
             .map_err(|e| IrLowerError::DmlValidate(Box::new(e)))?;
 
         match op {
-            Op::Insert { table, columns, rows, on_conflict } => {
+            Op::Insert { table, columns, rows, on_conflict, .. } => {
                 let oc = on_conflict.as_ref().map(|c| crate::dml::OnConflict {
                     columns: c.columns.clone(),
                     do_update: c.do_update.clone(),
                 });
+                // **PR10** — qualify into the op's effective schema (§2.7).
                 let asm = crate::dml::assemble_insert(
-                    &self.project_schema,
+                    eff_schema,
                     dialect,
                     table,
                     columns,
@@ -1178,7 +1270,7 @@ impl IrAuthor {
                 .map_err(IrLowerError::DmlAssemble)?;
                 Ok(self.dml_step(op_index, table, "insert", asm, false))
             }
-            Op::Update { table, set, r#where, batch } => {
+            Op::Update { table, set, r#where, batch, .. } => {
                 if batch.is_some() {
                     // A batched update is a backfill in disguise (resumable, paged):
                     // route it through the backfill path so its SQLite leg hits the
@@ -1195,7 +1287,7 @@ impl IrAuthor {
                     );
                 }
                 let asm = crate::dml::assemble_update(
-                    &self.project_schema,
+                    eff_schema,
                     dialect,
                     table,
                     set,
@@ -1204,9 +1296,9 @@ impl IrAuthor {
                 .map_err(IrLowerError::DmlAssemble)?;
                 Ok(self.dml_step(op_index, table, "update", asm, false))
             }
-            Op::Delete { table, r#where, limit } => {
+            Op::Delete { table, r#where, limit, .. } => {
                 let asm = crate::dml::assemble_delete(
-                    &self.project_schema,
+                    eff_schema,
                     dialect,
                     table,
                     r#where,
@@ -1217,7 +1309,7 @@ impl IrAuthor {
                 // refuses it without `Approval::Approved`.
                 Ok(self.dml_step(op_index, table, "delete", asm, true))
             }
-            Op::Backfill { table, cursor_column, batch_size, set, filter, name } => self
+            Op::Backfill { table, cursor_column, batch_size, set, filter, name, .. } => self
                 .lower_backfill(
                     table,
                     cursor_column,
@@ -1656,6 +1748,8 @@ impl IrAuthor {
     /// rebuild-only ([`IrLowerError::SqliteRebuildOnly`]).
     fn lower_add_constraint(
         &self,
+        decl: &DeclarativeAuthor,
+        eff_schema: &str,
         table: &str,
         constraint: &IrConstraint,
     ) -> Result<Vec<LoweredUnit>, IrLowerError> {
@@ -1673,13 +1767,16 @@ impl IrAuthor {
                         "addConstraint(fk) multi-column (later wave)",
                     ));
                 }
+                // **PR10** — the FK references resolve in the SAME effective schema
+                // the constraint is added in (the resolved qualifier, not the bound
+                // project schema).
                 let fk = crate::declarative::ir_fk_constraint_snapshot(
-                    &self.project_schema,
+                    eff_schema,
                     name,
                     local,
                     references_table,
                 );
-                self.decl.lower_add_fk(table, &fk)
+                decl.lower_add_fk(table, &fk)
             }
             IrConstraintKind::Unique { columns } => {
                 let body = format!("UNIQUE ({})", quote_cols(columns));
@@ -1687,7 +1784,7 @@ impl IrAuthor {
                     name.map_or_else(|| derived_constraint_name(table, columns, "key"), str::to_string);
                 // A UNIQUE add on an existing table scans + locks and can fail on
                 // existing duplicates — gated (requires_approval), like SET NOT NULL.
-                self.decl.lower_add_constraint(table, &cname, &body, true)
+                decl.lower_add_constraint(table, &cname, &body, true)
             }
             IrConstraintKind::Pk { columns } => {
                 let body = format!("PRIMARY KEY ({})", quote_cols(columns));
@@ -1695,7 +1792,7 @@ impl IrAuthor {
                     name.map_or_else(|| derived_constraint_name(table, columns, "pkey"), str::to_string);
                 // A PK add scans + locks the whole table under ACCESS EXCLUSIVE and
                 // fails on a NULL/duplicate key — gated (requires_approval).
-                self.decl.lower_add_constraint(table, &cname, &body, true)
+                decl.lower_add_constraint(table, &cname, &body, true)
             }
             IrConstraintKind::Check { .. } => {
                 // A CHECK predicate is a closed-AST `Expr`; rendering it to SQL is
@@ -2135,6 +2232,8 @@ mod tests {
                 columns: cols,
                 constraints: vec![],
                 indexes: vec![],
+                schema: None,
+                existence_guard: None,
             }],
             flags: IrFlagsOverride::default(),
             depends_on: vec![],
@@ -2142,6 +2241,94 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         }
+    }
+
+    // ── PR10: schema-qualifier render + existence-guard fail-closed ─────────────
+
+    /// **PR10** — an op carrying an explicit `schema` renders qualified into THAT
+    /// schema on PG (§2.7), not the bound project schema. The render seam reads the
+    /// resolved schema, so `createTable` lands in `"app2"."t"`. RED before the
+    /// `effective_schema` → `with_project_schema` threading.
+    #[test]
+    fn explicit_schema_renders_qualified_into_resolved_schema_pg() {
+        let mut ir = create_table_ir(
+            "t",
+            vec![TIrColumn {
+                name: "x".into(),
+                ty: ColType::Int,
+                nullable: None,
+                default: None,
+                unique: None,
+            }],
+        );
+        if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
+            *schema = Some("app2".into());
+        }
+        // The author is BOUND to project schema "app1"; the op overrides to "app2".
+        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
+        let migs = author.lower(&ir, &LiveSchema::default()).expect("lower");
+        let create = migs.iter().find(|m| m.up.contains("CREATE TABLE")).expect("create");
+        assert!(
+            create.up.contains("\"app2\".\"t\""),
+            "createTable with schema:app2 must qualify into \"app2\".\"t\"; up = {:?}",
+            create.up
+        );
+        assert!(
+            !create.up.contains("\"app1\".\"t\""),
+            "the bound project schema must NOT leak when an op overrides it"
+        );
+    }
+
+    /// **PR10** — the connection DEFAULT schema applies when an op omits its own
+    /// qualifier (§2.7). RED before `with_default_schema`/`effective_schema`.
+    #[test]
+    fn default_schema_applies_when_op_omits_qualifier_pg() {
+        let ir = create_table_ir(
+            "t",
+            vec![TIrColumn {
+                name: "x".into(),
+                ty: ColType::Int,
+                nullable: None,
+                default: None,
+                unique: None,
+            }],
+        );
+        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres)
+            .with_default_schema(Some("dflt".into()));
+        let migs = author.lower(&ir, &LiveSchema::default()).expect("lower");
+        let create = migs.iter().find(|m| m.up.contains("CREATE TABLE")).expect("create");
+        assert!(
+            create.up.contains("\"dflt\".\"t\""),
+            "an op with no schema must render into the connection default; up = {:?}",
+            create.up
+        );
+    }
+
+    /// **PR10** — an op carrying an `existence_guard` is REFUSED fail-closed at lower
+    /// (the executor-side probe is a later slice), NOT silently lowered with the
+    /// guard dropped (which would apply the bare op unconditionally — fail-OPEN over a
+    /// possibly-divergent existing object). RED would be a silent success.
+    #[test]
+    fn existence_guard_is_refused_fail_closed_at_lower() {
+        let mut ir = create_table_ir(
+            "t",
+            vec![TIrColumn {
+                name: "x".into(),
+                ty: ColType::Int,
+                nullable: None,
+                default: None,
+                unique: None,
+            }],
+        );
+        if let Op::CreateTable { existence_guard, .. } = &mut ir.ops[0] {
+            *existence_guard = Some(crate::ir::ExistenceGuard::IfNotExists);
+        }
+        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
+        let err = author.lower(&ir, &LiveSchema::default()).unwrap_err();
+        assert!(
+            matches!(err, IrLowerError::ExistenceGuardNotYetSupported(_)),
+            "a guarded op must be refused fail-closed at lower, got: {err:?}"
+        );
     }
 
     // §6.1.1 — the byte-identity invariant: for a MULTI-statement op (a
@@ -2349,8 +2536,9 @@ mod tests {
                 name: "users_email_uniq".into(),
                 table: Some("users".into()),
                 unique: Some(true),
-                if_exists: None,
                 concurrently: None,
+                schema: None,
+                existence_guard: None,
             }],
             flags: IrFlagsOverride::default(),
             depends_on: vec![],
@@ -2378,8 +2566,9 @@ mod tests {
                 name: "users_created_at_idx".into(),
                 table: Some("users".into()),
                 unique: None,
-                if_exists: None,
                 concurrently: None,
+                schema: None,
+                existence_guard: None,
             }],
             flags: IrFlagsOverride::default(),
             depends_on: vec![],
@@ -2563,6 +2752,8 @@ mod tests {
                 }],
                 constraints: vec![],
                 indexes: vec![],
+                schema: None,
+                existence_guard: None,
             }],
             flags: IrFlagsOverride::default(),
             depends_on: vec![],
@@ -2589,6 +2780,8 @@ mod tests {
                 ty: ColType::Uuid,
                 nullable: Some(false),
                 default: Some(IrDefault::Fn { r#fn: SynthDefaultFn::GenRandomUuid }),
+                schema: None,
+                existence_guard: None,
             }],
             flags: IrFlagsOverride::default(),
             depends_on: vec![],
@@ -2616,6 +2809,8 @@ mod tests {
                 ty: ColType::Text,
                 nullable: Some(false),
                 default: Some(IrDefault::Literal { value: crate::ir::IrScalar::Str("x".into()) }),
+                schema: None,
+                existence_guard: None,
             }],
             flags: IrFlagsOverride::default(),
             depends_on: vec![],
@@ -2658,8 +2853,9 @@ mod tests {
                 name: "users_email_uniq".into(),
                 table: Some("users".into()),
                 unique: Some(false),
-                if_exists: None,
                 concurrently: None,
+                schema: None,
+                existence_guard: None,
             }],
             flags: IrFlagsOverride::default(),
             depends_on: vec![],
@@ -2698,8 +2894,9 @@ mod tests {
                 name: "users_email_uniq".into(),
                 table: Some("users".into()),
                 unique: None,
-                if_exists: None,
                 concurrently: None,
+                schema: None,
+                existence_guard: None,
             }],
             flags: IrFlagsOverride::default(),
             depends_on: vec![],
@@ -2763,8 +2960,9 @@ mod tests {
                 name: "users_email_uniq".into(),
                 table: Some("users".into()),
                 unique: Some(false),
-                if_exists: None,
                 concurrently: None,
+                schema: None,
+                existence_guard: None,
             }],
             flags: IrFlagsOverride::default(),
             depends_on: vec![],

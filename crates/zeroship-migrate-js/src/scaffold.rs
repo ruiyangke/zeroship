@@ -241,6 +241,8 @@ fn synth_index_op(table: &str, idx: &IndexSnapshot) -> Result<Op, ScaffoldError>
         using: None,
         r#where: None,
         concurrently: None,
+        schema: None,
+        existence_guard: None,
     })
 }
 
@@ -344,6 +346,8 @@ fn synth_delta_ops(
                         columns,
                         constraints: Vec::new(),
                         indexes: Vec::new(),
+                        schema: None,
+                        existence_guard: None,
                     },
                     todo: None,
                 });
@@ -380,6 +384,8 @@ fn synth_delta_ops(
                             ty,
                             nullable: if col.nullable { None } else { Some(false) },
                             default,
+                            schema: None,
+                            existence_guard: None,
                         },
                         todo,
                     });
@@ -399,8 +405,9 @@ fn synth_delta_ops(
                 ops.push(SynthOp {
                     op: Op::DropTable {
                         table: table.clone(),
-                        if_exists: None,
                         cascade: None,
+                        schema: None,
+                        existence_guard: None,
                     },
                     todo: None,
                 });
@@ -417,7 +424,8 @@ fn synth_delta_ops(
                         op: Op::DropColumn {
                             table: table.clone(),
                             column: col.name.clone(),
-                            if_exists: None,
+                            schema: None,
+                            existence_guard: None,
                         },
                         todo: None,
                     });
@@ -533,6 +541,7 @@ fn render_op_call(op: &Op) -> String {
             ty,
             nullable,
             default,
+            ..
         } => {
             let mut chain = render_t_for(ty);
             if *nullable == Some(false) {

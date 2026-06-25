@@ -13,13 +13,13 @@
       "op": "dropColumn",
       "table": "orders",
       "column": "memo",
-      "ifExists": true
+      "existenceGuard": "ifExists"
     },
     {
       "op": "dropTable",
       "table": "scratch",
-      "ifExists": true,
-      "cascade": true
+      "cascade": true,
+      "existenceGuard": "ifExists"
     }
   ],
   "flags": {},

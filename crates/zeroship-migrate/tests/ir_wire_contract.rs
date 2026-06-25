@@ -36,21 +36,36 @@ use zeroship_migrate::EXPR_INVALID_NUMERIC;
 
 #[test]
 fn drop_table_fields_are_camel_case() {
+    // **PR10** — the legacy native `if_exists`/`ifExists` boolean field is GONE; the
+    // existence guard is the uniform `existenceGuard` enum (engine-synthesized via a
+    // catalog probe, NOT native `IF EXISTS`). The intentional wire break.
+    use zeroship_migrate::ir::ExistenceGuard;
     let op = Op::DropTable {
         table: "t".into(),
-        if_exists: Some(true),
         cascade: Some(false),
+        schema: None,
+        existence_guard: Some(ExistenceGuard::IfExists),
     };
     let v = serde_json::to_value(&op).unwrap();
     assert_eq!(v["op"], "dropTable");
-    assert!(v.get("ifExists").is_some(), "if_exists must serialize as ifExists, got: {v}");
+    assert_eq!(v["existenceGuard"], "ifExists", "the guard serializes camelCased: {v}");
+    assert!(v.get("ifExists").is_none(), "the old native ifExists bool must NOT appear: {v}");
     assert!(v.get("if_exists").is_none(), "snake_case if_exists must NOT appear: {v}");
-    // round-trips from camelCase wire form
-    let back: Op = serde_json::from_str(r#"{"op":"dropTable","table":"t","ifExists":true}"#).unwrap();
+    // round-trips from the camelCase wire form
+    let back: Op =
+        serde_json::from_str(r#"{"op":"dropTable","table":"t","existenceGuard":"ifExists"}"#)
+            .unwrap();
     match back {
-        Op::DropTable { if_exists, .. } => assert_eq!(if_exists, Some(true)),
+        Op::DropTable { existence_guard, .. } => {
+            assert_eq!(existence_guard, Some(ExistenceGuard::IfExists));
+        }
         _ => panic!("expected DropTable"),
     }
+    // The removed native field is rejected by deny_unknown_fields.
+    assert!(
+        serde_json::from_str::<Op>(r#"{"op":"dropTable","table":"t","if_exists":true}"#).is_err(),
+        "the removed if_exists field must be rejected"
+    );
 }
 
 #[test]
@@ -449,6 +464,8 @@ fn add_column_omits_absent_optionals() {
         ty: zeroship_migrate::ir::ColType::Int,
         nullable: None,
         default: None,
+        schema: None,
+        existence_guard: None,
     };
     let v = serde_json::to_value(&op).unwrap();
     let obj = v.as_object().unwrap();
@@ -477,6 +494,8 @@ fn create_index_omits_all_absent_optionals() {
         using: None,
         r#where: None,
         concurrently: None,
+        schema: None,
+        existence_guard: None,
     };
     let v = serde_json::to_value(&op).unwrap();
     let obj = v.as_object().unwrap();
@@ -570,6 +589,8 @@ fn checksum_of_ir_matches_js_idiomatic_omitted_optionals() {
         ty: ColType::Int,
         nullable: None,
         default: None,
+        schema: None,
+        existence_guard: None,
     };
     // The idiomatic JS-emitted document: the optional keys are simply ABSENT.
     let js_json = r#"{"op":"addColumn","table":"t","column":"x","type":"int"}"#;

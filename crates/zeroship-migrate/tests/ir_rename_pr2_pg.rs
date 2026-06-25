@@ -149,6 +149,8 @@ fn rename_ir(table: &str, from: &str, to: &str, ty: ColType) -> MigrationIr {
             from: from.into(),
             to: to.into(),
             ty,
+            schema: None,
+            existence_guard: None,
         }],
         flags: IrFlagsOverride::default(),
         depends_on: vec![],

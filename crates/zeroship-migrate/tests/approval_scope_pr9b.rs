@@ -190,7 +190,8 @@ fn drop_column_step(cfg: &ExecutorConfig, table: &str, column: &str, live: &Live
         ops: vec![Op::DropColumn {
             table: table.into(),
             column: column.into(),
-            if_exists: None,
+            schema: None,
+            existence_guard: None,
         }],
         flags: IrFlagsOverride::default(),
         depends_on: vec![],
@@ -214,6 +215,8 @@ fn rename_step(cfg: &ExecutorConfig, table: &str, from: &str, to: &str, live: &L
             from: from.into(),
             to: to.into(),
             ty: ColType::Text,
+            schema: None,
+            existence_guard: None,
         }],
         flags: IrFlagsOverride::default(),
         depends_on: vec![],

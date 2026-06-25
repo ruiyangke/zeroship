@@ -388,6 +388,7 @@ export function createTable(
   name: string,
   columns: Record<string, ColumnDefType>,
   build?: (b: TableBuilder) => void,
+  opts: TableOpOpts & { ifNotExists?: boolean } = {},
 ): void {
   requireString(name, "createTable(name, …)");
   const cols: Node[] = [];
@@ -414,8 +415,31 @@ export function createTable(
       columns: cols,
       constraints: constraints.length ? constraints : undefined,
       indexes: indexes.length ? indexes : undefined,
+      // **PR10** — the schema qualifier + the create-family existence guard.
+      schema: opts.schema,
+      existenceGuard: ifNotExistsGuard(opts.ifNotExists),
     }),
   );
+}
+
+/** **PR10** — the optional schema qualifier carried by every table-targeting op
+ *  (§2.7). Names-are-strings (no live-schema binding); the engine pins/refuses it
+ *  per profile. */
+interface TableOpOpts {
+  schema?: string;
+}
+
+/** **PR10** — map the create/add family `{ ifNotExists }` boolean to the wire
+ *  `existenceGuard: "ifNotExists"` token (omitted when falsy). */
+function ifNotExistsGuard(v: boolean | undefined): "ifNotExists" | undefined {
+  return v ? "ifNotExists" : undefined;
+}
+
+/** **PR10** — map the drop/rename/alter family `{ ifExists }` boolean to the wire
+ *  `existenceGuard: "ifExists"` token (omitted when falsy). Replaces the old native
+ *  `ifExists` boolean field (the intentional wire break). */
+function ifExistsGuard(v: boolean | undefined): "ifExists" | undefined {
+  return v ? "ifExists" : undefined;
 }
 
 function makeTableBuilder(constraints: Node[], indexes: Node[]): TableBuilder {
@@ -440,34 +464,92 @@ function makeTableBuilder(constraints: Node[], indexes: Node[]): TableBuilder {
   };
 }
 
-export function dropTable(table: string, opts: { ifExists?: boolean; cascade?: boolean } = {}): void {
+export function dropTable(
+  table: string,
+  opts: TableOpOpts & { ifExists?: boolean; cascade?: boolean } = {},
+): void {
   requireString(table, "dropTable(table)");
-  push(compact({ op: "dropTable", table, ifExists: opts.ifExists, cascade: opts.cascade }));
+  push(
+    compact({
+      op: "dropTable",
+      table,
+      cascade: opts.cascade,
+      schema: opts.schema,
+      existenceGuard: ifExistsGuard(opts.ifExists),
+    }),
+  );
 }
 
-export function addColumn(table: string, name: string, type: ColumnDefType): void {
+export function addColumn(
+  table: string,
+  name: string,
+  type: ColumnDefType,
+  opts: TableOpOpts & { ifNotExists?: boolean } = {},
+): void {
   requireString(table, "addColumn(table, …)");
   requireString(name, "addColumn(table, name, …)");
   if (!isColumnDef(type)) {
     throw structuredError("OP_INVALID", "addColumn type must be a t.* ColumnDef");
   }
-  push(compact({ op: "addColumn", table, column: name, ...type.__toAddColumnTail() }));
+  push(
+    compact({
+      op: "addColumn",
+      table,
+      column: name,
+      ...type.__toAddColumnTail(),
+      schema: opts.schema,
+      existenceGuard: ifNotExistsGuard(opts.ifNotExists),
+    }),
+  );
 }
 
-export function dropColumn(table: string, column: string, opts: { ifExists?: boolean } = {}): void {
+export function dropColumn(
+  table: string,
+  column: string,
+  opts: TableOpOpts & { ifExists?: boolean } = {},
+): void {
   requireString(table, "dropColumn(table, …)");
   requireString(column, "dropColumn(table, column)");
-  push(compact({ op: "dropColumn", table, column, ifExists: opts.ifExists }));
+  push(
+    compact({
+      op: "dropColumn",
+      table,
+      column,
+      schema: opts.schema,
+      existenceGuard: ifExistsGuard(opts.ifExists),
+    }),
+  );
 }
 
-export function renameColumn(table: string, from: string, to: string, type: ColumnDefType): void {
+export function renameColumn(
+  table: string,
+  from: string,
+  to: string,
+  type: ColumnDefType,
+  opts: TableOpOpts & { ifExists?: boolean } = {},
+): void {
   requireString(table, "renameColumn(table, …)");
   requireString(from, "renameColumn from");
   requireString(to, "renameColumn to");
-  push({ op: "renameColumn", table, from, to, type: colTypeOf(type) });
+  push(
+    compact({
+      op: "renameColumn",
+      table,
+      from,
+      to,
+      type: colTypeOf(type),
+      schema: opts.schema,
+      existenceGuard: ifExistsGuard(opts.ifExists),
+    }),
+  );
 }
 
-export function alterColumn(table: string, name: string, change: AlterColumnChange): void {
+export function alterColumn(
+  table: string,
+  name: string,
+  change: AlterColumnChange,
+  opts: TableOpOpts & { ifExists?: boolean } = {},
+): void {
   requireString(table, "alterColumn(table, …)");
   requireString(name, "alterColumn(table, name, …)");
   if (!change || typeof change !== "object") {
@@ -481,12 +563,23 @@ export function alterColumn(table: string, name: string, change: AlterColumnChan
         column: name,
         type: colTypeOf(change.type),
         using: resolveExpr(change.using),
+        schema: opts.schema,
+        existenceGuard: ifExistsGuard(opts.ifExists),
       }),
     );
     return;
   }
   if (change.nullable !== undefined) {
-    push({ op: "alterColumnNullability", table, column: name, nullable: change.nullable });
+    push(
+      compact({
+        op: "alterColumnNullability",
+        table,
+        column: name,
+        nullable: change.nullable,
+        schema: opts.schema,
+        existenceGuard: ifExistsGuard(opts.ifExists),
+      }),
+    );
     return;
   }
   throw structuredError("OP_INVALID", "alterColumn change must carry `type` or `nullable`");
@@ -507,32 +600,80 @@ function fkConstraintFromSpec(spec: ForeignKeySpec): Node {
   });
 }
 
-export function addForeignKey(table: string, spec: ForeignKeySpec): void {
+export function addForeignKey(
+  table: string,
+  spec: ForeignKeySpec,
+  opts: TableOpOpts & { ifNotExists?: boolean } = {},
+): void {
   requireString(table, "addForeignKey(table, …)");
-  push({ op: "addConstraint", table, constraint: fkConstraintFromSpec(spec) });
+  push(
+    compact({
+      op: "addConstraint",
+      table,
+      constraint: fkConstraintFromSpec(spec),
+      schema: opts.schema,
+      existenceGuard: ifNotExistsGuard(opts.ifNotExists),
+    }),
+  );
 }
 
-export function addUnique(table: string, spec: UniqueSpec): void {
+export function addUnique(
+  table: string,
+  spec: UniqueSpec,
+  opts: TableOpOpts & { ifNotExists?: boolean } = {},
+): void {
   requireString(table, "addUnique(table, …)");
   if (!spec || !Array.isArray(spec.columns)) {
     throw structuredError("OP_INVALID", "addUnique spec needs { columns: string[], name? }");
   }
-  push({ op: "addConstraint", table, constraint: compact({ name: spec.name, kind: { kind: "unique", columns: spec.columns } }) });
+  push(
+    compact({
+      op: "addConstraint",
+      table,
+      constraint: compact({ name: spec.name, kind: { kind: "unique", columns: spec.columns } }),
+      schema: opts.schema,
+      existenceGuard: ifNotExistsGuard(opts.ifNotExists),
+    }),
+  );
 }
 
-export function addCheck(table: string, spec: CheckSpec): void {
+export function addCheck(
+  table: string,
+  spec: CheckSpec,
+  opts: TableOpOpts & { ifNotExists?: boolean } = {},
+): void {
   requireString(table, "addCheck(table, …)");
   if (!spec || spec.expr === undefined) {
     throw structuredError("OP_INVALID", "addCheck spec needs { expr: (c) => Expr, name? }");
   }
-  push({ op: "addConstraint", table, constraint: compact({ name: spec.name, kind: { kind: "check", expr: resolveExpr(spec.expr) } }) });
+  push(
+    compact({
+      op: "addConstraint",
+      table,
+      constraint: compact({ name: spec.name, kind: { kind: "check", expr: resolveExpr(spec.expr) } }),
+      schema: opts.schema,
+      existenceGuard: ifNotExistsGuard(opts.ifNotExists),
+    }),
+  );
 }
 
-export function dropConstraint(table: string, spec: DropConstraintSpec | string): void {
+export function dropConstraint(
+  table: string,
+  spec: DropConstraintSpec | string,
+  opts: TableOpOpts & { ifExists?: boolean } = {},
+): void {
   requireString(table, "dropConstraint(table, …)");
   const name = typeof spec === "string" ? spec : spec && spec.name;
   requireString(name, "dropConstraint name");
-  push({ op: "dropConstraint", table, name });
+  push(
+    compact({
+      op: "dropConstraint",
+      table,
+      name,
+      schema: opts.schema,
+      existenceGuard: ifExistsGuard(opts.ifExists),
+    }),
+  );
 }
 
 export function createIndex(table: string, spec: CreateIndexSpec): void {
@@ -550,13 +691,20 @@ export function createIndex(table: string, spec: CreateIndexSpec): void {
       using: spec.using,
       where: resolveExpr(spec.where),
       concurrently: spec.concurrently,
+      schema: spec.schema,
+      existenceGuard: ifNotExistsGuard(spec.ifNotExists),
     }),
   );
 }
 
 export function dropIndex(
   name: string,
-  opts: { table?: string; unique?: boolean; ifExists?: boolean; concurrently?: boolean } = {},
+  opts: TableOpOpts & {
+    table?: string;
+    unique?: boolean;
+    ifExists?: boolean;
+    concurrently?: boolean;
+  } = {},
 ): void {
   requireString(name, "dropIndex(name, …)");
   push(
@@ -565,8 +713,9 @@ export function dropIndex(
       name,
       table: opts.table,
       unique: opts.unique,
-      ifExists: opts.ifExists,
       concurrently: opts.concurrently,
+      schema: opts.schema,
+      existenceGuard: ifExistsGuard(opts.ifExists),
     }),
   );
 }
@@ -583,7 +732,16 @@ export function insert<R extends Row = Row>(table: string, args: InsertArgs<R>):
       Object.prototype.hasOwnProperty.call(r, col) ? toIrScalar((r as Row)[col]) : null,
     ),
   );
-  push(compact({ op: "insert", table, columns, rows: positional, onConflict: normalizeOnConflict(args.onConflict) }));
+  push(
+    compact({
+      op: "insert",
+      table,
+      columns,
+      rows: positional,
+      onConflict: normalizeOnConflict(args.onConflict),
+      schema: args.schema,
+    }),
+  );
 }
 
 /** Normalize an `onConflict.doUpdate` `column → scalar` map through the IrScalar
@@ -608,6 +766,7 @@ export function update(table: string, args: UpdateArgs): void {
       set: resolveSet(args.set),
       where: resolveExpr(args.where),
       batch: args.batch,
+      schema: args.schema,
     }),
   );
 }
@@ -617,7 +776,15 @@ export function del(table: string, args: DelArgs): void {
   if (args.where === undefined || args.where === null) {
     throw structuredError("OP_INVALID", "del(table, { where }): where is mandatory");
   }
-  push(compact({ op: "delete", table, where: resolveExpr(args.where), limit: args.limit }));
+  push(
+    compact({
+      op: "delete",
+      table,
+      where: resolveExpr(args.where),
+      limit: args.limit,
+      schema: args.schema,
+    }),
+  );
 }
 
 const DEFAULT_BACKFILL_CURSOR = "id";
@@ -635,6 +802,7 @@ export function backfill(table: string, args: BackfillArgs): void {
       set: resolveSet(args.set),
       filter: resolveExpr(args.where),
       name: args.name || `backfill_${table}`,
+      schema: args.schema,
     }),
   );
 }

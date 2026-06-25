@@ -589,9 +589,29 @@ function makeTableBuilder(constraints, indexes) {
   };
 }
 
+// **PR10** — map the existence-guard booleans to the wire `existenceGuard` token
+// (omitted when falsy). The create/add family takes `ifNotExists`; the
+// drop/rename/alter family takes `ifExists`. Engine-synthesized via a catalog
+// probe — NOT a native `IF [NOT] EXISTS` clause. Replaces the old native
+// `ifExists` boolean field (the intentional wire break).
+function ifNotExistsGuard(v) {
+  return v ? "ifNotExists" : undefined;
+}
+function ifExistsGuard(v) {
+  return v ? "ifExists" : undefined;
+}
+
 export function dropTable(table, opts = {}) {
   requireString(table, "dropTable(table)");
-  return push(compact({ op: "dropTable", table, ifExists: opts.ifExists, cascade: opts.cascade }));
+  return push(
+    compact({
+      op: "dropTable",
+      table,
+      cascade: opts.cascade,
+      schema: opts.schema,
+      existenceGuard: ifExistsGuard(opts.ifExists),
+    }),
+  );
 }
 
 // ── DDL: columns ──
@@ -605,7 +625,16 @@ export function addColumn(table, name, type, opts = {}) {
   requireString(table, "addColumn(table, …)");
   requireString(name, "addColumn(table, name, …)");
   if (isColumnDef(type)) {
-    return push(compact({ op: "addColumn", table, column: name, ...type.__toAddColumnTail() }));
+    return push(
+      compact({
+        op: "addColumn",
+        table,
+        column: name,
+        ...type.__toAddColumnTail(),
+        schema: opts.schema,
+        existenceGuard: ifNotExistsGuard(opts.ifNotExists),
+      }),
+    );
   }
   return push(
     compact({
@@ -615,6 +644,8 @@ export function addColumn(table, name, type, opts = {}) {
       type: colTypeOf(type),
       nullable: opts.nullable,
       default: opts.default,
+      schema: opts.schema,
+      existenceGuard: ifNotExistsGuard(opts.ifNotExists),
     }),
   );
 }
@@ -622,7 +653,15 @@ export function addColumn(table, name, type, opts = {}) {
 export function dropColumn(table, column, opts = {}) {
   requireString(table, "dropColumn(table, …)");
   requireString(column, "dropColumn(table, column)");
-  return push(compact({ op: "dropColumn", table, column, ifExists: opts.ifExists }));
+  return push(
+    compact({
+      op: "dropColumn",
+      table,
+      column,
+      schema: opts.schema,
+      existenceGuard: ifExistsGuard(opts.ifExists),
+    }),
+  );
 }
 
 /**
@@ -781,6 +820,8 @@ export function createIndex(table, specOrColumns, legacyOpts) {
       using: spec.using,
       where: resolveExpr(spec.where),
       concurrently: spec.concurrently,
+      schema: spec.schema,
+      existenceGuard: ifNotExistsGuard(spec.ifNotExists),
     }),
   );
 }
@@ -793,8 +834,9 @@ export function dropIndex(name, opts = {}) {
       name,
       table: opts.table,
       unique: opts.unique,
-      ifExists: opts.ifExists,
       concurrently: opts.concurrently,
+      schema: opts.schema,
+      existenceGuard: ifExistsGuard(opts.ifExists),
     }),
   );
 }

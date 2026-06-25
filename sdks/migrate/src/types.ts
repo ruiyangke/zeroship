@@ -196,6 +196,13 @@ export interface CreateIndexSpec {
   using?: IndexMethod;
   where?: ExprFn;
   concurrently?: boolean;
+  /** **PR10** — the schema qualifier (§2.7). Honored under the general/Trusted CLI,
+   *  pinned/refused under the Confined creator profile. Names-are-strings. */
+  schema?: string;
+  /** **PR10** — engine-synthesized `IF NOT EXISTS` guard (catalog probe, not native
+   *  SQL). The index is created iff absent; a present same-shape index is a journaled
+   *  satisfied no-op; a present divergent one FAILS CLOSED (§2.7). */
+  ifNotExists?: boolean;
 }
 
 export interface AlterColumnChange {
@@ -219,6 +226,8 @@ export interface InsertArgs<R extends Row = Row> {
    * aliases for live surface).
    */
   onConflict?: { columns: string[]; doUpdate?: Partial<R> };
+  /** **PR10** — the schema qualifier (§2.7). */
+  schema?: string;
 }
 
 export interface UpdateArgs {
@@ -229,11 +238,15 @@ export interface UpdateArgs {
    *  (PG writable-CTE windowed UPDATE / SQLite per-batch-txn). Absent ⇒ a single
    *  unbatched UPDATE. Parity with the engine recorder. */
   batch?: IrBatch;
+  /** **PR10** — the schema qualifier (§2.7). */
+  schema?: string;
 }
 
 export interface DelArgs {
   where: ExprFn;
   limit?: number;
+  /** **PR10** — the schema qualifier (§2.7). */
+  schema?: string;
 }
 
 export interface BackfillArgs {
@@ -244,6 +257,8 @@ export interface BackfillArgs {
   /** Defaults to the engine's chosen batch size. */
   batchSize?: number;
   name?: string;
+  /** **PR10** — the schema qualifier (§2.7). */
+  schema?: string;
 }
 
 /** The table-scoped builder `createTable`'s `(b) => …` overload + `batchAlterTable`

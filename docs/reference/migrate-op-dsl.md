@@ -257,9 +257,13 @@ Below is the full shipped op surface. Every signature is the one exported by
 ### DDL — tables
 
 ```ts
-createTable(name, columns, build?); // ops.ts:387
-dropTable(table, { ifExists?, cascade? }?); // ops.ts:443
+createTable(name, columns, build?, { schema?, ifNotExists? }?); // ops.ts:387
+dropTable(table, { schema?, ifExists?, cascade? }?); // ops.ts:443
 ```
+
+Every table-targeting op also accepts an optional `schema` qualifier and (where
+applicable) an existence guard — see "The `schema` qualifier" and "Existence
+guards" below.
 
 `createTable` takes a column map and an optional `(b) => void` scoped builder
 for table-level constraints and indexes:
@@ -397,6 +401,88 @@ backfill("orders", {
 SQLite upsert and no raw route; a SQLite-targeted `onConflict` is a hard build
 error (`dialect_scope = PgOnly`), surfaced at build, never at runtime
 (`sdks/migrate/src/types.ts:207-222`).
+
+## The `schema` qualifier (profile-gated)
+
+Every table-targeting op accepts an optional `schema` (a plain identifier string —
+names-are-strings, never live-schema-bound). It selects the schema the op renders
+into. Its meaning is **profile-gated**:
+
+- **General / dbmate-like CLI (Trusted profile):** the qualifier is **honored**.
+  The op renders `"schema"."table"` on Postgres. The default schema, when an op
+  omits its own, is the connection default (a `--schema`/search-path flag,
+  threaded as the engine's `default_schema`) → else the connection `search_path`
+  head. On **SQLite** a non-`main` schema maps to an **attached-database name**:
+  the engine renders `"schema"."table"` but does **NOT** auto-`ATTACH` — the
+  attached DB must already exist (`main` is the default and needs no ATTACH). If
+  the attached DB is absent, SQLite errors at apply; surfacing that is the
+  operator's responsibility.
+
+- **Platform creator deploy (Confined profile):** the project schema is **pinned**.
+  An op that omits `schema`, or names the project schema, is fine; an explicit
+  `schema` that differs from the project schema is **refused at validate-time,
+  fail-closed**, with a structured `CROSS_SCHEMA` authoring error — *before* lower,
+  earlier and friendlier than the least-privilege migrator role's `42501` and the
+  parse-guard's cross-schema denial (both of which stay in force as line-2/line-3
+  defenses). The confinement invariant is unchanged; this is an additional, earlier
+  gate.
+
+- **Platform-internal (Platform profile):** an explicit `schema` must be a member
+  of the configured platform schema allow-list, else `CROSS_SCHEMA`.
+
+The schema string is an identifier the engine double-quotes, so it is also
+**validated for injection** at validate-time (`INVALID_SCHEMA_IDENT`): it must be a
+non-empty, alpha/`_`-leading bare identifier of `[A-Za-z0-9_]` — an injection-shaped
+value (`"; DROP …`, an embedded quote) is rejected on every profile.
+
+```ts
+// Trusted CLI: render into a non-default schema.
+createTable("audit_log", { id: t.id() }, undefined, { schema: "reporting" });
+insert("widgets", { rows: { id: 1 }, schema: "reporting" });
+// Confined creator deploy: a cross-schema op is refused fail-closed.
+dropTable("other_app_table", { schema: "some_other_app" }); // → CROSS_SCHEMA
+```
+
+## Existence guards (`ifExists` / `ifNotExists`)
+
+The create/add family (`createTable`, `addColumn`, `createIndex`,
+`addForeignKey`/`addUnique`/`addCheck`) accepts `{ ifNotExists: true }`; the
+drop/rename/alter family (`dropTable`, `dropColumn`, `dropIndex`,
+`dropConstraint`, `renameColumn`, `alterColumn`) accepts `{ ifExists: true }`. A
+guard on the wrong family is a `GUARD_DIRECTION` authoring error.
+
+These are **NOT** lowered to a native `IF [NOT] EXISTS` clause. Native support is
+patchy and asymmetric: Postgres has no `ADD CONSTRAINT IF NOT EXISTS` and none on
+`ALTER COLUMN`/`RENAME`; SQLite has no `ADD COLUMN IF NOT EXISTS`, none on
+drop-column, and none on rename. Lowering to native SQL would therefore silently
+support the guard on some ops/dialects and explode on others.
+
+Instead the engine **synthesizes** the guard uniformly via an **executor-side
+catalog probe**, run under the held project advisory lock (so probe→act is
+TOCTOU-free, the same interlock argument as the §2.0.3 contract): it queries the
+catalog (PG `pg_catalog`/`information_schema`; SQLite `sqlite_master` + PRAGMAs),
+decides **in Rust** whether the object is present, then runs the bare op or skips
+it. The default semantic is **shape-verify-or-fail**, never a bare skip:
+
+- `ifNotExists`, object **absent** → run the bare op.
+- `ifNotExists`, object **present and its shape matches** the declared op → a
+  journaled **satisfied** no-op (the migration still records a version — satisfied,
+  not failed).
+- `ifNotExists`, object **present but its shape DIFFERS** (e.g. `addColumn
+  ifNotExists` where the column exists with a different type) → **FAIL CLOSED** with
+  a drift error naming the divergence. It is never a silent skip over a divergent
+  object.
+- `ifExists`, object **present** → run the bare drop/alter.
+- `ifExists`, object **absent** → a journaled satisfied no-op (a drop has no shape
+  to verify — presence alone governs).
+
+> **Status:** the IR shape, the JS surface, the validate-time direction check, and
+> the wire/checksum/golden plumbing for the existence-guard family are in place.
+> The executor-side catalog probe (probe → shape-verify-or-fail → run/skip) is the
+> next slice; until it lands, lowering an op that carries an existence guard is
+> **refused fail-closed** (`ExistenceGuardNotYetSupported`) rather than silently
+> dropping the guard and applying the bare op unconditionally — which would be a
+> fail-OPEN over a possibly-divergent existing object.
 
 ### SQLite-safe rebuild (`batchAlterTable`)
 

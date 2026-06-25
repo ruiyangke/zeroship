@@ -112,6 +112,7 @@ async fn lower_plan_and_apply(
         APP,
         zeroship_migrate::validate::Dialect::Sqlite,
         reg,
+        None,
     )
     .expect("load gate");
     let plan = author
@@ -378,6 +379,7 @@ async fn on_conflict_rejected_on_sqlite() {
         APP,
         zeroship_migrate::validate::Dialect::Sqlite,
         &registry(&[("codes", APP)]),
+        None,
     )
     .expect("load gate (onConflict is a LOWER-time reject, not a load-gate reject)");
     let err = author
@@ -407,6 +409,7 @@ async fn batched_backfill_portable_on_sqlite() {
         APP,
         zeroship_migrate::validate::Dialect::Sqlite,
         &registry(&[("codes", APP)]),
+        None,
     )
     .expect("load gate");
     let plan = author
@@ -550,6 +553,7 @@ async fn unresolved_colref_rejected_at_apply_seam_on_sqlite() {
         APP,
         zeroship_migrate::validate::Dialect::Sqlite,
         &registry(&[("codes", APP)]),
+        None,
     )
     .expect("load gate (DML ColRef resolution is an apply-seam reject, not a load reject)");
     let err = author
@@ -587,6 +591,7 @@ async fn malformed_set_identifier_rejected_on_sqlite() {
         APP,
         zeroship_migrate::validate::Dialect::Sqlite,
         &registry(&[("codes", APP)]),
+        None,
     )
     .expect("load gate");
     let err = author
