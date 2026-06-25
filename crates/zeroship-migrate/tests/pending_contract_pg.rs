@@ -31,8 +31,8 @@ use zeroship_migrate::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
 use zeroship_migrate::ir_author::{IrAuthor, LiveSchema};
 use zeroship_migrate::plan::{PlanStep, RenameStep};
 use zeroship_migrate::{
-    provision_migrator, role::deprovision_migrator, Approval, ExecutorConfig, MigrationEngine,
-    PostgresBackend, SqlDialect,
+    provision_migrator, role::deprovision_migrator, Approval, ExecutorConfig, MigrationBackend,
+    MigrationEngine, PendingContractRecord, PostgresBackend, SqlDialect,
 };
 
 const DEFAULT_DSN: &str =
@@ -1027,6 +1027,184 @@ async fn bare_name_dropindex_on_pending_table_is_refused() {
         }
         other => panic!("expected a PendingContract refusal, got {other:?}"),
     }
+
+    teardown(&conn, &cfg).await;
+}
+
+// ----------------------------------------------------------------------------
+// PR9e — the obligation + its recovery marker are written in ONE transaction.
+// ----------------------------------------------------------------------------
+
+/// The net state of the (single) deploy-recovery marker, or `None` if no marker row.
+async fn marker_net_state(conn: &Client, cfg: &ExecutorConfig) -> Option<String> {
+    let meta = q(&cfg.pg.meta_schema);
+    let rows = conn
+        .query(
+            &format!(
+                "WITH latest AS (
+                     SELECT DISTINCT ON (deploy_id, pending_version) state
+                       FROM {meta}.schema_deploy_recovery
+                      ORDER BY deploy_id, pending_version, event_seq DESC
+                 ) SELECT state FROM latest LIMIT 1"
+            ),
+            &[],
+        )
+        .await
+        .expect("read recovery marker net-state");
+    rows.first().map(|r| r.get::<_, String>("state"))
+}
+
+/// The number of net-`pending` obligation rows.
+async fn pending_obligation_count(conn: &Client, cfg: &ExecutorConfig) -> i64 {
+    let meta = q(&cfg.pg.meta_schema);
+    let rows = conn
+        .query(
+            &format!(
+                "WITH latest AS (
+                     SELECT DISTINCT ON (pending_version) state
+                       FROM {meta}.schema_pending_contracts
+                      ORDER BY pending_version, event_seq DESC
+                 ) SELECT count(*)::bigint AS n FROM latest WHERE state = 'pending'"
+            ),
+            &[],
+        )
+        .await
+        .expect("count pending obligations");
+    rows[0].get::<_, i64>("n")
+}
+
+fn sample_record<'a>(pending_version: &'a str, contract_versions: &'a [String]) -> PendingContractRecord<'a> {
+    PendingContractRecord {
+        table: "members",
+        from_col: "email",
+        to_col: "email_address",
+        ty: "text",
+        pending_version,
+        plan_version: "plan_v1",
+        contract_versions,
+        by: "deploy-test",
+    }
+}
+
+// PR9e — the engine-stamped combined write commits the OBLIGATION row and its
+// `in_progress` recovery MARKER in ONE transaction. With a recovery scope present,
+// both rows are committed together; there is no window where the obligation exists
+// without its marker. RED PRE-FIX: the marker was a SEPARATE control-loop statement,
+// so an obligation-without-marker state was reachable.
+#[compio::test]
+async fn pr9e_obligation_and_marker_commit_atomically() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let be = PostgresBackend::new(&conn);
+    zeroship_migrate::ensure_journal(&conn, &cfg)
+        .await
+        .expect("bootstrap journal");
+
+    let contract_versions = vec!["c1".to_string(), "c2".to_string()];
+    let scope = zeroship_migrate::journal::DeployRecoveryScope { deploy_id: "dep_pr9e_1" };
+    be.record_pending_contract_with_recovery(
+        &cfg,
+        sample_record("pv_pr9e_1", &contract_versions),
+        Some(scope),
+    )
+    .await
+    .expect("combined obligation+marker write commits");
+
+    // BOTH committed in the same transaction: exactly one pending obligation AND a
+    // net-`in_progress` marker. The obligation can NEVER exist without its marker.
+    assert_eq!(
+        pending_obligation_count(&conn, &cfg).await,
+        1,
+        "the obligation row is committed"
+    );
+    assert_eq!(
+        marker_net_state(&conn, &cfg).await.as_deref(),
+        Some("in_progress"),
+        "PR9e: the recovery marker is BORN `in_progress`, committed atomically with the obligation"
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
+// PR9e — a forced mid-transaction failure of the combined write rolls back BOTH rows:
+// no obligation without a marker, no marker without an obligation. We force the
+// marker INSERT to fail by dropping `schema_deploy_recovery` first; the obligation
+// INSERT (which ran earlier in the same txn) must roll back too.
+#[compio::test]
+async fn pr9e_combined_write_failure_rolls_back_both_rows() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let be = PostgresBackend::new(&conn);
+    zeroship_migrate::ensure_journal(&conn, &cfg)
+        .await
+        .expect("bootstrap journal");
+
+    // Drop the recovery-marker table so the SECOND INSERT in the combined txn errors
+    // (relation does not exist) AFTER the obligation INSERT has run within the txn.
+    let meta = q(&cfg.pg.meta_schema);
+    conn.batch_execute(&format!("DROP TABLE {meta}.schema_deploy_recovery"))
+        .await
+        .expect("drop recovery table to force the marker INSERT to fail");
+
+    let contract_versions = vec!["c1".to_string()];
+    let scope = zeroship_migrate::journal::DeployRecoveryScope { deploy_id: "dep_pr9e_2" };
+    let err = be
+        .record_pending_contract_with_recovery(
+            &cfg,
+            sample_record("pv_pr9e_2", &contract_versions),
+            Some(scope),
+        )
+        .await
+        .expect_err("the marker INSERT fails ⇒ the whole combined write errors");
+    let _ = format!("{err:?}");
+
+    // The obligation row was ROLLED BACK with the failed marker INSERT — there is NO
+    // orphaned obligation. RED PRE-FIX (separate statements) the obligation would have
+    // committed independently and survived the marker failure.
+    assert_eq!(
+        pending_obligation_count(&conn, &cfg).await,
+        0,
+        "PR9e: a mid-txn marker failure rolls back the obligation too — no obligation without a marker"
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
+// PR9e — with NO recovery scope (the routine `.sql` / resolve / abort caller), the
+// combined write degrades to a single autocommit obligation INSERT and writes NO
+// marker — identical to the pre-PR9e `record_pending_contract`. This pins the
+// fail-closed default (R2): `None` ⇒ no marker.
+#[compio::test]
+async fn pr9e_no_scope_writes_obligation_only_no_marker() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let be = PostgresBackend::new(&conn);
+    zeroship_migrate::ensure_journal(&conn, &cfg)
+        .await
+        .expect("bootstrap journal");
+
+    let contract_versions = vec!["c1".to_string()];
+    be.record_pending_contract_with_recovery(
+        &cfg,
+        sample_record("pv_pr9e_3", &contract_versions),
+        None,
+    )
+    .await
+    .expect("scope-less obligation write commits");
+
+    assert_eq!(
+        pending_obligation_count(&conn, &cfg).await,
+        1,
+        "the obligation is committed"
+    );
+    assert_eq!(
+        marker_net_state(&conn, &cfg).await,
+        None,
+        "PR9e R2: with no recovery scope, NO marker is written (routine non-deploy path)"
+    );
 
     teardown(&conn, &cfg).await;
 }

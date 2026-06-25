@@ -920,6 +920,9 @@ pub async fn run_resolve_pending(
             &exec_cfg,
             "resolve-pending",
             crate::executor::LockMode::Acquire,
+            // The resolve-pending path discharges an obligation; it opens none, so no
+            // deploy recovery scope (PR9e).
+            None,
         )
         .await
         .map_err(|e| match e {

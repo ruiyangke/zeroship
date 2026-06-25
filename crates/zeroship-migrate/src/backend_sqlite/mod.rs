@@ -526,6 +526,18 @@ impl MigrationBackend for SqliteBackend {
         Ok(())
     }
 
+    async fn record_pending_contract_with_recovery(
+        &self,
+        _cfg: &ExecutorConfig,
+        _rec: crate::journal::PendingContractRecord<'_>,
+        _scope: Option<crate::journal::DeployRecoveryScope<'_>>,
+    ) -> Result<(), JournalError> {
+        // SQLite has no online-rename pending partition AND no half-state to recover,
+        // so both the obligation and the recovery marker are no-ops (the recovery
+        // `scope` is ignored — PR9e R4 fail-closed default).
+        Ok(())
+    }
+
     async fn resolve_pending_contract(
         &self,
         _cfg: &ExecutorConfig,
@@ -542,27 +554,7 @@ impl MigrationBackend for SqliteBackend {
     // `SqliteRebuild` is one atomic offline step), so there is no same-deploy
     // half-state to recover: all three markers are no-ops / empty.
 
-    async fn record_deploy_recovery_open(
-        &self,
-        _cfg: &ExecutorConfig,
-        _deploy_id: &str,
-        _pending_version: &str,
-        _by: &str,
-    ) -> Result<(), JournalError> {
-        Ok(())
-    }
-
-    async fn mark_deploy_recovery_reached_success(
-        &self,
-        _cfg: &ExecutorConfig,
-        _deploy_id: &str,
-        _pending_version: &str,
-        _by: &str,
-    ) -> Result<(), JournalError> {
-        Ok(())
-    }
-
-    async fn mark_deploy_recovery_reached_success_batch(
+    async fn mark_deploy_recovery_committed_batch(
         &self,
         _cfg: &ExecutorConfig,
         _deploy_id: &str,

@@ -111,44 +111,18 @@ pub mod points {
     /// the half-renamed table, mark the marker reconciled). Tripped by the
     /// deploy-recovery crash-fuzz test only.
     pub const DEPLOY_BEFORE_INPROCESS_ABORT: &str = "deploy.before_inprocess_abort";
-    /// In the control IR deploy loop (PR9d-rev finding 1): AFTER the engine committed
-    /// a same-deploy EXPAND's obligation row (`record_pending_contract`) and returned,
-    /// but BEFORE the control loop wrote its `open` recovery marker
-    /// (`record_deploy_recovery_open`). A crash here leaves the obligation OUTSTANDING
-    /// with **no** recovery marker — the obligation row and the marker are two separate
-    /// statements, not one transaction (the marker keys on the control-plane
-    /// `deploy_id` the migrate engine does not carry). This residual is NOT
-    /// auto-recovered by the next deploy's crash-recovery leg (it JOINs on the marker
-    /// table and finds nothing), but it IS fail-closed: the outstanding obligation
-    /// fences the table via the prior-deploy interlock, and the operator clears it with
-    /// `resolve-pending --abort | --apply`. Tripped by the obligation-without-marker
-    /// residual characterization test only.
-    pub const DEPLOY_AFTER_OBLIGATION_BEFORE_MARKER: &str =
-        "deploy.after_obligation.before_marker";
-    /// In the control IR deploy loop SUCCESS arm (PR9d HIGH): AFTER the
-    /// `reached_success` marker is stamped, the phase-2 `reconciled` append FAILS
-    /// (DB hiccup). This reproduces the HIGH window — a legitimately-pending go-live
-    /// whose `reconciled` append errored. The marker stays net-`reached_success`, so
-    /// the NEXT deploy's crash-recovery leg must STILL exclude it (no false-abort of
-    /// the live contract). Tripped by the legit-pending-survives-unrelated-deploy
-    /// test only.
-    pub const DEPLOY_SUCCESS_RECONCILE_FAILS: &str = "deploy.success_reconcile_fails";
-    /// In the control IR deploy loop SUCCESS arm (PR9d-crit HIGH): the PHASE-1
-    /// `reached_success` stamp itself FAILS (DB unreachable the instant the go-live
-    /// reached its success arm). This reproduces the IRREDUCIBLE residual the
-    /// `reached_success` discriminator cannot self-heal: the marker stays net-`open`
-    /// over a LEGITIMATELY-pending live contract (trigger + shadow column committed,
-    /// obligation pending). Unlike a phase-2 (`reconciled`) failure — which is
-    /// non-fatal because the marker is already net-`reached_success` — a phase-1
-    /// failure leaves a marker INDISTINGUISHABLE from a genuine crash half-state by
-    /// any durable signal (the go-live's physical schema state is byte-identical to a
-    /// crashed deploy's; see the two recovery tests). It is therefore NOT recoverable
-    /// by a re-run (the idempotent re-run finds the EXPAND `already_outstanding`, so it
-    /// never re-opens the obligation and never re-reaches the per-obligation stamp).
-    /// The ONLY safe clearance is the operator's `resolve-pending --apply` (complete
-    /// the rename, discharging the obligation so the next deploy's recovery leg finds
-    /// nothing outstanding to abort). Tripped by the phase-1-stamp-failure
-    /// characterization test only.
-    pub const DEPLOY_SUCCESS_REACHED_SUCCESS_STAMP_FAILS: &str =
-        "deploy.success_reached_success_stamp_fails";
+    /// In the control IR deploy loop SUCCESS arm (PR9e): the `committed` recovery-marker
+    /// promotion FAILS (DB unreachable the instant the go-live reaches its success arm).
+    /// Because the marker was BORN `in_progress` atomically with the obligation
+    /// (engine-stamped — PR9e), a promotion failure leaves it net-`in_progress`: the
+    /// *recoverable* (fail-safe) state. The deploy surfaces a HARD error, but the NEXT
+    /// same-app deploy's crash-recovery leg AUTO-ABORTS the half-rename (safe — a
+    /// pending contract has not cut over to the shadow column, so no data is lost), then
+    /// the app re-runs the rename cleanly. This is the INVERSE of the pre-PR9e phase-1
+    /// stamp-failure residual: there a failure left the marker `open` (protected) and a
+    /// later deploy silently reverted a committed contract; here a failure leaves it
+    /// recoverable and the later deploy safely auto-aborts. Tripped by the
+    /// no-false-abort / fail-safe-auto-recovery characterization test only.
+    pub const DEPLOY_SUCCESS_COMMITTED_STAMP_FAILS: &str =
+        "deploy.success_committed_stamp_fails";
 }
