@@ -797,13 +797,15 @@ function recordCreateIndex(
 function recordDropIndex(
   table: string,
   name: string,
-  args: { ifExists?: boolean; concurrently?: boolean; schema?: string },
+  args: { ifExists?: boolean; concurrently?: boolean; unique?: boolean; schema?: string },
 ): void {
   push(
     compact({
       op: "dropIndex",
       name,
       table,
+      // `unique` drives the destructive/approval gating at apply — preserved here.
+      unique: args.unique,
       concurrently: args.concurrently,
       schema: args.schema,
       existenceGuard: ifExistsGuard(args.ifExists),
@@ -1020,6 +1022,7 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
           recordDropIndex(name, idxName, {
             ifExists: args.ifExists,
             concurrently: args.concurrently,
+            unique: args.unique,
             schema: pickSchema(args, dflt),
           });
           return handle;

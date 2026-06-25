@@ -1,24 +1,25 @@
-// op.* migration fixture — the FULL §3.2/§3.3.1 FLUENT DML + EXPRESSION surface
-// (PR3). Authored in the headline form: `verb(table, { … })` DML with the one
-// `where` keyword across update/del/backfill, the row-object `insert({ rows })`
-// form, and the single-handle `(c) => Expr` builder (`c("name")` + the chainable
-// operator methods + the `c.fn.*` namespace). Proves the fluent builder records
-// the IDENTICAL frozen closed-AST wire nodes as the legacy `e.*` style.
+// op.* migration fixture — the FULL FLUENT DML + EXPRESSION surface, authored via
+// the SOLE public `table()` entry. Exercises the row-object `insert({ rows })`
+// form, `update`/`del`/`backfill` with the one `where` keyword, and the
+// single-handle `(c) => Expr` builder (`c("name")` + the chainable operator methods
+// + the `c.fn.*` namespace).
 //
 // Exercises EVERY Expr node + operator:
 //   colRef, literal (auto-wrapped bare value), binOp {eq,ne,lt,le,gt,ge,and,or,
 //   add,sub,mul,div,concat}, unaryOp {not,isNull,isNotNull,isTrue,isFalse},
 //   case, fnCall {coalesce,nullif,lower,upper,trim,length,abs}, fnSynth
 //   {concatWs,splitPart,now,genRandomUuid}, cast.
-import { insert, update, del, backfill } from "@zeroship/migrate";
+import { table } from "@zeroship/migrate";
 
 export default {
   name: "fluent_dml",
 
   up() {
+    const sc = table("status_codes");
+
     // insert({ rows }) — the row-OBJECT form (normalized to columns + positional
     // rows, column order from the first row's keys).
-    insert("status_codes", {
+    sc.insert({
       rows: [
         { code: 200, label: "ok" },
         { code: 404, label: "not found" },
@@ -26,9 +27,7 @@ export default {
     });
 
     // update({ set, where }) — `set` values + `where` are `(c) => Expr`.
-    // Exercises: fnCall(coalesce/lower/upper/trim/length/abs/nullif), binOp
-    // arithmetic + comparison + boolean, unaryOp, cast, concat.
-    update("status_codes", {
+    sc.update({
       set: {
         label: (c) => c.fn.coalesce(c("label"), "unknown"),
         norm: (c) => c.fn.lower(c.fn.trim(c("label"))),
@@ -43,9 +42,9 @@ export default {
       where: (c) => c("code").gt(0).and(c("label").isNotNull()),
     });
 
-    // del({ where, limit }) — mandatory `where`; exercises ne/le/ge/or/not + the
-    // isNull/isFalse unary tests + a searched CASE predicate.
-    del("status_codes", {
+    // del({ where, limit }) — mandatory `where`; ne/le/ge/or/not + isNull/isFalse +
+    // a searched CASE predicate.
+    sc.del({
       where: (c) =>
         c("code")
           .ne(0)
@@ -61,10 +60,9 @@ export default {
       limit: 100,
     });
 
-    // backfill({ set, where }) — `cursorColumn`/`batchSize` overridable; the
-    // predicate keyword is `where`. Exercises fnSynth concatWs/splitPart/now/
-    // genRandomUuid (the DB-evaluated apply-time scalars, §4.3).
-    backfill("status_codes", {
+    // backfill({ set, where }) — `cursorColumn`/`batchSize` overridable; fnSynth
+    // concatWs/splitPart/now/genRandomUuid.
+    sc.backfill({
       set: {
         full: (c) => c.fn.concatWs(" ", c("label"), c("code").cast("text")),
         first: (c) => c.fn.splitPart(c("label"), " ", 1),

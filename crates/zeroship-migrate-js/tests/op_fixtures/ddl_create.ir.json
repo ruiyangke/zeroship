@@ -29,8 +29,7 @@
         },
         {
           "name": "note",
-          "type": "text",
-          "nullable": true
+          "type": "text"
         }
       ],
       "constraints": [],
