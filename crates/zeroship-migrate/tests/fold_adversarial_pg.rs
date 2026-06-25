@@ -342,3 +342,55 @@ async fn drop_fk_constraint_keeps_same_named_user_index() {
     );
     teardown(&conn, &cfg).await;
 }
+
+/// Live round-trip: a reserved-word LOCAL FK column (`order`) must fold to the
+/// SAME `FOREIGN KEY ("order")` body `pg_get_constraintdef` reports. Pre-fix the
+/// FK `definition` was built with the local column interpolated RAW, so the fold
+/// emitted a bare `FOREIGN KEY (order)` — phantom-diffing the catalog (which
+/// quotes the keyword) under `ConstraintSnapshot`'s FULL Eq, failing this oracle.
+#[compio::test]
+async fn reserved_word_local_fk_column_round_trips() {
+    if !require_db() {
+        eprintln!("SKIP reserved_word_local_fk_column_round_trips (MIGRATE_REQUIRE_DB unset)");
+        return;
+    }
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let mut all: Vec<Op> = Vec::new();
+
+    // Parent table the FK references (its system `id`).
+    let parent = r#"{"ir_version":1,"name":"mkparent","ops":[
+        {"op":"createTable","name":"parent","columns":[
+            {"name":"label","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    all.extend(apply_doc(&conn, &cfg, parent, &registry(&[]), Approval::None).await);
+
+    // Child table whose FK LOCAL column is a reserved keyword (`order`).
+    let child = r#"{"ir_version":1,"name":"mkchild","ops":[
+        {"op":"createTable","name":"child","columns":[
+            {"name":"order","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    all.extend(apply_doc(&conn, &cfg, child, &registry(&[("parent", APP)]), Approval::None).await);
+
+    let reg = registry(&[("parent", APP), ("child", APP)]);
+
+    // FK on the reserved-word local column → exercises `fk_definition_pg(field=order)`.
+    let add_fk = r#"{"ir_version":1,"name":"addfk","ops":[
+        {"op":"addConstraint","table":"child",
+            "constraint":{"name":"child_order_fk","kind":{"kind":"fk","columns":["order"],
+                "referencesTable":"parent","referencesColumns":["id"]}}}
+    ]}"#;
+    all.extend(apply_doc(&conn, &cfg, add_fk, &reg, Approval::Approved).await);
+
+    let live = snapshot_schema(&conn, &cfg.project_schema).await.unwrap();
+    let folded = fold_ops(&all, SqlDialect::Postgres, &cfg.project_schema).expect("fold");
+    assert_eq!(
+        canonicalize(folded),
+        canonicalize(live),
+        r#"fold must match introspection for a reserved-word local FK column (FOREIGN KEY ("order"))"#
+    );
+    teardown(&conn, &cfg).await;
+}

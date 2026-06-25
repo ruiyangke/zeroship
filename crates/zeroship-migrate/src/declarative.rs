@@ -1986,19 +1986,16 @@ fn fk_definition_pg(
     // lowercase `parent`) AND a reserved-word/mixed-case schema or target resolves
     // correctly instead of being emitted as a bare keyword.
     //
-    // **mig-first P1 review (LOW — BACKLOG, not P1)**: the LOCAL FK column `field` is
-    // interpolated RAW (unlike the schema/target, and unlike the UNIQUE/PK body which
-    // routes through `constraintdef_cols`). For a reserved-word/mixed-case local FK
-    // column, `pg_get_constraintdef` would render `FOREIGN KEY ("order")` while this
-    // emits `FOREIGN KEY (order)`, phantom-diffing the FK `definition` (which the fold
-    // reuses, and `ConstraintSnapshot` has FULL Eq including `definition`). This is a
-    // PRE-EXISTING differ concern the fold merely inherits — the P1 corpus uses only
-    // safe lowercase FK columns so it never trips. BACKLOG: wrap `field` in
-    // `quote_ident_if_needed(field)` here and add a differ+fold round-trip case with a
-    // reserved-word FK column (e.g. a column named `order`). No change required to land
-    // P1.
+    // The LOCAL FK column is quoted the SAME conditional way as the schema/target
+    // (and as the UNIQUE/PK body via `constraintdef_cols`): `pg_get_constraintdef`
+    // renders `FOREIGN KEY ("order")` for a reserved-word/mixed-case column, so a
+    // raw `FOREIGN KEY (order)` would phantom-diff the FK `definition` (the fold
+    // reuses it, and `ConstraintSnapshot` has FULL Eq) AND mis-resolve `order` as
+    // the keyword. Over-quoting a safe lowercase column would equally phantom-diff
+    // the catalog's bare body — hence conditional (`quote_ident_if_needed`).
     let mut def = format!(
-        "FOREIGN KEY ({field}) REFERENCES {}.{}(id)",
+        "FOREIGN KEY ({}) REFERENCES {}.{}(id)",
+        quote_ident_if_needed(field),
         quote_ident_if_needed(project_schema),
         quote_ident_if_needed(target),
     );
@@ -5674,6 +5671,22 @@ mod fk_referenced_table_quoting_tests {
         assert!(
             def.contains(r#"REFERENCES app."order"(id)"#),
             "a reserved-word target must render quoted (catalog parity); def = {def:?}"
+        );
+    }
+
+    /// **RED before quoting the LOCAL FK column.** A reserved-word LOCAL FK
+    /// column (`order`) must render QUOTED in the `FOREIGN KEY (...)` body,
+    /// matching `pg_get_constraintdef` (`FOREIGN KEY ("order")`). The pre-fix raw
+    /// interpolation emitted `FOREIGN KEY (order)`, phantom-diffing the catalog
+    /// (which quotes it) — the fold REUSES this `definition` and
+    /// `ConstraintSnapshot` has FULL Eq, so the round-trip oracle would mismatch
+    /// (and the bare `order` mis-resolves as the `ORDER` keyword).
+    #[test]
+    fn reserved_word_local_fk_column_renders_quoted() {
+        let def = fk_definition_pg("order", "app", "orders", None, None, true);
+        assert!(
+            def.contains(r#"FOREIGN KEY ("order")"#),
+            "a reserved-word local FK column must render quoted (catalog parity); def = {def:?}"
         );
     }
 
