@@ -313,7 +313,7 @@ fn validate_ident(what: &'static str, value: &str) -> Result<(), PreconditionErr
 /// Double-quote a validated identifier (belt-and-suspenders; the value has passed
 /// [`validate_ident`] so it has no `"`).
 fn quote_ident(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
+    crate::dml::escape_quote_ident(ident)
 }
 
 /// Evaluate a precondition against the live DB. Returns `true` if the assertion
@@ -695,15 +695,14 @@ async fn run_sql_boolean_in_txn(
     sql: &str,
 ) -> Result<bool, PreconditionError> {
     // Pin the project schema (and only it) on the path, scoped to this txn.
-    conn.batch_execute(&format!(
-        "SET LOCAL search_path TO \"{}\"",
-        cfg.project_schema.replace('"', "\"\"")
-    ))
-    .await?;
+    let schema_q = crate::dml::escape_quote_ident(&cfg.project_schema);
+    conn.batch_execute(&format!("SET LOCAL search_path TO {schema_q}"))
+        .await?;
     // Drop to the migrator role for the read, scoped to this txn (line-2). No
     // role configured (tests / single-tenant dev) runs as the connecting role.
     if let Some(role) = &cfg.pg.migrator_role {
-        conn.batch_execute(&format!("SET LOCAL ROLE \"{}\"", role.replace('"', "\"\"")))
+        let role_q = crate::dml::escape_quote_ident(role);
+        conn.batch_execute(&format!("SET LOCAL ROLE {role_q}"))
             .await?;
     }
     let row = conn.query_one(sql, &[]).await?;

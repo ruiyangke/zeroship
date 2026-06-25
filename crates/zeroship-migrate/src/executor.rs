@@ -499,7 +499,7 @@ fn set_local_session_sql(cfg: &ExecutorConfig, m: &Migration) -> String {
 fn set_local_role_sql(cfg: &ExecutorConfig) -> Option<String> {
     cfg.pg.migrator_role
         .as_ref()
-        .map(|role| format!("SET LOCAL ROLE \"{}\"", role.replace('"', "\"\"")))
+        .map(|role| format!("SET LOCAL ROLE {}", crate::dml::escape_quote_ident(role)))
 }
 
 /// Session-level `SET …` for the **non-txn path** (no transaction to scope to).
@@ -2084,7 +2084,7 @@ pub(crate) async fn apply_transactional(
         !supersedes.is_empty(),
         "kind='squash' iff supersedes is non-empty"
     );
-    let meta = format!("\"{}\"", cfg.pg.meta_schema.replace('"', "\"\""));
+    let meta = crate::dml::escape_quote_ident(&cfg.pg.meta_schema);
     if let Err(e) = conn
         .execute(
             &format!(
@@ -2237,7 +2237,7 @@ pub(crate) async fn apply_dml_transactional(
         supersedes: &[],
         preconditions: &[],
     });
-    let meta = format!("\"{}\"", cfg.pg.meta_schema.replace('"', "\"\""));
+    let meta = crate::dml::escape_quote_ident(&cfg.pg.meta_schema);
     if let Err(e) = conn
         .execute(
             &format!(
@@ -2277,7 +2277,7 @@ async fn insert_supersedes_edges(
     squash_version: &str,
     supersedes: &[&str],
 ) -> Result<(), JournalError> {
-    let meta = format!("\"{}\"", cfg.pg.meta_schema.replace('"', "\"\""));
+    let meta = crate::dml::escape_quote_ident(&cfg.pg.meta_schema);
     for sup in supersedes {
         conn.execute(
             &format!(
@@ -2362,7 +2362,8 @@ pub(crate) async fn apply_non_transactional(
     // the role never leaks onto the session even if the `<up>` fails — and
     // `apply`'s `restore_session` is an unconditional backstop (L1).
     if let Some(role) = &cfg.pg.migrator_role {
-        conn.batch_execute(&format!("SET ROLE \"{}\"", role.replace('"', "\"\"")))
+        let role_q = crate::dml::escape_quote_ident(role);
+        conn.batch_execute(&format!("SET ROLE {role_q}"))
             .await?;
     }
     let up_result = conn.batch_execute(&m.up).await;
@@ -2500,9 +2501,9 @@ async fn recover_non_transactional(
             .get("invalid");
         if is_invalid {
             let stmt = format!(
-                "DROP INDEX IF EXISTS \"{}\".\"{}\"",
-                cfg.project_schema.replace('"', "\"\""),
-                idx.replace('"', "\"\""),
+                "DROP INDEX IF EXISTS {}.{}",
+                crate::dml::escape_quote_ident(&cfg.project_schema),
+                crate::dml::escape_quote_ident(&idx),
             );
             conn.batch_execute(&stmt).await?;
         }
@@ -3291,7 +3292,7 @@ pub(crate) async fn rollback_one_transactional(
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
 
     // Append the immutable `rolled_back` event in the SAME transaction, as admin.
-    let meta = format!("\"{}\"", cfg.pg.meta_schema.replace('"', "\"\""));
+    let meta = crate::dml::escape_quote_ident(&cfg.pg.meta_schema);
     if let Err(e) = conn
         .execute(
             &format!(

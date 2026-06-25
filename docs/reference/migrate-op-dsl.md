@@ -435,6 +435,19 @@ into. Its meaning is **profile-gated**:
   - **Trusted / Platform (operator CLI):** the widened scope admits the
     gate-approved schema, so the cross-schema backfill runs — under Trusted as the
     connecting/admin role (no migrator `SET ROLE`), the documented posture.
+
+    > **Trusted backfill SQL fragments are trusted SQL.** The backfill's
+    > authored `set` clause and `where` filter are interpolated into the windowed
+    > `UPDATE`. Under **Confined** they run through the confined guard (deny-list
+    > + cross-schema walk), so a creator's fragments are statically bounded. Under
+    > **Trusted / Platform** the runner uses the **trusted guard** — the deny-list
+    > and cross-schema walk are **skipped by design** (only the structural checks
+    > remain: cursor-not-mutated + parse). So an operator-authored
+    > `set`/`where` is run as trusted SQL, and a Trusted *cross-schema* backfill
+    > runs those fragments cross-schema under that non-deny-listed guard. This
+    > exactly mirrors the one-shot DML Trusted posture (operator-token-gated, the
+    > operator owns the DB) and is **not** a confinement hole: creators can never
+    > reach the Trusted profile, so they cannot author these fragments.
   - **SQLite (any profile):** a non-`main` schema is still refused **earlier**
     (`SqliteSchemaUnsupported`, before the backfill lower); SQLite's single `main`
     db renders the table unqualified.

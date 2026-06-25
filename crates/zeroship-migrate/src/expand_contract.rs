@@ -133,7 +133,7 @@ impl ExpandContractPlan {
 /// Quote a Postgres identifier (double embedded quotes, wrap in `"`). Mirrors
 /// [`crate::author`]'s quoting so output is injection-safe.
 fn quote_ident(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
+    crate::dml::escape_quote_ident(ident)
 }
 
 /// Validate a bare SQL identifier: non-empty, starts with a letter/underscore,

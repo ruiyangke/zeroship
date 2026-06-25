@@ -53,7 +53,7 @@ use zeroship_schema::query::{SqlDialect, SqliteEmitScope};
 /// [`crate::author`]'s quoting so emitted SQL is injection-safe even past the
 /// author-boundary `validate_ident` (defense in depth — the guard is line two).
 fn quote_ident(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
+    crate::dml::escape_quote_ident(ident)
 }
 
 /// The PG keywords whose category is NOT `UNRESERVED` (i.e. reserved,

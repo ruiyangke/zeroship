@@ -1364,7 +1364,7 @@ async fn pg_net_applied_trailer(
     conn: &compio_postgres::Client,
     exec_cfg: &ExecutorConfig,
 ) -> Result<Vec<TrailerEntry>, RunError> {
-    let meta = format!("\"{}\"", exec_cfg.pg.meta_schema.replace('"', "\"\""));
+    let meta = crate::dml::escape_quote_ident(&exec_cfg.pg.meta_schema);
     let rows = conn
         .query(
             &format!(

@@ -238,7 +238,7 @@ async fn first_baseline_version(
     conn: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<Option<String>, BaselineError> {
-    let meta = format!("\"{}\"", cfg.pg.meta_schema.replace('"', "\"\""));
+    let meta = crate::dml::escape_quote_ident(&cfg.pg.meta_schema);
     let rows = conn
         .query(
             &format!(

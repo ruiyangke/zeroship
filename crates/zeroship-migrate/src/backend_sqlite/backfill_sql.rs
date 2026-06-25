@@ -82,7 +82,7 @@ fn validate_ident(what: &'static str, value: &str) -> Result<(), BackfillError> 
 /// Double-quote a validated identifier (`"` → `""` — belt-and-suspenders; the value
 /// already passed [`validate_ident`] so it has no `"`).
 fn quote_ident(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
+    crate::dml::escape_quote_ident(ident)
 }
 
 /// Resolved facts about the cursor column from `PRAGMA table_info` (an engine-only
