@@ -431,23 +431,23 @@ interface TableOpOpts {
   schema?: string;
 }
 
-// The author-facing not-yet-supported guard option types
-// (`IfNotExistsNotYetSupported` / `IfExistsNotYetSupported`, both `false`) are
-// imported from `./types.js` — the single source of truth — so the op signatures
-// here and the spec interfaces there carry the identical build-time signal.
+// The author-facing guard option types (`IfNotExistsNotYetSupported` /
+// `IfExistsNotYetSupported`, both `boolean` as of PR10 Part B) are imported from
+// `./types.js` — the single source of truth — so the op signatures here and the
+// spec interfaces there carry the identical type.
 
-/** **PR10** — map the create/add family `{ ifNotExists }` boolean to the wire
- *  `existenceGuard: "ifNotExists"` token (omitted when falsy). The boolean param is
- *  kept (the runtime twin and IR shape are ready for Part B); the AUTHOR-facing
- *  option type is the not-yet-supported {@link IfNotExistsNotYetSupported} `false`. */
+/** **PR10 Part B** — map the create/add family `{ ifNotExists }` boolean to the
+ *  wire `existenceGuard: "ifNotExists"` token (omitted when falsy). The guard is
+ *  honored at apply time by the executor-side catalog probe (run-if-absent /
+ *  satisfied-noop-if-present-same-shape / fail-closed-if-divergent). */
 function ifNotExistsGuard(v: boolean | undefined): "ifNotExists" | undefined {
   return v ? "ifNotExists" : undefined;
 }
 
-/** **PR10** — map the drop/rename/alter family `{ ifExists }` boolean to the wire
- *  `existenceGuard: "ifExists"` token (omitted when falsy). Replaces the old native
- *  `ifExists` boolean field (the intentional wire break). Author-facing option type
- *  is the not-yet-supported {@link IfExistsNotYetSupported} `false`. */
+/** **PR10 Part B** — map the drop/rename/alter family `{ ifExists }` boolean to the
+ *  wire `existenceGuard: "ifExists"` token (omitted when falsy). Replaces the old
+ *  native `ifExists` boolean field (the intentional wire break). Honored at apply
+ *  time by the catalog probe (run-if-present / satisfied-noop-if-absent). */
 function ifExistsGuard(v: boolean | undefined): "ifExists" | undefined {
   return v ? "ifExists" : undefined;
 }

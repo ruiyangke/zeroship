@@ -191,6 +191,23 @@ export function lexiconBridgeShapes(): void {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// 6b. EXISTENCE GUARDS — supported as of op.* PR10 Part B (executor-side probe).
+//
+//    The `ifNotExists` (create/add family) and `ifExists` (drop/alter family)
+//    options are plain `boolean` now. Passing `true` MUST typecheck cleanly — it
+//    was a build-time error while the option types were the literal `false`. (No
+//    `@ts-expect-error`: these lines are well-typed and the file fails tsc if any
+//    of them stops compiling.)
+// ───────────────────────────────────────────────────────────────────────────
+
+export function existenceGuardsTypecheck(): void {
+  createTable("t", { n: t.int() }, undefined, { ifNotExists: true });
+  addColumn("t", "email", t.text(), { ifNotExists: true });
+  dropColumn("t", "legacy", { ifExists: true });
+  alterColumn("t", "a", { type: t.bigInt() }, { ifExists: true });
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // 7. EXHAUSTIVENESS — the bridge handles EVERY `@zeroship/db` `FieldDef.type`.
 //
 //    The db `TypeName` union (sdks/db/src/types.ts) is the single source. The

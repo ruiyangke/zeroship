@@ -15,28 +15,27 @@ import type { ColType, Expr, IrBatch, IrScalar } from "./generated/ir.js";
 export type { ColType, Expr, IrBatch, IrScalar };
 
 /**
- * **PR10 review (LOW) — NOT YET SUPPORTED.** The `ifNotExists` existence guard is a
- * DEFERRED platform capability. Its IR/wire/validate shape exists, but the
- * engine-synthesized catalog probe that actually honors it (probe →
- * shape-verify-or-fail → run/skip under the held advisory lock) is op.* PR10 Part B
- * and is NOT implemented yet — a guarded op is REFUSED FAIL-CLOSED at deploy (lower),
- * never silently dropped. The author-facing option is therefore typed as the literal
- * `false` so passing `ifNotExists: true` is a BUILD-TIME type error (a compile-time
- * signal the feature is unavailable, not a deploy-time 422 foot-gun). Widens back to
- * `boolean` when Part B lands. See `docs/reference/migrate-op-dsl.md`
+ * **Supported as of op.* PR10 Part B** (executor-side catalog probe). The
+ * `ifNotExists` existence guard (the create/add family) is honored by an
+ * engine-synthesized catalog probe at apply time: probe the live catalog under the
+ * held advisory lock + the open per-step transaction, then `decide` — run the op
+ * bare if the object is absent, journal a satisfied no-op if it is already present
+ * with the DECLARED shape, or FAIL CLOSED if it is present with a shape that
+ * diverges from (or cannot be proven equal to) the declared one. Never a silent
+ * skip over a divergence. The option is therefore a plain `boolean`. (The type name
+ * is retained to minimize call-site churn.) See `docs/reference/migrate-op-dsl.md`
  * (existence-guard section).
  */
-export type IfNotExistsNotYetSupported = false;
+export type IfNotExistsNotYetSupported = boolean;
 
 /**
- * **PR10 review (LOW) — NOT YET SUPPORTED.** The `ifExists` existence guard
- * (drop/rename/alter family) is a DEFERRED platform capability. See
- * {@link IfNotExistsNotYetSupported}: the executor-side catalog probe is op.* PR10
- * Part B; until then a guarded op is refused fail-closed at deploy. Typed as the
- * literal `false` so `ifExists: true` is a build-time type error, not a deploy-time
- * 422. Widens back to `boolean` when Part B lands.
+ * **Supported as of op.* PR10 Part B** (executor-side catalog probe). The
+ * `ifExists` existence guard (the drop/rename/alter family) is honored by the same
+ * probe-under-lock flow: run the drop/alter if the source object is PRESENT,
+ * journal a satisfied no-op if it is already absent (a drop has no shape to verify
+ * — presence alone governs). A plain `boolean`. See {@link IfNotExistsNotYetSupported}.
  */
-export type IfExistsNotYetSupported = false;
+export type IfExistsNotYetSupported = boolean;
 
 // ── The fluent column-type lexicon (`t.*`) → a chainable ColumnDef ──
 
@@ -208,7 +207,8 @@ export interface CheckSpec {
 export interface DropConstraintSpec {
   name: string;
   type?: "pk" | "fk" | "unique" | "check";
-  /** **NOT YET SUPPORTED** — see {@link IfExistsNotYetSupported}. */
+  /** **PR10 Part B** — `IF EXISTS` guard (catalog probe): the constraint is dropped
+   *  iff present; an already-absent constraint is a journaled satisfied no-op. */
   ifExists?: IfExistsNotYetSupported;
 }
 
@@ -224,12 +224,11 @@ export interface CreateIndexSpec {
   /** **PR10** — the schema qualifier (§2.7). Honored under the general/Trusted CLI,
    *  pinned/refused under the Confined creator profile. Names-are-strings. */
   schema?: string;
-  /** **PR10** — engine-synthesized `IF NOT EXISTS` guard (catalog probe, not native
-   *  SQL). **NOT YET SUPPORTED** — see {@link IfNotExistsNotYetSupported}: the probe
-   *  is op.* PR10 Part B; until then a guarded op is refused fail-closed at deploy.
-   *  Typed `false` so `ifNotExists: true` is a build-time error. When Part B lands:
-   *  the index is created iff absent; a present same-shape index is a journaled
-   *  satisfied no-op; a present divergent one FAILS CLOSED (§2.7). */
+  /** **PR10 Part B** — engine-synthesized `IF NOT EXISTS` guard (catalog probe, not
+   *  native SQL). The index is created iff absent; a present same-`(unique,columns)`
+   *  index is a journaled satisfied no-op; a present divergent one (unique flip,
+   *  column-set change, or an expression/partial index whose equivalence cannot be
+   *  proven) FAILS CLOSED (§2.7). */
   ifNotExists?: IfNotExistsNotYetSupported;
 }
 

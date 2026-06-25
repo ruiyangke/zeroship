@@ -464,14 +464,10 @@ drop/rename/alter family (`dropTable`, `dropColumn`, `dropIndex`,
 `dropConstraint`, `renameColumn`, `alterColumn`) carries an `ifExists` option. A
 guard on the wrong family is a `GUARD_DIRECTION` authoring error.
 
-> **These guards are NOT YET SUPPORTED — the option types are `false`, so passing
-> `{ ifNotExists: true }` / `{ ifExists: true }` is a BUILD-TIME (`tsc`) type
-> error, not a deploy-time surprise.** The full shape (IR/wire/validate) is in
-> place but the executor-side probe that honors the guard is a later slice (op.*
-> PR10 Part B); see the Status box below. The author-facing types
-> (`IfNotExistsNotYetSupported` / `IfExistsNotYetSupported`, both the literal
-> `false`) give a compile-time signal that the feature is unavailable. They widen
-> back to `boolean` when Part B lands.
+> **Supported as of op.* PR10 Part B** (executor-side catalog probe). The option
+> types are plain `boolean`; the guard is honored at apply time by a probe under the
+> held advisory lock + the open per-step transaction (see the semantics list and the
+> fail-closed defaults below).
 
 These are **NOT** lowered to a native `IF [NOT] EXISTS` clause. Native support is
 patchy and asymmetric: Postgres has no `ADD CONSTRAINT IF NOT EXISTS` and none on
@@ -498,32 +494,46 @@ it. The default semantic is **shape-verify-or-fail**, never a bare skip:
 - `ifExists`, object **absent** → a journaled satisfied no-op (a drop has no shape
   to verify — presence alone governs).
 
-> **Status — existence guards are NOT YET honored end-to-end; authoring one is a
-> hard lower-time refusal on EVERY op.** The IR shape, the JS surface (both the
-> typed `ops.ts` and its engine-embedded `migrate_ops.js` twin), the validate-time
-> direction check, and the wire/checksum/golden plumbing for the existence-guard
-> family are in place. The executor-side catalog probe (probe →
-> shape-verify-or-fail → run/skip) is the next slice. **Until it lands, passing
-> `{ ifNotExists: true }` / `{ ifExists: true }` to ANY op — `createTable`,
-> `addColumn`, `createIndex`, `addForeignKey`/`addUnique`/`addCheck`, `dropTable`,
-> `dropColumn`, `dropIndex`, `dropConstraint`, `renameColumn`, `alterColumn*` — is
-> **refused fail-closed at lower** (`ExistenceGuardNotYetSupported`).** The refusal
-> is **uniform**: the guard is recorded faithfully by the DSL (the twin no longer
-> silently drops it on any op — review F1) and then hard-refused at lower for every
-> op, so there is never the split where some ops silently drop the guard (applying
-> the bare op unconditionally — a fail-OPEN over a possibly-divergent existing
-> object) while others hard-error. Do not author an existence guard expecting it to
-> take effect yet: the author-facing option type is now the literal **`false`**
-> (`IfNotExistsNotYetSupported` / `IfExistsNotYetSupported`), so `{ ifNotExists:
-> true }` / `{ ifExists: true }` is a **build-time `tsc` error** — you get the
-> signal at compile time, not as a deploy-time 422. (The `migrate_ops.js` twin and
-> the IR shape still carry the boolean so Part B can light it up without a wire
-> break; the runtime refusal — `ExistenceGuardNotYetSupported` — names the deferral
-> and points at op.* PR10 Part B for any raw-JS deploy that bypasses `tsc`.) When
-> the probe lands, the divergent-object
-> shape-verify MUST fail closed (never a silent skip) and read the right catalog per
-> backend (PG `pg_catalog`/`information_schema`; SQLite `sqlite_master` + PRAGMAs),
-> including index/constraint guards.
+> **Supported as of op.* PR10 Part B** (executor-side catalog probe). The probe
+> reads the live catalog (PG `information_schema`/`pg_catalog`; SQLite `sqlite_master`
+> + PRAGMAs) inside the SAME open transaction that will run the `up`, under the
+> project advisory lock the whole plan already holds — so there is no probe→act
+> TOCTOU window. `decide` is pure Rust over the snapshot, never a SQL-level
+> conditional. On `SatisfiedNoop` the version still lands (a journaled completed row)
+> so a re-deploy skips it via normal pending computation; on `FailDrift` the txn is
+> rolled back and nothing is applied or journaled. (`crates/zeroship-migrate/src/guard_probe.rs`,
+> `executor.rs` PG `apply_transactional`, `backend_sqlite/mod.rs` SQLite
+> `apply_up_transactional`.)
+>
+> **Fail-closed defaults (a shape that cannot be fully introspected fails CLOSED,
+> never optimistically runs):**
+> - **Constraint `ifNotExists` — KIND check plus definition refusal.** A kind clash
+>   (`PRIMARY KEY` vs `UNIQUE` …) is `FailDrift` naming `kind`. A PRESENT same-name +
+>   same-kind constraint is ALSO `FailDrift` (naming `definition`), NOT a silent
+>   no-op: the live `pg_get_constraintdef` body cannot be byte-proven equal to the
+>   IR's un-normalized constraint, so a possibly-rewritten CHECK / different FK target
+>   is refused rather than skipped. The realistic `ifNotExists` use (the constraint is
+>   ABSENT) still runs bare.
+> - **Index `ifNotExists` over an expression / partial predicate** — `FailDrift`
+>   naming `expression`: the IR `createIndex` (a column-list) cannot render a
+>   byte-comparable `pg_get_expr` form, so equivalence is unprovable. A plain
+>   column-list index compares `(unique, columns)` fully.
+> - **SQLite type-affinity collision** — SQLite stores TEXT affinity for
+>   string/date/json/ref alike, so a same-name TEXT-affinity column whose SDK facet
+>   changed within one affinity is invisible to the catalog. The SQLite `ifNotExists`
+>   column/table verify compares the introspected token exactly; a differing token
+>   that still reduces to TEXT affinity is `FailDrift` (it cannot prove full-shape
+>   equality), never an affinity-only no-op (the same limitation the SQLite drift path
+>   already lives with).
+>
+> **`renameColumn ifExists` is refused fail-closed at lower** (`GuardProbeUnbuildable`):
+> the online-rename plan step is a multi-migration shape with no single Migration the
+> probe can attribute its verdict to, and `lower_rename` ALREADY mandates the live
+> `from` column exist (an absent source is a hard error today — stricter than the
+> guard's "absent → no-op"). The guard is refused rather than silently dropped.
+> Every other guarded op (`createTable`/`addColumn`/`createIndex`/`addConstraint`
+> family; `dropTable`/`dropColumn`/`dropIndex`/`dropConstraint`;
+> `alterColumnType`/`alterColumnNullability`) is honored by the probe.
 
 ### SQLite-safe rebuild (`batchAlterTable`)
 
