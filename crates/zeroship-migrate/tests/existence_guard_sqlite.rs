@@ -101,6 +101,21 @@ async fn table_exists(be: &SqliteBackend, table: &str) -> bool {
     !rows.is_empty()
 }
 
+/// Does an index of this name PHYSICALLY exist on `table`? Probes
+/// `PRAGMA index_list(table)` (the SQLite analogue of the PG `pg_indexes`
+/// helper). `unique_only` further asserts the index is unique.
+async fn index_exists(be: &SqliteBackend, table: &str, index: &str, unique_only: bool) -> bool {
+    let rows = be
+        .actor()
+        .query(&format!("SELECT name, \"unique\" FROM pragma_index_list('{table}')"))
+        .await
+        .expect("pragma index_list");
+    rows.iter().any(|r| {
+        r.first().and_then(|c| c.as_deref()) == Some(index)
+            && (!unique_only || r.get(1).and_then(|c| c.as_deref()) == Some("1"))
+    })
+}
+
 async fn journaled(be: &SqliteBackend, version: &str) -> bool {
     be.applied_sqlite()
         .await
@@ -503,6 +518,94 @@ async fn create_table_ifnotexists_reruns_idempotent_with_timestamp_and_text_colu
     // The columns physically survive the re-run (nothing churned/dropped).
     assert!(table_has_column(&be, "t", "title").await, "title survives re-run");
     assert!(table_has_column(&be, "t", "happened").await, "timestamp survives re-run");
+}
+
+/// **C1 regression — SQLite multi-unit secondary-index physical existence.**
+/// A guarded `createTable ifNotExists` with a `unique:true` field lowers to
+/// MULTIPLE units on SQLite too: the CREATE TABLE (which inlines the system-field
+/// indexes) PLUS a SEPARATE `CREATE INDEX` unit for the unique field's index
+/// (`lower_create_table` skips only the SYSTEM-field indexes on SQLite —
+/// declarative.rs:4587 — every other non-PK index, including a `unique:true`
+/// field's, is its own guarded `CREATE INDEX` unit; declarative.rs:4583-4604).
+///
+/// Before the C1 fix the SAME `Table` probe was stamped on EVERY unit, so once
+/// unit 0 created the table, the index unit saw the table PRESENT + base columns
+/// matching → SatisfiedNoop → the unique index was SILENTLY SKIPPED (but journaled
+/// completed). This asserts the unique index PHYSICALLY exists (via
+/// `PRAGMA index_list`) after a fresh guarded create, and that a RE-RUN is an
+/// idempotent no-op with the index surviving — the SQLite leg of the C1 fix that
+/// the PG `create_table_ifnotexists_fresh_creates_all_secondary_indexes_…` test
+/// covers on the PG leg.
+///
+/// RED pre-fix: the per-unit object-scoped probe does not exist, the index unit
+/// SatisfiedNoops on the table's presence, so `index_exists(… "t_email_key", …)`
+/// is false.
+#[compio::test]
+async fn create_table_ifnotexists_fresh_creates_unique_secondary_index_and_reruns_idempotent() {
+    let p = paths("sq_create_unique_idx");
+    let be = backend(&p);
+
+    // a `unique:true` field → a `t_email_key` unique index unit, ON TOP of the
+    // CREATE TABLE unit (which inlines the SQLite system-field indexes).
+    let make_op = || Op::CreateTable {
+        name: "t".into(),
+        columns: vec![IrColumn {
+            name: "email".into(),
+            ty: ColType::String,
+            nullable: Some(true),
+            default: None,
+            unique: Some(true),
+        }],
+        constraints: vec![],
+        indexes: vec![],
+        schema: None,
+        existence_guard: Some(ExistenceGuard::IfNotExists),
+    };
+
+    // Fresh guarded create on an empty db → > 1 unit (CREATE TABLE + the unique
+    // index). The index unit's OWN object-scoped probe sees the index ABSENT →
+    // RunBare, not SatisfiedNoop'd by the table's presence.
+    let steps1 = lower(make_op());
+    assert!(
+        steps1.len() >= 2,
+        "a guarded SQLite createTable with a unique field lowers to ≥2 units \
+         (CREATE TABLE + CREATE INDEX); got {}",
+        steps1.len()
+    );
+    for m in &steps1 {
+        apply_one(&be, m).await.expect("fresh guarded create applies");
+    }
+    assert!(table_exists(&be, "t").await, "table created");
+    assert!(table_has_column(&be, "t", "email").await, "email column present");
+    assert!(
+        index_exists(&be, "t", "t_email_key", true).await,
+        "the unique:true field's index must PHYSICALLY exist (C1: it was silently skipped)"
+    );
+    for m in &steps1 {
+        assert!(journaled(&be, m.version.as_str()).await, "unit {} journaled", m.version.as_str());
+    }
+
+    // RE-RUN: a fresh lowering of the SAME guarded create over the now-present
+    // table+index must be an idempotent no-op — the CREATE TABLE unit SatisfiedNoops
+    // (presence + affinity match), the index unit SatisfiedNoops on its OWN object
+    // (present + matching unique/columns), with NO "already exists" error and NO
+    // ExistenceGuardDrift.
+    let steps2 = lower(make_op());
+    for m in &steps2 {
+        apply_one(&be, m)
+            .await
+            .expect("re-run of the guarded create is an idempotent no-op");
+        assert!(
+            journaled(&be, m.version.as_str()).await,
+            "re-run unit {} re-journaled (satisfied no-op still journals)",
+            m.version.as_str()
+        );
+    }
+    // The unique index physically survives the re-run (not dropped/churned).
+    assert!(
+        index_exists(&be, "t", "t_email_key", true).await,
+        "unique index survives the idempotent re-run"
+    );
 }
 
 /// **F1 regression — addColumn re-run for a timestamp column.** A guarded
