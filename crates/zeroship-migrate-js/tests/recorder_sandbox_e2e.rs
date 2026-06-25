@@ -41,13 +41,15 @@ use zeroship_migrate_js::{
 };
 
 const HAPPY_MIGRATION: &str = r#"
-import { createTable } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 export const name = "e2e_happy";
 export function up() {
-  createTable("widgets", [
-    { name: "id", type: "uuid", nullable: false, default: { fn: { fn: "genRandomUuid" } } },
-    { name: "label", type: "text", nullable: true },
-  ]);
+  table("widgets").create({
+    columns: {
+      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
+      label: t.text(),
+    },
+  });
 }
 "#;
 
@@ -284,8 +286,8 @@ fn rlimit_cpu_or_wall_bounds_an_infinite_loop() {
     // A migration whose up() never returns (busy loop). RLIMIT_CPU (SIGXCPU) or the
     // wall watchdog (SIGKILL) must bound it. Either way => BUILD_RECORDER_BUDGET_EXCEEDED.
     let loop_src = r#"
-        import { createTable } from "@zeroship/migrate";
-        export function up() { createTable("t", [{name:"id",type:"int",nullable:false}]); while (true) {} }
+        import { table, t } from "@zeroship/migrate";
+        export function up() { table("t").create({ columns: { id: t.integer().notNull() } }); while (true) {} }
     "#;
     let req = RecordRequest {
         ts_source: loop_src.to_string(),
@@ -500,8 +502,8 @@ fn concurrent_records_get_separate_sandbox_children() {
     // concurrently and assert each IR carries its OWN owner_app + ops (no bleed).
     let mk = |owner: &'static str, table: &'static str| {
         let src = format!(
-            r#"import {{ createTable }} from "@zeroship/migrate";
-               export function up() {{ createTable("{table}", [{{name:"id",type:"int",nullable:false}}]); }}"#
+            r#"import {{ table, t }} from "@zeroship/migrate";
+               export function up() {{ table("{table}").create({{ columns: {{ id: t.integer().notNull() }} }}); }}"#
         );
         std::thread::spawn(move || {
             let req = RecordRequest {
@@ -546,12 +548,12 @@ fn untrusted_up_cannot_forge_owner_app() {
     // owner is stamped in Rust on the parsed IR after eval, not read from a global the
     // untrusted scope can reach.
     let forge_src = r#"
-        import { createTable } from "@zeroship/migrate";
+        import { table, t } from "@zeroship/migrate";
         export function up() {
           // Attempt to forge the tenant-identifying owner via every reachable name.
           try { globalThis.__zsOwnerApp = "app_VICTIM"; } catch (_) {}
           try { __zsOwnerApp = "app_VICTIM"; } catch (_) {}
-          createTable("t", [{ name: "id", type: "int", nullable: false }]);
+          table("t").create({ columns: { id: t.integer().notNull() } });
         }
     "#;
     let req = RecordRequest {
@@ -599,13 +601,15 @@ fn large_migration_ir_exceeding_pipe_buffer_records() {
     // wall-killed as a SPURIOUS BUILD_RECORDER_BUDGET_EXCEEDED. With concurrent
     // draining the legitimate large migration records cleanly.
     let big_src = r#"
-        import { createTable } from "@zeroship/migrate";
+        import { table, t } from "@zeroship/migrate";
         export function up() {
           for (let i = 0; i < 4000; i++) {
-            createTable("tbl_" + i, [
-              { name: "id", type: "int", nullable: false },
-              { name: "label", type: "text", nullable: true },
-            ]);
+            table("tbl_" + i).create({
+              columns: {
+                id: t.integer().notNull(),
+                label: t.text(),
+              },
+            });
           }
         }
     "#;
@@ -897,7 +901,7 @@ fn recorder_process_stub_invariants_are_pinned() {
     // assertion fails. (We avoid calling process.exit even if present — we only read
     // `typeof`.)
     let probe_src = r#"
-        import { createTable } from "@zeroship/migrate";
+        import { table, t } from "@zeroship/migrate";
         export function up() {
           const p = globalThis.process;
           const envIsEmpty = !!p && typeof p.env === "object" && p.env !== null
@@ -909,9 +913,9 @@ fn recorder_process_stub_invariants_are_pinned() {
               typeof globalThis.module === "undefined" &&
               typeof globalThis.__dirname === "undefined" &&
               typeof globalThis.Buffer === "undefined";
-          createTable("env_empty_" + envIsEmpty, [{ name: "id", type: "int", nullable: false }]);
-          createTable("exit_undef_" + exitUndefined, [{ name: "id", type: "int", nullable: false }]);
-          createTable("no_node_" + noNodeBindings, [{ name: "id", type: "int", nullable: false }]);
+          table("env_empty_" + envIsEmpty).create({ columns: { id: t.integer().notNull() } });
+          table("exit_undef_" + exitUndefined).create({ columns: { id: t.integer().notNull() } });
+          table("no_node_" + noNodeBindings).create({ columns: { id: t.integer().notNull() } });
         }
     "#;
     let req = RecordRequest {

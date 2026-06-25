@@ -89,13 +89,15 @@ async fn new_edit_build_apply_on_pg() {
     let mig_dir = tempfile::tempdir().unwrap();
     let stem = "20240617150000_make_widgets";
     let ts = r#"
-import { createTable, addColumn, t } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 export function up() {
-  createTable("widgets", {
-    label: t.text().notNull(),
-    status: t.text().notNull().default("new"),
+  table("widgets").create({
+    columns: {
+      label: t.text().notNull(),
+      status: t.text().notNull().default("new"),
+    },
   });
-  addColumn("widgets", "qty", t.int());
+  table("widgets").column("qty").add({ type: t.integer() });
 }
 "#;
     fs::write(mig_dir.path().join(format!("{stem}.ts")), ts.as_bytes()).unwrap();

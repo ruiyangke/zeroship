@@ -23,16 +23,16 @@ fn assert_child_built() {
 }
 
 const TS: &str = r#"
-import { createTable, t } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 export function up() {
-  createTable("t1", { label: t.text().notNull() });
+  table("t1").create({ columns: { label: t.text().notNull() } });
 }
 "#;
 
 const SIBLING_TS: &str = r#"
-import { createTable, t } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 export function up() {
-  createTable("t2", { label: t.text().notNull() });
+  table("t2").create({ columns: { label: t.text().notNull() } });
 }
 "#;
 

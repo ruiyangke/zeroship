@@ -15,9 +15,9 @@ use zeroship_migrate_js::recorder_service::{Authorizer, ConcurrencyLimits};
 use zeroship_migrate_js::{RecorderError, RecorderService};
 
 const MIGRATION: &str = r#"
-import { createTable } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 export function up() {
-  createTable("svc_tbl", [{ name: "id", type: "int", nullable: false }]);
+  table("svc_tbl").create({ columns: { id: t.integer().notNull() } });
 }
 "#;
 

@@ -23,12 +23,15 @@ fn record(src: &str) -> Result<String, String> {
 #[test]
 fn in_envelope_split_part_records() {
     let src = r#"
-        import { backfill, e } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export const name = "split_name";
         export function up() {
-            backfill("users", "id", 100,
-                { first_name: e.splitPart(e.col("name"), " ", 1) },
-                "split_name_bf");
+            table("users").backfill({
+                set: { first_name: (c) => c.fn.splitPart(c("name"), " ", 1) },
+                cursorColumn: "id",
+                batchSize: 100,
+                name: "split_name_bf",
+            });
         }
     "#;
     let json = record(src).expect("in-envelope splitPart records");
@@ -51,11 +54,15 @@ fn out_of_envelope_grammar_valid_split_part_records() {
     for (delim, n, label) in cases {
         let src = format!(
             r#"
-            import {{ backfill, e }} from "@zeroship/migrate";
+            import {{ table }} from "@zeroship/migrate";
             export const name = "pgonly";
             export function up() {{
-                backfill("users", "id", 100,
-                    {{ x: e.splitPart(e.col("name"), {delim}, {n}) }}, "pgonly_bf");
+                table("users").backfill({{
+                    set: {{ x: (c) => c.fn.splitPart(c("name"), {delim}, {n}) }},
+                    cursorColumn: "id",
+                    batchSize: 100,
+                    name: "pgonly_bf",
+                }});
             }}
             "#
         );
@@ -82,11 +89,15 @@ fn grammar_broken_split_part_throws_expr_not_portable() {
     for (delim, n, label) in cases {
         let src = format!(
             r#"
-            import {{ backfill, e }} from "@zeroship/migrate";
+            import {{ table }} from "@zeroship/migrate";
             export const name = "bad";
             export function up() {{
-                backfill("users", "id", 100,
-                    {{ x: e.splitPart(e.col("name"), {delim}, {n}) }}, "bad_bf");
+                table("users").backfill({{
+                    set: {{ x: (c) => c.fn.splitPart(c("name"), {delim}, {n}) }},
+                    cursorColumn: "id",
+                    batchSize: 100,
+                    name: "bad_bf",
+                }});
             }}
             "#
         );
@@ -103,11 +114,15 @@ fn grammar_broken_split_part_throws_expr_not_portable() {
 #[test]
 fn non_string_delim_throws() {
     let src = r#"
-        import { backfill, e } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export const name = "bad";
         export function up() {
-            backfill("users", "id", 100,
-                { x: e.splitPart(e.col("name"), e.col("sep"), 1) }, "bad_bf");
+            table("users").backfill({
+                set: { x: (c) => c.fn.splitPart(c("name"), c("sep"), 1) },
+                cursorColumn: "id",
+                batchSize: 100,
+                name: "bad_bf",
+            });
         }
     "#;
     let err = record(src).expect_err("a non-string delim must throw");

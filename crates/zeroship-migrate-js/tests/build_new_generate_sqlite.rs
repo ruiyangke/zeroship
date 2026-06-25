@@ -32,13 +32,15 @@ const APP: &str = "app_pr4";
 // a LITERAL default (synth defaults in createTable are a deferred render wave on the
 // engine — the determinism scaffold demonstrates the synth pattern in comments).
 const EDITED_TS: &str = r#"
-import { createTable, addColumn, t } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 export function up() {
-  createTable("notes", {
-    title: t.text().notNull(),
-    status: t.text().notNull().default("active"),
+  table("notes").create({
+    columns: {
+      title: t.text().notNull(),
+      status: t.text().notNull().default("active"),
+    },
   });
-  addColumn("notes", "body", t.text());
+  table("notes").column("body").add({ type: t.text() });
 }
 "#;
 

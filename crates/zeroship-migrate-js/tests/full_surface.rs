@@ -36,9 +36,9 @@ fn ops(ir: &Value) -> &Vec<Value> {
 #[test]
 fn t_text_nullable_by_default_notnull_opts_in() {
     let src = r#"
-        import { createTable, t } from "@zeroship/migrate";
+        import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            createTable("u", { a: t.text(), b: t.text().notNull() });
+            table("u").create({ columns: { a: t.text(), b: t.text().notNull() } });
         }};
     "#;
     let ir = record(src, "nullable");
@@ -60,34 +60,6 @@ fn t_text_nullable_by_default_notnull_opts_in() {
     );
 }
 
-/// A `createTable(name, { … })` object-literal map and the `(b) => …` scoped-
-/// builder overload both record the same `createTable` op — proving the two
-/// table-builder shapes read alike and produce the identical wire op.
-#[test]
-fn createtable_object_literal_and_builder_overload_record_same_op() {
-    let src_obj = r#"
-        import { createTable, t } from "@zeroship/migrate";
-        export default { name: "n", up() {
-            createTable("u", { id: t.uuid().notNull(), email: t.text() });
-        }};
-    "#;
-    // The (b) => … overload with the SAME columns + no extra constraints/indexes
-    // must yield a byte-identical createTable op.
-    let src_builder = r#"
-        import { createTable, t } from "@zeroship/migrate";
-        export default { name: "n", up() {
-            createTable("u", { id: t.uuid().notNull(), email: t.text() }, (b) => {});
-        }};
-    "#;
-    let a = record(src_obj, "ct_obj");
-    let b = record(src_builder, "ct_builder");
-    assert_eq!(
-        ops(&a)[0],
-        ops(&b)[0],
-        "the object-literal and (b) => … overloads must record the same createTable op"
-    );
-}
-
 /// `c.fn.concatWs(" ", c("a"), c("b"))` records a `fnSynth(concatWs)` node — the
 /// NULL-skipping safe-join helper (§3.3.1) that renders byte-identically on PG/
 /// SQLite. Pinning the node shape here (the apply-identity is in the engine's
@@ -95,9 +67,9 @@ fn createtable_object_literal_and_builder_overload_record_same_op() {
 #[test]
 fn concatws_records_fnsynth_node() {
     let src = r#"
-        import { update } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            update("u", { set: { full: (c) => c.fn.concatWs(" ", c("a"), c("b")) } });
+            table("u").update({ set: { full: (c) => c.fn.concatWs(" ", c("a"), c("b")) } });
         }};
     "#;
     let ir = record(src, "concatws");
@@ -117,21 +89,19 @@ fn concatws_records_fnsynth_node() {
 #[test]
 fn addforeignkey_field_order_independent() {
     let src_a = r#"
-        import { addForeignKey } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            addForeignKey("orders", {
+            table("orders").foreignKey("orders_customer_fk").add({
                 columns: ["customer_id"],
                 references: { table: "customers", columns: ["id"] },
-                name: "orders_customer_fk",
             });
         }};
     "#;
     // The SAME spec with the fields written in a different order.
     let src_b = r#"
-        import { addForeignKey } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            addForeignKey("orders", {
-                name: "orders_customer_fk",
+            table("orders").foreignKey("orders_customer_fk").add({
                 references: { columns: ["id"], table: "customers" },
                 columns: ["customer_id"],
             });
@@ -156,8 +126,8 @@ fn addforeignkey_field_order_independent() {
 #[test]
 fn name_omitted_records_filename_label() {
     let src = r#"
-        import { dropTable } from "@zeroship/migrate";
-        export default { up() { dropTable("scratch"); } };
+        import { table } from "@zeroship/migrate";
+        export default { up() { table("scratch").drop(); } };
     "#;
     let ir = record(src, "0009_drop_scratch");
     assert_eq!(
@@ -181,9 +151,9 @@ fn name_omitted_records_filename_label() {
 #[test]
 fn op_outside_recorder_aborts_recording() {
     let src = r#"
-        import { dropTable } from "@zeroship/migrate";
+        import { table, t } from "@zeroship/migrate";
         // Called at MODULE TOP LEVEL — outside any up()/down() recorder.
-        dropTable("oops");
+        table("u").create({ columns: { id: t.id() } });
         export default { up() {} };
     "#;
     let err = record_err(src, "outside");
@@ -194,8 +164,8 @@ fn op_outside_recorder_aborts_recording() {
     );
     // The well-formed control: the SAME op inside up() records cleanly.
     let ok_src = r#"
-        import { dropTable } from "@zeroship/migrate";
-        export default { up() { dropTable("oops"); } };
+        import { table, t } from "@zeroship/migrate";
+        export default { up() { table("u").create({ columns: { id: t.id() } }); } };
     "#;
     let ir = record(ok_src, "inside");
     assert_eq!(ops(&ir).len(), 1, "the same op inside up() records fine");
@@ -206,9 +176,9 @@ fn op_outside_recorder_aborts_recording() {
 #[test]
 fn insert_row_object_normalizes_to_columns_and_rows() {
     let src = r#"
-        import { insert } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            insert("t", { rows: [ { code: 1, label: "a" }, { code: 2, label: "b" } ] });
+            table("t").insert({ rows: [ { code: 1, label: "a" }, { code: 2, label: "b" } ] });
         }};
     "#;
     let ir = record(src, "insert_obj");
@@ -222,9 +192,9 @@ fn insert_row_object_normalizes_to_columns_and_rows() {
 #[test]
 fn determinism_lint_flags_date_now_in_op_arg() {
     let dirty = r#"
-        import { insert } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            insert("t", { rows: [ { created_at: Date.now() } ] });
+            table("t").insert({ rows: [ { created_at: Date.now() } ] });
         }};
     "#;
     let findings = lint_migration_determinism(dirty).expect("lint runs");
@@ -242,9 +212,9 @@ fn determinism_lint_flags_date_now_in_op_arg() {
     );
 
     let clean = r#"
-        import { insert } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            insert("t", { rows: [ { created_at: (c) => c.fn.now() } ] });
+            table("t").insert({ rows: [ { created_at: (c) => c.fn.now() } ] });
         }};
     "#;
     assert!(
@@ -264,9 +234,9 @@ fn determinism_lint_flags_rng_and_clock_constructor() {
     ] {
         let src = format!(
             r#"
-            import {{ insert }} from "@zeroship/migrate";
+            import {{ table }} from "@zeroship/migrate";
             export default {{ name: "n", up() {{
-                insert("t", {{ rows: [ {{ v: {src_frag} }} ] }});
+                table("t").insert({{ rows: [ {{ v: {src_frag} }} ] }});
             }}}};
             "#
         );
@@ -283,11 +253,12 @@ fn determinism_lint_flags_rng_and_clock_constructor() {
 #[test]
 fn same_source_records_same_json() {
     let src = r#"
-        import { createTable, addColumn, update, t } from "@zeroship/migrate";
+        import { table, t } from "@zeroship/migrate";
         export default { name: "det", up() {
-            createTable("u", { id: t.id(), email: t.text().notNull() });
-            addColumn("u", "status", t.text().default("new"));
-            update("u", { set: { email: (c) => c.fn.lower(c("email")) }, where: (c) => c("id").isNotNull() });
+            const u = table("u");
+            u.create({ columns: { id: t.id(), email: t.text().notNull() } });
+            u.column("status").add({ type: t.text().default("new") });
+            u.update({ set: { email: (c) => c.fn.lower(c("email")) }, where: (c) => c("id").isNotNull() });
         }};
     "#;
     let a = zeroship_migrate_js::record_migration_to_json(src, OWNER, "det").unwrap();
@@ -301,9 +272,9 @@ fn same_source_records_same_json() {
 #[test]
 fn fluent_expr_builder_constructs_closed_ast() {
     let src = r#"
-        import { update } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            update("t", {
+            table("t").update({
                 set: {
                     a: (c) => c("x").add(1).cast("integer"),
                     b: (c) => c("y").isNull().not(),
@@ -340,14 +311,17 @@ fn fluent_expr_builder_constructs_closed_ast() {
 #[test]
 fn fluent_insert_normalizes_bigint_and_bytes_scalars() {
     let src = r#"
-        import { createTable, insert, t } from "@zeroship/migrate";
+        import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            createTable("t", {
-                id: t.id(),
-                seq: t.numeric(38, 0).notNull().default(9007199254740993n),
-                salt: t.bytes().default(new Uint8Array([1, 2, 3, 255])),
+            const tbl = table("t");
+            tbl.create({
+                columns: {
+                    id: t.id(),
+                    seq: t.numeric(38, 0).notNull().default(9007199254740993n),
+                    salt: t.bytes().default(new Uint8Array([1, 2, 3, 255])),
+                },
             });
-            insert("t", { rows: [ { seq: 9007199254740993n, salt: new Uint8Array([0, 255]) } ] });
+            tbl.insert({ rows: [ { seq: 9007199254740993n, salt: new Uint8Array([0, 255]) } ] });
         }};
     "#;
     // Recording succeeds (the typed `MigrationIr` deserialize is the gate) — the
@@ -372,9 +346,9 @@ fn fluent_insert_normalizes_bigint_and_bytes_scalars() {
 #[test]
 fn update_carries_a_batch_knob() {
     let src = r#"
-        import { update } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            update("t", {
+            table("t").update({
                 set: { x: (c) => c.fn.now() },
                 where: (c) => c("id").isNotNull(),
                 batch: { cursorColumn: "id", batchSize: 500 },
@@ -400,9 +374,9 @@ fn record_path_surfaces_determinism_warnings() {
     use zeroship_migrate_js::record_migration_to_ir_with_warnings;
 
     let dirty = r#"
-        import { insert } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            insert("t", { rows: [ { created_at: Date.now() } ] });
+            table("t").insert({ rows: [ { created_at: Date.now() } ] });
         }};
     "#;
     // Recording still SUCCEEDS (warn, don't fail-closed) — the IR is produced …
@@ -421,9 +395,9 @@ fn record_path_surfaces_determinism_warnings() {
 
     // The structured `c.fn.now()` replacement records cleanly — NO warnings.
     let clean = r#"
-        import { insert } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            insert("t", { rows: [ { v: 1 } ] });
+            table("t").insert({ rows: [ { v: 1 } ] });
         }};
     "#;
     let clean_outcome = record_migration_to_ir_with_warnings(clean, OWNER, "clean")
@@ -475,15 +449,15 @@ fn assert_guard(op: &Value, want: &str) {
     );
 }
 
-/// `createTable(name, cols, { schema, ifNotExists })` records BOTH the schema
+/// `table(name).create({ columns, schema, ifNotExists })` records BOTH the schema
 /// qualifier and the `ifNotExists` create-family guard. RED before the twin fix
 /// (the bare `createTable` dropped both — a fail-OPEN unconditional CREATE).
 #[test]
 fn twin_create_table_carries_schema_and_guard() {
     let src = r#"
-        import { createTable, t } from "@zeroship/migrate";
+        import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            createTable("t", { id: t.int() }, { schema: "app2", ifNotExists: true });
+            table("t").create({ columns: { id: t.integer() }, schema: "app2", ifNotExists: true });
         }};
     "#;
     let ir = record(src, "create_schema_guard");
@@ -492,52 +466,49 @@ fn twin_create_table_carries_schema_and_guard() {
     assert_guard(op, "ifNotExists");
 }
 
-/// `renameColumn(table, from, to, type, { schema, ifExists })` records the schema
-/// qualifier + the `ifExists` alter-family guard. RED before the twin fix.
+/// `table(name).column(from).rename({ to, type, schema })` records the schema
+/// qualifier. RED before the twin fix.
 #[test]
-fn twin_rename_column_carries_schema_and_guard() {
+fn twin_rename_column_carries_schema() {
     let src = r#"
-        import { renameColumn, t } from "@zeroship/migrate";
+        import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            renameColumn("t", "a", "b", t.text(), { schema: "app2", ifExists: true });
+            table("t").column("a").rename({ to: "b", type: t.text(), schema: "app2" });
         }};
     "#;
     let ir = record(src, "rename_schema_guard");
     let op = op_named(&ir, "renameColumn");
     assert_schema(op, "app2");
-    assert_guard(op, "ifExists");
 }
 
-/// `alterColumn` with a `type` change records `alterColumnType` carrying the
-/// schema qualifier + the `ifExists` guard. RED before the twin fix.
+/// `table(name).column(col).alter({ type, schema })` records `alterColumnType`
+/// carrying the schema qualifier. RED before the twin fix.
 #[test]
-fn twin_alter_column_type_carries_schema_and_guard() {
+fn twin_alter_column_type_carries_schema() {
     let src = r#"
-        import { alterColumn, t } from "@zeroship/migrate";
+        import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            alterColumn("t", "a", { type: t.bigInt() }, { schema: "app2", ifExists: true });
+            table("t").column("a").alter({ type: t.bigInt(), schema: "app2" });
         }};
     "#;
     let ir = record(src, "alter_type_schema_guard");
     let op = op_named(&ir, "alterColumnType");
     assert_schema(op, "app2");
-    assert_guard(op, "ifExists");
 }
 
-/// `alterColumn` with a `nullable` change records `alterColumnNullability`
-/// carrying the schema qualifier + the `ifExists` guard. RED before the twin fix.
+/// `table(name).column(col).alter({ nullable, schema })` records
+/// `alterColumnNullability` carrying the schema qualifier. RED before the twin fix.
 #[test]
-fn twin_alter_column_nullability_carries_schema_and_guard() {
+fn twin_alter_column_nullability_carries_schema() {
     let src = r#"
-        import { alterColumn } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            alterColumn("t", "a", { nullable: false }, { schema: "app2", ifExists: true });
+            table("t").column("a").alter({ nullable: false, schema: "app2" });
         }};
     "#;
     let ir = record(src, "alter_null_schema_guard");
     let op = op_named(&ir, "alterColumnNullability");
     assert_schema(op, "app2");
-    assert_guard(op, "ifExists");
 }
 
 /// `addForeignKey` / `addUnique` / `addCheck` all record an `addConstraint` op
@@ -546,10 +517,14 @@ fn twin_alter_column_nullability_carries_schema_and_guard() {
 #[test]
 fn twin_add_constraint_family_carries_schema_and_guard() {
     let fk = r#"
-        import { addForeignKey } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            addForeignKey("t", { columns: ["o"], references: { table: "o", columns: ["id"] } },
-                { schema: "app2", ifNotExists: true });
+            table("t").foreignKey("t_o_fk").add({
+                columns: ["o"],
+                references: { table: "o", columns: ["id"] },
+                schema: "app2",
+                ifNotExists: true,
+            });
         }};
     "#;
     let fk_ir = record(fk, "fk_schema_guard");
@@ -558,9 +533,9 @@ fn twin_add_constraint_family_carries_schema_and_guard() {
     assert_guard(op, "ifNotExists");
 
     let uq = r#"
-        import { addUnique } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            addUnique("t", { columns: ["a"] }, { schema: "app2", ifNotExists: true });
+            table("t").unique("t_a_uq").add({ columns: ["a"], schema: "app2", ifNotExists: true });
         }};
     "#;
     let uq_ir = record(uq, "uq_schema_guard");
@@ -569,9 +544,9 @@ fn twin_add_constraint_family_carries_schema_and_guard() {
     assert_guard(op, "ifNotExists");
 
     let ck = r#"
-        import { addCheck } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            addCheck("t", { expr: (c) => c("a").gt(0) }, { schema: "app2", ifNotExists: true });
+            table("t").check("t_a_chk").add({ expr: (c) => c("a").gt(0), schema: "app2", ifNotExists: true });
         }};
     "#;
     let ck_ir = record(ck, "ck_schema_guard");
@@ -585,9 +560,9 @@ fn twin_add_constraint_family_carries_schema_and_guard() {
 #[test]
 fn twin_drop_constraint_carries_schema_and_guard() {
     let src = r#"
-        import { dropConstraint } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            dropConstraint("t", "t_a_key", { schema: "app2", ifExists: true });
+            table("t").constraint("t_a_key").drop({ schema: "app2", ifExists: true });
         }};
     "#;
     let dc_ir = record(src, "drop_constraint_schema_guard");
@@ -603,9 +578,9 @@ fn twin_drop_constraint_carries_schema_and_guard() {
 #[test]
 fn twin_add_column_carries_schema_and_guard() {
     let src = r#"
-        import { addColumn, t } from "@zeroship/migrate";
+        import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            addColumn("t", "c", t.int(), { schema: "app2", ifNotExists: true });
+            table("t").column("c").add({ type: t.integer(), schema: "app2", ifNotExists: true });
         }};
     "#;
     let ir = record(src, "add_column_schema_guard");
@@ -619,9 +594,9 @@ fn twin_add_column_carries_schema_and_guard() {
 #[test]
 fn twin_drop_table_carries_schema_and_guard() {
     let src = r#"
-        import { dropTable } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            dropTable("t", { schema: "app2", ifExists: true });
+            table("t").drop({ schema: "app2", ifExists: true });
         }};
     "#;
     let ir = record(src, "drop_table_schema_guard");
@@ -635,9 +610,9 @@ fn twin_drop_table_carries_schema_and_guard() {
 #[test]
 fn twin_drop_column_carries_schema_and_guard() {
     let src = r#"
-        import { dropColumn } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            dropColumn("t", "c", { schema: "app2", ifExists: true });
+            table("t").column("c").drop({ schema: "app2", ifExists: true });
         }};
     "#;
     let ir = record(src, "drop_column_schema_guard");
@@ -653,9 +628,9 @@ fn twin_drop_column_carries_schema_and_guard() {
 #[test]
 fn twin_create_index_carries_schema_and_guard() {
     let src = r#"
-        import { createIndex } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            createIndex("t", { columns: ["a"], schema: "app2", ifNotExists: true });
+            table("t").index("idx_t_a").add({ columns: ["a"], schema: "app2", ifNotExists: true });
         }};
     "#;
     let ir = record(src, "create_index_schema_guard");
@@ -669,9 +644,9 @@ fn twin_create_index_carries_schema_and_guard() {
 #[test]
 fn twin_drop_index_carries_schema_and_guard() {
     let src = r#"
-        import { dropIndex } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            dropIndex("idx_t_a", { table: "t", schema: "app2", ifExists: true });
+            table("t").index("idx_t_a").drop({ schema: "app2", ifExists: true });
         }};
     "#;
     let ir = record(src, "drop_index_schema_guard");
@@ -686,147 +661,126 @@ fn twin_drop_index_carries_schema_and_guard() {
 #[test]
 fn twin_dml_ops_carry_schema() {
     let ins = r#"
-        import { insert } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            insert("t", { rows: [{ a: 1 }], schema: "app2" });
+            table("t").insert({ rows: [{ a: 1 }], schema: "app2" });
         }};
     "#;
     assert_schema(&op_named(&record(ins, "insert_schema"), "insert"), "app2");
 
     let upd = r#"
-        import { update } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            update("t", { set: { a: (c) => c("a") }, schema: "app2" });
+            table("t").update({ set: { a: (c) => c("a") }, schema: "app2" });
         }};
     "#;
     assert_schema(&op_named(&record(upd, "update_schema"), "update"), "app2");
 
     let del = r#"
-        import { del } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            del("t", { where: (c) => c("a").gt(0), schema: "app2" });
+            table("t").del({ where: (c) => c("a").gt(0), schema: "app2" });
         }};
     "#;
     assert_schema(&op_named(&record(del, "delete_schema"), "delete"), "app2");
 
     let bf = r#"
-        import { backfill } from "@zeroship/migrate";
+        import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            backfill("t", { set: { a: (c) => c("a") }, schema: "app2" });
+            table("t").backfill({ set: { a: (c) => c("a") }, schema: "app2" });
         }};
     "#;
     assert_schema(&op_named(&record(bf, "backfill_schema"), "backfill"), "app2");
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// PR11 — the eager fluent `table()` facade twin. The engine-embedded V8 recorder's
-// `table()` must record the BYTE-IDENTICAL ops the equivalent flat-op migration
-// records (the facade is pure sugar over the same flat recorder). These author the
-// SAME migration both ways through the REAL V8 recorder and assert the recorded
-// `ops` arrays are equal — the headline byte-identical-IR invariant proven through
-// the actual engine path (the same path `Checksum::of_ir` folds over).
+// PR11 — the eager fluent `table()` surface. The engine-embedded V8 recorder's
+// `table()` records the canonical byte-stable op objects. These target the fluent
+// terminals directly through the REAL V8 recorder.
 // ───────────────────────────────────────────────────────────────────────────
 
 /// The full DDL + DML + schema + guard surface authored via `table()` records the
-/// IDENTICAL ops as the flat-op authoring. RED if the twin `table()` re-implements
-/// op construction or drops schema/guard propagation.
+/// expected canonical op sequence. RED if a fluent terminal drops schema/guard
+/// propagation or records the wrong op kind.
 #[test]
-fn twin_table_facade_records_identical_ops_as_flat() {
-    let via_facade = r#"
+fn twin_table_surface_records_full_expected_op_sequence() {
+    let src = r#"
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
             const u = table("users", { schema: "app2" });
-            u.create({ id: t.id(), email: t.text().notNull() }, undefined, { ifNotExists: true });
-            u.addColumn("status", t.text().notNull().default("new"));
-            u.dropColumn("legacy", { ifExists: true });
-            u.renameColumn("label", "display_label", t.text());
-            u.alterColumn("status", { nullable: false });
-            u.addForeignKey({ columns: ["team"], references: { table: "teams", columns: ["name"] }, name: "u_team_fk" });
-            u.addUnique({ columns: ["email"], name: "u_email_uq" });
-            u.addCheck({ expr: (c) => c("status").isNotNull(), name: "u_status_chk" });
-            u.dropConstraint({ name: "u_legacy_chk", type: "check" }, { ifExists: true });
-            u.createIndex({ columns: ["email"], name: "u_email_idx", unique: true });
-            u.dropIndex("u_old_idx", { ifExists: true });
+            u.create({ columns: { id: t.id(), email: t.text().notNull() }, ifNotExists: true });
+            u.column("status").add({ type: t.text().notNull().default("new") });
+            u.column("legacy").drop({ ifExists: true });
+            u.column("label").rename({ to: "display_label", type: t.text() });
+            u.column("status").alter({ nullable: false });
+            u.foreignKey("u_team_fk").add({ columns: ["team"], references: { table: "teams", columns: ["name"] } });
+            u.unique("u_email_uq").add({ columns: ["email"] });
+            u.check("u_status_chk").add({ expr: (c) => c("status").isNotNull() });
+            u.constraint("u_legacy_chk").drop({ ifExists: true });
+            u.index("u_email_idx").add({ columns: ["email"], unique: true });
+            u.index("u_old_idx").drop({ ifExists: true });
             u.insert({ rows: [{ email: "a@b.c", status: "new" }] });
             u.update({ set: { status: (c) => c.fn.lower(c("status")) }, where: (c) => c("id").isNotNull() });
             u.del({ where: (c) => c("status").isNull(), limit: 10 });
             u.backfill({ set: { status: (c) => c.fn.coalesce(c("status"), "new") }, cursorColumn: "id", batchSize: 500, name: "bf_status" });
         }};
     "#;
-    let via_flat = r#"
-        import {
-            createTable, addColumn, dropColumn, renameColumn, alterColumn,
-            addForeignKey, addUnique, addCheck, dropConstraint, createIndex, dropIndex,
-            insert, update, del, backfill, t,
-        } from "@zeroship/migrate";
-        export default { name: "n", up() {
-            createTable("users", { id: t.id(), email: t.text().notNull() }, { schema: "app2", ifNotExists: true });
-            addColumn("users", "status", t.text().notNull().default("new"), { schema: "app2" });
-            dropColumn("users", "legacy", { schema: "app2", ifExists: true });
-            renameColumn("users", "label", "display_label", t.text(), { schema: "app2" });
-            alterColumn("users", "status", { nullable: false }, { schema: "app2" });
-            addForeignKey("users", { columns: ["team"], references: { table: "teams", columns: ["name"] }, name: "u_team_fk" }, { schema: "app2" });
-            addUnique("users", { columns: ["email"], name: "u_email_uq" }, { schema: "app2" });
-            addCheck("users", { expr: (c) => c("status").isNotNull(), name: "u_status_chk" }, { schema: "app2" });
-            dropConstraint("users", { name: "u_legacy_chk", type: "check" }, { schema: "app2", ifExists: true });
-            createIndex("users", { columns: ["email"], name: "u_email_idx", unique: true, schema: "app2" });
-            dropIndex("u_old_idx", { table: "users", schema: "app2", ifExists: true });
-            insert("users", { rows: [{ email: "a@b.c", status: "new" }], schema: "app2" });
-            update("users", { set: { status: (c) => c.fn.lower(c("status")) }, where: (c) => c("id").isNotNull(), schema: "app2" });
-            del("users", { where: (c) => c("status").isNull(), limit: 10, schema: "app2" });
-            backfill("users", { set: { status: (c) => c.fn.coalesce(c("status"), "new") }, cursorColumn: "id", batchSize: 500, name: "bf_status", schema: "app2" });
-        }};
-    "#;
-    let facade = record(via_facade, "facade");
-    let flat = record(via_flat, "flat");
+    let ir = record(src, "fluent_full");
+    let names: Vec<&str> = ops(&ir)
+        .iter()
+        .map(|o| o.get("op").and_then(|v| v.as_str()).unwrap())
+        .collect();
     assert_eq!(
-        ops(&facade),
-        ops(&flat),
-        "the table() facade must record byte-identical ops to the flat-op authoring (pure sugar)"
+        names,
+        vec![
+            "createTable",
+            "addColumn",
+            "dropColumn",
+            "renameColumn",
+            "alterColumnNullability",
+            "addConstraint",
+            "addConstraint",
+            "addConstraint",
+            "dropConstraint",
+            "createIndex",
+            "dropIndex",
+            "insert",
+            "update",
+            "delete",
+            "backfill",
+        ]
     );
+    for op in ops(&ir) {
+        assert_schema(op, "app2");
+    }
+    assert_guard(&ops(&ir)[0], "ifNotExists");
+    assert_guard(&ops(&ir)[2], "ifExists");
+    assert_guard(&ops(&ir)[8], "ifExists");
+    assert_guard(&ops(&ir)[10], "ifExists");
 }
 
-/// `table()` with a `create(columns, build, opts)` build-callback records the
-/// IDENTICAL `createTable` op (incl. schema + guard) as the flat 4-arg
-/// `createTable(name, columns, build, opts)` — the build-collected constraints/
-/// indexes AND the schema/guard ride on the one op. RED if the twin's 4-arg
-/// createTable drops the opts bag when a builder is present.
+/// `table().create({ columns, primaryKey, uniques, indexes, ifNotExists })`
+/// records the table-level constraints/indexes AND the schema/guard on the one
+/// `createTable` op.
 #[test]
-fn twin_table_create_with_builder_and_opts_records_identical_op() {
-    let via_facade = r#"
+fn twin_table_create_with_table_level_specs_carries_schema_and_guard() {
+    let src = r#"
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("memberships", { schema: "app2" }).create(
-                { account_id: t.uuid().notNull(), team: t.text().notNull() },
-                (b) => {
-                    b.primaryKey(["account_id", "team"]);
-                    b.unique(["team"], { name: "m_team_uq" });
-                    b.index(["account_id"], { name: "m_account_idx" });
+            table("memberships", { schema: "app2" }).create({
+                columns: {
+                    account_id: t.uuid().notNull(),
+                    team: t.text().notNull(),
                 },
-                { ifNotExists: true },
-            );
+                primaryKey: ["account_id", "team"],
+                uniques: [{ name: "m_team_uq", columns: ["team"] }],
+                indexes: [{ name: "m_account_idx", columns: ["account_id"] }],
+                ifNotExists: true,
+            });
         }};
     "#;
-    let via_flat = r#"
-        import { createTable, t } from "@zeroship/migrate";
-        export default { name: "n", up() {
-            createTable(
-                "memberships",
-                { account_id: t.uuid().notNull(), team: t.text().notNull() },
-                (b) => {
-                    b.primaryKey(["account_id", "team"]);
-                    b.unique(["team"], { name: "m_team_uq" });
-                    b.index(["account_id"], { name: "m_account_idx" });
-                },
-                { schema: "app2", ifNotExists: true },
-            );
-        }};
-    "#;
-    let facade = record(via_facade, "facade_ct");
-    let flat = record(via_flat, "flat_ct");
-    assert_eq!(ops(&facade)[0], ops(&flat)[0]);
-    // And the one op actually carries the build-collected constraints + schema/guard.
-    let op = &ops(&facade)[0];
+    let ir = record(src, "facade_ct");
+    let op = &ops(&ir)[0];
     assert_eq!(op.get("op").unwrap(), "createTable");
     assert_schema(op, "app2");
     assert_guard(op, "ifNotExists");
@@ -843,9 +797,9 @@ fn twin_table_per_method_schema_overrides_default() {
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
             const u = table("users", { schema: "app2" });
-            u.addColumn("a", t.int());                       // table default
-            u.addColumn("b", t.int(), { ifNotExists: true }); // guard-only → keeps default
-            u.addColumn("c", t.int(), { schema: "other" });   // override
+            u.column("a").add({ type: t.integer() });                       // table default
+            u.column("b").add({ type: t.integer(), ifNotExists: true });     // guard-only → keeps default
+            u.column("c").add({ type: t.integer(), schema: "other" });       // override
         }};
     "#;
     let ir = record(src, "override");
@@ -863,27 +817,18 @@ fn twin_table_per_method_schema_overrides_default() {
     assert_eq!(cols[2], ("c", Some("other")));
 }
 
-/// `table()` with NO schema records ops carrying NO `schema` key — byte-identical
-/// to the flat op with no schema (the facade adds nothing when there's no default).
+/// `table()` with NO schema records ops carrying NO `schema` key.
 #[test]
 fn twin_table_no_schema_omits_key() {
-    let facade = record(
+    let ir = record(
         r#"
         import { table, t } from "@zeroship/migrate";
-        export default { name: "n", up() { table("users").addColumn("a", t.int()); }};
+        export default { name: "n", up() { table("users").column("a").add({ type: t.integer() }); }};
     "#,
         "facade_noschema",
     );
-    let flat = record(
-        r#"
-        import { addColumn, t } from "@zeroship/migrate";
-        export default { name: "n", up() { addColumn("users", "a", t.int()); }};
-    "#,
-        "flat_noschema",
-    );
-    assert_eq!(ops(&facade)[0], ops(&flat)[0]);
     assert!(
-        ops(&facade)[0].get("schema").is_none(),
+        ops(&ir)[0].get("schema").is_none(),
         "no table default ⇒ schema key omitted"
     );
 }

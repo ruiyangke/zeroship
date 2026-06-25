@@ -9,8 +9,8 @@ use zeroship_migrate_js::recorder_service::Authorizer;
 use zeroship_migrate_js::RecorderService;
 
 const MIGRATION: &str = r#"
-import { createTable } from "@zeroship/migrate";
-export function up() { createTable("http_tbl", [{ name: "id", type: "int", nullable: false }]); }
+import { table, t } from "@zeroship/migrate";
+export function up() { table("http_tbl").create({ columns: { id: t.integer().notNull() } }); }
 "#;
 
 struct OwnsOne(&'static str, &'static str);
@@ -89,8 +89,8 @@ fn authoring_reject_is_422_not_retryable() {
     // A migration that calls an op OUTSIDE up() (module top level) -> the recorder
     // surfaces an eval error -> 422, not retryable (an authoring bug, not a transient).
     let bad = r#"
-        import { createTable } from "@zeroship/migrate";
-        createTable("oops", [{ name: "id", type: "int", nullable: false }]); // top-level call
+        import { table, t } from "@zeroship/migrate";
+        table("oops").create({ columns: { id: t.integer().notNull() } }); // top-level call
         export function up() {}
     "#;
     let req = RecordHttpRequest {

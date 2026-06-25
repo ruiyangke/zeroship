@@ -26,13 +26,15 @@ use zeroship_migrate_js::{
 const OWNER: &str = "app_paths";
 
 const MIG_TS: &str = r#"
-import { createTable, addColumn, t } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 export function up() {
-  createTable("widgets", {
-    id: t.uuid().notNull().primaryKey().default({ fn: "genRandomUuid" }),
-    title: t.text().notNull(),
+  table("widgets").create({
+    columns: {
+      id: t.uuid().notNull().primaryKey().default({ fn: "genRandomUuid" }),
+      title: t.text().notNull(),
+    },
   });
-  addColumn("widgets", "qty", t.int());
+  table("widgets").column("qty").add({ type: t.integer() });
 }
 "#;
 

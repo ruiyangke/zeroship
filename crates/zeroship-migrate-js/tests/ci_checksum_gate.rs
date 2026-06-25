@@ -20,11 +20,13 @@ use zeroship_migrate_js::{
 const OWNER: &str = "app_gate";
 
 const MIG_TS: &str = r#"
-import { createTable, t } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 export function up() {
-  createTable("gadgets", {
-    id: t.uuid().notNull().primaryKey().default({ fn: "genRandomUuid" }),
-    label: t.text().notNull(),
+  table("gadgets").create({
+    columns: {
+      id: t.uuid().notNull().primaryKey().default({ fn: "genRandomUuid" }),
+      label: t.text().notNull(),
+    },
   });
 }
 "#;
