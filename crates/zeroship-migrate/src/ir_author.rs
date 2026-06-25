@@ -2421,8 +2421,10 @@ fn dml_id_from_seed(tag: &str, seed: &[u8]) -> crate::migration::MigrationId {
 }
 
 /// The op kind tag for §6.1.1 attribution — the human-facing name the guard
-/// denial / status surface leads with.
-const fn op_kind_tag(op: &Op) -> &'static str {
+/// denial / status surface leads with. Also consumed by the PR14 offline
+/// [`sql_preview`](crate::sql_preview) to label each op in the `--sql` plan preview.
+#[must_use]
+pub const fn op_kind_tag(op: &Op) -> &'static str {
     match op {
         Op::CreateTable { .. } => "createTable",
         Op::AddColumn { .. } => "addColumn",

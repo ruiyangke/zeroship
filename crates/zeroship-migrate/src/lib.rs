@@ -90,6 +90,7 @@ pub mod plan;
 pub mod precondition;
 pub mod role;
 pub mod shadow;
+pub mod sql_preview;
 pub mod squash;
 pub mod status;
 pub mod submit;
@@ -232,6 +233,13 @@ pub use validate::{
 // `MigrationPlan` kept.
 pub use plan::{
     AppliedPlan, BindValue, DialectScope, NotSingleStep, PlanStep, RenameStep,
+};
+// PR14 — the OFFLINE `--sql` plan preview (operator go-live review). A pure,
+// DB-free surfacing/formatting layer over the SQL `IrAuthor::lower_*` already
+// lowers; DB-state-dependent ops are labeled `-- [runtime-resolved]`, never
+// fabricated.
+pub use sql_preview::{
+    render_ir_json_sql, render_plan_sql, render_set_sql, PreviewOpts, RUNTIME_RESOLVED,
 };
 pub use precondition::{
     evaluate as evaluate_precondition, CmpOp, OnUnmet, Precondition, PreconditionCheck,
