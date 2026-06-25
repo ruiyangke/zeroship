@@ -104,6 +104,44 @@ fn fk_constraint_fields_are_camel_case_and_nested() {
 }
 
 #[test]
+fn ir_column_facet_fields_are_camel_case() {
+    // **Migration-first P2a (MED-2)** — the two declared-only IrColumn facets are the
+    // FIRST multi-word op-region fields, so they are the first to actually exercise
+    // the camelCase nested-field convention every sibling silently obeyed (each was
+    // single-word). They MUST serialize camelCase (`idPrefix` / `vectorMetric`),
+    // matching `FieldDescriptor`'s `#[serde(rename = …)]` and the design §4 — one
+    // spelling across IR↔descriptor. And because `IrColumn` is `deny_unknown_fields`,
+    // the snake_case spelling must NOT deserialize (the inverse of the bug: pre-fix
+    // a camelCase `.ir.json` following the codebase convention was REJECTED).
+    use zeroship_migrate::ir::{ColType, IrColumn, VectorMetric};
+
+    let col = IrColumn {
+        name: "id".into(),
+        ty: ColType::Uuid,
+        nullable: Some(false),
+        default: None,
+        unique: None,
+        id_prefix: Some("post".into()),
+        vector_metric: Some(VectorMetric::Cosine),
+    };
+    let v = serde_json::to_value(&col).unwrap();
+    assert_eq!(v["idPrefix"], "post", "idPrefix is camelCase on the wire: {v}");
+    assert_eq!(v["vectorMetric"], "cosine", "vectorMetric is camelCase on the wire: {v}");
+    assert!(v.get("id_prefix").is_none(), "snake_case id_prefix must NOT appear: {v}");
+    assert!(v.get("vector_metric").is_none(), "snake_case vector_metric must NOT appear: {v}");
+
+    // deny_unknown_fields: the camelCase wire form round-trips; snake_case is rejected.
+    let camel = r#"{"name":"id","type":"uuid","idPrefix":"post"}"#;
+    let back: IrColumn = serde_json::from_str(camel).expect("camelCase idPrefix round-trips");
+    assert_eq!(back.id_prefix.as_deref(), Some("post"));
+    let snake = r#"{"name":"id","type":"uuid","id_prefix":"post"}"#;
+    assert!(
+        serde_json::from_str::<IrColumn>(snake).is_err(),
+        "snake_case id_prefix must be rejected by deny_unknown_fields (camelCase is the contract)"
+    );
+}
+
+#[test]
 fn migration_ir_envelope_stays_snake_case() {
     // The envelope + flags keep snake_case per the §2.3 normative example.
     let json = r#"{"ir_version":1,"name":"n","owner_app":"app_x","ops":[],
@@ -453,6 +491,32 @@ fn bytes_decode_then_canonical_reencode_is_stable() {
 // single-checksum invariant (items 2 & 10). These tests are RED before the
 // `skip_serializing_if = "Option::is_none"` fix and GREEN after.
 // ----------------------------------------------------------------------------
+
+#[test]
+fn add_column_cannot_carry_declared_only_facets() {
+    // **Migration-first P2a (HIGH-1)** — the two declared-only facets (`idPrefix`,
+    // `vectorMetric`) are CREATE-ONLY: `Op::AddColumn` has NO facet slot (it carries
+    // only table/column/type/nullable?/default?/schema?/existenceGuard?). Pin that an
+    // `addColumn` IR CANNOT smuggle a facet in: `Op` is `deny_unknown_fields`, so a
+    // hand-crafted `.ir.json` carrying `idPrefix`/`vectorMetric` on an addColumn is
+    // rejected fail-closed at deserialize — the validate bound (`validate_column_facets`
+    // runs only on the createTable arm) can therefore never silently fail to apply to
+    // an added column, because such a column cannot exist on the wire. (The JS recorder
+    // ALSO refuses a facet-bearing ColumnDef on `add({type})` — see the migrate_ops
+    // `__toAddColumnTail` reject and its recorder regression test — so the gap is
+    // closed at BOTH the producer and the wire-contract layer.)
+    for facet in [
+        r#"{"op":"addColumn","table":"t","column":"x","type":"uuid","idPrefix":"post"}"#,
+        r#"{"op":"addColumn","table":"t","column":"x","type":{"vector":{"vector":8}},"vectorMetric":"cosine"}"#,
+    ] {
+        let err = serde_json::from_str::<Op>(facet).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field"),
+            "an addColumn carrying a create-only facet must be rejected by \
+             deny_unknown_fields, got: {err} (input: {facet})"
+        );
+    }
+}
 
 #[test]
 fn add_column_omits_absent_optionals() {

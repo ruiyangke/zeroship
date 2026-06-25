@@ -439,7 +439,7 @@ async fn fold_recovers_facets_pg() {
     // covered by the NO-DB fold unit test.)
     let posts = r#"{"ir_version":1,"name":"create_posts","ops":[
         {"op":"createTable","name":"posts","columns":[
-            {"name":"id","type":"uuid","nullable":false,"id_prefix":"post"},
+            {"name":"id","type":"uuid","nullable":false,"idPrefix":"post"},
             {"name":"title","type":"text","nullable":false}
         ]}
     ]}"#;

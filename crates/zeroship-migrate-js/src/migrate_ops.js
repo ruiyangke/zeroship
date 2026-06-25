@@ -134,6 +134,12 @@ function requireString(v, what) {
   }
 }
 
+/** The CLOSED pgvector distance-metric token set (P2a §4) — the camelCase wire
+ *  spelling of the Rust `VectorMetric` enum (`cosine | l2 | innerProduct`). Mirrored
+ *  here so `t.vector(n, { metric })` rejects an out-of-set metric with a friendly
+ *  client-side OP_INVALID (LOW-1); the engine's closed enum stays authoritative. */
+const VECTOR_METRICS = ["cosine", "l2", "innerProduct"];
+
 // ===========================================================================
 // (B) The IMMUTABLE chainable `t.*` column-type lexicon (§4). NULLABLE BY
 // DEFAULT; `.notNull()` / `.default(x)` / `.ref(target)` / `.primaryKey()` /
@@ -208,18 +214,44 @@ class ColumnDef {
       unique: this._unique && !this._primaryKey ? true : undefined,
       // Migration-first P2a (§2b): carry the declared-only facets onto the wire
       // IrColumn so the fold / gen-types (and the runtime under P5) keep the
-      // typed-id brand + the vector metric. The wire KEYS are snake_case to match
-      // the IrColumn serde field names (`id_prefix` / `vector_metric` — the struct
-      // carries no `rename_all`); the metric VALUE is the closed camelCase token
-      // (`cosine | l2 | innerProduct`). Absent ⇒ omitted (compact), so a plain
-      // column is byte-identical to the pre-P2a image (and checksum-neutral).
-      id_prefix: this._idPrefix,
-      vector_metric: this._vectorMetric,
+      // typed-id brand + the vector metric. The wire KEYS are camelCase
+      // (`idPrefix` / `vectorMetric`) — the op-region nested-field convention the
+      // IrColumn now matches via `#[serde(rename = …)]`, aligning the spelling with
+      // the FieldDescriptor + the design §4. The metric VALUE is the closed
+      // camelCase token (`cosine | l2 | innerProduct`). Absent ⇒ omitted (compact),
+      // so a plain column is byte-identical to the pre-P2a image (checksum-neutral).
+      idPrefix: this._idPrefix,
+      vectorMetric: this._vectorMetric,
     });
   }
 
-  /** Reduce to the `addColumn` op tail (`{ type, nullable?, default? }`). */
+  /** Reduce to the `addColumn` op tail (`{ type, nullable?, default? }`).
+   *
+   *  Migration-first P2a (HIGH-2): the `Op::AddColumn` IR has NO facet slot — it
+   *  carries only `{ type, nullable?, default? }`. The two declared-only facets
+   *  (`idPrefix` from `t.id({prefix})`, `vectorMetric` from `t.vector(n,{metric})`)
+   *  can ONLY be declared at create() time, where the IrColumn carries them. So a
+   *  facet-bearing ColumnDef on an `add({ type })` would be SILENTLY dropped on the
+   *  wire — the one outcome the closed-contract discipline forbids (a missed
+   *  consumer is silent drift). REFUSE it fail-closed with a structured OP_INVALID:
+   *  the author must declare the metric/prefix in create(), never via addColumn. */
   __toAddColumnTail() {
+    if (this._idPrefix !== undefined) {
+      throw structuredError(
+        "OP_INVALID",
+        "a t.id({ prefix }) typed-id prefix can only be declared in create(); an " +
+          "addColumn carries no prefix slot (the IrColumn facet is create-only)",
+        { facet: "idPrefix" },
+      );
+    }
+    if (this._vectorMetric !== undefined) {
+      throw structuredError(
+        "OP_INVALID",
+        "a t.vector(n, { metric }) distance metric can only be declared in create(); " +
+          "an addColumn carries no metric slot (the IrColumn facet is create-only)",
+        { facet: "vectorMetric" },
+      );
+    }
     return compact({
       type: this._type,
       nullable: this._nullable === false ? false : undefined,
@@ -305,6 +337,19 @@ export const t = {
     let col = new ColumnDef({ vector: { vector: n } });
     if (opts && opts.metric !== undefined) {
       requireString(opts.metric, "t.vector(n, { metric })");
+      // LOW-1: mirror how `n` is validated client-side — a closed-set check on the
+      // metric token gives a friendly OP_INVALID at authoring time instead of a
+      // cryptic serde "unknown variant" error at the Rust deserialize seam. The
+      // engine remains the authoritative validator (the closed `VectorMetric` enum);
+      // this is a redundant, earlier, better-worded guard over the SAME closed set.
+      if (!VECTOR_METRICS.includes(opts.metric)) {
+        throw structuredError(
+          "OP_INVALID",
+          `t.vector(n, { metric }): metric must be one of ${VECTOR_METRICS.join(" | ")}, ` +
+            `got ${JSON.stringify(opts.metric)}`,
+          { metric: opts.metric },
+        );
+      }
       col = col._with({ vectorMetric: opts.metric });
     }
     return col;

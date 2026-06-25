@@ -873,11 +873,21 @@ pub enum RecoveredCheck {
 
 /// Convert a numeric [`IrScalar`] literal to `f64` for a `min`/`max` bound, or
 /// `None` for a non-numeric literal (which is not a recognized range bound).
+///
+/// **Precision note (LOW-2).** A `Decimal` bound is narrowed to `f64` here. This is
+/// NOT a new precision loss: the reconstructed `FieldDescriptor.min`/`max` is itself
+/// an `f64` (`declarative.rs`), so the recovered facet cannot be wider than `f64`
+/// regardless; and an `Int` literal is wire-bounded to ±2^53 by `IrScalar` (the
+/// `< 2^53` JS-safe-integer guard), so the `Int` arm is lossless. A large `Decimal`
+/// CHECK bound narrows to the same `f64` the declarative path would carry — the two
+/// sides stay byte-identical (the keystone parity), they just share the `f64` model.
+/// A future reader should NOT assume a lossless decimal bound here.
 fn ir_scalar_as_f64(s: &crate::ir::IrScalar) -> Option<f64> {
     use crate::ir::IrScalar;
     match s {
         IrScalar::Int(i) => Some(*i as f64),
-        // A decimal literal is carried as its lossless string; parse for the bound.
+        // A decimal literal is carried as its lossless string; parse for the bound
+        // (narrowed to f64 — see the precision note above; matches the f64 facet).
         IrScalar::Decimal(d) => d.parse::<f64>().ok(),
         _ => None,
     }

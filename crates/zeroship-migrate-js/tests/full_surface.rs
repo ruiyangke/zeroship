@@ -817,6 +817,105 @@ fn twin_table_per_method_schema_overrides_default() {
     assert_eq!(cols[2], ("c", Some("other")));
 }
 
+// ---------------------------------------------------------------------------
+// Migration-first P2a — declared-only facets are CREATE-ONLY + closed-set metric
+// ---------------------------------------------------------------------------
+
+/// **HIGH-2** — `t.id({ prefix })` on an `addColumn` (`.column(x).add({type})`) is
+/// REFUSED fail-closed, not silently dropped. `Op::AddColumn` has no facet slot, so
+/// carrying the prefix through would silently lose the typed-id brand — the one
+/// outcome the closed-contract discipline forbids. RED pre-fix: `__toAddColumnTail`
+/// emitted `{type,nullable,default}` and dropped `_idPrefix` with no error.
+#[test]
+fn add_column_with_id_prefix_is_refused_not_dropped() {
+    let err = record_err(
+        r#"
+        import { table, t } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            table("posts").column("pid").add({ type: t.id({ prefix: "post" }) });
+        }};
+    "#,
+        "addcol_idprefix",
+    );
+    assert!(
+        err.contains("prefix") && err.contains("create()"),
+        "an addColumn carrying a t.id({{prefix}}) must be refused with a create-only \
+         OP_INVALID, got: {err}"
+    );
+}
+
+/// **HIGH-2** — `t.vector(n, { metric })` on an `addColumn` is likewise REFUSED, not
+/// silently dropped (the metric is a create-only IrColumn facet). RED pre-fix:
+/// `__toAddColumnTail` dropped `_vectorMetric` silently.
+#[test]
+fn add_column_with_vector_metric_is_refused_not_dropped() {
+    let err = record_err(
+        r#"
+        import { table, t } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            table("docs").column("emb").add({ type: t.vector(8, { metric: "cosine" }) });
+        }};
+    "#,
+        "addcol_metric",
+    );
+    assert!(
+        err.contains("metric") && err.contains("create()"),
+        "an addColumn carrying a t.vector(n, {{metric}}) must be refused with a \
+         create-only OP_INVALID, got: {err}"
+    );
+}
+
+/// A `t.vector(n)` (no metric) on an addColumn is STILL allowed — only the declared
+/// metric facet is create-only. Pins that the HIGH-2 reject is scoped to the facet,
+/// not the vector column type.
+#[test]
+fn add_column_plain_vector_is_allowed() {
+    let ir = record(
+        r#"
+        import { table, t } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            table("docs").column("emb").add({ type: t.vector(8) });
+        }};
+    "#,
+        "addcol_plain_vector",
+    );
+    let add = &ops(&ir)[0];
+    assert_eq!(add.get("op").unwrap(), "addColumn");
+    assert!(add.get("vectorMetric").is_none(), "a metric-less vector carries no facet");
+}
+
+/// **LOW-1** — an out-of-set metric is rejected CLIENT-SIDE with a friendly
+/// `OP_INVALID` naming the closed set, not deferred to a cryptic serde "unknown
+/// variant" at the Rust deserialize seam. RED pre-fix: `t.vector` only `requireString`d
+/// the metric and recorded it verbatim.
+#[test]
+fn vector_metric_out_of_set_is_rejected_client_side() {
+    let err = record_err(
+        r#"
+        import { table, t } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            table("docs").create({ columns: { emb: t.vector(8, { metric: "euclidean" }) } });
+        }};
+    "#,
+        "bad_metric",
+    );
+    // The CLIENT-SIDE guard fires at record time with a friendly OP_INVALID naming
+    // the call site + closed set ("must be one of …"). It must NOT fall through to
+    // the Rust deserialize seam's cryptic "unknown variant" error — that distinction
+    // is what makes this RED pre-fix (the serde error ALSO names the variants, so a
+    // token-only assertion would falsely pass; we pin the client-side wording).
+    assert!(
+        err.contains("t.vector(n, { metric })") && err.contains("must be one of"),
+        "an out-of-set vector metric must be rejected CLIENT-SIDE with a friendly \
+         OP_INVALID naming the closed set, got: {err}"
+    );
+    assert!(
+        !err.contains("unknown variant"),
+        "the metric must be caught client-side, NOT deferred to the serde \
+         'unknown variant' deserialize error: {err}"
+    );
+}
+
 /// `table()` with NO schema records ops carrying NO `schema` key.
 #[test]
 fn twin_table_no_schema_omits_key() {

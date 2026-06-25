@@ -16,7 +16,7 @@
               "fn": "genRandomUuid"
             }
           },
-          "id_prefix": "post"
+          "idPrefix": "post"
         },
         {
           "name": "title",
@@ -30,7 +30,7 @@
               "vector": 1536
             }
           },
-          "vector_metric": "cosine"
+          "vectorMetric": "cosine"
         },
         {
           "name": "secondary_embedding",
