@@ -1083,6 +1083,17 @@ mod tests {
     /// `baseline.rs` (meta_schema), `guard::platform_runner.rs` (meta_schema), and
     /// `db.rs::search_path_clause` (project/platform/extension schemas) all fed an
     /// engine identifier to `escape_quote_ident`, so this scan would have FAILED.
+    ///
+    /// **SCOPE — this is a PER-SITE regression pin, NOT a general invariant.** It
+    /// only catches the exact call-site *spellings* in `needles` above (the give-away
+    /// `escape_quote_ident(&cfg.…)` / `(role)` byte-patterns). A future engine-identifier
+    /// seam bound to a *differently-named* variable — e.g.
+    /// `let s = &cfg.pg.meta_schema; escape_quote_ident(s)` — would slip past this scan
+    /// undetected. The broader, spelling-independent guarantee that NO bare `"`-escape
+    /// seam exists outside `dml.rs` is held by `no_bare_escape_seam` (above); this test
+    /// complements it by naming the specific engine-identifier sites and proving they
+    /// route through the fail-closed wrapper. When adding a new engine-identifier render
+    /// seam, add its spelling to `needles` here.
     #[test]
     fn no_engine_identifier_uses_the_infallible_escaper() {
         use std::path::Path;
