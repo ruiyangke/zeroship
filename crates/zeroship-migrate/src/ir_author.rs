@@ -3039,9 +3039,10 @@ mod tests {
     ///     `IrScalar::Decimal` (and a bigint default ≥ 2^53 likewise, since a
     ///     fractional/large JSON number is rejected at parse) — `as_f64()`
     ///     returns `None` for a JSON string, so those fell through too.
-    /// So render_create_table emitted NO `DEFAULT` clause for any of them (a real
-    /// apply bug, losing the creator's default). RED before the unified
-    /// precision-preserving numeric-default helper in field_default_expr.
+    ///
+    /// So `render_create_table` emitted NO `DEFAULT` clause for any of them (a
+    /// real apply bug, losing the creator's default). RED before the unified
+    /// precision-preserving numeric-default helper in `field_default_expr`.
     #[test]
     fn create_table_int_bigint_and_decimal_column_defaults_render_pg() {
         use crate::ir::IrScalar;
