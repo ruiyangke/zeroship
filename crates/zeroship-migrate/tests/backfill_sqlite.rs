@@ -84,6 +84,9 @@ async fn scalar_i64(be: &SqliteBackend, sql: &str) -> i64 {
 
 fn spec(batch: u32) -> BackfillSpec {
     BackfillSpec {
+        // SQLite has one `main` db, no schema namespace; the executor renders the
+        // table unqualified. The field is carried for `backfill_id` discrimination.
+        schema: "main".to_string(),
         table: "nums".to_string(),
         cursor_column: "id".to_string(),
         batch_size: batch,
@@ -300,6 +303,7 @@ async fn seed_real_cursor(be: &SqliteBackend, n: i64) {
 
 fn real_spec(batch: u32) -> BackfillSpec {
     BackfillSpec {
+        schema: "main".to_string(),
         table: "rnums".to_string(),
         cursor_column: "rk".to_string(),
         batch_size: batch,
@@ -416,6 +420,7 @@ async fn sqlite_backfill_nocase_cursor_exactly_once() {
     // batch_size=2 so the first window touches BOTH 'a' and 'B'; NO filter so a
     // re-applied increment is visible. `val = val + 1` is non-idempotent.
     let s = BackfillSpec {
+        schema: "main".to_string(),
         table: "ci".to_string(),
         cursor_column: "k".to_string(),
         batch_size: 2,

@@ -463,28 +463,6 @@ pub enum IrLowerError {
          IrAuthor::with_schema_scope (Platform/Trusted only)."
     )]
     LowerCrossSchema(String),
-    /// **PR10 review F5** — a `backfill` (or batched `update`) whose EFFECTIVE schema
-    /// (§2.7) differs from the bound project schema. The resumable backfill EXECUTOR
-    /// ([`crate::backfill`]) qualifies its windowed `UPDATE` into the deploy-time
-    /// `ExecutorConfig::project_schema` ONLY — it does not consume a per-spec schema.
-    /// Honoring the qualifier would therefore require silently project-pinning the
-    /// batched UPDATE (a silent-wrong-schema), inconsistent with the one-shot DML
-    /// path that honors `eff_schema`. Lowering FAILS CLOSED rather than re-pin: a
-    /// schema-qualified batched backfill/update is refused until the executor threads
-    /// a per-spec schema. Confined/Platform never hit this (`eff == project`).
-    #[error(
-        "IrAuthor::lower of a schema-qualified backfill/batched-update names schema \
-         {schema:?}, but the resumable backfill executor qualifies only into the \
-         deploy-time project schema {project:?}; honoring it would silently re-pin the \
-         batched UPDATE to {project:?}. Refusing fail-closed (use the one-shot \
-         update/insert/delete path, which honors the schema, or drop the qualifier)."
-    )]
-    BackfillSchemaUnsupported {
-        /// The effective (op-named or default) schema the batched op requested.
-        schema: String,
-        /// The bound project schema the executor would otherwise silently pin to.
-        project: String,
-    },
     /// **PR2** — a SQLite `renameColumn` whose table's full live structure is not
     /// in [`LiveSchema::table_snapshots`] / [`LiveSchema::sqlite_schemas`]. SQLite
     /// has no native online rename, so the rename is reconciled by the 12-step
@@ -1753,16 +1731,20 @@ impl IrAuthor {
     /// `concatWs`, etc. differ per dialect) — but both legs consume the same
     /// `BackfillSpec` shape, so the plan step is uniform.
     ///
-    /// **PR10 review F5** — the backfill EXECUTOR ([`crate::backfill`]) qualifies its
-    /// windowed `UPDATE` into the deploy-time `ExecutorConfig::project_schema`; it
-    /// does NOT consume a per-spec schema. So a `backfill` (or batched `update`) whose
-    /// EFFECTIVE schema differs from the bound project schema cannot be honored
-    /// without silently project-pinning it (a silent-wrong-schema). Rather than drop
-    /// the qualifier, lowering FAILS CLOSED here
-    /// ([`IrLowerError::BackfillSchemaUnsupported`]) — the one-shot DML path
-    /// (`assemble_insert`/`update`/`delete`) honors `eff_schema`, but the resumable
-    /// batched path must refuse until the executor threads a per-spec schema. Under
-    /// Confined/Platform `eff == project`, so this never fires for the creator path.
+    /// **#149** — the backfill EXECUTOR ([`crate::backfill::BackfillSpec`]) now
+    /// carries a per-spec `schema`, so a schema-qualified batched backfill/update
+    /// RUNS (it no longer fails closed at lower). The spec's `schema` is set from
+    /// `eff_schema` (§2.7), which the cross-schema scope gate (`permits`) has
+    /// ALREADY vetted: under Confined `eff == project_schema` (a foreign qualifier
+    /// is refused upstream), so the executor qualifies into the project schema
+    /// byte-identically to before; under Trusted/Platform a gate-approved foreign
+    /// schema flows through and the windowed `UPDATE` qualifies into it (the
+    /// executor's profile-derived guard permits the cross-schema ref). Confinement
+    /// is unchanged — it lives in the scope gate, not in a lower-time refusal.
+    ///
+    /// The SQLite leg is unaffected: a non-`main` schema is refused EARLIER
+    /// ([`IrLowerError::SqliteSchemaUnsupported`]) before `lower_backfill`, and
+    /// SQLite's single `main` db renders the table unqualified.
     fn lower_backfill(
         &self,
         eff_schema: &str,
@@ -1773,22 +1755,22 @@ impl IrAuthor {
         filter: Option<&crate::expr::Expr>,
         name: &str,
     ) -> Result<PlanStep, IrLowerError> {
-        // **PR10 review F5** — refuse a non-project effective schema rather than
-        // silently project-pin the batched UPDATE (the executor qualifies into the
-        // deploy-time project schema only). `effective_schema` has already
-        // canonicalized a case-variant of `project_schema`, so this compares against
-        // the canonical project schema.
-        if !eff_schema.eq_ignore_ascii_case(&self.project_schema) {
-            return Err(IrLowerError::BackfillSchemaUnsupported {
-                schema: eff_schema.to_string(),
-                project: self.project_schema.clone(),
-            });
-        }
+        // #149 — `eff_schema` is the EFFECTIVE schema (§2.7), ALREADY vetted by the
+        // cross-schema scope gate (`permits`, in `lower_one_op`) BEFORE reaching
+        // here: under Confined `Single(project_schema)` a truly foreign qualifier is
+        // refused upstream, so `eff_schema == project_schema` always; under
+        // Trusted/Platform the scope widens and a gate-approved foreign schema flows
+        // through. So the batched-backfill executor now threads `spec.schema =
+        // eff_schema` (the executor qualifies its windowed UPDATE + anchors its
+        // search_path on it and guards via its profile-derived `guard_config`).
+        // There is NO lower-time refusal here anymore — confinement is enforced by
+        // the scope gate, not by pinning the backfill to the project schema.
         let clauses =
             crate::dml::assemble_backfill_clauses(self.dialect, table, set, filter)
                 .map_err(IrLowerError::DmlAssemble)?;
         let batch_size = u32::try_from(batch_size).unwrap_or(u32::MAX).max(1);
         let spec = crate::backfill::BackfillSpec {
+            schema: eff_schema.to_string(),
             table: table.to_string(),
             cursor_column: cursor_column.to_string(),
             batch_size,
@@ -2993,57 +2975,89 @@ mod tests {
         serde_json::from_str(&json).expect("backfill IR parses")
     }
 
-    /// **PR10 review F5 (MED)** — a schema-qualified `backfill` whose effective schema
-    /// differs from the bound project schema is REFUSED fail-closed at lower, NOT
-    /// silently project-pinned. The resumable backfill executor qualifies its windowed
-    /// UPDATE into the deploy-time project schema only, so honoring the qualifier would
-    /// silently re-pin the batched UPDATE to `app1` (a silent-wrong-schema). RED before
-    /// the lower-time check (it would have silently project-pinned the backfill).
+    /// **#149 (was PR10 review F5)** — a schema-qualified `backfill` whose effective
+    /// schema is a gate-APPROVED foreign schema now LOWERS to a `PlanStep::Backfill`
+    /// whose `spec.schema` is that foreign schema (it no longer fails closed). The
+    /// resumable backfill executor threads the per-spec schema, so the windowed
+    /// UPDATE qualifies into `app2`, NOT silently into `app1`. RED before #149 (it
+    /// returned `BackfillSchemaUnsupported`).
+    ///
+    /// Trusted/Platform posture: the foreign schema "app2" is ADMITTED by the scope
+    /// (a Confined creator could never name it — the cross-schema confinement gate
+    /// refuses it first), so the test reaches the now-enabled cross-schema backfill,
+    /// not the confinement gate.
     #[test]
-    fn schema_qualified_backfill_is_refused_fail_closed_pg() {
+    fn schema_qualified_backfill_runs_cross_schema_pg() {
         let ir = backfill_ir(Some("app2"));
-        // Trusted/Platform posture: the foreign schema "app2" is ADMITTED by the scope
-        // (a Confined creator could never name it — the cross-schema confinement gate
-        // refuses it first), so the test reaches the resumable-backfill functional limit
-        // (executor qualifies only into the project schema), not the confinement gate.
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres).with_schema_scope(
             crate::guard::SchemaScope::Allowlist(vec!["app1".into(), "app2".into()]),
         );
-        let err = author.lower(&ir, &LiveSchema::default()).unwrap_err();
-        match err {
-            IrLowerError::BackfillSchemaUnsupported { schema, project } => {
-                assert_eq!(schema, "app2");
-                assert_eq!(project, "app1");
-            }
-            other => panic!(
-                "a schema-qualified batched backfill must fail closed with \
-                 BackfillSchemaUnsupported (never silent project-pinning), got: {other:?}"
-            ),
-        }
+        let steps = author
+            .lower_steps(&ir, &LiveSchema::default())
+            .expect("a gate-approved cross-schema backfill lowers");
+        let spec = steps
+            .iter()
+            .find_map(|s| match s {
+                PlanStep::Backfill(spec) => Some(spec),
+                _ => None,
+            })
+            .expect("the backfill produced a PlanStep::Backfill");
+        assert_eq!(
+            spec.schema, "app2",
+            "the backfill spec carries the gate-approved foreign schema (not a \
+             silent project-pin to app1); got {:?}",
+            spec.schema
+        );
     }
 
-    /// **PR10 review F5** — a batched `update { batch }` (a backfill in disguise) with a
-    /// foreign schema is refused fail-closed identically to `backfill` — the resumable
-    /// path is uniform. RED before the check.
+    /// **#149 (was PR10 review F5)** — a batched `update {{ batch }}` (a backfill in
+    /// disguise) with a gate-approved foreign schema runs cross-schema identically to
+    /// `backfill` — the resumable path is uniform. RED before #149 (it failed closed).
     #[test]
-    fn schema_qualified_batched_update_is_refused_fail_closed_pg() {
+    fn schema_qualified_batched_update_runs_cross_schema_pg() {
         let json = r#"{"ir_version":1,"name":"u","owner_app":"app_a","ops":[
             {"op":"update","table":"t","schema":"app2",
              "set":{"v":{"node":"colRef","name":"v"}},
              "batch":{"cursorColumn":"id","batchSize":500}}
         ]}"#;
         let ir: MigrationIr = serde_json::from_str(json).expect("batched update IR parses");
-        // Trusted/Platform posture: "app2" is admitted by the scope (see the
-        // backfill twin) so the test hits the resumable functional limit, not the
-        // confinement gate.
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres).with_schema_scope(
             crate::guard::SchemaScope::Allowlist(vec!["app1".into(), "app2".into()]),
         );
-        let err = author.lower(&ir, &LiveSchema::default()).unwrap_err();
+        let steps = author
+            .lower_steps(&ir, &LiveSchema::default())
+            .expect("a gate-approved cross-schema batched update lowers");
+        let spec = steps
+            .iter()
+            .find_map(|s| match s {
+                PlanStep::Backfill(spec) => Some(spec),
+                _ => None,
+            })
+            .expect("the batched update produced a PlanStep::Backfill");
+        assert_eq!(
+            spec.schema, "app2",
+            "the batched-update backfill spec carries the foreign schema; got {:?}",
+            spec.schema
+        );
+    }
+
+    /// **#149** — Confinement is UNCHANGED: a Confined creator (scope =
+    /// `Single(project_schema)`) naming a FOREIGN schema in a backfill is still
+    /// refused at the cross-schema scope gate (BEFORE `lower_backfill`), so the
+    /// cross-schema backfill is reachable ONLY under the widened (Trusted/Platform)
+    /// posture. RED would be a Confined cross-schema backfill silently lowering.
+    #[test]
+    fn confined_cross_schema_backfill_still_refused_pg() {
+        let ir = backfill_ir(Some("app2"));
+        // Default scope is Confined `Single("app1")` (the bound project schema).
+        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
+        let err = author
+            .lower_steps(&ir, &LiveSchema::default())
+            .expect_err("a Confined cross-schema backfill must be refused by the scope gate");
         assert!(
-            matches!(err, IrLowerError::BackfillSchemaUnsupported { .. }),
-            "a schema-qualified batched update must fail closed (not silently \
-             project-pinned), got: {err:?}"
+            matches!(err, IrLowerError::LowerCrossSchema(_)),
+            "a Confined creator's foreign-schema backfill is refused at the \
+             cross-schema scope gate (confinement unchanged), got: {err:?}"
         );
     }
 
@@ -4080,6 +4094,7 @@ mod tests {
             expand: Vec::new(),
             contract: Vec::new(),
             backfill: crate::backfill::BackfillSpec {
+                schema: "app".into(),
                 table: "t".into(),
                 cursor_column: "id".into(),
                 batch_size: 1000,

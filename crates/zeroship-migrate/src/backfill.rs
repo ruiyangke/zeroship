@@ -61,7 +61,7 @@ use sha2::{Digest, Sha256};
 
 use crate::approval::Approval;
 use crate::db::ExecutorConfig;
-use crate::guard::{GuardConfig, GuardError, SqlGuard};
+use crate::guard::{GuardError, SqlGuard};
 use crate::journal::JournalError;
 
 /// The structured definition of a large-table backfill (design §5).
@@ -75,11 +75,28 @@ use crate::journal::JournalError;
 /// can never escape the target table or inject into the loop control.
 #[derive(Debug, Clone)]
 pub struct BackfillSpec {
-    /// The target table — a bare (unqualified) identifier in the project schema.
+    /// The **effective** (already gate-approved) schema the backfill targets — the
+    /// schema the windowed `UPDATE` qualifies into, the `search_path` anchors on,
+    /// and the catalog introspection probes. NOT necessarily the deploy-time
+    /// `ExecutorConfig::project_schema`:
+    ///
+    /// - **Confined** (zeroship creator): the cross-schema scope gate at lower
+    ///   (`IrAuthor::permits`) refuses any FOREIGN qualifier *before* the backfill
+    ///   is lowered, so this is always `== cfg.project_schema` — every render is
+    ///   byte-identical to the pre-#149 hardcoded project pin.
+    /// - **Trusted / Platform** (operator-token-gated general CLI): the scope
+    ///   widens, so a gate-approved foreign schema flows through here and the
+    ///   backfill runs cross-schema (the executor's own guard is profile-derived,
+    ///   so a cross-schema ref is only emitted under a guard that permits it).
+    ///
+    /// Set at lower from `IrAuthor`'s `eff_schema` (§2.7), which has already passed
+    /// the scope gate — so this field is never an unvetted author input.
+    pub schema: String,
+    /// The target table — a bare (unqualified) identifier in the [`schema`](Self::schema).
     /// Validated as a real identifier and quoted; a schema-qualified or otherwise
     /// malformed name is rejected ([`BackfillError::InvalidIdentifier`]). The
-    /// engine pins `search_path` to the project schema, so the resolved table is
-    /// always the project's own.
+    /// engine pins `search_path` to [`schema`](Self::schema), so the resolved table
+    /// is always the intended one.
     pub table: String,
     /// The ordered, unique-ish key to page by (the table's primary key or another
     /// strictly-ordered column). Validated as an identifier and quoted. The engine
@@ -109,15 +126,25 @@ pub struct BackfillSpec {
 
 impl BackfillSpec {
     /// A stable identity for this backfill, used as the progress-row PK so a
-    /// resumed run finds its own progress. Derived from the target table, cursor
-    /// column, the authored transform + filter, and the name — so changing the
-    /// transform yields a *different* backfill id (a re-authored backfill does not
-    /// silently resume against an old, incompatible cursor).
+    /// resumed run finds its own progress. Derived from the target schema + table,
+    /// cursor column, the authored transform + filter, and the name — so changing
+    /// the transform yields a *different* backfill id (a re-authored backfill does
+    /// not silently resume against an old, incompatible cursor).
+    ///
+    /// #149: the **schema** is in the hash (canonical position, right after the
+    /// name) so two otherwise-identical backfills targeting the same table in
+    /// DIFFERENT schemas (`app_a.users` vs `app_b.users`, now reachable under
+    /// Trusted) get DISTINCT ids and cannot alias each other's progress row on
+    /// crash-resume. Exactly-once–preserving: it only *separates* previously
+    /// colliding ids; the Confined path keeps a deterministic id (schema ==
+    /// project schema, unchanged input → unchanged hash), so an in-flight Confined
+    /// backfill resumes identically.
     #[must_use]
     pub fn backfill_id(&self) -> String {
         let mut h = Sha256::new();
         for field in [
             self.name.as_str(),
+            self.schema.as_str(),
             self.table.as_str(),
             self.cursor_column.as_str(),
             self.set_clause.as_str(),
@@ -278,10 +305,24 @@ fn validate_ident(what: &'static str, value: &str) -> Result<(), BackfillError> 
     Ok(())
 }
 
-/// Double-quote a validated identifier (the value has already passed
-/// [`validate_ident`], so it contains no `"`; the replace is belt-and-suspenders).
-fn quote_ident(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
+/// Double-quote an identifier. Routes through the ONE crate-shared engine seam
+/// ([`crate::dml::quote_ident_checked`]) so it is byte-identical to (and uniformly
+/// self-defending with) the `author`/`role`/`journal`/`dml` quoting — fail-closed
+/// on an empty / NUL identifier (the bytes `"`-doubling cannot neutralise).
+/// Author-supplied identifiers (table / cursor column) have already passed
+/// [`validate_ident`] (no `"`); the engine-supplied ones (project / effective
+/// schema, meta schema) carry a UUIDv7's `-` but never empty/NUL on a real path.
+fn quote_ident(ident: &str) -> Result<String, BackfillError> {
+    crate::dml::quote_ident_checked(ident).map_err(|e| BackfillError::InvalidIdentifier {
+        what: "engine-supplied identifier",
+        value: e.value,
+    })
+}
+
+/// #150 test seam (see `dml::tests::all_engine_seams_render_uniformly`).
+#[cfg(test)]
+pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, BackfillError> {
+    quote_ident(ident)
 }
 
 /// Build the per-batch statement (the ASSEMBLED statement that gets guard-checked
@@ -307,14 +348,21 @@ fn quote_ident(ident: &str) -> String {
 /// (e.g. `integer`, `text`, `bigint`) — a TRUSTED string, never the author's
 /// input — used only for the bound-cursor cast.
 fn build_batch_sql(
-    cfg: &ExecutorConfig,
+    _cfg: &ExecutorConfig,
     spec: &BackfillSpec,
     cursor_type: &str,
     have_cursor: bool,
-) -> String {
-    let schema = quote_ident(&cfg.project_schema);
-    let table = quote_ident(&spec.table);
-    let col = quote_ident(&spec.cursor_column);
+) -> Result<String, BackfillError> {
+    // #149: the windowed UPDATE qualifies into the backfill's EFFECTIVE schema
+    // (`spec.schema`), NOT the deploy-time `cfg.project_schema`. Under Confined
+    // `spec.schema == cfg.project_schema` (the scope gate pins it at lower), so
+    // this is byte-identical; under Trusted a gate-approved foreign schema flows
+    // through. The whole assembled statement is still guard-checked (the guard
+    // is profile-derived — see `run_backfill_bounded`), so a cross-schema ref is
+    // only emitted under a profile whose guard permits it.
+    let schema = quote_ident(&spec.schema)?;
+    let table = quote_ident(&spec.table)?;
+    let col = quote_ident(&spec.cursor_column)?;
     let filter = spec
         .filter
         .as_deref()
@@ -338,7 +386,7 @@ fn build_batch_sql(
     //               touched cursor.
     //  - final SELECT: COUNT(*) + MAX(window cursor)::text — natural-order max,
     //               so numeric columns are not lexically mis-ordered.
-    format!(
+    Ok(format!(
         "WITH _bf_window AS ( \
              SELECT {col} AS _bf_key FROM {schema}.{table} \
              WHERE {cursor_pred}{filter} \
@@ -355,7 +403,7 @@ fn build_batch_sql(
                 (SELECT max(_bf_key)::text FROM _bf_window) AS _bf_cursor",
         set_clause = spec.set_clause,
         batch = spec.batch_size,
-    )
+    ))
 }
 
 /// Bootstrap (idempotently) the meta-schema **backfill progress** table.
@@ -374,13 +422,17 @@ pub async fn ensure_backfill_progress(
     conn: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    // JournalError-returning seam: route directly through the shared engine helper
+    // (mapped via JournalError's From<IdentQuoteError>), byte-identical to the
+    // BackfillError-side `quote_ident`.
+    let meta = crate::dml::quote_ident_checked(&cfg.pg.meta_schema)?;
     conn.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {meta}"))
         .await?;
     conn.batch_execute(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_backfills (
             backfill_id    TEXT PRIMARY KEY,
             name           TEXT NOT NULL,
+            target_schema  TEXT NOT NULL,
             target_table   TEXT NOT NULL,
             cursor_column  TEXT NOT NULL,
             last_cursor    TEXT,
@@ -403,6 +455,11 @@ pub struct BackfillProgress {
     pub backfill_id: String,
     /// Human-readable name.
     pub name: String,
+    /// The effective schema the backfill targets (#149). Under Confined this is
+    /// the project schema; under Trusted it can be a gate-approved foreign schema.
+    /// Makes the progress row self-describing now that the id is
+    /// schema-discriminated.
+    pub target_schema: String,
     /// The target table.
     pub target_table: String,
     /// The cursor column.
@@ -434,11 +491,11 @@ pub async fn backfill_progress(
     backfill_id: &str,
 ) -> Result<Option<BackfillProgress>, JournalError> {
     ensure_backfill_progress(conn, cfg).await?;
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = crate::dml::quote_ident_checked(&cfg.pg.meta_schema)?;
     let rows = conn
         .query(
             &format!(
-                "SELECT backfill_id, name, target_table, cursor_column, last_cursor,
+                "SELECT backfill_id, name, target_schema, target_table, cursor_column, last_cursor,
                         rows_done, batches_done, complete,
                         to_char(updated_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS updated_at
                    FROM {meta}.schema_backfills WHERE backfill_id = $1"
@@ -452,6 +509,7 @@ pub async fn backfill_progress(
     Ok(Some(BackfillProgress {
         backfill_id: row.get("backfill_id"),
         name: row.get("name"),
+        target_schema: row.get("target_schema"),
         target_table: row.get("target_table"),
         cursor_column: row.get("cursor_column"),
         last_cursor: row.get("last_cursor"),
@@ -476,11 +534,11 @@ pub async fn list_backfills(
     cfg: &ExecutorConfig,
 ) -> Result<Vec<BackfillProgress>, JournalError> {
     ensure_backfill_progress(conn, cfg).await?;
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = crate::dml::quote_ident_checked(&cfg.pg.meta_schema)?;
     let rows = conn
         .query(
             &format!(
-                "SELECT backfill_id, name, target_table, cursor_column, last_cursor,
+                "SELECT backfill_id, name, target_schema, target_table, cursor_column, last_cursor,
                         rows_done, batches_done, complete,
                         to_char(updated_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS updated_at
                    FROM {meta}.schema_backfills ORDER BY started_at, backfill_id"
@@ -493,6 +551,7 @@ pub async fn list_backfills(
         .map(|row| BackfillProgress {
             backfill_id: row.get("backfill_id"),
             name: row.get("name"),
+            target_schema: row.get("target_schema"),
             target_table: row.get("target_table"),
             cursor_column: row.get("cursor_column"),
             last_cursor: row.get("last_cursor"),
@@ -510,7 +569,9 @@ pub async fn list_backfills(
 /// zone`) which is a TRUSTED, catalog-derived string (never the author's input).
 async fn resolve_cursor_type(
     conn: &Client,
-    cfg: &ExecutorConfig,
+    // #149: introspection now targets `spec.schema` (the effective schema), so the
+    // executor config is no longer read here. Kept for call-site uniformity.
+    _cfg: &ExecutorConfig,
     spec: &BackfillSpec,
 ) -> Result<String, BackfillError> {
     let rows = conn
@@ -521,7 +582,9 @@ async fn resolve_cursor_type(
                JOIN pg_namespace n ON n.oid = c.relnamespace
               WHERE n.nspname = $1 AND c.relname = $2 AND a.attname = $3
                 AND a.attnum > 0 AND NOT a.attisdropped",
-            &[&cfg.project_schema, &spec.table, &spec.cursor_column],
+            // #149: introspect the backfill's EFFECTIVE schema (under Confined ==
+            // cfg.project_schema), not the deploy-time project schema.
+            &[&spec.schema, &spec.table, &spec.cursor_column],
         )
         .await?;
     rows.into_iter()
@@ -530,7 +593,7 @@ async fn resolve_cursor_type(
         .ok_or_else(|| {
             BackfillError::TargetNotFound(format!(
                 "{}.{} column {} not found",
-                cfg.project_schema, spec.table, spec.cursor_column
+                spec.schema, spec.table, spec.cursor_column
             ))
         })
 }
@@ -555,7 +618,8 @@ async fn resolve_cursor_type(
 /// (injection-safe, like [`resolve_cursor_type`]).
 async fn validate_cursor_column(
     conn: &Client,
-    cfg: &ExecutorConfig,
+    // #149: introspection now targets `spec.schema`; the config is unused here.
+    _cfg: &ExecutorConfig,
     spec: &BackfillSpec,
 ) -> Result<(), BackfillError> {
     // `indkey[0]` is the (0-based) single key attnum of a single-key
@@ -577,7 +641,9 @@ async fn validate_cursor_column(
                JOIN pg_namespace n ON n.oid = c.relnamespace
               WHERE n.nspname = $1 AND c.relname = $2 AND a.attname = $3
                 AND a.attnum > 0 AND NOT a.attisdropped",
-            &[&cfg.project_schema, &spec.table, &spec.cursor_column],
+            // #149: introspect the backfill's EFFECTIVE schema (under Confined ==
+            // cfg.project_schema), not the deploy-time project schema.
+            &[&spec.schema, &spec.table, &spec.cursor_column],
         )
         .await?;
     let Some(row) = rows.into_iter().next() else {
@@ -585,7 +651,7 @@ async fn validate_cursor_column(
         // already, but stay defensive).
         return Err(BackfillError::TargetNotFound(format!(
             "{}.{} column {} not found",
-            cfg.project_schema, spec.table, spec.cursor_column
+            spec.schema, spec.table, spec.cursor_column
         )));
     };
     let not_null: bool = row.get("not_null");
@@ -767,9 +833,17 @@ pub async fn run_backfill_bounded(
     // Gate 3b — GUARD the ASSEMBLED statement (both window shapes: with and without
     // the cursor parameter), so the engine predicate + authored transform + filter
     // are validated as one unit before any batch runs. A denial aborts everything.
-    let guard = SqlGuard::new(GuardConfig::confined(cfg.project_schema.clone()));
+    // #149: the guard is PROFILE-DERIVED, not hardcoded Confined. Under Confined
+    // `guard_config()` returns `confined(project_schema)` (byte-identical to the
+    // prior hardcoded guard), so a Confined backfill is self-denied on any
+    // cross-schema ref exactly as before. Under Trusted/Platform it returns the
+    // widened guard (Trusted skips the deny-list/cross-schema walk), so a
+    // gate-approved cross-schema UPDATE is NOT self-denied by the executor's own
+    // guard. The lower-time scope gate already vetted `spec.schema`, so only a
+    // profile whose guard permits it can reach a cross-schema assembled statement.
+    let guard = SqlGuard::new(cfg.guard_config());
     for have_cursor in [false, true] {
-        let sql = build_batch_sql(cfg, spec, &cursor_type, have_cursor);
+        let sql = build_batch_sql(cfg, spec, &cursor_type, have_cursor)?;
         guard
             .check(&sql)
             .map_err(|source| BackfillError::Guard { source })?;
@@ -779,7 +853,7 @@ pub async fn run_backfill_bounded(
     // (mutating the paged key breaks the cursor → re-processing / loop /
     // double-apply). Inspect the assembled UPDATE's SET target list.
     assert_cursor_not_mutated(
-        &build_batch_sql(cfg, spec, &cursor_type, true),
+        &build_batch_sql(cfg, spec, &cursor_type, true)?,
         &spec.cursor_column,
     )?;
 
@@ -863,17 +937,18 @@ async fn upsert_progress_row(
     spec: &BackfillSpec,
     applied_by: &str,
 ) -> Result<(), BackfillError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
     conn.execute(
         &format!(
             "INSERT INTO {meta}.schema_backfills
-                 (backfill_id, name, target_table, cursor_column, applied_by)
-             VALUES ($1, $2, $3, $4, $5)
+                 (backfill_id, name, target_schema, target_table, cursor_column, applied_by)
+             VALUES ($1, $2, $3, $4, $5, $6)
              ON CONFLICT (backfill_id) DO NOTHING"
         ),
         &[
             &backfill_id,
             &spec.name,
+            &spec.schema,
             &spec.table,
             &spec.cursor_column,
             &applied_by,
@@ -889,7 +964,7 @@ async fn mark_complete(
     cfg: &ExecutorConfig,
     backfill_id: &str,
 ) -> Result<(), BackfillError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
     conn.execute(
         &format!(
             "UPDATE {meta}.schema_backfills
@@ -919,7 +994,7 @@ async fn run_one_batch(
     backfill_id: &str,
 ) -> Result<(u64, Option<String>), BackfillError> {
     let have_cursor = last_cursor.is_some();
-    let batch_sql = build_batch_sql(cfg, spec, cursor_type, have_cursor);
+    let batch_sql = build_batch_sql(cfg, spec, cursor_type, have_cursor)?;
 
     conn.batch_execute("BEGIN").await?;
 
@@ -936,11 +1011,18 @@ async fn run_one_batch(
     }
 
     // Pin search_path + mandatory timeouts (SET LOCAL — scoped to this txn).
+    //
+    // #149: the search_path anchors on the backfill's EFFECTIVE schema
+    // (`spec.schema`) so an unqualified reference in the authored set_clause /
+    // filter resolves in the TARGET schema. Under Confined `spec.schema ==
+    // cfg.project_schema` (the scope gate pins it at lower) — byte-identical to
+    // the prior pin. Routed through the shared engine seam (#150) so the render is
+    // uniformly self-defending (fail-closed on empty/NUL).
     let set_local = format!(
-        "SET LOCAL search_path TO \"{}\"; \
+        "SET LOCAL search_path TO {}; \
          SET LOCAL statement_timeout = {}; \
          SET LOCAL lock_timeout = {};",
-        cfg.project_schema.replace('"', "\"\""),
+        quote_ident(&spec.schema)?,
         cfg.statement_timeout_ms(),
         cfg.lock_timeout_ms(),
     );
@@ -949,10 +1031,13 @@ async fn run_one_batch(
         return Err(BackfillError::Db(e));
     }
 
-    // Drop to the migrator role for the authored `UPDATE` ONLY (line-2 confinement).
+    // Drop to the migrator role for the authored `UPDATE` ONLY (line-2
+    // confinement). Routed through the shared engine seam (#150). Under Trusted
+    // `migrator_role` is `None`, so the cross-schema UPDATE runs as the connecting
+    // (admin) role — the documented Trusted posture; confinement is unchanged.
     if let Some(role) = &cfg.pg.migrator_role {
         if let Err(e) = conn
-            .batch_execute(&format!("SET LOCAL ROLE \"{}\"", role.replace('"', "\"\"")))
+            .batch_execute(&format!("SET LOCAL ROLE {}", quote_ident(role)?))
             .await
         {
             let _ = conn.batch_execute("ROLLBACK").await;
@@ -1000,7 +1085,7 @@ async fn run_one_batch(
 
     if n > 0 {
         // Advance progress IN THE SAME TRANSACTION as the UPDATE (both-or-neither).
-        let meta = quote_ident(&cfg.pg.meta_schema);
+        let meta = quote_ident(&cfg.pg.meta_schema)?;
         if let Err(e) = conn
             .execute(
                 &format!(
@@ -1028,4 +1113,217 @@ async fn run_one_batch(
 
     conn.batch_execute("COMMIT").await?;
     Ok((n, max_cursor))
+}
+
+// ===========================================================================
+// #149 — Trusted cross-schema batched backfill (in-crate: a Trusted
+// `ExecutorConfig` needs `ExecutorConfig::trusted` + `OperatorCapability::for_test`,
+// both `pub(crate)`, so an integration test could not even construct one).
+//
+// Proves the now-ENABLED general-CLI cross-schema case runs against
+// `<foreign>."table"` end-to-end, journals progress with `target_schema`, and
+// crash-resumes exactly-once — and that the Confined render stays byte-identical.
+// ===========================================================================
+#[cfg(test)]
+#[allow(clippy::future_not_send)] // compio single-thread runtime; the stack is !Send by design.
+mod cross_schema_backfill_pg {
+    use super::*;
+    use crate::guard::OperatorCapability;
+
+    const DEFAULT_DSN: &str =
+        "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_migrate_test";
+
+    fn dsn() -> String {
+        std::env::var("MIGRATE_TEST_DB").unwrap_or_else(|_| DEFAULT_DSN.to_string())
+    }
+
+    async fn pg() -> Client {
+        crate::db::connect(&dsn()).await.expect("connect :5440")
+    }
+
+    fn token() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("{pid}_{nanos}_{n}")
+    }
+
+    /// A Trusted `ExecutorConfig` (minted via the in-crate-only `for_test` token
+    /// seam). Trusted runs as the connecting/admin role — NO migrator role — which
+    /// is what lets the cross-schema UPDATE touch a foreign schema.
+    fn trusted_cfg(tok: &str) -> ExecutorConfig {
+        let cap = OperatorCapability::for_test();
+        let mut c = ExecutorConfig::trusted(&cap, format!("prj_{tok}"), format!("proj_{tok}"));
+        c.pg.meta_schema = format!("meta_{tok}");
+        c.pg.statement_timeout = std::time::Duration::from_secs(30);
+        c.pg.lock_timeout = std::time::Duration::from_secs(10);
+        c
+    }
+
+    async fn count_where(conn: &Client, schema: &str, table: &str, pred: &str) -> i64 {
+        conn.query_one(
+            &format!("SELECT count(*)::bigint FROM \"{schema}\".\"{table}\" WHERE {pred}"),
+            &[],
+        )
+        .await
+        .expect("count")
+        .get::<_, i64>(0)
+    }
+
+    /// **#149 (faithful, real PG :5440)** — a Trusted cross-schema backfill runs the
+    /// windowed UPDATE against `<foreign>."widgets"` (a schema OTHER than the
+    /// deploy-time project schema), journals progress carrying `target_schema`, and
+    /// crash-resumes exactly-once. RED before #149: the lower refused it
+    /// (`BackfillSchemaUnsupported`) and the executor pinned `cfg.project_schema`,
+    /// so the foreign table would never be touched.
+    #[compio::test]
+    async fn trusted_backfill_runs_and_resumes_cross_schema() {
+        let conn = pg().await;
+        let tok = token();
+        let cfg = trusted_cfg(&tok);
+        // The FOREIGN target schema — distinct from cfg.project_schema.
+        let foreign = format!("foreign_{tok}");
+
+        // Project schema (journal/progress home anchor) + the foreign schema + table.
+        conn.batch_execute(&format!(
+            "CREATE SCHEMA IF NOT EXISTS \"{}\"; CREATE SCHEMA IF NOT EXISTS \"{foreign}\";",
+            cfg.project_schema
+        ))
+        .await
+        .expect("create schemas");
+        crate::journal::ensure_journal(&conn, &cfg).await.expect("journal");
+        conn.batch_execute(&format!(
+            "CREATE TABLE \"{foreign}\".widgets (id bigint PRIMARY KEY, val int, normalized text); \
+             INSERT INTO \"{foreign}\".widgets (id, val) \
+                 SELECT g, g FROM generate_series(1, 25) g"
+        ))
+        .await
+        .expect("seed foreign table");
+
+        // The spec targets the FOREIGN schema (eff_schema would have flowed here
+        // through the widened scope at lower).
+        let spec = BackfillSpec {
+            schema: foreign.clone(),
+            table: "widgets".to_string(),
+            cursor_column: "id".to_string(),
+            batch_size: 5,
+            set_clause: "normalized = 'v' || _bf.val::text".to_string(),
+            filter: Some("normalized IS NULL".to_string()),
+            name: "normalize_foreign".to_string(),
+        };
+
+        // ---- crash-resume: arm a one-shot mid-batches crash after 2 batches ----
+        crate::fault::arm(crate::fault::points::BACKFILL_MID_BATCHES, 1);
+        let crashed = run_backfill(&conn, &cfg, &spec, Approval::Approved, "trusted-test").await;
+        assert!(
+            matches!(crashed, Err(BackfillError::Fault(_))),
+            "the armed mid-batch crash fired; got {crashed:?}"
+        );
+        crate::fault::disarm_all();
+        // Some rows are done (the committed batches), some remain — a valid resumable
+        // cursor was left in the FOREIGN schema's progress.
+        let done_mid = count_where(&conn, &foreign, "widgets", "normalized IS NOT NULL").await;
+        assert!(
+            done_mid > 0 && done_mid < 25,
+            "a partial cross-schema backfill committed some (not all) rows; got {done_mid}"
+        );
+
+        // ---- resume: finishes the tail exactly-once ----
+        let out = run_backfill(&conn, &cfg, &spec, Approval::Approved, "trusted-test")
+            .await
+            .expect("resume finishes the cross-schema backfill");
+        assert!(out.resumed, "the second run resumed from the committed cursor");
+        assert!(out.complete, "the backfill reached the foreign table's tail");
+        // Exactly-once: every row normalized to its OWN value (no double-apply), and
+        // the non-idempotent guard (filter normalized IS NULL) held.
+        assert_eq!(
+            count_where(&conn, &foreign, "widgets", "normalized IS NULL").await,
+            0,
+            "every row in the FOREIGN schema was backfilled"
+        );
+        assert_eq!(
+            count_where(&conn, &foreign, "widgets", "normalized = 'v' || val::text").await,
+            25,
+            "each row normalized to its own value exactly once (no double-apply)"
+        );
+
+        // ---- the progress row is self-describing: target_schema == the foreign schema ----
+        let progress = backfill_progress(&conn, &cfg, &spec.backfill_id())
+            .await
+            .expect("read progress")
+            .expect("progress row exists");
+        assert_eq!(
+            progress.target_schema, foreign,
+            "the progress row carries the FOREIGN target_schema (#149)"
+        );
+        assert_eq!(progress.target_table, "widgets");
+
+        // teardown
+        let _ = conn
+            .batch_execute(&format!(
+                "DROP SCHEMA IF EXISTS \"{foreign}\" CASCADE; \
+                 DROP SCHEMA IF EXISTS \"{}\" CASCADE; \
+                 DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
+                cfg.project_schema, cfg.pg.meta_schema
+            ))
+            .await;
+    }
+
+    /// **#149 byte-identity** — for a Confined backfill (`spec.schema ==
+    /// cfg.project_schema`) the assembled batch SQL is byte-identical to qualifying
+    /// the project schema directly, so the pre-#149 Confined render is unchanged.
+    #[test]
+    fn confined_build_batch_sql_is_byte_identical() {
+        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let spec = BackfillSpec {
+            schema: "proj_x".to_string(), // == cfg.project_schema (Confined pin)
+            table: "widgets".to_string(),
+            cursor_column: "id".to_string(),
+            batch_size: 1000,
+            set_clause: "normalized = 'v'".to_string(),
+            filter: Some("normalized IS NULL".to_string()),
+            name: "bf".to_string(),
+        };
+        let got = build_batch_sql(&cfg, &spec, "integer", true).expect("build");
+        // The schema qualifier in the rendered CTE is the project schema, quoted.
+        assert!(
+            got.contains("FROM \"proj_x\".\"widgets\""),
+            "the windowed SELECT qualifies the project schema; got: {got}"
+        );
+        assert!(
+            got.contains("UPDATE \"proj_x\".\"widgets\" AS _bf"),
+            "the UPDATE qualifies the project schema; got: {got}"
+        );
+    }
+
+    /// **#149 collision regression** — two specs identical EXCEPT their schema get
+    /// DISTINCT `backfill_id`s, so cross-schema backfills cannot alias each other's
+    /// progress row on crash-resume. RED before #149 (schema was NOT in the hash, so
+    /// the ids collided). Pure (no DB).
+    #[test]
+    fn schema_discriminates_backfill_id() {
+        let base = BackfillSpec {
+            schema: "app_a".to_string(),
+            table: "users".to_string(),
+            cursor_column: "id".to_string(),
+            batch_size: 100,
+            set_clause: "x = 1".to_string(),
+            filter: None,
+            name: "bf".to_string(),
+        };
+        let other = BackfillSpec { schema: "app_b".to_string(), ..base.clone() };
+        assert_ne!(
+            base.backfill_id(),
+            other.backfill_id(),
+            "schema must discriminate the backfill_id (no cross-schema progress aliasing)"
+        );
+        // And a same-schema re-author keeps a STABLE id (resume semantics intact).
+        let same = base.clone();
+        assert_eq!(base.backfill_id(), same.backfill_id());
+    }
 }

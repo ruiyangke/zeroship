@@ -427,6 +427,7 @@ async fn ddl_backfill_ddl_interleave_applies_in_order() {
     ));
     // Step 2: backfill `normalized = lower(raw)` (the column exists from step 1).
     let backfill = PlanStep::Backfill(BackfillSpec {
+        schema: cfg.project_schema.clone(),
         table: "names".to_string(),
         cursor_column: "id".to_string(),
         batch_size: 100,
@@ -498,6 +499,7 @@ async fn multi_backfill_plan_runs_each_in_order() {
         None,
     ));
     let bf1 = PlanStep::Backfill(BackfillSpec {
+        schema: cfg.project_schema.clone(),
         table: "m".to_string(),
         cursor_column: "id".to_string(),
         batch_size: 50,
@@ -506,6 +508,7 @@ async fn multi_backfill_plan_runs_each_in_order() {
         name: "bf_a".to_string(),
     });
     let bf2 = PlanStep::Backfill(BackfillSpec {
+        schema: cfg.project_schema.clone(),
         table: "m".to_string(),
         cursor_column: "id".to_string(),
         batch_size: 50,
@@ -555,6 +558,7 @@ fn single_step_facade_yields_migration_for_sql_plan_and_fails_closed_otherwise()
         steps: vec![
             PlanStep::Ddl(m.clone()),
             PlanStep::Backfill(BackfillSpec {
+                schema: "s".into(),
                 table: "x".into(),
                 cursor_column: "id".into(),
                 batch_size: 1,
@@ -829,6 +833,7 @@ fn gen_fuzz_plan(seed: u64, cfg: &ExecutorConfig) -> Vec<PlanStep> {
         )));
     }
     steps.push(PlanStep::Backfill(BackfillSpec {
+        schema: schema.clone(),
         table: "f".to_string(),
         cursor_column: "id".to_string(),
         batch_size: 2, // < 6 rows ⇒ multiple committed batches (mid-batch crash)

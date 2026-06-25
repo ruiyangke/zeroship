@@ -421,15 +421,23 @@ into. Its meaning is **profile-gated**:
   non-`main` SQLite schema requires an explicit `ATTACH … AS <schema>` the operator
   arranges, never an implicit re-pin to `main`.
 
-- **Backfill / batched-update + an explicit schema (any profile):** the resumable
-  backfill executor qualifies its windowed `UPDATE` into the **deploy-time project
-  schema only** (it does not consume a per-spec schema). A `backfill` (or a batched
-  `update { batch }`) whose effective schema differs from the project schema is
-  therefore **refused fail-closed at lower** (`BackfillSchemaUnsupported`) rather
-  than silently project-pinned — inconsistent silent-wrong-schema is never the
-  disposition. The one-shot `insert`/`update`/`delete`/non-batched path honors the
-  schema normally; only the resumable batched path refuses until the executor
-  threads a per-spec schema.
+- **Backfill / batched-update + an explicit schema (profile-gated):** the resumable
+  backfill executor now threads a **per-spec schema** (`BackfillSpec.schema`), so a
+  schema-qualified `backfill` (or a batched `update { batch }`) **runs** against
+  `"schema"."table"` — the windowed `UPDATE`, the `search_path` anchor, and the
+  catalog introspection all target that schema, and the progress row records it
+  (`target_schema`). Which schemas are reachable is decided **upstream** by the
+  same cross-schema scope gate as every other op, so confinement is unchanged:
+  - **Confined (creator deploy):** the project schema is pinned; a foreign
+    qualifier is refused at validate-time (`CROSS_SCHEMA`) before the backfill is
+    lowered, so the spec's schema is always the project schema (the render is
+    byte-identical to the pre-threading project pin).
+  - **Trusted / Platform (operator CLI):** the widened scope admits the
+    gate-approved schema, so the cross-schema backfill runs — under Trusted as the
+    connecting/admin role (no migrator `SET ROLE`), the documented posture.
+  - **SQLite (any profile):** a non-`main` schema is still refused **earlier**
+    (`SqliteSchemaUnsupported`, before the backfill lower); SQLite's single `main`
+    db renders the table unqualified.
 
 - **Platform creator deploy (Confined profile):** the project schema is **pinned**.
   An op that omits `schema`, or names the project schema, is fine; an explicit

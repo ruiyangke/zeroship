@@ -271,6 +271,7 @@ mod touched_table_tests {
     #[test]
     fn backfill_step_contributes_its_table() {
         let spec = BackfillSpec {
+            schema: "app".into(),
             table: "members".into(),
             cursor_column: "id".into(),
             batch_size: 100,

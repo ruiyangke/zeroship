@@ -147,23 +147,49 @@ fn quote_ident(what: &'static str, ident: &str) -> Result<String, DmlError> {
     Ok(format!("\"{}\"", ident.replace('"', "\"\"")))
 }
 
-/// Quote the engine-supplied **project schema** for PG qualification. Unlike a
-/// bare authored identifier ([`quote_ident`]), the project schema under the
-/// Confined posture is the app id — a `UUIDv7` carrying `-` — so it is NOT a bare
-/// `[A-Za-z_][A-Za-z0-9_]*` ident and is emitted escape-and-quote, exactly as
-/// every other engine seam quotes it (`author::quote_ident` / `backfill` /
-/// `role` / `journal`): double an embedded `"`, wrap in `"`.
+/// A render-seam rejection of an **engine-supplied identifier** (project schema,
+/// migrator role, meta schema, …) — the single fail-closed gate every engine
+/// quoting seam routes through ([`quote_ident_checked`]). Distinct from
+/// [`DmlError::InvalidIdentifier`], which gates *author-supplied* bare
+/// identifiers with the strict `[A-Za-z_][A-Za-z0-9_]*` rule; this gate is for
+/// names the engine itself produces (a UUIDv7 schema carries `-`, so the strict
+/// rule cannot apply), and only refuses the two bytes that double-quote escaping
+/// cannot neutralise: an empty string and a NUL byte. Each module maps it to its
+/// own local error variant so the fail-closed message stays honest per surface.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("engine-supplied identifier is not quotable ({reason}): {value:?}")]
+pub struct IdentQuoteError {
+    /// Why the identifier could not be quoted (`"empty"` / `"contains NUL"`).
+    pub reason: &'static str,
+    /// The offending value.
+    pub value: String,
+}
+
+/// The ONE canonical render seam for an **engine-supplied identifier** — the
+/// project schema, the migrator role, the meta schema, a derived trigger name,
+/// etc. Every engine quoting helper (`author` / `backfill` / `role` / `journal`
+/// / `dml`) routes through this so all seams are **byte-identical** AND
+/// **uniformly self-defending**.
 ///
-/// The schema is never author-supplied, but this render seam still fails closed
-/// rather than trust the caller: it refuses an empty schema and any schema
-/// carrying a NUL byte — the one byte that `"`-doubling cannot neutralise (PG
-/// rejects NUL inside an identifier outright). Everything else (including `"`)
-/// is rendered safely by escaping, byte-identically to the prior `format!`.
-fn quote_schema(schema: &str) -> Result<String, DmlError> {
-    if schema.is_empty() || schema.contains('\0') {
-        return Err(DmlError::InvalidIdentifier { what: "schema", value: schema.to_string() });
+/// Unlike a bare authored identifier ([`quote_ident`]), an engine-supplied name
+/// is NOT a bare `[A-Za-z_][A-Za-z0-9_]*` ident — under the Confined posture the
+/// project schema is the app id (a `UUIDv7` carrying `-`). So it is emitted
+/// escape-and-quote: double an embedded `"`, wrap in `"`.
+///
+/// The name is never author-supplied, but this seam still fails closed rather
+/// than trust the caller: it refuses an empty string and any value carrying a
+/// NUL byte — the one byte that `"`-doubling cannot neutralise (PG rejects NUL
+/// inside an identifier outright). Everything else (including `"`) is rendered
+/// safely by escaping, **byte-identically** to a bare
+/// `format!("\"{}\"", x.replace('"', "\"\""))`.
+pub(crate) fn quote_ident_checked(ident: &str) -> Result<String, IdentQuoteError> {
+    if ident.is_empty() {
+        return Err(IdentQuoteError { reason: "empty", value: ident.to_string() });
     }
-    Ok(format!("\"{}\"", schema.replace('"', "\"\"")))
+    if ident.contains('\0') {
+        return Err(IdentQuoteError { reason: "contains NUL", value: ident.to_string() });
+    }
+    Ok(format!("\"{}\"", ident.replace('"', "\"\"")))
 }
 
 /// Qualify a validated bare table name for the target dialect.
@@ -191,11 +217,19 @@ fn qualify_table(
         // emitted exactly as the rest of the engine emits the schema —
         // escape-and-quote (`author::quote_ident` / `backfill` / `role`):
         // `"<schema with "" doubled>"`. The render seam still does not blindly
-        // trust the caller: `quote_schema` fails closed on the one byte that
-        // double-quote escaping cannot neutralise (a NUL, which PG rejects in an
-        // identifier outright). For a quote-free schema the output is
-        // byte-identical to the prior `format!`, so the dml goldens stay green.
-        SqlDialect::Postgres => Ok(format!("{}.{}", quote_schema(project_schema)?, t)),
+        // trust the caller: `quote_ident_checked` (the ONE shared engine seam)
+        // fails closed on the bytes that double-quote escaping cannot neutralise
+        // (empty / NUL, which PG rejects in an identifier outright). For a
+        // quote-free schema the output is byte-identical to the prior `format!`,
+        // so the dml goldens stay green.
+        SqlDialect::Postgres => Ok(format!(
+            "{}.{}",
+            quote_ident_checked(project_schema).map_err(|e| DmlError::InvalidIdentifier {
+                what: "schema",
+                value: e.value,
+            })?,
+            t
+        )),
         SqlDialect::Sqlite => Ok(t),
     }
 }
@@ -900,6 +934,57 @@ mod tests {
     use crate::expr::Expr;
 
     const SCHEMA: &str = "app_proj";
+
+    // ---- #150: the ONE shared engine identifier seam --------------------------
+
+    /// **#150** — `quote_ident_checked` fails CLOSED on the two bytes `"`-doubling
+    /// cannot neutralise: an empty string and a NUL byte. RED before #150: the peer
+    /// seams (`author`/`backfill`/`role`/`journal`) had NO such guard — they would
+    /// have ACCEPTED a NUL and emitted `"a\0b"`.
+    #[test]
+    fn quote_ident_checked_fails_closed_on_empty_and_nul() {
+        assert!(quote_ident_checked("").is_err(), "empty must fail closed");
+        assert!(quote_ident_checked("a\0b").is_err(), "NUL must fail closed");
+        assert_eq!(quote_ident_checked("").unwrap_err().reason, "empty");
+        assert_eq!(quote_ident_checked("a\0b").unwrap_err().reason, "contains NUL");
+    }
+
+    /// **#150** — for any non-empty / non-NUL identifier the output is
+    /// byte-identical to the bare `format!("\"{}\"", x.replace('"', "\"\""))` the
+    /// peers used, including a quote-bearing schema (the dml goldens stay green).
+    #[test]
+    fn quote_ident_checked_is_byte_identical_to_bare_format() {
+        for s in ["app_proj", "019efd94-1a2b-7000-8000-000000000000", "a\"b", "\"\""] {
+            assert_eq!(
+                quote_ident_checked(s).unwrap(),
+                format!("\"{}\"", s.replace('"', "\"\"")),
+                "byte-identity for {s:?}"
+            );
+        }
+        // explicit quote-doubling spot-check
+        assert_eq!(quote_ident_checked("a\"b").unwrap(), "\"a\"\"b\"");
+    }
+
+    /// **#150** — the four engine peer seams (`author`/`backfill`/`role`/`journal`)
+    /// now all route through `quote_ident_checked`, so they emit BYTE-IDENTICAL
+    /// output for the same quote-bearing schema (the "uniform render seam"
+    /// requirement). The peers wrap the shared helper, so comparing each to the
+    /// canonical helper proves the uniformity for all five.
+    #[test]
+    fn all_engine_seams_render_uniformly() {
+        let schema = "ap\"p"; // a quote-bearing engine schema
+        let canonical = quote_ident_checked(schema).unwrap();
+        // author (infallible-on-valid wrapper) — maps to its own error on failure.
+        assert_eq!(crate::author::quote_ident_for_test(schema).unwrap(), canonical);
+        assert_eq!(crate::backfill::quote_ident_for_test(schema).unwrap(), canonical);
+        assert_eq!(crate::role::quote_ident_for_test(schema).unwrap(), canonical);
+        assert_eq!(crate::journal::quote_ident_for_test(schema).unwrap(), canonical);
+        // …and they fail closed uniformly on a NUL too.
+        assert!(crate::author::quote_ident_for_test("a\0b").is_err());
+        assert!(crate::backfill::quote_ident_for_test("a\0b").is_err());
+        assert!(crate::role::quote_ident_for_test("a\0b").is_err());
+        assert!(crate::journal::quote_ident_for_test("a\0b").is_err());
+    }
 
     fn lit_str(s: &str) -> Expr {
         Expr::lit(IrScalar::Str(s.to_string()))
