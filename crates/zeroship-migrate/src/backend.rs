@@ -217,6 +217,36 @@ pub trait MigrationBackend {
         by: &str,
     ) -> Result<(), JournalError>;
 
+    // -- deploy-scoped recovery markers (PR9d MED) --------------------------
+
+    /// Open a deploy-scoped recovery marker for a same-deploy EXPAND (PR9d MED).
+    /// Admin-written, append-only. SQLite no-ops (no online-rename ⇒ no half-state
+    /// to recover, mirroring the pending-contract D7 stance).
+    async fn record_deploy_recovery_open(
+        &self,
+        cfg: &ExecutorConfig,
+        deploy_id: &str,
+        pending_version: &str,
+        by: &str,
+    ) -> Result<(), JournalError>;
+
+    /// Mark a deploy-scoped recovery obligation `reconciled` (APPEND a `reconciled`
+    /// row). Admin-written. SQLite no-ops.
+    async fn mark_deploy_recovery_reconciled(
+        &self,
+        cfg: &ExecutorConfig,
+        deploy_id: &str,
+        pending_version: &str,
+        by: &str,
+    ) -> Result<(), JournalError>;
+
+    /// Read the net-`open` deploy-recovery markers whose obligation is still
+    /// outstanding (the crash-recovery resume input). SQLite returns empty.
+    async fn outstanding_deploy_recoveries(
+        &self,
+        cfg: &ExecutorConfig,
+    ) -> Result<Vec<journal::DeployRecovery>, JournalError>;
+
     // -- DB-coupled validation / introspection ------------------------------
 
     /// The checksum/tamper drift report over the journal (dialect-agnostic
@@ -670,6 +700,34 @@ impl MigrationBackend for PostgresBackend<'_> {
         by: &str,
     ) -> Result<(), JournalError> {
         journal::resolve_pending_contract(self.conn, cfg, pc, resolution, by).await
+    }
+
+    async fn record_deploy_recovery_open(
+        &self,
+        cfg: &ExecutorConfig,
+        deploy_id: &str,
+        pending_version: &str,
+        by: &str,
+    ) -> Result<(), JournalError> {
+        journal::record_deploy_recovery_open(self.conn, cfg, deploy_id, pending_version, by).await
+    }
+
+    async fn mark_deploy_recovery_reconciled(
+        &self,
+        cfg: &ExecutorConfig,
+        deploy_id: &str,
+        pending_version: &str,
+        by: &str,
+    ) -> Result<(), JournalError> {
+        journal::mark_deploy_recovery_reconciled(self.conn, cfg, deploy_id, pending_version, by)
+            .await
+    }
+
+    async fn outstanding_deploy_recoveries(
+        &self,
+        cfg: &ExecutorConfig,
+    ) -> Result<Vec<journal::DeployRecovery>, JournalError> {
+        journal::outstanding_deploy_recoveries(self.conn, cfg).await
     }
 
     async fn check_checksum_drift(

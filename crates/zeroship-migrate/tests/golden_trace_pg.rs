@@ -268,7 +268,7 @@ async fn oracle_apply(
         applied.recovered.extend(outcome.recovered);
         pending_contract.extend(rename.contract.iter().cloned());
     }
-    Ok(DeclarativeDeployOutcome { applied, pending_contract })
+    Ok(DeclarativeDeployOutcome { applied, pending_contract, opened_obligations: Vec::new() })
 }
 
 /// The LIVE re-pointed path.

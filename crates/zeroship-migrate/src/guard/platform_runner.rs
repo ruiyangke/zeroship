@@ -879,33 +879,14 @@ pub async fn run_resolve_pending(
             to = pc.to_col,
             from = pc.from_col,
         );
-        let c1 = plan
-            .contract
-            .first()
-            .ok_or_else(|| RunError::ResolvePending("contract has no C1 step".to_string()))?;
-        // The shadow-column drop is E1's `down` (`ALTER TABLE … DROP COLUMN <to>`).
-        let drop_shadow_sql = plan
-            .expand
-            .first()
-            .and_then(|e1| e1.down.clone())
-            .ok_or_else(|| {
-                RunError::ResolvePending("could not derive shadow-column drop for abort".to_string())
-            })?;
-        (
-            vec![
-                crate::plan::PlanStep::Ddl(plain_ddl(
-                    &format!("resolve_abort_drop_trigger_{}", pc.table),
-                    c1.up.clone(),
-                    false,
-                )),
-                crate::plan::PlanStep::Ddl(plain_ddl(
-                    &format!("resolve_abort_drop_shadow_{}", pc.table),
-                    drop_shadow_sql,
-                    true,
-                )),
-            ],
-            crate::journal::Resolution::Aborted,
-        )
+        // Re-author the abort steps through the SHARED `build_abort_steps` — the
+        // SAME path the engine's same-deploy recovery
+        // (`abort_same_deploy_expands`) drives — so the CLI `--abort` and the
+        // automatic recovery can never drift in what they emit (C1 drop trigger+fn,
+        // then `DROP COLUMN IF EXISTS <to>`, both idempotent on resume).
+        let steps = crate::expand_contract::build_abort_steps(&exec_cfg.project_schema, &pc)
+            .map_err(|e| RunError::ResolvePending(format!("re-author abort: {e}")))?;
+        (steps, crate::journal::Resolution::Aborted)
     };
 
     // Apply under the REAL Approval::Approved gate (no bypass) via the dedicated

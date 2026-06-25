@@ -165,7 +165,7 @@ async fn oracle_apply(
         applied.applied.push(rebuild.migration.version.as_str().to_string());
     }
     assert!(plan.renames.is_empty(), "SQLite plans never carry PG renames");
-    Ok(DeclarativeDeployOutcome { applied, pending_contract: Vec::new() })
+    Ok(DeclarativeDeployOutcome { applied, pending_contract: Vec::new(), opened_obligations: Vec::new() })
 }
 
 fn people_v1() -> Vec<CollectionDescriptor> {

@@ -854,6 +854,97 @@ impl MigrationEngine {
         result
     }
 
+    /// PR9d MED — abort the same-deploy online-rename EXPANDs of a deploy whose
+    /// LATER file failed at apply, so a refused multi-file bundle leaves NO
+    /// half-renamed table.
+    ///
+    /// For each obligation in `obligations` that is STILL outstanding (read back
+    /// under the held lock — so an obligation already discharged by an earlier resume
+    /// attempt is skipped, making this idempotent on crash-resume), re-author the
+    /// SHARED abort DDL ([`crate::expand_contract::build_abort_steps`]: C1 drop
+    /// trigger+fn, then `DROP COLUMN IF EXISTS <to>` — both idempotent) and run it
+    /// through [`apply_plan_resolving`](Self::apply_plan_resolving), EXEMPTING the
+    /// obligation from the touched-table refusal (its drops ARE its resolution) and
+    /// APPENDING a `resolved='aborted'` row only on apply success (resolve-after-apply
+    /// inside the held lock is fail-closed). The pre-rename `from` column is left
+    /// intact.
+    ///
+    /// `lock_mode` is [`LockMode::AlreadyHeld`] when the control loop already owns the
+    /// whole-deploy project lock (the in-process leg) and [`LockMode::Acquire`] when a
+    /// standalone caller drives recovery.
+    ///
+    /// Returns the obligations it SUCCESSFULLY aborted. An abort-DDL failure (the DB
+    /// went unreachable mid-recovery) surfaces as `Err`: the obligation stays
+    /// outstanding + its recovery marker stays `open`, so the NEXT same-app deploy
+    /// re-attempts the abort under the lock (the documented irreducible residue the
+    /// operator can also clear with `resolve-pending`). Fail-closed: never a silent
+    /// fail-open.
+    ///
+    /// # Errors
+    /// [`DeclarativeApplyError`] from the abort apply (a DB error, or a re-author
+    /// failure surfaced as [`EngineError`]).
+    pub async fn abort_same_deploy_expands<B: MigrationBackend>(
+        &self,
+        obligations: &[crate::journal::PendingContract],
+        backend: &B,
+        exec_cfg: &ExecutorConfig,
+        applied_by: &str,
+        lock_mode: LockMode,
+    ) -> Result<Vec<crate::journal::PendingContract>, DeclarativeApplyError> {
+        if obligations.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Re-read the CURRENT outstanding set so a crash-resume that already aborted
+        // some obligations does not re-drive them (idempotent). Under the held lock
+        // (the in-process leg) this is consistent; on the standalone `Acquire` leg
+        // `apply_plan_resolving` takes the lock per obligation below.
+        let outstanding = backend
+            .outstanding_pending_contracts(exec_cfg)
+            .await
+            .map_err(|e| {
+                DeclarativeApplyError::Plain(EngineError::Apply(ApplyError::Journal(e)))
+            })?;
+        let still_outstanding: std::collections::BTreeSet<&str> = outstanding
+            .iter()
+            .map(|pc| pc.pending_version.as_str())
+            .collect();
+
+        let mut aborted: Vec<crate::journal::PendingContract> = Vec::new();
+        for pc in obligations {
+            if !still_outstanding.contains(pc.pending_version.as_str()) {
+                // Already discharged (a prior resume attempt aborted it, or a go-live
+                // applied it) — nothing to do. Idempotent.
+                continue;
+            }
+            let steps = crate::expand_contract::build_abort_steps(&exec_cfg.project_schema, pc)
+                .map_err(|e| {
+                    DeclarativeApplyError::Plain(EngineError::Apply(ApplyError::Backend(
+                        format!("re-author same-deploy abort: {e}"),
+                    )))
+                })?;
+            // The obligation is passed as the explicit-resolve so it is EXEMPTED from
+            // the touched-table refusal (its drops ARE its resolution) and APPENDED a
+            // `resolved='aborted'` row only on apply success. Blanket scope: an abort
+            // is the operator/recovery discharge of an already-opened obligation, not a
+            // co-bundled reviewed version set.
+            self.apply_plan_resolving(
+                &steps,
+                &[],
+                &[],
+                std::slice::from_ref(&(pc.clone(), crate::journal::Resolution::Aborted)),
+                Approval::Approved,
+                &crate::approval::ApprovalScope::All,
+                backend,
+                exec_cfg,
+                applied_by,
+                lock_mode,
+            )
+            .await?;
+            aborted.push(pc.clone());
+        }
+        Ok(aborted)
+    }
+
     /// The plan body, run with the project lock already held (either because the
     /// outer declarative caller owns it, or because [`apply_plan`](Self::apply_plan)
     /// acquired it up front for an `Acquire`-mode standalone call). Every sub-step
@@ -1130,6 +1221,9 @@ impl MigrationEngine {
             recovered: Vec::new(),
         };
         let mut pending_contract: Vec<Migration> = Vec::new();
+        // PR9d MED — the FULL obligation descriptors this plan freshly opened, handed
+        // back so the control loop can drive the same-deploy abort over exactly these.
+        let mut opened_obligations: Vec<crate::journal::PendingContract> = Vec::new();
         // Pending versions this loop has ALREADY recorded a `pending` row for, so a
         // second `PgExpandContract` step in the SAME deploy sharing the same
         // deterministic `pending_version` does NOT append a duplicate `pending` row
@@ -1363,6 +1457,19 @@ impl MigrationEngine {
                             .await
                             .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
                         recorded_this_deploy.insert(pending_version.clone());
+                        // PR9d MED — surface the FULL obligation descriptor so the
+                        // control loop's same-deploy recovery can re-author its abort
+                        // from these exact identity facts (table/from/to/ty + versions),
+                        // never a second journal read.
+                        opened_obligations.push(crate::journal::PendingContract {
+                            table: (*table).clone(),
+                            from_col: (*from).clone(),
+                            to_col: (*to).clone(),
+                            ty: (*ty).clone(),
+                            pending_version: pending_version.clone(),
+                            plan_version: plan_version.clone(),
+                            contract_versions,
+                        });
                     }
                     i += 1;
                 }
@@ -1463,6 +1570,7 @@ impl MigrationEngine {
         Ok(DeclarativeDeployOutcome {
             applied,
             pending_contract,
+            opened_obligations,
         })
     }
 
@@ -2122,6 +2230,16 @@ pub struct DeclarativeDeployOutcome {
     /// Empty when the deploy had no renames. These are gated
     /// (`requires_approval`; C2 is `destructive`).
     pub pending_contract: Vec<Migration>,
+    /// PR9d MED — the cross-deploy pending-contract OBLIGATIONS this plan opened
+    /// (one per online-rename EXPAND that recorded a fresh `pending` row this
+    /// invocation). The control-layer IR loop accumulates these across all files in
+    /// a deploy and — if a LATER file fails at apply — drives the SHARED
+    /// `build_abort_steps` over exactly THIS deploy's obligations
+    /// ([`MigrationEngine::abort_same_deploy_expands`]) to roll back the
+    /// half-renamed table BEFORE surfacing the creator's 4xx (no half-state). Empty
+    /// when the plan opened no new obligation (no rename, or an idempotent re-run
+    /// that net-applied-skipped the EXPAND).
+    pub opened_obligations: Vec<crate::journal::PendingContract>,
 }
 
 /// A failure from

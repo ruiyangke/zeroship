@@ -536,6 +536,39 @@ impl MigrationBackend for SqliteBackend {
         Ok(())
     }
 
+    // -- deploy-scoped recovery markers (PR9d MED) --------------------------
+    //
+    // SQLite never opens a pending-contract obligation (no online rename — a
+    // `SqliteRebuild` is one atomic offline step), so there is no same-deploy
+    // half-state to recover: all three markers are no-ops / empty.
+
+    async fn record_deploy_recovery_open(
+        &self,
+        _cfg: &ExecutorConfig,
+        _deploy_id: &str,
+        _pending_version: &str,
+        _by: &str,
+    ) -> Result<(), JournalError> {
+        Ok(())
+    }
+
+    async fn mark_deploy_recovery_reconciled(
+        &self,
+        _cfg: &ExecutorConfig,
+        _deploy_id: &str,
+        _pending_version: &str,
+        _by: &str,
+    ) -> Result<(), JournalError> {
+        Ok(())
+    }
+
+    async fn outstanding_deploy_recoveries(
+        &self,
+        _cfg: &ExecutorConfig,
+    ) -> Result<Vec<crate::journal::DeployRecovery>, JournalError> {
+        Ok(Vec::new())
+    }
+
     // -- DB-coupled validation / introspection ------------------------------
 
     async fn check_checksum_drift(
