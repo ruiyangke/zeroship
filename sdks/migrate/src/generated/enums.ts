@@ -127,3 +127,15 @@ export type OnlinePhase = "Expand" | "Contract";
  * (`"ifNotExists"`, `"ifExists"`).
  */
 export type ExistenceGuard = "ifNotExists" | "ifExists";
+
+/**
+ * The CLOSED referential-action lexicon for a FOREIGN KEY's `ON DELETE` /
+ * `ON UPDATE` clause (C1 — design §3.3). A CLOSED enum so the schema enumerates
+ * exactly the supported actions and serde REJECTS any out-of-set token at
+ * DESERIALIZE — a hand-crafted `.ir.json` cannot smuggle an arbitrary /
+ * injection-shaped action string into the FK render seam. Camel-cased on the
+ * wire (`"cascade"`, `"setNull"`, `"noAction"`, …); the per-dialect SQL spelling
+ * (`SET NULL`, `NO ACTION`, …) is the render seam's job via
+ * [`zeroship_schema::query::normalize_fk_action`].
+ */
+export type RefAction = "cascade" | "restrict" | "setNull" | "setDefault" | "noAction";

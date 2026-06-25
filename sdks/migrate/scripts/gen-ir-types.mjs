@@ -52,6 +52,10 @@ const ENUM_DEFS = [
   // `ifExists`). A closed string-enum like the others, so it is generated here and
   // consumed by the hand-authored `ir.ts` `Op` variants.
   "ExistenceGuard",
+  // **C1** — the closed FK referential-action lexicon (`cascade`/`restrict`/
+  // `setNull`/`setDefault`/`noAction`). A closed string-enum; consumed by the
+  // hand-authored `ir.ts` `IrConstraintKind` fk variant.
+  "RefAction",
 ];
 
 const banner = `/* eslint-disable */

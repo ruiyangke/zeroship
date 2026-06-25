@@ -77,6 +77,8 @@ const TS = {
   IndexMethod: ["btree", "gin", "gist", "ivfflat", "hnsw", "fts5"].sort(),
   // **PR10** — the closed existence-guard token set (`ir.ts` `ExistenceGuard`).
   ExistenceGuard: ["ifNotExists", "ifExists"].sort(),
+  // **C1** — the closed FK referential-action token set (`ir.ts` `RefAction`).
+  RefAction: ["cascade", "restrict", "setNull", "setDefault", "noAction"].sort(),
 };
 
 // **PR10 review F4** — the per-`Op` FIELD-presence map the hand-authored `ir.ts`
@@ -128,6 +130,10 @@ test("closed string-enum tokens match the schema", () => {
 
 test("ExistenceGuard tokens match the schema (PR10)", () => {
   assert.deepEqual(enumTokens(schema.$defs.ExistenceGuard), TS.ExistenceGuard);
+});
+
+test("RefAction tokens match the schema (C1 FK actions)", () => {
+  assert.deepEqual(enumTokens(schema.$defs.RefAction), TS.RefAction);
 });
 
 // **PR10 review F4** — the per-op FIELD-presence drift gate. This is the gate the

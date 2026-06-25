@@ -400,6 +400,71 @@ fn checksum_of_ir_is_identical_across_dialect_renders() {
     );
 }
 
+/// **C1 — FK referential-action checksum neutrality + sensitivity.** The new
+/// `IrConstraintKind::Fk { on_delete, on_update }` fields are additive-optional
+/// (`skip_serializing_if = "Option::is_none"`), so:
+///  - an FK that sets NO action serializes WITHOUT the `onDelete`/`onUpdate` keys
+///    — byte-identical to the pre-C1 wire image (the JCS canonical bytes, and thus
+///    `of_ir`, are unchanged). This is what keeps the action-free FK goldens'
+///    checksums stable across the C1 field addition (no `ir_version` bump needed).
+///  - an FK that DOES set an action (`onDelete: cascade`) produces a brand-new
+///    shape with the key present — a different (new) checksum. There is no
+///    persisted checksum for an FK-with-actions to preserve (it was unbuildable
+///    pre-C1), so the new bytes are correct.
+#[test]
+fn checksum_of_ir_fk_actions_are_additive_neutral_and_sensitive() {
+    use zeroship_migrate::ir::{IrConstraint, IrConstraintKind, RefAction};
+
+    let flags = MigrationFlags::default();
+    let owner = "app_fk";
+
+    let mk_fk = |on_delete: Option<RefAction>, on_update: Option<RefAction>| {
+        vec![Op::AddConstraint {
+            table: "orders".into(),
+            constraint: IrConstraint {
+                name: Some("orders_customer_fk".into()),
+                kind: IrConstraintKind::Fk {
+                    columns: vec!["customerId".into()],
+                    references_table: "customers".into(),
+                    references_columns: vec!["id".into()],
+                    on_delete,
+                    on_update,
+                },
+            },
+            schema: None,
+            existence_guard: None,
+        }]
+    };
+
+    // Neutrality: the action-free FK serializes WITHOUT the onDelete/onUpdate keys
+    // (the `skip_serializing_if` omitted-key image), so its canonical bytes are
+    // the pre-C1 image.
+    let none_ops = mk_fk(None, None);
+    let json = serde_json::to_string(&none_ops[0]).expect("op serializes");
+    assert!(
+        !json.contains("onDelete") && !json.contains("onUpdate"),
+        "an action-free FK must omit the onDelete/onUpdate keys (checksum neutrality): {json}"
+    );
+
+    // Sensitivity: setting onDelete = cascade changes the checksum (new bytes).
+    let cascade_ops = mk_fk(Some(RefAction::Cascade), None);
+    let none_ck = Checksum::of_ir(&CanonicalOpList(&none_ops), &flags, owner, &[], &[], &[]);
+    let cascade_ck = Checksum::of_ir(&CanonicalOpList(&cascade_ops), &flags, owner, &[], &[], &[]);
+    assert_ne!(
+        none_ck, cascade_ck,
+        "setting onDelete:cascade must change of_ir (FK actions are folded)"
+    );
+
+    // onDelete vs onUpdate are distinct positions (cascade-on-delete != cascade-on-update).
+    let cascade_upd = mk_fk(None, Some(RefAction::Cascade));
+    let cascade_upd_ck =
+        Checksum::of_ir(&CanonicalOpList(&cascade_upd), &flags, owner, &[], &[], &[]);
+    assert_ne!(
+        cascade_ck, cascade_upd_ck,
+        "onDelete and onUpdate are distinct FK action positions"
+    );
+}
+
 /// JCS key-order independence: building the same logical op two ways (here via
 /// a CreateTable with columns in a fixed order) is stable, and the canonical
 /// encoding does not depend on Rust struct field declaration order — it sorts

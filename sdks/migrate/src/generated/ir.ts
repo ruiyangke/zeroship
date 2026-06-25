@@ -25,6 +25,7 @@ import type {
   IndexMethod,
   OnUnmet,
   OnlinePhase,
+  RefAction,
   ScalarFn,
   SynthDefaultFn,
   SynthFn,
@@ -39,6 +40,7 @@ export type {
   IndexMethod,
   OnUnmet,
   OnlinePhase,
+  RefAction,
   ScalarFn,
   SynthDefaultFn,
   SynthFn,
@@ -109,7 +111,7 @@ export interface IrColumn {
 /** The kind of a table constraint (closed, internally tagged on `kind`). */
 export type IrConstraintKind =
   | { kind: "pk"; columns: string[] }
-  | { kind: "fk"; columns: string[]; referencesTable: string; referencesColumns: string[] }
+  | { kind: "fk"; columns: string[]; referencesTable: string; referencesColumns: string[]; onDelete?: RefAction | null; onUpdate?: RefAction | null }
   | { kind: "unique"; columns: string[] }
   | { kind: "check"; expr: Expr };
 
