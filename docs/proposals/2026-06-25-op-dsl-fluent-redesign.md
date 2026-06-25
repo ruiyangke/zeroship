@@ -152,7 +152,7 @@ deterministically droppable in later migrations. `using: "btree" | "gin" | "gist
 
 ```ts
 .insert({ rows: Row | Row[]; onConflict?: { columns: string[]; doUpdate?: Partial<Row> }; schema?: string }): TableHandle  // onConflict = PG-only
-.update({ set: Record<string, ExprFn>; where?: ExprFn; batch?: boolean; schema?: string }): TableHandle
+.update({ set: Record<string, ExprFn>; where?: ExprFn; batch?: { cursorColumn?: string; batchSize?: number }; schema?: string }): TableHandle  // batch = the IrBatch object (Op::Update.batch), not a bare flag
 .del({ where: ExprFn; limit?: number; schema?: string }): TableHandle                  // where mandatory; `del` (delete is a JS reserved word)
 .backfill({ set: Record<string, ExprFn>; where?: ExprFn; cursorColumn?: string; batchSize?: number; name?: string; schema?: string }): TableHandle
 ```

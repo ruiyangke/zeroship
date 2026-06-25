@@ -48,6 +48,29 @@ test("create() with a composite primaryKey records the table-level pk", () => {
   assert.deepEqual(ops[0].constraints, [{ kind: { kind: "pk", columns: ["a", "b"] } }]);
 });
 
+test("C2 — create() column that is both .unique() + .primaryKey() emits NO column-level unique", () => {
+  // A PRIMARY KEY already implies uniqueness, so the per-column image must NOT
+  // carry `unique:true` (lock-step with the addColumn-path suppression + the
+  // differ) — only the table-level pk constraint is recorded.
+  const ops = record(() =>
+    table("u").create({ columns: { x: t.text().unique().primaryKey() } }),
+  );
+  const col = ops[0].columns[0];
+  assert.equal(col.name, "x");
+  assert.equal(col.unique, undefined, "no redundant column-level unique alongside the pk");
+  assert.deepEqual(
+    ops[0].constraints,
+    [{ kind: { kind: "pk", columns: ["x"] } }],
+    "the sole constraint is the pk, not a redundant unique",
+  );
+  // Order-independence + a plain .unique() (no pk) still emits the column-level unique.
+  const ops2 = record(() =>
+    table("u").create({ columns: { x: t.text().primaryKey().unique(), y: t.text().unique() } }),
+  );
+  assert.equal(ops2[0].columns[0].unique, undefined, "order-independent: pk column drops unique");
+  assert.equal(ops2[0].columns[1].unique, true, "a non-pk .unique() column still records unique");
+});
+
 test(".column().add() carries a fluent ColumnDef's modifiers", () => {
   const ops = record(() =>
     table("u").column("status").add({ type: t.text().notNull().default("new") }),

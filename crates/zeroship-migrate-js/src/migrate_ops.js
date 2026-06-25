@@ -188,14 +188,17 @@ class ColumnDef {
   }
 
   /** Reduce to an `IrColumn` (the `createTable` columns[] shape). `name` is the
-   *  map key. `nullable`/`default`/`unique` omitted when at their defaults. */
+   *  map key. `nullable`/`default`/`unique` omitted when at their defaults.
+   *  C2 — a PRIMARY KEY already IMPLIES uniqueness, so a column that is BOTH
+   *  `.unique()` and `.primaryKey()` suppresses the redundant column-level UNIQUE
+   *  (lock-step with the addColumn path + the differ). */
   __toIrColumn(name) {
     return compact({
       name,
       type: this._type,
       nullable: this._nullable === false ? false : undefined,
       default: this._default,
-      unique: this._unique ? true : undefined,
+      unique: this._unique && !this._primaryKey ? true : undefined,
     });
   }
 

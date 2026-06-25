@@ -234,7 +234,12 @@ class ColumnDefImpl implements ColumnDefType {
       type: this._type,
       nullable: this._nullable === false ? false : undefined,
       default: this._default,
-      unique: this._unique ? true : undefined,
+      // C2 — a PRIMARY KEY already IMPLIES uniqueness, so a column that is BOTH
+      // `.unique()` and `.primaryKey()` would otherwise carry a redundant
+      // column-level UNIQUE (an extra index/constraint) on top of the table's pk
+      // constraint. Suppress it (lock-step with the addColumn path + the differ,
+      // which never emits a separate UNIQUE for the PK column).
+      unique: this._unique && !this._primaryKey ? true : undefined,
     });
   }
   __toAddColumnTail(): Node {
