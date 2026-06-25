@@ -1974,6 +1974,14 @@ pub(crate) async fn apply_transactional(
     kind: &str,
 ) -> Result<(), ApplyError> {
     let started = Instant::now();
+    // Render the fail-closed engine-identifier quote seams (PR13) BEFORE `BEGIN`.
+    // These are pure functions of `cfg`/`m` with no dependency on the open txn, so
+    // computing them up front means a fail-closed `IdentQuoteError` returns before
+    // any transaction is opened — no dangling txn left behind on the `?` path. The
+    // rendered SQL still EXECUTES inside the txn below, exactly as before.
+    let session_sql = set_local_session_sql(cfg, m)?;
+    let role_sql = set_local_role_sql(cfg)?;
+
     // `transaction()` needs `&mut Client`; the apply flow owns the connection,
     // so we take a short-lived mutable borrow via a raw pointer-free path:
     // callers pass `&Client`, so we cannot call `transaction()` directly. We
@@ -1987,7 +1995,7 @@ pub(crate) async fn apply_transactional(
     // COMMIT/ROLLBACK — nothing leaks onto the session (H2 / H3). This runs as
     // the admin (always permitted); the role switch is applied separately around
     // the `<up>` only.
-    if let Err(e) = conn.batch_execute(&set_local_session_sql(cfg, m)?).await {
+    if let Err(e) = conn.batch_execute(&session_sql).await {
         let _ = conn.batch_execute("ROLLBACK").await;
         return Err(ApplyError::Db(e));
     }
@@ -2059,8 +2067,8 @@ pub(crate) async fn apply_transactional(
     // already absent (ifExists), so there is nothing to run; only the journal row
     // below lands so the version is recorded net-applied.
     if !skip_up {
-        if let Some(set_role) = set_local_role_sql(cfg)? {
-            if let Err(e) = conn.batch_execute(&set_role).await {
+        if let Some(set_role) = &role_sql {
+            if let Err(e) = conn.batch_execute(set_role.as_str()).await {
                 let _ = conn.batch_execute("ROLLBACK").await;
                 return Err(ApplyError::Db(e));
             }
@@ -2193,9 +2201,11 @@ pub(crate) async fn apply_dml_transactional(
         })
         .collect();
 
-    conn.batch_execute("BEGIN").await?;
-    // SET LOCAL search_path + the mandatory timeouts, txn-scoped (vanish at
-    // COMMIT/ROLLBACK). Built from cfg directly (a DML step has no per-migration
+    // Render the fail-closed engine-identifier quote seams (PR13) BEFORE `BEGIN`,
+    // so a fail-closed `IdentQuoteError` returns before any transaction is opened
+    // (no dangling txn). Both are pure functions of `cfg` — no dependency on the
+    // open txn. The rendered SQL still EXECUTES inside the txn below, as before.
+    // `set_local` is built from cfg directly (a DML step has no per-migration
     // timeout override slot in PR0).
     let set_local = format!(
         "SET LOCAL search_path TO {}; \
@@ -2205,14 +2215,19 @@ pub(crate) async fn apply_dml_transactional(
         cfg.statement_timeout_ms(),
         cfg.lock_timeout_ms(),
     );
+    let role_sql = set_local_role_sql(cfg)?;
+
+    conn.batch_execute("BEGIN").await?;
+    // SET LOCAL search_path + the mandatory timeouts, txn-scoped (vanish at
+    // COMMIT/ROLLBACK).
     if let Err(e) = conn.batch_execute(&set_local).await {
         let _ = conn.batch_execute("ROLLBACK").await;
         return Err(ApplyError::Db(e));
     }
     // Drop to the migrator role for the DML ONLY (line-2 confinement); RESET
     // before the journal write so the journal stays unforgeable by the step.
-    if let Some(set_role) = set_local_role_sql(cfg)? {
-        if let Err(e) = conn.batch_execute(&set_role).await {
+    if let Some(set_role) = &role_sql {
+        if let Err(e) = conn.batch_execute(set_role.as_str()).await {
             let _ = conn.batch_execute("ROLLBACK").await;
             return Err(ApplyError::Db(e));
         }
@@ -3280,17 +3295,24 @@ pub(crate) async fn rollback_one_transactional(
         .as_deref()
         .expect("rollback_one_transactional is only called for RollbackStep::Down (down is Some)");
     let started = Instant::now();
+    // Render the fail-closed engine-identifier quote seams (PR13) BEFORE `BEGIN`,
+    // so a fail-closed `IdentQuoteError` returns before any transaction is opened
+    // (no dangling txn). Both are pure functions of `cfg`/`m` — no dependency on
+    // the open txn. The rendered SQL still EXECUTES inside the txn below, as before.
+    let session_sql = set_local_session_sql(cfg, m)?;
+    let role_sql = set_local_role_sql(cfg)?;
+
     conn.batch_execute("BEGIN").await?;
 
     // Pin search_path + mandatory timeouts (SET LOCAL — vanish at COMMIT/ROLLBACK).
-    if let Err(e) = conn.batch_execute(&set_local_session_sql(cfg, m)?).await {
+    if let Err(e) = conn.batch_execute(&session_sql).await {
         let _ = conn.batch_execute("ROLLBACK").await;
         return Err(RollbackError::Db(e));
     }
     // Drop to the migrator role for the `<down>` ONLY (line-2 confinement). RESET
     // ROLE before the journal append so the admin writes the rolled_back event.
-    if let Some(set_role) = set_local_role_sql(cfg)? {
-        if let Err(e) = conn.batch_execute(&set_role).await {
+    if let Some(set_role) = &role_sql {
+        if let Err(e) = conn.batch_execute(set_role.as_str()).await {
             let _ = conn.batch_execute("ROLLBACK").await;
             return Err(RollbackError::Db(e));
         }
@@ -3907,5 +3929,41 @@ mod trusted_apply_pg {
                 cfg.project_schema, cfg.pg.meta_schema
             ))
             .await;
+    }
+
+    /// **PR13 regression** — a fail-closed engine-identifier quote seam in a
+    /// `*_transactional` path must NOT leave a dangling open transaction.
+    ///
+    /// RED before the hoist fix: `apply_transactional` issued `BEGIN`, then hit
+    /// `set_local_session_sql(cfg, m)?` (which fails closed on the NUL in
+    /// `project_schema` via `search_path_clause`) and returned WITHOUT a
+    /// `ROLLBACK` — leaving the connection in an open transaction. We prove
+    /// closure by running `VACUUM` afterwards: Postgres rejects `VACUUM` with
+    /// "cannot run inside a transaction block" iff a txn is still open, and
+    /// accepts it when the connection is idle. (Post-fix the quote seam is
+    /// rendered BEFORE `BEGIN`, so no transaction is ever opened on this path.)
+    #[compio::test]
+    async fn fail_closed_quote_seam_leaves_no_dangling_txn() {
+        let conn = pg().await;
+        let tok = token();
+        let mut cfg = trusted_cfg(&tok);
+        // Corrupt the engine-supplied project schema with a NUL so the seam
+        // (`set_local_session_sql` → `search_path_clause` → `quote_ident_checked`)
+        // fails closed inside `apply_transactional`.
+        cfg.project_schema = format!("proj_{tok}\0bad");
+
+        let m = mig(1, "noop", "SELECT 1", false);
+        let outcome = apply_transactional(&conn, &cfg, &m, "pr13-test", &[], "apply").await;
+        assert!(
+            matches!(outcome, Err(ApplyError::IdentQuote(_))),
+            "the NUL project schema must fail closed via the quote seam; got {outcome:?}"
+        );
+
+        // The giveaway: `VACUUM` cannot run inside a transaction block. If the
+        // failed apply left `BEGIN` open (the pre-fix bug), this errors; idle, it
+        // succeeds. This is the structural proof that no txn was left dangling.
+        conn.batch_execute("VACUUM")
+            .await
+            .expect("VACUUM must succeed — connection must be idle, not in an open txn");
     }
 }
