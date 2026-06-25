@@ -966,11 +966,37 @@ fn check_constraint_name(table: &str, field: &str, kind: &str) -> String {
 /// `'{}'::jsonb`, array → `'[]'::jsonb`); AND, even with NO explicit default,
 /// json/object default to `'{}'::jsonb` and array to `'[]'::jsonb` (plugin-db's
 /// "default defaults"). Emission-only — not drift-compared.
+/// Render a numeric column DEFAULT to its SQL literal, precision-preserving.
+///
+/// A default reaches us as one of three carriers and each must render without
+/// loss or injection:
+///   - a JSON integer (`IrScalar::Int` ⇒ `as_i64`) — exact, no float rounding;
+///   - a JSON float (the differ's wire `FieldDef`, ⇒ `as_f64`);
+///   - a validated numeric STRING — `IrScalar::Decimal` carries arbitrary-
+///     precision decimals AND bigints ≥ 2^53 as a string (the IR rejects an
+///     oversized/fractional JSON number at parse). `as_f64` returns `None` for a
+///     JSON string and would corrupt a >2^53 bigint anyway, so we emit the string
+///     verbatim — re-validated as a plain numeric literal ([`crate::ir::
+///     is_decimal_string`]) so nothing else can inject raw text into the DDL.
+fn numeric_default_literal(v: &serde_json::Value) -> Option<String> {
+    if let Some(i) = v.as_i64() {
+        Some(i.to_string())
+    } else if let Some(f) = v.as_f64() {
+        Some(f.to_string())
+    } else {
+        v.as_str().filter(|s| crate::ir::is_decimal_string(s)).map(str::to_string)
+    }
+}
+
 fn field_default_expr(f: &FieldDescriptor) -> Option<String> {
     if let Some(default) = &f.default {
         return match f.ty.as_str() {
             "string" => default.as_str().map(sql_str),
-            "number" => default.as_f64().map(|n| n.to_string()),
+            // `int` (`t.integer()`/`t.bigInt()`) and `number` (`t.float()`/
+            // `t.numeric()`) share one precision-preserving renderer — without the
+            // `int` arm an integer column's DEFAULT silently dropped, and a
+            // decimal/bigint carried as a numeric string dropped from BOTH.
+            "int" | "number" => numeric_default_literal(default),
             "boolean" => default.as_bool().map(|b| b.to_string()),
             "json" | "object" => Some("'{}'::jsonb".into()),
             "array" => Some("'[]'::jsonb".into()),
