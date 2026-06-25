@@ -2622,7 +2622,10 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
 /// Build the [`IndexSnapshot`] for a `createIndex` op. A plain B-tree index is
 /// the common case; a non-`btree` `using` carries the access method. Pure
 /// translation (no state), so a free function.
-fn create_index_snapshot(
+///
+/// **Migration-first P1**: `pub(crate)` so the offline [`crate::fold`] replays a
+/// `createIndex` op through the SAME index-shaping the lower uses (no re-spell).
+pub(crate) fn create_index_snapshot(
     table: &str,
     columns: &[String],
     name: Option<&str>,
@@ -2644,7 +2647,10 @@ fn create_index_snapshot(
 /// Map an [`IrColumn`] to the [`FieldDescriptor`] the shared snapshot-builder
 /// consumes. Pure structural translation of the type + nullability + default +
 /// unique; the snapshot's default/sentinel rendering is the shared builder's job.
-fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
+///
+/// **Migration-first P1**: `pub(crate)` so the offline [`crate::fold`] builds the
+/// SAME `CollectionDescriptor` the lower builds — reusing one column-shaping path.
+pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
     // `nullable` defaults to TRUE (the `t.*` lexicon — §3.2); `required` is the
     // inverse the descriptor models. An explicit `nullable: false` ⇒ required.
     let required = !c.nullable.unwrap_or(true);
@@ -2766,7 +2772,10 @@ fn ir_default_to_value(d: &IrDefault) -> Option<serde_json::Value> {
 /// Quote + comma-join a constraint's column list (`"a", "b"`). Each identifier is
 /// double-quoted (embedded `"` doubled) so the column list can never alter the
 /// statement structure — the SAME quoting the declarative emitter uses.
-fn quote_cols(cols: &[String]) -> String {
+///
+/// **Migration-first P1**: `pub(crate)` so the offline [`crate::fold`] spells a
+/// UNIQUE/PK constraint body byte-identically to the lower (`UNIQUE (cols)`).
+pub(crate) fn quote_cols(cols: &[String]) -> String {
     cols.iter()
         .map(|c| crate::dml::escape_quote_ident(c))
         .collect::<Vec<_>>()
@@ -2778,7 +2787,10 @@ fn quote_cols(cols: &[String]) -> String {
 /// the server-side identifier limit via [`crate::author::cap_ident_name`] so the
 /// authored name matches what PG stores (an un-capped name would be truncated on
 /// CREATE and never round-trip).
-fn derived_constraint_name(table: &str, cols: &[String], suffix: &str) -> String {
+///
+/// **Migration-first P1**: `pub(crate)` so the offline [`crate::fold`] derives an
+/// unnamed UNIQUE/PK constraint name byte-identically to the lower.
+pub(crate) fn derived_constraint_name(table: &str, cols: &[String], suffix: &str) -> String {
     crate::author::cap_ident_name(&format!("{table}_{}_{suffix}", cols.join("_")))
 }
 
@@ -2823,7 +2835,9 @@ fn ir_constraint_name_and_kind(table: &str, constraint: &IrConstraint) -> (Strin
 
 /// The access-method string for a closed [`IndexMethod`] — matches the spellings
 /// the snapshot's `access_method` carries (and `render_create_index` emits).
-fn index_method_access(m: IndexMethod) -> &'static str {
+/// **Migration-first P1**: `pub(crate)` so the offline [`crate::fold`] resolves a
+/// `createTable` index's access method byte-identically to the lower.
+pub(crate) fn index_method_access(m: IndexMethod) -> &'static str {
     match m {
         IndexMethod::Btree => "btree",
         IndexMethod::Gin => "gin",
