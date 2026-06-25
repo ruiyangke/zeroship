@@ -596,6 +596,90 @@ fn twin_drop_constraint_carries_schema_and_guard() {
     assert_guard(op, "ifExists");
 }
 
+/// `addColumn(table, name, type, { schema, ifNotExists })` records the schema
+/// qualifier + the `ifNotExists` add-family guard. Completes the twin proof for
+/// the add-column op (PR10 review LOW — closes the full_surface coverage hole so a
+/// future recorder edit that drops the guard here is caught RED).
+#[test]
+fn twin_add_column_carries_schema_and_guard() {
+    let src = r#"
+        import { addColumn, t } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            addColumn("t", "c", t.int(), { schema: "app2", ifNotExists: true });
+        }};
+    "#;
+    let ir = record(src, "add_column_schema_guard");
+    let op = op_named(&ir, "addColumn");
+    assert_schema(op, "app2");
+    assert_guard(op, "ifNotExists");
+}
+
+/// `dropTable(table, { schema, ifExists })` records the schema qualifier + the
+/// `ifExists` drop-family guard. PR10 review LOW — coverage-hole closure.
+#[test]
+fn twin_drop_table_carries_schema_and_guard() {
+    let src = r#"
+        import { dropTable } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            dropTable("t", { schema: "app2", ifExists: true });
+        }};
+    "#;
+    let ir = record(src, "drop_table_schema_guard");
+    let op = op_named(&ir, "dropTable");
+    assert_schema(op, "app2");
+    assert_guard(op, "ifExists");
+}
+
+/// `dropColumn(table, column, { schema, ifExists })` records the schema qualifier
+/// + the `ifExists` drop-family guard. PR10 review LOW — coverage-hole closure.
+#[test]
+fn twin_drop_column_carries_schema_and_guard() {
+    let src = r#"
+        import { dropColumn } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            dropColumn("t", "c", { schema: "app2", ifExists: true });
+        }};
+    "#;
+    let ir = record(src, "drop_column_schema_guard");
+    let op = op_named(&ir, "dropColumn");
+    assert_schema(op, "app2");
+    assert_guard(op, "ifExists");
+}
+
+/// `createIndex(table, { columns, schema, ifNotExists })` records the schema
+/// qualifier + the `ifNotExists` create-family guard. PR10 review LOW —
+/// coverage-hole closure (a dropped guard here would turn a guarded index create
+/// into a bare unconditional CREATE INDEX — fail-OPEN).
+#[test]
+fn twin_create_index_carries_schema_and_guard() {
+    let src = r#"
+        import { createIndex } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            createIndex("t", { columns: ["a"], schema: "app2", ifNotExists: true });
+        }};
+    "#;
+    let ir = record(src, "create_index_schema_guard");
+    let op = op_named(&ir, "createIndex");
+    assert_schema(op, "app2");
+    assert_guard(op, "ifNotExists");
+}
+
+/// `dropIndex(name, { table, schema, ifExists })` records the schema qualifier +
+/// the `ifExists` drop-family guard. PR10 review LOW — coverage-hole closure.
+#[test]
+fn twin_drop_index_carries_schema_and_guard() {
+    let src = r#"
+        import { dropIndex } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            dropIndex("idx_t_a", { table: "t", schema: "app2", ifExists: true });
+        }};
+    "#;
+    let ir = record(src, "drop_index_schema_guard");
+    let op = op_named(&ir, "dropIndex");
+    assert_schema(op, "app2");
+    assert_guard(op, "ifExists");
+}
+
 /// The DML ops `insert` / `update` / `delete` / `backfill` carry the schema
 /// qualifier (no existence guard — DML is not guardable). RED before the twin fix
 /// (the schema was silently dropped, re-pinning the op to the project schema).

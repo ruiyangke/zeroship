@@ -31,6 +31,8 @@ import type {
   ExprFn,
   FnNamespace,
   ForeignKeySpec,
+  IfExistsNotYetSupported,
+  IfNotExistsNotYetSupported,
   InsertArgs,
   Row,
   ScalarValue,
@@ -388,7 +390,7 @@ export function createTable(
   name: string,
   columns: Record<string, ColumnDefType>,
   build?: (b: TableBuilder) => void,
-  opts: TableOpOpts & { ifNotExists?: boolean } = {},
+  opts: TableOpOpts & { ifNotExists?: IfNotExistsNotYetSupported } = {},
 ): void {
   requireString(name, "createTable(name, …)");
   const cols: Node[] = [];
@@ -429,15 +431,23 @@ interface TableOpOpts {
   schema?: string;
 }
 
+// The author-facing not-yet-supported guard option types
+// (`IfNotExistsNotYetSupported` / `IfExistsNotYetSupported`, both `false`) are
+// imported from `./types.js` — the single source of truth — so the op signatures
+// here and the spec interfaces there carry the identical build-time signal.
+
 /** **PR10** — map the create/add family `{ ifNotExists }` boolean to the wire
- *  `existenceGuard: "ifNotExists"` token (omitted when falsy). */
+ *  `existenceGuard: "ifNotExists"` token (omitted when falsy). The boolean param is
+ *  kept (the runtime twin and IR shape are ready for Part B); the AUTHOR-facing
+ *  option type is the not-yet-supported {@link IfNotExistsNotYetSupported} `false`. */
 function ifNotExistsGuard(v: boolean | undefined): "ifNotExists" | undefined {
   return v ? "ifNotExists" : undefined;
 }
 
 /** **PR10** — map the drop/rename/alter family `{ ifExists }` boolean to the wire
  *  `existenceGuard: "ifExists"` token (omitted when falsy). Replaces the old native
- *  `ifExists` boolean field (the intentional wire break). */
+ *  `ifExists` boolean field (the intentional wire break). Author-facing option type
+ *  is the not-yet-supported {@link IfExistsNotYetSupported} `false`. */
 function ifExistsGuard(v: boolean | undefined): "ifExists" | undefined {
   return v ? "ifExists" : undefined;
 }
@@ -466,7 +476,7 @@ function makeTableBuilder(constraints: Node[], indexes: Node[]): TableBuilder {
 
 export function dropTable(
   table: string,
-  opts: TableOpOpts & { ifExists?: boolean; cascade?: boolean } = {},
+  opts: TableOpOpts & { ifExists?: IfExistsNotYetSupported; cascade?: boolean } = {},
 ): void {
   requireString(table, "dropTable(table)");
   push(
@@ -484,7 +494,7 @@ export function addColumn(
   table: string,
   name: string,
   type: ColumnDefType,
-  opts: TableOpOpts & { ifNotExists?: boolean } = {},
+  opts: TableOpOpts & { ifNotExists?: IfNotExistsNotYetSupported } = {},
 ): void {
   requireString(table, "addColumn(table, …)");
   requireString(name, "addColumn(table, name, …)");
@@ -506,7 +516,7 @@ export function addColumn(
 export function dropColumn(
   table: string,
   column: string,
-  opts: TableOpOpts & { ifExists?: boolean } = {},
+  opts: TableOpOpts & { ifExists?: IfExistsNotYetSupported } = {},
 ): void {
   requireString(table, "dropColumn(table, …)");
   requireString(column, "dropColumn(table, column)");
@@ -526,7 +536,7 @@ export function renameColumn(
   from: string,
   to: string,
   type: ColumnDefType,
-  opts: TableOpOpts & { ifExists?: boolean } = {},
+  opts: TableOpOpts & { ifExists?: IfExistsNotYetSupported } = {},
 ): void {
   requireString(table, "renameColumn(table, …)");
   requireString(from, "renameColumn from");
@@ -548,7 +558,7 @@ export function alterColumn(
   table: string,
   name: string,
   change: AlterColumnChange,
-  opts: TableOpOpts & { ifExists?: boolean } = {},
+  opts: TableOpOpts & { ifExists?: IfExistsNotYetSupported } = {},
 ): void {
   requireString(table, "alterColumn(table, …)");
   requireString(name, "alterColumn(table, name, …)");
@@ -603,7 +613,7 @@ function fkConstraintFromSpec(spec: ForeignKeySpec): Node {
 export function addForeignKey(
   table: string,
   spec: ForeignKeySpec,
-  opts: TableOpOpts & { ifNotExists?: boolean } = {},
+  opts: TableOpOpts & { ifNotExists?: IfNotExistsNotYetSupported } = {},
 ): void {
   requireString(table, "addForeignKey(table, …)");
   push(
@@ -620,7 +630,7 @@ export function addForeignKey(
 export function addUnique(
   table: string,
   spec: UniqueSpec,
-  opts: TableOpOpts & { ifNotExists?: boolean } = {},
+  opts: TableOpOpts & { ifNotExists?: IfNotExistsNotYetSupported } = {},
 ): void {
   requireString(table, "addUnique(table, …)");
   if (!spec || !Array.isArray(spec.columns)) {
@@ -640,7 +650,7 @@ export function addUnique(
 export function addCheck(
   table: string,
   spec: CheckSpec,
-  opts: TableOpOpts & { ifNotExists?: boolean } = {},
+  opts: TableOpOpts & { ifNotExists?: IfNotExistsNotYetSupported } = {},
 ): void {
   requireString(table, "addCheck(table, …)");
   if (!spec || spec.expr === undefined) {
@@ -660,7 +670,7 @@ export function addCheck(
 export function dropConstraint(
   table: string,
   spec: DropConstraintSpec | string,
-  opts: TableOpOpts & { ifExists?: boolean } = {},
+  opts: TableOpOpts & { ifExists?: IfExistsNotYetSupported } = {},
 ): void {
   requireString(table, "dropConstraint(table, …)");
   const name = typeof spec === "string" ? spec : spec && spec.name;
@@ -702,7 +712,7 @@ export function dropIndex(
   opts: TableOpOpts & {
     table?: string;
     unique?: boolean;
-    ifExists?: boolean;
+    ifExists?: IfExistsNotYetSupported;
     concurrently?: boolean;
   } = {},
 ): void {

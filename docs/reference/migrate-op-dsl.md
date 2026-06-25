@@ -459,10 +459,19 @@ dropTable("other_app_table", { schema: "some_other_app" }); // → CROSS_SCHEMA
 ## Existence guards (`ifExists` / `ifNotExists`)
 
 The create/add family (`createTable`, `addColumn`, `createIndex`,
-`addForeignKey`/`addUnique`/`addCheck`) accepts `{ ifNotExists: true }`; the
+`addForeignKey`/`addUnique`/`addCheck`) carries an `ifNotExists` option; the
 drop/rename/alter family (`dropTable`, `dropColumn`, `dropIndex`,
-`dropConstraint`, `renameColumn`, `alterColumn`) accepts `{ ifExists: true }`. A
+`dropConstraint`, `renameColumn`, `alterColumn`) carries an `ifExists` option. A
 guard on the wrong family is a `GUARD_DIRECTION` authoring error.
+
+> **These guards are NOT YET SUPPORTED — the option types are `false`, so passing
+> `{ ifNotExists: true }` / `{ ifExists: true }` is a BUILD-TIME (`tsc`) type
+> error, not a deploy-time surprise.** The full shape (IR/wire/validate) is in
+> place but the executor-side probe that honors the guard is a later slice (op.*
+> PR10 Part B); see the Status box below. The author-facing types
+> (`IfNotExistsNotYetSupported` / `IfExistsNotYetSupported`, both the literal
+> `false`) give a compile-time signal that the feature is unavailable. They widen
+> back to `boolean` when Part B lands.
 
 These are **NOT** lowered to a native `IF [NOT] EXISTS` clause. Native support is
 patchy and asymmetric: Postgres has no `ADD CONSTRAINT IF NOT EXISTS` and none on
@@ -504,8 +513,14 @@ it. The default semantic is **shape-verify-or-fail**, never a bare skip:
 > op, so there is never the split where some ops silently drop the guard (applying
 > the bare op unconditionally — a fail-OPEN over a possibly-divergent existing
 > object) while others hard-error. Do not author an existence guard expecting it to
-> take effect yet; the typed `ops.ts` surface ACCEPTS the option, but the engine
-> refuses it until the probe ships. When the probe lands, the divergent-object
+> take effect yet: the author-facing option type is now the literal **`false`**
+> (`IfNotExistsNotYetSupported` / `IfExistsNotYetSupported`), so `{ ifNotExists:
+> true }` / `{ ifExists: true }` is a **build-time `tsc` error** — you get the
+> signal at compile time, not as a deploy-time 422. (The `migrate_ops.js` twin and
+> the IR shape still carry the boolean so Part B can light it up without a wire
+> break; the runtime refusal — `ExistenceGuardNotYetSupported` — names the deferral
+> and points at op.* PR10 Part B for any raw-JS deploy that bypasses `tsc`.) When
+> the probe lands, the divergent-object
 > shape-verify MUST fail closed (never a silent skip) and read the right catalog per
 > backend (PG `pg_catalog`/`information_schema`; SQLite `sqlite_master` + PRAGMAs),
 > including index/constraint guards.
