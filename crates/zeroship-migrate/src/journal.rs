@@ -500,6 +500,52 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
     ))
     .await?;
 
+    // 2a-quater. The append-only DEPLOY-SCOPED RECOVERY marker log (PR9d MED).
+    //     A multi-file APPROVED bundle applies per-step with NO whole-bundle
+    //     transaction (`executor.rs`: BEGIN;up;journal;COMMIT per migration). So an
+    //     in-scope online-rename EXPAND in file A commits durably (E1/E2/E3 +
+    //     dual-write trigger + the `schema_pending_contracts` obligation) BEFORE a
+    //     LATER file B in the SAME deploy can fail at apply for a runtime reason the
+    //     read-only pre-validation cannot predict. Pre-PR9d that left file A's table
+    //     half-renamed behind the creator's 4xx, owing a pending contract.
+    //
+    //     This log makes the WHOLE deploy a RECOVERABLE unit. Each same-deploy EXPAND
+    //     writes an `open` row keyed on a per-deploy `deploy_id` (a UUIDv7 generated
+    //     once at the start of the IR loop) + the EXPAND's `pending_version`. If a
+    //     later same-deploy file fails, the control loop drives the SHARED abort
+    //     (`build_abort_steps`) over exactly THIS deploy's `open` rows under the still
+    //     -held project lock, discharging each obligation `aborted` and marking the
+    //     recovery row `reconciled` — so the refused bundle leaves NO half-renamed
+    //     table. On a process CRASH between the EXPAND commit and the in-process abort,
+    //     the `open` row SURVIVES; the NEXT same-app deploy (serialized by the project
+    //     lock) reconciles it FIRST, before applying the new bundle. On deploy SUCCESS
+    //     the loop marks its rows `reconciled` (the EXPANDs legitimately remain pending
+    //     as the §2.0.2 cross-deploy partition — NOT a half-state).
+    //
+    //     **Strictly same-deploy-scoped.** Both legs operate only over rows whose
+    //     `deploy_id` is THIS deploy's (in-process) or an `open` prior-deploy row whose
+    //     obligation is still `outstanding` (crash leg). A legitimately-pending
+    //     prior-deploy contract whose deploy went go-live has its recovery row already
+    //     `reconciled`, so neither leg ever touches it.
+    //
+    //     **Append-only + immutable + admin-only** (same posture as
+    //     `schema_pending_contracts`): `state` transitions open→reconciled by
+    //     APPENDING a `reconciled` row (never UPDATE/DELETE); the net state per
+    //     (deploy_id, pending_version) is the latest `event_seq` row. The migrator role
+    //     has NO grant on the meta schema, so a creator migration can neither forge nor
+    //     suppress a recovery marker.
+    conn.batch_execute(&format!(
+        "CREATE TABLE IF NOT EXISTS {meta}.schema_deploy_recovery (
+            event_seq        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            deploy_id        TEXT NOT NULL,
+            pending_version  TEXT NOT NULL,
+            state            TEXT NOT NULL CHECK (state IN ('open','reconciled')),
+            \"by\"             TEXT NOT NULL,
+            \"at\"             TIMESTAMPTZ NOT NULL DEFAULT now()
+        )"
+    ))
+    .await?;
+
     // 2b. The MUTABLE inflight side-table for two-phase non-txn markers. NOT
     //     guarded by the immutability trigger — the marker is deleted on
     //     completion / recovery.
@@ -558,6 +604,7 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
         "schema_migrations",
         "schema_migrations_supersedes",
         "schema_pending_contracts",
+        "schema_deploy_recovery",
     ] {
         for (trg, level, events) in [
             ("zs_immutable_trg", "FOR EACH ROW", "UPDATE OR DELETE"),
@@ -1125,6 +1172,131 @@ pub async fn resolve_pending_contract(
         .await?;
     debug_assert_eq!(n, 1, "resolve_pending_contract must insert exactly one row");
     Ok(())
+}
+
+// -- deploy-scoped recovery markers (PR9d MED) ------------------------------
+
+/// An OUTSTANDING deploy-scoped recovery obligation: a same-deploy EXPAND whose
+/// recovery row is net-`open` (no later `reconciled` row). Carried back to the
+/// control loop so it can drive the same-deploy abort over exactly these
+/// `pending_version`s.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeployRecovery {
+    /// The per-deploy id (UUIDv7) the EXPAND was opened under.
+    pub deploy_id: String,
+    /// The obligation key (the EXPAND's E2 trigger version) this row marks for
+    /// recovery — the join key into `schema_pending_contracts`.
+    pub pending_version: String,
+}
+
+/// Open a deploy-scoped recovery marker for a same-deploy EXPAND (PR9d MED): APPEND
+/// an `open` row keyed on `(deploy_id, pending_version)`. Admin-written (the
+/// migrator has no meta-schema grant), under the immutability trigger.
+///
+/// # Errors
+/// [`JournalError::Db`] on insert failure.
+pub async fn record_deploy_recovery_open(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    deploy_id: &str,
+    pending_version: &str,
+    by: &str,
+) -> Result<(), JournalError> {
+    let meta = quote_ident(&cfg.pg.meta_schema);
+    let n = conn
+        .execute(
+            &format!(
+                "INSERT INTO {meta}.schema_deploy_recovery
+                     (deploy_id, pending_version, state, \"by\")
+                 VALUES ($1, $2, 'open', $3)"
+            ),
+            &[&deploy_id, &pending_version, &by],
+        )
+        .await?;
+    debug_assert_eq!(n, 1, "record_deploy_recovery_open must insert exactly one row");
+    Ok(())
+}
+
+/// Mark a deploy-scoped recovery obligation `reconciled` (PR9d MED): APPEND a
+/// `reconciled` row (append-only — the `open` row is never edited). Called on the
+/// deploy SUCCESS path (the EXPAND legitimately stays pending), after a same-deploy
+/// abort, or after a crash-recovery abort. Admin-written.
+///
+/// # Errors
+/// [`JournalError::Db`] on insert failure.
+pub async fn mark_deploy_recovery_reconciled(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    deploy_id: &str,
+    pending_version: &str,
+    by: &str,
+) -> Result<(), JournalError> {
+    let meta = quote_ident(&cfg.pg.meta_schema);
+    let n = conn
+        .execute(
+            &format!(
+                "INSERT INTO {meta}.schema_deploy_recovery
+                     (deploy_id, pending_version, state, \"by\")
+                 VALUES ($1, $2, 'reconciled', $3)"
+            ),
+            &[&deploy_id, &pending_version, &by],
+        )
+        .await?;
+    debug_assert_eq!(
+        n, 1,
+        "mark_deploy_recovery_reconciled must insert exactly one row"
+    );
+    Ok(())
+}
+
+/// Read the deploy-recovery markers that are net-`open` (latest event per
+/// `(deploy_id, pending_version)` is `open`) AND whose obligation is STILL
+/// outstanding in `schema_pending_contracts` (PR9d MED — the crash-recovery
+/// leg's resume input).
+///
+/// The outstanding-obligation join is what makes resume idempotent + correct: a
+/// recovery row whose obligation was already discharged (aborted by an earlier
+/// resume attempt, or applied by a go-live) is NOT re-driven. Ordered by
+/// `(deploy_id, pending_version)` for determinism.
+///
+/// # Errors
+/// [`JournalError::Db`] on query failure.
+pub async fn outstanding_deploy_recoveries(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+) -> Result<Vec<DeployRecovery>, JournalError> {
+    let meta = quote_ident(&cfg.pg.meta_schema);
+    let rows = conn
+        .query(
+            &format!(
+                "WITH latest_recovery AS (
+                     SELECT DISTINCT ON (deploy_id, pending_version)
+                            deploy_id, pending_version, state
+                       FROM {meta}.schema_deploy_recovery
+                      ORDER BY deploy_id, pending_version, event_seq DESC
+                 ),
+                 latest_obligation AS (
+                     SELECT DISTINCT ON (pending_version) pending_version, state
+                       FROM {meta}.schema_pending_contracts
+                      ORDER BY pending_version, event_seq DESC
+                 )
+                 SELECT r.deploy_id, r.pending_version
+                   FROM latest_recovery r
+                   JOIN latest_obligation o ON o.pending_version = r.pending_version
+                  WHERE r.state = 'open' AND o.state = '{pending}'
+                  ORDER BY r.deploy_id, r.pending_version",
+                pending = PendingState::Pending.as_str()
+            ),
+            &[],
+        )
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| DeployRecovery {
+            deploy_id: row.get("deploy_id"),
+            pending_version: row.get("pending_version"),
+        })
+        .collect())
 }
 
 /// Count the number of versions the journal currently records as **net-applied**

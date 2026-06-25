@@ -206,6 +206,63 @@ async fn pending_contract_count(conn: &compio_postgres::Client, app_id: &Uuid) -
     rows[0].get::<_, i64>("n")
 }
 
+/// How many NET-OUTSTANDING online-rename obligations does this app have — the
+/// DISTINCT-ON-latest `state='pending'` net-state, exactly what
+/// `outstanding_pending_contracts` (and the engine interlock) keys on. This is the
+/// PR9d MED assertion target: after a same-deploy abort APPENDS a `resolved='aborted'`
+/// row, the original `pending` row STILL EXISTS (append-only), so the raw
+/// `pending_contract_count` (which counts every `pending` row) stays 1 — but the NET
+/// state is discharged, so THIS count is 0. A non-half-state means net-outstanding == 0.
+async fn net_outstanding_contract_count(conn: &compio_postgres::Client, app_id: &Uuid) -> i64 {
+    let meta = format!("{}_migrations", app_id);
+    let q = format!("\"{}\".schema_pending_contracts", meta.replace('"', "\"\""));
+    let lit = q.replace('\'', "''");
+    let present = conn
+        .query(&format!("SELECT to_regclass('{lit}') IS NOT NULL AS p"), &[])
+        .await
+        .expect("regclass probe");
+    if !present[0].get::<_, bool>("p") {
+        return 0;
+    }
+    let rows = conn
+        .query(
+            &format!(
+                "WITH latest AS (
+                     SELECT DISTINCT ON (pending_version) pending_version, state
+                       FROM {q}
+                      ORDER BY pending_version, event_seq DESC
+                 )
+                 SELECT count(*)::int8 AS n FROM latest WHERE state = 'pending'"
+            ),
+            &[],
+        )
+        .await
+        .expect("count net-outstanding contracts");
+    rows[0].get::<_, i64>("n")
+}
+
+/// Does a trigger named `trg` exist on `<app_id>.<table>`? The online-rename EXPAND
+/// installs a dual-write trigger; a clean abort must DROP it (no half-renamed table).
+async fn trigger_exists(
+    conn: &compio_postgres::Client,
+    app_id: &Uuid,
+    table: &str,
+    trg: &str,
+) -> bool {
+    let schema = app_id.to_string();
+    let rows = conn
+        .query(
+            "SELECT 1 FROM pg_trigger t \
+             JOIN pg_class c ON c.oid = t.tgrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = $2 AND t.tgname = $3",
+            &[&schema, &table, &trg],
+        )
+        .await
+        .expect("query pg_trigger");
+    !rows.is_empty()
+}
+
 /// The DISTINCT set of journal actor (`"by"`) strings recorded for this app's
 /// completed migration events. PR9c CRITICAL forensic-attribution: an
 /// operator-approved go-live must record `deploy-approved:<approver>` /
@@ -2359,6 +2416,224 @@ async fn deploy_migrate_routed_co_bundled_unreviewed_destructive_is_refused_pg()
     let _ = std::fs::remove_dir_all(&dir1);
     let _ = std::fs::remove_dir_all(&dir_rename_only);
     let _ = std::fs::remove_dir_all(&dir2);
+    cleanup_app(&conn, &app_id).await;
+}
+
+// ===========================================================================
+// PR9d MED — DEPLOY-SCOPED EXPAND RECOVERY (close the multi-file half-state gap).
+//
+// PG DDL commits PER STEP (no whole-bundle transaction). A multi-file APPROVED
+// bundle where file A is an in-scope online rename whose EXPAND commits durably
+// (dual-write trigger + shadow column + a journaled pending contract) and a LATER
+// file B FAILS at apply for a runtime reason the read-only pre-validation cannot
+// predict (here: a duplicate-PK `insert` → unique violation) must NOT leave file A
+// half-renamed behind the creator's 4xx. PR9d drives a same-deploy abort of file A's
+// EXPAND before surfacing the error, so:
+//   * the deploy returns Err (file B's failure is surfaced),
+//   * table X is NOT half-renamed (dual-write trigger gone, shadow column gone,
+//     `from` intact),
+//   * NO net-outstanding pending contract remains.
+//
+// RED PRE-FIX: before PR9d the apply loop only released the lock + surfaced the
+// error; file A's committed EXPAND was NOT rolled back, so the trigger + shadow
+// column + outstanding contract would all persist (a creator-visible half-state).
+// ===========================================================================
+#[compio::test]
+async fn deploy_migrate_pr9d_same_deploy_later_file_failure_aborts_expand_no_half_state() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    // Deploy #1 (routine): create `members(handle)` and seed one row (id m1).
+    let create = r#"{"ir_version":1,"name":"create_members","ops":[
+        {"op":"createTable","name":"members","columns":[
+            {"name":"handle","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    let dir1 = migrations_dir(&[("0001_create_members.ir.json", create)]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir1)
+        .await
+        .expect("createTable deploy must succeed");
+    let schema = app_id.to_string();
+    conn.batch_execute(&format!(
+        "INSERT INTO \"{schema}\".members (id, handle, created_at, updated_at, version) VALUES \
+         ('m1','ada', now(), now(), 1)"
+    ))
+    .await
+    .expect("seed members");
+
+    // Deploy #2 (APPROVED, multi-file): file A = in-scope online rename handle →
+    // username (its EXPAND commits durably). file B = an `insert` duplicating the
+    // EXISTING PK id='m1' — a UNIQUE violation that fires only at APPLY (the
+    // read-only pre-validation cannot predict it). file A applies FIRST (versions
+    // sort by filename), so its EXPAND has committed when file B trips.
+    let rename = r#"{"ir_version":1,"name":"rename_handle","ops":[
+        {"op":"renameColumn","table":"members","from":"handle","to":"username","type":"text"}
+    ]}"#;
+    let dup_insert = r#"{"ir_version":1,"name":"dup_insert","ops":[
+        {"op":"insert","table":"members",
+         "columns":["id","created_at","updated_at","version","handle"],"rows":[
+            ["m1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,"dup"]
+        ]}
+    ]}"#;
+    let dir2 = migrations_dir(&[
+        ("0002_rename_handle.ir.json", rename),
+        ("0003_dup_insert.ir.json", dup_insert),
+    ]);
+
+    let err = approve_whole_bundle(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect_err("the later-file duplicate-PK insert must FAIL the deploy at apply");
+    // The creator's 4xx cause is surfaced (the file-B failure), not masked by recovery.
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("duplicate") || msg.contains("unique") || msg.contains("Apply") || msg.contains("Ir"),
+        "the surfaced error must be file B's apply failure, got {msg}"
+    );
+
+    // PR9d: file A's EXPAND was ABORTED — NO half-renamed table:
+    //   (1) the dual-write trigger is GONE,
+    assert!(
+        !trigger_exists(&conn, &app_id, "members", "zsdw_members_handle_username_trg").await,
+        "PR9d: the same-deploy abort must DROP the dual-write trigger (no half-state)"
+    );
+    //   (2) the shadow `username` column is GONE,
+    assert!(
+        !column_exists(&conn, &app_id, "members", "username").await,
+        "PR9d: the same-deploy abort must DROP the shadow `username` column (no half-state)"
+    );
+    //   (3) the original `handle` column is INTACT (pre-rename shape preserved),
+    assert!(
+        column_exists(&conn, &app_id, "members", "handle").await,
+        "PR9d: the abort preserves the pre-rename `handle` column"
+    );
+    //   (4) NO net-outstanding pending contract remains (the obligation was aborted).
+    assert_eq!(
+        net_outstanding_contract_count(&conn, &app_id).await,
+        0,
+        "PR9d: a same-deploy later-file failure must leave NO net-outstanding online-rename \
+         contract (the EXPAND was aborted, not left owing a forever-pending contract)"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir1);
+    let _ = std::fs::remove_dir_all(&dir2);
+    cleanup_app(&conn, &app_id).await;
+}
+
+// PR9d MED — CRASH-RECOVERY leg. The process dies AFTER a same-deploy EXPAND
+// commits (obligation + `open` recovery marker durably written) but BEFORE the
+// in-process abort runs (simulated via the `DEPLOY_BEFORE_INPROCESS_ABORT` fault).
+// That leaves the obligation OUTSTANDING + its recovery marker `open` — a genuine
+// crash half-state. The NEXT same-app deploy's crash-recovery leg (serialized by
+// the project lock) must converge it FIRST: abort the half-renamed table, mark the
+// marker reconciled, THEN apply the new bundle. Idempotent on resume.
+//
+// RED PRE-FIX: without the crash-recovery leg the `open` marker + outstanding
+// obligation + dual-write trigger + shadow column would persist across deploys.
+#[compio::test]
+async fn deploy_migrate_pr9d_crash_before_abort_is_recovered_on_next_deploy() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    let create = r#"{"ir_version":1,"name":"create_members","ops":[
+        {"op":"createTable","name":"members","columns":[
+            {"name":"handle","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    let dir1 = migrations_dir(&[("0001_create_members.ir.json", create)]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir1)
+        .await
+        .expect("createTable deploy must succeed");
+    let schema = app_id.to_string();
+    conn.batch_execute(&format!(
+        "INSERT INTO \"{schema}\".members (id, handle, created_at, updated_at, version) VALUES \
+         ('m1','ada', now(), now(), 1)"
+    ))
+    .await
+    .expect("seed members");
+
+    // Deploy #2: file A rename + file B dup-insert (fails at apply). ARM a crash
+    // BEFORE the in-process abort so the recovery markers are durably written but the
+    // abort never runs — the genuine crash half-state.
+    zeroship_migrate::fault::arm(
+        zeroship_migrate::fault::points::DEPLOY_BEFORE_INPROCESS_ABORT,
+        0,
+    );
+    let rename = r#"{"ir_version":1,"name":"rename_handle","ops":[
+        {"op":"renameColumn","table":"members","from":"handle","to":"username","type":"text"}
+    ]}"#;
+    let dup_insert = r#"{"ir_version":1,"name":"dup_insert","ops":[
+        {"op":"insert","table":"members",
+         "columns":["id","created_at","updated_at","version","handle"],"rows":[
+            ["m1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,"dup"]
+        ]}
+    ]}"#;
+    let dir2 = migrations_dir(&[
+        ("0002_rename_handle.ir.json", rename),
+        ("0003_dup_insert.ir.json", dup_insert),
+    ]);
+    let _ = approve_whole_bundle(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect_err("the deploy fails (file B) and the in-process abort is crash-skipped");
+    zeroship_migrate::fault::disarm_all();
+
+    // The crash left the half-state: the dual-write trigger + shadow column live,
+    // the obligation OUTSTANDING, the recovery marker `open`.
+    assert!(
+        trigger_exists(&conn, &app_id, "members", "zsdw_members_handle_username_trg").await,
+        "crash-before-abort must leave the EXPAND's dual-write trigger live (the half-state)"
+    );
+    assert_eq!(
+        net_outstanding_contract_count(&conn, &app_id).await,
+        1,
+        "crash-before-abort must leave the obligation OUTSTANDING (the half-state to recover)"
+    );
+
+    // Deploy #3 (the NEXT same-app deploy): a benign create. Its crash-recovery leg
+    // must FIRST converge the crashed deploy's half-state — abort the rename — before
+    // applying the new bundle.
+    let benign = r#"{"ir_version":1,"name":"create_widgets","ops":[
+        {"op":"createTable","name":"widgets","columns":[{"name":"label","type":"text"}]}
+    ]}"#;
+    let dir3 = migrations_dir(&[("0004_create_widgets.ir.json", benign)]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir3)
+        .await
+        .expect("the next deploy must reconcile the crash half-state then apply cleanly");
+
+    // The crash-recovery leg aborted the half-renamed table:
+    assert!(
+        !trigger_exists(&conn, &app_id, "members", "zsdw_members_handle_username_trg").await,
+        "crash-recovery must DROP the dual-write trigger on the next deploy"
+    );
+    assert!(
+        !column_exists(&conn, &app_id, "members", "username").await,
+        "crash-recovery must DROP the shadow `username` column on the next deploy"
+    );
+    assert!(
+        column_exists(&conn, &app_id, "members", "handle").await,
+        "crash-recovery preserves the pre-rename `handle` column"
+    );
+    assert_eq!(
+        net_outstanding_contract_count(&conn, &app_id).await,
+        0,
+        "crash-recovery must discharge the outstanding obligation on the next deploy"
+    );
+    // And the new bundle still applied.
+    assert!(
+        table_exists(&conn, &app_id, "widgets").await,
+        "the next deploy's own bundle must apply after reconciling the crash half-state"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir1);
+    let _ = std::fs::remove_dir_all(&dir2);
+    let _ = std::fs::remove_dir_all(&dir3);
     cleanup_app(&conn, &app_id).await;
 }
 

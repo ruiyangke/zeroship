@@ -103,4 +103,12 @@ pub mod points {
     /// In the online expand: BETWEEN the E1+E2 apply and the E3 backfill (a crash
     /// here leaves E1/E2 journaled but E3 not — resume re-runs the backfill).
     pub const EXPAND_BETWEEN_E2_AND_BACKFILL: &str = "expand.between_e2_and_backfill";
+    /// In the control IR deploy loop (PR9d): a same-deploy later-file failure has
+    /// been detected and the deploy's recovery markers are durably written, but the
+    /// process dies BEFORE the in-process abort runs. A crash here leaves the
+    /// just-opened obligation OUTSTANDING + its recovery marker `open` — exactly the
+    /// state the NEXT same-app deploy's crash-recovery leg must converge from (abort
+    /// the half-renamed table, mark the marker reconciled). Tripped by the
+    /// deploy-recovery crash-fuzz test only.
+    pub const DEPLOY_BEFORE_INPROCESS_ABORT: &str = "deploy.before_inprocess_abort";
 }

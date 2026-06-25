@@ -598,6 +598,106 @@ impl ExpandContractAuthor {
     }
 }
 
+/// Re-author the ABORT DDL for an outstanding online-rename obligation as plain,
+/// phase-less [`PlanStep::Ddl`] steps — the SINGLE source of truth shared by the
+/// operator's `resolve-pending --abort` CLI (`guard::platform_runner`) AND the
+/// engine's same-deploy recovery ([`MigrationEngine::abort_same_deploy_expands`]).
+///
+/// The abort is the data-PRESERVING-of-`from` reverse of an EXPAND: it tears down
+/// the dual-write (C1: DROP TRIGGER + DROP FUNCTION) and drops the shadow `to`
+/// column, leaving the pre-rename `from` column intact. Re-deriving it
+/// DETERMINISTICALLY from the obligation's stored identity facts (`table`/`from`/
+/// `to`) means a single authoring path can never drift between the CLI and the
+/// engine recovery (the previous duplication risk).
+///
+/// **Idempotent on resume (Deliverable: crash-safe recovery).** BOTH steps are
+/// `IF EXISTS`: the C1 `up` is `DROP TRIGGER IF EXISTS … DROP FUNCTION IF EXISTS …`
+/// (authored that way), and the shadow-column drop is authored here as
+/// `ALTER TABLE … DROP COLUMN IF EXISTS <to>` (NOT E1's bare `down`, which has no
+/// `IF EXISTS`). So re-running the abort after a partial crash — where the trigger
+/// and/or shadow column were already dropped — is a clean no-op, never an error.
+///
+/// Returns `(steps, Resolution::Aborted)`. The shadow-column drop is flagged
+/// `destructive` (it discards any value written ONLY to the shadow `to` column
+/// since cutover — the same data-loss the `--abort` acknowledgement covers).
+///
+/// # Errors
+/// [`ExpandContractError::Invalid`] if the obligation's stored identity facts are
+/// themselves invalid (empty/identical names) — the same author validation the
+/// original EXPAND passed, so this never fires for a real obligation.
+pub fn build_abort_steps(
+    project_schema: &str,
+    pc: &crate::journal::PendingContract,
+) -> Result<Vec<crate::plan::PlanStep>, ExpandContractError> {
+    // Re-author the rename so we can reuse the BYTE-STABLE C1 `up` (drop trigger +
+    // fn). The owner-app label is cosmetic on the re-authored plan (the steps below
+    // are re-wrapped as plain phase-less `Ddl`), so a stable sentinel is fine.
+    let author = ExpandContractAuthor::new(project_schema.to_string(), "deploy-recovery-abort");
+    let plan = author.author(&OnlineIntent::RenameColumn {
+        table: pc.table.clone(),
+        from: pc.from_col.clone(),
+        to: pc.to_col.clone(),
+        ty: pc.ty.clone(),
+    })?;
+    let c1 = plan
+        .contract
+        .first()
+        .ok_or_else(|| ExpandContractError::Invalid("re-authored plan has no C1 step".into()))?;
+    // The shadow `to` column drop, authored with IF EXISTS for idempotent resume
+    // (E1's `down` is a bare DROP COLUMN — not safe to re-run).
+    let tbl_q = qualified(project_schema, &pc.table);
+    let to_q = quote_ident(&pc.to_col);
+    let drop_shadow = format!("ALTER TABLE {tbl_q} DROP COLUMN IF EXISTS {to_q}");
+    Ok(vec![
+        crate::plan::PlanStep::Ddl(abort_plain_ddl(
+            &format!("recover_abort_drop_trigger_{}", pc.table),
+            c1.up.clone(),
+            false,
+        )),
+        crate::plan::PlanStep::Ddl(abort_plain_ddl(
+            &format!("recover_abort_drop_shadow_{}", pc.table),
+            drop_shadow,
+            true,
+        )),
+    ])
+}
+
+/// A fresh-id, phase-less plain `Ddl` migration carrying the abort `up` SQL. Mirror
+/// of `platform_runner::plain_ddl` (kept here so `build_abort_steps` is the shared
+/// authoring path); phase-less so the executor's expand-contract gate does NOT
+/// re-gate it on the journaled E-phase versions — the obligation read-back / the
+/// resolve exemption is the gate.
+fn abort_plain_ddl(name: &str, up: String, destructive: bool) -> Migration {
+    use crate::migration::ChecksumInput;
+    let flags = MigrationFlags {
+        destructive,
+        requires_approval: destructive,
+        ..MigrationFlags::default()
+    };
+    let mut m = Migration {
+        version: MigrationId::generate(),
+        name: name.to_string(),
+        up,
+        down: None,
+        checksum: Checksum::of(&ChecksumInput {
+            up: "",
+            down: None,
+            flags: &flags,
+            owner_app: "deploy-recovery-abort",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        }),
+        flags,
+        owner_app: "deploy-recovery-abort".to_string(),
+        depends_on: Vec::new(),
+        supersedes: Vec::new(),
+        preconditions: Vec::new(),
+    };
+    m.checksum = Checksum::of(&ChecksumInput::from_migration(&m));
+    m
+}
+
 /// Render the dual-write function + trigger SQL (shared by E2's `up` and C1's
 /// `down`, so they are byte-identical).
 ///
@@ -1283,6 +1383,18 @@ mod tests {
             "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_migrate_test";
         let dsn = std::env::var("MIGRATE_TEST_DB").unwrap_or_else(|_| DSN.to_string());
         let Ok(conn) = crate::db::connect(&dsn).await else {
+            // PR9d (2) — extend the faithful-e2e hard-gate to the migrate crate.
+            // This is a FAIL-CLOSED security proof (an empty-expand scope check that
+            // must REFUSE, not fall open). Under MIGRATE_REQUIRE_DB an unreachable
+            // :5440 must be a HARD failure, never a vacuous green skip — mirroring
+            // the control crate's `admin_conn` gate. Without the gate a misconfigured
+            // CI could pass this proof green without ever running it (the masking risk).
+            assert!(
+                std::env::var("MIGRATE_REQUIRE_DB").is_err(),
+                "MIGRATE_REQUIRE_DB is set but zeroship_migrate_test on :5440 is unreachable; \
+                 the faithful-deploy security suite must NOT silently skip in CI — \
+                 a missing test DB is a hard failure, not a vacuous green pass"
+            );
             eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
             return;
         };

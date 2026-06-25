@@ -1724,6 +1724,19 @@ async fn pg_opt() -> Option<Client> {
             .detach();
             Some(client)
         }
-        Err(_) => None,
+        Err(e) => {
+            // PR9d (2) — extend the faithful-e2e hard-gate to the migrate crate.
+            // `pg_opt()`'s sole caller silently skips when :5440 is down. Under
+            // MIGRATE_REQUIRE_DB that must be a HARD failure (an unreachable test DB is
+            // not a vacuous green pass), mirroring the control crate's `admin_conn`
+            // gate. This hard-gates every `pg_opt()` caller at once.
+            assert!(
+                std::env::var("MIGRATE_REQUIRE_DB").is_err(),
+                "MIGRATE_REQUIRE_DB is set but zeroship_migrate_test on :5440 is unreachable \
+                 ({e}); the faithful-deploy security suite must NOT silently skip in CI — \
+                 a missing test DB is a hard failure, not a vacuous green pass"
+            );
+            None
+        }
     }
 }

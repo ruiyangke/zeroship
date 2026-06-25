@@ -121,6 +121,43 @@ itself:
   applies — if any scope-gated op is out-of-scope the deploy is refused
   wholesale, so an earlier approved EXPAND never commits ahead of a guaranteed
   later refusal (no half-renamed-table state).
+
+> ⚠️ **No half-renamed-table state — the three cases it now covers (PR9d).** PG
+> DDL commits **per migration step** (`BEGIN; <up>; INSERT journal; COMMIT` per
+> migration); there is **no whole-bundle transaction**. So in a multi-file bundle,
+> an earlier in-scope online-rename EXPAND can durably commit (its dual-write
+> trigger + shadow column + a journaled pending contract) **before** a later file
+> is refused. The platform guarantees the creator never sees a half-renamed table
+> across all three refusal/failure classes:
+>
+> 1. **Scope refusal** (a co-bundled op outside the approved set) — caught by the
+>    whole-bundle pre-validation above, **before** any file applies; nothing
+>    commits.
+> 2. **Prior-deploy interlock refusal** (an op touching a table that owes an
+>    *outstanding* online-rename contract from an earlier deploy) — also caught by
+>    the same pre-validation read-back, before any file applies.
+> 3. **Same-deploy later-file APPLY failure** (a runtime error the read-only
+>    pre-validation *cannot* predict: a CHECK/unique violation, a backfill error, a
+>    second rename mid-expand failure, any genuine DB error). Here the earlier
+>    EXPAND *has already committed*. The deploy now drives a **deploy-scoped
+>    recovery**: under the still-held project lock it **aborts the same-deploy
+>    EXPAND** (drops the dual-write trigger + the shadow column with `IF EXISTS`,
+>    leaving the pre-rename column intact, and discharges the just-opened
+>    obligation `aborted`) **before** surfacing the creator's 4xx. The recovery is
+>    journaled (a per-deploy recovery marker) and **crash-safe**: if the process
+>    dies between the EXPAND commit and the abort, the **next** same-app deploy
+>    reconciles the leftover marker first (the abort's `DROP … IF EXISTS` is
+>    idempotent on resume). So a refused multi-file bundle leaves **no**
+>    half-renamed table regardless of the failure cause.
+>
+> **The one irreducible residue.** If the **abort DDL itself** fails (the DB went
+> unreachable mid-recovery), the obligation stays outstanding and its recovery
+> marker stays `open`. This is **fail-closed**, not fail-open: the next same-app
+> deploy re-attempts the abort, and the prior-deploy interlock (case 2) refuses any
+> new bundle touching the half-renamed table until it is cleared. The operator can
+> also clear it manually with the `resolve-pending --apply | --abort` CLI command
+> (`--apply` completes the rename; `--abort` rolls it back, dropping the shadow
+> column).
 - The approver's principal is stamped into the immutable journal
   (`applied_by = deploy-approved:<approver>` / `deploy-ir-approved:<approver>`),
   so an operator-approved go-live is forensically distinct from a routine deploy.

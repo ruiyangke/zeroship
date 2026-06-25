@@ -883,6 +883,19 @@ async fn collect_bundle_facts(
 /// Only consulted on the [`ApprovalScope::Versions`] (approved) path — the routine
 /// `ApprovalScope::All` / `Approval::None` deploy refuses each destructive op individually
 /// at apply, and additive-only routine deploys have no scope-gated step to pre-validate.
+///
+/// **Scope (PR9d).** This pre-validation closes only the **read-only-predictable**
+/// failure classes — (A) scope refusal and (B) prior-deploy interlock refusal — so no
+/// EXPAND commits ahead of a *guaranteed* later refusal. It does NOT (and cannot) cover a
+/// same-deploy later-file **runtime APPLY failure** (a CHECK/unique violation, a backfill
+/// error, any genuine DB error the read-only pass cannot foresee): by definition that only
+/// surfaces once the file actually applies, AFTER an earlier EXPAND has committed. That
+/// residual half-state is closed at the apply layer by [`apply_bundle_ir_migrations`]'s
+/// **deploy-scoped EXPAND recovery** (it aborts the same-deploy EXPAND under the held lock
+/// before surfacing the 4xx, crash-safe + idempotent on resume) — NOT here. The combined
+/// guarantee (no creator-visible half-renamed table across all three classes; only an
+/// abort-DDL failure leaves an operator-clearable residue) is documented in
+/// `docs/runbooks/db-migrations.md`.
 async fn prevalidate_bundle_scope(
     conn: &compio_postgres::Client,
     app_id: &Uuid,
@@ -997,6 +1010,22 @@ async fn prevalidate_bundle_scope(
 /// (the per-app schema `"<app_id>"`, all tables owned by `app_id`).
 ///
 /// An empty / IR-free directory is a clean no-op.
+///
+/// **Deploy-scoped EXPAND recovery (PR9d — no half-renamed table).** The whole file
+/// loop runs under ONE held project lock. Because PG DDL commits per step (no
+/// whole-bundle txn), an earlier in-scope online-rename EXPAND can durably commit
+/// before a LATER file fails at apply for a runtime reason the read-only
+/// pre-validation cannot predict. This routine makes the WHOLE deploy a recoverable
+/// unit: every same-deploy EXPAND is stamped with a journaled, per-deploy recovery
+/// marker; if a later file fails, the loop drives a same-deploy abort
+/// ([`MigrationEngine::abort_same_deploy_expands`]) over exactly this deploy's
+/// EXPANDs — under the still-held lock, before surfacing the creator's 4xx — so no
+/// half-renamed table is left behind. It is crash-safe: a process death between the
+/// EXPAND commit and the abort leaves the marker `open`, and the NEXT same-app deploy
+/// reconciles it first (the abort is idempotent on resume). The only residue is an
+/// abort-DDL failure (DB unreachable mid-recovery), which is fail-closed: the marker
+/// stays `open` for the next deploy + the interlock fences the table until cleared.
+/// See `docs/runbooks/db-migrations.md` and [`prevalidate_bundle_scope`].
 ///
 /// # Errors
 /// [`DeployMigrateError::Ir`] on a fail-closed gate refusal / lower failure (a
@@ -1142,9 +1171,89 @@ async fn apply_bundle_ir_migrations(
     // `deploy-ir-approved:<approver>` on an operator-approved go-live (computed once).
     let ir_actor = actor.ir_actor();
 
+    // PR9d MED — DEPLOY-SCOPED EXPAND RECOVERY (close the multi-file half-state gap).
+    //
+    // PG DDL commits PER STEP (no whole-bundle transaction), so an in-scope online-
+    // rename EXPAND in an EARLIER file durably commits (E1/E2/E3 + dual-write trigger
+    // + the pending-contract obligation) BEFORE a LATER file in the SAME deploy can
+    // fail at apply for a runtime reason the read-only pre-validation cannot predict
+    // (a CHECK/unique violation, a backfill error, a second rename mid-expand
+    // failure). Pre-PR9d that left the earlier table half-renamed behind the
+    // creator's 4xx, owing a pending contract.
+    //
+    // We make the WHOLE deploy a RECOVERABLE unit:
+    //   * `deploy_id` — a per-deploy UUIDv7 generated ONCE here, keying this deploy's
+    //     recovery markers (the strict same-deploy scope).
+    //   * `opened_this_deploy` — the obligations every file's EXPAND opened, each
+    //     also stamped with an `open` recovery marker (admin-written, append-only).
+    //   * CRASH-RECOVERY leg (below, before the loop, under the held lock): reconcile
+    //     any `open` PRIOR-deploy markers whose obligation is still outstanding by
+    //     driving the same abort, then mark them reconciled — BEFORE applying the new
+    //     bundle.
+    //   * IN-PROCESS leg (the loop's Err arm, before the lock release): drive the
+    //     abort over `opened_this_deploy`, then mark its markers reconciled.
+    //   * SUCCESS: mark this deploy's markers reconciled (the EXPANDs legitimately
+    //     remain pending as the §2.0.2 cross-deploy partition — NOT a half-state).
+    //
+    // All under the SINGLE whole-deploy project lock acquired above, so it is
+    // race-free. SQLite no-ops every recovery method (no online rename ⇒ no half-state).
+    let deploy_id = Uuid::now_v7().to_string();
+    let mut opened_this_deploy: Vec<zeroship_migrate::journal::PendingContract> = Vec::new();
+
     // Run the whole file loop under the held lock, capturing the result so the lock
     // is released on EVERY path (success/error/early-return) before we surface it.
     let loop_result: Result<(), DeployMigrateError> = async {
+        // CRASH-RECOVERY leg — reconcile any prior-deploy `open` recovery markers
+        // whose obligation is STILL outstanding (a process death between an EXPAND
+        // commit and the in-process abort of an EARLIER deploy). Idempotent: the
+        // abort's `DROP … IF EXISTS` is a no-op if already done, and the marker is
+        // marked `reconciled` only after the abort succeeds. This runs FIRST so the
+        // new bundle never applies on top of a half-renamed table from a crashed
+        // prior deploy.
+        let prior = backend
+            .outstanding_deploy_recoveries(exec_cfg)
+            .await
+            .map_err(|e| DeployMigrateError::Apply(EngineError::Apply(ApplyError::Journal(e))))?;
+        if !prior.is_empty() {
+            let prior_pvs: std::collections::BTreeSet<&str> =
+                prior.iter().map(|r| r.pending_version.as_str()).collect();
+            let outstanding = backend
+                .outstanding_pending_contracts(exec_cfg)
+                .await
+                .map_err(|e| DeployMigrateError::Apply(EngineError::Apply(ApplyError::Journal(e))))?;
+            let to_abort: Vec<_> = outstanding
+                .into_iter()
+                .filter(|pc| prior_pvs.contains(pc.pending_version.as_str()))
+                .collect();
+            engine
+                .abort_same_deploy_expands(
+                    &to_abort,
+                    backend,
+                    exec_cfg,
+                    &ir_actor,
+                    LockMode::AlreadyHeld,
+                )
+                .await
+                .map_err(DeployMigrateError::from)?;
+            for r in &prior {
+                backend
+                    .mark_deploy_recovery_reconciled(
+                        exec_cfg,
+                        &r.deploy_id,
+                        &r.pending_version,
+                        &ir_actor,
+                    )
+                    .await
+                    .map_err(|e| DeployMigrateError::Apply(EngineError::Apply(ApplyError::Journal(e))))?;
+            }
+            tracing::warn!(
+                app_id = %app_id,
+                reconciled = prior.len(),
+                "deploy-migrate: PR9d crash-recovery — aborted same-deploy EXPANDs from a \
+                 crashed prior deploy (half-renamed table rolled back) before applying this bundle"
+            );
+        }
+
     for path in &ir_files {
         let file = path
             .file_name()
@@ -1224,6 +1333,24 @@ async fn apply_bundle_ir_migrations(
                 .map(|m| m.version.as_str().to_string()),
         );
 
+        // PR9d MED — record an `open` deploy-recovery marker for every obligation
+        // THIS file's EXPAND just opened (keyed on this deploy's `deploy_id`), and
+        // accumulate the obligation so a LATER file's failure can abort exactly
+        // these. The marker is written admin-side, append-only, under the held lock
+        // — it durably survives a process crash for the crash-recovery leg above.
+        for pc in &outcome.opened_obligations {
+            backend
+                .record_deploy_recovery_open(
+                    exec_cfg,
+                    &deploy_id,
+                    &pc.pending_version,
+                    &ir_actor,
+                )
+                .await
+                .map_err(|e| DeployMigrateError::Apply(EngineError::Apply(ApplyError::Journal(e))))?;
+        }
+        opened_this_deploy.extend(outcome.opened_obligations.iter().cloned());
+
         // ADVANCE the cross-file registry + live-set with THIS file's freshly-
         // created tables (now applied), so the NEXT `.ir.json` sees them as
         // owned-by-the-deployer + live.
@@ -1236,6 +1363,137 @@ async fn apply_bundle_ir_migrations(
     }
     .await;
 
+    // PR9d MED — DEPLOY-SCOPED RECOVERY decision, run while the whole-deploy project
+    // lock is STILL HELD (before the release below), so it is race-free against any
+    // concurrent same-project deploy. Two arms:
+    //
+    //   * loop FAILED → IN-PROCESS abort leg: drive the SHARED abort over exactly
+    //     THIS deploy's opened obligations (`opened_this_deploy`), rolling back every
+    //     same-deploy half-renamed table, then mark this deploy's recovery markers
+    //     reconciled. The ORIGINAL loop error is still surfaced below (the creator
+    //     still gets their 4xx) — recovery is additive cleanup on the failure path,
+    //     it never masks the failure. An abort-DDL failure here is logged and leaves
+    //     the markers `open` (the documented irreducible residue: the NEXT same-app
+    //     deploy's crash-recovery leg re-attempts it, and the interlock still refuses
+    //     any new bundle touching the half-renamed table until cleared).
+    //
+    //   * loop SUCCEEDED → mark this deploy's recovery markers reconciled. The EXPANDs
+    //     legitimately remain pending as the §2.0.2 cross-deploy partition — a
+    //     SUCCESSFUL go-live is NOT a half-state, so its markers must close so the
+    //     crash-recovery leg never mistakes them for a crashed deploy.
+    //
+    // CRITICAL: this whole block runs BEFORE the lock release below and MUST NOT
+    // early-return (`?`) — that would skip the single-release PR9a invariant. The
+    // success-path reconcile failure is captured into `recovery_result` and surfaced
+    // AFTER the release.
+    let mut recovery_result: Result<(), DeployMigrateError> = Ok(());
+    if !opened_this_deploy.is_empty() {
+        match &loop_result {
+            Err(orig) if zeroship_migrate::fault::trip(
+                zeroship_migrate::fault::points::DEPLOY_BEFORE_INPROCESS_ABORT,
+            )
+            .is_err() =>
+            {
+                // CRASH SIMULATION (test-only fault; inert in production). The
+                // recovery markers are durably written but the process "dies" before
+                // the in-process abort — leaving the obligation OUTSTANDING + its
+                // marker `open`. The NEXT same-app deploy's crash-recovery leg
+                // converges this. Surface the original loop error below (the lock is
+                // released first), exactly as a real crash-then-restart would.
+                tracing::warn!(
+                    app_id = %app_id,
+                    error = %orig,
+                    "deploy-migrate: PR9d — simulated crash before the in-process abort \
+                     (test fault); leaving the recovery marker `open` for the next deploy"
+                );
+            }
+            Err(orig) => {
+                tracing::warn!(
+                    app_id = %app_id,
+                    error = %orig,
+                    opened = opened_this_deploy.len(),
+                    "deploy-migrate: PR9d — a later file failed; aborting THIS deploy's online-\
+                     rename EXPANDs (rolling back the half-renamed table) before surfacing the error"
+                );
+                match engine
+                    .abort_same_deploy_expands(
+                        &opened_this_deploy,
+                        backend,
+                        exec_cfg,
+                        &ir_actor,
+                        LockMode::AlreadyHeld,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        for pc in &opened_this_deploy {
+                            if let Err(e) = backend
+                                .mark_deploy_recovery_reconciled(
+                                    exec_cfg,
+                                    &deploy_id,
+                                    &pc.pending_version,
+                                    &ir_actor,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    app_id = %app_id, error = %e,
+                                    "deploy-migrate: PR9d — abort succeeded but marking the \
+                                     recovery marker reconciled failed; it stays `open` (next \
+                                     deploy's crash-recovery is a harmless no-op on the already-\
+                                     aborted obligation)"
+                                );
+                            }
+                        }
+                    }
+                    Err(abort_err) => {
+                        // The irreducible residue: the abort DDL itself failed (DB
+                        // unreachable mid-recovery). Leave the markers `open` so the
+                        // next same-app deploy re-attempts; the interlock keeps the
+                        // half-renamed table fenced until cleared. Fail-closed. We do
+                        // NOT overwrite the ORIGINAL loop error (the creator's 4xx
+                        // cause) — that is surfaced below.
+                        tracing::error!(
+                            app_id = %app_id,
+                            original_error = %orig,
+                            abort_error = %abort_err,
+                            "deploy-migrate: PR9d — same-deploy EXPAND abort FAILED; the obligation \
+                             stays outstanding + its recovery marker stays `open` (next deploy re-\
+                             attempts; resolve-pending --abort is the manual escape). The interlock \
+                             still refuses any new bundle touching the table until cleared."
+                        );
+                    }
+                }
+            }
+            Ok(()) => {
+                // The deploy SUCCEEDED, so its EXPANDs legitimately stay pending
+                // (§2.0.2). Mark the recovery markers reconciled so the crash-recovery
+                // leg of a FUTURE deploy never mistakes this go-live for a crash and
+                // false-aborts a legitimately-pending contract. This MUST succeed for
+                // the marker state to be consistent: a failure is captured and surfaced
+                // as a hard error AFTER the lock release (the DDL is already committed +
+                // idempotent, so the retried deploy re-reconciles cleanly) rather than
+                // silently leaving an `open` marker over a still-outstanding obligation.
+                for pc in &opened_this_deploy {
+                    if let Err(e) = backend
+                        .mark_deploy_recovery_reconciled(
+                            exec_cfg,
+                            &deploy_id,
+                            &pc.pending_version,
+                            &ir_actor,
+                        )
+                        .await
+                    {
+                        recovery_result = Err(DeployMigrateError::Apply(EngineError::Apply(
+                            ApplyError::Journal(e),
+                        )));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     // RELEASE the whole-deploy project lock on EVERY path (PR9a MED). Surface the
     // loop's error first; a release failure is only logged (the lock auto-releases
     // on session end regardless), mirroring `apply_declarative`'s release-or-warn.
@@ -1246,7 +1504,10 @@ async fn apply_bundle_ir_migrations(
             "deploy-migrate: failed to release whole-deploy project lock after IR loop (PR9a MED)"
         );
     }
+    // Surface the loop error first (the creator's original 4xx cause); only if the
+    // loop SUCCEEDED do we surface a success-path recovery-reconcile failure.
     loop_result?;
+    recovery_result?;
 
     // SET-LEVEL integrity manifest over the discovered+lowered `.ir.json` set
     // (§8 point 5). Mirrors the `.sql` path's `compute_manifest` traceability log:
