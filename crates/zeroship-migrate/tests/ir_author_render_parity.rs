@@ -6,6 +6,7 @@
 //! the same table TWO ways:
 //!   - a `t.*` schema (descriptors) fed through `DeclarativeAuthor::diff`, and
 //!   - the equivalent DSL IR fed through `IrAuthor::lower`,
+//!
 //! and assert the emitted SQL (`up` + `down` + the `COMMENT ON COLUMN` side
 //! outputs + the injected system fields) is identical.
 //!
@@ -355,7 +356,7 @@ fn create_index_render_is_byte_identical_pg() {
     };
     // Diff against a live table that already has the columns but not the index, so
     // the ONLY emitted op is the CREATE INDEX.
-    let desired = zeroship_migrate::declarative::desired_snapshot(SCHEMA, &[desc.clone()])
+    let desired = zeroship_migrate::declarative::desired_snapshot(SCHEMA, std::slice::from_ref(&desc))
         .expect("desired");
     let mut live_desc = desc.clone();
     live_desc.indexes = vec![];
@@ -670,6 +671,10 @@ fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
     );
 }
 
+// The `one` test-helper closure returns `Result<_, IrLowerError>` (the ~128-byte
+// lower error); this is a cold test path, not production, so the size heuristic is
+// allowed narrowly (mirrors the production `IrAuthor::lower` decision).
+#[allow(clippy::result_large_err)]
 #[test]
 fn standalone_alter_and_constraint_are_sqlite_rebuild_only() {
     use zeroship_migrate::ir::{ColType, IrConstraint, IrConstraintKind, Op};
@@ -995,7 +1000,7 @@ fn create_index_render_is_byte_identical_sqlite() {
         }],
     };
     let desired =
-        zeroship_migrate::declarative::desired_snapshot_for_dialect(SCHEMA, &[desc.clone()], SqlDialect::Sqlite)
+        zeroship_migrate::declarative::desired_snapshot_for_dialect(SCHEMA, std::slice::from_ref(&desc), SqlDialect::Sqlite)
             .expect("desired");
     let mut live_desc = desc.clone();
     live_desc.indexes = vec![];

@@ -292,7 +292,7 @@ enum Command {
     Load,
     /// Resolve a cross-deploy online-rename PENDING CONTRACT (§2.0.3). After an
     /// online `renameColumn` EXPAND applies, its contract (drop dual-write trigger
-    /// + drop old column) is deferred to a later deploy and held as a durable
+    /// and drop old column) is deferred to a later deploy and held as a durable
     /// obligation that fail-closed refuses further changes to the table. This
     /// command discharges it. GATED on `--yes` (both paths are destructive). PG
     /// only — a SQLite rename is atomic and has no pending partition.

@@ -47,6 +47,14 @@ use zeroship_schema::query::SqlDialect;
 /// dialect-chosen [`RenameStep`] (PG expand-contract or SQLite rebuild). Keeping
 /// them as one return type lets `lower`/`lower_guarded` build the ordered
 /// `Vec<PlanStep>` an [`AppliedPlan`] needs while still guarding each DDL fragment.
+//
+// `Dml(PlanStep)` is the large variant (a `PlanStep` carries the rendered
+// statement + binds). This is a SHORT-LIVED lowering accumulator, not stored or
+// returned by value in bulk — it is immediately unwrapped into the `Vec<PlanStep>`
+// at the call site, so the per-value size is irrelevant to any hot path. Boxing it
+// would add an allocation per lowered op for no real-world win, so the heuristic is
+// allowed here narrowly.
+#[allow(clippy::large_enum_variant)]
 enum LoweredOp {
     /// DDL units (createTable / addColumn / alter* / addConstraint / …) — each a
     /// `Migration` + its structural per-statement list (for guard-per-fragment).
@@ -822,6 +830,11 @@ impl IrAuthor {
     ///   (malformed, future ir_version, structural reject incl. the fail-closed
     ///   bare-name DropIndex, ownership violation, or checksum-hint mismatch).
     /// - [`LoadAndLowerError::Lower`] — lowering a validated op failed.
+    // The `Err` variant transitively embeds a load/declarative error (~128 bytes).
+    // This is the cold deploy-failure path; boxing the variants to satisfy the
+    // size heuristic would churn the `#[from]`/`?` ergonomics across the lower
+    // pipeline for no real-world win, so the lint is allowed narrowly here.
+    #[allow(clippy::result_large_err)]
     pub fn load_and_lower(
         &self,
         bytes: &str,
@@ -860,6 +873,9 @@ impl IrAuthor {
     /// - [`LoadAndLowerGuardedError::Load`] — the load gate refused the artifact.
     /// - [`LoadAndLowerGuardedError::Lower`] — a lower failure, a guard-denied
     ///   fragment (op-index attributed), or a reassembly-invariant break.
+    // Cold deploy-failure path; the `Err` variant is ~128 bytes. See
+    // `load_and_lower` for why the large error variants stay unboxed.
+    #[allow(clippy::result_large_err)]
     pub fn load_and_lower_guarded(
         &self,
         bytes: &str,
@@ -1745,6 +1761,12 @@ impl IrAuthor {
     /// The SQLite leg is unaffected: a non-`main` schema is refused EARLIER
     /// ([`IrLowerError::SqliteSchemaUnsupported`]) before `lower_backfill`, and
     /// SQLite's single `main` db renders the table unqualified.
+    // Eight cohesive lowering parameters destructured straight out of the
+    // `Op::Backfill` IR variant (schema/table/cursor/batch/set/filter/name); a
+    // params struct would just re-wrap the variant's own fields with no gain and
+    // risks the behavior change this hygiene pass forbids. Private method, 2
+    // in-crate callers.
+    #[allow(clippy::too_many_arguments)]
     fn lower_backfill(
         &self,
         eff_schema: &str,
@@ -1809,6 +1831,9 @@ impl IrAuthor {
     /// - [`IrGuardedLowerError::Denied`] — a rendered fragment was guard-denied.
     /// - [`IrGuardedLowerError::ReassemblyMismatch`] — the fragment split did not
     ///   round-trip (engine bug; fail closed).
+    // Cold lower-failure path; the `Err` variant is ~128 bytes. See
+    // `load_and_lower` for why the large error variants stay unboxed.
+    #[allow(clippy::result_large_err)]
     pub fn lower_guarded(
         &self,
         ir: &MigrationIr,

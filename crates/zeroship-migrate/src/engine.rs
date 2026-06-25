@@ -1685,6 +1685,12 @@ impl MigrationEngine {
     /// The denial / approval gate runs identically in both modes — an early gate
     /// rejection under `AlreadyHeld` returns without touching the lock (the outer
     /// `apply_declarative` still releases it), so the lock is never leaked.
+    // Eight cohesive apply parameters (plan + approval/scope + backend/cfg +
+    // attribution + lock-mode), each a distinct concern read independently in the
+    // body; bundling them into a params struct would be a pure-shuffle refactor
+    // with no readability gain and risks the behavior change this hygiene pass
+    // forbids. Private method, 3 in-crate callers.
+    #[allow(clippy::too_many_arguments)]
     async fn apply_inner<B: MigrationBackend>(
         &self,
         plan: &MigrationPlan,

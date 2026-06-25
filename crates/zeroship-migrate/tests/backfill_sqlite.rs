@@ -11,6 +11,14 @@
 //! - a re-run after completion is an idempotent no-op;
 //! - approval/cursor-safety gates fire (defense-in-depth).
 
+// Every test holds the `serial()` `MutexGuard` across its `.await`s ON PURPOSE:
+// the guard is a test-only serialization lock over `()` (see `serial`) whose whole
+// job is to keep the PROCESS-GLOBAL armed-fault window exclusive for the duration
+// of one backfill run. There is no cross-task contention to deadlock (compio test,
+// single executor), so `await_holding_lock` is a false positive for this
+// deliberate pattern — allowed narrowly, scoped to this one test file.
+#![allow(clippy::await_holding_lock)]
+
 use std::path::PathBuf;
 
 use tempfile::TempDir;

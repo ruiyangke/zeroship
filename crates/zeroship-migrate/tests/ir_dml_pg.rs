@@ -130,16 +130,14 @@ async fn ir_authored_insert_update_delete_on_pg() {
     let s = q(&cfg.project_schema);
 
     // DDL: a real table (the migrator role creates it).
-    let create = format!(
-        r#"{{"ir_version":1,"name":"create_codes","ops":[
-            {{"op":"createTable","name":"codes","columns":[
-                {{"name":"code","type":"int","nullable":false,"unique":true}},
-                {{"name":"label","type":"text"}}
-            ]}}
-        ]}}"#
-    );
+    let create = r#"{"ir_version":1,"name":"create_codes","ops":[
+            {"op":"createTable","name":"codes","columns":[
+                {"name":"code","type":"int","nullable":false,"unique":true},
+                {"name":"label","type":"text"}
+            ]}
+        ]}"#;
     let _ = s;
-    author_and_apply(&conn, &cfg, &create, &registry(&[]), Approval::None).await;
+    author_and_apply(&conn, &cfg, create, &registry(&[]), Approval::None).await;
 
     // INSERT two rows through the assembler.
     let seed = r#"{"ir_version":1,"name":"seed","ops":[

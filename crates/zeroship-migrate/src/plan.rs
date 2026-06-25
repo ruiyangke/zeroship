@@ -51,6 +51,14 @@ pub enum DialectScope {
 /// A rename lowered to ONE of two **dialect-distinct executable shapes**, chosen
 /// by the deploy-target dialect at lowering (§2.6.2). The dual-execution dispatch
 /// in `apply_plan` is structural — a match on this variant.
+//
+// `SqliteRebuild` is the large variant (it carries the full 12-step rebuild plan).
+// Boxing it would force `Box::new(..)` at every `RenameStep::SqliteRebuild(..)`
+// construction and a deref at every structural match across the engine, the
+// control deploy path, and ~10 integration tests — a wide, churny change for a
+// cold plan-step value never held in bulk. The size heuristic is allowed here
+// narrowly rather than perturb the public plan shape pre-launch.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum RenameStep {
     /// **Postgres**: an online expand-contract. Executed via

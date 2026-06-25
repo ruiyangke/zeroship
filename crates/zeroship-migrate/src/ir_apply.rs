@@ -132,6 +132,12 @@ pub enum SqliteIrApplyError {
 ///
 /// # Errors
 /// [`SqliteIrApplyError`] on I/O / live-schema / fail-closed gate / apply failure.
+// Eight cohesive deploy parameters (backend + identity + descriptor set + IR dir
+// + exec/guard config + approval). This is the stable public SQLite-IR go-live
+// entry with ~20 in-tree (test) call sites; bundling into a params struct would
+// churn every caller for no readability gain and risks the behavior change this
+// hygiene pass forbids. Each arg is a distinct concern.
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_bundle_ir_sqlite(
     backend: &SqliteBackend,
     project_schema: &str,

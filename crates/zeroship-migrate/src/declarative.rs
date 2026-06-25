@@ -2533,9 +2533,9 @@ impl DeclarativeAuthor {
     /// **PR10** — a clone of this author bound to a different `project_schema`,
     /// for rendering ONE op under its resolved schema qualifier (§2.7). The
     /// emitter (`PgEmitter`) and `qualified()` read `project_schema`, so swapping
-    /// it here re-qualifies every statement the returned author renders. `owner_app`
-    /// + `dialect` are preserved. For the common no-override case the resolved
-    /// schema EQUALS the current `project_schema`, so the clone renders
+    /// it here re-qualifies every statement the returned author renders.
+    /// `owner_app` and `dialect` are preserved. For the common no-override case the
+    /// resolved schema EQUALS the current `project_schema`, so the clone renders
     /// byte-identically — keeping the Confined / no-schema path unchanged.
     #[must_use]
     pub(crate) fn with_project_schema(&self, schema: impl Into<String>) -> Self {

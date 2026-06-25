@@ -164,7 +164,7 @@ impl EventKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingState {
     /// The obligation is outstanding: the EXPAND ran, the contract (drop trigger
-    /// + drop old column) has not yet been applied. Any new op touching the
+    /// and drop old column) has not yet been applied. Any new op touching the
     /// rename's table is fail-closed refused (§2.0.3 item 2).
     Pending,
     /// The obligation is discharged: the contract was applied (`--apply`) or the
