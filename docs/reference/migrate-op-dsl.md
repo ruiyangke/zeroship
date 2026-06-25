@@ -902,7 +902,7 @@ Until per-version approval scoping lands, the approved go-live surface stays
 test-only (the regression test above pins it); treat online `renameColumn` as a
 dev/CLI capability, not a shipped production deploy path.
 
-## Offline SQL preview (`plan --sql`)
+## Offline SQL preview (`plan`)
 
 `zeroship-migrate plan --dir <d> --dialect <pg|sqlite>` renders the **exact
 per-dialect SQL the pending migration set WOULD execute** — without a database and
@@ -912,9 +912,9 @@ dbmate feature, here for one job: **operator go-live review**. Before approving 
 instead of approving blind.
 
 It is **distinct from `validate`** (the shadow dry-run): `validate` needs a real DB
-and *applies* the migration on a throwaway shadow to prove it runs; `plan --sql`
+and *applies* the migration on a throwaway shadow to prove it runs; `plan`
 opens **no connection** and renders the SQL statically. Use `validate` to prove it
-*works*; use `plan --sql` to review *what it does*.
+*works*; use `plan` to review *what it does*.
 
 The preview is a **surfacing layer**, not a second renderer: it prints back the SQL
 the engine already lowers (the `Migration.up` / DML `template`). It never
