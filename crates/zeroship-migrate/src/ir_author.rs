@@ -2057,7 +2057,16 @@ impl IrAuthor {
                     snap.constraints.push(ConstraintSnapshot {
                         name,
                         kind: "UNIQUE".to_string(),
-                        definition: format!("UNIQUE ({})", quote_cols(columns)),
+                        // Shared `pg_get_constraintdef`-matching spelling (conditional
+                        // quoting) — the SAME helper the offline fold uses, so the
+                        // lower's snapshot half and the fold cannot drift on the UNIQUE
+                        // `definition` body. (Unconditional `quote_cols` would emit
+                        // `UNIQUE ("handle")`, phantom-diffing the catalog's
+                        // `UNIQUE (handle)`.)
+                        definition: format!(
+                            "UNIQUE ({})",
+                            crate::declarative::constraintdef_cols(columns)
+                        ),
                     });
                 }
             }
@@ -2892,6 +2901,51 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         }
+    }
+
+    /// REGRESSION (mig-first P1 critique, Finding #4): the lower's createTable
+    /// table-level UNIQUE `definition` is spelled via the SHARED
+    /// [`crate::declarative::constraintdef_cols`] — the SAME helper the offline fold
+    /// uses — so the lower's snapshot half and the fold cannot drift on the body. The
+    /// CREATE DDL inlines that definition (`CONSTRAINT <name> UNIQUE (cols)`), so a
+    /// safe lowercase column renders BARE (`UNIQUE (handle)`), matching live
+    /// `pg_get_constraintdef`. RED before the fix: the lower used `quote_cols` →
+    /// `UNIQUE ("handle")`, phantom-diffing the catalog AND disagreeing with the fold.
+    #[test]
+    fn create_table_level_unique_definition_spelling_matches_fold_pg() {
+        let mut ir = create_table_ir(
+            "t",
+            vec![TIrColumn {
+                name: "handle".into(),
+                ty: ColType::Text,
+                nullable: Some(false),
+                default: None,
+                unique: None,
+            }],
+        );
+        if let Op::CreateTable { constraints, .. } = &mut ir.ops[0] {
+            constraints.push(IrConstraint {
+                name: Some("t_handle_uq".into()),
+                kind: IrConstraintKind::Unique { columns: vec!["handle".into()] },
+            });
+        }
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        let migs = author.lower(&ir, &LiveSchema::default()).expect("lower createTable+unique");
+        let create = migs
+            .iter()
+            .find(|m| m.up.contains("CREATE TABLE"))
+            .expect("a CREATE TABLE migration");
+        assert!(
+            create.up.contains("UNIQUE (handle)"),
+            "the lower must spell the UNIQUE definition BARE (matching the fold + \
+             pg_get_constraintdef), not `UNIQUE (\"handle\")`; got:\n{}",
+            create.up
+        );
+        assert!(
+            !create.up.contains("UNIQUE (\"handle\")"),
+            "the lower must NOT over-quote the UNIQUE column; got:\n{}",
+            create.up
+        );
     }
 
     // ── PR10: schema-qualifier render + existence-guard fail-closed ─────────────

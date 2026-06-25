@@ -20,6 +20,22 @@
 //! the `build_table_snapshot` snapshot-builder, this is the load-bearing proof that
 //! the fold matches what the differ + introspection produce.
 //!
+//! # What this oracle does NOT cover (mig-first P1 critique, Finding #3)
+//!
+//! `ColumnSnapshot`'s `Eq` compares only `name` / `data_type` / `nullable`. The
+//! EMISSION-ONLY fields — `default`, `encryption_sentinel`, `comment_sentinel` —
+//! are deliberately EXCLUDED from equality (introspection always leaves them
+//! `None`; only the desired/folded snapshot populates them). So this round-trip
+//! STRUCTURALLY CANNOT validate the fold's emission metadata — the exact fields P2
+//! `gen-types` reads to drive AEAD encrypt/decrypt + the column `DEFAULT` clause.
+//! Those are validated by the NO-DB unit goldens in `src/fold.rs`
+//! (`fold_emission_metadata_matches_builder_golden`,
+//! `fold_add_column_emission_metadata_matches_builder_golden`), which assert the
+//! fold's emitted `default` / sentinels match `build_table_snapshot` DIRECTLY (not
+//! via this Eq-blind oracle). The fold's fail-closed refusal of an encryption-
+//! contract-changing `alterColumnType` (the apply path cannot re-stamp the
+//! sentinel) is likewise a `src/fold.rs` unit concern.
+//!
 //! Requires `:5440` (the `*_pg` suite convention) + `MIGRATE_REQUIRE_DB=1`; run
 //! with `--test-threads=1`. This crate is the ONLY PG-test runner active.
 

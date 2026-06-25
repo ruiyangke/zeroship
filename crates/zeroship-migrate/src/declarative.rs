@@ -115,6 +115,18 @@ pub(crate) fn quote_ident_if_needed(ident: &str) -> String {
     }
 }
 
+/// Spell a `pg_get_constraintdef`-matching column list for a UNIQUE / PRIMARY KEY
+/// constraint `definition` body — `<col>, <col>, …` with CONDITIONAL per-column
+/// quoting ([`quote_ident_if_needed`]: bare for a safe lowercase ident, double-
+/// quoted for reserved/mixed-case). This is the SINGLE source of the constraintdef
+/// body spelling: BOTH the offline fold ([`crate::fold`]) and the IR lower's
+/// snapshot half ([`crate::ir_author`]) consume it, so the folded and the
+/// lower-emitted UNIQUE/PK `definition` cannot drift (an unconditional quote would
+/// phantom-diff `UNIQUE ("handle")` against the catalog's `UNIQUE (handle)`).
+pub(crate) fn constraintdef_cols(cols: &[String]) -> String {
+    cols.iter().map(|c| quote_ident_if_needed(c)).collect::<Vec<_>>().join(", ")
+}
+
 /// True iff `b` is a SQL identifier byte (so a whole-word scan does not match a
 /// substring of a larger identifier). ASCII alphanumerics + `_` + `$`. A
 /// double-quote is NOT an identifier byte, so `"col"` boundaries match a word.
