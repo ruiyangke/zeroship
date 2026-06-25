@@ -147,6 +147,25 @@ fn quote_ident(what: &'static str, ident: &str) -> Result<String, DmlError> {
     Ok(format!("\"{}\"", ident.replace('"', "\"\"")))
 }
 
+/// Quote the engine-supplied **project schema** for PG qualification. Unlike a
+/// bare authored identifier ([`quote_ident`]), the project schema under the
+/// Confined posture is the app id — a `UUIDv7` carrying `-` — so it is NOT a bare
+/// `[A-Za-z_][A-Za-z0-9_]*` ident and is emitted escape-and-quote, exactly as
+/// every other engine seam quotes it (`author::quote_ident` / `backfill` /
+/// `role` / `journal`): double an embedded `"`, wrap in `"`.
+///
+/// The schema is never author-supplied, but this render seam still fails closed
+/// rather than trust the caller: it refuses an empty schema and any schema
+/// carrying a NUL byte — the one byte that `"`-doubling cannot neutralise (PG
+/// rejects NUL inside an identifier outright). Everything else (including `"`)
+/// is rendered safely by escaping, byte-identically to the prior `format!`.
+fn quote_schema(schema: &str) -> Result<String, DmlError> {
+    if schema.is_empty() || schema.contains('\0') {
+        return Err(DmlError::InvalidIdentifier { what: "schema", value: schema.to_string() });
+    }
+    Ok(format!("\"{}\"", schema.replace('"', "\"\"")))
+}
+
 /// Qualify a validated bare table name for the target dialect.
 ///
 /// - **Postgres**: `"schema"."table"` — the project schema is engine-supplied
@@ -164,7 +183,19 @@ fn qualify_table(
 ) -> Result<String, DmlError> {
     let t = quote_ident("table", table)?;
     match dialect {
-        SqlDialect::Postgres => Ok(format!("\"{}\".{}", project_schema.replace('"', "\"\""), t)),
+        // L1 self-defense (PR10b): the project schema is engine-supplied (never
+        // author-supplied) on every current path — under the Confined posture it
+        // is the app id (a UUIDv7, e.g. `019efd94-…`, which carries `-`), so it
+        // is NOT a bare `[A-Za-z_][A-Za-z0-9_]*` identifier and MUST NOT go
+        // through `quote_ident` (that would reject every real deploy). It is
+        // emitted exactly as the rest of the engine emits the schema —
+        // escape-and-quote (`author::quote_ident` / `backfill` / `role`):
+        // `"<schema with "" doubled>"`. The render seam still does not blindly
+        // trust the caller: `quote_schema` fails closed on the one byte that
+        // double-quote escaping cannot neutralise (a NUL, which PG rejects in an
+        // identifier outright). For a quote-free schema the output is
+        // byte-identical to the prior `format!`, so the dml goldens stay green.
+        SqlDialect::Postgres => Ok(format!("{}.{}", quote_schema(project_schema)?, t)),
         SqlDialect::Sqlite => Ok(t),
     }
 }
@@ -891,6 +922,82 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, DmlError::InvalidIdentifier { what: "table", .. }), "{err:?}");
+    }
+
+    /// L1 self-defense (PR10b): the PG `qualify_table` arm must not blindly trust
+    /// the engine-supplied `project_schema`. A NUL byte — the one char that
+    /// `"`-doubling cannot neutralise (PG rejects it inside an identifier) — is
+    /// refused fail-closed with `DmlError::InvalidIdentifier { what: "schema" }`,
+    /// not interpolated. RED before the `quote_schema` assertion landed (the old
+    /// `format!` would have emitted a statement carrying the raw NUL).
+    #[test]
+    fn rejects_nul_in_project_schema_pg() {
+        let err = assemble_insert(
+            "app\0proj",
+            SqlDialect::Postgres,
+            "t",
+            &["a".into()],
+            &[vec![IrScalar::Int(1)]],
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, DmlError::InvalidIdentifier { what: "schema", .. }), "{err:?}");
+    }
+
+    /// An empty schema is likewise refused fail-closed — `""` cannot name a real
+    /// relation and an empty quoted ident (`""`) is degenerate.
+    #[test]
+    fn rejects_empty_project_schema_pg() {
+        let err = assemble_insert(
+            "",
+            SqlDialect::Postgres,
+            "t",
+            &["a".into()],
+            &[vec![IrScalar::Int(1)]],
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, DmlError::InvalidIdentifier { what: "schema", .. }), "{err:?}");
+    }
+
+    /// The real Confined project schema is the app id — a UUIDv7 carrying `-`,
+    /// which is NOT a bare `[A-Za-z_]…` ident. It MUST render (not be rejected):
+    /// the prior over-strict `quote_ident` predicate would have broken every real
+    /// deploy. `-` is render-safe, emitted verbatim inside the quoted schema.
+    #[test]
+    fn uuid_project_schema_renders_pg() {
+        let a = assemble_insert(
+            "019efd94-a4e0-7a82-8a08-95e1f906ca3f",
+            SqlDialect::Postgres,
+            "members",
+            &["id".into()],
+            &[vec![IrScalar::Int(1)]],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            a.template,
+            "INSERT INTO \"019efd94-a4e0-7a82-8a08-95e1f906ca3f\".\"members\" (\"id\") \
+             VALUES ($1)"
+        );
+    }
+
+    /// A hostile `"`-bearing schema cannot break out of the quoted identifier:
+    /// it is SAFELY escaped (doubled `""`), not raw-interpolated and not
+    /// (wrongly) rejected — the statement shape is unaltered, matching how every
+    /// other engine seam quotes the schema.
+    #[test]
+    fn quote_bearing_project_schema_is_escaped_not_broken_out_pg() {
+        let a = assemble_insert(
+            "a\"; DROP--",
+            SqlDialect::Postgres,
+            "t",
+            &["a".into()],
+            &[vec![IrScalar::Int(1)]],
+            None,
+        )
+        .unwrap();
+        assert_eq!(a.template, "INSERT INTO \"a\"\"; DROP--\".\"t\" (\"a\") VALUES ($1)");
     }
 
     #[test]
