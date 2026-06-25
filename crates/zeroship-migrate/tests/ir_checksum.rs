@@ -390,7 +390,7 @@ fn checksum_of_ir_is_identical_across_dialect_renders() {
     // LOWERED flags (SQLite forcing transactional:true) into the hash, the two
     // renders WOULD diverge — demonstrating exactly the invariant break the
     // of_ir doc forbids, and proving this test is load-bearing (not vacuous).
-    let sqlite_lowered_flags = MigrationFlags { transactional: true, ..neutral_flags.clone() };
+    let sqlite_lowered_flags = MigrationFlags { transactional: true, ..neutral_flags };
     let sqlite_render_buggy =
         Checksum::of_ir(&CanonicalOpList(&ops), &sqlite_lowered_flags, owner, &[], &[], &[]);
     assert_ne!(

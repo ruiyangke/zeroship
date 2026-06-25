@@ -127,10 +127,8 @@ async fn journal_count(conn: &Client, cfg: &ExecutorConfig) -> i64 {
     // as zero (the read-back ensure_journal creates it on a real apply).
     let row = conn
         .query_one(
-            &format!(
-                "SELECT count(*) FROM information_schema.tables \
-                 WHERE table_schema=$1 AND table_name='schema_migrations'"
-            ),
+            "SELECT count(*) FROM information_schema.tables \
+             WHERE table_schema=$1 AND table_name='schema_migrations'",
             &[&cfg.pg.meta_schema],
         )
         .await
