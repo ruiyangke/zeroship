@@ -426,7 +426,7 @@ impl MigrationBackend for SqliteBackend {
             let live = self.snapshot_schema_sqlite().await.map_err(|e| {
                 ApplyError::Backend(format!("sqlite existence-guard snapshot failed: {e}"))
             })?;
-            match crate::guard_probe::decide(probe, &live) {
+            match crate::guard_probe::decide(probe, &live, SqlDialect::Sqlite) {
                 crate::guard_probe::GuardVerdict::RunBare => {
                     return journal_sql::apply_one_additive(&self.actor, m, applied_by)
                         .await

@@ -111,6 +111,18 @@ async fn index_exists(conn: &Client, schema: &str, table: &str, index: &str) -> 
     !rows.is_empty()
 }
 
+async fn constraint_exists(conn: &Client, schema: &str, table: &str, constraint: &str) -> bool {
+    let rows = conn
+        .query(
+            "SELECT 1 FROM information_schema.table_constraints \
+             WHERE constraint_schema = $1 AND table_name = $2 AND constraint_name = $3",
+            &[&schema, &table, &constraint],
+        )
+        .await
+        .expect("query table_constraints");
+    !rows.is_empty()
+}
+
 async fn table_exists(conn: &Client, schema: &str, table: &str) -> bool {
     let rows = conn
         .query(
@@ -528,6 +540,83 @@ async fn add_constraint_ifnotexists_present_different_kind_fails_kind() {
     let err = apply(&conn, &cfg, &steps).await.expect_err("kind clash fails closed");
     let (_, field, _) = expect_drift(err);
     assert_eq!(field, "kind");
+    teardown(&conn, &cfg).await;
+}
+
+// --- F2: createTable deferred-FK re-run idempotency ------------------------
+
+/// **F2 regression** — a guarded `createTable ifNotExists` carrying a DEFERRED FK
+/// (target not yet live at lower → emitted as a follow-on `ALTER TABLE … ADD
+/// CONSTRAINT … FOREIGN KEY …` unit). Before the fix the createTable FK unit reused
+/// the stand-alone `addConstraint` fail-closed rule, so on a RE-DEPLOY the present
+/// same-name+same-kind FK hard-FailDrifted (`ExistenceGuardDrift { constraint
+/// owner_fkey, definition }`) — any forward/cyclic-reference guarded create was
+/// non-idempotent. The fix stamps the byte-comparable `pg_get_constraintdef`-shaped
+/// `expect_definition` on the createTable FK probe, so a re-run that finds a
+/// byte-equal live FK is a SatisfiedNoop.
+///
+/// RED pre-fix: the second apply returns `ExistenceGuardDrift { definition }` on
+/// `owner_fkey`.
+#[compio::test]
+async fn create_table_ifnotexists_deferred_fk_reruns_idempotent() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+
+    // The FK target table must physically exist at apply time (the deferred ADD
+    // CONSTRAINT references it) AND be OWNED by the migrator role so the least-priv
+    // ADD CONSTRAINT has REFERENCES privilege — so create it THROUGH the migrator.
+    // Each `lower()` uses an empty LiveSchema, so `people` is never live at the
+    // `pets` lowering and the `ref` ALWAYS lowers as a DEFERRED FK (a follow-on ALTER).
+    apply(&conn, &cfg, &lower(&cfg, Op::CreateTable {
+        name: "people".into(),
+        columns: vec![col("label", ColType::String)],
+        constraints: vec![],
+        indexes: vec![],
+        schema: None,
+        existence_guard: None,
+    }))
+    .await
+    .expect("create FK target table via the migrator");
+
+    // A guarded createTable with a `ref` to `people` → a deferred FK unit
+    // (`owner_fkey`) on top of the CREATE TABLE + system-field index units.
+    let make_op = || Op::CreateTable {
+        name: "pets".into(),
+        columns: vec![IrColumn {
+            name: "owner".into(),
+            ty: ColType::Ref { references: "people".into() },
+            nullable: Some(true),
+            default: None,
+            unique: None,
+        }],
+        constraints: vec![],
+        indexes: vec![],
+        schema: None,
+        existence_guard: Some(ExistenceGuard::IfNotExists),
+    };
+
+    // First apply: creates pets + the deferred FK.
+    let steps1 = lower(&cfg, make_op());
+    apply(&conn, &cfg, &steps1).await.expect("fresh guarded create with deferred FK applies");
+    let s = &cfg.project_schema;
+    assert!(table_exists(&conn, s, "pets").await, "pets created");
+    assert!(
+        constraint_exists(&conn, s, "pets", "owner_fkey").await,
+        "the deferred FK owner_fkey must PHYSICALLY exist after the fresh create"
+    );
+
+    // RE-RUN: the deferred-FK unit's probe finds a present same-name FK whose live
+    // `pg_get_constraintdef` byte-equals the declared definition → SatisfiedNoop, NOT
+    // a hard FailDrift. The whole guarded create re-runs idempotently.
+    let steps2 = lower(&cfg, make_op());
+    apply(&conn, &cfg, &steps2)
+        .await
+        .expect("re-run of the guarded createTable with a deferred FK is idempotent (F2)");
+    assert!(
+        constraint_exists(&conn, s, "pets", "owner_fkey").await,
+        "the FK survives the idempotent re-run"
+    );
     teardown(&conn, &cfg).await;
 }
 

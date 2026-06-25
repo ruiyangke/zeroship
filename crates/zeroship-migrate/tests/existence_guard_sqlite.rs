@@ -15,8 +15,11 @@
 //! - dropColumn ifExists: present → drops + journaled; absent → SatisfiedNoop.
 //! - dropTable ifExists: absent → SatisfiedNoop journaled.
 //!
-//! Plus the SQLite TEXT-affinity fail-closed default: a same-name TEXT-affinity
-//! column whose declared token differs is FailDrift, never an affinity-only noop.
+//! Plus the SQLite affinity-fold compare (F1): the PG-spelled snapshot data_type is
+//! folded to the SQLite affinity (`sqlite_canonical_type`) before compare — exactly
+//! as the differ does — so a guarded createTable/addColumn re-run is idempotent for
+//! every type (timestamp/jsonb/text/ref all fold to the `text` affinity and match),
+//! while a GENUINE affinity change (string→number, text↔real) still fails closed.
 
 use zeroship_migrate::backend::MigrationBackend;
 use zeroship_migrate::db::ExecutorConfig;
@@ -149,13 +152,15 @@ async fn add_column_ifnotexists_absent_runs() {
 }
 
 #[compio::test]
-async fn add_column_ifnotexists_present_text_affinity_match_fails_closed() {
-    // **H1 fail-closed contract** — on SQLite a present TEXT-affinity column's true
-    // SDK facet is NOT introspectable (string/date/json/ref all read back as `text`),
-    // so even a same-token `string`-over-`string` add CANNOT be PROVEN equal from the
-    // catalog. Per the module docstring it fails CLOSED (FailDrift naming data_type)
-    // rather than an affinity-only SatisfiedNoop. (Non-TEXT affinities are provable —
-    // see the integer test below.)
+async fn add_column_ifnotexists_present_text_affinity_match_is_noop() {
+    // **F1 — SQLite text-affinity present-match is an idempotent no-op** (restores the
+    // noop coverage finding 4 flagged). On SQLite a present TEXT-affinity column reads
+    // back as the `text` affinity; a same-token `string`-over-`string` guarded re-add
+    // folds to `text` == `text` → SatisfiedNoop (NOT a duplicate-column error, NOT a
+    // fail-closed). This matches the declarative DIFFER, which compares only the
+    // canonical affinity on SQLite (the within-affinity facet blind spot is a
+    // documented SQLite divergence — and a `string`/`ref` column is physically the
+    // same `text` column on SQLite either way).
     let p = paths("sq_add_text_match");
     let be = backend(&p);
     for m in lower(Op::CreateTable {
@@ -190,13 +195,13 @@ async fn add_column_ifnotexists_present_text_affinity_match_fails_closed() {
         existence_guard: Some(ExistenceGuard::IfNotExists),
     });
     let v = migs[0].version.as_str().to_string();
-    let err = apply_one(&be, &migs[0])
-        .await
-        .expect_err("a present TEXT-affinity column fails closed (unprovable facet)");
-    let (object, field) = expect_drift(err);
-    assert_eq!(field, "data_type", "TEXT-affinity fail-closed names data_type");
-    assert!(object.contains("email"), "names the column: {object}");
-    assert!(!journaled(&be, &v).await, "fail-closed journals nothing");
+    for m in &migs {
+        apply_one(&be, m)
+            .await
+            .expect("a present TEXT-affinity column is an idempotent satisfied no-op (F1)");
+    }
+    assert!(table_has_column(&be, "t", "email").await, "column still present");
+    assert!(journaled(&be, &v).await, "satisfied no-op still journals");
 }
 
 #[compio::test]
@@ -247,21 +252,16 @@ async fn add_column_ifnotexists_present_integer_affinity_match_is_noop() {
 }
 
 #[compio::test]
-async fn add_column_ifnotexists_sqlite_ref_over_live_string_fails_closed() {
-    // **H1 regression (the headline within-TEXT-affinity facet change)** — addColumn
-    // ifNotExists declaring a `ref` over a column the live DB authored as `string`.
-    //
-    // In this engine the declared snapshot data_type is the PG spelling
-    // (`field_data_type` always maps via the PG dialect), and BOTH `string` AND `ref`
-    // collapse to the literal PG `text`. On the SQLite leg the live catalog stores
-    // ONLY the `text` affinity, so a plain compare (`text` == `text`) would
-    // SatisfiedNoop and SILENTLY SKIP the add over a DIVERGENT column (live `string`
-    // vs declared `ref` — a real facet change the catalog cannot disprove). The probe
-    // now carries the un-collapsed declared facet (`ref`), so the decider fails
-    // CLOSED before any FK DDL runs.
-    //
-    // RED pre-fix: the plain `text` == `text` compare returns SatisfiedNoop (no
-    // error, version journaled) — masking the divergence.
+async fn add_column_ifnotexists_sqlite_ref_over_live_string_is_noop() {
+    // **F1 — within-TEXT-affinity facet change is a no-op on SQLite (differ-consistent).**
+    // addColumn ifNotExists declaring a `ref` over a column the live DB authored as
+    // `string`. BOTH `string` and `ref` fold to the SQLite `text` affinity, and on
+    // SQLite a `ref` column adds NO foreign key via `ALTER` — it is physically the
+    // SAME `text` column either way, so the facet difference carries no provable
+    // physical divergence. The declarative DIFFER treats this as no-change (it compares
+    // only the canonical affinity), and the guard now matches: a SatisfiedNoop, so a
+    // guarded re-add is idempotent. (A GENUINE affinity change — string→number — still
+    // diverges; see `add_column_ifnotexists_present_divergent_type_fails_closed`.)
     let p = paths("sq_add_ref_over_string");
     let be = backend(&p);
     for m in lower(Op::CreateTable {
@@ -288,9 +288,9 @@ async fn add_column_ifnotexists_sqlite_ref_over_live_string_fails_closed() {
         apply_one(&be, &m).await.expect("add the live string column unguarded");
     }
 
-    // Guarded add declaring a REF (a different SDK facet that ALSO maps to snapshot
-    // `text`, same TEXT affinity) → the blind spot. The probe short-circuits to
-    // FailDrift before any FK SQL is attempted.
+    // Guarded add declaring a REF (a different SDK facet that also folds to the `text`
+    // affinity) → present-match → SatisfiedNoop (NOT a fail-closed, NOT a silent skip
+    // over a real divergence — there is none on SQLite).
     let migs = lower(Op::AddColumn {
         table: "t".into(),
         column: "owner".into(),
@@ -301,13 +301,13 @@ async fn add_column_ifnotexists_sqlite_ref_over_live_string_fails_closed() {
         existence_guard: Some(ExistenceGuard::IfNotExists),
     });
     let v = migs[0].version.as_str().to_string();
-    let err = apply_one(&be, &migs[0])
-        .await
-        .expect_err("a within-TEXT-affinity facet change must fail closed, not noop");
-    let (object, field) = expect_drift(err);
-    assert_eq!(field, "data_type", "H1: within-affinity facet change names data_type");
-    assert!(object.contains("owner"), "names the column: {object}");
-    assert!(!journaled(&be, &v).await, "fail-closed journals nothing (no silent skip)");
+    for m in &migs {
+        apply_one(&be, m)
+            .await
+            .expect("a within-TEXT-affinity facet change is an idempotent no-op on SQLite (F1)");
+    }
+    assert!(table_has_column(&be, "t", "owner").await, "owner column still present");
+    assert!(journaled(&be, &v).await, "satisfied no-op still journals");
 }
 
 #[compio::test]
@@ -443,6 +443,120 @@ async fn drop_column_ifexists_present_runs_absent_noops() {
         apply_one(&be, m).await.expect("drop absent column is a satisfied no-op");
     }
     assert!(journaled(&be, &v2).await, "satisfied no-op journals");
+}
+
+/// **F1 regression (the headline finding)** — a guarded `createTable ifNotExists`
+/// RE-RUN on SQLite must be an idempotent no-op. Before the fix the Table probe's
+/// `expect_columns` data_type was the PG spelling (`field_data_type` always maps via
+/// the PG dialect), so a timestamp system column read as `timestamp with time zone`
+/// while the live SQLite catalog reports the `text` affinity. `decide_table`'s raw
+/// `expect != live` compare therefore hard-FailDrifted (`ExistenceGuardDrift` naming
+/// `column t.created_at` / `data_type`) on EVERY re-deploy — every table carries
+/// created_at/updated_at/deleted_at timestamps, so NO guarded SQLite createTable was
+/// idempotent. After the fix the decider folds both sides through
+/// `sqlite_canonical_type` (timestamp/jsonb/text → `text` affinity) and the Table
+/// leg verifies presence+affinity only, so the re-run is a SatisfiedNoop.
+///
+/// RED pre-fix: the second apply returns `ExistenceGuardDrift { data_type }`.
+#[compio::test]
+async fn create_table_ifnotexists_reruns_idempotent_with_timestamp_and_text_columns() {
+    let p = paths("sq_create_rerun");
+    let be = backend(&p);
+    // A table with a text column AND a timestamp column ON TOP of the always-present
+    // system fields (id text, created_at/updated_at/deleted_at timestamps, …).
+    let make_op = || Op::CreateTable {
+        name: "t".into(),
+        columns: vec![col("title", ColType::String), col("happened", ColType::Timestamp)],
+        constraints: vec![],
+        indexes: vec![],
+        schema: None,
+        existence_guard: Some(ExistenceGuard::IfNotExists),
+    };
+
+    // First apply: creates the table + secondary indexes.
+    let steps1 = lower(make_op());
+    for m in &steps1 {
+        apply_one(&be, m).await.expect("fresh guarded create applies");
+    }
+    assert!(table_exists(&be, "t").await, "table created");
+    assert!(table_has_column(&be, "t", "title").await, "title column present");
+    assert!(table_has_column(&be, "t", "happened").await, "timestamp column present");
+
+    // RE-RUN: a fresh lowering of the SAME guarded create over the now-present table
+    // must be an idempotent no-op — the CREATE TABLE unit SatisfiedNoops (presence +
+    // affinity match across the text/timestamp/system columns), every index unit
+    // SatisfiedNoops on its own object. NO ExistenceGuardDrift.
+    let steps2 = lower(make_op());
+    for m in &steps2 {
+        apply_one(&be, m)
+            .await
+            .expect("re-run of the guarded createTable is an idempotent no-op (F1)");
+    }
+    // Every re-run unit re-journaled (satisfied no-op still journals).
+    for m in &steps2 {
+        assert!(
+            journaled(&be, m.version.as_str()).await,
+            "re-run unit {} re-journaled",
+            m.version.as_str()
+        );
+    }
+    // The columns physically survive the re-run (nothing churned/dropped).
+    assert!(table_has_column(&be, "t", "title").await, "title survives re-run");
+    assert!(table_has_column(&be, "t", "happened").await, "timestamp survives re-run");
+}
+
+/// **F1 regression — addColumn re-run for a timestamp column.** A guarded
+/// `addColumn ifNotExists` of a timestamp column, re-run over the now-present
+/// column, must be a SatisfiedNoop (not a false `timestamp with time zone != text`
+/// drift). The timestamp is NOT a within-text-affinity SDK-facet ambiguity that the
+/// Column-leg H1 guards (that is for string↔ref/date authored as a bare string); a
+/// timestamp authored as a timestamp folds to the `text` affinity and matches.
+#[compio::test]
+async fn add_column_ifnotexists_timestamp_rerun_is_noop() {
+    let p = paths("sq_add_ts_rerun");
+    let be = backend(&p);
+    for m in lower(Op::CreateTable {
+        name: "t".into(),
+        columns: vec![col("n", ColType::Int)],
+        constraints: vec![],
+        indexes: vec![],
+        schema: None,
+        existence_guard: None,
+    }) {
+        apply_one(&be, &m).await.expect("create base table");
+    }
+    // First guarded add: runs (absent → creates the timestamp column).
+    let migs1 = lower(Op::AddColumn {
+        table: "t".into(),
+        column: "happened".into(),
+        ty: ColType::Timestamp,
+        nullable: Some(true),
+        default: None,
+        schema: None,
+        existence_guard: Some(ExistenceGuard::IfNotExists),
+    });
+    for m in &migs1 {
+        apply_one(&be, m).await.expect("guarded addColumn(timestamp) runs");
+    }
+    assert!(table_has_column(&be, "t", "happened").await, "timestamp column created");
+
+    // RE-RUN: present + matching affinity → SatisfiedNoop, NOT a false drift.
+    let migs2 = lower(Op::AddColumn {
+        table: "t".into(),
+        column: "happened".into(),
+        ty: ColType::Timestamp,
+        nullable: Some(true),
+        default: None,
+        schema: None,
+        existence_guard: Some(ExistenceGuard::IfNotExists),
+    });
+    let v2 = migs2[0].version.as_str().to_string();
+    for m in &migs2 {
+        apply_one(&be, m)
+            .await
+            .expect("re-run of guarded addColumn(timestamp) is an idempotent no-op (F1)");
+    }
+    assert!(journaled(&be, &v2).await, "satisfied no-op still journals");
 }
 
 #[compio::test]
