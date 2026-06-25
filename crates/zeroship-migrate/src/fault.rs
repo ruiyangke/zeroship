@@ -111,6 +111,20 @@ pub mod points {
     /// the half-renamed table, mark the marker reconciled). Tripped by the
     /// deploy-recovery crash-fuzz test only.
     pub const DEPLOY_BEFORE_INPROCESS_ABORT: &str = "deploy.before_inprocess_abort";
+    /// In the control IR deploy loop (PR9d-rev finding 1): AFTER the engine committed
+    /// a same-deploy EXPAND's obligation row (`record_pending_contract`) and returned,
+    /// but BEFORE the control loop wrote its `open` recovery marker
+    /// (`record_deploy_recovery_open`). A crash here leaves the obligation OUTSTANDING
+    /// with **no** recovery marker — the obligation row and the marker are two separate
+    /// statements, not one transaction (the marker keys on the control-plane
+    /// `deploy_id` the migrate engine does not carry). This residual is NOT
+    /// auto-recovered by the next deploy's crash-recovery leg (it JOINs on the marker
+    /// table and finds nothing), but it IS fail-closed: the outstanding obligation
+    /// fences the table via the prior-deploy interlock, and the operator clears it with
+    /// `resolve-pending --abort | --apply`. Tripped by the obligation-without-marker
+    /// residual characterization test only.
+    pub const DEPLOY_AFTER_OBLIGATION_BEFORE_MARKER: &str =
+        "deploy.after_obligation.before_marker";
     /// In the control IR deploy loop SUCCESS arm (PR9d HIGH): AFTER the
     /// `reached_success` marker is stamped, the phase-2 `reconciled` append FAILS
     /// (DB hiccup). This reproduces the HIGH window — a legitimately-pending go-live

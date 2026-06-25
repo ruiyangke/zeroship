@@ -1402,6 +1402,16 @@ fn postgis_dsn() -> String {
     std::env::var("MIGRATE_POSTGIS_DB").unwrap_or_else(|_| DEFAULT_POSTGIS_DSN.to_string())
 }
 
+/// PR9d-rev (2) — the dual-gate predicate for the PostGIS skip path. Returns
+/// `true` (⇒ the caller must HARD-FAIL instead of silently skipping) when BOTH
+/// `MIGRATE_REQUIRE_DB` AND `MIGRATE_REQUIRE_POSTGIS` are set: that is the CI
+/// posture that DOES provision PostGIS, where a wiring break must not silently
+/// skip the geoPoint zero-drift proof. A PostGIS-less local run (neither var, or
+/// only `MIGRATE_REQUIRE_DB` for the :5440 suite) returns `false` ⇒ still skips.
+fn postgis_skip_is_hard_failure() -> bool {
+    std::env::var("MIGRATE_REQUIRE_DB").is_ok() && std::env::var("MIGRATE_REQUIRE_POSTGIS").is_ok()
+}
+
 /// Connect to the PostGIS-capable instance and ensure the `postgis` extension is
 /// present, or `None` (⇒ skip the test) when the instance is unreachable or
 /// PostGIS cannot be installed.
@@ -1410,6 +1420,21 @@ async fn postgis_pg() -> Option<Client> {
     {
         Ok(pair) => pair,
         Err(e) => {
+            // PR9d-rev (2) — close the last DB-down silent-skip in the migrate
+            // suite. This is the geo round-trip (zero-drift) proof, not a
+            // fail-closed security refusal, so it does NOT gate on bare
+            // `MIGRATE_REQUIRE_DB` (the :5440 test DB has no PostGIS). It gates
+            // on BOTH `MIGRATE_REQUIRE_DB` AND `MIGRATE_REQUIRE_POSTGIS`: a CI
+            // job that DOES provision PostGIS sets both and can no longer let a
+            // wiring break silently skip the geo proof, while a PostGIS-less
+            // local run (with neither, or only `MIGRATE_REQUIRE_DB`) still skips.
+            assert!(
+                !postgis_skip_is_hard_failure(),
+                "MIGRATE_REQUIRE_DB and MIGRATE_REQUIRE_POSTGIS are both set but the PostGIS \
+                 instance is unreachable ({e}); a CI run that provisions PostGIS must NOT \
+                 silently skip the geoPoint zero-drift proof — a missing PostGIS DB is a hard \
+                 failure there, not a vacuous green pass"
+            );
             eprintln!("SKIP: PostGIS instance unreachable ({e})");
             return None;
         }
@@ -1423,10 +1448,70 @@ async fn postgis_pg() -> Option<Client> {
         .await
         .is_err()
     {
+        // Same dual-gate as the connect arm: under MIGRATE_REQUIRE_DB +
+        // MIGRATE_REQUIRE_POSTGIS, an instance that is reachable but cannot
+        // install PostGIS is also a hard failure, not a silent skip.
+        assert!(
+            !postgis_skip_is_hard_failure(),
+            "MIGRATE_REQUIRE_DB and MIGRATE_REQUIRE_POSTGIS are both set but the PostGIS \
+             extension is not installable on the target instance; the geoPoint zero-drift \
+             proof must NOT silently skip in a PostGIS-provisioned CI run"
+        );
         eprintln!("SKIP: PostGIS extension not available on the target instance");
         return None;
     }
     Some(client)
+}
+
+/// PR9d-rev (2) REGRESSION — the PostGIS skip path is a HARD failure exactly when
+/// a CI run that provisions PostGIS (`MIGRATE_REQUIRE_DB` + `MIGRATE_REQUIRE_POSTGIS`)
+/// finds it unreachable, and a SILENT skip in every other posture. This pins the
+/// dual-gate predicate that `postgis_pg()`'s two `return None` arms now assert on.
+///
+/// Pre-fix `postgis_pg()` `return None`-skipped unconditionally on a down PostGIS,
+/// so the `both set ⇒ true` row below had no enforcement at all — this test would
+/// have had nothing to assert (the predicate did not exist). It runs under
+/// `--test-threads=1` and restores every env var it touches.
+#[test]
+fn t13b_postgis_skip_hard_fails_only_when_db_and_postgis_both_required() {
+    // SAFETY: the migrate suite runs `--test-threads=1`, so no concurrent test
+    // observes these process-global env vars; each case restores them immediately.
+    fn with_env(db: Option<&str>, postgis: Option<&str>, expect_hard: bool) {
+        fn set_or_clear(key: &str, val: Option<&str>) {
+            // Edition 2021: `std::env::{set_var,remove_var}` are safe fns (the
+            // unsafe-ification is edition-2024-only), and the workspace denies
+            // `unsafe_code` — so no `unsafe` block here. Safe under the suite's
+            // `--test-threads=1` single-threaded run.
+            match val {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+        let prev_db = std::env::var("MIGRATE_REQUIRE_DB").ok();
+        let prev_pg = std::env::var("MIGRATE_REQUIRE_POSTGIS").ok();
+        set_or_clear("MIGRATE_REQUIRE_DB", db);
+        set_or_clear("MIGRATE_REQUIRE_POSTGIS", postgis);
+        let got = postgis_skip_is_hard_failure();
+        // restore BEFORE asserting, so a failure does not leak env into siblings
+        set_or_clear("MIGRATE_REQUIRE_DB", prev_db.as_deref());
+        set_or_clear("MIGRATE_REQUIRE_POSTGIS", prev_pg.as_deref());
+        assert_eq!(
+            got, expect_hard,
+            "db={db:?} postgis={postgis:?}: expected hard-fail={expect_hard}, got {got}"
+        );
+    }
+
+    // neither set ⇒ silent skip (plain local run)
+    with_env(None, None, false);
+    // only MIGRATE_REQUIRE_DB (the :5440 suite, no PostGIS) ⇒ still silent skip,
+    // because the :5440 DB has no PostGIS — this is the row that proves the geo
+    // proof is NOT gated by the generic faithful-e2e flag.
+    with_env(Some("1"), None, false);
+    // only MIGRATE_REQUIRE_POSTGIS ⇒ silent skip (no faithful-e2e posture at all)
+    with_env(None, Some("1"), false);
+    // BOTH set ⇒ a CI run that DID provision PostGIS; an unreachable instance is a
+    // HARD failure, never a vacuous green pass.
+    with_env(Some("1"), Some("1"), true);
 }
 
 #[compio::test]
