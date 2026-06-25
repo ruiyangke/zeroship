@@ -22,20 +22,19 @@ export type { ColType, Expr, IrBatch, IrScalar };
  * bare if the object is absent, journal a satisfied no-op if it is already present
  * with the DECLARED shape, or FAIL CLOSED if it is present with a shape that
  * diverges from (or cannot be proven equal to) the declared one. Never a silent
- * skip over a divergence. The option is therefore a plain `boolean`. (The type name
- * is retained to minimize call-site churn.) See `docs/reference/migrate-op-dsl.md`
- * (existence-guard section).
+ * skip over a divergence. The option is therefore a plain `boolean`. See
+ * `docs/reference/migrate-op-dsl.md` (existence-guard section).
  */
-export type IfNotExistsNotYetSupported = boolean;
+export type IfNotExistsGuard = boolean;
 
 /**
  * **Supported as of op.* PR10 Part B** (executor-side catalog probe). The
  * `ifExists` existence guard (the drop/rename/alter family) is honored by the same
  * probe-under-lock flow: run the drop/alter if the source object is PRESENT,
  * journal a satisfied no-op if it is already absent (a drop has no shape to verify
- * — presence alone governs). A plain `boolean`. See {@link IfNotExistsNotYetSupported}.
+ * — presence alone governs). A plain `boolean`. See {@link IfNotExistsGuard}.
  */
-export type IfExistsNotYetSupported = boolean;
+export type IfExistsGuard = boolean;
 
 // ── The fluent column-type lexicon (`t.*`) → a chainable ColumnDef ──
 
@@ -209,7 +208,7 @@ export interface DropConstraintSpec {
   type?: "pk" | "fk" | "unique" | "check";
   /** **PR10 Part B** — `IF EXISTS` guard (catalog probe): the constraint is dropped
    *  iff present; an already-absent constraint is a journaled satisfied no-op. */
-  ifExists?: IfExistsNotYetSupported;
+  ifExists?: IfExistsGuard;
 }
 
 export type IndexMethod = "btree" | "gin" | "gist" | "ivfflat" | "hnsw" | "fts5";
@@ -229,7 +228,7 @@ export interface CreateIndexSpec {
    *  index is a journaled satisfied no-op; a present divergent one (unique flip,
    *  column-set change, or an expression/partial index whose equivalence cannot be
    *  proven) FAILS CLOSED (§2.7). */
-  ifNotExists?: IfNotExistsNotYetSupported;
+  ifNotExists?: IfNotExistsGuard;
 }
 
 export interface AlterColumnChange {
@@ -301,7 +300,7 @@ export interface TableBuilder {
 /** The `batchAlterTable` scoped column/constraint subset (pre-bound to the table). */
 export interface BatchAlterBuilder {
   addColumn(name: string, type: ColumnDef): void;
-  dropColumn(name: string, opts?: { ifExists?: IfExistsNotYetSupported }): void;
+  dropColumn(name: string, opts?: { ifExists?: IfExistsGuard }): void;
   renameColumn(from: string, to: string, type: ColumnDef): void;
   alterColumn(name: string, change: AlterColumnChange): void;
   addForeignKey(spec: ForeignKeySpec): void;

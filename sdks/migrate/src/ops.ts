@@ -31,8 +31,8 @@ import type {
   ExprFn,
   FnNamespace,
   ForeignKeySpec,
-  IfExistsNotYetSupported,
-  IfNotExistsNotYetSupported,
+  IfExistsGuard,
+  IfNotExistsGuard,
   InsertArgs,
   Row,
   ScalarValue,
@@ -390,7 +390,7 @@ export function createTable(
   name: string,
   columns: Record<string, ColumnDefType>,
   build?: (b: TableBuilder) => void,
-  opts: TableOpOpts & { ifNotExists?: IfNotExistsNotYetSupported } = {},
+  opts: TableOpOpts & { ifNotExists?: IfNotExistsGuard } = {},
 ): void {
   requireString(name, "createTable(name, …)");
   const cols: Node[] = [];
@@ -431,8 +431,8 @@ interface TableOpOpts {
   schema?: string;
 }
 
-// The author-facing guard option types (`IfNotExistsNotYetSupported` /
-// `IfExistsNotYetSupported`, both `boolean` as of PR10 Part B) are imported from
+// The author-facing guard option types (`IfNotExistsGuard` /
+// `IfExistsGuard`, both `boolean` as of PR10 Part B) are imported from
 // `./types.js` — the single source of truth — so the op signatures here and the
 // spec interfaces there carry the identical type.
 
@@ -476,7 +476,7 @@ function makeTableBuilder(constraints: Node[], indexes: Node[]): TableBuilder {
 
 export function dropTable(
   table: string,
-  opts: TableOpOpts & { ifExists?: IfExistsNotYetSupported; cascade?: boolean } = {},
+  opts: TableOpOpts & { ifExists?: IfExistsGuard; cascade?: boolean } = {},
 ): void {
   requireString(table, "dropTable(table)");
   push(
@@ -494,7 +494,7 @@ export function addColumn(
   table: string,
   name: string,
   type: ColumnDefType,
-  opts: TableOpOpts & { ifNotExists?: IfNotExistsNotYetSupported } = {},
+  opts: TableOpOpts & { ifNotExists?: IfNotExistsGuard } = {},
 ): void {
   requireString(table, "addColumn(table, …)");
   requireString(name, "addColumn(table, name, …)");
@@ -516,7 +516,7 @@ export function addColumn(
 export function dropColumn(
   table: string,
   column: string,
-  opts: TableOpOpts & { ifExists?: IfExistsNotYetSupported } = {},
+  opts: TableOpOpts & { ifExists?: IfExistsGuard } = {},
 ): void {
   requireString(table, "dropColumn(table, …)");
   requireString(column, "dropColumn(table, column)");
@@ -536,7 +536,7 @@ export function renameColumn(
   from: string,
   to: string,
   type: ColumnDefType,
-  opts: TableOpOpts & { ifExists?: IfExistsNotYetSupported } = {},
+  opts: TableOpOpts & { ifExists?: IfExistsGuard } = {},
 ): void {
   requireString(table, "renameColumn(table, …)");
   requireString(from, "renameColumn from");
@@ -558,7 +558,7 @@ export function alterColumn(
   table: string,
   name: string,
   change: AlterColumnChange,
-  opts: TableOpOpts & { ifExists?: IfExistsNotYetSupported } = {},
+  opts: TableOpOpts & { ifExists?: IfExistsGuard } = {},
 ): void {
   requireString(table, "alterColumn(table, …)");
   requireString(name, "alterColumn(table, name, …)");
@@ -613,7 +613,7 @@ function fkConstraintFromSpec(spec: ForeignKeySpec): Node {
 export function addForeignKey(
   table: string,
   spec: ForeignKeySpec,
-  opts: TableOpOpts & { ifNotExists?: IfNotExistsNotYetSupported } = {},
+  opts: TableOpOpts & { ifNotExists?: IfNotExistsGuard } = {},
 ): void {
   requireString(table, "addForeignKey(table, …)");
   push(
@@ -630,7 +630,7 @@ export function addForeignKey(
 export function addUnique(
   table: string,
   spec: UniqueSpec,
-  opts: TableOpOpts & { ifNotExists?: IfNotExistsNotYetSupported } = {},
+  opts: TableOpOpts & { ifNotExists?: IfNotExistsGuard } = {},
 ): void {
   requireString(table, "addUnique(table, …)");
   if (!spec || !Array.isArray(spec.columns)) {
@@ -650,7 +650,7 @@ export function addUnique(
 export function addCheck(
   table: string,
   spec: CheckSpec,
-  opts: TableOpOpts & { ifNotExists?: IfNotExistsNotYetSupported } = {},
+  opts: TableOpOpts & { ifNotExists?: IfNotExistsGuard } = {},
 ): void {
   requireString(table, "addCheck(table, …)");
   if (!spec || spec.expr === undefined) {
@@ -670,7 +670,7 @@ export function addCheck(
 export function dropConstraint(
   table: string,
   spec: DropConstraintSpec | string,
-  opts: TableOpOpts & { ifExists?: IfExistsNotYetSupported } = {},
+  opts: TableOpOpts & { ifExists?: IfExistsGuard } = {},
 ): void {
   requireString(table, "dropConstraint(table, …)");
   const name = typeof spec === "string" ? spec : spec && spec.name;
@@ -712,7 +712,7 @@ export function dropIndex(
   opts: TableOpOpts & {
     table?: string;
     unique?: boolean;
-    ifExists?: IfExistsNotYetSupported;
+    ifExists?: IfExistsGuard;
     concurrently?: boolean;
   } = {},
 ): void {
