@@ -456,10 +456,25 @@ fn add_column_snapshot(
 }
 
 /// Fold a `createTable`'s TABLE-LEVEL constraints + indexes onto the
-/// `build_table_snapshot`-built [`TableSnapshot`]. Byte-identical to
-/// `IrAuthor::fold_create_table_specs` (each spec built the SAME way as its
-/// stand-alone-op equivalent), so an op-authored table folds to the SAME snapshot
-/// the apply path produces (and the differ re-diffs clean).
+/// `build_table_snapshot`-built [`TableSnapshot`].
+///
+/// This fold and the lower ([`IrAuthor::fold_create_table_specs`]) agree on every
+/// constraint/index NAME and on the UNIQUE definition body (both route through the
+/// shared `constraintdef_cols` speller), so an op-authored table re-diffs clean
+/// against the apply path. They DELIBERATELY differ on one point — NOT "byte
+/// identical": for a table-level UNIQUE the fold ALSO materializes the implicit
+/// unique index, whereas the lower pushes only the `ConstraintSnapshot`
+/// (`ir_author.rs` ~2057-2070, no index). The reason is that the two snapshots
+/// model different things:
+/// - the lower's is an EMISSION PLAN — `snap.indexes` drives `CREATE INDEX`, and PG
+///   auto-creates the constraint's implicit index, so emitting it would duplicate;
+/// - the fold's is a LOGICAL-STATE model — it must match what `snapshot_schema`
+///   reports, and live introspection DOES return constraint-backed unique indexes
+///   (the `pg_index` query has no constraint filter, drift.rs ~675).
+///
+/// So the fold's implicit-index materialization is REQUIRED for `fold == introspect`
+/// to hold; do NOT "align" it with the lower by removing it — that would break the
+/// round-trip oracle.
 ///
 /// Fail-closed parity with the lower:
 /// - a user composite / per-column PRIMARY KEY is refused (the platform owns the
@@ -632,22 +647,6 @@ fn unique_constraint(name: &str, columns: &[String]) -> FoldedConstraint {
     }
 }
 
-/// A PRIMARY KEY constraint + its implicit unique index (PG names the index after
-/// the constraint). NOTE: the platform owns the synthetic `id` PK on every table
-/// (injected by `build_table_snapshot` as `<table>_pkey`), so a SECOND PK is never
-/// satisfiable — this helper exists for totality but the createTable / addConstraint
-/// arms refuse a user PK fail-closed before reaching it.
-fn pk_constraint(name: &str, columns: &[String]) -> FoldedConstraint {
-    FoldedConstraint {
-        constraint: ConstraintSnapshot {
-            name: name.to_string(),
-            kind: "PRIMARY KEY".to_string(),
-            definition: format!("PRIMARY KEY ({})", constraintdef_cols(columns)),
-        },
-        index: Some(IndexSnapshot::btree(name.to_string(), true, columns.to_vec())),
-    }
-}
-
 /// The folded constraint (plus implicit index) a stand-alone `addConstraint` op
 /// produces. FK via the shared `ir_fk_*` (no index); UNIQUE/PK via the derived name
 /// with a `pg_get_constraintdef`-matching body and the implicit unique index; CHECK
@@ -698,12 +697,18 @@ fn add_constraint_snapshot(
             );
             Ok(unique_constraint(&cname, columns))
         }
-        IrConstraintKind::Pk { columns } => {
-            let cname = name.map_or_else(
-                || derived_constraint_name(table, columns, "pkey"),
-                str::to_string,
-            );
-            Ok(pk_constraint(&cname, columns))
+        IrConstraintKind::Pk { .. } => {
+            // Byte-for-byte parity with the createTable Pk refusal
+            // (`fold_create_table_specs`): the platform owns the synthetic
+            // `<table>_pkey` PK, so a SECOND user PK — NAMED or derived — is never
+            // satisfiable. PG errors `multiple primary keys for table not allowed`
+            // at apply, so a two-PK snapshot is UNREACHABLE by introspection;
+            // accepting it would be fail-OPEN relative to apply (a named user PK
+            // would otherwise slip past the DuplicateConstraint net the derived
+            // `<table>_pkey` incidentally trips).
+            Err(FoldError::Unsupported(
+                "addConstraint user PRIMARY KEY (the platform owns the `id` primary key)",
+            ))
         }
         IrConstraintKind::Check { .. } => Err(FoldError::ExprDeferred("addConstraint(check)")),
     }
@@ -1120,6 +1125,40 @@ mod tests {
                 name: "u_handle".to_string()
             }
         );
+    }
+
+    #[test]
+    fn add_constraint_user_pk_is_refused_fail_closed() {
+        // A standalone addConstraint(Pk) — named OR derived — must be REFUSED
+        // fail-closed (byte-for-byte parity with the createTable Pk refusal): the
+        // platform owns the synthetic `<table>_pkey` PK, so a SECOND PK is never
+        // satisfiable. PG errors `multiple primary keys for table not allowed` at
+        // apply, so a snapshot with two PKs is UNREACHABLE by introspection — a
+        // fail-OPEN the fold's contract forbids. A NAMED user PK (distinct from
+        // `<table>_pkey`) must not slip past the DuplicateConstraint net.
+        for name in [Some("my_custom_pk"), None] {
+            let pk = IrConstraint {
+                name: name.map(ToString::to_string),
+                kind: IrConstraintKind::Pk { columns: vec!["a".to_string()] },
+            };
+            let err = fold(&[
+                create("t", vec![col("a", ColType::Text, false)]),
+                Op::AddConstraint {
+                    table: "t".to_string(),
+                    constraint: pk,
+                    schema: None,
+                    existence_guard: None,
+                },
+            ])
+            .unwrap_err();
+            assert_eq!(
+                err,
+                FoldError::Unsupported(
+                    "addConstraint user PRIMARY KEY (the platform owns the `id` primary key)"
+                ),
+                "named={name:?} user PK must be refused, not fold to a two-PK snapshot",
+            );
+        }
     }
 
     #[test]

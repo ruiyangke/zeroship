@@ -252,9 +252,31 @@ async fn fold_equals_introspect_pg() {
         apply_doc(&conn, &cfg, users, &registry(&[("parents", APP)]), Approval::None).await,
     );
 
+    // (2b) `notes` with an FK to parents whose onDelete is SET NULL + onUpdate is
+    //      RESTRICT — exercises the non-cascade referential-action spellings the
+    //      shared `fk_definition_pg` must render byte-identically on both sides
+    //      (step 2's FK is onDelete CASCADE only; this covers the SET NULL / RESTRICT
+    //      arms `pg_get_constraintdef` reports). SET NULL requires the local column
+    //      be nullable, so `parent_id` is nullable.
+    let notes = r#"{"ir_version":1,"name":"create_notes","ops":[
+        {"op":"createTable","name":"notes","columns":[
+            {"name":"body","type":"text","nullable":false},
+            {"name":"parent_id","type":{"ref":{"references":"parents"}},"nullable":true}
+        ],
+        "constraints":[
+            {"name":"notes_parent_fk","kind":{"kind":"fk","columns":["parent_id"],
+                "referencesTable":"parents","referencesColumns":["id"],
+                "onDelete":"setNull","onUpdate":"restrict"}}
+        ]}
+    ]}"#;
+    all_ops.extend(
+        apply_doc(&conn, &cfg, notes, &registry(&[("parents", APP)]), Approval::None).await,
+    );
+
     // The full project registry for the remaining docs (every created table is
-    // owned by APP — subsequent ops that target `users`/`parents` must see it).
-    let full = registry(&[("parents", APP), ("users", APP)]);
+    // owned by APP — subsequent ops that target `users`/`parents`/`notes` must see
+    // it).
+    let full = registry(&[("parents", APP), ("users", APP), ("notes", APP)]);
 
     // (3) addColumn (nullable + not-null).
     let add_cols = r#"{"ir_version":1,"name":"add_cols","ops":[
@@ -303,6 +325,23 @@ async fn fold_equals_introspect_pg() {
     ]}"#;
     all_ops.extend(apply_doc(&conn, &cfg, drop_con, &full, Approval::Approved).await);
 
+    // (6b) A STANDALONE addConstraint(UNIQUE) → dropConstraint pair (distinct from
+    //      step 6, which drops a createTable-LEVEL UNIQUE). This proves a unique
+    //      constraint that was ADDED post-create (so its implicit index entered the
+    //      fold via the addConstraint arm, not the createTable arm) folds away to
+    //      base — both the constraint AND its implicit index — matching introspection
+    //      after the DROP CONSTRAINT also drops PG's implicit index.
+    let add_uq2 = r#"{"ir_version":1,"name":"add_uq2","ops":[
+        {"op":"addConstraint","table":"users",
+            "constraint":{"name":"users_email_uq2","kind":{"kind":"unique","columns":["email"]}}}
+    ]}"#;
+    all_ops.extend(apply_doc(&conn, &cfg, add_uq2, &full, Approval::Approved).await);
+
+    let drop_uq2 = r#"{"ir_version":1,"name":"drop_uq2","ops":[
+        {"op":"dropConstraint","table":"users","name":"users_email_uq2"}
+    ]}"#;
+    all_ops.extend(apply_doc(&conn, &cfg, drop_uq2, &full, Approval::Approved).await);
+
     // (7) createIndex, then dropIndex it.
     let mk_idx = r#"{"ir_version":1,"name":"mk_idx","ops":[
         {"op":"createIndex","table":"users","columns":["nickname"],"name":"users_nick_idx"}
@@ -313,6 +352,25 @@ async fn fold_equals_introspect_pg() {
         {"op":"dropIndex","name":"users_nick_idx","table":"users"}
     ]}"#;
     all_ops.extend(apply_doc(&conn, &cfg, drop_idx, &full, Approval::None).await);
+
+    // (7b) dropTable(notes) → recreate `notes` with a DIFFERENT shape (no FK, new
+    //      columns). Proves the fold drops the old table state ENTIRELY (its FK
+    //      constraint + the implicit FK metadata) and rebuilds from the new
+    //      descriptor — matching introspection of the recreated table, not a merge of
+    //      old+new. dropTable needs `Approved` (destructive); the recreated `notes`
+    //      is still APP-owned and already in `full`.
+    let drop_notes = r#"{"ir_version":1,"name":"drop_notes","ops":[
+        {"op":"dropTable","table":"notes"}
+    ]}"#;
+    all_ops.extend(apply_doc(&conn, &cfg, drop_notes, &full, Approval::Approved).await);
+
+    let recreate_notes = r#"{"ir_version":1,"name":"recreate_notes","ops":[
+        {"op":"createTable","name":"notes","columns":[
+            {"name":"title","type":"text","nullable":false},
+            {"name":"pinned","type":"bool","nullable":false}
+        ]}
+    ]}"#;
+    all_ops.extend(apply_doc(&conn, &cfg, recreate_notes, &full, Approval::None).await);
 
     // (8) DML — Insert + Update — to prove they are schema no-ops (the folded schema
     //     is unchanged by them). They apply cleanly and add nothing structural. The
