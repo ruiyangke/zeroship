@@ -430,9 +430,15 @@ pub struct IrColumn {
     /// runtime, once P5 deletes the declared-schema cache — keep the typed-id brand.
     /// Default-absent + `skip_serializing_if` so a column that declares no prefix is
     /// BYTE-IDENTICAL on the wire and in the checksum to the pre-P2a image. Bounded
-    /// at validate-time ([`crate::validate`]) to the typed_id charset/length + the
+    /// at validate-time ([`crate::validate`]) to the `typed_id` charset/length + the
     /// reserved-prefix deny-list (a hand-crafted `.ir.json` is the threat model).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    ///
+    /// Camel-cased on the wire (`"idPrefix"`) — the op-region nested-field
+    /// convention (`ir_wire_contract`, asserted by
+    /// `ir_column_facet_fields_are_camel_case`); this aligns the spelling with the
+    /// `FieldDescriptor.id_prefix` (`#[serde(rename = "idPrefix")]`, `declarative.rs`)
+    /// and the design §4, so the same concept is spelled ONE way across IR↔descriptor.
+    #[serde(rename = "idPrefix", skip_serializing_if = "Option::is_none")]
     pub id_prefix: Option<String>,
     /// **Migration-first P2a (§2b)** — the `t.vector(n, { metric })` distance
     /// metric, the other DECLARED-ONLY hint introspection cannot recover. Bounded
@@ -440,7 +446,11 @@ pub struct IrColumn {
     /// metric at deserialize); the validator additionally asserts it co-occurs only
     /// with a [`ColType::Vector`] column. Default-absent + `skip_serializing_if`, so
     /// checksum-neutral for a non-vector / metric-less column.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    ///
+    /// Camel-cased on the wire (`"vectorMetric"`) — same op-region convention as
+    /// `idPrefix`, aligning with `FieldDescriptor.vector_metric`
+    /// (`#[serde(rename = "vectorMetric")]`) and the design §4.
+    #[serde(rename = "vectorMetric", skip_serializing_if = "Option::is_none")]
     pub vector_metric: Option<VectorMetric>,
 }
 

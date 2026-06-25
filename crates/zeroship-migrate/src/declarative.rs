@@ -1354,6 +1354,36 @@ pub(crate) fn build_table_snapshot(
                     if let Some(prefix) = &f.id_prefix {
                         validate_id_prefix(prefix)?;
                     }
+                    // **MED-1 fail-closed** — the id-fold DISCARDS this field (it is a
+                    // prefix declaration for the already-injected system PK, not a
+                    // second column), so a column-level modifier carried on it is
+                    // SILENTLY LOST. The op.* `ir_column_to_field` remaps ANY
+                    // `id`-named `uuid` column to type `"id"`, so a hand-authored
+                    // `id: t.uuid().unique()` / `id: t.uuid().default(<literal>)` would
+                    // reach here and have its `unique` / `default` quietly swallowed —
+                    // a fail-closed→silent-drop regression. REJECT those discarded
+                    // modifiers instead.
+                    //
+                    // NOTE — only `unique` + a user `default` are checked, NOT
+                    // nullability: the system PK is ALWAYS NOT NULL irrespective of the
+                    // folded field's `required` flag, and the declarative `t.id(prefix)`
+                    // descriptor legitimately leaves `required` at its default (`false`)
+                    // — the NOT NULL is injected by `system_field_columns`, not carried
+                    // on the field — so the fold ignoring `nullable` is correct, not a
+                    // drop. A legitimate `t.id(prefix?)` carries NO user `default` (its
+                    // synth `genRandomUuid` maps to `None`) and is never a column-level
+                    // UNIQUE (the PK implies it), so this never fires for the real id
+                    // shape — only for a modifier that would otherwise vanish.
+                    if f.unique || f.default.is_some() {
+                        return Err(DeclarativeError::Invalid(format!(
+                            "field 'id' folds into the system primary key, so a \
+                             column-level modifier on it would be silently discarded: \
+                             {}{}— declare the id as a bare `t.id(prefix?)` (the system \
+                             PK is already NOT NULL, unique, and DB-defaulted)",
+                            if f.unique { "unique " } else { "" },
+                            if f.default.is_some() { "default " } else { "" },
+                        )));
+                    }
                     continue;
                 }
                 return Err(DeclarativeError::Invalid(format!(
@@ -5459,6 +5489,90 @@ mod snapshot_builder_refactor_safety_tests {
         let snap = build_table_snapshot("app", &d, SqlDialect::Sqlite)
             .expect("rich descriptor builds a snapshot");
         assert_eq!(format!("{snap:#?}"), GOLDEN_SQLITE.trim_end_matches('\n'));
+    }
+
+    /// One-field `id` descriptor with the given modifiers — mirrors what
+    /// `ir_column_to_field` produces for an `id`-named uuid column under the P2a
+    /// remap (`ty = "id"`). The op.* `t.id()` synth default maps to `default: None`,
+    /// so a `Some(default)` here models the dangerous `id: t.uuid().default(<lit>)`.
+    fn id_descriptor(required: bool, unique: bool, default: Option<serde_json::Value>) -> CollectionDescriptor {
+        CollectionDescriptor {
+            name: "posts".into(),
+            owner_app: "app_test".into(),
+            fields: vec![FieldDescriptor {
+                name: "id".into(),
+                ty: "id".into(),
+                required,
+                unique,
+                default,
+                ..Default::default()
+            }],
+            indexes: vec![],
+        }
+    }
+
+    /// **MED-1** — the id-fold DISCARDS the `id` field (it is a prefix declaration
+    /// for the already-injected system PK), so a column-level modifier on it would be
+    /// SILENTLY LOST. Because `ir_column_to_field` remaps ANY `id`-named uuid column
+    /// to type `"id"`, a hand-authored `id: t.uuid().unique()` reaches this fold; pin
+    /// that the discarded `unique` is now a HARD REJECT, never a silent drop.
+    /// RED pre-fix: the fold `continue`d, swallowing `unique`, and the snapshot built
+    /// a single bare `id` PK with no error.
+    #[test]
+    fn id_field_with_unique_is_rejected_not_silently_folded() {
+        let d = id_descriptor(true, /* unique */ true, None);
+        let err = build_table_snapshot("app", &d, SqlDialect::Postgres)
+            .expect_err("a unique modifier on the folded id must be rejected");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("system primary key") && msg.contains("unique"),
+            "the discarded `unique` on `id` must be a hard error: {msg}"
+        );
+    }
+
+    /// **MED-1** — the dangerous `id: t.uuid().default(<literal>)` shape: a user
+    /// default on the folded id would be silently lost. Pin the hard reject.
+    #[test]
+    fn id_field_with_user_default_is_rejected_not_silently_folded() {
+        let d = id_descriptor(true, false, Some(serde_json::json!("hardcoded")));
+        let err = build_table_snapshot("app", &d, SqlDialect::Postgres)
+            .expect_err("a user default on the folded id must be rejected");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("system primary key") && msg.contains("default"),
+            "the discarded `default` on `id` must be a hard error: {msg}"
+        );
+    }
+
+    /// **MED-1 — nullability is NOT a discarded modifier.** The system PK is always
+    /// NOT NULL irrespective of the folded field's `required` flag, and the
+    /// declarative `t.id(prefix)` descriptor legitimately leaves `required` at its
+    /// `false` default (the NOT NULL is injected by `system_field_columns`). So a
+    /// folded `id` field with `required:false` and no `unique`/`default` must STILL
+    /// fold cleanly — the reject must NOT over-fire on nullability. (Guards the fix
+    /// against the regression that briefly broke
+    /// `re_declaring_id_with_prefix_folds_into_the_system_pk_no_second_column`.)
+    #[test]
+    fn id_field_with_default_required_flag_still_folds() {
+        let d = id_descriptor(/* required */ false, false, None);
+        let snap = build_table_snapshot("app", &d, SqlDialect::Postgres)
+            .expect("a t.id() with the descriptor's default required:false still folds");
+        let id_cols = snap.columns.iter().filter(|c| c.name == "id").count();
+        assert_eq!(id_cols, 1, "exactly one (system) id column — nullability is not a drop");
+    }
+
+    /// **MED-1 — the legitimate shape STILL folds.** A clean `t.id(prefix?)` PK
+    /// (`ty = "id"`, no user default, not column-unique — exactly what
+    /// `ir_column_to_field` produces, since the synth `genRandomUuid` default maps to
+    /// `None`) must fold into the single system PK with NO error and NO second column.
+    /// Guards against the reject over-firing on the real id shape.
+    #[test]
+    fn clean_id_field_still_folds_into_the_system_pk() {
+        let d = id_descriptor(/* required */ true, false, None);
+        let snap = build_table_snapshot("app", &d, SqlDialect::Postgres)
+            .expect("a clean t.id() folds cleanly");
+        let id_cols = snap.columns.iter().filter(|c| c.name == "id").count();
+        assert_eq!(id_cols, 1, "exactly one (system) id column — the field folds, not duplicates");
     }
 }
 
