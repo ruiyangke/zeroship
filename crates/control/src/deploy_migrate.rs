@@ -1467,27 +1467,80 @@ async fn apply_bundle_ir_migrations(
             }
             Ok(()) => {
                 // The deploy SUCCEEDED, so its EXPANDs legitimately stay pending
-                // (§2.0.2). Mark the recovery markers reconciled so the crash-recovery
-                // leg of a FUTURE deploy never mistakes this go-live for a crash and
-                // false-aborts a legitimately-pending contract. This MUST succeed for
-                // the marker state to be consistent: a failure is captured and surfaced
-                // as a hard error AFTER the lock release (the DDL is already committed +
-                // idempotent, so the retried deploy re-reconciles cleanly) rather than
-                // silently leaving an `open` marker over a still-outstanding obligation.
-                for pc in &opened_this_deploy {
-                    if let Err(e) = backend
-                        .mark_deploy_recovery_reconciled(
-                            exec_cfg,
-                            &deploy_id,
-                            &pc.pending_version,
-                            &ir_actor,
+                // (§2.0.2). PR9d HIGH — the crash-vs-legit discriminator. We do this in
+                // TWO append phases so that a `reconciled`-append failure can NEVER
+                // re-expose this go-live to a future deploy's crash-recovery leg:
+                //
+                //   1. `reached_success` — stamped FIRST, for every obligation, BEFORE
+                //      any `reconciled` append. A net-`reached_success` marker means the
+                //      deploy reached its success arm (the EXPAND went go-live), so
+                //      `outstanding_deploy_recoveries` EXCLUDES it (it only returns
+                //      net-`open`). Even if step 2 fails, the marker is net-
+                //      `reached_success`, not `open` — so the next deploy's crash-
+                //      recovery leg never false-aborts this legitimately-pending
+                //      contract (closing the HIGH window). Only the FIRST stamp matters
+                //      for the discriminator; if a later obligation's `reached_success`
+                //      append fails we surface a hard error (the operator re-runs the
+                //      idempotent deploy), but the already-stamped obligations are
+                //      already protected.
+                //   2. `reconciled` — best-effort cleanup so the marker log closes
+                //      tidily. A failure here is NON-fatal: the marker is already net-
+                //      `reached_success` (protected), so we log and continue rather than
+                //      hard-failing a go-live. The next deploy's success path is a no-op
+                //      on an already-protected marker.
+                'stamp: {
+                    // Phase 1 — stamp `reached_success` for ALL obligations first.
+                    for pc in &opened_this_deploy {
+                        if let Err(e) = backend
+                            .mark_deploy_recovery_reached_success(
+                                exec_cfg,
+                                &deploy_id,
+                                &pc.pending_version,
+                                &ir_actor,
+                            )
+                            .await
+                        {
+                            recovery_result = Err(DeployMigrateError::Apply(EngineError::Apply(
+                                ApplyError::Journal(e),
+                            )));
+                            break 'stamp;
+                        }
+                    }
+                    // Phase 2 — best-effort `reconciled` (cleanup only; the marker is
+                    // already net-`reached_success` ⇒ never crash-recovered).
+                    for pc in &opened_this_deploy {
+                        // PR9d HIGH test fault: simulate the `reconciled` append failing
+                        // (the exact HIGH window) so the regression test can assert the
+                        // marker stays net-`reached_success` and the NEXT deploy's
+                        // crash-recovery leg does NOT false-abort the live contract.
+                        // Inert in production.
+                        let recon_result = if zeroship_migrate::fault::trip(
+                            zeroship_migrate::fault::points::DEPLOY_SUCCESS_RECONCILE_FAILS,
                         )
-                        .await
-                    {
-                        recovery_result = Err(DeployMigrateError::Apply(EngineError::Apply(
-                            ApplyError::Journal(e),
-                        )));
-                        break;
+                        .is_err()
+                        {
+                            Err(zeroship_migrate::journal::JournalError::Backend(
+                                "fault-injection: simulated `reconciled` append failure".into(),
+                            ))
+                        } else {
+                            backend
+                                .mark_deploy_recovery_reconciled(
+                                    exec_cfg,
+                                    &deploy_id,
+                                    &pc.pending_version,
+                                    &ir_actor,
+                                )
+                                .await
+                        };
+                        if let Err(e) = recon_result {
+                            tracing::warn!(
+                                app_id = %app_id, error = %e,
+                                "deploy-migrate: PR9d — go-live `reconciled` append failed; the \
+                                 marker is already net-`reached_success`, so the crash-recovery \
+                                 leg still excludes it (the legitimately-pending contract is \
+                                 protected). Non-fatal — leaving the marker `reached_success`."
+                            );
+                        }
                     }
                 }
             }

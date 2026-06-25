@@ -230,6 +230,20 @@ pub trait MigrationBackend {
         by: &str,
     ) -> Result<(), JournalError>;
 
+    /// Stamp a deploy-scoped recovery marker `reached_success` (PR9d HIGH): APPEND a
+    /// `reached_success` row as the FIRST action of the deploy SUCCESS arm, BEFORE
+    /// the `reconciled` append. This is the crash-vs-legit-pending discriminator: a
+    /// net-`reached_success` marker means the deploy went go-live (the obligation is
+    /// legitimately pending), so the crash-recovery leg never false-aborts it.
+    /// Admin-written. SQLite no-ops.
+    async fn mark_deploy_recovery_reached_success(
+        &self,
+        cfg: &ExecutorConfig,
+        deploy_id: &str,
+        pending_version: &str,
+        by: &str,
+    ) -> Result<(), JournalError>;
+
     /// Mark a deploy-scoped recovery obligation `reconciled` (APPEND a `reconciled`
     /// row). Admin-written. SQLite no-ops.
     async fn mark_deploy_recovery_reconciled(
@@ -710,6 +724,23 @@ impl MigrationBackend for PostgresBackend<'_> {
         by: &str,
     ) -> Result<(), JournalError> {
         journal::record_deploy_recovery_open(self.conn, cfg, deploy_id, pending_version, by).await
+    }
+
+    async fn mark_deploy_recovery_reached_success(
+        &self,
+        cfg: &ExecutorConfig,
+        deploy_id: &str,
+        pending_version: &str,
+        by: &str,
+    ) -> Result<(), JournalError> {
+        journal::mark_deploy_recovery_reached_success(
+            self.conn,
+            cfg,
+            deploy_id,
+            pending_version,
+            by,
+        )
+        .await
     }
 
     async fn mark_deploy_recovery_reconciled(

@@ -158,6 +158,25 @@ itself:
 > also clear it manually with the `resolve-pending --apply | --abort` CLI command
 > (`--apply` completes the rename; `--abort` rolls it back, dropping the shadow
 > column).
+>
+> **A legit go-live is never mistaken for a crash (PR9d HIGH).** A *successful*
+> online-rename go-live legitimately leaves its EXPAND pending (the §2.0.2
+> cross-deploy partition) — that is **not** a half-state and must never be aborted by
+> a later deploy's always-on recovery leg. To make the success arm distinguishable
+> from a genuine crash, it stamps the recovery marker **`reached_success`** *before*
+> it appends the `reconciled` marker. The recovery leg only treats **net-`open`**
+> markers as recoverable, so a legitimately-pending go-live is excluded — even in the
+> window where the **`reconciled` append itself fails** (DB hiccup right after the
+> EXPAND committed). That `reconciled`-append failure is now **non-fatal**: the
+> marker is already net-`reached_success` (the live contract is protected), the
+> deploy still **succeeds**, and the next deploy's success path is a harmless no-op on
+> the already-protected marker. (Pre-PR9d this window left a bare `open` marker that
+> the next *unrelated* deploy's recovery leg would mistake for a crash and silently
+> roll back a column the creator's app was already using.) The only success-path
+> hard error left is if the **`reached_success` stamp itself** cannot be written for
+> a later obligation in a multi-EXPAND go-live — that surfaces as a hard error and the
+> operator simply **re-runs the (idempotent) deploy promptly**; the already-stamped
+> obligations are already protected.
 - The approver's principal is stamped into the immutable journal
   (`applied_by = deploy-approved:<approver>` / `deploy-ir-approved:<approver>`),
   so an operator-approved go-live is forensically distinct from a routine deploy.

@@ -111,4 +111,12 @@ pub mod points {
     /// the half-renamed table, mark the marker reconciled). Tripped by the
     /// deploy-recovery crash-fuzz test only.
     pub const DEPLOY_BEFORE_INPROCESS_ABORT: &str = "deploy.before_inprocess_abort";
+    /// In the control IR deploy loop SUCCESS arm (PR9d HIGH): AFTER the
+    /// `reached_success` marker is stamped, the phase-2 `reconciled` append FAILS
+    /// (DB hiccup). This reproduces the HIGH window — a legitimately-pending go-live
+    /// whose `reconciled` append errored. The marker stays net-`reached_success`, so
+    /// the NEXT deploy's crash-recovery leg must STILL exclude it (no false-abort of
+    /// the live contract). Tripped by the legit-pending-survives-unrelated-deploy
+    /// test only.
+    pub const DEPLOY_SUCCESS_RECONCILE_FAILS: &str = "deploy.success_reconcile_fails";
 }

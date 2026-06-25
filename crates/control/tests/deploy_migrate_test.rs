@@ -2637,6 +2637,133 @@ async fn deploy_migrate_pr9d_crash_before_abort_is_recovered_on_next_deploy() {
     cleanup_app(&conn, &app_id).await;
 }
 
+// PR9d HIGH — the CENTRAL same-deploy-scope safety invariant: a LEGITIMATELY-pending
+// prior-deploy EXPAND (a SUCCESSFUL go-live) is NEVER aborted by a subsequent deploy's
+// always-on crash-recovery leg, EVEN when the go-live's success-path `reconciled` marker
+// append FAILED (the HIGH window: EXPAND committed, obligation legitimately pending,
+// `reconciled` append errored ⇒ pre-fix a bare `open` marker the next deploy's crash-
+// recovery leg would mistake for a crash half-state and false-abort).
+//
+// The fix is the `reached_success` discriminator: the success arm stamps the marker
+// `reached_success` BEFORE attempting `reconciled`, so a `reconciled`-append failure
+// leaves the marker net-`reached_success` (NOT `open`). `outstanding_deploy_recoveries`
+// only returns net-`open` markers, so the crash-recovery leg excludes the live contract.
+//
+// This test is the unique path the prior PR9d tests never reached: deploy #3 does NOT
+// touch the pending table (so the §2.0.3 interlock does NOT refuse it — it proceeds to
+// the apply loop + the always-on crash-recovery leg) AND the go-live's reconcile is
+// forced to fail (via the `DEPLOY_SUCCESS_RECONCILE_FAILS` fault) so the marker is the
+// bare-`open`-pre-fix state. RED PRE-FIX: without the discriminator deploy #3's crash-
+// recovery leg drops the dual-write trigger + shadow column of a live contract.
+#[compio::test]
+async fn deploy_migrate_pr9d_legit_pending_survives_unrelated_deploy_after_reconcile_failure() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    // Deploy #1 (routine): create `members(handle)` + seed Ada.
+    let create = r#"{"ir_version":1,"name":"create_members","ops":[
+        {"op":"createTable","name":"members","columns":[
+            {"name":"handle","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    let dir1 = migrations_dir(&[("0001_create_members.ir.json", create)]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir1)
+        .await
+        .expect("createTable deploy must succeed");
+    let schema = app_id.to_string();
+    conn.batch_execute(&format!(
+        "INSERT INTO \"{schema}\".members (id, handle, created_at, updated_at, version) VALUES \
+         ('m1','ada', now(), now(), 1)"
+    ))
+    .await
+    .expect("seed members");
+
+    // Deploy #2 (APPROVED): online rename handle → username GOES LIVE (succeeds). ARM
+    // `DEPLOY_SUCCESS_RECONCILE_FAILS` so the success arm stamps `reached_success` but the
+    // `reconciled` append "fails" — reproducing the HIGH window. The deploy still SUCCEEDS
+    // (the `reconciled` failure is non-fatal once `reached_success` is stamped).
+    zeroship_migrate::fault::arm(
+        zeroship_migrate::fault::points::DEPLOY_SUCCESS_RECONCILE_FAILS,
+        0,
+    );
+    let rename = r#"{"ir_version":1,"name":"rename_handle","ops":[
+        {"op":"renameColumn","table":"members","from":"handle","to":"username","type":"text"}
+    ]}"#;
+    let dir2 = migrations_dir(&[("0002_rename_handle.ir.json", rename)]);
+    let outcome = approve_whole_bundle(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect("the approved go-live must SUCCEED (a failed `reconciled` append is non-fatal)");
+    zeroship_migrate::fault::disarm_all();
+    assert!(
+        !outcome.pending_contract.is_empty(),
+        "the go-live surfaces a pending CONTRACT (C2 drop-old-column), got {outcome:?}"
+    );
+
+    // The go-live is LIVE: dual-write trigger + shadow `username` column + the obligation
+    // legitimately pending. This is the §2.0.2 cross-deploy partition, NOT a half-state.
+    assert!(
+        trigger_exists(&conn, &app_id, "members", "zsdw_members_handle_username_trg").await,
+        "the go-live's dual-write trigger must be LIVE (the legit-pending contract)"
+    );
+    assert!(
+        column_exists(&conn, &app_id, "members", "username").await,
+        "the go-live's shadow `username` column must be LIVE"
+    );
+    assert_eq!(
+        net_outstanding_contract_count(&conn, &app_id).await,
+        1,
+        "the legit go-live leaves exactly ONE net-outstanding obligation (pending, not aborted)"
+    );
+
+    // Deploy #3 (the NEXT same-app deploy): a benign create on an UNRELATED table. It does
+    // NOT touch `members`, so the §2.0.3 interlock does NOT refuse it — it proceeds to the
+    // always-on crash-recovery leg. That leg MUST exclude the legit-pending marker
+    // (net-`reached_success`, NOT `open`) and leave the live contract intact.
+    let benign = r#"{"ir_version":1,"name":"create_widgets","ops":[
+        {"op":"createTable","name":"widgets","columns":[{"name":"label","type":"text"}]}
+    ]}"#;
+    let dir3 = migrations_dir(&[("0004_create_widgets.ir.json", benign)]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir3)
+        .await
+        .expect("the unrelated deploy must apply WITHOUT touching the live contract");
+
+    // THE LOAD-BEARING ASSERTIONS — the live contract SURVIVED the unrelated deploy:
+    assert!(
+        trigger_exists(&conn, &app_id, "members", "zsdw_members_handle_username_trg").await,
+        "PR9d HIGH: the crash-recovery leg must NOT abort a legit go-live — the dual-write \
+         trigger must STILL be live after an unrelated deploy (RED pre-fix: dropped)"
+    );
+    assert!(
+        column_exists(&conn, &app_id, "members", "username").await,
+        "PR9d HIGH: the shadow `username` column must SURVIVE the unrelated deploy \
+         (RED pre-fix: dropped by the false-abort)"
+    );
+    assert!(
+        column_exists(&conn, &app_id, "members", "handle").await,
+        "the pre-rename `handle` column is untouched throughout"
+    );
+    assert_eq!(
+        net_outstanding_contract_count(&conn, &app_id).await,
+        1,
+        "PR9d HIGH: the legit pending obligation must SURVIVE the unrelated deploy \
+         (RED pre-fix: discharged `aborted` by the false-abort)"
+    );
+    // …and the unrelated deploy's own bundle still applied.
+    assert!(
+        table_exists(&conn, &app_id, "widgets").await,
+        "the unrelated deploy's own table must be created"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir1);
+    let _ = std::fs::remove_dir_all(&dir2);
+    let _ = std::fs::remove_dir_all(&dir3);
+    cleanup_app(&conn, &app_id).await;
+}
+
 // A path-only reference so an unused-import lint never fires if a test is
 // cfg'd out in a future refactor.
 #[allow(dead_code)]
