@@ -232,18 +232,53 @@ fn sql_dir_renders_offline() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// NO DB CONNECTION — render the representative IR with NO `DATABASE_URL` set and no
-/// DB reachable. The offline render path must succeed without opening a socket; if it
-/// ever connected, this would error or hang. (A timing-free structural proof: the
-/// `render_ir_json_sql` API takes only bytes + dialect + opts — there is no DSN
-/// parameter — and it returns synchronously here.)
+/// MED-1 — HONESTY ON THE RAW `.sql` LEG. Operator-authored raw `.sql` is rendered
+/// VERBATIM, never dialect-transformed. A PG-only `.sql` (`SERIAL`) rendered under
+/// `--dialect sqlite` must therefore NOT be captioned with a bare `(dialect: sqlite)`
+/// claim — that would mislead an operator reviewing a SQLite go-live into thinking
+/// the PG SQL had been lowered for SQLite. The header must carry the verbatim/NOT-
+/// transformed disclaimer instead, while the body stays byte-verbatim.
 #[test]
-fn render_opens_no_db_connection() {
-    // Scrub any inherited DSN so a stray connect would fail loudly.
+fn raw_sql_caption_does_not_claim_a_transformed_dialect() {
+    let dir = tempdir_with(&[(
+        "V0001__legacy.sql",
+        "CREATE TABLE legacy (id SERIAL PRIMARY KEY, name text);\n",
+    )]);
+    let plans = zeroship_migrate::loader::load_dir(&dir).expect("loads .sql offline");
+    // Render the PG-only raw SQL under the SQLITE dialect request.
+    let out = render_set_sql(&plans, SqlDialect::Sqlite, &opts());
+
+    // The PG SQL is shown VERBATIM (the SERIAL never became INTEGER / AUTOINCREMENT).
+    assert!(out.contains("id SERIAL PRIMARY KEY"), "raw SQL must be verbatim:\n{out}");
+
+    // CRITICAL: no bare `(dialect: sqlite)` claim anywhere — neither the doc header
+    // nor the per-plan header may assert the SQL was lowered for SQLite.
+    assert!(
+        !out.contains("(dialect: sqlite)"),
+        "raw .sql must NOT be captioned with a transformed-dialect claim:\n{out}"
+    );
+    // It DOES surface the honest verbatim/NOT-transformed disclaimer.
+    assert!(
+        out.contains("NOT dialect-transformed"),
+        "raw .sql header must disclose it is verbatim / not transformed:\n{out}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// RENDER SUCCEEDS WITHOUT A DSN (truth-in-advertising, LOW-1). Scrubbing
+/// `DATABASE_URL` and asserting `is_ok()` proves only that the render does not
+/// REQUIRE a DSN env var — it does NOT prove the absence of a hard-coded connect
+/// (a path dialing a fixed host would still pass here). Named honestly for what it
+/// proves. The LOAD-BEARING offline-proof is `cli_plan_prints_and_exits_zero_offline`
+/// below: it runs the real binary under a scrubbed env, so a stray connect to any
+/// host would fail or hang the subprocess.
+#[test]
+fn render_succeeds_without_a_dsn() {
+    // Scrub any inherited DSN so the render cannot lean on an env-provided DSN.
     std::env::remove_var("DATABASE_URL");
     let pg = render_ir_json_sql(REPRESENTATIVE_IR, SqlDialect::Postgres, &opts());
     let sqlite = render_ir_json_sql(REPRESENTATIVE_IR, SqlDialect::Sqlite, &opts());
-    assert!(pg.is_ok() && sqlite.is_ok(), "offline render must not need a DB");
+    assert!(pg.is_ok() && sqlite.is_ok(), "offline render must not need a DSN");
 }
 
 /// `render_plan_sql` — the single-plan renderer (symmetric with `render_set_sql`,
@@ -279,6 +314,73 @@ fn render_plan_sql_surfaces_lowered_ddl_offline() {
             assert!(out.contains(body), "render_plan_sql missing lowered DDL:\n{body}\n--\n{out}");
         }
     }
+}
+
+/// LOW-2 — `render_plan_sql` over a PG `OnlineRename(PgExpandContract)` plan. This is
+/// the public-API entrypoint for a hand-built rename plan (no CLI path feeds an
+/// OnlineRename step). It locks the no-fabrication contract for the rename render
+/// surface: the expand/contract ADDITIVE DDL must appear ONLY as `--`-comment lines
+/// under a `-- [runtime-resolved]` label, and NO bare executable rename SQL (no
+/// `ALTER … RENAME`, no `CREATE TRIGGER`, no uncommented expand DDL) may leak.
+#[test]
+fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
+    use zeroship_migrate::plan::{PlanStep, RenameStep};
+    use zeroship_migrate::{ExpandContractAuthor, OnlineIntent};
+
+    // Author a REAL PG expand-contract plan via the same author the engine uses, so
+    // the test feeds the genuine E1..C2 + backfill shape (never a synthetic stub).
+    let ec = ExpandContractAuthor::new("public", "app_preview")
+        .author(&OnlineIntent::RenameColumn {
+            table: "codes".to_string(),
+            from: "label".to_string(),
+            to: "display_name".to_string(),
+            ty: "text".to_string(),
+        })
+        .expect("expand-contract author lowers the rename");
+    let rename = RenameStep::PgExpandContract(ec);
+
+    // Borrow a real, fully-formed AppliedPlan via the offline `.sql` loader, then swap
+    // its single DDL step for the OnlineRename step (the only piece under test).
+    let dir = tempdir_with(&[("V0001__seed.sql", "CREATE TABLE codes (id text primary key);\n")]);
+    let mut plan = zeroship_migrate::loader::load_dir(&dir)
+        .expect("loads .sql offline")
+        .pop()
+        .expect("one plan");
+    plan.steps = vec![PlanStep::OnlineRename(rename)];
+
+    let out = render_plan_sql(&plan, SqlDialect::Postgres, &opts());
+
+    // The rename is labeled runtime-resolved (the backfill + cutover depend on live state).
+    assert!(
+        out.contains(RUNTIME_RESOLVED) && out.contains("expand-contract"),
+        "online rename must be labeled runtime-resolved:\n{out}"
+    );
+
+    // The expand/contract additive DDL IS surfaced (the E1 `ADD COLUMN` / the E2
+    // dual-write `CREATE … TRIGGER`) — but it must appear ONLY inside `--` comment
+    // lines, never as a bare executable statement.
+    assert!(out.contains("ADD COLUMN"), "the additive expand DDL should be surfaced:\n{out}");
+
+    // THE no-fabrication invariant: every non-blank line is a comment. No bare
+    // executable rename SQL (no uncommented ALTER/CREATE TRIGGER/RENAME) may leak —
+    // if any did, it would appear as a non-`--` line and trip this loop.
+    for line in out.lines() {
+        let l = line.trim_start();
+        if l.is_empty() || l.starts_with("--") {
+            continue;
+        }
+        panic!("bare executable SQL leaked from an online-rename render: {line:?}\n{out}");
+    }
+    // Belt-and-suspenders: the lines that carry the rename mechanics are comments.
+    for needle in ["ADD COLUMN", "CREATE OR REPLACE FUNCTION", "CREATE", "TRIGGER"] {
+        for line in out.lines().filter(|l| l.contains(needle)) {
+            assert!(
+                line.trim_start().starts_with("--"),
+                "rename mechanic {needle:?} must be a comment, not executable: {line:?}\n{out}"
+            );
+        }
+    }
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// A malformed `.ir.json` is a hard error (the CLI maps this to a non-zero exit).

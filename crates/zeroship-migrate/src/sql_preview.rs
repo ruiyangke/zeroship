@@ -79,6 +79,37 @@ fn dialect_label(d: SqlDialect) -> &'static str {
     }
 }
 
+/// How a plan's body relates to the requested `--dialect` — drives the HONEST header
+/// caption (MED-1). The `.ir.json` leg is genuinely per-dialect LOWERED, so its
+/// header may claim the dialect. The raw `.sql` (Flyway, operator-authored) leg is
+/// printed VERBATIM — it is NOT dialect-transformed — so captioning it with a
+/// `(dialect: sqlite)` claim would mislead an operator reviewing a SQLite go-live
+/// when the file is actually PG-only SQL. That leg gets a verbatim caption instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DialectCaption {
+    /// The body was lowered for this dialect — claim it.
+    Lowered(SqlDialect),
+    /// The body is operator-authored raw `.sql`, shown verbatim — NOT transformed.
+    /// `requested` is the `--dialect` the operator asked for (named only to be
+    /// explicit that we did NOT honour it for raw SQL).
+    VerbatimRawSql { requested: SqlDialect },
+}
+
+impl DialectCaption {
+    /// The parenthetical the header carries. Lowered ⇒ a dialect claim; raw `.sql`
+    /// ⇒ an explicit "NOT dialect-transformed" disclaimer (never a bare dialect
+    /// claim over verbatim foreign-dialect SQL).
+    fn header_suffix(self) -> String {
+        match self {
+            DialectCaption::Lowered(d) => format!("(dialect: {})", dialect_label(d)),
+            DialectCaption::VerbatimRawSql { requested } => format!(
+                "(verbatim raw .sql — NOT dialect-transformed; --dialect {} ignored for raw SQL)",
+                dialect_label(requested)
+            ),
+        }
+    }
+}
+
 /// A single rendered preview line + whether it was a runtime-resolved LABEL (vs a
 /// real rendered statement). The set-level renderer tallies these for the summary.
 struct Rendered {
@@ -110,17 +141,25 @@ impl Rendered {
 pub fn render_plan_sql(plan: &AppliedPlan, dialect: SqlDialect, _opts: &PreviewOpts) -> String {
     let rendered = render_plan_steps(plan);
     let mut out = String::new();
-    write_plan_header(&mut out, plan, dialect);
+    write_plan_header(&mut out, plan, DialectCaption::Lowered(dialect));
     write_rendered(&mut out, &rendered);
     out
 }
 
 /// Render a SET of plans (a whole migration directory) to one preview document
 /// with a leading honest header and a trailing tally.
+///
+/// This is the RAW `.sql` (Flyway, operator-authored) leg: each plan's body is the
+/// verbatim operator SQL, which is NOT dialect-transformed (MED-1). The headers
+/// therefore carry a `(verbatim raw .sql — NOT dialect-transformed)` caption rather
+/// than a `(dialect: …)` claim, so an operator reviewing a SQLite go-live is never
+/// misled into thinking PG-only verbatim SQL was lowered for SQLite. `dialect` here
+/// is only the operator's REQUESTED target (surfaced as "ignored for raw SQL").
 #[must_use]
 pub fn render_set_sql(plans: &[AppliedPlan], dialect: SqlDialect, _opts: &PreviewOpts) -> String {
+    let caption = DialectCaption::VerbatimRawSql { requested: dialect };
     let mut out = String::new();
-    write_doc_header(&mut out, dialect);
+    write_doc_header(&mut out, caption);
     let mut total_statements = 0usize;
     let mut total_runtime = 0usize;
     for plan in plans {
@@ -128,7 +167,7 @@ pub fn render_set_sql(plans: &[AppliedPlan], dialect: SqlDialect, _opts: &Previe
         total_statements += rendered.iter().filter(|r| r.statement).count();
         total_runtime += rendered.iter().filter(|r| r.runtime_resolved).count();
         out.push('\n');
-        write_plan_header(&mut out, plan, dialect);
+        write_plan_header(&mut out, plan, caption);
         write_rendered(&mut out, &rendered);
     }
     let _ = writeln!(
@@ -184,7 +223,12 @@ pub fn render_ir_json_sql(
     // Synthesize a plan header from the IR identity (no full AppliedPlan needed —
     // a single un-lowerable op would otherwise make `lower_plan` abort).
     let _ = writeln!(out, "-- ============================================================");
-    let _ = writeln!(out, "-- plan {:?}  (dialect: {})", ir.name, dialect_label(dialect));
+    let _ = writeln!(
+        out,
+        "-- plan {:?}  {}",
+        ir.name,
+        DialectCaption::Lowered(dialect).header_suffix()
+    );
     let _ = writeln!(out, "-- ============================================================");
     write_rendered(&mut out, &rendered);
     let statements = rendered.iter().filter(|r| r.statement).count();
@@ -519,25 +563,27 @@ fn indent_sql(sql: &str) -> String {
         .join("\n")
 }
 
-/// Write the per-plan header block.
-fn write_plan_header(out: &mut String, plan: &AppliedPlan, dialect: SqlDialect) {
+/// Write the per-plan header block. `caption` decides whether the parenthetical is a
+/// dialect claim (lowered `.ir.json`) or a verbatim-raw-`.sql` disclaimer (MED-1).
+fn write_plan_header(out: &mut String, plan: &AppliedPlan, caption: DialectCaption) {
     let _ = writeln!(out, "-- ============================================================");
     let _ = writeln!(
         out,
-        "-- plan {} {:?}  (dialect: {})",
+        "-- plan {} {:?}  {}",
         plan.version.as_str(),
         plan.name,
-        dialect_label(dialect)
+        caption.header_suffix()
     );
     let _ = writeln!(out, "-- ============================================================");
 }
 
-/// Write the document-level honest header.
-fn write_doc_header(out: &mut String, dialect: SqlDialect) {
+/// Write the document-level honest header. `caption` carries the dialect claim (for
+/// the lowered legs) or the verbatim-raw-`.sql` disclaimer (the raw `.sql` leg, MED-1).
+fn write_doc_header(out: &mut String, caption: DialectCaption) {
     let _ = writeln!(
         out,
-        "-- zeroship-migrate offline SQL preview (dialect: {})",
-        dialect_label(dialect)
+        "-- zeroship-migrate offline SQL preview {}",
+        caption.header_suffix()
     );
     let _ = writeln!(
         out,
