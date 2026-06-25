@@ -258,6 +258,22 @@ enum Command {
     /// Dry-run on a shadow DB + report checksum drift + destructive advisories.
     /// NO DDL on the real DB.
     Validate,
+    /// Render the exact per-dialect SQL the pending migration set WOULD execute,
+    /// WITHOUT a DB and WITHOUT applying (the canonical Alembic `--sql` / Flyway /
+    /// dbmate feature). For OPERATOR GO-LIVE REVIEW — review the exact SQL before
+    /// approving an `approved_versions` go-live (vs approving blind).
+    ///
+    /// DB-state-dependent ops (online-rename backfill/cutover, SQLite rebuild,
+    /// existence-guarded ops) print a labeled `-- [runtime-resolved]` line, never
+    /// fabricated SQL. DISTINCT from `validate` (the DB-backed shadow dry-run that
+    /// APPLIES on a throwaway). Loads `.sql` (Flyway/dbmate) and/or `.ir.json`
+    /// (creator) artifacts from `--dir`; opens NO DB connection.
+    Plan {
+        /// Render for this dialect (`pg` | `sqlite`). Default: the `--engine`
+        /// override if present, else `pg`. NO DB connection is opened to pick it.
+        #[arg(long, value_enum)]
+        dialect: Option<EngineArg>,
+    },
     /// Roll back applied migrations via their `down` (gated; requires `--yes`).
     /// `--to <version>` unwinds everything after that numeric version; `--steps
     /// <N>` unwinds the N most-recent. Neither ⇒ roll back ALL.
@@ -627,6 +643,115 @@ fn run_new(dir: &Path, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `plan --sql` — the OFFLINE per-dialect SQL plan preview (PR14). Loads `.sql`
+/// (Flyway/dbmate) and/or `.ir.json` (creator) artifacts from `dir`, renders the
+/// exact SQL the engine WOULD run via the pure, DB-free
+/// [`zeroship_migrate::sql_preview`] surfacing layer, and prints it to stdout. DB-
+/// state-dependent ops print `-- [runtime-resolved]` labels, never fabricated SQL.
+///
+/// Opens NO DB connection (a unit/integration test asserts this offline path). The
+/// dialect is `chosen` (`--dialect` > `--engine`), defaulting to Postgres — NEVER
+/// probed from a live DSN. Returns the process exit code: SUCCESS on a rendered
+/// preview, FAILURE on a missing/unreadable dir or an unloadable artifact.
+fn run_plan_preview(
+    dir: &Path,
+    chosen: Option<EngineArg>,
+    _layer: &FileEnvLayer,
+) -> ExitCode {
+    use zeroship_migrate::sql_preview::{render_ir_json_sql, render_set_sql, PreviewOpts};
+    use zeroship_schema::query::SqlDialect;
+
+    let dialect = match chosen {
+        Some(EngineArg::Sqlite) => SqlDialect::Sqlite,
+        // `--dialect pg`, `--engine pg`, or unset all render the PG leg (the default
+        // operator target). NO DSN probe.
+        _ => SqlDialect::Postgres,
+    };
+    // The general/Trusted operator preview renders unqualified ops into `public`
+    // (dbmate's home schema, `DEFAULT_GENERIC_SCHEMA`); a flag/profile could widen
+    // this, but it is NEVER derived from a DB.
+    let opts = PreviewOpts {
+        default_schema: DEFAULT_GENERIC_SCHEMA.to_string(),
+        owner_app: "app_preview".to_string(),
+    };
+
+    // Discover artifacts. `.ir.json` (creator) files render via the offline IR
+    // lower; everything else (`.sql`, Flyway/dbmate) loads via `load_dir`. We render
+    // the two seams separately, in a stable filename order, so a mixed dir previews
+    // both. An EMPTY dir is an honest non-zero refusal (nothing to preview).
+    let read = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("zeroship-migrate: plan: read dir {}: {e}", dir.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut ir_files: Vec<PathBuf> = Vec::new();
+    let mut has_sql = false;
+    for entry in read {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if name.ends_with(".ir.json") {
+            ir_files.push(path);
+        } else if name.ends_with(".sql") && !name.ends_with(".down.sql") {
+            has_sql = true;
+        }
+    }
+    ir_files.sort();
+
+    if !has_sql && ir_files.is_empty() {
+        eprintln!(
+            "zeroship-migrate: plan: no `.sql` or `.ir.json` artifacts found in {}",
+            dir.display()
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let mut output = String::new();
+
+    // The `.sql` (Flyway/dbmate) leg: `load_dir` lowers each to a single-step plan
+    // (no DB), then the set renderer formats them.
+    if has_sql {
+        match zeroship_migrate::loader::load_dir(dir) {
+            Ok(plans) => {
+                output.push_str(&render_set_sql(&plans, dialect, &opts));
+            }
+            Err(e) => {
+                eprintln!("zeroship-migrate: plan: load `.sql` artifacts: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    // The `.ir.json` (creator) leg: load + lower each offline, per dialect.
+    for path in &ir_files {
+        let bytes = match std::fs::read_to_string(path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("zeroship-migrate: plan: read {}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+        };
+        match render_ir_json_sql(&bytes, dialect, &opts) {
+            Ok(text) => {
+                output.push('\n');
+                output.push_str(&text);
+            }
+            Err(e) => {
+                eprintln!("zeroship-migrate: plan: {}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    print!("{output}");
+    ExitCode::SUCCESS
+}
+
 /// The Postgres `dump` schema body: shell `pg_dump --schema-only` against the DSN.
 /// Find it on `PATH` (or honour `PG_DUMP` for a pinned binary, e.g. under Nix where
 /// it is not on `PATH`). If `pg_dump` is unavailable / fails, error (don't
@@ -732,6 +857,18 @@ async fn main() -> ExitCode {
         };
     }
 
+    // `plan --sql` is OFFLINE (no DB): render the exact per-dialect SQL the pending
+    // set WOULD run, for operator go-live review. Dispatch BEFORE building a
+    // DSN-bearing RunConfig — it opens no connection, mints no capability. The
+    // dialect comes from `--dialect`, else the `--engine` override, else `pg` (NEVER
+    // from a live DSN probe). It loads `.sql` (Flyway/dbmate) AND `.ir.json`
+    // (creator) artifacts from `--dir`.
+    if let Command::Plan { dialect } = &cli.command {
+        let dir = effective_dir(&cli, &layer);
+        let chosen = dialect.or(cli.engine);
+        return run_plan_preview(&dir, chosen, &layer);
+    }
+
     let cfg = match run_config(&cli, &layer) {
         Ok(c) => c,
         Err(e) => {
@@ -820,7 +957,11 @@ async fn main() -> ExitCode {
             .await
         }
         // Handled above (offline / non-plan commands).
-        Command::New { .. } | Command::Wait { .. } | Command::Dump | Command::Load => {
+        Command::New { .. }
+        | Command::Wait { .. }
+        | Command::Dump
+        | Command::Load
+        | Command::Plan { .. } => {
             unreachable!()
         }
     };

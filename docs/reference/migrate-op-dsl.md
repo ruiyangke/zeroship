@@ -894,6 +894,57 @@ Until per-version approval scoping lands, the approved go-live surface stays
 test-only (the regression test above pins it); treat online `renameColumn` as a
 dev/CLI capability, not a shipped production deploy path.
 
+## Offline SQL preview (`plan --sql`)
+
+`zeroship-migrate plan --dir <d> --dialect <pg|sqlite>` renders the **exact
+per-dialect SQL the pending migration set WOULD execute** — without a database and
+without applying anything. This is the canonical Alembic `--sql` / Atlas / Flyway /
+dbmate feature, here for one job: **operator go-live review**. Before approving an
+`approved_versions` go-live you can read the precise SQL the deploy will run,
+instead of approving blind.
+
+It is **distinct from `validate`** (the shadow dry-run): `validate` needs a real DB
+and *applies* the migration on a throwaway shadow to prove it runs; `plan --sql`
+opens **no connection** and renders the SQL statically. Use `validate` to prove it
+*works*; use `plan --sql` to review *what it does*.
+
+The preview is a **surfacing layer**, not a second renderer: it prints back the SQL
+the engine already lowers (the `Migration.up` / DML `template`). It never
+re-implements rendering, so the previewed DDL/DML is byte-identical to what apply
+runs.
+
+**What renders (the offline-renderable subset).** The DB-independent ops render
+their real SQL: `createTable` / `dropTable` / `addColumn` / `dropColumn` /
+`addForeignKey` / `addUnique` / `addCheck` / `dropConstraint` / `createIndex` /
+`dropIndex`, and one-shot `insert` / `update` / `delete` (the DML prints its
+placeholder template — `$n` on Postgres, `?n` on SQLite — with a bind-count note;
+bind values are bound natively, never interpolated into the SQL).
+
+**The honest boundary — `-- [runtime-resolved]`.** Some ops cannot be faithfully
+rendered offline because their SQL depends on the **live database state**. The
+preview never fabricates SQL for these; it emits a clearly-labeled
+`-- [runtime-resolved] …` line stating *why*:
+
+- **online `renameColumn`** — needs the live `from` column's type/structure to
+  reconcile the type and author the expand-contract dual-write (PG) or the 12-step
+  rebuild (SQLite); the **backfill is windowed by PK** and the PG **contract cutover
+  is partitioned across deploys**, so the exact statement stream depends on live
+  state.
+- **`backfill`** — a runtime windowed batch loop (statement stream depends on live
+  row count / PK ranges).
+- **existence-guarded ops** (`ifExists` / `ifNotExists`) — the apply is a runtime
+  catalog probe + run / satisfied-noop / fail-drift decision. The **bare** DDL the
+  apply would run when the probe says "run" *is* printed (it is real SQL), under the
+  label — but no `IF [NOT] EXISTS` clause is invented (the engine emits none; the
+  guard is a probe, not a native clause).
+- **stand-alone SQLite `alterColumn*` / `addConstraint` / `dropConstraint`** —
+  reconciled via the live 12-step rebuild, which needs the live table structure.
+
+The preview's header and trailing `-- preview: N statement(s) rendered, M
+runtime-resolved` summary make the offline-renderable subset and the labeled
+remainder explicit. Both `.sql` (Flyway/dbmate) and `.ir.json` (creator) artifacts
+in the directory are previewed.
+
 ## Appendix: the hero example as IR
 
 A migration is recorded into a dialect-neutral `.ir.json` artifact (the frozen
