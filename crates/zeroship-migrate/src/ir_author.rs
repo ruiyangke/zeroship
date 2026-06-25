@@ -1285,10 +1285,9 @@ impl IrAuthor {
                     self.add_column_snapshot(table, column, ty, *nullable, default.as_ref())?;
                 // **PR10 Part B** — addColumn ifNotExists: verify (data_type, nullable)
                 // from the SAME shared-builder column snapshot the ADD renders from.
-                // **H1** — carry the un-collapsed SDK facet token when this column
-                // collapses to the SQLite TEXT affinity, so a present column whose
-                // facet the SQLite catalog cannot prove (e.g. live `string` vs
-                // declared `date`) fails CLOSED instead of an affinity-only noop.
+                // **F1** — the decider compares the canonical SQLite affinity (consistent
+                // with the differ); a present-matching column is an idempotent
+                // SatisfiedNoop, a genuine affinity change diverges.
                 if let Some(g) = guard {
                     probe = Some(crate::guard_probe::GuardProbe::Column {
                         schema: eff_schema.clone(),
@@ -1296,7 +1295,6 @@ impl IrAuthor {
                         column: column.clone(),
                         direction: g.into(),
                         expect: Some((col.data_type.clone(), col.nullable)),
-                        sqlite_text_facet: sqlite_text_facet_for(ty, &col.data_type, self.dialect),
                     });
                 }
                 vec![decl.lower_add_column(table, &col)]
@@ -1337,8 +1335,6 @@ impl IrAuthor {
                         column: column.clone(),
                         direction: g.into(),
                         expect: None,
-                        // presence-only drop: no shape to verify, so no facet.
-                        sqlite_text_facet: None,
                     });
                 }
                 vec![decl.lower_drop_column(table, column)]
@@ -1480,6 +1476,14 @@ impl IrAuthor {
                         name: cname,
                         direction: g.into(),
                         expect_kind: Some(ckind),
+                        // **F2** — the stand-alone addConstraint IR carries an
+                        // un-normalized body that CANNOT be proven byte-equal to the
+                        // live `pg_get_constraintdef`; leave `None` so the MED
+                        // fail-closed rule applies (a present same-name+same-kind
+                        // constraint is FailDrift, not a silent noop). Only the
+                        // createTable deferred-FK unit, whose body IS the canonical
+                        // `pg_get_constraintdef` spelling, sets `expect_definition`.
+                        expect_definition: None,
                     });
                 }
                 units
@@ -1495,6 +1499,8 @@ impl IrAuthor {
                         name: name.clone(),
                         direction: g.into(),
                         expect_kind: None,
+                        // presence-only drop: nothing to structurally compare.
+                        expect_definition: None,
                     });
                 }
                 vec![decl.lower_drop_constraint(table, name)]
@@ -2516,48 +2522,6 @@ fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
             (inner, None)
         }
     }
-}
-
-/// **H1** — the un-collapsed SDK facet token to carry on a guard probe for a column
-/// the SQLite catalog cannot prove the full facet of: the TEXT-affinity blind spot.
-///
-/// The guard's `column_shape_divergence` compares the probe's declared `data_type`
-/// (the value `build_table_snapshot` produced) against the LIVE introspected
-/// `data_type`. The declared snapshot data_type is the **PG** type spelling
-/// (`field_data_type` always maps via the PG dialect), so the facets that COLLAPSE
-/// to the literal `text` in the snapshot are exactly `string`/`ref`/`actor`/`id`
-/// (and a string `literal`); `json`→`jsonb` and `date`→`timestamp with time zone`
-/// are DISTINCT in the snapshot and so are already provably-different from a live
-/// SQLite `text` affinity by the plain compare.
-///
-/// On SQLite the live catalog stores ONLY the affinity (`text`), so when the
-/// declared snapshot data_type is also `text`, a same-name live `text`-affinity
-/// column whose true SDK facet differs (live authored `ref` vs declared `string`,
-/// or vice-versa) is INVISIBLE to the plain compare. Returns `Some(<facet token>)`
-/// in exactly that case (SQLite + declared snapshot data_type is `text`), so the
-/// decider fails CLOSED instead of an affinity-only noop. `None` on PG (distinct
-/// live types), for non-`text` snapshot types, and for an encrypted column (stored
-/// BLOB — an unambiguous non-TEXT affinity).
-///
-/// `snapshot_data_type` is the SAME value the probe carries as `expect.data_type`,
-/// so this stays in lockstep with what `column_shape_divergence` actually compares.
-fn sqlite_text_facet_for(ty: &ColType, snapshot_data_type: &str, dialect: SqlDialect) -> Option<String> {
-    if !matches!(dialect, SqlDialect::Sqlite) {
-        return None;
-    }
-    // An encrypted column is stored as BLOB (BYTEA on the snapshot) — an unambiguous
-    // non-TEXT affinity that never participates in the blind spot.
-    if matches!(ty, ColType::Encrypted { .. }) {
-        return None;
-    }
-    // The blind spot is precisely: the declared snapshot data_type collapses to the
-    // `text` token AND the backend is SQLite (live stores only the affinity).
-    if !snapshot_data_type.eq_ignore_ascii_case("text") {
-        return None;
-    }
-    // Carry the un-collapsed SDK facet token for a precise FailDrift message.
-    let (token, _) = col_type_to_token(ty);
-    Some(token)
 }
 
 /// Fail-closed guard: refuse any column carrying a SYNTH default

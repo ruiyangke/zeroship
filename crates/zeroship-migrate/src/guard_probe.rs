@@ -41,23 +41,28 @@
 //!   naming `expression`: the live index carries a non-empty `pg_get_expr`
 //!   predicate the IR `createIndex` (a column-list AST) cannot render to a
 //!   byte-comparable form, so equivalence cannot be proven.
-//! - **SQLite TEXT-affinity collision (H1)** — SQLite stores only the TEXT
-//!   affinity for a `text`-family column, and the engine's declared snapshot
-//!   data_type is the PG spelling (`field_data_type` maps via the PG dialect), so
-//!   the facets that collapse to the literal `text` in BOTH the snapshot and the
-//!   SQLite live catalog (`string`/`ref`/`actor`/`id` + a string `literal`) become
-//!   indistinguishable on the SQLite leg: a same-name column whose true SDK facet
-//!   changed within that group (live authored `string` vs declared `ref`) is
-//!   INVISIBLE to a plain affinity compare. On the SQLite leg an `ifNotExists`
-//!   column/table verify therefore CANNOT prove full-shape equality for a
-//!   `text`-affinity column; it fails CLOSED (`FailDrift` naming `data_type`)
-//!   rather than `SatisfiedNoop` on an affinity-only match. The probe carries the
-//!   un-collapsed declared facet token ([`ExpectColumn::sqlite_text_facet`] /
-//!   `GuardProbe::Column::sqlite_text_facet`), set ONLY on the SQLite leg when the
-//!   declared snapshot data_type is `text`, to drive this. Facets whose snapshot
-//!   spelling is DISTINCT (`json`→`jsonb`, `date`→`timestamp with time zone`) and
-//!   the non-TEXT affinities (INTEGER/REAL/BLOB) are unambiguous and compare
-//!   exactly (the flag is `None`).
+//! - **SQLite affinity compare (F1)** — the engine's declared snapshot data_type is
+//!   ALWAYS the PG `information_schema` spelling (`field_data_type` maps via the PG
+//!   dialect, dialect-agnostically), but a REAL SQLite catalog reports the SQLite
+//!   *affinity* (`text`/`integer`/`real`/`numeric`/`blob`). A raw spelling compare
+//!   therefore false-drifts on EVERY non-text type on SQLite (a `timestamp with time
+//!   zone` / `jsonb` / `uuid`→`text` snapshot vs a `text` live affinity,
+//!   `double precision`→`real`, `bytea`→`blob`). The SQLite leg of [`decide`] folds
+//!   BOTH the declared and the live data_type through
+//!   [`crate::declarative::sqlite_canonical_type`] — the SAME affinity fold the
+//!   declarative DIFFER uses — so a clean guarded `createTable`/`addColumn` re-run is
+//!   idempotent for every type, while a genuine affinity change (string→number, i.e.
+//!   `text` vs `real`) still maps to two distinct canonical tokens and IS a
+//!   divergence. Several distinct SDK facets collapse to the `text` affinity on SQLite
+//!   (`string`/`ref`/`actor`/`id` + `date`/`json` + a string `literal`) and the live
+//!   catalog stores only the affinity, so a within-text-affinity facet change (live
+//!   `string` vs declared `ref`/`date`) is INVISIBLE — but we do NOT fail closed on
+//!   it: an affinity-match is a `SatisfiedNoop`, exactly as the DIFFER treats it (a
+//!   documented SQLite divergence, see `docs/reference/sqlite-divergences.md`; on
+//!   SQLite a `ref` column adds no FK via `ALTER` — it is physically a plain `text`
+//!   column either way, so the blind spot carries no provable physical divergence).
+//!   On PG both sides are the `information_schema` spelling and the raw compare is
+//!   exact.
 //!
 //! The expected `data_type`/`nullable`/`unique`/`columns`/`kind` values are built
 //! by the SAME shared snapshot builders the lowering arms call
@@ -67,24 +72,21 @@
 
 use crate::drift::SchemaSnapshot;
 use crate::ir::ExistenceGuard;
+use zeroship_schema::query::SqlDialect;
 
 /// One declared column's verifiable shape for a `createTable ifNotExists`
 /// [`GuardProbe::Table`] probe. Built from the SAME shared snapshot the CREATE
 /// renders from, so the `data_type`/`nullable` strings are byte-comparable against
 /// introspection.
 ///
-/// `sqlite_text_facet` carries the **un-collapsed SDK facet token** (e.g. `date`,
-/// `json`, `ref`) and is `Some` ONLY when the authoring dialect is SQLite AND this
-/// column collapses to the ambiguous **TEXT affinity** (string/date/json/ref → the
-/// literal `TEXT`). The SQLite catalog stores only the affinity (`text`), so a
-/// same-name column whose SDK facet changed WITHIN the TEXT affinity (live `string`
-/// vs declared `date`) is INVISIBLE to a plain affinity compare. When this is
-/// `Some`, [`column_shape_divergence`] fails CLOSED (`FailDrift` naming
-/// `data_type`) on a TEXT-affinity column rather than optimistically
-/// `SatisfiedNoop`-ing — matching the module's documented fail-closed contract. On
-/// PG (and for non-TEXT SQLite affinities — INTEGER/REAL/BLOB, which are
-/// unambiguous) it is `None` and the plain affinity compare is already
-/// facet-precise.
+/// **F1/F3** — both legs verify presence + the canonical column *affinity*
+/// (data_type folded through [`crate::declarative::sqlite_canonical_type`] on the
+/// SQLite leg, raw `information_schema` on PG) + nullability. They deliberately do
+/// NOT carry the un-collapsed SDK facet: a `createTable`/`addColumn ifNotExists`
+/// re-run over a present-matching object is the idempotent case and is a
+/// `SatisfiedNoop` — the within-text-affinity facet blind spot is a documented SQLite
+/// divergence the DIFFER also accepts (and carries no provable physical divergence on
+/// SQLite). See the module-level F1 note.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExpectColumn {
     /// Column name.
@@ -93,10 +95,6 @@ pub struct ExpectColumn {
     pub data_type: String,
     /// Declared nullability.
     pub nullable: bool,
-    /// The un-collapsed SDK facet token for a SQLite TEXT-affinity column; `None`
-    /// otherwise (see the type docs).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sqlite_text_facet: Option<String>,
 }
 
 /// The guard DIRECTION carried on a probe (a 1:1 copy of [`ExistenceGuard`], kept
@@ -158,14 +156,10 @@ pub enum GuardProbe {
         /// Guard direction.
         direction: GuardDir,
         /// The declared `(data_type, nullable)` to verify (`ifNotExists`); `None`
-        /// for the presence-only `ifExists` drop.
+        /// for the presence-only `ifExists` drop. The SQLite leg compares the
+        /// canonical affinity (`sqlite_canonical_type` fold), consistent with the
+        /// differ; PG compares the raw `information_schema` spelling.
         expect: Option<(String, bool)>,
-        /// The un-collapsed SDK facet token for a SQLite TEXT-affinity column (see
-        /// [`ExpectColumn::sqlite_text_facet`]); `None` on PG / non-TEXT affinity /
-        /// the presence-only `ifExists` drop. When `Some`, a present TEXT-affinity
-        /// column fails CLOSED rather than `SatisfiedNoop` (H1 fail-closed).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sqlite_text_facet: Option<String>,
     },
     /// `createIndex ifNotExists` (`expect` = `Some((unique, columns))`) or
     /// `dropIndex ifExists` (`expect` = `None`, presence-only).
@@ -196,11 +190,24 @@ pub enum GuardProbe {
         direction: GuardDir,
         /// The declared catalog kind to compare (`ifNotExists`); `None` for the
         /// presence-only `ifExists` drop. NOTE: a PRESENT same-name constraint
-        /// under `ifNotExists` is `FailDrift` even on a kind MATCH — the live
-        /// `pg_get_constraintdef` body cannot be proven equal to the IR's
-        /// un-normalized constraint, so we refuse rather than skip (see the module
-        /// docs).
+        /// under `ifNotExists` is `FailDrift` even on a kind MATCH **when
+        /// `expect_definition` is `None`** — the live `pg_get_constraintdef` body
+        /// cannot be proven equal to an IR-authored un-normalized constraint body,
+        /// so we refuse rather than skip (see the module docs).
         expect_kind: Option<String>,
+        /// **F2 fix** — the declared constraint definition in the EXACT
+        /// `pg_get_constraintdef` spelling, set ONLY when the authoring path can
+        /// produce a byte-comparable body (the `createTable` deferred-FK unit, whose
+        /// `definition` is built by [`crate::declarative::fk_definition_pg`] to round-
+        /// trip byte-for-byte against the live catalog). When `Some`, a PRESENT
+        /// same-name + same-kind constraint is structurally compared: a byte-equal
+        /// live definition is an idempotent `SatisfiedNoop` (a re-run of the guarded
+        /// `createTable ifNotExists` is idempotent); a divergent one is `FailDrift`
+        /// naming `definition`. `None` on the stand-alone `addConstraint ifNotExists`
+        /// path (the IR carries an un-normalized body that CANNOT be proven equal —
+        /// the MED fail-closed rule applies) and on the presence-only `ifExists` drop.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect_definition: Option<String>,
     },
     /// `alterColumnType` / `alterColumnNullability` / `renameColumn` `ifExists`:
     /// the SOURCE column must EXIST (presence-only — an alter/rename intentionally
@@ -264,27 +271,41 @@ pub enum GuardVerdict {
 /// Decide the verdict for `probe` against the LIVE catalog `live`. Pure (no DB
 /// access — the caller has already taken the snapshot under the held lock + open
 /// txn). See the module docs for the per-variant fail-closed rules.
+///
+/// `dialect` is the backend the LIVE snapshot was introspected from. It is the
+/// caller-known fact (the PG executor passes [`SqlDialect::Postgres`]; the SQLite
+/// backend passes [`SqlDialect::Sqlite`]), NOT carried on the wire-serialized probe.
+///
+/// **F1** — the declared probe `data_type` is ALWAYS the PG `information_schema`
+/// spelling (the snapshot builder maps via the PG dialect, dialect-agnostically),
+/// but a REAL SQLite catalog reports the SQLite affinity (`text`/`integer`/`real`/
+/// `numeric`/`blob`). A raw `expect != live` compare therefore false-drifts on EVERY
+/// non-text-affinity type on SQLite (a `timestamp with time zone` snapshot vs a
+/// `text` live affinity, etc.). On the SQLite leg we therefore canonicalize BOTH
+/// sides through [`crate::declarative::sqlite_canonical_type`] — the SAME affinity
+/// fold the differ uses (`declarative.rs`) — so a guarded `createTable`/`addColumn`
+/// re-run is idempotent for every type, while a real affinity change still diverges.
 #[must_use]
-pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot) -> GuardVerdict {
+pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, dialect: SqlDialect) -> GuardVerdict {
     match probe {
         GuardProbe::Table { table, direction, expect_columns, .. } => {
-            decide_table(table, *direction, expect_columns, live)
+            decide_table(table, *direction, expect_columns, live, dialect)
         }
-        GuardProbe::Column { table, column, direction, expect, sqlite_text_facet, .. } => {
-            decide_column(
-                table,
-                column,
-                *direction,
-                expect.as_ref(),
-                sqlite_text_facet.as_deref(),
-                live,
-            )
+        GuardProbe::Column { table, column, direction, expect, .. } => {
+            decide_column(table, column, *direction, expect.as_ref(), live, dialect)
         }
         GuardProbe::Index { table, name, direction, expect, .. } => {
             decide_index(table, name, *direction, expect.as_ref(), live)
         }
-        GuardProbe::Constraint { table, name, direction, expect_kind, .. } => {
-            decide_constraint(table, name, *direction, expect_kind.as_deref(), live)
+        GuardProbe::Constraint { table, name, direction, expect_kind, expect_definition, .. } => {
+            decide_constraint(
+                table,
+                name,
+                *direction,
+                expect_kind.as_deref(),
+                expect_definition.as_deref(),
+                live,
+            )
         }
         GuardProbe::ColumnPresence { table, column, .. } => {
             // Always IfExists. Source column must EXIST → RunBare; absent → Noop.
@@ -302,6 +323,7 @@ fn decide_table(
     direction: GuardDir,
     expect_columns: &[ExpectColumn],
     live: &SchemaSnapshot,
+    dialect: SqlDialect,
 ) -> GuardVerdict {
     let present = live.tables.contains_key(table);
     match direction {
@@ -333,9 +355,9 @@ fn decide_table(
                             &ec.name,
                             &ec.data_type,
                             ec.nullable,
-                            ec.sqlite_text_facet.as_deref(),
                             &live_col.data_type,
                             live_col.nullable,
+                            dialect,
                         ) {
                             return v;
                         }
@@ -363,8 +385,8 @@ fn decide_column(
     column: &str,
     direction: GuardDir,
     expect: Option<&(String, bool)>,
-    sqlite_text_facet: Option<&str>,
     live: &SchemaSnapshot,
+    dialect: SqlDialect,
 ) -> GuardVerdict {
     let present = column_present(live, table, column);
     match direction {
@@ -405,9 +427,9 @@ fn decide_column(
                 column,
                 dtype,
                 *nullable,
-                sqlite_text_facet,
                 &live_col.data_type,
                 live_col.nullable,
+                dialect,
             )
             .unwrap_or(GuardVerdict::SatisfiedNoop)
         }
@@ -417,56 +439,61 @@ fn decide_column(
 /// Compare a declared column shape against the live one. Returns a `FailDrift`
 /// verdict on a divergence, or `None` if they match exactly.
 ///
-/// **SQLite TEXT-affinity fail-closed (H1)**: the engine's declared snapshot
-/// data_type is the PG spelling, and the facets that collapse to the literal `text`
-/// in BOTH the snapshot and the SQLite live catalog (`string`/`ref`/`actor`/`id` +
-/// a string `literal`) are indistinguishable on SQLite — the live catalog stores
-/// only the affinity (`text`), the un-collapsed SDK facet is NOT recoverable. So a
-/// same-name column whose SDK facet changed within that group (live authored
-/// `string` vs declared `ref`) is INVISIBLE to a plain affinity compare: both spell
-/// `text`, the plain `expect_dtype != live_dtype` branch passes, and we would
-/// SILENTLY `SatisfiedNoop` over a divergent column.
+/// **F1 — dialect-aware data_type compare.** The declared `expect_dtype` is ALWAYS
+/// the PG `information_schema` spelling (the snapshot builder maps via the PG
+/// dialect regardless of backend — `declarative::field_data_type`). A REAL SQLite
+/// catalog reports the SQLite *affinity* (`text`/`integer`/`real`/`numeric`/`blob`),
+/// so a raw `expect_dtype != live_dtype` compare false-drifts on EVERY non-text
+/// type on SQLite (a `timestamp with time zone` / `jsonb` / `uuid`→`text` snapshot
+/// vs a `text` live affinity, `double precision`→`real`, `bytea`→`blob`, …). On the
+/// SQLite leg we therefore fold BOTH sides through
+/// [`crate::declarative::sqlite_canonical_type`] — the SAME affinity fold the
+/// declarative differ uses — so a clean guarded re-run is idempotent for every
+/// type, while a real affinity change (`text` vs `real`, i.e. string→number) still
+/// maps to two DIFFERENT canonical tokens and IS a divergence. On PG both sides are
+/// already the `information_schema` spelling and the raw compare is exact.
 ///
-/// `sqlite_text_facet` is `Some(<declared SDK facet>)` ONLY when the authoring
-/// dialect is SQLite AND this column's declared snapshot data_type is `text`. When
-/// it is `Some` and the affinity tokens MATCH (`text` == `text`), we CANNOT prove
-/// the full SDK facet is equal from the catalog, so we fail CLOSED (`FailDrift`
-/// naming `data_type`, carrying the declared facet as `expected`) rather than
-/// optimistically matching — exactly the module's documented contract. On PG (the
-/// live type IS the distinct facet), for facets whose snapshot spelling is distinct
-/// (`json`→`jsonb`, `date`→`timestamp with time zone`), and for non-TEXT SQLite
-/// affinities (INTEGER/REAL/BLOB — unambiguous), `sqlite_text_facet` is `None` and
-/// the plain affinity compare is already facet-precise. A genuine `text` != `text`
-/// mismatch still trips the plain inequality branch above regardless.
+/// **F1 — SQLite verifies the canonical AFFINITY, consistent with the differ.**
+/// After the fold, several distinct SDK facets collapse to the `text` affinity on
+/// SQLite (`string`/`ref`/`actor`/`id` + `date`/`json` + a string `literal`), and the
+/// live catalog stores only the affinity — the un-collapsed SDK facet is NOT
+/// recoverable. We do NOT fail closed on that blind spot: an affinity-match is a
+/// `SatisfiedNoop`, exactly as the declarative DIFFER treats it (it compares only
+/// `sqlite_canonical_type` on SQLite — a within-affinity facet change is a documented
+/// SQLite divergence, see `docs/reference/sqlite-divergences.md`). This is what makes
+/// a guarded `createTable`/`addColumn ifNotExists` RE-RUN idempotent on SQLite (every
+/// table carries text-affinity system columns; a stand-alone `addColumn` of a `ref`
+/// over a live `string` is physically a no-op anyway — SQLite cannot add an FK via
+/// `ALTER`, so both are plain `text` columns). A GENUINE affinity change
+/// (string→number, `text` vs `real`) still maps to two distinct canonical tokens and
+/// IS a divergence. On PG both sides are the `information_schema` spelling and the raw
+/// compare is exact.
 fn column_shape_divergence(
     table: &str,
     column: &str,
     expect_dtype: &str,
     expect_nullable: bool,
-    sqlite_text_facet: Option<&str>,
     live_dtype: &str,
     live_nullable: bool,
+    dialect: SqlDialect,
 ) -> Option<GuardVerdict> {
-    if expect_dtype != live_dtype {
+    // **F1** — on SQLite, compare the canonical AFFINITY (PG-spelled snapshot folded
+    // to the SQLite affinity the emitter would have written, AND the already-SQLite
+    // live token folded to the same canonical form). On PG, compare the raw
+    // `information_schema` spellings unchanged.
+    let dtypes_match = match dialect {
+        SqlDialect::Postgres => expect_dtype == live_dtype,
+        SqlDialect::Sqlite => {
+            crate::declarative::sqlite_canonical_type(expect_dtype)
+                == crate::declarative::sqlite_canonical_type(live_dtype)
+        }
+    };
+    if !dtypes_match {
         return Some(drift(
             &format!("column {table}.{column}"),
             "data_type",
             expect_dtype,
             live_dtype,
-        ));
-    }
-    // **H1** — the affinity tokens MATCH, but on the SQLite leg a TEXT-affinity
-    // column's true SDK facet is NOT introspectable: a live `string` and a declared
-    // `date` BOTH read back as `text`. We cannot PROVE the facet is equal from the
-    // catalog, so fail closed (matching the module-doc contract) rather than noop.
-    if let Some(facet) = sqlite_text_facet {
-        return Some(drift(
-            &format!("column {table}.{column}"),
-            "data_type",
-            // The declared facet (un-collapsed) makes the message precise; the live
-            // side is the affinity the catalog reports — the full facet is unprovable.
-            &format!("{facet} (TEXT affinity — SDK facet unprovable from SQLite catalog)"),
-            &format!("{live_dtype} (affinity only)"),
         ));
     }
     if expect_nullable != live_nullable {
@@ -550,6 +577,7 @@ fn decide_constraint(
     name: &str,
     direction: GuardDir,
     expect_kind: Option<&str>,
+    expect_definition: Option<&str>,
     live: &SchemaSnapshot,
 ) -> GuardVerdict {
     let live_con = live
@@ -576,15 +604,41 @@ fn decide_constraint(
                     );
                 }
             }
-            // **MED finding (fail-closed over a catalog-exposed divergence).** A
-            // same-name + same-kind constraint is NOT a SatisfiedNoop: the live
-            // `pg_get_constraintdef` definition cannot be byte-compared against the
-            // IR's un-normalized constraint body, so we cannot PROVE the predicate
-            // (a rewritten CHECK, a different FK target / column / ON-DELETE) is
-            // equal. A same-name + same-kind + DIFFERENT-definition constraint is a
-            // real divergence the PG catalog exposes via `pg_get_constraintdef`, so
-            // we refuse rather than skip. The realistic `ifNotExists` use (the
-            // constraint is ABSENT) still RunBare above.
+            // **F2 — structural compare when a byte-comparable definition is
+            // available.** The `createTable` deferred-FK unit stamps the declared FK
+            // body in the EXACT `pg_get_constraintdef` spelling
+            // (`declarative::fk_definition_pg`), so a present same-name + same-kind FK
+            // CAN be proven equal: a byte-equal live definition is an idempotent
+            // `SatisfiedNoop` (a re-run of the guarded `createTable ifNotExists`
+            // succeeds instead of hard-FailDrift), and a divergent one (a re-pointed
+            // FK target / changed column / ON-DELETE) is a real divergence we still
+            // refuse, naming `definition`. The compare normalizes the referenced-table
+            // SCHEMA QUALIFIER out of both sides ([`normalize_fk_definition`]): the
+            // declared side is always `REFERENCES <schema>.<table>` but
+            // `pg_get_constraintdef` OMITS the schema when the referenced table is in
+            // the live `search_path` (it is — same project schema, cross-app FKs are
+            // rejected at author time), so the qualifier is search_path-sensitive noise.
+            // Every MATERIAL divergence (target table, columns, ON DELETE/UPDATE,
+            // DEFERRABLE) survives the normalization and is still caught.
+            if let Some(decl_def) = expect_definition {
+                if normalize_fk_definition(decl_def) == normalize_fk_definition(&live_con.definition) {
+                    return GuardVerdict::SatisfiedNoop;
+                }
+                return drift(
+                    &format!("constraint {name}"),
+                    "definition",
+                    decl_def,
+                    if live_con.definition.is_empty() { "<present>" } else { &live_con.definition },
+                );
+            }
+            // **MED finding (fail-closed over a catalog-exposed divergence).** With NO
+            // byte-comparable declared definition (the stand-alone `addConstraint
+            // ifNotExists` path), a same-name + same-kind constraint is NOT a
+            // SatisfiedNoop: the live `pg_get_constraintdef` definition cannot be
+            // byte-compared against the IR's un-normalized constraint body, so we
+            // cannot PROVE the predicate (a rewritten CHECK, a different FK target /
+            // column / ON-DELETE) is equal. We refuse rather than skip. The realistic
+            // `ifNotExists` use (the constraint is ABSENT) still RunBare above.
             drift(
                 &format!("constraint {name}"),
                 "definition",
@@ -593,6 +647,41 @@ fn decide_constraint(
             )
         }
     }
+}
+
+/// Normalize a FOREIGN KEY `pg_get_constraintdef` body for a search_path-invariant
+/// structural compare (F2): strip the referenced-table SCHEMA QUALIFIER that appears
+/// right after `REFERENCES `. The declared side (`fk_definition_pg`) ALWAYS qualifies
+/// the target (`REFERENCES "schema".people(id)` or `REFERENCES schema.people(id)`),
+/// but `pg_get_constraintdef` OMITS the schema when the referenced table is in the
+/// live `search_path` (`REFERENCES people(id)`). The qualifier is the ONLY
+/// search_path-sensitive token; collapsing it makes the byte-compare stable while
+/// every material divergence (the referenced TABLE name, the column lists, the ON
+/// DELETE/UPDATE actions, the DEFERRABLE clause) is preserved.
+///
+/// A cross-schema FK is rejected at author time (`reject_cross_app_ref`), so the
+/// referenced table is always in the project schema — there is no case where dropping
+/// the schema would conflate two different targets.
+fn normalize_fk_definition(def: &str) -> String {
+    const NEEDLE: &str = "REFERENCES ";
+    let Some(pos) = def.find(NEEDLE) else {
+        return def.to_string();
+    };
+    let after = pos + NEEDLE.len();
+    let rest = &def[after..];
+    // The referenced object reference runs up to the opening `(` of its column list.
+    let Some(paren_rel) = rest.find('(') else {
+        return def.to_string();
+    };
+    let obj = &rest[..paren_rel]; // e.g. `"schema".people` / `schema.people` / `people`
+    // Keep only the FINAL dotted segment (the table), dropping any `<schema>.` prefix.
+    // Handles quoted identifiers by splitting on the last unquoted-or-quoted `.`.
+    let table_seg = obj.rsplit('.').next().unwrap_or(obj).trim();
+    let mut out = String::with_capacity(def.len());
+    out.push_str(&def[..after]);
+    out.push_str(table_seg);
+    out.push_str(&rest[paren_rel..]);
+    out
 }
 
 /// Whether `table.column` exists in the live snapshot.
@@ -618,6 +707,16 @@ mod tests {
     use crate::drift::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, TableSnapshot};
     use std::collections::BTreeMap;
 
+    /// `decide` on the PG leg (raw `information_schema` compare).
+    fn decide_pg(probe: &GuardProbe, live: &SchemaSnapshot) -> GuardVerdict {
+        decide(probe, live, SqlDialect::Postgres)
+    }
+
+    /// `decide` on the SQLite leg (affinity-fold compare — F1).
+    fn decide_sqlite(probe: &GuardProbe, live: &SchemaSnapshot) -> GuardVerdict {
+        decide(probe, live, SqlDialect::Sqlite)
+    }
+
     fn col(name: &str, dtype: &str, nullable: bool) -> ColumnSnapshot {
         ColumnSnapshot {
             name: name.to_string(),
@@ -630,12 +729,7 @@ mod tests {
     }
 
     fn ec(name: &str, dtype: &str, nullable: bool) -> ExpectColumn {
-        ExpectColumn {
-            name: name.to_string(),
-            data_type: dtype.to_string(),
-            nullable,
-            sqlite_text_facet: None,
-        }
+        ExpectColumn { name: name.to_string(), data_type: dtype.to_string(), nullable }
     }
 
     fn snapshot_with(table: &str, t: TableSnapshot) -> SchemaSnapshot {
@@ -663,10 +757,9 @@ mod tests {
             column: "email".into(),
             direction: GuardDir::IfNotExists,
             expect: Some(("text".into(), true)),
-            sqlite_text_facet: None,
         };
         let live = SchemaSnapshot::default();
-        assert_eq!(decide(&probe, &live), GuardVerdict::RunBare);
+        assert_eq!(decide_pg(&probe, &live), GuardVerdict::RunBare);
     }
 
     #[test]
@@ -677,12 +770,11 @@ mod tests {
             column: "email".into(),
             direction: GuardDir::IfNotExists,
             expect: Some(("text".into(), true)),
-            sqlite_text_facet: None,
         };
         let mut t = empty_table();
         t.columns.push(col("email", "text", true));
         let live = snapshot_with("users", t);
-        assert_eq!(decide(&probe, &live), GuardVerdict::SatisfiedNoop);
+        assert_eq!(decide_pg(&probe, &live), GuardVerdict::SatisfiedNoop);
     }
 
     #[test]
@@ -693,12 +785,11 @@ mod tests {
             column: "email".into(),
             direction: GuardDir::IfNotExists,
             expect: Some(("text".into(), true)),
-            sqlite_text_facet: None,
         };
         let mut t = empty_table();
         t.columns.push(col("email", "integer", true));
         let live = snapshot_with("users", t);
-        match decide(&probe, &live) {
+        match decide_pg(&probe, &live) {
             GuardVerdict::FailDrift(d) => assert_eq!(d.field, "data_type"),
             v => panic!("expected FailDrift(data_type), got {v:?}"),
         }
@@ -712,89 +803,86 @@ mod tests {
             column: "email".into(),
             direction: GuardDir::IfNotExists,
             expect: Some(("text".into(), true)),
-            sqlite_text_facet: None,
         };
         let mut t = empty_table();
         t.columns.push(col("email", "text", false));
         let live = snapshot_with("users", t);
-        match decide(&probe, &live) {
+        match decide_pg(&probe, &live) {
             GuardVerdict::FailDrift(d) => assert_eq!(d.field, "nullable"),
             v => panic!("expected FailDrift(nullable), got {v:?}"),
         }
     }
 
-    // -- H1: SQLite TEXT-affinity facet fail-closed ------------------------
+    // -- F1: SQLite within-text-affinity facet change = noop (differ-consistent) --
 
     #[test]
-    fn column_ifnotexists_sqlite_text_affinity_facet_change_fails_closed() {
-        // H1: on SQLite the live column reads back as the `text` affinity for a
-        // string column; the guard declares `date` (also TEXT affinity). A plain
-        // affinity compare (`text` == `text`) would SatisfiedNoop and silently skip
-        // the add over a divergent column. With the un-collapsed declared facet
-        // carried in the probe, the decider fails CLOSED instead.
+    fn column_ifnotexists_sqlite_within_text_affinity_facet_change_is_noop() {
+        // **F1** — on SQLite the live column reads back as the `text` affinity; the
+        // guard declares a column whose snapshot is `timestamp with time zone` (a
+        // `date` facet) which folds to the same `text` affinity. The within-text-
+        // affinity facet blind spot is a documented SQLite divergence the DIFFER also
+        // accepts (it compares only `sqlite_canonical_type`). The guard matches: an
+        // affinity-match is a SatisfiedNoop (idempotent re-run), NOT a fail-closed and
+        // NOT a false `timestamp with time zone != text` drift. (On SQLite a `ref`/date
+        // column is physically a plain `text` column anyway — no provable divergence.)
         let probe = GuardProbe::Column {
             schema: "app".into(),
             table: "users".into(),
             column: "happened".into(),
             direction: GuardDir::IfNotExists,
-            // declared `date` collapses to the `text` affinity on SQLite.
-            expect: Some(("text".into(), true)),
-            sqlite_text_facet: Some("date".into()),
+            expect: Some(("timestamp with time zone".into(), true)),
         };
         let mut t = empty_table();
-        // live column authored as `string` → introspected affinity `text`.
+        // live column → introspected affinity `text`.
         t.columns.push(col("happened", "text", true));
-        match decide(&probe, &snapshot_with("users", t)) {
-            GuardVerdict::FailDrift(d) => {
-                assert_eq!(d.field, "data_type");
-                assert!(
-                    d.expected.contains("date"),
-                    "names the declared facet, got {}",
-                    d.expected
-                );
-            }
-            v => panic!("expected FailDrift(data_type) on a SQLite TEXT-affinity facet, got {v:?}"),
-        }
+        assert_eq!(
+            decide_sqlite(&probe, &snapshot_with("users", t)),
+            GuardVerdict::SatisfiedNoop,
+            "a within-text-affinity facet on SQLite is an idempotent no-op (differ-consistent)"
+        );
     }
 
     #[test]
     fn column_ifnotexists_no_facet_text_match_is_noop() {
-        // The PG / non-TEXT-affinity path: `sqlite_text_facet` is None, so a `text`
-        // == `text` match is a legitimate SatisfiedNoop (the live type IS the facet).
+        // A plain `text` == `text` match is a legitimate SatisfiedNoop.
         let probe = GuardProbe::Column {
             schema: "app".into(),
             table: "users".into(),
             column: "email".into(),
             direction: GuardDir::IfNotExists,
             expect: Some(("text".into(), true)),
-            sqlite_text_facet: None,
         };
         let mut t = empty_table();
         t.columns.push(col("email", "text", true));
-        assert_eq!(decide(&probe, &snapshot_with("users", t)), GuardVerdict::SatisfiedNoop);
+        assert_eq!(decide_pg(&probe, &snapshot_with("users", t)), GuardVerdict::SatisfiedNoop);
     }
 
     #[test]
-    fn table_ifnotexists_sqlite_text_affinity_facet_fails_closed() {
-        // The Table (createTable) leg of H1: a per-column `sqlite_text_facet` flag on
-        // a present TEXT-affinity column fails the whole-table verify closed.
+    fn table_ifnotexists_sqlite_text_affinity_reruns_idempotent_noop() {
+        // **F1 — the createTable Table leg is presence + affinity only.** A guarded
+        // createTable re-run over a table THIS engine made: the declared `timestamp
+        // with time zone` (date) / `text` columns fold to the SQLite `text` affinity
+        // and MATCH the live `text` affinity → SatisfiedNoop (idempotent re-run), NOT
+        // a false `timestamp with time zone != text` drift and NOT an H1 fail-closed.
         let probe = GuardProbe::Table {
             schema: "app".into(),
             table: "events".into(),
             direction: GuardDir::IfNotExists,
-            expect_columns: vec![ExpectColumn {
-                name: "at".into(),
-                data_type: "text".into(),
-                nullable: true,
-                sqlite_text_facet: Some("date".into()),
-            }],
+            expect_columns: vec![
+                // a timestamp snapshot column (PG spelling) over a live SQLite `text`.
+                ec("at", "timestamp with time zone", true),
+                // a string column (snapshot `text`) over a live `text`.
+                ec("name", "text", true),
+            ],
         };
         let mut t = empty_table();
         t.columns.push(col("at", "text", true));
-        match decide(&probe, &snapshot_with("events", t)) {
-            GuardVerdict::FailDrift(d) => assert_eq!(d.field, "data_type"),
-            v => panic!("expected FailDrift(data_type) for a SQLite TEXT-affinity table column, got {v:?}"),
-        }
+        t.columns.push(col("name", "text", true));
+        assert_eq!(
+            decide_sqlite(&probe, &snapshot_with("events", t)),
+            GuardVerdict::SatisfiedNoop,
+            "a SQLite createTable re-run over text-affinity columns must be idempotent"
+        );
     }
 
     // -- Column ifExists (dropColumn) --------------------------------------
@@ -807,12 +895,11 @@ mod tests {
             column: "legacy".into(),
             direction: GuardDir::IfExists,
             expect: None,
-            sqlite_text_facet: None,
         };
         let mut t = empty_table();
         t.columns.push(col("legacy", "text", true));
-        assert_eq!(decide(&probe, &snapshot_with("users", t)), GuardVerdict::RunBare);
-        assert_eq!(decide(&probe, &SchemaSnapshot::default()), GuardVerdict::SatisfiedNoop);
+        assert_eq!(decide_pg(&probe, &snapshot_with("users", t)), GuardVerdict::RunBare);
+        assert_eq!(decide_pg(&probe, &SchemaSnapshot::default()), GuardVerdict::SatisfiedNoop);
     }
 
     // -- Table ifNotExists -------------------------------------------------
@@ -828,7 +915,7 @@ mod tests {
         let mut t = empty_table();
         t.columns.push(col("id", "integer", false));
         t.columns.push(col("sneaky", "text", true)); // extra live column
-        match decide(&probe, &snapshot_with("users", t)) {
+        match decide_pg(&probe, &snapshot_with("users", t)) {
             GuardVerdict::FailDrift(d) => assert_eq!(d.field, "columns"),
             v => panic!("expected FailDrift(columns) for extra live column, got {v:?}"),
         }
@@ -844,7 +931,7 @@ mod tests {
         };
         let mut t = empty_table();
         t.columns.push(col("id", "integer", false));
-        assert_eq!(decide(&probe, &snapshot_with("users", t)), GuardVerdict::SatisfiedNoop);
+        assert_eq!(decide_pg(&probe, &snapshot_with("users", t)), GuardVerdict::SatisfiedNoop);
     }
 
     // -- Index ifNotExists -------------------------------------------------
@@ -861,7 +948,7 @@ mod tests {
         let mut t = empty_table();
         t.indexes
             .push(IndexSnapshot::btree("users_email_idx".to_string(), false, vec!["email".to_string()]));
-        match decide(&probe, &snapshot_with("users", t)) {
+        match decide_pg(&probe, &snapshot_with("users", t)) {
             GuardVerdict::FailDrift(d) => assert_eq!(d.field, "unique"),
             v => panic!("expected FailDrift(unique), got {v:?}"),
         }
@@ -880,7 +967,7 @@ mod tests {
         let mut idx = IndexSnapshot::btree("users_lower_idx".to_string(), false, Vec::new());
         idx.expression = Some("lower(email)".into());
         t.indexes.push(idx);
-        match decide(&probe, &snapshot_with("users", t)) {
+        match decide_pg(&probe, &snapshot_with("users", t)) {
             GuardVerdict::FailDrift(d) => assert_eq!(d.field, "expression"),
             v => panic!("expected FailDrift(expression) for partial/expression index, got {v:?}"),
         }
@@ -904,8 +991,9 @@ mod tests {
             name: "users_email_key".into(),
             direction: GuardDir::IfNotExists,
             expect_kind: Some("UNIQUE".into()),
+            expect_definition: None,
         };
-        assert_eq!(decide(&probe, &SchemaSnapshot::default()), GuardVerdict::RunBare);
+        assert_eq!(decide_pg(&probe, &SchemaSnapshot::default()), GuardVerdict::RunBare);
     }
 
     #[test]
@@ -916,11 +1004,12 @@ mod tests {
             name: "users_pk".into(),
             direction: GuardDir::IfNotExists,
             expect_kind: Some("UNIQUE".into()),
+            expect_definition: None,
         };
         let mut t = empty_table();
         t.constraints
             .push(constraint("users_pk", "PRIMARY KEY", "PRIMARY KEY (id)"));
-        match decide(&probe, &snapshot_with("users", t)) {
+        match decide_pg(&probe, &snapshot_with("users", t)) {
             GuardVerdict::FailDrift(d) => assert_eq!(d.field, "kind"),
             v => panic!("expected FailDrift(kind), got {v:?}"),
         }
@@ -937,13 +1026,220 @@ mod tests {
             name: "users_age_chk".into(),
             direction: GuardDir::IfNotExists,
             expect_kind: Some("CHECK".into()),
+            expect_definition: None,
         };
         let mut t = empty_table();
         t.constraints
             .push(constraint("users_age_chk", "CHECK", "CHECK ((age > 18))"));
-        match decide(&probe, &snapshot_with("users", t)) {
+        match decide_pg(&probe, &snapshot_with("users", t)) {
             GuardVerdict::FailDrift(d) => assert_eq!(d.field, "definition"),
             v => panic!("expected FailDrift(definition) on same-name+same-kind, got {v:?}"),
+        }
+    }
+
+    // -- F1: SQLite affinity-fold data_type compare ------------------------
+
+    #[test]
+    fn sqlite_timestamp_snapshot_vs_text_live_is_noop_not_false_drift() {
+        // **F1 root-cause unit** — the PG-spelled snapshot data_type for a timestamp
+        // column is `timestamp with time zone`, but a REAL SQLite catalog reports the
+        // `text` affinity. The OLD raw `expect != live` compare false-FailDrifted on
+        // EVERY re-run (every table has created_at/updated_at/deleted_at timestamps).
+        // After the affinity fold both sides canonicalize to `text` → SatisfiedNoop.
+        let probe = GuardProbe::Column {
+            schema: "app".into(),
+            table: "events".into(),
+            column: "created_at".into(),
+            direction: GuardDir::IfNotExists,
+            // snapshot spelling (PG) vs the live SQLite `text` affinity.
+            expect: Some(("timestamp with time zone".into(), false)),
+            // a timestamp is NOT a TEXT-affinity SDK-facet blind spot from the
+            // addColumn leg's perspective only when no facet flag is set; here we
+            // assert the fold alone removes the false drift (facet None).
+        };
+        let mut t = empty_table();
+        t.columns.push(col("created_at", "text", false));
+        assert_eq!(
+            decide_sqlite(&probe, &snapshot_with("events", t)),
+            GuardVerdict::SatisfiedNoop,
+            "a timestamp-snapshot vs text-affinity live must NOT false-drift on SQLite"
+        );
+    }
+
+    #[test]
+    fn sqlite_jsonb_snapshot_vs_text_live_is_noop() {
+        // **F1** — a `json` column: snapshot `jsonb`, live SQLite `text` affinity. The
+        // affinity fold makes them MATCH (both `text`) → SatisfiedNoop. NOT a false
+        // `jsonb != text` drift; the within-text-affinity facet blind spot is accepted
+        // (differ-consistent), so a guarded re-run over a json column is idempotent.
+        let probe = GuardProbe::Column {
+            schema: "app".into(),
+            table: "docs".into(),
+            column: "body".into(),
+            direction: GuardDir::IfNotExists,
+            expect: Some(("jsonb".into(), true)),
+        };
+        let mut t = empty_table();
+        t.columns.push(col("body", "text", true));
+        assert_eq!(
+            decide_sqlite(&probe, &snapshot_with("docs", t)),
+            GuardVerdict::SatisfiedNoop,
+            "a jsonb-snapshot vs text-affinity live must fold-match to a no-op on SQLite"
+        );
+    }
+
+    #[test]
+    fn sqlite_real_snapshot_matches_real_live_is_noop() {
+        // A non-text affinity (`number` → snapshot `double precision`, live `real`):
+        // unambiguous, no facet flag. The fold maps both to `real` → SatisfiedNoop.
+        let probe = GuardProbe::Column {
+            schema: "app".into(),
+            table: "m".into(),
+            column: "amount".into(),
+            direction: GuardDir::IfNotExists,
+            expect: Some(("double precision".into(), true)),
+        };
+        let mut t = empty_table();
+        t.columns.push(col("amount", "real", true));
+        assert_eq!(
+            decide_sqlite(&probe, &snapshot_with("m", t)),
+            GuardVerdict::SatisfiedNoop
+        );
+    }
+
+    #[test]
+    fn sqlite_real_text_genuine_change_still_diverges() {
+        // A REAL affinity change (string→number): snapshot `text` vs live `real` fold
+        // to DIFFERENT canonical tokens → FailDrift even on SQLite.
+        let probe = GuardProbe::Column {
+            schema: "app".into(),
+            table: "m".into(),
+            column: "x".into(),
+            direction: GuardDir::IfNotExists,
+            expect: Some(("text".into(), true)),
+        };
+        let mut t = empty_table();
+        t.columns.push(col("x", "real", true));
+        match decide_sqlite(&probe, &snapshot_with("m", t)) {
+            GuardVerdict::FailDrift(d) => assert_eq!(d.field, "data_type"),
+            v => panic!("expected FailDrift(data_type) on a genuine text→real change, got {v:?}"),
+        }
+    }
+
+    #[test]
+    fn pg_leg_does_not_fold_affinities() {
+        // The PG leg compares raw `information_schema` spellings. A `jsonb` declared
+        // over a `text` live column is a real PG divergence (NOT folded to match).
+        let probe = GuardProbe::Column {
+            schema: "app".into(),
+            table: "docs".into(),
+            column: "body".into(),
+            direction: GuardDir::IfNotExists,
+            expect: Some(("jsonb".into(), true)),
+        };
+        let mut t = empty_table();
+        t.columns.push(col("body", "text", true));
+        match decide_pg(&probe, &snapshot_with("docs", t)) {
+            GuardVerdict::FailDrift(d) => assert_eq!(d.field, "data_type"),
+            v => panic!("PG leg must NOT fold jsonb→text, got {v:?}"),
+        }
+    }
+
+    // -- F2: createTable deferred-FK structural compare --------------------
+
+    #[test]
+    fn constraint_ifnotexists_with_definition_schema_qualifier_normalized_is_noop() {
+        // **F2** — the createTable deferred-FK probe carries the declared
+        // `pg_get_constraintdef` body, which is ALWAYS schema-qualified
+        // (`REFERENCES app.people(id)`), but the LIVE `pg_get_constraintdef` OMITS the
+        // schema when the referenced table is in the search_path (`REFERENCES
+        // people(id)`). After normalizing the qualifier out of both sides they MATCH →
+        // SatisfiedNoop (the real-world re-deploy case — a hard FailDrift here was the
+        // F2 bug).
+        let declared = "FOREIGN KEY (owner) REFERENCES app.people(id) DEFERRABLE INITIALLY DEFERRED";
+        let live = "FOREIGN KEY (owner) REFERENCES people(id) DEFERRABLE INITIALLY DEFERRED";
+        let probe = GuardProbe::Constraint {
+            schema: "app".into(),
+            table: "pets".into(),
+            name: "pets_owner_fkey".into(),
+            direction: GuardDir::IfNotExists,
+            expect_kind: Some("FOREIGN KEY".into()),
+            expect_definition: Some(declared.into()),
+        };
+        let mut t = empty_table();
+        t.constraints.push(constraint("pets_owner_fkey", "FOREIGN KEY", live));
+        assert_eq!(
+            decide_pg(&probe, &snapshot_with("pets", t)),
+            GuardVerdict::SatisfiedNoop,
+            "schema-qualifier-only difference must normalize to an idempotent no-op"
+        );
+    }
+
+    #[test]
+    fn normalize_fk_definition_strips_referenced_schema_qualifier() {
+        // Quoted, bare, and already-unqualified targets all normalize to the same form.
+        let a = normalize_fk_definition(
+            "FOREIGN KEY (owner) REFERENCES \"app\".people(id) ON DELETE RESTRICT",
+        );
+        let b = normalize_fk_definition(
+            "FOREIGN KEY (owner) REFERENCES app.people(id) ON DELETE RESTRICT",
+        );
+        let c = normalize_fk_definition(
+            "FOREIGN KEY (owner) REFERENCES people(id) ON DELETE RESTRICT",
+        );
+        assert_eq!(a, c);
+        assert_eq!(b, c);
+        assert!(c.contains("REFERENCES people(id)"), "table + columns preserved: {c}");
+        // A re-pointed target survives normalization → still DIFFERENT.
+        let d = normalize_fk_definition(
+            "FOREIGN KEY (owner) REFERENCES app.companies(id) ON DELETE RESTRICT",
+        );
+        assert_ne!(c, d, "a different referenced TABLE must not be normalized away");
+    }
+
+    #[test]
+    fn constraint_ifnotexists_with_definition_divergent_fails_closed() {
+        // A re-pointed FK (different live definition) still fails CLOSED naming
+        // `definition` even with the structural-compare path.
+        let probe = GuardProbe::Constraint {
+            schema: "app".into(),
+            table: "pets".into(),
+            name: "pets_owner_fkey".into(),
+            direction: GuardDir::IfNotExists,
+            expect_kind: Some("FOREIGN KEY".into()),
+            expect_definition: Some(
+                "FOREIGN KEY (owner) REFERENCES app.people(id) DEFERRABLE INITIALLY DEFERRED".into(),
+            ),
+        };
+        let mut t = empty_table();
+        // live FK points at a DIFFERENT table.
+        t.constraints.push(constraint(
+            "pets_owner_fkey",
+            "FOREIGN KEY",
+            "FOREIGN KEY (owner) REFERENCES app.companies(id) DEFERRABLE INITIALLY DEFERRED",
+        ));
+        match decide_pg(&probe, &snapshot_with("pets", t)) {
+            GuardVerdict::FailDrift(d) => assert_eq!(d.field, "definition"),
+            v => panic!("expected FailDrift(definition) on a re-pointed FK, got {v:?}"),
+        }
+    }
+
+    #[test]
+    fn constraint_ifnotexists_with_definition_kind_clash_still_fails_kind() {
+        // A kind clash takes precedence over the structural definition compare.
+        let probe = GuardProbe::Constraint {
+            schema: "app".into(),
+            table: "pets".into(),
+            name: "pets_owner_fkey".into(),
+            direction: GuardDir::IfNotExists,
+            expect_kind: Some("FOREIGN KEY".into()),
+            expect_definition: Some("FOREIGN KEY (owner) REFERENCES app.people(id)".into()),
+        };
+        let mut t = empty_table();
+        t.constraints.push(constraint("pets_owner_fkey", "UNIQUE", "UNIQUE (owner)"));
+        match decide_pg(&probe, &snapshot_with("pets", t)) {
+            GuardVerdict::FailDrift(d) => assert_eq!(d.field, "kind"),
+            v => panic!("expected FailDrift(kind) on a kind clash, got {v:?}"),
         }
     }
 
@@ -959,7 +1255,7 @@ mod tests {
         };
         let mut t = empty_table();
         t.columns.push(col("name", "text", true));
-        assert_eq!(decide(&probe, &snapshot_with("users", t)), GuardVerdict::RunBare);
-        assert_eq!(decide(&probe, &SchemaSnapshot::default()), GuardVerdict::SatisfiedNoop);
+        assert_eq!(decide_pg(&probe, &snapshot_with("users", t)), GuardVerdict::RunBare);
+        assert_eq!(decide_pg(&probe, &SchemaSnapshot::default()), GuardVerdict::SatisfiedNoop);
     }
 }

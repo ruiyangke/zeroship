@@ -824,7 +824,7 @@ fn ddl_to_information_schema(ddl: &str) -> String {
 /// type-change detection is untouched — and a REAL SQLite type change (e.g.
 /// `text` → `real`, i.e. string → number) still maps to two DIFFERENT canonical
 /// tokens and IS detected.
-fn sqlite_canonical_type(data_type: &str) -> &'static str {
+pub(crate) fn sqlite_canonical_type(data_type: &str) -> &'static str {
     let lower = data_type.trim().to_ascii_lowercase();
     // Parameterised extension types keep their DDL spelling in the snapshot
     // (`vector(384)`, `geography(POINT, 4326)`); both emit BLOB on SQLite.
@@ -4550,7 +4550,15 @@ impl DeclarativeAuthor {
         // for ITS object), and a partially-created table (crash between units)
         // re-runs the missing units correctly.
         if let Some(dir) = guard {
-            let sqlite = matches!(self.dialect, SqlDialect::Sqlite);
+            // **F1/F3** — the Table probe verifies presence + canonical column
+            // affinity + nullability only (see `ExpectColumn` / `decide_table` docs).
+            // It does NOT carry the SDK facet: a `createTable ifNotExists` re-run sees a
+            // table THIS engine created, so an affinity-match is the idempotent
+            // SatisfiedNoop case (the within-text-affinity facet blind spot is a
+            // documented SQLite divergence the differ also accepts). The decider folds
+            // the PG-spelled snapshot data_type to the SQLite affinity at compare time,
+            // so a `timestamp with time zone`/`jsonb`/`text` snapshot no longer
+            // false-drifts against a live `text` affinity.
             mig.existence_guard = Some(crate::guard_probe::GuardProbe::Table {
                 schema: self.project_schema.clone(),
                 table: table.to_string(),
@@ -4562,16 +4570,6 @@ impl DeclarativeAuthor {
                         name: c.name.clone(),
                         data_type: c.data_type.clone(),
                         nullable: c.nullable,
-                        // **H1** — on SQLite a `text`-affinity column's true SDK facet
-                        // is NOT introspectable (string/date/json/ref all read back as
-                        // `text`), so a TEXT-affinity column cannot be proven equal from
-                        // the catalog. Flag it so the decider fails CLOSED rather than an
-                        // affinity-only noop. The snapshot stores the SQLite affinity
-                        // lowercased (`drift_sql.rs`), so `== "text"` IS the TEXT-affinity
-                        // test; non-TEXT affinities (integer/real/blob) stay provable.
-                        sqlite_text_facet: (sqlite
-                            && c.data_type.eq_ignore_ascii_case("text"))
-                        .then(|| c.data_type.clone()),
                     })
                     .collect(),
             });
@@ -4610,16 +4608,23 @@ impl DeclarativeAuthor {
         for fk in deferred {
             let mut fk_mig = self.render_add_fk(table, fk, vec![table_version.clone()]);
             if let Some(dir) = guard {
-                // Object-scoped probe for THIS FK constraint. A present same-name
-                // constraint is FailDrift (the live pg_get_constraintdef body cannot
-                // be proven equal to the IR's), an absent one RunBare — matching the
-                // standalone addConstraint ifNotExists path.
+                // Object-scoped probe for THIS FK constraint. **F2** — UNLIKE the
+                // stand-alone `addConstraint ifNotExists` path (whose IR body cannot be
+                // proven equal to the live catalog), the `createTable` deferred FK
+                // carries the FK definition in the EXACT `pg_get_constraintdef`
+                // spelling (`fk_definition_pg`), so the probe stamps `expect_definition`
+                // and the decider STRUCTURALLY compares: a present same-name + same-kind
+                // FK whose live definition byte-equals the declared one is an idempotent
+                // SatisfiedNoop (a re-run of the guarded `createTable ifNotExists` over a
+                // forward/cyclic-reference schema succeeds instead of hard-FailDrift); a
+                // re-pointed / changed FK is still FailDrift. An absent one RunBare.
                 fk_mig.existence_guard = Some(crate::guard_probe::GuardProbe::Constraint {
                     schema: self.project_schema.clone(),
                     table: table.to_string(),
                     name: fk.name.clone(),
                     direction: dir,
                     expect_kind: Some("FOREIGN KEY".to_string()),
+                    expect_definition: Some(fk.definition.clone()),
                 });
             }
             out.push(single_stmt(fk_mig));

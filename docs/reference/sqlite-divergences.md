@@ -15,6 +15,7 @@ For the **migration** authoring surface, the equivalent boundary — which DML t
 | Transaction isolation | `env.db.transaction(..., { isolationLevel })` emits `BEGIN ISOLATION LEVEL ...` | validates the supplied isolation level but always runs plain `BEGIN` | Commit/rollback/savepoint behavior should line up; do not depend on SQLite honoring PG isolation-level distinctions. |
 | Write contention | backend-native locking | WAL mode + single writer actor; busy-family SQLite errors collapse to the same typed lock-contention surface | Callers should branch on the typed error code, not raw SQLite error text. |
 | Text ordering | backend ordering plus the database collation | emulates PG NULL placement with `IS NULL` buckets, but does not inject a cross-engine collation | Do not depend on locale-sensitive or Unicode string ordering matching exactly across backends. |
+| Migration column-shape verify (existence-guard / drift) | compares the full `information_schema` type spelling | compares only the SQLite **type affinity** (`text`/`integer`/`real`/`numeric`/`blob`) | Several distinct SDK facets fold to the `text` affinity on SQLite (`string`/`ref`/`date`/`json`/…). A within-text-affinity facet change (e.g. `string`→`ref`) is invisible to SQLite introspection and is treated as **no change** by both the differ and the `ifNotExists` existence-guard probe (a `ref` adds no FK via `ALTER` on SQLite — it is physically the same `text` column). A genuine affinity change (`text`↔`real`, i.e. string↔number) IS detected. |
 
 ## Source of truth
 

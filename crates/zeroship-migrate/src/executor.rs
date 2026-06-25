@@ -2002,7 +2002,11 @@ pub(crate) async fn apply_transactional(
                 });
             }
         };
-        match crate::guard_probe::decide(probe, &live) {
+        match crate::guard_probe::decide(
+            probe,
+            &live,
+            zeroship_schema::query::SqlDialect::Postgres,
+        ) {
             crate::guard_probe::GuardVerdict::RunBare => { /* fall through */ }
             crate::guard_probe::GuardVerdict::SatisfiedNoop => {
                 // Skip the `up` + the role switch; the journal block below still runs
