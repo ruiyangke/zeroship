@@ -585,6 +585,8 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
                     columns: vec!["pinned".into()],
                     references_table: "posts".into(),
                     references_columns: vec!["id".into()],
+                    on_delete: None,
+                    on_update: None,
                 },
             },
             schema: None,
@@ -595,6 +597,74 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
     ));
     assert_eq!(decl, ir, "addConstraint(fk) render must be byte-identical to the differ's deferred FK");
     assert!(ir.iter().any(|(up, _)| up.contains("FOREIGN KEY")));
+}
+
+/// **C1 — a stand-alone addConstraint(fk) with `on_delete: cascade` RENDERS
+/// `ON DELETE CASCADE` on Postgres.** The pre-C1 imperative FK silently dropped the
+/// actions; this is the regression test that would FAIL on the pre-C1 code (the
+/// rendered DDL carried no `ON DELETE` clause). Applies on PG (the stand-alone
+/// addConstraint path is PG-only by `require_pg_for`; the SQLite leg refuses a
+/// stand-alone FK add, unchanged).
+#[test]
+fn add_constraint_fk_renders_on_delete_cascade_pg() {
+    use zeroship_migrate::ir::{IrConstraint, IrConstraintKind, Op, RefAction};
+    let mut live = BTreeSet::new();
+    live.insert("posts".to_string());
+    live.insert("authors".to_string());
+
+    let ir = sql_pairs(&ir_lower_one(
+        Op::AddConstraint {
+            table: "authors".into(),
+            constraint: IrConstraint {
+                name: Some("authors_pinned_fk".into()),
+                kind: IrConstraintKind::Fk {
+                    columns: vec!["pinned".into()],
+                    references_table: "posts".into(),
+                    references_columns: vec!["id".into()],
+                    on_delete: Some(RefAction::Cascade),
+                    on_update: None,
+                },
+            },
+            schema: None,
+            existence_guard: None,
+        },
+        &live,
+        SqlDialect::Postgres,
+    ));
+    let up = &ir[0].0;
+    assert!(up.contains("FOREIGN KEY"), "must render a FOREIGN KEY: {up}");
+    assert!(
+        up.contains("ON DELETE CASCADE"),
+        "C1: on_delete: cascade must render ON DELETE CASCADE (got: {up})"
+    );
+
+    // Neutrality: with NO actions the same FK renders WITHOUT an ON DELETE clause
+    // (the differ's RESTRICT/NO-ACTION default is implicit), proving the action is
+    // what introduces the clause.
+    let ir_none = sql_pairs(&ir_lower_one(
+        Op::AddConstraint {
+            table: "authors".into(),
+            constraint: IrConstraint {
+                name: Some("authors_pinned_fk".into()),
+                kind: IrConstraintKind::Fk {
+                    columns: vec!["pinned".into()],
+                    references_table: "posts".into(),
+                    references_columns: vec!["id".into()],
+                    on_delete: None,
+                    on_update: None,
+                },
+            },
+            schema: None,
+            existence_guard: None,
+        },
+        &live,
+        SqlDialect::Postgres,
+    ));
+    assert!(
+        !ir_none[0].0.contains("ON DELETE CASCADE"),
+        "an action-free FK must NOT render ON DELETE CASCADE (got: {})",
+        ir_none[0].0
+    );
 }
 
 #[test]
