@@ -150,7 +150,9 @@ itself:
 >    *after* that commit but before the abort, the **next** same-app deploy reconciles
 >    the leftover marker first (the abort's `DROP … IF EXISTS` is idempotent on
 >    resume). So a refused multi-file bundle leaves **no silently-half-open** renamed
->    table regardless of the failure cause.
+>    table for any crash **at or after** the obligation+marker commit. (One narrow
+>    pre-existing window remains — a crash *between* the E-phase DDL commit and the
+>    obligation+marker commit; see the E-phase residue note below.)
 >
 > **The obligation + its recovery marker are now ATOMIC (PR9e — residue 2 CLOSED).**
 > The journaled pending-contract obligation and its recovery marker are written in
@@ -171,6 +173,17 @@ itself:
 > (case 2) refuses any new bundle touching the half-renamed table until it is cleared.
 > The operator can also clear it manually with `resolve-pending --apply | --abort`.
 >
+> **A second narrow residue — the E-phase-commit-vs-obligation-commit window.**
+> `run_online` commits the shadow column + dual-write trigger in its **own** per-step
+> transaction; the obligation+marker transaction commits **after** it returns. A crash in
+> that gap leaves a live shadow column + `zsdw_` trigger with **no** obligation row and
+> **no** recovery marker — invisible to both the crash-recovery leg (its marker JOIN is
+> empty) and the §2.0.3 interlock read-back (no pending contract). It is **pre-existing**
+> (not introduced by PR9d/PR9e) and **narrow** (a crash in a sub-second window). It
+> **self-heals** only if the *exact same* rename is re-deployed; a different next bundle
+> leaves the orphaned shadow column + trigger unfenced. A future hardening (not yet
+> shipped) is an **orphan-shadow sweep** that introspects live `zsdw_` triggers lacking a
+> matching obligation and surfaces/aborts them.
 > **A legit go-live is never mistaken for a crash, and a stamp failure can no longer
 > silently revert one (PR9e — the inversion that CLOSES the MED).** A *successful*
 > online-rename go-live legitimately leaves its EXPAND pending (the §2.0.2 cross-deploy

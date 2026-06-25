@@ -2838,7 +2838,7 @@ async fn deploy_migrate_pr9e_legit_committed_go_live_survives_unrelated_deploy()
     // Deploy #3 (the NEXT same-app deploy): a benign create on an UNRELATED table. It does
     // NOT touch `members`, so the §2.0.3 interlock does NOT refuse it — it proceeds to the
     // always-on crash-recovery leg. That leg MUST exclude the legit-pending marker
-    // (net-`reached_success`, NOT `open`) and leave the live contract intact.
+    // (net-`committed`, NOT `in_progress`) and leave the live contract intact.
     let benign = r#"{"ir_version":1,"name":"create_widgets","ops":[
         {"op":"createTable","name":"widgets","columns":[{"name":"label","type":"text"}]}
     ]}"#;

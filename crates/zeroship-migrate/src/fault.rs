@@ -106,7 +106,7 @@ pub mod points {
     /// In the control IR deploy loop (PR9d): a same-deploy later-file failure has
     /// been detected and the deploy's recovery markers are durably written, but the
     /// process dies BEFORE the in-process abort runs. A crash here leaves the
-    /// just-opened obligation OUTSTANDING + its recovery marker `open` — exactly the
+    /// just-opened obligation OUTSTANDING + its recovery marker net-`in_progress` — exactly the
     /// state the NEXT same-app deploy's crash-recovery leg must converge from (abort
     /// the half-renamed table, mark the marker reconciled). Tripped by the
     /// deploy-recovery crash-fuzz test only.

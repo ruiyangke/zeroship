@@ -888,7 +888,7 @@ impl MigrationEngine {
     ///
     /// Returns the obligations it SUCCESSFULLY aborted. An abort-DDL failure (the DB
     /// went unreachable mid-recovery) surfaces as `Err`: the obligation stays
-    /// outstanding + its recovery marker stays `open`, so the NEXT same-app deploy
+    /// outstanding + its recovery marker stays net-`in_progress`, so the NEXT same-app deploy
     /// re-attempts the abort under the lock (the documented irreducible residue the
     /// operator can also clear with `resolve-pending`). Fail-closed: never a silent
     /// fail-open.
