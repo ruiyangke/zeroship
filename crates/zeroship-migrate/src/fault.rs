@@ -119,4 +119,22 @@ pub mod points {
     /// the live contract). Tripped by the legit-pending-survives-unrelated-deploy
     /// test only.
     pub const DEPLOY_SUCCESS_RECONCILE_FAILS: &str = "deploy.success_reconcile_fails";
+    /// In the control IR deploy loop SUCCESS arm (PR9d-crit HIGH): the PHASE-1
+    /// `reached_success` stamp itself FAILS (DB unreachable the instant the go-live
+    /// reached its success arm). This reproduces the IRREDUCIBLE residual the
+    /// `reached_success` discriminator cannot self-heal: the marker stays net-`open`
+    /// over a LEGITIMATELY-pending live contract (trigger + shadow column committed,
+    /// obligation pending). Unlike a phase-2 (`reconciled`) failure — which is
+    /// non-fatal because the marker is already net-`reached_success` — a phase-1
+    /// failure leaves a marker INDISTINGUISHABLE from a genuine crash half-state by
+    /// any durable signal (the go-live's physical schema state is byte-identical to a
+    /// crashed deploy's; see the two recovery tests). It is therefore NOT recoverable
+    /// by a re-run (the idempotent re-run finds the EXPAND `already_outstanding`, so it
+    /// never re-opens the obligation and never re-reaches the per-obligation stamp).
+    /// The ONLY safe clearance is the operator's `resolve-pending --apply` (complete
+    /// the rename, discharging the obligation so the next deploy's recovery leg finds
+    /// nothing outstanding to abort). Tripped by the phase-1-stamp-failure
+    /// characterization test only.
+    pub const DEPLOY_SUCCESS_REACHED_SUCCESS_STAMP_FAILS: &str =
+        "deploy.success_reached_success_stamp_fails";
 }

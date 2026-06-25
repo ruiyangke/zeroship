@@ -244,6 +244,18 @@ pub trait MigrationBackend {
         by: &str,
     ) -> Result<(), JournalError>;
 
+    /// Stamp `reached_success` for a WHOLE deploy's obligation set in ONE atomic
+    /// transaction (PR9d-crit HIGH). Either ALL of this deploy's obligations flip to
+    /// net-`reached_success` or none do — there is no partial-stamp window in a
+    /// multi-EXPAND go-live. Admin-written. SQLite no-ops.
+    async fn mark_deploy_recovery_reached_success_batch(
+        &self,
+        cfg: &ExecutorConfig,
+        deploy_id: &str,
+        pending_versions: &[String],
+        by: &str,
+    ) -> Result<(), JournalError>;
+
     /// Mark a deploy-scoped recovery obligation `reconciled` (APPEND a `reconciled`
     /// row). Admin-written. SQLite no-ops.
     async fn mark_deploy_recovery_reconciled(
@@ -738,6 +750,23 @@ impl MigrationBackend for PostgresBackend<'_> {
             cfg,
             deploy_id,
             pending_version,
+            by,
+        )
+        .await
+    }
+
+    async fn mark_deploy_recovery_reached_success_batch(
+        &self,
+        cfg: &ExecutorConfig,
+        deploy_id: &str,
+        pending_versions: &[String],
+        by: &str,
+    ) -> Result<(), JournalError> {
+        journal::mark_deploy_recovery_reached_success_batch(
+            self.conn,
+            cfg,
+            deploy_id,
+            pending_versions,
             by,
         )
         .await

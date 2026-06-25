@@ -562,6 +562,16 @@ impl MigrationBackend for SqliteBackend {
         Ok(())
     }
 
+    async fn mark_deploy_recovery_reached_success_batch(
+        &self,
+        _cfg: &ExecutorConfig,
+        _deploy_id: &str,
+        _pending_versions: &[String],
+        _by: &str,
+    ) -> Result<(), JournalError> {
+        Ok(())
+    }
+
     async fn mark_deploy_recovery_reconciled(
         &self,
         _cfg: &ExecutorConfig,
