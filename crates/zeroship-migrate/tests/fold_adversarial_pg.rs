@@ -124,14 +124,11 @@ fn canonicalize(mut snap: SchemaSnapshot) -> SchemaSnapshot {
 /// ADVERSARIAL #A — create an index on a column, then DROP that column. PG
 /// auto-drops the dependent index; does the fold?
 ///
-/// REVIEW FINDING (HIGH) — currently FAILS: the fold's `DropColumn` arm
-/// (`fold.rs:235`) removes only the column, never the indexes/constraints that
-/// reference it. PG's `ALTER TABLE … DROP COLUMN` cascades to dependent indexes
-/// (and UNIQUE/FK constraints). So `fold_ops != introspect` after a column with a
-/// dependent index/constraint is dropped — a phantom index/constraint survives in
-/// the fold, which would corrupt P2 gen-types. `#[ignore]` until the fold drops a
-/// dropped column's dependent indexes + constraints.
-#[ignore = "REVIEW FINDING (HIGH): fold DropColumn does not cascade dependent indexes/constraints; see fold.rs:235"]
+/// REVIEW FINDING (HIGH) — FIXED: the fold's `DropColumn` arm now cascades to
+/// dependent indexes (and UNIQUE/FK constraints + their implicit indexes), mirroring
+/// PG's `ALTER TABLE … DROP COLUMN` auto-cascade. This test PROVES `fold_ops ==
+/// introspect` after a column with a dependent index is dropped (it FAILED before
+/// the fix: a phantom `t_b_idx` survived in the fold).
 #[compio::test]
 async fn drop_column_cascades_dependent_index() {
     if !require_db() {
@@ -176,10 +173,9 @@ async fn drop_column_cascades_dependent_index() {
 /// ADVERSARIAL #B — add a UNIQUE constraint on a column, then DROP that column. PG
 /// auto-drops the dependent UNIQUE constraint + its implicit index. Does the fold?
 ///
-/// REVIEW FINDING (HIGH) — currently FAILS (same root cause as #A): the fold
-/// retains both the `t_b_uq` UNIQUE constraint AND its implicit index after the
-/// underlying column `b` is dropped, while live introspection shows neither.
-#[ignore = "REVIEW FINDING (HIGH): fold DropColumn does not cascade dependent UNIQUE constraint+index; see fold.rs:235"]
+/// REVIEW FINDING (HIGH) — FIXED (same root cause as #A): the fold now drops both
+/// the `t_b_uq` UNIQUE constraint AND its implicit index when the underlying column
+/// `b` is dropped, matching live introspection (which shows neither).
 #[compio::test]
 async fn drop_column_cascades_dependent_unique_constraint() {
     if !require_db() {
