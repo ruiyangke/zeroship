@@ -238,7 +238,11 @@ async fn first_baseline_version(
     conn: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<Option<String>, BaselineError> {
-    let meta = crate::dml::escape_quote_ident(&cfg.pg.meta_schema);
+    // Engine-supplied meta schema: route through the ONE shared engine seam so it
+    // fails closed on an empty / NUL name, byte-identical to the prior
+    // `escape_quote_ident`. This is a journal-table read, so the fail-closed error
+    // is mapped through `JournalError` (which carries `From<IdentQuoteError>`).
+    let meta = crate::dml::quote_ident_checked(&cfg.pg.meta_schema).map_err(JournalError::from)?;
     let rows = conn
         .query(
             &format!(

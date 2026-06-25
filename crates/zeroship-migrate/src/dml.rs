@@ -195,21 +195,26 @@ pub(crate) fn quote_ident_checked(ident: &str) -> Result<String, IdentQuoteError
 /// The ONE raw double-quote escape primitive for the whole crate: double every
 /// embedded `"`, wrap in `"`. This is the *single physical home* of the
 /// `replace('"', "\"\"")` byte-logic — every identifier-quoting seam in
-/// `zeroship-migrate` (the fail-closed engine wrapper [`quote_ident_checked`],
-/// the author-boundary [`quote_ident`], and the infallible local helpers in
-/// `declarative` / `shadow` / `expand_contract` / `precondition` / `baseline` /
-/// `db` / `ir_author` / `executor` / `backend_sqlite` / `guard::platform_runner`)
-/// routes through it. Centralising it keeps every render seam byte-identical and
-/// makes the "no remaining bare escape seam" claim *structurally* true — enforced
-/// by [`no_bare_escape_seam_outside_dml`] below.
+/// `zeroship-migrate` routes through it, either DIRECTLY (the author-boundary
+/// helpers, whose input is already gated by an upstream `validate_ident`:
+/// `declarative` / `shadow` / `expand_contract` / `precondition`'s structured-check
+/// `quote_ident` / `ir_author` / `backend_sqlite`) or via the fail-closed engine
+/// wrapper [`quote_ident_checked`] (every **engine-supplied** identifier render
+/// seam — project schema, migrator role, meta schema, recovery index name — in
+/// `db` / `executor` / `precondition` / `baseline` / `guard::platform_runner` /
+/// `author` / `backfill` / `role` / `journal`). Centralising it keeps every render
+/// seam byte-identical and makes the "no remaining bare escape seam" claim
+/// *structurally* true — enforced by [`no_bare_escape_seam_outside_dml`] below.
 ///
 /// It is infallible by construction: double-quote escaping neutralises every byte
 /// EXCEPT the empty string and a NUL (which PG rejects in an identifier outright).
 /// Callers that handle **engine-supplied** identifiers (project schema, migrator
-/// role, meta schema) must therefore route through [`quote_ident_checked`], which
-/// adds the empty/NUL fail-closed gate on top of this primitive. Callers quoting
-/// author identifiers already gated upstream (`validate_ident`) may call this
-/// directly.
+/// role, meta schema) MUST therefore route through [`quote_ident_checked`], which
+/// adds the empty/NUL fail-closed gate on top of this primitive — so EVERY
+/// engine-identifier render seam in the crate is uniformly self-defending, not
+/// just the five (`dml`/`role`/`author`/`backfill`/`journal`) that originally
+/// adopted the wrapper. Callers quoting author identifiers already gated upstream
+/// (`validate_ident`) may call this directly.
 pub(crate) fn escape_quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
@@ -1058,6 +1063,73 @@ mod tests {
             offenders.is_empty(),
             "bare `\"`-escape seam found outside dml.rs — route these through \
              dml::escape_quote_ident / quote_ident_checked: {offenders:?}"
+        );
+    }
+
+    /// **PR13 (#150 LOW1)** — STRUCTURAL proof that the "every engine-supplied
+    /// identifier render seam fail-closes" contract is TRUE, not just true for the
+    /// five seams (`dml`/`role`/`author`/`backfill`/`journal`) that first adopted
+    /// the wrapper. The infallible primitive [`escape_quote_ident`] must NEVER be
+    /// handed an **engine-supplied** identifier (project schema / migrator role /
+    /// meta schema) — those must route through [`quote_ident_checked`] so they
+    /// fail closed on empty / NUL. We scan the crate source for the give-away
+    /// byte-patterns (`escape_quote_ident(&cfg.pg.meta_schema)`,
+    /// `escape_quote_ident(&cfg.project_schema)`, `escape_quote_ident(role)`,
+    /// `escape_quote_ident(&exec_cfg.pg.meta_schema)`) — every such site is an
+    /// engine-identifier seam that must NOT use the infallible escaper.
+    ///
+    /// RED before PR13: `precondition.rs` (project_schema + role), `executor.rs`
+    /// (role + meta_schema ×4 + project_schema + recovery index),
+    /// `baseline.rs` (meta_schema), `guard::platform_runner.rs` (meta_schema), and
+    /// `db.rs::search_path_clause` (project/platform/extension schemas) all fed an
+    /// engine identifier to `escape_quote_ident`, so this scan would have FAILED.
+    #[test]
+    fn no_engine_identifier_uses_the_infallible_escaper() {
+        use std::path::Path;
+        // The engine-supplied identifier argument patterns. `quote_ident_checked`
+        // takes the SAME args; the infallible `escape_quote_ident` must not.
+        let esc = ['e', 's', 'c', 'a', 'p', 'e', '_', 'q', 'u', 'o', 't', 'e', '_', 'i', 'd', 'e', 'n', 't']
+            .iter()
+            .collect::<String>();
+        let needles = [
+            format!("{esc}(&cfg.pg.meta_schema)"),
+            format!("{esc}(&cfg.project_schema)"),
+            format!("{esc}(&exec_cfg.pg.meta_schema)"),
+            format!("{esc}(&exec_cfg.project_schema)"),
+            format!("{esc}(role)"),
+        ];
+        let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders: Vec<String> = Vec::new();
+        let mut stack = vec![src_root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read_dir src") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                // dml.rs holds only the helper + this test's needle literals.
+                if path.file_name().and_then(|n| n.to_str()) == Some("dml.rs") {
+                    continue;
+                }
+                let body = std::fs::read_to_string(&path).expect("read src file");
+                for needle in &needles {
+                    if body.contains(needle.as_str()) {
+                        offenders.push(format!(
+                            "{} ({needle})",
+                            path.strip_prefix(&src_root).unwrap().display()
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "engine-supplied identifier handed to the INFALLIBLE escaper — route \
+             through dml::quote_ident_checked so it fails closed on empty/NUL: {offenders:?}"
         );
     }
 
