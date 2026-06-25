@@ -20,8 +20,9 @@
  */
 
 import { promises as fs } from "node:fs";
+import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 /** A 64-char lowercase sha256 hex string. */
@@ -163,4 +164,126 @@ function recordViaCli(
  *  `bundle::sha256_hex` use (lowercase, 64 hex chars). */
 export function sha256Hex(bytes: Buffer): Sha256Hex {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+// ── Migration-first P3 — `gen-types` wiring ──────────────────────────────────
+//
+// The vite-plugin is a thin client of the SAME `zeroship-migrate-js` CLI it
+// already shells for `record`/`build`. P3 wires in the EXISTING `gen-types`
+// subcommand, which folds the committed `.ir.json` set and emits the typed
+// `env.db` surface (`env.db.ts` + `schema.runtime.json`) into an output DIR.
+//
+// **P3 is mechanical-only — type ACTIVATION is deferred to P5.** Both
+// `@zeroship/db`'s shipped `env.d.ts` AND the generated `env.db.ts` declare
+// `declare module "zeroship" { interface Env { db } }`; having BOTH in the same
+// tsc program is TS2717 (duplicate-property) unless the `Db<>` types are
+// byte-identical. So P3 emits into a COMMITTED dir that is NOT in the app
+// tsconfig `include` (default `generated/zeroship/`, see `GEN_TYPES_OUT_DEFAULT`).
+// The artifacts are generated + committed + drift-gated, but NOT wired into the
+// typecheck and the `@zeroship/db`/zeroship-schema alias is untouched. P5 owns
+// the cutover (delete `export default { schema }`, swap the alias, fold the
+// generated `env.db.ts` into `include`).
+
+/** The default `gen-types` output dir (relative to root). Chosen to live OUTSIDE
+ *  the app tsconfig `include` (NOT under `src/`) and to be COMMITTED (NOT
+ *  `.zeroship/`, which is gitignored) — see the P3/P5 note above. */
+export const GEN_TYPES_OUT_DEFAULT = "generated/zeroship";
+
+/** Options shared by the gen-types helpers (binary resolution + dir). */
+export interface GenTypesOptions {
+  /** Project root. */
+  root: string;
+  /** Migrations dir relative to root (default `migrations`). */
+  migrationsDir?: string;
+  /** The gen-types output dir relative to root (default
+   *  `generated/zeroship`). Emitted OUTSIDE the tsc program in P3. */
+  genTypesOut?: string;
+  /** Explicit path to the `zeroship-migrate-js` CLI binary. When set, it is
+   *  used verbatim (tests / packaged installs); no graceful dev-skip probing. */
+  cliPath?: string;
+}
+
+/** Outcome of {@link genTypesViaCli}. `skipped` is the graceful dev no-op when
+ *  the CLI binary is absent (the committed `env.db.ts` stays valid). */
+export type GenTypesResult =
+  | { status: "ok"; cli: string }
+  | { status: "skipped"; reason: string };
+
+/**
+ * Resolve the `zeroship-migrate-js` CLI binary, MIRRORING the dev-server's
+ * graceful resolution (`dev-server.ts` `ZEROSHIP_BIN` / `node_modules/.bin`):
+ *
+ *  1. an explicit `cliPath` option (tests / packaged installs) — used verbatim;
+ *  2. the `ZEROSHIP_MIGRATE_JS_BIN` env override;
+ *  3. `<root>/node_modules/.bin/zeroship-migrate-js` if it exists;
+ *  4. otherwise `null` — the caller decides (dev: warn-once + no-op; CI: hard-fail).
+ *
+ * Unlike the recorder's `recordViaCli` (which hard-throws on a bare PATH name),
+ * this returns `null` for the absent case so dev can no-op without a stack trace.
+ */
+export function resolveGenTypesCli(root: string, cliPath?: string): string | null {
+  if (cliPath) return cliPath;
+  const fromEnv = process.env.ZEROSHIP_MIGRATE_JS_BIN;
+  if (fromEnv) return fromEnv;
+  const local = resolve(root, "node_modules/.bin/zeroship-migrate-js");
+  if (existsSync(local)) return local;
+  return null;
+}
+
+/**
+ * Shell the EXISTING `zeroship-migrate-js gen-types --dir <migrations> --out
+ * <outDir> [--check]` subcommand — the migration-first type emitter. Mirrors
+ * `recordViaCli`'s subprocess shape; never evaluates untrusted `.ts` in-process.
+ *
+ * Binary resolution is graceful (see {@link resolveGenTypesCli}). When the
+ * binary is ABSENT:
+ *  - `requireBinary` (CI / `--check` gate) → throws (a misconfigured CI must not
+ *    silently pass);
+ *  - otherwise (dev) → returns `{ status: "skipped" }` so the caller can warn
+ *    once and continue — the committed artifacts stay valid.
+ *
+ * A present-binary non-zero exit (e.g. a `--check` drift) ALWAYS throws.
+ */
+export function genTypesViaCli(
+  opts: GenTypesOptions & { check?: boolean; requireBinary?: boolean }
+): GenTypesResult {
+  const migrationsDir = join(opts.root, opts.migrationsDir ?? "migrations");
+  const outDir = join(opts.root, opts.genTypesOut ?? GEN_TYPES_OUT_DEFAULT);
+
+  const cli = resolveGenTypesCli(opts.root, opts.cliPath);
+  if (cli == null) {
+    if (opts.requireBinary) {
+      throw new Error(
+        "migrations: zeroship-migrate-js not found (looked at ZEROSHIP_MIGRATE_JS_BIN " +
+          "+ node_modules/.bin/zeroship-migrate-js) — required for the gen-types drift gate"
+      );
+    }
+    return {
+      status: "skipped",
+      reason:
+        "zeroship-migrate-js not found (ZEROSHIP_MIGRATE_JS_BIN / node_modules/.bin); " +
+        "the committed env.db.ts is used as-is",
+    };
+  }
+
+  const args = [
+    "gen-types",
+    "--dir",
+    migrationsDir,
+    "--out",
+    outDir,
+    ...(opts.check ? ["--check"] : []),
+  ];
+  const res = spawnSync(cli, args, { encoding: "utf8" });
+  if (res.error) {
+    throw new Error(
+      `migrations: failed to invoke the gen-types CLI (${cli}): ${res.error.message}`
+    );
+  }
+  if (res.status !== 0) {
+    throw new Error(
+      `migrations: gen-types CLI (${cli} ${args.join(" ")}) exited ${res.status}: ${res.stderr}`
+    );
+  }
+  return { status: "ok", cli };
 }

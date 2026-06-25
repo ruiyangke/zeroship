@@ -300,9 +300,9 @@ describe("recordViaCli against the REAL zeroship-migrate-js binary (faithful e2e
   const REAL_STEM = "20240617123000_real_notes";
   // A real op.* migration `.ts` (the recorder resolves `@zeroship/migrate`).
   const REAL_TS = [
-    'import { createTable, t } from "@zeroship/migrate";',
+    'import { table, t } from "@zeroship/migrate";',
     "export function up() {",
-    '  createTable("real_notes", {',
+    '  table("real_notes").create({',
     "    title: t.text().notNull(),",
     "  });",
     "}",

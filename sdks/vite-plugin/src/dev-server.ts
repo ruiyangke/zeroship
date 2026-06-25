@@ -28,6 +28,7 @@ import {
 import { findServerEntry } from "./build.js";
 import type { TransformState } from "./transform.js";
 import { resolveDevDatabase, type DevDatabase } from "./dev-db.js";
+import { genTypesViaCli } from "./migrations.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -39,6 +40,12 @@ export interface DevServerOptions {
    * user; `false` disables. See `ZeroshipOptions.devAuth`.
    */
   devAuth?: DevAuthOption;
+  /** Migration-first gen-types (P3). See `ZeroshipOptions.migrations`. */
+  migrations?: {
+    dir?: string;
+    genTypesOut?: string;
+    cliPath?: string;
+  };
 }
 
 type FetchMethod = "fetchModule" | "getBuiltins";
@@ -53,6 +60,55 @@ const ALLOWED_FETCH_METHODS = new Set<FetchMethod>(["fetchModule", "getBuiltins"
 
 function requestPath(req: http.IncomingMessage): string {
   return new URL(req.url ?? "", "http://localhost").pathname;
+}
+
+/**
+ * Is `file` inside the migrations dir? Used by `hotUpdate` to decide whether a
+ * change should trigger a gen-types regeneration. `file` is an absolute path
+ * (Vite normalises to forward slashes); `migrationsAbs` is the resolved dir.
+ */
+function isUnderMigrationsDir(file: string, migrationsAbs: string): boolean {
+  const prefix = migrationsAbs.endsWith("/") ? migrationsAbs : migrationsAbs + "/";
+  return file === migrationsAbs || file.startsWith(prefix);
+}
+
+/**
+ * Migration-first gen-types (P3) — REGENERATE the typed `env.db` surface from
+ * the migration set in DEV. Fire-and-forget: any failure is LOGGED, never
+ * thrown (a bad migration must not crash the dev server). The graceful
+ * binary-absence path (warn-once + no-op) lives in `genTypesViaCli`.
+ *
+ * Dev always WRITES (no `--check` drift gate; that is a CI/build concern).
+ */
+function regenTypesDev(
+  root: string,
+  migrations: DevServerOptions["migrations"],
+  warnedNoBinaryRef: { value: boolean }
+): void {
+  try {
+    const result = genTypesViaCli({
+      root,
+      migrationsDir: migrations?.dir,
+      genTypesOut: migrations?.genTypesOut,
+      cliPath: migrations?.cliPath,
+      check: false,
+      requireBinary: false,
+    });
+    if (result.status === "skipped") {
+      // Warn only ONCE per dev-server lifetime — not on every keystroke.
+      if (!warnedNoBinaryRef.value) {
+        warnedNoBinaryRef.value = true;
+        console.warn(`[zeroship] gen-types skipped in dev — ${result.reason}`);
+      }
+    } else {
+      console.log(
+        "[zeroship] gen-types: regenerated env.db.ts + schema.runtime.json from the migrations"
+      );
+    }
+  } catch (e) {
+    // Dev: never throw — a malformed migration must not take down the server.
+    console.error(`[zeroship] gen-types failed (dev): ${(e as Error).message}`);
+  }
 }
 
 function writeJson(
@@ -204,6 +260,13 @@ export function devServerPlugin(
   let devDb: DevDatabase | null = null;
   let disposeRuntime: (() => void) | null = null;
 
+  // Migration-first gen-types (P3). The absolute migrations dir is resolved in
+  // configureServer (once `root` is known) so the `hotUpdate` branch can match
+  // changed files against it. `warnedNoBinary` keeps the binary-absence warning
+  // to ONCE per dev-server lifetime.
+  let migrationsAbs: string | null = null;
+  const warnedNoBinary = { value: false };
+
   // Accumulates file paths changed since the last HMR poll. The V8 runtime
   // polls GET /__zeroship_hmr_check every 500ms via setInterval + fetch().
   // We can't push via WebSocket (V8 has no outbound WS client) or hold a
@@ -244,6 +307,16 @@ export function devServerPlugin(
 
     configureServer(server: ViteDevServer) {
       if (!isDev) return;
+
+      // 0. Migration-first gen-types (P3) — ensure the migrations dir is
+      //    WATCHED so a change there fires `hotUpdate` (Vite only watches the
+      //    module graph + root by default; a migrations dir holding `.ts`
+      //    sources not imported by app code may not be covered). The
+      //    `hotUpdate` branch below regenerates `env.db.ts` on a change.
+      migrationsAbs = resolve(root, options.migrations?.dir ?? "migrations");
+      if (existsSync(migrationsAbs)) {
+        server.watcher.add(migrationsAbs);
+      }
 
       // 1. Module fetch endpoint ─────────────────────────────────────────
       //
@@ -592,6 +665,15 @@ export function devServerPlugin(
     },
 
     hotUpdate({ file }: { file: string }) {
+      // Migration-first gen-types (P3): a change under the migrations dir
+      // regenerates the typed `env.db` surface. Fire-and-forget — the helper
+      // logs on error and NEVER throws (a bad migration must not crash dev).
+      if (migrationsAbs != null && isUnderMigrationsDir(file, migrationsAbs)) {
+        regenTypesDev(root, options.migrations, warnedNoBinary);
+        // Don't return — a migration `.ts` is still a `.ts`; fall through to the
+        // HMR-queue path below so the runtime re-fetches if it imported one.
+      }
+
       if (
         file.endsWith(".ts") || file.endsWith(".tsx") ||
         file.endsWith(".js") || file.endsWith(".jsx")
