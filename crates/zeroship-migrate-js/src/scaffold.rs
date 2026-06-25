@@ -340,6 +340,13 @@ fn synth_delta_ops(
                         nullable: if col.nullable { None } else { Some(false) },
                         default,
                         unique: None,
+                        // Migration-first P2a (§2b): id_prefix / vector_metric are
+                        // DECLARED-ONLY hints DB introspection cannot recover, so a
+                        // scaffold from a live catalog leaves them absent (faithful
+                        // to the scaffold's fail-closed posture — it never invents a
+                        // declared-only facet it cannot observe).
+                        id_prefix: None,
+                        vector_metric: None,
                     });
                 }
                 ops.push(SynthOp {

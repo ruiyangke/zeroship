@@ -71,6 +71,25 @@ pub const CODE_INVALID_SCHEMA_IDENT: &str = "INVALID_SCHEMA_IDENT";
 /// (§2.7): an `ifExists` on a create*/add* op, or an `ifNotExists` on a
 /// drop*/rename/alter op. A structured authoring error, not a render-time blow-up.
 pub const CODE_GUARD_DIRECTION: &str = "GUARD_DIRECTION";
+/// **Migration-first P2a (§4)** — a `t.id({prefix})` `id_prefix` that is not a
+/// valid typed-id prefix (charset / length) or is in the reserved-prefix
+/// deny-list (`usr`, …). The IR's threat model is a hand-crafted `.ir.json`, so a
+/// malformed/reserved prefix is a fail-closed VALIDATE error, not a render-time
+/// surprise (it would otherwise mint ids colliding with platform `usr_…` ids).
+pub const CODE_INVALID_ID_PREFIX: &str = "INVALID_ID_PREFIX";
+/// **Migration-first P2a (§4)** — a `vector_metric` carried on a column that is
+/// NOT a `ColType::Vector`. The metric is structurally bounded by the closed
+/// [`crate::ir::VectorMetric`] enum at deserialize; this is the co-occurrence
+/// rule (the metric is meaningless without a vector type, and would otherwise be
+/// a silent dead field a hand-crafted artifact could ride in on).
+pub const CODE_VECTOR_METRIC_MISPLACED: &str = "VECTOR_METRIC_MISPLACED";
+
+/// The MAX byte length a `t.id({prefix})` prefix may carry (P2a §4). Mirrors the
+/// typed_id convention (`crates/core/src/typed_id.rs`: `usr`/`app`/`ses` are 3
+/// chars; the auto-derivation in `plugin-db`'s `system_fields_pass` caps at 4 for
+/// collection-derived prefixes). A hand-authored prefix is bounded to the SAME 4
+/// so the minted `<prefix>_<22 base62>` typed-id keeps the compact platform shape.
+pub const MAX_ID_PREFIX_LEN: usize = 4;
 
 /// The dialect a structured rejection pertains to (§8.8 `dialect` field).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -378,6 +397,14 @@ pub fn validate_op_scoped(
             for c in constraints {
                 check_constraint(&c.kind, &scope)?;
             }
+            // **Migration-first P2a (§4)** — the per-column declared-only facets
+            // (`id_prefix` / `vector_metric`) carry validate-time bounds: the IR's
+            // threat model is a hand-crafted `.ir.json`, so a malformed/reserved
+            // prefix or a misplaced metric is refused fail-closed BEFORE lower /
+            // checksum, never deferred to a render surprise.
+            for col in columns {
+                validate_column_facets(col, target_dialect, op_index, ts_location)?;
+            }
             Ok(())
         }
         Op::CreateIndex { table, r#where, .. } => {
@@ -587,6 +614,90 @@ fn is_safe_schema_ident(s: &str) -> bool {
     !s.is_empty()
         && s.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// **Migration-first P2a (§4)** — validate one [`IrColumn`](crate::ir::IrColumn)'s
+/// declared-only facets (`id_prefix` / `vector_metric`) against their bounds.
+///
+/// Two fail-closed checks, with the IR's hand-crafted-`.ir.json` threat model in
+/// mind (the closed-enum + `deny_unknown_fields` design):
+///
+/// 1. **`id_prefix`** — must be a valid typed-id prefix: the SAME `^[a-z][a-z0-9_]*$`
+///    charset rule + reserved-prefix deny-list (`usr`, …) the runtime enforces via
+///    [`zeroship_schema::query::validate_id_prefix`] (the SINGLE source of truth,
+///    mirroring `crates/core/src/typed_id.rs` + `system_fields_pass`'s
+///    `RESERVED_AUTO_PREFIXES`), PLUS a [`MAX_ID_PREFIX_LEN`] length bound so a
+///    hand-authored prefix keeps the compact `<prefix>_<22 base62>` typed-id shape.
+///    A reserved/malformed/over-long prefix is [`CODE_INVALID_ID_PREFIX`], refused
+///    BEFORE lower — never a render-time surprise minting colliding `usr_…` ids.
+/// 2. **`vector_metric`** — structurally bounded by the closed
+///    [`crate::ir::VectorMetric`] enum at deserialize; the only authoring error
+///    left is CO-OCCURRENCE: a metric carried on a non-`Vector` column is
+///    meaningless (the opclass has no vector to apply to) and is refused
+///    ([`CODE_VECTOR_METRIC_MISPLACED`]) so a hand-crafted artifact cannot ride a
+///    dead field in.
+///
+/// # Errors
+/// [`CODE_INVALID_ID_PREFIX`] / [`CODE_VECTOR_METRIC_MISPLACED`] as above.
+fn validate_column_facets(
+    col: &crate::ir::IrColumn,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+) -> Result<(), AuthoringError> {
+    let mk = |code: &str, reason: String, fix: String| AuthoringError {
+        code: code.to_string(),
+        kind: None,
+        op_index,
+        ts_location: ts_location.map(str::to_string),
+        dialect: target_dialect,
+        reason,
+        suggested_fix: Some(fix),
+    };
+
+    if let Some(prefix) = &col.id_prefix {
+        // Charset + reserved deny-list — the runtime's single source of truth.
+        if let Err(e) = zeroship_schema::query::validate_id_prefix(prefix) {
+            return Err(mk(
+                CODE_INVALID_ID_PREFIX,
+                format!(
+                    "column {:?} declares an invalid t.id() prefix {prefix:?}: {e}",
+                    col.name
+                ),
+                "use a prefix matching ^[a-z][a-z0-9_]*$ that is not platform-reserved \
+                 (e.g. \"post\", \"org\")"
+                    .to_string(),
+            ));
+        }
+        // Length bound — keep the compact typed-id shape (charset already checked).
+        if prefix.len() > MAX_ID_PREFIX_LEN {
+            return Err(mk(
+                CODE_INVALID_ID_PREFIX,
+                format!(
+                    "column {:?} declares a t.id() prefix {prefix:?} of {} bytes; the \
+                     maximum is {MAX_ID_PREFIX_LEN} (a typed-id prefix is kept short so \
+                     the minted `<prefix>_<22 base62>` id stays compact)",
+                    col.name,
+                    prefix.len()
+                ),
+                format!("shorten the prefix to at most {MAX_ID_PREFIX_LEN} characters"),
+            ));
+        }
+    }
+
+    if col.vector_metric.is_some() && !matches!(col.ty, crate::ir::ColType::Vector { .. }) {
+        return Err(mk(
+            CODE_VECTOR_METRIC_MISPLACED,
+            format!(
+                "column {:?} carries a vector_metric but is not a vector column; a \
+                 distance metric only applies to a t.vector(n) column",
+                col.name
+            ),
+            "drop the metric, or declare the column as t.vector(n, { metric })".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// **Apply/render-seam ColRef resolution (rule (c), MED).** Re-run the
@@ -1592,8 +1703,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None,
-            }],
+                unique: None, id_prefix: None, vector_metric: None }],
             constraints: vec![IrConstraint {
                 name: None,
                 kind: IrConstraintKind::Check {
@@ -1876,8 +1986,8 @@ mod tests {
             Op::CreateTable {
                 name: "users".into(),
                 columns: vec![
-                    IrColumn { name: "first".into(), ty: ColType::Text, nullable: None, default: None, unique: None },
-                    IrColumn { name: "total".into(), ty: ColType::Int, nullable: None, default: None, unique: None },
+                    IrColumn { name: "first".into(), ty: ColType::Text, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None },
+                    IrColumn { name: "total".into(), ty: ColType::Int, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None },
                 ],
                 constraints: vec![IrConstraint {
                     name: None,
@@ -1926,8 +2036,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None,
-            }],
+                unique: None, id_prefix: None, vector_metric: None }],
             constraints: vec![IrConstraint {
                 name: None,
                 kind: IrConstraintKind::Check {
@@ -1973,8 +2082,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None,
-            }],
+                unique: None, id_prefix: None, vector_metric: None }],
             constraints: vec![IrConstraint {
                 name: None,
                 kind: IrConstraintKind::Check {
@@ -2004,8 +2112,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None,
-            }],
+                unique: None, id_prefix: None, vector_metric: None }],
             constraints: vec![IrConstraint {
                 name: None,
                 kind: IrConstraintKind::Check {
@@ -2160,5 +2267,122 @@ mod tests {
             "an unknown column is a rule-(c) expr-kind capability-boundary reject"
         );
         assert_eq!(err.op_index, 0, "the structured error attributes the failing op");
+    }
+
+    // ── Migration-first P2a — column-facet validate-time bounds (§4) ─────────
+    // RED before the `validate_column_facets` wiring: a hand-crafted `.ir.json`
+    // carrying a malformed/reserved/over-long id_prefix or a misplaced metric would
+    // have passed validate and deferred the blow-up to render / mint colliding ids.
+
+    use crate::ir::VectorMetric;
+
+    /// Build a createTable Op with a single `id` column carrying `id_prefix`.
+    fn create_with_id_prefix(prefix: &str) -> Op {
+        Op::CreateTable {
+            name: "things".into(),
+            columns: vec![IrColumn {
+                name: "id".into(),
+                ty: ColType::Uuid,
+                nullable: None,
+                default: None,
+                unique: None,
+                id_prefix: Some(prefix.to_string()),
+                vector_metric: None,
+            }],
+            constraints: vec![],
+            indexes: vec![],
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    #[test]
+    fn p2a_create_table_accepts_a_valid_id_prefix() {
+        let ir = ir_with(vec![create_with_id_prefix("post")]);
+        assert!(
+            validate_ir(&ir, Dialect::Postgres, &[]).is_ok(),
+            "a well-formed, unreserved, in-length id prefix must validate"
+        );
+    }
+
+    #[test]
+    fn p2a_create_table_rejects_a_reserved_id_prefix() {
+        // `usr` is the platform user-id prefix (RESERVED_ID_PREFIXES); a creator
+        // prefix that collides with it would mint ids colliding with platform users.
+        let ir = ir_with(vec![create_with_id_prefix("usr")]);
+        let err = validate_ir(&ir, Dialect::Postgres, &[])
+            .expect_err("a reserved id prefix must be refused at validate, fail-closed");
+        assert_eq!(err.code, CODE_INVALID_ID_PREFIX, "got: {err}");
+        assert_eq!(err.op_index, 0);
+    }
+
+    #[test]
+    fn p2a_create_table_rejects_a_malformed_id_prefix() {
+        // An upper-case / non-`[a-z0-9_]` prefix is not a valid typed-id segment.
+        let ir = ir_with(vec![create_with_id_prefix("Po-st")]);
+        let err = validate_ir(&ir, Dialect::Postgres, &[])
+            .expect_err("a malformed id prefix must be refused at validate");
+        assert_eq!(err.code, CODE_INVALID_ID_PREFIX, "got: {err}");
+    }
+
+    #[test]
+    fn p2a_create_table_rejects_an_over_long_id_prefix() {
+        // Charset-valid but longer than MAX_ID_PREFIX_LEN — refused so the minted
+        // `<prefix>_<22 base62>` typed-id keeps the compact platform shape.
+        let ir = ir_with(vec![create_with_id_prefix("toolong")]);
+        let err = validate_ir(&ir, Dialect::Postgres, &[])
+            .expect_err("an over-long id prefix must be refused at validate");
+        assert_eq!(err.code, CODE_INVALID_ID_PREFIX, "got: {err}");
+        assert!(err.reason.contains("maximum"), "the error names the length bound: {err}");
+    }
+
+    #[test]
+    fn p2a_create_table_rejects_vector_metric_on_non_vector_column() {
+        // A metric on a non-Vector column is the co-occurrence violation — the
+        // closed enum already bounds the metric token at deserialize; this catches a
+        // dead metric a hand-crafted artifact rides in on a text column.
+        let ir = ir_with(vec![Op::CreateTable {
+            name: "docs".into(),
+            columns: vec![IrColumn {
+                name: "body".into(),
+                ty: ColType::Text,
+                nullable: None,
+                default: None,
+                unique: None,
+                id_prefix: None,
+                vector_metric: Some(VectorMetric::Cosine),
+            }],
+            constraints: vec![],
+            indexes: vec![],
+            schema: None,
+            existence_guard: None,
+        }]);
+        let err = validate_ir(&ir, Dialect::Postgres, &[])
+            .expect_err("a vector_metric on a non-vector column must be refused");
+        assert_eq!(err.code, CODE_VECTOR_METRIC_MISPLACED, "got: {err}");
+    }
+
+    #[test]
+    fn p2a_create_table_accepts_vector_metric_on_a_vector_column() {
+        let ir = ir_with(vec![Op::CreateTable {
+            name: "docs".into(),
+            columns: vec![IrColumn {
+                name: "embedding".into(),
+                ty: ColType::Vector { vector: 1536 },
+                nullable: None,
+                default: None,
+                unique: None,
+                id_prefix: None,
+                vector_metric: Some(VectorMetric::Cosine),
+            }],
+            constraints: vec![],
+            indexes: vec![],
+            schema: None,
+            existence_guard: None,
+        }]);
+        assert!(
+            validate_ir(&ir, Dialect::Postgres, &[]).is_ok(),
+            "a metric on a t.vector(n) column is the legitimate co-occurrence"
+        );
     }
 }

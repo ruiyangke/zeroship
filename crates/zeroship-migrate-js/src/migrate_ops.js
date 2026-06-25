@@ -151,6 +151,11 @@ class ColumnDef {
     this._default = fields ? fields.default : undefined;
     this._primaryKey = fields && fields.primaryKey !== undefined ? fields.primaryKey : false;
     this._unique = fields && fields.unique !== undefined ? fields.unique : false;
+    // Migration-first P2a (§2b): the declared-only, uncatalogable facets carried
+    // on the IrColumn — the typed-id prefix (`t.id({prefix})`) and the pgvector
+    // distance metric (`t.vector(n, {metric})`). Absent ⇒ omitted on the wire.
+    this._idPrefix = fields ? fields.idPrefix : undefined;
+    this._vectorMetric = fields ? fields.vectorMetric : undefined;
   }
 
   /** Clone with the named fields overridden — the basis of immutability (§4). */
@@ -160,6 +165,8 @@ class ColumnDef {
       default: "default" in over ? over.default : this._default,
       primaryKey: over.primaryKey !== undefined ? over.primaryKey : this._primaryKey,
       unique: over.unique !== undefined ? over.unique : this._unique,
+      idPrefix: "idPrefix" in over ? over.idPrefix : this._idPrefix,
+      vectorMetric: "vectorMetric" in over ? over.vectorMetric : this._vectorMetric,
     });
   }
 
@@ -199,6 +206,15 @@ class ColumnDef {
       nullable: this._nullable === false ? false : undefined,
       default: this._default,
       unique: this._unique && !this._primaryKey ? true : undefined,
+      // Migration-first P2a (§2b): carry the declared-only facets onto the wire
+      // IrColumn so the fold / gen-types (and the runtime under P5) keep the
+      // typed-id brand + the vector metric. The wire KEYS are snake_case to match
+      // the IrColumn serde field names (`id_prefix` / `vector_metric` — the struct
+      // carries no `rename_all`); the metric VALUE is the closed camelCase token
+      // (`cosine | l2 | innerProduct`). Absent ⇒ omitted (compact), so a plain
+      // column is byte-identical to the pre-P2a image (and checksum-neutral).
+      id_prefix: this._idPrefix,
+      vector_metric: this._vectorMetric,
     });
   }
 
@@ -248,8 +264,21 @@ function toIrDefault(value) {
 /** The immutable fluent column-type lexicon (§4). Canonical names only. */
 export const t = {
   /** A conventional primary-key id: a non-null UUID PK defaulting to a DB-evaluated
-   *  `gen_random_uuid()` (the structured FnSynth default, never a frozen literal). */
-  id: () => new ColumnDef("uuid").primaryKey().default({ fn: "genRandomUuid" }),
+   *  `gen_random_uuid()` (the structured FnSynth default, never a frozen literal).
+   *
+   *  `t.id({ prefix })` (P2a §2b) records the declared typed-id prefix on the wire
+   *  `IrColumn.idPrefix`, so the fold / gen-types — and the runtime once P5 deletes
+   *  the declared-schema cache — keep the `usr_<base62>`-style typed-id brand. The
+   *  prefix is bounded at validate-time (charset / length / reserved deny-list);
+   *  the recorder records it verbatim (the engine is the authoritative validator). */
+  id: (opts) => {
+    let col = new ColumnDef("uuid").primaryKey().default({ fn: "genRandomUuid" });
+    if (opts && opts.prefix !== undefined) {
+      requireString(opts.prefix, "t.id({ prefix })");
+      col = col._with({ idPrefix: opts.prefix });
+    }
+    return col;
+  },
   text: () => new ColumnDef("text"),
   /** Fixed-precision decimal. Defaults to (38, 9). */
   numeric: (precision = 38, scale = 9) => new ColumnDef({ decimal: { precision, scale } }),
@@ -263,11 +292,22 @@ export const t = {
     requireString(targetTable, "t.ref(target)");
     return new ColumnDef({ ref: { references: targetTable } });
   },
-  vector: (n) => {
+  /** A pgvector embedding column of dimensionality `n`. `t.vector(n, { metric })`
+   *  (P2a §2b) records the declared distance metric on the wire
+   *  `IrColumn.vectorMetric` (the closed `cosine | l2 | innerProduct` set), so the
+   *  ivfflat/hnsw opclass renders the declared metric instead of defaulting — a
+   *  DECLARED-ONLY hint DB introspection cannot recover. The metric token is one of
+   *  the closed set; the engine REJECTS an out-of-set metric at deserialize. */
+  vector: (n, opts) => {
     if (typeof n !== "number" || !Number.isInteger(n) || n <= 0) {
       throw structuredError("OP_INVALID", `t.vector(n): n must be a positive integer, got ${n}`);
     }
-    return new ColumnDef({ vector: { vector: n } });
+    let col = new ColumnDef({ vector: { vector: n } });
+    if (opts && opts.metric !== undefined) {
+      requireString(opts.metric, "t.vector(n, { metric })");
+      col = col._with({ vectorMetric: opts.metric });
+    }
+    return col;
   },
   geoPoint: () => new ColumnDef("geoPoint"),
   /** 32-bit signed integer (canonical; the `int` alias is removed, §7). */

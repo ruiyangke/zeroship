@@ -78,7 +78,7 @@ async fn apply_one(be: &SqliteBackend, m: &Migration) -> Result<(), ApplyError> 
 }
 
 fn col(name: &str, ty: ColType) -> IrColumn {
-    IrColumn { name: name.into(), ty, nullable: Some(true), default: None, unique: None }
+    IrColumn { name: name.into(), ty, nullable: Some(true), default: None, unique: None, id_prefix: None, vector_metric: None }
 }
 
 async fn table_has_column(be: &SqliteBackend, table: &str, column: &str) -> bool {
@@ -554,8 +554,7 @@ async fn create_table_ifnotexists_fresh_creates_unique_secondary_index_and_rerun
             ty: ColType::String,
             nullable: Some(true),
             default: None,
-            unique: Some(true),
-        }],
+            unique: Some(true), id_prefix: None, vector_metric: None }],
         constraints: vec![],
         indexes: vec![],
         schema: None,

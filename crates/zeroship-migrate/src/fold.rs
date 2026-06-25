@@ -529,8 +529,7 @@ fn add_column_snapshot(
         ty: ty.clone(),
         nullable,
         default: default.cloned(),
-        unique: None,
-    });
+        unique: None, id_prefix: None, vector_metric: None });
     let desc = CollectionDescriptor {
         name: table.to_string(),
         owner_app: FOLD_OWNER_APP.to_string(),
@@ -831,6 +830,346 @@ fn add_constraint_snapshot(
     }
 }
 
+// ===========================================================================
+// Migration-first P2a — fold-and-RECOVER (§2a + §5): the seam P2b/gen-types
+// consumes. `fold_ops` produces the drift SchemaSnapshot (and correctly DEFERS a
+// CHECK there — it cannot render the SQL `definition` offline); this seam
+// reconstructs, per column, the FieldDescriptor / wire-`FieldDef` the SDK type
+// inference consumes, by RECOVERING facets from the applied migration shape:
+//   - type / vector dims / encrypted (default mode) / ref target / id_prefix /
+//     vector_metric — already on the descriptor `ir_column_to_field` builds from
+//     the op `IrColumn` (the §2b carried fields + the §2a structural ones);
+//   - enum / min / max — LIFTED from the canonical closed-AST CHECK shapes
+//     (`recover_check_facet`), bounded to recognized shapes (an unrecognized CHECK
+//     is left unprojected — the column types as its base scalar; NEVER a panic).
+// This is the offline analogue of `crud/introspect_schema.rs`'s runtime derive.
+// ===========================================================================
+
+/// A facet recovered by LIFTING a canonical closed-AST CHECK (P2a §5.3). Bounded
+/// to the SDK-emitted shapes over a SINGLE column; an unrecognized CHECK yields
+/// `None` from [`recover_check_facet`] and is left unprojected.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecoveredCheck {
+    /// `col >= a [AND col <= b]` / `col <= b` → a numeric `min`/`max` bound.
+    Range {
+        /// The bounded column.
+        column: String,
+        /// Lower bound (`>=`), if present.
+        min: Option<f64>,
+        /// Upper bound (`<=`), if present.
+        max: Option<f64>,
+    },
+    /// `col = v` or a left-folded OR-chain `col = v1 OR col = v2 OR …` → an enum
+    /// membership over a single column. (The op.* closed AST has NO `IN` node, so
+    /// the canonical enum shape is the eq/eq-OR-chain; this is the closed-AST
+    /// analogue of the declarative `IN (...)` the spec §5.3 names.)
+    Enum {
+        /// The constrained column.
+        column: String,
+        /// The accepted values, in source order.
+        values: Vec<serde_json::Value>,
+    },
+}
+
+/// Convert a numeric [`IrScalar`] literal to `f64` for a `min`/`max` bound, or
+/// `None` for a non-numeric literal (which is not a recognized range bound).
+fn ir_scalar_as_f64(s: &crate::ir::IrScalar) -> Option<f64> {
+    use crate::ir::IrScalar;
+    match s {
+        IrScalar::Int(i) => Some(*i as f64),
+        // A decimal literal is carried as its lossless string; parse for the bound.
+        IrScalar::Decimal(d) => d.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+/// Convert an [`IrScalar`] literal to the `serde_json::Value` an enum membership
+/// carries (string / number / bool), mirroring the declarative `enum_values`
+/// domain. `None` for a non-scalar (`Bytes`) the enum facet does not model.
+fn ir_scalar_to_json(s: &crate::ir::IrScalar) -> Option<serde_json::Value> {
+    use crate::ir::IrScalar;
+    match s {
+        IrScalar::Bool(b) => Some(serde_json::Value::Bool(*b)),
+        IrScalar::Int(i) => Some(serde_json::Value::from(*i)),
+        IrScalar::Str(s) => Some(serde_json::Value::String(s.clone())),
+        // A decimal enum member is rare; carry it as a JSON number when it parses
+        // losslessly into the f64 domain `serde_json::Number` admits, else `None`
+        // (an unparseable decimal is not a recognized enum member).
+        IrScalar::Decimal(d) => d
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(serde_json::Value::Number),
+        // `Null` / `Bytes` are not enum-member shapes the facet models.
+        IrScalar::Null | IrScalar::Bytes(_) => None,
+    }
+}
+
+/// Match `BinOp{op, ColRef(col), Literal(value)}` — the canonical "column compared
+/// to a literal" leaf the SDK emits for a bound / enum member. Returns
+/// `(column, value)` only for this exact shape (literal on the RHS).
+fn match_col_op_lit(
+    expr: &crate::expr::Expr,
+    want: crate::expr::BinaryOp,
+) -> Option<(&str, &crate::ir::IrScalar)> {
+    use crate::expr::Expr;
+    if let Expr::BinOp { op, lhs, rhs } = expr {
+        if *op == want {
+            if let (Expr::ColRef { name }, Expr::Literal { value }) = (lhs.as_ref(), rhs.as_ref()) {
+                return Some((name.as_str(), value));
+            }
+        }
+    }
+    None
+}
+
+/// **P2a §5.3** — lift a canonical closed-AST CHECK `Expr` back to a
+/// [`RecoveredCheck`] facet, or `None` for an unrecognized shape (which stays
+/// unprojected — the column types as its base scalar; NEVER a panic, §4(a)).
+///
+/// Recognized shapes (all over a SINGLE column):
+/// - `col >= n` → `Range { min }`;
+/// - `col <= n` → `Range { max }`;
+/// - `col >= a AND col <= b` (same column) → `Range { min, max }`;
+/// - `col = v` → `Enum { [v] }`;
+/// - `col = v1 OR col = v2 OR …` (left-folded, same column) → `Enum { [v1, v2, …] }`.
+///
+/// The keystone caveat (§6) applies: this is a RECOGNIZED-shape inverse, not a
+/// total one. A hand-written `c('age').ge(0).and(c('age').le(120))` is
+/// indistinguishable from a `min/max` facet (both reconstruct the same bound),
+/// which is acceptable; an arbitrary boolean CHECK is NOT projectable and yields
+/// `None`.
+#[must_use]
+pub fn recover_check_facet(expr: &crate::expr::Expr) -> Option<RecoveredCheck> {
+    use crate::expr::{BinaryOp, Expr};
+
+    // Range: `col >= a AND col <= b` over the SAME column.
+    if let Expr::BinOp { op: BinaryOp::And, lhs, rhs } = expr {
+        let lo = match_col_op_lit(lhs, BinaryOp::Ge);
+        let hi = match_col_op_lit(rhs, BinaryOp::Le);
+        if let (Some((c1, lo_v)), Some((c2, hi_v))) = (lo, hi) {
+            if c1 == c2 {
+                if let (Some(min), Some(max)) = (ir_scalar_as_f64(lo_v), ir_scalar_as_f64(hi_v)) {
+                    return Some(RecoveredCheck::Range {
+                        column: c1.to_string(),
+                        min: Some(min),
+                        max: Some(max),
+                    });
+                }
+            }
+        }
+    }
+    // Range: a lone `col >= n`.
+    if let Some((c, v)) = match_col_op_lit(expr, BinaryOp::Ge) {
+        if let Some(min) = ir_scalar_as_f64(v) {
+            return Some(RecoveredCheck::Range { column: c.to_string(), min: Some(min), max: None });
+        }
+    }
+    // Range: a lone `col <= n`.
+    if let Some((c, v)) = match_col_op_lit(expr, BinaryOp::Le) {
+        if let Some(max) = ir_scalar_as_f64(v) {
+            return Some(RecoveredCheck::Range { column: c.to_string(), min: None, max: Some(max) });
+        }
+    }
+    // Enum: a single `col = v` OR a left-folded OR-chain of `col = v` over one column.
+    if let Some((column, values)) = recover_enum_chain(expr) {
+        return Some(RecoveredCheck::Enum { column, values });
+    }
+    None
+}
+
+/// Walk a left-folded OR chain of `col = v` equalities over a SINGLE column,
+/// returning `(column, [values])` in source (left-to-right) order, or `None` if
+/// the chain mixes columns / contains a non-`(col = literal)` leaf.
+fn recover_enum_chain(expr: &crate::expr::Expr) -> Option<(String, Vec<serde_json::Value>)> {
+    use crate::expr::{BinaryOp, Expr};
+    let mut column: Option<String> = None;
+    let mut values: Vec<serde_json::Value> = Vec::new();
+
+    // Collect leaves of the left-folded OR tree in source order.
+    fn collect<'a>(e: &'a Expr, leaves: &mut Vec<&'a Expr>) -> bool {
+        if let Expr::BinOp { op: BinaryOp::Or, lhs, rhs } = e {
+            collect(lhs, leaves) && collect(rhs, leaves)
+        } else {
+            leaves.push(e);
+            true
+        }
+    }
+    let mut leaves: Vec<&Expr> = Vec::new();
+    if !collect(expr, &mut leaves) {
+        return None;
+    }
+    for leaf in leaves {
+        let (c, v) = match_col_op_lit(leaf, BinaryOp::Eq)?;
+        match &column {
+            Some(existing) if existing != c => return None, // mixed columns ⇒ not an enum
+            Some(_) => {}
+            None => column = Some(c.to_string()),
+        }
+        values.push(ir_scalar_to_json(v)?);
+    }
+    // A bare non-OR `col = v` yields exactly one leaf — still a valid singleton enum.
+    column.map(|c| (c, values))
+}
+
+/// **Migration-first P2a (§5.1) — the FieldDef reconstruction seam.**
+///
+/// Replay `ops` into the coherent folded state (fail-closed via [`fold_ops`]),
+/// then reconstruct, per table, the wire-`FieldDef` map (`{ <col>: { type, … } }`)
+/// the `@zeroship/db` type inference consumes — recovering each facet from the
+/// applied shape:
+///
+/// - **type / vector dims / encrypted(default) / ref / id_prefix / vector_metric**
+///   from the op `IrColumn` via [`ir_column_to_field`] (reusing the shared
+///   descriptor machinery — the §2b carried fields + §2a structural ones);
+/// - **enum / min / max** LIFTED from canonical CHECKs ([`recover_check_facet`]),
+///   bounded to recognized shapes;
+/// - the column SET (after `addColumn` / `dropColumn` / `renameColumn`) tracked so
+///   the reconstructed map matches the FOLDED logical state, never a stale
+///   createTable snapshot.
+///
+/// The returned `Value` per table is exactly what [`descriptor_to_sdk_schema`]
+/// emits — the SAME shape the declarative differ consumes losslessly — so P2b's
+/// `.d.ts` emitter maps `descriptor → t.*()` builder calls off one facet table.
+///
+/// # Errors
+/// Any structural-incoherence [`FoldError`] [`fold_ops`] raises (the stream must
+/// be coherent first). The ONE exception is [`FoldError::ExprDeferred`] for a
+/// CHECK: `fold_ops` defers a CHECK because it cannot render the snapshot's SQL
+/// `definition` offline, but a CHECK is exactly what this seam LIFTS — so a
+/// CHECK-bearing-but-otherwise-coherent stream is reconstructed, not refused (a
+/// CHECK over an unrecognized shape is then left unprojected, §4(a)).
+pub fn fold_to_field_defs(
+    ops: &[Op],
+    dialect: SqlDialect,
+    project_schema: &str,
+) -> Result<BTreeMap<String, serde_json::Value>, FoldError> {
+    // 1. Fail-closed coherence. `fold_ops` is the structural-coherence oracle
+    //    (add-to-missing-table, drop-absent-column, duplicate-create, …). It ALSO
+    //    refuses a CHECK with `ExprDeferred` because it cannot render the snapshot's
+    //    SQL `definition` offline — but a CHECK is exactly what THIS seam lifts, so
+    //    that single deferral is EXPECTED and tolerated here (the recovery's own
+    //    op-replay below tracks the live column set independently). Any OTHER
+    //    FoldError is a genuine incoherence and propagates.
+    match fold_ops(ops, dialect, project_schema) {
+        Ok(_) | Err(FoldError::ExprDeferred(_)) => {}
+        Err(e) => return Err(e),
+    }
+
+    // 2. Build a per-table FieldDescriptor map by replaying the ops' column shapes.
+    //    We track FieldDescriptors (not snapshots) because the descriptor carries
+    //    the recoverable facets (encrypted/vector*/ref/id_prefix) the snapshot
+    //    flattens to a `data_type` string. Drops/renames keep it in lock-step with
+    //    the folded state — this replay IS the live column set (no snapshot needed).
+    let mut tables: BTreeMap<String, BTreeMap<String, crate::declarative::FieldDescriptor>> =
+        BTreeMap::new();
+    // Per-table CHECK facets to lift onto the matching column at the end. A CHECK
+    // over an unrecognized shape is left unprojected (the column types as its base
+    // scalar) — NOT an error, per §4(a).
+    let mut checks: BTreeMap<String, Vec<RecoveredCheck>> = BTreeMap::new();
+
+    for op in ops {
+        match op {
+            Op::CreateTable { name, columns, constraints, .. } => {
+                let mut cols: BTreeMap<String, crate::declarative::FieldDescriptor> =
+                    BTreeMap::new();
+                for c in columns {
+                    cols.insert(c.name.clone(), ir_column_to_field(c));
+                }
+                tables.insert(name.clone(), cols);
+                for c in constraints {
+                    if let IrConstraintKind::Check { expr } = &c.kind {
+                        if let Some(facet) = recover_check_facet(expr) {
+                            checks.entry(name.clone()).or_default().push(facet);
+                        }
+                    }
+                }
+            }
+            Op::DropTable { table, .. } => {
+                tables.remove(table);
+                checks.remove(table);
+            }
+            Op::AddColumn { table, column, ty, nullable, default, .. } => {
+                if let Some(cols) = tables.get_mut(table) {
+                    // AddColumn carries no id_prefix/vector_metric (the Op shape has
+                    // none — those are createTable-`id`/`vector` authoring facets),
+                    // so the reconstructed descriptor for an added column carries
+                    // only type/nullable/default/encrypted/vector_dims.
+                    let field = ir_column_to_field(&IrColumn {
+                        name: column.clone(),
+                        ty: ty.clone(),
+                        nullable: *nullable,
+                        default: default.clone(),
+                        unique: None,
+                        id_prefix: None,
+                        vector_metric: None,
+                    });
+                    cols.insert(column.clone(), field);
+                }
+            }
+            Op::DropColumn { table, column, .. } => {
+                if let Some(cols) = tables.get_mut(table) {
+                    cols.remove(column);
+                }
+            }
+            Op::RenameColumn { table, from, to, .. } => {
+                if let Some(cols) = tables.get_mut(table) {
+                    if let Some(mut field) = cols.remove(from) {
+                        field.name = to.clone();
+                        cols.insert(to.clone(), field);
+                    }
+                }
+            }
+            Op::AddConstraint { table, constraint, .. } => {
+                if let IrConstraintKind::Check { expr } = &constraint.kind {
+                    if let Some(facet) = recover_check_facet(expr) {
+                        checks.entry(table.clone()).or_default().push(facet);
+                    }
+                }
+            }
+            // Every other op (DML, index, type/nullability alters, drop*) does not
+            // change the reconstructed column-facet shape.
+            _ => {}
+        }
+    }
+
+    // 3. Lift the recovered CHECK facets onto their columns, then emit the
+    //    wire-FieldDef map. `cols` IS the folded logical column set — `dropColumn`
+    //    removed its entry and `renameColumn` re-keyed it during the replay above —
+    //    so a column dropped after a CHECK that referenced it never resurrects (the
+    //    facet's `cols.get_mut` simply finds nothing).
+    let mut out: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    for (table, mut cols) in tables {
+        for facet in checks.remove(&table).unwrap_or_default() {
+            match facet {
+                RecoveredCheck::Range { column, min, max } => {
+                    if let Some(f) = cols.get_mut(&column) {
+                        if min.is_some() {
+                            f.min = min;
+                        }
+                        if max.is_some() {
+                            f.max = max;
+                        }
+                    }
+                }
+                RecoveredCheck::Enum { column, values } => {
+                    if let Some(f) = cols.get_mut(&column) {
+                        f.enum_values = Some(values);
+                    }
+                }
+            }
+        }
+        let desc = CollectionDescriptor {
+            name: table.clone(),
+            owner_app: FOLD_OWNER_APP.to_string(),
+            fields: cols.into_values().collect(),
+            indexes: Vec::new(),
+        };
+        out.insert(table, crate::declarative::descriptor_to_sdk_schema(&desc));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -850,6 +1189,8 @@ mod tests {
             nullable: Some(nullable),
             default: None,
             unique: None,
+            id_prefix: None,
+            vector_metric: None,
         }
     }
 
@@ -1874,8 +2215,7 @@ mod tests {
             ty,
             nullable: Some(nullable),
             default,
-            unique: None,
-        });
+            unique: None, id_prefix: None, vector_metric: None });
         let desc = CollectionDescriptor {
             name: table.to_string(),
             owner_app: FOLD_OWNER_APP.to_string(),
@@ -1907,8 +2247,7 @@ mod tests {
                     ty: ColType::Text,
                     nullable: Some(false),
                     default: Some(IrDefault::Literal { value: IrScalar::Str("beta".to_string()) }),
-                    unique: None,
-                },
+                    unique: None, id_prefix: None, vector_metric: None },
                 // An `int` column with a literal default — the snapshot's
                 // emission-only `default` IS what P2 gen-types reads, so it MUST
                 // render (regression: int defaults were silently dropped — the
@@ -1918,8 +2257,7 @@ mod tests {
                     ty: ColType::Int,
                     nullable: Some(false),
                     default: Some(IrDefault::Literal { value: IrScalar::Int(7) }),
-                    unique: None,
-                },
+                    unique: None, id_prefix: None, vector_metric: None },
                 // A `json` column always carries the `'{}'::jsonb` default (even with
                 // no explicit default) — a second independent emission-only golden.
                 col("meta", ColType::Json, true),
@@ -2033,5 +2371,262 @@ mod tests {
             "fold and lower must spell the UNIQUE definition identically"
         );
         assert_eq!(folded.definition, "UNIQUE (handle)", "bare spelling matches pg_get_constraintdef");
+    }
+
+    // ===================================================================
+    // Migration-first P2a — fold-and-RECOVER (`fold_to_field_defs` + the
+    // CHECK-lift recognizer). Each test is RED pre-change: the recovery seam +
+    // the recognizer + the new IR facets did not exist before P2a, so a build
+    // that lacked them could not even reference these symbols, and the facet
+    // assertions (id_prefix, vector_metric, enum/min/max lift) all depend on the
+    // P2a carry + lift logic.
+    // ===================================================================
+
+    fn defs(ops: &[Op]) -> std::collections::BTreeMap<String, serde_json::Value> {
+        fold_to_field_defs(ops, SqlDialect::Postgres, SCHEMA).unwrap()
+    }
+
+    /// The reconstructed wire-FieldDef object for `table.column`.
+    fn field_def<'a>(
+        m: &'a std::collections::BTreeMap<String, serde_json::Value>,
+        table: &str,
+        column: &str,
+    ) -> &'a serde_json::Value {
+        m.get(table)
+            .and_then(|t| t.get(column))
+            .unwrap_or_else(|| panic!("no reconstructed FieldDef for {table}.{column}"))
+    }
+
+    #[test]
+    fn recover_id_prefix_facet() {
+        // §2b: id_prefix is a DECLARED-ONLY facet the carry + reconstruction must
+        // surface as `idPrefix` on the rebuilt FieldDef.
+        let id = IrColumn {
+            name: "id".into(),
+            ty: ColType::Uuid,
+            nullable: Some(false),
+            default: None,
+            unique: None,
+            id_prefix: Some("post".into()),
+            vector_metric: None,
+        };
+        let m = defs(&[create("posts", vec![id])]);
+        let def = field_def(&m, "posts", "id");
+        assert_eq!(def.get("idPrefix").and_then(|v| v.as_str()), Some("post"),
+            "the typed-id prefix is recovered onto the FieldDef: {def}");
+    }
+
+    #[test]
+    fn recover_vector_metric_facet() {
+        // §2b: vector_metric is the other DECLARED-ONLY facet; recovered as the
+        // camelCase `vectorMetric` token + the dims.
+        let embedding = IrColumn {
+            name: "embedding".into(),
+            ty: ColType::Vector { vector: 1536 },
+            nullable: Some(true),
+            default: None,
+            unique: None,
+            id_prefix: None,
+            vector_metric: Some(crate::ir::VectorMetric::InnerProduct),
+        };
+        let m = defs(&[create("docs", vec![embedding])]);
+        let def = field_def(&m, "docs", "embedding");
+        assert_eq!(def.get("vectorMetric").and_then(|v| v.as_str()), Some("innerProduct"),
+            "the declared vector metric is recovered: {def}");
+        assert_eq!(def.get("vectorDims").and_then(|v| v.as_i64()), Some(1536),
+            "the vector dims ride alongside the metric: {def}");
+    }
+
+    #[test]
+    fn recover_ref_target_facet() {
+        // §2a: the FK target → the `ref` brand, recovered from the Ref ColType.
+        let owner = IrColumn {
+            name: "owner".into(),
+            ty: ColType::Ref { references: "orgs".into() },
+            nullable: Some(false),
+            default: None,
+            unique: None,
+            id_prefix: None,
+            vector_metric: None,
+        };
+        let m = defs(&[create("teams", vec![owner])]);
+        let def = field_def(&m, "teams", "owner");
+        assert_eq!(def.get("type").and_then(|v| v.as_str()), Some("ref"));
+        assert_eq!(def.get("refTarget").and_then(|v| v.as_str()), Some("orgs"),
+            "the FK target collection is recovered as the ref brand: {def}");
+    }
+
+    #[test]
+    fn recover_encrypted_default_mode_facet() {
+        // §2a: an encrypted column is recovered structurally (default mode) — the
+        // ONLY encrypted shape op.* can author (see the encrypted-mode finding test).
+        let secret = col("secret", encrypted_text(), true);
+        let m = defs(&[create("vaults", vec![secret])]);
+        let def = field_def(&m, "vaults", "secret");
+        assert!(def.get("encrypted").is_some(),
+            "an encrypted column is recovered with the (default-mode) encrypted facet: {def}");
+    }
+
+    /// Build a single-column CHECK `IrConstraint` from a closed-AST predicate.
+    fn check(name: &str, expr: Expr) -> IrConstraint {
+        IrConstraint { name: Some(name.into()), kind: IrConstraintKind::Check { expr } }
+    }
+
+    fn create_with_checks(name: &str, columns: Vec<IrColumn>, checks: Vec<IrConstraint>) -> Op {
+        Op::CreateTable {
+            name: name.to_string(),
+            columns,
+            constraints: checks,
+            indexes: Vec::new(),
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    #[test]
+    fn recover_min_max_range_from_check() {
+        // §5.3: `age >= 0 AND age <= 120` lifts to min:0, max:120 on a numeric column.
+        use crate::expr::{BinaryOp, Expr};
+        let range = Expr::BinOp {
+            op: BinaryOp::And,
+            lhs: Box::new(Expr::BinOp {
+                op: BinaryOp::Ge,
+                lhs: Box::new(Expr::col("age")),
+                rhs: Box::new(Expr::lit(IrScalar::Int(0))),
+            }),
+            rhs: Box::new(Expr::BinOp {
+                op: BinaryOp::Le,
+                lhs: Box::new(Expr::col("age")),
+                rhs: Box::new(Expr::lit(IrScalar::Int(120))),
+            }),
+        };
+        let m = defs(&[create_with_checks(
+            "people",
+            vec![col("age", ColType::Float, false)],
+            vec![check("people_age_range", range)],
+        )]);
+        let def = field_def(&m, "people", "age");
+        assert_eq!(def.get("min").and_then(serde_json::Value::as_f64), Some(0.0),
+            "the lower bound is lifted from the CHECK: {def}");
+        assert_eq!(def.get("max").and_then(serde_json::Value::as_f64), Some(120.0),
+            "the upper bound is lifted from the CHECK: {def}");
+    }
+
+    #[test]
+    fn recover_lone_min_from_check() {
+        use crate::expr::{BinaryOp, Expr};
+        let ge = Expr::BinOp {
+            op: BinaryOp::Ge,
+            lhs: Box::new(Expr::col("qty")),
+            rhs: Box::new(Expr::lit(IrScalar::Int(1))),
+        };
+        let m = defs(&[create_with_checks(
+            "orders",
+            vec![col("qty", ColType::Float, false)],
+            vec![check("orders_qty_min", ge)],
+        )]);
+        let def = field_def(&m, "orders", "qty");
+        assert_eq!(def.get("min").and_then(serde_json::Value::as_f64), Some(1.0));
+        assert!(def.get("max").is_none(), "a lone >= lifts only the min: {def}");
+    }
+
+    #[test]
+    fn recover_enum_from_eq_or_chain_check() {
+        // §5.3: the op.* closed AST has no IN node; the canonical enum shape is the
+        // left-folded `role = 'admin' OR role = 'user'` chain → ["admin","user"].
+        use crate::expr::{BinaryOp, Expr};
+        let eq = |v: &str| Expr::BinOp {
+            op: BinaryOp::Eq,
+            lhs: Box::new(Expr::col("role")),
+            rhs: Box::new(Expr::lit(IrScalar::Str(v.into()))),
+        };
+        let chain = Expr::BinOp {
+            op: BinaryOp::Or,
+            lhs: Box::new(eq("admin")),
+            rhs: Box::new(eq("user")),
+        };
+        let m = defs(&[create_with_checks(
+            "members",
+            vec![col("role", ColType::Text, false)],
+            vec![check("members_role_enum", chain)],
+        )]);
+        let def = field_def(&m, "members", "role");
+        let got = def.get("enum").and_then(|v| v.as_array()).expect("enum recovered");
+        let values: Vec<&str> = got.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(values, vec!["admin", "user"], "the enum members are lifted in order: {def}");
+    }
+
+    #[test]
+    fn unrecognized_check_is_left_unprojected_not_a_panic() {
+        // §4(a): an arbitrary boolean CHECK (here `length(name) > 3`) is NOT one of
+        // the recognized shapes, so it is left unprojected — the column types as its
+        // base scalar, and the recovery does NOT panic / error.
+        use crate::expr::{BinaryOp, Expr, ScalarFn};
+        let weird = Expr::BinOp {
+            op: BinaryOp::Gt,
+            lhs: Box::new(Expr::FnCall { r#fn: ScalarFn::Length, args: vec![Expr::col("name")] }),
+            rhs: Box::new(Expr::lit(IrScalar::Int(3))),
+        };
+        let m = defs(&[create_with_checks(
+            "names",
+            vec![col("name", ColType::Text, false)],
+            vec![check("names_len_chk", weird)],
+        )]);
+        let def = field_def(&m, "names", "name");
+        assert!(def.get("min").is_none() && def.get("max").is_none() && def.get("enum").is_none(),
+            "an unrecognized CHECK projects NO facet (the column types as its base): {def}");
+        assert_eq!(def.get("type").and_then(|v| v.as_str()), Some("string"));
+    }
+
+    #[test]
+    fn recovery_respects_a_dropped_column() {
+        // The reconstruction tracks the folded logical state: a column dropped after
+        // creation must NOT appear in the rebuilt FieldDef map.
+        let m = defs(&[
+            create("t", vec![col("keep", ColType::Text, true), col("gone", ColType::Int, true)]),
+            Op::DropColumn {
+                table: "t".into(),
+                column: "gone".into(),
+                schema: None,
+                existence_guard: None,
+            },
+        ]);
+        let t = m.get("t").expect("table reconstructed");
+        assert!(t.get("keep").is_some(), "a surviving column is present");
+        assert!(t.get("gone").is_none(), "a dropped column is absent from the reconstruction");
+    }
+
+    // ── The encrypted-mode finding (§4 DDL note / task item 5) ───────────────
+    // op.* can author ONLY a DEFAULT-mode encrypted column: `ColType::Encrypted`
+    // carries the inner type ONLY, and the recorder `t.encrypted({ of })` exposes
+    // no mode/keyId/wraps surface. So a non-default-encrypted column is
+    // UNREPRESENTABLE in the IR — fail-closed BY CONSTRUCTION, NOT a silently
+    // wrong-mode sentinel. This test pins that: the encrypted facet the descriptor
+    // recovers is the kernel default (the empty `{}`), and there is no IR surface to
+    // make it otherwise.
+
+    #[test]
+    fn encrypted_via_op_star_is_default_mode_only_fail_closed_by_construction() {
+        // The recorder/IR can build an encrypted column carrying ONLY the inner type.
+        let enc = encrypted_text();
+        // The descriptor the shared kernel reads back marks `encrypted` with the
+        // kernel's default selector (the empty object) — there is NO mode/keyId/wraps
+        // field on `ColType::Encrypted` to carry a non-default mode.
+        let field = ir_column_to_field(&IrColumn {
+            name: "secret".into(),
+            ty: enc,
+            nullable: Some(true),
+            default: None,
+            unique: None,
+            id_prefix: None,
+            vector_metric: None,
+        });
+        assert_eq!(
+            field.encrypted,
+            Some(serde_json::json!({})),
+            "op.* encrypted is the kernel DEFAULT mode (empty selector) — a non-default \
+             mode is unrepresentable in ColType::Encrypted, so the path is fail-closed by \
+             construction, never a wrong-mode sentinel"
+        );
     }
 }

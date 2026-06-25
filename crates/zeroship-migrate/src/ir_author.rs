@@ -2115,8 +2115,7 @@ impl IrAuthor {
             ty: ty.clone(),
             nullable,
             default: default.cloned(),
-            unique: None,
-        });
+            unique: None, id_prefix: None, vector_metric: None });
         let desc = CollectionDescriptor {
             name: table.to_string(),
             owner_app: self.decl.owner_app().to_string(),
@@ -2663,7 +2662,18 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
     // `nullable` defaults to TRUE (the `t.*` lexicon — §3.2); `required` is the
     // inverse the descriptor models. An explicit `nullable: false` ⇒ required.
     let required = !c.nullable.unwrap_or(true);
-    let (ty, references) = col_type_to_token(&c.ty);
+    let (mut ty, references) = col_type_to_token(&c.ty);
+    // **Migration-first P2a (§2b)** — a `t.id({prefix})` authoring records the
+    // `id` column as a `uuid` PK carrying `id_prefix`. The shared descriptor kernel
+    // expects an `id`-named field to declare type `"id"` (so it FOLDS into the
+    // system PK instead of being rejected as a second `id` column —
+    // `declarative.rs` `validate_desired`); map it here so the carried prefix
+    // round-trips through `descriptor_to_sdk_schema` as `{ type: "id", idPrefix }`.
+    // (The pre-P2a op.* convention authored NO `id` column — the platform injected
+    // it — so this arm only fires for an explicit `t.id({prefix})` re-declaration.)
+    if c.name == "id" && matches!(c.ty, ColType::Uuid) {
+        ty = "id".to_string();
+    }
     // An ENCRYPTED column carries the inner token as `ty` PLUS the `encrypted`
     // facet — the shared builder reads the facet to pick BYTEA + the `zsenc`
     // sentinel (built by the shared kernel, never re-spelled here, §6.5). The
@@ -2681,6 +2691,15 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         ColType::Vector { vector } => Some(i64::from(*vector)),
         _ => None,
     };
+    // **Migration-first P2a (§2b)** — thread the two DECLARED-ONLY, uncatalogable
+    // facets the runtime/gen-types lose under P5 if the IR doesn't carry them:
+    //   - `id_prefix` (`t.id({prefix})`) → the descriptor's `id_prefix` so the
+    //     shared kernel keeps the typed-id brand on the `id` column;
+    //   - `vector_metric` (`t.vector(n, {metric})`) → the descriptor's
+    //     `vector_metric` (camelCase token) so the ivfflat/hnsw opclass renders the
+    //     declared metric instead of defaulting.
+    // Every other facet is RECOVERED from the applied shape (fold/sentinels/CHECK),
+    // not carried — see the P2 type-source design.
     FieldDescriptor {
         name: c.name.clone(),
         ty,
@@ -2690,6 +2709,8 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         default: c.default.as_ref().and_then(ir_default_to_value),
         encrypted,
         vector_dims,
+        vector_metric: c.vector_metric.map(|m| m.as_token().to_string()),
+        id_prefix: c.id_prefix.clone(),
         ..Default::default()
     }
 }
@@ -2920,8 +2941,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: Some(false),
                 default: None,
-                unique: None,
-            }],
+                unique: None, id_prefix: None, vector_metric: None }],
         );
         if let Op::CreateTable { constraints, .. } = &mut ir.ops[0] {
             constraints.push(IrConstraint {
@@ -2963,8 +2983,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None,
-            }],
+                unique: None, id_prefix: None, vector_metric: None }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             *schema = Some("app2".into());
@@ -3006,8 +3025,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None,
-            }],
+                unique: None, id_prefix: None, vector_metric: None }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             // A case-VARIANT of the bound project schema — the gate folds it in.
@@ -3054,8 +3072,7 @@ mod tests {
                     ty: ColType::Int,
                     nullable: Some(false),
                     default: Some(IrDefault::Literal { value: IrScalar::Int(5) }),
-                    unique: None,
-                },
+                    unique: None, id_prefix: None, vector_metric: None },
                 // A bigint default beyond 2^53 — carried as a decimal STRING (the IR
                 // rejects a fractional/oversized JSON number), and `as_f64` would
                 // corrupt it; the verbatim string keeps it exact.
@@ -3066,8 +3083,7 @@ mod tests {
                     default: Some(IrDefault::Literal {
                         value: IrScalar::Decimal("9007199254740993".into()),
                     }),
-                    unique: None,
-                },
+                    unique: None, id_prefix: None, vector_metric: None },
                 TIrColumn {
                     name: "ratio".into(),
                     ty: ColType::Float,
@@ -3075,8 +3091,7 @@ mod tests {
                     default: Some(IrDefault::Literal {
                         value: IrScalar::Decimal("0.5".into()),
                     }),
-                    unique: None,
-                },
+                    unique: None, id_prefix: None, vector_metric: None },
             ],
         );
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
@@ -3113,8 +3128,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None,
-            }],
+                unique: None, id_prefix: None, vector_metric: None }],
         );
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres)
             // Trusted CLI widens the scope to admit the connection default it binds.
@@ -3147,8 +3161,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None,
-            }],
+                unique: None, id_prefix: None, vector_metric: None }],
         );
         // No `with_schema_scope` ⇒ Confined `Single("app1")`; the op omits its own
         // qualifier, so the effective schema resolves to the foreign default "other".
@@ -3184,8 +3197,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None,
-            }],
+                unique: None, id_prefix: None, vector_metric: None }],
         );
         // The op itself names a FOREIGN schema "other" (≠ project "app1"); NO
         // connection default is bound, so this exercises the EXPLICIT-qualifier arm,
@@ -3221,8 +3233,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None,
-            }],
+                unique: None, id_prefix: None, vector_metric: None }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             *schema = Some("reporting".into());
@@ -3257,8 +3268,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None,
-            }],
+                unique: None, id_prefix: None, vector_metric: None }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             *schema = Some("reporting".into());
@@ -3294,8 +3304,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None,
-            }],
+                unique: None, id_prefix: None, vector_metric: None }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             // The op names the project schema explicitly — the implicit main target.
@@ -3438,8 +3447,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None,
-            }],
+                unique: None, id_prefix: None, vector_metric: None }],
         );
         if let Op::CreateTable { existence_guard, .. } = &mut ir.ops[0] {
             *existence_guard = Some(crate::ir::ExistenceGuard::IfNotExists);
@@ -3478,8 +3486,7 @@ mod tests {
                 ty: ColType::Encrypted { of: Box::new(ColType::String) },
                 nullable: None,
                 default: None,
-                unique: None,
-            }],
+                unique: None, id_prefix: None, vector_metric: None }],
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let guard_cfg = GuardConfig::confined("app".to_string());
@@ -3527,8 +3534,7 @@ mod tests {
                 ty: ColType::String,
                 nullable: None,
                 default: None,
-                unique: None,
-            }],
+                unique: None, id_prefix: None, vector_metric: None }],
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         // Guard confined to "other" — the rendered `CREATE TABLE "app".…` is then a
@@ -3558,8 +3564,7 @@ mod tests {
                 ty: ColType::String,
                 nullable: Some(false),
                 default: None,
-                unique: None,
-            }],
+                unique: None, id_prefix: None, vector_metric: None }],
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Sqlite);
         let guard_cfg = GuardConfig::confined_sqlite("app".to_string());
@@ -3598,8 +3603,7 @@ mod tests {
                 default: Some(IrDefault::Literal {
                     value: crate::ir::IrScalar::Str(nasty.into()),
                 }),
-                unique: None,
-            }],
+                unique: None, id_prefix: None, vector_metric: None }],
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let guard_cfg = GuardConfig::confined("app".to_string());
@@ -3806,8 +3810,7 @@ mod tests {
                     ty: ColType::Text,
                     nullable: Some(false),
                     default: None,
-                    unique: None,
-                },
+                    unique: None, id_prefix: None, vector_metric: None },
             ];
 
             // IrAuthor's createTable snapshot (its real lowering seam: the private
@@ -3882,8 +3885,7 @@ mod tests {
                     ty: ColType::Timestamp,
                     nullable: None,
                     default: Some(IrDefault::Fn { r#fn: SynthDefaultFn::Now }),
-                    unique: None,
-                }],
+                    unique: None, id_prefix: None, vector_metric: None }],
                 constraints: vec![],
                 indexes: vec![],
                 schema: None,
@@ -4259,8 +4261,7 @@ mod tests {
             ty: ColType::Text,
             nullable: Some(false),
             default: None,
-            unique: None,
-        }]);
+            unique: None, id_prefix: None, vector_metric: None }]);
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let plan = author.lower_plan(&ir, &LiveSchema::default()).expect("lower_plan");
 
@@ -4319,8 +4320,7 @@ mod tests {
             ty: ColType::Text,
             nullable: Some(false),
             default: None,
-            unique: None,
-        }]);
+            unique: None, id_prefix: None, vector_metric: None }]);
         let pg = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
             .lower_plan(&ir, &LiveSchema::default())
             .expect("pg lower_plan");
@@ -4351,11 +4351,9 @@ mod tests {
     #[test]
     fn ir_plan_anchor_changes_when_op_list_changes() {
         let a = create_table_ir("t", vec![TIrColumn {
-            name: "c".into(), ty: ColType::Text, nullable: None, default: None, unique: None,
-        }]);
+            name: "c".into(), ty: ColType::Text, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None }]);
         let b = create_table_ir("t", vec![TIrColumn {
-            name: "c".into(), ty: ColType::Int, nullable: None, default: None, unique: None,
-        }]);
+            name: "c".into(), ty: ColType::Int, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None }]);
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let pa = author.lower_plan(&a, &LiveSchema::default()).expect("lower a");
         let pb = author.lower_plan(&b, &LiveSchema::default()).expect("lower b");
