@@ -209,7 +209,7 @@ impl SqliteRebuildSpec {
 /// Double-quote a SQLite identifier (escaping embedded quotes). Engine-controlled
 /// identifiers, quoted defensively.
 fn quote_ident(s: &str) -> String {
-    format!("\"{}\"", s.replace('"', "\"\""))
+    crate::dml::escape_quote_ident(s)
 }
 
 /// Execute ONE 12-step table rebuild atomically with confinement + journal it

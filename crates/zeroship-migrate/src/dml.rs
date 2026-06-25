@@ -144,7 +144,7 @@ fn quote_ident(what: &'static str, ident: &str) -> Result<String, DmlError> {
     if !ok {
         return Err(DmlError::InvalidIdentifier { what, value: ident.to_string() });
     }
-    Ok(format!("\"{}\"", ident.replace('"', "\"\"")))
+    Ok(escape_quote_ident(ident))
 }
 
 /// A render-seam rejection of an **engine-supplied identifier** (project schema,
@@ -189,7 +189,29 @@ pub(crate) fn quote_ident_checked(ident: &str) -> Result<String, IdentQuoteError
     if ident.contains('\0') {
         return Err(IdentQuoteError { reason: "contains NUL", value: ident.to_string() });
     }
-    Ok(format!("\"{}\"", ident.replace('"', "\"\"")))
+    Ok(escape_quote_ident(ident))
+}
+
+/// The ONE raw double-quote escape primitive for the whole crate: double every
+/// embedded `"`, wrap in `"`. This is the *single physical home* of the
+/// `replace('"', "\"\"")` byte-logic — every identifier-quoting seam in
+/// `zeroship-migrate` (the fail-closed engine wrapper [`quote_ident_checked`],
+/// the author-boundary [`quote_ident`], and the infallible local helpers in
+/// `declarative` / `shadow` / `expand_contract` / `precondition` / `baseline` /
+/// `db` / `ir_author` / `executor` / `backend_sqlite` / `guard::platform_runner`)
+/// routes through it. Centralising it keeps every render seam byte-identical and
+/// makes the "no remaining bare escape seam" claim *structurally* true — enforced
+/// by [`no_bare_escape_seam_outside_dml`] below.
+///
+/// It is infallible by construction: double-quote escaping neutralises every byte
+/// EXCEPT the empty string and a NUL (which PG rejects in an identifier outright).
+/// Callers that handle **engine-supplied** identifiers (project schema, migrator
+/// role, meta schema) must therefore route through [`quote_ident_checked`], which
+/// adds the empty/NUL fail-closed gate on top of this primitive. Callers quoting
+/// author identifiers already gated upstream (`validate_ident`) may call this
+/// directly.
+pub(crate) fn escape_quote_ident(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
 /// Qualify a validated bare table name for the target dialect.
@@ -984,6 +1006,59 @@ mod tests {
         assert!(crate::backfill::quote_ident_for_test("a\0b").is_err());
         assert!(crate::role::quote_ident_for_test("a\0b").is_err());
         assert!(crate::journal::quote_ident_for_test("a\0b").is_err());
+    }
+
+    /// **#150 (PR12 fix)** — STRUCTURAL enforcement of the "no remaining bare
+    /// `format!`/`replace` escape seam" claim. The raw `"` → `""` escape logic
+    /// (`replace('"', "\"\"")`) must live in EXACTLY one physical home —
+    /// [`escape_quote_ident`] in this module — and nowhere else in the crate
+    /// source. Every other quoting seam routes through it (directly for infallible
+    /// author-validated helpers, or via [`quote_ident_checked`] for the fail-closed
+    /// engine-identifier surfaces).
+    ///
+    /// RED before this fix: 15+ render sites across `executor` / `precondition` /
+    /// `baseline` / `guard::platform_runner` / `expand_contract` / `shadow` /
+    /// `declarative` / `db` / `ir_author` / `backend_sqlite` carried their own
+    /// inline `replace('"', "\"\"")`, so this scan would have found bare seams
+    /// outside `dml.rs` and FAILED. After the fix only `dml.rs` (the helper + this
+    /// test's own needle strings) contains the pattern.
+    #[test]
+    fn no_bare_escape_seam_outside_dml() {
+        use std::path::Path;
+        // The exact escape-call byte-pattern. We scan for the `replace` call that
+        // doubles a double-quote; the ONLY legitimate occurrences live in dml.rs.
+        let needle = ['r', 'e', 'p', 'l', 'a', 'c', 'e']
+            .iter()
+            .collect::<String>()
+            + "('\"', \"\\\"\\\"\")";
+        let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders: Vec<String> = Vec::new();
+        let mut stack = vec![src_root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read_dir src") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                // dml.rs is the single sanctioned home (helper + this test).
+                if path.file_name().and_then(|n| n.to_str()) == Some("dml.rs") {
+                    continue;
+                }
+                let body = std::fs::read_to_string(&path).expect("read src file");
+                if body.contains(&needle) {
+                    offenders.push(path.strip_prefix(&src_root).unwrap().display().to_string());
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "bare `\"`-escape seam found outside dml.rs — route these through \
+             dml::escape_quote_ident / quote_ident_checked: {offenders:?}"
+        );
     }
 
     fn lit_str(s: &str) -> Expr {

@@ -297,7 +297,7 @@ impl ExecutorConfig {
     ///   parity. The operator owns the DB, so this pin is convenience, not a
     ///   boundary.
     pub(crate) fn search_path_clause(&self) -> String {
-        let quote = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+        let quote = |s: &str| crate::dml::escape_quote_ident(s);
         match self.trust {
             crate::guard::TrustProfile::Platform if !self.platform_schemas.is_empty() => self
                 .platform_schemas

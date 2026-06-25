@@ -286,7 +286,7 @@ fn fresh_shadow_name(prefix: &str) -> String {
 
 /// Quote a SQL identifier (mirrors `role::quote_ident` / `journal::quote_ident`).
 fn quote_ident(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
+    crate::dml::escape_quote_ident(ident)
 }
 
 thread_local! {

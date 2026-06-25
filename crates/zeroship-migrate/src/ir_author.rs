@@ -2566,7 +2566,7 @@ fn ir_default_to_value(d: &IrDefault) -> Option<serde_json::Value> {
 /// statement structure — the SAME quoting the declarative emitter uses.
 fn quote_cols(cols: &[String]) -> String {
     cols.iter()
-        .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+        .map(|c| crate::dml::escape_quote_ident(c))
         .collect::<Vec<_>>()
         .join(", ")
 }
