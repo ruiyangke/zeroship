@@ -3053,17 +3053,23 @@ mod tests {
     // carries the inner type ONLY, and the recorder `t.encrypted({ of })` exposes
     // no mode/keyId/wraps surface. So a non-default-encrypted column is
     // UNREPRESENTABLE in the IR — fail-closed BY CONSTRUCTION, NOT a silently
-    // wrong-mode sentinel. This test pins that: the encrypted facet the descriptor
-    // recovers is the kernel default (the empty `{}`), and there is no IR surface to
-    // make it otherwise.
+    // wrong-mode sentinel.
+    //
+    // **P2b HIGH-1/MED-1 fix:** recovery now restores the KERNEL DEFAULTS the SDK's
+    // `t.encrypted()` stamps (`mode:randomised, keyId:default, wraps:<inner>`) PLUS the
+    // fail-safe auto-mask (`full/pii`), so the author→generate→fold chain is byte-
+    // lossless over a default `t.encrypted()` (the keystone). The fail-closed property
+    // is UNCHANGED: that recovered triple is the ONLY shape op.* can produce — there is
+    // no IR surface for a non-default mode/keyId.
 
     #[test]
     fn encrypted_via_op_star_is_default_mode_only_fail_closed_by_construction() {
         // The recorder/IR can build an encrypted column carrying ONLY the inner type.
         let enc = encrypted_text();
-        // The descriptor the shared kernel reads back marks `encrypted` with the
-        // kernel's default selector (the empty object) — there is NO mode/keyId/wraps
-        // field on `ColType::Encrypted` to carry a non-default mode.
+        // The descriptor the shared kernel reads back recovers the encrypted facet as
+        // the SDK kernel default (`t.encrypted()` byte-image) + the fail-safe auto-mask
+        // — there is NO mode/keyId/wraps field on `ColType::Encrypted` to make it carry
+        // a NON-default mode, so this is the only representable encrypted shape.
         let field = ir_column_to_field(&IrColumn {
             name: "secret".into(),
             ty: enc,
@@ -3075,10 +3081,15 @@ mod tests {
         });
         assert_eq!(
             field.encrypted,
-            Some(serde_json::json!({})),
-            "op.* encrypted is the kernel DEFAULT mode (empty selector) — a non-default \
-             mode is unrepresentable in ColType::Encrypted, so the path is fail-closed by \
-             construction, never a wrong-mode sentinel"
+            Some(serde_json::json!({ "mode": "randomised", "keyId": "default", "wraps": "string" })),
+            "op.* encrypted recovers the SDK kernel-DEFAULT triple (the `t.encrypted()` \
+             byte-image) — a non-default mode is unrepresentable in ColType::Encrypted, \
+             so the path is fail-closed by construction, never a wrong-mode sentinel"
+        );
+        assert_eq!(
+            field.mask,
+            Some(serde_json::json!({ "kind": "full", "classification": "pii" })),
+            "a default t.encrypted() carries the fail-safe auto-mask, recovered byte-exact"
         );
     }
 
