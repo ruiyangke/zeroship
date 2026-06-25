@@ -116,15 +116,34 @@ follow-on unique constraint, mirroring the existing `.primaryKey()` hoist) and `
 ```
 
 `RefAction = "cascade" | "restrict" | "setNull" | "setDefault" | "noAction"`. **C1: `onDelete`/`onUpdate`
-are actually rendered** (today the imperative FK silently drops them; the declarative path already honors
-them — the imperative path is brought to parity via an IR change, §6).
+are actually rendered** on the stand-alone `.foreignKey(name).add(...)` **Postgres** path (today the
+imperative FK silently drops them; the declarative `ref` path already honors them — the imperative path
+is brought to parity via an IR change, §6).
+
+> **C1 apply reachability (scope).** The RENDERED+TESTED C1 path is the stand-alone
+> `addConstraint(fk)` on **Postgres** (`ir_author_render_parity.rs`). C1 is **PG-only at
+> apply** today: the SQLite leg has no IR field for FK actions (its column-`ref` path
+> carries no action), and the `createTable({ foreignKeys })` table-level FK lowers on
+> PG only (the SQLite CREATE renders from the column descriptor — see §3.1). A later
+> wave plumbs C1 through the createTable/SQLite-rebuild FK path and/or a
+> `t.ref().onDelete()` column-level surface for full both-backends parity.
 
 ### 3.4 Indexes — `.index(name)` selector
 
 ```ts
 .index(name).add({ columns: string[]; unique?: boolean; using?: IndexMethod; where?: ExprFn; ifNotExists?: boolean; schema?: string }): TableHandle
-.index(name).drop({ ifExists?: boolean; concurrently?: boolean; schema?: string }): TableHandle
+.index(name).drop({ ifExists?: boolean; concurrently?: boolean; unique?: boolean; schema?: string }): TableHandle
 ```
+
+> **`.index(name).drop({ unique? })` — apply-gating signal.** `unique?` rides on
+> the drop args (beyond the bare identity + `ifExists`/`concurrently`) because the
+> IR `Op::DropIndex.unique` field DRIVES the destructive/approval gate at apply: a
+> `unique: true` drop silently removes a data-integrity guarantee, so it lowers
+> `destructive + requires_approval` and is refused under `Approval::None`. The hint
+> is OR-ed with the AUTHORITATIVE live catalog (a hostile/buggy `unique: false` on
+> an actually-unique index can NOT defeat the gate), but carrying it lets an author
+> name the destructive drop for approval up-front. Absent/`false` ⇒ a plain,
+> reversible drop.
 
 **Name-first (deliberate):** indexes and constraints must be named via the selector — explicit names are
 deterministically droppable in later migrations. `using: "btree" | "gin" | "gist" | "ivfflat" | "hnsw" | "fts5"`.
@@ -192,10 +211,15 @@ the golden corpus output is unchanged, only the authoring call sites change.
 
 The **one** wire change — **C1 FK referential actions**: `IrConstraintKind::Fk` gains `on_delete` /
 `on_update` optional fields (`ir.rs`), `op-ir.schema.json` regenerated, `Checksum::of_ir` folds them,
-the render brought to parity with the declarative path (`declarative.rs` already renders actions), the
-recorder twin emits them, the of_ir round-trip + variant-exhaustiveness gate updated, golden re-blessed.
-`ir_version` bumps if the wire contract requires it (the field is additive-optional; confirm the
-`deny_unknown_fields` contract during impl).
+the **stand-alone `addConstraint(fk)` Postgres** render brought to parity with the declarative `ref`
+path (`declarative.rs` already renders actions), the recorder twin emits them, the of_ir round-trip +
+variant-exhaustiveness gate updated, golden re-blessed. `ir_version` bumps if the wire contract requires
+it (the field is additive-optional; confirm the `deny_unknown_fields` contract during impl).
+
+> **Apply scope is PG-only today** (see the §3.3 C1-reachability note): the wire fields exist on both
+> dialects, but only the PG stand-alone FK add RENDERS them. SQLite FK actions and the
+> `createTable`/SQLite-rebuild FK path are a later wave; the spec frames C1 as parity *of the wire
+> contract*, with apply parity tracked as follow-up — not as already-shipped both-backends apply.
 
 ---
 
