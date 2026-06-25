@@ -1,53 +1,32 @@
-// `@zeroship/migrate` — the no-raw-SQL, fully-structured, named-ESM-import op
-// builder for portable bi-dialect (PG + SQLite) migrations (§3.2/§3.3.1).
+// `@zeroship/migrate` — the no-raw-SQL, fully-structured, FLUENT-only op builder
+// for portable bi-dialect (PG + SQLite) migrations (design
+// `2026-06-25-op-dsl-fluent-redesign.md`).
 //
-// A migration is a `.ts` module that imports the op-functions it uses and exports
-// a single `default { up, down? }` object whose parameterless `up()`/`down()`
-// record into the ambient per-migration recorder (§3.1). Names are plain strings
-// (NOT live-schema-bound — §3.3). Every expression is the fluent `(c) => Expr`
+// A migration is a `.ts` module that imports `{ table, t }`, and exports a single
+// `default { up, down? }` object whose parameterless `up()`/`down()` author
+// against the ambient per-migration recorder via `table()`. Names are plain
+// strings (NOT live-schema-bound). Every expression is the fluent `(c) => Expr`
 // builder; there is no raw escape and no `Raw` type (property A).
 //
-//   import { createTable, addColumn, backfill, t } from "@zeroship/migrate";
+//   import { table, t } from "@zeroship/migrate";
 //
 //   export default {
 //     up() {
-//       addColumn("users", "first_name", t.text());
-//       backfill("users", { set: { first_name: c => c.fn.splitPart(c("name"), " ", 1) } });
+//       table("users")
+//         .column("first_name").add({ type: t.text() })
+//         .backfill({ set: { first_name: c => c.fn.splitPart(c("name"), " ", 1) } });
 //     },
 //   };
 
 export {
-  // DDL: tables
-  createTable,
-  dropTable,
-  // DDL: columns
-  addColumn,
-  dropColumn,
-  renameColumn,
-  alterColumn,
-  // DDL: constraints / indexes
-  addForeignKey,
-  addUnique,
-  addCheck,
-  dropConstraint,
-  createIndex,
-  dropIndex,
-  // DML
-  insert,
-  update,
-  del, // `del`, not `delete` — `delete` is a JS reserved word
-  backfill,
-  // SQLite-safe rebuild
-  batchAlterTable,
-  // the eager fluent table() facade (PR11) — pure sugar over the flat ops above,
-  // scoped to one table, recording eagerly; lowers to byte-identical IR
+  // the SOLE public authoring entry — the reusable fluent TableHandle
   table,
-  // the fluent column-type lexicon
+  // the immutable fluent column-type lexicon
   t,
   // the shared `@zeroship/db` lexicon bridge (PR5 goal A): lift a live-schema
   // `t.*` field into a migration ColumnDef through the one shared ColType lexicon
   fromDb,
-  // the §4.3 determinism lint (best-effort source scan)
+  // the determinism lint (best-effort source scan)
   lintDeterminism,
 } from "./ops.js";
 
@@ -61,7 +40,6 @@ export type { DbSchemaField, DbFieldType } from "./db-lexicon.js";
 export type {
   // authoring types
   ColumnDef,
-  ColumnOpts,
   TypeLexicon,
   ExprBuilder,
   ExprChain,
@@ -70,23 +48,24 @@ export type {
   ScalarValue,
   Row,
   Migration,
+  // the fluent handle + selector sub-handles
+  TableHandle,
+  TableOptions,
+  ColumnRef,
+  ForeignKeyRef,
+  UniqueRef,
+  CheckRef,
+  ConstraintRef,
+  IndexRef,
+  CreateTableArgs,
+  ForeignKeyReference,
   // op-arg shapes
-  ForeignKeySpec,
-  UniqueSpec,
-  CheckSpec,
-  DropConstraintSpec,
-  CreateIndexSpec,
-  AlterColumnChange,
   InsertArgs,
   UpdateArgs,
   DelArgs,
   BackfillArgs,
-  TableBuilder,
-  BatchAlterBuilder,
-  TableHandle,
-  TableOptions,
   IndexMethod,
-  FkAction,
+  RefAction,
   DeterminismFinding,
   // re-exported generated IR wire types (ergonomics; goldens are the contract)
   ColType,
@@ -98,5 +77,5 @@ export type {
 // The full generated dialect-neutral IR wire types (`Op`, `IrConstraint`,
 // `MigrationIr`, …) — generated from the engine's `op-ir.schema.json`. Re-exported
 // AS ERGONOMICS so an advanced caller can name the exact serde shape; the golden
-// `.ir.json` corpus remains the source of truth (§4.3 / PR3).
+// `.ir.json` corpus remains the source of truth.
 export type * as ir from "./generated/ir.js";

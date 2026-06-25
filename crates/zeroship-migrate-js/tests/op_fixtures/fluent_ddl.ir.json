@@ -94,7 +94,7 @@
         },
         {
           "name": "label",
-          "type": "string"
+          "type": "text"
         },
         {
           "name": "hits",

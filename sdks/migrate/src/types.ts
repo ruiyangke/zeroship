@@ -1,14 +1,15 @@
-// `@zeroship/migrate` — the authoring-surface TS types (§3.2/§3.3.1).
+// `@zeroship/migrate` — the authoring-surface TS types (fluent-only redesign,
+// design `2026-06-25-op-dsl-fluent-redesign.md`).
 //
-// These are MANUAL types that codegen cannot express: the fluent builder method
-// surface (the chainable `ColumnDef` + the `(c) => Expr` `ExprBuilder`), the
-// op-function signatures, and the all-strings typing stance (§3.3 — names are
-// plain `string`, NOT live-schema-bound). The dialect-neutral IR wire types
-// (`Op`, `Expr`, `ColType`, `IrConstraint`, …) are GENERATED from the engine's
-// `op-ir.schema.json` (`json-schema-to-typescript`) and re-exported from
-// `./generated/ir` AS ERGONOMICS — the goldens remain the contract source of
-// truth (§4.3 / PR3). This module imports the generated wire types where a manual
-// type wants to reference the exact serde shape.
+// These are MANUAL types that codegen cannot express: the fluent `table()`
+// handle + its selector sub-handles (`.column`/`.foreignKey`/…), the chainable
+// `ColumnDef` (`t.*`), the `(c) => Expr` `ExprBuilder`, and the all-strings
+// typing stance (§3 — names are plain `string`, NOT live-schema-bound). The
+// dialect-neutral IR wire types (`Op`, `Expr`, `ColType`, `IrConstraint`, …) are
+// GENERATED from the engine's `op-ir.schema.json` (`json-schema-to-typescript`)
+// and re-exported from `./generated/ir` AS ERGONOMICS — the goldens remain the
+// contract source of truth (§6). This module imports the generated wire types
+// where a manual type wants to reference the exact serde shape.
 
 import type { ColType, Expr, IrBatch, IrScalar } from "./generated/ir.js";
 
@@ -39,64 +40,63 @@ export type IfExistsGuard = boolean;
 // ── The fluent column-type lexicon (`t.*`) → a chainable ColumnDef ──
 
 /**
- * A chainable column definition produced by the fluent `t.*` lexicon (§3.2).
+ * A chainable column definition produced by the fluent `t.*` lexicon (§4).
  * NULLABLE BY DEFAULT; `.notNull()`/`.default(x)`/`.ref(target)`/`.primaryKey()`
  * /`.unique()` opt in. ONE column-type representation — every column-type
- * position (`createTable`/`addColumn`/`renameColumn`/`alterColumn`) takes a
- * `ColumnDef`; there is no second bare-string `ColType` union on the surface.
+ * position (`create.columns`/`.column().add()`/`.column().rename()`/
+ * `.column().alter()`) takes a `ColumnDef`.
+ *
+ * **IMMUTABLE (§4):** every modifier returns a FRESH `ColumnDef` — it does NOT
+ * mutate the receiver — so a hoisted type var (`const t1 = t.text().notNull()`)
+ * is safe to reuse across multiple columns without aliasing (`t1.unique()` leaves
+ * `t1` untouched). This is the contract behind the var-assign authoring style.
  */
 export interface ColumnDef {
-  /** Mark the column `NOT NULL` (the rarer, riskier opt-in). */
+  /** Mark the column `NOT NULL` (the rarer, riskier opt-in). Returns a fresh def. */
   notNull(): ColumnDef;
   /** A structured default — a typed scalar literal OR a nullary synth scalar
-   *  (`{ fn: "now" | "genRandomUuid" }`). NEVER raw SQL (property A). */
+   *  (`{ fn: "now" | "genRandomUuid" }`). NEVER raw SQL (property A). Returns a
+   *  fresh def. */
   default(value: ScalarValue | { fn: "now" | "genRandomUuid" }): ColumnDef;
-  /** Re-target as a foreign-key reference (a plain-string target table). */
+  /** Re-target as a foreign-key reference (a plain-string target table). Returns
+   *  a fresh def. */
   ref(targetTable: string): ColumnDef;
-  /** Mark as the table primary key (implies `NOT NULL`). */
+  /** Mark as the table primary key (implies `NOT NULL`). Returns a fresh def. */
   primaryKey(): ColumnDef;
-  /** Add a single-column `UNIQUE`. */
+  /** Add a single-column `UNIQUE`. Returns a fresh def. */
   unique(): ColumnDef;
 }
 
-/** A column-type options-bag overload (`t.text({ notNull: true, default: 0 })`). */
-export interface ColumnOpts {
-  notNull?: boolean;
-  primaryKey?: boolean;
-  unique?: boolean;
-  ref?: string;
-  default?: ScalarValue | { fn: "now" | "genRandomUuid" };
-}
-
-/** The fluent `t.*` column-type lexicon (shared in shape with `@zeroship/db`). */
+/** The fluent `t.*` column-type lexicon (shared in shape with `@zeroship/db`).
+ *  Canonical names only — the `string`/`int` aliases and the `{notNull,default}`
+ *  options-bag overload are REMOVED (§7). */
 export interface TypeLexicon {
   /** A conventional id: a non-null UUID PK defaulting to `gen_random_uuid()`. */
   id(): ColumnDef;
-  text(opts?: ColumnOpts): ColumnDef;
+  text(): ColumnDef;
   /** Fixed-precision decimal (default (38, 9)). */
-  numeric(precision?: number, scale?: number, opts?: ColumnOpts): ColumnDef;
-  timestamp(opts?: ColumnOpts): ColumnDef;
-  uuid(opts?: ColumnOpts): ColumnDef;
-  bytes(opts?: ColumnOpts): ColumnDef;
-  boolean(opts?: ColumnOpts): ColumnDef;
-  json(opts?: ColumnOpts): ColumnDef;
+  numeric(precision?: number, scale?: number): ColumnDef;
+  timestamp(): ColumnDef;
+  uuid(): ColumnDef;
+  bytes(): ColumnDef;
+  boolean(): ColumnDef;
+  json(): ColumnDef;
   /** A foreign-key reference column (plain-string target — NOT live-schema-bound). */
-  ref(targetTable: string, opts?: ColumnOpts): ColumnDef;
-  vector(n: number, opts?: ColumnOpts): ColumnDef;
-  geoPoint(opts?: ColumnOpts): ColumnDef;
-  string(opts?: ColumnOpts): ColumnDef;
-  int(opts?: ColumnOpts): ColumnDef;
-  integer(opts?: ColumnOpts): ColumnDef;
-  bigInt(opts?: ColumnOpts): ColumnDef;
-  float(opts?: ColumnOpts): ColumnDef;
+  ref(targetTable: string): ColumnDef;
+  vector(n: number): ColumnDef;
+  geoPoint(): ColumnDef;
+  /** 32-bit signed integer (canonical; the `int` alias is removed, §7). */
+  integer(): ColumnDef;
+  bigInt(): ColumnDef;
+  float(): ColumnDef;
   /** An application-level encrypted column wrapping an inner type. */
-  encrypted(arg: { of: ColumnDef | ColType } | ColumnDef | ColType, opts?: ColumnOpts): ColumnDef;
+  encrypted(arg: { of: ColumnDef | ColType } | ColumnDef | ColType): ColumnDef;
 }
 
 // ── Scalars / rows ──
 
 /** A typed scalar value an `insert` row / default / `onConflict.doUpdate` may
- *  carry (§2.5/§3.2 numeric domain). The builder normalizes a JS `bigint` into the
+ *  carry (§3.5 numeric domain). The builder normalizes a JS `bigint` into the
  *  `{ decimal }` carrier (integers beyond 2^53) and a `Uint8Array` into the
  *  `{ bytes: base64 }` carrier before recording — both are accepted here for
  *  authoring ergonomics; you MAY also pass the explicit `{ decimal }` carrier (e.g.
@@ -111,13 +111,15 @@ export type ScalarValue =
   | Uint8Array;
 
 /** A loose insert row — a `Record<string, ScalarValue>`. NEVER auto-bound to the
- *  live schema (§3.3); a caller MAY supply a generic for editor convenience. */
+ *  live schema (§3.5); a caller MAY supply a generic for editor convenience. */
 export type Row = Record<string, ScalarValue>;
 
-// ── The fluent expression builder (§3.3.1) ──
+// ── The fluent expression builder (§3.6 / `(c) => Expr`) ──
 
 /** The chainable expression value `c("…")` / every built sub-expression carries.
- *  Each method builds one closed-AST node; bare JS values auto-wrap to `Literal`. */
+ *  Each method builds one closed-AST node; bare JS values auto-wrap to `Literal`.
+ *  `coalesce`/`concatWs` live ONLY on `c.fn` (§7 c/c.fn dedup) — they are NOT on
+ *  the chain. */
 export interface ExprChain {
   // comparison
   eq(x: unknown): ExprChain;
@@ -135,10 +137,8 @@ export interface ExprChain {
   sub(x: unknown): ExprChain;
   mul(x: unknown): ExprChain;
   div(x: unknown): ExprChain;
-  // string/value
+  // string/value — raw `||` concat only (NULL-skipping joins are `c.fn.concatWs`)
   concat(...parts: unknown[]): ExprChain;
-  concatWs(sep: unknown, ...parts: unknown[]): ExprChain;
-  coalesce(...args: unknown[]): ExprChain;
   // null/bool tests
   isNull(): ExprChain;
   isNotNull(): ExprChain;
@@ -148,8 +148,9 @@ export interface ExprChain {
   cast(target: "text" | "integer" | "real" | "boolean" | "blob"): ExprChain;
 }
 
-/** The `c.fn.*` scalar-function namespace (§3.3.1) — reached off the single
- *  builder handle; there is no importable `fn`. */
+/** The `c.fn.*` scalar-function namespace (§3.6) — reached off the single
+ *  builder handle; there is no importable `fn`. `coalesce`/`concatWs` live here
+ *  (and ONLY here — §7). */
 export interface FnNamespace {
   lower(e: unknown): ExprChain;
   upper(e: unknown): ExprChain;
@@ -165,7 +166,7 @@ export interface FnNamespace {
   /** The engine-synthesized portable split helper (§9), in-envelope-only. */
   splitPart(col: unknown, delim: string, n: number): ExprChain;
   /** DB-evaluated apply-time scalars (the structured replacement for a frozen
-   *  `Date.now()` / UUID literal, §4.3). */
+   *  `Date.now()` / UUID literal). */
   now(): ExprChain;
   genRandomUuid(): ExprChain;
 }
@@ -181,60 +182,19 @@ export interface ExprBuilder {
  *  form). NEVER a raw string (property A). */
 export type ExprFn = (c: ExprBuilder) => ExprChain;
 
-// ── Op-function arg shapes (§3.2) ──
+// ── Shared op-arg fragments (§3) ──
 
-export type FkAction = "cascade" | "restrict" | "setNull" | "setDefault" | "noAction";
-
-export interface ForeignKeySpec {
-  columns: string[];
-  references: { table: string; columns: string[] };
-  onDelete?: FkAction;
-  onUpdate?: FkAction;
-  name?: string;
-}
-
-export interface UniqueSpec {
-  columns: string[];
-  name?: string;
-}
-
-export interface CheckSpec {
-  expr: ExprFn;
-  name?: string;
-}
-
-export interface DropConstraintSpec {
-  name: string;
-  type?: "pk" | "fk" | "unique" | "check";
-  /** **PR10 Part B** — `IF EXISTS` guard (catalog probe): the constraint is dropped
-   *  iff present; an already-absent constraint is a journaled satisfied no-op. */
-  ifExists?: IfExistsGuard;
-}
+/** A FK's `ON DELETE`/`ON UPDATE` referential action (§3.3). Renamed from the old
+ *  `FkAction` — these ARE rendered now (C1). */
+export type RefAction = "cascade" | "restrict" | "setNull" | "setDefault" | "noAction";
 
 export type IndexMethod = "btree" | "gin" | "gist" | "ivfflat" | "hnsw" | "fts5";
 
-export interface CreateIndexSpec {
+/** A named foreign-key reference (the `references` half of a FK add / a
+ *  `create.foreignKeys[]` entry). */
+export interface ForeignKeyReference {
+  table: string;
   columns: string[];
-  name?: string;
-  unique?: boolean;
-  using?: IndexMethod;
-  where?: ExprFn;
-  concurrently?: boolean;
-  /** **PR10** — the schema qualifier (§2.7). Honored under the general/Trusted CLI,
-   *  pinned/refused under the Confined creator profile. Names-are-strings. */
-  schema?: string;
-  /** **PR10 Part B** — engine-synthesized `IF NOT EXISTS` guard (catalog probe, not
-   *  native SQL). The index is created iff absent; a present same-`(unique,columns)`
-   *  index is a journaled satisfied no-op; a present divergent one (unique flip,
-   *  column-set change, or an expression/partial index whose equivalence cannot be
-   *  proven) FAILS CLOSED (§2.7). */
-  ifNotExists?: IfNotExistsGuard;
-}
-
-export interface AlterColumnChange {
-  type?: ColumnDef | ColType;
-  using?: ExprFn;
-  nullable?: boolean;
 }
 
 export interface InsertArgs<R extends Row = Row> {
@@ -245,33 +205,28 @@ export interface InsertArgs<R extends Row = Row> {
    * portable SQLite upsert and no raw route (property A); a SQLite-targeted
    * `onConflict` surfaces at build with the structured envelope, never at
    * runtime.
-   *
-   * NOTE: intentionally NOT tagged `@deprecated` — that tag would strike the
-   * field through in editor autocomplete and falsely signal removal. `@deprecated`
-   * is reserved for genuinely-removed symbols (AGENTS.md: no `@deprecated`
-   * aliases for live surface).
    */
   onConflict?: { columns: string[]; doUpdate?: Partial<R> };
-  /** **PR10** — the schema qualifier (§2.7). */
+  /** The schema qualifier (§3); overrides the handle default. */
   schema?: string;
 }
 
 export interface UpdateArgs {
   set: Record<string, ExprFn>;
   where?: ExprFn;
-  /** Page a large one-shot UPDATE over a cursor column (`Op::Update.batch`, §2.3.1):
-   *  the engine lowers it to the same windowed/batched executor a `backfill` uses
+  /** Page a large one-shot UPDATE over a cursor column (`Op::Update.batch`): the
+   *  engine lowers it to the same windowed/batched executor a `backfill` uses
    *  (PG writable-CTE windowed UPDATE / SQLite per-batch-txn). Absent ⇒ a single
    *  unbatched UPDATE. Parity with the engine recorder. */
   batch?: IrBatch;
-  /** **PR10** — the schema qualifier (§2.7). */
+  /** The schema qualifier (§3); overrides the handle default. */
   schema?: string;
 }
 
 export interface DelArgs {
   where: ExprFn;
   limit?: number;
-  /** **PR10** — the schema qualifier (§2.7). */
+  /** The schema qualifier (§3); overrides the handle default. */
   schema?: string;
 }
 
@@ -283,93 +238,146 @@ export interface BackfillArgs {
   /** Defaults to the engine's chosen batch size. */
   batchSize?: number;
   name?: string;
-  /** **PR10** — the schema qualifier (§2.7). */
+  /** The schema qualifier (§3); overrides the handle default. */
   schema?: string;
 }
 
-/** The table-scoped builder `createTable`'s `(b) => …` overload + `batchAlterTable`
- *  pass. */
-export interface TableBuilder {
-  index(columns: string[], opts?: { name?: string; unique?: boolean; using?: IndexMethod; where?: ExprFn }): void;
-  unique(columns: string[], opts?: { name?: string }): void;
-  primaryKey(columns: string[]): void;
-  check(expr: ExprFn, opts?: { name?: string }): void;
-  foreignKey(spec: ForeignKeySpec): void;
-}
-
-/** The `batchAlterTable` scoped column/constraint subset (pre-bound to the table). */
-export interface BatchAlterBuilder {
-  addColumn(name: string, type: ColumnDef): void;
-  dropColumn(name: string, opts?: { ifExists?: IfExistsGuard }): void;
-  renameColumn(from: string, to: string, type: ColumnDef): void;
-  alterColumn(name: string, change: AlterColumnChange): void;
-  addForeignKey(spec: ForeignKeySpec): void;
-  addCheck(spec: CheckSpec): void;
-}
-
-// ── The eager fluent `table()` facade (PR11) ──
+// ── `table()` entry + the fluent handle (§3) ──
 
 /** The options bag `table(name, opts?)` accepts. Carries the default `{ schema }`
- *  every op the returned {@link TableHandle} records is stamped with (a per-method
+ *  every op the returned {@link TableHandle} records is stamped with (a per-op
  *  `schema` override wins; see {@link TableHandle}). An extensible object so a
- *  future per-table default (e.g. a default index method) can be added without a
- *  signature break. */
+ *  future per-table default can be added without a signature break. */
 export interface TableOptions {
-  /** **PR10/PR11** — the default schema qualifier propagated to every op the
-   *  handle records (§2.7). Names-are-strings (no live-schema binding); a
-   *  per-method `schema` on an individual call overrides it. */
+  /** The default schema qualifier propagated to every op the handle records (§3).
+   *  Names-are-strings (no live-schema binding); a per-op `schema` on an
+   *  individual call overrides it. */
   schema?: string;
+}
+
+/** The all-object `create({...})` payload (§3.1). Table-level constraints/indexes
+ *  are FIELDS (no `build` callback — "no exceptions"); each carries a required
+ *  `name` (name-first, §3.4). */
+export interface CreateTableArgs {
+  columns: Record<string, ColumnDef>;
+  /** Composite PK (else a single PK via `t.id()` / a column's `.primaryKey()`). */
+  primaryKey?: string[];
+  uniques?: Array<{ name: string; columns: string[] }>;
+  checks?: Array<{ name: string; expr: ExprFn }>;
+  foreignKeys?: Array<{
+    name: string;
+    columns: string[];
+    references: ForeignKeyReference;
+    onDelete?: RefAction;
+    onUpdate?: RefAction;
+  }>;
+  indexes?: Array<{
+    name: string;
+    columns: string[];
+    unique?: boolean;
+    using?: IndexMethod;
+    where?: ExprFn;
+  }>;
+  ifNotExists?: boolean;
+  /** Overrides the handle default schema. */
+  schema?: string;
+}
+
+/** The `.column(name)` selector sub-handle (§3.2). Each terminal records eagerly
+ *  and returns the parent {@link TableHandle} (so chaining + var-reuse work). */
+export interface ColumnRef {
+  /** Add the column. Honors ALL modifiers on `type` — including `.unique()` (C2,
+   *  emits a follow-on unique constraint) and `.primaryKey()` (emits a follow-on
+   *  pk). */
+  add(args: { type: ColumnDef; ifNotExists?: boolean; schema?: string }): TableHandle;
+  drop(args?: { ifExists?: boolean; schema?: string }): TableHandle;
+  /** Named ⇒ no from/to swap. `type` is the column's type after rename. */
+  rename(args: { to: string; type: ColumnDef; schema?: string }): TableHandle;
+  alter(args: { type?: ColumnDef; nullable?: boolean; using?: ExprFn; schema?: string }): TableHandle;
+}
+
+/** The `.foreignKey(name)` selector sub-handle (§3.3). */
+export interface ForeignKeyRef {
+  add(args: {
+    columns: string[];
+    references: ForeignKeyReference;
+    onDelete?: RefAction;
+    onUpdate?: RefAction;
+    ifNotExists?: boolean;
+    schema?: string;
+  }): TableHandle;
+}
+
+/** The `.unique(name)` selector sub-handle (§3.3). */
+export interface UniqueRef {
+  add(args: { columns: string[]; ifNotExists?: boolean; schema?: string }): TableHandle;
+}
+
+/** The `.check(name)` selector sub-handle (§3.3). */
+export interface CheckRef {
+  add(args: { expr: ExprFn; ifNotExists?: boolean; schema?: string }): TableHandle;
+}
+
+/** The `.constraint(name)` selector sub-handle (§3.3) — kind-agnostic drop by
+ *  name; its only terminal is `.drop`. */
+export interface ConstraintRef {
+  drop(args?: { ifExists?: boolean; schema?: string }): TableHandle;
+}
+
+/** The `.index(name)` selector sub-handle (§3.4). */
+export interface IndexRef {
+  add(args: {
+    columns: string[];
+    unique?: boolean;
+    using?: IndexMethod;
+    where?: ExprFn;
+    ifNotExists?: boolean;
+    schema?: string;
+  }): TableHandle;
+  drop(args?: { ifExists?: boolean; concurrently?: boolean; schema?: string }): TableHandle;
 }
 
 /**
- * The recorder-bound handle `table(name, opts?)` returns (PR11). It is PURE SUGAR
- * over the flat op-functions (`addColumn`/`dropColumn`/…): every method delegates
- * to the SAME flat recorder scoped to this table, recording EAGERLY — the call IS
- * the recording, there is no terminal/`build` to forget. The `{ schema }` from
- * `table()` is injected into every recorded op; a per-method `schema` (where the
- * method takes an opts/spec/args bag) overrides the table default. The guard
- * options (`ifNotExists` / `ifExists`) pass through per-method exactly as the flat
- * ops accept them. A `table()`-authored migration lowers to BYTE-IDENTICAL IR as
- * the equivalent flat-op migration.
+ * The recorder-bound handle `table(name, opts?)` returns — the SOLE public
+ * authoring surface (§3). It is a REUSABLE value carrying only `{ name,
+ * schemaDefault }`; every terminal records EAGERLY onto the ambient recorder and
+ * returns the handle, so it is valid for unlimited chaining + var-reuse (§4). The
+ * `{ schema }` from `table()` is the DEFAULT injected into every recorded op; a
+ * per-op `schema` overrides it (by key presence — an absent/`undefined` per-op
+ * schema keeps the table default).
+ *
+ * Direct methods exist for the table itself + its data (§3.1/§3.5); selector
+ * sub-handles (`.column`/`.foreignKey`/`.unique`/`.check`/`.constraint`/`.index`)
+ * exist for the table's named sub-objects (§3.2/§3.3/§3.4). A selector that is
+ * never terminated is a hard `SELECTOR_NOT_TERMINATED` build error at drain (§5).
  */
 export interface TableHandle {
-  // DDL: this table
-  /** Scoped `createTable(name, columns, build?, opts?)`. */
-  create(
-    columns: Record<string, ColumnDef>,
-    build?: (b: TableBuilder) => void,
-    opts?: { schema?: string; ifNotExists?: IfNotExistsGuard },
-  ): void;
-  /** Scoped `dropTable(table, opts?)`. */
-  drop(opts?: { schema?: string; ifExists?: IfExistsGuard; cascade?: boolean }): void;
+  // §3.1 — the table itself (all-object terminals).
+  // NOTE: the spec's §3.1 also lists a table-level `.rename({ to })`, but that is
+  // a NET-NEW operation: there is no `renameTable` Op variant in the IR and no
+  // executor support for it (the flat surface never had a table rename either).
+  // This PR's hard constraint is "IR byte-identical except C1; apply path
+  // UNCHANGED", so table rename is DEFERRED (it needs a new Op + executor wave)
+  // and is intentionally absent from the handle.
+  create(args: CreateTableArgs): TableHandle;
+  drop(args?: { ifExists?: boolean; cascade?: boolean; schema?: string }): TableHandle;
 
-  // DDL: columns
-  addColumn(name: string, type: ColumnDef, opts?: { schema?: string; ifNotExists?: IfNotExistsGuard }): void;
-  dropColumn(name: string, opts?: { schema?: string; ifExists?: IfExistsGuard }): void;
-  renameColumn(from: string, to: string, type: ColumnDef, opts?: { schema?: string; ifExists?: IfExistsGuard }): void;
-  alterColumn(name: string, change: AlterColumnChange, opts?: { schema?: string; ifExists?: IfExistsGuard }): void;
+  // §3.2/§3.3/§3.4 — selectors for named sub-objects
+  column(name: string): ColumnRef;
+  foreignKey(name: string): ForeignKeyRef;
+  unique(name: string): UniqueRef;
+  check(name: string): CheckRef;
+  constraint(name: string): ConstraintRef;
+  index(name: string): IndexRef;
 
-  // DDL: constraints / indexes
-  addForeignKey(spec: ForeignKeySpec, opts?: { schema?: string; ifNotExists?: IfNotExistsGuard }): void;
-  addUnique(spec: UniqueSpec, opts?: { schema?: string; ifNotExists?: IfNotExistsGuard }): void;
-  addCheck(spec: CheckSpec, opts?: { schema?: string; ifNotExists?: IfNotExistsGuard }): void;
-  dropConstraint(spec: DropConstraintSpec | string, opts?: { schema?: string; ifExists?: IfExistsGuard }): void;
-  /** Scoped `createIndex(table, spec)`. The schema/guard ride on the SPEC (there is
-   *  no separate opts bag); the table default fills an absent `spec.schema`. */
-  createIndex(spec: CreateIndexSpec): void;
-  /** Scoped `dropIndex(name, { table, … })`. The facade STAMPS this table onto the
-   *  drop (the whole point of scoping) — a fluent `table("users").dropIndex("ix")`
-   *  means "drop index ix that belongs to users". */
-  dropIndex(name: string, opts?: { schema?: string; ifExists?: IfExistsGuard; unique?: boolean; concurrently?: boolean }): void;
-
-  // DML (no existence guard — DML is not guardable; `schema` rides on args)
-  insert<R extends Row = Row>(args: InsertArgs<R>): void;
-  update(args: UpdateArgs): void;
-  del(args: DelArgs): void;
-  backfill(args: BackfillArgs): void;
+  // §3.5 — table data (direct named DML; no existence guard — DML is unguardable)
+  insert<R extends Row = Row>(args: InsertArgs<R>): TableHandle;
+  update(args: UpdateArgs): TableHandle;
+  del(args: DelArgs): TableHandle;
+  backfill(args: BackfillArgs): TableHandle;
 }
 
-/** One §4.3 determinism-lint finding. */
+/** One determinism-lint finding. */
 export interface DeterminismFinding {
   code: "NONDETERMINISTIC_OP_ARG";
   accessor: string;
@@ -377,7 +385,7 @@ export interface DeterminismFinding {
   reason: string;
 }
 
-/** The migration module shape (§3.1): `export default { name?, up, down? }`. */
+/** The migration module shape (§2): `export default { name?, up, down? }`. */
 export interface Migration {
   name?: string;
   up(): void;

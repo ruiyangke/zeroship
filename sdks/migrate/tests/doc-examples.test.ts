@@ -34,15 +34,11 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = resolve(HERE, "..");
 const DOC = resolve(PKG_ROOT, "../../docs/reference/migrate-op-dsl.md");
 
-// The full documented import vocabulary the fragment harness exposes. Kept in
-// sync with the doc's "Named imports, no prefix" table; an op the doc names but
-// the package does not export fails THIS import line at compile time.
+// The full documented import vocabulary the fragment harness exposes. The
+// fluent-only redesign exports just `{ table, t, fromDb, lintDeterminism }`; an op
+// the doc names but the package does not export fails THIS import line at compile
+// time. (The flat ops are GONE — a doc that still imports them fails the gate.)
 const VOCAB_PREAMBLE = `import {
-  createTable, dropTable,
-  addColumn, dropColumn, renameColumn, alterColumn,
-  addForeignKey, addUnique, addCheck, dropConstraint, createIndex, dropIndex,
-  insert, update, del, backfill,
-  batchAlterTable,
   table,
   t, fromDb, lintDeterminism,
 } from "@zeroship/migrate";

@@ -1,46 +1,58 @@
-// `@zeroship/migrate` — the op-builder DSL implementation (§3.2/§3.3.1, PR3).
+// `@zeroship/migrate` — the fluent-only op-builder DSL implementation
+// (design `2026-06-25-op-dsl-fluent-redesign.md`).
 //
 // This is the TS authoring surface a creator imports:
-//   import { createTable, addColumn, backfill, t } from "@zeroship/migrate";
+//   import { table, t } from "@zeroship/migrate";
+//
+//   export default {
+//     up() {
+//       table("users")
+//         .column("first_name").add({ type: t.text() })
+//         .backfill({ set: { first_name: c => c.fn.splitPart(c("name"), " ", 1) } });
+//     },
+//   };
 //
 // It is the typed peer of the engine-embedded recorder
 // (`crates/zeroship-migrate-js/src/migrate_ops.js`, which the Rust runtime
 // `include_str!`s into V8 at build/record time). Both emit the IDENTICAL
 // dialect-neutral op objects the closed Rust `Op` enum / `op-ir.schema.json`
-// deserialize — the `.ir.json` wire shape is frozen, and the golden corpus
-// (`tests/op_fixtures`) + the `Checksum::of_ir` round-trip are the contract.
+// deserialize — the `.ir.json` wire shape is frozen (byte-identical to the
+// pre-redesign flat surface except the C1 FK-actions delta), and the golden
+// corpus (`tests/op_fixtures`) + the `Checksum::of_ir` round-trip are the
+// contract.
 //
-// Each op-function RECORDS one canonical op object onto the ambient per-migration
-// recorder (§3.1), synchronously, returning void. Calling an op-function OUTSIDE
-// an active recorder throws a structured `OP_OUTSIDE_RECORDER`.
+// `table()` is the SOLE public entry. The flat op-functions are GONE from the
+// public API; their op-construction logic survives as the internal `recordX`
+// helpers the handle delegates to (so the IR is unchanged). Every terminal
+// RECORDS one canonical op object onto the ambient per-migration recorder
+// synchronously, returning the handle. Recording OUTSIDE an active recorder
+// throws a structured `OP_OUTSIDE_RECORDER`.
 
 import type {
-  AlterColumnChange,
   BackfillArgs,
-  BatchAlterBuilder,
-  CheckSpec,
+  CheckRef,
   ColType,
   ColumnDef as ColumnDefType,
-  ColumnOpts,
-  CreateIndexSpec,
+  ColumnRef,
+  ConstraintRef,
+  CreateTableArgs,
   DelArgs,
   DeterminismFinding,
-  DropConstraintSpec,
   ExprBuilder,
   ExprChain as ExprChainType,
   ExprFn,
   FnNamespace,
-  ForeignKeySpec,
-  IfExistsGuard,
-  IfNotExistsGuard,
+  ForeignKeyRef,
+  ForeignKeyReference,
+  IndexRef,
   InsertArgs,
+  RefAction,
   Row,
   ScalarValue,
-  TableBuilder,
   TableHandle,
   TableOptions,
   TypeLexicon,
-  UniqueSpec,
+  UniqueRef,
   UpdateArgs,
 } from "./types.js";
 
@@ -50,9 +62,23 @@ import { colTypeFromDbField, type DbSchemaField } from "./db-lexicon.js";
 
 type Node = Record<string, unknown>;
 
-// ── The ambient recorder (§3.1) ──
+// ── The ambient recorder (§3.1 / §5) ──
 
-let active: Node[] | null = null;
+/** A handed-out, not-yet-terminated selector the recorder tracks (§5). */
+interface PendingSelector {
+  selector: string;
+  name: string;
+  terminated: boolean;
+}
+
+interface Recorder {
+  ops: Node[];
+  /** Every selector the handle handed out this phase, keyed by a monotonic id. */
+  pending: Map<number, PendingSelector>;
+  nextSelectorId: number;
+}
+
+let active: Recorder | null = null;
 
 function structuredError(code: string, message: string, extra?: Record<string, unknown>): Error {
   const err = new Error(message) as Error & Record<string, unknown>;
@@ -63,28 +89,77 @@ function structuredError(code: string, message: string, extra?: Record<string, u
 
 /** Begin a fresh recording buffer (the build evaluator calls this before a phase). */
 export function __begin(): void {
-  active = [];
+  active = { ops: [], pending: new Map(), nextSelectorId: 0 };
 }
 
-/** Drain + return the recorded op list, clearing the active recorder. */
+/**
+ * Drain + return the recorded op list, clearing the active recorder. At DRAIN
+ * (not eagerly — so a var-held selector terminated on a later line is fine, §5),
+ * any selector that was handed out but never terminated is a hard structured
+ * `SELECTOR_NOT_TERMINATED` error.
+ */
 export function __drain(): Node[] {
   if (active === null) return [];
-  const out = active;
+  const rec = active;
   active = null;
-  return out;
+  for (const sel of rec.pending.values()) {
+    if (!sel.terminated) {
+      throw structuredError(
+        "SELECTOR_NOT_TERMINATED",
+        `selector .${sel.selector}(${JSON.stringify(sel.name)}) was never terminated; ` +
+          "a selector records nothing until its terminal (.add/.drop/.rename/.alter) is called",
+        {
+          selector: sel.selector,
+          name: sel.name,
+          suggested_fix: `call a terminal on .${sel.selector}(${JSON.stringify(sel.name)}) ` +
+            "(e.g. .add({…})) or remove the selector",
+        },
+      );
+    }
+  }
+  return rec.ops;
 }
 
-function push(op: Node): Node {
+function recorder(): Recorder {
   if (active === null) {
     throw structuredError(
       "OP_OUTSIDE_RECORDER",
-      `op-function "${String(op.op)}" called outside an active migration recorder; ` +
-        "op-functions may only be called synchronously inside up()/down()",
-      { suggested_fix: "move the op-function call inside the migration's up()/down() body" },
+      "op authoring called outside an active migration recorder; " +
+        "the table() handle may only be used synchronously inside up()/down()",
+      { suggested_fix: "move the table()/selector calls inside the migration's up()/down() body" },
     );
   }
-  active.push(op);
+  return active;
+}
+
+function push(op: Node): Node {
+  recorder().ops.push(op);
   return op;
+}
+
+/** Register a handed-out selector; returns its id (used at terminate). */
+function registerSelector(selector: string, name: string): number {
+  const rec = recorder();
+  const id = rec.nextSelectorId++;
+  rec.pending.set(id, { selector, name, terminated: false });
+  return id;
+}
+
+/** Mark a selector terminated; double-terminate is a structured error (§5). */
+function terminateSelector(id: number): void {
+  const rec = recorder();
+  const sel = rec.pending.get(id);
+  // `sel` is always present for a live id; defensive only.
+  if (sel === undefined) return;
+  if (sel.terminated) {
+    throw structuredError(
+      "SELECTOR_ALREADY_TERMINATED",
+      `selector .${sel.selector}(${JSON.stringify(sel.name)}) was terminated twice; ` +
+        "each selector records exactly one op",
+      { selector: sel.selector, name: sel.name },
+    );
+  }
+  sel.terminated = true;
 }
 
 function compact<T extends Record<string, unknown>>(obj: T): T {
@@ -100,40 +175,59 @@ function requireString(v: unknown, what: string): asserts v is string {
   }
 }
 
-// ── (B) The chainable `t.*` lexicon ──
+// ── (B) The IMMUTABLE chainable `t.*` lexicon (§4) ──
 
 class ColumnDefImpl implements ColumnDefType {
-  _type: ColType;
-  _nullable = true;
-  _default: unknown = undefined;
-  _primaryKey = false;
-  _unique = false;
+  readonly _type: ColType;
+  readonly _nullable: boolean;
+  readonly _default: unknown;
+  readonly _primaryKey: boolean;
+  readonly _unique: boolean;
 
-  constructor(colType: ColType) {
+  constructor(
+    colType: ColType,
+    fields?: { nullable?: boolean; default?: unknown; primaryKey?: boolean; unique?: boolean },
+  ) {
     this._type = colType;
+    this._nullable = fields?.nullable ?? true;
+    this._default = fields?.default;
+    this._primaryKey = fields?.primaryKey ?? false;
+    this._unique = fields?.unique ?? false;
   }
-  notNull(): this {
-    this._nullable = false;
-    return this;
+
+  /** Clone with the named fields overridden — the basis of immutability (§4). */
+  private with(over: {
+    type?: ColType;
+    nullable?: boolean;
+    default?: unknown;
+    primaryKey?: boolean;
+    unique?: boolean;
+  }): ColumnDefImpl {
+    return new ColumnDefImpl(over.type ?? this._type, {
+      nullable: over.nullable ?? this._nullable,
+      default: "default" in over ? over.default : this._default,
+      primaryKey: over.primaryKey ?? this._primaryKey,
+      unique: over.unique ?? this._unique,
+    });
   }
-  default(value: ScalarValue | { fn: "now" | "genRandomUuid" }): this {
-    this._default = toIrDefault(value);
-    return this;
+
+  notNull(): ColumnDefImpl {
+    return this.with({ nullable: false });
   }
-  ref(targetTable: string): this {
+  default(value: ScalarValue | { fn: "now" | "genRandomUuid" }): ColumnDefImpl {
+    return this.with({ default: toIrDefault(value) });
+  }
+  ref(targetTable: string): ColumnDefImpl {
     requireString(targetTable, "t.*.ref(target)");
-    this._type = { ref: { references: targetTable } } as ColType;
-    return this;
+    return this.with({ type: { ref: { references: targetTable } } as ColType });
   }
-  primaryKey(): this {
-    this._primaryKey = true;
-    this._nullable = false;
-    return this;
+  primaryKey(): ColumnDefImpl {
+    return this.with({ primaryKey: true, nullable: false });
   }
-  unique(): this {
-    this._unique = true;
-    return this;
+  unique(): ColumnDefImpl {
+    return this.with({ unique: true });
   }
+
   __toIrColumn(name: string): Node {
     return compact({
       name,
@@ -156,16 +250,6 @@ function isColumnDef(x: unknown): x is ColumnDefImpl {
   return x instanceof ColumnDefImpl;
 }
 
-function applyOpts(def: ColumnDefImpl, opts?: ColumnOpts): ColumnDefImpl {
-  if (opts === undefined || opts === null) return def;
-  if (opts.notNull) def.notNull();
-  if (opts.primaryKey) def.primaryKey();
-  if (opts.unique) def.unique();
-  if (opts.ref !== undefined) def.ref(opts.ref);
-  if (opts.default !== undefined) def.default(opts.default);
-  return def;
-}
-
 /** Base64-encode raw bytes (the `IrScalar::Bytes` wire carrier) without a Node
  *  `Buffer` dependency — runs identically in the V8 record host and Node. */
 function bytesToBase64(bytes: Uint8Array): string {
@@ -177,13 +261,10 @@ function bytesToBase64(bytes: Uint8Array): string {
 
 /**
  * Normalize a JS scalar into the closed `IrScalar` WIRE carrier so the recorded
- * shape is exactly what Rust's `IrScalar` deserializer accepts (§2.5/§3.2):
- *  - a JS `bigint` → `{ decimal: "<v>" }` (a bare bigint THROWS at JSON.stringify;
- *    `{decimal}` is the integers-beyond-2^53 carrier);
- *  - a `Uint8Array` → `{ bytes: "<base64>" }` (the raw-bytes carrier; the default
- *    JSON spelling `{"0":…}` is HARD-REJECTED by the Rust deserializer);
- *  - everything else (string / safe number / boolean / null / the explicit
- *    `{decimal}` / `{bytes}` carriers) passes through verbatim.
+ * shape is exactly what Rust's `IrScalar` deserializer accepts (§3.5):
+ *  - a JS `bigint` → `{ decimal: "<v>" }` (a bare bigint THROWS at JSON.stringify);
+ *  - a `Uint8Array` → `{ bytes: "<base64>" }` (the raw-bytes carrier);
+ *  - everything else passes through verbatim.
  */
 function toIrScalar(value: unknown): unknown {
   if (typeof value === "bigint") return { decimal: value.toString() };
@@ -199,43 +280,36 @@ function toIrDefault(value: ScalarValue | { fn: "now" | "genRandomUuid" }): Node
 }
 
 export const t: TypeLexicon = {
-  id: () => {
-    const d = new ColumnDefImpl("uuid");
-    d.primaryKey();
-    d.default({ fn: "genRandomUuid" });
-    return d;
-  },
-  text: (opts) => applyOpts(new ColumnDefImpl("text"), opts),
-  numeric: (precision = 38, scale = 9, opts) =>
-    applyOpts(new ColumnDefImpl({ decimal: { precision, scale } } as ColType), opts),
-  timestamp: (opts) => applyOpts(new ColumnDefImpl("timestamp"), opts),
-  uuid: (opts) => applyOpts(new ColumnDefImpl("uuid"), opts),
-  bytes: (opts) => applyOpts(new ColumnDefImpl("bytea"), opts),
-  boolean: (opts) => applyOpts(new ColumnDefImpl("bool"), opts),
-  json: (opts) => applyOpts(new ColumnDefImpl("json"), opts),
-  ref: (targetTable, opts) => {
+  id: () => new ColumnDefImpl("uuid").primaryKey().default({ fn: "genRandomUuid" }),
+  text: () => new ColumnDefImpl("text"),
+  numeric: (precision = 38, scale = 9) =>
+    new ColumnDefImpl({ decimal: { precision, scale } } as ColType),
+  timestamp: () => new ColumnDefImpl("timestamp"),
+  uuid: () => new ColumnDefImpl("uuid"),
+  bytes: () => new ColumnDefImpl("bytea"),
+  boolean: () => new ColumnDefImpl("bool"),
+  json: () => new ColumnDefImpl("json"),
+  ref: (targetTable) => {
     requireString(targetTable, "t.ref(target)");
-    return applyOpts(new ColumnDefImpl({ ref: { references: targetTable } } as ColType), opts);
+    return new ColumnDefImpl({ ref: { references: targetTable } } as ColType);
   },
-  vector: (n, opts) => {
+  vector: (n) => {
     if (typeof n !== "number" || !Number.isInteger(n) || n <= 0) {
       throw structuredError("OP_INVALID", `t.vector(n): n must be a positive integer, got ${n}`);
     }
-    return applyOpts(new ColumnDefImpl({ vector: { vector: n } } as ColType), opts);
+    return new ColumnDefImpl({ vector: { vector: n } } as ColType);
   },
-  geoPoint: (opts) => applyOpts(new ColumnDefImpl("geoPoint"), opts),
-  string: (opts) => applyOpts(new ColumnDefImpl("string"), opts),
-  int: (opts) => applyOpts(new ColumnDefImpl("int"), opts),
-  integer: (opts) => applyOpts(new ColumnDefImpl("int"), opts),
-  bigInt: (opts) => applyOpts(new ColumnDefImpl("bigInt"), opts),
-  float: (opts) => applyOpts(new ColumnDefImpl("float"), opts),
-  encrypted: (arg, opts) => {
+  geoPoint: () => new ColumnDefImpl("geoPoint"),
+  integer: () => new ColumnDefImpl("int"),
+  bigInt: () => new ColumnDefImpl("bigInt"),
+  float: () => new ColumnDefImpl("float"),
+  encrypted: (arg) => {
     const inner = arg && typeof arg === "object" && "of" in arg ? (arg as { of: unknown }).of : arg;
     const innerType = isColumnDef(inner) ? inner._type : (inner as ColType);
     if (innerType === undefined) {
       throw structuredError("OP_INVALID", "t.encrypted({ of }): of must be a ColumnDef or ColType");
     }
-    return applyOpts(new ColumnDefImpl({ encrypted: { of: innerType } } as ColType), opts);
+    return new ColumnDefImpl({ encrypted: { of: innerType } } as ColType);
   },
 };
 
@@ -252,25 +326,23 @@ function colTypeOf(typeArg: ColumnDefType | ColType): ColType {
  * schema lowers through the IDENTICAL `ColType` path a hand-written migration
  * column does (PR5 goal A — one shared lexicon). The TYPE is bridged via the
  * single-source {@link colTypeFromDbField} reduction; the column's NULLABILITY is
- * carried over (`@zeroship/db` `.required()` → migration `.notNull()`; otherwise
- * nullable, matching the migration DSL default). Table/column NAMES are NEVER
- * bound to the live schema — a `t.ref(target)` keeps its target as a plain string
- * (§3.3). Returns a chainable `ColumnDef`, so a caller can still layer migration
- * modifiers (`.default(...)`, `.primaryKey()`, …) on top.
+ * carried over (`@zeroship/db` `.required()` → migration `.notNull()`). Table/
+ * column NAMES are NEVER bound to the live schema. Returns a chainable
+ * (immutable) `ColumnDef`, so a caller can still layer migration modifiers on top.
  */
 export function fromDb(field: DbSchemaField): ColumnDefType {
-  const def = new ColumnDefImpl(colTypeFromDbField(field));
+  let def: ColumnDefImpl = new ColumnDefImpl(colTypeFromDbField(field));
   const fd = field instanceof DbTypeBuilder ? field.toFieldDef() : field;
   if (fd && typeof fd === "object" && (fd as { required?: boolean }).required === true) {
-    def.notNull();
+    def = def.notNull();
   }
   if (fd && typeof fd === "object" && (fd as { unique?: boolean }).unique === true) {
-    def.unique();
+    def = def.unique();
   }
   return def;
 }
 
-// ── (B) The fluent `(c) => Expr` builder ──
+// ── (B) The fluent `(c) => Expr` builder (§3.6) ──
 
 function chain(node: Node): ExprChainImpl {
   return new ExprChainImpl(node);
@@ -307,12 +379,6 @@ class ExprChainImpl implements ExprChainType {
     let acc = this.__node;
     for (const p of parts) acc = { node: "binOp", op: "concat", lhs: acc, rhs: exprArg(p) };
     return chain(acc);
-  }
-  concatWs(sep: unknown, ...parts: unknown[]) {
-    return chain({ node: "fnSynth", fn: "concatWs", args: [exprArg(sep), this.__node, ...parts.map(exprArg)] });
-  }
-  coalesce(...args: unknown[]) {
-    return chain({ node: "fnCall", fn: "coalesce", args: [this.__node, ...args.map(exprArg)] });
   }
   isNull() { return chain({ node: "unaryOp", op: "isNull", operand: this.__node }); }
   isNotNull() { return chain({ node: "unaryOp", op: "isNotNull", operand: this.__node }); }
@@ -386,31 +452,67 @@ function resolveSet(set: Record<string, ExprFn>): Record<string, Node> {
   return out;
 }
 
-// ── (A) The op-functions ──
+// ── (C) Existence-guard token mappers ──
 
-export function createTable(
-  name: string,
-  columns: Record<string, ColumnDefType>,
-  build?: (b: TableBuilder) => void,
-  opts: TableOpOpts & { ifNotExists?: IfNotExistsGuard } = {},
-): void {
-  requireString(name, "createTable(name, …)");
+function ifNotExistsGuard(v: boolean | undefined): "ifNotExists" | undefined {
+  return v ? "ifNotExists" : undefined;
+}
+function ifExistsGuard(v: boolean | undefined): "ifExists" | undefined {
+  return v ? "ifExists" : undefined;
+}
+
+// ── (D) The internal op-construction helpers (the single source of truth) ──
+//
+// These build + push the EXACT canonical op object the Rust `Op` enum / the
+// recorder twin emit (byte-identical IR except the C1 FK-actions delta). They are
+// internal — only the fluent `table()` handle calls them.
+
+function recordCreateTable(name: string, args: CreateTableArgs): void {
   const cols: Node[] = [];
   const constraints: Node[] = [];
   const indexes: Node[] = [];
   const pkCols: string[] = [];
 
-  for (const colName of Object.keys(columns)) {
-    const def = columns[colName];
+  for (const colName of Object.keys(args.columns)) {
+    const def = args.columns[colName];
     if (!isColumnDef(def)) {
-      throw structuredError("OP_INVALID", `createTable column "${colName}" must be a t.* ColumnDef`);
+      throw structuredError("OP_INVALID", `create column "${colName}" must be a t.* ColumnDef`);
     }
     cols.push(def.__toIrColumn(colName));
     if (def._primaryKey) pkCols.push(colName);
   }
-  if (pkCols.length > 0) constraints.push({ kind: { kind: "pk", columns: pkCols } });
+  // A composite `primaryKey: [...]` wins over per-column `.primaryKey()` hoists.
+  const pk = args.primaryKey && args.primaryKey.length > 0 ? args.primaryKey : pkCols;
+  if (pk.length > 0) constraints.push({ kind: { kind: "pk", columns: pk } });
 
-  if (typeof build === "function") build(makeTableBuilder(constraints, indexes));
+  for (const uq of args.uniques ?? []) {
+    constraints.push(compact({ name: uq.name, kind: { kind: "unique", columns: uq.columns } }));
+  }
+  for (const ck of args.checks ?? []) {
+    constraints.push(compact({ name: ck.name, kind: { kind: "check", expr: resolveExpr(ck.expr) } }));
+  }
+  for (const fkSpec of args.foreignKeys ?? []) {
+    constraints.push(
+      fkConstraintFromSpec({
+        name: fkSpec.name,
+        columns: fkSpec.columns,
+        references: fkSpec.references,
+        onDelete: fkSpec.onDelete,
+        onUpdate: fkSpec.onUpdate,
+      }),
+    );
+  }
+  for (const idx of args.indexes ?? []) {
+    indexes.push(
+      compact({
+        name: idx.name,
+        columns: idx.columns,
+        unique: idx.unique,
+        using: idx.using,
+        where: resolveExpr(idx.where),
+      }),
+    );
+  }
 
   push(
     compact({
@@ -419,130 +521,95 @@ export function createTable(
       columns: cols,
       constraints: constraints.length ? constraints : undefined,
       indexes: indexes.length ? indexes : undefined,
-      // **PR10** — the schema qualifier + the create-family existence guard.
-      schema: opts.schema,
-      existenceGuard: ifNotExistsGuard(opts.ifNotExists),
+      schema: args.schema,
+      existenceGuard: ifNotExistsGuard(args.ifNotExists),
     }),
   );
 }
 
-/** **PR10** — the optional schema qualifier carried by every table-targeting op
- *  (§2.7). Names-are-strings (no live-schema binding); the engine pins/refuses it
- *  per profile. */
-interface TableOpOpts {
-  schema?: string;
-}
-
-// The author-facing guard option types (`IfNotExistsGuard` /
-// `IfExistsGuard`, both `boolean` as of PR10 Part B) are imported from
-// `./types.js` — the single source of truth — so the op signatures here and the
-// spec interfaces there carry the identical type.
-
-/** **PR10 Part B** — map the create/add family `{ ifNotExists }` boolean to the
- *  wire `existenceGuard: "ifNotExists"` token (omitted when falsy). The guard is
- *  honored at apply time by the executor-side catalog probe (run-if-absent /
- *  satisfied-noop-if-present-same-shape / fail-closed-if-divergent). */
-function ifNotExistsGuard(v: boolean | undefined): "ifNotExists" | undefined {
-  return v ? "ifNotExists" : undefined;
-}
-
-/** **PR10 Part B** — map the drop/rename/alter family `{ ifExists }` boolean to the
- *  wire `existenceGuard: "ifExists"` token (omitted when falsy). Replaces the old
- *  native `ifExists` boolean field (the intentional wire break). Honored at apply
- *  time by the catalog probe (run-if-present / satisfied-noop-if-absent). */
-function ifExistsGuard(v: boolean | undefined): "ifExists" | undefined {
-  return v ? "ifExists" : undefined;
-}
-
-function makeTableBuilder(constraints: Node[], indexes: Node[]): TableBuilder {
-  return {
-    index(columns, opts = {}) {
-      indexes.push(
-        compact({ name: opts.name, columns, unique: opts.unique, using: opts.using, where: resolveExpr(opts.where) }),
-      );
-    },
-    unique(columns, opts = {}) {
-      constraints.push(compact({ name: opts.name, kind: { kind: "unique", columns } }));
-    },
-    primaryKey(columns) {
-      constraints.push({ kind: { kind: "pk", columns } });
-    },
-    check(expr, opts = {}) {
-      constraints.push(compact({ name: opts.name, kind: { kind: "check", expr: resolveExpr(expr) } }));
-    },
-    foreignKey(spec) {
-      constraints.push(fkConstraintFromSpec(spec));
-    },
-  };
-}
-
-export function dropTable(
+function recordDropTable(
   table: string,
-  opts: TableOpOpts & { ifExists?: IfExistsGuard; cascade?: boolean } = {},
+  args: { ifExists?: boolean; cascade?: boolean; schema?: string },
 ): void {
-  requireString(table, "dropTable(table)");
   push(
     compact({
       op: "dropTable",
       table,
-      cascade: opts.cascade,
-      schema: opts.schema,
-      existenceGuard: ifExistsGuard(opts.ifExists),
+      cascade: args.cascade,
+      schema: args.schema,
+      existenceGuard: ifExistsGuard(args.ifExists),
     }),
   );
 }
 
-export function addColumn(
+function recordAddColumn(
   table: string,
-  name: string,
-  type: ColumnDefType,
-  opts: TableOpOpts & { ifNotExists?: IfNotExistsGuard } = {},
+  column: string,
+  type: ColumnDefImpl,
+  args: { ifNotExists?: boolean; schema?: string },
 ): void {
-  requireString(table, "addColumn(table, …)");
-  requireString(name, "addColumn(table, name, …)");
-  if (!isColumnDef(type)) {
-    throw structuredError("OP_INVALID", "addColumn type must be a t.* ColumnDef");
-  }
   push(
     compact({
       op: "addColumn",
       table,
-      column: name,
+      column,
       ...type.__toAddColumnTail(),
-      schema: opts.schema,
-      existenceGuard: ifNotExistsGuard(opts.ifNotExists),
+      schema: args.schema,
+      existenceGuard: ifNotExistsGuard(args.ifNotExists),
     }),
   );
+  // C2 — `.column(x).add({ type: t.text().unique() })` honors `.unique()`: emit a
+  // follow-on unique constraint (mirroring the createTable per-column `.unique()`
+  // image, which rides the column's `unique:true` field — but an ADD COLUMN has no
+  // inline UNIQUE, so it lowers to a separate ADD CONSTRAINT). Likewise a
+  // `.primaryKey()` on an added column hoists a pk add.
+  if (type._unique) {
+    push(
+      compact({
+        op: "addConstraint",
+        table,
+        constraint: { kind: { kind: "unique", columns: [column] } },
+        schema: args.schema,
+        existenceGuard: ifNotExistsGuard(args.ifNotExists),
+      }),
+    );
+  }
+  if (type._primaryKey) {
+    push(
+      compact({
+        op: "addConstraint",
+        table,
+        constraint: { kind: { kind: "pk", columns: [column] } },
+        schema: args.schema,
+        existenceGuard: ifNotExistsGuard(args.ifNotExists),
+      }),
+    );
+  }
 }
 
-export function dropColumn(
+function recordDropColumn(
   table: string,
   column: string,
-  opts: TableOpOpts & { ifExists?: IfExistsGuard } = {},
+  args: { ifExists?: boolean; schema?: string },
 ): void {
-  requireString(table, "dropColumn(table, …)");
-  requireString(column, "dropColumn(table, column)");
   push(
     compact({
       op: "dropColumn",
       table,
       column,
-      schema: opts.schema,
-      existenceGuard: ifExistsGuard(opts.ifExists),
+      schema: args.schema,
+      existenceGuard: ifExistsGuard(args.ifExists),
     }),
   );
 }
 
-export function renameColumn(
+function recordRenameColumn(
   table: string,
   from: string,
   to: string,
   type: ColumnDefType,
-  opts: TableOpOpts & { ifExists?: IfExistsGuard } = {},
+  args: { schema?: string },
 ): void {
-  requireString(table, "renameColumn(table, …)");
-  requireString(from, "renameColumn from");
-  requireString(to, "renameColumn to");
   push(
     compact({
       op: "renameColumn",
@@ -550,23 +617,16 @@ export function renameColumn(
       from,
       to,
       type: colTypeOf(type),
-      schema: opts.schema,
-      existenceGuard: ifExistsGuard(opts.ifExists),
+      schema: args.schema,
     }),
   );
 }
 
-export function alterColumn(
+function recordAlterColumn(
   table: string,
   name: string,
-  change: AlterColumnChange,
-  opts: TableOpOpts & { ifExists?: IfExistsGuard } = {},
+  change: { type?: ColumnDefType; nullable?: boolean; using?: ExprFn; schema?: string },
 ): void {
-  requireString(table, "alterColumn(table, …)");
-  requireString(name, "alterColumn(table, name, …)");
-  if (!change || typeof change !== "object") {
-    throw structuredError("OP_INVALID", "alterColumn change must be an object");
-  }
   if (change.type !== undefined) {
     push(
       compact({
@@ -575,8 +635,7 @@ export function alterColumn(
         column: name,
         type: colTypeOf(change.type),
         using: resolveExpr(change.using),
-        schema: opts.schema,
-        existenceGuard: ifExistsGuard(opts.ifExists),
+        schema: change.schema,
       }),
     );
     return;
@@ -588,154 +647,173 @@ export function alterColumn(
         table,
         column: name,
         nullable: change.nullable,
-        schema: opts.schema,
-        existenceGuard: ifExistsGuard(opts.ifExists),
+        schema: change.schema,
       }),
     );
     return;
   }
-  throw structuredError("OP_INVALID", "alterColumn change must carry `type` or `nullable`");
+  throw structuredError("OP_INVALID", ".column(name).alter({…}) must carry `type` or `nullable`");
 }
 
-function fkConstraintFromSpec(spec: ForeignKeySpec): Node {
+/** Build an `IrConstraint` of kind `fk`. **C1**: `onDelete`/`onUpdate` ARE
+ *  emitted (compacted — omitted when absent, so an action-free FK is byte-
+ *  identical to the pre-C1 wire image). */
+function fkConstraintFromSpec(spec: {
+  name?: string;
+  columns: string[];
+  references: ForeignKeyReference;
+  onDelete?: RefAction;
+  onUpdate?: RefAction;
+}): Node {
   if (!spec || typeof spec !== "object" || !spec.references) {
-    throw structuredError("OP_INVALID", "addForeignKey spec needs { columns, references:{ table, columns } }");
+    throw structuredError("OP_INVALID", ".foreignKey(name).add needs { columns, references:{ table, columns } }");
   }
   return compact({
     name: spec.name,
-    kind: {
+    kind: compact({
       kind: "fk",
       columns: spec.columns,
       referencesTable: spec.references.table,
       referencesColumns: spec.references.columns,
-    },
+      onDelete: spec.onDelete,
+      onUpdate: spec.onUpdate,
+    }),
   });
 }
 
-export function addForeignKey(
+function recordAddForeignKey(
   table: string,
-  spec: ForeignKeySpec,
-  opts: TableOpOpts & { ifNotExists?: IfNotExistsGuard } = {},
+  name: string,
+  args: {
+    columns: string[];
+    references: ForeignKeyReference;
+    onDelete?: RefAction;
+    onUpdate?: RefAction;
+    ifNotExists?: boolean;
+    schema?: string;
+  },
 ): void {
-  requireString(table, "addForeignKey(table, …)");
   push(
     compact({
       op: "addConstraint",
       table,
-      constraint: fkConstraintFromSpec(spec),
-      schema: opts.schema,
-      existenceGuard: ifNotExistsGuard(opts.ifNotExists),
+      constraint: fkConstraintFromSpec({
+        name,
+        columns: args.columns,
+        references: args.references,
+        onDelete: args.onDelete,
+        onUpdate: args.onUpdate,
+      }),
+      schema: args.schema,
+      existenceGuard: ifNotExistsGuard(args.ifNotExists),
     }),
   );
 }
 
-export function addUnique(
+function recordAddUnique(
   table: string,
-  spec: UniqueSpec,
-  opts: TableOpOpts & { ifNotExists?: IfNotExistsGuard } = {},
+  name: string,
+  args: { columns: string[]; ifNotExists?: boolean; schema?: string },
 ): void {
-  requireString(table, "addUnique(table, …)");
-  if (!spec || !Array.isArray(spec.columns)) {
-    throw structuredError("OP_INVALID", "addUnique spec needs { columns: string[], name? }");
+  if (!Array.isArray(args.columns)) {
+    throw structuredError("OP_INVALID", ".unique(name).add needs { columns: string[] }");
   }
   push(
     compact({
       op: "addConstraint",
       table,
-      constraint: compact({ name: spec.name, kind: { kind: "unique", columns: spec.columns } }),
-      schema: opts.schema,
-      existenceGuard: ifNotExistsGuard(opts.ifNotExists),
+      constraint: compact({ name, kind: { kind: "unique", columns: args.columns } }),
+      schema: args.schema,
+      existenceGuard: ifNotExistsGuard(args.ifNotExists),
     }),
   );
 }
 
-export function addCheck(
+function recordAddCheck(
   table: string,
-  spec: CheckSpec,
-  opts: TableOpOpts & { ifNotExists?: IfNotExistsGuard } = {},
+  name: string,
+  args: { expr: ExprFn; ifNotExists?: boolean; schema?: string },
 ): void {
-  requireString(table, "addCheck(table, …)");
-  if (!spec || spec.expr === undefined) {
-    throw structuredError("OP_INVALID", "addCheck spec needs { expr: (c) => Expr, name? }");
+  if (!args || args.expr === undefined) {
+    throw structuredError("OP_INVALID", ".check(name).add needs { expr: (c) => Expr }");
   }
   push(
     compact({
       op: "addConstraint",
       table,
-      constraint: compact({ name: spec.name, kind: { kind: "check", expr: resolveExpr(spec.expr) } }),
-      schema: opts.schema,
-      existenceGuard: ifNotExistsGuard(opts.ifNotExists),
+      constraint: compact({ name, kind: { kind: "check", expr: resolveExpr(args.expr) } }),
+      schema: args.schema,
+      existenceGuard: ifNotExistsGuard(args.ifNotExists),
     }),
   );
 }
 
-export function dropConstraint(
+function recordDropConstraint(
   table: string,
-  spec: DropConstraintSpec | string,
-  opts: TableOpOpts & { ifExists?: IfExistsGuard } = {},
+  name: string,
+  args: { ifExists?: boolean; schema?: string },
 ): void {
-  requireString(table, "dropConstraint(table, …)");
-  const name = typeof spec === "string" ? spec : spec && spec.name;
-  requireString(name, "dropConstraint name");
   push(
     compact({
       op: "dropConstraint",
       table,
       name,
-      schema: opts.schema,
-      existenceGuard: ifExistsGuard(opts.ifExists),
+      schema: args.schema,
+      existenceGuard: ifExistsGuard(args.ifExists),
     }),
   );
 }
 
-export function createIndex(table: string, spec: CreateIndexSpec): void {
-  requireString(table, "createIndex(table, …)");
-  if (!spec || !Array.isArray(spec.columns)) {
-    throw structuredError("OP_INVALID", "createIndex spec needs { columns: string[], … }");
+function recordCreateIndex(
+  table: string,
+  name: string,
+  args: {
+    columns: string[];
+    unique?: boolean;
+    using?: import("./types.js").IndexMethod;
+    where?: ExprFn;
+    ifNotExists?: boolean;
+    schema?: string;
+  },
+): void {
+  if (!Array.isArray(args.columns)) {
+    throw structuredError("OP_INVALID", ".index(name).add needs { columns: string[] }");
   }
   push(
     compact({
       op: "createIndex",
       table,
-      columns: spec.columns,
-      name: spec.name,
-      unique: spec.unique,
-      using: spec.using,
-      where: resolveExpr(spec.where),
-      concurrently: spec.concurrently,
-      schema: spec.schema,
-      existenceGuard: ifNotExistsGuard(spec.ifNotExists),
+      columns: args.columns,
+      name,
+      unique: args.unique,
+      using: args.using,
+      where: resolveExpr(args.where),
+      schema: args.schema,
+      existenceGuard: ifNotExistsGuard(args.ifNotExists),
     }),
   );
 }
 
-export function dropIndex(
+function recordDropIndex(
+  table: string,
   name: string,
-  opts: TableOpOpts & {
-    table?: string;
-    unique?: boolean;
-    ifExists?: IfExistsGuard;
-    concurrently?: boolean;
-  } = {},
+  args: { ifExists?: boolean; concurrently?: boolean; schema?: string },
 ): void {
-  requireString(name, "dropIndex(name, …)");
   push(
     compact({
       op: "dropIndex",
       name,
-      table: opts.table,
-      unique: opts.unique,
-      concurrently: opts.concurrently,
-      schema: opts.schema,
-      existenceGuard: ifExistsGuard(opts.ifExists),
+      table,
+      concurrently: args.concurrently,
+      schema: args.schema,
+      existenceGuard: ifExistsGuard(args.ifExists),
     }),
   );
 }
 
-export function insert<R extends Row = Row>(table: string, args: InsertArgs<R>): void {
-  requireString(table, "insert(table, …)");
+function recordInsert<R extends Row = Row>(table: string, args: InsertArgs<R>): void {
   let rows = args.rows as R | R[];
-  if (rows === undefined) throw structuredError("OP_INVALID", "insert(table, { rows }): rows is required");
+  if (rows === undefined) throw structuredError("OP_INVALID", "insert({ rows }): rows is required");
   if (!Array.isArray(rows)) rows = [rows];
   const arr = rows as R[];
   const columns = arr.length > 0 ? Object.keys(arr[0]) : [];
@@ -756,9 +834,6 @@ export function insert<R extends Row = Row>(table: string, args: InsertArgs<R>):
   );
 }
 
-/** Normalize an `onConflict.doUpdate` `column → scalar` map through the IrScalar
- *  carrier so a bigint/Uint8Array assignment matches the Rust `IrOnConflict`
- *  `BTreeMap<String, IrScalar>` shape (§2.4.1). */
 function normalizeOnConflict(
   oc: { columns: string[]; doUpdate?: Record<string, unknown> } | undefined,
 ): Node | undefined {
@@ -769,8 +844,7 @@ function normalizeOnConflict(
   return { columns: oc.columns, doUpdate } as Node;
 }
 
-export function update(table: string, args: UpdateArgs): void {
-  requireString(table, "update(table, …)");
+function recordUpdate(table: string, args: UpdateArgs): void {
   push(
     compact({
       op: "update",
@@ -783,10 +857,9 @@ export function update(table: string, args: UpdateArgs): void {
   );
 }
 
-export function del(table: string, args: DelArgs): void {
-  requireString(table, "del(table, …)");
+function recordDel(table: string, args: DelArgs): void {
   if (args.where === undefined || args.where === null) {
-    throw structuredError("OP_INVALID", "del(table, { where }): where is mandatory");
+    throw structuredError("OP_INVALID", "del({ where }): where is mandatory");
   }
   push(
     compact({
@@ -802,9 +875,8 @@ export function del(table: string, args: DelArgs): void {
 const DEFAULT_BACKFILL_CURSOR = "id";
 const DEFAULT_BACKFILL_BATCH = 1000;
 
-export function backfill(table: string, args: BackfillArgs): void {
-  requireString(table, "backfill(table, …)");
-  if (args.set === undefined) throw structuredError("OP_INVALID", "backfill(table, { set }): set is required");
+function recordBackfill(table: string, args: BackfillArgs): void {
+  if (args.set === undefined) throw structuredError("OP_INVALID", "backfill({ set }): set is required");
   push(
     compact({
       op: "backfill",
@@ -819,150 +891,165 @@ export function backfill(table: string, args: BackfillArgs): void {
   );
 }
 
-export function batchAlterTable(table: string, build: (b: BatchAlterBuilder) => void): void {
-  requireString(table, "batchAlterTable(table, …)");
-  if (typeof build !== "function") {
-    throw structuredError("OP_INVALID", "batchAlterTable(table, build): build must be a callback");
-  }
-  build({
-    addColumn: (name, type) => addColumn(table, name, type),
-    dropColumn: (name, opts) => dropColumn(table, name, opts),
-    renameColumn: (from, to, type) => renameColumn(table, from, to, type),
-    alterColumn: (name, change) => alterColumn(table, name, change),
-    addForeignKey: (spec) => addForeignKey(table, spec),
-    addCheck: (spec) => addCheck(table, spec),
-  });
-}
+// ── (E) The fluent `table()` handle — the SOLE public entry (§3) ──
 
-// ── (D) The eager fluent `table()` facade (PR11) ──
-
-// `table(name, opts?)` returns a recorder-bound handle whose methods MIRROR the
-// flat op-functions scoped to one table, recording EAGERLY (the call IS the
-// recording — no terminal/`build` to forget). It is PURE SUGAR: every method
-// DELEGATES to the SAME exported flat op-function (the single source of truth),
-// exactly as `batchAlterTable` does (it calls `addColumn(table, …)` etc., never
-// re-implementing op construction). The `{ schema }` from `table()` is the DEFAULT
-// schema injected into every op the handle records; a per-method `schema` (where
-// the method takes an opts/spec/args bag) OVERRIDES it. The override is by KEY
-// PRESENCE — a per-call bag that omits `schema` keeps the table default, and an
-// explicit `undefined` does NOT wipe the default (see `pickSchema`). A
-// `table()`-authored migration therefore lowers to BYTE-IDENTICAL IR as the
-// equivalent flat-op migration.
-
-/** Per-method-wins-over-table-default schema precedence (§ PR11 §4): a per-call
- *  `schema` overrides the table default only when the KEY is present with a defined
- *  value; an omitted key (or an explicit `undefined`) keeps the table default. This
- *  is what makes a `table("t",{schema})` default survive a per-method opts bag that
- *  carries only a guard. */
+/** Per-op-wins-over-table-default schema precedence (§3/§4): a per-op `schema`
+ *  overrides the table default only when the KEY is present with a defined value;
+ *  an omitted key (or an explicit `undefined`) keeps the table default. */
 function pickSchema(perCall: { schema?: string } | undefined, dflt: string | undefined): string | undefined {
   if (perCall && perCall.schema !== undefined) return perCall.schema;
   return dflt;
 }
 
+function requireColumnDef(x: unknown, where: string): asserts x is ColumnDefImpl {
+  if (!isColumnDef(x)) {
+    throw structuredError("OP_INVALID", `${where} must be a t.* ColumnDef`);
+  }
+}
+
 export function table(name: string, opts: TableOptions = {}): TableHandle {
   requireString(name, "table(name, …)");
   const dflt = opts.schema;
-  return {
-    // DDL: this table
-    create(columns, build, createOpts = {}) {
-      createTable(name, columns, build, {
-        schema: pickSchema(createOpts, dflt),
-        ifNotExists: createOpts.ifNotExists,
-      });
+
+  const handle: TableHandle = {
+    // §3.1 — the table itself
+    create(args) {
+      recordCreateTable(name, { ...args, schema: pickSchema(args, dflt) });
+      return handle;
     },
-    drop(dropOpts = {}) {
-      dropTable(name, {
-        schema: pickSchema(dropOpts, dflt),
-        ifExists: dropOpts.ifExists,
-        cascade: dropOpts.cascade,
+    drop(args = {}) {
+      recordDropTable(name, {
+        ifExists: args.ifExists,
+        cascade: args.cascade,
+        schema: pickSchema(args, dflt),
       });
+      return handle;
+    },
+    // §3.2 — columns
+    column(col): ColumnRef {
+      requireString(col, ".column(name)");
+      const id = registerSelector("column", col);
+      return {
+        add(args) {
+          requireColumnDef(args.type, ".column(name).add({ type })");
+          terminateSelector(id);
+          recordAddColumn(name, col, args.type, {
+            ifNotExists: args.ifNotExists,
+            schema: pickSchema(args, dflt),
+          });
+          return handle;
+        },
+        drop(args = {}) {
+          terminateSelector(id);
+          recordDropColumn(name, col, { ifExists: args.ifExists, schema: pickSchema(args, dflt) });
+          return handle;
+        },
+        rename(args) {
+          requireString(args.to, ".column(name).rename({ to })");
+          requireColumnDef(args.type, ".column(name).rename({ type })");
+          terminateSelector(id);
+          recordRenameColumn(name, col, args.to, args.type, { schema: pickSchema(args, dflt) });
+          return handle;
+        },
+        alter(args) {
+          terminateSelector(id);
+          recordAlterColumn(name, col, { ...args, schema: pickSchema(args, dflt) });
+          return handle;
+        },
+      };
     },
 
-    // DDL: columns
-    addColumn(col, type, colOpts = {}) {
-      addColumn(name, col, type, {
-        schema: pickSchema(colOpts, dflt),
-        ifNotExists: colOpts.ifNotExists,
-      });
+    // §3.3 — constraints
+    foreignKey(fkName): ForeignKeyRef {
+      requireString(fkName, ".foreignKey(name)");
+      const id = registerSelector("foreignKey", fkName);
+      return {
+        add(args) {
+          terminateSelector(id);
+          recordAddForeignKey(name, fkName, { ...args, schema: pickSchema(args, dflt) });
+          return handle;
+        },
+      };
     },
-    dropColumn(col, colOpts = {}) {
-      dropColumn(name, col, {
-        schema: pickSchema(colOpts, dflt),
-        ifExists: colOpts.ifExists,
-      });
+    unique(uqName): UniqueRef {
+      requireString(uqName, ".unique(name)");
+      const id = registerSelector("unique", uqName);
+      return {
+        add(args) {
+          terminateSelector(id);
+          recordAddUnique(name, uqName, { ...args, schema: pickSchema(args, dflt) });
+          return handle;
+        },
+      };
     },
-    renameColumn(from, to, type, renameOpts = {}) {
-      renameColumn(name, from, to, type, {
-        schema: pickSchema(renameOpts, dflt),
-        ifExists: renameOpts.ifExists,
-      });
+    check(ckName): CheckRef {
+      requireString(ckName, ".check(name)");
+      const id = registerSelector("check", ckName);
+      return {
+        add(args) {
+          terminateSelector(id);
+          recordAddCheck(name, ckName, { ...args, schema: pickSchema(args, dflt) });
+          return handle;
+        },
+      };
     },
-    alterColumn(col, change, alterOpts = {}) {
-      alterColumn(name, col, change, {
-        schema: pickSchema(alterOpts, dflt),
-        ifExists: alterOpts.ifExists,
-      });
-    },
-
-    // DDL: constraints / indexes
-    addForeignKey(spec, fkOpts = {}) {
-      addForeignKey(name, spec, {
-        schema: pickSchema(fkOpts, dflt),
-        ifNotExists: fkOpts.ifNotExists,
-      });
-    },
-    addUnique(spec, uqOpts = {}) {
-      addUnique(name, spec, {
-        schema: pickSchema(uqOpts, dflt),
-        ifNotExists: uqOpts.ifNotExists,
-      });
-    },
-    addCheck(spec, ckOpts = {}) {
-      addCheck(name, spec, {
-        schema: pickSchema(ckOpts, dflt),
-        ifNotExists: ckOpts.ifNotExists,
-      });
-    },
-    dropConstraint(spec, dcOpts = {}) {
-      dropConstraint(name, spec, {
-        schema: pickSchema(dcOpts, dflt),
-        ifExists: dcOpts.ifExists,
-      });
-    },
-    createIndex(spec) {
-      // `createIndex` reads schema/guard off the SPEC (no separate opts bag): inject
-      // the table default into the spec, letting a per-call `spec.schema` win.
-      createIndex(name, { ...spec, schema: pickSchema(spec, dflt) });
-    },
-    dropIndex(idxName, idxOpts = {}) {
-      // `dropIndex` is name-keyed — STAMP this table into its opts (the whole point
-      // of scoping: drop the index that belongs to THIS table).
-      dropIndex(idxName, {
-        table: name,
-        schema: pickSchema(idxOpts, dflt),
-        ifExists: idxOpts.ifExists,
-        unique: idxOpts.unique,
-        concurrently: idxOpts.concurrently,
-      });
+    constraint(cName): ConstraintRef {
+      requireString(cName, ".constraint(name)");
+      const id = registerSelector("constraint", cName);
+      return {
+        drop(args = {}) {
+          terminateSelector(id);
+          recordDropConstraint(name, cName, { ifExists: args.ifExists, schema: pickSchema(args, dflt) });
+          return handle;
+        },
+      };
     },
 
-    // DML — schema rides on the args object; no existence guard (DML is unguardable).
+    // §3.4 — indexes
+    index(idxName): IndexRef {
+      requireString(idxName, ".index(name)");
+      const id = registerSelector("index", idxName);
+      return {
+        add(args) {
+          terminateSelector(id);
+          recordCreateIndex(name, idxName, { ...args, schema: pickSchema(args, dflt) });
+          return handle;
+        },
+        drop(args = {}) {
+          terminateSelector(id);
+          recordDropIndex(name, idxName, {
+            ifExists: args.ifExists,
+            concurrently: args.concurrently,
+            schema: pickSchema(args, dflt),
+          });
+          return handle;
+        },
+      };
+    },
+
+    // §3.5 — table data (no existence guard; schema rides on args)
     insert(args) {
-      insert(name, { ...args, schema: pickSchema(args, dflt) });
+      recordInsert(name, { ...args, schema: pickSchema(args, dflt) });
+      return handle;
     },
     update(args) {
-      update(name, { ...args, schema: pickSchema(args, dflt) });
+      recordUpdate(name, { ...args, schema: pickSchema(args, dflt) });
+      return handle;
     },
     del(args) {
-      del(name, { ...args, schema: pickSchema(args, dflt) });
+      recordDel(name, { ...args, schema: pickSchema(args, dflt) });
+      return handle;
     },
     backfill(args) {
-      backfill(name, { ...args, schema: pickSchema(args, dflt) });
+      recordBackfill(name, { ...args, schema: pickSchema(args, dflt) });
+      return handle;
     },
   };
+
+  return handle;
 }
 
-// ── (C) Determinism lint (§4.3) ──
+// ── (C) Determinism lint ──
 
 const NONDETERMINISM_PATTERNS: { re: RegExp; name: string; steer: string }[] = [
   { re: /\bDate\s*\.\s*now\s*\(/, name: "Date.now()", steer: "c.fn.now()" },
@@ -972,20 +1059,15 @@ const NONDETERMINISM_PATTERNS: { re: RegExp; name: string; steer: string }[] = [
 ];
 
 /**
- * Lint a migration's SOURCE for the §4.3 nondeterminism accessors (`Date.now()` /
+ * Lint a migration's SOURCE for the nondeterminism accessors (`Date.now()` /
  * `Math.random()` / `crypto.randomUUID()` / `new Date()`).
  *
- * SCOPE — intentional coarse whole-source scan. §4.3 specifies "syntactically
- * appearing inside an op-function argument", but this lint is a deliberate
- * fail-SAFE whole-source regex scan: it OVER-flags (a clock accessor in a comment
- * or a non-op helper trips it) and NEVER under-flags. That is the chosen contract,
- * not a bug — the build-once committed artifact (§5.1) already neutralizes
- * post-deploy non-determinism, so the lint's only job is a best-effort pre-commit
- * STEER (§8.8), where a false positive is cheap (rephrase) and a false negative
- * (a baked build-time value slipping through) is the real hazard. Findings are
- * surfaced as WARNINGS on the record path, never a hard reject (see
- * `record_migration_to_ir_with_warnings`). Narrowing to true op-arg spans is a
- * possible future precision improvement; the over-flag behavior is pinned by test.
+ * SCOPE — intentional coarse whole-source scan: it OVER-flags (a clock accessor
+ * in a comment trips it) and NEVER under-flags. The build-once committed artifact
+ * already neutralizes post-deploy non-determinism, so the lint's only job is a
+ * best-effort pre-commit STEER where a false positive is cheap (rephrase) and a
+ * false negative (a baked build-time value slipping through) is the real hazard.
+ * Findings are surfaced as WARNINGS on the record path, never a hard reject.
  */
 export function lintDeterminism(source: string): DeterminismFinding[] {
   if (typeof source !== "string") return [];
@@ -996,7 +1078,7 @@ export function lintDeterminism(source: string): DeterminismFinding[] {
         code: "NONDETERMINISTIC_OP_ARG",
         accessor: name,
         suggested_fix: `replace ${name} with the DB-evaluated ${steer}`,
-        reason: `${name} bakes a build-time value into the artifact; use the structured FnSynth scalar (§4.3)`,
+        reason: `${name} bakes a build-time value into the artifact; use the structured FnSynth scalar`,
       });
     }
   }

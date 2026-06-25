@@ -1,10 +1,17 @@
-// Parity guard: the npm `@zeroship/migrate` DSL records the SAME ops the engine's
-// embedded recorder (`crates/zeroship-migrate-js/src/migrate_ops.js`) committed
-// into the golden corpus. The npm `ops.ts` and the V8-embedded `migrate_ops.js`
-// are two implementations of the same locked surface (§3.2/§3.3.1); this test
-// re-authors a golden fixture's `up()` through the npm DSL and asserts the
-// recorded op list equals the committed golden `.ir.json`'s `ops` — so the two
-// implementations cannot silently diverge on the frozen wire shape.
+// Byte-identity oracle: the fluent `@zeroship/migrate` authoring surface records
+// the SAME ops the engine's embedded recorder (`migrate_ops.js`) committed into
+// the golden corpus. The npm `ops.ts` and the V8-embedded `migrate_ops.js` are
+// two implementations of the same locked fluent surface; this test re-authors a
+// golden fixture's `up()` through `table()` and asserts the recorded op list
+// equals the committed golden `.ir.json`'s `ops` — proving the fluent-only
+// redesign is PURE SUGAR (the recorded IR is byte-identical to the pre-redesign
+// golden, except the C1 FK-actions delta which the FK goldens carry).
+//
+// Re-bless note: `fluent_ddl`'s `label` column was authored via the now-removed
+// `t.string()` alias (wire `string`). The spec removes that alias (canonical
+// `text`/`integer`), so `label` is re-authored as `t.text()` and the golden's
+// `label` type re-blessed `string` → `text`. This is the ONLY byte change beyond
+// C1 — a direct consequence of the mandated alias removal (`t.string`/`t.int`).
 
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -12,23 +19,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import {
-  addColumn,
-  addCheck,
-  addForeignKey,
-  addUnique,
-  alterColumn,
-  backfill,
-  batchAlterTable,
-  createIndex,
-  createTable,
-  del,
-  dropConstraint,
-  insert,
-  renameColumn,
-  t,
-  update,
-} from "../src/index.js";
+import { t, table } from "../src/index.js";
 import { __begin, __drain } from "../src/ops.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -40,10 +31,9 @@ async function golden(stem: string): Promise<any> {
 
 /** Normalize a `createTable` op for parity comparison: the committed golden is the
  *  RUST RE-SERIALIZATION of the typed IR, which fills `constraints`/`indexes` with
- *  serde defaults (`[]`) on serialize; the npm DSL OMITS empty arrays (the
- *  cross-impl-determinism `skip_serializing_if`-style image). Both deserialize to
- *  the same typed op (absent == empty), so we drop empty `constraints`/`indexes`
- *  on both sides before comparing — the wire shape is otherwise identical. */
+ *  serde defaults (`[]`) on serialize; the fluent recorder OMITS empty arrays. Both
+ *  deserialize to the same typed op (absent == empty), so we drop empty
+ *  `constraints`/`indexes` on both sides before comparing. */
 function normalizeOps(ops: any[]): any[] {
   return ops.map((op) => {
     if (op.op !== "createTable") return op;
@@ -60,77 +50,75 @@ function record(up: () => void): any[] {
   return __drain();
 }
 
-test("fluent_ddl npm-recorded ops equal the committed golden", async () => {
+test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
   const ops = record(() => {
-    createTable("accounts", {
-      id: t.id(),
-      email: t.text().notNull().unique(),
-      balance: t.numeric(12, 2).notNull().default({ decimal: "0.00" }),
-      created_at: t.timestamp().notNull().default({ fn: "now" }),
-      external_id: t.uuid(),
-      avatar: t.bytes(),
-      active: t.boolean().notNull().default(true),
-      profile: t.json(),
-      owner: t.ref("users"),
-      embedding: t.vector(1536),
-      location: t.geoPoint(),
-      label: t.string(),
-      hits: t.int().notNull().default(0),
-      big_hits: t.bigInt(),
-      ratio: t.float(),
-      secret: t.encrypted({ of: t.text() }),
+    table("accounts").create({
+      columns: {
+        id: t.id(),
+        email: t.text().notNull().unique(),
+        balance: t.numeric(12, 2).notNull().default({ decimal: "0.00" }),
+        created_at: t.timestamp().notNull().default({ fn: "now" }),
+        external_id: t.uuid(),
+        avatar: t.bytes(),
+        active: t.boolean().notNull().default(true),
+        profile: t.json(),
+        owner: t.ref("users"),
+        embedding: t.vector(1536),
+        location: t.geoPoint(),
+        // re-blessed string → text (t.string alias removed, §7).
+        label: t.text(),
+        hits: t.integer().notNull().default(0),
+        big_hits: t.bigInt(),
+        ratio: t.float(),
+        secret: t.encrypted({ of: t.text() }),
+      },
     });
-    createTable(
-      "memberships",
-      { account_id: t.uuid().notNull(), team: t.text().notNull() },
-      (b) => {
-        b.primaryKey(["account_id", "team"]);
-        b.unique(["team"], { name: "memberships_team_uq" });
-        b.index(["account_id"], { name: "memberships_account_idx" });
-        b.check((c) => c("team").isNotNull(), { name: "memberships_team_chk" });
-        b.foreignKey({
+    table("memberships").create({
+      columns: { account_id: t.uuid().notNull(), team: t.text().notNull() },
+      primaryKey: ["account_id", "team"],
+      uniques: [{ name: "memberships_team_uq", columns: ["team"] }],
+      checks: [{ name: "memberships_team_chk", expr: (c) => c("team").isNotNull() }],
+      foreignKeys: [
+        {
+          name: "memberships_account_fk",
           columns: ["account_id"],
           references: { table: "accounts", columns: ["id"] },
-          name: "memberships_account_fk",
-        });
-      },
-    );
-    addColumn("accounts", "status", t.text().notNull().default("new"));
-    addForeignKey("memberships", {
+        },
+      ],
+      indexes: [{ name: "memberships_account_idx", columns: ["account_id"] }],
+    });
+    table("accounts").column("status").add({ type: t.text().notNull().default("new") });
+    table("memberships").foreignKey("memberships_team_fk").add({
       columns: ["team"],
       references: { table: "teams", columns: ["name"] },
-      name: "memberships_team_fk",
     });
-    addUnique("accounts", { columns: ["external_id"], name: "accounts_external_uq" });
-    addCheck("accounts", { expr: (c) => c("balance").ge(0), name: "accounts_balance_chk" });
-    dropConstraint("accounts", { name: "accounts_legacy_chk", type: "check" });
-    alterColumn("accounts", "balance", { type: t.numeric(14, 2) });
-    alterColumn("accounts", "profile", { nullable: false });
-    renameColumn("accounts", "label", "display_label", t.text());
-    createIndex("accounts", {
+    table("accounts").unique("accounts_external_uq").add({ columns: ["external_id"] });
+    table("accounts").check("accounts_balance_chk").add({ expr: (c) => c("balance").ge(0) });
+    table("accounts").constraint("accounts_legacy_chk").drop();
+    table("accounts").column("balance").alter({ type: t.numeric(14, 2) });
+    table("accounts").column("profile").alter({ nullable: false });
+    table("accounts").column("label").rename({ to: "display_label", type: t.text() });
+    table("accounts").index("accounts_active_email_idx").add({
       columns: ["email"],
-      name: "accounts_active_email_idx",
       unique: true,
       where: (c) => c("active").isTrue(),
     });
-    batchAlterTable("accounts", (b) => {
-      b.addColumn("nickname", t.text());
-      b.alterColumn("nickname", { nullable: false });
-    });
+    table("accounts").column("nickname").add({ type: t.text() });
+    table("accounts").column("nickname").alter({ nullable: false });
   });
   const g = await golden("fluent_ddl");
   assert.deepEqual(normalizeOps(ops), normalizeOps(g.ops));
 });
 
-test("fluent_dml npm-recorded ops equal the committed golden", async () => {
+test("fluent_dml fluent-recorded ops equal the committed golden", async () => {
   const ops = record(() => {
-    insert("status_codes", {
+    table("status_codes").insert({
       rows: [
         { code: 200, label: "ok" },
         { code: 404, label: "not found" },
       ],
     });
-    update("status_codes", {
+    table("status_codes").update({
       set: {
         label: (c) => c.fn.coalesce(c("label"), "unknown"),
         norm: (c) => c.fn.lower(c.fn.trim(c("label"))),
@@ -144,7 +132,7 @@ test("fluent_dml npm-recorded ops equal the committed golden", async () => {
       },
       where: (c) => c("code").gt(0).and(c("label").isNotNull()),
     });
-    del("status_codes", {
+    table("status_codes").del({
       where: (c) =>
         c("code")
           .ne(0)
@@ -159,7 +147,7 @@ test("fluent_dml npm-recorded ops equal the committed golden", async () => {
           ),
       limit: 100,
     });
-    backfill("status_codes", {
+    table("status_codes").backfill({
       set: {
         full: (c) => c.fn.concatWs(" ", c("label"), c("code").cast("text")),
         first: (c) => c.fn.splitPart(c("label"), " ", 1),

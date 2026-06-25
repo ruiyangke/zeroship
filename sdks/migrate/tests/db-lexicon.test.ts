@@ -10,17 +10,20 @@ import { test } from "node:test";
 
 import { t as dbT } from "@zeroship/db";
 
-import { colTypeFromDbField, createTable, fromDb, t, UnsupportedColTypeError } from "../src/index.js";
+import { colTypeFromDbField, fromDb, t, table, UnsupportedColTypeError } from "../src/index.js";
 import { __begin, __drain } from "../src/ops.js";
 
 /** The dialect-neutral `ColType` the migration `t.*` records for a column — read
- *  off the impl's `_type` brand (the exact field `createTable`/`addColumn` lower). */
+ *  off the impl's `_type` brand (the exact field `.create()`/`.column().add()` lower). */
 function migrateColType(def: unknown): unknown {
   return (def as { _type: unknown })._type;
 }
 
 test("ONE lexicon: a @zeroship/db field reduces to the same ColType the migration t.* produces", () => {
-  assert.deepEqual(colTypeFromDbField(dbT.string()), migrateColType(t.string()));
+  // `dbT.string()` reduces to the neutral `"string"` ColType (the migration
+  // lexicon's canonical text type is `t.text()`→`"text"`; the `string` token is a
+  // distinct wire variant only the db bridge still produces, §7 alias removal).
+  assert.deepEqual(colTypeFromDbField(dbT.string()), "string");
   assert.deepEqual(colTypeFromDbField(dbT.boolean()), migrateColType(t.boolean()));
   assert.deepEqual(colTypeFromDbField(dbT.timestamp()), migrateColType(t.timestamp()));
   assert.deepEqual(colTypeFromDbField(dbT.json()), migrateColType(t.json()));
@@ -56,11 +59,11 @@ test("fromDb lifts a live-schema field into a migration column on the SAME ColTy
   // A db `t.ref("users").required()` → a migration column with the {ref} ColType +
   // notNull carried over, recorded byte-identically to a hand-written migration column.
   __begin();
-  createTable("posts", { author_id: fromDb(dbT.ref("users").required()) });
+  table("posts").create({ columns: { author_id: fromDb(dbT.ref("users").required()) } });
   const viaSchema = __drain();
 
   __begin();
-  createTable("posts", { author_id: t.ref("users").notNull() });
+  table("posts").create({ columns: { author_id: t.ref("users").notNull() } });
   const viaMigration = __drain();
 
   assert.deepEqual(viaSchema[0].columns, viaMigration[0].columns);
@@ -70,7 +73,7 @@ test("fromDb lifts a live-schema field into a migration column on the SAME ColTy
 
 test("fromDb carries .unique() over from the @zeroship/db field", () => {
   __begin();
-  createTable("u", { email: fromDb(dbT.string().unique()) });
+  table("u").create({ columns: { email: fromDb(dbT.string().unique()) } });
   const ops = __drain();
   assert.equal(ops[0].columns[0].unique, true);
 });
