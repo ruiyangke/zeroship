@@ -388,6 +388,45 @@ pub enum IrLowerError {
          silently dropped"
     )]
     ExistenceGuardNotYetSupported(&'static str),
+    /// **PR10 review F3** — a SQLite-targeted op whose EFFECTIVE schema (§2.7) is a
+    /// NON-`main` schema (i.e. neither the bound project schema nor the implicit
+    /// `main` target). The SQLite emitter renders UNqualified `main` DDL and carries
+    /// no schema — so honoring a `schema:'reporting'` qualifier would require an
+    /// explicit `ATTACH 'reporting.db' AS reporting`, which the engine does NOT
+    /// auto-perform. Rather than SILENTLY dropping the qualifier (rendering the op
+    /// into `main` — a silent-WRONG-target), lowering FAILS CLOSED here: a non-main
+    /// schema qualifier on the SQLite leg requires an explicit ATTACH the author must
+    /// arrange, never an implicit re-pin to `main`. Carries the offending schema.
+    /// (Confined/Platform on SQLite are unaffected: `eff == project == main`.)
+    #[error(
+        "IrAuthor::lower targets SQLite with a non-main schema qualifier {0:?} — the \
+         SQLite leg renders unqualified `main` DDL and performs NO auto-ATTACH; a \
+         non-main schema requires an explicit `ATTACH … AS {0}` the author must \
+         arrange. Refusing to silently render into `main` (a wrong-target drop)."
+    )]
+    SqliteSchemaUnsupported(String),
+    /// **PR10 review F5** — a `backfill` (or batched `update`) whose EFFECTIVE schema
+    /// (§2.7) differs from the bound project schema. The resumable backfill EXECUTOR
+    /// ([`crate::backfill`]) qualifies its windowed `UPDATE` into the deploy-time
+    /// `ExecutorConfig::project_schema` ONLY — it does not consume a per-spec schema.
+    /// Honoring the qualifier would therefore require silently project-pinning the
+    /// batched UPDATE (a silent-wrong-schema), inconsistent with the one-shot DML
+    /// path that honors `eff_schema`. Lowering FAILS CLOSED rather than re-pin: a
+    /// schema-qualified batched backfill/update is refused until the executor threads
+    /// a per-spec schema. Confined/Platform never hit this (`eff == project`).
+    #[error(
+        "IrAuthor::lower of a schema-qualified backfill/batched-update names schema \
+         {schema:?}, but the resumable backfill executor qualifies only into the \
+         deploy-time project schema {project:?}; honoring it would silently re-pin the \
+         batched UPDATE to {project:?}. Refusing fail-closed (use the one-shot \
+         update/insert/delete path, which honors the schema, or drop the qualifier)."
+    )]
+    BackfillSchemaUnsupported {
+        /// The effective (op-named or default) schema the batched op requested.
+        schema: String,
+        /// The bound project schema the executor would otherwise silently pin to.
+        project: String,
+    },
     /// **PR2** — a SQLite `renameColumn` whose table's full live structure is not
     /// in [`LiveSchema::table_snapshots`] / [`LiveSchema::sqlite_schemas`]. SQLite
     /// has no native online rename, so the rename is reconciled by the 12-step
@@ -671,16 +710,34 @@ impl IrAuthor {
 
     /// **PR10** — the EFFECTIVE schema an op renders into (§2.7): the op's own
     /// `schema` qualifier → else the connection [`default_schema`](Self::default_schema)
-    /// → else the dialect default (`project_schema`). The Confined cross-schema
-    /// VALIDATE gate has already refused a `schema != project_schema` before lower,
-    /// so under Confined this resolves to `project_schema` for every op (the op's
-    /// schema is absent or equals it; `default_schema` is `None`) — defense in
-    /// depth, byte-identical to the pre-PR10 render.
+    /// → else the dialect default (`project_schema`).
+    ///
+    /// **Confined gate/render agreement (review F2).** The Confined cross-schema
+    /// VALIDATE gate ([`crate::guard::SchemaScope::permits`]) accepts an op `schema`
+    /// that matches `project_schema` CASE-INSENSITIVELY (`'APP1'` passes under
+    /// project `'app1'`). The render seam (`quote_ident`) is byte-verbatim, so
+    /// rendering the op's casing would emit `"APP1"."t"` — a DIFFERENT,
+    /// case-sensitive Postgres schema than the project's `app1`, splitting the gate
+    /// from the render (the gate treats it as the project schema; the DB does not).
+    /// To keep the two in lock-step we CANONICALIZE: when the op's `schema`
+    /// case-insensitively equals `project_schema`, render the canonical
+    /// `project_schema` casing, never the op's verbatim casing. Under Confined this
+    /// therefore resolves to `project_schema` for every op (the op's schema is
+    /// absent or case-folds to it; `default_schema` is `None`) — defense in depth,
+    /// byte-identical to the pre-PR10 render. Under Platform/Trusted the op's schema
+    /// is honored verbatim unless it case-folds to `project_schema` (in which case
+    /// the canonical form is rendered — harmless, since they denote the same schema
+    /// only when casing matches, and PG folds unquoted identifiers to lowercase).
     #[must_use]
     fn effective_schema<'a>(&'a self, op: &'a Op) -> &'a str {
-        op.schema()
-            .or(self.default_schema.as_deref())
-            .unwrap_or(&self.project_schema)
+        match op.schema().or(self.default_schema.as_deref()) {
+            // The op (or connection default) names the project schema in a DIFFERENT
+            // casing the case-insensitive gate accepted — render the canonical form
+            // so gate and render agree (never the verbatim `"APP1"`).
+            Some(s) if s.eq_ignore_ascii_case(&self.project_schema) => &self.project_schema,
+            Some(s) => s,
+            None => &self.project_schema,
+        }
     }
 
     /// The loader's IR branch (§7.2): run the fail-closed `.ir.json` LOAD GATE
@@ -1035,6 +1092,18 @@ impl IrAuthor {
         // a `schema != project_schema` at validate-time, so under Confined this is
         // `project_schema` for every op and the clone renders byte-identically.
         let eff_schema = self.effective_schema(op).to_string();
+        // **PR10 review F3** — fail-closed on a NON-`main` schema on the SQLite leg.
+        // The SQLite emitter renders unqualified `main` DDL/DML and performs NO
+        // auto-ATTACH, so an effective schema other than the implicit `main` target
+        // (the bound `project_schema`) would be SILENTLY dropped — a silent-wrong-
+        // target. Refuse rather than re-pin to `main`. (`effective_schema` has
+        // already canonicalized a case-variant of `project_schema` back to the
+        // project casing, so this compares against the canonical project schema.)
+        if matches!(self.dialect, SqlDialect::Sqlite)
+            && !eff_schema.eq_ignore_ascii_case(&self.project_schema)
+        {
+            return Err(IrLowerError::SqliteSchemaUnsupported(eff_schema));
+        }
         let decl = self.decl.with_project_schema(&eff_schema);
         // **PR10** — fail-closed on an existence guard until the executor-side probe
         // lands (see [`IrLowerError::ExistenceGuardNotYetSupported`]). The guard is
@@ -1277,6 +1346,7 @@ impl IrAuthor {
                     // PR6b boundary, never a silent one-shot UPDATE.
                     let b = batch.as_ref().expect("batch is_some");
                     return self.lower_backfill(
+                        eff_schema,
                         table,
                         &b.cursor_column,
                         b.batch_size.get(),
@@ -1311,6 +1381,7 @@ impl IrAuthor {
             }
             Op::Backfill { table, cursor_column, batch_size, set, filter, name, .. } => self
                 .lower_backfill(
+                    eff_schema,
                     table,
                     cursor_column,
                     batch_size.get(),
@@ -1361,8 +1432,20 @@ impl IrAuthor {
     /// are dialect-rendered (the §9 `c.fn.splitPart` lowering, NULL-skipping
     /// `concatWs`, etc. differ per dialect) — but both legs consume the same
     /// `BackfillSpec` shape, so the plan step is uniform.
+    ///
+    /// **PR10 review F5** — the backfill EXECUTOR ([`crate::backfill`]) qualifies its
+    /// windowed `UPDATE` into the deploy-time `ExecutorConfig::project_schema`; it
+    /// does NOT consume a per-spec schema. So a `backfill` (or batched `update`) whose
+    /// EFFECTIVE schema differs from the bound project schema cannot be honored
+    /// without silently project-pinning it (a silent-wrong-schema). Rather than drop
+    /// the qualifier, lowering FAILS CLOSED here
+    /// ([`IrLowerError::BackfillSchemaUnsupported`]) — the one-shot DML path
+    /// (`assemble_insert`/`update`/`delete`) honors `eff_schema`, but the resumable
+    /// batched path must refuse until the executor threads a per-spec schema. Under
+    /// Confined/Platform `eff == project`, so this never fires for the creator path.
     fn lower_backfill(
         &self,
+        eff_schema: &str,
         table: &str,
         cursor_column: &str,
         batch_size: u64,
@@ -1370,6 +1453,17 @@ impl IrAuthor {
         filter: Option<&crate::expr::Expr>,
         name: &str,
     ) -> Result<PlanStep, IrLowerError> {
+        // **PR10 review F5** — refuse a non-project effective schema rather than
+        // silently project-pin the batched UPDATE (the executor qualifies into the
+        // deploy-time project schema only). `effective_schema` has already
+        // canonicalized a case-variant of `project_schema`, so this compares against
+        // the canonical project schema.
+        if !eff_schema.eq_ignore_ascii_case(&self.project_schema) {
+            return Err(IrLowerError::BackfillSchemaUnsupported {
+                schema: eff_schema.to_string(),
+                project: self.project_schema.clone(),
+            });
+        }
         let clauses =
             crate::dml::assemble_backfill_clauses(self.dialect, table, set, filter)
                 .map_err(IrLowerError::DmlAssemble)?;
@@ -2279,6 +2373,46 @@ mod tests {
         );
     }
 
+    /// **PR10 review F2 (HIGH)** — Confined gate/render AGREEMENT for a case-variant
+    /// qualifier. The Confined cross-schema gate accepts `schema:'APP1'` under
+    /// project `'app1'` (case-INsensitive `permits`), but the render seam is
+    /// byte-verbatim — so the op must NOT land in `"APP1"."t"` (a different,
+    /// case-sensitive Postgres schema than `app1`). `effective_schema` canonicalizes
+    /// a case-folding match back to the project casing, so the render is `"app1"."t"`.
+    /// RED before the canonicalization (the verbatim `"APP1"` would render and split
+    /// the gate from the DB).
+    #[test]
+    fn confined_case_variant_schema_canonicalizes_to_project_casing_pg() {
+        let mut ir = create_table_ir(
+            "t",
+            vec![TIrColumn {
+                name: "x".into(),
+                ty: ColType::Int,
+                nullable: None,
+                default: None,
+                unique: None,
+            }],
+        );
+        if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
+            // A case-VARIANT of the bound project schema — the gate folds it in.
+            *schema = Some("APP1".into());
+        }
+        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
+        let migs = author.lower(&ir, &LiveSchema::default()).expect("lower");
+        let create = migs.iter().find(|m| m.up.contains("CREATE TABLE")).expect("create");
+        assert!(
+            create.up.contains("\"app1\".\"t\""),
+            "a case-variant of the project schema must render the CANONICAL project \
+             casing \"app1\".\"t\", never the verbatim \"APP1\"; up = {:?}",
+            create.up
+        );
+        assert!(
+            !create.up.contains("\"APP1\""),
+            "the verbatim case-variant casing must NOT reach the render (gate/render \
+             divergence — it would land in a different PG schema than the gate blessed)"
+        );
+    }
+
     /// **PR10** — the connection DEFAULT schema applies when an op omits its own
     /// qualifier (§2.7). RED before `with_default_schema`/`effective_schema`.
     #[test]
@@ -2301,6 +2435,141 @@ mod tests {
             create.up.contains("\"dflt\".\"t\""),
             "an op with no schema must render into the connection default; up = {:?}",
             create.up
+        );
+    }
+
+    /// **PR10 review F3 (MED)** — a SQLite-targeted op with a NON-`main` schema
+    /// qualifier is REFUSED fail-closed at lower, NOT silently rendered into `main`.
+    /// The SQLite emitter performs no auto-ATTACH, so honoring `schema:'reporting'`
+    /// would otherwise silently drop the qualifier and land the op in `main` (a
+    /// silent-WRONG-target). The Trusted/general CLI is the exposed surface (no
+    /// confinement gate pins the schema). RED before the lower-time fail-closed check
+    /// (it would have silently emitted unqualified `main` DDL).
+    #[test]
+    fn sqlite_non_main_schema_is_refused_fail_closed_at_lower() {
+        let mut ir = create_table_ir(
+            "t",
+            vec![TIrColumn {
+                name: "x".into(),
+                ty: ColType::Int,
+                nullable: None,
+                default: None,
+                unique: None,
+            }],
+        );
+        if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
+            *schema = Some("reporting".into());
+        }
+        // Project schema "app"; the SQLite leg's implicit target is `main` (== the
+        // bound project schema). "reporting" is a different, non-main schema.
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Sqlite);
+        let err = author.lower(&ir, &LiveSchema::default()).unwrap_err();
+        match err {
+            IrLowerError::SqliteSchemaUnsupported(s) => assert_eq!(s, "reporting"),
+            other => panic!(
+                "a non-main schema on the SQLite leg must fail closed with \
+                 SqliteSchemaUnsupported, got: {other:?}"
+            ),
+        }
+    }
+
+    /// **PR10 review F3** — the SQLite leg still lowers cleanly when the op's schema
+    /// equals the bound project schema (the implicit `main` target) — the fail-closed
+    /// refusal is NARROW (only non-main schemas), never a blanket SQLite-schema block.
+    #[test]
+    fn sqlite_project_schema_qualifier_still_lowers() {
+        let mut ir = create_table_ir(
+            "t",
+            vec![TIrColumn {
+                name: "x".into(),
+                ty: ColType::Int,
+                nullable: None,
+                default: None,
+                unique: None,
+            }],
+        );
+        if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
+            // The op names the project schema explicitly — the implicit main target.
+            *schema = Some("app".into());
+        }
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Sqlite);
+        let migs = author.lower(&ir, &LiveSchema::default()).expect("lower");
+        assert!(migs.iter().any(|m| m.up.contains("CREATE TABLE")));
+    }
+
+    /// Build a one-op `backfill` IR from JSON (`SafeU64` has no public ctor — the
+    /// wire is its construction path). `schema` is the optional §2.7 qualifier.
+    fn backfill_ir(schema: Option<&str>) -> MigrationIr {
+        let schema_field = schema.map(|s| format!(r#","schema":"{s}""#)).unwrap_or_default();
+        let json = format!(
+            r#"{{"ir_version":1,"name":"bf","owner_app":"app_a","ops":[
+                {{"op":"backfill","table":"t","cursorColumn":"id","batchSize":1000,
+                 "set":{{"v":{{"node":"colRef","name":"v"}}}},
+                 "name":"backfill_t"{schema_field}}}
+            ]}}"#
+        );
+        serde_json::from_str(&json).expect("backfill IR parses")
+    }
+
+    /// **PR10 review F5 (MED)** — a schema-qualified `backfill` whose effective schema
+    /// differs from the bound project schema is REFUSED fail-closed at lower, NOT
+    /// silently project-pinned. The resumable backfill executor qualifies its windowed
+    /// UPDATE into the deploy-time project schema only, so honoring the qualifier would
+    /// silently re-pin the batched UPDATE to `app1` (a silent-wrong-schema). RED before
+    /// the lower-time check (it would have silently project-pinned the backfill).
+    #[test]
+    fn schema_qualified_backfill_is_refused_fail_closed_pg() {
+        let ir = backfill_ir(Some("app2"));
+        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
+        let err = author.lower(&ir, &LiveSchema::default()).unwrap_err();
+        match err {
+            IrLowerError::BackfillSchemaUnsupported { schema, project } => {
+                assert_eq!(schema, "app2");
+                assert_eq!(project, "app1");
+            }
+            other => panic!(
+                "a schema-qualified batched backfill must fail closed with \
+                 BackfillSchemaUnsupported (never silent project-pinning), got: {other:?}"
+            ),
+        }
+    }
+
+    /// **PR10 review F5** — a batched `update { batch }` (a backfill in disguise) with a
+    /// foreign schema is refused fail-closed identically to `backfill` — the resumable
+    /// path is uniform. RED before the check.
+    #[test]
+    fn schema_qualified_batched_update_is_refused_fail_closed_pg() {
+        let json = r#"{"ir_version":1,"name":"u","owner_app":"app_a","ops":[
+            {"op":"update","table":"t","schema":"app2",
+             "set":{"v":{"node":"colRef","name":"v"}},
+             "batch":{"cursorColumn":"id","batchSize":500}}
+        ]}"#;
+        let ir: MigrationIr = serde_json::from_str(json).expect("batched update IR parses");
+        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
+        let err = author.lower(&ir, &LiveSchema::default()).unwrap_err();
+        assert!(
+            matches!(err, IrLowerError::BackfillSchemaUnsupported { .. }),
+            "a schema-qualified batched update must fail closed (not silently \
+             project-pinned), got: {err:?}"
+        );
+    }
+
+    /// **PR10 review F5** — a backfill that omits the schema (or names the project
+    /// schema) still lowers cleanly — the refusal is NARROW (only a FOREIGN schema),
+    /// never a blanket backfill-schema block. The one-shot project-schema path is
+    /// unaffected.
+    #[test]
+    fn unqualified_backfill_still_lowers_pg() {
+        let ir = backfill_ir(None);
+        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
+        // A backfill lowers to a `PlanStep::Backfill` (NOT a flat DDL `Migration`),
+        // so inspect the full step list, not the DDL-only `lower` projection.
+        let steps = author
+            .lower_steps(&ir, &LiveSchema::default())
+            .expect("an unqualified backfill lowers");
+        assert!(
+            steps.iter().any(|s| matches!(s, PlanStep::Backfill(_))),
+            "the unqualified backfill produced a Backfill plan step; got {steps:?}"
         );
     }
 

@@ -77,10 +77,13 @@ pub enum TrustProfile {
 
 /// The schemas a guard permits references to (design §4.1).
 ///
-/// `Single` is the **Confined** shape — byte-identical to today's
-/// `project_schema: String` semantics (one allowed schema; everything else is a
-/// `CrossSchema` violation). `Allowlist` is the **Platform** shape: a reference
-/// passes iff its schema is a member of the allowlist.
+/// `Single` is the **Confined** shape — the `project_schema: String` semantics
+/// (one allowed schema; everything else is a `CrossSchema` violation), matched
+/// CASE-INSENSITIVELY. A case-variant qualifier (`'APP1'` under `'app1'`) is
+/// admitted, then canonicalized to `project_schema` at render
+/// ([`crate::ir_author::IrAuthor::effective_schema`]) so gate and render never
+/// diverge. `Allowlist` is the **Platform** shape: a reference passes iff its
+/// schema is (case-insensitively) a member of the allowlist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemaScope {
     /// Confined: exactly one permitted schema (the project schema). Any other
@@ -92,11 +95,18 @@ pub enum SchemaScope {
 }
 
 impl SchemaScope {
-    /// True if `schema` is permitted by this scope (case-insensitive).
+    /// True if `schema` is permitted by this scope (CASE-INSENSITIVE, ASCII).
     ///
-    /// - `Single(s)` ⇒ `schema == s` (byte-identical to the old
-    ///   `project_schema` equality test).
-    /// - `Allowlist(v)` ⇒ `schema ∈ v`.
+    /// - `Single(s)` ⇒ `schema.eq_ignore_ascii_case(s)`.
+    /// - `Allowlist(v)` ⇒ `schema` case-folds to a member of `v`.
+    ///
+    /// **Gate/render agreement (review F2).** The match is case-INsensitive, but
+    /// the render seam ([`crate::declarative::quote_ident`]) is byte-verbatim. So a
+    /// case-VARIANT qualifier the gate accepts (`'APP1'` under project `'app1'`)
+    /// MUST be canonicalized to `project_schema` before render, or the op would land
+    /// in a DIFFERENT case-sensitive Postgres schema than the one the gate blessed.
+    /// That canonicalization lives in [`crate::ir_author::IrAuthor::effective_schema`]
+    /// — this `permits` only decides admission, never the rendered casing.
     #[must_use]
     pub fn permits(&self, schema: &str) -> bool {
         match self {
@@ -1226,8 +1236,9 @@ fn foreign_schema_literal_in_body(body: &str, scope: &SchemaScope) -> Option<Str
     for literal in extract_string_literals(body) {
         let lit = literal.trim();
         // A schema the scope permits is never a violation. Under `Single(s)`
-        // this is `lit == s` (byte-identical to the old `project_schema`
-        // exclusion); under `Allowlist` an operator-supplied schema is exempt.
+        // this is `lit.eq_ignore_ascii_case(s)` (the project schema, case-
+        // insensitively — see `SchemaScope::permits`); under `Allowlist` an
+        // operator-supplied schema is exempt.
         if scope.permits(lit) {
             continue;
         }
@@ -1295,7 +1306,8 @@ fn foreign_schema_in_body(body: &str, scope: &SchemaScope) -> Option<String> {
             if bytes.get(i + 1).copied().is_some_and(is_ident_byte) {
                 let schema = &body[s..i];
                 // A scope-permitted schema is never a violation (`Single(s)` ⇒
-                // `schema == s`, byte-identical to the old exclusion). The
+                // `schema.eq_ignore_ascii_case(s)` — the project schema, case-
+                // insensitively). The
                 // `PLATFORM_SCHEMAS` backstop fires for any non-permitted schema
                 // in PLATFORM_SCHEMAS (the port schemas are not in it — HIGH-3).
                 if !scope.permits(schema)

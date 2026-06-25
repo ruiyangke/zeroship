@@ -27,7 +27,13 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const schemaPath = resolve(here, "../../../crates/zeroship-migrate/op-ir.schema.json");
-const outPath = resolve(here, "../src/generated/enums.ts");
+// The output path defaults to the committed enums.ts, but the freshness CI gate
+// (`tests/ir-types-drift.test.ts`) overrides it via `GEN_IR_OUT` to regenerate
+// into a temp file and byte-compare against the committed copy — the "regenerate
+// + diff" gate (PR10 review F4) without a shell `git diff`.
+const outPath = process.env.GEN_IR_OUT
+  ? resolve(process.env.GEN_IR_OUT)
+  : resolve(here, "../src/generated/enums.ts");
 
 // The closed STRING-ENUM defs (every `oneOf` branch is a `const` string). These
 // have no `$ref` and are codegen-safe.
@@ -42,6 +48,10 @@ const ENUM_DEFS = [
   "CmpOp",
   "OnUnmet",
   "OnlinePhase",
+  // **PR10** — the closed 2-token existence-guard modifier (`ifNotExists`/
+  // `ifExists`). A closed string-enum like the others, so it is generated here and
+  // consumed by the hand-authored `ir.ts` `Op` variants.
+  "ExistenceGuard",
 ];
 
 const banner = `/* eslint-disable */

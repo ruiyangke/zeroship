@@ -412,11 +412,24 @@ into. Its meaning is **profile-gated**:
   The op renders `"schema"."table"` on Postgres. The default schema, when an op
   omits its own, is the connection default (a `--schema`/search-path flag,
   threaded as the engine's `default_schema`) → else the connection `search_path`
-  head. On **SQLite** a non-`main` schema maps to an **attached-database name**:
-  the engine renders `"schema"."table"` but does **NOT** auto-`ATTACH` — the
-  attached DB must already exist (`main` is the default and needs no ATTACH). If
-  the attached DB is absent, SQLite errors at apply; surfacing that is the
-  operator's responsibility.
+  head. On **SQLite** the implicit target is `main` (the app file); a `schema`
+  that resolves to `main` (or to the bound project schema) renders unqualified.
+  A **non-`main` schema is refused fail-closed at lower** (`SqliteSchemaUnsupported`):
+  the SQLite emitter renders unqualified `main` DDL and the engine does **NOT**
+  auto-`ATTACH`, so honoring a non-`main` qualifier would silently drop it and land
+  the op in `main` — a silent wrong-target. Rather than that, lowering refuses; a
+  non-`main` SQLite schema requires an explicit `ATTACH … AS <schema>` the operator
+  arranges, never an implicit re-pin to `main`.
+
+- **Backfill / batched-update + an explicit schema (any profile):** the resumable
+  backfill executor qualifies its windowed `UPDATE` into the **deploy-time project
+  schema only** (it does not consume a per-spec schema). A `backfill` (or a batched
+  `update { batch }`) whose effective schema differs from the project schema is
+  therefore **refused fail-closed at lower** (`BackfillSchemaUnsupported`) rather
+  than silently project-pinned — inconsistent silent-wrong-schema is never the
+  disposition. The one-shot `insert`/`update`/`delete`/non-batched path honors the
+  schema normally; only the resumable batched path refuses until the executor
+  threads a per-spec schema.
 
 - **Platform creator deploy (Confined profile):** the project schema is **pinned**.
   An op that omits `schema`, or names the project schema, is fine; an explicit
@@ -476,13 +489,26 @@ it. The default semantic is **shape-verify-or-fail**, never a bare skip:
 - `ifExists`, object **absent** → a journaled satisfied no-op (a drop has no shape
   to verify — presence alone governs).
 
-> **Status:** the IR shape, the JS surface, the validate-time direction check, and
-> the wire/checksum/golden plumbing for the existence-guard family are in place.
-> The executor-side catalog probe (probe → shape-verify-or-fail → run/skip) is the
-> next slice; until it lands, lowering an op that carries an existence guard is
-> **refused fail-closed** (`ExistenceGuardNotYetSupported`) rather than silently
-> dropping the guard and applying the bare op unconditionally — which would be a
-> fail-OPEN over a possibly-divergent existing object.
+> **Status — existence guards are NOT YET honored end-to-end; authoring one is a
+> hard lower-time refusal on EVERY op.** The IR shape, the JS surface (both the
+> typed `ops.ts` and its engine-embedded `migrate_ops.js` twin), the validate-time
+> direction check, and the wire/checksum/golden plumbing for the existence-guard
+> family are in place. The executor-side catalog probe (probe →
+> shape-verify-or-fail → run/skip) is the next slice. **Until it lands, passing
+> `{ ifNotExists: true }` / `{ ifExists: true }` to ANY op — `createTable`,
+> `addColumn`, `createIndex`, `addForeignKey`/`addUnique`/`addCheck`, `dropTable`,
+> `dropColumn`, `dropIndex`, `dropConstraint`, `renameColumn`, `alterColumn*` — is
+> **refused fail-closed at lower** (`ExistenceGuardNotYetSupported`).** The refusal
+> is **uniform**: the guard is recorded faithfully by the DSL (the twin no longer
+> silently drops it on any op — review F1) and then hard-refused at lower for every
+> op, so there is never the split where some ops silently drop the guard (applying
+> the bare op unconditionally — a fail-OPEN over a possibly-divergent existing
+> object) while others hard-error. Do not author an existence guard expecting it to
+> take effect yet; the typed `ops.ts` surface ACCEPTS the option, but the engine
+> refuses it until the probe ships. When the probe lands, the divergent-object
+> shape-verify MUST fail closed (never a silent skip) and read the right catalog per
+> backend (PG `pg_catalog`/`information_schema`; SQLite `sqlite_master` + PRAGMAs),
+> including index/constraint guards.
 
 ### SQLite-safe rebuild (`batchAlterTable`)
 

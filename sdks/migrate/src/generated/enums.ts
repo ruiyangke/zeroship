@@ -112,3 +112,18 @@ export type OnUnmet = "Halt" | "Skip";
  * for free (a separate, later deploy can apply the contract).
  */
 export type OnlinePhase = "Expand" | "Contract";
+
+/**
+ * **PR10** — the uniform existence-guard modifier (§2.7). Carried on a guarded
+ * DDL op as `existence_guard: Option<ExistenceGuard>` (omitted-when-absent on
+ * the wire). The engine SYNTHESIZES the guard via an executor-side CATALOG PROBE
+ * (decide-in-Rust: probe → run-or-skip), NEVER by lowering to a native
+ * `IF [NOT] EXISTS` clause — native support is patchy and asymmetric across PG /
+ * SQLite (PG has no `ADD CONSTRAINT IF NOT EXISTS` / none on alter/rename;
+ * SQLite has no `ADD COLUMN IF NOT EXISTS` / none on drop-column/rename). A
+ * CLOSED 2-variant enum so serde rejects any other token at deserialize and the
+ * validate-time legal-direction check (`ifNotExists` on create* /add*; `ifExists`
+ * on drop* /rename/alter) is a total match. Camel-cased on the wire
+ * (`"ifNotExists"`, `"ifExists"`).
+ */
+export type ExistenceGuard = "ifNotExists" | "ifExists";

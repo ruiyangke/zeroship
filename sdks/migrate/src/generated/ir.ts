@@ -21,6 +21,7 @@ import type {
   BinaryOp,
   CastTarget,
   CmpOp,
+  ExistenceGuard,
   IndexMethod,
   OnUnmet,
   OnlinePhase,
@@ -34,6 +35,7 @@ export type {
   BinaryOp,
   CastTarget,
   CmpOp,
+  ExistenceGuard,
   IndexMethod,
   OnUnmet,
   OnlinePhase,
@@ -139,12 +141,21 @@ export interface IrBatch {
 }
 
 /** The CLOSED `op.*` operation enum (§2.3), internally tagged on `op`,
- *  camel-cased. NOTE the `del()` DSL function records the `"delete"` variant tag. */
+ *  camel-cased. NOTE the `del()` DSL function records the `"delete"` variant tag.
+ *
+ *  **PR10** — every TABLE-TARGETING variant carries an optional `schema?` (the
+ *  §2.7 schema-qualifier — honored under Trusted/Platform, pinned/refused under
+ *  Confined), and every GUARDABLE DDL variant additionally carries an optional
+ *  `existenceGuard?`. The DML ops (`insert`/`update`/`delete`/`backfill`) carry
+ *  `schema?` but NO `existenceGuard?` (DML has no existence semantics). The
+ *  removed native `ifExists?: boolean` on `dropTable`/`dropColumn`/`dropIndex` is
+ *  GONE (the intentional wire break) — the guard is now the uniform
+ *  `existenceGuard?` token. */
 export type Op =
-  | { op: "createTable"; name: string; columns: IrColumn[]; constraints?: IrConstraint[]; indexes?: IrIndex[] }
-  | { op: "dropTable"; table: string; ifExists?: boolean | null; cascade?: boolean | null }
-  | { op: "addColumn"; table: string; column: string; type: ColType; nullable?: boolean | null; default?: IrDefault | null }
-  | { op: "dropColumn"; table: string; column: string; ifExists?: boolean | null }
+  | { op: "createTable"; name: string; columns: IrColumn[]; constraints?: IrConstraint[]; indexes?: IrIndex[]; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "dropTable"; table: string; cascade?: boolean | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "addColumn"; table: string; column: string; type: ColType; nullable?: boolean | null; default?: IrDefault | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "dropColumn"; table: string; column: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | {
       op: "createIndex";
       table: string;
@@ -154,17 +165,19 @@ export type Op =
       using?: IndexMethod | null;
       where?: Expr | null;
       concurrently?: boolean | null;
+      schema?: string | null;
+      existenceGuard?: ExistenceGuard | null;
     }
-  | { op: "dropIndex"; name: string; table?: string | null; unique?: boolean | null; ifExists?: boolean | null; concurrently?: boolean | null }
-  | { op: "alterColumnType"; table: string; column: string; type: ColType; using?: Expr | null }
-  | { op: "alterColumnNullability"; table: string; column: string; nullable: boolean }
-  | { op: "renameColumn"; table: string; from: string; to: string; type: ColType }
-  | { op: "addConstraint"; table: string; constraint: IrConstraint }
-  | { op: "dropConstraint"; table: string; name: string }
-  | { op: "insert"; table: string; columns: string[]; rows: IrScalar[][]; onConflict?: IrOnConflict | null }
-  | { op: "update"; table: string; set: { [column: string]: Expr }; where?: Expr | null; batch?: IrBatch | null }
-  | { op: "delete"; table: string; where: Expr; limit?: number | null }
-  | { op: "backfill"; table: string; cursorColumn: string; batchSize: number; set: { [column: string]: Expr }; filter?: Expr | null; name: string };
+  | { op: "dropIndex"; name: string; table?: string | null; unique?: boolean | null; concurrently?: boolean | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "alterColumnType"; table: string; column: string; type: ColType; using?: Expr | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "alterColumnNullability"; table: string; column: string; nullable: boolean; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "renameColumn"; table: string; from: string; to: string; type: ColType; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "addConstraint"; table: string; constraint: IrConstraint; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "dropConstraint"; table: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "insert"; table: string; columns: string[]; rows: IrScalar[][]; onConflict?: IrOnConflict | null; schema?: string | null }
+  | { op: "update"; table: string; set: { [column: string]: Expr }; where?: Expr | null; batch?: IrBatch | null; schema?: string | null }
+  | { op: "delete"; table: string; where: Expr; limit?: number | null; schema?: string | null }
+  | { op: "backfill"; table: string; cursorColumn: string; batchSize: number; set: { [column: string]: Expr }; filter?: Expr | null; name: string; schema?: string | null };
 
 /** All-`Option` overrides of the migration flags. */
 export interface IrFlagsOverride {

@@ -434,3 +434,202 @@ fn record_path_surfaces_determinism_warnings() {
         clean_outcome.warnings
     );
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// PR10 review F1 (HIGH) — twin-fidelity round-trip.
+//
+// The engine-embedded V8 recorder (`migrate_ops.js`) is the byte-for-byte twin
+// of `sdks/migrate/src/ops.ts`. Before this fix the twin DROPPED the `schema`
+// qualifier and `existenceGuard` token on 10 op variants at RECORD time — a
+// silently-dropped `ifNotExists` turned a guarded create into a bare
+// unconditional create (fail-OPEN over a divergent object), and a dropped schema
+// silently re-pinned the op to the project schema. These tests author EVERY
+// schema-targeting / guardable op through the REAL V8 recorder WITH a schema
+// qualifier + (where legal) an existence guard and assert the recorded IR
+// carries them — RED before the twin emits `schema`/`existenceGuard` on these ops.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Find the first recorded op with the given `op` discriminant.
+fn op_named<'a>(ir: &'a Value, name: &str) -> &'a Value {
+    ops(ir)
+        .iter()
+        .find(|o| o.get("op").and_then(|v| v.as_str()) == Some(name))
+        .unwrap_or_else(|| panic!("no recorded `{name}` op in {ir:#}"))
+}
+
+fn assert_schema(op: &Value, want: &str) {
+    assert_eq!(
+        op.get("schema").and_then(|v| v.as_str()),
+        Some(want),
+        "op `{}` must carry schema:{want:?}; got {op:#}",
+        op.get("op").and_then(|v| v.as_str()).unwrap_or("?"),
+    );
+}
+
+fn assert_guard(op: &Value, want: &str) {
+    assert_eq!(
+        op.get("existenceGuard").and_then(|v| v.as_str()),
+        Some(want),
+        "op `{}` must carry existenceGuard:{want:?}; got {op:#}",
+        op.get("op").and_then(|v| v.as_str()).unwrap_or("?"),
+    );
+}
+
+/// `createTable(name, cols, { schema, ifNotExists })` records BOTH the schema
+/// qualifier and the `ifNotExists` create-family guard. RED before the twin fix
+/// (the bare `createTable` dropped both — a fail-OPEN unconditional CREATE).
+#[test]
+fn twin_create_table_carries_schema_and_guard() {
+    let src = r#"
+        import { createTable, t } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            createTable("t", { id: t.int() }, { schema: "app2", ifNotExists: true });
+        }};
+    "#;
+    let ir = record(src, "create_schema_guard");
+    let op = op_named(&ir, "createTable");
+    assert_schema(op, "app2");
+    assert_guard(op, "ifNotExists");
+}
+
+/// `renameColumn(table, from, to, type, { schema, ifExists })` records the schema
+/// qualifier + the `ifExists` alter-family guard. RED before the twin fix.
+#[test]
+fn twin_rename_column_carries_schema_and_guard() {
+    let src = r#"
+        import { renameColumn, t } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            renameColumn("t", "a", "b", t.text(), { schema: "app2", ifExists: true });
+        }};
+    "#;
+    let ir = record(src, "rename_schema_guard");
+    let op = op_named(&ir, "renameColumn");
+    assert_schema(op, "app2");
+    assert_guard(op, "ifExists");
+}
+
+/// `alterColumn` with a `type` change records `alterColumnType` carrying the
+/// schema qualifier + the `ifExists` guard. RED before the twin fix.
+#[test]
+fn twin_alter_column_type_carries_schema_and_guard() {
+    let src = r#"
+        import { alterColumn, t } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            alterColumn("t", "a", { type: t.bigInt() }, { schema: "app2", ifExists: true });
+        }};
+    "#;
+    let ir = record(src, "alter_type_schema_guard");
+    let op = op_named(&ir, "alterColumnType");
+    assert_schema(op, "app2");
+    assert_guard(op, "ifExists");
+}
+
+/// `alterColumn` with a `nullable` change records `alterColumnNullability`
+/// carrying the schema qualifier + the `ifExists` guard. RED before the twin fix.
+#[test]
+fn twin_alter_column_nullability_carries_schema_and_guard() {
+    let src = r#"
+        import { alterColumn } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            alterColumn("t", "a", { nullable: false }, { schema: "app2", ifExists: true });
+        }};
+    "#;
+    let ir = record(src, "alter_null_schema_guard");
+    let op = op_named(&ir, "alterColumnNullability");
+    assert_schema(op, "app2");
+    assert_guard(op, "ifExists");
+}
+
+/// `addForeignKey` / `addUnique` / `addCheck` all record an `addConstraint` op
+/// carrying the schema qualifier + the `ifNotExists` add-family guard. RED before
+/// the twin fix.
+#[test]
+fn twin_add_constraint_family_carries_schema_and_guard() {
+    let fk = r#"
+        import { addForeignKey } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            addForeignKey("t", { columns: ["o"], references: { table: "o", columns: ["id"] } },
+                { schema: "app2", ifNotExists: true });
+        }};
+    "#;
+    let fk_ir = record(fk, "fk_schema_guard");
+    let op = op_named(&fk_ir, "addConstraint");
+    assert_schema(op, "app2");
+    assert_guard(op, "ifNotExists");
+
+    let uq = r#"
+        import { addUnique } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            addUnique("t", { columns: ["a"] }, { schema: "app2", ifNotExists: true });
+        }};
+    "#;
+    let uq_ir = record(uq, "uq_schema_guard");
+    let op = op_named(&uq_ir, "addConstraint");
+    assert_schema(op, "app2");
+    assert_guard(op, "ifNotExists");
+
+    let ck = r#"
+        import { addCheck } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            addCheck("t", { expr: (c) => c("a").gt(0) }, { schema: "app2", ifNotExists: true });
+        }};
+    "#;
+    let ck_ir = record(ck, "ck_schema_guard");
+    let op = op_named(&ck_ir, "addConstraint");
+    assert_schema(op, "app2");
+    assert_guard(op, "ifNotExists");
+}
+
+/// `dropConstraint(table, name, { schema, ifExists })` records the schema
+/// qualifier + the `ifExists` drop-family guard. RED before the twin fix.
+#[test]
+fn twin_drop_constraint_carries_schema_and_guard() {
+    let src = r#"
+        import { dropConstraint } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            dropConstraint("t", "t_a_key", { schema: "app2", ifExists: true });
+        }};
+    "#;
+    let dc_ir = record(src, "drop_constraint_schema_guard");
+    let op = op_named(&dc_ir, "dropConstraint");
+    assert_schema(op, "app2");
+    assert_guard(op, "ifExists");
+}
+
+/// The DML ops `insert` / `update` / `delete` / `backfill` carry the schema
+/// qualifier (no existence guard — DML is not guardable). RED before the twin fix
+/// (the schema was silently dropped, re-pinning the op to the project schema).
+#[test]
+fn twin_dml_ops_carry_schema() {
+    let ins = r#"
+        import { insert } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            insert("t", { rows: [{ a: 1 }], schema: "app2" });
+        }};
+    "#;
+    assert_schema(&op_named(&record(ins, "insert_schema"), "insert"), "app2");
+
+    let upd = r#"
+        import { update } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            update("t", { set: { a: (c) => c("a") }, schema: "app2" });
+        }};
+    "#;
+    assert_schema(&op_named(&record(upd, "update_schema"), "update"), "app2");
+
+    let del = r#"
+        import { del } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            del("t", { where: (c) => c("a").gt(0), schema: "app2" });
+        }};
+    "#;
+    assert_schema(&op_named(&record(del, "delete_schema"), "delete"), "app2");
+
+    let bf = r#"
+        import { backfill } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            backfill("t", { set: { a: (c) => c("a") }, schema: "app2" });
+        }};
+    "#;
+    assert_schema(&op_named(&record(bf, "backfill_schema"), "backfill"), "app2");
+}
