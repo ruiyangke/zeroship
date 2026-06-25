@@ -50,7 +50,8 @@
 use std::collections::BTreeMap;
 
 use crate::declarative::{
-    build_table_snapshot, ir_fk_constraint_snapshot, CollectionDescriptor, DeclarativeError,
+    build_table_snapshot, ir_fk_constraint_snapshot, quote_ident_if_needed, CollectionDescriptor,
+    DeclarativeError,
 };
 use crate::drift::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot};
 use crate::ir::{
@@ -58,7 +59,6 @@ use crate::ir::{
 };
 use crate::ir_author::{
     create_index_snapshot, derived_constraint_name, index_method_access, ir_column_to_field,
-    quote_cols,
 };
 use zeroship_schema::query::SqlDialect;
 
@@ -295,21 +295,17 @@ pub fn fold_ops(
                 col.nullable = *nullable;
             }
             Op::AddConstraint { table, constraint, .. } => {
-                // Build the ConstraintSnapshot the SAME way the lower's snapshot half
-                // does (`lower_add_constraint`): FK via the shared `ir_fk_*`, UNIQUE
-                // via `UNIQUE (cols)` + derived `_key` name, PK via `PRIMARY KEY (cols)`
-                // + derived `_pkey` name, CHECK deferred. We must verify the target
-                // table FIRST (fail-closed) before stamping.
-                let cs = add_constraint_snapshot(table, project_schema, constraint)?;
+                // Build the constraint (+ its implicit index for UNIQUE/PK, which PG
+                // MATERIALIZES and live introspection reports) the SAME way the lower's
+                // snapshot half does: FK via the shared `ir_fk_*`, UNIQUE/PK with a
+                // `pg_get_constraintdef`-matching body + the implicit unique index PG
+                // names after the constraint, CHECK deferred. Verify the target table
+                // FIRST (fail-closed) before stamping.
+                let folded = add_constraint_snapshot(table, project_schema, constraint)?;
                 let snap = table_mut(&mut tables, table)?;
-                if snap.constraints.iter().any(|c| c.name == cs.name) {
-                    return Err(FoldError::DuplicateConstraint {
-                        table: table.clone(),
-                        name: cs.name,
-                    });
-                }
-                snap.constraints.push(cs);
+                push_folded_constraint(table, snap, folded)?;
                 snap.constraints.sort_by(|a, b| a.name.cmp(&b.name));
+                snap.indexes.sort_by(|a, b| a.name.cmp(&b.name));
             }
             Op::DropConstraint { table, name, .. } => {
                 let snap = table_mut(&mut tables, table)?;
@@ -321,6 +317,10 @@ pub fn fold_ops(
                         name: name.clone(),
                     });
                 }
+                // Dropping a UNIQUE/PK constraint ALSO drops its implicit unique index
+                // of the same name (PG cascades the index with the constraint); a FK
+                // has no index, so this retain is a no-op for it.
+                snap.indexes.retain(|i| &i.name != name);
             }
             Op::CreateIndex { table, columns, name, unique, using, .. } => {
                 let idx = create_index_snapshot(table, columns, name.as_deref(), *unique, *using);
@@ -489,22 +489,15 @@ fn fold_create_table_specs(
                     on_delete.map(RefAction::as_token),
                     on_update.map(RefAction::as_token),
                 );
-                push_constraint(table, snap, fk)?;
+                // A FOREIGN KEY materializes no index.
+                push_folded_constraint(table, snap, FoldedConstraint { constraint: fk, index: None })?;
             }
             IrConstraintKind::Unique { columns } => {
                 let name = c.name.as_deref().map_or_else(
                     || derived_constraint_name(table, columns, "key"),
                     str::to_string,
                 );
-                push_constraint(
-                    table,
-                    snap,
-                    ConstraintSnapshot {
-                        name,
-                        kind: "UNIQUE".to_string(),
-                        definition: format!("UNIQUE ({})", quote_cols(columns)),
-                    },
-                )?;
+                push_folded_constraint(table, snap, unique_constraint(&name, columns))?;
             }
         }
     }
@@ -530,30 +523,90 @@ fn fold_create_table_specs(
     Ok(())
 }
 
-/// Push a constraint onto the table, fail-closed on a name collision.
-fn push_constraint(
+/// A folded constraint + the implicit unique INDEX (if any) PG MATERIALIZES for it.
+///
+/// A UNIQUE / PRIMARY KEY constraint creates a `pg_constraint` row AND an implicit
+/// unique index of the SAME name (`pg_index` reports it), so live introspection
+/// returns BOTH. The fold must mirror both for `fold == introspect` to hold (the
+/// shared `build_table_snapshot` already does this for the system `<table>_pkey`).
+/// A FOREIGN KEY creates no index, so `index` is `None`.
+struct FoldedConstraint {
+    constraint: ConstraintSnapshot,
+    index: Option<IndexSnapshot>,
+}
+
+/// Push a folded constraint (+ its implicit index) onto the table, fail-closed on a
+/// name collision against an existing constraint OR index of the same name.
+fn push_folded_constraint(
     table: &str,
     snap: &mut TableSnapshot,
-    cs: ConstraintSnapshot,
+    folded: FoldedConstraint,
 ) -> Result<(), FoldError> {
-    if snap.constraints.iter().any(|c| c.name == cs.name) {
+    if snap.constraints.iter().any(|c| c.name == folded.constraint.name) {
         return Err(FoldError::DuplicateConstraint {
             table: table.to_string(),
-            name: cs.name,
+            name: folded.constraint.name,
         });
     }
-    snap.constraints.push(cs);
+    if let Some(idx) = &folded.index {
+        if snap.indexes.iter().any(|i| i.name == idx.name) {
+            return Err(FoldError::DuplicateIndex(idx.name.clone()));
+        }
+    }
+    snap.constraints.push(folded.constraint);
+    if let Some(idx) = folded.index {
+        snap.indexes.push(idx);
+    }
     Ok(())
 }
 
-/// The `ConstraintSnapshot` a stand-alone `addConstraint` op produces — built the
-/// SAME way as `IrAuthor::lower_add_constraint`'s snapshot half (FK via the shared
-/// `ir_fk_*`, UNIQUE/PK via the derived name + `quote_cols` body, CHECK deferred).
+/// Spell a `pg_get_constraintdef`-matching column list (conditional per-column
+/// quoting — bare for safe lowercase identifiers, double-quoted for reserved/mixed-
+/// case), so a folded UNIQUE/PK `definition` compares byte-for-byte with live (an
+/// unconditional quote would phantom-diff `UNIQUE ("handle")` against the catalog's
+/// `UNIQUE (handle)`).
+fn constraintdef_cols(cols: &[String]) -> String {
+    cols.iter().map(|c| quote_ident_if_needed(c)).collect::<Vec<_>>().join(", ")
+}
+
+/// A UNIQUE constraint + its implicit unique index (PG names the index after the
+/// constraint). The index covers the same columns, btree, unique.
+fn unique_constraint(name: &str, columns: &[String]) -> FoldedConstraint {
+    FoldedConstraint {
+        constraint: ConstraintSnapshot {
+            name: name.to_string(),
+            kind: "UNIQUE".to_string(),
+            definition: format!("UNIQUE ({})", constraintdef_cols(columns)),
+        },
+        index: Some(IndexSnapshot::btree(name.to_string(), true, columns.to_vec())),
+    }
+}
+
+/// A PRIMARY KEY constraint + its implicit unique index (PG names the index after
+/// the constraint). NOTE: the platform owns the synthetic `id` PK on every table
+/// (injected by `build_table_snapshot` as `<table>_pkey`), so a SECOND PK is never
+/// satisfiable — this helper exists for totality but the createTable / addConstraint
+/// arms refuse a user PK fail-closed before reaching it.
+fn pk_constraint(name: &str, columns: &[String]) -> FoldedConstraint {
+    FoldedConstraint {
+        constraint: ConstraintSnapshot {
+            name: name.to_string(),
+            kind: "PRIMARY KEY".to_string(),
+            definition: format!("PRIMARY KEY ({})", constraintdef_cols(columns)),
+        },
+        index: Some(IndexSnapshot::btree(name.to_string(), true, columns.to_vec())),
+    }
+}
+
+/// The folded constraint (+ implicit index) a stand-alone `addConstraint` op
+/// produces. FK via the shared `ir_fk_*` (no index); UNIQUE/PK via the derived name
+/// + a `pg_get_constraintdef`-matching body + the implicit unique index; CHECK
+/// deferred.
 fn add_constraint_snapshot(
     table: &str,
     project_schema: &str,
     constraint: &IrConstraint,
-) -> Result<ConstraintSnapshot, FoldError> {
+) -> Result<FoldedConstraint, FoldError> {
     let name = constraint.name.as_deref();
     match &constraint.kind {
         IrConstraintKind::Fk {
@@ -576,36 +629,31 @@ fn add_constraint_snapshot(
                     "addConstraint(fk) referencing a non-`id` column (later wave)",
                 ));
             }
-            Ok(ir_fk_constraint_snapshot(
-                project_schema,
-                name,
-                local,
-                references_table,
-                on_delete.map(RefAction::as_token),
-                on_update.map(RefAction::as_token),
-            ))
+            Ok(FoldedConstraint {
+                constraint: ir_fk_constraint_snapshot(
+                    project_schema,
+                    name,
+                    local,
+                    references_table,
+                    on_delete.map(RefAction::as_token),
+                    on_update.map(RefAction::as_token),
+                ),
+                index: None,
+            })
         }
         IrConstraintKind::Unique { columns } => {
             let cname = name.map_or_else(
                 || derived_constraint_name(table, columns, "key"),
                 str::to_string,
             );
-            Ok(ConstraintSnapshot {
-                name: cname,
-                kind: "UNIQUE".to_string(),
-                definition: format!("UNIQUE ({})", quote_cols(columns)),
-            })
+            Ok(unique_constraint(&cname, columns))
         }
         IrConstraintKind::Pk { columns } => {
             let cname = name.map_or_else(
                 || derived_constraint_name(table, columns, "pkey"),
                 str::to_string,
             );
-            Ok(ConstraintSnapshot {
-                name: cname,
-                kind: "PRIMARY KEY".to_string(),
-                definition: format!("PRIMARY KEY ({})", quote_cols(columns)),
-            })
+            Ok(pk_constraint(&cname, columns))
         }
         IrConstraintKind::Check { .. } => Err(FoldError::ExprDeferred("addConstraint(check)")),
     }
@@ -934,9 +982,17 @@ mod tests {
             },
         ])
         .unwrap();
-        let c = named.tables["users"].constraints.iter().find(|c| c.name == "u_handle").unwrap();
+        let t = &named.tables["users"];
+        let c = t.constraints.iter().find(|c| c.name == "u_handle").unwrap();
         assert_eq!(c.kind, "UNIQUE");
-        assert_eq!(c.definition, "UNIQUE (\"handle\")");
+        // `pg_get_constraintdef`-matching: conditional quoting (bare for a safe
+        // lowercase ident), NOT unconditional `UNIQUE ("handle")`.
+        assert_eq!(c.definition, "UNIQUE (handle)");
+        // A UNIQUE constraint also materializes the implicit unique index PG names
+        // after the constraint — live introspection reports it, so the fold must too.
+        let idx = t.indexes.iter().find(|i| i.name == "u_handle").unwrap();
+        assert!(idx.unique, "implicit unique index for the UNIQUE constraint");
+        assert_eq!(idx.columns, vec!["handle".to_string()]);
 
         // An unnamed UNIQUE derives `<table>_<cols>_key`.
         let derived = fold(&[
