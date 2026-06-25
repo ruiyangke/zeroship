@@ -109,12 +109,15 @@ fn checksum_of_ir_byte_stable_golden() {
             }],
             constraints: vec![],
             indexes: vec![],
+            schema: None,
+            existence_guard: None,
         },
         Op::Insert {
             table: "accounts".into(),
             columns: vec!["id".into()],
             rows: vec![vec![IrScalar::Int(7)]],
             on_conflict: None,
+            schema: None,
         },
     ];
     let deps = [dep()];
@@ -151,6 +154,8 @@ fn checksum_of_ir_deterministic_and_sensitive() {
         ty: zeroship_migrate::ir::ColType::Int,
         nullable: Some(true),
         default: None,
+        schema: None,
+        existence_guard: None,
     };
     let add_b = Op::AddColumn {
         table: "users".into(),
@@ -158,6 +163,8 @@ fn checksum_of_ir_deterministic_and_sensitive() {
         ty: zeroship_migrate::ir::ColType::Text,
         nullable: Some(true),
         default: None,
+        schema: None,
+        existence_guard: None,
     };
 
     let ops1 = vec![add_a.clone(), add_b.clone()];
@@ -248,12 +255,14 @@ fn checksum_of_ir_folds_scalars_and_ast_literals() {
         columns: vec!["a".into()],
         rows: vec![vec![IrScalar::Int(1)]],
         on_conflict: None,
+        schema: None,
     };
     let ins2 = Op::Insert {
         table: "t".into(),
         columns: vec!["a".into()],
         rows: vec![vec![IrScalar::Int(2)]],
         on_conflict: None,
+        schema: None,
     };
     let v1 = vec![ins1];
     let v2 = vec![ins2];
@@ -282,6 +291,7 @@ fn checksum_of_ir_folds_scalars_and_ast_literals() {
                 rhs: Box::new(Expr::lit(IrScalar::Int(threshold))),
             }),
             batch: None,
+            schema: None,
         }
     };
     let u0 = vec![mk_update(0)];
@@ -362,6 +372,8 @@ fn checksum_of_ir_is_identical_across_dialect_renders() {
         using: None,
         r#where: None,
         concurrently: Some(true),
+        schema: None,
+        existence_guard: None,
     }];
 
     // What a CORRECT IrAuthor does: compute the neutral flags ONCE and feed the
@@ -407,6 +419,8 @@ fn checksum_of_ir_jcs_is_key_sorted_stable() {
         }],
         constraints: vec![],
         indexes: vec![],
+        schema: None,
+        existence_guard: None,
     };
     let v = vec![ct];
     let a = Checksum::of_ir(&CanonicalOpList(&v), &flags, owner, &[], &[], &[]);

@@ -148,6 +148,8 @@ fn create_table_render_is_byte_identical_pg() {
         ],
         constraints: vec![],
         indexes: vec![],
+        schema: None,
+        existence_guard: None,
     }];
 
     let decl = declarative_pairs(&[desc]);
@@ -209,6 +211,8 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
         }],
         constraints: vec![],
         indexes: vec![],
+        schema: None,
+        existence_guard: None,
     }];
     let mut live = BTreeSet::new();
     live.insert("authors".to_string());
@@ -259,6 +263,8 @@ fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
         }],
         constraints: vec![],
         indexes: vec![],
+        schema: None,
+        existence_guard: None,
     }];
 
     let decl = declarative_pairs(&[desc]);
@@ -319,6 +325,8 @@ fn add_column_render_is_byte_identical_pg() {
         ty: ColType::String,
         nullable: None,
         default: None,
+        schema: None,
+        existence_guard: None,
     }];
     let mut live = BTreeSet::new();
     live.insert("people".to_string());
@@ -369,6 +377,8 @@ fn create_index_render_is_byte_identical_pg() {
         using: None,
         r#where: None,
         concurrently: None,
+        schema: None,
+        existence_guard: None,
     }];
     let mut live = BTreeSet::new();
     live.insert("events".to_string());
@@ -459,6 +469,8 @@ fn alter_column_type_render_is_byte_identical_pg() {
             column: "qty".into(),
             ty: ColType::Float,
             using: None,
+            schema: None,
+            existence_guard: None,
         },
         &live_set,
         SqlDialect::Postgres,
@@ -499,7 +511,13 @@ fn alter_column_nullability_render_is_byte_identical_pg() {
     let mut live_set = BTreeSet::new();
     live_set.insert("people".to_string());
     let ir = sql_pairs(&ir_lower_one(
-        Op::AlterColumnNullability { table: "people".into(), column: "name".into(), nullable: false },
+        Op::AlterColumnNullability {
+            table: "people".into(),
+            column: "name".into(),
+            nullable: false,
+            schema: None,
+            existence_guard: None,
+        },
         &live_set,
         SqlDialect::Postgres,
     ));
@@ -568,6 +586,8 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
                     references_columns: vec!["id".into()],
                 },
             },
+            schema: None,
+            existence_guard: None,
         },
         &live_set,
         SqlDialect::Postgres,
@@ -593,6 +613,8 @@ fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
                 name: Some("widgets_slug_key".into()),
                 kind: IrConstraintKind::Unique { columns: vec!["slug".into()] },
             },
+            schema: None,
+            existence_guard: None,
         },
         &live,
         SqlDialect::Postgres,
@@ -613,6 +635,8 @@ fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
                 name: Some("widgets_pkey".into()),
                 kind: IrConstraintKind::Pk { columns: vec!["a".into(), "b".into()] },
             },
+            schema: None,
+            existence_guard: None,
         },
         &live,
         SqlDialect::Postgres,
@@ -627,7 +651,12 @@ fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
     );
 
     let drop = sql_pairs(&ir_lower_one(
-        Op::DropConstraint { table: "widgets".into(), name: "widgets_slug_key".into() },
+        Op::DropConstraint {
+            table: "widgets".into(),
+            name: "widgets_slug_key".into(),
+            schema: None,
+            existence_guard: None,
+        },
         &live,
         SqlDialect::Postgres,
     ));
@@ -667,21 +696,44 @@ fn standalone_alter_and_constraint_are_sqlite_rebuild_only() {
     };
     for (op, tag) in [
         (
-            Op::AlterColumnType { table: "widgets".into(), column: "qty".into(), ty: ColType::Float, using: None },
+            Op::AlterColumnType {
+                table: "widgets".into(),
+                column: "qty".into(),
+                ty: ColType::Float,
+                using: None,
+                schema: None,
+                existence_guard: None,
+            },
             "alterColumnType",
         ),
         (
-            Op::AlterColumnNullability { table: "widgets".into(), column: "qty".into(), nullable: false },
+            Op::AlterColumnNullability {
+                table: "widgets".into(),
+                column: "qty".into(),
+                nullable: false,
+                schema: None,
+                existence_guard: None,
+            },
             "alterColumnNullability",
         ),
         (
             Op::AddConstraint {
                 table: "widgets".into(),
                 constraint: IrConstraint { name: None, kind: IrConstraintKind::Unique { columns: vec!["slug".into()] } },
+                schema: None,
+                existence_guard: None,
             },
             "addConstraint",
         ),
-        (Op::DropConstraint { table: "widgets".into(), name: "x".into() }, "dropConstraint"),
+        (
+            Op::DropConstraint {
+                table: "widgets".into(),
+                name: "x".into(),
+                schema: None,
+                existence_guard: None,
+            },
+            "dropConstraint",
+        ),
     ] {
         match one(op).unwrap_err() {
             IrLowerError::SqliteRebuildOnly(got) => assert_eq!(got, tag),
@@ -739,6 +791,8 @@ fn create_table_render_is_byte_identical_sqlite() {
         ],
         constraints: vec![],
         indexes: vec![],
+        schema: None,
+        existence_guard: None,
     }];
 
     let decl = declarative_pairs_for(&[desc], SqlDialect::Sqlite);
@@ -814,6 +868,8 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
         }],
         constraints: vec![],
         indexes: vec![],
+        schema: None,
+        existence_guard: None,
     }];
     let mut live = BTreeSet::new();
     live.insert("authors".to_string());
@@ -859,6 +915,8 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
         }],
         constraints: vec![],
         indexes: vec![],
+        schema: None,
+        existence_guard: None,
     }];
     let decl = declarative_pairs_for(&[desc], SqlDialect::Sqlite);
     let ir = ir_pairs_for(ops, &BTreeSet::new(), SqlDialect::Sqlite);
@@ -910,6 +968,8 @@ fn add_column_render_is_byte_identical_sqlite() {
         ty: ColType::String,
         nullable: None,
         default: None,
+        schema: None,
+        existence_guard: None,
     }];
     let mut live = BTreeSet::new();
     live.insert("people".to_string());
@@ -958,6 +1018,8 @@ fn create_index_render_is_byte_identical_sqlite() {
         using: None,
         r#where: None,
         concurrently: None,
+        schema: None,
+        existence_guard: None,
     }];
     let mut live = BTreeSet::new();
     live.insert("events".to_string());

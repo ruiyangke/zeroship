@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 
 use crate::ir::{IrVersionError, MigrationIr, Op};
 use crate::migration::{Checksum, MigrationFlags};
-use crate::validate::{validate_ir, AuthoringError, Dialect};
+use crate::validate::{validate_ir_scoped, AuthoringError, Dialect};
 
 /// A failure of the `.ir.json` load gate. Each variant maps to one ordered
 /// fail-closed step (§5.2).
@@ -340,6 +340,7 @@ pub fn load_ir_document(
     deploying_app: &str,
     target_dialect: Dialect,
     registry: &BTreeMap<String, String>,
+    schema_scope: Option<&crate::guard::SchemaScope>,
 ) -> Result<MigrationIr, IrLoadError> {
     // 1. deserialize (closed AST + numeric domain reject malformed/lossy here).
     let mut ir: MigrationIr =
@@ -348,8 +349,11 @@ pub fn load_ir_document(
     // 2. ir_version fail-closed — BEFORE any checksum/lower (§5.3).
     ir.check_ir_version()?;
 
-    // 3. structural validation — the authoritative gate over every Expr slot.
-    validate_ir(&ir, target_dialect, &[])?;
+    // 3. structural validation — the authoritative gate over every Expr slot, plus
+    //    (PR10) the schema-confinement + guard-direction gate threaded with the
+    //    active [`SchemaScope`]: a Confined cross-schema op is REFUSED here,
+    //    fail-closed, BEFORE lower (§2.7).
+    validate_ir_scoped(&ir, target_dialect, &[], schema_scope)?;
 
     // 4. ownership — over the ARTIFACT's claimed owner is irrelevant; the check is
     //    against the deploying app + the project registry (fail-closed unknown).
@@ -403,6 +407,8 @@ mod tests {
             }],
             constraints: vec![],
             indexes: vec![],
+            schema: None,
+            existence_guard: None,
         }
     }
 
@@ -418,7 +424,7 @@ mod tests {
     fn load_rejects_future_ir_version_before_anything_else() {
         let bytes = r#"{"ir_version": 999, "name": "m", "ops": [{"op":"dropTable","table":"t"}]}"#;
         let reg = registry(&[("t", "app_a")]);
-        let err = load_ir_document(bytes, "app_a", Dialect::Postgres, &reg).unwrap_err();
+        let err = load_ir_document(bytes, "app_a", Dialect::Postgres, &reg, None).unwrap_err();
         assert!(matches!(err, IrLoadError::Version(_)), "got: {err}");
     }
 
@@ -433,7 +439,7 @@ mod tests {
         let ops = r#"[{"op":"createTable","name":"users","columns":[{"name":"first","type":"text"}],"constraints":[{"kind":{"kind":"check","expr":{"node":"unaryOp","op":"isNotNull","operand":{"node":"colRef","name":"ghost"}}}}]}]"#;
         let bytes = ir_json(ops, "");
         let reg = registry(&[("users", "app_a")]);
-        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg).unwrap_err();
+        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None).unwrap_err();
         match err {
             IrLoadError::Validate(ae) => {
                 assert_eq!(ae.code, crate::validate::CODE_UNSUPPORTED);
@@ -451,8 +457,8 @@ mod tests {
         let bytes = ir_json(ops, "");
         let reg = registry(&[("users", "app_a")]);
         // PG accepts (validation OK), SQLite rejects.
-        assert!(load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg).is_ok());
-        let err = load_ir_document(&bytes, "app_a", Dialect::Sqlite, &reg).unwrap_err();
+        assert!(load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None).is_ok());
+        let err = load_ir_document(&bytes, "app_a", Dialect::Sqlite, &reg, None).unwrap_err();
         assert!(matches!(err, IrLoadError::Validate(_)), "got: {err}");
     }
 
@@ -463,7 +469,7 @@ mod tests {
         let ops = r#"[{"op":"delete","table":"users","where":{"node":"evilNode"}}]"#;
         let bytes = ir_json(ops, "");
         let reg = registry(&[("users", "app_a")]);
-        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg).unwrap_err();
+        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None).unwrap_err();
         assert!(matches!(err, IrLoadError::Deserialize(_)), "got: {err}");
     }
 
@@ -472,7 +478,7 @@ mod tests {
         let ops = r#"[{"op":"insert","table":"users","columns":["a"],"rows":[[9007199254740992]]}]"#;
         let bytes = ir_json(ops, "");
         let reg = registry(&[("users", "app_a")]);
-        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg).unwrap_err();
+        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None).unwrap_err();
         match err {
             IrLoadError::Deserialize(msg) => {
                 assert!(msg.contains(crate::ir::EXPR_INVALID_NUMERIC), "got: {msg}");
@@ -488,7 +494,7 @@ mod tests {
         let ops = r#"[{"op":"dropColumn","table":"users","column":"x"}]"#;
         let bytes = ir_json(ops, "");
         let reg = registry(&[("users", "app_owner")]); // owned by a DIFFERENT app
-        let err = load_ir_document(&bytes, "app_intruder", Dialect::Postgres, &reg).unwrap_err();
+        let err = load_ir_document(&bytes, "app_intruder", Dialect::Postgres, &reg, None).unwrap_err();
         match err {
             IrLoadError::NotTableOwner { table, owner, deploying_app, op_index } => {
                 assert_eq!(table, "users");
@@ -508,7 +514,7 @@ mod tests {
         let ops = r#"[{"op":"delete","table":"never_declared","where":{"node":"literal","value":true}}]"#;
         let bytes = ir_json(ops, "");
         let reg = registry(&[("users", "app_a")]); // no entry for `never_declared`
-        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg).unwrap_err();
+        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None).unwrap_err();
         match err {
             IrLoadError::NotTableOwner { table, owner, .. } => {
                 assert_eq!(table, "never_declared");
@@ -531,7 +537,7 @@ mod tests {
         let bytes = ir_json(ops, "");
         // The registry knows the victim app owns tables; the intruder owns nothing.
         let reg = registry(&[("victim_secrets", "app_victim")]);
-        let err = load_ir_document(&bytes, "app_intruder", Dialect::Postgres, &reg).unwrap_err();
+        let err = load_ir_document(&bytes, "app_intruder", Dialect::Postgres, &reg, None).unwrap_err();
         match err {
             IrLoadError::Validate(ae) => {
                 assert_eq!(ae.code, crate::validate::CODE_UNSUPPORTED);
@@ -555,7 +561,7 @@ mod tests {
         let ops = r#"[{"op":"dropIndex","name":"mine_idx","table":"mine"}]"#;
         let bytes = ir_json(ops, "");
         let reg = registry(&[("mine", "app_a")]);
-        load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg)
+        load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None)
             .expect("a table-hinted DropIndex on an owned table is allowed");
     }
 
@@ -566,7 +572,7 @@ mod tests {
         let ops = r#"[{"op":"dropIndex","name":"theirs_idx","table":"theirs"}]"#;
         let bytes = ir_json(ops, "");
         let reg = registry(&[("theirs", "app_owner")]);
-        let err = load_ir_document(&bytes, "app_intruder", Dialect::Postgres, &reg).unwrap_err();
+        let err = load_ir_document(&bytes, "app_intruder", Dialect::Postgres, &reg, None).unwrap_err();
         match err {
             IrLoadError::NotTableOwner { table, owner, .. } => {
                 assert_eq!(table, "theirs");
@@ -583,7 +589,7 @@ mod tests {
         let ops = r#"[{"op":"createTable","name":"fresh","columns":[{"name":"first","type":"text"}]},{"op":"addColumn","table":"fresh","column":"x","type":"int"}]"#;
         let bytes = ir_json(ops, "");
         let reg = registry(&[]); // `fresh` is brand new — not in the project registry
-        let ir = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg).unwrap();
+        let ir = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None).unwrap();
         assert_eq!(ir.owner_app, "app_a", "owner_app must be server-stamped");
     }
 
@@ -599,7 +605,7 @@ mod tests {
         let ops = r#"[{"op":"insert","table":"fresh","columns":["id"],"rows":[[1]]},{"op":"createTable","name":"fresh","columns":[{"name":"id","type":"int"}]}]"#;
         let bytes = ir_json(ops, "");
         let reg = registry(&[]); // `fresh` is brand new — declared later in THIS migration
-        let ir = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg)
+        let ir = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None)
             .expect("DML before its createTable passes ownership (order-independent pre-pass)");
         assert_eq!(ir.owner_app, "app_a");
     }
@@ -614,7 +620,7 @@ mod tests {
         let ops = r#"[{"op":"insert","table":"users","columns":["id"],"rows":[[1]]},{"op":"createTable","name":"users","columns":[{"name":"id","type":"int"}]}]"#;
         let bytes = ir_json(ops, "");
         let reg = registry(&[("users", "app_owner")]);
-        let err = load_ir_document(&bytes, "app_intruder", Dialect::Postgres, &reg).unwrap_err();
+        let err = load_ir_document(&bytes, "app_intruder", Dialect::Postgres, &reg, None).unwrap_err();
         match err {
             IrLoadError::NotTableOwner { table, owner, op_index, .. } => {
                 assert_eq!(table, "users");
@@ -633,7 +639,7 @@ mod tests {
         let ops = r#"[{"op":"createTable","name":"users","columns":[{"name":"first","type":"text"}]}]"#;
         let bytes = ir_json(ops, "");
         let reg = registry(&[("users", "app_owner")]);
-        let err = load_ir_document(&bytes, "app_intruder", Dialect::Postgres, &reg).unwrap_err();
+        let err = load_ir_document(&bytes, "app_intruder", Dialect::Postgres, &reg, None).unwrap_err();
         assert!(matches!(err, IrLoadError::NotTableOwner { .. }), "got: {err}");
     }
 
@@ -646,7 +652,8 @@ mod tests {
             ops: vec![create_table("fresh"), Op::DropColumn {
                 table: "fresh".into(),
                 column: "x".into(),
-                if_exists: None,
+                schema: None,
+                existence_guard: None,
             }],
             flags: crate::ir::IrFlagsOverride::default(),
             depends_on: vec![],
@@ -683,7 +690,7 @@ mod tests {
             "94383de0064858b3bff63599509d674a111aaad6874630c4c584357032ae2ced";
         let bytes = ir_json(ops, &format!(r#", "checksum": "{FROZEN_HINT}""#));
         let reg = registry(&[("users", "app_a")]);
-        let loaded = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg)
+        let loaded = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None)
             .expect("loader must accept the frozen-hex hint for this fixed IR");
         assert_eq!(loaded.checksum.as_deref(), Some(FROZEN_HINT));
     }
@@ -692,7 +699,12 @@ mod tests {
     fn load_accepts_a_correct_checksum_hint() {
         // Build the IR, compute the CORRECT hint domain checksum, embed it, and
         // assert the load accepts it.
-        let ops_vec = vec![Op::DropTable { table: "users".into(), if_exists: None, cascade: None }];
+        let ops_vec = vec![Op::DropTable {
+            table: "users".into(),
+            cascade: None,
+            schema: None,
+            existence_guard: None,
+        }];
         let ir = MigrationIr {
             ir_version: 1,
             name: "m".into(),
@@ -708,7 +720,7 @@ mod tests {
         let ops = r#"[{"op":"dropTable","table":"users"}]"#;
         let bytes = ir_json(ops, &format!(r#", "checksum": "{}""#, correct.as_str()));
         let reg = registry(&[("users", "app_a")]);
-        let loaded = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg).unwrap();
+        let loaded = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None).unwrap();
         // The hint is carried through (the engine recomputes; it does not strip it).
         assert_eq!(loaded.checksum.as_deref(), Some(correct.as_str()));
     }
@@ -718,7 +730,7 @@ mod tests {
         let ops = r#"[{"op":"dropTable","table":"users"}]"#;
         let bytes = ir_json(ops, r#", "checksum": "deadbeefdeadbeef""#);
         let reg = registry(&[("users", "app_a")]);
-        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg).unwrap_err();
+        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None).unwrap_err();
         match err {
             IrLoadError::ChecksumHintMismatch { hint, recomputed } => {
                 assert_eq!(hint, "deadbeefdeadbeef");
@@ -734,7 +746,7 @@ mod tests {
         let ops = r#"[{"op":"dropTable","table":"users"}]"#;
         let bytes = ir_json(ops, "");
         let reg = registry(&[("users", "app_a")]);
-        assert!(load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg).is_ok());
+        assert!(load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None).is_ok());
     }
 
     // ── HIGH: hint domain is not yet fully computable (deps/supersedes/flags) ─
@@ -756,7 +768,7 @@ mod tests {
             r#", "depends_on": ["m_0001"], "checksum": "deadbeefdeadbeef""#,
         );
         let reg = registry(&[("users", "app_a")]);
-        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg).unwrap_err();
+        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None).unwrap_err();
         assert!(
             matches!(err, IrLoadError::ChecksumHintNotComputable { .. }),
             "a hint over a depends_on-bearing IR must fail closed, got: {err}"
@@ -771,7 +783,7 @@ mod tests {
             r#", "supersedes": ["m_0001"], "checksum": "deadbeefdeadbeef""#,
         );
         let reg = registry(&[("users", "app_a")]);
-        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg).unwrap_err();
+        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None).unwrap_err();
         assert!(
             matches!(err, IrLoadError::ChecksumHintNotComputable { .. }),
             "a hint over a supersedes-bearing IR must fail closed, got: {err}"
@@ -788,7 +800,7 @@ mod tests {
             r#", "flags": {"transactional": false}, "checksum": "deadbeefdeadbeef""#,
         );
         let reg = registry(&[("users", "app_a")]);
-        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg).unwrap_err();
+        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None).unwrap_err();
         assert!(
             matches!(err, IrLoadError::ChecksumHintNotComputable { .. }),
             "a hint over a non-default-flags IR must fail closed, got: {err}"
@@ -804,7 +816,7 @@ mod tests {
         let bytes = ir_json(ops, r#", "depends_on": ["m_0001"]"#);
         let reg = registry(&[("users", "app_a")]);
         assert!(
-            load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg).is_ok(),
+            load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None).is_ok(),
             "a depends_on-bearing IR WITHOUT a hint must load"
         );
     }
@@ -818,7 +830,7 @@ mod tests {
         // ordering (§5.2).
         let bytes = r#"{"ir_version": 999, "name": "m", "ops": [{"op":"dropTable","table":"foreign"}], "checksum": "deadbeef"}"#;
         let reg = registry(&[("foreign", "other_app")]);
-        let err = load_ir_document(bytes, "app_a", Dialect::Postgres, &reg).unwrap_err();
+        let err = load_ir_document(bytes, "app_a", Dialect::Postgres, &reg, None).unwrap_err();
         assert!(matches!(err, IrLoadError::Version(_)), "version gate must precede others, got: {err}");
     }
 

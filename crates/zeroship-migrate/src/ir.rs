@@ -68,7 +68,7 @@ pub const EXPR_INVALID_NUMERIC: &str = "EXPR_INVALID_NUMERIC";
 /// engine that this build cannot faithfully interpret), per the AGENTS.md
 /// "wire-format versioning is code-evolution discipline, not user-compat" stance.
 /// A bump MUST be checksum-neutral for already-applied artifacts (§5.3).
-pub const CURRENT_IR_VERSION: u32 = 1;
+pub const CURRENT_IR_VERSION: u32 = 2;
 
 /// A [`MigrationIr`] declared an `ir_version` this engine build does not
 /// understand — a FUTURE version `> CURRENT_IR_VERSION` (§5.3, design line 888).
@@ -506,9 +506,43 @@ pub struct IrBatch {
     pub batch_size: SafeU64,
 }
 
+/// **PR10** — the uniform existence-guard modifier (§2.7). Carried on a guarded
+/// DDL op as `existence_guard: Option<ExistenceGuard>` (omitted-when-absent on
+/// the wire). The engine SYNTHESIZES the guard via an executor-side CATALOG PROBE
+/// (decide-in-Rust: probe → run-or-skip), NEVER by lowering to a native
+/// `IF [NOT] EXISTS` clause — native support is patchy and asymmetric across PG /
+/// SQLite (PG has no `ADD CONSTRAINT IF NOT EXISTS` / none on alter/rename;
+/// SQLite has no `ADD COLUMN IF NOT EXISTS` / none on drop-column/rename). A
+/// CLOSED 2-variant enum so serde rejects any other token at deserialize and the
+/// validate-time legal-direction check (`ifNotExists` on create*/add*; `ifExists`
+/// on drop*/rename/alter) is a total match. Camel-cased on the wire
+/// (`"ifNotExists"`, `"ifExists"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ExistenceGuard {
+    /// Run the op only if the target object is ABSENT; if PRESENT with the
+    /// declared shape it is a journaled satisfied no-op, and if PRESENT with a
+    /// DIVERGENT shape the apply FAILS CLOSED (never a silent skip). Legal on the
+    /// create*/add* family (`createTable`/`addColumn`/`createIndex`/`addConstraint`).
+    IfNotExists,
+    /// Run the drop/alter only if the target object is PRESENT; if ABSENT it is a
+    /// journaled satisfied no-op (a drop has no shape to verify — presence alone
+    /// governs). Legal on the drop*/rename/alter family
+    /// (`dropTable`/`dropColumn`/`dropIndex`/`dropConstraint`/`renameColumn`/`alterColumn*`).
+    IfExists,
+}
+
 /// The CLOSED `op.*` operation enum (§2.3), internally tagged on `"op"` and
 /// camel-cased (`{"op":"createTable", …}`). NO `untagged`, NO `flatten` on the
 /// enum itself — see the module-level note + the ADR.
+///
+/// **PR10** — every table-targeting variant carries an optional
+/// `schema: Option<String>` (the schema-qualifier — honored under Trusted/Platform,
+/// pinned/refused under Confined; §2.7) and, where guardable, an optional
+/// `existence_guard: Option<ExistenceGuard>`. Both are omitted-when-absent on the
+/// wire (`skip_serializing_if = "Option::is_none"`), so they fold into
+/// [`Checksum::of_ir`](crate::migration::Checksum::of_ir) ONLY when present and are
+/// checksum-neutral when unset — preserving the cross-impl single-checksum invariant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
 pub enum Op {
@@ -524,17 +558,29 @@ pub enum Op {
         /// Indexes created with the table.
         #[serde(default)]
         indexes: Vec<IrIndex>,
+        /// **PR10** — the schema qualifier (§2.7). Honored under Trusted/Platform,
+        /// pinned/refused under Confined. Omitted-when-absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifNotExists` legal here). Engine-
+        /// synthesized via a catalog probe; never a native `IF NOT EXISTS`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
     },
     /// `DROP TABLE`.
     DropTable {
         /// Table to drop.
         table: String,
-        /// `IF EXISTS`.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        if_exists: Option<bool>,
         /// `CASCADE`.
         #[serde(skip_serializing_if = "Option::is_none")]
         cascade: Option<bool>,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifExists` legal here). Engine-
+        /// synthesized via a catalog probe; never a native `IF EXISTS`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
     },
     /// `ALTER TABLE … ADD COLUMN`.
     AddColumn {
@@ -551,6 +597,12 @@ pub enum Op {
         /// Structured default (typed literal or synth scalar) — never raw SQL.
         #[serde(skip_serializing_if = "Option::is_none")]
         default: Option<IrDefault>,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifNotExists` legal here).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
     },
     /// `ALTER TABLE … DROP COLUMN`.
     DropColumn {
@@ -558,9 +610,12 @@ pub enum Op {
         table: String,
         /// Column to drop.
         column: String,
-        /// `IF EXISTS`.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        if_exists: Option<bool>,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifExists` legal here).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
     },
     /// `CREATE [UNIQUE] INDEX [CONCURRENTLY]`.
     CreateIndex {
@@ -583,6 +638,12 @@ pub enum Op {
         /// `CONCURRENTLY`.
         #[serde(skip_serializing_if = "Option::is_none")]
         concurrently: Option<bool>,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifNotExists` legal here).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
     },
     /// `DROP INDEX [CONCURRENTLY]`.
     DropIndex {
@@ -603,12 +664,15 @@ pub enum Op {
         /// authored index's declared uniqueness; absent/false ⇒ a plain drop.
         #[serde(skip_serializing_if = "Option::is_none")]
         unique: Option<bool>,
-        /// `IF EXISTS`.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        if_exists: Option<bool>,
         /// `CONCURRENTLY`.
         #[serde(skip_serializing_if = "Option::is_none")]
         concurrently: Option<bool>,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifExists` legal here).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
     },
     /// `ALTER TABLE … ALTER COLUMN … TYPE …`.
     AlterColumnType {
@@ -622,6 +686,12 @@ pub enum Op {
         /// `USING` cast expression (a closed-AST node, never raw SQL — property A).
         #[serde(skip_serializing_if = "Option::is_none")]
         using: Option<Expr>,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifExists` legal here).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
     },
     /// `ALTER TABLE … ALTER COLUMN … SET/DROP NOT NULL`.
     AlterColumnNullability {
@@ -631,6 +701,12 @@ pub enum Op {
         column: String,
         /// The desired nullability.
         nullable: bool,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifExists` legal here).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
     },
     /// `ALTER TABLE … RENAME COLUMN …` (the new type carried for re-derivation).
     RenameColumn {
@@ -643,6 +719,12 @@ pub enum Op {
         /// The column type after rename.
         #[serde(rename = "type")]
         ty: ColType,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifExists` legal here).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
     },
     /// `ALTER TABLE … ADD CONSTRAINT …`.
     AddConstraint {
@@ -650,6 +732,12 @@ pub enum Op {
         table: String,
         /// The constraint to add.
         constraint: IrConstraint,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifNotExists` legal here).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
     },
     /// `ALTER TABLE … DROP CONSTRAINT …`.
     DropConstraint {
@@ -657,6 +745,12 @@ pub enum Op {
         table: String,
         /// Constraint name.
         name: String,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifExists` legal here).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
     },
     /// `INSERT INTO … VALUES …` with typed scalar rows.
     Insert {
@@ -673,6 +767,10 @@ pub enum Op {
         /// insert (portable on both backends).
         #[serde(skip_serializing_if = "Option::is_none")]
         on_conflict: Option<IrOnConflict>,
+        /// **PR10** — the schema qualifier (§2.7). DML carries `schema` but NO
+        /// existence guard (existence guards govern DDL object presence).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
     },
     /// `UPDATE … SET … WHERE …` (optionally batched).
     Update {
@@ -686,6 +784,9 @@ pub enum Op {
         /// Optional batching knob.
         #[serde(skip_serializing_if = "Option::is_none")]
         batch: Option<IrBatch>,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
     },
     /// `DELETE FROM … WHERE …`.
     ///
@@ -703,6 +804,9 @@ pub enum Op {
         /// Optional LIMIT (JS-safe-integer bounded).
         #[serde(skip_serializing_if = "Option::is_none")]
         limit: Option<SafeU64>,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
     },
     /// A resumable, cursor-paged backfill.
     Backfill {
@@ -719,6 +823,9 @@ pub enum Op {
         filter: Option<Expr>,
         /// Backfill name (journaled progress key).
         name: String,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
     },
 }
 
@@ -754,6 +861,76 @@ impl Op {
             // present it is the touched table, otherwise the op names only the
             // index (resolved against the live schema downstream).
             Op::DropIndex { table, .. } => table.as_deref(),
+        }
+    }
+
+    /// **PR10** — the author-supplied schema qualifier on this op, if any (§2.7).
+    /// EXHAUSTIVE over the closed [`Op`] set so a new variant must consciously
+    /// declare whether it carries a `schema`. Threaded into the Confined
+    /// cross-schema VALIDATE gate (refuse `schema != project_schema`) and the
+    /// effective-schema resolution at lower.
+    #[must_use]
+    pub fn schema(&self) -> Option<&str> {
+        match self {
+            Op::CreateTable { schema, .. }
+            | Op::DropTable { schema, .. }
+            | Op::AddColumn { schema, .. }
+            | Op::DropColumn { schema, .. }
+            | Op::CreateIndex { schema, .. }
+            | Op::DropIndex { schema, .. }
+            | Op::AlterColumnType { schema, .. }
+            | Op::AlterColumnNullability { schema, .. }
+            | Op::RenameColumn { schema, .. }
+            | Op::AddConstraint { schema, .. }
+            | Op::DropConstraint { schema, .. }
+            | Op::Insert { schema, .. }
+            | Op::Update { schema, .. }
+            | Op::Delete { schema, .. }
+            | Op::Backfill { schema, .. } => schema.as_deref(),
+        }
+    }
+
+    /// **PR10** — the existence guard on this op, if any (§2.7). `None` for the DML
+    /// ops (`insert`/`update`/`delete`/`backfill`), which carry no guard.
+    /// EXHAUSTIVE over the closed [`Op`] set.
+    #[must_use]
+    pub fn existence_guard(&self) -> Option<ExistenceGuard> {
+        match self {
+            Op::CreateTable { existence_guard, .. }
+            | Op::DropTable { existence_guard, .. }
+            | Op::AddColumn { existence_guard, .. }
+            | Op::DropColumn { existence_guard, .. }
+            | Op::CreateIndex { existence_guard, .. }
+            | Op::DropIndex { existence_guard, .. }
+            | Op::AlterColumnType { existence_guard, .. }
+            | Op::AlterColumnNullability { existence_guard, .. }
+            | Op::RenameColumn { existence_guard, .. }
+            | Op::AddConstraint { existence_guard, .. }
+            | Op::DropConstraint { existence_guard, .. } => *existence_guard,
+            Op::Insert { .. } | Op::Update { .. } | Op::Delete { .. } | Op::Backfill { .. } => None,
+        }
+    }
+
+    /// **PR10** — the legal existence-guard DIRECTION for this op variant, or
+    /// `None` if the variant admits no guard (the DML ops). The validate-time
+    /// legal-direction check rejects a guard whose direction does not match this:
+    /// `ifNotExists` on the create*/add* family, `ifExists` on the
+    /// drop*/rename/alter family. EXHAUSTIVE over the closed [`Op`] set.
+    #[must_use]
+    pub fn legal_existence_guard(&self) -> Option<ExistenceGuard> {
+        match self {
+            Op::CreateTable { .. }
+            | Op::AddColumn { .. }
+            | Op::CreateIndex { .. }
+            | Op::AddConstraint { .. } => Some(ExistenceGuard::IfNotExists),
+            Op::DropTable { .. }
+            | Op::DropColumn { .. }
+            | Op::DropIndex { .. }
+            | Op::AlterColumnType { .. }
+            | Op::AlterColumnNullability { .. }
+            | Op::RenameColumn { .. }
+            | Op::DropConstraint { .. } => Some(ExistenceGuard::IfExists),
+            Op::Insert { .. } | Op::Update { .. } | Op::Delete { .. } | Op::Backfill { .. } => None,
         }
     }
 }
@@ -1230,11 +1407,13 @@ mod tests {
     fn op_is_internally_tagged_on_op_key() {
         let op = Op::DropTable {
             table: "t".into(),
-            if_exists: Some(true),
             cascade: None,
+            schema: None,
+            existence_guard: Some(ExistenceGuard::IfExists),
         };
         let v = serde_json::to_value(&op).unwrap();
         assert_eq!(v["op"], "dropTable", "tag must be the camelCase variant on key \"op\"");
+        assert_eq!(v["existenceGuard"], "ifExists", "the guard serializes camelCased");
         // Round-trips.
         let back: Op = serde_json::from_value(v).unwrap();
         assert_eq!(op, back);
@@ -1284,6 +1463,8 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
+            schema: None,
+            existence_guard: None,
         };
         let b = Op::AddColumn {
             table: "t".into(),
@@ -1291,6 +1472,8 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
+            schema: None,
+            existence_guard: None,
         };
         let fwd = CanonicalOpList(&[a.clone(), b.clone()]).canonical_bytes();
         let rev = CanonicalOpList(&[b, a]).canonical_bytes();
@@ -1376,7 +1559,12 @@ mod tests {
             ir_version: CURRENT_IR_VERSION,
             name: "m".into(),
             owner_app: String::new(),
-            ops: vec![Op::DropTable { table: "t".into(), if_exists: None, cascade: None }],
+            ops: vec![Op::DropTable {
+                table: "t".into(),
+                cascade: None,
+                schema: None,
+                existence_guard: None,
+            }],
             flags: IrFlagsOverride::default(),
             depends_on: vec![],
             supersedes: vec![],
@@ -1416,7 +1604,12 @@ mod tests {
         // excludes the hint, and (2) a determinism check over identical inputs.
         // Build two MigrationIr differing only in `.checksum` to make the intent
         // legible; the equality below is true by the signature, not by chance.
-        let base_ops = vec![Op::DropTable { table: "t".into(), if_exists: None, cascade: None }];
+        let base_ops = vec![Op::DropTable {
+            table: "t".into(),
+            cascade: None,
+            schema: None,
+            existence_guard: None,
+        }];
         let with_hint = MigrationIr {
             ir_version: 1,
             name: "m".into(),
@@ -1451,6 +1644,121 @@ mod tests {
             of_ir_for(&without_hint).as_str(),
             "the advisory `.checksum` hint must NOT participate in Checksum::of_ir"
         );
+    }
+
+    // ---- PR10: schema qualifier + existence guard (wire shape) ----
+
+    /// The legacy native `if_exists` field is GONE (folded into `existence_guard`).
+    /// `deny_unknown_fields` rejects a `.ir.json` still carrying it — the intentional
+    /// wire break. RED before the field removal (it deserialized fine pre-PR10).
+    #[test]
+    fn legacy_if_exists_field_is_rejected() {
+        let json = r#"{"op":"dropTable","table":"t","if_exists":true}"#;
+        let err = serde_json::from_str::<Op>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("if_exists") || err.to_string().contains("unknown field"),
+            "the removed if_exists field must be rejected by deny_unknown_fields, got: {err}"
+        );
+        // The camelCase native spelling is likewise gone.
+        let json2 = r#"{"op":"dropTable","table":"t","ifExists":true}"#;
+        assert!(serde_json::from_str::<Op>(json2).is_err(), "native ifExists bool is gone too");
+    }
+
+    /// `schema` round-trips and is OMITTED on the wire when absent (the
+    /// cross-impl determinism contract). When present it serializes as `"schema"`.
+    #[test]
+    fn schema_qualifier_round_trips_and_omits_when_absent() {
+        let with = Op::AddColumn {
+            table: "t".into(),
+            column: "c".into(),
+            ty: ColType::Int,
+            nullable: None,
+            default: None,
+            schema: Some("app2".into()),
+            existence_guard: None,
+        };
+        let v = serde_json::to_value(&with).unwrap();
+        assert_eq!(v["schema"], "app2");
+        assert!(v.get("existenceGuard").is_none(), "absent guard omitted: {v}");
+        let back: Op = serde_json::from_value(v).unwrap();
+        assert_eq!(with, back);
+
+        let without = Op::AddColumn {
+            table: "t".into(),
+            column: "c".into(),
+            ty: ColType::Int,
+            nullable: None,
+            default: None,
+            schema: None,
+            existence_guard: None,
+        };
+        let v2 = serde_json::to_value(&without).unwrap();
+        assert!(v2.get("schema").is_none(), "absent schema is omitted on the wire: {v2}");
+    }
+
+    /// `existence_guard` round-trips as the camelCase token; the legal-direction
+    /// accessors classify each variant's admissible guard.
+    #[test]
+    fn existence_guard_round_trips_and_classifies() {
+        let create = Op::CreateTable {
+            name: "t".into(),
+            columns: vec![],
+            constraints: vec![],
+            indexes: vec![],
+            schema: None,
+            existence_guard: Some(ExistenceGuard::IfNotExists),
+        };
+        let v = serde_json::to_value(&create).unwrap();
+        assert_eq!(v["existenceGuard"], "ifNotExists");
+        assert_eq!(create.legal_existence_guard(), Some(ExistenceGuard::IfNotExists));
+        assert_eq!(create.existence_guard(), Some(ExistenceGuard::IfNotExists));
+
+        let drop = Op::DropColumn {
+            table: "t".into(),
+            column: "c".into(),
+            schema: None,
+            existence_guard: Some(ExistenceGuard::IfExists),
+        };
+        assert_eq!(drop.legal_existence_guard(), Some(ExistenceGuard::IfExists));
+        // DML carries no guard.
+        let ins = Op::Insert {
+            table: "t".into(),
+            columns: vec!["a".into()],
+            rows: vec![vec![IrScalar::Int(1)]],
+            on_conflict: None,
+            schema: Some("app2".into()),
+        };
+        assert_eq!(ins.legal_existence_guard(), None);
+        assert_eq!(ins.existence_guard(), None);
+        assert_eq!(ins.schema(), Some("app2"));
+    }
+
+    /// An ABSENT `schema`/`existence_guard` is checksum-NEUTRAL (omitted on the
+    /// wire, so the canonical bytes are byte-identical to a pre-PR10 op of the
+    /// same logical shape); a PRESENT one FOLDS (shifts the bytes).
+    #[test]
+    fn schema_and_guard_fold_only_when_present() {
+        let bare = Op::DropTable {
+            table: "t".into(),
+            cascade: None,
+            schema: None,
+            existence_guard: None,
+        };
+        let schemaed = Op::DropTable {
+            table: "t".into(),
+            cascade: None,
+            schema: Some("app2".into()),
+            existence_guard: None,
+        };
+        let guarded = Op::DropTable {
+            table: "t".into(),
+            cascade: None,
+            schema: None,
+            existence_guard: Some(ExistenceGuard::IfExists),
+        };
+        let cb = |op: &Op| CanonicalOpList(std::slice::from_ref(op)).canonical_bytes();
+        assert_ne!(cb(&bare), cb(&schemaed), "present schema must shift the canonical bytes");
+        assert_ne!(cb(&bare), cb(&guarded), "present guard must shift the canonical bytes");
     }
 
     #[test]

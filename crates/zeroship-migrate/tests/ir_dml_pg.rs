@@ -104,6 +104,7 @@ async fn author_and_apply(
         APP,
         zeroship_migrate::validate::Dialect::Postgres,
         reg,
+        None,
     )
     .expect("load gate");
     let plan = author.lower_plan(&document, &LiveSchema::default()).expect("lower the IR plan on PG");
@@ -449,6 +450,7 @@ async fn ir_unresolved_colref_rejected_at_apply_seam_on_pg() {
         APP,
         zeroship_migrate::validate::Dialect::Postgres,
         &registry(&[("codes", APP)]),
+        None,
     )
     .expect("load gate (DML ColRef resolution is an apply-seam reject, not a load reject)");
     let err = author

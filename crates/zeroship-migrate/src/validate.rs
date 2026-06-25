@@ -53,6 +53,24 @@ pub const CODE_EXPR_NOT_PORTABLE: &str = "EXPR_NOT_PORTABLE";
 pub const CODE_DIALECT_SCOPE_PGONLY: &str = "DIALECT_SCOPE_PGONLY";
 /// An op-function called outside an active recorder (§3.1) — emitted JS-side.
 pub const CODE_OP_OUTSIDE_RECORDER: &str = "OP_OUTSIDE_RECORDER";
+/// **PR10** — an op naming a `schema` the active [`SchemaScope`](crate::guard::SchemaScope)
+/// does not permit (§2.7). The Confined creator profile pins the project schema:
+/// an explicit `schema != project_schema` is REFUSED at validate-time, fail-closed,
+/// BEFORE lower — additional and EARLIER than the migrator-role 42501 + the
+/// parse-guard cross-schema denial (which stay unchanged). The Platform profile
+/// permits only its allow-list. The friendly remedy is "drop the qualifier or name
+/// the project schema".
+pub const CODE_CROSS_SCHEMA: &str = "CROSS_SCHEMA";
+/// **PR10** — a `schema` qualifier that is not a safe bare SQL identifier (§2.7):
+/// empty, not alpha/`_`-leading, or carrying a non-`[A-Za-z0-9_]` char. The schema
+/// is an author-controlled identifier the engine double-quotes; this rejects an
+/// injection-shaped value (`"; DROP …`, embedded quote) at validate-time, before
+/// it can reach the render seam.
+pub const CODE_INVALID_SCHEMA_IDENT: &str = "INVALID_SCHEMA_IDENT";
+/// **PR10** — an existence guard whose DIRECTION is illegal for the op variant
+/// (§2.7): an `ifExists` on a create*/add* op, or an `ifNotExists` on a
+/// drop*/rename/alter op. A structured authoring error, not a render-time blow-up.
+pub const CODE_GUARD_DIRECTION: &str = "GUARD_DIRECTION";
 
 /// The dialect a structured rejection pertains to (§8.8 `dialect` field).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,9 +282,32 @@ pub fn validate_ir(
     target_dialect: Dialect,
     ts_locations: &[Option<String>],
 ) -> Result<(), AuthoringError> {
+    validate_ir_scoped(ir, target_dialect, ts_locations, None)
+}
+
+/// **PR10** — [`validate_ir`] threaded with the active schema confinement scope
+/// (§2.7). `schema_scope`:
+/// - `None` ⇒ the **Trusted** posture (the public dbmate-like CLI): NO cross-schema
+///   confinement (the operator owns the DB). The legal-direction + schema-ident
+///   checks STILL run (they are trust-independent safety/authoring checks).
+/// - `Some(SchemaScope::Single(project_schema))` ⇒ the **Confined** creator
+///   profile: an explicit `schema != project_schema` is REFUSED fail-closed
+///   ([`CODE_CROSS_SCHEMA`]).
+/// - `Some(SchemaScope::Allowlist([...]))` ⇒ the **Platform** profile: an explicit
+///   `schema` must be a member of the allow-list.
+///
+/// # Errors
+/// The first [`AuthoringError`] any op produces (cross-schema, invalid schema ident,
+/// illegal guard direction, or an embedded-expression rejection).
+pub fn validate_ir_scoped(
+    ir: &crate::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+    schema_scope: Option<&crate::guard::SchemaScope>,
+) -> Result<(), AuthoringError> {
     for (op_index, op) in ir.ops.iter().enumerate() {
         let ts = ts_locations.get(op_index).and_then(Option::as_deref);
-        validate_op(op, target_dialect, op_index, ts)?;
+        validate_op_scoped(op, target_dialect, op_index, ts, schema_scope)?;
     }
     Ok(())
 }
@@ -283,7 +324,29 @@ pub fn validate_op(
     op_index: usize,
     ts_location: Option<&str>,
 ) -> Result<(), AuthoringError> {
+    // The bare entry keeps the Trusted posture (no cross-schema confinement); the
+    // schema-ident + guard-direction checks still run (trust-independent).
+    validate_op_scoped(op, target_dialect, op_index, ts_location, None)
+}
+
+/// **PR10** — [`validate_op`] threaded with the active
+/// [`SchemaScope`](crate::guard::SchemaScope) (§2.7). Runs the schema/guard gate
+/// FIRST, then the per-op expression-slot checks.
+///
+/// # Errors
+/// Returns the first [`AuthoringError`] the gate or any embedded expression produces.
+pub fn validate_op_scoped(
+    op: &crate::ir::Op,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+    schema_scope: Option<&crate::guard::SchemaScope>,
+) -> Result<(), AuthoringError> {
     use crate::ir::{IrConstraintKind, Op};
+
+    // **PR10** — schema confinement + guard-direction gate, BEFORE any expression
+    // walk. Fail-closed: a Confined cross-schema op never reaches lower.
+    validate_op_schema_and_guard(op, target_dialect, op_index, ts_location, schema_scope)?;
 
     // A `Check` constraint's expr validates against the given scope.
     let check_constraint =
@@ -295,7 +358,7 @@ pub fn validate_op(
         };
 
     match op {
-        Op::CreateTable { name, columns, constraints, indexes } => {
+        Op::CreateTable { name, columns, constraints, indexes, .. } => {
             // A createTable is self-contained: resolve ColRefs against its own
             // declared columns PLUS the seven platform system fields the engine
             // auto-injects at lower/render time (`declarative::SYSTEM_FIELD_NAMES`).
@@ -333,7 +396,7 @@ pub fn validate_op(
             }
             Ok(())
         }
-        Op::AddConstraint { table, constraint } => {
+        Op::AddConstraint { table, constraint, .. } => {
             let scope = TargetScope::structural_only(table);
             check_constraint(&constraint.kind, &scope)
         }
@@ -405,6 +468,125 @@ pub fn validate_op(
         | Op::DropConstraint { .. }
         | Op::Insert { .. } => Ok(()),
     }
+}
+
+/// **PR10** — validate an op's `schema` qualifier + existence-guard direction
+/// (§2.7), BEFORE the per-op expression-slot checks. Three fail-closed checks:
+///
+/// 1. **Schema identifier safety** — if a `schema` is present it MUST be a safe bare
+///    identifier ([`is_safe_schema_ident`], mirroring `dml.rs`'s `quote_ident`
+///    shape); an injection-shaped value is rejected ([`CODE_INVALID_SCHEMA_IDENT`])
+///    REGARDLESS of profile (the engine double-quotes it, but a fail-closed
+///    validate-time reject is the defense the names-are-strings stance needs).
+/// 2. **Cross-schema confinement** — under a `Some(scope)` (Confined/Platform) an
+///    explicit `schema` the scope does not `permit` is refused
+///    ([`CODE_CROSS_SCHEMA`]). Absent schema, or a permitted one, passes. Trusted
+///    (`None`) skips this — no confinement.
+/// 3. **Existence-guard direction** — a guard whose direction is illegal for the op
+///    variant is refused ([`CODE_GUARD_DIRECTION`]).
+fn validate_op_schema_and_guard(
+    op: &crate::ir::Op,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+    schema_scope: Option<&crate::guard::SchemaScope>,
+) -> Result<(), AuthoringError> {
+    let mk = |code: &str, reason: String, fix: String| AuthoringError {
+        code: code.to_string(),
+        kind: None,
+        op_index,
+        ts_location: ts_location.map(str::to_string),
+        dialect: target_dialect,
+        reason,
+        suggested_fix: Some(fix),
+    };
+
+    // (1) + (2) — the schema qualifier.
+    if let Some(schema) = op.schema() {
+        if !is_safe_schema_ident(schema) {
+            return Err(mk(
+                CODE_INVALID_SCHEMA_IDENT,
+                format!(
+                    "schema qualifier {schema:?} is not a safe bare SQL identifier \
+                     (must be non-empty, start with a letter or '_', and contain only \
+                     letters, digits, or '_')"
+                ),
+                "use a plain identifier for the schema, e.g. schema: \"app2\"".to_string(),
+            ));
+        }
+        if let Some(scope) = schema_scope {
+            if !scope.permits(schema) {
+                let (reason, fix) = match scope {
+                    crate::guard::SchemaScope::Single(project) => (
+                        format!(
+                            "this migration is CONFINED to its project schema {project:?}, \
+                             but op names a different schema {schema:?} — a cross-schema \
+                             migration is refused fail-closed (the creator profile pins the \
+                             project schema; the migrator role would also reject it, but this \
+                             is the earlier, friendlier gate)"
+                        ),
+                        format!(
+                            "drop the schema qualifier (it defaults to {project:?}) or set \
+                             schema: {project:?}"
+                        ),
+                    ),
+                    crate::guard::SchemaScope::Allowlist(allowed) => (
+                        format!(
+                            "op names schema {schema:?}, which is not in the permitted \
+                             platform schema allow-list {allowed:?}"
+                        ),
+                        format!("name one of the permitted schemas {allowed:?}"),
+                    ),
+                };
+                return Err(mk(CODE_CROSS_SCHEMA, reason, fix));
+            }
+        }
+    }
+
+    // (3) — the existence-guard direction.
+    if let Some(guard) = op.existence_guard() {
+        match op.legal_existence_guard() {
+            Some(legal) if legal == guard => {}
+            Some(_) => {
+                let (got, want, family) = match guard {
+                    crate::ir::ExistenceGuard::IfExists => {
+                        ("ifExists", "ifNotExists", "create*/add*")
+                    }
+                    crate::ir::ExistenceGuard::IfNotExists => {
+                        ("ifNotExists", "ifExists", "drop*/rename/alter")
+                    }
+                };
+                return Err(mk(
+                    CODE_GUARD_DIRECTION,
+                    format!(
+                        "existence guard {got:?} is not legal on this op (the {family} family \
+                         takes {want:?})"
+                    ),
+                    format!("use {want:?} on this op, or drop the guard"),
+                ));
+            }
+            None => {
+                // A DML op carries no guard slot, so `existence_guard()` is `None`
+                // there and this arm is unreachable; defensively refuse.
+                return Err(mk(
+                    CODE_GUARD_DIRECTION,
+                    "this op admits no existence guard".to_string(),
+                    "remove the existence guard from this op".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// **PR10** — a safe bare SQL identifier for a schema qualifier (§2.7): non-empty,
+/// alpha/`_`-leading, all chars `[A-Za-z0-9_]`. Mirrors `dml.rs`'s `quote_ident`
+/// shape so the validate-time gate and the emitter's double-quoting agree.
+#[must_use]
+fn is_safe_schema_ident(s: &str) -> bool {
+    !s.is_empty()
+        && s.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// **Apply/render-seam ColRef resolution (rule (c), MED).** Re-run the
@@ -1429,6 +1611,8 @@ mod tests {
                 },
             }],
             indexes: vec![],
+            schema: None,
+            existence_guard: None,
         }]);
         let err = validate_ir(&ir, Dialect::Postgres, &[]).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
@@ -1510,6 +1694,130 @@ mod tests {
         }
     }
 
+    // ── PR10: schema confinement + guard direction + schema-ident safety ────────
+
+    /// CONFINED — an explicit `schema != project_schema` is REFUSED fail-closed at
+    /// validate-time with the structured `CROSS_SCHEMA` code (§2.7). RED before the
+    /// gate (the op would have lowered cross-schema). An op whose schema EQUALS the
+    /// project schema, or omits it, passes.
+    #[test]
+    fn confined_cross_schema_op_is_refused_at_validate() {
+        use crate::guard::SchemaScope;
+        let cross = ir_with(vec![Op::DropTable {
+            table: "t".into(),
+            cascade: None,
+            schema: Some("other_app".into()),
+            existence_guard: None,
+        }]);
+        let scope = SchemaScope::Single("app_a".into());
+        let err =
+            validate_ir_scoped(&cross, Dialect::Postgres, &[], Some(&scope)).unwrap_err();
+        assert_eq!(err.code, CODE_CROSS_SCHEMA, "got: {err}");
+
+        // schema == project schema (case-insensitive) passes.
+        let same = ir_with(vec![Op::DropTable {
+            table: "t".into(),
+            cascade: None,
+            schema: Some("APP_A".into()),
+            existence_guard: None,
+        }]);
+        assert!(validate_ir_scoped(&same, Dialect::Postgres, &[], Some(&scope)).is_ok());
+
+        // Absent schema passes.
+        let none = ir_with(vec![Op::DropTable {
+            table: "t".into(),
+            cascade: None,
+            schema: None,
+            existence_guard: None,
+        }]);
+        assert!(validate_ir_scoped(&none, Dialect::Postgres, &[], Some(&scope)).is_ok());
+    }
+
+    /// TRUSTED (`None` scope) honors any schema — no cross-schema confinement — but
+    /// PLATFORM (`Allowlist`) refuses a schema outside its allow-list (§2.7).
+    #[test]
+    fn trusted_honors_any_schema_platform_gates_to_allowlist() {
+        use crate::guard::SchemaScope;
+        let foreign = ir_with(vec![Op::DropTable {
+            table: "t".into(),
+            cascade: None,
+            schema: Some("anything".into()),
+            existence_guard: None,
+        }]);
+        // Trusted: permitted.
+        assert!(validate_ir_scoped(&foreign, Dialect::Postgres, &[], None).is_ok());
+        // Platform allow-list excluding "anything": refused.
+        let scope = SchemaScope::Allowlist(vec!["zeroship".into(), "public".into()]);
+        let err =
+            validate_ir_scoped(&foreign, Dialect::Postgres, &[], Some(&scope)).unwrap_err();
+        assert_eq!(err.code, CODE_CROSS_SCHEMA);
+        // A schema IN the allow-list passes.
+        let ok = ir_with(vec![Op::DropTable {
+            table: "t".into(),
+            cascade: None,
+            schema: Some("zeroship".into()),
+            existence_guard: None,
+        }]);
+        assert!(validate_ir_scoped(&ok, Dialect::Postgres, &[], Some(&scope)).is_ok());
+    }
+
+    /// A `schema` qualifier that is not a safe bare identifier (injection-shaped) is
+    /// REFUSED with `INVALID_SCHEMA_IDENT` — REGARDLESS of profile (§2.7). RED before
+    /// `is_safe_schema_ident` guards the author-controlled identifier position.
+    #[test]
+    fn injection_shaped_schema_ident_is_refused() {
+        for bad in ["a\"; DROP TABLE x;--", "1bad", "has space", "", "a-b"] {
+            let ir = ir_with(vec![Op::DropTable {
+                table: "t".into(),
+                cascade: None,
+                schema: Some(bad.into()),
+                existence_guard: None,
+            }]);
+            // Even Trusted (None scope) rejects an injection-shaped ident.
+            let err = validate_ir_scoped(&ir, Dialect::Postgres, &[], None).unwrap_err();
+            assert_eq!(err.code, CODE_INVALID_SCHEMA_IDENT, "schema {bad:?} got: {err}");
+        }
+    }
+
+    /// A guard whose DIRECTION is illegal for the op variant is an authoring error
+    /// (`GUARD_DIRECTION`): `ifExists` on a create*/add* op, `ifNotExists` on a
+    /// drop*/rename op (§2.7). RED before the legal-direction check.
+    #[test]
+    fn wrong_direction_existence_guard_is_an_authoring_error() {
+        // ifExists on createTable — illegal.
+        let bad_create = ir_with(vec![Op::CreateTable {
+            name: "t".into(),
+            columns: vec![],
+            constraints: vec![],
+            indexes: vec![],
+            schema: None,
+            existence_guard: Some(crate::ir::ExistenceGuard::IfExists),
+        }]);
+        let err = validate_ir_scoped(&bad_create, Dialect::Postgres, &[], None).unwrap_err();
+        assert_eq!(err.code, CODE_GUARD_DIRECTION, "got: {err}");
+
+        // ifNotExists on dropTable — illegal.
+        let bad_drop = ir_with(vec![Op::DropTable {
+            table: "t".into(),
+            cascade: None,
+            schema: None,
+            existence_guard: Some(crate::ir::ExistenceGuard::IfNotExists),
+        }]);
+        let err2 = validate_ir_scoped(&bad_drop, Dialect::Postgres, &[], None).unwrap_err();
+        assert_eq!(err2.code, CODE_GUARD_DIRECTION);
+
+        // The LEGAL directions pass.
+        let ok_create = ir_with(vec![Op::CreateTable {
+            name: "t".into(),
+            columns: vec![],
+            constraints: vec![],
+            indexes: vec![],
+            schema: None,
+            existence_guard: Some(crate::ir::ExistenceGuard::IfNotExists),
+        }]);
+        assert!(validate_ir_scoped(&ok_create, Dialect::Postgres, &[], None).is_ok());
+    }
+
     // (E) MED — ColRef resolution at the apply/render seam. At LOAD the DML scope
     // is structural-only (the live column set is unknown), so an unresolved ColRef
     // PASSES the load walk. At APPLY, `validate_ir_resolved` re-runs the walk with
@@ -1525,6 +1833,7 @@ mod tests {
             set: [("name".to_string(), Expr::col("ghost"))].into_iter().collect(),
             r#where: None,
             batch: None,
+            schema: None,
         }]);
 
         // At LOAD: structural-only scope ⇒ the unresolved ColRef is NOT caught.
@@ -1551,6 +1860,7 @@ mod tests {
             set: [("name".to_string(), Expr::col("name"))].into_iter().collect(),
             r#where: None,
             batch: None,
+            schema: None,
         }]);
         let mut live: BTreeMap<String, Vec<String>> = BTreeMap::new();
         live.insert("users".to_string(), vec!["id".to_string(), "name".to_string()]);
@@ -1589,11 +1899,14 @@ mod tests {
                         operand: Box::new(Expr::col("first")),
                     }),
                 }],
+                schema: None,
+                existence_guard: None,
             },
             Op::Delete {
                 table: "users".into(),
                 r#where: Expr::lit(IrScalar::Bool(true)),
                 limit: None,
+                schema: None,
             },
         ]);
         assert!(validate_ir(&ir, Dialect::Postgres, &[]).is_ok());
@@ -1636,6 +1949,8 @@ mod tests {
                     operand: Box::new(Expr::col("deleted_at")),
                 }),
             }],
+            schema: None,
+            existence_guard: None,
         }]);
         assert!(
             validate_ir(&ir, Dialect::Postgres, &[]).is_ok(),
@@ -1670,6 +1985,8 @@ mod tests {
                 },
             }],
             indexes: vec![],
+            schema: None,
+            existence_guard: None,
         }]);
         let err = validate_ir(&ir, Dialect::Postgres, &[]).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -1699,6 +2016,8 @@ mod tests {
                 },
             }],
             indexes: vec![],
+            schema: None,
+            existence_guard: None,
         }]);
         let err = validate_ir(&ir, Dialect::Postgres, &[]).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -1713,8 +2032,13 @@ mod tests {
         let mut set = BTreeMap::new();
         set.insert("name".to_string(), split(", ", 1)); // multi-char delim
         let ir = ir_with(vec![
-            Op::DropColumn { table: "t".into(), column: "x".into(), if_exists: None },
-            Op::Update { table: "users".into(), set, r#where: None, batch: None },
+            Op::DropColumn {
+                table: "t".into(),
+                column: "x".into(),
+                schema: None,
+                existence_guard: None,
+            },
+            Op::Update { table: "users".into(), set, r#where: None, batch: None, schema: None },
         ]);
         let ts = vec![None, Some("m.ts:9".to_string())];
         let err = validate_ir(&ir, Dialect::Sqlite, &ts).unwrap_err();
@@ -1735,6 +2059,8 @@ mod tests {
             using: None,
             r#where: Some(split(", ", 1)),
             concurrently: None,
+            schema: None,
+            existence_guard: None,
         }]);
         let err = validate_ir(&ir, Dialect::Sqlite, &[]).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
@@ -1750,6 +2076,8 @@ mod tests {
             column: "a".into(),
             ty: ColType::Int,
             using: Some(split(", ", 1)),
+            schema: None,
+            existence_guard: None,
         }]);
         let err = validate_ir(&ir, Dialect::Sqlite, &[]).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
@@ -1767,6 +2095,7 @@ mod tests {
             set,
             filter: Some(split(", ", 1)), // out-of-envelope → reject
             name: "bf".into(),
+            schema: None,
         }]);
         let err = validate_ir(&ir, Dialect::Sqlite, &[]).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
@@ -1804,6 +2133,7 @@ mod tests {
                 rhs: Box::new(Expr::lit(IrScalar::Int(1))),
             }),
             batch: None,
+            schema: None,
         }]);
 
         // LOAD-time (the tsc-analog): structural-only — the plain-string name is
