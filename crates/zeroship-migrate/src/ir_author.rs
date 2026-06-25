@@ -1250,29 +1250,29 @@ impl IrAuthor {
                 reject_synth_default(columns.iter().map(|c| (c.name.as_str(), c.default.as_ref())))?;
                 let desc = self.create_table_descriptor(name, columns);
                 let snap = build_table_snapshot(&eff_schema, &desc, self.dialect)?;
-                // **PR10 Part B** — stamp the createTable ifNotExists probe from the
-                // SAME shared-builder snapshot the CREATE renders from, so the
-                // expected `(name, data_type, nullable)` strings are byte-comparable
-                // against introspection. createTable only carries `ifNotExists`.
-                if let Some(g) = guard {
-                    probe = Some(crate::guard_probe::GuardProbe::Table {
-                        schema: eff_schema.clone(),
-                        table: name.clone(),
-                        direction: g.into(),
-                        expect_columns: snap
-                            .columns
-                            .iter()
-                            .map(|c| (c.name.clone(), c.data_type.clone(), c.nullable))
-                            .collect(),
-                    });
-                }
                 // The SQLite CREATE routes through the shared `zeroship_schema`
                 // emitter, which consumes the SDK schema `Value` — built here from
                 // the SAME descriptor bridge (`descriptor_to_sdk_schema`) the
                 // differ's `desired_snapshot_for_dialect` uses, so the §6.4
                 // byte-identity holds on the SQLite leg (the PG leg ignores it).
                 let sqlite_schema = crate::declarative::descriptor_to_sdk_schema(&desc);
-                let migs = decl.lower_create_table(name, &snap, &sqlite_schema, live)?;
+                // **PR10 Part B (C1 fix)** — createTable lowers to MULTIPLE units
+                // (CREATE TABLE + one CREATE INDEX per non-PK index + deferred FKs).
+                // A single `Table` probe stamped on EVERY unit silently drops the
+                // secondary indexes/FKs (unit 0 creates the table → units 1..N see it
+                // PRESENT → SatisfiedNoop → the index/FK is SKIPPED). `lower_create_table`
+                // therefore attributes an OBJECT-SCOPED probe to each unit (Table on the
+                // CREATE, Index on each CREATE INDEX, Constraint on each deferred FK), so
+                // a re-run stays idempotent unit-by-unit. We pass the guard direction in
+                // and DO NOT build/stamp a single shared probe here (the bottom-of-fn
+                // generic stamp is skipped for CreateTable).
+                let migs = decl.lower_create_table(
+                    name,
+                    &snap,
+                    &sqlite_schema,
+                    live,
+                    guard.map(Into::into),
+                )?;
                 // The just-created table is now live for any later intra-IR FK.
                 live.insert(name.clone());
                 migs
@@ -1524,22 +1524,40 @@ impl IrAuthor {
                 mig.version = ddl_step_version(op_index, kind, &mig.up);
             }
         }
-        // **PR10 Part B** — stamp the existence-guard probe onto EACH lowered unit. A
-        // multi-unit op (createTable CREATE + COMMENT side-statements; addColumn
-        // similar) gets the SAME probe on every unit: the executor's per-probe
-        // decision is idempotent under one txn (a satisfied table no-op skips its
-        // CREATE and its COMMENTs alike — each unit re-probes the live catalog under
-        // the same held lock and gets the same verdict), so no cross-unit grouping key
-        // is needed. If `guard` was set but no arm built a probe (an internal
-        // invariant violation — every guard-legal DDL arm above either builds a probe
-        // or returns fail-closed before this point), refuse rather than apply the bare
-        // op with a silently-dropped guard.
+        // **PR10 Part B** — stamp the existence-guard probe onto each lowered unit.
+        //
+        // For SINGLE-OBJECT ops (addColumn, createIndex, dropTable, dropColumn,
+        // dropIndex, addConstraint, dropConstraint, …) the arm above built ONE
+        // `probe` describing that one object. A single-object op may still emit a
+        // multi-STATEMENT unit list (e.g. addColumn's `ADD COLUMN` + follow-on
+        // `COMMENT ON COLUMN`), but those statements all describe the SAME object, so
+        // stamping the one probe on every unit is correct: each re-probes the live
+        // catalog under the held lock and gets the same verdict.
+        //
+        // **C1 fix** — `createTable` is the ONE multi-OBJECT op: it lowers to the
+        // CREATE TABLE + a CREATE INDEX per non-PK index + deferred FKs, each a
+        // DIFFERENT object. A single shared probe would silently drop the secondary
+        // index/FK units (see the CreateTable arm). It therefore attributes an
+        // object-scoped probe to each unit INSIDE `lower_create_table` and leaves
+        // `probe == None` here; we must NOT clobber those per-unit probes with a
+        // single shared one. Detect that case (guard set, no shared probe, units
+        // already carry per-unit guards) and skip the generic stamp.
         if guard.is_some() {
-            let Some(probe) = probe else {
-                return Err(IrLowerError::GuardProbeUnbuildable(op_kind_tag(op)));
-            };
-            for (mig, _statements) in &mut migs {
-                mig.existence_guard = Some(probe.clone());
+            match probe {
+                Some(probe) => {
+                    for (mig, _statements) in &mut migs {
+                        mig.existence_guard = Some(probe.clone());
+                    }
+                }
+                // No shared probe built. This is legal ONLY for the multi-object
+                // createTable path, which has already stamped a per-unit probe on
+                // EVERY unit. If any unit is unstamped, the guard would be silently
+                // dropped on the bare op — refuse fail-closed.
+                None => {
+                    if migs.iter().any(|(mig, _)| mig.existence_guard.is_none()) {
+                        return Err(IrLowerError::GuardProbeUnbuildable(op_kind_tag(op)));
+                    }
+                }
             }
         }
         Ok(LoweredOp::Ddl(migs))

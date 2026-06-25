@@ -4477,6 +4477,7 @@ impl DeclarativeAuthor {
         snapshot: &TableSnapshot,
         sqlite_schema: &serde_json::Value,
         live_tables: &std::collections::BTreeSet<String>,
+        guard: Option<crate::guard_probe::GuardDir>,
     ) -> Result<Vec<LoweredUnit>, DeclarativeError> {
         let is_sqlite = matches!(self.dialect, SqlDialect::Sqlite);
         let mut inline_fks: Vec<&ConstraintSnapshot> = Vec::new();
@@ -4527,13 +4528,39 @@ impl DeclarativeAuthor {
             )
         };
         let up = statements.join(";\n");
-        let mig = self.make(
+        let mut mig = self.make(
             &format!("create_table_{table}"),
             up,
             Some(down),
             MigrationFlags::default(),
             Vec::new(),
         );
+        // **PR10 Part B (C1 fix)** — a guarded `createTable ifNotExists` lowers to
+        // MULTIPLE units (the CREATE TABLE + one CREATE INDEX per non-PK index
+        // [PG always injects the 3 system-field indexes] + deferred FKs). Each unit
+        // is a SEPARATE apply_transactional txn that re-probes the live catalog. A
+        // SINGLE shared `Table` probe stamped on every unit silently DROPS the
+        // secondary indexes/FKs: once unit 0 creates the table, units 1..N see the
+        // table PRESENT + base columns matching → SatisfiedNoop → the index/FK is
+        // SKIPPED but journaled completed. We therefore attribute an OBJECT-SCOPED
+        // probe to each unit: the CREATE TABLE gets the `Table` shape probe; each
+        // CREATE INDEX gets its own `Index ifNotExists` probe; each deferred FK gets
+        // its own `Constraint ifNotExists` probe. A re-run of the guarded create is
+        // then idempotent unit-by-unit (each unit independently SatisfiedNoops only
+        // for ITS object), and a partially-created table (crash between units)
+        // re-runs the missing units correctly.
+        if let Some(dir) = guard {
+            mig.existence_guard = Some(crate::guard_probe::GuardProbe::Table {
+                schema: self.project_schema.clone(),
+                table: table.to_string(),
+                direction: dir,
+                expect_columns: snapshot
+                    .columns
+                    .iter()
+                    .map(|c| (c.name.clone(), c.data_type.clone(), c.nullable))
+                    .collect(),
+            });
+        }
         let table_version = mig.version.clone();
         out.push((mig, statements));
 
@@ -4547,14 +4574,40 @@ impl DeclarativeAuthor {
             if is_sqlite && is_system_field_index(table, &idx.name) {
                 continue;
             }
-            let idx_mig = self.render_create_index(table, idx, vec![table_version.clone()]);
+            let mut idx_mig = self.render_create_index(table, idx, vec![table_version.clone()]);
+            if let Some(dir) = guard {
+                // Object-scoped probe for THIS index — absent → CREATE; present with
+                // the same (unique, columns) → idempotent SatisfiedNoop; divergent →
+                // FailDrift. Never SatisfiedNoop'd by the table's presence alone.
+                idx_mig.existence_guard = Some(crate::guard_probe::GuardProbe::Index {
+                    schema: self.project_schema.clone(),
+                    table: table.to_string(),
+                    name: idx.name.clone(),
+                    direction: dir,
+                    expect: Some((idx.unique, idx.columns.clone())),
+                });
+            }
             out.push(single_stmt(idx_mig));
         }
 
         // Deferred FKs (PG only) as follow-on ALTER TABLE ADD CONSTRAINT — each a
         // single statement.
         for fk in deferred {
-            out.push(single_stmt(self.render_add_fk(table, fk, vec![table_version.clone()])));
+            let mut fk_mig = self.render_add_fk(table, fk, vec![table_version.clone()]);
+            if let Some(dir) = guard {
+                // Object-scoped probe for THIS FK constraint. A present same-name
+                // constraint is FailDrift (the live pg_get_constraintdef body cannot
+                // be proven equal to the IR's), an absent one RunBare — matching the
+                // standalone addConstraint ifNotExists path.
+                fk_mig.existence_guard = Some(crate::guard_probe::GuardProbe::Constraint {
+                    schema: self.project_schema.clone(),
+                    table: table.to_string(),
+                    name: fk.name.clone(),
+                    direction: dir,
+                    expect_kind: Some("FOREIGN KEY".to_string()),
+                });
+            }
+            out.push(single_stmt(fk_mig));
         }
         Ok(out)
     }
