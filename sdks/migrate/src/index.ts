@@ -39,6 +39,9 @@ export {
   backfill,
   // SQLite-safe rebuild
   batchAlterTable,
+  // the eager fluent table() facade (PR11) — pure sugar over the flat ops above,
+  // scoped to one table, recording eagerly; lowers to byte-identical IR
+  table,
   // the fluent column-type lexicon
   t,
   // the shared `@zeroship/db` lexicon bridge (PR5 goal A): lift a live-schema
@@ -80,6 +83,8 @@ export type {
   BackfillArgs,
   TableBuilder,
   BatchAlterBuilder,
+  TableHandle,
+  TableOptions,
   IndexMethod,
   FkAction,
   DeterminismFinding,

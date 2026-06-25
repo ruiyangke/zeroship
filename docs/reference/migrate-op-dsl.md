@@ -547,6 +547,117 @@ several column/constraint changes against one table so they share one rebuild
 (`sdks/migrate/src/types.ts:260-267`): `b.addColumn`, `b.dropColumn`,
 `b.renameColumn`, `b.alterColumn`, `b.addForeignKey`, `b.addCheck`.
 
+## The fluent `table()` surface
+
+`table(name, opts?)` returns a **recorder-bound handle** whose methods mirror the
+flat ops above, **scoped to one table**. It is an *additive* ergonomic
+alternative to the flat named imports — both surfaces coexist, and a
+`table()`-authored migration lowers to **byte-identical IR** as the equivalent
+flat-op migration (the facade is pure sugar: every method delegates to the same
+flat recorder, `sdks/migrate/src/ops.ts` `table()`).
+
+```ts
+import { table, t } from "@zeroship/migrate";
+
+export default {
+  up() {
+    const users = table("users");
+    users.create({ id: t.id(), email: t.text().notNull().unique() });
+    users.addColumn("status", t.text().notNull().default("new"));
+    users.createIndex({ columns: ["email"], name: "users_email_idx", unique: true });
+    users.backfill({ set: { status: (c) => c.fn.coalesce(c("status"), "new") } });
+  },
+};
+```
+
+The handle covers the full per-table surface: `.create(columns, build?, opts?)`,
+`.drop(opts?)`, `.addColumn`, `.dropColumn`, `.renameColumn`, `.alterColumn`,
+`.addForeignKey`, `.addUnique`, `.addCheck`, `.dropConstraint`, `.createIndex`,
+`.dropIndex`, and the DML `.insert` / `.update` / `.del` / `.backfill`. Each is
+the flat op with the leading `table` argument bound — `table("users").addColumn(…)`
+is exactly `addColumn("users", …)`.
+
+### Eager, one level — there is no terminal to forget
+
+**Every method records EAGERLY: the call IS the recording.** There is no `build`
+callback and no terminal `.commit()`/`.done()` step. We deliberately rejected a
+two-level `table("users").column("email").drop()` form: a forgotten terminal
+(`table("users").column("email")` with nothing after it) would silently record
+*nothing* — a dropped op with no error. The one-level eager model makes that
+failure mode unconstructible; if you call a method, the op is recorded.
+
+A handle is also reusable and order-preserving — each call appends one op:
+
+```ts
+import { table, t } from "@zeroship/migrate";
+
+export default {
+  up() {
+    const u = table("users");
+    u.addColumn("first_name", t.text()); // recorded
+    u.addColumn("last_name", t.text());  // recorded, after the first
+    u.dropColumn("full_name");           // recorded, last
+  },
+};
+```
+
+### `{ schema }` propagation and per-method override
+
+The `{ schema }` passed to `table()` is the **default schema** stamped onto every
+op the handle records. A **per-method `schema`** (on the method's opts/spec/args
+bag) **overrides** the table default for that one call; an opts bag that omits
+`schema` keeps the default (an absent key never wipes it).
+
+```ts
+import { table, t } from "@zeroship/migrate";
+
+export default {
+  up() {
+    const u = table("users", { schema: "tenant" });
+    u.addColumn("a", t.int());                       // op.schema === "tenant"
+    u.addColumn("b", t.int(), { ifNotExists: true }); // still "tenant" (guard-only bag)
+    u.addColumn("c", t.int(), { schema: "other" });   // overridden → "other"
+  },
+};
+```
+
+`table("users")` with no schema records ops with **no** `schema` key — identical
+to the flat `addColumn("users", …)`. (Schema qualifiers are profile-gated; see
+[The `schema` qualifier](#the-schema-qualifier-profile-gated).)
+
+### Guard pass-through
+
+The existence guards pass through per-method exactly as the flat ops accept them —
+`{ ifNotExists }` on the create/add family, `{ ifExists }` on the drop/alter
+family (see [Existence guards](#existence-guards-ifexists--ifnotexists)):
+
+```ts
+import { table, t } from "@zeroship/migrate";
+
+export default {
+  up() {
+    const u = table("users");
+    u.addColumn("nickname", t.text(), { ifNotExists: true });
+    u.dropColumn("legacy", { ifExists: true });
+  },
+};
+```
+
+### The three flat-op asymmetries the handle smooths over
+
+- **`createIndex` carries schema/guard on the SPEC**, not a separate opts bag, so
+  `.createIndex(spec)` injects the table default into `spec.schema` (a per-call
+  `spec.schema` still wins). There is no second `opts` argument.
+- **`dropIndex` is name-keyed, not table-keyed.** The flat `dropIndex(name, opts)`
+  takes the owning `table` *inside* opts. The handle **stamps this table** onto the
+  drop — `table("users").dropIndex("ix_email")` means "drop index `ix_email` that
+  belongs to `users`" and records `{ op: "dropIndex", name: "ix_email", table:
+  "users" }`. (The byte-identical flat equivalent is `dropIndex("ix_email",
+  { table: "users" })`.)
+- **DML carries `schema` on the ARGS object** and has **no** existence guard, so
+  `.insert/.update/.del/.backfill` inject the table default into the args' `schema`
+  and accept no guard.
+
 ## The fluent expression surface
 
 Every expression position — a DML `set` value, a `where`, an `addCheck` body, a

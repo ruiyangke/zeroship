@@ -43,6 +43,7 @@ const VOCAB_PREAMBLE = `import {
   addForeignKey, addUnique, addCheck, dropConstraint, createIndex, dropIndex,
   insert, update, del, backfill,
   batchAlterTable,
+  table,
   t, fromDb, lintDeterminism,
 } from "@zeroship/migrate";
 import { t as dbT } from "@zeroship/db";

@@ -307,6 +307,68 @@ export interface BatchAlterBuilder {
   addCheck(spec: CheckSpec): void;
 }
 
+// ── The eager fluent `table()` facade (PR11) ──
+
+/** The options bag `table(name, opts?)` accepts. Carries the default `{ schema }`
+ *  every op the returned {@link TableHandle} records is stamped with (a per-method
+ *  `schema` override wins; see {@link TableHandle}). An extensible object so a
+ *  future per-table default (e.g. a default index method) can be added without a
+ *  signature break. */
+export interface TableOptions {
+  /** **PR10/PR11** — the default schema qualifier propagated to every op the
+   *  handle records (§2.7). Names-are-strings (no live-schema binding); a
+   *  per-method `schema` on an individual call overrides it. */
+  schema?: string;
+}
+
+/**
+ * The recorder-bound handle `table(name, opts?)` returns (PR11). It is PURE SUGAR
+ * over the flat op-functions (`addColumn`/`dropColumn`/…): every method delegates
+ * to the SAME flat recorder scoped to this table, recording EAGERLY — the call IS
+ * the recording, there is no terminal/`build` to forget. The `{ schema }` from
+ * `table()` is injected into every recorded op; a per-method `schema` (where the
+ * method takes an opts/spec/args bag) overrides the table default. The guard
+ * options (`ifNotExists` / `ifExists`) pass through per-method exactly as the flat
+ * ops accept them. A `table()`-authored migration lowers to BYTE-IDENTICAL IR as
+ * the equivalent flat-op migration.
+ */
+export interface TableHandle {
+  // DDL: this table
+  /** Scoped `createTable(name, columns, build?, opts?)`. */
+  create(
+    columns: Record<string, ColumnDef>,
+    build?: (b: TableBuilder) => void,
+    opts?: { schema?: string; ifNotExists?: IfNotExistsGuard },
+  ): void;
+  /** Scoped `dropTable(table, opts?)`. */
+  drop(opts?: { schema?: string; ifExists?: IfExistsGuard; cascade?: boolean }): void;
+
+  // DDL: columns
+  addColumn(name: string, type: ColumnDef, opts?: { schema?: string; ifNotExists?: IfNotExistsGuard }): void;
+  dropColumn(name: string, opts?: { schema?: string; ifExists?: IfExistsGuard }): void;
+  renameColumn(from: string, to: string, type: ColumnDef, opts?: { schema?: string; ifExists?: IfExistsGuard }): void;
+  alterColumn(name: string, change: AlterColumnChange, opts?: { schema?: string; ifExists?: IfExistsGuard }): void;
+
+  // DDL: constraints / indexes
+  addForeignKey(spec: ForeignKeySpec, opts?: { schema?: string; ifNotExists?: IfNotExistsGuard }): void;
+  addUnique(spec: UniqueSpec, opts?: { schema?: string; ifNotExists?: IfNotExistsGuard }): void;
+  addCheck(spec: CheckSpec, opts?: { schema?: string; ifNotExists?: IfNotExistsGuard }): void;
+  dropConstraint(spec: DropConstraintSpec | string, opts?: { schema?: string; ifExists?: IfExistsGuard }): void;
+  /** Scoped `createIndex(table, spec)`. The schema/guard ride on the SPEC (there is
+   *  no separate opts bag); the table default fills an absent `spec.schema`. */
+  createIndex(spec: CreateIndexSpec): void;
+  /** Scoped `dropIndex(name, { table, … })`. The facade STAMPS this table onto the
+   *  drop (the whole point of scoping) — a fluent `table("users").dropIndex("ix")`
+   *  means "drop index ix that belongs to users". */
+  dropIndex(name: string, opts?: { schema?: string; ifExists?: IfExistsGuard; unique?: boolean; concurrently?: boolean }): void;
+
+  // DML (no existence guard — DML is not guardable; `schema` rides on args)
+  insert<R extends Row = Row>(args: InsertArgs<R>): void;
+  update(args: UpdateArgs): void;
+  del(args: DelArgs): void;
+  backfill(args: BackfillArgs): void;
+}
+
 /** One §4.3 determinism-lint finding. */
 export interface DeterminismFinding {
   code: "NONDETERMINISTIC_OP_ARG";

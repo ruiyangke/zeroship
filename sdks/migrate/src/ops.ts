@@ -37,6 +37,8 @@ import type {
   Row,
   ScalarValue,
   TableBuilder,
+  TableHandle,
+  TableOptions,
   TypeLexicon,
   UniqueSpec,
   UpdateArgs,
@@ -830,6 +832,134 @@ export function batchAlterTable(table: string, build: (b: BatchAlterBuilder) => 
     addForeignKey: (spec) => addForeignKey(table, spec),
     addCheck: (spec) => addCheck(table, spec),
   });
+}
+
+// ── (D) The eager fluent `table()` facade (PR11) ──
+
+// `table(name, opts?)` returns a recorder-bound handle whose methods MIRROR the
+// flat op-functions scoped to one table, recording EAGERLY (the call IS the
+// recording — no terminal/`build` to forget). It is PURE SUGAR: every method
+// DELEGATES to the SAME exported flat op-function (the single source of truth),
+// exactly as `batchAlterTable` does (it calls `addColumn(table, …)` etc., never
+// re-implementing op construction). The `{ schema }` from `table()` is the DEFAULT
+// schema injected into every op the handle records; a per-method `schema` (where
+// the method takes an opts/spec/args bag) OVERRIDES it. The override is by KEY
+// PRESENCE — a per-call bag that omits `schema` keeps the table default, and an
+// explicit `undefined` does NOT wipe the default (see `pickSchema`). A
+// `table()`-authored migration therefore lowers to BYTE-IDENTICAL IR as the
+// equivalent flat-op migration.
+
+/** Per-method-wins-over-table-default schema precedence (§ PR11 §4): a per-call
+ *  `schema` overrides the table default only when the KEY is present with a defined
+ *  value; an omitted key (or an explicit `undefined`) keeps the table default. This
+ *  is what makes a `table("t",{schema})` default survive a per-method opts bag that
+ *  carries only a guard. */
+function pickSchema(perCall: { schema?: string } | undefined, dflt: string | undefined): string | undefined {
+  if (perCall && perCall.schema !== undefined) return perCall.schema;
+  return dflt;
+}
+
+export function table(name: string, opts: TableOptions = {}): TableHandle {
+  requireString(name, "table(name, …)");
+  const dflt = opts.schema;
+  return {
+    // DDL: this table
+    create(columns, build, createOpts = {}) {
+      createTable(name, columns, build, {
+        schema: pickSchema(createOpts, dflt),
+        ifNotExists: createOpts.ifNotExists,
+      });
+    },
+    drop(dropOpts = {}) {
+      dropTable(name, {
+        schema: pickSchema(dropOpts, dflt),
+        ifExists: dropOpts.ifExists,
+        cascade: dropOpts.cascade,
+      });
+    },
+
+    // DDL: columns
+    addColumn(col, type, colOpts = {}) {
+      addColumn(name, col, type, {
+        schema: pickSchema(colOpts, dflt),
+        ifNotExists: colOpts.ifNotExists,
+      });
+    },
+    dropColumn(col, colOpts = {}) {
+      dropColumn(name, col, {
+        schema: pickSchema(colOpts, dflt),
+        ifExists: colOpts.ifExists,
+      });
+    },
+    renameColumn(from, to, type, renameOpts = {}) {
+      renameColumn(name, from, to, type, {
+        schema: pickSchema(renameOpts, dflt),
+        ifExists: renameOpts.ifExists,
+      });
+    },
+    alterColumn(col, change, alterOpts = {}) {
+      alterColumn(name, col, change, {
+        schema: pickSchema(alterOpts, dflt),
+        ifExists: alterOpts.ifExists,
+      });
+    },
+
+    // DDL: constraints / indexes
+    addForeignKey(spec, fkOpts = {}) {
+      addForeignKey(name, spec, {
+        schema: pickSchema(fkOpts, dflt),
+        ifNotExists: fkOpts.ifNotExists,
+      });
+    },
+    addUnique(spec, uqOpts = {}) {
+      addUnique(name, spec, {
+        schema: pickSchema(uqOpts, dflt),
+        ifNotExists: uqOpts.ifNotExists,
+      });
+    },
+    addCheck(spec, ckOpts = {}) {
+      addCheck(name, spec, {
+        schema: pickSchema(ckOpts, dflt),
+        ifNotExists: ckOpts.ifNotExists,
+      });
+    },
+    dropConstraint(spec, dcOpts = {}) {
+      dropConstraint(name, spec, {
+        schema: pickSchema(dcOpts, dflt),
+        ifExists: dcOpts.ifExists,
+      });
+    },
+    createIndex(spec) {
+      // `createIndex` reads schema/guard off the SPEC (no separate opts bag): inject
+      // the table default into the spec, letting a per-call `spec.schema` win.
+      createIndex(name, { ...spec, schema: pickSchema(spec, dflt) });
+    },
+    dropIndex(idxName, idxOpts = {}) {
+      // `dropIndex` is name-keyed — STAMP this table into its opts (the whole point
+      // of scoping: drop the index that belongs to THIS table).
+      dropIndex(idxName, {
+        table: name,
+        schema: pickSchema(idxOpts, dflt),
+        ifExists: idxOpts.ifExists,
+        unique: idxOpts.unique,
+        concurrently: idxOpts.concurrently,
+      });
+    },
+
+    // DML — schema rides on the args object; no existence guard (DML is unguardable).
+    insert(args) {
+      insert(name, { ...args, schema: pickSchema(args, dflt) });
+    },
+    update(args) {
+      update(name, { ...args, schema: pickSchema(args, dflt) });
+    },
+    del(args) {
+      del(name, { ...args, schema: pickSchema(args, dflt) });
+    },
+    backfill(args) {
+      backfill(name, { ...args, schema: pickSchema(args, dflt) });
+    },
+  };
 }
 
 // ── (C) Determinism lint (§4.3) ──

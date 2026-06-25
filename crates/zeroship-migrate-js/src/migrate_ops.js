@@ -505,7 +505,7 @@ export const cFn = {
  *     indexes (the §3.2 second overload, parallel to `batchAlterTable`); OR
  *   - the legacy `{ constraints, indexes }` options bag.
  */
-export function createTable(name, columns, opts) {
+export function createTable(name, columns, opts, tableOptsArg) {
   requireString(name, "createTable(name, …)");
 
   let cols;
@@ -551,7 +551,18 @@ export function createTable(name, columns, opts) {
   // **PR10** — the schema qualifier + the create-family existence guard. The
   // opts bag is the THIRD arg when it is NOT the scoped-builder callback (and
   // not the legacy {constraints,indexes} bag); read schema/ifNotExists off it.
-  const tableOpts = opts && typeof opts === "object" && typeof opts !== "function" ? opts : {};
+  // **PR11** — when the THIRD arg is the `(b) => …` scoped builder OR is absent
+  // (the facade passes `build = undefined`), the schema/guard bag rides on the
+  // FOURTH arg (`tableOptsArg`), mirroring the TS `createTable(name, columns,
+  // build?, opts)` 4-arg signature so the `table()` facade's `.create(columns,
+  // build?, opts)` lowers to the IDENTICAL op. When the third arg is itself the
+  // bag (the flat 3-arg call), read it there.
+  const tableOpts =
+    opts && typeof opts === "object" && !Array.isArray(opts)
+      ? opts
+      : tableOptsArg && typeof tableOptsArg === "object"
+        ? tableOptsArg
+        : {};
   return push(
     compact({
       op: "createTable",
@@ -1137,6 +1148,127 @@ export function batchAlterTable(table, build) {
     addCheck: (spec) => addCheck(table, spec),
   };
   build(scoped);
+}
+
+// ===========================================================================
+// (D) The eager fluent `table()` facade (PR11). The byte-for-byte twin of
+// `sdks/migrate/src/ops.ts`'s `table()`: a recorder-bound handle whose methods
+// mirror the flat ops scoped to one table, recording EAGERLY (the call IS the
+// recording — no terminal to forget). PURE SUGAR: every method DELEGATES to the
+// SAME flat op-function above (single source of truth — it never re-implements op
+// construction), exactly as `batchAlterTable` does. The `{ schema }` from
+// `table()` is the DEFAULT injected into every recorded op; a per-method `schema`
+// OVERRIDES it (by key presence — an absent/`undefined` per-call schema keeps the
+// table default). A `table()`-authored migration records the IDENTICAL op list as
+// the equivalent flat-op migration (byte-identical IR).
+// ===========================================================================
+
+/** Per-method-wins-over-table-default schema precedence (PR11): a per-call `schema`
+ *  overrides the table default only when present + defined; an omitted/`undefined`
+ *  per-call schema keeps the table default. */
+function pickSchema(perCall, dflt) {
+  if (perCall && perCall.schema !== undefined) return perCall.schema;
+  return dflt;
+}
+
+export function table(name, opts = {}) {
+  requireString(name, "table(name, …)");
+  const dflt = opts.schema;
+  return {
+    // DDL: this table — delegates to the flat `createTable(name, columns, build?,
+    // opts)` (the twin now accepts the 4-arg build+opts form, mirroring ops.ts).
+    create(columns, build, createOpts = {}) {
+      createTable(name, columns, build, {
+        schema: pickSchema(createOpts, dflt),
+        ifNotExists: createOpts.ifNotExists,
+      });
+    },
+    drop(dropOpts = {}) {
+      dropTable(name, {
+        schema: pickSchema(dropOpts, dflt),
+        ifExists: dropOpts.ifExists,
+        cascade: dropOpts.cascade,
+      });
+    },
+
+    // DDL: columns
+    addColumn(col, type, colOpts = {}) {
+      addColumn(name, col, type, {
+        schema: pickSchema(colOpts, dflt),
+        ifNotExists: colOpts.ifNotExists,
+      });
+    },
+    dropColumn(col, colOpts = {}) {
+      dropColumn(name, col, {
+        schema: pickSchema(colOpts, dflt),
+        ifExists: colOpts.ifExists,
+      });
+    },
+    renameColumn(from, to, type, renameOpts = {}) {
+      renameColumn(name, from, to, type, {
+        schema: pickSchema(renameOpts, dflt),
+        ifExists: renameOpts.ifExists,
+      });
+    },
+    alterColumn(col, change, alterOpts = {}) {
+      alterColumn(name, col, change, {
+        schema: pickSchema(alterOpts, dflt),
+        ifExists: alterOpts.ifExists,
+      });
+    },
+
+    // DDL: constraints / indexes
+    addForeignKey(spec, fkOpts = {}) {
+      addForeignKey(name, spec, {
+        schema: pickSchema(fkOpts, dflt),
+        ifNotExists: fkOpts.ifNotExists,
+      });
+    },
+    addUnique(spec, uqOpts = {}) {
+      addUnique(name, spec, {
+        schema: pickSchema(uqOpts, dflt),
+        ifNotExists: uqOpts.ifNotExists,
+      });
+    },
+    addCheck(spec, ckOpts = {}) {
+      addCheck(name, spec, {
+        schema: pickSchema(ckOpts, dflt),
+        ifNotExists: ckOpts.ifNotExists,
+      });
+    },
+    dropConstraint(spec, dcOpts = {}) {
+      dropConstraint(name, spec, {
+        schema: pickSchema(dcOpts, dflt),
+        ifExists: dcOpts.ifExists,
+      });
+    },
+    createIndex(spec) {
+      createIndex(name, { ...spec, schema: pickSchema(spec, dflt) });
+    },
+    dropIndex(idxName, idxOpts = {}) {
+      dropIndex(idxName, {
+        table: name,
+        schema: pickSchema(idxOpts, dflt),
+        ifExists: idxOpts.ifExists,
+        unique: idxOpts.unique,
+        concurrently: idxOpts.concurrently,
+      });
+    },
+
+    // DML — schema rides on the args object; no existence guard.
+    insert(args) {
+      insert(name, { ...args, schema: pickSchema(args, dflt) });
+    },
+    update(args) {
+      update(name, { ...args, schema: pickSchema(args, dflt) });
+    },
+    del(args) {
+      del(name, { ...args, schema: pickSchema(args, dflt) });
+    },
+    backfill(args) {
+      backfill(name, { ...args, schema: pickSchema(args, dflt) });
+    },
+  };
 }
 
 // ===========================================================================

@@ -717,3 +717,173 @@ fn twin_dml_ops_carry_schema() {
     "#;
     assert_schema(&op_named(&record(bf, "backfill_schema"), "backfill"), "app2");
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// PR11 — the eager fluent `table()` facade twin. The engine-embedded V8 recorder's
+// `table()` must record the BYTE-IDENTICAL ops the equivalent flat-op migration
+// records (the facade is pure sugar over the same flat recorder). These author the
+// SAME migration both ways through the REAL V8 recorder and assert the recorded
+// `ops` arrays are equal — the headline byte-identical-IR invariant proven through
+// the actual engine path (the same path `Checksum::of_ir` folds over).
+// ───────────────────────────────────────────────────────────────────────────
+
+/// The full DDL + DML + schema + guard surface authored via `table()` records the
+/// IDENTICAL ops as the flat-op authoring. RED if the twin `table()` re-implements
+/// op construction or drops schema/guard propagation.
+#[test]
+fn twin_table_facade_records_identical_ops_as_flat() {
+    let via_facade = r#"
+        import { table, t } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            const u = table("users", { schema: "app2" });
+            u.create({ id: t.id(), email: t.text().notNull() }, undefined, { ifNotExists: true });
+            u.addColumn("status", t.text().notNull().default("new"));
+            u.dropColumn("legacy", { ifExists: true });
+            u.renameColumn("label", "display_label", t.text());
+            u.alterColumn("status", { nullable: false });
+            u.addForeignKey({ columns: ["team"], references: { table: "teams", columns: ["name"] }, name: "u_team_fk" });
+            u.addUnique({ columns: ["email"], name: "u_email_uq" });
+            u.addCheck({ expr: (c) => c("status").isNotNull(), name: "u_status_chk" });
+            u.dropConstraint({ name: "u_legacy_chk", type: "check" }, { ifExists: true });
+            u.createIndex({ columns: ["email"], name: "u_email_idx", unique: true });
+            u.dropIndex("u_old_idx", { ifExists: true });
+            u.insert({ rows: [{ email: "a@b.c", status: "new" }] });
+            u.update({ set: { status: (c) => c.fn.lower(c("status")) }, where: (c) => c("id").isNotNull() });
+            u.del({ where: (c) => c("status").isNull(), limit: 10 });
+            u.backfill({ set: { status: (c) => c.fn.coalesce(c("status"), "new") }, cursorColumn: "id", batchSize: 500, name: "bf_status" });
+        }};
+    "#;
+    let via_flat = r#"
+        import {
+            createTable, addColumn, dropColumn, renameColumn, alterColumn,
+            addForeignKey, addUnique, addCheck, dropConstraint, createIndex, dropIndex,
+            insert, update, del, backfill, t,
+        } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            createTable("users", { id: t.id(), email: t.text().notNull() }, { schema: "app2", ifNotExists: true });
+            addColumn("users", "status", t.text().notNull().default("new"), { schema: "app2" });
+            dropColumn("users", "legacy", { schema: "app2", ifExists: true });
+            renameColumn("users", "label", "display_label", t.text(), { schema: "app2" });
+            alterColumn("users", "status", { nullable: false }, { schema: "app2" });
+            addForeignKey("users", { columns: ["team"], references: { table: "teams", columns: ["name"] }, name: "u_team_fk" }, { schema: "app2" });
+            addUnique("users", { columns: ["email"], name: "u_email_uq" }, { schema: "app2" });
+            addCheck("users", { expr: (c) => c("status").isNotNull(), name: "u_status_chk" }, { schema: "app2" });
+            dropConstraint("users", { name: "u_legacy_chk", type: "check" }, { schema: "app2", ifExists: true });
+            createIndex("users", { columns: ["email"], name: "u_email_idx", unique: true, schema: "app2" });
+            dropIndex("u_old_idx", { table: "users", schema: "app2", ifExists: true });
+            insert("users", { rows: [{ email: "a@b.c", status: "new" }], schema: "app2" });
+            update("users", { set: { status: (c) => c.fn.lower(c("status")) }, where: (c) => c("id").isNotNull(), schema: "app2" });
+            del("users", { where: (c) => c("status").isNull(), limit: 10, schema: "app2" });
+            backfill("users", { set: { status: (c) => c.fn.coalesce(c("status"), "new") }, cursorColumn: "id", batchSize: 500, name: "bf_status", schema: "app2" });
+        }};
+    "#;
+    let facade = record(via_facade, "facade");
+    let flat = record(via_flat, "flat");
+    assert_eq!(
+        ops(&facade),
+        ops(&flat),
+        "the table() facade must record byte-identical ops to the flat-op authoring (pure sugar)"
+    );
+}
+
+/// `table()` with a `create(columns, build, opts)` build-callback records the
+/// IDENTICAL `createTable` op (incl. schema + guard) as the flat 4-arg
+/// `createTable(name, columns, build, opts)` — the build-collected constraints/
+/// indexes AND the schema/guard ride on the one op. RED if the twin's 4-arg
+/// createTable drops the opts bag when a builder is present.
+#[test]
+fn twin_table_create_with_builder_and_opts_records_identical_op() {
+    let via_facade = r#"
+        import { table, t } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            table("memberships", { schema: "app2" }).create(
+                { account_id: t.uuid().notNull(), team: t.text().notNull() },
+                (b) => {
+                    b.primaryKey(["account_id", "team"]);
+                    b.unique(["team"], { name: "m_team_uq" });
+                    b.index(["account_id"], { name: "m_account_idx" });
+                },
+                { ifNotExists: true },
+            );
+        }};
+    "#;
+    let via_flat = r#"
+        import { createTable, t } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            createTable(
+                "memberships",
+                { account_id: t.uuid().notNull(), team: t.text().notNull() },
+                (b) => {
+                    b.primaryKey(["account_id", "team"]);
+                    b.unique(["team"], { name: "m_team_uq" });
+                    b.index(["account_id"], { name: "m_account_idx" });
+                },
+                { schema: "app2", ifNotExists: true },
+            );
+        }};
+    "#;
+    let facade = record(via_facade, "facade_ct");
+    let flat = record(via_flat, "flat_ct");
+    assert_eq!(ops(&facade)[0], ops(&flat)[0]);
+    // And the one op actually carries the build-collected constraints + schema/guard.
+    let op = &ops(&facade)[0];
+    assert_eq!(op.get("op").unwrap(), "createTable");
+    assert_schema(op, "app2");
+    assert_guard(op, "ifNotExists");
+    assert!(op.get("constraints").and_then(|c| c.as_array()).map(|a| !a.is_empty()).unwrap_or(false));
+    assert!(op.get("indexes").and_then(|i| i.as_array()).map(|a| !a.is_empty()).unwrap_or(false));
+}
+
+/// A per-method `schema` OVERRIDES the `table()` default through the V8 recorder
+/// (precedence: per-call key-present wins; an opts bag without a `schema` key keeps
+/// the table default).
+#[test]
+fn twin_table_per_method_schema_overrides_default() {
+    let src = r#"
+        import { table, t } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            const u = table("users", { schema: "app2" });
+            u.addColumn("a", t.int());                       // table default
+            u.addColumn("b", t.int(), { ifNotExists: true }); // guard-only → keeps default
+            u.addColumn("c", t.int(), { schema: "other" });   // override
+        }};
+    "#;
+    let ir = record(src, "override");
+    let cols: Vec<(&str, Option<&str>)> = ops(&ir)
+        .iter()
+        .map(|o| {
+            (
+                o.get("column").and_then(|v| v.as_str()).unwrap(),
+                o.get("schema").and_then(|v| v.as_str()),
+            )
+        })
+        .collect();
+    assert_eq!(cols[0], ("a", Some("app2")));
+    assert_eq!(cols[1], ("b", Some("app2")));
+    assert_eq!(cols[2], ("c", Some("other")));
+}
+
+/// `table()` with NO schema records ops carrying NO `schema` key — byte-identical
+/// to the flat op with no schema (the facade adds nothing when there's no default).
+#[test]
+fn twin_table_no_schema_omits_key() {
+    let facade = record(
+        r#"
+        import { table, t } from "@zeroship/migrate";
+        export default { name: "n", up() { table("users").addColumn("a", t.int()); }};
+    "#,
+        "facade_noschema",
+    );
+    let flat = record(
+        r#"
+        import { addColumn, t } from "@zeroship/migrate";
+        export default { name: "n", up() { addColumn("users", "a", t.int()); }};
+    "#,
+        "flat_noschema",
+    );
+    assert_eq!(ops(&facade)[0], ops(&flat)[0]);
+    assert!(
+        ops(&facade)[0].get("schema").is_none(),
+        "no table default ⇒ schema key omitted"
+    );
+}
