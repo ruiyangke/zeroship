@@ -316,6 +316,11 @@ export function devServerPlugin(
       migrationsAbs = resolve(root, options.migrations?.dir ?? "migrations");
       if (existsSync(migrationsAbs)) {
         server.watcher.add(migrationsAbs);
+        // Initial regen on boot: migrations may have changed while the dev
+        // server was down (`hotUpdate` only fires on a *subsequent* change, so
+        // without this a fresh `pnpm dev` leaves env.db.ts stale). Fire-and-forget
+        // — `regenTypesDev` logs on error and NEVER throws.
+        regenTypesDev(root, options.migrations, warnedNoBinary);
       }
 
       // 1. Module fetch endpoint ─────────────────────────────────────────

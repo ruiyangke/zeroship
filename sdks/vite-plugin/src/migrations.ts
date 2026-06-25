@@ -189,6 +189,14 @@ export function sha256Hex(bytes: Buffer): Sha256Hex {
  *  `.zeroship/`, which is gitignored) — see the P3/P5 note above. */
 export const GEN_TYPES_OUT_DEFAULT = "generated/zeroship";
 
+/** The bare PATH name of the `gen-types` CLI — the same binary `recordViaCli`
+ *  shells (migrations.ts `record`/`build`). When the binary is on `$PATH` (the
+ *  natural `cargo install` location) but not in `node_modules/.bin`, the prod
+ *  drift gate falls through to this so `spawnSync` resolves it via `$PATH`,
+ *  exactly as the recorder does — instead of spuriously hard-failing "not found"
+ *  on a legitimately-configured CI host. */
+const GEN_TYPES_CLI_BIN = "zeroship-migrate-js";
+
 /** Options shared by the gen-types helpers (binary resolution + dir). */
 export interface GenTypesOptions {
   /** Project root. */
@@ -211,23 +219,39 @@ export type GenTypesResult =
 
 /**
  * Resolve the `zeroship-migrate-js` CLI binary, MIRRORING the dev-server's
- * graceful resolution (`dev-server.ts` `ZEROSHIP_BIN` / `node_modules/.bin`):
+ * graceful resolution (`dev-server.ts:442-443` `ZEROSHIP_BIN || node_modules/.bin
+ * || bare "zeroship"`) and the recorder's `recordViaCli` (which falls through to
+ * the bare `"zeroship-migrate-js"` PATH name):
  *
  *  1. an explicit `cliPath` option (tests / packaged installs) — used verbatim;
  *  2. the `ZEROSHIP_MIGRATE_JS_BIN` env override;
  *  3. `<root>/node_modules/.bin/zeroship-migrate-js` if it exists;
- *  4. otherwise `null` — the caller decides (dev: warn-once + no-op; CI: hard-fail).
+ *  4a. when `requireBinary` (the prod/CI drift gate) → the bare `"zeroship-migrate-js"`
+ *      PATH name, so `spawnSync` resolves it via `$PATH` exactly as `recordViaCli`
+ *      does. A genuinely-missing binary then surfaces a real `spawnSync` ENOENT
+ *      (which `genTypesViaCli` throws on) — NOT a spurious "not found" on a host
+ *      where the binary is on `$PATH` but not in `node_modules/.bin`;
+ *  4b. otherwise (dev) → `null`, so the caller can detect true absence and
+ *      warn-once + no-op without a stack trace (the committed env.db.ts stays valid).
  *
- * Unlike the recorder's `recordViaCli` (which hard-throws on a bare PATH name),
- * this returns `null` for the absent case so dev can no-op without a stack trace.
+ * The `requireBinary` split is the faithful mirror: `record`/`build` always reach
+ * the bare PATH name, so the prod drift gate must too — else `record` succeeds in
+ * the same build while `--check` hard-fails on the same legitimately-configured machine.
  */
-export function resolveGenTypesCli(root: string, cliPath?: string): string | null {
+export function resolveGenTypesCli(
+  root: string,
+  cliPath?: string,
+  requireBinary = false
+): string | null {
   if (cliPath) return cliPath;
   const fromEnv = process.env.ZEROSHIP_MIGRATE_JS_BIN;
   if (fromEnv) return fromEnv;
   const local = resolve(root, "node_modules/.bin/zeroship-migrate-js");
   if (existsSync(local)) return local;
-  return null;
+  // Prod/CI: fall through to the bare PATH name (mirror of recordViaCli) so
+  // `$PATH`-installed binaries resolve; a real absence surfaces as ENOENT.
+  // Dev: return null so the caller can no-op gracefully.
+  return requireBinary ? GEN_TYPES_CLI_BIN : null;
 }
 
 /**
@@ -237,10 +261,12 @@ export function resolveGenTypesCli(root: string, cliPath?: string): string | nul
  *
  * Binary resolution is graceful (see {@link resolveGenTypesCli}). When the
  * binary is ABSENT:
- *  - `requireBinary` (CI / `--check` gate) → throws (a misconfigured CI must not
- *    silently pass);
- *  - otherwise (dev) → returns `{ status: "skipped" }` so the caller can warn
- *    once and continue — the committed artifacts stay valid.
+ *  - `requireBinary` (CI / `--check` gate) → resolution falls through to the bare
+ *    `"zeroship-migrate-js"` PATH name (mirror of `recordViaCli`); a genuinely
+ *    missing binary then throws via the `spawnSync` ENOENT below. A misconfigured
+ *    CI must not silently pass — but a `$PATH`-installed binary must resolve.
+ *  - otherwise (dev) → resolution returns `null` and we return `{ status:
+ *    "skipped" }` so the caller can warn once and continue — committed artifacts stay valid.
  *
  * A present-binary non-zero exit (e.g. a `--check` drift) ALWAYS throws.
  */
@@ -250,14 +276,10 @@ export function genTypesViaCli(
   const migrationsDir = join(opts.root, opts.migrationsDir ?? "migrations");
   const outDir = join(opts.root, opts.genTypesOut ?? GEN_TYPES_OUT_DEFAULT);
 
-  const cli = resolveGenTypesCli(opts.root, opts.cliPath);
+  // `requireBinary` (prod/CI) lets resolution fall through to the bare PATH name;
+  // dev gets `null` here only — never the bare name — so the no-op stays graceful.
+  const cli = resolveGenTypesCli(opts.root, opts.cliPath, opts.requireBinary);
   if (cli == null) {
-    if (opts.requireBinary) {
-      throw new Error(
-        "migrations: zeroship-migrate-js not found (looked at ZEROSHIP_MIGRATE_JS_BIN " +
-          "+ node_modules/.bin/zeroship-migrate-js) — required for the gen-types drift gate"
-      );
-    }
     return {
       status: "skipped",
       reason:
@@ -276,6 +298,8 @@ export function genTypesViaCli(
   ];
   const res = spawnSync(cli, args, { encoding: "utf8" });
   if (res.error) {
+    // Includes the prod/CI case where the bare PATH name failed to resolve
+    // (ENOENT) — a real hard-fail for the drift gate, not a silent pass.
     throw new Error(
       `migrations: failed to invoke the gen-types CLI (${cli}): ${res.error.message}`
     );

@@ -191,20 +191,105 @@ describe("gen-types wiring (P3)", () => {
     }
   });
 
-  test("missing binary with requireBinary (CI gate) → throws", async () => {
+  // MED-1 (review fix): with `requireBinary` and a GENUINELY-absent binary (not in
+  // env, not in node_modules/.bin, not on $PATH) the prod gate must still HARD-FAIL
+  // — now via the bare-name spawn ENOENT (not a silent pass). We scrub $PATH so the
+  // bare name truly cannot resolve.
+  test("missing binary with requireBinary (CI gate) → throws (bare-name spawn ENOENT)", async () => {
     const fx = await makeFixture({
       "migrations/20240617123000_notes.ts": "export function up() {}\n",
     });
     const savedEnv = process.env.ZEROSHIP_MIGRATE_JS_BIN;
+    const savedPath = process.env.PATH;
     delete process.env.ZEROSHIP_MIGRATE_JS_BIN;
+    process.env.PATH = ""; // no $PATH dir contains `zeroship-migrate-js`
     try {
       assert.throws(
         () => genTypesViaCli({ root: fx.root, check: true, requireBinary: true }),
-        /zeroship-migrate-js not found/
+        (err: Error) => {
+          // The bare PATH name was spawned and failed to resolve.
+          assert.match(err.message, /failed to invoke the gen-types CLI/);
+          assert.match(err.message, /zeroship-migrate-js/);
+          return true;
+        }
       );
     } finally {
       if (savedEnv === undefined) delete process.env.ZEROSHIP_MIGRATE_JS_BIN;
       else process.env.ZEROSHIP_MIGRATE_JS_BIN = savedEnv;
+      process.env.PATH = savedPath;
+      await fx.cleanup();
+    }
+  });
+
+  // MED-1 (review fix): the prod/CI drift gate must MIRROR `recordViaCli` and the
+  // dev-server's binary resolution, both of which fall through to a BARE PATH name.
+  // Without this, a host with the binary on `$PATH` (the natural `cargo install`
+  // location) but NOT in node_modules/.bin and no env var would let `record`/`build`
+  // succeed while the prod `--check` gate spuriously hard-fails "not found".
+  test("resolveGenTypesCli: requireBinary falls through to the bare PATH name (mirror of recordViaCli)", async () => {
+    // A fixture with NO node_modules/.bin and (below) NO env override.
+    const fx = await makeFixture({ "x.txt": "x" });
+    const savedEnv = process.env.ZEROSHIP_MIGRATE_JS_BIN;
+    delete process.env.ZEROSHIP_MIGRATE_JS_BIN;
+    try {
+      // Dev (requireBinary=false): null → graceful no-op.
+      assert.equal(resolveGenTypesCli(fx.root), null);
+      assert.equal(resolveGenTypesCli(fx.root, undefined, false), null);
+      // Prod/CI (requireBinary=true): the bare PATH name, so spawnSync resolves
+      // it via $PATH exactly as record/build do — NOT null (which would spuriously
+      // hard-fail on a $PATH-installed binary).
+      assert.equal(
+        resolveGenTypesCli(fx.root, undefined, true),
+        "zeroship-migrate-js"
+      );
+    } finally {
+      if (savedEnv === undefined) delete process.env.ZEROSHIP_MIGRATE_JS_BIN;
+      else process.env.ZEROSHIP_MIGRATE_JS_BIN = savedEnv;
+      await fx.cleanup();
+    }
+  });
+
+  // MED-1 end-to-end: with the binary ONLY on $PATH (not node_modules/.bin, no env
+  // var), the prod drift gate (`requireBinary:true`) must SUCCEED — proving the
+  // bare-name fall-through resolves a $PATH-installed binary. Pre-fix this threw
+  // "zeroship-migrate-js not found" (resolution returned null) — a build-breaking
+  // false negative on a legitimately-configured machine.
+  test("genTypesViaCli(requireBinary): resolves a $PATH-installed binary (no node_modules/.bin, no env)", async () => {
+    const fx = await makeFixture({
+      "migrations/20240617123000_notes.ts": "export function up() {}\n",
+      // Stub binary placed under a dir we prepend to $PATH, named EXACTLY the
+      // bare CLI name so $PATH resolution finds it.
+      "pathbin/zeroship-migrate-js": STUB_GENTYPES,
+    });
+    const pathBin = join(fx.root, "pathbin");
+    await fs.chmod(join(pathBin, "zeroship-migrate-js"), 0o755);
+    const savedPath = process.env.PATH;
+    const savedEnv = process.env.ZEROSHIP_MIGRATE_JS_BIN;
+    const savedArgsLog = process.env.ARGS_LOG;
+    delete process.env.ZEROSHIP_MIGRATE_JS_BIN; // force the bare-name fall-through
+    process.env.PATH = `${pathBin}:${savedPath ?? ""}`;
+    process.env.ARGS_LOG = join(fx.root, "args.json");
+    try {
+      const result = genTypesViaCli({
+        root: fx.root,
+        genTypesOut: "generated/zeroship",
+        check: true,
+        requireBinary: true,
+      });
+      assert.equal(result.status, "ok");
+      assert.equal((result as { cli: string }).cli, "zeroship-migrate-js");
+      // It really ran the $PATH binary with the gen-types --check args.
+      const args = JSON.parse(
+        await fs.readFile(join(fx.root, "args.json"), "utf8")
+      ) as string[];
+      assert.equal(args[0], "gen-types");
+      assert.ok(args.includes("--check"));
+    } finally {
+      process.env.PATH = savedPath;
+      if (savedEnv === undefined) delete process.env.ZEROSHIP_MIGRATE_JS_BIN;
+      else process.env.ZEROSHIP_MIGRATE_JS_BIN = savedEnv;
+      if (savedArgsLog === undefined) delete process.env.ARGS_LOG;
+      else process.env.ARGS_LOG = savedArgsLog;
       await fx.cleanup();
     }
   });
@@ -257,7 +342,11 @@ describe("dev-server hotUpdate → gen-types (P3)", () => {
   async function drive(
     root: string,
     cliPath: string,
-    changedFile: string
+    changedFile: string,
+    // MED-2 made configureServer regenerate on boot. To isolate the hotUpdate
+    // branch, clear the boot-regen artifacts (args log + generated dir) before
+    // firing hotUpdate.
+    clearBootRegen = true
   ): Promise<void> {
     const state: TransformState = {
       serverFunctionMap: new Map(),
@@ -281,6 +370,13 @@ describe("dev-server hotUpdate → gen-types (P3)", () => {
       httpServer: { once() {} },
     };
     hook(devPlugin, "configureServer")(server);
+    // configureServer ran the boot regen (MED-2); wait for its spawnSync FS, then
+    // wipe its outputs so the subsequent hotUpdate assertion measures hotUpdate alone.
+    await new Promise((r) => setTimeout(r, 10));
+    if (clearBootRegen) {
+      await fs.rm(join(root, "args.json"), { force: true });
+      await fs.rm(join(root, "generated"), { recursive: true, force: true });
+    }
     // Now fire the hotUpdate for the changed file.
     hook(devPlugin, "hotUpdate")({ file: changedFile });
     // gen-types runs synchronously (spawnSync) inside hotUpdate; give the FS a tick.
@@ -294,6 +390,44 @@ describe("dev-server hotUpdate → gen-types (P3)", () => {
       const args = JSON.parse(await fs.readFile(argsLog, "utf8")) as string[];
       assert.equal(args[0], "gen-types");
       // The artifacts were emitted into generated/zeroship.
+      await fs.access(join(root, "generated/zeroship/env.db.ts"));
+      await fs.access(join(root, "generated/zeroship/schema.runtime.json"));
+    });
+  });
+
+  // MED-2 (review fix): an INITIAL regen must run on dev-server boot (in
+  // configureServer), not only on a subsequent change. Without it, a migration
+  // changed while the dev server was down leaves env.db.ts stale until the next
+  // save. Assert the artifacts exist after configureServer alone — NO hotUpdate fired.
+  test("configureServer regenerates env.db.ts on boot (no hotUpdate needed)", async () => {
+    await withStub({}, async ({ root, cliPath, argsLog }) => {
+      const state: TransformState = {
+        serverFunctionMap: new Map(),
+        discoveredProcedures: [],
+      };
+      const plugins = devServerPlugin(
+        { migrations: { cliPath, dir: "migrations", genTypesOut: "generated/zeroship" } } as any,
+        state
+      );
+      const [envPlugin, devPlugin] = plugins as any[];
+      const hookFn = (plugin: any, name: string): AnyFn => {
+        const h = plugin?.[name];
+        return typeof h === "function" ? h.bind(plugin) : h?.handler?.bind(plugin);
+      };
+      hookFn(envPlugin, "configResolved")({ root, command: "serve" });
+      const server = {
+        watcher: { add() {} },
+        middlewares: { use() {} },
+        environments: {},
+        config: { root },
+        httpServer: { once() {} },
+      };
+      // configureServer ONLY — deliberately NO hotUpdate.
+      hookFn(devPlugin, "configureServer")(server);
+      await new Promise((r) => setTimeout(r, 10));
+      // gen-types ran on boot.
+      const args = JSON.parse(await fs.readFile(argsLog, "utf8")) as string[];
+      assert.equal(args[0], "gen-types");
       await fs.access(join(root, "generated/zeroship/env.db.ts"));
       await fs.access(join(root, "generated/zeroship/schema.runtime.json"));
     });
@@ -405,6 +539,30 @@ describe("gen-types against the REAL zeroship-migrate-js binary (faithful e2e)",
         requireBinary: true,
       });
       assert.equal(checkOk.status, "ok");
+
+      // 5. (LOW-1 review fix) REAL drift → throw, end-to-end. Tamper the committed
+      //    env.db.ts and assert the REAL CLI's `--check` exits non-zero and
+      //    `genTypesViaCli` THROWS (the production drift gate, locked by the suite
+      //    against the actual binary — not only the stub).
+      const dtsPath = join(fx.root, "generated/zeroship/env.db.ts");
+      await fs.appendFile(dtsPath, "\n// drift: a hand-edit the migrations don't produce\n");
+      assert.throws(
+        () =>
+          genTypesViaCli({
+            root: fx.root,
+            cliPath,
+            genTypesOut: "generated/zeroship",
+            check: true,
+            requireBinary: true,
+          }),
+        (err: Error) => {
+          // Non-zero exit surfaced as a throw (exact exit code is the CLI's; we
+          // assert the gate fired, not the precise number).
+          assert.match(err.message, /gen-types CLI/);
+          assert.match(err.message, /--check/);
+          return true;
+        }
+      );
     } finally {
       await fx.cleanup();
     }
