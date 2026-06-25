@@ -208,6 +208,17 @@ pub fn fold_ops(
                 tables.insert(name.clone(), snap);
             }
             Op::DropTable { table, .. } => {
+                // Remove ONLY the target table. We do NOT cascade-drop FK constraints
+                // on OTHER tables that reference it, and that is faithful (not a hole):
+                // the lower IGNORES the op's `cascade` flag (`ir_author.rs`
+                // `lower_drop_table` emits `DROP TABLE <t>`, never `… CASCADE`), so a
+                // drop of a still-referenced table FAILS at apply. A folded state with a
+                // referencing FK left dangling is therefore UNREACHABLE — the engine
+                // never produces it — so the fold needs no cascade here.
+                //
+                // REVISIT if/when `Op::DropTable.cascade` is ever threaded into the
+                // render path: a real `DROP TABLE … CASCADE` WOULD drop referencing FKs
+                // on other tables, and this arm would then have to mirror that cascade.
                 if tables.remove(table).is_none() {
                     return Err(FoldError::MissingTable(table.clone()));
                 }
@@ -242,6 +253,40 @@ pub fn fold_ops(
                         column: column.clone(),
                     });
                 }
+                // PG's `ALTER TABLE … DROP COLUMN` AUTO-CASCADES to every dependent
+                // index and UNIQUE/FK constraint that references the dropped column
+                // (and a multi-column index/constraint that merely PARTIALLY covers
+                // it is dropped whole, identically). Live introspection therefore
+                // shows none of them after the drop, so the fold MUST mirror the
+                // cascade — otherwise a phantom index/constraint survives in the
+                // fold and `fold_ops != snapshot_schema(live)`, corrupting P2
+                // gen-types and producing permanent phantom drift.
+                //
+                // (1) Drop every index covering the column. `IndexSnapshot::columns`
+                //     is the raw key-column list, so an exact name compare suffices;
+                //     a multi-column index partially covering it is dropped too.
+                snap.indexes.retain(|i| !i.columns.iter().any(|c| c == column));
+                // (2) Drop every constraint whose LOCAL column list contains the
+                //     column. UNIQUE (`UNIQUE (cols)`) and FOREIGN KEY
+                //     (`FOREIGN KEY (cols) REFERENCES …`) both carry their local
+                //     columns as the leading parenthesized group; the system
+                //     `<table>_pkey` is `PRIMARY KEY (id)` and CHECK is never folded,
+                //     so neither false-matches a non-`id` user column. Collect the
+                //     dropped constraint names first to cascade their implicit unique
+                //     indexes (mirror the DropConstraint index-cascade below).
+                let dropped_constraints: Vec<String> = snap
+                    .constraints
+                    .iter()
+                    .filter(|c| constraint_local_columns_contain(&c.definition, column))
+                    .map(|c| c.name.clone())
+                    .collect();
+                snap.constraints
+                    .retain(|c| !dropped_constraints.contains(&c.name));
+                // A UNIQUE/PK constraint backs an implicit unique index of the SAME
+                // name (a FK backs none), which PG cascades with the constraint —
+                // remove it identically to the DropConstraint arm.
+                snap.indexes
+                    .retain(|i| !dropped_constraints.contains(&i.name));
             }
             Op::RenameColumn { table, from, to, .. } => {
                 let snap = table_mut(&mut tables, table)?;
@@ -634,6 +679,34 @@ fn push_folded_constraint(
     Ok(())
 }
 
+/// True iff the LOCAL column list of a constraint `definition` contains `column`.
+///
+/// Used by the `DropColumn` cascade: PG auto-drops a UNIQUE/FK constraint when one
+/// of its local columns is dropped, so the fold must too. Both the foldable
+/// column-list constraints carry their LOCAL columns as the LEADING parenthesized
+/// group — `UNIQUE (cols)` and `FOREIGN KEY (cols) REFERENCES <schema>.<tgt>(id)…`
+/// — so we parse that first `(...)`. The FK's REFERENCED column list (`(id)`) comes
+/// AFTER `REFERENCES`, never in the leading group, so a column named `id` on the
+/// REFERENCING side is matched while the referenced `(id)` is correctly ignored.
+/// The system `<table>_pkey` (`PRIMARY KEY (id)`) is the only PK and CHECK bodies
+/// are never folded, so neither false-matches a non-`id` user column.
+///
+/// Columns are spelled by [`constraintdef_cols`] (conditional quoting), so each
+/// comma-separated token is trimmed of whitespace and surrounding double-quotes
+/// before the exact compare. This intentionally matches a column that PARTIALLY
+/// covers a multi-column constraint — PG drops such a constraint whole.
+fn constraint_local_columns_contain(definition: &str, column: &str) -> bool {
+    let Some(open) = definition.find('(') else {
+        return false;
+    };
+    let Some(close_rel) = definition[open + 1..].find(')') else {
+        return false;
+    };
+    let cols = &definition[open + 1..open + 1 + close_rel];
+    cols.split(',')
+        .any(|tok| tok.trim().trim_matches('"') == column)
+}
+
 /// A UNIQUE constraint + its implicit unique index (PG names the index after the
 /// constraint). The index covers the same columns, btree, unique.
 fn unique_constraint(name: &str, columns: &[String]) -> FoldedConstraint {
@@ -886,6 +959,145 @@ mod tests {
         assert_eq!(
             err,
             FoldError::MissingColumn { table: "users".to_string(), column: "ghost".to_string() }
+        );
+    }
+
+    fn drop_column(table: &str, column: &str) -> Op {
+        Op::DropColumn {
+            table: table.to_string(),
+            column: column.to_string(),
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    #[test]
+    fn drop_column_cascades_dependent_index() {
+        // PG auto-drops an index over a dropped column; the pure fold must too.
+        // Pre-fix this RETAINED the stale `t_b_idx`, leaving fold != introspect.
+        let with_idx = fold(&[
+            create("t", vec![col("a", ColType::Text, false), col("b", ColType::Text, true)]),
+            create_index("t", Some("t_b_idx"), &["b"], false),
+        ])
+        .unwrap();
+        assert!(
+            with_idx.tables["t"].indexes.iter().any(|i| i.name == "t_b_idx"),
+            "precondition: index present before the drop"
+        );
+        let dropped = fold(&[
+            create("t", vec![col("a", ColType::Text, false), col("b", ColType::Text, true)]),
+            create_index("t", Some("t_b_idx"), &["b"], false),
+            drop_column("t", "b"),
+        ])
+        .unwrap();
+        let t = &dropped.tables["t"];
+        assert!(!t.columns.iter().any(|c| c.name == "b"), "column gone");
+        assert!(
+            !t.indexes.iter().any(|i| i.name == "t_b_idx"),
+            "the index over the dropped column cascades away (matches PG auto-drop)"
+        );
+        // Equals the schema that never had the index/column at all.
+        let base = fold(&[create("t", vec![col("a", ColType::Text, false)])]).unwrap();
+        assert_eq!(dropped, base, "drop-column-with-index folds back to the bare table");
+    }
+
+    #[test]
+    fn drop_column_cascades_dependent_unique_constraint_and_index() {
+        // PG auto-drops a UNIQUE constraint (AND its implicit index) over a dropped
+        // column. Pre-fix the fold retained BOTH, leaving fold != introspect.
+        let dropped = fold(&[
+            create("t", vec![col("a", ColType::Text, false), col("b", ColType::Text, false)]),
+            Op::AddConstraint {
+                table: "t".to_string(),
+                constraint: unique_constraint(Some("t_b_uq"), &["b"]),
+                schema: None,
+                existence_guard: None,
+            },
+            drop_column("t", "b"),
+        ])
+        .unwrap();
+        let t = &dropped.tables["t"];
+        assert!(
+            !t.constraints.iter().any(|c| c.name == "t_b_uq"),
+            "the UNIQUE constraint over the dropped column cascades away"
+        );
+        assert!(
+            !t.indexes.iter().any(|i| i.name == "t_b_uq"),
+            "the constraint's implicit unique index cascades away too"
+        );
+        let base = fold(&[create("t", vec![col("a", ColType::Text, false)])]).unwrap();
+        assert_eq!(dropped, base, "drop-column-with-unique folds back to the bare table");
+    }
+
+    #[test]
+    fn drop_column_cascades_dependent_fk_constraint() {
+        // PG auto-drops a FK constraint when its LOCAL (referencing) column is dropped.
+        let fk = IrConstraint {
+            name: Some("m_team_fk".to_string()),
+            kind: IrConstraintKind::Fk {
+                columns: vec!["team_id".to_string()],
+                references_table: "teams".to_string(),
+                references_columns: vec!["id".to_string()],
+                on_delete: None,
+                on_update: None,
+            },
+        };
+        let dropped = fold(&[
+            create("teams", vec![col("label", ColType::Text, false)]),
+            create("members", vec![col("team_id", ColType::Text, false)]),
+            Op::AddConstraint {
+                table: "members".to_string(),
+                constraint: fk,
+                schema: None,
+                existence_guard: None,
+            },
+            drop_column("members", "team_id"),
+        ])
+        .unwrap();
+        assert!(
+            !dropped.tables["members"].constraints.iter().any(|c| c.name == "m_team_fk"),
+            "the FK over the dropped local column cascades away"
+        );
+    }
+
+    #[test]
+    fn drop_column_keeps_unrelated_index_and_constraint() {
+        // The cascade must NOT over-drop: an index/constraint on a DIFFERENT column,
+        // and the system `<table>_pkey` (PRIMARY KEY (id)), survive the drop of `b`.
+        let snap = fold(&[
+            create(
+                "t",
+                vec![
+                    col("a", ColType::Text, false),
+                    col("b", ColType::Text, true),
+                    col("c", ColType::Text, false),
+                ],
+            ),
+            create_index("t", Some("t_c_idx"), &["c"], false),
+            drop_column("t", "b"),
+        ])
+        .unwrap();
+        let t = &snap.tables["t"];
+        assert!(t.indexes.iter().any(|i| i.name == "t_c_idx"), "unrelated index kept");
+        assert!(
+            t.constraints.iter().any(|c| c.name == "t_pkey"),
+            "system PK (PRIMARY KEY (id)) not dropped by a non-id column drop"
+        );
+    }
+
+    #[test]
+    fn drop_column_cascades_multicolumn_index_partial_cover() {
+        // A multi-column index that merely PARTIALLY covers the dropped column is
+        // dropped whole by PG — the fold mirrors that.
+        let snap = fold(&[
+            create("t", vec![col("a", ColType::Text, false), col("b", ColType::Text, true)]),
+            create_index("t", Some("t_ab_idx"), &["a", "b"], false),
+            drop_column("t", "b"),
+        ])
+        .unwrap();
+        assert!(
+            !snap.tables["t"].indexes.iter().any(|i| i.name == "t_ab_idx"),
+            "a multi-column index partially covering the dropped column cascades away"
         );
     }
 
