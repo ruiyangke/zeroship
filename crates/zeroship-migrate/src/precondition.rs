@@ -291,6 +291,11 @@ pub enum PreconditionError {
         /// What specifically is wrong with the shape.
         reason: String,
     },
+    /// An engine-supplied identifier (project schema / migrator role) was not
+    /// quotable (empty or NUL-bearing) at a render seam — fail-closed rather than
+    /// interpolate it. Maps [`crate::dml::IdentQuoteError`].
+    #[error("precondition: {0}")]
+    IdentQuote(#[from] crate::dml::IdentQuoteError),
 }
 
 /// Validate a bare SQL identifier (mirrors `backfill::validate_ident`): non-empty,
@@ -695,13 +700,16 @@ async fn run_sql_boolean_in_txn(
     sql: &str,
 ) -> Result<bool, PreconditionError> {
     // Pin the project schema (and only it) on the path, scoped to this txn.
-    let schema_q = crate::dml::escape_quote_ident(&cfg.project_schema);
+    // Routed through the ONE engine seam so it fails closed on an empty/NUL
+    // schema, byte-identical to the prior `escape_quote_ident` on every real
+    // (quote-free / `-`-bearing UUIDv7) schema.
+    let schema_q = crate::dml::quote_ident_checked(&cfg.project_schema)?;
     conn.batch_execute(&format!("SET LOCAL search_path TO {schema_q}"))
         .await?;
     // Drop to the migrator role for the read, scoped to this txn (line-2). No
     // role configured (tests / single-tenant dev) runs as the connecting role.
     if let Some(role) = &cfg.pg.migrator_role {
-        let role_q = crate::dml::escape_quote_ident(role);
+        let role_q = crate::dml::quote_ident_checked(role)?;
         conn.batch_execute(&format!("SET LOCAL ROLE {role_q}"))
             .await?;
     }

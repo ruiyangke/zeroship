@@ -135,10 +135,17 @@ impl BackfillSpec {
     /// name) so two otherwise-identical backfills targeting the same table in
     /// DIFFERENT schemas (`app_a.users` vs `app_b.users`, now reachable under
     /// Trusted) get DISTINCT ids and cannot alias each other's progress row on
-    /// crash-resume. Exactly-once–preserving: it only *separates* previously
-    /// colliding ids; the Confined path keeps a deterministic id (schema ==
-    /// project schema, unchanged input → unchanged hash), so an in-flight Confined
-    /// backfill resumes identically.
+    /// crash-resume.
+    ///
+    /// Stability is **going forward**, not across the #149 boundary: because the
+    /// schema is now folded into the SHA256 input, a backfill's id DIFFERS from the
+    /// one the pre-#149 code computed for the same transform (which hashed no
+    /// schema). That is acceptable pre-launch — there are no production progress
+    /// rows for the new id to orphan (a stranded old-id row would just mean a
+    /// re-authored backfill restarts from the top, which is exactly-once-safe). For
+    /// any FIXED engine version the id is fully deterministic: same schema (under
+    /// Confined, always the project schema) + same transform ⇒ same id, so an
+    /// in-flight backfill always resumes against its own progress row.
     #[must_use]
     pub fn backfill_id(&self) -> String {
         let mut h = Sha256::new();

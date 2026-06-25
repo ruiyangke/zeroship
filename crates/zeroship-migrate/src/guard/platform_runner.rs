@@ -195,6 +195,15 @@ pub struct ValidateReport {
 }
 
 /// Any failure a runner can surface (printed by the bin; exits non-zero).
+///
+/// Some variants (`Apply(EngineError)` / `DryRun(DryRunError)`) are ~144 bytes, so
+/// `Result<_, RunError>` trips `clippy::result_large_err` on the few helpers whose
+/// `Ok` is small. We deliberately do NOT box those variants: they carry `#[from]`
+/// for `?`-ergonomics across the whole runner surface, and boxing would force a
+/// manual `From` + churn every `?` site to satisfy a size heuristic on a cold,
+/// CLI-only error path that is constructed at most once per `migrate` invocation.
+/// The few small-`Ok` helpers carry a narrow, commented
+/// `#[allow(clippy::result_large_err)]` instead.
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
     /// Loading / parsing the migration directory failed.
@@ -296,6 +305,8 @@ pub enum RunError {
 /// `Migration` and never touches `PlanStep`/`RenameStep`, so it stays decoupled
 /// from plan-shape evolution; the facade fails closed if a platform changelog
 /// ever produced a multi-step plan (it cannot today — see the precondition test).
+// Cold CLI error path; see RunError's doc for why the large variants stay unboxed.
+#[allow(clippy::result_large_err)]
 fn load_dir_flat(dir: &Path) -> Result<Vec<crate::migration::Migration>, RunError> {
     let plans = load_dir(dir)?;
     let mut migrations = Vec::with_capacity(plans.len());
@@ -321,6 +332,8 @@ fn load_dir_flat(dir: &Path) -> Result<Vec<crate::migration::Migration>, RunErro
 /// # Errors
 /// [`RunError::DestructiveRefused`] when the plan is destructive (or
 /// approval-gated) and `yes` is `false`.
+// Cold CLI error path; see RunError's doc for why the large variants stay unboxed.
+#[allow(clippy::result_large_err)]
 pub fn destructive_gate_decision(
     plan: &MigrationPlan,
     yes: bool,
@@ -487,6 +500,8 @@ fn dsn_scheme_engine(url: &str) -> Option<EngineKind> {
 /// # Errors
 /// [`RunError::EngineConflict`] when the override contradicts an unambiguous DSN
 /// scheme.
+// Cold CLI error path; see RunError's doc for why the large variants stay unboxed.
+#[allow(clippy::result_large_err)]
 pub fn resolve_engine(database_url: &str, override_kind: Option<EngineKind>) -> Result<Engine, RunError> {
     let Some(kind) = override_kind else {
         return Ok(classify_engine(database_url));
@@ -525,6 +540,8 @@ impl RunConfig {
     ///
     /// # Errors
     /// [`RunError::EngineConflict`] when `engine_override` contradicts the DSN.
+    // Cold CLI error path; see RunError's doc — large variants stay unboxed.
+    #[allow(clippy::result_large_err)]
     pub fn resolve_engine(&self) -> Result<Engine, RunError> {
         resolve_engine(&self.database_url, self.engine_override)
     }
@@ -569,6 +586,8 @@ fn sqlite_journal_path(app: &Path) -> PathBuf {
 /// Open the hardened [`SqliteBackend`] for the CLI's SQLite leg, from the app-file
 /// path extracted off the `--database-url`. The journal lives in a sibling
 /// `<file>.migrations` file (§2.5.2).
+// Cold CLI error path; see RunError's doc for why the large variants stay unboxed.
+#[allow(clippy::result_large_err)]
 fn open_sqlite_backend(app: &Path) -> Result<SqliteBackend, RunError> {
     let journal = sqlite_journal_path(app);
     SqliteBackend::open(app, &journal).map_err(|e| RunError::Sqlite(e.to_string()))
@@ -1364,7 +1383,12 @@ async fn pg_net_applied_trailer(
     conn: &compio_postgres::Client,
     exec_cfg: &ExecutorConfig,
 ) -> Result<Vec<TrailerEntry>, RunError> {
-    let meta = crate::dml::escape_quote_ident(&exec_cfg.pg.meta_schema);
+    // Engine-supplied meta schema: route through the ONE shared engine seam so it
+    // fails closed on an empty / NUL name (byte-identical to the prior
+    // `escape_quote_ident` for every real schema). Journal-table read → mapped
+    // through `JournalError` (RunError carries `From<JournalError>`).
+    let meta = crate::dml::quote_ident_checked(&exec_cfg.pg.meta_schema)
+        .map_err(crate::journal::JournalError::from)?;
     let rows = conn
         .query(
             &format!(
@@ -1440,6 +1464,8 @@ pub struct TrailerEntry {
 /// [`RunError::LoadCmd`] on a malformed/truncated trailer line (a non-empty trailer
 /// line that is not `--   <version>\t<checksum>\t<name>`) — a corrupt dump must
 /// fail cleanly, never silently drop a migration's checksum/name.
+// Cold CLI error path; see RunError's doc for why the large variants stay unboxed.
+#[allow(clippy::result_large_err)]
 pub fn parse_schema_dump(content: &str) -> Result<(String, Vec<TrailerEntry>), RunError> {
     let Some(idx) = content.rfind(SCHEMA_TRAILER_ANCHOR) else {
         return Ok((content.to_string(), Vec::new()));
@@ -1974,6 +2000,8 @@ pub async fn run_down(cfg: &RunConfig) -> Result<RunReport, RunError> {
 ///
 /// # Errors
 /// [`RunError`] only on a load/parse failure of the migration directory.
+// Cold CLI error path; see RunError's doc for why the large variants stay unboxed.
+#[allow(clippy::result_large_err)]
 pub fn lint_advisories(cfg: &RunConfig) -> Result<Vec<(String, Vec<Advisory>)>, RunError> {
     let migrations = load_dir_flat(&cfg.dir)?;
     let guard_cfg = build_guard_cfg(cfg);

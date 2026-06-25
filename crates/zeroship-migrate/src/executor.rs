@@ -381,6 +381,13 @@ pub enum ApplyError {
         /// The LIVE value.
         actual: String,
     },
+    /// An engine-supplied identifier (project schema / migrator role / meta schema)
+    /// was not quotable (empty or NUL-bearing) at a render seam — fail-closed
+    /// rather than interpolate it. Maps [`crate::dml::IdentQuoteError`]; the
+    /// meta-schema journal-write seams route the same byte-logic through
+    /// [`JournalError`] (which also carries this `From`).
+    #[error("apply: {0}")]
+    IdentQuote(#[from] crate::dml::IdentQuoteError),
 }
 
 /// A stable i64 advisory-lock key from the project id, mirroring the
@@ -482,24 +489,36 @@ fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
 /// INSERT — the migrator can no longer write the journal (its grant is revoked;
 /// C1 fix), so the journal write must run as the admin, atomically in the SAME
 /// transaction as the `up`.
-fn set_local_session_sql(cfg: &ExecutorConfig, m: &Migration) -> String {
-    format!(
+fn set_local_session_sql(
+    cfg: &ExecutorConfig,
+    m: &Migration,
+) -> Result<String, crate::dml::IdentQuoteError> {
+    Ok(format!(
         "SET LOCAL search_path TO {}; \
          SET LOCAL statement_timeout = {}; \
          SET LOCAL lock_timeout = {};",
-        cfg.search_path_clause(),
+        cfg.search_path_clause()?,
         effective_timeout_ms(cfg, m),
         cfg.lock_timeout_ms(),
-    )
+    ))
 }
 
 /// `SET LOCAL ROLE "<migrator>"` for the txn path, or empty when no migrator role
 /// is configured (tests / single-tenant dev). Brackets ONLY the `<up>`; the
 /// caller `RESET ROLE`s before the journal write (C1).
-fn set_local_role_sql(cfg: &ExecutorConfig) -> Option<String> {
-    cfg.pg.migrator_role
+///
+/// The migrator role is an engine-supplied identifier, so it is quoted through
+/// the ONE shared engine seam ([`crate::dml::quote_ident_checked`]) — fail-closed
+/// on an empty / NUL name, byte-identical to the prior `escape_quote_ident` for
+/// every real role.
+fn set_local_role_sql(
+    cfg: &ExecutorConfig,
+) -> Result<Option<String>, crate::dml::IdentQuoteError> {
+    cfg.pg
+        .migrator_role
         .as_ref()
-        .map(|role| format!("SET LOCAL ROLE {}", crate::dml::escape_quote_ident(role)))
+        .map(|role| Ok(format!("SET LOCAL ROLE {}", crate::dml::quote_ident_checked(role)?)))
+        .transpose()
 }
 
 /// Session-level `SET …` for the **non-txn path** (no transaction to scope to).
@@ -520,7 +539,7 @@ pub(crate) async fn configure_session_non_txn(
 ) -> Result<(), ApplyError> {
     let stmt = format!(
         "SET search_path TO {}; SET statement_timeout = {}; SET lock_timeout = {};",
-        cfg.search_path_clause(),
+        cfg.search_path_clause()?,
         effective_timeout_ms(cfg, m),
         cfg.lock_timeout_ms(),
     );
@@ -1968,7 +1987,7 @@ pub(crate) async fn apply_transactional(
     // COMMIT/ROLLBACK — nothing leaks onto the session (H2 / H3). This runs as
     // the admin (always permitted); the role switch is applied separately around
     // the `<up>` only.
-    if let Err(e) = conn.batch_execute(&set_local_session_sql(cfg, m)).await {
+    if let Err(e) = conn.batch_execute(&set_local_session_sql(cfg, m)?).await {
         let _ = conn.batch_execute("ROLLBACK").await;
         return Err(ApplyError::Db(e));
     }
@@ -2040,7 +2059,7 @@ pub(crate) async fn apply_transactional(
     // already absent (ifExists), so there is nothing to run; only the journal row
     // below lands so the version is recorded net-applied.
     if !skip_up {
-        if let Some(set_role) = set_local_role_sql(cfg) {
+        if let Some(set_role) = set_local_role_sql(cfg)? {
             if let Err(e) = conn.batch_execute(&set_role).await {
                 let _ = conn.batch_execute("ROLLBACK").await;
                 return Err(ApplyError::Db(e));
@@ -2084,7 +2103,7 @@ pub(crate) async fn apply_transactional(
         !supersedes.is_empty(),
         "kind='squash' iff supersedes is non-empty"
     );
-    let meta = crate::dml::escape_quote_ident(&cfg.pg.meta_schema);
+    let meta = crate::dml::quote_ident_checked(&cfg.pg.meta_schema)?;
     if let Err(e) = conn
         .execute(
             &format!(
@@ -2182,7 +2201,7 @@ pub(crate) async fn apply_dml_transactional(
         "SET LOCAL search_path TO {}; \
          SET LOCAL statement_timeout = {}; \
          SET LOCAL lock_timeout = {};",
-        cfg.search_path_clause(),
+        cfg.search_path_clause()?,
         cfg.statement_timeout_ms(),
         cfg.lock_timeout_ms(),
     );
@@ -2192,7 +2211,7 @@ pub(crate) async fn apply_dml_transactional(
     }
     // Drop to the migrator role for the DML ONLY (line-2 confinement); RESET
     // before the journal write so the journal stays unforgeable by the step.
-    if let Some(set_role) = set_local_role_sql(cfg) {
+    if let Some(set_role) = set_local_role_sql(cfg)? {
         if let Err(e) = conn.batch_execute(&set_role).await {
             let _ = conn.batch_execute("ROLLBACK").await;
             return Err(ApplyError::Db(e));
@@ -2237,7 +2256,7 @@ pub(crate) async fn apply_dml_transactional(
         supersedes: &[],
         preconditions: &[],
     });
-    let meta = crate::dml::escape_quote_ident(&cfg.pg.meta_schema);
+    let meta = crate::dml::quote_ident_checked(&cfg.pg.meta_schema)?;
     if let Err(e) = conn
         .execute(
             &format!(
@@ -2277,7 +2296,7 @@ async fn insert_supersedes_edges(
     squash_version: &str,
     supersedes: &[&str],
 ) -> Result<(), JournalError> {
-    let meta = crate::dml::escape_quote_ident(&cfg.pg.meta_schema);
+    let meta = crate::dml::quote_ident_checked(&cfg.pg.meta_schema)?;
     for sup in supersedes {
         conn.execute(
             &format!(
@@ -2362,7 +2381,7 @@ pub(crate) async fn apply_non_transactional(
     // the role never leaks onto the session even if the `<up>` fails — and
     // `apply`'s `restore_session` is an unconditional backstop (L1).
     if let Some(role) = &cfg.pg.migrator_role {
-        let role_q = crate::dml::escape_quote_ident(role);
+        let role_q = crate::dml::quote_ident_checked(role)?;
         conn.batch_execute(&format!("SET ROLE {role_q}"))
             .await?;
     }
@@ -2502,8 +2521,8 @@ async fn recover_non_transactional(
         if is_invalid {
             let stmt = format!(
                 "DROP INDEX IF EXISTS {}.{}",
-                crate::dml::escape_quote_ident(&cfg.project_schema),
-                crate::dml::escape_quote_ident(&idx),
+                crate::dml::quote_ident_checked(&cfg.project_schema)?,
+                crate::dml::quote_ident_checked(&idx)?,
             );
             conn.batch_execute(&stmt).await?;
         }
@@ -2647,6 +2666,11 @@ pub enum RollbackError {
     /// A journal operation failed.
     #[error(transparent)]
     Journal(#[from] JournalError),
+    /// An engine-supplied identifier (migrator role / project schema / meta schema)
+    /// was not quotable (empty or NUL-bearing) at a render seam — fail-closed
+    /// rather than interpolate it. Maps [`crate::dml::IdentQuoteError`].
+    #[error("rollback: {0}")]
+    IdentQuote(#[from] crate::dml::IdentQuoteError),
     /// A **dialect-neutral** backend error (non-Postgres
     /// [`MigrationBackend`](crate::backend::MigrationBackend) impls). See
     /// [`ApplyError::Backend`]. The Postgres impl never constructs this arm.
@@ -3259,13 +3283,13 @@ pub(crate) async fn rollback_one_transactional(
     conn.batch_execute("BEGIN").await?;
 
     // Pin search_path + mandatory timeouts (SET LOCAL — vanish at COMMIT/ROLLBACK).
-    if let Err(e) = conn.batch_execute(&set_local_session_sql(cfg, m)).await {
+    if let Err(e) = conn.batch_execute(&set_local_session_sql(cfg, m)?).await {
         let _ = conn.batch_execute("ROLLBACK").await;
         return Err(RollbackError::Db(e));
     }
     // Drop to the migrator role for the `<down>` ONLY (line-2 confinement). RESET
     // ROLE before the journal append so the admin writes the rolled_back event.
-    if let Some(set_role) = set_local_role_sql(cfg) {
+    if let Some(set_role) = set_local_role_sql(cfg)? {
         if let Err(e) = conn.batch_execute(&set_role).await {
             let _ = conn.batch_execute("ROLLBACK").await;
             return Err(RollbackError::Db(e));
@@ -3292,7 +3316,7 @@ pub(crate) async fn rollback_one_transactional(
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
 
     // Append the immutable `rolled_back` event in the SAME transaction, as admin.
-    let meta = crate::dml::escape_quote_ident(&cfg.pg.meta_schema);
+    let meta = crate::dml::quote_ident_checked(&cfg.pg.meta_schema)?;
     if let Err(e) = conn
         .execute(
             &format!(
@@ -3368,7 +3392,7 @@ mod pg_confinement_shape_tests {
         let cfg = ExecutorConfig::new("prj_x", "proj_x").with_migrator_role("migrator_proj_x");
         let m = trivial_migration();
 
-        let session = set_local_session_sql(&cfg, &m);
+        let session = set_local_session_sql(&cfg, &m).expect("session sql renders");
         // search_path is the project schema, then the `public` extension schema
         // (the `new()` default) — pinned for confined resolution.
         assert_eq!(
@@ -3380,7 +3404,9 @@ mod pg_confinement_shape_tests {
         );
 
         // The migrator role bracket comes from cfg.pg.migrator_role.
-        let role = set_local_role_sql(&cfg).expect("migrator role set");
+        let role = set_local_role_sql(&cfg)
+            .expect("role ident quotable")
+            .expect("migrator role set");
         assert_eq!(role, "SET LOCAL ROLE \"migrator_proj_x\"");
     }
 
@@ -3399,7 +3425,9 @@ mod pg_confinement_shape_tests {
         );
         // And the PG-only role bracket is therefore absent.
         assert!(
-            set_local_role_sql(&cfg).is_none(),
+            set_local_role_sql(&cfg)
+                .expect("role ident quotable")
+                .is_none(),
             "no SET LOCAL ROLE is emitted when the PG confinement carries no role"
         );
         // The neutral identity fields ARE populated (engine-agnostic).

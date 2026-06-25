@@ -296,15 +296,28 @@ impl ExecutorConfig {
     ///   still resolves (and is no longer guard-blocked), preserving dbmate
     ///   parity. The operator owns the DB, so this pin is convenience, not a
     ///   boundary.
-    pub(crate) fn search_path_clause(&self) -> String {
-        let quote = |s: &str| crate::dml::escape_quote_ident(s);
+    ///
+    /// Every element is an **engine-supplied** identifier (project schema, platform
+    /// schemas, extension schemas), so each is rendered through the ONE shared
+    /// engine seam ([`crate::dml::quote_ident_checked`]) — fail-closed on an empty
+    /// / NUL name, byte-identical to the prior `escape_quote_ident` for every real
+    /// schema. So the whole quoting surface (not just the DDL/journal seams) is
+    /// uniformly self-defending.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::dml::IdentQuoteError`] if any configured schema is empty or carries
+    /// a NUL byte (an engine-internal misconfiguration; never reachable from a
+    /// well-formed `ExecutorConfig`).
+    pub(crate) fn search_path_clause(&self) -> Result<String, crate::dml::IdentQuoteError> {
+        let quote = |s: &str| crate::dml::quote_ident_checked(s);
         match self.trust {
             crate::guard::TrustProfile::Platform if !self.platform_schemas.is_empty() => self
                 .platform_schemas
                 .iter()
                 .map(|s| quote(s))
-                .collect::<Vec<_>>()
-                .join(", "),
+                .collect::<Result<Vec<_>, _>>()
+                .map(|parts| parts.join(", ")),
             // Confined / Trusted: the project schema is first (the sole writable
             // resolution target — `CREATE TABLE foo` lands here, not in an
             // extension schema), followed by the extension schema(s) so an
@@ -312,14 +325,14 @@ impl ExecutorConfig {
             // The extension schemas carry USAGE only (provisioned in
             // `role::provision_migrator`), so this is resolution, not write reach.
             _ => {
-                let mut parts = vec![quote(&self.project_schema)];
+                let mut parts = vec![quote(&self.project_schema)?];
                 for ext in &self.pg.extension_schemas {
                     // Avoid duplicating the project schema if it (oddly) appears.
                     if ext != &self.project_schema {
-                        parts.push(quote(ext));
+                        parts.push(quote(ext)?);
                     }
                 }
-                parts.join(", ")
+                Ok(parts.join(", "))
             }
         }
     }
