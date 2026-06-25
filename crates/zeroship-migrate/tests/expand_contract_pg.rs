@@ -277,6 +277,7 @@ async fn contract_with_empty_depends_on_is_refused_fail_closed() {
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }; __mig.recompute_checksum(); __mig };
 
     let err = apply(

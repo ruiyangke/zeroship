@@ -214,6 +214,7 @@ async fn create_members(engine: &MigrationEngine, be: &PostgresBackend<'_>, cfg:
         depends_on: vec![],
         supersedes: vec![],
         preconditions: vec![],
+        existence_guard: None,
     };
     engine
         .apply_plan(
@@ -277,6 +278,7 @@ fn addcolumn_step(cfg: &ExecutorConfig, table: &str, column: &str) -> (PlanStep,
         depends_on: vec![],
         supersedes: vec![],
         preconditions: vec![],
+        existence_guard: None,
     };
     (PlanStep::Ddl(m), vec![table.to_string()])
 }
@@ -670,6 +672,7 @@ async fn orphaned_pending_contract_is_surfaced_by_status_as_distinct_state() {
         depends_on: vec![],
         supersedes: vec![],
         preconditions: vec![],
+        existence_guard: None,
     };
     let st2 = zeroship_migrate::status(&conn, &cfg, std::slice::from_ref(&present))
         .await
@@ -728,6 +731,7 @@ async fn dependent_plan_blocks_on_a_pending_contract_dependency() {
         depends_on: vec![a_plan_version.clone()],
         supersedes: vec![],
         preconditions: vec![],
+        existence_guard: None,
     };
 
     let st = zeroship_migrate::status(&conn, &cfg, std::slice::from_ref(&b))
@@ -1011,6 +1015,7 @@ async fn bare_name_dropindex_on_pending_table_is_refused() {
             depends_on: vec![],
             supersedes: vec![],
             preconditions: vec![],
+            existence_guard: None,
         };
         PlanStep::Ddl(m)
     };

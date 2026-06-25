@@ -205,6 +205,7 @@ async fn seed_pending_rename(conn: &Client, cfg: &ExecutorConfig) -> String {
         depends_on: vec![],
         supersedes: vec![],
         preconditions: vec![],
+        existence_guard: None,
     };
     engine
         .apply_plan(

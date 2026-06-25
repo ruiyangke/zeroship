@@ -375,6 +375,7 @@ fn denied_migration(cfg: &ExecutorConfig) -> Migration {
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }
 }
 

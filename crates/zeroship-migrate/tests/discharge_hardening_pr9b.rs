@@ -185,6 +185,7 @@ fn forged_ddl(version: &zeroship_migrate::migration::MigrationId, up: &str) -> P
         depends_on: vec![],
         supersedes: vec![],
         preconditions: vec![],
+        existence_guard: None,
     })
 }
 
@@ -225,6 +226,7 @@ async fn forged_contract_versionids_with_innocuous_sql_do_not_discharge() {
         depends_on: vec![],
         supersedes: vec![],
         preconditions: vec![],
+        existence_guard: None,
     };
     engine
         .apply_plan(

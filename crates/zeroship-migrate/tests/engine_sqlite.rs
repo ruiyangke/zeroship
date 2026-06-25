@@ -856,6 +856,7 @@ fn baseline_migration(name: &str, up: &str) -> Migration {
         depends_on: vec![],
         supersedes: vec![],
         preconditions: vec![],
+        existence_guard: None,
     };
     m.recompute_checksum();
     m

@@ -387,6 +387,7 @@ async fn sqlite_rename_opens_no_obligation_and_never_gates_a_follow_on_deploy() 
         depends_on: vec![],
         supersedes: vec![],
         preconditions: vec![],
+        existence_guard: None,
     };
     engine
         .apply_plan_with_touched(

@@ -1868,6 +1868,7 @@ fn crate_root_reexports_compose_an_end_to_end_check() {
         depends_on: vec![],
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }; __mig.recompute_checksum(); __mig };
     assert!(m.version.as_str().starts_with("mig_"));
     assert_eq!(m.checksum.as_str().len(), 64);

@@ -161,6 +161,7 @@ fn ddl(version: u64, name: &str, schema: &str, up: &str, down: Option<&str>) -> 
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }
 }
 

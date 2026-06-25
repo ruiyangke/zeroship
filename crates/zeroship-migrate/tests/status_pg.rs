@@ -81,6 +81,7 @@ fn mig(version: MigrationId, name: &str, schema: &str, table: &str) -> Migration
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     };
     __mig.recompute_checksum();
     __mig

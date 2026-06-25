@@ -375,6 +375,7 @@ async fn executor_reruns_guard_even_on_a_hand_built_clean_plan() {
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }; __mig.recompute_checksum(); __mig };
     let version = evil.version.as_str().to_string();
     let forged_plan = MigrationPlan {

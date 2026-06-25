@@ -742,6 +742,7 @@ async fn p0_3_apply_rollback_reapply_squash_status_lifecycle() {
             depends_on: Vec::new(),
             supersedes: Vec::new(),
             preconditions: Vec::new(),
+            existence_guard: None,
         };
         m.recompute_checksum();
         m
@@ -823,6 +824,7 @@ async fn p0_3_apply_rollback_reapply_squash_status_lifecycle() {
         depends_on: Vec::new(),
         supersedes: vec![v1.version.clone(), v2.version.clone(), v3.version.clone()],
         preconditions: Vec::new(),
+        existence_guard: None,
     };
     s.recompute_checksum();
 
