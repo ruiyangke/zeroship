@@ -88,6 +88,7 @@ fn mig(version: MigrationId, name: &str, up: &str) -> Migration {
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }
 }
 
@@ -244,6 +245,7 @@ async fn checksum_drift_reads_latest_completed_checksum_across_reapply() {
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }; __mig.recompute_checksum(); __mig };
     let cs_a = mig_a.checksum.as_str().to_string();
 
@@ -261,6 +263,7 @@ async fn checksum_drift_reads_latest_completed_checksum_across_reapply() {
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }; __mig.recompute_checksum(); __mig };
     let cs_b = mig_b.checksum.as_str().to_string();
     assert_ne!(cs_a, cs_b, "upA and upB must have distinct checksums");

@@ -109,6 +109,7 @@ fn create_table_mig(
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     };
     __mig.recompute_checksum();
     __mig
@@ -352,6 +353,7 @@ async fn rollback_refuses_irreversible_without_force_then_skips_with_force() {
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }; __mig.recompute_checksum(); __mig };
     let m3 = create_table_mig(v3, &cfg, "t3");
     let set = [m1.clone(), m2.clone(), m3.clone()];
@@ -429,6 +431,7 @@ async fn force_skip_irreversible_refuses_when_a_dependency_is_rolled_back_beneat
             depends_on: Vec::new(),
             supersedes: Vec::new(),
             preconditions: Vec::new(),
+            existence_guard: None,
         }; __mig.recompute_checksum(); __mig }
     };
     // v2: audit with FK to orders, IRREVERSIBLE, depends_on v1.
@@ -448,6 +451,7 @@ async fn force_skip_irreversible_refuses_when_a_dependency_is_rolled_back_beneat
             depends_on: vec![v1.clone()],
             supersedes: Vec::new(),
             preconditions: Vec::new(),
+            existence_guard: None,
         }; __mig.recompute_checksum(); __mig }
     };
     let set = [m1.clone(), m2.clone()];
@@ -495,6 +499,7 @@ async fn force_requires_both_force_and_backup_acknowledged() {
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }; __mig.recompute_checksum(); __mig };
     apply(&conn, &cfg, std::slice::from_ref(&m1), Approval::None, "actor").await.expect("seed");
 
@@ -549,6 +554,7 @@ async fn rollback_runs_downs_in_reverse_topological_order_of_depends_on() {
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }; __mig.recompute_checksum(); __mig };
     // A: child with a REAL FK to parent; depends_on B.
     let a_up = format!(
@@ -567,6 +573,7 @@ async fn rollback_runs_downs_in_reverse_topological_order_of_depends_on() {
         depends_on: vec![vb.clone()],
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }; __mig.recompute_checksum(); __mig };
 
     // Supply A first (lower version) to prove ordering is by depends_on, not slice
@@ -668,6 +675,7 @@ async fn rollback_to_version_refuses_when_a_kept_migration_depends_on_a_rolled_b
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }; __mig.recompute_checksum(); __mig };
     // A: child with a REAL FK to parent; depends_on B (LOWER version — KEPT by the
     // ToVersion(va) threshold since va is NOT > va).
@@ -687,6 +695,7 @@ async fn rollback_to_version_refuses_when_a_kept_migration_depends_on_a_rolled_b
         depends_on: vec![vb.clone()],
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }; __mig.recompute_checksum(); __mig };
 
     let set = [m_a.clone(), m_b.clone()];
@@ -770,6 +779,7 @@ async fn rollback_all_diamond_unwinds_in_reverse_topological_order() {
         depends_on: deps,
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }; __mig.recompute_checksum(); __mig };
 
     let m_a = mk(
@@ -876,6 +886,7 @@ async fn rollback_all_multiroot_forest_unwinds_cleanly() {
         depends_on: deps,
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }; __mig.recompute_checksum(); __mig };
 
     let m_p1 = mk(
@@ -967,6 +978,7 @@ async fn dangerous_down_is_guard_denied_and_nothing_rolled_back() {
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }; __mig.recompute_checksum(); __mig };
     apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor").await.expect("seed (up is benign)");
     assert!(table_exists(&conn, &cfg.project_schema, "t").await);
@@ -1015,6 +1027,7 @@ async fn cross_schema_down_is_permission_denied_by_the_migrator_role() {
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }; __mig.recompute_checksum(); __mig };
     apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor").await.expect("seed");
 
@@ -1112,6 +1125,7 @@ async fn non_transactional_down_is_refused_up_front_and_nothing_rolled_back() {
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }; __mig.recompute_checksum(); __mig };
     apply(&conn, &cfg, std::slice::from_ref(&m), Approval::None, "actor")
         .await

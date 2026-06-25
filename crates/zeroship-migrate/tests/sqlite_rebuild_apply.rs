@@ -1594,6 +1594,7 @@ fn simple_migration(name: &str, up: &str) -> Migration {
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }
 }
 
@@ -1744,5 +1745,6 @@ fn rebuild_migration(table: &str, spec: &SqliteRebuildSpec) -> Migration {
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }
 }

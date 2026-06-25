@@ -256,6 +256,7 @@ async fn create_members(engine: &MigrationEngine, be: &PostgresBackend<'_>, cfg:
         depends_on: vec![],
         supersedes: vec![],
         preconditions: vec![],
+        existence_guard: None,
     };
     engine
         .apply_plan(

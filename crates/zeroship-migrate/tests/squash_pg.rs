@@ -95,6 +95,7 @@ fn mig(version: MigrationId, name: &str, up: &str) -> Migration {
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     }
 }
 

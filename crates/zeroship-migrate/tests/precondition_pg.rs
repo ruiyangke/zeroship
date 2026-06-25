@@ -106,6 +106,7 @@ fn mig_with_pre(
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: pre,
+        existence_guard: None,
     };
     __mig.recompute_checksum();
     __mig
