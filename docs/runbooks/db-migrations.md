@@ -165,18 +165,52 @@ itself:
 > a later deploy's always-on recovery leg. To make the success arm distinguishable
 > from a genuine crash, it stamps the recovery marker **`reached_success`** *before*
 > it appends the `reconciled` marker. The recovery leg only treats **net-`open`**
-> markers as recoverable, so a legitimately-pending go-live is excluded — even in the
-> window where the **`reconciled` append itself fails** (DB hiccup right after the
-> EXPAND committed). That `reconciled`-append failure is now **non-fatal**: the
-> marker is already net-`reached_success` (the live contract is protected), the
-> deploy still **succeeds**, and the next deploy's success path is a harmless no-op on
-> the already-protected marker. (Pre-PR9d this window left a bare `open` marker that
-> the next *unrelated* deploy's recovery leg would mistake for a crash and silently
-> roll back a column the creator's app was already using.) The only success-path
-> hard error left is if the **`reached_success` stamp itself** cannot be written for
-> a later obligation in a multi-EXPAND go-live — that surfaces as a hard error and the
-> operator simply **re-runs the (idempotent) deploy promptly**; the already-stamped
-> obligations are already protected.
+> markers as recoverable, so a legitimately-pending go-live is excluded.
+>
+> The success arm has **two append phases**, and they fail very differently:
+>
+> 1. **Phase 1 — `reached_success`** (the discriminator). All of this deploy's
+>    obligations are stamped in **one atomic transaction** (PR9d-crit HIGH), so a
+>    multi-EXPAND go-live flips **all or none** — there is no partial-stamp window
+>    where one obligation is protected and a sibling stays a bare `open` over a live
+>    contract.
+> 2. **Phase 2 — `reconciled`** (cleanup). Best-effort. A `reconciled`-append failure
+>    (a DB hiccup right after phase 1 committed) is **non-fatal**: the marker is
+>    already net-`reached_success` (the live contract is protected), the deploy still
+>    **succeeds**, and the next deploy's success path is a harmless no-op on the
+>    already-protected marker. (Pre-PR9d this window left a bare `open` marker that the
+>    next *unrelated* deploy's recovery leg would mistake for a crash and silently roll
+>    back a column the creator's app was already using.)
+>
+> **The irreducible success-path residual (be precise — a re-run does NOT fix it).**
+> If **phase 1 itself fails** (the DB went unreachable the instant the go-live reached
+> its success arm), the deploy surfaces a **hard error** and *all* of its recovery
+> markers stay net-`open` over a **legitimately-pending live contract** (the dual-write
+> trigger + shadow column are committed, the obligation is pending). This marker is
+> **byte-for-byte indistinguishable from a genuine crash half-state** — the go-live's
+> physical schema state is identical to a deploy that crashed before its in-process
+> abort (compare the `crash_before_abort_is_recovered` and
+> `legit_pending_survives_…` recovery tests: both leave the trigger + shadow column
+> live and the obligation outstanding). No durable signal can tell them apart, so:
+>
+> - **Re-running the deploy does NOT clear it.** The idempotent re-run finds the EXPAND
+>   `already_outstanding`, so it never re-opens the obligation, `opened_this_deploy` is
+>   empty, and the success arm never re-stamps the stale `open` marker. The phase-1
+>   failure is *not* self-healing.
+> - **Until it is cleared, an unrelated next deploy's always-on crash-recovery leg
+>   WILL false-abort this live contract** (drop the dual-write trigger + shadow column,
+>   discharge the obligation `aborted`) — the deploy must be treated as not-yet-safe.
+> - **The only safe clearance is the operator running `resolve-pending --apply`**
+>   (complete the rename, discharging the obligation so the recovery leg's
+>   outstanding-join finds nothing to abort). `--abort` is the alternative if the
+>   rename should be rolled back instead. Run this **before** any further deploy of the
+>   same app.
+>
+> The phase-1 hard error is logged at `error` level with this exact remedy so the
+> operator is alerted. This residual is the narrow, honestly-documented cost of having
+> *no* durable crash-vs-go-live signal beyond the success-arm commit record; closing
+> it entirely would require a per-deploy outcome journal written atomically with the
+> EXPAND commit (a future hardening, not in PR9d).
 - The approver's principal is stamped into the immutable journal
   (`applied_by = deploy-approved:<approver>` / `deploy-ir-approved:<approver>`),
   so an operator-approved go-live is forensically distinct from a routine deploy.

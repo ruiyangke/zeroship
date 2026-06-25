@@ -241,6 +241,77 @@ async fn net_outstanding_contract_count(conn: &compio_postgres::Client, app_id: 
     rows[0].get::<_, i64>("n")
 }
 
+/// The NET state of the deploy-recovery marker for `pending_version` (latest
+/// `event_seq` per key), or `None` if no marker row exists. PR9d-crit HIGH: a
+/// successful go-live's marker must be net-`reached_success`; a phase-1-stamp
+/// FAILURE leaves it net-`open` (the irreducible residual the discriminator cannot
+/// self-heal). This reads the same `schema_deploy_recovery` net-state that
+/// `outstanding_deploy_recoveries` keys its `r.state = 'open'` predicate on.
+async fn recovery_marker_net_state(
+    conn: &compio_postgres::Client,
+    app_id: &Uuid,
+) -> Option<String> {
+    let meta = format!("{}_migrations", app_id);
+    let q = format!("\"{}\".schema_deploy_recovery", meta.replace('"', "\"\""));
+    let lit = q.replace('\'', "''");
+    let present = conn
+        .query(&format!("SELECT to_regclass('{lit}') IS NOT NULL AS p"), &[])
+        .await
+        .expect("regclass probe");
+    if !present[0].get::<_, bool>("p") {
+        return None;
+    }
+    let rows = conn
+        .query(
+            &format!(
+                "WITH latest AS (
+                     SELECT DISTINCT ON (deploy_id, pending_version) state
+                       FROM {q}
+                      ORDER BY deploy_id, pending_version, event_seq DESC
+                 )
+                 SELECT state FROM latest LIMIT 1"
+            ),
+            &[],
+        )
+        .await
+        .expect("read recovery marker net-state");
+    rows.first().map(|r| r.get::<_, String>("state"))
+}
+
+/// Faithfully model the operator's `resolve-pending --apply` clearance: APPEND a
+/// `resolved` row to `schema_pending_contracts` for every outstanding obligation,
+/// discharging it (append-only — the original `pending` row is preserved). This is
+/// the same net-state transition the `migrate resolve-pending --apply` CLI commits
+/// (its journal write is `resolve_pending_contract` with `Resolution::Applied`);
+/// once the obligation is net-discharged, `outstanding_deploy_recoveries`'
+/// outstanding-join finds nothing, so a later deploy's crash-recovery leg has
+/// nothing to (false-)abort. We append directly as the admin (the same role the CLI
+/// runs as) to keep the test self-contained — the load-bearing fact is the net
+/// `state='resolved'` transition, which we assert via `net_outstanding_contract_count`.
+async fn operator_resolve_pending_apply(conn: &compio_postgres::Client, app_id: &Uuid) {
+    let meta = format!("{}_migrations", app_id);
+    let q = format!("\"{}\".schema_pending_contracts", meta.replace('"', "\"\""));
+    // Re-author a `resolved` row from each net-outstanding `pending` row's identity
+    // fields (the CLI re-derives these from the obligation; here we copy them).
+    conn.batch_execute(&format!(
+        "INSERT INTO {q}
+             (state, \"table\", from_col, to_col, ty, pending_version, plan_version,
+              contract_versions, resolution, \"by\")
+         SELECT 'resolved', \"table\", from_col, to_col, ty, pending_version, plan_version,
+                contract_versions, 'applied', 'test-operator-resolve'
+           FROM (
+               SELECT DISTINCT ON (pending_version)
+                      pending_version, plan_version, state, \"table\", from_col,
+                      to_col, ty, contract_versions
+                 FROM {q}
+                ORDER BY pending_version, event_seq DESC
+           ) latest
+          WHERE latest.state = 'pending'"
+    ))
+    .await
+    .expect("operator resolve-pending --apply: append resolved rows");
+}
+
 /// Does a trigger named `trg` exist on `<app_id>.<table>`? The online-rename EXPAND
 /// installs a dual-write trigger; a clean abort must DROP it (no half-renamed table).
 async fn trigger_exists(
@@ -2756,6 +2827,143 @@ async fn deploy_migrate_pr9d_legit_pending_survives_unrelated_deploy_after_recon
     assert!(
         table_exists(&conn, &app_id, "widgets").await,
         "the unrelated deploy's own table must be created"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir1);
+    let _ = std::fs::remove_dir_all(&dir2);
+    let _ = std::fs::remove_dir_all(&dir3);
+    cleanup_app(&conn, &app_id).await;
+}
+
+// PR9d-crit HIGH — the PHASE-1 stamp-failure residual, characterized honestly.
+//
+// The PR9d HIGH discriminator (`reached_success`) only closes the PHASE-2
+// (`reconciled`-append) window. If PHASE-1 — the `reached_success` stamp ITSELF —
+// fails (DB unreachable the instant a single-EXPAND go-live reaches its success arm),
+// the deploy surfaces a HARD error and its recovery marker stays net-`open` over a
+// LEGITIMATELY-pending LIVE contract (trigger + shadow column committed, obligation
+// pending). The go-live's physical schema state is byte-identical to a genuine crash
+// half-state (see `…crash_before_abort_is_recovered…`), so NO durable signal
+// distinguishes them — and a re-run does NOT clear it (the EXPAND is
+// `already_outstanding`, so `opened_this_deploy` is empty and the success arm never
+// re-stamps the stale marker).
+//
+// This test pins that residual + its DOCUMENTED SAFE CLEARANCE:
+//   1. go-live with the new `DEPLOY_SUCCESS_REACHED_SUCCESS_STAMP_FAILS` fault armed
+//      ⇒ the deploy returns a HARD error, BUT the contract is physically LIVE and the
+//      marker is net-`open` (the residual exists — NOT silently swallowed).
+//   2. the documented remedy — operator `resolve-pending --apply` — discharges the
+//      obligation; AFTER it, the recovery leg's outstanding-join finds nothing, so an
+//      unrelated next deploy is SAFE and leaves the live contract intact.
+// This is the "honest narrowing" closure: the phase-1 transaction-failure residual is
+// irreducible by re-run (no durable crash-vs-go-live signal), and the only safe
+// clearance is the manual `resolve-pending --apply`, exactly as the runbook now states.
+#[compio::test]
+async fn deploy_migrate_pr9d_phase1_stamp_failure_residual_and_operator_clearance() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    // Deploy #1 (routine): create `members(handle)` + seed Ada.
+    let create = r#"{"ir_version":1,"name":"create_members","ops":[
+        {"op":"createTable","name":"members","columns":[
+            {"name":"handle","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    let dir1 = migrations_dir(&[("0001_create_members.ir.json", create)]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir1)
+        .await
+        .expect("createTable deploy must succeed");
+    let schema = app_id.to_string();
+    conn.batch_execute(&format!(
+        "INSERT INTO \"{schema}\".members (id, handle, created_at, updated_at, version) VALUES \
+         ('m1','ada', now(), now(), 1)"
+    ))
+    .await
+    .expect("seed members");
+
+    // Deploy #2 (APPROVED): single-EXPAND online rename handle → username. ARM the
+    // PHASE-1 stamp failure: the EXPAND commits go-live, but the `reached_success`
+    // discriminator stamp "fails" (DB hiccup) ⇒ the deploy returns a HARD error.
+    zeroship_migrate::fault::arm(
+        zeroship_migrate::fault::points::DEPLOY_SUCCESS_REACHED_SUCCESS_STAMP_FAILS,
+        0,
+    );
+    let rename = r#"{"ir_version":1,"name":"rename_handle","ops":[
+        {"op":"renameColumn","table":"members","from":"handle","to":"username","type":"text"}
+    ]}"#;
+    let dir2 = migrations_dir(&[("0002_rename_handle.ir.json", rename)]);
+    let err = approve_whole_bundle(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect_err("a phase-1 `reached_success` stamp failure must surface a HARD error");
+    zeroship_migrate::fault::disarm_all();
+    // The original go-live's EXPAND DDL is committed (the failure is post-commit), and
+    // the error is the journal-class phase-1 failure (not the apply itself).
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("reached_success") || msg.to_lowercase().contains("journal") || msg.contains("phase-1") || msg.contains("stamp"),
+        "the error must be the phase-1 stamp failure, got: {msg}"
+    );
+
+    // THE RESIDUAL: the contract is physically LIVE (go-live committed) AND the
+    // recovery marker is net-`open` (the discriminator never stamped). This is the
+    // exact half-state-indistinguishable shape the discriminator cannot self-heal.
+    assert!(
+        trigger_exists(&conn, &app_id, "members", "zsdw_members_handle_username_trg").await,
+        "the go-live's dual-write trigger is LIVE despite the phase-1 stamp failure"
+    );
+    assert!(
+        column_exists(&conn, &app_id, "members", "username").await,
+        "the go-live's shadow `username` column is LIVE despite the phase-1 stamp failure"
+    );
+    assert_eq!(
+        net_outstanding_contract_count(&conn, &app_id).await,
+        1,
+        "the obligation is legitimately pending (the go-live committed)"
+    );
+    assert_eq!(
+        recovery_marker_net_state(&conn, &app_id).await.as_deref(),
+        Some("open"),
+        "PR9d-crit HIGH: the phase-1 stamp failure leaves the marker net-`open` — the \
+         irreducible residual (a re-run would NOT clear it: the EXPAND is already_outstanding)"
+    );
+
+    // THE DOCUMENTED SAFE CLEARANCE: operator `resolve-pending --apply` discharges the
+    // obligation (append-only `resolved` row). This is the ONLY safe clearance — NOT a
+    // re-run.
+    operator_resolve_pending_apply(&conn, &app_id).await;
+    assert_eq!(
+        net_outstanding_contract_count(&conn, &app_id).await,
+        0,
+        "resolve-pending --apply discharges the obligation (net-outstanding → 0)"
+    );
+
+    // Deploy #3 (an unrelated next deploy): AFTER the operator clearance the recovery
+    // leg's outstanding-join finds nothing, so it has nothing to (false-)abort — the
+    // live contract SURVIVES and the new bundle applies cleanly.
+    let benign = r#"{"ir_version":1,"name":"create_widgets","ops":[
+        {"op":"createTable","name":"widgets","columns":[{"name":"label","type":"text"}]}
+    ]}"#;
+    let dir3 = migrations_dir(&[("0004_create_widgets.ir.json", benign)]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir3)
+        .await
+        .expect("after the operator clearance, an unrelated deploy applies safely");
+
+    assert!(
+        trigger_exists(&conn, &app_id, "members", "zsdw_members_handle_username_trg").await,
+        "PR9d-crit HIGH: after resolve-pending --apply, the unrelated deploy does NOT \
+         false-abort — the dual-write trigger SURVIVES"
+    );
+    assert!(
+        column_exists(&conn, &app_id, "members", "username").await,
+        "the shadow `username` column survives the post-clearance unrelated deploy"
+    );
+    assert!(
+        table_exists(&conn, &app_id, "widgets").await,
+        "the unrelated deploy's own table is created"
     );
 
     let _ = std::fs::remove_dir_all(&dir1);

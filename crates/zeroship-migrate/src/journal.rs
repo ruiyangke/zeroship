@@ -1264,6 +1264,57 @@ pub async fn mark_deploy_recovery_reached_success(
     Ok(())
 }
 
+/// Stamp `reached_success` for a WHOLE deploy's obligations in ONE transaction
+/// (PR9d-crit HIGH): a single `BEGIN … COMMIT` brackets every per-obligation
+/// `reached_success` INSERT, so the phase-1 discriminator stamp is ATOMIC across a
+/// multi-EXPAND go-live — it either flips ALL of this deploy's obligations to
+/// net-`reached_success` or none of them (no partial-stamp window where some
+/// obligations are protected and a sibling stays net-`open`). A genuine
+/// commit/connection failure rolls the whole batch back, leaving every marker
+/// net-`open` (the documented irreducible residual — see the runbook + the
+/// `DEPLOY_SUCCESS_REACHED_SUCCESS_STAMP_FAILS` fault doc; safe clearance is
+/// operator `resolve-pending --apply`, NOT a re-run).
+///
+/// `pending_versions` is this deploy's full obligation key set. An empty slice is a
+/// no-op (no transaction opened).
+///
+/// Admin-written, append-only, under the immutability trigger.
+///
+/// # Errors
+/// [`JournalError::Db`] on any insert/commit failure (the partial batch is rolled
+/// back so no obligation is left half-stamped).
+pub async fn mark_deploy_recovery_reached_success_batch(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    deploy_id: &str,
+    pending_versions: &[String],
+    by: &str,
+) -> Result<(), JournalError> {
+    if pending_versions.is_empty() {
+        return Ok(());
+    }
+    conn.batch_execute("BEGIN").await?;
+    let result = async {
+        for pv in pending_versions {
+            mark_deploy_recovery_reached_success(conn, cfg, deploy_id, pv, by).await?;
+        }
+        Ok::<(), JournalError>(())
+    }
+    .await;
+    if let Err(e) = result {
+        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+            tracing::warn!(
+                error = %rb,
+                "zeroship-migrate: ROLLBACK failed after a \
+                 mark_deploy_recovery_reached_success_batch error (PR9d-crit HIGH)"
+            );
+        }
+        return Err(e);
+    }
+    conn.batch_execute("COMMIT").await?;
+    Ok(())
+}
+
 /// Mark a deploy-scoped recovery obligation `reconciled` (PR9d MED): APPEND a
 /// `reconciled` row (append-only — the `open` row is never edited). Called on the
 /// deploy SUCCESS path (the EXPAND legitimately stays pending), after a same-deploy

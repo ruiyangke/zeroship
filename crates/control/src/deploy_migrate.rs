@@ -1471,40 +1471,93 @@ async fn apply_bundle_ir_migrations(
                 // TWO append phases so that a `reconciled`-append failure can NEVER
                 // re-expose this go-live to a future deploy's crash-recovery leg:
                 //
-                //   1. `reached_success` — stamped FIRST, for every obligation, BEFORE
-                //      any `reconciled` append. A net-`reached_success` marker means the
-                //      deploy reached its success arm (the EXPAND went go-live), so
+                //   1. `reached_success` — stamped FIRST, for every obligation, in ONE
+                //      ATOMIC transaction (PR9d-crit HIGH), BEFORE any `reconciled`
+                //      append. A net-`reached_success` marker means the deploy reached
+                //      its success arm (the EXPAND went go-live), so
                 //      `outstanding_deploy_recoveries` EXCLUDES it (it only returns
                 //      net-`open`). Even if step 2 fails, the marker is net-
                 //      `reached_success`, not `open` — so the next deploy's crash-
                 //      recovery leg never false-aborts this legitimately-pending
-                //      contract (closing the HIGH window). Only the FIRST stamp matters
-                //      for the discriminator; if a later obligation's `reached_success`
-                //      append fails we surface a hard error (the operator re-runs the
-                //      idempotent deploy), but the already-stamped obligations are
-                //      already protected.
+                //      contract (closing the phase-2 HIGH window). The atomic batch
+                //      ALSO closes the multi-EXPAND partial-stamp sub-case: pre-PR9d-crit
+                //      a per-obligation loop could stamp obligation A then fail on B,
+                //      leaving A protected but B a bare `open` over a live contract —
+                //      now A and B flip together or not at all.
+                //
+                //      IRREDUCIBLE RESIDUAL (honest narrowing — PR9d-crit HIGH). If the
+                //      phase-1 transaction ITSELF fails (DB unreachable the instant the
+                //      go-live reached its success arm), ALL of this deploy's markers
+                //      stay net-`open` over a LEGITIMATELY-pending live contract
+                //      (trigger + shadow column committed, obligation pending). This is
+                //      NOT self-healing and NOT recoverable by a re-run: the go-live's
+                //      physical schema state is byte-identical to a genuine crash
+                //      half-state (compare the two recovery tests — both leave the
+                //      trigger + shadow column live + the obligation outstanding), so no
+                //      durable signal distinguishes them; and an idempotent re-run finds
+                //      the EXPAND `already_outstanding` (engine `already_outstanding`
+                //      guard) so it never re-opens the obligation, `opened_this_deploy`
+                //      is empty, and this success arm never re-stamps the stale marker.
+                //      Until the operator runs `resolve-pending --apply` (complete the
+                //      rename, discharging the obligation so the recovery leg's
+                //      outstanding-join finds nothing to abort), an UNRELATED next deploy
+                //      WOULD false-abort this live contract. The runbook documents this;
+                //      a re-run is NOT the remedy. We surface the phase-1 failure as a
+                //      hard error so the operator is alerted to run the manual clearance.
                 //   2. `reconciled` — best-effort cleanup so the marker log closes
                 //      tidily. A failure here is NON-fatal: the marker is already net-
                 //      `reached_success` (protected), so we log and continue rather than
                 //      hard-failing a go-live. The next deploy's success path is a no-op
                 //      on an already-protected marker.
                 'stamp: {
-                    // Phase 1 — stamp `reached_success` for ALL obligations first.
-                    for pc in &opened_this_deploy {
-                        if let Err(e) = backend
-                            .mark_deploy_recovery_reached_success(
+                    // Phase 1 — stamp `reached_success` for ALL of this deploy's
+                    // obligations in ONE atomic transaction. The
+                    // `DEPLOY_SUCCESS_REACHED_SUCCESS_STAMP_FAILS` fault (inert in
+                    // production) simulates the irreducible phase-1 transaction failure
+                    // so the characterization test can pin the documented residual +
+                    // the `resolve-pending --apply` safe-clearance behavior.
+                    let pending_versions: Vec<String> = opened_this_deploy
+                        .iter()
+                        .map(|pc| pc.pending_version.clone())
+                        .collect();
+                    let phase1 = if zeroship_migrate::fault::trip(
+                        zeroship_migrate::fault::points::DEPLOY_SUCCESS_REACHED_SUCCESS_STAMP_FAILS,
+                    )
+                    .is_err()
+                    {
+                        Err(zeroship_migrate::journal::JournalError::Backend(
+                            "fault-injection: simulated phase-1 `reached_success` stamp failure"
+                                .into(),
+                        ))
+                    } else {
+                        backend
+                            .mark_deploy_recovery_reached_success_batch(
                                 exec_cfg,
                                 &deploy_id,
-                                &pc.pending_version,
+                                &pending_versions,
                                 &ir_actor,
                             )
                             .await
-                        {
-                            recovery_result = Err(DeployMigrateError::Apply(EngineError::Apply(
-                                ApplyError::Journal(e),
-                            )));
-                            break 'stamp;
-                        }
+                    };
+                    if let Err(e) = phase1 {
+                        // The irreducible residual: every marker stays net-`open` over a
+                        // live contract. Surface a hard error (the operator must run
+                        // `resolve-pending --apply` — a re-run will NOT clear it). Do
+                        // NOT attempt phase 2.
+                        tracing::error!(
+                            app_id = %app_id, error = %e,
+                            "deploy-migrate: PR9d-crit HIGH — the phase-1 `reached_success` \
+                             discriminator stamp FAILED; this go-live's recovery markers stay \
+                             net-`open` over a LIVE contract. This is NOT recoverable by a re-run \
+                             (the EXPAND is already_outstanding). The operator MUST run \
+                             `resolve-pending --apply` to discharge the obligation; until then an \
+                             unrelated deploy's crash-recovery leg could false-abort the live \
+                             contract."
+                        );
+                        recovery_result = Err(DeployMigrateError::Apply(EngineError::Apply(
+                            ApplyError::Journal(e),
+                        )));
+                        break 'stamp;
                     }
                     // Phase 2 — best-effort `reconciled` (cleanup only; the marker is
                     // already net-`reached_success` ⇒ never crash-recovered).
