@@ -1267,6 +1267,28 @@
                 "type": "string"
               }
             },
+            "onDelete": {
+              "description": "`ON DELETE` referential action (C1). Additive-optional: an absent\naction is checksum-neutral (`skip_serializing_if`), so a FK that sets\nno action serializes byte-identically to the pre-C1 wire image.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RefAction"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "onUpdate": {
+              "description": "`ON UPDATE` referential action (C1). Additive-optional (see\n`on_delete`).",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RefAction"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "kind": {
               "type": "string",
               "const": "fk"
@@ -1320,6 +1342,36 @@
             "kind",
             "expr"
           ]
+        }
+      ]
+    },
+    "RefAction": {
+      "description": "The CLOSED referential-action lexicon for a FOREIGN KEY's `ON DELETE` /\n`ON UPDATE` clause (C1 — design §3.3). A CLOSED enum so the schema enumerates\nexactly the supported actions and serde REJECTS any out-of-set token at\nDESERIALIZE — a hand-crafted `.ir.json` cannot smuggle an arbitrary /\ninjection-shaped action string into the FK render seam. Camel-cased on the\nwire (`\"cascade\"`, `\"setNull\"`, `\"noAction\"`, …); the per-dialect SQL spelling\n(`SET NULL`, `NO ACTION`, …) is the render seam's job via\n[`zeroship_schema::query::normalize_fk_action`].",
+      "oneOf": [
+        {
+          "description": "`ON DELETE/UPDATE CASCADE`.",
+          "type": "string",
+          "const": "cascade"
+        },
+        {
+          "description": "`ON DELETE/UPDATE RESTRICT`.",
+          "type": "string",
+          "const": "restrict"
+        },
+        {
+          "description": "`ON DELETE/UPDATE SET NULL`.",
+          "type": "string",
+          "const": "setNull"
+        },
+        {
+          "description": "`ON DELETE/UPDATE SET DEFAULT`.",
+          "type": "string",
+          "const": "setDefault"
+        },
+        {
+          "description": "`ON DELETE/UPDATE NO ACTION` (the SQL default).",
+          "type": "string",
+          "const": "noAction"
         }
       ]
     },

@@ -387,6 +387,46 @@ pub struct IrColumn {
     pub unique: Option<bool>,
 }
 
+/// The CLOSED referential-action lexicon for a FOREIGN KEY's `ON DELETE` /
+/// `ON UPDATE` clause (C1 — design §3.3). A CLOSED enum so the schema enumerates
+/// exactly the supported actions and serde REJECTS any out-of-set token at
+/// DESERIALIZE — a hand-crafted `.ir.json` cannot smuggle an arbitrary /
+/// injection-shaped action string into the FK render seam. Camel-cased on the
+/// wire (`"cascade"`, `"setNull"`, `"noAction"`, …); the per-dialect SQL spelling
+/// (`SET NULL`, `NO ACTION`, …) is the render seam's job via
+/// [`zeroship_schema::query::normalize_fk_action`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum RefAction {
+    /// `ON DELETE/UPDATE CASCADE`.
+    Cascade,
+    /// `ON DELETE/UPDATE RESTRICT`.
+    Restrict,
+    /// `ON DELETE/UPDATE SET NULL`.
+    SetNull,
+    /// `ON DELETE/UPDATE SET DEFAULT`.
+    SetDefault,
+    /// `ON DELETE/UPDATE NO ACTION` (the SQL default).
+    NoAction,
+}
+
+impl RefAction {
+    /// The SDK `FkAction` token (the camelCase spelling
+    /// [`zeroship_schema::query::normalize_fk_action`] maps to the per-dialect
+    /// SQL clause). Kept in lock-step with the `serde(rename_all = "camelCase")`
+    /// wire image so the render seam consumes the same string the wire carries.
+    #[must_use]
+    pub fn as_token(self) -> &'static str {
+        match self {
+            RefAction::Cascade => "cascade",
+            RefAction::Restrict => "restrict",
+            RefAction::SetNull => "setNull",
+            RefAction::SetDefault => "setDefault",
+            RefAction::NoAction => "noAction",
+        }
+    }
+}
+
 /// The kind of a table constraint. CLOSED enum, internally tagged on `"kind"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
@@ -404,6 +444,15 @@ pub enum IrConstraintKind {
         references_table: String,
         /// The referenced columns.
         references_columns: Vec<String>,
+        /// `ON DELETE` referential action (C1). Additive-optional: an absent
+        /// action is checksum-neutral (`skip_serializing_if`), so a FK that sets
+        /// no action serializes byte-identically to the pre-C1 wire image.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_delete: Option<RefAction>,
+        /// `ON UPDATE` referential action (C1). Additive-optional (see
+        /// `on_delete`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_update: Option<RefAction>,
     },
     /// UNIQUE over the named columns.
     Unique {

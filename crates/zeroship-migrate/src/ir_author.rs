@@ -36,6 +36,7 @@ use crate::drift::{ColumnSnapshot, IndexSnapshot};
 use crate::guard::{guard_for, GuardConfig, GuardError};
 use crate::ir::{
     ColType, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IndexMethod, MigrationIr, Op,
+    RefAction,
 };
 use crate::migration::Migration;
 use crate::plan::{AppliedPlan, PlanStep, RenameStep};
@@ -2177,7 +2178,13 @@ impl IrAuthor {
         self.require_pg_for("addConstraint")?;
         let name = constraint.name.as_deref();
         let mig = match &constraint.kind {
-            IrConstraintKind::Fk { columns, references_table, .. } => {
+            IrConstraintKind::Fk {
+                columns,
+                references_table,
+                on_delete,
+                on_update,
+                ..
+            } => {
                 // PR1 single-column FK (the `ref` shape references the target's
                 // `id`); a multi-column FK is a later wave.
                 let local = columns.first().ok_or(IrLowerError::UnsupportedOp(
@@ -2191,11 +2198,16 @@ impl IrAuthor {
                 // **PR10** — the FK references resolve in the SAME effective schema
                 // the constraint is added in (the resolved qualifier, not the bound
                 // project schema).
+                // **C1** — thread the referential actions into the snapshot so the
+                // imperative `addConstraint(fk)` path renders `ON DELETE …` /
+                // `ON UPDATE …` (parity with the declarative `ref` path).
                 let fk = crate::declarative::ir_fk_constraint_snapshot(
                     eff_schema,
                     name,
                     local,
                     references_table,
+                    on_delete.map(RefAction::as_token),
+                    on_update.map(RefAction::as_token),
                 );
                 decl.lower_add_fk(table, &fk)
             }
@@ -2623,7 +2635,12 @@ fn ir_constraint_name_and_kind(table: &str, constraint: &IrConstraint) -> (Strin
             // to `lower_add_constraint`'s `ir_fk_constraint_snapshot` call (the
             // single-column FK names off the local column as `<col>_fkey`).
             let local = columns.first().map_or("", String::as_str);
-            let snap = crate::declarative::ir_fk_constraint_snapshot("", explicit, local, references_table);
+            // Name derivation is independent of the referential actions (it keys on
+            // the local column / explicit name), so `None, None` keeps the derived
+            // `<col>_fkey` byte-identical to the lowered FK's name.
+            let snap = crate::declarative::ir_fk_constraint_snapshot(
+                "", explicit, local, references_table, None, None,
+            );
             (snap.name, "FOREIGN KEY".to_string())
         }
         IrConstraintKind::Unique { columns } => (

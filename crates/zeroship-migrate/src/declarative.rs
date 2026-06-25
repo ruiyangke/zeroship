@@ -1670,21 +1670,26 @@ pub(crate) fn ir_fk_constraint_snapshot(
     explicit_name: Option<&str>,
     local_column: &str,
     references_table: &str,
+    on_delete: Option<&str>,
+    on_update: Option<&str>,
 ) -> ConstraintSnapshot {
     let name = explicit_name
         .map(ToString::to_string)
         .unwrap_or_else(|| fk_constraint_name(local_column));
-    // Match the differ's `ref` FK defaults byte-for-byte (`declarative.rs:1325`):
-    // NO ACTION on_delete/on_update (rendered RESTRICT by the shared
-    // `normalize_fk_action`) + `deferrable = true` (the ref default), so a
-    // stand-alone IR FK is byte-identical to the FK the differ builds for the same
-    // single-column reference.
+    // C1 — the referential actions ARE rendered. When both are absent the
+    // `None,None` defaults reproduce the differ's `ref` FK byte-for-byte
+    // (`declarative.rs:1325`): NO ACTION on_delete/on_update (rendered RESTRICT by
+    // the shared `normalize_fk_action`) + `deferrable = true` (the ref default),
+    // so an action-free stand-alone IR FK stays byte-identical to the FK the
+    // differ builds for the same single-column reference. A set action threads
+    // through `fk_definition_pg` (which already accepts both) → the rendered
+    // definition carries `ON DELETE CASCADE` / `ON UPDATE …` per the action token.
     let definition = fk_definition_pg(
         local_column,
         project_schema,
         references_table,
-        None,
-        None,
+        on_delete,
+        on_update,
         true,
     );
     ConstraintSnapshot { name, kind: "FOREIGN KEY".to_string(), definition }
