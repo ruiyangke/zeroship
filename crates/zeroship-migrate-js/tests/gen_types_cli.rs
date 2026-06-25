@@ -123,7 +123,7 @@ fn gen_types_check_trips_on_drift() {
     let out = tempfile::tempdir().unwrap();
     write_artifacts(out.path(), &artifacts).expect("write");
 
-    // Corrupt the committed env.db.d.ts (simulate a stale, hand-edited artifact).
+    // Corrupt the committed env.db.ts (simulate a stale, hand-edited artifact).
     let dts_path = out.path().join(ENV_DTS_FILE);
     let mut stale = std::fs::read_to_string(&dts_path).unwrap();
     stale.push_str("\n// drift\n");
@@ -132,7 +132,7 @@ fn gen_types_check_trips_on_drift() {
     // `--check` must now FAIL (the CI drift gate).
     let err = check_artifacts(out.path(), &artifacts).expect_err("drift must trip --check");
     let msg = err.to_string();
-    assert!(msg.contains("STALE") || msg.contains("env.db.d.ts"), "drift names the file: {msg}");
+    assert!(msg.contains("STALE") || msg.contains("env.db.ts"), "drift names the file: {msg}");
 }
 
 #[test]

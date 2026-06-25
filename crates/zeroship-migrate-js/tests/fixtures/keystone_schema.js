@@ -13,6 +13,11 @@ const users = {
   // An enum membership (lifted from a CHECK on the fold side).
   role: t.string().enum("admin", "member", "guest"),
   active: t.boolean(),
+  // A DEFAULT-mode encrypted column — the §6 keystone goodie. `t.encrypted()`
+  // stamps `encrypted: { mode:"randomised", keyId:"default", wraps:"string" }` AND a
+  // fail-safe auto-mask `{ kind:"full", classification:"pii" }`; the author->generate
+  // ->fold chain must recover BOTH byte-identically (HIGH-1).
+  token: t.encrypted(),
 };
 
 const docs = {

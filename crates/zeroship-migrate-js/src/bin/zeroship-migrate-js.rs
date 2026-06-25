@@ -97,8 +97,8 @@ enum Command {
     },
     /// **Migration-first P2b** — emit the typed `env.db` surface FROM the migration
     /// set (migrations are the source of truth; types are generated from the fold).
-    /// Writes `schema.runtime.json` (the RuntimeSchemaDescriptor) + `env.db.d.ts`
-    /// (a generated ambient `@zeroship/db` `t.*()` schema) into `--out`.
+    /// Writes `schema.runtime.json` (the RuntimeSchemaDescriptor) + `env.db.ts`
+    /// (a generated `@zeroship/db` `t.*()` schema MODULE) into `--out`.
     GenTypes {
         /// The migrations directory holding the committed `.ir.json` set.
         #[arg(long, default_value = "./migrations")]
@@ -110,11 +110,6 @@ enum Command {
         /// exit non-zero on drift. No file is written.
         #[arg(long)]
         check: bool,
-        /// Treat the migration set as owner-app-scoped (reserved; the fold is
-        /// owner-agnostic today, so this flag is accepted for forward-compatibility
-        /// with the project-union phase and does not change the output).
-        #[arg(long)]
-        owner_app: bool,
     },
     /// Generate a versioned op.* migration by diffing a `schema.js` (the
     /// `@zeroship/db` `t.*` DSL) against the live database (deliverable D).
@@ -206,12 +201,7 @@ async fn main() -> ExitCode {
             applied,
             owner_app,
         } => cmd_verify(&dir, &applied, &owner_app),
-        Command::GenTypes {
-            dir,
-            out,
-            check,
-            owner_app,
-        } => cmd_gen_types(&dir, &out, check, owner_app),
+        Command::GenTypes { dir, out, check } => cmd_gen_types(&dir, &out, check),
         Command::Generate {
             schema,
             database_url,
@@ -394,7 +384,7 @@ fn cmd_verify(dir: &Path, applied: &str, owner_app: &str) -> ExitCode {
 /// surface from the committed `.ir.json` migration set. The `--project-schema` the
 /// fold embeds in FK definitions is irrelevant to the recovered FieldDef map, so a
 /// constant `public` is used (gen-types is dialect/schema-neutral for type recovery).
-fn cmd_gen_types(dir: &Path, out: &Path, check: bool, _owner_app: bool) -> ExitCode {
+fn cmd_gen_types(dir: &Path, out: &Path, check: bool) -> ExitCode {
     let ops = match zeroship_migrate_js::load_dir_ops(dir) {
         Ok(o) => o,
         Err(e) => {
@@ -412,7 +402,7 @@ fn cmd_gen_types(dir: &Path, out: &Path, check: bool, _owner_app: bool) -> ExitC
     if check {
         match zeroship_migrate_js::check_artifacts(out, &artifacts) {
             Ok(()) => {
-                println!("gen-types --check: OK (env.db.d.ts + schema.runtime.json track the migrations)");
+                println!("gen-types --check: OK (env.db.ts + schema.runtime.json track the migrations)");
                 ExitCode::SUCCESS
             }
             Err(e) => {

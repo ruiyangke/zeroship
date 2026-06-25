@@ -3,7 +3,7 @@
 //! Mirrors `generate_all_types_parity.rs`: author an op stream covering the full
 //! portable type/facet matrix (text/int/bigInt/float/bool/json/timestamp/uuid/bytes/
 //! numeric + ref + vector + encrypted + id-with-prefix + an enum CHECK + min/max),
-//! generate the `env.db.d.ts`, and assert the emitted file contains the expected
+//! generate the `env.db.ts`, and assert the emitted file contains the expected
 //! `@zeroship/db` `t.*()` builder chain per column. The richer reverse renderer
 //! (vs `scaffold.rs::render_t_for`, which TODO-stubs goodies) is the thing under test.
 //!
@@ -160,7 +160,7 @@ fn env_dts_golden_covers_full_type_matrix() {
     ] {
         assert!(
             dts.contains(chain),
-            "the emitted env.db.d.ts must render the `{chain}` chain; got:\n{dts}"
+            "the emitted env.db.ts must render the `{chain}` chain; got:\n{dts}"
         );
     }
 }

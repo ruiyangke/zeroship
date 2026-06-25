@@ -2676,11 +2676,33 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
     }
     // An ENCRYPTED column carries the inner token as `ty` PLUS the `encrypted`
     // facet — the shared builder reads the facet to pick BYTEA + the `zsenc`
-    // sentinel (built by the shared kernel, never re-spelled here, §6.5). The
-    // empty `{}` selects the kernel's defaults (`randomised:default:<inner>`),
-    // matching the differ's `t.encrypted(...)` shape.
-    let encrypted = matches!(c.ty, ColType::Encrypted { .. })
-        .then(|| serde_json::json!({}));
+    // sentinel (built by the shared kernel, never re-spelled here, §6.5).
+    //
+    // **Migration-first P2b (§6 keystone, HIGH-1 fix).** The op.* `ColType::Encrypted`
+    // is the DEFAULT-mode encrypted shape (no mode/keyId on the carrier — the §4 DDL
+    // note: non-default encrypted-via-op.* stays fail-closed). Recovery therefore
+    // restores the KERNEL DEFAULTS the SDK's `t.encrypted()` stamps
+    // (`{ mode: "randomised", keyId: "default", wraps: <inner> }`) and the FAIL-SAFE
+    // AUTO-MASK (`{ kind: "full", classification: "pii" }`) — BYTE-IDENTICAL to what
+    // `descriptor_to_sdk_schema` emits for an authored `t.encrypted()` and to what the
+    // runtime recovers from the `zsenc`/`__zsmask` sentinels (`introspect_schema.rs`).
+    // A bare `{}` would DROP both, drifting the keystone (the prior HIGH-1 bug).
+    let (encrypted, encrypted_mask) = match &c.ty {
+        ColType::Encrypted { of } => {
+            let wraps = encrypted_wraps_token(of);
+            (
+                Some(serde_json::json!({
+                    "mode": "randomised",
+                    "keyId": "default",
+                    "wraps": wraps,
+                })),
+                // The fail-safe auto-mask every `t.encrypted()` column gets at builder
+                // time when no `.mask(...)` is chained (SDK `types.ts` `t.encrypted`).
+                Some(serde_json::json!({ "kind": "full", "classification": "pii" })),
+            )
+        }
+        _ => (None, None),
+    };
     // A `vector(N)` column carries its dimensionality N (the `vector` facet on the
     // neutral `ColType`). The shared snapshot builder spells `vector(N)` ONLY when
     // the descriptor's `vector_dims` is set, so the dimension MUST be threaded here
@@ -2708,10 +2730,24 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         references,
         default: c.default.as_ref().and_then(ir_default_to_value),
         encrypted,
+        mask: encrypted_mask,
         vector_dims,
         vector_metric: c.vector_metric.map(|m| m.as_token().to_string()),
         id_prefix: c.id_prefix.clone(),
         ..Default::default()
+    }
+}
+
+/// The `wraps` token (`"string"` | `"number"` | `"bytes"`) an encrypted column's
+/// inner [`ColType`] maps to — the SDK's `t.encrypted({ wraps })` domain (only those
+/// three are admissible; everything else folds to `"string"`, the kernel default).
+/// Used by [`ir_column_to_field`] to recover the encrypted facet's `wraps` BYTE-EXACT
+/// to what `t.encrypted()` stamps for the same inner type.
+fn encrypted_wraps_token(of: &ColType) -> &'static str {
+    match of {
+        ColType::Int | ColType::BigInt | ColType::Float | ColType::Decimal { .. } => "number",
+        ColType::Bytea => "bytes",
+        _ => "string",
     }
 }
 

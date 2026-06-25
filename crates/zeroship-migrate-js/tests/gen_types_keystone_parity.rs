@@ -109,4 +109,35 @@ fn keystone_recovers_declared_only_and_check_facets() {
         Some("innerProduct"),
         "the declared vector metric survives"
     );
+
+    // HIGH-1 + MED-1: a DEFAULT `t.encrypted()` recovers BOTH the kernel-default
+    // encrypted facet AND the fail-safe auto-mask byte-identically — the goodie the
+    // prior keystone fixture omitted so the chain only LOOKED lossless. Without the
+    // recovery fix this DRIFTS (`encrypted: {}`, mask dropped).
+    let token = &users["token"];
+    assert_eq!(
+        token.get("encrypted").and_then(|e| e.get("mode")).and_then(|v| v.as_str()),
+        Some("randomised"),
+        "the encrypted kernel-default mode survives author->generate->fold"
+    );
+    assert_eq!(
+        token.get("encrypted").and_then(|e| e.get("keyId")).and_then(|v| v.as_str()),
+        Some("default"),
+        "the encrypted kernel-default keyId survives"
+    );
+    assert_eq!(
+        token.get("encrypted").and_then(|e| e.get("wraps")).and_then(|v| v.as_str()),
+        Some("string"),
+        "the encrypted wraps inner-type survives"
+    );
+    assert_eq!(
+        token.get("mask").and_then(|m| m.get("kind")).and_then(|v| v.as_str()),
+        Some("full"),
+        "the fail-safe auto-mask kind survives (MED-1: was silently dropped)"
+    );
+    assert_eq!(
+        token.get("mask").and_then(|m| m.get("classification")).and_then(|v| v.as_str()),
+        Some("pii"),
+        "the fail-safe auto-mask classification survives"
+    );
 }

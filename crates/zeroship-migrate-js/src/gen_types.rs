@@ -4,7 +4,7 @@
 //!
 //! Migration-first (`docs/proposals/2026-06-25-migration-first-schema.md` §2.1)
 //! makes the op.* migration set the SOLE source of truth and (P5) deletes
-//! `export default { schema }`. So the typed `env.db.d.ts` MUST be emitted from the
+//! `export default { schema }`. So the typed `env.db.ts` MUST be emitted from the
 //! migrations, not from a declared schema object. This module:
 //!
 //! 1. loads the committed `.ir.json` set in version order ([`load_dir_ops`]),
@@ -15,7 +15,7 @@
 //!    - **`schema.runtime.json`** — the `RuntimeSchemaDescriptor`:
 //!      `Record<collection, Record<column, FieldDef>>` (formalises what
 //!      `normalizeSchema` produces at runtime);
-//!    - **`env.db.d.ts`** — a GENERATED ambient module reconstructing a
+//!    - **`env.db.ts`** — a GENERATED module reconstructing a
 //!      `const schema = { … } as const` of `@zeroship/db` `t.*()` builder calls
 //!      (§5.2: the SDK type inference keys ONLY off `TypeBuilder`, so the emitter
 //!      MUST emit builder calls, never a hand-rolled interface), then
@@ -36,8 +36,17 @@ use crate::discover_migrations;
 /// The two emitted artifact filenames (committed; the `--check` CI gate diffs
 /// against them).
 pub const RUNTIME_DESCRIPTOR_FILE: &str = "schema.runtime.json";
-/// The generated ambient `env.db` typings file.
-pub const ENV_DTS_FILE: &str = "env.db.d.ts";
+/// The generated `env.db` typings file.
+///
+/// **CRITICAL-1 fix:** this is a real `.ts` MODULE, NOT a `.d.ts`. The emit strategy
+/// (§5.2) reconstructs `const schema = { … t.string() … } as const` — i.e. RUNTIME
+/// `t.*()` builder-call value expressions, the only thing the `@zeroship/db` type
+/// inference keys off (`InferFieldDef<T extends TypeBuilder<…>>`). tsc treats ANY
+/// `*.d.ts` as an AMBIENT declaration context where `const x = <expr>` is illegal
+/// (`TS1046`/`TS1254` — a `.d.ts` const initializer must be a literal). So the file
+/// MUST be a normal module. The `declare module "zeroship" { … }` augmentation +
+/// `export {}` are valid module-level constructs in a `.ts` file.
+pub const ENV_DTS_FILE: &str = "env.db.ts";
 
 /// A `gen-types` error (load / fold / produce / IO / drift).
 #[derive(Debug, thiserror::Error)]
@@ -138,7 +147,7 @@ pub struct GeneratedArtifacts {
     /// The `RuntimeSchemaDescriptor` JSON bytes (`schema.runtime.json`), pretty +
     /// trailing newline (the canonical byte convention).
     pub runtime_descriptor: String,
-    /// The generated `env.db.d.ts` source.
+    /// The generated `env.db.ts` source.
     pub env_dts: String,
 }
 
@@ -163,7 +172,7 @@ pub fn render_artifacts(
         serde_json::to_string_pretty(&runtime_value).expect("serialize FieldDef map");
     runtime_descriptor.push('\n');
 
-    // (b) env.db.d.ts — reconstructed `t.*()` builder schema.
+    // (b) env.db.ts — reconstructed `t.*()` builder schema.
     let env_dts = render_env_dts(&defs);
 
     Ok(GeneratedArtifacts {
@@ -172,9 +181,11 @@ pub fn render_artifacts(
     })
 }
 
-/// Render the generated `env.db.d.ts`: a `const schema = { … } as const` of
+/// Render the generated `env.db.ts`: a `const schema = { … } as const` of
 /// `@zeroship/db` `t.*()` builder calls, then the `zeroship` module augmentation
-/// `interface Env { db: Db<typeof schema> }`.
+/// `interface Env { db: Db<typeof schema> }`. Emitted as a real `.ts` MODULE (not a
+/// `.d.ts`) — the `t.*()` value expressions are illegal in a `.d.ts` ambient context
+/// (CRITICAL-1; see [`ENV_DTS_FILE`]).
 fn render_env_dts(defs: &BTreeMap<String, Value>) -> String {
     let mut body = String::new();
     body.push_str(
@@ -276,21 +287,36 @@ fn render_builder_chain(def: &Value) -> String {
     // `.enum(...)` membership (lifted from a CHECK) — the spread of the values; the
     // `as const` at the schema root narrows these to a literal union in `Row<S>`.
     if let Some(values) = obj.get("enum").and_then(Value::as_array) {
-        let rendered: Vec<String> = values.iter().map(render_enum_member).collect();
-        chain.push_str(&format!(".enum({})", rendered.join(", ")));
+        // Only string/number members are SDK-admissible (LOW-2); a non-scalar member
+        // is dropped rather than rendered as an un-typecheckable `.enum(true)`. If no
+        // admissible member survives, the `.enum(...)` is omitted entirely (the column
+        // types as its base scalar).
+        let rendered: Vec<String> = values.iter().filter_map(render_enum_member).collect();
+        if !rendered.is_empty() {
+            chain.push_str(&format!(".enum({})", rendered.join(", ")));
+        }
     }
-    // `.mask({ kind, classification })` — recovered from the `__zsmask` sentinel.
+    // `.mask({ kind, classification })`. An ENCRYPTED column already carries the
+    // fail-safe auto-mask `{ full, pii }` IMPLICITLY via `t.encrypted()` (the SDK
+    // stamps it at builder time), so re-emitting `.mask({ full, pii })` would be
+    // redundant noise — skip it for that exact default. A NON-default mask on an
+    // encrypted column (an explicit `.mask({ kind: "last4" })` overriding the
+    // auto-mask) IS rendered. A mask on a non-encrypted column is always rendered.
     if let Some(mask) = obj.get("mask").and_then(Value::as_object) {
         let kind = mask.get("kind").and_then(Value::as_str).unwrap_or("full");
         let classification = mask
             .get("classification")
             .and_then(Value::as_str)
             .unwrap_or("pii");
-        chain.push_str(&format!(
-            ".mask({{ kind: {}, classification: {} }})",
-            js_str(kind),
-            js_str(classification)
-        ));
+        let is_encrypted_automask =
+            has_encrypted && kind == "full" && classification == "pii";
+        if !is_encrypted_automask {
+            chain.push_str(&format!(
+                ".mask({{ kind: {}, classification: {} }})",
+                js_str(kind),
+                js_str(classification)
+            ));
+        }
     }
     // `.fts(language?)`.
     if obj.get("fts").and_then(Value::as_bool) == Some(true) {
@@ -308,21 +334,39 @@ fn render_builder_chain(def: &Value) -> String {
 }
 
 /// `t.encrypted({ mode?, keyId?, wraps? })` — render the encrypted base from the
-/// `encrypted` facet sub-object. A bare `{}` (the op.* default-mode shape) renders
-/// `t.encrypted()`.
+/// `encrypted` facet sub-object.
+///
+/// The KERNEL-DEFAULT triple (`mode:"randomised"`, `keyId:"default"`, `wraps:"string"`)
+/// — what the SDK's bare `t.encrypted()` stamps, and what the op.* default-mode
+/// recovery restores (`ir_column_to_field`) — collapses to a bare `t.encrypted()`:
+/// the two spellings are TYPE-EQUIVALENT (same `TypeBuilder<…>`), and the bare form
+/// is the clean generated output. Only a NON-default facet (e.g. a deterministic mode,
+/// a non-default keyId, or a non-string wraps) renders the explicit `{ … }` opts. The
+/// FULL facet (mode/keyId/wraps) is always preserved in `schema.runtime.json`; this
+/// collapse is a `.d.ts`-readability choice, not a loss.
 fn render_encrypted_base(obj: &serde_json::Map<String, Value>) -> String {
     let enc = match obj.get("encrypted").and_then(Value::as_object) {
         Some(e) => e,
         None => return "t.encrypted()".to_string(),
     };
+    let mode = enc.get("mode").and_then(Value::as_str);
+    let key_id = enc.get("keyId").and_then(Value::as_str);
+    let wraps = enc.get("wraps").and_then(Value::as_str);
+    // Kernel default (or absent) on every sub-field ⇒ bare `t.encrypted()`.
+    let mode_default = matches!(mode, None | Some("randomised"));
+    let key_default = matches!(key_id, None | Some("default"));
+    let wraps_default = matches!(wraps, None | Some("string"));
+    if mode_default && key_default && wraps_default {
+        return "t.encrypted()".to_string();
+    }
     let mut opts = Vec::new();
-    if let Some(mode) = enc.get("mode").and_then(Value::as_str) {
+    if let Some(mode) = mode {
         opts.push(format!("mode: {}", js_str(mode)));
     }
-    if let Some(key_id) = enc.get("keyId").and_then(Value::as_str) {
+    if let Some(key_id) = key_id {
         opts.push(format!("keyId: {}", js_str(key_id)));
     }
-    if let Some(wraps) = enc.get("wraps").and_then(Value::as_str) {
+    if let Some(wraps) = wraps {
         // `wraps` is a TypeBuilder argument in the SDK (`t.string()`/`t.number()`/
         // `t.bytes()`), reconstructed from the inner-type token.
         let wraps_builder = match wraps {
@@ -387,14 +431,21 @@ fn render_number(n: f64) -> String {
     }
 }
 
-/// Render an `enum` member (string / number / boolean) as a TS literal.
-fn render_enum_member(v: &Value) -> String {
+/// Render an `enum` member as a TS literal — STRING or NUMBER only.
+///
+/// **LOW-2 fix:** the SDK `.enum<Values extends readonly (T & (string | number))[]>`
+/// signature (`types.ts`) forbids boolean / non-scalar members, and on a `t.string()`
+/// column even a numeric member is rejected. The CHECK-lift (`recover_enum_chain`)
+/// only ever carries `string`/`number` today, so a bool/non-scalar member is
+/// unreachable — but render it FAIL-CLOSED (skip, returning `None`) rather than emit a
+/// `.enum(true)` the SDK would reject at tsc, so the renderer can never produce an
+/// un-typecheckable artifact even if a hand-crafted IR smuggled one in.
+fn render_enum_member(v: &Value) -> Option<String> {
     match v {
-        Value::String(s) => js_str(s),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        // A non-scalar enum member is not authorable; render its JSON (best effort).
-        other => other.to_string(),
+        Value::String(s) => Some(js_str(s)),
+        Value::Number(n) => Some(n.to_string()),
+        // Bool / null / array / object are NOT admissible SDK enum members.
+        _ => None,
     }
 }
 
@@ -578,10 +629,42 @@ mod tests {
     fn renders_encrypted_default_and_explicit() {
         // op.* default-mode encrypted → a bare `t.encrypted()`.
         assert_eq!(chain(json!({ "type": "string", "encrypted": {} })), "t.encrypted()");
+        // The KERNEL-DEFAULT triple the recovery now restores collapses to bare
+        // `t.encrypted()` (type-equivalent; HIGH-1 fix keeps the `.d.ts` clean while
+        // the full facet lives in schema.runtime.json).
+        assert_eq!(
+            chain(json!({ "type": "string", "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" } })),
+            "t.encrypted()"
+        );
         // An explicit-mode encrypted (if the IR ever carries it) renders the opts.
         assert_eq!(
             chain(json!({ "type": "string", "encrypted": { "mode": "deterministic", "keyId": "k1" } })),
             "t.encrypted({ mode: \"deterministic\", keyId: \"k1\" })"
+        );
+        // A non-default keyId alone (mode/wraps default) still renders explicit.
+        assert_eq!(
+            chain(json!({ "type": "string", "encrypted": { "keyId": "pii_key" } })),
+            "t.encrypted({ keyId: \"pii_key\" })"
+        );
+    }
+
+    #[test]
+    fn enum_members_fail_closed_on_non_scalar() {
+        // LOW-2: string/number members render; a bool / null member is NOT SDK-
+        // admissible (`.enum<Values extends (string|number)[]>`), so it is dropped
+        // rather than emitted as an un-typecheckable `.enum(true)`.
+        assert_eq!(render_enum_member(&json!("a")), Some("\"a\"".to_string()));
+        assert_eq!(render_enum_member(&json!(3)), Some("3".to_string()));
+        assert_eq!(render_enum_member(&json!(true)), None);
+        assert_eq!(render_enum_member(&json!(null)), None);
+        assert_eq!(render_enum_member(&json!({"k": 1})), None);
+        // A column whose enum is ENTIRELY non-scalar emits NO `.enum(...)` (types as
+        // its base scalar) rather than `.enum()`.
+        assert_eq!(chain(json!({ "type": "string", "enum": [true, null] })), "t.string()");
+        // Mixed: only the admissible members survive.
+        assert_eq!(
+            chain(json!({ "type": "string", "enum": ["ok", true] })),
+            "t.string().enum(\"ok\")"
         );
     }
 
