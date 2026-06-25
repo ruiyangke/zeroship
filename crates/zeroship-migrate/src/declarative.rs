@@ -2600,6 +2600,7 @@ impl DeclarativeAuthor {
             depends_on,
             supersedes: Vec::new(),
             preconditions: Vec::new(),
+            existence_guard: None,
         }
     }
 
@@ -5407,6 +5408,7 @@ mod advisory_seam_tests {
             depends_on: Vec::new(),
             supersedes: Vec::new(),
             preconditions: Vec::new(),
+            existence_guard: None,
         }
     }
 

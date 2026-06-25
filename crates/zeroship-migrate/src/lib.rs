@@ -76,6 +76,7 @@ pub mod expr;
 #[doc(hidden)]
 pub mod fault;
 pub mod guard;
+pub mod guard_probe;
 pub mod ir;
 pub mod ir_apply;
 pub mod ir_author;

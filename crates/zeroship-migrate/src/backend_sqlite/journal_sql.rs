@@ -169,6 +169,81 @@ pub(crate) async fn apply_one_additive(
     Ok(true)
 }
 
+/// **PR10 Part B** — journal `m` as a `completed`, `kind='apply'` event WITHOUT
+/// running its `up` DDL: the SQLite arm of an existence-guard
+/// [`SatisfiedNoop`](crate::guard_probe::GuardVerdict::SatisfiedNoop). The guarded
+/// object already has the declared shape (`ifNotExists`) or is already absent
+/// (`ifExists`), so the `up` is a no-op, but the version must still LAND so a
+/// re-deploy sees it net-applied and skips it via normal pending computation.
+///
+/// Mirrors [`apply_one_additive`]'s idempotency pre-check and [`run_apply_txn`]'s
+/// atomic journal write, but SKIPS the CreatorUp `up` phase entirely (so no creator
+/// DDL runs). The single `completed` row is written under one `BEGIN IMMEDIATE` in
+/// `EngineJournal` mode — same recorded-not-run shape as [`baseline`], but with
+/// `kind='apply'` (the guarded op IS an `apply`, just one whose effect is already
+/// satisfied), so the journal `kind` matches a re-deploy's bare-apply expectation
+/// and the checksum is `m`'s real checksum.
+///
+/// Returns `false` if `m` was already net-applied (idempotent no-op), `true` if a
+/// fresh satisfied-noop row was journaled.
+pub(crate) async fn journal_satisfied_noop(
+    actor: &MigrationActor,
+    m: &Migration,
+    applied_by: &str,
+) -> Result<bool, SqliteActorError> {
+    ensure_journal(actor).await?;
+
+    let version = m.version.as_str().to_string();
+    if applied(actor)
+        .await?
+        .iter()
+        .any(|e| e.version == version && e.phase == Phase::Completed)
+    {
+        return Ok(false);
+    }
+
+    actor.set_mode(Mode::EngineJournal).await?;
+    actor.exec("BEGIN IMMEDIATE").await?;
+    let result = async {
+        let name = sql_lit(&m.name);
+        let checksum = sql_lit(m.checksum.as_str());
+        let applied_by_lit = sql_lit(applied_by);
+        let version_lit = sql_lit(&version);
+        actor
+            .exec(&format!(
+                "INSERT INTO \"_mig\".schema_migrations \
+                 (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
+                 VALUES ('{applied}', {version_lit}, {name}, {checksum}, {applied_by_lit}, \
+                         'completed', 'success', 'apply')",
+                applied = EventKind::Applied.as_str()
+            ))
+            .await?;
+        Ok::<(), SqliteActorError>(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => {
+            actor.exec("COMMIT").await?;
+            Ok(true)
+        }
+        Err(e) => {
+            let rb = actor.exec("ROLLBACK").await;
+            match actor.is_autocommit().await {
+                Ok(true) => Err(e),
+                Ok(false) => Err(SqliteActorError::Poisoned(format!(
+                    "transaction still open after ROLLBACK (rollback result: {rb:?}); \
+                     original satisfied-noop journal error: {e}"
+                ))),
+                Err(probe) => Err(SqliteActorError::Poisoned(format!(
+                    "could not confirm autocommit after ROLLBACK: {probe}; \
+                     original satisfied-noop journal error: {e}"
+                ))),
+            }
+        }
+    }
+}
+
 /// Record `m` as the SQLite project's **baseline** — a `kind='baseline'`,
 /// `completed` journal event WITHOUT running its `up` (the adoption path,
 /// design §5 / H3). This is the SQLite arm behind the single neutral

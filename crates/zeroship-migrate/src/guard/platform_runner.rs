@@ -987,6 +987,7 @@ fn plain_ddl(name: &str, up: String, destructive: bool) -> crate::migration::Mig
         depends_on: Vec::new(),
         supersedes: Vec::new(),
         preconditions: Vec::new(),
+        existence_guard: None,
     };
     // Re-derive the checksum over the actual content.
     m.checksum = Checksum::of(&ChecksumInput::from_migration(&m));
@@ -2098,6 +2099,7 @@ mod tests {
             depends_on: Vec::new(),
             supersedes: Vec::new(),
             preconditions: Vec::new(),
+            existence_guard: None,
         };
         m.recompute_checksum();
         m

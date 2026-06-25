@@ -567,6 +567,24 @@ pub struct Migration {
     /// [`checksum`]: Migration::checksum
     #[serde(default)]
     pub preconditions: Vec<PreconditionCheck>,
+    /// **PR10 Part B** — the executor-side existence-guard probe (§2.7), stamped
+    /// onto this migration at IR-lower time when its source op carried an
+    /// `existence_guard` (`ifNotExists`/`ifExists`). At apply time the executor
+    /// reads the live catalog under the held project advisory lock + the open
+    /// per-step transaction and [`decide`](crate::guard_probe::decide)s whether to
+    /// run the `up` bare, journal a satisfied no-op (skip the `up`), or fail closed
+    /// on a shape divergence. `None` for an unguarded migration and for every
+    /// `.sql`-path / declarative migration.
+    ///
+    /// DELIBERATELY EXCLUDED from [`ChecksumInput`] / [`Checksum::of`]: the IR-path
+    /// drift anchor is [`Checksum::of_ir`] over the op-list, which ALREADY folds the
+    /// guard, and the `.sql` path never sets this field. Folding it into the
+    /// per-migration checksum would change every existing golden/checksum (the field
+    /// defaults to `None`); excluding it keeps them byte-identical. The field is
+    /// `skip_serializing_if = "Option::is_none"` so the on-disk wire is unchanged
+    /// when unset; it round-trips only the in-memory plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub existence_guard: Option<crate::guard_probe::GuardProbe>,
 }
 
 impl Migration {
@@ -772,6 +790,7 @@ mod tests {
             depends_on: Vec::new(),
             supersedes: Vec::new(),
             preconditions: Vec::new(),
+            existence_guard: None,
         };
         assert_eq!(Checksum::of(&ChecksumInput::from_migration(&m)), expected);
     }

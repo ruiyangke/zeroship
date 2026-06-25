@@ -412,6 +412,44 @@ impl MigrationBackend for SqliteBackend {
                 "sqlite backend P2: journal kind '{kind}' not yet implemented (only 'apply')"
             )));
         }
+        // **PR10 Part B — existence-guard catalog probe (SQLite).** Mirror the PG
+        // probe: read the live SQLite catalog and `decide` BEFORE running the `up`.
+        // The read + the additive apply both run under the SAME held project lock +
+        // atomic boundary `execute_pending` already enforces (apply_up_transactional
+        // is called under the held lock), so there is no probe→act TOCTOU window.
+        //
+        // - RunBare       → normal `apply_one_additive`.
+        // - SatisfiedNoop → journal the completed row WITHOUT running the `up` DDL.
+        // - FailDrift     → typed `ExistenceGuardDrift` (parity with the PG arm) —
+        //                   never a silent skip over a divergence.
+        if let Some(probe) = &m.existence_guard {
+            let live = self.snapshot_schema_sqlite().await.map_err(|e| {
+                ApplyError::Backend(format!("sqlite existence-guard snapshot failed: {e}"))
+            })?;
+            match crate::guard_probe::decide(probe, &live) {
+                crate::guard_probe::GuardVerdict::RunBare => {
+                    return journal_sql::apply_one_additive(&self.actor, m, applied_by)
+                        .await
+                        .map(|_| ())
+                        .map_err(apply_err);
+                }
+                crate::guard_probe::GuardVerdict::SatisfiedNoop => {
+                    return journal_sql::journal_satisfied_noop(&self.actor, m, applied_by)
+                        .await
+                        .map(|_| ())
+                        .map_err(apply_err);
+                }
+                crate::guard_probe::GuardVerdict::FailDrift(d) => {
+                    return Err(ApplyError::ExistenceGuardDrift {
+                        version: m.version.as_str().to_string(),
+                        object: d.object,
+                        field: d.field,
+                        expected: d.expected,
+                        actual: d.actual,
+                    });
+                }
+            }
+        }
         journal_sql::apply_one_additive(&self.actor, m, applied_by)
             .await
             .map(|_| ())
