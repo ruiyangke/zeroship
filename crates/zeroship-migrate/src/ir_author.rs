@@ -336,6 +336,24 @@ pub struct IrAuthor {
     /// the authored `.ir.json`), threaded in by the CLI/connection via
     /// [`IrAuthor::with_default_schema`].
     default_schema: Option<String>,
+    /// **PR10 review (MED)** — the schema-confinement scope this author's
+    /// [`default_schema`](Self::default_schema) is validated against at lower time
+    /// (§2.7). The friendly cross-schema VALIDATE gate
+    /// ([`crate::validate::validate_op_schema_and_guard`]) inspects ONLY the op's own
+    /// `schema()` qualifier — it never sees the connection
+    /// [`default_schema`](Self::default_schema). So a `default_schema` pointing at a
+    /// FOREIGN schema would slip the gate and render every guard-less op into that
+    /// foreign schema. To close that hole fail-closed, `lower_one_op` asserts the
+    /// EFFECTIVE schema against THIS scope whenever the resolved schema came from the
+    /// connection default (the op's own qualifier is already gated upstream).
+    ///
+    /// Defaults to the Confined posture — `Single(project_schema)` — so the
+    /// safe-by-default path (every creator entry) refuses a foreign default_schema
+    /// even if the bare `lower()` is called without an upstream load gate. A
+    /// Platform/Trusted CLI widens it explicitly via
+    /// [`with_schema_scope`](Self::with_schema_scope) when it sets a multi-schema or
+    /// search-path-driven default.
+    scope: crate::guard::SchemaScope,
 }
 
 /// A failure lowering an IR op to SQL.
@@ -382,10 +400,14 @@ pub enum IrLowerError {
     /// Carries the op tag. (The schema-qualifier half of PR10 is complete; the
     /// guard half waits on the executor probe.)
     #[error(
-        "IrAuthor::lower cannot yet honor the existence guard on op {0:?} — the \
-         engine-synthesized catalog probe (probe → shape-verify-or-fail → run/skip) \
-         is the executor-side slice; the guard is refused fail-closed rather than \
-         silently dropped"
+        "the `ifNotExists`/`ifExists` existence guard is NOT YET SUPPORTED by this \
+         platform (op {0:?}) — it is a deferred capability, not an error in your \
+         migration. Honoring it needs the engine-synthesized catalog probe \
+         (probe → shape-verify-or-fail → run/skip under the held advisory lock), \
+         which is a later slice (op.* PR10 Part B); until then the guard is refused \
+         fail-closed rather than silently dropped (a dropped guard would apply the \
+         bare op unconditionally — a fail-OPEN over a possibly-divergent existing \
+         object). Remove the `ifNotExists`/`ifExists` option to deploy now."
     )]
     ExistenceGuardNotYetSupported(&'static str),
     /// **PR10 review F3** — a SQLite-targeted op whose EFFECTIVE schema (§2.7) is a
@@ -405,6 +427,25 @@ pub enum IrLowerError {
          arrange. Refusing to silently render into `main` (a wrong-target drop)."
     )]
     SqliteSchemaUnsupported(String),
+    /// **PR10 review (MED)** — the connection [`default_schema`](IrAuthor::default_schema)
+    /// resolved an op's EFFECTIVE schema (§2.7) to a schema the author's
+    /// confinement [`scope`](IrAuthor::scope) does NOT permit. The friendly op-level
+    /// cross-schema VALIDATE gate inspects ONLY the op's own qualifier, never this
+    /// connection default; so a foreign `default_schema` would otherwise render every
+    /// guard-less op (one that omits its own qualifier) into the foreign schema while
+    /// the validate gate stays silent. Lowering FAILS CLOSED here: a `default_schema`
+    /// outside the active scope is refused, not rendered. The default scope is the
+    /// Confined `Single(project_schema)`, so a creator-path author refuses a foreign
+    /// default even without the upstream load gate; a Platform/Trusted CLI widens it
+    /// via [`IrAuthor::with_schema_scope`]. Carries the offending schema.
+    #[error(
+        "IrAuthor::lower resolved a connection default_schema to {0:?}, which the \
+         author's schema-confinement scope does not permit — the op-level cross-schema \
+         gate never inspects the connection default, so a foreign default is refused \
+         fail-closed here rather than rendered into {0:?}. Bind a default within scope, \
+         or widen the scope via IrAuthor::with_schema_scope (Platform/Trusted only)."
+    )]
+    DefaultSchemaOutOfScope(String),
     /// **PR10 review F5** — a `backfill` (or batched `update`) whose EFFECTIVE schema
     /// (§2.7) differs from the bound project schema. The resumable backfill EXECUTOR
     /// ([`crate::backfill`]) qualifies its windowed `UPDATE` into the deploy-time
@@ -692,6 +733,10 @@ impl IrAuthor {
                 owner_app,
                 dialect,
             ),
+            // Confined-by-default scope: a `default_schema` set later is admitted
+            // ONLY if it case-folds to the project schema unless a Platform/Trusted
+            // CLI explicitly widens via `with_schema_scope` (§2.7 review MED).
+            scope: crate::guard::SchemaScope::Single(project_schema.clone()),
             project_schema,
             dialect,
             default_schema: None,
@@ -702,9 +747,34 @@ impl IrAuthor {
     /// effective schema for any op that omits its own `schema` qualifier. The
     /// general/Trusted CLI sets this from a `--schema`/search-path flag; the
     /// Confined platform path leaves it `None` (lowering pins `project_schema`).
+    ///
+    /// **Confinement (review MED).** A `default_schema` is NOT trusted blindly: it
+    /// is validated against this author's [`scope`](Self::scope) at lower time
+    /// ([`lower_one_op`](Self::lower_one_op)). The default scope is the Confined
+    /// `Single(project_schema)`, so a foreign `default_schema` is REFUSED fail-closed
+    /// unless a Platform/Trusted CLI first widened the scope via
+    /// [`with_schema_scope`](Self::with_schema_scope). This is what stops a foreign
+    /// connection default from rendering every guard-less op into a foreign schema —
+    /// the friendly cross-schema VALIDATE gate only inspects the op's own qualifier,
+    /// never this default.
     #[must_use]
     pub fn with_default_schema(mut self, schema: Option<String>) -> Self {
         self.default_schema = schema;
+        self
+    }
+
+    /// **PR10 review (MED)** — widen the schema-confinement [`scope`](Self::scope)
+    /// the connection [`default_schema`](Self::default_schema) is validated against
+    /// (§2.7). The default scope is the Confined `Single(project_schema)`; a
+    /// Platform/Trusted CLI that sets a multi-schema or foreign-search-path default
+    /// calls this with the matching [`crate::guard::SchemaScope`] (typically
+    /// [`crate::guard::GuardConfig::schema_scope`]) so the default it then binds is
+    /// admitted by the same scope the op-level cross-schema gate uses. Leaving the
+    /// scope at its Confined default and binding a foreign `default_schema` is
+    /// refused fail-closed at lower.
+    #[must_use]
+    pub fn with_schema_scope(mut self, scope: crate::guard::SchemaScope) -> Self {
+        self.scope = scope;
         self
     }
 
@@ -1092,6 +1162,21 @@ impl IrAuthor {
         // a `schema != project_schema` at validate-time, so under Confined this is
         // `project_schema` for every op and the clone renders byte-identically.
         let eff_schema = self.effective_schema(op).to_string();
+        // **PR10 review (MED)** — validate the EFFECTIVE schema against the author's
+        // confinement scope WHEN it was resolved from the connection `default_schema`
+        // (the op's OWN `schema()` qualifier is already gated by the friendly
+        // cross-schema VALIDATE gate upstream — `validate_op_schema_and_guard` — which
+        // never inspects `default_schema`). A foreign `default_schema` would otherwise
+        // render every guard-less op into the foreign schema while that gate stays
+        // silent; refuse fail-closed here. The default scope is the Confined
+        // `Single(project_schema)`, so a creator-path author refuses a foreign default
+        // even without the upstream load gate.
+        if op.schema().is_none()
+            && self.default_schema.is_some()
+            && !self.scope.permits(&eff_schema)
+        {
+            return Err(IrLowerError::DefaultSchemaOutOfScope(eff_schema));
+        }
         // **PR10 review F3** — fail-closed on a NON-`main` schema on the SQLite leg.
         // The SQLite emitter renders unqualified `main` DDL/DML and performs NO
         // auto-ATTACH, so an effective schema other than the implicit `main` target
@@ -2414,7 +2499,10 @@ mod tests {
     }
 
     /// **PR10** — the connection DEFAULT schema applies when an op omits its own
-    /// qualifier (§2.7). RED before `with_default_schema`/`effective_schema`.
+    /// qualifier (§2.7). RED before `with_default_schema`/`effective_schema`. The
+    /// default scope is now the Confined `Single(project_schema)`, so a foreign
+    /// `default_schema` (`"dflt"` ≠ `"app1"`) must be admitted by an explicit
+    /// `with_schema_scope` widen — the Platform/Trusted CLI posture (review MED).
     #[test]
     fn default_schema_applies_when_op_omits_qualifier_pg() {
         let ir = create_table_ir(
@@ -2428,6 +2516,8 @@ mod tests {
             }],
         );
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres)
+            // Trusted CLI widens the scope to admit the connection default it binds.
+            .with_schema_scope(crate::guard::SchemaScope::Allowlist(vec!["dflt".into()]))
             .with_default_schema(Some("dflt".into()));
         let migs = author.lower(&ir, &LiveSchema::default()).expect("lower");
         let create = migs.iter().find(|m| m.up.contains("CREATE TABLE")).expect("create");
@@ -2436,6 +2526,41 @@ mod tests {
             "an op with no schema must render into the connection default; up = {:?}",
             create.up
         );
+    }
+
+    /// **PR10 review (MED)** — a CONFINED author whose connection `default_schema`
+    /// points at a FOREIGN schema (`"other"` ≠ project `"app1"`) must be REFUSED
+    /// fail-closed at lower, NOT rendered into `"other"."t"`. The friendly op-level
+    /// cross-schema VALIDATE gate inspects ONLY the op's own `schema()` qualifier
+    /// (absent here), never the connection default — so without this lower-time scope
+    /// check the foreign default would silently render every guard-less op into the
+    /// foreign schema. The default scope is `Single(project_schema)` (Confined), so no
+    /// `with_schema_scope` widen ⇒ a foreign default is out of scope. RED before the
+    /// `DefaultSchemaOutOfScope` lower check (it would have emitted `"other"."t"`).
+    #[test]
+    fn confined_foreign_default_schema_is_refused_fail_closed_at_lower() {
+        let ir = create_table_ir(
+            "t",
+            vec![TIrColumn {
+                name: "x".into(),
+                ty: ColType::Int,
+                nullable: None,
+                default: None,
+                unique: None,
+            }],
+        );
+        // No `with_schema_scope` ⇒ Confined `Single("app1")`; the op omits its own
+        // qualifier, so the effective schema resolves to the foreign default "other".
+        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres)
+            .with_default_schema(Some("other".into()));
+        let err = author.lower(&ir, &LiveSchema::default()).unwrap_err();
+        match err {
+            IrLowerError::DefaultSchemaOutOfScope(s) => assert_eq!(s, "other"),
+            other => panic!(
+                "a Confined foreign default_schema must be refused with \
+                 DefaultSchemaOutOfScope, got {other:?}"
+            ),
+        }
     }
 
     /// **PR10 review F3 (MED)** — a SQLite-targeted op with a NON-`main` schema

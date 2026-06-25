@@ -56,6 +56,65 @@ fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
+/// The PG keywords whose category is NOT `UNRESERVED` (i.e. reserved,
+/// type/function-name, or column-name keywords). `quote_identifier` — and thus
+/// `pg_get_constraintdef` — wraps an identifier in double quotes iff it is not a
+/// "safe" bare identifier OR it collides with one of THESE keywords (an unreserved
+/// keyword is rendered bare). Sourced from `pg_get_keywords() WHERE catcode<>'U'`
+/// on PG 17. Used by [`quote_ident_if_needed`] so the FK referenced-table body we
+/// build matches the live catalog byte-for-byte (§review LOW): a table/schema named
+/// `order`/`user`/`select` (each passes `validate_collection`/`is_safe_schema_ident`
+/// but is reserved) renders QUOTED in the catalog — and now here too — so the
+/// desired-vs-live FK body re-diffs clean instead of phantom-dropping.
+const PG_NON_UNRESERVED_KEYWORDS: &[&str] = &[
+    "all", "analyse", "analyze", "and", "any", "array", "as", "asc", "asymmetric",
+    "authorization", "between", "bigint", "binary", "bit", "boolean", "both", "case",
+    "cast", "char", "character", "check", "coalesce", "collate", "collation", "column",
+    "concurrently", "constraint", "create", "cross", "current_catalog", "current_date",
+    "current_role", "current_schema", "current_time", "current_timestamp",
+    "current_user", "dec", "decimal", "default", "deferrable", "desc", "distinct", "do",
+    "else", "end", "except", "exists", "extract", "false", "fetch", "float", "for",
+    "foreign", "freeze", "from", "full", "grant", "greatest", "group", "grouping",
+    "having", "ilike", "in", "initially", "inner", "inout", "int", "integer",
+    "intersect", "interval", "into", "is", "isnull", "join", "json_array",
+    "json_arrayagg", "json_object", "json_objectagg", "lateral", "leading", "least",
+    "left", "like", "limit", "localtime", "localtimestamp", "national", "natural",
+    "nchar", "none", "normalize", "not", "notnull", "null", "nullif", "numeric",
+    "offset", "on", "only", "or", "order", "out", "outer", "overlaps", "overlay",
+    "placing", "position", "precision", "primary", "real", "references", "returning",
+    "right", "row", "select", "session_user", "setof", "similar", "smallint", "some",
+    "substring", "symmetric", "system_user", "table", "tablesample", "then", "time",
+    "timestamp", "to", "trailing", "treat", "trim", "true", "union", "unique", "user",
+    "using", "values", "varchar", "variadic", "verbose", "when", "where", "window",
+    "with", "xmlattributes", "xmlconcat", "xmlelement", "xmlexists", "xmlforest",
+    "xmlnamespaces", "xmlparse", "xmlpi", "xmlroot", "xmlserialize", "xmltable",
+];
+
+/// Quote an identifier ONLY when Postgres' own `quote_identifier` would — i.e.
+/// mirror what `pg_get_constraintdef` emits. An identifier is left BARE iff it is a
+/// "safe" lowercase identifier (starts with `[a-z_]`, all chars `[a-z0-9_]`) AND is
+/// not a non-unreserved keyword ([`PG_NON_UNRESERVED_KEYWORDS`]); otherwise it is
+/// double-quoted (mixed-case, leading digit, reserved word, …).
+///
+/// This is the seam the FK referenced-table body uses so the desired snapshot
+/// round-trips byte-for-byte against the live `pg_get_constraintdef` output
+/// (unconditional [`quote_ident`] would over-quote a normal lowercase name like
+/// `parent` → `"parent"`, which the catalog renders bare → a phantom FK re-create on
+/// every diff). It also closes the latent injection/wrong-resolution seam: a
+/// reserved-word or mixed-case schema/target now renders quoted (correct
+/// resolution), not as a bare keyword.
+fn quote_ident_if_needed(ident: &str) -> String {
+    let safe_bare = !ident.is_empty()
+        && ident.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
+        && ident.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && !PG_NON_UNRESERVED_KEYWORDS.contains(&ident);
+    if safe_bare {
+        ident.to_string()
+    } else {
+        quote_ident(ident)
+    }
+}
+
 /// True iff `b` is a SQL identifier byte (so a whole-word scan does not match a
 /// substring of a larger identifier). ASCII alphanumerics + `_` + `$`. A
 /// double-quote is NOT an identifier byte, so `"col"` boundaries match a word.
@@ -1877,7 +1936,17 @@ fn fk_definition_pg(
     deferrable: bool,
 ) -> String {
     use std::fmt::Write as _;
-    let mut def = format!("FOREIGN KEY ({field}) REFERENCES {project_schema}.{target}(id)");
+    // **PR10 review (LOW)** — quote the referenced schema + table the SAME way
+    // `pg_get_constraintdef` does (conditional: bare for safe lowercase names,
+    // double-quoted for reserved-word/mixed-case), so the desired FK body matches
+    // the live catalog byte-for-byte (over-quoting would phantom-diff a normal
+    // lowercase `parent`) AND a reserved-word/mixed-case schema or target resolves
+    // correctly instead of being emitted as a bare keyword.
+    let mut def = format!(
+        "FOREIGN KEY ({field}) REFERENCES {}.{}(id)",
+        quote_ident_if_needed(project_schema),
+        quote_ident_if_needed(target),
+    );
     let on_update = normalize_fk_action(on_update);
     let on_delete = normalize_fk_action(on_delete);
     // pg renders ON UPDATE before ON DELETE, and omits a NO ACTION clause.
@@ -5431,5 +5500,83 @@ mod advisory_seam_tests {
             all.iter().any(|a| a.rule == rule::FK_WITHOUT_INDEX),
             "an FK with no covering index anywhere in the plan must still emit a Notice"
         );
+    }
+}
+
+#[cfg(test)]
+mod fk_referenced_table_quoting_tests {
+    //! **PR10 review (LOW)** — the PG FK referenced-table clause must quote the
+    //! referenced schema + table the SAME way `pg_get_constraintdef` does
+    //! (conditional, not unconditional), so the desired FK body round-trips
+    //! byte-for-byte against the live catalog AND a reserved-word/mixed-case name
+    //! resolves correctly instead of being emitted as a bare keyword.
+    use super::{fk_definition_pg, quote_ident_if_needed};
+
+    /// A safe lowercase schema + target render BARE (matching the catalog — an
+    /// unconditional `quote_ident` would over-quote and phantom-diff).
+    #[test]
+    fn lowercase_schema_and_target_render_bare() {
+        let def = fk_definition_pg("author", "app", "authors", None, None, true);
+        assert!(
+            def.contains("REFERENCES app.authors(id)"),
+            "safe lowercase names must render bare (catalog parity); def = {def:?}"
+        );
+        assert!(!def.contains('"'), "no identifier should be quoted here; def = {def:?}");
+    }
+
+    /// **RED before the conditional-quote fix.** A RESERVED-WORD target table
+    /// (`order` — passes `validate_collection`'s `[A-Za-z0-9_]` gate but is a PG
+    /// reserved keyword) must render QUOTED, matching `pg_get_constraintdef`
+    /// (`REFERENCES app."order"(id)`). The pre-fix unconditional-unquoted body
+    /// (`app.order(id)`) would phantom-diff against the live catalog (which quotes
+    /// it) AND mis-resolve as the `ORDER` keyword.
+    #[test]
+    fn reserved_word_target_renders_quoted() {
+        let def = fk_definition_pg("oid", "app", "order", None, None, true);
+        assert!(
+            def.contains(r#"REFERENCES app."order"(id)"#),
+            "a reserved-word target must render quoted (catalog parity); def = {def:?}"
+        );
+    }
+
+    /// A reserved-word SCHEMA (`user`) renders quoted on the schema side too.
+    #[test]
+    fn reserved_word_schema_renders_quoted() {
+        let def = fk_definition_pg("uid", "user", "accounts", None, None, true);
+        assert!(
+            def.contains(r#"REFERENCES "user".accounts(id)"#),
+            "a reserved-word schema must render quoted; def = {def:?}"
+        );
+    }
+
+    /// A MIXED-CASE identifier renders quoted (PG folds unquoted to lowercase, so
+    /// the catalog quotes it; we must match to round-trip).
+    #[test]
+    fn mixed_case_target_renders_quoted() {
+        let def = fk_definition_pg("pid", "app", "Parent", None, None, true);
+        assert!(
+            def.contains(r#"REFERENCES app."Parent"(id)"#),
+            "a mixed-case target must render quoted; def = {def:?}"
+        );
+    }
+
+    /// Unit-level table for `quote_ident_if_needed`: bare for safe lowercase
+    /// non-keywords (incl. unreserved keywords like `value`), quoted otherwise.
+    #[test]
+    fn quote_ident_if_needed_matches_pg_quote_identifier() {
+        // Safe lowercase non-keyword → bare.
+        assert_eq!(quote_ident_if_needed("authors"), "authors");
+        assert_eq!(quote_ident_if_needed("app_2"), "app_2");
+        assert_eq!(quote_ident_if_needed("_priv"), "_priv");
+        // Unreserved keyword → bare (catalog renders it bare).
+        assert_eq!(quote_ident_if_needed("value"), "value");
+        assert_eq!(quote_ident_if_needed("name"), "name");
+        // Non-unreserved keyword → quoted.
+        assert_eq!(quote_ident_if_needed("order"), r#""order""#);
+        assert_eq!(quote_ident_if_needed("user"), r#""user""#);
+        assert_eq!(quote_ident_if_needed("select"), r#""select""#);
+        // Mixed case / leading digit / unsafe → quoted.
+        assert_eq!(quote_ident_if_needed("Parent"), r#""Parent""#);
+        assert_eq!(quote_ident_if_needed("2cool"), r#""2cool""#);
     }
 }
