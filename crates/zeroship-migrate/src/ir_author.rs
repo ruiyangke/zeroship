@@ -32,11 +32,11 @@ use crate::declarative::{
     build_table_snapshot, CollectionDescriptor, DeclarativeAuthor, DeclarativeError,
     FieldDescriptor, LoweredUnit,
 };
-use crate::drift::{ColumnSnapshot, IndexSnapshot};
+use crate::drift::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, TableSnapshot};
 use crate::guard::{guard_for, GuardConfig, GuardError};
 use crate::ir::{
-    ColType, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IndexMethod, MigrationIr, Op,
-    RefAction,
+    ColType, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IndexMethod,
+    MigrationIr, Op, RefAction,
 };
 use crate::migration::Migration;
 use crate::plan::{AppliedPlan, PlanStep, RenameStep};
@@ -1234,7 +1234,7 @@ impl IrAuthor {
         let guard = op.existence_guard();
         let mut probe: Option<crate::guard_probe::GuardProbe> = None;
         let mut migs: Vec<LoweredUnit> = match op {
-            Op::CreateTable { name, columns, .. } => {
+            Op::CreateTable { name, columns, constraints, indexes, .. } => {
                 // A column carrying a SYNTH default (`now()`/`genRandomUuid()`) must
                 // FAIL CLOSED, not silently lower with NO default. `ir_default_to_value`
                 // maps `IrDefault::Fn → None` — correct for the system-field path the
@@ -1244,7 +1244,22 @@ impl IrAuthor {
                 // author-supplied synth default is refused here rather than lost.
                 reject_synth_default(columns.iter().map(|c| (c.name.as_str(), c.default.as_ref())))?;
                 let desc = self.create_table_descriptor(name, columns);
-                let snap = build_table_snapshot(&eff_schema, &desc, self.dialect)?;
+                let mut snap = build_table_snapshot(&eff_schema, &desc, self.dialect)?;
+                // **PR15 (HIGH fix)** — fold the op's TABLE-LEVEL constraints +
+                // indexes into the snapshot so they actually LOWER to DDL (they were
+                // recorded into the IR by `create({ uniques, foreignKeys, indexes })`
+                // / a composite `primaryKey` / a per-column `.primaryKey()`, but the
+                // descriptor bridge carried only columns — the constraints/indexes
+                // were SILENTLY DROPPED at apply). `lower_create_table` already emits
+                // FK/UNIQUE/CHECK from `snap.constraints` and `CREATE INDEX` from
+                // `snap.indexes`; this stamps the op's specs onto the SAME snapshot so
+                // a named unique / check / table-level FK / extra index appears in the
+                // live catalog. Architecturally-unsupportable specs (a composite or
+                // per-column user PK — the platform OWNS the `id` PK; a CHECK — its
+                // closed-AST `expr` waits on the Wave-C Expr→SQL renderer, like
+                // stand-alone `addConstraint(check)`) FAIL CLOSED here, never a silent
+                // no-op.
+                self.fold_create_table_specs(name, &eff_schema, &mut snap, constraints, indexes)?;
                 // The SQLite CREATE routes through the shared `zeroship_schema`
                 // emitter, which consumes the SDK schema `Value` — built here from
                 // the SAME descriptor bridge (`descriptor_to_sdk_schema`) the
@@ -1924,6 +1939,154 @@ impl IrAuthor {
             fields: columns.iter().map(ir_column_to_field).collect(),
             indexes: Vec::new(),
         }
+    }
+
+    /// **PR15 (HIGH fix)** — fold a `createTable` op's TABLE-LEVEL constraints +
+    /// indexes onto the `build_table_snapshot`-built [`TableSnapshot`], so they
+    /// actually lower to DDL instead of being silently dropped.
+    ///
+    /// `build_table_snapshot` carries only per-column facets (the descriptor bridge
+    /// `create_table_descriptor` discards the op's `constraints` / `indexes`). But
+    /// `lower_create_table` ALREADY emits FK / UNIQUE / CHECK from `snap.constraints`
+    /// and a `CREATE INDEX` per `snap.indexes`, so stamping the op's specs onto the
+    /// same snapshot is all that is needed for a named unique / table-level FK /
+    /// extra index to appear in the live catalog.
+    ///
+    /// Each spec is built byte-identically to its stand-alone-op equivalent (a
+    /// table-level FK reuses [`crate::declarative::ir_fk_constraint_snapshot`], a
+    /// UNIQUE reuses the `UNIQUE (cols)` body + `<table>_<cols>_key` derived name a
+    /// stand-alone `addConstraint(unique)` uses), so an op-authored table and the
+    /// differ's equivalent re-diff clean.
+    ///
+    /// **Fail-closed, never a silent no-op** (HIGH-finding mandate):
+    /// - a composite or per-column user **PRIMARY KEY** is refused — the platform
+    ///   OWNS the synthetic `id TEXT PRIMARY KEY`, so a second PK is never
+    ///   satisfiable (PG/SQLite both reject two PKs); a user PK is a hard error;
+    /// - a **CHECK** is refused with [`IrLowerError::ExprRenderDeferred`] — its
+    ///   closed-AST `expr` needs the Wave-C Expr→SQL renderer (identical to the
+    ///   stand-alone `addConstraint(check)` deferral);
+    /// - a **multi-column / non-`id`-referencing FK** is refused (the single-`id`
+    ///   FK shape is the only one `lower_create_table` / `fk_clause` render today);
+    /// - a partial-index **`where`** predicate is refused (Wave-C Expr→SQL), and a
+    ///   non-`btree` index `using` on **SQLite** is refused;
+    /// - on **SQLite**, a table-level UNIQUE/FK is refused: the SQLite CREATE renders
+    ///   from the SDK schema `Value` (descriptor-derived), which carries no
+    ///   table-level constraint, so stamping it onto the snapshot would NOT reach the
+    ///   SQLite emitter — a silent drop. (Indexes DO reach both backends — they are
+    ///   emitted from `snap.indexes` outside the dialect branch.)
+    fn fold_create_table_specs(
+        &self,
+        table: &str,
+        eff_schema: &str,
+        snap: &mut TableSnapshot,
+        constraints: &[IrConstraint],
+        indexes: &[IrIndex],
+    ) -> Result<(), IrLowerError> {
+        let is_sqlite = matches!(self.dialect, SqlDialect::Sqlite);
+        for c in constraints {
+            match &c.kind {
+                IrConstraintKind::Pk { .. } => {
+                    // The platform owns the `id` PK; a user composite / per-column PK
+                    // would emit a SECOND `PRIMARY KEY`, which both backends reject.
+                    return Err(IrLowerError::UnsupportedOp(
+                        "createTable user PRIMARY KEY (the platform owns the `id` \
+                         primary key; a composite/per-column PK is not supported)",
+                    ));
+                }
+                IrConstraintKind::Check { .. } => {
+                    // Same blocker as stand-alone addConstraint(check): the closed-AST
+                    // predicate needs the deferred Expr→SQL renderer.
+                    return Err(IrLowerError::ExprRenderDeferred("createTable check"));
+                }
+                IrConstraintKind::Fk {
+                    columns,
+                    references_table,
+                    references_columns,
+                    on_delete,
+                    on_update,
+                } => {
+                    if is_sqlite {
+                        return Err(IrLowerError::UnsupportedOp(
+                            "createTable table-level FOREIGN KEY on SQLite (the SQLite \
+                             CREATE renders from the descriptor; a table-level FK is \
+                             not threaded into the emitter)",
+                        ));
+                    }
+                    // The render path (`fk_clause`) references the target's `id`
+                    // single-column, so only a single local column FK is supported.
+                    let local = columns.first().ok_or(IrLowerError::UnsupportedOp(
+                        "createTable FOREIGN KEY with no local column",
+                    ))?;
+                    if columns.len() != 1 {
+                        return Err(IrLowerError::UnsupportedOp(
+                            "createTable multi-column FOREIGN KEY (later wave)",
+                        ));
+                    }
+                    // The reference must be the target's `id` (the only shape
+                    // `fk_clause` renders); anything else is refused, not dropped.
+                    if !(references_columns.is_empty()
+                        || (references_columns.len() == 1 && references_columns[0] == "id"))
+                    {
+                        return Err(IrLowerError::UnsupportedOp(
+                            "createTable FOREIGN KEY referencing a non-`id` column \
+                             (later wave)",
+                        ));
+                    }
+                    let fk = crate::declarative::ir_fk_constraint_snapshot(
+                        eff_schema,
+                        c.name.as_deref(),
+                        local,
+                        references_table,
+                        on_delete.map(RefAction::as_token),
+                        on_update.map(RefAction::as_token),
+                    );
+                    snap.constraints.push(fk);
+                }
+                IrConstraintKind::Unique { columns } => {
+                    if is_sqlite {
+                        return Err(IrLowerError::UnsupportedOp(
+                            "createTable table-level UNIQUE on SQLite (the SQLite \
+                             CREATE renders from the descriptor; a table-level UNIQUE \
+                             is not threaded into the emitter)",
+                        ));
+                    }
+                    let name = c.name.as_deref().map_or_else(
+                        || derived_constraint_name(table, columns, "key"),
+                        str::to_string,
+                    );
+                    snap.constraints.push(ConstraintSnapshot {
+                        name,
+                        kind: "UNIQUE".to_string(),
+                        definition: format!("UNIQUE ({})", quote_cols(columns)),
+                    });
+                }
+            }
+        }
+        for ix in indexes {
+            if ix.r#where.is_some() {
+                // A partial-index predicate is a closed-AST Expr — Wave-C renderer.
+                return Err(IrLowerError::ExprRenderDeferred("createTable index where"));
+            }
+            let access = ix.using.map_or("btree", index_method_access);
+            if is_sqlite && access != "btree" {
+                return Err(IrLowerError::UnsupportedOp(
+                    "createTable non-btree index `using` on SQLite (later wave)",
+                ));
+            }
+            let name = ix.name.clone().unwrap_or_else(|| {
+                crate::author::cap_ident_name(&format!("{table}_{}_idx", ix.columns.join("_")))
+            });
+            let mut snap_idx =
+                IndexSnapshot::btree(name, ix.unique.unwrap_or(false), ix.columns.clone());
+            snap_idx.access_method = access.to_string();
+            snap.indexes.push(snap_idx);
+        }
+        // Keep the snapshot's deterministic name ordering (build_table_snapshot
+        // sorts constraints + indexes by name — a re-diff against live, which is
+        // also name-sorted, depends on it).
+        snap.constraints.sort_by(|a, b| a.name.cmp(&b.name));
+        snap.indexes.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(())
     }
 
     /// Build the [`ColumnSnapshot`] for an `addColumn` op by routing its single

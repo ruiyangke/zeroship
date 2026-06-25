@@ -4134,8 +4134,16 @@ impl DeclarativeAuthor {
         // #3/#4: inline CHECK constraints (literal-pin, min/max, enum) as
         // table-level `CONSTRAINT <name> CHECK (...)` clauses. The definition is
         // the emitted DDL clause built by `field_check_constraints`.
+        //
+        // **PR15 (HIGH fix)** — a `createTable({ uniques })` table-level UNIQUE
+        // (folded into the snapshot as a `UNIQUE` `ConstraintSnapshot` by
+        // `ir_author::create_table_descriptor`'s spec-fold) is inlined here as a
+        // `CONSTRAINT <name> <definition>` clause, the SAME shape a stand-alone
+        // `addConstraint(unique)` renders (`UNIQUE (cols)`), so a table built with
+        // a named unique round-trips against the live catalog. CHECK is inlined the
+        // same way; both are emission-only bodies the differ does not re-diff.
         for c in &t.constraints {
-            if c.kind == "CHECK" {
+            if c.kind == "CHECK" || c.kind == "UNIQUE" {
                 parts.push(format!("CONSTRAINT {} {}", quote_ident(&c.name), c.definition));
             }
         }
