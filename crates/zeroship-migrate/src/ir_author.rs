@@ -446,6 +446,31 @@ pub enum IrLowerError {
          or widen the scope via IrAuthor::with_schema_scope (Platform/Trusted only)."
     )]
     DefaultSchemaOutOfScope(String),
+    /// **PR10 review (LOW, confinement defense-in-depth)** — an op carrying an
+    /// EXPLICIT `schema()` qualifier that the author's confinement
+    /// [`scope`](IrAuthor::scope) does NOT permit. The friendly op-level cross-schema
+    /// VALIDATE gate ([`crate::ir::validate_ir_scoped`]) already refuses this
+    /// fail-closed on every PRODUCTION path (`load_and_lower[_guarded]` →
+    /// `load_ir_document` → `validate_ir_scoped` gates the explicit qualifier before
+    /// lower). But the public [`lower`](IrAuthor::lower)/[`lower_steps`](IrAuthor::lower_steps)
+    /// entries do NOT re-run validation — they assume the IR was pre-validated by the
+    /// load gate. A future INTERNAL caller invoking bare `lower()` with an op carrying
+    /// an explicit FOREIGN `schema()` would otherwise render into that foreign schema,
+    /// since the only lower-time scope check covered the `default_schema` case. This
+    /// arm makes `lower()` self-defending regardless of whether validate ran: an
+    /// explicit out-of-scope qualifier is refused fail-closed at lower, matching the
+    /// SQLite/`default_schema` checks beside it. Carries the offending schema. (Not
+    /// creator-reachable — the load gate already refuses it; this is the latent-footgun
+    /// backstop for internal callers.)
+    #[error(
+        "IrAuthor::lower of an op explicitly qualified with schema {0:?}, which the \
+         author's schema-confinement scope does not permit — the public lower entries \
+         do not re-run the cross-schema VALIDATE gate, so an out-of-scope explicit \
+         qualifier is refused fail-closed here rather than rendered into {0:?}. Route \
+         through the load gate (which validates), or widen the scope via \
+         IrAuthor::with_schema_scope (Platform/Trusted only)."
+    )]
+    LowerCrossSchema(String),
     /// **PR10 review F5** — a `backfill` (or batched `update`) whose EFFECTIVE schema
     /// (§2.7) differs from the bound project schema. The resumable backfill EXECUTOR
     /// ([`crate::backfill`]) qualifies its windowed `UPDATE` into the deploy-time
@@ -1176,6 +1201,23 @@ impl IrAuthor {
             && !self.scope.permits(&eff_schema)
         {
             return Err(IrLowerError::DefaultSchemaOutOfScope(eff_schema));
+        }
+        // **PR10 review (LOW)** — defense-in-depth for the EXPLICIT-qualifier case.
+        // The public `lower`/`lower_steps` entries do NOT re-run the cross-schema
+        // VALIDATE gate (`validate_ir_scoped`) — they assume the IR was pre-validated
+        // by the load gate. Every production path routes through that gate, which
+        // refuses an explicit foreign `op.schema()` fail-closed BEFORE lower. But a
+        // future internal caller invoking bare `lower()` with an op carrying an
+        // explicit out-of-scope qualifier would render into the foreign schema, since
+        // the check ABOVE only covers the `default_schema` (op.schema().is_none())
+        // case. Make `lower()` self-defending regardless of whether validate ran:
+        // refuse an explicit out-of-scope qualifier here, matching the fail-closed
+        // posture of the SQLite/`default_schema` checks. Under Confined the scope is
+        // `Single(project_schema)`, so a same-or-case-variant qualifier is permitted
+        // (canonicalized by `effective_schema`) and only a TRULY foreign qualifier is
+        // refused; Platform/Trusted widen the scope so their explicit qualifiers pass.
+        if op.schema().is_some() && !self.scope.permits(&eff_schema) {
+            return Err(IrLowerError::LowerCrossSchema(eff_schema));
         }
         // **PR10 review F3** — fail-closed on a NON-`main` schema on the SQLite leg.
         // The SQLite emitter renders unqualified `main` DDL/DML and performs NO
@@ -2444,7 +2486,12 @@ mod tests {
             *schema = Some("app2".into());
         }
         // The author is BOUND to project schema "app1"; the op overrides to "app2".
-        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
+        // This is the Trusted/Platform render path (a Confined creator could never name
+        // a foreign schema — the cross-schema confinement gate refuses it first), so the
+        // scope ADMITS "app2"; the test then proves the qualified render, not the gate.
+        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres).with_schema_scope(
+            crate::guard::SchemaScope::Allowlist(vec!["app1".into(), "app2".into()]),
+        );
         let migs = author.lower(&ir, &LiveSchema::default()).expect("lower");
         let create = migs.iter().find(|m| m.up.contains("CREATE TABLE")).expect("create");
         assert!(
@@ -2563,6 +2610,83 @@ mod tests {
         }
     }
 
+    /// **PR10 review (LOW, confinement defense-in-depth)** — a CONFINED author whose
+    /// op carries an EXPLICIT FOREIGN `schema()` qualifier (`"other"` ≠ project
+    /// `"app1"`) must be REFUSED fail-closed at lower, NOT rendered into `"other"."t"`,
+    /// EVEN when `lower()` is invoked DIRECTLY (bypassing the load gate's
+    /// `validate_ir_scoped` cross-schema check). The public lower entries do not
+    /// re-validate; before this arm the only lower-time scope check covered the
+    /// `default_schema` (op.schema().is_none()) case, so a bare `lower()` with an
+    /// explicit foreign qualifier would have rendered `"other"."t"`. The default scope
+    /// is `Single("app1")` (Confined, no `with_schema_scope` widen) ⇒ "other" is out of
+    /// scope. RED before the `LowerCrossSchema` lower check (it would have emitted
+    /// `"other"."t"`).
+    #[test]
+    fn confined_explicit_foreign_op_schema_is_refused_fail_closed_at_lower() {
+        let mut ir = create_table_ir(
+            "t",
+            vec![TIrColumn {
+                name: "x".into(),
+                ty: ColType::Int,
+                nullable: None,
+                default: None,
+                unique: None,
+            }],
+        );
+        // The op itself names a FOREIGN schema "other" (≠ project "app1"); NO
+        // connection default is bound, so this exercises the EXPLICIT-qualifier arm,
+        // not the default_schema arm.
+        if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
+            *schema = Some("other".into());
+        }
+        // No `with_schema_scope` ⇒ Confined `Single("app1")`. Invoke `lower()`
+        // DIRECTLY — no load gate, no validate_ir_scoped — to prove lower is
+        // self-defending.
+        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
+        let err = author.lower(&ir, &LiveSchema::default()).unwrap_err();
+        match err {
+            IrLowerError::LowerCrossSchema(s) => assert_eq!(s, "other"),
+            other => panic!(
+                "a Confined explicit foreign op.schema() must be refused at lower with \
+                 LowerCrossSchema, got {other:?}"
+            ),
+        }
+    }
+
+    /// Companion to the refusal test: an explicit qualifier that the scope DOES permit
+    /// (a Platform author whose `with_schema_scope` allowlist includes the named
+    /// schema) lowers and renders into that schema verbatim — the new
+    /// `LowerCrossSchema` arm gates ONLY truly out-of-scope qualifiers, never an
+    /// in-scope one.
+    #[test]
+    fn platform_explicit_in_scope_op_schema_lowers_into_that_schema() {
+        let mut ir = create_table_ir(
+            "t",
+            vec![TIrColumn {
+                name: "x".into(),
+                ty: ColType::Int,
+                nullable: None,
+                default: None,
+                unique: None,
+            }],
+        );
+        if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
+            *schema = Some("reporting".into());
+        }
+        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres)
+            .with_schema_scope(crate::guard::SchemaScope::Allowlist(vec![
+                "app1".into(),
+                "reporting".into(),
+            ]));
+        let migs = author.lower(&ir, &LiveSchema::default()).expect("lower");
+        let create = migs.iter().find(|m| m.up.contains("CREATE TABLE")).expect("create");
+        assert!(
+            create.up.contains("\"reporting\".\"t\""),
+            "an in-scope explicit qualifier must render into that schema; up = {:?}",
+            create.up
+        );
+    }
+
     /// **PR10 review F3 (MED)** — a SQLite-targeted op with a NON-`main` schema
     /// qualifier is REFUSED fail-closed at lower, NOT silently rendered into `main`.
     /// The SQLite emitter performs no auto-ATTACH, so honoring `schema:'reporting'`
@@ -2586,8 +2710,14 @@ mod tests {
             *schema = Some("reporting".into());
         }
         // Project schema "app"; the SQLite leg's implicit target is `main` (== the
-        // bound project schema). "reporting" is a different, non-main schema.
-        let author = IrAuthor::new("app", "app_a", SqlDialect::Sqlite);
+        // bound project schema). "reporting" is a different, non-main schema. This is
+        // the Trusted/general-CLI posture (the exposed surface — a Confined creator
+        // could never NAME a foreign schema; the cross-schema confinement gate refuses
+        // it first), so widen the scope to ADMIT "reporting" — the test then exercises
+        // the SQLite functional limit (no auto-ATTACH), not the confinement boundary.
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Sqlite).with_schema_scope(
+            crate::guard::SchemaScope::Allowlist(vec!["app".into(), "reporting".into()]),
+        );
         let err = author.lower(&ir, &LiveSchema::default()).unwrap_err();
         match err {
             IrLowerError::SqliteSchemaUnsupported(s) => assert_eq!(s, "reporting"),
@@ -2645,7 +2775,13 @@ mod tests {
     #[test]
     fn schema_qualified_backfill_is_refused_fail_closed_pg() {
         let ir = backfill_ir(Some("app2"));
-        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
+        // Trusted/Platform posture: the foreign schema "app2" is ADMITTED by the scope
+        // (a Confined creator could never name it — the cross-schema confinement gate
+        // refuses it first), so the test reaches the resumable-backfill functional limit
+        // (executor qualifies only into the project schema), not the confinement gate.
+        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres).with_schema_scope(
+            crate::guard::SchemaScope::Allowlist(vec!["app1".into(), "app2".into()]),
+        );
         let err = author.lower(&ir, &LiveSchema::default()).unwrap_err();
         match err {
             IrLowerError::BackfillSchemaUnsupported { schema, project } => {
@@ -2670,7 +2806,12 @@ mod tests {
              "batch":{"cursorColumn":"id","batchSize":500}}
         ]}"#;
         let ir: MigrationIr = serde_json::from_str(json).expect("batched update IR parses");
-        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
+        // Trusted/Platform posture: "app2" is admitted by the scope (see the
+        // backfill twin) so the test hits the resumable functional limit, not the
+        // confinement gate.
+        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres).with_schema_scope(
+            crate::guard::SchemaScope::Allowlist(vec!["app1".into(), "app2".into()]),
+        );
         let err = author.lower(&ir, &LiveSchema::default()).unwrap_err();
         assert!(
             matches!(err, IrLowerError::BackfillSchemaUnsupported { .. }),
