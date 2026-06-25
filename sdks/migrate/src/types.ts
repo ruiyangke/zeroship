@@ -257,12 +257,38 @@ export interface TableOptions {
 
 /** The all-object `create({...})` payload (§3.1). Table-level constraints/indexes
  *  are FIELDS (no `build` callback — "no exceptions"); each carries a required
- *  `name` (name-first, §3.4). */
+ *  `name` (name-first, §3.4).
+ *
+ *  Apply-level lowering (what reaches the live DDL):
+ *  - `uniques`, `foreignKeys`, `indexes` LOWER to DDL on Postgres (a named UNIQUE
+ *    + a single-`id` FOREIGN KEY + extra indexes appear in the live catalog).
+ *  - `indexes` also lower on SQLite (plain btree); a table-level `uniques` /
+ *    `foreignKeys` on SQLite is a HARD authoring error (the SQLite CREATE renders
+ *    from the column descriptor — a table-level constraint is not threaded into
+ *    the emitter; refused fail-closed rather than silently dropped).
+ *  - `foreignKeys` are single-local-column, referencing the target's `id` (the
+ *    only shape the renderer emits today); a multi-column / non-`id` FK is a HARD
+ *    error (later wave).
+ *  - `checks` and a partial-index `where` are HARD deferred errors: the closed-AST
+ *    expression needs the Wave-C `Expr`→SQL renderer (same deferral as stand-alone
+ *    `.check(name).add({expr})` / `addConstraint(check)`).
+ *  - `primaryKey` (composite) and a column's `.primaryKey()` are HARD errors at
+ *    apply: the platform OWNS the synthetic `id TEXT PRIMARY KEY`, so a second PK
+ *    is never satisfiable (both backends reject two PRIMARY KEYs). Use `t.id()` for
+ *    the (single, platform-managed) primary key.
+ *
+ *  None of the above is ever a silent no-op — an unsupported spec fails closed at
+ *  lower time. */
 export interface CreateTableArgs {
   columns: Record<string, ColumnDef>;
-  /** Composite PK (else a single PK via `t.id()` / a column's `.primaryKey()`). */
+  /** Composite PK. DEFERRED/UNSUPPORTED at apply — the platform owns the synthetic
+   *  `id` primary key; a composite/per-column user PK is a HARD lower error (a
+   *  second PRIMARY KEY is never satisfiable). Use `t.id()`. */
   primaryKey?: string[];
   uniques?: Array<{ name: string; columns: string[] }>;
+  /** DEFERRED at apply — the CHECK predicate is a closed-AST `expr` awaiting the
+   *  Wave-C `Expr`→SQL renderer; a table-level check is a HARD lower error today
+   *  (mirrors stand-alone `.check().add()`), never a silent drop. */
   checks?: Array<{ name: string; expr: ExprFn }>;
   foreignKeys?: Array<{
     name: string;
@@ -276,6 +302,9 @@ export interface CreateTableArgs {
     columns: string[];
     unique?: boolean;
     using?: IndexMethod;
+    /** DEFERRED at apply — a partial-index predicate is a closed-AST `expr`
+     *  awaiting the Wave-C `Expr`→SQL renderer; a `where` here is a HARD lower
+     *  error today, never a silent drop. */
     where?: ExprFn;
   }>;
   ifNotExists?: boolean;
