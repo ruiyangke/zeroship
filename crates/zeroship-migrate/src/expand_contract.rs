@@ -447,6 +447,9 @@ impl ExpandContractAuthor {
         // in the journal/gate timeline without the executor trying to run the
         // batched UPDATE as one statement.
         let backfill = BackfillSpec {
+            // #149: the E3 backfill targets the bound project schema (expand-contract
+            // is a Confined-profile, single-project online change).
+            schema: self.project_schema.clone(),
             table: table.to_string(),
             // The orchestrator/caller supplies the real PK as cursor_column; we
             // default to "id" (the platform's conventional PK) and document that
@@ -1403,6 +1406,7 @@ mod tests {
 
         let cfg = crate::db::ExecutorConfig::new("prj_low_i", "prj_low_i");
         let backfill = BackfillSpec {
+            schema: "prj_low_i".into(),
             table: "users".into(),
             cursor_column: "id".into(),
             batch_size: 50,

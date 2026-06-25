@@ -100,12 +100,27 @@ pub enum RoleError {
     /// The derived role name was empty or otherwise unusable.
     #[error("invalid migrator role name derived from project id '{0}'")]
     BadRoleName(String),
+    /// An engine-supplied identifier (role / project schema / meta schema /
+    /// extension schema) was not quotable (empty or NUL-bearing) at a render
+    /// seam — fail-closed rather than interpolate it. Maps
+    /// [`crate::dml::IdentQuoteError`].
+    #[error("role provisioning: {0}")]
+    IdentQuote(#[from] crate::dml::IdentQuoteError),
 }
 
 /// Quote a SQL identifier (double embedded quotes, wrap in `"`), so a schema /
-/// role name is never interpolated as raw SQL. Mirrors `journal::quote_ident`.
-fn quote_ident(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
+/// role name is never interpolated as raw SQL. Routes through the ONE crate-shared
+/// engine seam ([`crate::dml::quote_ident_checked`]) — byte-identical to (and
+/// uniformly self-defending with) `author`/`backfill`/`journal`/`dml`: fail-closed
+/// on an empty / NUL identifier.
+fn quote_ident(ident: &str) -> Result<String, RoleError> {
+    Ok(crate::dml::quote_ident_checked(ident)?)
+}
+
+/// #150 test seam (see `dml::tests::all_engine_seams_render_uniformly`).
+#[cfg(test)]
+pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, RoleError> {
+    quote_ident(ident)
 }
 
 /// Quote a string for a SQL string literal context (double embedded `'`).
@@ -196,10 +211,10 @@ pub fn migrator_role_name(project_id: &str) -> Result<String, RoleError> {
 /// - [`RoleError::Db`] on any DDL failure (e.g. the caller lacks `CREATEROLE`).
 pub async fn provision_migrator(admin: &Client, cfg: &ExecutorConfig) -> Result<(), RoleError> {
     let role = migrator_role_name(&cfg.project_id)?;
-    let role_q = quote_ident(&role);
+    let role_q = quote_ident(&role)?;
     let role_lit = quote_lit(&role);
-    let proj_q = quote_ident(&cfg.project_schema);
-    let meta_q = quote_ident(&cfg.pg.meta_schema);
+    let proj_q = quote_ident(&cfg.project_schema)?;
+    let meta_q = quote_ident(&cfg.pg.meta_schema)?;
 
     // 1. Create the role idempotently with the locked-down attribute set.
     //    NOLOGIN: reached only via SET ROLE from the admin connection.
@@ -304,7 +319,7 @@ pub async fn provision_migrator(admin: &Client, cfg: &ExecutorConfig) -> Result<
     let mut path_parts = vec![proj_q.clone()];
     for ext in &cfg.pg.extension_schemas {
         if ext != &cfg.project_schema {
-            path_parts.push(quote_ident(ext));
+            path_parts.push(quote_ident(ext)?);
         }
     }
     exec_retry(
@@ -328,7 +343,7 @@ pub async fn provision_migrator(admin: &Client, cfg: &ExecutorConfig) -> Result<
         if ext == &cfg.project_schema {
             continue;
         }
-        let ext_q = quote_ident(ext);
+        let ext_q = quote_ident(ext)?;
         exec_retry(admin, &format!("REVOKE ALL ON SCHEMA {ext_q} FROM {role_q}")).await?;
         exec_retry(admin, &format!("GRANT USAGE ON SCHEMA {ext_q} TO {role_q}")).await?;
     }
@@ -347,7 +362,7 @@ pub async fn provision_migrator(admin: &Client, cfg: &ExecutorConfig) -> Result<
 /// - [`RoleError::Db`] on any DDL failure.
 pub async fn deprovision_migrator(admin: &Client, cfg: &ExecutorConfig) -> Result<(), RoleError> {
     let role = migrator_role_name(&cfg.project_id)?;
-    let role_q = quote_ident(&role);
+    let role_q = quote_ident(&role)?;
     let role_lit = quote_lit(&role);
 
     exec_retry(

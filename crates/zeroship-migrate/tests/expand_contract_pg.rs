@@ -1130,6 +1130,7 @@ async fn split_column_expand_contract_dual_write_under_app_role() {
 
     // ---- E3: backfill the parts from the source for the pre-existing rows ----
     let backfill = BackfillSpec {
+        schema: schema.clone(),
         table: "people".into(),
         cursor_column: "id".into(),
         batch_size: 1000,
@@ -1400,6 +1401,7 @@ async fn merge_columns_expand_contract_dual_write_under_app_role() {
 
     // ---- E3: backfill phone from the two sources via the precedence rule ----
     let backfill = BackfillSpec {
+        schema: schema.clone(),
         table: "contacts".into(),
         cursor_column: "id".into(),
         batch_size: 1000,

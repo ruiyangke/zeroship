@@ -352,12 +352,26 @@ pub enum JournalError {
     /// means out-of-band mutation).
     #[error("unrecognized journal event_kind '{0}'")]
     BadEventKind(String),
+    /// An engine-supplied identifier (the meta schema or a derived trigger name)
+    /// was not quotable (empty or NUL-bearing) at a render seam — fail-closed
+    /// rather than interpolate it. Maps [`crate::dml::IdentQuoteError`].
+    #[error("journal render: {0}")]
+    IdentQuote(#[from] crate::dml::IdentQuoteError),
 }
 
 /// Quote a SQL identifier by doubling embedded quotes and wrapping in
-/// double-quotes, so a schema name is never interpolated as raw SQL.
-fn quote_ident(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
+/// double-quotes, so a schema name is never interpolated as raw SQL. Routes
+/// through the ONE crate-shared engine seam ([`crate::dml::quote_ident_checked`])
+/// — byte-identical to (and uniformly self-defending with)
+/// `author`/`backfill`/`role`/`dml`: fail-closed on an empty / NUL identifier.
+fn quote_ident(ident: &str) -> Result<String, JournalError> {
+    Ok(crate::dml::quote_ident_checked(ident)?)
+}
+
+/// #150 test seam (see `dml::tests::all_engine_seams_render_uniformly`).
+#[cfg(test)]
+pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, JournalError> {
+    quote_ident(ident)
 }
 
 /// Bootstrap (idempotently) the meta schema + journal table + inflight
@@ -370,8 +384,8 @@ fn quote_ident(ident: &str) -> String {
 /// # Errors
 /// [`JournalError::Db`] on any DDL failure.
 pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
-    let trg_fn = quote_ident(&format!("{}_schema_migrations_immutable", cfg.pg.meta_schema));
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
+    let trg_fn = quote_ident(&format!("{}_schema_migrations_immutable", cfg.pg.meta_schema))?;
     let meta_lit = cfg.pg.meta_schema.replace('\'', "''");
 
     // 1. Meta schema.
@@ -656,7 +670,7 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
             ),
         ] {
             let trg_lit = trg.replace('\'', "''");
-            let trg_q = quote_ident(trg);
+            let trg_q = quote_ident(trg)?;
             conn.batch_execute(&format!(
                 "DO $do$ BEGIN
                     IF NOT EXISTS (
@@ -706,7 +720,7 @@ pub async fn applied(
     conn: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<AppliedEntry>, JournalError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
     // Single-table net state: take the LATEST event per version (DISTINCT ON over
     // the consolidated events table, by `event_seq DESC`) and keep only the
     // versions whose latest event is `applied` (net-applied). Then UNION the lone
@@ -837,7 +851,7 @@ pub async fn net_rolled_back(
     conn: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<RolledBackEntry>, JournalError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -885,7 +899,7 @@ pub async fn history(
     conn: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<HistoryEvent>, JournalError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -944,7 +958,7 @@ pub async fn record_rolled_back(
     rolled_back_by: &str,
     exec_ms: i64,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
     let n = conn
         .execute(
             &format!(
@@ -974,7 +988,7 @@ pub async fn record_started(
     checksum: &str,
     applied_by: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
     conn.execute(
         &format!(
             "INSERT INTO {meta}.schema_migrations_inflight
@@ -1019,7 +1033,7 @@ pub async fn record_completed(
     cfg: &ExecutorConfig,
     rec: CompletedRecord<'_>,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
     // Plain INSERT (consistent with the transactional path, M3). `event_seq` is a
     // surrogate identity PK, so this appends a fresh `completed` event — including
     // a re-apply after a rollback (Plan 5), where a prior `completed` + a later
@@ -1069,7 +1083,7 @@ pub async fn outstanding_pending_contracts(
     conn: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<PendingContract>, JournalError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -1167,7 +1181,7 @@ pub async fn record_pending_contract_with_recovery(
     rec: PendingContractRecord<'_>,
     scope: Option<DeployRecoveryScope<'_>>,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
     let cv_json = serde_json::to_string(rec.contract_versions).map_err(|e| {
         JournalError::Backend(format!("failed to serialize contract_versions JSON: {e}"))
     })?;
@@ -1252,7 +1266,7 @@ pub async fn resolve_pending_contract(
     resolution: Resolution,
     by: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
     let cv_json = serde_json::to_string(&pc.contract_versions).map_err(|e| {
         JournalError::Backend(format!("failed to serialize contract_versions JSON: {e}"))
     })?;
@@ -1325,7 +1339,7 @@ pub async fn mark_deploy_recovery_committed(
     pending_version: &str,
     by: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
     let n = conn
         .execute(
             &format!(
@@ -1410,7 +1424,7 @@ pub async fn mark_deploy_recovery_reconciled(
     pending_version: &str,
     by: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
     let n = conn
         .execute(
             &format!(
@@ -1459,7 +1473,7 @@ pub async fn outstanding_deploy_recoveries(
     conn: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<DeployRecovery>, JournalError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -1506,7 +1520,7 @@ pub async fn outstanding_deploy_recoveries(
 /// # Errors
 /// [`JournalError::Db`] on query failure.
 pub async fn applied_count(conn: &Client, cfg: &ExecutorConfig) -> Result<i64, JournalError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
     let row = conn
         .query_one(
             &format!(
@@ -1548,7 +1562,7 @@ pub async fn superseded_versions(
     conn: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<String>, JournalError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -1617,7 +1631,7 @@ pub async fn latest_completed_checksums(
     conn: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<std::collections::HashMap<String, String>, JournalError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -1701,7 +1715,7 @@ async fn record_baseline_inner(
     cfg: &ExecutorConfig,
     rec: BaselineRecord<'_>,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
     let n = conn
         .execute(
             &format!(
@@ -1738,7 +1752,7 @@ pub async fn clear_inflight(
     cfg: &ExecutorConfig,
     version: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
     conn.execute(
         &format!("DELETE FROM {meta}.schema_migrations_inflight WHERE version = $1"),
         &[&version],

@@ -135,6 +135,7 @@ async fn backfill_fills_all_rows_in_ten_separate_batches() {
     seed_widgets(&conn, &cfg.project_schema, 10_000).await;
 
     let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
         table: "widgets".into(),
         cursor_column: "id".into(),
         batch_size: 1000,
@@ -200,6 +201,7 @@ async fn backfill_resumes_from_committed_cursor_exactly_once_after_crash() {
     // id + 2 (not id + 1). After the whole backfill, every row must be exactly
     // id + 1.
     let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
         table: "widgets".into(),
         cursor_column: "id".into(),
         batch_size: 1000,
@@ -283,6 +285,7 @@ async fn backfill_handles_non_multiple_table_size() {
     seed_widgets(&conn, &cfg.project_schema, 2500).await;
 
     let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
         table: "widgets".into(),
         cursor_column: "id".into(),
         batch_size: 1000,
@@ -335,6 +338,7 @@ async fn backfill_with_filter_touches_only_matching_rows() {
     .expect("pre-fill");
 
     let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
         table: "widgets".into(),
         cursor_column: "id".into(),
         batch_size: 500,
@@ -374,6 +378,7 @@ async fn backfill_progress_is_observable_midflight_and_listed() {
     seed_widgets(&conn, &cfg.project_schema, 5000).await;
 
     let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
         table: "widgets".into(),
         cursor_column: "id".into(),
         batch_size: 1000,
@@ -434,6 +439,7 @@ async fn backfill_without_approval_is_refused() {
     seed_widgets(&conn, &cfg.project_schema, 10).await;
 
     let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
         table: "widgets".into(),
         cursor_column: "id".into(),
         batch_size: 5,
@@ -472,6 +478,7 @@ async fn backfill_with_cross_schema_transform_is_guard_denied() {
     // A transform that reaches the platform `control` schema via a subquery —
     // the assembled UPDATE is guard-checked and the cross-schema ref is denied.
     let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
         table: "widgets".into(),
         cursor_column: "id".into(),
         batch_size: 5,
@@ -502,6 +509,7 @@ async fn backfill_with_file_access_transform_is_guard_denied() {
     seed_widgets(&conn, &cfg.project_schema, 10).await;
 
     let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
         table: "widgets".into(),
         cursor_column: "id".into(),
         batch_size: 5,
@@ -534,6 +542,7 @@ async fn backfill_rejects_injection_in_table_identifier() {
     // A table name carrying an injection / schema qualification.
     for bad in ["widgets\"; DROP TABLE widgets; --", "control.users", "widgets; --", ""] {
         let spec = BackfillSpec {
+            schema: cfg.project_schema.clone(),
             table: bad.into(),
             cursor_column: "id".into(),
             batch_size: 5,
@@ -568,6 +577,7 @@ async fn backfill_rejects_injection_in_cursor_column_identifier() {
     seed_widgets(&conn, &cfg.project_schema, 10).await;
 
     let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
         table: "widgets".into(),
         cursor_column: "id\" > 0 OR (SELECT 1)=1 --".into(),
         batch_size: 5,
@@ -613,6 +623,7 @@ async fn backfill_targeting_table_outside_project_schema_is_denied() {
     .expect("create foreign table");
 
     let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
         table: "foreign_secrets".into(),
         cursor_column: "id".into(),
         batch_size: 5,
@@ -655,6 +666,7 @@ async fn backfill_runs_under_migrator_role_and_completes() {
     .expect("chown widgets to migrator");
 
     let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
         table: "widgets".into(),
         cursor_column: "id".into(),
         batch_size: 1000,
@@ -722,6 +734,7 @@ async fn backfill_refuses_non_unique_cursor_column() {
     .expect("seed items");
 
     let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
         table: "items".into(),
         cursor_column: "grp".into(),
         batch_size: 10,
@@ -768,6 +781,7 @@ async fn backfill_refuses_nullable_cursor_column() {
     .expect("seed things");
 
     let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
         table: "things".into(),
         cursor_column: "code".into(),
         batch_size: 10,
@@ -809,6 +823,7 @@ async fn backfill_refuses_set_clause_that_mutates_cursor_column() {
 
     // The transform assigns `id`, the very column it pages on.
     let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
         table: "widgets".into(),
         cursor_column: "id".into(),
         batch_size: 5,

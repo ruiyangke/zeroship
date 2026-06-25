@@ -108,22 +108,34 @@ pub enum AuthorRequest {
     },
 }
 
-/// Quote a Postgres identifier (double embedded quotes, wrap in `"`). Mirrors
-/// the executor/role/journal quoting so author output is injection-safe.
-fn quote_ident(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
+/// Quote a Postgres identifier (double embedded quotes, wrap in `"`). Routes
+/// through the ONE crate-shared engine seam ([`crate::dml::quote_ident_checked`])
+/// so author output is byte-identical to (and uniformly self-defending with) the
+/// executor/role/journal quoting — fail-closed on an empty / NUL identifier
+/// (which `"`-doubling cannot neutralise) rather than silently emitting it.
+fn quote_ident(ident: &str) -> Result<String, AuthorError> {
+    crate::dml::quote_ident_checked(ident).map_err(|e| {
+        AuthorError::Invalid(format!("unquotable identifier ({}): {:?}", e.reason, e.value))
+    })
+}
+
+/// #150 test seam: route a probe through the local `quote_ident` so the shared
+/// helper's uniform render can be asserted across all engine seams.
+#[cfg(test)]
+pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, AuthorError> {
+    quote_ident(ident)
 }
 
 /// Render `<schema>.<object>`, both parts quoted.
-fn qualified(schema: &str, object: &str) -> String {
-    format!("{}.{}", quote_ident(schema), quote_ident(object))
+fn qualified(schema: &str, object: &str) -> Result<String, AuthorError> {
+    Ok(format!("{}.{}", quote_ident(schema)?, quote_ident(object)?))
 }
 
 /// Render one column definition for a `CREATE TABLE` / `ADD COLUMN` clause.
-fn column_def(c: &Column) -> String {
+fn column_def(c: &Column) -> Result<String, AuthorError> {
     let null = if c.nullable { "" } else { " NOT NULL" };
     // `ty` is emitted verbatim — a Postgres type, not an identifier.
-    format!("{} {}{}", quote_ident(&c.name), c.ty, null)
+    Ok(format!("{} {}{}", quote_ident(&c.name)?, c.ty, null))
 }
 
 /// The Postgres identifier length limit (`NAMEDATALEN - 1`), in bytes. An index
@@ -242,11 +254,11 @@ impl MigrationAuthor for DeterministicAuthor {
                 let cols = columns
                     .iter()
                     .map(column_def)
-                    .collect::<Vec<_>>()
+                    .collect::<Result<Vec<_>, _>>()?
                     .join(", ");
-                let up = format!("CREATE TABLE {} ({cols})", qualified(schema, name));
+                let up = format!("CREATE TABLE {} ({cols})", qualified(schema, name)?);
                 // A clean additive create has a precise reverse.
-                let down = Some(format!("DROP TABLE {}", qualified(schema, name)));
+                let down = Some(format!("DROP TABLE {}", qualified(schema, name)?));
                 self.make(
                     &format!("create_table_{name}"),
                     up,
@@ -264,13 +276,13 @@ impl MigrationAuthor for DeterministicAuthor {
                 }
                 let up = format!(
                     "ALTER TABLE {} ADD COLUMN {}",
-                    qualified(schema, table),
-                    column_def(column),
+                    qualified(schema, table)?,
+                    column_def(column)?,
                 );
                 let down = Some(format!(
                     "ALTER TABLE {} DROP COLUMN {}",
-                    qualified(schema, table),
-                    quote_ident(&column.name),
+                    qualified(schema, table)?,
+                    quote_ident(&column.name)?,
                 ));
                 self.make(
                     &format!("add_column_{table}_{}", column.name),
@@ -296,7 +308,7 @@ impl MigrationAuthor for DeterministicAuthor {
                 let cols = columns
                     .iter()
                     .map(|c| quote_ident(c))
-                    .collect::<Vec<_>>()
+                    .collect::<Result<Vec<_>, _>>()?
                     .join(", ");
                 // The non-txn idempotency rule (executor) REQUIRES `CREATE INDEX
                 // CONCURRENTLY IF NOT EXISTS` so crash-recovery can re-run the
@@ -304,15 +316,15 @@ impl MigrationAuthor for DeterministicAuthor {
                 let concurrent_kw = if *concurrently { "CONCURRENTLY " } else { "" };
                 let up = format!(
                     "CREATE INDEX {concurrent_kw}IF NOT EXISTS {} ON {} ({cols})",
-                    quote_ident(&idx),
-                    qualified(schema, table),
+                    quote_ident(&idx)?,
+                    qualified(schema, table)?,
                 );
                 // A concurrent DROP mirrors a concurrent CREATE; `IF EXISTS`
                 // keeps the down idempotent too.
                 let drop_concurrent = if *concurrently { "CONCURRENTLY " } else { "" };
                 let down = Some(format!(
                     "DROP INDEX {drop_concurrent}IF EXISTS {}",
-                    qualified(schema, &idx),
+                    qualified(schema, &idx)?,
                 ));
                 let flags = MigrationFlags {
                     // CONCURRENTLY cannot run inside a transaction.
