@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use zeroship_control::deploy_migrate::{
     apply_bundle_migrations, apply_bundle_migrations_approved, apply_bundle_migrations_routed,
-    plan_reviewed_versions, DeployActor, DeployMigrateError,
+    plan_reviewed_manifest, plan_reviewed_versions, DeployActor, DeployMigrateError,
 };
 
 /// A stand-in operator/admin approver for the approved-go-live tests. In production
@@ -49,7 +49,7 @@ async fn approve_whole_bundle(
     let reviewed = plan_reviewed_versions(dsn, app_id, dir)
         .await
         .expect("reviewer plan must enumerate the bundle's destructive scope-versions");
-    apply_bundle_migrations_approved(dsn, app_id, dir, &reviewed, &test_approver()).await
+    apply_bundle_migrations_approved(dsn, app_id, dir, &reviewed, &test_approver(), None).await
 }
 
 /// Admin DSN with CREATEROLE + CREATE SCHEMA (the `postgres` superuser), the
@@ -1439,6 +1439,215 @@ async fn deploy_migrate_ddl_touching_pending_table_is_refused_e2e() {
     cleanup_app(&conn, &app_id).await;
 }
 
+// PR9c MED — BUNDLE-LEVEL INTERLOCK ATOMICITY (no half-state). The critique's
+// residual: the scope-gate pre-validation alone closes only the SCOPE failure
+// mode. A multi-file APPROVED bundle could still leave a half-state when an
+// IN-SCOPE online-rename EXPAND in file A durably commits and a LATER file B is
+// refused for a NON-scope reason — here the §2.0.3 cross-deploy interlock (file B
+// touches a table with an OUTSTANDING pending contract from a PRIOR deploy).
+//
+// Pre-fix, the per-file apply committed file A's EXPAND (live dual-write trigger +
+// duplicated column + journaled pending contract on `widgets`) and THEN file B
+// tripped the interlock on `members` — leaving `widgets` half-renamed even though
+// the creator saw a 4xx. The PR9c fix runs the interlock read-back at the BUNDLE
+// level BEFORE applying any file, so the whole bundle is refused and `widgets` is
+// NEVER renamed.
+//
+// This test would FAIL RED pre-fix: `widgets.title` would exist (file A's EXPAND
+// committed) despite the 4xx.
+#[compio::test]
+async fn deploy_migrate_approved_bundle_interlock_leaves_earlier_rename_unapplied() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    // Deploy #1: create BOTH tables — `widgets(label)` (the in-scope rename target
+    // in deploy #3 file A) and `members(handle)` (the prior-deploy pending target).
+    let create = r#"{"ir_version":1,"name":"create_tables","ops":[
+        {"op":"createTable","name":"widgets","columns":[
+            {"name":"label","type":"text","nullable":false}
+        ]},
+        {"op":"createTable","name":"members","columns":[
+            {"name":"handle","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    let dir1 = migrations_dir(&[("0001_create.ir.json", create)]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir1)
+        .await
+        .expect("createTable deploy must succeed");
+
+    // Deploy #2 (APPROVED): rename members.handle → username, opening a DURABLE
+    // pending contract on `members` (the prior-deploy obligation).
+    let rename_members = r#"{"ir_version":1,"name":"rename_members","ops":[
+        {"op":"renameColumn","table":"members","from":"handle","to":"username","type":"text"}
+    ]}"#;
+    let dir2 = migrations_dir(&[("0002_rename_members.ir.json", rename_members)]);
+    approve_whole_bundle(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect("approved members rename opens the pending obligation");
+
+    // Deploy #3 (APPROVED, MULTI-FILE):
+    //   file A — rename widgets.label → title (an IN-SCOPE online-rename EXPAND), then
+    //   file B — addColumn on `members` (TOUCHES the prior-deploy pending table).
+    // The scope gate ADMITS both (the widgets rename is in the approved set; the
+    // members addColumn is additive, not gated), so ONLY the bundle-level interlock
+    // gate can refuse it. It MUST — and it must refuse BEFORE file A's EXPAND commits.
+    let rename_widgets = r#"{"ir_version":1,"name":"rename_widgets","ops":[
+        {"op":"renameColumn","table":"widgets","from":"label","to":"title","type":"text"}
+    ]}"#;
+    let touch_members = r#"{"ir_version":1,"name":"touch_members","ops":[
+        {"op":"addColumn","table":"members","column":"nickname","type":"text","nullable":true}
+    ]}"#;
+    let dir3 = migrations_dir(&[
+        ("0003_rename_widgets.ir.json", rename_widgets),
+        ("0004_touch_members.ir.json", touch_members),
+    ]);
+    let err = approve_whole_bundle(&admin_dsn(), &app_id, &dir3)
+        .await
+        .expect_err("the bundle touches a prior-deploy pending table → refused wholesale");
+    match err {
+        DeployMigrateError::Apply(zeroship_migrate::EngineError::PendingContract(payload)) => {
+            assert_eq!(payload.code, zeroship_migrate::CODE_TABLE_HAS_PENDING_CONTRACT);
+            assert_eq!(payload.table, "members", "the interlock named the pending table");
+        }
+        other => panic!("expected a TABLE_HAS_PENDING_CONTRACT refusal, got {other:?}"),
+    }
+
+    // ATOMICITY: the earlier in-scope rename was NOT applied — `widgets.title` does
+    // NOT exist and the original `widgets.label` is untouched. Pre-fix the EXPAND
+    // would have committed `title` (+ a dual-write trigger) before file B refused.
+    assert!(
+        !column_exists(&conn, &app_id, "widgets", "title").await,
+        "the earlier file's EXPAND must NOT have committed — no half-renamed widgets table"
+    );
+    assert!(
+        column_exists(&conn, &app_id, "widgets", "label").await,
+        "the original column is intact — the whole bundle applied NOTHING"
+    );
+    // And file B's touching column was likewise never added.
+    assert!(
+        !column_exists(&conn, &app_id, "members", "nickname").await,
+        "the refused bundle applied NOTHING"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir1);
+    let _ = std::fs::remove_dir_all(&dir2);
+    let _ = std::fs::remove_dir_all(&dir3);
+    cleanup_app(&conn, &app_id).await;
+}
+
+// PR9c H2 — APPROVAL/MANIFEST BINDING. An operator approves a REVIEWED set by
+// supplying its combined integrity manifest hash out-of-band (the value
+// `plan_reviewed_manifest` computes). The approved apply binds to it: the CORRECT
+// hash completes the EXPAND; a WRONG hash (standing in for a set tampered/reordered
+// between approval and apply) is REFUSED before any DDL with `ManifestMismatch`,
+// applying NOTHING. This closes the H2 TOCTOU on the go-live path so an approval
+// authorizes EXACTLY the reviewed bytes, not merely a version-id list.
+//
+// RED pre-fix: before H2, `expected_manifest` did not exist and a reordered/edited
+// set was applied under a matching version-id approval.
+#[compio::test]
+async fn deploy_migrate_approved_apply_binds_to_reviewed_manifest_h2() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+
+    // ---- (A) WRONG manifest ⇒ refused, nothing applied -------------------------
+    let app_bad = fresh_app_id();
+    cleanup_app(&conn, &app_bad).await;
+    let create = r#"{"ir_version":1,"name":"create_members","ops":[
+        {"op":"createTable","name":"members","columns":[
+            {"name":"handle","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    let dir1b = migrations_dir(&[("0001_create_members.ir.json", create)]);
+    apply_bundle_migrations(&admin_dsn(), &app_bad, &dir1b)
+        .await
+        .expect("createTable deploy must succeed");
+
+    let rename = r#"{"ir_version":1,"name":"rename_handle","ops":[
+        {"op":"renameColumn","table":"members","from":"handle","to":"username","type":"text"}
+    ]}"#;
+    let dir2b = migrations_dir(&[("0002_rename_handle.ir.json", rename)]);
+    let reviewed_b = plan_reviewed_versions(&admin_dsn(), &app_bad, &dir2b)
+        .await
+        .expect("reviewer plan");
+    // The operator approved a DIFFERENT set's hash (a stand-in for tamper between
+    // review and apply): a hash that the arrived bundle cannot recompute.
+    let wrong_hash = "deadbeef".repeat(8); // 64 hex chars, never the real manifest
+    let err = apply_bundle_migrations_approved(
+        &admin_dsn(),
+        &app_bad,
+        &dir2b,
+        &reviewed_b,
+        &test_approver(),
+        Some(wrong_hash.as_str()),
+    )
+    .await
+    .expect_err("a manifest mismatch must refuse the deploy before any DDL");
+    match err {
+        DeployMigrateError::ManifestMismatch { expected, actual } => {
+            assert_eq!(expected, wrong_hash, "the refusal echoes the approved hash");
+            assert_ne!(actual, wrong_hash, "the arrived bundle computed a different hash");
+        }
+        other => panic!("expected ManifestMismatch, got {other:?}"),
+    }
+    // FAIL CLOSED: the EXPAND never ran — no new column, old column intact.
+    assert!(
+        !column_exists(&conn, &app_bad, "members", "username").await,
+        "the refused approved deploy applied NOTHING (no EXPAND)"
+    );
+    assert!(
+        column_exists(&conn, &app_bad, "members", "handle").await,
+        "the old column is untouched"
+    );
+
+    // ---- (B) CORRECT manifest ⇒ completes the EXPAND ---------------------------
+    let app_ok = fresh_app_id();
+    cleanup_app(&conn, &app_ok).await;
+    let dir1g = migrations_dir(&[("0001_create_members.ir.json", create)]);
+    apply_bundle_migrations(&admin_dsn(), &app_ok, &dir1g)
+        .await
+        .expect("createTable deploy must succeed");
+    let dir2g = migrations_dir(&[("0002_rename_handle.ir.json", rename)]);
+    let reviewed_g = plan_reviewed_versions(&admin_dsn(), &app_ok, &dir2g)
+        .await
+        .expect("reviewer plan");
+    // The operator computes the REAL reviewed manifest (the trusted out-of-band stamp).
+    let good_hash = plan_reviewed_manifest(&admin_dsn(), &app_ok, &dir2g)
+        .await
+        .expect("reviewer manifest");
+    let outcome = apply_bundle_migrations_approved(
+        &admin_dsn(),
+        &app_ok,
+        &dir2g,
+        &reviewed_g,
+        &test_approver(),
+        Some(good_hash.as_str()),
+    )
+    .await
+    .expect("an approved deploy whose bundle matches the reviewed manifest completes");
+    assert!(
+        !outcome.pending_contract.is_empty(),
+        "the completed EXPAND surfaces a pending CONTRACT"
+    );
+    assert!(
+        column_exists(&conn, &app_ok, "members", "username").await,
+        "the EXPAND created the new column under the matching approval"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir1b);
+    let _ = std::fs::remove_dir_all(&dir2b);
+    let _ = std::fs::remove_dir_all(&dir1g);
+    let _ = std::fs::remove_dir_all(&dir2g);
+    cleanup_app(&conn, &app_bad).await;
+    cleanup_app(&conn, &app_ok).await;
+}
+
 // PR9a MED-2 (DML clause) — the §2.0.3(2) "any op (DDL or DML)" requirement: a
 // DML-ONLY second deploy (an `insert` into the pending table) is ALSO refused via
 // the REAL `MigrationIr::touched_tables()` derivation (a DML op contributes its
@@ -1573,7 +1782,7 @@ async fn deploy_migrate_two_concurrent_same_project_deploys_serialize_a1() {
     let a_done_task = a_done.clone();
     let deploy_a = compio::runtime::spawn(async move {
         let r =
-            apply_bundle_migrations_approved(&dsn_a, &app_a, &dir_a_clone, &reviewed_a, &test_approver()).await;
+            apply_bundle_migrations_approved(&dsn_a, &app_a, &dir_a_clone, &reviewed_a, &test_approver(), None).await;
         a_done_task.set(true);
         r
     });
@@ -1683,7 +1892,7 @@ async fn deploy_migrate_different_project_proceeds_while_p_backfills_a2() {
         .await
         .expect("reviewer plan for deploy P");
     let deploy_p = compio::runtime::spawn(async move {
-        apply_bundle_migrations_approved(&dsn_p, &app_p, &dirp2_clone, &reviewed_p, &test_approver()).await
+        apply_bundle_migrations_approved(&dsn_p, &app_p, &dirp2_clone, &reviewed_p, &test_approver(), None).await
     });
 
     // While P is (or is about to be) parked under its held lock, deploy Q — a
@@ -1875,7 +2084,7 @@ async fn deploy_migrate_routed_approved_rename_completes_expand_pg() {
         ]}
     ]}"#;
     let dir1 = migrations_dir(&[("0001_create_users.ir.json", create)]);
-    apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir1, &[], &DeployActor::Routine)
+    apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir1, &[], &DeployActor::Routine, None)
         .await
         .expect("routine create deploy (empty approved set) must apply");
     assert!(column_exists(&conn, &app_id, "users", "name").await, "name created");
@@ -1907,7 +2116,7 @@ async fn deploy_migrate_routed_approved_rename_completes_expand_pg() {
 
     // (A1) NON-APPROVED through the SAME seam (empty set) ⇒ FAIL-CLOSED: the EXPAND is
     // refused, no go-live, the column is still `name`, the seeded row is untouched.
-    let refused = apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir2, &[], &DeployActor::Routine)
+    let refused = apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir2, &[], &DeployActor::Routine, None)
         .await
         .expect_err("an UNAPPROVED rename through the routing seam must be refused");
     match refused {
@@ -1921,7 +2130,7 @@ async fn deploy_migrate_routed_approved_rename_completes_expand_pg() {
     );
 
     // (A2) APPROVED through the seam (the reviewed set) ⇒ the EXPAND COMPLETES.
-    let outcome = apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir2, &reviewed, &test_approver())
+    let outcome = apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir2, &reviewed, &test_approver(), None)
         .await
         .expect("the operator-approved rename through the routing seam must COMPLETE the expand");
     assert!(!outcome.applied.is_empty(), "the approved EXPAND applied migrations");
@@ -1990,7 +2199,7 @@ async fn deploy_migrate_routed_interlock_inherited_refuses_touch_of_pending_tabl
         ]}
     ]}"#;
     let dir1 = migrations_dir(&[("0001_create_members.ir.json", create)]);
-    apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir1, &[], &DeployActor::Routine)
+    apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir1, &[], &DeployActor::Routine, None)
         .await
         .expect("routine create deploy must apply");
 
@@ -2003,7 +2212,7 @@ async fn deploy_migrate_routed_interlock_inherited_refuses_touch_of_pending_tabl
     let reviewed = plan_reviewed_versions(&admin_dsn(), &app_id, &dir2)
         .await
         .expect("reviewer plan");
-    apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir2, &reviewed, &test_approver())
+    apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir2, &reviewed, &test_approver(), None)
         .await
         .expect("approved rename completes EXPAND + journals the obligation");
 
@@ -2013,7 +2222,7 @@ async fn deploy_migrate_routed_interlock_inherited_refuses_touch_of_pending_tabl
         {"op":"addColumn","table":"members","column":"nickname","type":"text","nullable":true}
     ]}"#;
     let dir3 = migrations_dir(&[("0003_add_nickname.ir.json", touch)]);
-    let err = apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir3, &[], &DeployActor::Routine)
+    let err = apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir3, &[], &DeployActor::Routine, None)
         .await
         .expect_err("a deploy touching the pending table must be refused on the routed path");
     match err {
@@ -2073,7 +2282,7 @@ async fn deploy_migrate_routed_co_bundled_unreviewed_destructive_is_refused_pg()
         ]}
     ]}"#;
     let dir1 = migrations_dir(&[("0001_create_tables.ir.json", create)]);
-    apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir1, &[], &DeployActor::Routine)
+    apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir1, &[], &DeployActor::Routine, None)
         .await
         .expect("routine create deploy must apply");
 
@@ -2097,7 +2306,7 @@ async fn deploy_migrate_routed_co_bundled_unreviewed_destructive_is_refused_pg()
         ("0002_rename_email.ir.json", rename),
         ("0003_drop_legacy.ir.json", drop),
     ]);
-    let err = apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir2, &reviewed_rename_only, &test_approver())
+    let err = apply_bundle_migrations_routed(&admin_dsn(), &app_id, &dir2, &reviewed_rename_only, &test_approver(), None)
         .await
         .expect_err(
             "an unreviewed co-bundled destructive dropColumn (different table) must be refused \

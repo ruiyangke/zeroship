@@ -120,8 +120,9 @@ pub use declarative::{
     IndexDescriptor, RenameHint, SqliteRebuild,
 };
 pub use engine::{
-    DeclarativeApplyError, DeclarativeDeployOutcome, DeclarativeDeployPlan, EngineError,
-    MigrationEngine, MigrationPlan, OnlineError, PlannedMigration, RollbackEngineError,
+    recognizes_contract_apply, DeclarativeApplyError, DeclarativeDeployOutcome,
+    DeclarativeDeployPlan, EngineError, MigrationEngine, MigrationPlan, OnlineError,
+    PlannedMigration, RollbackEngineError,
 };
 pub use expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent, OnlineSchemaChange,

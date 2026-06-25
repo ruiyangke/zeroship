@@ -124,17 +124,27 @@ itself:
 - The approver's principal is stamped into the immutable journal
   (`applied_by = deploy-approved:<approver>` / `deploy-ir-approved:<approver>`),
   so an operator-approved go-live is forensically distinct from a routine deploy.
+- **The approval can bind the exact reviewed bytes (H2).** Alongside the version
+  set, the operator may pass the reviewed bundle's **combined integrity manifest
+  hash** on the approval channel (`?expected_manifest=<hash>`). The reviewer
+  computes it out-of-band with `deploy_migrate::plan_reviewed_manifest` (the SAME
+  hash the apply recomputes — `.sql` flat set ++ every `.ir.json` file's lowered
+  migrations). When present, the approved apply **refuses the bundle before any
+  DDL** (`approved_manifest_mismatch`, 422) if the arrived set recomputes a
+  different hash — a reorder / edit / insert / remove between review and apply.
+  This closes the H2 TOCTOU: an approval that carries the manifest authorizes
+  **exactly the reviewed bytes**, not merely a version-id list. The expected hash
+  is a TRUSTED out-of-band stamp (operator-reviewed), never read from the `.zship`.
 
-> ⚠️ **NOT tamper-proof yet (H2 follow-up).** Approving a reviewed version set
-> does **not** currently bind the *bytes* that run. The H2 integrity manifest is
-> computed-and-logged only (`apply_verified_scoped(expected: None)`) — there is no
-> trusted out-of-band stamp persisted at review time to verify the apply-time set
-> against. A migration set reordered/edited/inserted-into between authoring/review
-> and apply is **not** refused. Until the H2 follow-up lands (persist
-> `compute_manifest(...)` at review time keyed by app + bundle, then pass
-> `Some(&expected)` on the go-live apply), treat an operator-approved go-live as
-> **integrity-traceable but not tamper-prevented**: review the migration set from
-> a trusted source of truth, not from the `.zship` alone.
+> ℹ️ **H2 binding is opt-in per approval (and recommended for destructive go-live).**
+> If the operator approves with *only* `?approved_versions=` and **no**
+> `?expected_manifest=`, the go-live is **integrity-traceable but not
+> tamper-prevented** (the manifest is still computed + logged for forensics): a
+> set reordered/edited between review and apply under a matching version-id
+> approval is not refused. Pass `?expected_manifest=` (from
+> `plan_reviewed_manifest`) to make the approval tamper-proof — review the
+> migration set from a trusted source of truth, not the `.zship` alone, and stamp
+> its hash on the approval.
 
 ## Tests
 

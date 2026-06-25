@@ -97,10 +97,11 @@ use std::path::Path;
 
 use uuid::Uuid;
 use zeroship_migrate::{
-    compute_manifest, connect, load_dir_migrations, provision_migrator, Approval, ApprovalScope,
-    ConnectError, DeclarativeApplyError, DriftError, EngineError, ExecutorConfig, IrAuthor,
-    LiveSchema, LoadAndLowerGuardedError, LoaderError, LockMode, MigrationBackend, MigrationEngine,
-    PostgresBackend, RoleError, SqlDialect,
+    compute_manifest, connect, load_dir_migrations, provision_migrator, recognizes_contract_apply,
+    Approval, ApprovalScope, ApplyError, ConnectError, DeclarativeApplyError, DriftError,
+    EngineError, ExecutorConfig, IrAuthor, LiveSchema, LoadAndLowerGuardedError, LoaderError,
+    LockMode, MigrationBackend, MigrationEngine, PlanStep, PostgresBackend, RenameStep, RoleError,
+    SqlDialect,
 };
 
 /// What a successful deploy-migrate produced (for logging / the deploy log).
@@ -171,6 +172,24 @@ pub enum DeployMigrateError {
     /// FK-inline live-table set) failed.
     #[error("deploy-migrate live snapshot: {0}")]
     Snapshot(#[from] DriftError),
+    /// **PR9c H2 — approval/manifest binding.** The operator approved a REVIEWED
+    /// migration set (supplying its integrity manifest hash out-of-band via the
+    /// deploy approval channel), but the bundle that arrived computes a DIFFERENT
+    /// combined manifest — the set was reordered / edited / inserted-into / removed-
+    /// from between approval and apply (a TOCTOU). NOTHING is applied; the deploy
+    /// handler maps this to a 422 (creator/build-fault). Closes the H2 gap on the
+    /// approved go-live path: an approval now authorizes EXACTLY the reviewed bytes,
+    /// not merely a reviewed version-id list.
+    #[error(
+        "deploy-migrate approved-set manifest mismatch (expected {expected}, got {actual}): \
+         the migration set was tampered between approval and apply — nothing applied"
+    )]
+    ManifestMismatch {
+        /// The hash the operator reviewed + approved (out-of-band, not from the `.zship`).
+        expected: String,
+        /// The hash actually computed over the arrived bundle.
+        actual: String,
+    },
     /// A rename's online expand/backfill failed while applying an IR plan via
     /// `apply_plan`. REACHABLE since PR2: an IR `renameColumn` lowers to a
     /// `PlanStep::OnlineRename(PgExpandContract)`, whose EXPAND backfill is
@@ -245,6 +264,9 @@ pub async fn apply_bundle_migrations(
         Approval::None,
         &ApprovalScope::All,
         &DeployActor::Routine,
+        // Routine deploy: no operator approval, no manifest binding (the routine
+        // path refuses every destructive/online op anyway).
+        None,
     )
     .await
 }
@@ -354,6 +376,11 @@ pub async fn apply_bundle_migrations_approved(
     migrations_dir: &Path,
     reviewed_versions: &[String],
     actor: &DeployActor,
+    // PR9c H2: the operator-reviewed COMBINED manifest hash (out-of-band) the
+    // approval binds to. `Some` ⇒ the arrived bundle must recompute it before any
+    // DDL (a reorder/edit/insert/remove is refused); `None` ⇒ version-scoped only
+    // (the documented integrity-traceable-not-tamper-prevented posture).
+    expected_manifest: Option<&str>,
 ) -> Result<MigrateOutcome, DeployMigrateError> {
     let scope = ApprovalScope::Versions(reviewed_versions.iter().cloned().collect());
     apply_bundle_migrations_with_approval(
@@ -363,6 +390,7 @@ pub async fn apply_bundle_migrations_approved(
         Approval::Approved,
         &scope,
         actor,
+        expected_manifest,
     )
     .await
 }
@@ -392,6 +420,12 @@ pub async fn apply_bundle_migrations_routed(
     // handler MUST have authorized this principal via `Action::AppsApproveMigration`
     // (operator-only) before passing a non-empty set — see `api.rs`.
     actor: &DeployActor,
+    // PR9c H2: the operator-reviewed COMBINED manifest hash, supplied out-of-band by
+    // the deploy approval channel alongside `approved_versions`. `Some` ⇒ the SCOPED
+    // approved apply binds the approval to exactly those reviewed bytes (a tampered /
+    // reordered set is refused before any DDL). IGNORED on the empty-set routine path
+    // (no approval to bind). `None` ⇒ version-scoped only (pre-H2 posture).
+    expected_manifest: Option<&str>,
 ) -> Result<MigrateOutcome, DeployMigrateError> {
     if approved_versions.is_empty() {
         apply_bundle_migrations(migrate_dsn, app_id, migrations_dir).await
@@ -399,7 +433,7 @@ pub async fn apply_bundle_migrations_routed(
         // NOTE: kept single-line on `migrate_dsn` so the PR9c guard test's structural
         // pin (`apply_bundle_migrations_approved(migrate_dsn`) matches — it proves the
         // non-empty branch routes to the SCOPED approved surface.
-        apply_bundle_migrations_approved(migrate_dsn, app_id, migrations_dir, approved_versions, actor).await
+        apply_bundle_migrations_approved(migrate_dsn, app_id, migrations_dir, approved_versions, actor, expected_manifest).await
     }
 }
 
@@ -410,6 +444,9 @@ async fn apply_bundle_migrations_with_approval(
     approval: Approval,
     scope: &ApprovalScope,
     actor: &DeployActor,
+    // PR9c H2: the operator-reviewed manifest hash to bind the approval to, or
+    // `None` on the routine path / a version-scoped-only approval.
+    expected_manifest: Option<&str>,
 ) -> Result<MigrateOutcome, DeployMigrateError> {
     // The per-app schema + project id are the trusted path id. The plugin-db
     // model maps app_id → schema "<app_id>"; the engine uses the same id to seed
@@ -466,7 +503,7 @@ async fn apply_bundle_migrations_with_approval(
     //       front, no EXPAND ever commits ahead of a guaranteed-later refusal. The per-step
     //       scope gate in the apply loop is RETAINED as defense-in-depth; this gate makes
     //       the refusal whole-bundle. A no-op on the routine (`ApprovalScope::All`) path.
-    prevalidate_bundle_scope(&conn, app_id, migrations_dir, scope).await?;
+    prevalidate_bundle_scope(&conn, app_id, migrations_dir, scope, expected_manifest).await?;
 
     // (c) Plan (Confined guard) + apply PENDING via the integrity-manifest seam
     //     (`apply_verified`). Approval::None ⇒ a destructive migration is refused
@@ -491,26 +528,26 @@ async fn apply_bundle_migrations_with_approval(
     //     incident forensics, and route through `apply_verified(expected: None)` so
     //     the gate is wired and threading a trusted stamp later is a one-line change.
     //
-    //     FOLLOW-UP (REQUIRED for the SEC defense to bite): the build/review side
-    //     must stamp `compute_manifest(...)` at authoring time and persist it
-    //     out-of-band (control DB, keyed by app + bundle), and this call must then
-    //     pass `Some(&expected)` so a tampered/reordered set is REFUSED before any
-    //     DDL. Until then this is traceability only, NOT tamper-prevention.
-    //
-    //     PR9c NOTE — now a LIVE gap, not a dormant one. With the approved go-live
-    //     path active (`?approved_versions=` COMPLETES destructive/online ops), an
-    //     operator's approval of a REVIEWED version set does not bind the BYTES that
-    //     run: a set reordered/edited between review and apply is not refused here.
-    //     The runbook (`docs/runbooks/db-migrations.md`, "Operator-approved creator
-    //     go-live") documents this — treat approved go-live as integrity-traceable
-    //     but NOT tamper-prevented until the H2 stamp lands.
+    //     PR9c H2 — the trusted-stamp binding NOW LANDS, at the PRE-APPLY gate (not
+    //     here). `prevalidate_bundle_scope` accepts the operator's OUT-OF-BAND reviewed
+    //     manifest hash (`?expected_manifest=`, computed by `plan_reviewed_manifest`)
+    //     and verifies the WHOLE arrived bundle (the COMBINED `.sql` + IR set) recomputes
+    //     it BEFORE any DDL — refusing `ManifestMismatch` on a reorder/edit/insert/remove.
+    //     That is a STRICTLY STRONGER binding than threading `Some(&expected)` into this
+    //     `.sql`-only `apply_verified_scoped` call would be (which covers only the `.sql`
+    //     leg and fires mid-apply): the pre-apply gate covers the IR leg too and aborts
+    //     before provisioning. So this call keeps `expected: None` (the per-`.sql` manifest
+    //     is computed + logged for forensics), and the trusted binding is enforced up front.
+    //     When the operator approves WITHOUT a manifest hash, the go-live stays
+    //     integrity-traceable (manifest logged) but not tamper-prevented — see the runbook.
     let manifest = compute_manifest(&migrations);
     tracing::info!(
         app_id = %app_id,
         migration_count = migrations.len(),
         manifest = %manifest.as_str(),
-        "deploy-migrate: computed migration-set integrity manifest (traceability only — \
-         no trusted build-side stamp to verify against yet; see H2 follow-up)"
+        "deploy-migrate: computed .sql migration-set integrity manifest (forensics; the H2 \
+         tamper-prevention binding is enforced up front in prevalidate_bundle_scope when the \
+         operator supplies the reviewed manifest hash)"
     );
     let engine = MigrationEngine::new();
     let guard_cfg = zeroship_migrate::GuardConfig::confined(schema.clone());
@@ -606,6 +643,33 @@ pub async fn plan_reviewed_versions(
     Ok(reviewed.into_iter().collect())
 }
 
+/// **PR9c H2 — the reviewer-facing integrity-manifest primitive.** Read-only plan a
+/// bundle and return the COMBINED integrity manifest hash (`.sql` flat set ++ every
+/// `.ir.json` file's lowered migrations) the operator reviews + approves. The hash is
+/// computed over byte-identical inputs to the approved apply's pre-DDL verification
+/// ([`prevalidate_bundle_scope`]'s H2 gate), so the operator can stamp it on the
+/// approval channel (`?expected_manifest=`) and the apply will accept EXACTLY the
+/// reviewed bytes — a reorder/edit/insert/remove between review and apply is refused
+/// before any DDL.
+///
+/// The live schema must already exist (same read-only introspection as
+/// [`plan_reviewed_versions`]). This is the trusted OUT-OF-BAND stamp source: the
+/// reviewer computes it from the set they actually reviewed, NOT from a hash shipped
+/// inside the `.zship`.
+///
+/// # Errors
+/// [`DeployMigrateError`] on connect / load / IR gate / introspection failure (the
+/// same fail-closed errors the real deploy surfaces, since it runs the same pipeline).
+pub async fn plan_reviewed_manifest(
+    migrate_dsn: &str,
+    app_id: &Uuid,
+    migrations_dir: &Path,
+) -> Result<String, DeployMigrateError> {
+    let conn = connect(migrate_dsn).await?;
+    let facts = collect_bundle_facts(&conn, app_id, migrations_dir).await?;
+    Ok(facts.bundle_manifest.as_str().to_string())
+}
+
 /// **PR9c HIGH (bundle atomicity) + PR9b reviewer plan — the SHARED scope-gate
 /// enumerator.** Lower the WHOLE bundle (`.sql` + every `.ir.json`, version-ordered)
 /// read-only — applying NOTHING — and collect the full set of per-version scope-keys
@@ -625,18 +689,73 @@ async fn collect_scope_gated_versions(
     app_id: &Uuid,
     migrations_dir: &Path,
 ) -> Result<std::collections::BTreeSet<String>, DeployMigrateError> {
+    Ok(collect_bundle_facts(conn, app_id, migrations_dir).await?.gated)
+}
+
+/// The read-only facts a single whole-bundle lower pass yields, shared by the
+/// reviewer plan ([`plan_reviewed_versions`]) AND the PR9c pre-apply gates. ONE
+/// lower pass produces ALL of them so the scope gate and the interlock gate key on
+/// byte-identical version-ids / touched tables / lowered DDL — never a second pass
+/// that could drift.
+struct BundleFacts {
+    /// Every per-version scope-key a destructive / online-rename-EXPAND step would
+    /// require approval for (the reviewer's "what needs approval" set).
+    gated: std::collections::BTreeSet<String>,
+    /// Every table the WHOLE bundle touches (DDL + DML + rename intents), unioned
+    /// across all files — the §2.0.3 interlock keys on this.
+    touched: std::collections::BTreeSet<String>,
+    /// The lowered `Ddl` steps' `version → up` SQL across the bundle. The
+    /// contract-apply recognizer re-author-compares against this to decide whether
+    /// THIS bundle legitimately discharges an outstanding obligation.
+    ddl_up_by_version: BTreeMap<String, String>,
+    /// The PG EXPAND trigger versions this bundle RE-PRESENTS (a self-expand
+    /// re-running idempotently is NOT a new touch of its own pending table).
+    self_expand_triggers: std::collections::BTreeSet<String>,
+    /// **PR9c H2** — the COMBINED integrity manifest over the whole reviewed bundle
+    /// (`.sql` flat set ++ every `.ir.json` file's lowered migrations, in
+    /// discovery/version order). The operator reviews + approves THIS hash
+    /// out-of-band; the approved apply verifies the arrived bundle recomputes it
+    /// before any DDL, so an approval binds the BYTES, not just a version-id list.
+    /// Computed read-only here so the verification happens BEFORE provisioning /
+    /// applying anything.
+    bundle_manifest: zeroship_migrate::ManifestHash,
+}
+
+/// **PR9c — the SINGLE whole-bundle read-only lower pass.** Lower the WHOLE bundle
+/// (`.sql` + every `.ir.json`, version-ordered) applying NOTHING, and collect the
+/// scope-gated versions (the reviewer plan) PLUS the §2.0.3 interlock facts (the
+/// bundle's full touched-table set, the lowered DDL `up` SQL by version, and the
+/// self-expand triggers). Running the SAME load + guarded-lower pipeline the real
+/// apply does (advancing the ownership registry + live-set per file) means the
+/// pre-apply gates can NEVER drift from the apply pass and let a half-state slip
+/// through.
+async fn collect_bundle_facts(
+    conn: &compio_postgres::Client,
+    app_id: &Uuid,
+    migrations_dir: &Path,
+) -> Result<BundleFacts, DeployMigrateError> {
     let schema = app_id.to_string();
     let app = schema.clone();
 
-    let mut reviewed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut gated: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut touched: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut ddl_up_by_version: BTreeMap<String, String> = BTreeMap::new();
+    let mut self_expand_triggers: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+    // The COMBINED reviewed migration set (`.sql` flat ++ every IR file's lowered
+    // migrations) the H2 bundle manifest folds over — accumulated in discovery order.
+    let mut combined: Vec<zeroship_migrate::Migration> = Vec::new();
 
-    // (1) `.sql` leg: a destructive `.sql` migration's version is its own version-id.
+    // (1) `.sql` leg: a destructive `.sql` migration's version is its own version-id;
+    //     a `.sql` migration is one Ddl step whose `up` is the file body.
     let migrations = load_dir_migrations(migrations_dir)?;
     for m in &migrations {
         if m.flags.destructive {
-            reviewed.insert(m.version.as_str().to_string());
+            gated.insert(m.version.as_str().to_string());
         }
+        ddl_up_by_version.insert(m.version.as_str().to_string(), m.up.clone());
     }
+    combined.extend(migrations.iter().cloned());
 
     // (2) `.ir.json` leg: lower each file (read-only) the SAME way the deploy does and
     //     collect every scope-gated step's scope-version. Discover IR files.
@@ -700,9 +819,34 @@ async fn collect_scope_gated_versions(
                 .map_err(|source| DeployMigrateError::Ir { file: file.clone(), source })?;
             for step in &lowered.plan.steps {
                 if let Some(v) = step.approval_scope_version() {
-                    reviewed.insert(v.to_string());
+                    gated.insert(v.to_string());
+                }
+                // Collect the lowered DDL `up` by version (the recognizer's re-author
+                // compare anchor) + the self-expand trigger versions.
+                match step {
+                    PlanStep::Ddl(m) => {
+                        ddl_up_by_version.insert(m.version.as_str().to_string(), m.up.clone());
+                    }
+                    PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => {
+                        self_expand_triggers.insert(ec.trigger_version.as_str().to_string());
+                    }
+                    _ => {}
                 }
             }
+            // The artifact's op-list touched-set — exactly what the apply loop threads
+            // into the engine interlock — unioned with the lowered steps' rename-intent
+            // tables (so a renameColumn on the pending table is caught).
+            for t in &lowered.touched_tables {
+                touched.insert(t.clone());
+            }
+            for t in zeroship_migrate::plan::tables_touched_by(&lowered.plan.steps) {
+                touched.insert(t);
+            }
+            // Fold this file's lowered migrations into the combined reviewed set (the
+            // H2 manifest anchor) — the SAME `lowered.migrations()` the apply loop folds
+            // into its IR set-level manifest, so the operator-reviewed hash and the
+            // arrived-bundle hash are computed over byte-identical inputs.
+            combined.extend(lowered.migrations());
             for t in lowered.created_tables {
                 registry.entry(t.clone()).or_insert_with(|| app.clone());
                 live_schema.tables.insert(t);
@@ -710,7 +854,13 @@ async fn collect_scope_gated_versions(
         }
     }
 
-    Ok(reviewed)
+    Ok(BundleFacts {
+        gated,
+        touched,
+        ddl_up_by_version,
+        self_expand_triggers,
+        bundle_manifest: compute_manifest(&combined),
+    })
 }
 
 /// **PR9c HIGH (bundle atomicity / no half-state) — the PRE-APPLY bundle-scope gate.**
@@ -738,16 +888,100 @@ async fn prevalidate_bundle_scope(
     app_id: &Uuid,
     migrations_dir: &Path,
     scope: &ApprovalScope,
+    // PR9c H2: the integrity manifest hash the operator REVIEWED + approved,
+    // supplied out-of-band via the deploy approval channel (NOT from the `.zship`).
+    // `Some` ⇒ verify the arrived bundle recomputes it BEFORE any DDL; `None` ⇒ the
+    // approval is version-scoped only (integrity-traceable, not tamper-prevented —
+    // the documented pre-H2 posture).
+    expected_manifest: Option<&str>,
 ) -> Result<(), DeployMigrateError> {
     let ApprovalScope::Versions(_) = scope else {
         return Ok(());
     };
-    let gated = collect_scope_gated_versions(conn, app_id, migrations_dir).await?;
-    if let Some(unscoped) = gated.iter().find(|v| !scope.admits(v)) {
+    // ONE whole-bundle read-only lower pass produces BOTH the scope-gate facts and
+    // the §2.0.3 interlock facts — so neither gate can drift from the apply pass.
+    let facts = collect_bundle_facts(conn, app_id, migrations_dir).await?;
+
+    // (A0) H2 — APPROVAL/MANIFEST BINDING. When the operator supplied the reviewed
+    //      manifest hash, refuse the WHOLE bundle BEFORE any DDL if the arrived set
+    //      recomputes a DIFFERENT combined manifest (a reorder / edit / insert /
+    //      remove between approval and apply). This binds the approval to the exact
+    //      reviewed BYTES, closing the H2 TOCTOU on the go-live path. The expected
+    //      hash is a TRUSTED out-of-band stamp (operator-reviewed, not bundle-derived),
+    //      so this is a real anti-tamper check, not a vacuous self-compare.
+    if let Some(expected) = expected_manifest {
+        let actual = facts.bundle_manifest.as_str();
+        if expected != actual {
+            return Err(DeployMigrateError::ManifestMismatch {
+                expected: expected.to_string(),
+                actual: actual.to_string(),
+            });
+        }
+    }
+
+    // (A) SCOPE gate — refuse the whole bundle if any scope-gated version is OUTSIDE
+    //     the operator's approved set (the original PR9c HIGH check).
+    if let Some(unscoped) = facts.gated.iter().find(|v| !scope.admits(v)) {
         return Err(DeployMigrateError::from(EngineError::ApprovalNotScoped {
             version: unscoped.clone(),
         }));
     }
+
+    // (B) INTERLOCK gate (PR9c MED — the residual half-state the critique found).
+    //     The scope gate alone closes only the SCOPE failure mode. A multi-file
+    //     APPROVED bundle could still leave a half-state when an in-scope EXPAND
+    //     in file N durably commits and a LATER file N+M is refused for a NON-scope
+    //     reason — the §2.0.3 cross-deploy interlock: an op touching a table with an
+    //     OUTSTANDING online-rename contract from a PRIOR deploy. Pre-fix that
+    //     read-back ran only per-file INSIDE the apply loop, so the earlier EXPAND
+    //     was already committed when the later file tripped it — a half-renamed table
+    //     (live dual-write trigger + duplicated column + a journaled pending contract)
+    //     even though the creator saw a 4xx.
+    //
+    //     We now run the SAME interlock read-back at the BUNDLE level BEFORE applying
+    //     any file: read the outstanding obligations and refuse wholesale if the
+    //     bundle's full touched-set hits a prior-deploy pending table that this bundle
+    //     does NOT legitimately discharge. "Legitimately discharge" reuses the engine's
+    //     SHARED `recognizes_contract_apply` re-author-compare (the SAME predicate the
+    //     apply loop uses) so a real contract-apply deploy is NOT false-refused, and a
+    //     self-expand re-run of the same rename is exempt by its trigger version. No
+    //     drift: a bundle this gate refuses is exactly one the apply loop would refuse,
+    //     only now NOTHING commits ahead of the refusal.
+    let exec_cfg = ExecutorConfig::new(app_id.to_string(), app_id.to_string());
+    let backend = PostgresBackend::new(conn);
+    let outstanding = backend
+        .outstanding_pending_contracts(&exec_cfg)
+        .await
+        .map_err(|e| DeployMigrateError::Apply(EngineError::Apply(ApplyError::Journal(e))))?;
+    if !outstanding.is_empty() {
+        // Borrowed view of the lowered DDL `up` SQL for the shared recognizer.
+        let ddl_up_view: BTreeMap<&str, &str> = facts
+            .ddl_up_by_version
+            .iter()
+            .map(|(v, up)| (v.as_str(), up.as_str()))
+            .collect();
+        for pc in &outstanding {
+            // A bundle that RE-PRESENTS this obligation's contract (re-author-compare)
+            // is its legitimate discharge — NOT a half-state-risking touch.
+            if recognizes_contract_apply(&exec_cfg.project_schema, pc, &ddl_up_view) {
+                continue;
+            }
+            // The SAME rename re-running idempotently (its EXPAND re-presents this
+            // obligation's trigger) is a net no-op, not a new touch of its own table.
+            if facts.self_expand_triggers.contains(&pc.pending_version) {
+                continue;
+            }
+            if facts.touched.contains(&pc.table) {
+                return Err(DeployMigrateError::from(EngineError::PendingContract(
+                    zeroship_migrate::pending::PendingContractRefusal::new(
+                        pc.table.clone(),
+                        pc.pending_version.clone(),
+                    ),
+                )));
+            }
+        }
+    }
+
     Ok(())
 }
 

@@ -615,6 +615,10 @@ pub async fn deploy(
             // keeps the routine fail-closed apply; a non-empty set routes to the SCOPED
             // approved apply so the reviewed online-rename/destructive ops complete.
             let approved_versions = approval_query.approved_version_ids();
+            // PR9c H2: the operator's reviewed manifest hash (out-of-band), bound to
+            // the approval on the scoped path so a tampered/reordered set is refused
+            // before any DDL.
+            let expected_manifest = approval_query.expected_manifest_hash();
 
             // PR9c CRITICAL — OPERATOR-ONLY APPROVAL GATE. `?approved_versions=` is the
             // go-live channel that COMPLETES an online-rename EXPAND / a scoped destructive
@@ -653,6 +657,7 @@ pub async fn deploy(
                 &uid,
                 &success.manifest_json,
                 &approved_versions,
+                expected_manifest.as_deref(),
                 &deploy_actor,
                 &state,
             )
@@ -702,6 +707,10 @@ async fn run_deploy_migrations(
     // apply (`ApprovalScope::Versions`): only the listed versions' destructive/online
     // ops run; everything else stays refused. NEVER a blanket bundle-wide approval.
     approved_versions: &[String],
+    // PR9c H2: the operator's reviewed COMBINED manifest hash (out-of-band), or `None`
+    // for a version-scoped-only / routine deploy. On the scoped approved path the
+    // arrived bundle must recompute it before any DDL, else the deploy is refused.
+    expected_manifest: Option<&str>,
     // PR9c CRITICAL: the forensic actor for the §2.2 journal — `Routine` (static marker)
     // when no approval set was passed, or `Approved { approver }` carrying the
     // operator/admin principal the handler authorized via `Action::AppsApproveMigration`.
@@ -778,6 +787,7 @@ async fn run_deploy_migrations(
                 &mig_dir,
                 approved_versions,
                 deploy_actor,
+                expected_manifest,
             )
             .await
         }
@@ -832,6 +842,12 @@ async fn run_deploy_migrations(
                 // could not lower. The creator can act on all of these → 422.
                 DME::Load(_) | DME::Apply(_) | DME::OnlineExpand(_) | DME::Ir { .. } => {
                     (StatusCode::UNPROCESSABLE_ENTITY, "migration_failed")
+                }
+                // PR9c H2: the arrived set does not match the operator-approved
+                // manifest — a tampered/reordered set between approval and apply. The
+                // creator/build pipeline can act on it (re-review / re-approve) → 422.
+                DME::ManifestMismatch { .. } => {
+                    (StatusCode::UNPROCESSABLE_ENTITY, "approved_manifest_mismatch")
                 }
                 // Infra-fault: connect / provision / live-introspection / IR file
                 // read — not the creator's migration content → 503.
@@ -1281,15 +1297,32 @@ pub struct CreatorScopeQuery {
 /// The approval does NOT travel inside the creator-authored `.zship` (an operator
 /// decision must not be forgeable by the bundle author — the anti-bypass point of the
 /// PR9b scoping); it rides the request as a separate, authz-gated channel (only an
-/// `AppsDeploy`-authorized caller can pass it at all). The version-ids an operator
-/// approves are the ones `deploy_migrate::plan_reviewed_versions` enumerates for the
-/// bundle. A richer persisted approval-record workflow (an endpoint that stores the
-/// reviewed set keyed by app+bundle-hash and re-validates the deploy's set against it)
-/// is a deferred follow-up; PR9c threads + enforces the scope.
+/// `AppsDeploy`-authorized caller can pass it at all, and a NON-empty set additionally
+/// requires the operator-only `Action::AppsApproveMigration`). The version-ids an
+/// operator approves are the ones `deploy_migrate::plan_reviewed_versions` enumerates
+/// for the bundle.
+///
+/// **PR9c H2 — the approval can bind the exact reviewed BYTES.** Alongside the version
+/// set, the operator may pass `?expected_manifest=<hash>` — the reviewed bundle's
+/// combined integrity manifest (`deploy_migrate::plan_reviewed_manifest`). When present,
+/// the approved apply refuses the deploy before any DDL if the arrived set recomputes a
+/// different hash (a reorder/edit/insert/remove between review and apply). This is the
+/// trusted-out-of-band stamp the H2 follow-up called for, threaded inline on the
+/// approval channel rather than via a separate persisted approval-record workflow.
 #[derive(Deserialize, Default)]
 pub struct DeployApprovalQuery {
     #[serde(default)]
     pub approved_versions: Option<String>,
+    /// **PR9c H2** — the integrity manifest hash the operator REVIEWED + approved,
+    /// supplied out-of-band on the approval channel. When present (alongside a
+    /// non-empty `approved_versions`), the approved apply REFUSES the bundle before
+    /// any DDL if the arrived migration set recomputes a different combined manifest
+    /// (a reorder/edit/insert/remove between approval and apply — a TOCTOU). This
+    /// binds the approval to the exact reviewed BYTES, not just a version-id list.
+    /// Absent ⇒ version-scoped only (integrity-traceable, not tamper-prevented — the
+    /// documented pre-H2 posture).
+    #[serde(default)]
+    pub expected_manifest: Option<String>,
 }
 
 impl DeployApprovalQuery {
@@ -1308,6 +1341,17 @@ impl DeployApprovalQuery {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
+    }
+
+    /// The trimmed reviewed-manifest hash, or `None` when absent/blank. A blank
+    /// value is treated as absent (version-scoped only) rather than as a hash that
+    /// can never match — an empty string is not a meaningful approval stamp.
+    fn expected_manifest_hash(&self) -> Option<String> {
+        self.expected_manifest
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
     }
 }
 
