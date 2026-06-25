@@ -50,7 +50,7 @@
 use std::collections::BTreeMap;
 
 use crate::declarative::{
-    build_table_snapshot, ir_fk_constraint_snapshot, quote_ident_if_needed, CollectionDescriptor,
+    build_table_snapshot, constraintdef_cols, ir_fk_constraint_snapshot, CollectionDescriptor,
     DeclarativeError,
 };
 use crate::drift::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot};
@@ -197,7 +197,14 @@ pub fn fold_ops(
                 }
                 let desc = create_table_descriptor(name, columns);
                 let mut snap = build_table_snapshot(project_schema, &desc, dialect)?;
-                fold_create_table_specs(name, project_schema, &mut snap, constraints, indexes)?;
+                fold_create_table_specs(
+                    name,
+                    project_schema,
+                    &mut snap,
+                    constraints,
+                    indexes,
+                    dialect,
+                )?;
                 tables.insert(name.clone(), snap);
             }
             Op::DropTable { table, .. } => {
@@ -262,15 +269,30 @@ pub fn fold_ops(
                 snap.columns.sort_by(|a, b| a.name.cmp(&b.name));
             }
             Op::AlterColumnType { table, column, ty, .. } => {
-                // Re-derive ONLY `data_type` from the new type via the shared builder
-                // (so `vector(N)` / `geography(...)` / encrypted-BYTEA spellings match
-                // introspection's `canonical_extension_type`). Keep the live
-                // `nullable`. The `using` cast is fold-irrelevant (it casts DATA, not
-                // shape). We build a throwaway one-field snapshot to spell the type,
-                // then transplant only `data_type` onto the existing column.
-                let new_type =
-                    add_column_snapshot(table, column, ty, None, None, project_schema, dialect)?
-                        .data_type;
+                // Re-derive the new column shape from the new type via the shared
+                // builder (so `vector(N)` / `geography(...)` / encrypted-BYTEA
+                // spellings match introspection's `canonical_extension_type`). Keep
+                // the live `nullable`. The `using` cast is fold-irrelevant (it casts
+                // DATA, not shape).
+                //
+                // FAIL-CLOSED on an encryption-contract change. A plain↔encrypted
+                // (or masked) type change rewrites the column's emission contract:
+                // its `encryption_sentinel` / `comment_sentinel` — the EXACT fields
+                // P2 gen-types reads to drive the AEAD encrypt/decrypt pass. The
+                // apply path (`render_alter_column_type`) emits ONLY `ALTER COLUMN
+                // … TYPE bytea`, never the `COMMENT ON COLUMN … zsenc` an encrypted
+                // column needs, so the LIVE DB also lacks the metadata after such an
+                // alter. Folding only `data_type` here would carry the OLD (now
+                // wrong / stale) sentinel — a silently-wrong snapshot, which P1
+                // deliverable 2 forbids. Until the apply path can faithfully
+                // re-stamp the sentinel, refuse the change (parity with the lower's
+                // `using` / SQLite alter refusals). Detection is symmetric:
+                //   - the TARGET type carries a sentinel (plain→encrypted/masked), OR
+                //   - the SOURCE column carries one (encrypted/masked→anything).
+                let new_col =
+                    add_column_snapshot(table, column, ty, None, None, project_schema, dialect)?;
+                let target_has_sentinel = new_col.encryption_sentinel.is_some()
+                    || new_col.comment_sentinel.is_some();
                 let snap = table_mut(&mut tables, table)?;
                 let col = snap
                     .columns
@@ -280,7 +302,16 @@ pub fn fold_ops(
                         table: table.clone(),
                         column: column.clone(),
                     })?;
-                col.data_type = new_type;
+                let source_has_sentinel =
+                    col.encryption_sentinel.is_some() || col.comment_sentinel.is_some();
+                if target_has_sentinel || source_has_sentinel {
+                    return Err(FoldError::Unsupported(
+                        "alterColumnType to/from an encrypted (or masked) column \
+                         (the apply path cannot re-stamp the zsenc/zsmask sentinel; \
+                         fail-closed rather than fold a stale encryption contract)",
+                    ));
+                }
+                col.data_type = new_col.data_type;
             }
             Op::AlterColumnNullability { table, column, nullable, .. } => {
                 let snap = table_mut(&mut tables, table)?;
@@ -435,20 +466,29 @@ fn add_column_snapshot(
 ///   synthetic `id` PK — a second PK is never satisfiable);
 /// - a CHECK is refused with [`FoldError::ExprDeferred`] (closed-AST predicate);
 /// - a multi-column / non-`id`-referencing FK is refused;
-/// - a partial-index `where` is refused (closed-AST predicate).
+/// - a partial-index `where` is refused (closed-AST predicate);
+/// - on **SQLite**, a table-level FOREIGN KEY, a table-level UNIQUE, and a
+///   non-btree index `using` are refused — BYTE-FOR-BYTE parity with the lower
+///   ([`crate::ir_author::IrAuthor::fold_create_table_specs`]).
 ///
-/// Note: the lower's SQLite-specific refusals (table-level UNIQUE/FK not threaded
-/// into the SQLite emitter) are an APPLY-render limitation, NOT a logical-shape
-/// limitation — the folded snapshot is dialect-shaped by `build_table_snapshot`
-/// (which already handles the FTS divergence). The fold's job is the LOGICAL shape;
-/// the round-trip oracle exercises the supported corpus per dialect.
+/// The SQLite refusals are NOT cosmetic: in the migration-first model the fold is
+/// the SOLE source of truth for gen-types. The lower (= the apply path) REFUSES
+/// these shapes on SQLite (the SQLite CREATE renders from the descriptor; a
+/// table-level FK/UNIQUE / non-btree `using` is not threaded into the emitter), so
+/// such a `createTable` can NEVER be deployed on SQLite. A fold that ACCEPTED it
+/// would emit types for a schema that never applies — fail-OPEN relative to apply,
+/// breaking the fold's own contract ("a set the engine already applied is
+/// internally consistent, so the fold agrees with apply"). So the fold mirrors the
+/// lower's refusals exactly.
 fn fold_create_table_specs(
     table: &str,
     project_schema: &str,
     snap: &mut TableSnapshot,
     constraints: &[IrConstraint],
     indexes: &[IrIndex],
+    dialect: SqlDialect,
 ) -> Result<(), FoldError> {
+    let is_sqlite = matches!(dialect, SqlDialect::Sqlite);
     for c in constraints {
         match &c.kind {
             IrConstraintKind::Pk { .. } => {
@@ -466,6 +506,13 @@ fn fold_create_table_specs(
                 on_delete,
                 on_update,
             } => {
+                if is_sqlite {
+                    return Err(FoldError::Unsupported(
+                        "createTable table-level FOREIGN KEY on SQLite (the SQLite \
+                         CREATE renders from the descriptor; a table-level FK is not \
+                         threaded into the emitter)",
+                    ));
+                }
                 let local = columns
                     .first()
                     .ok_or(FoldError::Unsupported("createTable FOREIGN KEY with no local column"))?;
@@ -493,6 +540,13 @@ fn fold_create_table_specs(
                 push_folded_constraint(table, snap, FoldedConstraint { constraint: fk, index: None })?;
             }
             IrConstraintKind::Unique { columns } => {
+                if is_sqlite {
+                    return Err(FoldError::Unsupported(
+                        "createTable table-level UNIQUE on SQLite (the SQLite CREATE \
+                         renders from the descriptor; a table-level UNIQUE is not \
+                         threaded into the emitter)",
+                    ));
+                }
                 let name = c.name.as_deref().map_or_else(
                     || derived_constraint_name(table, columns, "key"),
                     str::to_string,
@@ -506,6 +560,11 @@ fn fold_create_table_specs(
             return Err(FoldError::ExprDeferred("createTable index where"));
         }
         let access = ix.using.map_or("btree", index_method_access);
+        if is_sqlite && access != "btree" {
+            return Err(FoldError::Unsupported(
+                "createTable non-btree index `using` on SQLite (later wave)",
+            ));
+        }
         let name = ix.name.clone().unwrap_or_else(|| {
             crate::author::cap_ident_name(&format!("{table}_{}_idx", ix.columns.join("_")))
         });
@@ -560,15 +619,6 @@ fn push_folded_constraint(
     Ok(())
 }
 
-/// Spell a `pg_get_constraintdef`-matching column list (conditional per-column
-/// quoting — bare for safe lowercase identifiers, double-quoted for reserved/mixed-
-/// case), so a folded UNIQUE/PK `definition` compares byte-for-byte with live (an
-/// unconditional quote would phantom-diff `UNIQUE ("handle")` against the catalog's
-/// `UNIQUE (handle)`).
-fn constraintdef_cols(cols: &[String]) -> String {
-    cols.iter().map(|c| quote_ident_if_needed(c)).collect::<Vec<_>>().join(", ")
-}
-
 /// A UNIQUE constraint + its implicit unique index (PG names the index after the
 /// constraint). The index covers the same columns, btree, unique.
 fn unique_constraint(name: &str, columns: &[String]) -> FoldedConstraint {
@@ -598,9 +648,9 @@ fn pk_constraint(name: &str, columns: &[String]) -> FoldedConstraint {
     }
 }
 
-/// The folded constraint (+ implicit index) a stand-alone `addConstraint` op
+/// The folded constraint (plus implicit index) a stand-alone `addConstraint` op
 /// produces. FK via the shared `ir_fk_*` (no index); UNIQUE/PK via the derived name
-/// + a `pg_get_constraintdef`-matching body + the implicit unique index; CHECK
+/// with a `pg_get_constraintdef`-matching body and the implicit unique index; CHECK
 /// deferred.
 fn add_constraint_snapshot(
     table: &str,
@@ -1320,5 +1370,347 @@ mod tests {
         };
         let err = fold(&[op]).unwrap_err();
         assert!(matches!(err, FoldError::Unsupported(m) if m.contains("PRIMARY KEY")));
+    }
+
+    // -----------------------------------------------------------------------
+    // Finding #1 (MED) — alterColumnType to/from an encrypted column must NOT
+    // silently lose / carry a stale encryption sentinel. The fold fails closed
+    // (the apply path cannot re-stamp the zsenc sentinel today).
+    // -----------------------------------------------------------------------
+
+    fn encrypted_text() -> ColType {
+        ColType::Encrypted { of: Box::new(ColType::Text) }
+    }
+
+    fn alter_type(table: &str, column: &str, ty: ColType) -> Op {
+        Op::AlterColumnType {
+            table: table.to_string(),
+            column: column.to_string(),
+            ty,
+            using: None,
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    /// A FRESH `t.encrypted(text)` column folds WITH an encryption sentinel (the
+    /// shared builder stamps the `zsenc:` contract P2 gen-types reads). This is the
+    /// baseline the alter path must preserve — assert the sentinel is present so the
+    /// "alter loses it" regression below is meaningful.
+    #[test]
+    fn fresh_encrypted_column_carries_sentinel() {
+        let snap = fold(&[create("v", vec![col("secret", encrypted_text(), true)])]).unwrap();
+        let c = snap.tables["v"].columns.iter().find(|c| c.name == "secret").unwrap();
+        assert!(
+            c.encryption_sentinel.is_some() || c.comment_sentinel.is_some(),
+            "a fresh encrypted column carries the zsenc sentinel (the P2 contract)"
+        );
+    }
+
+    /// REGRESSION (Finding #1): plain→encrypted via `alterColumnType` is FAIL-CLOSED.
+    /// Pre-fix the fold transplanted ONLY `data_type` (bytea), keeping the OLD
+    /// `encryption_sentinel=None` — so the folded encrypted column carried NO
+    /// sentinel (a silently-wrong snapshot, since the oracle excludes the sentinel
+    /// from Eq). The apply path likewise never emits the `COMMENT … zsenc`, so live
+    /// also lacks it. Until apply can re-stamp it, the fold refuses the change.
+    #[test]
+    fn alter_column_type_to_encrypted_is_unsupported() {
+        let err = fold(&[
+            create("v", vec![col("secret", ColType::Text, true)]),
+            alter_type("v", "secret", encrypted_text()),
+        ])
+        .unwrap_err();
+        assert!(
+            matches!(err, FoldError::Unsupported(m) if m.contains("encrypted")),
+            "plain→encrypted alterColumnType must fail closed, got {err:?}"
+        );
+    }
+
+    /// REGRESSION (Finding #1, symmetric): encrypted→plain via `alterColumnType` is
+    /// also FAIL-CLOSED. The SOURCE column carries the sentinel; transplanting only
+    /// `data_type` would leave the now-stale `zsenc` sentinel on a plaintext column.
+    #[test]
+    fn alter_column_type_from_encrypted_is_unsupported() {
+        let err = fold(&[
+            create("v", vec![col("secret", encrypted_text(), true)]),
+            alter_type("v", "secret", ColType::Text),
+        ])
+        .unwrap_err();
+        assert!(
+            matches!(err, FoldError::Unsupported(m) if m.contains("encrypted")),
+            "encrypted→plain alterColumnType must fail closed, got {err:?}"
+        );
+    }
+
+    /// A PLAIN→PLAIN `alterColumnType` (neither side encrypted) still works — the
+    /// fail-closed guard is scoped to the encryption-contract change only.
+    #[test]
+    fn alter_column_type_plain_to_plain_still_folds() {
+        let snap = fold(&[
+            create("v", vec![col("n", ColType::Int, false)]),
+            alter_type("v", "n", ColType::BigInt),
+        ])
+        .unwrap();
+        let n = snap.tables["v"].columns.iter().find(|c| c.name == "n").unwrap();
+        let want = fold(&[create("v", vec![col("n", ColType::BigInt, false)])]).unwrap();
+        let want_n = want.tables["v"].columns.iter().find(|c| c.name == "n").unwrap();
+        assert_eq!(n.data_type, want_n.data_type, "plain→plain re-derives data_type");
+    }
+
+    // -----------------------------------------------------------------------
+    // Finding #2 (MED) — the fold must mirror the lower's SQLite refusals so it
+    // never emits types for a schema that can never deploy on SQLite (fail-OPEN).
+    // -----------------------------------------------------------------------
+
+    fn fold_sqlite(ops: &[Op]) -> Result<SchemaSnapshot, FoldError> {
+        fold_ops(ops, SqlDialect::Sqlite, SCHEMA)
+    }
+
+    fn create_with(name: &str, columns: Vec<IrColumn>, constraints: Vec<IrConstraint>, indexes: Vec<IrIndex>) -> Op {
+        Op::CreateTable {
+            name: name.to_string(),
+            columns,
+            constraints,
+            indexes,
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    /// REGRESSION (Finding #2): a createTable TABLE-LEVEL FOREIGN KEY is refused on
+    /// SQLite — byte-for-byte parity with the lower (`ir_author.rs`), which never
+    /// threads a table-level FK into the SQLite emitter. Pre-fix the fold ACCEPTED
+    /// it (fail-open: a schema the engine can never apply on SQLite).
+    #[test]
+    fn create_table_level_fk_unsupported_on_sqlite() {
+        let parents = create("teams", vec![col("label", ColType::Text, false)]);
+        let kids = create_with(
+            "memberships",
+            vec![col("team_id", ColType::Text, false)],
+            vec![IrConstraint {
+                name: Some("m_team_fk".to_string()),
+                kind: IrConstraintKind::Fk {
+                    columns: vec!["team_id".to_string()],
+                    references_table: "teams".to_string(),
+                    references_columns: vec!["id".to_string()],
+                    on_delete: None,
+                    on_update: None,
+                },
+            }],
+            Vec::new(),
+        );
+        let err = fold_sqlite(&[parents, kids]).unwrap_err();
+        assert!(
+            matches!(err, FoldError::Unsupported(m) if m.contains("FOREIGN KEY") && m.contains("SQLite")),
+            "table-level FK on SQLite must fail closed, got {err:?}"
+        );
+        // The SAME shape FOLDS on Postgres (the parity is dialect-scoped).
+        let parents = create("teams", vec![col("label", ColType::Text, false)]);
+        let kids = create_with(
+            "memberships",
+            vec![col("team_id", ColType::Text, false)],
+            vec![IrConstraint {
+                name: Some("m_team_fk".to_string()),
+                kind: IrConstraintKind::Fk {
+                    columns: vec!["team_id".to_string()],
+                    references_table: "teams".to_string(),
+                    references_columns: vec!["id".to_string()],
+                    on_delete: None,
+                    on_update: None,
+                },
+            }],
+            Vec::new(),
+        );
+        assert!(fold(&[parents, kids]).is_ok(), "table-level FK folds on Postgres");
+    }
+
+    /// REGRESSION (Finding #2): a createTable TABLE-LEVEL UNIQUE is refused on SQLite.
+    #[test]
+    fn create_table_level_unique_unsupported_on_sqlite() {
+        let op = create_with(
+            "t",
+            vec![col("handle", ColType::Text, false)],
+            vec![unique_constraint(Some("t_handle_uq"), &["handle"])],
+            Vec::new(),
+        );
+        let err = fold_sqlite(&[op]).unwrap_err();
+        assert!(
+            matches!(err, FoldError::Unsupported(m) if m.contains("UNIQUE") && m.contains("SQLite")),
+            "table-level UNIQUE on SQLite must fail closed, got {err:?}"
+        );
+    }
+
+    /// REGRESSION (Finding #2): a createTable non-btree index `using` is refused on
+    /// SQLite.
+    #[test]
+    fn create_table_non_btree_index_using_unsupported_on_sqlite() {
+        let op = create_with(
+            "t",
+            vec![col("doc", ColType::Json, false)],
+            Vec::new(),
+            vec![IrIndex {
+                name: Some("t_doc_idx".to_string()),
+                columns: vec!["doc".to_string()],
+                unique: None,
+                using: Some(crate::ir::IndexMethod::Gin),
+                r#where: None,
+            }],
+        );
+        let err = fold_sqlite(&[op]).unwrap_err();
+        assert!(
+            matches!(err, FoldError::Unsupported(m) if m.contains("non-btree") && m.contains("SQLite")),
+            "non-btree index `using` on SQLite must fail closed, got {err:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Finding #3 (LOW) — the round-trip oracle's ColumnSnapshot Eq excludes
+    // default / encryption_sentinel / comment_sentinel, so it structurally CANNOT
+    // validate the fold's emission metadata. These NO-DB goldens assert the fold's
+    // emitted default / sentinels match build_table_snapshot DIRECTLY (not via the
+    // Eq-blind oracle) — the fields P2 gen-types depends on.
+    // -----------------------------------------------------------------------
+
+    /// The `ColumnSnapshot` build_table_snapshot produces for ONE field — the ground
+    /// truth the fold's emission metadata must match.
+    fn builder_column(table: &str, column: &str, ty: ColType, nullable: bool, default: Option<IrDefault>) -> ColumnSnapshot {
+        let field = ir_column_to_field(&IrColumn {
+            name: column.to_string(),
+            ty,
+            nullable: Some(nullable),
+            default,
+            unique: None,
+        });
+        let desc = CollectionDescriptor {
+            name: table.to_string(),
+            owner_app: FOLD_OWNER_APP.to_string(),
+            fields: vec![field],
+            indexes: Vec::new(),
+        };
+        build_table_snapshot(SCHEMA, &desc, SqlDialect::Postgres)
+            .unwrap()
+            .columns
+            .into_iter()
+            .find(|c| c.name == column)
+            .unwrap()
+    }
+
+    /// GOLDEN (Finding #3): the fold's emitted default + sentinels for a createTable
+    /// encrypted column + a defaulted column match build_table_snapshot's directly.
+    /// The headline round-trip oracle CANNOT see these fields (excluded from Eq).
+    #[test]
+    fn fold_emission_metadata_matches_builder_golden() {
+        let snap = fold(&[create(
+            "g",
+            vec![
+                col("secret", encrypted_text(), true),
+                // A `string` column with a literal default — the shared builder DOES
+                // render a quoted `DEFAULT 'beta'` clause for the `string` token, so
+                // the non-triviality assertion below is real.
+                IrColumn {
+                    name: "tier".to_string(),
+                    ty: ColType::Text,
+                    nullable: Some(false),
+                    default: Some(IrDefault::Literal { value: IrScalar::Str("beta".to_string()) }),
+                    unique: None,
+                },
+                // A `json` column always carries the `'{}'::jsonb` default (even with
+                // no explicit default) — a second independent emission-only golden.
+                col("meta", ColType::Json, true),
+            ],
+        )])
+        .unwrap();
+        let t = &snap.tables["g"];
+
+        let secret = t.columns.iter().find(|c| c.name == "secret").unwrap();
+        let want_secret = builder_column("g", "secret", encrypted_text(), true, None);
+        assert_eq!(
+            secret.encryption_sentinel, want_secret.encryption_sentinel,
+            "fold's encryption_sentinel matches the shared builder"
+        );
+        assert_eq!(
+            secret.comment_sentinel, want_secret.comment_sentinel,
+            "fold's comment_sentinel matches the shared builder"
+        );
+        // A fresh encrypted column DOES carry the sentinel (the contract is non-empty).
+        assert!(
+            want_secret.encryption_sentinel.is_some() || want_secret.comment_sentinel.is_some(),
+            "the encrypted golden is non-trivial (a sentinel exists to compare)"
+        );
+
+        let tier = t.columns.iter().find(|c| c.name == "tier").unwrap();
+        let want_tier = builder_column(
+            "g",
+            "tier",
+            ColType::Text,
+            false,
+            Some(IrDefault::Literal { value: IrScalar::Str("beta".to_string()) }),
+        );
+        assert_eq!(tier.default, want_tier.default, "fold's emitted string default matches the shared builder");
+        assert!(want_tier.default.is_some(), "the string default golden is non-trivial");
+
+        let meta = t.columns.iter().find(|c| c.name == "meta").unwrap();
+        let want_meta = builder_column("g", "meta", ColType::Json, true, None);
+        assert_eq!(meta.default, want_meta.default, "fold's emitted json default matches the shared builder");
+        assert!(want_meta.default.is_some(), "the json default golden is non-trivial ('{{}}'::jsonb)");
+    }
+
+    /// GOLDEN (Finding #3, addColumn): the fold's emitted default + sentinels for an
+    /// addColumn path match build_table_snapshot's directly too.
+    #[test]
+    fn fold_add_column_emission_metadata_matches_builder_golden() {
+        let snap = fold(&[
+            create("g", vec![col("x", ColType::Text, true)]),
+            Op::AddColumn {
+                table: "g".to_string(),
+                column: "secret".to_string(),
+                ty: encrypted_text(),
+                nullable: Some(true),
+                default: None,
+                schema: None,
+                existence_guard: None,
+            },
+        ])
+        .unwrap();
+        let secret = snap.tables["g"].columns.iter().find(|c| c.name == "secret").unwrap();
+        let want = builder_column("g", "secret", encrypted_text(), true, None);
+        assert_eq!(secret.encryption_sentinel, want.encryption_sentinel, "addColumn encryption_sentinel parity");
+        assert_eq!(secret.comment_sentinel, want.comment_sentinel, "addColumn comment_sentinel parity");
+        assert!(
+            want.encryption_sentinel.is_some() || want.comment_sentinel.is_some(),
+            "the addColumn encrypted golden is non-trivial"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Finding #4 (LOW) — the fold and the lower must agree on the UNIQUE
+    // constraint `definition` body spelling (shared `constraintdef_cols`), so the
+    // two copies of the createTable-spec folding cannot drift.
+    // -----------------------------------------------------------------------
+
+    /// REGRESSION (Finding #4): the fold and the lower spell the UNIQUE `definition`
+    /// IDENTICALLY (both via the shared `constraintdef_cols`). Pre-fix the lower used
+    /// `quote_cols` → `UNIQUE ("handle")` while the fold used the conditional-quote
+    /// helper → `UNIQUE (handle)`; the catalog's `pg_get_constraintdef` spells it
+    /// bare, so the fold's form is correct and the lower now matches it.
+    #[test]
+    fn fold_and_lower_agree_on_unique_definition_spelling() {
+        // The fold's spelling for a single safe lowercase column.
+        let snap = fold(&[create_with(
+            "t",
+            vec![col("handle", ColType::Text, false)],
+            vec![unique_constraint(Some("t_handle_uq"), &["handle"])],
+            Vec::new(),
+        )])
+        .unwrap();
+        let folded = snap.tables["t"].constraints.iter().find(|c| c.name == "t_handle_uq").unwrap();
+        // The lower's snapshot half spells it via the SAME shared helper now.
+        let cols = vec!["handle".to_string()];
+        let lower_body = format!("UNIQUE ({})", crate::declarative::constraintdef_cols(&cols));
+        assert_eq!(
+            folded.definition, lower_body,
+            "fold and lower must spell the UNIQUE definition identically"
+        );
+        assert_eq!(folded.definition, "UNIQUE (handle)", "bare spelling matches pg_get_constraintdef");
     }
 }
