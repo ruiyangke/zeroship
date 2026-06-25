@@ -317,7 +317,8 @@ export interface CreateTableArgs {
 export interface ColumnRef {
   /** Add the column. Honors ALL modifiers on `type` — including `.unique()` (C2,
    *  emits a follow-on unique constraint) and `.primaryKey()` (emits a follow-on
-   *  pk). */
+   *  pk). When BOTH are set, the redundant UNIQUE is suppressed (a PRIMARY KEY
+   *  already implies uniqueness) — only the pk add is recorded. */
   add(args: { type: ColumnDef; ifNotExists?: boolean; schema?: string }): TableHandle;
   drop(args?: { ifExists?: boolean; schema?: string }): TableHandle;
   /** Named ⇒ no from/to swap. `type` is the column's type after rename. */

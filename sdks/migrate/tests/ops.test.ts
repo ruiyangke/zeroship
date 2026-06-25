@@ -83,6 +83,24 @@ test("C2 — .column().add({ type: t.uuid().primaryKey() }) emits the column + a
   assert.deepEqual(ops[1].constraint, { kind: { kind: "pk", columns: ["id"] } });
 });
 
+test("C2 — .column().add({ type: t.text().unique().primaryKey() }) suppresses the redundant unique", () => {
+  // A PRIMARY KEY already implies uniqueness, so the follow-on UNIQUE is redundant
+  // DDL — only the pk add is recorded (no extra addConstraint(unique)).
+  const ops = record(() => table("u").column("id").add({ type: t.text().unique().primaryKey() }));
+  assert.equal(ops.length, 2, "an addColumn + ONLY the pk add (no redundant unique)");
+  assert.equal(ops[0].op, "addColumn");
+  assert.equal(ops[1].op, "addConstraint");
+  assert.deepEqual(
+    ops[1].constraint,
+    { kind: { kind: "pk", columns: ["id"] } },
+    "the single follow-on constraint is the pk, not a redundant unique",
+  );
+  // Order-independence: .primaryKey().unique() suppresses the unique too.
+  const ops2 = record(() => table("u").column("id").add({ type: t.text().primaryKey().unique() }));
+  assert.equal(ops2.length, 2, "order-independent: still no redundant unique");
+  assert.deepEqual(ops2[1].constraint, { kind: { kind: "pk", columns: ["id"] } });
+});
+
 test(".foreignKey().add() field order is irrelevant (named fields, not positionals)", () => {
   const a = record(() =>
     table("orders").foreignKey("fk").add({

@@ -563,7 +563,12 @@ function recordAddColumn(
   // image, which rides the column's `unique:true` field — but an ADD COLUMN has no
   // inline UNIQUE, so it lowers to a separate ADD CONSTRAINT). Likewise a
   // `.primaryKey()` on an added column hoists a pk add.
-  if (type._unique) {
+  //
+  // A PRIMARY KEY already IMPLIES uniqueness, so when BOTH are set the follow-on
+  // UNIQUE is redundant DDL (an extra index/constraint) — suppress it when
+  // `_primaryKey` is set, mirroring how the differ never emits a separate UNIQUE
+  // for the PK column. Only the pk add is recorded.
+  if (type._unique && !type._primaryKey) {
     push(
       compact({
         op: "addConstraint",

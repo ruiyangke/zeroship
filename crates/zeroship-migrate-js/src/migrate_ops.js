@@ -560,8 +560,11 @@ function recordAddColumn(table, column, type, args) {
   );
   // C2 — `.column(x).add({ type: t.text().unique() })` honors `.unique()`: an
   // ADD COLUMN has no inline UNIQUE, so it lowers to a separate ADD CONSTRAINT.
-  // Likewise `.primaryKey()` hoists a pk add.
-  if (type._unique) {
+  // Likewise `.primaryKey()` hoists a pk add. A PRIMARY KEY already IMPLIES
+  // uniqueness, so when BOTH are set the follow-on UNIQUE is redundant DDL —
+  // suppress it (lock-step with the TS surface + the differ, which never emits a
+  // separate UNIQUE for the PK column). Only the pk add is recorded.
+  if (type._unique && !type._primaryKey) {
     push(
       compact({
         op: "addConstraint",
