@@ -677,6 +677,8 @@ impl MigrationEngine {
             exec_cfg,
             applied_by,
             lock_mode,
+            // Routine (non-deploy) caller — no recovery scope (PR9e R2).
+            None,
         )
         .await
     }
@@ -720,6 +722,10 @@ impl MigrationEngine {
             exec_cfg,
             applied_by,
             lock_mode,
+            // No deploy recovery scope on the routine (non-deploy-handler) wrapper —
+            // identical to a non-deploy apply (PR9e R2 fail-closed default: `None` ⇒
+            // no marker written).
+            None,
         )
         .await
     }
@@ -752,6 +758,7 @@ impl MigrationEngine {
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
         lock_mode: LockMode,
+        recovery_scope: Option<&crate::journal::DeployRecoveryScope<'_>>,
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
         self.apply_plan_resolving(
             steps,
@@ -764,6 +771,7 @@ impl MigrationEngine {
             exec_cfg,
             applied_by,
             lock_mode,
+            recovery_scope,
         )
         .await
     }
@@ -812,6 +820,11 @@ impl MigrationEngine {
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
         lock_mode: LockMode,
+        // PR9e — the deploy-scoped recovery scope. When `Some`, every EXPAND this plan
+        // opens writes its `in_progress` recovery marker in the SAME transaction as
+        // the obligation row (engine-stamped, atomic). `None` for routine (`.sql` /
+        // resolve / abort) callers that carry no deploy recovery scope.
+        recovery_scope: Option<&crate::journal::DeployRecoveryScope<'_>>,
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
         // **Whole-plan project-lock acquisition (§2.0.3(1)).** When the caller asks
         // us to `Acquire`, take the project advisory lock ONCE up front for the
@@ -836,7 +849,7 @@ impl MigrationEngine {
         let result = self
             .apply_plan_locked(
                 steps, touched_tables, depends_on, resolve, approval, scope, backend, exec_cfg,
-                applied_by,
+                applied_by, recovery_scope,
             )
             .await;
         if we_hold_lock {
@@ -938,6 +951,9 @@ impl MigrationEngine {
                 exec_cfg,
                 applied_by,
                 lock_mode,
+                // An abort opens no new obligation (it discharges one), so no recovery
+                // marker is written here.
+                None,
             )
             .await?;
             aborted.push(pc.clone());
@@ -961,6 +977,7 @@ impl MigrationEngine {
         backend: &B,
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
+        recovery_scope: Option<&crate::journal::DeployRecoveryScope<'_>>,
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
         // **Bootstrap the journal up front (§2.0.1).** The journal is the
         // net-applied ledger every sub-step reads (idempotency/net-applied-skip)
@@ -1440,8 +1457,15 @@ impl MigrationEngine {
                             .iter()
                             .map(|m| m.version.as_str().to_string())
                             .collect();
+                        // PR9e — write the obligation AND, when this is a deploy with a
+                        // recovery scope, its `in_progress` recovery marker in ONE
+                        // transaction (engine-stamped, atomic). Every outstanding
+                        // obligation then ALWAYS has a marker — closing the
+                        // obligation-vs-marker crash window structurally. `None` on the
+                        // routine path is identical to the pre-PR9e single autocommit
+                        // INSERT.
                         backend
-                            .record_pending_contract(
+                            .record_pending_contract_with_recovery(
                                 exec_cfg,
                                 crate::journal::PendingContractRecord {
                                     table,
@@ -1453,6 +1477,7 @@ impl MigrationEngine {
                                     contract_versions: &contract_versions,
                                     by: applied_by,
                                 },
+                                recovery_scope.copied(),
                             )
                             .await
                             .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;

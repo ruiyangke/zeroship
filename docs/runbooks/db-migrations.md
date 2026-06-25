@@ -122,7 +122,7 @@ itself:
   wholesale, so an earlier approved EXPAND never commits ahead of a guaranteed
   later refusal (no half-renamed-table state).
 
-> ⚠️ **No half-renamed-table state — the three cases it now covers (PR9d).** PG
+> ⚠️ **No half-renamed-table state — the three cases it now covers (PR9d/PR9e).** PG
 > DDL commits **per migration step** (`BEGIN; <up>; INSERT journal; COMMIT` per
 > migration); there is **no whole-bundle transaction**. So in a multi-file bundle,
 > an earlier in-scope online-rename EXPAND can durably commit (its dual-write
@@ -144,99 +144,70 @@ itself:
 >    EXPAND** (drops the dual-write trigger + the shadow column with `IF EXISTS`,
 >    leaving the pre-rename column intact, and discharges the just-opened
 >    obligation `aborted`) **before** surfacing the creator's 4xx. The recovery is
->    journaled (a per-deploy recovery marker) and **crash-safe**: if the process
->    dies *after* the `open` marker is written but before the abort, the **next**
->    same-app deploy reconciles the leftover marker first (the abort's
->    `DROP … IF EXISTS` is idempotent on resume). The one window the auto leg does
->    NOT cover — a crash *between* the obligation row and the marker write, leaving
->    an outstanding obligation with no marker — is **residue 2** below: still
->    fail-closed (the table stays fenced), cleared by `resolve-pending`. So a refused
->    multi-file bundle leaves **no silently-half-open** renamed table regardless of
->    the failure cause.
+>    journaled (a per-deploy recovery marker) and **crash-safe**: the marker is
+>    written by the **engine in the same transaction as the obligation row** (PR9e),
+>    so every outstanding obligation **always** has a marker. If the process dies
+>    *after* that commit but before the abort, the **next** same-app deploy reconciles
+>    the leftover marker first (the abort's `DROP … IF EXISTS` is idempotent on
+>    resume). So a refused multi-file bundle leaves **no silently-half-open** renamed
+>    table regardless of the failure cause.
 >
-> **The irreducible residues — there are TWO.** Both are **fail-closed** (the
-> prior-deploy interlock fences the half-renamed table until cleared), never
-> fail-open, and both are cleared by the operator with the
-> `resolve-pending --apply | --abort` CLI command (`--apply` completes the rename;
-> `--abort` rolls it back, dropping the shadow column):
+> **The obligation + its recovery marker are now ATOMIC (PR9e — residue 2 CLOSED).**
+> The journaled pending-contract obligation and its recovery marker are written in
+> **one transaction** by the engine: the control-plane `deploy_id` is threaded into the
+> migrate engine's apply path (a `DeployRecoveryScope`), so the `INSERT` of the
+> obligation row and the `INSERT` of the `in_progress` recovery marker commit together
+> or not at all. There is **no window** in which an obligation can be committed without
+> its marker, so the auto crash-recovery leg's JOIN can never miss one — every crash
+> window converges automatically. The pre-PR9e "obligation-recorded-but-marker-not-
+> yet-written" residue is **eliminated**, not merely fenced.
 >
-> 1. **Abort-DDL failure.** If the **abort DDL itself** fails (the DB went
->    unreachable mid-recovery), the obligation stays outstanding and its recovery
->    marker stays `open`. The next same-app deploy's crash-recovery leg re-attempts
->    the abort (the abort's `DROP … IF EXISTS` is idempotent), and the prior-deploy
->    interlock (case 2) refuses any new bundle touching the half-renamed table until
->    it is cleared.
-> 2. **Obligation-recorded-but-marker-not-yet-written crash.** The journaled
->    pending-contract obligation and its `open` recovery marker are written by
->    **two separate statements** (the engine commits the EXPAND DDL + the obligation
->    row; the control loop then writes the `open` marker — they are NOT in one
->    transaction, because the per-deploy `deploy_id` the marker keys on is a
->    control-plane value the migrate engine does not carry). A process death in that
->    narrow window leaves the obligation **outstanding but with NO recovery marker**.
->    Because the auto crash-recovery leg JOINs `outstanding_deploy_recoveries` on the
->    marker table, it finds nothing to abort — so this residue is **NOT
->    auto-recovered** by the next deploy (unlike residue 1). It is still
->    **fail-closed**: the obligation is outstanding, so the prior-deploy interlock
->    (case 2) fences the table against any new bundle, and the **only** clearance is
->    the operator running `resolve-pending --abort` (roll back the half-rename) or
->    `--apply` (complete it). The posture is identical to residue 1 (fenced + manual
->    resolve), it just does not self-heal via the auto leg. Closing this window
->    entirely would require folding the marker write into the same transaction as the
->    obligation row — i.e. threading the control-plane `deploy_id` into the migrate
->    engine's apply path (a future hardening, not in PR9d).
+> **The one remaining residue — abort-DDL failure.** It is **fail-closed** (the
+> prior-deploy interlock fences the half-renamed table until cleared), never fail-open,
+> and is **auto-recovered** by the next deploy: if the **abort DDL itself** fails (the
+> DB went unreachable mid-recovery), the obligation stays outstanding and its recovery
+> marker stays net-`in_progress`. The next same-app deploy's crash-recovery leg
+> re-attempts the abort (idempotent `DROP … IF EXISTS`), and the prior-deploy interlock
+> (case 2) refuses any new bundle touching the half-renamed table until it is cleared.
+> The operator can also clear it manually with `resolve-pending --apply | --abort`.
 >
-> **A legit go-live is never mistaken for a crash (PR9d HIGH).** A *successful*
-> online-rename go-live legitimately leaves its EXPAND pending (the §2.0.2
-> cross-deploy partition) — that is **not** a half-state and must never be aborted by
-> a later deploy's always-on recovery leg. To make the success arm distinguishable
-> from a genuine crash, it stamps the recovery marker **`reached_success`** *before*
-> it appends the `reconciled` marker. The recovery leg only treats **net-`open`**
-> markers as recoverable, so a legitimately-pending go-live is excluded.
+> **A legit go-live is never mistaken for a crash, and a stamp failure can no longer
+> silently revert one (PR9e — the inversion that CLOSES the MED).** A *successful*
+> online-rename go-live legitimately leaves its EXPAND pending (the §2.0.2 cross-deploy
+> partition) — that is **not** a half-state and must never be aborted by a later
+> deploy's always-on recovery leg. The discriminator is the marker's **birth state**:
 >
-> The success arm has **two append phases**, and they fail very differently:
+> - The marker is **born `in_progress`** (atomically with the obligation, above).
+>   `in_progress` *is* the "this deploy has not durably reached a terminal outcome"
+>   signal.
+> - On success, the deploy **promotes** every marker `in_progress` → `committed` in
+>   **one atomic batch**. The crash-recovery leg recovers **only net-`in_progress`**
+>   markers, so a net-`committed` go-live is **excluded — never aborted**.
+> - On a same-deploy / crash abort, the marker is closed `reconciled`.
 >
-> 1. **Phase 1 — `reached_success`** (the discriminator). All of this deploy's
->    obligations are stamped in **one atomic transaction** (PR9d-crit HIGH), so a
->    multi-EXPAND go-live flips **all or none** — there is no partial-stamp window
->    where one obligation is protected and a sibling stays a bare `open` over a live
->    contract.
-> 2. **Phase 2 — `reconciled`** (cleanup). Best-effort. A `reconciled`-append failure
->    (a DB hiccup right after phase 1 committed) is **non-fatal**: the marker is
->    already net-`reached_success` (the live contract is protected), the deploy still
->    **succeeds**, and the next deploy's success path is a harmless no-op on the
->    already-protected marker. (Pre-PR9d this window left a bare `open` marker that the
->    next *unrelated* deploy's recovery leg would mistake for a crash and silently roll
->    back a column the creator's app was already using.)
+> **Why a promotion failure can no longer false-abort a committed go-live.** If the
+> `committed` promotion **itself** fails (the DB went unreachable the instant the
+> go-live reached its success arm), the marker stays net-`in_progress` — the
+> **recoverable (fail-safe) state**. The deploy surfaces a **hard error**, and the next
+> same-app deploy's recovery leg **auto-aborts** the half-rename. This is **safe and
+> loses no data**: a *pending* contract has **not** cut over reads/writes to the shadow
+> column (the dual-write trigger keeps the old + shadow columns in sync, and the
+> drop-old-column contract has not run), so rolling the rename back preserves the
+> original column and all its data. The abort is idempotent, the obligation is
+> discharged `aborted`, and the app can re-run the rename cleanly.
 >
-> **The irreducible success-path residual (be precise — a re-run does NOT fix it).**
-> If **phase 1 itself fails** (the DB went unreachable the instant the go-live reached
-> its success arm), the deploy surfaces a **hard error** and *all* of its recovery
-> markers stay net-`open` over a **legitimately-pending live contract** (the dual-write
-> trigger + shadow column are committed, the obligation is pending). This marker is
-> **byte-for-byte indistinguishable from a genuine crash half-state** — the go-live's
-> physical schema state is identical to a deploy that crashed before its in-process
-> abort (compare the `crash_before_abort_is_recovered` and
-> `legit_pending_survives_…` recovery tests: both leave the trigger + shadow column
-> live and the obligation outstanding). No durable signal can tell them apart, so:
->
-> - **Re-running the deploy does NOT clear it.** The idempotent re-run finds the EXPAND
->   `already_outstanding`, so it never re-opens the obligation, `opened_this_deploy` is
->   empty, and the success arm never re-stamps the stale `open` marker. The phase-1
->   failure is *not* self-healing.
-> - **Until it is cleared, an unrelated next deploy's always-on crash-recovery leg
->   WILL false-abort this live contract** (drop the dual-write trigger + shadow column,
->   discharge the obligation `aborted`) — the deploy must be treated as not-yet-safe.
-> - **The only safe clearance is the operator running `resolve-pending --apply`**
->   (complete the rename, discharging the obligation so the recovery leg's
->   outstanding-join finds nothing to abort). `--abort` is the alternative if the
->   rename should be rolled back instead. Run this **before** any further deploy of the
->   same app.
->
-> The phase-1 hard error is logged at `error` level with this exact remedy so the
-> operator is alerted. This residual is the narrow, honestly-documented cost of having
-> *no* durable crash-vs-go-live signal beyond the success-arm commit record; closing
-> it entirely would require a per-deploy outcome journal written atomically with the
-> EXPAND commit (a future hardening, not in PR9d).
+> This is the **inverse** of the pre-PR9e design, whose stamp failure left the marker
+> in a *protected* (`open`/`reached_success`) state — so a later unrelated deploy would
+> **silently revert** a live contract it could not distinguish from a crash, with no
+> auto-recovery (manual `resolve-pending --apply` only). The PR9e direction degrades a
+> stamp failure to **"safely re-runnable crash recovery"**, not "silent revert of a live
+> contract." The key asymmetry: a pending contract has not cut over, so auto-aborting it
+> is always data-safe; the harm the old MED could cause — dropping a shadow column **with
+> data written only to it since cutover** — cannot occur, because cutover happens only
+> when the contract (drop-old-column) runs, which by definition has not happened while
+> the obligation is still pending. The promotion-failure hard error is logged at `error`
+> level so the operator is alerted, but **no operator action is required** for safety —
+> the next deploy auto-recovers.
 - The approver's principal is stamped into the immutable journal
   (`applied_by = deploy-approved:<approver>` / `deploy-ir-approved:<approver>`),
   so an operator-approved go-live is forensically distinct from a routine deploy.

@@ -242,11 +242,12 @@ async fn net_outstanding_contract_count(conn: &compio_postgres::Client, app_id: 
 }
 
 /// The NET state of the deploy-recovery marker for `pending_version` (latest
-/// `event_seq` per key), or `None` if no marker row exists. PR9d-crit HIGH: a
-/// successful go-live's marker must be net-`reached_success`; a phase-1-stamp
-/// FAILURE leaves it net-`open` (the irreducible residual the discriminator cannot
-/// self-heal). This reads the same `schema_deploy_recovery` net-state that
-/// `outstanding_deploy_recoveries` keys its `r.state = 'open'` predicate on.
+/// `event_seq` per key), or `None` if no marker row exists. PR9e: a marker is BORN
+/// `in_progress` (atomically with the obligation) and a successful go-live PROMOTES it
+/// to net-`committed`; a `committed`-promotion FAILURE leaves it net-`in_progress`
+/// (the fail-safe / recoverable state). This reads the same `schema_deploy_recovery`
+/// net-state that `outstanding_deploy_recoveries` keys its `r.state = 'in_progress'`
+/// predicate on.
 async fn recovery_marker_net_state(
     conn: &compio_postgres::Client,
     app_id: &Uuid,
@@ -288,6 +289,10 @@ async fn recovery_marker_net_state(
 /// nothing to (false-)abort. We append directly as the admin (the same role the CLI
 /// runs as) to keep the test self-contained — the load-bearing fact is the net
 /// `state='resolved'` transition, which we assert via `net_outstanding_contract_count`.
+///
+/// (PR9e: retained as a faithful operator-clearance helper for the manual-clearance
+/// path even though the headline residual now auto-recovers without it.)
+#[allow(dead_code)]
 async fn operator_resolve_pending_apply(conn: &compio_postgres::Client, app_id: &Uuid) {
     let meta = format!("{}_migrations", app_id);
     let q = format!("\"{}\".schema_pending_contracts", meta.replace('"', "\"\""));
@@ -319,6 +324,10 @@ async fn operator_resolve_pending_apply(conn: &compio_postgres::Client, app_id: 
 /// leaving the pre-rename column intact — the same net schema state the CLI commits.
 /// The load-bearing fact this models is the obligation net-discharge (which un-fences
 /// the table for the prior-deploy interlock) plus the physical rollback.
+///
+/// (PR9e: retained as a faithful operator-clearance helper; the headline residual now
+/// auto-recovers without manual intervention.)
+#[allow(dead_code)]
 async fn operator_resolve_pending_abort(
     conn: &compio_postgres::Client,
     app_id: &Uuid,
@@ -2752,26 +2761,19 @@ async fn deploy_migrate_pr9d_crash_before_abort_is_recovered_on_next_deploy() {
     cleanup_app(&conn, &app_id).await;
 }
 
-// PR9d HIGH — the CENTRAL same-deploy-scope safety invariant: a LEGITIMATELY-pending
-// prior-deploy EXPAND (a SUCCESSFUL go-live) is NEVER aborted by a subsequent deploy's
-// always-on crash-recovery leg, EVEN when the go-live's success-path `reconciled` marker
-// append FAILED (the HIGH window: EXPAND committed, obligation legitimately pending,
-// `reconciled` append errored ⇒ pre-fix a bare `open` marker the next deploy's crash-
-// recovery leg would mistake for a crash half-state and false-abort).
+// PR9e — the CENTRAL same-deploy-scope safety invariant (deliverable a): a
+// LEGITIMATELY-pending prior-deploy EXPAND (a SUCCESSFUL go-live) is NEVER aborted by a
+// subsequent deploy's always-on crash-recovery leg. The marker is born `in_progress`
+// atomically with the obligation, and the success arm PROMOTES it to `committed` in one
+// atomic batch. `outstanding_deploy_recoveries` recovers ONLY net-`in_progress` markers,
+// so a net-`committed` go-live is EXCLUDED and never false-aborted.
 //
-// The fix is the `reached_success` discriminator: the success arm stamps the marker
-// `reached_success` BEFORE attempting `reconciled`, so a `reconciled`-append failure
-// leaves the marker net-`reached_success` (NOT `open`). `outstanding_deploy_recoveries`
-// only returns net-`open` markers, so the crash-recovery leg excludes the live contract.
-//
-// This test is the unique path the prior PR9d tests never reached: deploy #3 does NOT
-// touch the pending table (so the §2.0.3 interlock does NOT refuse it — it proceeds to
-// the apply loop + the always-on crash-recovery leg) AND the go-live's reconcile is
-// forced to fail (via the `DEPLOY_SUCCESS_RECONCILE_FAILS` fault) so the marker is the
-// bare-`open`-pre-fix state. RED PRE-FIX: without the discriminator deploy #3's crash-
-// recovery leg drops the dual-write trigger + shadow column of a live contract.
+// Deploy #3 does NOT touch the pending table (so the §2.0.3 interlock does NOT refuse it
+// — it proceeds to the apply loop + the always-on crash-recovery leg). The key new
+// assertion is that the go-live's marker is net-`committed` and the recovery JOIN
+// excludes it, so the live contract SURVIVES.
 #[compio::test]
-async fn deploy_migrate_pr9d_legit_pending_survives_unrelated_deploy_after_reconcile_failure() {
+async fn deploy_migrate_pr9e_legit_committed_go_live_survives_unrelated_deploy() {
     let Some(conn) = admin_conn().await else {
         eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
         return;
@@ -2797,25 +2799,24 @@ async fn deploy_migrate_pr9d_legit_pending_survives_unrelated_deploy_after_recon
     .await
     .expect("seed members");
 
-    // Deploy #2 (APPROVED): online rename handle → username GOES LIVE (succeeds). ARM
-    // `DEPLOY_SUCCESS_RECONCILE_FAILS` so the success arm stamps `reached_success` but the
-    // `reconciled` append "fails" — reproducing the HIGH window. The deploy still SUCCEEDS
-    // (the `reconciled` failure is non-fatal once `reached_success` is stamped).
-    zeroship_migrate::fault::arm(
-        zeroship_migrate::fault::points::DEPLOY_SUCCESS_RECONCILE_FAILS,
-        0,
-    );
+    // Deploy #2 (APPROVED): online rename handle → username GOES LIVE (succeeds). No fault
+    // armed — the success arm promotes the marker `in_progress` → `committed`.
     let rename = r#"{"ir_version":1,"name":"rename_handle","ops":[
         {"op":"renameColumn","table":"members","from":"handle","to":"username","type":"text"}
     ]}"#;
     let dir2 = migrations_dir(&[("0002_rename_handle.ir.json", rename)]);
     let outcome = approve_whole_bundle(&admin_dsn(), &app_id, &dir2)
         .await
-        .expect("the approved go-live must SUCCEED (a failed `reconciled` append is non-fatal)");
-    zeroship_migrate::fault::disarm_all();
+        .expect("the approved go-live must SUCCEED");
     assert!(
         !outcome.pending_contract.is_empty(),
         "the go-live surfaces a pending CONTRACT (C2 drop-old-column), got {outcome:?}"
+    );
+    // The marker is net-`committed` — the legit go-live signal the recovery JOIN excludes.
+    assert_eq!(
+        recovery_marker_net_state(&conn, &app_id).await.as_deref(),
+        Some("committed"),
+        "PR9e: a successful go-live PROMOTES its recovery marker to net-`committed`"
     );
 
     // The go-live is LIVE: dual-write trigger + shadow `username` column + the obligation
@@ -2879,31 +2880,31 @@ async fn deploy_migrate_pr9d_legit_pending_survives_unrelated_deploy_after_recon
     cleanup_app(&conn, &app_id).await;
 }
 
-// PR9d-crit HIGH — the PHASE-1 stamp-failure residual, characterized honestly.
+// PR9e HEADLINE — the MED closure: a `committed`-promotion failure AUTO-RECOVERS with
+// NO false-abort + NO silent revert (the inversion).
 //
-// The PR9d HIGH discriminator (`reached_success`) only closes the PHASE-2
-// (`reconciled`-append) window. If PHASE-1 — the `reached_success` stamp ITSELF —
-// fails (DB unreachable the instant a single-EXPAND go-live reaches its success arm),
-// the deploy surfaces a HARD error and its recovery marker stays net-`open` over a
-// LEGITIMATELY-pending LIVE contract (trigger + shadow column committed, obligation
-// pending). The go-live's physical schema state is byte-identical to a genuine crash
-// half-state (see `…crash_before_abort_is_recovered…`), so NO durable signal
-// distinguishes them — and a re-run does NOT clear it (the EXPAND is
-// `already_outstanding`, so `opened_this_deploy` is empty and the success arm never
-// re-stamps the stale marker).
+// In PR9e the recovery marker is BORN `in_progress` atomically with the obligation, and
+// the success arm's only job is to PROMOTE `in_progress` → `committed`. If that
+// promotion FAILS (DB unreachable the instant a single-EXPAND go-live reaches its
+// success arm), the deploy surfaces a HARD error and the marker stays net-`in_progress`
+// — the *recoverable* (fail-safe) state. An UNRELATED next deploy then AUTO-ABORTS the
+// half-rename (no operator action), which is SAFE: a *pending* contract has not cut over
+// reads/writes to the shadow column (dual-write keeps both in sync; the drop-old-column
+// contract has not run), so the original column + its DATA survive. The app can then
+// re-run the rename cleanly.
 //
-// This test pins that residual + its DOCUMENTED SAFE CLEARANCE:
-//   1. go-live with the new `DEPLOY_SUCCESS_REACHED_SUCCESS_STAMP_FAILS` fault armed
-//      ⇒ the deploy returns a HARD error, BUT the contract is physically LIVE and the
-//      marker is net-`open` (the residual exists — NOT silently swallowed).
-//   2. the documented remedy — operator `resolve-pending --apply` — discharges the
-//      obligation; AFTER it, the recovery leg's outstanding-join finds nothing, so an
-//      unrelated next deploy is SAFE and leaves the live contract intact.
-// This is the "honest narrowing" closure: the phase-1 transaction-failure residual is
-// irreducible by re-run (no durable crash-vs-go-live signal), and the only safe
-// clearance is the manual `resolve-pending --apply`, exactly as the runbook now states.
+// This is the INVERSE of the pre-PR9e phase-1 stamp-failure residual: there a failure
+// left the marker `open` (protected) and a later deploy SILENTLY reverted a committed
+// contract it could not distinguish from a crash, with NO auto-recovery (manual
+// `resolve-pending --apply` only). Here a failure leaves the marker recoverable, so the
+// next deploy safely auto-aborts — degrading to "safely re-runnable crash recovery",
+// not "silent revert of a live contract".
+//
+// RED PRE-FIX: on the pre-PR9e code the marker is net-`open` over a live contract and
+// the next deploy false-aborts it with no auto-recovery (it required manual clearance).
+// This test asserts the new auto-safe behavior AND that no shadow-col data is lost.
 #[compio::test]
-async fn deploy_migrate_pr9d_phase1_stamp_failure_residual_and_operator_clearance() {
+async fn deploy_migrate_pr9e_committed_stamp_failure_auto_recovers_no_false_abort_silent_revert() {
     let Some(conn) = admin_conn().await else {
         eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
         return;
@@ -2930,10 +2931,11 @@ async fn deploy_migrate_pr9d_phase1_stamp_failure_residual_and_operator_clearanc
     .expect("seed members");
 
     // Deploy #2 (APPROVED): single-EXPAND online rename handle → username. ARM the
-    // PHASE-1 stamp failure: the EXPAND commits go-live, but the `reached_success`
-    // discriminator stamp "fails" (DB hiccup) ⇒ the deploy returns a HARD error.
+    // `committed` promotion failure: the EXPAND commits go-live, but the marker
+    // promotion "fails" (DB hiccup) ⇒ the deploy returns a HARD error and the marker
+    // stays net-`in_progress`.
     zeroship_migrate::fault::arm(
-        zeroship_migrate::fault::points::DEPLOY_SUCCESS_REACHED_SUCCESS_STAMP_FAILS,
+        zeroship_migrate::fault::points::DEPLOY_SUCCESS_COMMITTED_STAMP_FAILS,
         0,
     );
     let rename = r#"{"ir_version":1,"name":"rename_handle","ops":[
@@ -2942,111 +2944,122 @@ async fn deploy_migrate_pr9d_phase1_stamp_failure_residual_and_operator_clearanc
     let dir2 = migrations_dir(&[("0002_rename_handle.ir.json", rename)]);
     let err = approve_whole_bundle(&admin_dsn(), &app_id, &dir2)
         .await
-        .expect_err("a phase-1 `reached_success` stamp failure must surface a HARD error");
+        .expect_err("a `committed` promotion failure must surface a HARD error");
     zeroship_migrate::fault::disarm_all();
-    // The original go-live's EXPAND DDL is committed (the failure is post-commit), and
-    // the error is the journal-class phase-1 failure (not the apply itself).
     let msg = format!("{err}");
     assert!(
-        msg.contains("reached_success") || msg.to_lowercase().contains("journal") || msg.contains("phase-1") || msg.contains("stamp"),
-        "the error must be the phase-1 stamp failure, got: {msg}"
+        msg.contains("committed") || msg.to_lowercase().contains("journal") || msg.contains("promotion") || msg.contains("stamp"),
+        "the error must be the `committed` promotion failure, got: {msg}"
     );
 
-    // THE RESIDUAL: the contract is physically LIVE (go-live committed) AND the
-    // recovery marker is net-`open` (the discriminator never stamped). This is the
-    // exact half-state-indistinguishable shape the discriminator cannot self-heal.
+    // The contract is physically LIVE (go-live committed) AND the marker is net-
+    // `in_progress` (the promotion never ran). Crucially this is the RECOVERABLE state.
     assert!(
         trigger_exists(&conn, &app_id, "members", "zsdw_members_handle_username_trg").await,
-        "the go-live's dual-write trigger is LIVE despite the phase-1 stamp failure"
-    );
-    assert!(
-        column_exists(&conn, &app_id, "members", "username").await,
-        "the go-live's shadow `username` column is LIVE despite the phase-1 stamp failure"
+        "the go-live's dual-write trigger is LIVE despite the promotion failure"
     );
     assert_eq!(
         net_outstanding_contract_count(&conn, &app_id).await,
         1,
-        "the obligation is legitimately pending (the go-live committed)"
+        "the obligation is pending (the go-live committed)"
     );
     assert_eq!(
         recovery_marker_net_state(&conn, &app_id).await.as_deref(),
-        Some("open"),
-        "PR9d-crit HIGH: the phase-1 stamp failure leaves the marker net-`open` — the \
-         irreducible residual (a re-run would NOT clear it: the EXPAND is already_outstanding)"
+        Some("in_progress"),
+        "PR9e: a promotion failure leaves the marker net-`in_progress` — the FAIL-SAFE \
+         (recoverable) state, NOT a protected state a later deploy would silently revert"
     );
 
-    // THE DOCUMENTED SAFE CLEARANCE: operator `resolve-pending --apply` discharges the
-    // obligation (append-only `resolved` row). This is the ONLY safe clearance — NOT a
-    // re-run.
-    operator_resolve_pending_apply(&conn, &app_id).await;
-    assert_eq!(
-        net_outstanding_contract_count(&conn, &app_id).await,
-        0,
-        "resolve-pending --apply discharges the obligation (net-outstanding → 0)"
-    );
-
-    // Deploy #3 (an unrelated next deploy): AFTER the operator clearance the recovery
-    // leg's outstanding-join finds nothing, so it has nothing to (false-)abort — the
-    // live contract SURVIVES and the new bundle applies cleanly.
+    // Deploy #3 (an UNRELATED next deploy): it does NOT touch `members`, so it proceeds
+    // to the always-on crash-recovery leg. Because the marker is net-`in_progress`, the
+    // leg AUTO-ABORTS the half-rename — NO operator action required.
     let benign = r#"{"ir_version":1,"name":"create_widgets","ops":[
         {"op":"createTable","name":"widgets","columns":[{"name":"label","type":"text"}]}
     ]}"#;
     let dir3 = migrations_dir(&[("0004_create_widgets.ir.json", benign)]);
     apply_bundle_migrations(&admin_dsn(), &app_id, &dir3)
         .await
-        .expect("after the operator clearance, an unrelated deploy applies safely");
+        .expect("the unrelated deploy auto-recovers the in_progress half-rename then applies");
 
+    // The half-rename was AUTO-ABORTED (trigger + shadow column dropped, obligation
+    // discharged) — no operator action, no silent live-contract revert (pending ⇒ no
+    // cutover, so this is safe), and NO data lost: the original `handle` column + Ada's
+    // value survive.
     assert!(
-        trigger_exists(&conn, &app_id, "members", "zsdw_members_handle_username_trg").await,
-        "PR9d-crit HIGH: after resolve-pending --apply, the unrelated deploy does NOT \
-         false-abort — the dual-write trigger SURVIVES"
+        !trigger_exists(&conn, &app_id, "members", "zsdw_members_handle_username_trg").await,
+        "PR9e: the auto crash-recovery leg DROPS the dual-write trigger (auto-abort)"
     );
     assert!(
-        column_exists(&conn, &app_id, "members", "username").await,
-        "the shadow `username` column survives the post-clearance unrelated deploy"
+        !column_exists(&conn, &app_id, "members", "username").await,
+        "PR9e: the auto crash-recovery leg DROPS the shadow `username` column"
+    );
+    assert!(
+        column_exists(&conn, &app_id, "members", "handle").await,
+        "PR9e: the pre-rename `handle` column SURVIVES the auto-abort (no data loss)"
+    );
+    let rows = conn
+        .query(
+            &format!("SELECT handle FROM \"{schema}\".members WHERE id='m1'"),
+            &[],
+        )
+        .await
+        .expect("read back members data");
+    assert_eq!(
+        rows.first().map(|r| r.get::<_, String>("handle")).as_deref(),
+        Some("ada"),
+        "PR9e: the seeded `handle` data survives the auto-abort (a pending contract had \
+         not cut over to the shadow column, so the abort loses no data)"
+    );
+    assert_eq!(
+        net_outstanding_contract_count(&conn, &app_id).await,
+        0,
+        "PR9e: the auto-abort discharges the obligation — NO manual resolve-pending needed"
     );
     assert!(
         table_exists(&conn, &app_id, "widgets").await,
         "the unrelated deploy's own table is created"
     );
 
+    // The table is now UN-FENCED — the auto-abort discharged the obligation, so a deploy
+    // TOUCHING `members` applies cleanly (no permanent fence, no manual clearance). This
+    // is the "re-runnable" guarantee: the failed go-live left no forever-blocked table.
+    let touch = r#"{"ir_version":1,"name":"add_nickname","ops":[
+        {"op":"addColumn","table":"members","column":"nickname","type":"text","nullable":true}
+    ]}"#;
+    let dir4 = migrations_dir(&[("0005_add_nickname.ir.json", touch)]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir4)
+        .await
+        .expect("PR9e: after the auto-abort the table is un-fenced — a touching deploy applies");
+    assert!(
+        column_exists(&conn, &app_id, "members", "nickname").await,
+        "PR9e: the post-auto-abort touching deploy applies (no permanent fence)"
+    );
+
     let _ = std::fs::remove_dir_all(&dir1);
     let _ = std::fs::remove_dir_all(&dir2);
     let _ = std::fs::remove_dir_all(&dir3);
+    let _ = std::fs::remove_dir_all(&dir4);
     cleanup_app(&conn, &app_id).await;
 }
 
-// PR9d-rev finding 1 MED — the OBLIGATION-WITHOUT-MARKER crash residual, characterized.
+// PR9e — the OBLIGATION + its recovery MARKER are ATOMIC (the LOW closure). This
+// replaces the pre-PR9e `…obligation_without_marker_residual…` characterization: that
+// residual modeled a crash WINDOW between the obligation commit and a SEPARATE
+// control-loop marker write. PR9e folds the marker write INTO the obligation's
+// transaction (engine-stamped via the threaded `DeployRecoveryScope`), so the window no
+// longer exists — there is no fault point that can produce an obligation without a
+// marker.
 //
-// The journaled pending-contract obligation (`record_pending_contract`, committed
-// inside the engine's `apply_plan`) and its `open` recovery marker
-// (`record_deploy_recovery_open`, written by the control loop) are TWO separate
-// statements, NOT one transaction — the marker keys on the control-plane `deploy_id`
-// the migrate engine does not carry. A process death in that window (simulated by the
-// new `DEPLOY_AFTER_OBLIGATION_BEFORE_MARKER` fault) leaves the obligation OUTSTANDING
-// with NO recovery marker.
+// This test pins the structural guarantee: after a same-deploy EXPAND commits, EVERY
+// outstanding obligation has a net-`in_progress` recovery marker (never `None`). Because
+// the two rows commit in one transaction, an obligation-without-marker state is
+// unreachable. The removed `DEPLOY_AFTER_OBLIGATION_BEFORE_MARKER` fault constant is gone
+// (compile-time proof the window is closed).
 //
-// This residual is DISTINCT from the crash-before-abort residual
-// (`…crash_before_abort_is_recovered…`): there a marker WAS written, so the next
-// deploy's auto crash-recovery leg (which JOINs `outstanding_deploy_recoveries` on the
-// marker table) converges it. HERE there is no marker, so the auto leg finds nothing
-// and does NOT auto-abort it. It is nonetheless FAIL-CLOSED: the outstanding obligation
-// fences `members` via the §2.0.3 prior-deploy interlock, and the operator clears it
-// with `resolve-pending --abort` (or `--apply`). This is residue 2 in
-// docs/runbooks/db-migrations.md.
-//
-// This test pins all four facts:
-//   1. the crash leaves an outstanding obligation with NO recovery marker (net-state None);
-//   2. the table is FENCED — a touching deploy is refused (fail-closed, not fail-open);
-//   3. the auto crash-recovery leg does NOT clear it — an UNRELATED next deploy proceeds
-//      yet the obligation + trigger SURVIVE (the auto leg never sees the marker-less obligation);
-//   4. `resolve-pending --abort` clears it — obligation discharged, half-rename rolled back,
-//      the table un-fenced so a later touching deploy applies.
-//
-// RED PRE-FIX (before this fault point existed) the window was UNDOCUMENTED and untested;
-// there was no way to even reach the marker-less state to assert its fail-closed posture.
+// RED PRE-FIX: the marker was a separate control-loop statement, so an
+// obligation-without-marker state was reachable (and was the documented residue 2).
 #[compio::test]
-async fn deploy_migrate_pr9d_obligation_without_marker_residual_is_fenced_and_operator_clearable() {
+async fn deploy_migrate_pr9e_obligation_and_marker_are_atomic() {
     let Some(conn) = admin_conn().await else {
         eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
         return;
@@ -3072,137 +3085,39 @@ async fn deploy_migrate_pr9d_obligation_without_marker_residual_is_fenced_and_op
     .await
     .expect("seed members");
 
-    // Deploy #2 (APPROVED): single-EXPAND online rename handle → username. The EXPAND
-    // commits go-live and the engine records the obligation; ARM the new fault so the
-    // control loop "crashes" AFTER that obligation commit but BEFORE writing the `open`
-    // recovery marker. The deploy returns a HARD error and the marker is never written.
-    zeroship_migrate::fault::arm(
-        zeroship_migrate::fault::points::DEPLOY_AFTER_OBLIGATION_BEFORE_MARKER,
-        0,
-    );
+    // Deploy #2 (APPROVED): single-EXPAND online rename handle → username goes live. NO
+    // fault armed — there is no longer any fault point between the obligation and marker.
     let rename = r#"{"ir_version":1,"name":"rename_handle","ops":[
         {"op":"renameColumn","table":"members","from":"handle","to":"username","type":"text"}
     ]}"#;
     let dir2 = migrations_dir(&[("0002_rename_handle.ir.json", rename)]);
-    let err = approve_whole_bundle(&admin_dsn(), &app_id, &dir2)
+    approve_whole_bundle(&admin_dsn(), &app_id, &dir2)
         .await
-        .expect_err("a crash between the obligation commit and the marker write surfaces a HARD error");
-    zeroship_migrate::fault::disarm_all();
-    let msg = format!("{err:?}");
-    assert!(
-        msg.contains("after_obligation") || msg.contains("before_marker") || msg.contains("Apply"),
-        "the surfaced error must be the obligation-before-marker crash, got {msg}"
-    );
+        .expect("the approved go-live must SUCCEED");
 
-    // FACT 1 — the obligation is OUTSTANDING (the EXPAND committed) but there is NO
-    // recovery marker (net-state None, not `open`). This is the residue's distinguishing
-    // shape vs. the crash-before-abort residue (which leaves a net-`open` marker).
-    assert!(
-        trigger_exists(&conn, &app_id, "members", "zsdw_members_handle_username_trg").await,
-        "the EXPAND's dual-write trigger is LIVE (the go-live committed before the crash)"
-    );
+    // The obligation is outstanding (the go-live legitimately stays pending) AND it has
+    // its recovery marker — committed in the SAME transaction. On a successful go-live the
+    // success arm then PROMOTES that marker to net-`committed`. The load-bearing fact is
+    // that the marker is NEVER `None`: every outstanding obligation always has a marker.
     assert_eq!(
         net_outstanding_contract_count(&conn, &app_id).await,
         1,
-        "the obligation is OUTSTANDING (committed by the engine before the marker-write crash)"
+        "the go-live leaves exactly one outstanding obligation (pending)"
+    );
+    let net = recovery_marker_net_state(&conn, &app_id).await;
+    assert!(
+        net.is_some(),
+        "PR9e: the obligation ALWAYS has a recovery marker (committed atomically with it) \
+         — an obligation-without-marker state is structurally unreachable (got {net:?})"
     );
     assert_eq!(
-        recovery_marker_net_state(&conn, &app_id).await,
-        None,
-        "PR9d-rev finding 1: the crash window leaves NO recovery marker at all (net-state None, \
-         NOT `open`) — the auto crash-recovery leg cannot see this residue"
-    );
-
-    // FACT 2 — FAIL-CLOSED fencing: a deploy TOUCHING `members` is refused by the §2.0.3
-    // prior-deploy interlock (the outstanding obligation fences the table). Not fail-open.
-    let touch = r#"{"ir_version":1,"name":"add_nickname","ops":[
-        {"op":"addColumn","table":"members","column":"nickname","type":"text","nullable":true}
-    ]}"#;
-    let dir_touch = migrations_dir(&[("0003_add_nickname.ir.json", touch)]);
-    let touch_err = apply_bundle_migrations(&admin_dsn(), &app_id, &dir_touch)
-        .await
-        .expect_err("the fenced table must refuse a touching deploy (fail-closed)");
-    match touch_err {
-        DeployMigrateError::Apply(zeroship_migrate::EngineError::PendingContract(payload)) => {
-            assert_eq!(payload.table, "members", "the interlock fences the half-renamed table");
-        }
-        other => panic!("expected a TABLE_HAS_PENDING_CONTRACT refusal, got {other:?}"),
-    }
-    assert!(
-        !column_exists(&conn, &app_id, "members", "nickname").await,
-        "the refused touching deploy applied NOTHING"
-    );
-
-    // FACT 3 — the AUTO crash-recovery leg does NOT clear this residue. An UNRELATED next
-    // deploy (does not touch `members`) proceeds to the always-on recovery leg, which
-    // JOINs the marker table and finds NOTHING (no marker was ever written) — so it does
-    // NOT abort the marker-less obligation. The obligation + trigger SURVIVE.
-    let benign = r#"{"ir_version":1,"name":"create_widgets","ops":[
-        {"op":"createTable","name":"widgets","columns":[{"name":"label","type":"text"}]}
-    ]}"#;
-    let dir3 = migrations_dir(&[("0004_create_widgets.ir.json", benign)]);
-    apply_bundle_migrations(&admin_dsn(), &app_id, &dir3)
-        .await
-        .expect("the unrelated deploy proceeds (the recovery leg finds no marker to act on)");
-    assert!(
-        table_exists(&conn, &app_id, "widgets").await,
-        "the unrelated deploy's own table is created"
-    );
-    assert_eq!(
-        net_outstanding_contract_count(&conn, &app_id).await,
-        1,
-        "PR9d-rev finding 1: the auto crash-recovery leg does NOT clear a marker-less obligation \
-         — it stays OUTSTANDING after an unrelated deploy (it is not auto-recovered, only fenced)"
-    );
-    assert!(
-        trigger_exists(&conn, &app_id, "members", "zsdw_members_handle_username_trg").await,
-        "the half-renamed trigger SURVIVES the unrelated deploy (no auto-abort without a marker)"
-    );
-
-    // FACT 4 — the DOCUMENTED CLEARANCE: operator `resolve-pending --abort` discharges the
-    // obligation and rolls back the half-rename (drop trigger + shadow column, preserve
-    // `handle`). After it, the table is UN-FENCED and a touching deploy applies.
-    operator_resolve_pending_abort(
-        &conn,
-        &app_id,
-        "members",
-        "zsdw_members_handle_username_trg",
-        "username",
-    )
-    .await;
-    assert_eq!(
-        net_outstanding_contract_count(&conn, &app_id).await,
-        0,
-        "resolve-pending --abort discharges the obligation (net-outstanding → 0)"
-    );
-    assert!(
-        !trigger_exists(&conn, &app_id, "members", "zsdw_members_handle_username_trg").await,
-        "resolve-pending --abort drops the dual-write trigger (rolls back the half-rename)"
-    );
-    assert!(
-        !column_exists(&conn, &app_id, "members", "username").await,
-        "resolve-pending --abort drops the shadow `username` column"
-    );
-    assert!(
-        column_exists(&conn, &app_id, "members", "handle").await,
-        "resolve-pending --abort preserves the pre-rename `handle` column"
-    );
-
-    // The table is now UN-FENCED: a touching deploy applies cleanly.
-    let dir_touch2 = migrations_dir(&[("0005_add_nickname.ir.json", touch)]);
-    apply_bundle_migrations(&admin_dsn(), &app_id, &dir_touch2)
-        .await
-        .expect("after the operator clearance, a touching deploy is no longer fenced");
-    assert!(
-        column_exists(&conn, &app_id, "members", "nickname").await,
-        "the post-clearance touching deploy applies (the obligation no longer fences the table)"
+        net.as_deref(),
+        Some("committed"),
+        "PR9e: a successful go-live promotes the (atomically-born) marker to net-`committed`"
     );
 
     let _ = std::fs::remove_dir_all(&dir1);
     let _ = std::fs::remove_dir_all(&dir2);
-    let _ = std::fs::remove_dir_all(&dir_touch);
-    let _ = std::fs::remove_dir_all(&dir3);
-    let _ = std::fs::remove_dir_all(&dir_touch2);
     cleanup_app(&conn, &app_id).await;
 }
 

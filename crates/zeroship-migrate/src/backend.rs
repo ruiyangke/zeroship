@@ -207,6 +207,21 @@ pub trait MigrationBackend {
         rec: journal::PendingContractRecord<'_>,
     ) -> Result<(), JournalError>;
 
+    /// Open a `pending` cross-deploy obligation AND, when a
+    /// [`journal::DeployRecoveryScope`] is supplied, its `in_progress` deploy-scoped
+    /// recovery marker — in ONE transaction (PR9e). This is the engine-stamped write
+    /// that closes the obligation-vs-marker crash window: the obligation row and its
+    /// recovery marker commit atomically or not at all, so every outstanding
+    /// obligation ALWAYS has a marker. With `scope = None` it is identical to
+    /// [`record_pending_contract`](Self::record_pending_contract). Admin-written.
+    /// SQLite no-ops the recovery half (no online rename ⇒ no half-state).
+    async fn record_pending_contract_with_recovery(
+        &self,
+        cfg: &ExecutorConfig,
+        rec: journal::PendingContractRecord<'_>,
+        scope: Option<journal::DeployRecoveryScope<'_>>,
+    ) -> Result<(), JournalError>;
+
     /// Discharge an obligation by APPENDING a `resolved` row (never a delete —
     /// history is append-only). Admin-written. SQLite no-ops.
     async fn resolve_pending_contract(
@@ -217,38 +232,17 @@ pub trait MigrationBackend {
         by: &str,
     ) -> Result<(), JournalError>;
 
-    // -- deploy-scoped recovery markers (PR9d MED) --------------------------
+    // -- deploy-scoped recovery markers (PR9d MED / PR9e) -------------------
 
-    /// Open a deploy-scoped recovery marker for a same-deploy EXPAND (PR9d MED).
-    /// Admin-written, append-only. SQLite no-ops (no online-rename ⇒ no half-state
-    /// to recover, mirroring the pending-contract D7 stance).
-    async fn record_deploy_recovery_open(
-        &self,
-        cfg: &ExecutorConfig,
-        deploy_id: &str,
-        pending_version: &str,
-        by: &str,
-    ) -> Result<(), JournalError>;
-
-    /// Stamp a deploy-scoped recovery marker `reached_success` (PR9d HIGH): APPEND a
-    /// `reached_success` row as the FIRST action of the deploy SUCCESS arm, BEFORE
-    /// the `reconciled` append. This is the crash-vs-legit-pending discriminator: a
-    /// net-`reached_success` marker means the deploy went go-live (the obligation is
-    /// legitimately pending), so the crash-recovery leg never false-aborts it.
-    /// Admin-written. SQLite no-ops.
-    async fn mark_deploy_recovery_reached_success(
-        &self,
-        cfg: &ExecutorConfig,
-        deploy_id: &str,
-        pending_version: &str,
-        by: &str,
-    ) -> Result<(), JournalError>;
-
-    /// Stamp `reached_success` for a WHOLE deploy's obligation set in ONE atomic
-    /// transaction (PR9d-crit HIGH). Either ALL of this deploy's obligations flip to
-    /// net-`reached_success` or none do — there is no partial-stamp window in a
-    /// multi-EXPAND go-live. Admin-written. SQLite no-ops.
-    async fn mark_deploy_recovery_reached_success_batch(
+    /// Promote a WHOLE deploy's recovery markers to `committed` in ONE atomic
+    /// transaction (PR9e). Called on the deploy SUCCESS arm: it promotes every
+    /// net-`in_progress` marker this deploy opened to net-`committed`, the
+    /// crash-vs-legit-pending discriminator. A net-`committed` marker means the deploy
+    /// went go-live (the obligation is legitimately pending), so the crash-recovery
+    /// leg never aborts it. Either ALL of this deploy's markers promote or none do —
+    /// and a promotion failure leaves them net-`in_progress` (the recoverable /
+    /// fail-safe state). Admin-written. SQLite no-ops.
+    async fn mark_deploy_recovery_committed_batch(
         &self,
         cfg: &ExecutorConfig,
         deploy_id: &str,
@@ -257,7 +251,8 @@ pub trait MigrationBackend {
     ) -> Result<(), JournalError>;
 
     /// Mark a deploy-scoped recovery obligation `reconciled` (APPEND a `reconciled`
-    /// row). Admin-written. SQLite no-ops.
+    /// row) — CLOSE the marker after a same-deploy abort or a crash-recovery abort.
+    /// Admin-written. SQLite no-ops.
     async fn mark_deploy_recovery_reconciled(
         &self,
         cfg: &ExecutorConfig,
@@ -266,7 +261,7 @@ pub trait MigrationBackend {
         by: &str,
     ) -> Result<(), JournalError>;
 
-    /// Read the net-`open` deploy-recovery markers whose obligation is still
+    /// Read the net-`in_progress` deploy-recovery markers whose obligation is still
     /// outstanding (the crash-recovery resume input). SQLite returns empty.
     async fn outstanding_deploy_recoveries(
         &self,
@@ -718,6 +713,15 @@ impl MigrationBackend for PostgresBackend<'_> {
         journal::record_pending_contract(self.conn, cfg, rec).await
     }
 
+    async fn record_pending_contract_with_recovery(
+        &self,
+        cfg: &ExecutorConfig,
+        rec: journal::PendingContractRecord<'_>,
+        scope: Option<journal::DeployRecoveryScope<'_>>,
+    ) -> Result<(), JournalError> {
+        journal::record_pending_contract_with_recovery(self.conn, cfg, rec, scope).await
+    }
+
     async fn resolve_pending_contract(
         &self,
         cfg: &ExecutorConfig,
@@ -728,41 +732,14 @@ impl MigrationBackend for PostgresBackend<'_> {
         journal::resolve_pending_contract(self.conn, cfg, pc, resolution, by).await
     }
 
-    async fn record_deploy_recovery_open(
-        &self,
-        cfg: &ExecutorConfig,
-        deploy_id: &str,
-        pending_version: &str,
-        by: &str,
-    ) -> Result<(), JournalError> {
-        journal::record_deploy_recovery_open(self.conn, cfg, deploy_id, pending_version, by).await
-    }
-
-    async fn mark_deploy_recovery_reached_success(
-        &self,
-        cfg: &ExecutorConfig,
-        deploy_id: &str,
-        pending_version: &str,
-        by: &str,
-    ) -> Result<(), JournalError> {
-        journal::mark_deploy_recovery_reached_success(
-            self.conn,
-            cfg,
-            deploy_id,
-            pending_version,
-            by,
-        )
-        .await
-    }
-
-    async fn mark_deploy_recovery_reached_success_batch(
+    async fn mark_deploy_recovery_committed_batch(
         &self,
         cfg: &ExecutorConfig,
         deploy_id: &str,
         pending_versions: &[String],
         by: &str,
     ) -> Result<(), JournalError> {
-        journal::mark_deploy_recovery_reached_success_batch(
+        journal::mark_deploy_recovery_committed_batch(
             self.conn,
             cfg,
             deploy_id,

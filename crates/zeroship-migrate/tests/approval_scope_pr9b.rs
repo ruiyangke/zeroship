@@ -316,6 +316,7 @@ async fn approving_rename_version_does_not_authorize_co_bundled_dropcolumn() {
             &cfg,
             "app_test",
             zeroship_migrate::executor::LockMode::Acquire,
+            None,
         )
         .await
         .expect_err("a co-bundled unreviewed dropColumn must be refused even under approval");
@@ -366,6 +367,7 @@ async fn approving_the_exact_destructive_version_authorizes_only_that_op() {
             &cfg,
             "app_test",
             zeroship_migrate::executor::LockMode::Acquire,
+            None,
         )
         .await
         .expect_err("the wrong scope must refuse the drop");
@@ -388,6 +390,7 @@ async fn approving_the_exact_destructive_version_authorizes_only_that_op() {
             &cfg,
             "app_test",
             zeroship_migrate::executor::LockMode::Acquire,
+            None,
         )
         .await
         .expect("the exact-version scope must authorize the drop");
@@ -426,6 +429,7 @@ async fn unscoped_empty_scope_authorizes_no_destructive_op() {
             &cfg,
             "app_test",
             zeroship_migrate::executor::LockMode::Acquire,
+            None,
         )
         .await
         .expect_err("an empty scope must authorize NOTHING destructive");
@@ -465,6 +469,7 @@ async fn approval_scope_all_preserves_legacy_blanket_behavior() {
             &cfg,
             "app_test",
             zeroship_migrate::executor::LockMode::Acquire,
+            None,
         )
         .await
         .expect("ApprovalScope::All must apply the destructive op (legacy blanket behavior)");

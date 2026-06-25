@@ -1185,15 +1185,18 @@ async fn apply_bundle_ir_migrations(
     //   * `deploy_id` — a per-deploy UUIDv7 generated ONCE here, keying this deploy's
     //     recovery markers (the strict same-deploy scope).
     //   * `opened_this_deploy` — the obligations every file's EXPAND opened, each
-    //     also stamped with an `open` recovery marker (admin-written, append-only).
+    //     also stamped with an `in_progress` recovery marker IN THE SAME TRANSACTION as
+    //     the obligation (PR9e — engine-stamped, admin-written, append-only). Every
+    //     outstanding obligation therefore ALWAYS has a marker.
     //   * CRASH-RECOVERY leg (below, before the loop, under the held lock): reconcile
-    //     any `open` PRIOR-deploy markers whose obligation is still outstanding by
-    //     driving the same abort, then mark them reconciled — BEFORE applying the new
-    //     bundle.
+    //     any `in_progress` PRIOR-deploy markers whose obligation is still outstanding
+    //     by driving the same abort, then mark them reconciled — BEFORE applying the
+    //     new bundle.
     //   * IN-PROCESS leg (the loop's Err arm, before the lock release): drive the
     //     abort over `opened_this_deploy`, then mark its markers reconciled.
-    //   * SUCCESS: mark this deploy's markers reconciled (the EXPANDs legitimately
-    //     remain pending as the §2.0.2 cross-deploy partition — NOT a half-state).
+    //   * SUCCESS: PROMOTE this deploy's markers `in_progress` → `committed` (PR9e —
+    //     the EXPANDs legitimately remain pending as the §2.0.2 cross-deploy partition;
+    //     a `committed` marker is excluded by the crash-recovery leg).
     //
     // All under the SINGLE whole-deploy project lock acquired above, so it is
     // race-free. SQLite no-ops every recovery method (no online rename ⇒ no half-state).
@@ -1203,9 +1206,10 @@ async fn apply_bundle_ir_migrations(
     // Run the whole file loop under the held lock, capturing the result so the lock
     // is released on EVERY path (success/error/early-return) before we surface it.
     let loop_result: Result<(), DeployMigrateError> = async {
-        // CRASH-RECOVERY leg — reconcile any prior-deploy `open` recovery markers
-        // whose obligation is STILL outstanding (a process death between an EXPAND
-        // commit and the in-process abort of an EARLIER deploy). Idempotent: the
+        // CRASH-RECOVERY leg — reconcile any prior-deploy `in_progress` recovery
+        // markers whose obligation is STILL outstanding (a process death between an
+        // EXPAND commit and the in-process abort of an EARLIER deploy, OR a `committed`
+        // promotion that failed — both correctly recoverable). Idempotent: the
         // abort's `DROP … IF EXISTS` is a no-op if already done, and the marker is
         // marked `reconciled` only after the abort succeeds. This runs FIRST so the
         // new bundle never applies on top of a half-renamed table from a crashed
@@ -1319,6 +1323,14 @@ async fn apply_bundle_ir_migrations(
                 exec_cfg,
                 &ir_actor,
                 LockMode::AlreadyHeld,
+                // PR9e — thread THIS deploy's recovery scope so a same-deploy EXPAND's
+                // obligation row + its `in_progress` recovery marker commit in ONE
+                // transaction (engine-stamped). Every outstanding obligation then
+                // ALWAYS has a marker — the obligation-vs-marker crash window
+                // (PR9d-rev finding 1) is structurally closed.
+                Some(&zeroship_migrate::journal::DeployRecoveryScope {
+                    deploy_id: &deploy_id,
+                }),
             )
             .await
             .map_err(DeployMigrateError::from)?;
@@ -1333,39 +1345,13 @@ async fn apply_bundle_ir_migrations(
                 .map(|m| m.version.as_str().to_string()),
         );
 
-        // PR9d-rev finding 1 — CRASH WINDOW between the engine committing the
-        // obligation row (above, inside `apply_plan` → `record_pending_contract`) and
-        // the control loop writing its `open` recovery marker (below). These are two
-        // separate statements, NOT one transaction (the marker keys on the
-        // control-plane `deploy_id` the migrate engine does not carry). A process
-        // death here leaves the obligation OUTSTANDING with no marker — a fail-closed
-        // residual the auto crash-recovery leg does NOT cover (it JOINs the marker
-        // table), cleared only by `resolve-pending`. Documented in db-migrations.md
-        // (residue 2) and pinned by the obligation-without-marker characterization
-        // test. The trip is a no-op unless that test arms it.
-        if !outcome.opened_obligations.is_empty() {
-            zeroship_migrate::fault::trip(
-                zeroship_migrate::fault::points::DEPLOY_AFTER_OBLIGATION_BEFORE_MARKER,
-            )
-            .map_err(|e| DeployMigrateError::Apply(EngineError::Apply(e)))?;
-        }
-
-        // PR9d MED — record an `open` deploy-recovery marker for every obligation
-        // THIS file's EXPAND just opened (keyed on this deploy's `deploy_id`), and
-        // accumulate the obligation so a LATER file's failure can abort exactly
-        // these. The marker is written admin-side, append-only, under the held lock
-        // — it durably survives a process crash for the crash-recovery leg above.
-        for pc in &outcome.opened_obligations {
-            backend
-                .record_deploy_recovery_open(
-                    exec_cfg,
-                    &deploy_id,
-                    &pc.pending_version,
-                    &ir_actor,
-                )
-                .await
-                .map_err(|e| DeployMigrateError::Apply(EngineError::Apply(ApplyError::Journal(e))))?;
-        }
+        // PR9e — the obligation-vs-marker crash window is CLOSED structurally. The
+        // engine now writes each EXPAND's `in_progress` recovery marker in the SAME
+        // transaction as its obligation row (via the threaded `DeployRecoveryScope`
+        // above), so there is no longer any window in which an obligation is committed
+        // without its marker. The control loop only ACCUMULATES the opened obligations
+        // so a LATER same-deploy file's failure can abort exactly these (the in-process
+        // abort leg below); it no longer writes the marker itself.
         opened_this_deploy.extend(outcome.opened_obligations.iter().cloned());
 
         // ADVANCE the cross-file registry + live-set with THIS file's freshly-
@@ -1380,28 +1366,32 @@ async fn apply_bundle_ir_migrations(
     }
     .await;
 
-    // PR9d MED — DEPLOY-SCOPED RECOVERY decision, run while the whole-deploy project
-    // lock is STILL HELD (before the release below), so it is race-free against any
-    // concurrent same-project deploy. Two arms:
+    // PR9d MED / PR9e — DEPLOY-SCOPED RECOVERY decision, run while the whole-deploy
+    // project lock is STILL HELD (before the release below), so it is race-free against
+    // any concurrent same-project deploy. Two arms:
     //
     //   * loop FAILED → IN-PROCESS abort leg: drive the SHARED abort over exactly
     //     THIS deploy's opened obligations (`opened_this_deploy`), rolling back every
     //     same-deploy half-renamed table, then mark this deploy's recovery markers
-    //     reconciled. The ORIGINAL loop error is still surfaced below (the creator
-    //     still gets their 4xx) — recovery is additive cleanup on the failure path,
-    //     it never masks the failure. An abort-DDL failure here is logged and leaves
-    //     the markers `open` (the documented irreducible residue: the NEXT same-app
-    //     deploy's crash-recovery leg re-attempts it, and the interlock still refuses
-    //     any new bundle touching the half-renamed table until cleared).
+    //     reconciled (closing them). The ORIGINAL loop error is still surfaced below
+    //     (the creator still gets their 4xx) — recovery is additive cleanup on the
+    //     failure path, it never masks the failure. An abort-DDL failure here is logged
+    //     and leaves the markers net-`in_progress` (the next same-app deploy's
+    //     crash-recovery leg re-attempts it, and the interlock still refuses any new
+    //     bundle touching the half-renamed table until cleared).
     //
-    //   * loop SUCCEEDED → mark this deploy's recovery markers reconciled. The EXPANDs
-    //     legitimately remain pending as the §2.0.2 cross-deploy partition — a
-    //     SUCCESSFUL go-live is NOT a half-state, so its markers must close so the
-    //     crash-recovery leg never mistakes them for a crashed deploy.
+    //   * loop SUCCEEDED → PROMOTE this deploy's recovery markers `in_progress` →
+    //     `committed` (PR9e). The EXPANDs legitimately remain pending as the §2.0.2
+    //     cross-deploy partition — a SUCCESSFUL go-live is NOT a half-state, so its
+    //     markers are promoted to `committed` so the crash-recovery leg (which recovers
+    //     ONLY net-`in_progress`) excludes them. A promotion FAILURE leaves them
+    //     net-`in_progress` — the fail-safe state: the next deploy auto-aborts the
+    //     half-rename (no data loss; a pending contract has not cut over), never a
+    //     silent revert of a committed contract.
     //
     // CRITICAL: this whole block runs BEFORE the lock release below and MUST NOT
     // early-return (`?`) — that would skip the single-release PR9a invariant. The
-    // success-path reconcile failure is captured into `recovery_result` and surfaced
+    // success-path promotion failure is captured into `recovery_result` and surfaced
     // AFTER the release.
     let mut recovery_result: Result<(), DeployMigrateError> = Ok(());
     if !opened_this_deploy.is_empty() {
@@ -1412,16 +1402,17 @@ async fn apply_bundle_ir_migrations(
             .is_err() =>
             {
                 // CRASH SIMULATION (test-only fault; inert in production). The
-                // recovery markers are durably written but the process "dies" before
-                // the in-process abort — leaving the obligation OUTSTANDING + its
-                // marker `open`. The NEXT same-app deploy's crash-recovery leg
-                // converges this. Surface the original loop error below (the lock is
-                // released first), exactly as a real crash-then-restart would.
+                // recovery markers are durably written (engine-stamped, atomic with the
+                // obligation) but the process "dies" before the in-process abort —
+                // leaving the obligation OUTSTANDING + its marker net-`in_progress`. The
+                // NEXT same-app deploy's crash-recovery leg converges this. Surface the
+                // original loop error below (the lock is released first), exactly as a
+                // real crash-then-restart would.
                 tracing::warn!(
                     app_id = %app_id,
                     error = %orig,
                     "deploy-migrate: PR9d — simulated crash before the in-process abort \
-                     (test fault); leaving the recovery marker `open` for the next deploy"
+                     (test fault); leaving the recovery marker net-`in_progress` for the next deploy"
                 );
             }
             Err(orig) => {
@@ -1456,17 +1447,17 @@ async fn apply_bundle_ir_migrations(
                                 tracing::warn!(
                                     app_id = %app_id, error = %e,
                                     "deploy-migrate: PR9d — abort succeeded but marking the \
-                                     recovery marker reconciled failed; it stays `open` (next \
-                                     deploy's crash-recovery is a harmless no-op on the already-\
-                                     aborted obligation)"
+                                     recovery marker reconciled failed; it stays net-`in_progress` \
+                                     (next deploy's crash-recovery is a harmless no-op on the \
+                                     already-aborted obligation)"
                                 );
                             }
                         }
                     }
                     Err(abort_err) => {
-                        // The irreducible residue: the abort DDL itself failed (DB
-                        // unreachable mid-recovery). Leave the markers `open` so the
-                        // next same-app deploy re-attempts; the interlock keeps the
+                        // The residue: the abort DDL itself failed (DB unreachable
+                        // mid-recovery). Leave the markers net-`in_progress` so the next
+                        // same-app deploy re-attempts; the interlock keeps the
                         // half-renamed table fenced until cleared. Fail-closed. We do
                         // NOT overwrite the ORIGINAL loop error (the creator's 4xx
                         // cause) — that is surfaced below.
@@ -1475,143 +1466,85 @@ async fn apply_bundle_ir_migrations(
                             original_error = %orig,
                             abort_error = %abort_err,
                             "deploy-migrate: PR9d — same-deploy EXPAND abort FAILED; the obligation \
-                             stays outstanding + its recovery marker stays `open` (next deploy re-\
-                             attempts; resolve-pending --abort is the manual escape). The interlock \
-                             still refuses any new bundle touching the table until cleared."
+                             stays outstanding + its recovery marker stays net-`in_progress` (next \
+                             deploy re-attempts; resolve-pending --abort is the manual escape). The \
+                             interlock still refuses any new bundle touching the table until cleared."
                         );
                     }
                 }
             }
             Ok(()) => {
                 // The deploy SUCCEEDED, so its EXPANDs legitimately stay pending
-                // (§2.0.2). PR9d HIGH — the crash-vs-legit discriminator. We do this in
-                // TWO append phases so that a `reconciled`-append failure can NEVER
-                // re-expose this go-live to a future deploy's crash-recovery leg:
+                // (§2.0.2). PR9e — PROMOTE this deploy's recovery markers from
+                // `in_progress` to `committed` in ONE atomic batch. This is the
+                // crash-vs-legit discriminator: a net-`committed` marker means the
+                // deploy reached its success arm (the EXPAND went go-live), so
+                // `outstanding_deploy_recoveries` EXCLUDES it (it only recovers
+                // net-`in_progress`).
                 //
-                //   1. `reached_success` — stamped FIRST, for every obligation, in ONE
-                //      ATOMIC transaction (PR9d-crit HIGH), BEFORE any `reconciled`
-                //      append. A net-`reached_success` marker means the deploy reached
-                //      its success arm (the EXPAND went go-live), so
-                //      `outstanding_deploy_recoveries` EXCLUDES it (it only returns
-                //      net-`open`). Even if step 2 fails, the marker is net-
-                //      `reached_success`, not `open` — so the next deploy's crash-
-                //      recovery leg never false-aborts this legitimately-pending
-                //      contract (closing the phase-2 HIGH window). The atomic batch
-                //      ALSO closes the multi-EXPAND partial-stamp sub-case: pre-PR9d-crit
-                //      a per-obligation loop could stamp obligation A then fail on B,
-                //      leaving A protected but B a bare `open` over a live contract —
-                //      now A and B flip together or not at all.
+                // **Why a promotion failure can NO LONGER false-abort a committed
+                // go-live (the MED closure — the inversion).** The marker is BORN
+                // `in_progress` atomically with the obligation (engine-stamped), and
+                // `in_progress` itself is the "this deploy has not durably reached a
+                // terminal outcome" signal. The success arm's ONLY job here is to
+                // PROMOTE `in_progress` → `committed`. If that promotion FAILS (DB
+                // unreachable the instant the go-live reaches its success arm), the
+                // marker stays net-`in_progress` — the *recoverable* (fail-safe) state.
+                // So the next deploy's recovery leg AUTO-ABORTS the half-rename rather
+                // than silently keeping live a contract it cannot distinguish from a
+                // crash. Aborting is SAFE because a *pending* contract has not cut over
+                // reads/writes to the shadow column (the dual-write trigger keeps both
+                // in sync; the drop-old-column contract has not run), so NO data is
+                // lost; the abort's `DROP … IF EXISTS` is idempotent, the obligation is
+                // discharged `aborted`, and the app re-runs the rename cleanly. This is
+                // the inverse of the pre-PR9e `open`+later-stamp design, whose stamp
+                // failure left the marker in the *protected* `open`/`reached_success`
+                // direction and let a later deploy silently revert a live contract.
                 //
-                //      IRREDUCIBLE RESIDUAL (honest narrowing — PR9d-crit HIGH). If the
-                //      phase-1 transaction ITSELF fails (DB unreachable the instant the
-                //      go-live reached its success arm), ALL of this deploy's markers
-                //      stay net-`open` over a LEGITIMATELY-pending live contract
-                //      (trigger + shadow column committed, obligation pending). This is
-                //      NOT self-healing and NOT recoverable by a re-run: the go-live's
-                //      physical schema state is byte-identical to a genuine crash
-                //      half-state (compare the two recovery tests — both leave the
-                //      trigger + shadow column live + the obligation outstanding), so no
-                //      durable signal distinguishes them; and an idempotent re-run finds
-                //      the EXPAND `already_outstanding` (engine `already_outstanding`
-                //      guard) so it never re-opens the obligation, `opened_this_deploy`
-                //      is empty, and this success arm never re-stamps the stale marker.
-                //      Until the operator runs `resolve-pending --apply` (complete the
-                //      rename, discharging the obligation so the recovery leg's
-                //      outstanding-join finds nothing to abort), an UNRELATED next deploy
-                //      WOULD false-abort this live contract. The runbook documents this;
-                //      a re-run is NOT the remedy. We surface the phase-1 failure as a
-                //      hard error so the operator is alerted to run the manual clearance.
-                //   2. `reconciled` — best-effort cleanup so the marker log closes
-                //      tidily. A failure here is NON-fatal: the marker is already net-
-                //      `reached_success` (protected), so we log and continue rather than
-                //      hard-failing a go-live. The next deploy's success path is a no-op
-                //      on an already-protected marker.
-                'stamp: {
-                    // Phase 1 — stamp `reached_success` for ALL of this deploy's
-                    // obligations in ONE atomic transaction. The
-                    // `DEPLOY_SUCCESS_REACHED_SUCCESS_STAMP_FAILS` fault (inert in
-                    // production) simulates the irreducible phase-1 transaction failure
-                    // so the characterization test can pin the documented residual +
-                    // the `resolve-pending --apply` safe-clearance behavior.
-                    let pending_versions: Vec<String> = opened_this_deploy
-                        .iter()
-                        .map(|pc| pc.pending_version.clone())
-                        .collect();
-                    let phase1 = if zeroship_migrate::fault::trip(
-                        zeroship_migrate::fault::points::DEPLOY_SUCCESS_REACHED_SUCCESS_STAMP_FAILS,
-                    )
-                    .is_err()
-                    {
-                        Err(zeroship_migrate::journal::JournalError::Backend(
-                            "fault-injection: simulated phase-1 `reached_success` stamp failure"
-                                .into(),
-                        ))
-                    } else {
-                        backend
-                            .mark_deploy_recovery_reached_success_batch(
-                                exec_cfg,
-                                &deploy_id,
-                                &pending_versions,
-                                &ir_actor,
-                            )
-                            .await
-                    };
-                    if let Err(e) = phase1 {
-                        // The irreducible residual: every marker stays net-`open` over a
-                        // live contract. Surface a hard error (the operator must run
-                        // `resolve-pending --apply` — a re-run will NOT clear it). Do
-                        // NOT attempt phase 2.
-                        tracing::error!(
-                            app_id = %app_id, error = %e,
-                            "deploy-migrate: PR9d-crit HIGH — the phase-1 `reached_success` \
-                             discriminator stamp FAILED; this go-live's recovery markers stay \
-                             net-`open` over a LIVE contract. This is NOT recoverable by a re-run \
-                             (the EXPAND is already_outstanding). The operator MUST run \
-                             `resolve-pending --apply` to discharge the obligation; until then an \
-                             unrelated deploy's crash-recovery leg could false-abort the live \
-                             contract."
-                        );
-                        recovery_result = Err(DeployMigrateError::Apply(EngineError::Apply(
-                            ApplyError::Journal(e),
-                        )));
-                        break 'stamp;
-                    }
-                    // Phase 2 — best-effort `reconciled` (cleanup only; the marker is
-                    // already net-`reached_success` ⇒ never crash-recovered).
-                    for pc in &opened_this_deploy {
-                        // PR9d HIGH test fault: simulate the `reconciled` append failing
-                        // (the exact HIGH window) so the regression test can assert the
-                        // marker stays net-`reached_success` and the NEXT deploy's
-                        // crash-recovery leg does NOT false-abort the live contract.
-                        // Inert in production.
-                        let recon_result = if zeroship_migrate::fault::trip(
-                            zeroship_migrate::fault::points::DEPLOY_SUCCESS_RECONCILE_FAILS,
+                // The batch is atomic so a multi-EXPAND go-live promotes ALL or NONE —
+                // there is no partial window where one obligation is `committed` and a
+                // sibling stays `in_progress`. We surface a promotion failure as a HARD
+                // error so the operator is alerted (the go-live's DDL is committed but
+                // the deploy returns Err); the residual is now FAIL-SAFE (the next
+                // deploy auto-aborts), not the pre-PR9e irreducible manual-only residue.
+                let pending_versions: Vec<String> = opened_this_deploy
+                    .iter()
+                    .map(|pc| pc.pending_version.clone())
+                    .collect();
+                // The `DEPLOY_SUCCESS_COMMITTED_STAMP_FAILS` fault (inert in production)
+                // simulates the promotion failure so the no-false-abort characterization
+                // test can pin the fail-safe auto-recovery behavior.
+                let promote = if zeroship_migrate::fault::trip(
+                    zeroship_migrate::fault::points::DEPLOY_SUCCESS_COMMITTED_STAMP_FAILS,
+                )
+                .is_err()
+                {
+                    Err(zeroship_migrate::journal::JournalError::Backend(
+                        "fault-injection: simulated `committed` promotion failure".into(),
+                    ))
+                } else {
+                    backend
+                        .mark_deploy_recovery_committed_batch(
+                            exec_cfg,
+                            &deploy_id,
+                            &pending_versions,
+                            &ir_actor,
                         )
-                        .is_err()
-                        {
-                            Err(zeroship_migrate::journal::JournalError::Backend(
-                                "fault-injection: simulated `reconciled` append failure".into(),
-                            ))
-                        } else {
-                            backend
-                                .mark_deploy_recovery_reconciled(
-                                    exec_cfg,
-                                    &deploy_id,
-                                    &pc.pending_version,
-                                    &ir_actor,
-                                )
-                                .await
-                        };
-                        if let Err(e) = recon_result {
-                            tracing::warn!(
-                                app_id = %app_id, error = %e,
-                                "deploy-migrate: PR9d — go-live `reconciled` append failed; the \
-                                 marker is already net-`reached_success`, so the crash-recovery \
-                                 leg still excludes it (the legitimately-pending contract is \
-                                 protected). Non-fatal — leaving the marker `reached_success`."
-                            );
-                        }
-                    }
+                        .await
+                };
+                if let Err(e) = promote {
+                    tracing::error!(
+                        app_id = %app_id, error = %e,
+                        "deploy-migrate: PR9e — the `committed` recovery-marker promotion \
+                         FAILED; this go-live's markers stay net-`in_progress` over a LIVE \
+                         contract. This is FAIL-SAFE: the NEXT same-app deploy's crash-recovery \
+                         leg will AUTO-ABORT the half-rename (no data loss — a pending contract \
+                         has not cut over to the shadow column), then the app can re-run the \
+                         rename cleanly. Surfacing a hard error so the operator is alerted."
+                    );
+                    recovery_result = Err(DeployMigrateError::Apply(EngineError::Apply(
+                        ApplyError::Journal(e),
+                    )));
                 }
             }
         }

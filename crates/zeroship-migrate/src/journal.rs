@@ -285,6 +285,29 @@ pub struct PendingContractRecord<'a> {
     pub by: &'a str,
 }
 
+/// The deploy-scoped recovery SCOPE threaded into the EXPAND obligation write so
+/// the obligation row and its recovery marker are committed in ONE transaction
+/// (PR9e). When present, [`record_pending_contract_with_recovery`] appends a
+/// `state='in_progress'` row to `schema_deploy_recovery` in the SAME `BEGIN … COMMIT`
+/// as the `pending` obligation row — so every outstanding obligation ALWAYS has a
+/// marker (closing the PR9d-rev finding-1 obligation-vs-marker crash window: the two
+/// rows commit atomically or not at all).
+///
+/// The marker is born `in_progress`, meaning "the deploy that opened this EXPAND has
+/// not yet durably reached a terminal outcome." The deploy's success arm later
+/// promotes it to `committed` (the legit-pending go-live signal; never recovered);
+/// a same-deploy / crash abort closes it `aborted` / `reconciled`. The
+/// crash-recovery leg recovers ONLY net-`in_progress` markers — so a phase-1
+/// promotion FAILURE leaves the marker in the *recoverable* (fail-safe) state, never
+/// the *protected* state (PR9e: the inversion that closes the MED false-abort).
+#[derive(Debug, Clone, Copy)]
+pub struct DeployRecoveryScope<'a> {
+    /// The per-deploy id (UUIDv7) the marker is keyed on — generated once per deploy
+    /// by the control loop and threaded into the engine apply path so the marker is
+    /// engine-stamped in the obligation's transaction.
+    pub deploy_id: &'a str,
+}
+
 /// One journal entry (completed) or inflight marker (started), as read back for
 /// the drift check + pending computation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -500,7 +523,7 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
     ))
     .await?;
 
-    // 2a-quater. The append-only DEPLOY-SCOPED RECOVERY marker log (PR9d MED).
+    // 2a-quater. The append-only DEPLOY-SCOPED RECOVERY marker log (PR9d MED / PR9e).
     //     A multi-file APPROVED bundle applies per-step with NO whole-bundle
     //     transaction (`executor.rs`: BEGIN;up;journal;COMMIT per migration). So an
     //     in-scope online-rename EXPAND in file A commits durably (E1/E2/E3 +
@@ -510,39 +533,54 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
     //     half-renamed behind the creator's 4xx, owing a pending contract.
     //
     //     This log makes the WHOLE deploy a RECOVERABLE unit. Each same-deploy EXPAND
-    //     writes an `open` row keyed on a per-deploy `deploy_id` (a UUIDv7 generated
-    //     once at the start of the IR loop) + the EXPAND's `pending_version`. If a
-    //     later same-deploy file fails, the control loop drives the SHARED abort
-    //     (`build_abort_steps`) over exactly THIS deploy's `open` rows under the still
-    //     -held project lock, discharging each obligation `aborted` and marking the
-    //     recovery row `reconciled` — so the refused bundle leaves NO half-renamed
-    //     table. On a process CRASH between the EXPAND commit and the in-process abort,
-    //     the `open` row SURVIVES; the NEXT same-app deploy (serialized by the project
-    //     lock) reconciles it FIRST, before applying the new bundle. On deploy SUCCESS
-    //     the loop marks its rows `reconciled` (the EXPANDs legitimately remain pending
-    //     as the §2.0.2 cross-deploy partition — NOT a half-state).
+    //     writes an `in_progress` row keyed on a per-deploy `deploy_id` (a UUIDv7
+    //     generated once at the start of the IR loop) + the EXPAND's `pending_version`
+    //     — and that row is committed in the SAME transaction as the obligation row
+    //     (PR9e — [`record_pending_contract_with_recovery`]), so every outstanding
+    //     obligation ALWAYS has a marker. If a later same-deploy file fails, the
+    //     control loop drives the SHARED abort (`build_abort_steps`) over exactly THIS
+    //     deploy's net-`in_progress` rows under the still-held project lock, discharging
+    //     each obligation `aborted` and marking the recovery row `reconciled` — so the
+    //     refused bundle leaves NO half-renamed table. On a process CRASH between the
+    //     EXPAND+marker commit and the in-process abort, the `in_progress` row SURVIVES;
+    //     the NEXT same-app deploy (serialized by the project lock) reconciles it FIRST,
+    //     before applying the new bundle. On deploy SUCCESS the loop promotes its rows to
+    //     `committed` (the EXPANDs legitimately remain pending as the §2.0.2 cross-deploy
+    //     partition — NOT a half-state).
     //
     //     **Strictly same-deploy-scoped.** Both legs operate only over rows whose
-    //     `deploy_id` is THIS deploy's (in-process) or a net-`open` prior-deploy row
-    //     whose obligation is still `outstanding` (crash leg). PR9d HIGH — the success
-    //     arm stamps the marker `reached_success` BEFORE appending `reconciled`, and the
-    //     crash leg's resume query (`outstanding_deploy_recoveries`) only returns
-    //     net-`open` markers. So a legitimately-pending prior-deploy go-live is excluded
-    //     EVEN if its `reconciled` append failed (its marker is net-`reached_success`,
-    //     not `open`): the crash leg can never false-abort a live contract.
+    //     `deploy_id` is THIS deploy's (in-process) or a net-`in_progress` prior-deploy
+    //     row whose obligation is still `outstanding` (crash leg).
+    //
+    //     **The crash-vs-legit discriminator (PR9e — the inversion).** The marker is
+    //     born `in_progress` (with the obligation, atomically), and `in_progress` itself
+    //     IS the "this deploy has not durably reached a terminal outcome" signal. The
+    //     success arm PROMOTES it to `committed` in one atomic batch; the crash leg's
+    //     resume query (`outstanding_deploy_recoveries`) recovers ONLY net-`in_progress`
+    //     markers. A net-`committed` marker is a fully-reached go-live ⇒ EXCLUDED, never
+    //     aborted. Crucially, if the `committed` promotion FAILS (DB unreachable the
+    //     instant the go-live reaches its success arm) the marker stays net-`in_progress`
+    //     — the *recoverable* (fail-safe) state — so the next deploy AUTO-ABORTS the
+    //     half-rename rather than silently mistaking a no-longer-protected marker for a
+    //     committed one. A *pending* contract has not cut over reads/writes to the shadow
+    //     column (the dual-write trigger keeps both in sync, and the drop-old-column
+    //     contract has not run), so aborting it loses no data. This is the inverse of the
+    //     pre-PR9e `open`+later-stamp design, whose stamp-failure direction *protected*
+    //     the marker and let a later deploy silently revert a live contract it could not
+    //     distinguish from a crash.
     //
     //     **Append-only + immutable + admin-only** (same posture as
-    //     `schema_pending_contracts`): `state` transitions open→reconciled by
-    //     APPENDING a `reconciled` row (never UPDATE/DELETE); the net state per
-    //     (deploy_id, pending_version) is the latest `event_seq` row. The migrator role
-    //     has NO grant on the meta schema, so a creator migration can neither forge nor
-    //     suppress a recovery marker.
+    //     `schema_pending_contracts`): `state` transitions
+    //     in_progress→committed/aborted/reconciled by APPENDING a row (never
+    //     UPDATE/DELETE); the net state per (deploy_id, pending_version) is the latest
+    //     `event_seq` row. The migrator role has NO grant on the meta schema, so a
+    //     creator migration can neither forge nor suppress a recovery marker.
     conn.batch_execute(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_deploy_recovery (
             event_seq        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             deploy_id        TEXT NOT NULL,
             pending_version  TEXT NOT NULL,
-            state            TEXT NOT NULL CHECK (state IN ('open','reached_success','reconciled')),
+            state            TEXT NOT NULL CHECK (state IN ('in_progress','committed','aborted','reconciled')),
             \"by\"             TEXT NOT NULL,
             \"at\"             TIMESTAMPTZ NOT NULL DEFAULT now()
         )"
@@ -1098,32 +1136,99 @@ pub async fn record_pending_contract(
     cfg: &ExecutorConfig,
     rec: PendingContractRecord<'_>,
 ) -> Result<(), JournalError> {
+    record_pending_contract_with_recovery(conn, cfg, rec, None).await
+}
+
+/// Open a cross-deploy pending-contract obligation AND, when a
+/// [`DeployRecoveryScope`] is supplied, its deploy-scoped recovery marker — in ONE
+/// transaction (PR9e).
+///
+/// This is the engine-stamped write that closes the obligation-vs-marker crash
+/// window (PR9d-rev finding 1): the `pending` obligation row and the `in_progress`
+/// recovery marker are bracketed in a single `BEGIN … COMMIT`, so either BOTH commit
+/// or NEITHER does. Every outstanding obligation therefore ALWAYS has a marker — the
+/// auto crash-recovery leg's JOIN can never miss one.
+///
+/// With `scope = None` this is exactly the routine (`.sql` / non-deploy / resolve /
+/// abort) write: a single autocommit obligation INSERT with no marker — identical to
+/// the pre-PR9e [`record_pending_contract`]. The deploy path passes
+/// `Some(DeployRecoveryScope { deploy_id })`.
+///
+/// Both INSERTs are admin-side (same `Client`, same role), under the held project
+/// lock and the immutability trigger.
+///
+/// # Errors
+/// [`JournalError::Db`] on insert/commit failure. When a scope is present and any
+/// statement fails, the whole transaction is rolled back so there is never an
+/// obligation without its marker (nor a marker without its obligation).
+pub async fn record_pending_contract_with_recovery(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    rec: PendingContractRecord<'_>,
+    scope: Option<DeployRecoveryScope<'_>>,
+) -> Result<(), JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema);
     let cv_json = serde_json::to_string(rec.contract_versions).map_err(|e| {
         JournalError::Backend(format!("failed to serialize contract_versions JSON: {e}"))
     })?;
-    let n = conn
-        .execute(
-            &format!(
-                "INSERT INTO {meta}.schema_pending_contracts
-                     (state, \"table\", from_col, to_col, ty, pending_version,
-                      plan_version, contract_versions, \"by\")
-                 VALUES ('{pending}', $1, $2, $3, $4, $5, $6, $7, $8)",
-                pending = PendingState::Pending.as_str()
-            ),
-            &[
-                &rec.table,
-                &rec.from_col,
-                &rec.to_col,
-                &rec.ty,
-                &rec.pending_version,
-                &rec.plan_version,
-                &cv_json,
-                &rec.by,
-            ],
-        )
-        .await?;
-    debug_assert_eq!(n, 1, "record_pending_contract must insert exactly one row");
+    let obligation_sql = format!(
+        "INSERT INTO {meta}.schema_pending_contracts
+             (state, \"table\", from_col, to_col, ty, pending_version,
+              plan_version, contract_versions, \"by\")
+         VALUES ('{pending}', $1, $2, $3, $4, $5, $6, $7, $8)",
+        pending = PendingState::Pending.as_str()
+    );
+    let obligation_params: [&(dyn compio_postgres::types::ToSql + Sync); 8] = [
+        &rec.table,
+        &rec.from_col,
+        &rec.to_col,
+        &rec.ty,
+        &rec.pending_version,
+        &rec.plan_version,
+        &cv_json,
+        &rec.by,
+    ];
+
+    // No recovery scope (routine / resolve / abort path) — a single autocommit
+    // obligation INSERT, byte-identical to the pre-PR9e behavior.
+    let Some(scope) = scope else {
+        let n = conn.execute(&obligation_sql, &obligation_params).await?;
+        debug_assert_eq!(n, 1, "record_pending_contract must insert exactly one row");
+        return Ok(());
+    };
+
+    // Deploy path — bracket the obligation row AND its `in_progress` recovery marker
+    // in ONE transaction so they commit atomically (PR9e: no obligation-without-marker
+    // window). Roll the whole thing back on any failure.
+    conn.batch_execute("BEGIN").await?;
+    let result = async {
+        let n = conn.execute(&obligation_sql, &obligation_params).await?;
+        debug_assert_eq!(n, 1, "record_pending_contract must insert exactly one row");
+        let m = conn
+            .execute(
+                &format!(
+                    "INSERT INTO {meta}.schema_deploy_recovery
+                         (deploy_id, pending_version, state, \"by\")
+                     VALUES ($1, $2, 'in_progress', $3)"
+                ),
+                &[&scope.deploy_id, &rec.pending_version, &rec.by],
+            )
+            .await?;
+        debug_assert_eq!(m, 1, "the in_progress recovery marker must insert exactly one row");
+        Ok::<(), JournalError>(())
+    }
+    .await;
+    if let Err(e) = result {
+        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+            tracing::warn!(
+                error = %rb,
+                "zeroship-migrate: ROLLBACK failed after a \
+                 record_pending_contract_with_recovery error (PR9e)"
+            );
+        }
+        return Err(e);
+    }
+    conn.batch_execute("COMMIT").await?;
     Ok(())
 }
 
@@ -1180,9 +1285,9 @@ pub async fn resolve_pending_contract(
 // -- deploy-scoped recovery markers (PR9d MED) ------------------------------
 
 /// An OUTSTANDING deploy-scoped recovery obligation: a same-deploy EXPAND whose
-/// recovery row is net-`open` (no later `reconciled` row). Carried back to the
-/// control loop so it can drive the same-deploy abort over exactly these
-/// `pending_version`s.
+/// recovery row is net-`in_progress` (never promoted to `committed`, never closed
+/// `reconciled`). Carried back to the control loop so it can drive the same-deploy
+/// abort over exactly these `pending_version`s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeployRecovery {
     /// The per-deploy id (UUIDv7) the EXPAND was opened under.
@@ -1192,54 +1297,28 @@ pub struct DeployRecovery {
     pub pending_version: String,
 }
 
-/// Open a deploy-scoped recovery marker for a same-deploy EXPAND (PR9d MED): APPEND
-/// an `open` row keyed on `(deploy_id, pending_version)`. Admin-written (the
-/// migrator has no meta-schema grant), under the immutability trigger.
+/// Promote a deploy-scoped recovery marker to `committed` (PR9e): APPEND a
+/// `committed` row keyed on `(deploy_id, pending_version)`.
 ///
-/// # Errors
-/// [`JournalError::Db`] on insert failure.
-pub async fn record_deploy_recovery_open(
-    conn: &Client,
-    cfg: &ExecutorConfig,
-    deploy_id: &str,
-    pending_version: &str,
-    by: &str,
-) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
-    let n = conn
-        .execute(
-            &format!(
-                "INSERT INTO {meta}.schema_deploy_recovery
-                     (deploy_id, pending_version, state, \"by\")
-                 VALUES ($1, $2, 'open', $3)"
-            ),
-            &[&deploy_id, &pending_version, &by],
-        )
-        .await?;
-    debug_assert_eq!(n, 1, "record_deploy_recovery_open must insert exactly one row");
-    Ok(())
-}
-
-/// Stamp a deploy-scoped recovery marker `reached_success` (PR9d HIGH): APPEND a
-/// `reached_success` row keyed on `(deploy_id, pending_version)`. Written as the
-/// FIRST action of the deploy SUCCESS arm, BEFORE the `reconciled` append.
-///
-/// This is the crash-vs-legit-pending DISCRIMINATOR. A net-`reached_success` marker
-/// means the deploy that opened the EXPAND reached its success arm — i.e. the
-/// online-rename went go-live and the obligation is LEGITIMATELY pending (the
-/// §2.0.2 cross-deploy partition), NOT a crashed half-state. A net-`open` marker
-/// means the success arm NEVER ran (a later same-deploy file failed and the process
-/// died before the in-process abort) — a genuine crash half-state. The
-/// crash-recovery leg ([`outstanding_deploy_recoveries`]) only treats net-`open`
-/// markers as recoverable, so it can never false-abort a legitimately-pending
-/// go-live whose subsequent `reconciled` append happened to fail (the HIGH window):
-/// that marker is net-`reached_success`, not `open`.
+/// This is the crash-vs-legit-pending DISCRIMINATOR. A net-`committed` marker means
+/// the deploy that opened the EXPAND reached its success arm — i.e. the online-rename
+/// went go-live and the obligation is LEGITIMATELY pending (the §2.0.2 cross-deploy
+/// partition), NOT a crashed half-state. A net-`in_progress` marker means the deploy
+/// has not durably reached its terminal outcome (a later same-deploy file failed and
+/// the process died before the in-process abort, OR the `committed` promotion itself
+/// failed) — recoverable. The crash-recovery leg ([`outstanding_deploy_recoveries`])
+/// only treats net-`in_progress` markers as recoverable, so it never aborts a
+/// `committed` go-live. And because a *failure* to promote leaves the marker in the
+/// `in_progress` (recoverable / fail-safe) state — never a protected state it would
+/// later be unable to distinguish — there is no window in which a committed go-live
+/// is mistaken for recoverable-but-shouldn't-be (PR9e: the inversion that closes the
+/// MED false-abort).
 ///
 /// Admin-written, append-only, under the immutability trigger.
 ///
 /// # Errors
 /// [`JournalError::Db`] on insert failure.
-pub async fn mark_deploy_recovery_reached_success(
+pub async fn mark_deploy_recovery_committed(
     conn: &Client,
     cfg: &ExecutorConfig,
     deploy_id: &str,
@@ -1252,28 +1331,30 @@ pub async fn mark_deploy_recovery_reached_success(
             &format!(
                 "INSERT INTO {meta}.schema_deploy_recovery
                      (deploy_id, pending_version, state, \"by\")
-                 VALUES ($1, $2, 'reached_success', $3)"
+                 VALUES ($1, $2, 'committed', $3)"
             ),
             &[&deploy_id, &pending_version, &by],
         )
         .await?;
     debug_assert_eq!(
         n, 1,
-        "mark_deploy_recovery_reached_success must insert exactly one row"
+        "mark_deploy_recovery_committed must insert exactly one row"
     );
     Ok(())
 }
 
-/// Stamp `reached_success` for a WHOLE deploy's obligations in ONE transaction
-/// (PR9d-crit HIGH): a single `BEGIN … COMMIT` brackets every per-obligation
-/// `reached_success` INSERT, so the phase-1 discriminator stamp is ATOMIC across a
-/// multi-EXPAND go-live — it either flips ALL of this deploy's obligations to
-/// net-`reached_success` or none of them (no partial-stamp window where some
-/// obligations are protected and a sibling stays net-`open`). A genuine
-/// commit/connection failure rolls the whole batch back, leaving every marker
-/// net-`open` (the documented irreducible residual — see the runbook + the
-/// `DEPLOY_SUCCESS_REACHED_SUCCESS_STAMP_FAILS` fault doc; safe clearance is
-/// operator `resolve-pending --apply`, NOT a re-run).
+/// Promote a WHOLE deploy's recovery markers to `committed` in ONE transaction
+/// (PR9e): a single `BEGIN … COMMIT` brackets every per-obligation `committed`
+/// INSERT, so the success-arm promotion is ATOMIC across a multi-EXPAND go-live — it
+/// either promotes ALL of this deploy's markers to net-`committed` or none of them
+/// (no partial window where one go-live obligation is protected and a sibling stays
+/// net-`in_progress`). A genuine commit/connection failure rolls the whole batch
+/// back, leaving every marker net-`in_progress` — the *recoverable* (fail-safe)
+/// state: the next deploy AUTO-ABORTS the half-rename (safe because a pending
+/// contract has not cut over to the shadow column, so no data is lost). This is the
+/// PR9e inversion — a promotion failure degrades to "safely re-runnable crash
+/// recovery", never "silent revert of a live contract a later deploy mistakes for
+/// committed".
 ///
 /// `pending_versions` is this deploy's full obligation key set. An empty slice is a
 /// no-op (no transaction opened).
@@ -1282,8 +1363,8 @@ pub async fn mark_deploy_recovery_reached_success(
 ///
 /// # Errors
 /// [`JournalError::Db`] on any insert/commit failure (the partial batch is rolled
-/// back so no obligation is left half-stamped).
-pub async fn mark_deploy_recovery_reached_success_batch(
+/// back so no marker is left half-promoted).
+pub async fn mark_deploy_recovery_committed_batch(
     conn: &Client,
     cfg: &ExecutorConfig,
     deploy_id: &str,
@@ -1296,7 +1377,7 @@ pub async fn mark_deploy_recovery_reached_success_batch(
     conn.batch_execute("BEGIN").await?;
     let result = async {
         for pv in pending_versions {
-            mark_deploy_recovery_reached_success(conn, cfg, deploy_id, pv, by).await?;
+            mark_deploy_recovery_committed(conn, cfg, deploy_id, pv, by).await?;
         }
         Ok::<(), JournalError>(())
     }
@@ -1306,7 +1387,7 @@ pub async fn mark_deploy_recovery_reached_success_batch(
             tracing::warn!(
                 error = %rb,
                 "zeroship-migrate: ROLLBACK failed after a \
-                 mark_deploy_recovery_reached_success_batch error (PR9d-crit HIGH)"
+                 mark_deploy_recovery_committed_batch error (PR9e)"
             );
         }
         return Err(e);
@@ -1316,9 +1397,9 @@ pub async fn mark_deploy_recovery_reached_success_batch(
 }
 
 /// Mark a deploy-scoped recovery obligation `reconciled` (PR9d MED): APPEND a
-/// `reconciled` row (append-only — the `open` row is never edited). Called on the
-/// deploy SUCCESS path (the EXPAND legitimately stays pending), after a same-deploy
-/// abort, or after a crash-recovery abort. Admin-written.
+/// `reconciled` row (append-only — the `in_progress` row is never edited). Called
+/// after a same-deploy abort or a crash-recovery abort to CLOSE the marker (the
+/// EXPAND was rolled back). Admin-written.
 ///
 /// # Errors
 /// [`JournalError::Db`] on insert failure.
@@ -1347,9 +1428,9 @@ pub async fn mark_deploy_recovery_reconciled(
     Ok(())
 }
 
-/// Read the deploy-recovery markers that are net-`open` (latest event per
-/// `(deploy_id, pending_version)` is `open`) AND whose obligation is STILL
-/// outstanding in `schema_pending_contracts` (PR9d MED — the crash-recovery
+/// Read the deploy-recovery markers that are net-`in_progress` (latest event per
+/// `(deploy_id, pending_version)` is `in_progress`) AND whose obligation is STILL
+/// outstanding in `schema_pending_contracts` (PR9d MED / PR9e — the crash-recovery
 /// leg's resume input).
 ///
 /// The outstanding-obligation join is what makes resume idempotent + correct: a
@@ -1357,15 +1438,20 @@ pub async fn mark_deploy_recovery_reconciled(
 /// resume attempt, or applied by a go-live) is NOT re-driven. Ordered by
 /// `(deploy_id, pending_version)` for determinism.
 ///
-/// **The crash-vs-legit discriminator (PR9d HIGH).** The `r.state = 'open'`
-/// predicate is load-bearing: a deploy that reached its SUCCESS arm stamps the
-/// marker `reached_success` BEFORE attempting `reconciled`
-/// ([`mark_deploy_recovery_reached_success`]). A net-`reached_success` marker is
-/// therefore EXCLUDED here — so a legitimately-pending go-live whose subsequent
-/// `reconciled` append failed (the HIGH window: EXPAND committed, obligation
-/// pending, marker-reconcile errored) is NEVER returned to the crash-recovery leg
-/// and thus NEVER false-aborted. Only a net-`open` marker (success arm never ran ⇒
-/// a genuine crashed half-state) is recoverable.
+/// **The crash-vs-legit discriminator (PR9e — the inversion).** The
+/// `r.state = 'in_progress'` predicate is load-bearing: the marker is BORN
+/// `in_progress` atomically with the obligation
+/// ([`record_pending_contract_with_recovery`]), and a deploy that reaches its SUCCESS
+/// arm PROMOTES it to `committed` ([`mark_deploy_recovery_committed_batch`]). A
+/// net-`committed` marker is therefore EXCLUDED here — a fully-reached go-live is
+/// never aborted. Conversely a net-`in_progress` marker means the deploy did NOT
+/// durably reach a terminal outcome: either it genuinely crashed, OR the `committed`
+/// promotion itself failed. BOTH are correctly recoverable — aborting the half-rename
+/// is SAFE because a *pending* contract has not cut over reads/writes to the shadow
+/// column (the dual-write trigger keeps both in sync; the drop-old-column contract
+/// has not run), so no data is lost. This is the PR9e inversion: a promotion failure
+/// leaves the marker in the *recoverable* state, never a *protected* state a later
+/// deploy would silently revert (the pre-PR9e MED false-abort vector).
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure.
@@ -1391,7 +1477,7 @@ pub async fn outstanding_deploy_recoveries(
                  SELECT r.deploy_id, r.pending_version
                    FROM latest_recovery r
                    JOIN latest_obligation o ON o.pending_version = r.pending_version
-                  WHERE r.state = 'open' AND o.state = '{pending}'
+                  WHERE r.state = 'in_progress' AND o.state = '{pending}'
                   ORDER BY r.deploy_id, r.pending_version",
                 pending = PendingState::Pending.as_str()
             ),
