@@ -69,6 +69,7 @@ pub mod db;
 pub mod declarative;
 pub mod dml;
 pub mod drift;
+pub mod fold;
 pub mod engine;
 pub mod expand_contract;
 pub mod executor;
@@ -140,6 +141,11 @@ pub use executor::{
     apply, rollback, ApplyError, ApplyOutcome, LockMode, PreconditionVerdict, RollbackError,
     RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,
 };
+// **Migration-first P1** — the OFFLINE ops→snapshot fold (the keystone). Pure, no
+// DB: replay an ordered `Op` list into the EXISTING `SchemaSnapshot` (drift.rs),
+// the offline companion of `snapshot_schema`. Later phases (`gen-types`) emit the
+// `env.db` types + runtime descriptor from this. See `fold.rs`.
+pub use fold::{fold_ops, FoldError};
 pub use guard::{
     flags_for, guard_for, GuardConfig, GuardError, GuardOutcome, GuardReport, MigrationGuard,
     PgGuard, SchemaScope, SqlGuard, SqliteDescriptorGuard, TrustProfile,
