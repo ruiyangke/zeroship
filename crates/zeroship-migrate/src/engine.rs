@@ -960,38 +960,13 @@ impl MigrationEngine {
         // author error all return `false` (NOT a contract-apply ⇒ the obligation is
         // NOT discharged and the table stays gated).
         let recognizes_contract_apply = |pc: &crate::journal::PendingContract| -> bool {
-            if pc.contract_versions.is_empty() {
-                return false;
-            }
-            // Re-author deterministically from the obligation's stored identity facts
-            // (the SAME re-author `platform_runner.rs` does at `resolve-pending`). The
-            // `owner_app` does not affect the contract `up` text, so any stable value
-            // is fine for the comparison.
-            let author = crate::expand_contract::ExpandContractAuthor::new(
-                exec_cfg.project_schema.clone(),
-                "discharge-recognize",
-            );
-            let Ok(plan) = author.author(&crate::expand_contract::OnlineIntent::RenameColumn {
-                table: pc.table.clone(),
-                from: pc.from_col.clone(),
-                to: pc.to_col.clone(),
-                ty: pc.ty.clone(),
-            }) else {
-                return false;
-            };
-            // The recorded `contract_versions` are the rename's C1/C2 ids in order, the
-            // SAME order `plan.contract` re-authors. Require one discharging Ddl step
-            // per recorded contract version whose `up` matches the re-authored step's
-            // `up` exactly. A length mismatch (the recorded set is not the full C1/C2)
-            // also fails closed.
-            if pc.contract_versions.len() != plan.contract.len() {
-                return false;
-            }
-            pc.contract_versions.iter().zip(plan.contract.iter()).all(|(v, authored)| {
-                ddl_up_by_version
-                    .get(v.as_str())
-                    .is_some_and(|up| *up == authored.up.as_str())
-            })
+            // PR9c: the recognizer is now the shared module-level
+            // [`recognizes_contract_apply`] so the control-plane PRE-APPLY interlock
+            // gate (`prevalidate_bundle_scope`) and this APPLY-time loop decide
+            // "is this deploy the legitimate contract-apply?" by the SAME
+            // re-author-compare — no drift between the bundle-level pre-check and
+            // the per-file apply.
+            recognizes_contract_apply(&exec_cfg.project_schema, pc, &ddl_up_by_version)
         };
         // The set of EXPAND trigger versions this plan RE-PRESENTS — a
         // `PgExpandContract` step whose `pending_version` matches an outstanding
@@ -1972,6 +1947,63 @@ impl MigrationEngine {
         )
         .await
     }
+}
+
+/// **PR9b L1 / PR9c — the SHARED contract-apply recognizer.** Decide whether a
+/// deploy whose `Ddl` steps carry `ddl_up_by_version` (version → `up` SQL) is the
+/// LEGITIMATE contract-apply for the outstanding obligation `pc` — i.e. whether
+/// it RE-PRESENTS the obligation's recorded C1/C2 with the SAME re-authored `up`
+/// SQL (re-author-compare, NOT a version-id match alone). Fail-CLOSED: an empty
+/// `contract_versions`, a missing/ mismatched discharging Ddl step, a length
+/// mismatch, or an author error all return `false` (⇒ NOT a contract-apply ⇒ the
+/// obligation stays gated).
+///
+/// This is the SINGLE source of truth for that decision, shared by:
+///   • the APPLY-time interlock loop in
+///     [`apply_plan_resolving`](MigrationEngine::apply_plan_resolving), and
+///   • the control-plane PRE-APPLY bundle interlock gate (PR9c HIGH/MED — refuse a
+///     multi-file approved bundle BEFORE any earlier file's online-rename EXPAND can
+///     commit ahead of a guaranteed-later interlock refusal).
+///
+/// Keeping ONE recognizer means the pre-check and the apply can never drift: a
+/// bundle the pre-check would refuse is exactly one the apply loop would refuse,
+/// and a legitimate contract-apply both exempt.
+#[must_use]
+pub fn recognizes_contract_apply(
+    project_schema: &str,
+    pc: &crate::journal::PendingContract,
+    ddl_up_by_version: &std::collections::BTreeMap<&str, &str>,
+) -> bool {
+    if pc.contract_versions.is_empty() {
+        return false;
+    }
+    // Re-author deterministically from the obligation's stored identity facts (the
+    // SAME re-author `platform_runner.rs` does at `resolve-pending`). The
+    // `owner_app` does not affect the contract `up` text, so any stable value is
+    // fine for the comparison.
+    let author = crate::expand_contract::ExpandContractAuthor::new(
+        project_schema.to_string(),
+        "discharge-recognize",
+    );
+    let Ok(plan) = author.author(&crate::expand_contract::OnlineIntent::RenameColumn {
+        table: pc.table.clone(),
+        from: pc.from_col.clone(),
+        to: pc.to_col.clone(),
+        ty: pc.ty.clone(),
+    }) else {
+        return false;
+    };
+    if pc.contract_versions.len() != plan.contract.len() {
+        return false;
+    }
+    pc.contract_versions
+        .iter()
+        .zip(plan.contract.iter())
+        .all(|(v, authored)| {
+            ddl_up_by_version
+                .get(v.as_str())
+                .is_some_and(|up| *up == authored.up.as_str())
+        })
 }
 
 /// The structured result of [`MigrationEngine::plan_declarative`].
