@@ -77,8 +77,17 @@ at validate time (PR10).
 }): TableHandle
 
 .drop({ ifExists?: boolean; cascade?: boolean; schema?: string }): TableHandle
-.rename({ to: string; schema?: string }): TableHandle      // NEW — table rename
+.rename({ to: string; schema?: string }): TableHandle      // NEW — table rename — DEFERRED (see note)
 ```
+
+> **`.rename` is DEFERRED, not shipped.** A table rename is a NET-NEW operation:
+> there is no `renameTable` Op variant in the IR and no executor support for it
+> (the flat surface never had a table rename either). This PR's hard constraint —
+> *IR byte-identical except C1; apply path unchanged* — forbids the new Op +
+> executor wave a table rename needs, so `.rename` is intentionally ABSENT from the
+> shipped `TableHandle` (`sdks/migrate/src/types.ts`) and tracked as a follow-up
+> PR (new `Op::RenameTable` + executor + render). It is listed here for the target
+> shape only.
 
 `create` is the one all-object form (no `build` callback) — honors "no exceptions": table-level
 constraints/indexes are fields, not a callback. A name is required on each constraint/index (name-first,
