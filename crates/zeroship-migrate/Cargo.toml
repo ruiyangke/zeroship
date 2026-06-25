@@ -28,6 +28,10 @@ base64 = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Migration-first P2b: `fold_to_field_defs` preserves the createTable column ORDER
+# (the keystone parity compares serialized FieldDef maps, so a sorted-vs-declared
+# order would false-mismatch). An insertion-ordered map is the clean carrier.
+indexmap = { workspace = true }
 zeroship-core = { workspace = true }
 # Schema-authority P2: the engine ADOPTS the shared schema core for its
 # schema-DESCRIPTION layer (the DSL→SQL type map + the DDL-shape vocabulary +

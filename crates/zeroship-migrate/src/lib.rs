@@ -145,7 +145,10 @@ pub use executor::{
 // DB: replay an ordered `Op` list into the EXISTING `SchemaSnapshot` (drift.rs),
 // the offline companion of `snapshot_schema`. Later phases (`gen-types`) emit the
 // `env.db` types + runtime descriptor from this. See `fold.rs`.
-pub use fold::{fold_ops, fold_to_field_defs, recover_check_facet, FoldError, RecoveredCheck};
+pub use fold::{
+    descriptors_to_create_ops, fold_ops, fold_to_field_defs, recover_check_facet, FoldError,
+    ProduceError, RecoveredCheck,
+};
 pub use guard::{
     flags_for, guard_for, GuardConfig, GuardError, GuardOutcome, GuardReport, MigrationGuard,
     PgGuard, SchemaScope, SqlGuard, SqliteDescriptorGuard, TrustProfile,
