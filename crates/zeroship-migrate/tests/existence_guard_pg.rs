@@ -99,6 +99,18 @@ async fn column_exists(conn: &Client, schema: &str, table: &str, column: &str) -
     !rows.is_empty()
 }
 
+async fn index_exists(conn: &Client, schema: &str, table: &str, index: &str) -> bool {
+    let rows = conn
+        .query(
+            "SELECT 1 FROM pg_indexes \
+             WHERE schemaname = $1 AND tablename = $2 AND indexname = $3",
+            &[&schema, &table, &index],
+        )
+        .await
+        .expect("query pg_indexes");
+    !rows.is_empty()
+}
+
 async fn table_exists(conn: &Client, schema: &str, table: &str) -> bool {
     let rows = conn
         .query(
@@ -337,6 +349,98 @@ async fn create_table_ifnotexists_present_matching_is_noop() {
     let v = match &steps[0] { PlanStep::Ddl(m) => m.version.as_str().to_string(), _ => unreachable!() };
     apply(&conn, &cfg, &steps).await.expect("matching createTable is a satisfied no-op");
     assert!(journaled(&conn, &cfg, &v).await, "no-op journals the version");
+    teardown(&conn, &cfg).await;
+}
+
+/// **C1 regression** — a guarded `createTable ifNotExists` lowers to MULTIPLE
+/// units (CREATE TABLE + one CREATE INDEX per non-PK index [PG injects the 3
+/// system-field indexes deleted_at/updated_at/created_by] + the `unique:true`
+/// field's unique index). Before the fix the SAME `Table` probe was stamped on
+/// EVERY unit, so once unit 0 created the table, units 1..N saw it PRESENT + base
+/// columns matching → SatisfiedNoop → every secondary index was SILENTLY SKIPPED
+/// (but journaled completed). This asserts the unique index AND the 3 system-field
+/// indexes PHYSICALLY exist after a fresh guarded create, and that a RE-RUN of the
+/// same guarded create is an idempotent no-op (no error, all units re-journaled).
+///
+/// RED pre-fix: the unique + system-field indexes are absent (skipped), so
+/// `index_exists(... "t_email_key")` is false.
+#[compio::test]
+async fn create_table_ifnotexists_fresh_creates_all_secondary_indexes_and_reruns_idempotent() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+
+    let make_op = || Op::CreateTable {
+        name: "t".into(),
+        // a unique:true field → a `t_email_key` unique index unit, ON TOP of the
+        // CREATE TABLE + the 3 PG system-field index units.
+        columns: vec![IrColumn {
+            name: "email".into(),
+            ty: ColType::String,
+            nullable: Some(true),
+            default: None,
+            unique: Some(true),
+        }],
+        constraints: vec![],
+        indexes: vec![],
+        schema: None,
+        existence_guard: Some(ExistenceGuard::IfNotExists),
+    };
+
+    // Fresh guarded create on an empty schema → unit0 creates the table; every
+    // secondary index unit must ALSO run (its own object-scoped probe sees the
+    // index ABSENT → RunBare), not be SatisfiedNoop'd by the table's presence.
+    let steps = lower(&cfg, make_op());
+    // > 1 unit: CREATE TABLE + unique idx + 3 system-field idxs.
+    assert!(
+        steps.len() >= 5,
+        "a guarded createTable with a unique field + system fields lowers to ≥5 units; got {}",
+        steps.len()
+    );
+    apply(&conn, &cfg, &steps).await.expect("fresh guarded create applies");
+
+    let s = &cfg.project_schema;
+    assert!(table_exists(&conn, s, "t").await, "table created");
+    assert!(
+        index_exists(&conn, s, "t", "t_email_key").await,
+        "the unique:true field's unique index must PHYSICALLY exist (C1: it was silently skipped)"
+    );
+    for sysidx in ["t_deleted_at_idx", "t_updated_at_idx", "t_created_by_idx"] {
+        assert!(
+            index_exists(&conn, s, "t", sysidx).await,
+            "the system-field index {sysidx} must PHYSICALLY exist (C1: it was silently skipped)"
+        );
+    }
+    // Every unit's version must be journaled completed.
+    for step in &steps {
+        if let PlanStep::Ddl(m) = step {
+            assert!(
+                journaled(&conn, &cfg, m.version.as_str()).await,
+                "unit {} journaled",
+                m.version.as_str()
+            );
+        }
+    }
+
+    // RE-RUN: a fresh lowering of the SAME guarded create over the now-present
+    // table+indexes must be an idempotent no-op — every unit SatisfiedNoops on its
+    // OWN object (table present+matching; each index present+matching), with NO
+    // "already exists" error.
+    let steps2 = lower(&cfg, make_op());
+    apply(&conn, &cfg, &steps2)
+        .await
+        .expect("re-run of the guarded create is an idempotent no-op");
+    for step in &steps2 {
+        if let PlanStep::Ddl(m) = step {
+            assert!(
+                journaled(&conn, &cfg, m.version.as_str()).await,
+                "re-run unit {} re-journaled (satisfied no-op still journals)",
+                m.version.as_str()
+            );
+        }
+    }
+    // Indexes are still present (the re-run did not drop/churn them).
+    assert!(index_exists(&conn, s, "t", "t_email_key").await, "unique index survives re-run");
     teardown(&conn, &cfg).await;
 }
 
