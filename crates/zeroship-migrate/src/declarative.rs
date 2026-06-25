@@ -103,7 +103,7 @@ const PG_NON_UNRESERVED_KEYWORDS: &[&str] = &[
 /// every diff). It also closes the latent injection/wrong-resolution seam: a
 /// reserved-word or mixed-case schema/target now renders quoted (correct
 /// resolution), not as a bare keyword.
-fn quote_ident_if_needed(ident: &str) -> String {
+pub(crate) fn quote_ident_if_needed(ident: &str) -> String {
     let safe_bare = !ident.is_empty()
         && ident.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
         && ident.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
@@ -824,7 +824,7 @@ fn ddl_to_information_schema(ddl: &str) -> String {
 /// type-change detection is untouched — and a REAL SQLite type change (e.g.
 /// `text` → `real`, i.e. string → number) still maps to two DIFFERENT canonical
 /// tokens and IS detected.
-pub(crate) fn sqlite_canonical_type(data_type: &str) -> &'static str {
+pub fn sqlite_canonical_type(data_type: &str) -> &'static str {
     let lower = data_type.trim().to_ascii_lowercase();
     // Parameterised extension types keep their DDL spelling in the snapshot
     // (`vector(384)`, `geography(POINT, 4326)`); both emit BLOB on SQLite.

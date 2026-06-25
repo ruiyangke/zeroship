@@ -118,9 +118,9 @@ pub use classify::{
     TouchedRelation,
 };
 pub use declarative::{
-    desired_snapshot, desired_snapshot_for_dialect, dsl_to_pg_data_type, CollectionDescriptor,
-    DeclarativeAuthor, DeclarativeError, DeclarativePlan, DesiredSchema, FieldDescriptor,
-    IndexDescriptor, RenameHint, SqliteRebuild,
+    desired_snapshot, desired_snapshot_for_dialect, dsl_to_pg_data_type, sqlite_canonical_type,
+    CollectionDescriptor, DeclarativeAuthor, DeclarativeError, DeclarativePlan, DesiredSchema,
+    FieldDescriptor, IndexDescriptor, RenameHint, SqliteRebuild,
 };
 pub use engine::{
     recognizes_contract_apply, DeclarativeApplyError, DeclarativeDeployOutcome,
