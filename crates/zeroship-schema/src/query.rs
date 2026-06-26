@@ -2288,6 +2288,7 @@ fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         // (`bigint`/`int4`/`int8`) are deliberately NOT accepted — they are not DSL
         // tokens and stay on the TEXT fallback so they remain typo-rejected.
         Some("int") | Some("integer") => "INTEGER",
+        Some("bigInt") => "BIGINT",
         Some("boolean") => "BOOLEAN",
         Some("date") => "TIMESTAMPTZ",
         // D3 — `t.calendarDate()` is a `YYYY-MM-DD` value with no time

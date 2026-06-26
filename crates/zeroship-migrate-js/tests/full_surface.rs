@@ -926,6 +926,79 @@ fn add_column_with_standalone_mask_is_carried() {
     assert_eq!(mask.get("classification").and_then(|v| v.as_str()), Some("spi"));
 }
 
+#[test]
+fn generated_and_identity_column_facets_are_recorded_on_create_and_add_column() {
+    let ir = record(
+        r#"
+        import { table, t } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            table("line_items").create({ columns: {
+                id: t.bigInt().identity({ always: true }).primaryKey(),
+                qty: t.int(),
+                unit_cents: t.int(),
+                total_cents: t.int().generated((c) => c.col("qty").mul(c.col("unit_cents"))),
+                virtual_total: t.int().generated((c) => c.col("qty").mul(c.col("unit_cents")), { virtual: true }),
+            }});
+            table("line_items").column("added_total").add({
+                type: t.int().generated((c) => c.col("qty").mul(c.col("unit_cents"))),
+            });
+            table("line_items").column("seq").add({ type: t.bigInt().identity() });
+        }};
+    "#,
+        "generated_identity_facets",
+    );
+    let create = &ops(&ir)[0];
+    assert_eq!(create.get("op").unwrap(), "createTable");
+    let cols = create.get("columns").and_then(|c| c.as_array()).unwrap();
+    let by_name = |name: &str| {
+        cols.iter()
+            .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name))
+            .unwrap_or_else(|| panic!("missing column {name}: {cols:#?}"))
+    };
+    assert_eq!(by_name("id").get("identity").unwrap(), &serde_json::json!({ "always": true }));
+    assert_eq!(
+        by_name("total_cents").get("generated").unwrap(),
+        &serde_json::json!({
+            "expr": {
+                "node": "binOp",
+                "op": "mul",
+                "lhs": { "node": "colRef", "name": "qty" },
+                "rhs": { "node": "colRef", "name": "unit_cents" }
+            },
+            "stored": true
+        })
+    );
+    assert_eq!(
+        by_name("virtual_total")
+            .get("generated")
+            .and_then(|g| g.get("stored"))
+            .and_then(|s| s.as_bool()),
+        Some(false),
+        "generated(expr, {{ virtual: true }}) records stored:false",
+    );
+
+    let pk = create
+        .get("constraints")
+        .and_then(|c| c.as_array())
+        .unwrap()
+        .iter()
+        .find(|c| c.get("kind").and_then(|k| k.get("kind")).and_then(|k| k.as_str()) == Some("pk"))
+        .expect("primaryKey() hoists a pk constraint");
+    assert_eq!(pk.get("kind").unwrap().get("columns").unwrap(), &serde_json::json!(["id"]));
+
+    let add_generated = &ops(&ir)[1];
+    assert_eq!(add_generated.get("op").unwrap(), "addColumn");
+    assert!(add_generated.get("generated").is_some(), "addColumn must carry generated");
+
+    let add_identity = &ops(&ir)[2];
+    assert_eq!(add_identity.get("op").unwrap(), "addColumn");
+    assert_eq!(
+        add_identity.get("identity").unwrap(),
+        &serde_json::json!({ "always": false }),
+        "identity() default records BY DEFAULT"
+    );
+}
+
 /// A `t.vector(n)` (no metric) on an addColumn is STILL allowed — only the declared
 /// metric facet is create-only. Pins that the HIGH-2 reject is scoped to the facet,
 /// not the vector column type.

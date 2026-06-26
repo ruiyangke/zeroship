@@ -107,6 +107,16 @@ export interface MaskOptions {
   classification?: Classification;
 }
 
+/** Options for `.generated(expr, { virtual })`. Omitted ⇒ STORED. */
+export interface GeneratedOptions {
+  virtual?: boolean;
+}
+
+/** Options for `.identity({ always })`. Omitted ⇒ `BY DEFAULT AS IDENTITY`. */
+export interface IdentityOptions {
+  always?: boolean;
+}
+
 // ── The fluent column-type lexicon (`t.*`) → a chainable ColumnDef ──
 
 /**
@@ -144,6 +154,13 @@ export interface ColumnDef {
    * `.mask()` on an ENCRYPTED column OVERRIDES the auto-mask. Returns a fresh def.
    */
   mask(opts: MaskOptions): ColumnDef;
+  /** Declare a generated/computed column from a closed expression AST. Omitted
+   * options render a STORED generated column; `{ virtual: true }` requests a
+   * SQLite VIRTUAL column and is rejected on Postgres. */
+  generated(expr: ExprFn | ExprChain | Expr, opts?: GeneratedOptions): ColumnDef;
+  /** Declare a SQL identity column. `{ always: true }` renders
+   * `GENERATED ALWAYS AS IDENTITY`; otherwise `BY DEFAULT`. */
+  identity(opts?: IdentityOptions): ColumnDef;
 }
 
 /** The fluent `t.*` column-type lexicon (shared in shape with `@zeroship/db`).
@@ -173,6 +190,7 @@ export interface TypeLexicon {
   geoPoint(): ColumnDef;
   /** 32-bit signed integer (canonical; the `int` alias is removed, §7). */
   integer(): ColumnDef;
+  int(): ColumnDef;
   bigInt(): ColumnDef;
   float(): ColumnDef;
   /** An application-level encrypted column wrapping an inner type. */
@@ -258,9 +276,10 @@ export interface FnNamespace {
 }
 
 /** The single injected builder handle: a column-accessor function `c("name")`
- *  (string arg → a chainable ColRef) carrying the `c.fn.*` namespace. */
+ *  (or `c.col("name")`) carrying the `c.fn.*` namespace. */
 export interface ExprBuilder {
   (name: string): ExprChain;
+  col(name: string): ExprChain;
   fn: FnNamespace;
 }
 

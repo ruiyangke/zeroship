@@ -1,6 +1,7 @@
-// Lock-step parity for the column-level SENSITIVE-DATA facets (#173/#174/#178):
-// `t.id({ prefix })`, `t.vector(n, { metric })`, and the standalone
-// `t.text().mask({ kind, classification })`. These were added to the engine
+// Lock-step parity for the column-level facets (#173/#174/#178 + generated/identity):
+// `t.id({ prefix })`, `t.vector(n, { metric })`, standalone
+// `t.text().mask({ kind, classification })`, `.generated(...)`, and `.identity(...)`.
+// These were added to the engine
 // recorder (`crates/zeroship-migrate-js/src/migrate_ops.js`) + the IR + fold +
 // gen-types FIRST, but never to the PUBLIC `@zeroship/migrate` authoring surface
 // (`src/ops.ts` / `src/types.ts`). #178 closes that gap.
@@ -10,7 +11,8 @@
 // recorder `migrate_ops.js` `table()`/`t.*`, then assert the two recorded op lists
 // are byte-identical. Because the recorder twin is the source of truth the Rust
 // engine `include_str!`s into V8, this proves the public DSL records the EXACT
-// camelCase wire form (`idPrefix` / `vectorMetric` / `mask:{kind,classification}`)
+// camelCase wire form (`idPrefix` / `vectorMetric` / `mask:{kind,classification}` /
+// `generated:{expr,stored}` / `identity:{always}`)
 // the engine deserializes.
 //
 // RED before #178: the public `t.id`/`t.vector` ignored their option bags and
@@ -41,13 +43,20 @@ const ENGINE: Rec = { begin: engBegin, drain: engDrain, t: engT, table: engTable
  *  the recorded op list. The SAME author body runs against both impls. */
 function authorWith({ begin, drain, t, table }: Rec): any[] {
   begin();
-  // createTable carrying ALL THREE facets:
+  // createTable carrying the column facets:
   //  - t.id({ prefix })            → IrColumn.idPrefix
   //  - t.vector(n, { metric })     → IrColumn.vectorMetric (closed cosine|l2|innerProduct)
   //  - t.text().mask({ kind, classification }) → IrColumn.mask:{kind,classification}
+  //  - t.int().generated(expr)     → IrColumn.generated:{expr,stored}
+  //  - t.bigInt().identity(opts)   → IrColumn.identity:{always}
   table("documents").create({
     columns: {
       id: t.id({ prefix: "doc" }),
+      seq: t.bigInt().identity({ always: true }),
+      qty: t.int(),
+      unit_cents: t.int(),
+      total_cents: t.int().generated((c: any) => c.col("qty").mul(c.col("unit_cents"))),
+      virtual_total: t.int().generated((c: any) => c.col("qty").mul(c.col("unit_cents")), { virtual: true }),
       embedding: t.vector(1536, { metric: "cosine" }),
       // a standalone mask with an explicit classification
       ssn: t.text().mask({ kind: "last4", classification: "pci" }),
@@ -59,6 +68,10 @@ function authorWith({ begin, drain, t, table }: Rec): any[] {
   // addColumn carries vectorMetric + mask (NOT idPrefix — fail-closed on add):
   table("documents").column("summary_vec").add({ type: t.vector(768, { metric: "innerProduct" }) });
   table("documents").column("phone").add({ type: t.text().mask({ kind: "last4" }) });
+  table("documents").column("added_total").add({
+    type: t.int().generated((c: any) => c.col("qty").mul(c.col("unit_cents"))),
+  });
+  table("documents").column("added_seq").add({ type: t.bigInt().identity() });
   return drain();
 }
 
@@ -85,15 +98,32 @@ test("the recorded facets carry the exact camelCase wire form", () => {
   // classification defaults to "pii"
   assert.deepEqual(byName("email").mask, { kind: "email", classification: "pii" });
 
+  // generated/identity facets carry their exact nested camelCase shape.
+  assert.deepEqual(byName("seq").identity, { always: true });
+  assert.deepEqual(byName("total_cents").generated, {
+    expr: {
+      node: "binOp",
+      op: "mul",
+      lhs: { node: "colRef", name: "qty" },
+      rhs: { node: "colRef", name: "unit_cents" },
+    },
+    stored: true,
+  });
+  assert.equal(byName("virtual_total").generated.stored, false);
+
   // a facet-less column carries NONE of the facet keys (checksum-neutral).
   const title = byName("title");
-  assert.ok(!("idPrefix" in title) && !("vectorMetric" in title) && !("mask" in title));
+  assert.ok(!("idPrefix" in title) && !("vectorMetric" in title) && !("mask" in title) && !("generated" in title) && !("identity" in title));
 
-  // addColumn carries vectorMetric + mask on the op tail.
+  // addColumn carries vectorMetric + mask + generated + identity on the op tail.
   const addVec = ops.find((o: any) => o.op === "addColumn" && o.column === "summary_vec");
   assert.equal(addVec.vectorMetric, "innerProduct");
   const addPhone = ops.find((o: any) => o.op === "addColumn" && o.column === "phone");
   assert.deepEqual(addPhone.mask, { kind: "last4", classification: "pii" });
+  const addGenerated = ops.find((o: any) => o.op === "addColumn" && o.column === "added_total");
+  assert.equal(addGenerated.generated.stored, true);
+  const addIdentity = ops.find((o: any) => o.op === "addColumn" && o.column === "added_seq");
+  assert.deepEqual(addIdentity.identity, { always: false });
 });
 
 test("an out-of-set mask kind/classification/metric is a structured OP_INVALID (runtime guard)", () => {

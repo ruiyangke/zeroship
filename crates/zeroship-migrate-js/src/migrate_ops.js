@@ -184,6 +184,8 @@ class ColumnDef {
     // IrColumn. Absent ⇒ omitted on the wire. An encrypted column's auto-mask is IMPLIED
     // by `t.encrypted()` (the engine re-derives it) — only an explicit mask lands here.
     this._mask = fields ? fields.mask : undefined;
+    this._generated = fields ? fields.generated : undefined;
+    this._identity = fields ? fields.identity : undefined;
   }
 
   /** Clone with the named fields overridden — the basis of immutability (§4). */
@@ -196,6 +198,8 @@ class ColumnDef {
       idPrefix: "idPrefix" in over ? over.idPrefix : this._idPrefix,
       vectorMetric: "vectorMetric" in over ? over.vectorMetric : this._vectorMetric,
       mask: "mask" in over ? over.mask : this._mask,
+      generated: "generated" in over ? over.generated : this._generated,
+      identity: "identity" in over ? over.identity : this._identity,
     });
   }
 
@@ -256,6 +260,28 @@ class ColumnDef {
     return this._with({ mask: { kind: opts.kind, classification } });
   }
 
+  generated(expr, opts) {
+    if (opts !== undefined && (opts === null || typeof opts !== "object")) {
+      throw structuredError("OP_INVALID", "t.*.generated(expr, opts): opts must be { virtual?: boolean }");
+    }
+    if (opts && opts.virtual !== undefined && typeof opts.virtual !== "boolean") {
+      throw structuredError("OP_INVALID", "t.*.generated(expr, { virtual }): virtual must be a boolean");
+    }
+    return this._with({
+      generated: { expr: resolveExpr(expr), stored: opts && opts.virtual === true ? false : true },
+    });
+  }
+
+  identity(opts) {
+    if (opts !== undefined && (opts === null || typeof opts !== "object")) {
+      throw structuredError("OP_INVALID", "t.*.identity(opts): opts must be { always?: boolean }");
+    }
+    if (opts && opts.always !== undefined && typeof opts.always !== "boolean") {
+      throw structuredError("OP_INVALID", "t.*.identity({ always }): always must be a boolean");
+    }
+    return this._with({ identity: { always: opts && opts.always === true ? true : false } });
+  }
+
   /** Reduce to an `IrColumn` (the `createTable` columns[] shape). `name` is the
    *  map key. `nullable`/`default`/`unique` omitted when at their defaults.
    *  C2 — a PRIMARY KEY already IMPLIES uniqueness, so a column that is BOTH
@@ -283,6 +309,8 @@ class ColumnDef {
       // emits the `__zsmask` sentinel. Absent ⇒ omitted (compact), so a mask-less column
       // is byte-identical to the pre-mask image (checksum-neutral).
       mask: this._mask,
+      generated: this._generated,
+      identity: this._identity,
     });
   }
 
@@ -317,6 +345,8 @@ class ColumnDef {
       // so a plain ADD COLUMN is byte-identical to the pre-#173 wire image.
       vectorMetric: this._vectorMetric,
       mask: this._mask,
+      generated: this._generated,
+      identity: this._identity,
     });
   }
 }
@@ -416,8 +446,9 @@ export const t = {
     return col;
   },
   geoPoint: () => new ColumnDef("geoPoint"),
-  /** 32-bit signed integer (canonical; the `int` alias is removed, §7). */
+  /** 32-bit signed integer. */
   integer: () => new ColumnDef("int"),
+  int: () => new ColumnDef("int"),
   bigInt: () => new ColumnDef("bigInt"),
   float: () => new ColumnDef("float"),
   /** An application-level encrypted column wrapping an inner `t.*` type. */
@@ -512,6 +543,7 @@ function makeBuilder() {
     requireString(name, 'c("name")');
     return chain({ node: "colRef", name });
   };
+  c.col = c;
   c.fn = cFn; // the scalar-function namespace (§3.6)
   return c;
 }

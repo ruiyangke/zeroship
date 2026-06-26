@@ -49,7 +49,9 @@ import type {
   FnNamespace,
   ForeignKeyRef,
   ForeignKeyReference,
+  GeneratedOptions,
   IdOptions,
+  IdentityOptions,
   IndexRef,
   InsertArgs,
   Join,
@@ -243,6 +245,8 @@ class ColumnDefImpl implements ColumnDefType {
   readonly _idPrefix: string | undefined;
   readonly _vectorMetric: string | undefined;
   readonly _mask: { kind: string; classification: string } | undefined;
+  readonly _generated: { expr: Node; stored: boolean } | undefined;
+  readonly _identity: { always: boolean } | undefined;
 
   constructor(
     colType: ColType,
@@ -254,6 +258,8 @@ class ColumnDefImpl implements ColumnDefType {
       idPrefix?: string;
       vectorMetric?: string;
       mask?: { kind: string; classification: string };
+      generated?: { expr: Node; stored: boolean };
+      identity?: { always: boolean };
     },
   ) {
     this._type = colType;
@@ -264,6 +270,8 @@ class ColumnDefImpl implements ColumnDefType {
     this._idPrefix = fields?.idPrefix;
     this._vectorMetric = fields?.vectorMetric;
     this._mask = fields?.mask;
+    this._generated = fields?.generated;
+    this._identity = fields?.identity;
   }
 
   /** Clone with the named fields overridden — the basis of immutability (§4). */
@@ -276,6 +284,8 @@ class ColumnDefImpl implements ColumnDefType {
     idPrefix?: string;
     vectorMetric?: string;
     mask?: { kind: string; classification: string };
+    generated?: { expr: Node; stored: boolean };
+    identity?: { always: boolean };
   }): ColumnDefImpl {
     return new ColumnDefImpl(over.type ?? this._type, {
       nullable: over.nullable ?? this._nullable,
@@ -285,6 +295,8 @@ class ColumnDefImpl implements ColumnDefType {
       idPrefix: "idPrefix" in over ? over.idPrefix : this._idPrefix,
       vectorMetric: "vectorMetric" in over ? over.vectorMetric : this._vectorMetric,
       mask: "mask" in over ? over.mask : this._mask,
+      generated: "generated" in over ? over.generated : this._generated,
+      identity: "identity" in over ? over.identity : this._identity,
     });
   }
 
@@ -346,6 +358,28 @@ class ColumnDefImpl implements ColumnDefType {
     return this.with({ mask: { kind: opts.kind, classification } });
   }
 
+  generated(expr: ExprFn | ExprChainType | Expr, opts?: GeneratedOptions): ColumnDefImpl {
+    if (opts !== undefined && (opts === null || typeof opts !== "object")) {
+      throw structuredError("OP_INVALID", "t.*.generated(expr, opts): opts must be { virtual?: boolean }");
+    }
+    if (opts?.virtual !== undefined && typeof opts.virtual !== "boolean") {
+      throw structuredError("OP_INVALID", "t.*.generated(expr, { virtual }): virtual must be a boolean");
+    }
+    return this.with({
+      generated: { expr: resolveExpr(expr as ExprFn | ExprChainType | Node)!, stored: opts?.virtual === true ? false : true },
+    });
+  }
+
+  identity(opts?: IdentityOptions): ColumnDefImpl {
+    if (opts !== undefined && (opts === null || typeof opts !== "object")) {
+      throw structuredError("OP_INVALID", "t.*.identity(opts): opts must be { always?: boolean }");
+    }
+    if (opts?.always !== undefined && typeof opts.always !== "boolean") {
+      throw structuredError("OP_INVALID", "t.*.identity({ always }): always must be a boolean");
+    }
+    return this.with({ identity: { always: opts?.always === true } });
+  }
+
   __toIrColumn(name: string): Node {
     return compact({
       name,
@@ -365,6 +399,8 @@ class ColumnDefImpl implements ColumnDefType {
       idPrefix: this._idPrefix,
       vectorMetric: this._vectorMetric,
       mask: this._mask,
+      generated: this._generated,
+      identity: this._identity,
     });
   }
   __toAddColumnTail(): Node {
@@ -389,6 +425,8 @@ class ColumnDefImpl implements ColumnDefType {
       // (camelCase keys, lock-step with `Op::AddColumn`). Absent ⇒ omitted (compact).
       vectorMetric: this._vectorMetric,
       mask: this._mask,
+      generated: this._generated,
+      identity: this._identity,
     });
   }
 }
@@ -471,6 +509,7 @@ export const t: TypeLexicon = {
   },
   geoPoint: () => new ColumnDefImpl("geoPoint"),
   integer: () => new ColumnDefImpl("int"),
+  int: () => new ColumnDefImpl("int"),
   bigInt: () => new ColumnDefImpl("bigInt"),
   float: () => new ColumnDefImpl("float"),
   encrypted: (arg) => {
@@ -601,6 +640,7 @@ function makeBuilder(): ExprBuilder {
     requireString(name, 'c("name")');
     return chain({ node: "colRef", name });
   }) as unknown as ExprBuilder;
+  c.col = c;
   c.fn = fn;
   return c;
 }

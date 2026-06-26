@@ -346,7 +346,10 @@ fn synth_delta_ops(
                         // to the scaffold's fail-closed posture — it never invents a
                         // declared-only facet it cannot observe).
                         id_prefix: None,
-                        vector_metric: None, mask: None,
+                        vector_metric: None,
+                        mask: None,
+                        generated: None,
+                        identity: None,
                     });
                 }
                 ops.push(SynthOp {
@@ -399,6 +402,8 @@ fn synth_delta_ops(
                             // not scaffold, is the source of truth for those — #173/#174).
                             vector_metric: None,
                             mask: None,
+                            generated: None,
+                            identity: None,
                             schema: None,
                             existence_guard: None,
                         },

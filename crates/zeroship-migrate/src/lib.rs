@@ -200,10 +200,10 @@ pub use migration::{
 // `Checksum::of_ir` front door folds. There is NO `Raw`/`RawDown` (property A);
 // every transform/predicate is the closed [`expr::Expr`] AST.
 pub use ir::{
-    CanonicalOpList, ColType, IndexMethod, IrBatch, IrClassification, IrColumn, IrConstraint,
-    IrConstraintKind, IrDefault, IrFlagsOverride, IrIndex, IrMask, IrMaskKind, IrScalar,
-    IrVersionError, MigrationIr, Op, RefAction, SafeU64, SynthDefaultFn, VectorMetric,
-    CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
+    CanonicalOpList, ColType, GeneratedCol, IdentityCol, IndexMethod, IrBatch, IrClassification,
+    IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrFlagsOverride, IrIndex, IrMask,
+    IrMaskKind, IrScalar, IrVersionError, MigrationIr, Op, RefAction, SafeU64, SynthDefaultFn,
+    VectorMetric, CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
 };
 // The fail-closed `.ir.json` load gate (§5.2/§5.3/§8.6): deserialize →
 // `ir_version` → `validate_ir` → server-stamped ownership → advisory checksum-hint
@@ -236,8 +236,8 @@ pub use expr::{BinaryOp, CaseBranch, CastTarget, Expr, ScalarFn, SynthFn, UnaryO
 pub use validate::{
     validate_expr, validate_ir, validate_ir_resolved, validate_op, validate_op_resolved,
     AuthoringError, Dialect as ValidatorDialect, TargetScope, UnsupportedKind,
-    CODE_DIALECT_SCOPE_PGONLY, CODE_EXPR_NOT_PORTABLE, CODE_OP_OUTSIDE_RECORDER, CODE_UNSUPPORTED,
-    SPLIT_PART_MAX_N,
+    CODE_COLUMN_FACET_CONFLICT, CODE_DIALECT_SCOPE_PGONLY, CODE_EXPR_NOT_PORTABLE,
+    CODE_OP_OUTSIDE_RECORDER, CODE_UNSUPPORTED, SPLIT_PART_MAX_N,
 };
 // The `op.*` DSL plan model (§2.0). Distinct from the dry-run `MigrationPlan`
 // (re-exported from `engine`, unchanged): these are the net-new ordered
