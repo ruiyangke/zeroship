@@ -550,3 +550,108 @@ async fn fold_equals_introspect_after_rename_table_pg() {
 
     teardown(&conn, &cfg).await;
 }
+
+/// **op.* table-rename follow-up — INCOMING cross-table FK references must follow
+/// the rename in the fold (review HIGH).**
+///
+/// When a table with an INCOMING FK is renamed, live PG re-renders every
+/// referencing FK via `pg_get_constraintdef(oid)`, which resolves the target by
+/// OID and reports the CURRENT (new) name. The offline fold must mirror that: a
+/// renameTable has to rewrite OTHER tables' FK `definition` strings (and `ref`
+/// column targets) from the old name to the new one, or `fold_ops` phantom-drifts
+/// against live for every diff and gen-types emits a `ref` to a dead collection.
+///
+/// Scenario: `accounts` (FK target) + `orders` (FK `account_id → accounts`), then
+/// rename `accounts → members`. Assert:
+///   (1) the live `orders` FK definition now references `members` (PG followed the
+///       rename by OID); AND
+///   (2) `fold_ops(create accounts + create orders + rename) == live` — which is
+///       FALSE pre-fix, because the folded `orders` FK still says `accounts`.
+///
+/// RED before the fix: the fold's RenameTable arm re-keyed only the renamed table's
+/// own entry, leaving every incoming FK `definition` pointing at the old name, so
+/// the canonicalized fold != live and this assert fails.
+#[compio::test]
+async fn fold_rewrites_incoming_fk_on_table_rename_pg() {
+    if !require_db() {
+        eprintln!("SKIP fold_rewrites_incoming_fk_on_table_rename_pg (MIGRATE_REQUIRE_DB unset)");
+        return;
+    }
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+
+    let mut all_ops: Vec<Op> = Vec::new();
+
+    // (1) The FK-TARGET table.
+    let accounts = r#"{"ir_version":1,"name":"create_accounts","ops":[
+        {"op":"createTable","name":"accounts","columns":[
+            {"name":"email","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    all_ops.extend(apply_doc(&conn, &cfg, accounts, &registry(&[]), Approval::None).await);
+
+    // (2) `orders` with an INCOMING FK to `accounts` (the thing the rename must
+    //     re-target). The `ref` column carries the FK target; the table-level Fk
+    //     constraint carries the policy.
+    let orders = r#"{"ir_version":1,"name":"create_orders","ops":[
+        {"op":"createTable","name":"orders","columns":[
+            {"name":"total","type":"int","nullable":false},
+            {"name":"account_id","type":{"ref":{"references":"accounts"}},"nullable":true}
+        ],
+        "constraints":[
+            {"name":"orders_account_fk","kind":{"kind":"fk","columns":["account_id"],
+                "referencesTable":"accounts","referencesColumns":["id"],"onDelete":"cascade"}}
+        ]}
+    ]}"#;
+    all_ops.extend(
+        apply_doc(&conn, &cfg, orders, &registry(&[("accounts", APP)]), Approval::None).await,
+    );
+
+    // (3) Rename the FK TARGET `accounts → members`. Backward-incompatible ⇒
+    //     `Approval::Approved`. The registry owns the SOURCE name.
+    let rename = r#"{"ir_version":1,"name":"rename_accounts","ops":[
+        {"op":"renameTable","table":"accounts","to":"members"}
+    ]}"#;
+    all_ops.extend(
+        apply_doc(
+            &conn,
+            &cfg,
+            rename,
+            &registry(&[("accounts", APP), ("orders", APP)]),
+            Approval::Approved,
+        )
+        .await,
+    );
+
+    let live = snapshot_schema(&conn, &cfg.project_schema)
+        .await
+        .expect("introspect after rename");
+
+    // (1) Live PG followed the rename by OID: the `orders` FK now references the NEW
+    //     name. (Asserted explicitly so a future PG behaviour change is loud.)
+    let orders_live = &live.tables["orders"];
+    let fk = orders_live
+        .constraints
+        .iter()
+        .find(|c| c.kind == "FOREIGN KEY")
+        .expect("orders carries the FK");
+    assert!(
+        fk.definition.contains("members") && !fk.definition.contains("accounts"),
+        "live PG re-targets the incoming FK to the NEW name: {}",
+        fk.definition
+    );
+
+    // (2) The offline fold of the SAME stream equals live — i.e. the renameTable arm
+    //     rewrote the INCOMING FK definition from `accounts` to `members`. FALSE
+    //     pre-fix (the folded `orders` FK still said `accounts`).
+    let folded = fold_ops(&all_ops, SqlDialect::Postgres, &cfg.project_schema)
+        .expect("fold create+create+rename offline");
+    assert_eq!(
+        canonicalize(folded),
+        canonicalize(live),
+        "fold must rewrite the INCOMING FK to the renamed table's new name"
+    );
+
+    teardown(&conn, &cfg).await;
+}
