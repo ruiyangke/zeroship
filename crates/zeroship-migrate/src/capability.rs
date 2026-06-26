@@ -209,6 +209,28 @@ impl VendorCapabilities {
     /// Only `confined()` produces `Single`; only `platform()`/`trusted()` produce
     /// `Allowlist`/`None` — so this mapping is exact, by construction
     /// (`guard.rs` `schema_scope`).
+    ///
+    /// # GUARD-RAIL — `None ⇒ operator` is intentional, NOT fail-open
+    ///
+    /// `None` maps to the FULL [`operator`](Self::operator) capability set
+    /// because `None` is produced EXCLUSIVELY by a **Trusted** `GuardConfig`
+    /// (`GuardConfig::schema_scope` returns `None` only for `TrustProfile::Trusted`,
+    /// `guard.rs`), and a Trusted config can be minted ONLY with an
+    /// `OperatorCapability` token inside `platform_runner` — never from a
+    /// creator-reachable path. Every CREATOR entry threads `Some(Single(_))`
+    /// explicitly: `IrAuthor::load_and_lower` pins
+    /// `Some(SchemaScope::Single(project_schema))` (`ir_author.rs`), and
+    /// `load_and_lower_guarded` derives the scope from a `GuardConfig::confined`
+    /// the submit ingress forces (`submit.rs`) ⇒ `Some(Single)`. So no
+    /// creator-reachable call ever passes `None` here.
+    ///
+    /// This is pinned by an end-to-end test (`vendor_via_creator_load_path_is_denied`
+    /// in `ir_author.rs`): a vendor op loaded through the Confined creator entry is
+    /// refused `VENDOR_OP_DENIED`, proving the creator path's scope is `Single`,
+    /// never the `None` that would grant operator caps. A FUTURE caller that
+    /// hands `None` to the validate layer for a creator IR would be granting full
+    /// vendor caps — so `None` MUST stay an operator-only, `OperatorCapability`-gated
+    /// signal; do not introduce a non-Trusted `None` producer.
     #[must_use]
     pub fn from_scope(scope: Option<&SchemaScope>) -> Self {
         match scope {

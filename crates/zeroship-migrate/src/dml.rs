@@ -394,6 +394,13 @@ fn cast_target_sql(target: crate::expr::CastTarget, dialect: SqlDialect) -> &'st
         (CastTarget::Boolean, SqlDialect::Sqlite) => "integer",
         (CastTarget::Blob, SqlDialect::Postgres) => "bytea",
         (CastTarget::Blob, SqlDialect::Sqlite) => "blob",
+        (CastTarget::Uuid, SqlDialect::Postgres) => "uuid",
+        // SQLite has no uuid type; uuids are stored as text. The vendor policy
+        // predicates that use `::uuid` are PgOnly (the containing vendor op is
+        // refused on a SQLite target at validate, §4.3), so this arm only fires
+        // for a portable-core `.cast("uuid")` on SQLite — render `text`, the
+        // portable storage spelling (mirrors `boolean`→`integer` above).
+        (CastTarget::Uuid, SqlDialect::Sqlite) => "text",
     }
 }
 

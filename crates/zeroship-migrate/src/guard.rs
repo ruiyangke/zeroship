@@ -644,10 +644,34 @@ impl SqlGuard {
             // Role management — privilege escalation. ALLOW iff Platform (§4.1):
             // the platform schema migrations must CREATE/ALTER/DROP roles and
             // pin their search_path (0025/0027). Confined still hard-denies.
-            NodeEnum::CreateRoleStmt(_)
-            | NodeEnum::AlterRoleStmt(_)
-            | NodeEnum::AlterRoleSetStmt(_)
-            | NodeEnum::DropRoleStmt(_) => {
+            //
+            // SUPERUSER is the ONE role attribute that stays HARD-DENIED even
+            // under Platform (vendor spec §3.4): a superuser bypasses RLS and
+            // reaches the host (file I/O, `COPY … PROGRAM`). Platform widens
+            // privilege *within* the DB, never *host* reach — so a
+            // `CREATE/ALTER ROLE … SUPERUSER` is refused before the Platform
+            // allow. (Trusted skips the whole deny-list earlier — operator owns
+            // the DB.) This guards the vendor `createRole({ superuser: true })`
+            // render-here-refuse-at-guard backstop.
+            NodeEnum::CreateRoleStmt(s) => {
+                if role_grants_superuser(&s.options) {
+                    return Err(denied(rule::SUPERUSER_ROLE, raw));
+                }
+                if self.cfg.trust() == TrustProfile::Platform {
+                    return Ok(());
+                }
+                return Err(denied(rule::ROLE_MANAGEMENT, raw));
+            }
+            NodeEnum::AlterRoleStmt(s) => {
+                if role_grants_superuser(&s.options) {
+                    return Err(denied(rule::SUPERUSER_ROLE, raw));
+                }
+                if self.cfg.trust() == TrustProfile::Platform {
+                    return Ok(());
+                }
+                return Err(denied(rule::ROLE_MANAGEMENT, raw));
+            }
+            NodeEnum::AlterRoleSetStmt(_) | NodeEnum::DropRoleStmt(_) => {
                 if self.cfg.trust() == TrustProfile::Platform {
                     return Ok(());
                 }
@@ -1643,6 +1667,19 @@ fn is_safe_transaction_kind(kind: i32) -> bool {
     ]
     .iter()
     .any(|k| kind == *k as i32)
+}
+
+/// True if a `CREATE ROLE` / `ALTER ROLE` options list grants the `SUPERUSER`
+/// attribute (vendor spec §3.4). The attribute is a `DefElem` named `superuser`
+/// with a boolean arg (`SUPERUSER` ⇒ true, `NOSUPERUSER` ⇒ false). Denied in
+/// ALL profiles including Platform — superuser is host-reaching, not merely
+/// in-DB privilege.
+fn role_grants_superuser(options: &[protobuf::Node]) -> bool {
+    options.iter().any(|opt| {
+        matches!(opt.node.as_ref(), Some(NodeEnum::DefElem(d))
+            if d.defname.eq_ignore_ascii_case("superuser")
+                && def_elem_bool(d) == Some(true))
+    })
 }
 
 /// True if a CREATE FUNCTION carries the `security` definer option.
@@ -2803,6 +2840,45 @@ mod tests {
         assert!(
             is_denied(&g, rce_do),
             "COPY…PROGRAM in a body MUST deny even under Platform"
+        );
+    }
+
+    // ---- HIGH-2 (vendor-pg review): SUPERUSER is host-reaching, denied even
+    // under Platform (vendor spec §3.4). RED pre-fix: the CreateRoleStmt arm
+    // returned Ok(()) unconditionally under Platform, so `CREATE ROLE x
+    // SUPERUSER` PASSED — a render-here-refuse-at-guard backstop that did not
+    // actually refuse. ----------------------------------------------------------
+
+    #[test]
+    fn superuser_role_denied_even_under_platform() {
+        let g = platform_guard();
+        // A plain role create is fine under Platform (the platform mints roles).
+        assert!(
+            g.check(r#"CREATE ROLE "zeroship_auth" LOGIN"#).is_ok(),
+            "a non-superuser CREATE ROLE must still pass under Platform: {:?}",
+            g.check(r#"CREATE ROLE "zeroship_auth" LOGIN"#)
+        );
+        // But SUPERUSER reaches the host — denied even under Platform, with the
+        // dedicated rule id (NOT the generic role_management, which Platform
+        // relaxes).
+        for sql in [
+            r#"CREATE ROLE "evil" SUPERUSER"#,
+            r#"CREATE ROLE "evil" LOGIN SUPERUSER BYPASSRLS"#,
+            r#"ALTER ROLE "zeroship_auth" SUPERUSER"#,
+        ] {
+            match g.check(sql) {
+                Err(GuardError::Denied { rule: r, .. }) => assert_eq!(
+                    r,
+                    rule::SUPERUSER_ROLE,
+                    "SUPERUSER must deny with the superuser_role rule, got rule={r} for {sql}"
+                ),
+                other => panic!("SUPERUSER must be DENIED even under Platform; got {other:?} for {sql}"),
+            }
+        }
+        // NOSUPERUSER (the negative attribute) is not an escalation — it passes.
+        assert!(
+            g.check(r#"CREATE ROLE "zeroship_auth" NOSUPERUSER LOGIN"#).is_ok(),
+            "NOSUPERUSER must not trip the superuser deny"
         );
     }
 

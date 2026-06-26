@@ -263,6 +263,12 @@ pub mod rule {
     pub const EXTENSION_NOT_ALLOWLISTED: &str = "extension_not_allowlisted";
     pub const ALTER_SYSTEM: &str = "alter_system";
     pub const ROLE_MANAGEMENT: &str = "role_management";
+    /// `CREATE/ALTER ROLE … SUPERUSER` — host-reaching privilege escalation
+    /// (a superuser bypasses RLS, reads/writes arbitrary files, runs `COPY …
+    /// PROGRAM`). Denied in ALL profiles INCLUDING Platform (vendor spec §3.4:
+    /// Platform widens privilege *within* the DB, never *host* reach). Only
+    /// Trusted (operator-owns-the-DB) skips the whole deny-list.
+    pub const SUPERUSER_ROLE: &str = "superuser_role";
     pub const PRIVILEGE_MANAGEMENT: &str = "privilege_management";
     pub const FILE_ACCESS_FUNCTION: &str = "file_access_function";
     pub const NETWORK_FUNCTION: &str = "network_function";
