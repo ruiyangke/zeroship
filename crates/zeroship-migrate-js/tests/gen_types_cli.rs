@@ -55,7 +55,7 @@ fn create_users() -> Op {
                 default: None,
                 unique: None,
                 id_prefix: Some("usr2".into()),
-                vector_metric: None,
+                vector_metric: None, mask: None,
             },
             IrColumn {
                 name: "email".into(),
@@ -64,7 +64,7 @@ fn create_users() -> Op {
                 default: None,
                 unique: Some(true),
                 id_prefix: None,
-                vector_metric: None,
+                vector_metric: None, mask: None,
             },
         ],
         constraints: Vec::new(),
@@ -83,6 +83,8 @@ fn add_bio() -> Op {
         ty: ColType::Text,
         nullable: Some(true),
         default: None,
+        vector_metric: None,
+        mask: None,
         schema: None,
         existence_guard: None,
     }

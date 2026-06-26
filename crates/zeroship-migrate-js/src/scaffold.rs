@@ -346,7 +346,7 @@ fn synth_delta_ops(
                         // to the scaffold's fail-closed posture — it never invents a
                         // declared-only facet it cannot observe).
                         id_prefix: None,
-                        vector_metric: None,
+                        vector_metric: None, mask: None,
                     });
                 }
                 ops.push(SynthOp {
@@ -393,6 +393,12 @@ fn synth_delta_ops(
                             ty,
                             nullable: if col.nullable { None } else { Some(false) },
                             default,
+                            // The scaffolder synthesizes an AddColumn from a live-snapshot
+                            // diff; the snapshot column type carries no declared vector
+                            // metric / standalone mask facet at this layer (op.* authoring,
+                            // not scaffold, is the source of truth for those — #173/#174).
+                            vector_metric: None,
+                            mask: None,
                             schema: None,
                             existence_guard: None,
                         },

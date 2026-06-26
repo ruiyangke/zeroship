@@ -29,7 +29,7 @@ fn col(name: &str, ty: ColType) -> IrColumn {
         default: None,
         unique: None,
         id_prefix: None,
-        vector_metric: None,
+        vector_metric: None, mask: None,
     }
 }
 
@@ -42,7 +42,7 @@ fn all_types_ops() -> Vec<Op> {
         default: None,
         unique: None,
         id_prefix: Some("gdt".into()),
-        vector_metric: None,
+        vector_metric: None, mask: None,
     };
     let embedding = IrColumn {
         name: "embedding".into(),
@@ -52,6 +52,7 @@ fn all_types_ops() -> Vec<Op> {
         unique: None,
         id_prefix: None,
         vector_metric: Some(VectorMetric::L2),
+        mask: None,
     };
     let columns = vec![
         id,

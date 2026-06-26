@@ -35,8 +35,8 @@ use crate::declarative::{
 use crate::drift::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, TableSnapshot};
 use crate::guard::{guard_for, GuardConfig, GuardError};
 use crate::ir::{
-    ColType, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IndexMethod,
-    MigrationIr, Op, RefAction,
+    ColType, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrMask, IndexMethod,
+    MigrationIr, Op, RefAction, VectorMetric,
 };
 use crate::migration::Migration;
 use crate::plan::{AppliedPlan, PlanStep, RenameStep};
@@ -1287,17 +1287,25 @@ impl IrAuthor {
                 live.insert(name.clone());
                 migs
             }
-            Op::AddColumn { table, column, ty, nullable, default, .. } => {
+            Op::AddColumn { table, column, ty, nullable, default, vector_metric, mask, .. } => {
                 // Fail-closed on a synth default (see the createTable arm): a
                 // user-authored `now()`/`genRandomUuid()` must NOT be silently dropped.
                 reject_synth_default(std::iter::once((column.as_str(), default.as_ref())))?;
-                let col =
-                    self.add_column_snapshot(table, column, ty, *nullable, default.as_ref())?;
+                // **#173 / #174** — thread the carried facets (vector metric / standalone
+                // mask) so a vector ADD COLUMN renders the metric opclass and a masked ADD
+                // COLUMN emits the `__zsmask` sentinel. The sibling `<col>_masked` is a
+                // SEPARATE physical column the shared builder injects for a masked column —
+                // capture it so the ADD path lowers it too (otherwise the runtime mask
+                // read-pass has no sibling to write to; the bug the PG round-trip caught).
+                let (col, masked_sibling) = self.add_column_snapshot_with_sibling(
+                    table, column, ty, *nullable, default.as_ref(), *vector_metric, *mask,
+                )?;
                 // **PR10 Part B** — addColumn ifNotExists: verify (data_type, nullable)
                 // from the SAME shared-builder column snapshot the ADD renders from.
                 // **F1** — the decider compares the canonical SQLite affinity (consistent
                 // with the differ); a present-matching column is an idempotent
-                // SatisfiedNoop, a genuine affinity change diverges.
+                // SatisfiedNoop, a genuine affinity change diverges. The guard probes the
+                // MAIN column (the sibling is an engine-managed implementation detail).
                 if let Some(g) = guard {
                     probe = Some(crate::guard_probe::GuardProbe::Column {
                         schema: eff_schema.clone(),
@@ -1307,7 +1315,13 @@ impl IrAuthor {
                         expect: Some((col.data_type.clone(), col.nullable)),
                     });
                 }
-                vec![decl.lower_add_column(table, &col)]
+                // Lower the main column, then the masked sibling (if any) as a second
+                // ADD COLUMN — both ride the same migration unit list.
+                let mut units = vec![decl.lower_add_column(table, &col)];
+                if let Some(sibling) = masked_sibling {
+                    units.push(decl.lower_add_column(table, &sibling));
+                }
+                units
             }
             Op::CreateIndex { table, columns, name, unique, using, .. } => {
                 let idx = create_index_snapshot(table, columns, name.as_deref(), *unique, *using);
@@ -1411,7 +1425,7 @@ impl IrAuthor {
                 // Build the desired `ColumnSnapshot` via the SHARED builder (a
                 // one-field descriptor) so the emitted `data_type` is byte-identical
                 // to the differ's type mapping — never re-spelled (§6.5).
-                let col = self.add_column_snapshot(table, column, ty, None, None)?;
+                let col = self.add_column_snapshot(table, column, ty, None, None, None, None)?;
                 // **PR10 Part B** — alterColumnType ifExists: the SOURCE column must
                 // EXIST (presence-only — an alter intentionally CHANGES the shape, so
                 // there is nothing to shape-verify).
@@ -2102,6 +2116,12 @@ impl IrAuthor {
     /// field through the SHARED builder (a one-field descriptor) and pulling the
     /// matching column out — so the default / encryption / comment sentinel is
     /// built by the shared kernel, never re-spelled here (§6.5).
+    ///
+    /// Returns ONLY the main column (the callers that just need the column's
+    /// `data_type` — `alterColumnType`, the rename type-assertion). The masked-sibling
+    /// fidelity belongs to the ADD path; use [`Self::add_column_snapshot_with_sibling`]
+    /// there (#174).
+    #[allow(clippy::too_many_arguments)]
     fn add_column_snapshot(
         &self,
         table: &str,
@@ -2109,13 +2129,41 @@ impl IrAuthor {
         ty: &ColType,
         nullable: Option<bool>,
         default: Option<&IrDefault>,
+        vector_metric: Option<VectorMetric>,
+        mask: Option<IrMask>,
     ) -> Result<ColumnSnapshot, IrLowerError> {
+        Ok(self
+            .add_column_snapshot_with_sibling(table, column, ty, nullable, default, vector_metric, mask)?
+            .0)
+    }
+
+    /// **#174** — like [`Self::add_column_snapshot`], but ALSO returns the hidden
+    /// `<col>_masked TEXT` sibling the shared builder injects for a masked column (a
+    /// standalone `.mask()` OR an encrypted auto-mask). The ADD path lowers BOTH the
+    /// main column and the sibling as `ADD COLUMN`s — otherwise a masked added column
+    /// would grow the main column but NOT the sibling the runtime mask read-pass writes
+    /// to (the bug the `mask_addcol_pg` round-trip caught). A non-masked column returns
+    /// `(main, None)`.
+    #[allow(clippy::too_many_arguments)]
+    fn add_column_snapshot_with_sibling(
+        &self,
+        table: &str,
+        column: &str,
+        ty: &ColType,
+        nullable: Option<bool>,
+        default: Option<&IrDefault>,
+        vector_metric: Option<VectorMetric>,
+        mask: Option<IrMask>,
+    ) -> Result<(ColumnSnapshot, Option<ColumnSnapshot>), IrLowerError> {
         let field = ir_column_to_field(&IrColumn {
             name: column.to_string(),
             ty: ty.clone(),
             nullable,
             default: default.cloned(),
-            unique: None, id_prefix: None, vector_metric: None });
+            // **#173** — `id_prefix` stays `None` (an added column is never the system
+            // PK); the vector metric + standalone mask ARE carried so the snapshot
+            // renders the metric opclass / `__zsmask` sentinel.
+            unique: None, id_prefix: None, vector_metric, mask });
         let desc = CollectionDescriptor {
             name: table.to_string(),
             owner_app: self.decl.owner_app().to_string(),
@@ -2123,10 +2171,15 @@ impl IrAuthor {
             indexes: Vec::new(),
         };
         let snap = build_table_snapshot(&self.project_schema, &desc, self.dialect)?;
-        snap.columns
-            .into_iter()
+        let sibling_name = format!("{column}_masked");
+        let main = snap
+            .columns
+            .iter()
             .find(|c| c.name == column)
-            .ok_or(IrLowerError::UnsupportedOp("addColumn (column folded away)"))
+            .cloned()
+            .ok_or(IrLowerError::UnsupportedOp("addColumn (column folded away)"))?;
+        let sibling = snap.columns.into_iter().find(|c| c.name == sibling_name);
+        Ok((main, sibling))
     }
 
     /// **PR2 — lower an online `renameColumn` op (§2.6 / §2.6.1 / §2.6.2).** Map the
@@ -2185,7 +2238,7 @@ impl IrAuthor {
         // `data_type` via the SHARED builder (the SAME spelling the differ's
         // `field_data_type` produces and the live introspection records). This is
         // the type the IR ASSERTS the column has.
-        let col = self.add_column_snapshot(table, to, ty, None, None)?;
+        let col = self.add_column_snapshot(table, to, ty, None, None, None, None)?;
         let ir_data_type = col.data_type.clone();
 
         // **AUTHORITATIVE IR-vs-live type reconciliation (HIGH/MED — both legs).**
@@ -2730,7 +2783,13 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         references,
         default: c.default.as_ref().and_then(ir_default_to_value),
         encrypted,
-        mask: encrypted_mask,
+        // Precedence: an EXPLICIT standalone `.mask()` carried on the IrColumn WINS;
+        // for an encrypted column with NO explicit mask, fall back to the fail-safe
+        // auto-mask `{ full, pii }` (`encrypted_mask`). A plaintext column with no mask
+        // stays `None`. This makes a standalone-masked column emit the `__zsmask`
+        // sentinel + `_masked` sibling via `field_to_sdk_def`/`mask_sentinel_for_field`
+        // — closing both the gen-types type gap and the runtime masking gap.
+        mask: c.mask.map(IrMask::to_sdk_json).or(encrypted_mask),
         vector_dims,
         vector_metric: c.vector_metric.map(|m| m.as_token().to_string()),
         id_prefix: c.id_prefix.clone(),
@@ -2977,7 +3036,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: Some(false),
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None }],
         );
         if let Op::CreateTable { constraints, .. } = &mut ir.ops[0] {
             constraints.push(IrConstraint {
@@ -3019,7 +3078,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             *schema = Some("app2".into());
@@ -3061,7 +3120,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             // A case-VARIANT of the bound project schema — the gate folds it in.
@@ -3108,7 +3167,7 @@ mod tests {
                     ty: ColType::Int,
                     nullable: Some(false),
                     default: Some(IrDefault::Literal { value: IrScalar::Int(5) }),
-                    unique: None, id_prefix: None, vector_metric: None },
+                    unique: None, id_prefix: None, vector_metric: None, mask: None },
                 // A bigint default beyond 2^53 — carried as a decimal STRING (the IR
                 // rejects a fractional/oversized JSON number), and `as_f64` would
                 // corrupt it; the verbatim string keeps it exact.
@@ -3119,7 +3178,7 @@ mod tests {
                     default: Some(IrDefault::Literal {
                         value: IrScalar::Decimal("9007199254740993".into()),
                     }),
-                    unique: None, id_prefix: None, vector_metric: None },
+                    unique: None, id_prefix: None, vector_metric: None, mask: None },
                 TIrColumn {
                     name: "ratio".into(),
                     ty: ColType::Float,
@@ -3127,7 +3186,7 @@ mod tests {
                     default: Some(IrDefault::Literal {
                         value: IrScalar::Decimal("0.5".into()),
                     }),
-                    unique: None, id_prefix: None, vector_metric: None },
+                    unique: None, id_prefix: None, vector_metric: None, mask: None },
             ],
         );
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
@@ -3164,7 +3223,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None }],
         );
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres)
             // Trusted CLI widens the scope to admit the connection default it binds.
@@ -3197,7 +3256,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None }],
         );
         // No `with_schema_scope` ⇒ Confined `Single("app1")`; the op omits its own
         // qualifier, so the effective schema resolves to the foreign default "other".
@@ -3233,7 +3292,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None }],
         );
         // The op itself names a FOREIGN schema "other" (≠ project "app1"); NO
         // connection default is bound, so this exercises the EXPLICIT-qualifier arm,
@@ -3269,7 +3328,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             *schema = Some("reporting".into());
@@ -3304,7 +3363,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             *schema = Some("reporting".into());
@@ -3340,7 +3399,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             // The op names the project schema explicitly — the implicit main target.
@@ -3483,7 +3542,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None }],
         );
         if let Op::CreateTable { existence_guard, .. } = &mut ir.ops[0] {
             *existence_guard = Some(crate::ir::ExistenceGuard::IfNotExists);
@@ -3522,7 +3581,7 @@ mod tests {
                 ty: ColType::Encrypted { of: Box::new(ColType::String) },
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None }],
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let guard_cfg = GuardConfig::confined("app".to_string());
@@ -3570,7 +3629,7 @@ mod tests {
                 ty: ColType::String,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None }],
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         // Guard confined to "other" — the rendered `CREATE TABLE "app".…` is then a
@@ -3600,7 +3659,7 @@ mod tests {
                 ty: ColType::String,
                 nullable: Some(false),
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None }],
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Sqlite);
         let guard_cfg = GuardConfig::confined_sqlite("app".to_string());
@@ -3639,7 +3698,7 @@ mod tests {
                 default: Some(IrDefault::Literal {
                     value: crate::ir::IrScalar::Str(nasty.into()),
                 }),
-                unique: None, id_prefix: None, vector_metric: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None }],
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let guard_cfg = GuardConfig::confined("app".to_string());
@@ -3797,6 +3856,8 @@ mod tests {
                     &ColType::Encrypted { of: Box::new(ColType::String) },
                     None,
                     None,
+                    None,
+                    None,
                 )
                 .expect("ir add_column_snapshot");
 
@@ -3846,7 +3907,7 @@ mod tests {
                     ty: ColType::Text,
                     nullable: Some(false),
                     default: None,
-                    unique: None, id_prefix: None, vector_metric: None },
+                    unique: None, id_prefix: None, vector_metric: None, mask: None },
             ];
 
             // IrAuthor's createTable snapshot (its real lowering seam: the private
@@ -3921,7 +3982,7 @@ mod tests {
                     ty: ColType::Timestamp,
                     nullable: None,
                     default: Some(IrDefault::Fn { r#fn: SynthDefaultFn::Now }),
-                    unique: None, id_prefix: None, vector_metric: None }],
+                    unique: None, id_prefix: None, vector_metric: None, mask: None }],
                 constraints: vec![],
                 indexes: vec![],
                 schema: None,
@@ -3952,6 +4013,8 @@ mod tests {
                 ty: ColType::Uuid,
                 nullable: Some(false),
                 default: Some(IrDefault::Fn { r#fn: SynthDefaultFn::GenRandomUuid }),
+                vector_metric: None,
+                mask: None,
                 schema: None,
                 existence_guard: None,
             }],
@@ -3981,6 +4044,8 @@ mod tests {
                 ty: ColType::Text,
                 nullable: Some(false),
                 default: Some(IrDefault::Literal { value: crate::ir::IrScalar::Str("x".into()) }),
+                vector_metric: None,
+                mask: None,
                 schema: None,
                 existence_guard: None,
             }],
@@ -4297,7 +4362,7 @@ mod tests {
             ty: ColType::Text,
             nullable: Some(false),
             default: None,
-            unique: None, id_prefix: None, vector_metric: None }]);
+            unique: None, id_prefix: None, vector_metric: None, mask: None }]);
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let plan = author.lower_plan(&ir, &LiveSchema::default()).expect("lower_plan");
 
@@ -4356,7 +4421,7 @@ mod tests {
             ty: ColType::Text,
             nullable: Some(false),
             default: None,
-            unique: None, id_prefix: None, vector_metric: None }]);
+            unique: None, id_prefix: None, vector_metric: None, mask: None }]);
         let pg = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
             .lower_plan(&ir, &LiveSchema::default())
             .expect("pg lower_plan");
@@ -4387,9 +4452,9 @@ mod tests {
     #[test]
     fn ir_plan_anchor_changes_when_op_list_changes() {
         let a = create_table_ir("t", vec![TIrColumn {
-            name: "c".into(), ty: ColType::Text, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None }]);
+            name: "c".into(), ty: ColType::Text, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None, mask: None }]);
         let b = create_table_ir("t", vec![TIrColumn {
-            name: "c".into(), ty: ColType::Int, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None }]);
+            name: "c".into(), ty: ColType::Int, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None, mask: None }]);
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let pa = author.lower_plan(&a, &LiveSchema::default()).expect("lower a");
         let pb = author.lower_plan(&b, &LiveSchema::default()).expect("lower b");

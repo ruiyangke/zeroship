@@ -140,6 +140,24 @@ function requireString(v, what) {
  *  client-side OP_INVALID (LOW-1); the engine's closed enum stays authoritative. */
 const VECTOR_METRICS = ["cosine", "l2", "innerProduct"];
 
+/** The CLOSED column-mask token sets (#174) — the SDK/IR WIRE spelling of the Rust
+ *  `IrMaskKind` / `IrClassification` enums. The two date kinds are KEBAB
+ *  (`date-year`/`date-decade`) to match the SDK wire form `t.string().mask()` emits;
+ *  the rest are single camelCase words. Mirrored here so `.mask({ kind, classification })`
+ *  rejects an out-of-set token with a friendly client-side OP_INVALID; the engine's
+ *  closed enums stay authoritative. */
+const MASK_KINDS = [
+  "full",
+  "last4",
+  "first4",
+  "email",
+  "name",
+  "date-year",
+  "date-decade",
+  "none",
+];
+const MASK_CLASSIFICATIONS = ["public", "pii", "spi", "phi", "pci", "internal"];
+
 // ===========================================================================
 // (B) The IMMUTABLE chainable `t.*` column-type lexicon (§4). NULLABLE BY
 // DEFAULT; `.notNull()` / `.default(x)` / `.ref(target)` / `.primaryKey()` /
@@ -162,6 +180,10 @@ class ColumnDef {
     // distance metric (`t.vector(n, {metric})`). Absent ⇒ omitted on the wire.
     this._idPrefix = fields ? fields.idPrefix : undefined;
     this._vectorMetric = fields ? fields.vectorMetric : undefined;
+    // #174: a STANDALONE column mask (`.mask({ kind, classification })`) carried on the
+    // IrColumn. Absent ⇒ omitted on the wire. An encrypted column's auto-mask is IMPLIED
+    // by `t.encrypted()` (the engine re-derives it) — only an explicit mask lands here.
+    this._mask = fields ? fields.mask : undefined;
   }
 
   /** Clone with the named fields overridden — the basis of immutability (§4). */
@@ -173,6 +195,7 @@ class ColumnDef {
       unique: over.unique !== undefined ? over.unique : this._unique,
       idPrefix: "idPrefix" in over ? over.idPrefix : this._idPrefix,
       vectorMetric: "vectorMetric" in over ? over.vectorMetric : this._vectorMetric,
+      mask: "mask" in over ? over.mask : this._mask,
     });
   }
 
@@ -200,6 +223,39 @@ class ColumnDef {
     return this._with({ unique: true });
   }
 
+  /** `.mask({ kind, classification? })` (#174) — declare a STANDALONE column mask so the
+   *  field reads back as `MaskedValue<T>` and the op lower emits the `__zsmask` sentinel
+   *  + `_masked` sibling (the same shape `t.encrypted()`'s auto-mask uses). `kind` is
+   *  required and one of the closed `MASK_KINDS`; `classification` is optional and
+   *  defaults to `"pii"` (the SDK default), one of the closed `MASK_CLASSIFICATIONS`. A
+   *  `.mask()` on an ENCRYPTED column is allowed — it OVERRIDES the auto-mask. The
+   *  closed-set checks mirror `t.vector(n, { metric })`: a friendly client-side
+   *  OP_INVALID over the SAME closed set the engine's enums enforce authoritatively. */
+  mask(opts) {
+    if (opts === null || typeof opts !== "object") {
+      throw structuredError("OP_INVALID", "t.*.mask(opts): opts must be { kind, classification? }");
+    }
+    requireString(opts.kind, "t.*.mask({ kind })");
+    if (!MASK_KINDS.includes(opts.kind)) {
+      throw structuredError(
+        "OP_INVALID",
+        `t.*.mask({ kind }): kind must be one of ${MASK_KINDS.join(" | ")}, ` +
+          `got ${JSON.stringify(opts.kind)}`,
+        { kind: opts.kind },
+      );
+    }
+    const classification = opts.classification === undefined ? "pii" : opts.classification;
+    if (!MASK_CLASSIFICATIONS.includes(classification)) {
+      throw structuredError(
+        "OP_INVALID",
+        `t.*.mask({ classification }): classification must be one of ` +
+          `${MASK_CLASSIFICATIONS.join(" | ")}, got ${JSON.stringify(classification)}`,
+        { classification },
+      );
+    }
+    return this._with({ mask: { kind: opts.kind, classification } });
+  }
+
   /** Reduce to an `IrColumn` (the `createTable` columns[] shape). `name` is the
    *  map key. `nullable`/`default`/`unique` omitted when at their defaults.
    *  C2 — a PRIMARY KEY already IMPLIES uniqueness, so a column that is BOTH
@@ -222,40 +278,45 @@ class ColumnDef {
       // so a plain column is byte-identical to the pre-P2a image (checksum-neutral).
       idPrefix: this._idPrefix,
       vectorMetric: this._vectorMetric,
+      // #174: carry a STANDALONE mask onto the wire IrColumn (`{ kind, classification }`)
+      // so the offline fold + gen-types keep the `MaskedValue<T>` brand and the lower
+      // emits the `__zsmask` sentinel. Absent ⇒ omitted (compact), so a mask-less column
+      // is byte-identical to the pre-mask image (checksum-neutral).
+      mask: this._mask,
     });
   }
 
-  /** Reduce to the `addColumn` op tail (`{ type, nullable?, default? }`).
+  /** Reduce to the `addColumn` op tail (`{ type, nullable?, default?, vectorMetric?,
+   *  mask? }`).
    *
-   *  Migration-first P2a (HIGH-2): the `Op::AddColumn` IR has NO facet slot — it
-   *  carries only `{ type, nullable?, default? }`. The two declared-only facets
-   *  (`idPrefix` from `t.id({prefix})`, `vectorMetric` from `t.vector(n,{metric})`)
-   *  can ONLY be declared at create() time, where the IrColumn carries them. So a
-   *  facet-bearing ColumnDef on an `add({ type })` would be SILENTLY dropped on the
-   *  wire — the one outcome the closed-contract discipline forbids (a missed
-   *  consumer is silent drift). REFUSE it fail-closed with a structured OP_INVALID:
-   *  the author must declare the metric/prefix in create(), never via addColumn. */
+   *  #173: `Op::AddColumn` NOW carries the `vectorMetric` + `mask` facets (the engine
+   *  Op gained the slots), so a vector / masked ADD COLUMN renders the metric opclass /
+   *  `__zsmask` sentinel instead of silently dropping the facet. They are carried here.
+   *
+   *  `idPrefix` STAYS fail-closed: an added column is NEVER the system PK (the table
+   *  already has its `id`), so a `t.id({ prefix })` typed-id prefix on an added column is
+   *  meaningless — `Op::AddColumn` deliberately has no `idPrefix` slot. A facet-bearing
+   *  ColumnDef on an `add({ type })` would otherwise SILENTLY drop the prefix on the wire
+   *  (the one outcome the closed-contract discipline forbids); REFUSE it with a structured
+   *  OP_INVALID directing the author to declare `t.id({ prefix })` only in create(). */
   __toAddColumnTail() {
     if (this._idPrefix !== undefined) {
       throw structuredError(
         "OP_INVALID",
-        "a t.id({ prefix }) typed-id prefix can only be declared in create(); an " +
-          "addColumn carries no prefix slot (the IrColumn facet is create-only)",
+        "a t.id({ prefix }) typed-id prefix can only be declared in create(); an added " +
+          "column is never the system primary key, so an addColumn carries no prefix slot",
         { facet: "idPrefix" },
-      );
-    }
-    if (this._vectorMetric !== undefined) {
-      throw structuredError(
-        "OP_INVALID",
-        "a t.vector(n, { metric }) distance metric can only be declared in create(); " +
-          "an addColumn carries no metric slot (the IrColumn facet is create-only)",
-        { facet: "vectorMetric" },
       );
     }
     return compact({
       type: this._type,
       nullable: this._nullable === false ? false : undefined,
       default: this._default,
+      // #173: carry the vector metric + standalone mask onto the addColumn op tail
+      // (camelCase keys, lock-step with `Op::AddColumn`). Absent ⇒ omitted (compact),
+      // so a plain ADD COLUMN is byte-identical to the pre-#173 wire image.
+      vectorMetric: this._vectorMetric,
+      mask: this._mask,
     });
   }
 }

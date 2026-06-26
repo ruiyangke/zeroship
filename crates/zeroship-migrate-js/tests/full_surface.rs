@@ -844,12 +844,13 @@ fn add_column_with_id_prefix_is_refused_not_dropped() {
     );
 }
 
-/// **HIGH-2** — `t.vector(n, { metric })` on an `addColumn` is likewise REFUSED, not
-/// silently dropped (the metric is a create-only IrColumn facet). RED pre-fix:
-/// `__toAddColumnTail` dropped `_vectorMetric` silently.
+/// **#173** — `t.vector(n, { metric })` on an `addColumn` is now CARRIED on the op
+/// tail (`Op::AddColumn` gained a `vectorMetric` slot), not refused/dropped — a vector
+/// ADD COLUMN renders the metric opclass. RED pre-#173: `__toAddColumnTail` THREW a
+/// create-only `OP_INVALID` on `_vectorMetric` (the P2a fail-closed this lift removes).
 #[test]
-fn add_column_with_vector_metric_is_refused_not_dropped() {
-    let err = record_err(
+fn add_column_with_vector_metric_is_carried_not_refused() {
+    let ir = record(
         r#"
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
@@ -858,11 +859,37 @@ fn add_column_with_vector_metric_is_refused_not_dropped() {
     "#,
         "addcol_metric",
     );
-    assert!(
-        err.contains("metric") && err.contains("create()"),
-        "an addColumn carrying a t.vector(n, {{metric}}) must be refused with a \
-         create-only OP_INVALID, got: {err}"
+    let add = &ops(&ir)[0];
+    assert_eq!(add.get("op").unwrap(), "addColumn");
+    assert_eq!(
+        add.get("vectorMetric").and_then(|v| v.as_str()),
+        Some("cosine"),
+        "an addColumn t.vector(n, {{ metric }}) must CARRY the metric on the op tail \
+         (the #173 lift of the P2a fail-closed), got: {add:#}"
     );
+}
+
+/// **#174** — a standalone `.mask({ kind, classification })` on an `addColumn` is
+/// CARRIED on the op tail (`Op::AddColumn` gained a `mask` slot) so a masked ADD COLUMN
+/// emits the `__zsmask` sentinel + `_masked` sibling and keeps the `MaskedValue<T>`
+/// brand. RED pre-#174: `ColumnDef` had no `.mask()` method at all (and the op tail had
+/// no mask slot), so the facet could not be authored on an added column.
+#[test]
+fn add_column_with_standalone_mask_is_carried() {
+    let ir = record(
+        r#"
+        import { table, t } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            table("people").column("ssn").add({ type: t.text().mask({ kind: "last4", classification: "spi" }) });
+        }};
+    "#,
+        "addcol_mask",
+    );
+    let add = &ops(&ir)[0];
+    assert_eq!(add.get("op").unwrap(), "addColumn");
+    let mask = add.get("mask").unwrap_or_else(|| panic!("addColumn must carry mask: {add:#}"));
+    assert_eq!(mask.get("kind").and_then(|v| v.as_str()), Some("last4"));
+    assert_eq!(mask.get("classification").and_then(|v| v.as_str()), Some("spi"));
 }
 
 /// A `t.vector(n)` (no metric) on an addColumn is STILL allowed — only the declared

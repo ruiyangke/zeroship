@@ -123,6 +123,7 @@ fn ir_column_facet_fields_are_camel_case() {
         unique: None,
         id_prefix: Some("post".into()),
         vector_metric: Some(VectorMetric::Cosine),
+        mask: None,
     };
     let v = serde_json::to_value(&col).unwrap();
     assert_eq!(v["idPrefix"], "post", "idPrefix is camelCase on the wire: {v}");
@@ -493,28 +494,50 @@ fn bytes_decode_then_canonical_reencode_is_stable() {
 // ----------------------------------------------------------------------------
 
 #[test]
-fn add_column_cannot_carry_declared_only_facets() {
-    // **Migration-first P2a (HIGH-1)** — the two declared-only facets (`idPrefix`,
-    // `vectorMetric`) are CREATE-ONLY: `Op::AddColumn` has NO facet slot (it carries
-    // only table/column/type/nullable?/default?/schema?/existenceGuard?). Pin that an
-    // `addColumn` IR CANNOT smuggle a facet in: `Op` is `deny_unknown_fields`, so a
-    // hand-crafted `.ir.json` carrying `idPrefix`/`vectorMetric` on an addColumn is
-    // rejected fail-closed at deserialize — the validate bound (`validate_column_facets`
-    // runs only on the createTable arm) can therefore never silently fail to apply to
-    // an added column, because such a column cannot exist on the wire. (The JS recorder
-    // ALSO refuses a facet-bearing ColumnDef on `add({type})` — see the migrate_ops
-    // `__toAddColumnTail` reject and its recorder regression test — so the gap is
-    // closed at BOTH the producer and the wire-contract layer.)
-    for facet in [
+fn add_column_id_prefix_is_create_only_but_metric_and_mask_are_carried() {
+    // **#173** — `vectorMetric` + `mask` are now CARRIED on `Op::AddColumn` (a vector /
+    // masked ADD COLUMN is meaningful), so a wire `addColumn` declaring them DESERIALIZES
+    // cleanly. `idPrefix` STAYS create-only: an added column is never the system PK, so
+    // `Op::AddColumn` deliberately has NO `idPrefix` slot — a hand-crafted `.ir.json`
+    // carrying it is rejected fail-closed by `deny_unknown_fields` at deserialize.
+
+    // idPrefix on addColumn: STILL rejected (no slot — create-only).
+    let id_err = serde_json::from_str::<Op>(
         r#"{"op":"addColumn","table":"t","column":"x","type":"uuid","idPrefix":"post"}"#,
+    )
+    .unwrap_err();
+    assert!(
+        id_err.to_string().contains("unknown field"),
+        "an addColumn carrying idPrefix must be rejected by deny_unknown_fields (create-only \
+         facet, no slot), got: {id_err}"
+    );
+
+    // vectorMetric on addColumn: now ACCEPTED (the #173 slot) and round-trips.
+    let metric_op: Op = serde_json::from_str(
         r#"{"op":"addColumn","table":"t","column":"x","type":{"vector":{"vector":8}},"vectorMetric":"cosine"}"#,
-    ] {
-        let err = serde_json::from_str::<Op>(facet).unwrap_err();
-        assert!(
-            err.to_string().contains("unknown field"),
-            "an addColumn carrying a create-only facet must be rejected by \
-             deny_unknown_fields, got: {err} (input: {facet})"
-        );
+    )
+    .expect("addColumn now carries vectorMetric (#173)");
+    match &metric_op {
+        Op::AddColumn { vector_metric, .. } => assert_eq!(
+            *vector_metric,
+            Some(zeroship_migrate::ir::VectorMetric::Cosine),
+            "the carried vector metric deserializes onto the op"
+        ),
+        other => panic!("expected AddColumn, got {other:?}"),
+    }
+
+    // mask on addColumn: now ACCEPTED (the #174 slot) and round-trips.
+    let mask_op: Op = serde_json::from_str(
+        r#"{"op":"addColumn","table":"t","column":"ssn","type":"text","mask":{"kind":"last4","classification":"spi"}}"#,
+    )
+    .expect("addColumn now carries mask (#174)");
+    match &mask_op {
+        Op::AddColumn { mask, .. } => {
+            let m = mask.expect("the carried mask deserializes onto the op");
+            assert_eq!(m.kind, zeroship_migrate::ir::IrMaskKind::Last4);
+            assert_eq!(m.classification, zeroship_migrate::ir::IrClassification::Spi);
+        }
+        other => panic!("expected AddColumn, got {other:?}"),
     }
 }
 
@@ -528,6 +551,8 @@ fn add_column_omits_absent_optionals() {
         ty: zeroship_migrate::ir::ColType::Int,
         nullable: None,
         default: None,
+        vector_metric: None,
+        mask: None,
         schema: None,
         existence_guard: None,
     };
@@ -581,7 +606,7 @@ fn nested_ir_column_index_constraint_omit_absent_optionals() {
         ty: ColType::Uuid,
         nullable: None,
         default: None,
-        unique: None, id_prefix: None, vector_metric: None };
+        unique: None, id_prefix: None, vector_metric: None, mask: None };
     let cv = serde_json::to_value(&col).unwrap();
     let cobj = cv.as_object().unwrap();
     for absent in ["nullable", "default", "unique"] {
@@ -652,6 +677,8 @@ fn checksum_of_ir_matches_js_idiomatic_omitted_optionals() {
         ty: ColType::Int,
         nullable: None,
         default: None,
+        vector_metric: None,
+        mask: None,
         schema: None,
         existence_guard: None,
     };

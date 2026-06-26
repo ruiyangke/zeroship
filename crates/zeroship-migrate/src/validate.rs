@@ -486,9 +486,30 @@ pub fn validate_op_scoped(
             }
             Ok(())
         }
+        // **#173** — AddColumn carries the same per-column declared facets
+        // (`vector_metric` / standalone `mask`) `createTable` columns do, so it gets the
+        // SAME fail-closed facet validation: a `vector_metric` on a non-vector added
+        // column is refused [`CODE_VECTOR_METRIC_MISPLACED`] BEFORE lower (mask/kind are
+        // already structurally bounded by their closed enums at deserialize). Build a
+        // synthetic single-column `IrColumn` view and route it through the shared
+        // [`validate_column_facets`]. (`id_prefix` cannot reach here — `Op::AddColumn` has
+        // no slot; the recorder fail-closes it — so the prefix arm of the validator is a
+        // no-op for this view.)
+        Op::AddColumn { column, ty, vector_metric, mask, .. } => {
+            let view = crate::ir::IrColumn {
+                name: column.clone(),
+                ty: ty.clone(),
+                nullable: None,
+                default: None,
+                unique: None,
+                id_prefix: None,
+                vector_metric: *vector_metric,
+                mask: *mask,
+            };
+            validate_column_facets(&view, target_dialect, op_index, ts_location)
+        }
         // Ops with no embedded expression slot.
         Op::DropTable { .. }
-        | Op::AddColumn { .. }
         | Op::DropColumn { .. }
         | Op::AlterColumnNullability { .. }
         | Op::RenameColumn { .. }
@@ -1703,7 +1724,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None }],
             constraints: vec![IrConstraint {
                 name: None,
                 kind: IrConstraintKind::Check {
@@ -1986,8 +2007,8 @@ mod tests {
             Op::CreateTable {
                 name: "users".into(),
                 columns: vec![
-                    IrColumn { name: "first".into(), ty: ColType::Text, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None },
-                    IrColumn { name: "total".into(), ty: ColType::Int, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None },
+                    IrColumn { name: "first".into(), ty: ColType::Text, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None, mask: None },
+                    IrColumn { name: "total".into(), ty: ColType::Int, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None, mask: None },
                 ],
                 constraints: vec![IrConstraint {
                     name: None,
@@ -2036,7 +2057,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None }],
             constraints: vec![IrConstraint {
                 name: None,
                 kind: IrConstraintKind::Check {
@@ -2082,7 +2103,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None }],
             constraints: vec![IrConstraint {
                 name: None,
                 kind: IrConstraintKind::Check {
@@ -2112,7 +2133,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None }],
             constraints: vec![IrConstraint {
                 name: None,
                 kind: IrConstraintKind::Check {
@@ -2287,7 +2308,7 @@ mod tests {
                 default: None,
                 unique: None,
                 id_prefix: Some(prefix.to_string()),
-                vector_metric: None,
+                vector_metric: None, mask: None,
             }],
             constraints: vec![],
             indexes: vec![],
@@ -2351,6 +2372,7 @@ mod tests {
                 unique: None,
                 id_prefix: None,
                 vector_metric: Some(VectorMetric::Cosine),
+                mask: None,
             }],
             constraints: vec![],
             indexes: vec![],
@@ -2374,6 +2396,7 @@ mod tests {
                 unique: None,
                 id_prefix: None,
                 vector_metric: Some(VectorMetric::Cosine),
+                mask: None,
             }],
             constraints: vec![],
             indexes: vec![],

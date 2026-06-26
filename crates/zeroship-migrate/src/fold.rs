@@ -223,7 +223,7 @@ pub fn fold_ops(
                     return Err(FoldError::MissingTable(table.clone()));
                 }
             }
-            Op::AddColumn { table, column, ty, nullable, default, .. } => {
+            Op::AddColumn { table, column, ty, nullable, default, vector_metric, mask, .. } => {
                 let snap = table_mut(&mut tables, table)?;
                 if snap.columns.iter().any(|c| &c.name == column) {
                     return Err(FoldError::DuplicateColumn {
@@ -231,16 +231,26 @@ pub fn fold_ops(
                         column: column.clone(),
                     });
                 }
-                let col = add_column_snapshot(
+                // **#173 / #174** — thread the carried facets so the SNAPSHOT for a vector
+                // / masked added column renders the metric opclass / `__zsmask` sentinel
+                // (this snapshot feeds the `--sql` plan preview + the apply path), and grow
+                // the `<col>_masked` sibling for a masked column so the offline fold matches
+                // the live apply.
+                let (col, masked_sibling) = add_column_snapshot(
                     table,
                     column,
                     ty,
                     *nullable,
                     default.as_ref(),
+                    *vector_metric,
+                    *mask,
                     project_schema,
                     dialect,
                 )?;
                 snap.columns.push(col);
+                if let Some(sibling) = masked_sibling {
+                    snap.columns.push(sibling);
+                }
                 snap.columns.sort_by(|a, b| a.name.cmp(&b.name));
             }
             Op::DropColumn { table, column, .. } => {
@@ -361,8 +371,9 @@ pub fn fold_ops(
                 // `using` / SQLite alter refusals). Detection is symmetric:
                 //   - the TARGET type carries a sentinel (plain→encrypted/masked), OR
                 //   - the SOURCE column carries one (encrypted/masked→anything).
-                let new_col =
-                    add_column_snapshot(table, column, ty, None, None, project_schema, dialect)?;
+                let (new_col, _sibling) = add_column_snapshot(
+                    table, column, ty, None, None, None, None, project_schema, dialect,
+                )?;
                 let target_has_sentinel = new_col.encryption_sentinel.is_some()
                     || new_col.comment_sentinel.is_some();
                 let snap = table_mut(&mut tables, table)?;
@@ -511,25 +522,36 @@ fn create_table_descriptor(name: &str, columns: &[IrColumn]) -> CollectionDescri
     }
 }
 
-/// The `ColumnSnapshot` for a single field — routes ONE field through the shared
-/// `build_table_snapshot` (a one-field descriptor) and pulls the matching column
-/// out, so the default / encryption / comment sentinel is built by the shared
-/// kernel, never re-spelled. Mirrors `IrAuthor::add_column_snapshot`.
+/// The `ColumnSnapshot`(s) for a single added field — routes ONE field through the
+/// shared `build_table_snapshot` (a one-field descriptor) and pulls the matching
+/// column out, so the default / encryption / comment sentinel is built by the shared
+/// kernel, never re-spelled. Mirrors `IrAuthor::add_column_snapshot_with_sibling`.
+///
+/// **#174** — returns the MAIN column plus the hidden `<col>_masked TEXT` sibling the
+/// shared builder injects for a masked column, so the OFFLINE fold snapshot grows the
+/// SAME sibling the live apply path does (otherwise `fold_ops` would phantom-drift
+/// against the introspected live table for a masked added column). A non-masked column
+/// returns `(main, None)`.
+#[allow(clippy::too_many_arguments)]
 fn add_column_snapshot(
     table: &str,
     column: &str,
     ty: &ColType,
     nullable: Option<bool>,
     default: Option<&IrDefault>,
+    vector_metric: Option<crate::ir::VectorMetric>,
+    mask: Option<crate::ir::IrMask>,
     project_schema: &str,
     dialect: SqlDialect,
-) -> Result<ColumnSnapshot, FoldError> {
+) -> Result<(ColumnSnapshot, Option<ColumnSnapshot>), FoldError> {
     let field = ir_column_to_field(&IrColumn {
         name: column.to_string(),
         ty: ty.clone(),
         nullable,
         default: default.cloned(),
-        unique: None, id_prefix: None, vector_metric: None });
+        // **#173** — `id_prefix` stays `None` (an added column is never the system PK);
+        // the vector metric + standalone mask ARE threaded so the snapshot renders them.
+        unique: None, id_prefix: None, vector_metric, mask });
     let desc = CollectionDescriptor {
         name: table.to_string(),
         owner_app: FOLD_OWNER_APP.to_string(),
@@ -537,10 +559,15 @@ fn add_column_snapshot(
         indexes: Vec::new(),
     };
     let snap = build_table_snapshot(project_schema, &desc, dialect)?;
-    snap.columns
-        .into_iter()
+    let sibling_name = format!("{column}_masked");
+    let main = snap
+        .columns
+        .iter()
         .find(|c| c.name == column)
-        .ok_or(FoldError::Unsupported("addColumn (column folded away)"))
+        .cloned()
+        .ok_or(FoldError::Unsupported("addColumn (column folded away)"))?;
+    let sibling = snap.columns.into_iter().find(|c| c.name == sibling_name);
+    Ok((main, sibling))
 }
 
 /// Fold a `createTable`'s TABLE-LEVEL constraints + indexes onto the
@@ -1154,12 +1181,13 @@ pub fn fold_to_field_defs(
                 checks.remove(table);
                 fks.remove(table);
             }
-            Op::AddColumn { table, column, ty, nullable, default, .. } => {
+            Op::AddColumn { table, column, ty, nullable, default, vector_metric, mask, .. } => {
                 if let Some(cols) = tables.get_mut(table) {
-                    // AddColumn carries no id_prefix/vector_metric (the Op shape has
-                    // none — those are createTable-`id`/`vector` authoring facets),
-                    // so the reconstructed descriptor for an added column carries
-                    // only type/nullable/default/encrypted/vector_dims.
+                    // **#173** — AddColumn carries no `id_prefix` (an added column is never
+                    // the system PK), but it DOES carry the `vector_metric` + standalone
+                    // `mask` facets, so the reconstructed descriptor for an added vector /
+                    // masked column round-trips the metric opclass / `__zsmask` mask
+                    // through the offline fold.
                     let field = ir_column_to_field(&IrColumn {
                         name: column.clone(),
                         ty: ty.clone(),
@@ -1167,7 +1195,8 @@ pub fn fold_to_field_defs(
                         default: default.clone(),
                         unique: None,
                         id_prefix: None,
-                        vector_metric: None,
+                        vector_metric: *vector_metric,
+                        mask: *mask,
                     });
                     cols.insert(column.clone(), field);
                 }
@@ -1545,6 +1574,14 @@ pub fn descriptors_to_create_ops(
                 .vector_metric
                 .as_deref()
                 .and_then(parse_vector_metric_token);
+            // **#174** — carry a STANDALONE mask onto the produced IrColumn so the
+            // keystone round-trip (descriptors → ops → fold) keeps it. The encrypted
+            // auto-mask `{ full, pii }` is NOT carried — it is re-implied by the
+            // `ColType::Encrypted` carrier in `ir_column_to_field` (carrying it would
+            // double-emit). A descriptor whose mask IS the encrypted auto-mask on an
+            // encrypted column is therefore dropped here (recovered downstream); a
+            // standalone/non-default mask is carried.
+            let mask = standalone_mask_facet(f);
             columns.push(IrColumn {
                 name: f.name.clone(),
                 ty,
@@ -1553,6 +1590,7 @@ pub fn descriptors_to_create_ops(
                 unique: if f.unique { Some(true) } else { None },
                 id_prefix: f.id_prefix.clone(),
                 vector_metric,
+                mask,
             });
             // A `ref` column carries the FK target on its `ColType::Ref` (the brand)
             // AND its POLICY on a separate `Fk` constraint — the SAME split the
@@ -1614,6 +1652,66 @@ fn parse_vector_metric_token(token: &str) -> Option<crate::ir::VectorMetric> {
     }
 }
 
+/// **#174** — extract a STANDALONE [`crate::ir::IrMask`] from a descriptor's
+/// `mask` JSON (`{ kind, classification }`), to carry on the produced [`IrColumn`].
+///
+/// Returns `None` when the field carries no mask, OR when the mask is exactly the
+/// ENCRYPTED auto-mask (`{ full, pii }`) ON AN ENCRYPTED column — that mask is RE-IMPLIED
+/// by the `ColType::Encrypted` carrier in [`crate::ir_author::ir_column_to_field`], so
+/// carrying it here would double-source it and perturb the keystone (the encrypted
+/// auto-mask must come from the carrier, not the mask facet). A standalone mask on a
+/// plaintext column, or a NON-default mask on an encrypted column (an explicit override),
+/// IS carried. An unparseable kind/classification token yields `None` (fail-soft — the
+/// closed-enum producer never panics; the keystone's own gate catches a genuine drop).
+fn standalone_mask_facet(f: &crate::declarative::FieldDescriptor) -> Option<crate::ir::IrMask> {
+    let mask = f.mask.as_ref()?;
+    let kind = mask.get("kind").and_then(serde_json::Value::as_str)?;
+    let classification = mask.get("classification").and_then(serde_json::Value::as_str)?;
+    // Suppress the encrypted auto-mask: only when the column is ACTUALLY encrypted and
+    // the mask is the exact kernel default. (A plaintext column authored with
+    // `.mask({ full, pii })` is a real standalone mask and IS carried.)
+    let is_encrypted = f.encrypted.is_some();
+    if is_encrypted && kind == "full" && classification == "pii" {
+        return None;
+    }
+    Some(crate::ir::IrMask {
+        kind: parse_mask_kind_token(kind)?,
+        classification: parse_classification_token(classification)?,
+    })
+}
+
+/// Parse an SDK/IR-wire mask `kind` token (kebab `date-year`/`date-decade`; camelCase
+/// otherwise) back to the closed [`crate::ir::IrMaskKind`]. Out-of-set ⇒ `None`.
+fn parse_mask_kind_token(token: &str) -> Option<crate::ir::IrMaskKind> {
+    use crate::ir::IrMaskKind;
+    Some(match token {
+        "full" => IrMaskKind::Full,
+        "last4" => IrMaskKind::Last4,
+        "first4" => IrMaskKind::First4,
+        "email" => IrMaskKind::Email,
+        "name" => IrMaskKind::Name,
+        "date-year" => IrMaskKind::DateYear,
+        "date-decade" => IrMaskKind::DateDecade,
+        "none" => IrMaskKind::None,
+        _ => return None,
+    })
+}
+
+/// Parse an SDK/IR-wire `classification` token back to the closed
+/// [`crate::ir::IrClassification`]. Out-of-set ⇒ `None`.
+fn parse_classification_token(token: &str) -> Option<crate::ir::IrClassification> {
+    use crate::ir::IrClassification;
+    Some(match token {
+        "public" => IrClassification::Public,
+        "pii" => IrClassification::Pii,
+        "spi" => IrClassification::Spi,
+        "phi" => IrClassification::Phi,
+        "pci" => IrClassification::Pci,
+        "internal" => IrClassification::Internal,
+        _ => return None,
+    })
+}
+
 /// Map a descriptor `default` JSON value to a closed-AST [`crate::ir::IrScalar`] for an
 /// `IrDefault::Literal`. The inverse of `ir_default_to_value`; a non-scalar default
 /// (array/object/null) maps to `IrScalar::Null` (the SDK never authors those as a
@@ -1642,7 +1740,7 @@ mod tests {
             default: None,
             unique: None,
             id_prefix: None,
-            vector_metric: None,
+            vector_metric: None, mask: None,
         }
     }
 
@@ -1718,6 +1816,8 @@ mod tests {
             ty,
             nullable: Some(nullable),
             default: None,
+            vector_metric: None,
+            mask: None,
             schema: None,
             existence_guard: None,
         }
@@ -2667,7 +2767,7 @@ mod tests {
             ty,
             nullable: Some(nullable),
             default,
-            unique: None, id_prefix: None, vector_metric: None });
+            unique: None, id_prefix: None, vector_metric: None, mask: None });
         let desc = CollectionDescriptor {
             name: table.to_string(),
             owner_app: FOLD_OWNER_APP.to_string(),
@@ -2699,7 +2799,7 @@ mod tests {
                     ty: ColType::Text,
                     nullable: Some(false),
                     default: Some(IrDefault::Literal { value: IrScalar::Str("beta".to_string()) }),
-                    unique: None, id_prefix: None, vector_metric: None },
+                    unique: None, id_prefix: None, vector_metric: None, mask: None },
                 // An `int` column with a literal default — the snapshot's
                 // emission-only `default` IS what P2 gen-types reads, so it MUST
                 // render (regression: int defaults were silently dropped — the
@@ -2709,7 +2809,7 @@ mod tests {
                     ty: ColType::Int,
                     nullable: Some(false),
                     default: Some(IrDefault::Literal { value: IrScalar::Int(7) }),
-                    unique: None, id_prefix: None, vector_metric: None },
+                    unique: None, id_prefix: None, vector_metric: None, mask: None },
                 // A `json` column always carries the `'{}'::jsonb` default (even with
                 // no explicit default) — a second independent emission-only golden.
                 col("meta", ColType::Json, true),
@@ -2778,6 +2878,8 @@ mod tests {
                 ty: encrypted_text(),
                 nullable: Some(true),
                 default: None,
+                vector_metric: None,
+                mask: None,
                 schema: None,
                 existence_guard: None,
             },
@@ -2860,7 +2962,7 @@ mod tests {
             default: None,
             unique: None,
             id_prefix: Some("post".into()),
-            vector_metric: None,
+            vector_metric: None, mask: None,
         };
         let m = defs(&[create("posts", vec![id])]);
         let def = field_def(&m, "posts", "id");
@@ -2880,6 +2982,7 @@ mod tests {
             unique: None,
             id_prefix: None,
             vector_metric: Some(crate::ir::VectorMetric::InnerProduct),
+            mask: None,
         };
         let m = defs(&[create("docs", vec![embedding])]);
         let def = field_def(&m, "docs", "embedding");
@@ -2887,6 +2990,91 @@ mod tests {
             "the declared vector metric is recovered: {def}");
         assert_eq!(def.get("vectorDims").and_then(|v| v.as_i64()), Some(1536),
             "the vector dims ride alongside the metric: {def}");
+    }
+
+    /// **#174** — a STANDALONE `.mask()` on a PLAINTEXT createTable column is now CARRIED
+    /// on `IrColumn.mask`, lowered to `FieldDescriptor.mask`, and RECOVERED onto the
+    /// FieldDef. RED pre-#174: `IrColumn` had no `mask` field, so the offline fold dropped
+    /// it (the documented gap).
+    #[test]
+    fn recover_standalone_mask_facet() {
+        let ssn = IrColumn {
+            name: "ssn".into(),
+            ty: ColType::Text,
+            nullable: Some(true),
+            default: None,
+            unique: None,
+            id_prefix: None,
+            vector_metric: None,
+            mask: Some(crate::ir::IrMask {
+                kind: crate::ir::IrMaskKind::Last4,
+                classification: crate::ir::IrClassification::Spi,
+            }),
+        };
+        let m = defs(&[create("people", vec![ssn])]);
+        let def = field_def(&m, "people", "ssn");
+        let mask = def.get("mask").unwrap_or_else(|| panic!("mask must be recovered: {def}"));
+        assert_eq!(mask.get("kind").and_then(|v| v.as_str()), Some("last4"));
+        assert_eq!(mask.get("classification").and_then(|v| v.as_str()), Some("spi"));
+    }
+
+    /// **#174 precedence** — an EXPLICIT `.mask()` on an ENCRYPTED column OVERRIDES the
+    /// fail-safe auto-mask `{ full, pii }` the `ColType::Encrypted` carrier implies. RED
+    /// pre-#174: `ir_column_to_field` hard-coded `mask: encrypted_mask`, so an encrypted
+    /// column ALWAYS recovered `{ full, pii }` and an explicit override was impossible.
+    #[test]
+    fn explicit_mask_overrides_encrypted_auto_mask() {
+        let secret = IrColumn {
+            name: "secret".into(),
+            ty: ColType::Encrypted { of: Box::new(ColType::Text) },
+            nullable: Some(true),
+            default: None,
+            unique: None,
+            id_prefix: None,
+            vector_metric: None,
+            mask: Some(crate::ir::IrMask {
+                kind: crate::ir::IrMaskKind::Last4,
+                classification: crate::ir::IrClassification::Pci,
+            }),
+        };
+        let m = defs(&[create("vault", vec![secret])]);
+        let def = field_def(&m, "vault", "secret");
+        let mask = def.get("mask").unwrap_or_else(|| panic!("mask must be recovered: {def}"));
+        assert_eq!(
+            mask.get("kind").and_then(|v| v.as_str()),
+            Some("last4"),
+            "the EXPLICIT mask wins over the encrypted auto-mask `full`: {def}"
+        );
+        assert_eq!(mask.get("classification").and_then(|v| v.as_str()), Some("pci"));
+    }
+
+    /// **#173** — a `mask` facet carried on `Op::AddColumn` is recovered onto the added
+    /// column's FieldDef (the addColumn fold arm now threads the facet). RED pre-#173:
+    /// `Op::AddColumn` had no `mask` slot and the fold arm hard-coded `mask: None`.
+    #[test]
+    fn recover_mask_on_added_column() {
+        let ops = vec![
+            create("people", vec![col("name", ColType::Text, false)]),
+            Op::AddColumn {
+                table: "people".into(),
+                column: "card".into(),
+                ty: ColType::Text,
+                nullable: Some(true),
+                default: None,
+                vector_metric: None,
+                mask: Some(crate::ir::IrMask {
+                    kind: crate::ir::IrMaskKind::First4,
+                    classification: crate::ir::IrClassification::Pci,
+                }),
+                schema: None,
+                existence_guard: None,
+            },
+        ];
+        let m = defs(&ops);
+        let def = field_def(&m, "people", "card");
+        let mask = def.get("mask").unwrap_or_else(|| panic!("added-column mask must be recovered: {def}"));
+        assert_eq!(mask.get("kind").and_then(|v| v.as_str()), Some("first4"));
+        assert_eq!(mask.get("classification").and_then(|v| v.as_str()), Some("pci"));
     }
 
     #[test]
@@ -2899,7 +3087,7 @@ mod tests {
             default: None,
             unique: None,
             id_prefix: None,
-            vector_metric: None,
+            vector_metric: None, mask: None,
         };
         let m = defs(&[create("teams", vec![owner])]);
         let def = field_def(&m, "teams", "owner");
@@ -3077,7 +3265,7 @@ mod tests {
             default: None,
             unique: None,
             id_prefix: None,
-            vector_metric: None,
+            vector_metric: None, mask: None,
         });
         assert_eq!(
             field.encrypted,

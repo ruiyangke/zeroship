@@ -342,6 +342,8 @@ async fn forged_contract_versionids_with_innocuous_sql_do_not_discharge() {
             ty: ColType::Text,
             nullable: Some(true),
             default: None,
+            vector_metric: None,
+            mask: None,
             schema: None,
             existence_guard: None,
         }],
