@@ -53,6 +53,17 @@ pub enum VendorError {
         /// What was empty.
         what: &'static str,
     },
+    /// `PgRaw.binds` are recorded in the IR but are not executed as native
+    /// parameters by today's DDL/vendor path. Reject until a parameterized `PgRaw`
+    /// plan step exists.
+    #[error(
+        "vendor render: pgRaw with {count} bind value(s) is unsupported until \
+         pgRaw executes through a parameterized plan step"
+    )]
+    PgRawBindsUnsupported {
+        /// Number of supplied bind values.
+        count: usize,
+    },
 }
 
 /// Quote an identifier through the crate's single seam, mapping the error.
@@ -461,12 +472,12 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
         }
         // ── The gated raw escape ──────────────────────────────────────────────
         Op::PgRaw { sql, binds } => {
-            // `${…}` interpolation slots accept ONLY typed binds: a positional
-            // placeholder per bind. The verbatim SQL is embedded as-is and the
-            // WHOLE statement is `pg_query`-parsed + deny-scanned by the guard.
-            // (The binds are carried for the apply phase; render keeps the SQL
-            // verbatim — the template's placeholders are already in `sql`.)
-            let _ = binds;
+            if !binds.is_empty() {
+                return Err(VendorError::PgRawBindsUnsupported { count: binds.len() });
+            }
+            // The verbatim SQL is embedded as-is and the WHOLE statement is
+            // `pg_query`-parsed + deny-scanned by the guard. Non-empty binds are
+            // rejected above until PgRaw has a parameterized executor path.
             vec![VendorStatement { name: "pg_raw".to_string(), up: sql.clone(), down: None }]
         }
         // Non-vendor ops never reach here (the lower seam routes only vendor ops).

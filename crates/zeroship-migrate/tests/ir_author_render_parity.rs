@@ -741,6 +741,51 @@ fn add_constraint_fk_renders_on_delete_cascade_pg() {
 }
 
 #[test]
+fn standalone_add_constraint_fk_rejects_non_id_reference_columns_pg() {
+    use zeroship_migrate::ir::{IrConstraint, IrConstraintKind, Op};
+    let mut live = BTreeSet::new();
+    live.insert("posts".to_string());
+    live.insert("authors".to_string());
+
+    let ir = MigrationIr {
+        ir_version: 1,
+        name: "m".into(),
+        owner_app: OWNER.into(),
+        ops: vec![Op::AddConstraint {
+            table: "authors".into(),
+            constraint: IrConstraint {
+                name: Some("authors_pinned_fk".into()),
+                kind: IrConstraintKind::Fk {
+                    columns: vec!["pinned".into()],
+                    references_table: "posts".into(),
+                    references_columns: vec!["other".into()],
+                    on_delete: None,
+                    on_update: None,
+                },
+            },
+            schema: None,
+            existence_guard: None,
+        }],
+        flags: Default::default(),
+        depends_on: vec![],
+        supersedes: vec![],
+        preconditions: vec![],
+        checksum: None,
+    };
+
+    let err = IrAuthor::new(SCHEMA, OWNER, SqlDialect::Postgres)
+        .lower(&ir, &LiveSchema::from(&live))
+        .expect_err(
+            "standalone addConstraint(fk) must not silently render REFERENCES posts(id) \
+             when referencesColumns names a different target column",
+        );
+    assert!(
+        err.to_string().contains("non-`id`"),
+        "error should explain that only id references are supported today, got: {err}"
+    );
+}
+
+#[test]
 fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
     use zeroship_migrate::ir::{IrConstraint, IrConstraintKind, Op};
     // UNIQUE/PK have no stand-alone differ counterpart (the differ inlines them at

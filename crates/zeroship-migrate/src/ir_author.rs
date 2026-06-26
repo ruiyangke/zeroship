@@ -507,6 +507,21 @@ pub enum IrLowerError {
          refused fail-closed"
     )]
     VendorPgOnly(&'static str),
+    /// **2026-06 security review #2** — a vendor op reached lower without the
+    /// capability validated by the load gate. Lower refuses it before rendering so
+    /// direct `lower`/`lower_guarded` callers cannot rely on the SQL guard's
+    /// deny-list coverage for benign-looking vendor SQL.
+    #[error(
+        "IrAuthor::lower of vendor op {op:?} requires capability {capability:?}, \
+         but the active vendor capability set does not grant it; refusing before \
+         rendering"
+    )]
+    VendorCapabilityDenied {
+        /// The op kind tag.
+        op: &'static str,
+        /// The capability the op requires.
+        capability: crate::capability::VendorCapability,
+    },
     /// **VENDOR** — rendering a vendor op to its Postgres DDL failed (an invalid
     /// identifier, an unrenderable policy/trigger predicate, an empty privilege/role
     /// list). Carries the underlying [`crate::vendor::VendorError`].
@@ -1594,11 +1609,12 @@ impl IrAuthor {
             // its Postgres DDL (vendor spec §4.4). Every vendor op is `PgOnly`: a
             // SQLite target is refused fail-closed here (the validate gate already
             // refuses it at load on SQLite, §4.3 — this is defense in depth). The
-            // capability gate (§3.2 gate 1) ran at validate; the rendered SQL hits
-            // the guard deny-list at `lower_guarded` (§3.2 gate 2). The rendered
-            // statements (one or more — a `createRole { setSearchPath }` is two)
-            // each become a journaled `LoweredUnit` so the per-fragment guard checks
-            // them individually.
+            // capability gate (§3.2 gate 1) runs at validate AND is re-enforced
+            // here before rendering, so direct lower callers cannot bypass it. The
+            // rendered SQL hits the guard deny-list at `lower_guarded` (§3.2 gate
+            // 2). The rendered statements (one or more — a `createRole {
+            // setSearchPath }` is two) each become a journaled `LoweredUnit` so the
+            // per-fragment guard checks them individually.
             Op::CreateSchema { .. }
             | Op::DropSchema { .. }
             | Op::CreateExtension { .. }
@@ -1623,6 +1639,7 @@ impl IrAuthor {
                 if matches!(self.dialect, SqlDialect::Sqlite) {
                     return Err(IrLowerError::VendorPgOnly(op_kind_tag(op)));
                 }
+                enforce_vendor_capability_at_lower(op, Some(&self.scope))?;
                 let stmts = crate::vendor::render_vendor_op(op, &eff_schema)?;
                 stmts
                     .into_iter()
@@ -1957,12 +1974,16 @@ impl IrAuthor {
         live: &LiveSchema,
     ) -> Result<(Vec<PlanStep>, Vec<GuardedFragment>), IrGuardedLowerError> {
         let guard = guard_for(guard_cfg);
+        let guard_scope = guard_cfg.schema_scope();
         let mut steps: Vec<PlanStep> = Vec::new();
         let mut fragments: Vec<GuardedFragment> = Vec::new();
         let mut live_tables: BTreeSet<String> = live.tables.clone();
 
         for (op_index, op) in ir.ops.iter().enumerate() {
             let op_kind = op_kind_tag(op);
+            if !matches!(self.dialect, SqlDialect::Sqlite) {
+                enforce_vendor_capability_at_lower(op, guard_scope.as_ref())?;
+            }
             // Lower this op (advancing `live_tables` for intra-IR FK inlining). A
             // lower failure aborts before any guarding — nothing applied. Each unit
             // carries its STRUCTURAL per-statement list (the exact statements the
@@ -2528,9 +2549,9 @@ impl IrAuthor {
             IrConstraintKind::Fk {
                 columns,
                 references_table,
+                references_columns,
                 on_delete,
                 on_update,
-                ..
             } => {
                 // PR1 single-column FK (the `ref` shape references the target's
                 // `id`); a multi-column FK is a later wave.
@@ -2540,6 +2561,13 @@ impl IrAuthor {
                 if columns.len() != 1 {
                     return Err(IrLowerError::UnsupportedOp(
                         "addConstraint(fk) multi-column (later wave)",
+                    ));
+                }
+                if !(references_columns.is_empty()
+                    || (references_columns.len() == 1 && references_columns[0] == "id"))
+                {
+                    return Err(IrLowerError::UnsupportedOp(
+                        "addConstraint(fk) referencing a non-`id` column (later wave)",
                     ));
                 }
                 // **PR10** — the FK references resolve in the SAME effective schema
@@ -2674,6 +2702,24 @@ fn plan_step_version_empty_expand_sentinel(step: &PlanStep) -> crate::migration:
     match step {
         PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => empty_expand_sentinel_id(ec),
         other => plan_step_version(other),
+    }
+}
+
+fn enforce_vendor_capability_at_lower(
+    op: &Op,
+    scope: Option<&crate::guard::SchemaScope>,
+) -> Result<(), IrLowerError> {
+    let Some(capability) = op.vendor_capability() else {
+        return Ok(());
+    };
+    let caps = crate::capability::VendorCapabilities::from_scope(scope);
+    if caps.grants(capability) {
+        Ok(())
+    } else {
+        Err(IrLowerError::VendorCapabilityDenied {
+            op: op_kind_tag(op),
+            capability,
+        })
     }
 }
 
