@@ -198,7 +198,10 @@
         "delete"
       ],
       "forEach": "row",
-      "execute": "audit_events_block_tamper",
+      "action": {
+        "kind": "executeFunction",
+        "name": "audit_events_block_tamper"
+      },
       "when": {
         "node": "unaryOp",
         "op": "isNotNull",
@@ -206,6 +209,28 @@
           "node": "colRef",
           "name": "app_id"
         }
+      }
+    },
+    {
+      "op": "createTrigger",
+      "name": "audit_events_append_only",
+      "table": "audit_events",
+      "schema": "zeroship",
+      "timing": "before",
+      "events": [
+        "update"
+      ],
+      "forEach": "row",
+      "action": {
+        "kind": "body",
+        "statements": [
+          {
+            "stmt": "raise",
+            "level": "abort",
+            "message": "append-only",
+            "errcode": "P0001"
+          }
+        ]
       }
     },
     {

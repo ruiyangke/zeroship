@@ -55,7 +55,7 @@ const TS = {
   Op: [
     "createTable", "dropTable", "renameTable", "addColumn", "dropColumn", "createIndex",
     "dropIndex", "alterColumnType", "alterColumnNullability", "renameColumn", "addConstraint",
-    "dropConstraint", "insert", "update", "delete", "backfill",
+    "dropConstraint", "insert", "update", "delete", "backfill", "createTrigger", "dropTrigger",
   ].sort(),
   // Expr node tags.
   Expr: ["colRef", "literal", "binOp", "unaryOp", "case", "fnCall", "fnSynth", "cast"].sort(),
@@ -67,18 +67,25 @@ const TS = {
   ].sort(),
   // IrConstraintKind tags.
   IrConstraintKind: ["pk", "fk", "unique", "check"].sort(),
+  // §A2 — trigger action/body tags.
+  TriggerAction: ["executeFunction", "body"].sort(),
+  TriggerStmt: ["insert", "update", "delete", "select", "raise"].sort(),
   // The closed string-enums (generated into enums.ts).
   BinaryOp: ["eq", "ne", "lt", "le", "gt", "ge", "and", "or", "add", "sub", "mul", "div", "concat"].sort(),
   UnaryOp: ["not", "isNull", "isNotNull", "isTrue", "isFalse"].sort(),
   ScalarFn: ["coalesce", "nullif", "lower", "upper", "trim", "length", "abs"].sort(),
   SynthFn: ["concatWs", "splitPart", "now", "genRandomUuid"].sort(),
   SynthDefaultFn: ["now", "genRandomUuid"].sort(),
-  CastTarget: ["text", "integer", "real", "boolean", "blob"].sort(),
+  CastTarget: ["text", "integer", "real", "boolean", "blob", "uuid"].sort(),
   IndexMethod: ["btree", "gin", "gist", "ivfflat", "hnsw", "fts5"].sort(),
   // **PR10** — the closed existence-guard token set (`ir.ts` `ExistenceGuard`).
   ExistenceGuard: ["ifNotExists", "ifExists"].sort(),
   // **C1** — the closed FK referential-action token set (`ir.ts` `RefAction`).
   RefAction: ["cascade", "restrict", "setNull", "setDefault", "noAction"].sort(),
+  TriggerTiming: ["before", "after", "insteadOf"].sort(),
+  TriggerEvent: ["insert", "update", "delete", "truncate"].sort(),
+  ForEach: ["row", "statement"].sort(),
+  RaiseLevel: ["abort", "fail", "ignore", "rollback"].sort(),
 };
 
 // **PR10 review F4** — the per-`Op` FIELD-presence map the hand-authored `ir.ts`
@@ -107,6 +114,8 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   update: ["batch", "schema", "set", "table", "where"].sort(),
   delete: ["limit", "schema", "table", "where"].sort(),
   backfill: ["batchSize", "cursorColumn", "filter", "name", "schema", "set", "table"].sort(),
+  createTrigger: ["action", "events", "forEach", "name", "schema", "table", "timing", "when"].sort(),
+  dropTrigger: ["ifExists", "name", "schema", "table"].sort(),
 };
 
 test("Op variant tags match the schema", () => {
@@ -125,8 +134,25 @@ test("IrConstraintKind tags match the schema", () => {
   assert.deepEqual(variantTags(schema.$defs.IrConstraintKind, "kind"), TS.IrConstraintKind);
 });
 
+test("trigger action/body tags match the schema", () => {
+  assert.deepEqual(variantTags(schema.$defs.TriggerAction, "kind"), TS.TriggerAction);
+  assert.deepEqual(variantTags(schema.$defs.TriggerStmt, "stmt"), TS.TriggerStmt);
+});
+
 test("closed string-enum tokens match the schema", () => {
-  for (const name of ["BinaryOp", "UnaryOp", "ScalarFn", "SynthFn", "SynthDefaultFn", "CastTarget", "IndexMethod"] as const) {
+  for (const name of [
+    "BinaryOp",
+    "UnaryOp",
+    "ScalarFn",
+    "SynthFn",
+    "SynthDefaultFn",
+    "CastTarget",
+    "IndexMethod",
+    "TriggerTiming",
+    "TriggerEvent",
+    "ForEach",
+    "RaiseLevel",
+  ] as const) {
     assert.deepEqual(enumTokens(schema.$defs[name]), (TS as any)[name], `${name} tokens drifted`);
   }
 });

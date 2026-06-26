@@ -1,7 +1,7 @@
 //! The VENDOR capability-composition policy (vendor spec §3).
 //!
 //! The privileged `@zeroship/migrate/pg` primitives (roles, grants, RLS/policies,
-//! triggers, functions, extensions, schemas, the gated raw escape) are gated NOT
+//! functions, extensions, schemas, the gated raw escape) are gated NOT
 //! by a hard-coded "platform" profile name but by a **composition of boolean
 //! capability flags** + a schema allowlist. A vendor op declares the ONE
 //! [`VendorCapability`] it needs ([`crate::ir::Op::vendor_capability`]); the active
@@ -41,8 +41,6 @@ pub enum VendorCapability {
     Rls,
     /// `CREATE/DROP POLICY` ([`VendorCapabilities::allow_policy`]).
     Policy,
-    /// `CREATE/DROP TRIGGER` ([`VendorCapabilities::allow_trigger`]).
-    Trigger,
     /// `CREATE/DROP FUNCTION` ([`VendorCapabilities::allow_function`]).
     Function,
     /// The gated raw escape (`pg.sql`) ([`VendorCapabilities::allow_raw_sql`]).
@@ -61,7 +59,6 @@ impl VendorCapability {
             VendorCapability::Grant => "grant",
             VendorCapability::Rls => "rls",
             VendorCapability::Policy => "policy",
-            VendorCapability::Trigger => "trigger",
             VendorCapability::Function => "function",
             VendorCapability::RawSql => "rawSql",
         }
@@ -77,7 +74,6 @@ impl VendorCapability {
             VendorCapability::Grant => "allowGrant",
             VendorCapability::Rls => "allowRls",
             VendorCapability::Policy => "allowPolicy",
-            VendorCapability::Trigger => "allowTrigger",
             VendorCapability::Function => "allowFunction",
             VendorCapability::RawSql => "allowRawSql",
         }
@@ -104,8 +100,6 @@ pub struct VendorCapabilities {
     pub allow_rls: bool,
     /// `CREATE/DROP POLICY`.
     pub allow_policy: bool,
-    /// `CREATE/DROP TRIGGER`.
-    pub allow_trigger: bool,
     /// `CREATE/DROP FUNCTION` (the raw body escape).
     pub allow_function: bool,
     /// The gated raw-statement escape (`pg.sql`).
@@ -133,7 +127,6 @@ impl VendorCapabilities {
             allow_grant: false,
             allow_rls: false,
             allow_policy: false,
-            allow_trigger: false,
             allow_function: false,
             allow_raw_sql: false,
             allow_cross_schema: false,
@@ -154,7 +147,6 @@ impl VendorCapabilities {
             allow_grant: true,
             allow_rls: true,
             allow_policy: true,
-            allow_trigger: true,
             allow_function: true,
             allow_raw_sql: true,
             allow_cross_schema: true,
@@ -163,7 +155,7 @@ impl VendorCapabilities {
     }
 
     /// The **local** preset (an in-between dev/CI posture): structural vendor DDL
-    /// (extensions, schemas, grants, RLS, policies, triggers, functions) is
+    /// (extensions, schemas, grants, RLS, policies, functions) is
     /// enabled, but ROLE management and the raw `pg.sql` escape are NOT — a local
     /// dev DB does not mint roles and never needs the last-resort raw escape. This
     /// preset is not wired to a `TrustProfile` (there is no `Local` profile); it is
@@ -177,7 +169,6 @@ impl VendorCapabilities {
             allow_grant: true,
             allow_rls: true,
             allow_policy: true,
-            allow_trigger: true,
             allow_function: true,
             allow_raw_sql: false,
             allow_cross_schema: true,
@@ -256,7 +247,6 @@ impl VendorCapabilities {
             VendorCapability::Grant => self.allow_grant,
             VendorCapability::Rls => self.allow_rls,
             VendorCapability::Policy => self.allow_policy,
-            VendorCapability::Trigger => self.allow_trigger,
             VendorCapability::Function => self.allow_function,
             VendorCapability::RawSql => self.allow_raw_sql,
         }
@@ -277,7 +267,6 @@ mod tests {
             VendorCapability::Grant,
             VendorCapability::Rls,
             VendorCapability::Policy,
-            VendorCapability::Trigger,
             VendorCapability::Function,
             VendorCapability::RawSql,
         ] {
@@ -295,7 +284,6 @@ mod tests {
             VendorCapability::Grant,
             VendorCapability::Rls,
             VendorCapability::Policy,
-            VendorCapability::Trigger,
             VendorCapability::Function,
             VendorCapability::RawSql,
         ] {

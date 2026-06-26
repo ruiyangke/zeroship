@@ -67,7 +67,7 @@ export function up() {
     body: "BEGIN RAISE EXCEPTION 'audit_events is append-only'; END;",
   });
 
-  // ── triggers (0002) ──
+  // ── triggers (0002 + A2) ──
   const audit = table("audit_events", { schema: "zeroship" });
   audit.createTrigger({
     name: "audit_events_block_update",
@@ -76,6 +76,13 @@ export function up() {
     forEach: "row",
     execute: "audit_events_block_tamper",
     when: (c) => c("app_id").isNotNull(),
+  });
+  audit.createTrigger({
+    name: "audit_events_append_only",
+    timing: "before",
+    events: ["update"],
+    forEach: "row",
+    body: (b) => [b.raise({ level: "abort", message: "append-only", errcode: "P0001" })],
   });
   audit.dropTrigger({ name: "audit_events_block_update", ifExists: true });
 

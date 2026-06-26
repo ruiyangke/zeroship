@@ -22,13 +22,17 @@ import type {
   CastTarget,
   CmpOp,
   ExistenceGuard,
+  ForEach,
   IndexMethod,
   OnUnmet,
   OnlinePhase,
+  RaiseLevel,
   RefAction,
   ScalarFn,
   SynthDefaultFn,
   SynthFn,
+  TriggerEvent,
+  TriggerTiming,
   UnaryOp,
 } from "./enums.js";
 
@@ -37,13 +41,17 @@ export type {
   CastTarget,
   CmpOp,
   ExistenceGuard,
+  ForEach,
   IndexMethod,
   OnUnmet,
   OnlinePhase,
+  RaiseLevel,
   RefAction,
   ScalarFn,
   SynthDefaultFn,
   SynthFn,
+  TriggerEvent,
+  TriggerTiming,
   UnaryOp,
 };
 
@@ -180,6 +188,21 @@ export interface IrBatch {
   batchSize: number;
 }
 
+/** §A2 — the closed trigger action: either call an operator-provided function
+ *  (PG render path) or carry a structured trigger body (SQLite render path). */
+export type TriggerAction =
+  | { kind: "executeFunction"; name: string }
+  | { kind: "body"; statements: TriggerStmt[] };
+
+/** §A2/§3.2 — one structured trigger body statement. Reuses the DML payload
+ *  shapes where possible and adds the closed `Raise` node. */
+export type TriggerStmt =
+  | { stmt: "insert"; table: string; columns: string[]; rows: IrScalar[][]; schema?: string | null }
+  | { stmt: "update"; table: string; set: { [column: string]: Expr }; where?: Expr | null; schema?: string | null }
+  | { stmt: "delete"; table: string; where: Expr; limit?: number | null; schema?: string | null }
+  | { stmt: "select"; expr: Expr }
+  | { stmt: "raise"; level: RaiseLevel; message: string; errcode?: string | null };
+
 /** The CLOSED `op.*` operation enum (§2.3), internally tagged on `op`,
  *  camel-cased. NOTE the `del()` DSL function records the `"delete"` variant tag.
  *
@@ -218,7 +241,19 @@ export type Op =
   | { op: "insert"; table: string; columns: string[]; rows: IrScalar[][]; onConflict?: IrOnConflict | null; schema?: string | null }
   | { op: "update"; table: string; set: { [column: string]: Expr }; where?: Expr | null; batch?: IrBatch | null; schema?: string | null }
   | { op: "delete"; table: string; where: Expr; limit?: number | null; schema?: string | null }
-  | { op: "backfill"; table: string; cursorColumn: string; batchSize: number; set: { [column: string]: Expr }; filter?: Expr | null; name: string; schema?: string | null };
+  | { op: "backfill"; table: string; cursorColumn: string; batchSize: number; set: { [column: string]: Expr }; filter?: Expr | null; name: string; schema?: string | null }
+  | {
+      op: "createTrigger";
+      name: string;
+      table: string;
+      schema?: string | null;
+      timing: TriggerTiming;
+      events: TriggerEvent[];
+      forEach: ForEach;
+      action: TriggerAction;
+      when?: Expr | null;
+    }
+  | { op: "dropTrigger"; name: string; table: string; schema?: string | null; ifExists?: boolean | null };
 
 /** All-`Option` overrides of the migration flags. */
 export interface IrFlagsOverride {

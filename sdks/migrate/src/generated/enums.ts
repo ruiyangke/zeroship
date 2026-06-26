@@ -41,7 +41,16 @@ export type UnaryOp = "not" | "isNull" | "isNotNull" | "isTrue" | "isFalse";
  * method and no AST variant (§3.3.1.1(a)). These are the provably-identical
  * cross-dialect scalars.
  */
-export type ScalarFn = "coalesce" | "nullif" | "lower" | "upper" | "trim" | "length" | "abs";
+export type ScalarFn =
+  | "coalesce"
+  | "nullif"
+  | "lower"
+  | "upper"
+  | "trim"
+  | "length"
+  | "abs"
+  | "currentSetting"
+  | "currentUser";
 
 /**
  * The engine-SYNTHESIZED helpers (`FnSynth`) whose per-dialect lowering the
@@ -69,7 +78,7 @@ export type SynthDefaultFn = "now" | "genRandomUuid";
  * The closed portable cast-target set (§3.3.1). A non-portable cast target is
  * rejected (`UNSUPPORTED { kind: "expr" }`).
  */
-export type CastTarget = "text" | "integer" | "real" | "boolean" | "blob";
+export type CastTarget = "text" | "integer" | "real" | "boolean" | "blob" | "uuid";
 
 /**
  * The CLOSED index-method lexicon (§3.3.1 `createIndex` `using` union, design
@@ -139,3 +148,26 @@ export type ExistenceGuard = "ifNotExists" | "ifExists";
  * [`zeroship_schema::query::normalize_fk_action`].
  */
 export type RefAction = "cascade" | "restrict" | "setNull" | "setDefault" | "noAction";
+
+/**
+ * The CLOSED trigger-timing lexicon (`BEFORE`/`AFTER`/`INSTEAD OF`).
+ */
+export type TriggerTiming = "before" | "after" | "insteadOf";
+
+/**
+ * The CLOSED trigger-event lexicon (`INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`),
+ * joined by `OR` in `CREATE TRIGGER … BEFORE UPDATE OR DELETE`. `TRUNCATE`
+ * renders on Postgres and is refused on SQLite as a per-facet unsupported shape.
+ */
+export type TriggerEvent = "insert" | "update" | "delete" | "truncate";
+
+/**
+ * The CLOSED trigger `FOR EACH {ROW|STATEMENT}` lexicon. `STATEMENT` renders on
+ * Postgres and is refused on SQLite as a per-facet unsupported shape.
+ */
+export type ForEach = "row" | "statement";
+
+/**
+ * The closed trigger-body raise levels.
+ */
+export type RaiseLevel = "abort" | "fail" | "ignore" | "rollback";

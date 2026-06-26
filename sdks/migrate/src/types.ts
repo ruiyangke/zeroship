@@ -18,12 +18,26 @@ import type {
   IrBatch,
   IrScalar,
   MaskKind,
+  RaiseLevel,
+  TriggerAction,
+  TriggerStmt,
   VectorMetric,
 } from "./generated/ir.js";
 
 // Re-export the closed facet token unions from the wire layer (single source of
 // truth — the IR `ir.ts` mirrors the engine schema; the authoring surface re-exports).
-export type { ColType, Expr, IrBatch, IrScalar, MaskKind, Classification, VectorMetric };
+export type {
+  ColType,
+  Expr,
+  IrBatch,
+  IrScalar,
+  MaskKind,
+  Classification,
+  RaiseLevel,
+  TriggerAction,
+  TriggerStmt,
+  VectorMetric,
+};
 
 /**
  * **Supported as of op.* PR10 Part B** (executor-side catalog probe). The
@@ -201,7 +215,7 @@ export interface ExprChain {
   isTrue(): ExprChain;
   isFalse(): ExprChain;
   // cast (the closed portable target set only)
-  cast(target: "text" | "integer" | "real" | "boolean" | "blob"): ExprChain;
+  cast(target: "text" | "integer" | "real" | "boolean" | "blob" | "uuid"): ExprChain;
 }
 
 /** The `c.fn.*` scalar-function namespace (§3.6) — reached off the single
@@ -295,6 +309,63 @@ export interface BackfillArgs {
   batchSize?: number;
   name?: string;
   /** The schema qualifier (§3); overrides the handle default. */
+  schema?: string;
+}
+
+export type TriggerTiming = "before" | "after" | "insteadOf";
+export type TriggerEvent = "insert" | "update" | "delete" | "truncate";
+export type ForEach = "row" | "statement";
+
+export interface TriggerRaiseArgs {
+  level: RaiseLevel;
+  message: string;
+  errcode?: string;
+}
+
+export interface TriggerInsertArgs<R extends Row = Row> {
+  table: string;
+  rows: R | R[];
+  schema?: string;
+}
+
+export interface TriggerUpdateArgs {
+  table: string;
+  set: Record<string, ExprFn>;
+  where?: ExprFn;
+  schema?: string;
+}
+
+export interface TriggerDeleteArgs {
+  table: string;
+  where: ExprFn;
+  limit?: number;
+  schema?: string;
+}
+
+export interface TriggerBodyBuilder {
+  raise(args: TriggerRaiseArgs): TriggerStmt;
+  insert<R extends Row = Row>(args: TriggerInsertArgs<R>): TriggerStmt;
+  update(args: TriggerUpdateArgs): TriggerStmt;
+  del(args: TriggerDeleteArgs): TriggerStmt;
+  select(expr: ExprFn | ExprChain | Expr): TriggerStmt;
+}
+
+interface CreateTriggerBaseArgs {
+  name: string;
+  timing: TriggerTiming;
+  events: TriggerEvent[];
+  forEach: ForEach;
+  when?: ExprFn;
+  schema?: string;
+}
+
+export type CreateTriggerArgs =
+  | (CreateTriggerBaseArgs & { execute: string; body?: never })
+  | (CreateTriggerBaseArgs & { body: (b: TriggerBodyBuilder) => TriggerStmt[]; execute?: never });
+
+export interface DropTriggerArgs {
+  name: string;
+  ifExists?: boolean;
   schema?: string;
 }
 
@@ -467,6 +538,10 @@ export interface TableHandle {
   update(args: UpdateArgs): TableHandle;
   del(args: DelArgs): TableHandle;
   backfill(args: BackfillArgs): TableHandle;
+
+  // §A2 — cross-dialect core triggers.
+  createTrigger(args: CreateTriggerArgs): TableHandle;
+  dropTrigger(args: DropTriggerArgs): TableHandle;
 }
 
 /** One determinism-lint finding. */

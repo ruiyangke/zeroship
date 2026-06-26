@@ -35,6 +35,7 @@ import type {
   ColumnDef as ColumnDefType,
   ColumnRef,
   ConstraintRef,
+  CreateTriggerArgs,
   CreateTableArgs,
   DelArgs,
   DeterminismFinding,
@@ -53,6 +54,8 @@ import type {
   ScalarValue,
   TableHandle,
   TableOptions,
+  TriggerBodyBuilder,
+  TriggerStmt,
   TypeLexicon,
   UniqueRef,
   UpdateArgs,
@@ -538,7 +541,7 @@ class ExprChainImpl implements ExprChainType {
   isNotNull() { return chain({ node: "unaryOp", op: "isNotNull", operand: this.__node }); }
   isTrue() { return chain({ node: "unaryOp", op: "isTrue", operand: this.__node }); }
   isFalse() { return chain({ node: "unaryOp", op: "isFalse", operand: this.__node }); }
-  cast(target: "text" | "integer" | "real" | "boolean" | "blob") {
+  cast(target: "text" | "integer" | "real" | "boolean" | "blob" | "uuid") {
     return chain({ node: "cast", operand: this.__node, target });
   }
 }
@@ -988,23 +991,29 @@ function recordDropIndex(
   );
 }
 
-function recordInsert<R extends Row = Row>(table: string, args: InsertArgs<R>): void {
-  let rows = args.rows as R | R[];
-  if (rows === undefined) throw structuredError("OP_INVALID", "insert({ rows }): rows is required");
-  if (!Array.isArray(rows)) rows = [rows];
-  const arr = rows as R[];
+function normalizeInsertRows<R extends Row = Row>(
+  rows: R | R[] | undefined,
+  what: string,
+): { columns: string[]; rows: unknown[][] } {
+  if (rows === undefined) throw structuredError("OP_INVALID", `${what}: rows is required`);
+  const arr = (Array.isArray(rows) ? rows : [rows]) as R[];
   const columns = arr.length > 0 ? Object.keys(arr[0]) : [];
   const positional = arr.map((r) =>
     columns.map((col) =>
       Object.prototype.hasOwnProperty.call(r, col) ? toIrScalar((r as Row)[col]) : null,
     ),
   );
+  return { columns, rows: positional };
+}
+
+function recordInsert<R extends Row = Row>(table: string, args: InsertArgs<R>): void {
+  const normalized = normalizeInsertRows(args.rows, "insert({ rows })");
   push(
     compact({
       op: "insert",
       table,
-      columns,
-      rows: positional,
+      columns: normalized.columns,
+      rows: normalized.rows,
       onConflict: normalizeOnConflict(args.onConflict),
       schema: args.schema,
     }),
@@ -1066,6 +1075,109 @@ function recordBackfill(table: string, args: BackfillArgs): void {
       schema: args.schema,
     }),
   );
+}
+
+const TRIGGER_RAISE_LEVELS = ["abort", "fail", "ignore", "rollback"] as const;
+
+function triggerBodyBuilder(): TriggerBodyBuilder {
+  return {
+    raise(args) {
+      if (!args || typeof args !== "object") {
+        throw structuredError("OP_INVALID", "b.raise({ level, message, errcode? }) needs an object");
+      }
+      requireString(args.level, "b.raise({ level })");
+      if (!(TRIGGER_RAISE_LEVELS as readonly string[]).includes(args.level)) {
+        throw structuredError(
+          "OP_INVALID",
+          `b.raise({ level }): level must be one of ${TRIGGER_RAISE_LEVELS.join(" | ")}, ` +
+            `got ${JSON.stringify(args.level)}`,
+          { level: args.level },
+        );
+      }
+      requireString(args.message, "b.raise({ message })");
+      if (args.errcode !== undefined) requireString(args.errcode, "b.raise({ errcode })");
+      return compact({
+        stmt: "raise",
+        level: args.level,
+        message: args.message,
+        errcode: args.errcode,
+      }) as TriggerStmt;
+    },
+    insert(args) {
+      if (!args || typeof args !== "object") {
+        throw structuredError("OP_INVALID", "b.insert({ table, rows, schema? }) needs an object");
+      }
+      requireString(args.table, "b.insert({ table })");
+      const normalized = normalizeInsertRows(args.rows, "b.insert({ rows })");
+      return compact({
+        stmt: "insert",
+        table: args.table,
+        columns: normalized.columns,
+        rows: normalized.rows,
+        schema: args.schema,
+      }) as TriggerStmt;
+    },
+    update(args) {
+      if (!args || typeof args !== "object") {
+        throw structuredError("OP_INVALID", "b.update({ table, set, where?, schema? }) needs an object");
+      }
+      requireString(args.table, "b.update({ table })");
+      return compact({
+        stmt: "update",
+        table: args.table,
+        set: resolveSet(args.set),
+        where: resolveExpr(args.where),
+        schema: args.schema,
+      }) as TriggerStmt;
+    },
+    del(args) {
+      if (!args || typeof args !== "object") {
+        throw structuredError("OP_INVALID", "b.del({ table, where, limit?, schema? }) needs an object");
+      }
+      requireString(args.table, "b.del({ table })");
+      if (args.where === undefined || args.where === null) {
+        throw structuredError("OP_INVALID", "b.del({ where }): where is mandatory (no unfiltered delete)");
+      }
+      return compact({
+        stmt: "delete",
+        table: args.table,
+        where: resolveExpr(args.where),
+        limit: args.limit,
+        schema: args.schema,
+      }) as TriggerStmt;
+    },
+    select(expr) {
+      return { stmt: "select", expr: resolveExpr(expr)! } as TriggerStmt;
+    },
+  };
+}
+
+function resolveTriggerAction(args: CreateTriggerArgs): Node {
+  const hasExecute = "execute" in args && args.execute !== undefined;
+  const hasBody = "body" in args && args.body !== undefined;
+  if (hasExecute === hasBody) {
+    throw structuredError(
+      "OP_INVALID",
+      ".createTrigger(...) needs exactly one action: { execute: string } or { body: (b) => TriggerStmt[] }",
+    );
+  }
+  if (hasExecute) {
+    requireString(args.execute, ".createTrigger({ execute })");
+    return { kind: "executeFunction", name: args.execute };
+  }
+  if (!("body" in args) || typeof args.body !== "function") {
+    throw structuredError("OP_INVALID", ".createTrigger({ body }) must be a function");
+  }
+  const statements = args.body(triggerBodyBuilder());
+  if (!Array.isArray(statements)) {
+    throw structuredError("OP_INVALID", ".createTrigger({ body }) must return an array of trigger statements");
+  }
+  for (const stmt of statements) {
+    if (!stmt || typeof stmt !== "object" || typeof (stmt as Node).stmt !== "string") {
+      throw structuredError("OP_INVALID", "trigger body entries must be statements returned by the trigger body builder");
+    }
+  }
+  return { kind: "body", statements };
 }
 
 // ── (E) The fluent `table()` handle — the SOLE public entry (§3) ──
@@ -1228,6 +1340,32 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
     },
     backfill(args) {
       recordBackfill(name, { ...args, schema: pickSchema(args, dflt) });
+      return handle;
+    },
+    createTrigger(args) {
+      requireString(args.name, ".createTrigger({ name })");
+      push(compact({
+        op: "createTrigger",
+        name: args.name,
+        table: name,
+        schema: pickSchema(args, dflt),
+        timing: args.timing,
+        events: args.events,
+        forEach: args.forEach,
+        action: resolveTriggerAction(args),
+        when: resolveExpr(args.when),
+      }));
+      return handle;
+    },
+    dropTrigger(args) {
+      requireString(args.name, ".dropTrigger({ name })");
+      push(compact({
+        op: "dropTrigger",
+        name: args.name,
+        table: name,
+        schema: pickSchema(args, dflt),
+        ifExists: args.ifExists,
+      }));
       return handle;
     },
   };

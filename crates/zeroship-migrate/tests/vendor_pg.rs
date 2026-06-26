@@ -10,13 +10,14 @@ use zeroship_migrate::expr::{CastTarget, Expr, ScalarFn};
 use zeroship_migrate::guard::SchemaScope;
 use zeroship_migrate::ir::{
     CanonicalOpList, ForEach, FuncLanguage, GrantTarget, IrScalar, MigrationIr, Op, PolicyCmd,
-    Privilege, TriggerEvent, TriggerTiming, CURRENT_IR_VERSION,
+    Privilege, RaiseLevel, TriggerAction, TriggerEvent, TriggerStmt, TriggerTiming,
+    CURRENT_IR_VERSION,
 };
 use zeroship_migrate::validate::{
     validate_ir_scoped, Dialect, CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
 };
 use zeroship_migrate::vendor::render_vendor_op;
-use zeroship_migrate::{Checksum, MigrationFlags};
+use zeroship_migrate::{Checksum, GuardConfig, IrAuthor, LiveSchema, MigrationFlags, SqlDialect};
 
 const SCHEMA: &str = "zeroship";
 
@@ -156,22 +157,148 @@ fn render_create_policy_with_closed_predicate() {
     assert!(up.contains("CAST("), "got: {up}");
 }
 
-#[test]
-fn render_create_trigger_multi_event() {
-    let op = Op::CreateTrigger {
+fn execute_trigger_op() -> Op {
+    Op::CreateTrigger {
         name: "audit_events_block_update".into(),
         table: "audit_events".into(),
         schema: None,
         timing: TriggerTiming::Before,
         events: vec![TriggerEvent::Update, TriggerEvent::Delete],
         for_each: ForEach::Row,
-        execute: "audit_events_block_tamper".into(),
+        action: TriggerAction::ExecuteFunction { name: "audit_events_block_tamper".into() },
         when: None,
-    };
+    }
+}
+
+fn body_trigger_op(message: &str) -> Op {
+    Op::CreateTrigger {
+        name: "audit_events_append_only".into(),
+        table: "audit_events".into(),
+        schema: None,
+        timing: TriggerTiming::Before,
+        events: vec![TriggerEvent::Update],
+        for_each: ForEach::Row,
+        action: TriggerAction::Body {
+            statements: vec![TriggerStmt::Raise {
+                level: RaiseLevel::Abort,
+                message: message.into(),
+                errcode: None,
+            }],
+        },
+        when: None,
+    }
+}
+
+#[test]
+fn render_create_trigger_execute_function_matches_audit_shape() {
+    let op = execute_trigger_op();
     assert_eq!(
         render_up(&op),
         r#"CREATE TRIGGER "audit_events_block_update" BEFORE UPDATE OR DELETE ON "zeroship"."audit_events" FOR EACH ROW EXECUTE FUNCTION "zeroship"."audit_events_block_tamper"()"#
     );
+}
+
+#[test]
+fn sqlite_body_trigger_with_raise_abort_renders_exact_closed_body() {
+    let ir = ir_with(vec![body_trigger_op("append-only")]);
+    let author = IrAuthor::new("app", "app_corpus", SqlDialect::Sqlite);
+    let migs = author.lower(&ir, &LiveSchema::default()).expect("SQLite body trigger lowers");
+    assert_eq!(migs.len(), 1);
+    assert_eq!(
+        migs[0].up,
+        r#"CREATE TRIGGER "audit_events_append_only" BEFORE UPDATE ON "audit_events" FOR EACH ROW BEGIN SELECT RAISE(ABORT,'append-only'); END;"#
+    );
+}
+
+#[test]
+fn trigger_action_and_facet_refusals_are_dialect_specific() {
+    let scope = SchemaScope::Single("app".into());
+
+    let pg_body = ir_with(vec![body_trigger_op("append-only")]);
+    let err = validate_ir_scoped(&pg_body, Dialect::Postgres, &[], Some(&scope))
+        .expect_err("PG must reject closed trigger bodies instead of synthesizing functions");
+    assert_eq!(err.code, CODE_UNSUPPORTED);
+    assert_eq!(err.dialect, Dialect::Postgres);
+    assert!(err.reason.contains("triggerBody"), "got {err:?}");
+
+    let sqlite_exec = ir_with(vec![execute_trigger_op()]);
+    let err = validate_ir_scoped(&sqlite_exec, Dialect::Sqlite, &[], Some(&scope))
+        .expect_err("SQLite must reject ExecuteFunction trigger actions");
+    assert_eq!(err.code, CODE_UNSUPPORTED);
+    assert_eq!(err.dialect, Dialect::Sqlite);
+    assert!(err.reason.contains("executeFunction"), "got {err:?}");
+
+    let mut truncate = body_trigger_op("append-only");
+    if let Op::CreateTrigger { events, .. } = &mut truncate {
+        *events = vec![TriggerEvent::Truncate];
+    }
+    let err = validate_ir_scoped(&ir_with(vec![truncate]), Dialect::Sqlite, &[], Some(&scope))
+        .expect_err("SQLite must reject only the TRUNCATE facet");
+    assert_eq!(err.code, CODE_UNSUPPORTED);
+    assert_eq!(err.dialect, Dialect::Sqlite);
+    assert!(err.reason.contains("triggerEventTruncate"), "got {err:?}");
+
+    let mut statement = body_trigger_op("append-only");
+    if let Op::CreateTrigger { for_each, .. } = &mut statement {
+        *for_each = ForEach::Statement;
+    }
+    let err = validate_ir_scoped(&ir_with(vec![statement]), Dialect::Sqlite, &[], Some(&scope))
+        .expect_err("SQLite must reject only the FOR EACH STATEMENT facet");
+    assert_eq!(err.code, CODE_UNSUPPORTED);
+    assert_eq!(err.dialect, Dialect::Sqlite);
+    assert!(err.reason.contains("forEachStatement"), "got {err:?}");
+}
+
+#[test]
+fn body_trigger_is_not_vendor_gated_under_confined_validate_or_lower_guarded() {
+    let ir = ir_with(vec![body_trigger_op("append-only")]);
+    let scope = SchemaScope::Single("app".into());
+    validate_ir_scoped(&ir, Dialect::Sqlite, &[], Some(&scope))
+        .expect("Body trigger is cross-dialect core and should validate under Confined");
+
+    let author = IrAuthor::new("app", "app_corpus", SqlDialect::Sqlite);
+    let guard_cfg = GuardConfig::confined_sqlite("app");
+    let (steps, fragments) = author
+        .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
+        .expect("Body trigger should lower through the Confined guarded SQLite path");
+    assert_eq!(steps.len(), 1);
+    assert_eq!(fragments.len(), 1);
+    assert_eq!(
+        fragments[0].sql,
+        r#"CREATE TRIGGER "audit_events_append_only" BEFORE UPDATE ON "audit_events" FOR EACH ROW BEGIN SELECT RAISE(ABORT,'append-only'); END;"#
+    );
+}
+
+#[test]
+fn trigger_raise_message_is_sql_literal_escaped() {
+    let ir = ir_with(vec![body_trigger_op("can't mutate rows")]);
+    let author = IrAuthor::new("app", "app_corpus", SqlDialect::Sqlite);
+    let migs = author.lower(&ir, &LiveSchema::default()).expect("SQLite body trigger lowers");
+    assert_eq!(
+        migs[0].up,
+        r#"CREATE TRIGGER "audit_events_append_only" BEFORE UPDATE ON "audit_events" FOR EACH ROW BEGIN SELECT RAISE(ABORT,'can''t mutate rows'); END;"#
+    );
+    assert!(
+        !migs[0].up.contains("can't mutate"),
+        "embedded quote must be doubled inside the SQL literal: {}",
+        migs[0].up
+    );
+}
+
+#[test]
+fn pg_body_trigger_lower_refuses_with_trigger_body_kind() {
+    let ir = ir_with(vec![body_trigger_op("append-only")]);
+    let author = IrAuthor::new(SCHEMA, "app_corpus", SqlDialect::Postgres);
+    let err = author
+        .lower(&ir, &LiveSchema::default())
+        .expect_err("PG Body trigger must fail closed at lower");
+    match err {
+        zeroship_migrate::ir_author::IrLowerError::TriggerUnsupported { kind, dialect } => {
+            assert_eq!(kind, "triggerBody");
+            assert_eq!(dialect, SqlDialect::Postgres);
+        }
+        other => panic!("expected triggerBody unsupported, got {other:?}"),
+    }
 }
 
 #[test]
@@ -314,7 +441,7 @@ fn out_of_set_privilege_rejected_at_deserialize() {
 
 #[test]
 fn out_of_set_trigger_timing_rejected_at_deserialize() {
-    let json = r#"{"op":"createTrigger","name":"t","table":"x","timing":"sideways","events":["insert"],"forEach":"row","execute":"f"}"#;
+    let json = r#"{"op":"createTrigger","name":"t","table":"x","timing":"sideways","events":["insert"],"forEach":"row","action":{"kind":"executeFunction","name":"f"}}"#;
     let r: Result<Op, _> = serde_json::from_str(json);
     assert!(r.is_err(), "an out-of-set trigger timing must be rejected at deserialize");
 }

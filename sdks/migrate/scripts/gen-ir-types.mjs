@@ -56,6 +56,11 @@ const ENUM_DEFS = [
   // `setNull`/`setDefault`/`noAction`). A closed string-enum; consumed by the
   // hand-authored `ir.ts` `IrConstraintKind` fk variant.
   "RefAction",
+  // §A2 — closed trigger facet/action body tokens.
+  "TriggerTiming",
+  "TriggerEvent",
+  "ForEach",
+  "RaiseLevel",
 ];
 
 const banner = `/* eslint-disable */

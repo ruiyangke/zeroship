@@ -35,8 +35,9 @@ use crate::declarative::{
 use crate::drift::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, TableSnapshot};
 use crate::guard::{guard_for, GuardConfig, GuardError};
 use crate::ir::{
-    ColType, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrMask, IndexMethod,
-    MigrationIr, Op, RefAction, VectorMetric,
+    ColType, ForEach, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrMask,
+    IndexMethod, MigrationIr, Op, RaiseLevel, RefAction, TriggerAction, TriggerEvent, TriggerStmt,
+    VectorMetric,
 };
 use crate::migration::Migration;
 use crate::plan::{AppliedPlan, PlanStep, RenameStep};
@@ -527,6 +528,16 @@ pub enum IrLowerError {
     /// list). Carries the underlying [`crate::vendor::VendorError`].
     #[error(transparent)]
     Vendor(#[from] crate::vendor::VendorError),
+    /// A trigger action or facet is unsupported on the target dialect. Triggers are
+    /// cross-dialect core, so these are per-facet/action refusals rather than the
+    /// old whole-construct vendor gate.
+    #[error("IrAuthor::lower of trigger facet/action {kind:?} is unsupported on {dialect:?}")]
+    TriggerUnsupported {
+        /// Stable unsupported-kind token (`triggerBody`, `executeFunction`, …).
+        kind: &'static str,
+        /// The target dialect that cannot render the facet/action.
+        dialect: SqlDialect,
+    },
     /// **PR2** — a `renameColumn` whose IR-carried [`ColType`] does not match the
     /// LIVE `from` column's actual `data_type`. A pure online rename mirrors values
     /// across the two columns (PG dual-write `NEW.<to> := NEW.<from>`; the SQLite
@@ -1605,6 +1616,11 @@ impl IrAuthor {
                     live_schema,
                 )?));
             }
+            // CROSS-DIALECT CORE triggers. The op is admitted without a vendor
+            // capability; unsupported pieces are refused per dialect/action/facet.
+            Op::CreateTrigger { .. } | Op::DropTrigger { .. } => {
+                self.lower_trigger_op(op, &eff_schema, &decl)?
+            }
             // VENDOR (`@zeroship/migrate/pg`) — render the privileged primitive to
             // its Postgres DDL (vendor spec §4.4). Every vendor op is `PgOnly`: a
             // SQLite target is refused fail-closed here (the validate gate already
@@ -1631,8 +1647,6 @@ impl IrAuthor {
             | Op::NoForceRls { .. }
             | Op::CreatePolicy { .. }
             | Op::DropPolicy { .. }
-            | Op::CreateTrigger { .. }
-            | Op::DropTrigger { .. }
             | Op::CreateFunction { .. }
             | Op::DropFunction { .. }
             | Op::PgRaw { .. } => {
@@ -1701,6 +1715,36 @@ impl IrAuthor {
             }
         }
         Ok(LoweredOp::Ddl(migs))
+    }
+
+    fn lower_trigger_op(
+        &self,
+        op: &Op,
+        eff_schema: &str,
+        decl: &DeclarativeAuthor,
+    ) -> Result<Vec<LoweredUnit>, IrLowerError> {
+        match self.dialect {
+            SqlDialect::Postgres => {
+                let stmts = match crate::vendor::render_vendor_op(op, eff_schema) {
+                    Ok(stmts) => stmts,
+                    Err(crate::vendor::VendorError::UnsupportedTriggerAction { kind }) => {
+                        return Err(IrLowerError::TriggerUnsupported {
+                            kind,
+                            dialect: SqlDialect::Postgres,
+                        });
+                    }
+                    Err(e) => return Err(IrLowerError::Vendor(e)),
+                };
+                Ok(stmts
+                    .into_iter()
+                    .map(|s| decl.lower_vendor_statement(&s.name, s.up, s.down))
+                    .collect())
+            }
+            SqlDialect::Sqlite => {
+                let stmt = render_sqlite_trigger_op(op, eff_schema)?;
+                Ok(vec![decl.lower_vendor_statement(&stmt.name, stmt.up, stmt.down)])
+            }
+        }
     }
 
     /// **§PR6a — lower a DML op** (`insert`/`update`/`del`/`backfill`) into a
@@ -2625,6 +2669,206 @@ impl IrAuthor {
 #[cfg(test)]
 fn split_up_fragments(up: &str) -> Vec<&str> {
     up.split(";\n").collect()
+}
+
+fn render_sqlite_trigger_op(
+    op: &Op,
+    eff_schema: &str,
+) -> Result<crate::vendor::VendorStatement, IrLowerError> {
+    match op {
+        Op::CreateTrigger {
+            name,
+            table,
+            timing,
+            events,
+            for_each,
+            when,
+            action,
+            ..
+        } => {
+            if events.is_empty() {
+                return Err(IrLowerError::Vendor(crate::vendor::VendorError::EmptyList {
+                    what: "trigger events",
+                }));
+            }
+            if events.iter().any(|e| matches!(e, TriggerEvent::Truncate)) {
+                return Err(IrLowerError::TriggerUnsupported {
+                    kind: "triggerEventTruncate",
+                    dialect: SqlDialect::Sqlite,
+                });
+            }
+            if matches!(for_each, ForEach::Statement) {
+                return Err(IrLowerError::TriggerUnsupported {
+                    kind: "forEachStatement",
+                    dialect: SqlDialect::Sqlite,
+                });
+            }
+            let TriggerAction::Body { statements } = action else {
+                return Err(IrLowerError::TriggerUnsupported {
+                    kind: "executeFunction",
+                    dialect: SqlDialect::Sqlite,
+                });
+            };
+            if statements.is_empty() {
+                return Err(IrLowerError::Vendor(crate::vendor::VendorError::EmptyList {
+                    what: "trigger body statements",
+                }));
+            }
+
+            let qname = crate::dml::quote_bare_ident("trigger", name)?;
+            let qtable = crate::dml::quote_bare_ident("table", table)?;
+            let events_sql =
+                events.iter().map(|e| e.as_sql()).collect::<Vec<_>>().join(" OR ");
+            let mut up = format!(
+                "CREATE TRIGGER {qname} {} {events_sql} ON {qtable}",
+                timing.as_sql()
+            );
+            up.push_str(" FOR EACH ROW");
+            if let Some(pred) = when {
+                up.push_str(&format!(
+                    " WHEN ({})",
+                    crate::dml::render_predicate_sqlite(pred)?
+                ));
+            }
+            let body: Result<Vec<_>, _> = statements
+                .iter()
+                .map(|stmt| render_sqlite_trigger_stmt(stmt, eff_schema))
+                .collect();
+            up.push_str(" BEGIN ");
+            up.push_str(&body?.into_iter().map(|s| format!("{s};")).collect::<Vec<_>>().join(" "));
+            up.push_str(" END;");
+            Ok(crate::vendor::VendorStatement {
+                name: format!("create_trigger_{name}_{table}"),
+                up,
+                down: Some(format!("DROP TRIGGER IF EXISTS {qname}")),
+            })
+        }
+        Op::DropTrigger { name, table, if_exists, .. } => {
+            let qname = crate::dml::quote_bare_ident("trigger", name)?;
+            let mut up = String::from("DROP TRIGGER ");
+            if if_exists.unwrap_or(false) {
+                up.push_str("IF EXISTS ");
+            }
+            up.push_str(&qname);
+            Ok(crate::vendor::VendorStatement {
+                name: format!("drop_trigger_{name}_{table}"),
+                up,
+                down: None,
+            })
+        }
+        _ => Err(IrLowerError::UnsupportedOp("non-trigger op routed to trigger renderer")),
+    }
+}
+
+fn sqlite_trigger_table_ref(
+    table: &str,
+    schema: Option<&str>,
+    eff_schema: &str,
+) -> Result<String, IrLowerError> {
+    if let Some(schema) = schema {
+        if !schema.eq_ignore_ascii_case(eff_schema) {
+            return Err(IrLowerError::LowerCrossSchema(schema.to_string()));
+        }
+    }
+    Ok(crate::dml::quote_bare_ident("table", table)?)
+}
+
+fn render_sqlite_trigger_stmt(
+    stmt: &TriggerStmt,
+    eff_schema: &str,
+) -> Result<String, IrLowerError> {
+    match stmt {
+        TriggerStmt::Insert { table, columns, rows, schema } => {
+            if columns.is_empty() {
+                return Err(IrLowerError::DmlAssemble(crate::dml::DmlError::MalformedInsert {
+                    table: table.clone(),
+                    reason: "no columns".to_string(),
+                }));
+            }
+            if rows.is_empty() {
+                return Err(IrLowerError::DmlAssemble(crate::dml::DmlError::MalformedInsert {
+                    table: table.clone(),
+                    reason: "no rows".to_string(),
+                }));
+            }
+            let qtable = sqlite_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
+            let qcols: Result<Vec<_>, _> =
+                columns.iter().map(|c| crate::dml::quote_bare_ident("column", c)).collect();
+            let qcols = qcols?;
+            let mut groups = Vec::with_capacity(rows.len());
+            for (ri, row) in rows.iter().enumerate() {
+                if row.len() != columns.len() {
+                    return Err(IrLowerError::DmlAssemble(
+                        crate::dml::DmlError::MalformedInsert {
+                            table: table.clone(),
+                            reason: format!(
+                                "row {ri} has {} value(s) but {} column(s) were named",
+                                row.len(),
+                                columns.len()
+                            ),
+                        },
+                    ));
+                }
+                let vals: Result<Vec<_>, _> =
+                    row.iter().map(crate::dml::inline_literal).collect();
+                groups.push(format!("({})", vals?.join(", ")));
+            }
+            Ok(format!(
+                "INSERT INTO {qtable} ({}) VALUES {}",
+                qcols.join(", "),
+                groups.join(", ")
+            ))
+        }
+        TriggerStmt::Update { table, set, r#where, schema } => {
+            if set.is_empty() {
+                return Err(IrLowerError::DmlAssemble(crate::dml::DmlError::EmptySet {
+                    op: "update",
+                    table: table.clone(),
+                }));
+            }
+            let qtable = sqlite_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
+            let mut assigns = Vec::with_capacity(set.len());
+            for (col, rhs) in set {
+                assigns.push(format!(
+                    "{} = {}",
+                    crate::dml::quote_bare_ident("column", col)?,
+                    crate::dml::render_expr_inline(rhs, SqlDialect::Sqlite)?
+                ));
+            }
+            let mut sql = format!("UPDATE {qtable} SET {}", assigns.join(", "));
+            if let Some(pred) = r#where {
+                sql.push_str(&format!(
+                    " WHERE {}",
+                    crate::dml::render_expr_inline(pred, SqlDialect::Sqlite)?
+                ));
+            }
+            Ok(sql)
+        }
+        TriggerStmt::Delete { table, r#where, limit, schema } => {
+            let qtable = sqlite_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
+            let pred = crate::dml::render_expr_inline(r#where, SqlDialect::Sqlite)?;
+            Ok(match limit {
+                None => format!("DELETE FROM {qtable} WHERE {pred}"),
+                Some(n) => format!(
+                    "DELETE FROM {qtable} WHERE rowid IN \
+                     (SELECT rowid FROM {qtable} WHERE {pred} LIMIT {})",
+                    n.get()
+                ),
+            })
+        }
+        TriggerStmt::Select { expr } => Ok(format!(
+            "SELECT {}",
+            crate::dml::render_expr_inline(expr, SqlDialect::Sqlite)?
+        )),
+        TriggerStmt::Raise { level: RaiseLevel::Ignore, message: _, .. } => {
+            Ok("SELECT RAISE(IGNORE)".to_string())
+        }
+        TriggerStmt::Raise { level, message, .. } => Ok(format!(
+            "SELECT RAISE({},{})",
+            level.as_sqlite_sql(),
+            crate::dml::sql_string_literal(message)
+        )),
+    }
 }
 
 /// The journal version of a plan step — the deterministic marker the plan's

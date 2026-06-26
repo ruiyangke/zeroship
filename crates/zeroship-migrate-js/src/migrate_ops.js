@@ -932,22 +932,27 @@ function recordDropIndex(table, name, args) {
   );
 }
 
-function recordInsert(table, args) {
-  let rows = args.rows;
-  if (rows === undefined) {
-    throw structuredError("OP_INVALID", "insert({ rows }): rows is required");
+function normalizeInsertRows(rows, what) {
+  let normalizedRows = rows;
+  if (normalizedRows === undefined) {
+    throw structuredError("OP_INVALID", `${what}: rows is required`);
   }
-  if (!Array.isArray(rows)) rows = [rows];
-  const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
-  const positional = rows.map((r) =>
+  if (!Array.isArray(normalizedRows)) normalizedRows = [normalizedRows];
+  const columns = normalizedRows.length > 0 ? Object.keys(normalizedRows[0]) : [];
+  const positional = normalizedRows.map((r) =>
     columns.map((col) => (Object.prototype.hasOwnProperty.call(r, col) ? toIrScalar(r[col]) : null)),
   );
+  return { columns, rows: positional };
+}
+
+function recordInsert(table, args) {
+  const normalized = normalizeInsertRows(args.rows, "insert({ rows })");
   push(
     compact({
       op: "insert",
       table,
-      columns,
-      rows: positional,
+      columns: normalized.columns,
+      rows: normalized.rows,
       onConflict: normalizeOnConflict(args.onConflict),
       schema: args.schema,
     }),
@@ -1004,6 +1009,108 @@ function recordBackfill(table, args) {
       schema: args.schema,
     }),
   );
+}
+
+const TRIGGER_RAISE_LEVELS = ["abort", "fail", "ignore", "rollback"];
+
+function triggerBodyBuilder() {
+  return {
+    raise(args) {
+      if (!args || typeof args !== "object") {
+        throw structuredError("OP_INVALID", "b.raise({ level, message, errcode? }) needs an object");
+      }
+      requireString(args.level, "b.raise({ level })");
+      if (!TRIGGER_RAISE_LEVELS.includes(args.level)) {
+        throw structuredError(
+          "OP_INVALID",
+          `b.raise({ level }): level must be one of ${TRIGGER_RAISE_LEVELS.join(" | ")}, got ${JSON.stringify(args.level)}`,
+          { level: args.level },
+        );
+      }
+      requireString(args.message, "b.raise({ message })");
+      if (args.errcode !== undefined) requireString(args.errcode, "b.raise({ errcode })");
+      return compact({
+        stmt: "raise",
+        level: args.level,
+        message: args.message,
+        errcode: args.errcode,
+      });
+    },
+    insert(args) {
+      if (!args || typeof args !== "object") {
+        throw structuredError("OP_INVALID", "b.insert({ table, rows, schema? }) needs an object");
+      }
+      requireString(args.table, "b.insert({ table })");
+      const normalized = normalizeInsertRows(args.rows, "b.insert({ rows })");
+      return compact({
+        stmt: "insert",
+        table: args.table,
+        columns: normalized.columns,
+        rows: normalized.rows,
+        schema: args.schema,
+      });
+    },
+    update(args) {
+      if (!args || typeof args !== "object") {
+        throw structuredError("OP_INVALID", "b.update({ table, set, where?, schema? }) needs an object");
+      }
+      requireString(args.table, "b.update({ table })");
+      return compact({
+        stmt: "update",
+        table: args.table,
+        set: resolveSet(args.set),
+        where: resolveExpr(args.where),
+        schema: args.schema,
+      });
+    },
+    del(args) {
+      if (!args || typeof args !== "object") {
+        throw structuredError("OP_INVALID", "b.del({ table, where, limit?, schema? }) needs an object");
+      }
+      requireString(args.table, "b.del({ table })");
+      if (args.where === undefined || args.where === null) {
+        throw structuredError("OP_INVALID", "b.del({ where }): where is mandatory (no unfiltered delete)");
+      }
+      return compact({
+        stmt: "delete",
+        table: args.table,
+        where: resolveExpr(args.where),
+        limit: args.limit,
+        schema: args.schema,
+      });
+    },
+    select(expr) {
+      return { stmt: "select", expr: resolveExpr(expr) };
+    },
+  };
+}
+
+function resolveTriggerAction(args) {
+  const hasExecute = args.execute !== undefined;
+  const hasBody = args.body !== undefined;
+  if (hasExecute === hasBody) {
+    throw structuredError(
+      "OP_INVALID",
+      ".createTrigger(...) needs exactly one action: { execute: string } or { body: (b) => TriggerStmt[] }",
+    );
+  }
+  if (hasExecute) {
+    requireString(args.execute, ".createTrigger({ execute })");
+    return { kind: "executeFunction", name: args.execute };
+  }
+  if (typeof args.body !== "function") {
+    throw structuredError("OP_INVALID", ".createTrigger({ body }) must be a function");
+  }
+  const statements = args.body(triggerBodyBuilder());
+  if (!Array.isArray(statements)) {
+    throw structuredError("OP_INVALID", ".createTrigger({ body }) must return an array of trigger statements");
+  }
+  for (const stmt of statements) {
+    if (!stmt || typeof stmt !== "object" || typeof stmt.stmt !== "string") {
+      throw structuredError("OP_INVALID", "trigger body entries must be statements returned by the trigger body builder");
+    }
+  }
+  return { kind: "body", statements };
 }
 
 // ===========================================================================
@@ -1175,7 +1282,7 @@ export function table(name, opts = {}) {
     },
 
     // ── VENDOR (`@zeroship/migrate/pg`) — table-scoped privileged primitives ──
-    // RLS / policies / triggers hang off the table handle (vendor spec §2.4/§2.5).
+    // RLS / policies hang off the table handle (vendor spec §2.4/§2.5).
     // Exposed always; the engine's capability gate refuses them fail-closed under
     // a confined capability set. Each pushes a vendor op carrying the table.
     enableRowLevelSecurity() {
@@ -1221,7 +1328,6 @@ export function table(name, opts = {}) {
     },
     createTrigger(args) {
       requireString(args.name, ".createTrigger({ name })");
-      requireString(args.execute, ".createTrigger({ execute })");
       push(compact({
         op: "createTrigger",
         name: args.name,
@@ -1230,7 +1336,7 @@ export function table(name, opts = {}) {
         timing: args.timing,
         events: args.events,
         forEach: args.forEach,
-        execute: args.execute,
+        action: resolveTriggerAction(args),
         when: resolveExpr(args.when),
       }));
       return handle;
