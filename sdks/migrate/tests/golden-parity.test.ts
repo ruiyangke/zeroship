@@ -163,3 +163,17 @@ test("fluent_dml fluent-recorded ops equal the committed golden", async () => {
   const g = await golden("fluent_dml");
   assert.deepEqual(normalizeOps(ops), normalizeOps(g.ops));
 });
+
+// Recorder lock-step for the table-rename follow-up: the TS `table().rename({ to })`
+// surface records the SAME `renameTable` ops the V8 `migrate_ops.js` recorder
+// committed into the `ddl_rename_table` golden — a bare rename AND a schema+ifExists
+// rename. The byte-identity oracle for the new `Op::RenameTable` variant across both
+// fluent impls (RED before `rename()` existed on the handle).
+test("ddl_rename_table fluent-recorded ops equal the committed golden", async () => {
+  const ops = record(() => {
+    table("accounts").rename({ to: "members" });
+    table("orders").rename({ to: "purchases", ifExists: true, schema: "reporting" });
+  });
+  const g = await golden("ddl_rename_table");
+  assert.deepEqual(normalizeOps(ops), normalizeOps(g.ops));
+});

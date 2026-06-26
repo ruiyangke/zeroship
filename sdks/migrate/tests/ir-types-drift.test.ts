@@ -53,8 +53,8 @@ function opFieldsByTag(def: any, tagField: string): Record<string, string[]> {
 const TS = {
   // Op variant tags (the `del()` fn records `"delete"`).
   Op: [
-    "createTable", "dropTable", "addColumn", "dropColumn", "createIndex", "dropIndex",
-    "alterColumnType", "alterColumnNullability", "renameColumn", "addConstraint",
+    "createTable", "dropTable", "renameTable", "addColumn", "dropColumn", "createIndex",
+    "dropIndex", "alterColumnType", "alterColumnNullability", "renameColumn", "addConstraint",
     "dropConstraint", "insert", "update", "delete", "backfill",
   ].sort(),
   // Expr node tags.
@@ -90,6 +90,7 @@ const TS = {
 const TS_OP_FIELDS: Record<string, string[]> = {
   createTable: ["columns", "constraints", "existenceGuard", "indexes", "name", "schema"].sort(),
   dropTable: ["cascade", "existenceGuard", "schema", "table"].sort(),
+  renameTable: ["existenceGuard", "schema", "table", "to"].sort(),
   addColumn: ["column", "default", "existenceGuard", "nullable", "schema", "table", "type"].sort(),
   dropColumn: ["column", "existenceGuard", "schema", "table"].sort(),
   createIndex: ["columns", "concurrently", "existenceGuard", "name", "schema", "table", "unique", "using", "where"].sort(),

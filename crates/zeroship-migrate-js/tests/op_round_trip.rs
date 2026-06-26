@@ -154,7 +154,7 @@ fn every_op_variant_has_a_fixture() {
                 .map(str::to_string)
         })
         .collect();
-    assert_eq!(expected.len(), 15, "the closed Op set has 15 variants (PR1)");
+    assert_eq!(expected.len(), 16, "the closed Op set has 16 variants (PR1 + the table rename follow-up)");
 
     // The union of op discriminants across all recorded fixtures.
     let mut covered: BTreeSet<String> = BTreeSet::new();

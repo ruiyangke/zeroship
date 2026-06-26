@@ -547,6 +547,22 @@ function recordDropTable(
   );
 }
 
+function recordRenameTable(
+  table: string,
+  to: string,
+  args: { ifExists?: boolean; schema?: string },
+): void {
+  push(
+    compact({
+      op: "renameTable",
+      table,
+      to,
+      schema: args.schema,
+      existenceGuard: ifExistsGuard(args.ifExists),
+    }),
+  );
+}
+
 function recordAddColumn(
   table: string,
   column: string,
@@ -933,6 +949,14 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
       recordDropTable(name, {
         ifExists: args.ifExists,
         cascade: args.cascade,
+        schema: pickSchema(args, dflt),
+      });
+      return handle;
+    },
+    rename(args) {
+      requireString(args.to, "table(name).rename({ to })");
+      recordRenameTable(name, args.to, {
+        ifExists: args.ifExists,
         schema: pickSchema(args, dflt),
       });
       return handle;

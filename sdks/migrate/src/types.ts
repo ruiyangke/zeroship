@@ -391,14 +391,12 @@ export interface IndexRef {
  */
 export interface TableHandle {
   // §3.1 — the table itself (all-object terminals).
-  // NOTE: the spec's §3.1 also lists a table-level `.rename({ to })`, but that is
-  // a NET-NEW operation: there is no `renameTable` Op variant in the IR and no
-  // executor support for it (the flat surface never had a table rename either).
-  // This PR's hard constraint is "IR byte-identical except C1; apply path
-  // UNCHANGED", so table rename is DEFERRED (it needs a new Op + executor wave)
-  // and is intentionally absent from the handle.
   create(args: CreateTableArgs): TableHandle;
   drop(args?: { ifExists?: boolean; cascade?: boolean; schema?: string }): TableHandle;
+  /** Rename the whole table to `to` (a fast `ALTER TABLE … RENAME TO …` — NOT the
+   *  online column expand-contract; `ifExists` guards the source table). Records a
+   *  `renameTable` Op; the engine emits the inverse rename as the down-migration. */
+  rename(args: { to: string; ifExists?: boolean; schema?: string }): TableHandle;
 
   // §3.2/§3.3/§3.4 — selectors for named sub-objects
   column(name: string): ColumnRef;

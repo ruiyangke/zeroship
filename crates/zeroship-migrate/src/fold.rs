@@ -223,6 +223,26 @@ pub fn fold_ops(
                     return Err(FoldError::MissingTable(table.clone()));
                 }
             }
+            Op::RenameTable { table, to, .. } => {
+                // A whole-table rename moves the snapshot WHOLESALE from the old key
+                // to the new one — every column / index / constraint / facet is
+                // preserved (a `TableSnapshot` carries no own `name`; the BTreeMap
+                // KEY is the table name, so a re-key IS the rename). A later op
+                // referencing the NEW name now resolves; one referencing the OLD name
+                // errors (`MissingTable`), exactly the contract the column rename has.
+                //
+                // The two structural guards mirror the column-rename arm:
+                //   - the SOURCE must exist (fail-closed `MissingTable`);
+                //   - the TARGET must NOT already exist (fail-closed `DuplicateTable`)
+                //     — a rename cannot collide with a live table.
+                if tables.contains_key(to) {
+                    return Err(FoldError::DuplicateTable(to.clone()));
+                }
+                let snap = tables
+                    .remove(table)
+                    .ok_or_else(|| FoldError::MissingTable(table.clone()))?;
+                tables.insert(to.clone(), snap);
+            }
             Op::AddColumn { table, column, ty, nullable, default, vector_metric, mask, .. } => {
                 let snap = table_mut(&mut tables, table)?;
                 if snap.columns.iter().any(|c| &c.name == column) {
@@ -1181,6 +1201,22 @@ pub fn fold_to_field_defs(
                 checks.remove(table);
                 fks.remove(table);
             }
+            Op::RenameTable { table, to, .. } => {
+                // Re-key the table's reconstructed column map AND its pending
+                // CHECK / FK facets from the old name to the new one, so gen-types
+                // sees the RENAMED table (the same wholesale move the structural
+                // `fold_ops` does). A column dropped/renamed/added under the new
+                // name afterward resolves; the old name no longer does.
+                if let Some(cols) = tables.remove(table) {
+                    tables.insert(to.clone(), cols);
+                }
+                if let Some(c) = checks.remove(table) {
+                    checks.insert(to.clone(), c);
+                }
+                if let Some(f) = fks.remove(table) {
+                    fks.insert(to.clone(), f);
+                }
+            }
             Op::AddColumn { table, column, ty, nullable, default, vector_metric, mask, .. } => {
                 if let Some(cols) = tables.get_mut(table) {
                     // **#173** — AddColumn carries no `id_prefix` (an added column is never
@@ -2105,6 +2141,95 @@ mod tests {
         ])
         .unwrap_err();
         assert_eq!(err, FoldError::RenameCollision { table: "users".to_string(), to: "b".to_string() });
+    }
+
+    fn rename_table(table: &str, to: &str) -> Op {
+        Op::RenameTable {
+            table: table.to_string(),
+            to: to.to_string(),
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    #[test]
+    fn rename_table_moves_snapshot_wholesale() {
+        // A table rename re-keys the snapshot from the old name to the new one,
+        // PRESERVING every column + index. A later op referencing the NEW name
+        // resolves; the old key is gone.
+        let snap = fold(&[
+            create("accounts", vec![col("email", ColType::Text, false), col("balance", ColType::Int, true)]),
+            create_index("accounts", Some("accounts_email_idx"), &["email"], true),
+            rename_table("accounts", "members"),
+        ])
+        .unwrap();
+        assert!(!snap.tables.contains_key("accounts"), "old table name is gone after rename");
+        let t = snap.tables.get("members").expect("renamed table present under new name");
+        assert!(t.columns.iter().any(|c| c.name == "email"), "columns preserved across table rename");
+        assert!(t.columns.iter().any(|c| c.name == "balance"), "all columns preserved");
+        assert!(
+            t.indexes.iter().any(|i| i.name == "accounts_email_idx"),
+            "indexes preserved across table rename"
+        );
+    }
+
+    #[test]
+    fn rename_table_then_reference_new_name_resolves() {
+        // After the rename, an op on the NEW name (add a column) folds onto the
+        // moved snapshot.
+        let snap = fold(&[
+            create("accounts", vec![col("email", ColType::Text, false)]),
+            rename_table("accounts", "members"),
+            Op::AddColumn {
+                table: "members".to_string(),
+                column: "nickname".to_string(),
+                ty: ColType::Text,
+                nullable: Some(true),
+                default: None,
+                vector_metric: None,
+                mask: None,
+                schema: None,
+                existence_guard: None,
+            },
+        ])
+        .unwrap();
+        let t = &snap.tables["members"];
+        assert!(t.columns.iter().any(|c| c.name == "nickname"), "op on the renamed-to name resolves");
+    }
+
+    #[test]
+    fn rename_table_then_reference_old_name_errors() {
+        // After the rename, an op on the OLD name fails closed (the table no longer
+        // exists under that key) — the same contract a column rename has.
+        let err = fold(&[
+            create("accounts", vec![col("email", ColType::Text, false)]),
+            rename_table("accounts", "members"),
+            drop_column("accounts", "email"),
+        ])
+        .unwrap_err();
+        assert_eq!(err, FoldError::MissingTable("accounts".to_string()));
+    }
+
+    #[test]
+    fn rename_table_missing_source_errors() {
+        let err = fold(&[
+            create("accounts", vec![col("email", ColType::Text, false)]),
+            rename_table("ghost", "x"),
+        ])
+        .unwrap_err();
+        assert_eq!(err, FoldError::MissingTable("ghost".to_string()));
+    }
+
+    #[test]
+    fn rename_table_to_existing_errors() {
+        // A rename cannot collide with a live table.
+        let err = fold(&[
+            create("accounts", vec![col("email", ColType::Text, false)]),
+            create("members", vec![col("id", ColType::Uuid, false)]),
+            rename_table("accounts", "members"),
+        ])
+        .unwrap_err();
+        assert_eq!(err, FoldError::DuplicateTable("members".to_string()));
     }
 
     #[test]

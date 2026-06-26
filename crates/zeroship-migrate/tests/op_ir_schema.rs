@@ -83,6 +83,7 @@ fn op_variant_names_from_schema() {
     let mut expected: Vec<String> = [
         "createTable",
         "dropTable",
+        "renameTable",
         "addColumn",
         "dropColumn",
         "createIndex",

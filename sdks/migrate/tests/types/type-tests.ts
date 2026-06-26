@@ -86,8 +86,18 @@ export function badOpShapes(): void {
   // @ts-expect-error — `update.set` values must be (c) => Expr callbacks, not raw strings.
   table("users").update({ set: { name: "raw sql string" } });
 
-  // @ts-expect-error — the table-level `.rename({ to })` is deferred (no renameTable op).
+  // @ts-expect-error — the table-level `.rename({ to })` REQUIRES a `to` string.
+  table("users").rename({});
+
+  // @ts-expect-error — `.rename({ to })` has no `from` (that is the column-rename shape).
+  table("users").rename({ from: "users", to: "people" });
+}
+
+// The table-level `.rename({ to })` now type-checks (the renameTable op shipped):
+// a bare rename and a schema+ifExists rename, both returning the chainable handle.
+export function goodTableRename(): void {
   table("users").rename({ to: "people" });
+  table("users").rename({ to: "people", ifExists: true, schema: "reporting" });
 }
 
 // ───────────────────────────────────────────────────────────────────────────
