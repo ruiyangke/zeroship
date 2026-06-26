@@ -24,6 +24,10 @@ import {
   type ColumnDef,
   type DbFieldType,
 } from "../../src/index.js";
+// The internal closed-set validation arrays (NOT part of the public `index.ts`
+// surface) — imported directly for the LOW-2 element-typing assertion below.
+import { MASK_CLASSIFICATIONS, MASK_KINDS, VECTOR_METRICS } from "../../src/ops.js";
+import type { Classification, MaskKind, VectorMetric } from "../../src/generated/ir.js";
 
 // ───────────────────────────────────────────────────────────────────────────
 // 1. NAMES STAY STRINGS — the anti-rot guarantee (§1/§3).
@@ -244,4 +248,38 @@ export function dbFieldTypeExhaustiveness(token: DbFieldType): void {
       return _exhaustive;
     }
   }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 8. LOW-2 — the internal closed-set validation arrays in `ops.ts`
+//    (`MASK_KINDS` / `MASK_CLASSIFICATIONS` / `VECTOR_METRICS`) carry the CLOSED
+//    wire-union element type, NOT a loose `string`.
+//
+//    This turns the array LITERALS into a compile-time drift guard: if the
+//    engine's `MaskKind` / `Classification` / `VectorMetric` union drops a token,
+//    the committed array element that no longer matches becomes a tsc error, so the
+//    runtime `.includes` guard can never silently diverge from the closed enum it
+//    mirrors (the SDK-side static peer of the runtime `ir-types-drift` gate).
+//
+//    RED PROOF: with the pre-fix `readonly string[]` arrays,
+//    `(typeof MASK_KINDS)[number]` is `string`, which is NOT mutually assignable to
+//    the closed `MaskKind` union — so `expectExactType<...>(true)` is a hard tsc
+//    error here and `typecheck:types` fails. The change to `readonly MaskKind[]`
+//    (etc.) makes the element type EXACTLY the union, so it compiles.
+// ───────────────────────────────────────────────────────────────────────────
+
+// Exact (invariant) type equality — the canonical `Equal` test. `readonly
+// string[]`'s `string` element is NOT exactly the closed union, so it fails this.
+type ExactEqual<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
+  ? true
+  : false;
+
+function expectExactType<A, B>(_proof: ExactEqual<A, B> extends true ? true : never): void {
+  /* type-level only — never called */
+}
+
+export function closedSetArrayElementTyping(): void {
+  expectExactType<(typeof MASK_KINDS)[number], MaskKind>(true);
+  expectExactType<(typeof MASK_CLASSIFICATIONS)[number], Classification>(true);
+  expectExactType<(typeof VECTOR_METRICS)[number], VectorMetric>(true);
 }

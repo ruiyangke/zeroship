@@ -63,6 +63,8 @@ import { TypeBuilder as DbTypeBuilder } from "@zeroship/db";
 
 import { colTypeFromDbField, type DbSchemaField } from "./db-lexicon.js";
 
+import type { Classification, MaskKind, VectorMetric } from "./generated/ir.js";
+
 type Node = Record<string, unknown>;
 
 // ── The ambient recorder (§3.1 / §5) ──
@@ -185,7 +187,7 @@ function requireString(v: unknown, what: string): asserts v is string {
  *  `migrate_ops.js`) so `t.vector(n, { metric })` rejects an out-of-set metric
  *  with a friendly client-side OP_INVALID; the engine's closed enum stays
  *  authoritative. */
-const VECTOR_METRICS: readonly string[] = ["cosine", "l2", "innerProduct"];
+export const VECTOR_METRICS: readonly VectorMetric[] = ["cosine", "l2", "innerProduct"];
 
 /** The CLOSED column-mask token sets (#174) — the SDK/IR WIRE spelling of the
  *  engine's `IrMaskKind` / `IrClassification` enums. The two date kinds are KEBAB
@@ -193,7 +195,7 @@ const VECTOR_METRICS: readonly string[] = ["cosine", "l2", "innerProduct"];
  *  (lock-step with `migrate_ops.js`) so `.mask({ kind, classification })` rejects an
  *  out-of-set token with a friendly client-side OP_INVALID; the engine's closed
  *  enums stay authoritative. */
-const MASK_KINDS: readonly string[] = [
+export const MASK_KINDS: readonly MaskKind[] = [
   "full",
   "last4",
   "first4",
@@ -203,7 +205,7 @@ const MASK_KINDS: readonly string[] = [
   "date-decade",
   "none",
 ];
-const MASK_CLASSIFICATIONS: readonly string[] = [
+export const MASK_CLASSIFICATIONS: readonly Classification[] = [
   "public",
   "pii",
   "spi",
