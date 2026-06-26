@@ -387,6 +387,14 @@ export default {
 export function installSchema(schema, _env, _options) {
     globalThis.__zsCapturedSchema = JSON.stringify({
         keys: Object.keys(schema),
+        // **P4b review fix (MED)** — the declared schema rides
+        // `options.declaredSchemas` so collection-LEVEL options
+        // (softDelete / versioning / indexes) the field-only descriptor
+        // cannot encode are recoverable. Capture its keys to prove the
+        // runtime-entry threads it (the descriptor stays the field source).
+        declaredKeys: (_options && _options.declaredSchemas)
+            ? Object.keys(_options.declaredSchemas)
+            : [],
     });
     return { collections: {}, ready: Promise.resolve() };
 }
@@ -433,12 +441,18 @@ import "@zeroship/db/internal";
         }
         _ => panic!("expected sync Response"),
     };
-    // installSchema was handed the descriptor's collections (`posts`), NOT the
-    // declared `todos`.
+    // The FIELD SOURCE (installSchema's first arg) is the descriptor's
+    // collections (`posts`), NOT the declared `todos`.
     assert!(body.contains(r#"\"keys\":[\"posts\"]"#),
         "expected installSchema sourced from the descriptor (posts), got: {body}");
-    assert!(!body.contains("todos"),
-        "the declared `todos` schema must NOT reach installSchema in descriptor mode: {body}");
+    // **P4b review fix (MED)** — the declared `todos` schema is NOT the field
+    // source, but its collection-LEVEL options (softDelete / versioning /
+    // indexes) must still be recoverable: the runtime-entry threads the declared
+    // map through `options.declaredSchemas`. Pre-fix it was passed nowhere, so
+    // `declaredKeys` was `[]` and those options were silently dropped.
+    assert!(body.contains(r#"\"declaredKeys\":[\"todos\"]"#),
+        "the declared `todos` schema must reach installSchema via options.declaredSchemas \
+         (collection-option recovery), got: {body}");
 }
 
 #[test]

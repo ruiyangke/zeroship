@@ -52,7 +52,7 @@
 // for the same pattern.
 export {};
 
-declare const user: { default?: { schema?: unknown } };
+declare const user: { default?: { schema?: unknown; __zsDeclaredSchema?: unknown } };
 declare const globalThis: {
   __zs_env?: () => { db?: unknown } | undefined;
   // **P9 §8** — the capability-handle resolver the runtime installs.
@@ -87,6 +87,17 @@ const hasDescriptor =
 const declaredSchema = (user && user.default && typeof user.default === "object")
   ? (user.default as { schema?: unknown }).schema
   : undefined;
+// **P4b review fix (MED)** — the ORIGINAL declared schema (the t.*
+// SchemaBuilder map), needed to recover collection-LEVEL options
+// (softDelete / versioning / indexes) the field-only descriptor cannot
+// encode. A Vite-built app's synthetic SSR entry OVERWRITES `default.schema`
+// with the descriptor, so it also forwards the untouched declared map as
+// `default.__zsDeclaredSchema`; raw-JS deploys never overwrite it, so
+// `default.schema` IS the declared map. Prefer the explicit carrier.
+const declaredSchemaForOptions =
+  (user && user.default && typeof user.default === "object")
+    ? ((user.default as { __zsDeclaredSchema?: unknown }).__zsDeclaredSchema ?? declaredSchema)
+    : undefined;
 // The object passed as installSchema's first arg. In descriptor mode the
 // descriptor is also threaded through `options.descriptor` (the actual source
 // _installSchemaInner reads); passing it as the first arg too keeps the call
@@ -110,7 +121,7 @@ if (schema && typeof schema === "object") {
       installSchema?: (
         schema: unknown,
         env: unknown,
-        options?: { platform?: unknown; descriptor?: unknown },
+        options?: { platform?: unknown; descriptor?: unknown; declaredSchemas?: unknown },
       ) => { collections: unknown; ready: Promise<void> };
     };
     if (typeof sdk.installSchema === "function") {
@@ -135,6 +146,14 @@ if (schema && typeof schema === "object") {
         // **P4b** — in descriptor mode this is the source of truth;
         // _installSchemaInner reads it and ignores the first arg.
         descriptor: hasDescriptor ? descriptor : undefined,
+        // **P4b review fix (MED)** — the field-only descriptor cannot encode
+        // collection-LEVEL options (softDelete / versioning / indexes). Thread
+        // the declared `default.schema` (t.* SchemaBuilder map) alongside so
+        // `_installSchemaInner` recovers those options per collection while the
+        // declared schema still coexists (P5 deletes this carrier).
+        declaredSchemas: hasDescriptor
+          ? (declaredSchemaForOptions as Record<string, unknown> | undefined)
+          : undefined,
       });
 
       globalThis.__zsSchemaReady = (async () => {

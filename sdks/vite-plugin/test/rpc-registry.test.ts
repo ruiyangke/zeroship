@@ -104,6 +104,12 @@ describe("rpcRegistryPlugin — resolveId / load", () => {
     assert.match(code, /globalThis\.__zsRuntimeDescriptor/);
     assert.match(code, /_zsSchema\s*=[\s\S]*_zsUserDefault\.schema/);
     assert.match(code, /rpc:\s*_zsRpc/);
+    // **P4b review fix (MED)** — `_zsSchema` is the descriptor when one is
+    // bundled (field-only, no collection-level options). The entry MUST also
+    // forward the ORIGINAL declared schema as `__zsDeclaredSchema` so the
+    // runtime-entry can recover softDelete / versioning / indexes. Pre-fix this
+    // carrier did not exist, so the runtime silently dropped those options.
+    assert.match(code, /__zsDeclaredSchema:\s*_zsUserDefault\.schema/);
   });
 
   test("load returns null for unrelated ids", () => {
@@ -324,6 +330,9 @@ describe("buildServerEntrySource — Phase-2 (binding-fed) shape", () => {
     assert.match(code, /globalThis\.__zsRuntimeDescriptor/);
     assert.match(code, /fetch:\s*_zsFetch/);
     assert.match(code, /rpc:\s*_zsRpc/);
+    // **P4b review fix (MED)** — the original declared schema carrier for
+    // collection-level option recovery (see the namespace-walk entry).
+    assert.match(code, /__zsDeclaredSchema:\s*_zsUserDefault\.schema/);
   });
 
   test("user dict-shape default.rpc merges with binding-derived entries", () => {

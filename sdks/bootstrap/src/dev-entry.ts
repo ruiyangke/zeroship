@@ -253,6 +253,13 @@ export function devEntry(options: DevEntryOptions): DevEntry {
           platform,
           // **P4b** — in descriptor mode this is the source of truth.
           descriptor: hasDescriptor ? descriptor : undefined,
+          // **P4b review fix (MED)** — recover collection-LEVEL options
+          // (softDelete / versioning / indexes) the field-only descriptor
+          // cannot encode. Inert in self-contained dev (no descriptor is
+          // bundled), present for parity with the production runtime-entry.
+          declaredSchemas: hasDescriptor
+            ? (declaredSchema as Record<string, unknown> | undefined)
+            : undefined,
         } as Parameters<typeof installSchema>[2],
       );
       schemaReady = (async () => {

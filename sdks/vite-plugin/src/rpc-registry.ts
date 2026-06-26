@@ -160,6 +160,12 @@ const _zsFetchHandler = createFetchHandler(async () => ({
 
 export default {
   schema: _zsSchema,
+  // P4b review fix (MED) — forward the ORIGINAL declared schema (the t.*
+  // SchemaBuilder map) untouched. _zsSchema is the descriptor when one is
+  // bundled, which is field-only and cannot encode collection-level options
+  // (softDelete / versioning / indexes); the runtime-entry reads this carrier
+  // to recover them while the declared schema still coexists (P5 deletes it).
+  __zsDeclaredSchema: _zsUserDefault.schema,
   fetch: _zsFetchHandler,
   rpc: _zsRpc,
 };
@@ -288,6 +294,12 @@ const _zsFetchHandler = createFetchHandler(async () => ({
 
 export default {
   schema: _zsSchema,
+  // P4b review fix (MED) — forward the ORIGINAL declared schema (the t.*
+  // SchemaBuilder map) untouched. _zsSchema is the descriptor when one is
+  // bundled, which is field-only and cannot encode collection-level options
+  // (softDelete / versioning / indexes); the runtime-entry reads this carrier
+  // to recover them while the declared schema still coexists (P5 deletes it).
+  __zsDeclaredSchema: _zsUserDefault.schema,
   fetch: _zsFetchHandler,
   rpc: _zsRpc,
 };

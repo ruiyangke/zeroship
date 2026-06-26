@@ -961,6 +961,21 @@ export interface InstallSchemaOptions {
    * `schemas` (the transitional path; P5 removes the declared source).
    */
   descriptor?: RuntimeSchemaDescriptor;
+
+  /**
+   * **Migration-first cutover (P4b) — review fix (MED).** The declared
+   * `default.schema` (the `t.*` {@link SchemaBuilder} map), carried ALONGSIDE
+   * the {@link descriptor} purely so collection-LEVEL options
+   * (`softDelete` / `versioning` / declared indexes) can be recovered. The
+   * field-only `RuntimeSchemaDescriptor` structurally cannot encode them, so in
+   * descriptor mode the runtime entries pass the declared map here and
+   * `_installSchemaInner` merges each collection's options from it while the
+   * declared schema still coexists as a transitional fallback (P5 deletes both
+   * this carrier and the descriptor fallback once the descriptor itself carries
+   * collection options). Ignored when no descriptor is present — the declared
+   * map is then the first `schemas` argument and its builders are read directly.
+   */
+  declaredSchemas?: Record<string, unknown>;
 }
 
 const RESERVED_ENV_DB_NAMES = new Set<string>([
@@ -1103,22 +1118,62 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
 
   validateRefTargets(source);
 
+  // **Migration-first cutover (P4b) — review fix (MED).** The
+  // {@link RuntimeSchemaDescriptor} is structurally a pure field-map
+  // (`Record<collection, Record<column, FieldDef>>`); it cannot carry
+  // collection-LEVEL options (`softDelete` / `versioning` / declared
+  // indexes), which live only on the declared `SchemaBuilder`. Sourcing the
+  // fields off the descriptor while reading options off the descriptor too
+  // would silently drop those runtime behaviours (soft-delete row filtering,
+  // optimistic-concurrency CAS). While the declared schema still coexists as
+  // a transitional fallback (P5 deletes it), recover the collection-level
+  // options by merging them from the matching declared `SchemaBuilder`. When
+  // `source === schemas` (no-descriptor fallback) `rawSchema` IS the builder
+  // and this is identical to reading its options directly.
+  const declaredSchemas = options?.declaredSchemas;
+  const collectionOptionsFor = (
+    name: string,
+    rawSchema: unknown,
+  ): { softDelete: boolean; versioning: boolean; indexes: readonly NamedIndexSpec[] } => {
+    if (rawSchema instanceof SchemaBuilder) {
+      return {
+        softDelete: rawSchema.options.softDelete,
+        versioning: rawSchema.options.versioning,
+        indexes: rawSchema.indexes,
+      };
+    }
+    // Descriptor mode: `rawSchema` is a wire field-map (the descriptor IS the
+    // first `schemas` argument too, so it carries no collection-level options).
+    // Recover them from the declared SchemaBuilder of the same name, threaded
+    // via `options.declaredSchemas`.
+    const declared =
+      declaredSchemas != null && typeof declaredSchemas === "object"
+        ? declaredSchemas[name]
+        : undefined;
+    if (declared instanceof SchemaBuilder) {
+      return {
+        softDelete: declared.options.softDelete,
+        versioning: declared.options.versioning,
+        indexes: declared.indexes,
+      };
+    }
+    return { softDelete: false, versioning: false, indexes: [] };
+  };
+
   for (const [name, rawSchema] of Object.entries(source)) {
     const isBuilder = rawSchema instanceof SchemaBuilder;
     const fields = isBuilder ? rawSchema.fields : rawSchema;
-    const softDelete = isBuilder ? rawSchema.options.softDelete : false;
-    const versioning = isBuilder ? rawSchema.options.versioning : false;
-    const declaredIndexes = isBuilder ? rawSchema.indexes : [];
+    const opts = collectionOptionsFor(name, rawSchema);
     (collections as Record<string, Collection<unknown, string, T>>)[name] =
       model(
         name,
         fields as Record<string, unknown>,
         native,
         namingStrategy,
-        softDelete,
-        versioning,
+        opts.softDelete,
+        opts.versioning,
         /* skipRegister */ true,
-        declaredIndexes,
+        opts.indexes,
       ) as Collection<unknown, string, T>;
   }
 
@@ -1135,8 +1190,12 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
     for (const [key, def] of Object.entries(normalized)) {
       dbSchema[namingStrategy.toColumn(key)] = def as ZeroshipDbFieldDef;
     }
+    // Descriptor mode carries no indexes; recover them from the declared
+    // schema (same merge as the collection-options pass above). On PG these
+    // are benign — migrations own DDL — but the dev-SQLite register feed and
+    // the unindexed-filter warning both read them, so keep them faithful.
     const declaredIndexes: readonly NamedIndexSpec[] =
-      isSchemaBuilder(rawSchema) ? rawSchema.indexes : [];
+      collectionOptionsFor(name, rawSchema).indexes;
     const wireIndexes: ZeroshipDbNamedIndex[] = declaredIndexes.map((idx) => ({
       name: idx.name,
       fields: idx.fields.map((f) => namingStrategy.toColumn(f)),
