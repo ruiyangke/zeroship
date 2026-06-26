@@ -1350,6 +1350,27 @@ impl IrAuthor {
                 }
                 vec![decl.lower_drop_table(table)]
             }
+            Op::RenameTable { table, to, .. } => {
+                // A whole-table rename is a FAST catalog-metadata ALTER, NOT the
+                // online column expand-contract (§2.6) — there is no per-column
+                // dual-write that makes a TABLE coexist under two names, so it
+                // lowers to a single direct `ALTER TABLE … RENAME TO …` (a
+                // `LoweredOp::Ddl`, exactly like DropTable), with the inverse rename
+                // as `down`.
+                //
+                // **PR10 Part B** — renameTable ifExists: presence-only on the
+                // SOURCE table (empty columns), the SAME probe shape DropTable uses
+                // (an `ifExists` rename of an absent table is a SatisfiedNoop).
+                if let Some(g) = guard {
+                    probe = Some(crate::guard_probe::GuardProbe::Table {
+                        schema: eff_schema.clone(),
+                        table: table.clone(),
+                        direction: g.into(),
+                        expect_columns: Vec::new(),
+                    });
+                }
+                vec![decl.lower_rename_table(table, to)]
+            }
             Op::DropColumn { table, column, .. } => {
                 // **PR10 Part B** — dropColumn ifExists: presence-only on the column.
                 if let Some(g) = guard {
@@ -2666,6 +2687,7 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
         Op::AddColumn { .. } => "addColumn",
         Op::CreateIndex { .. } => "createIndex",
         Op::DropTable { .. } => "dropTable",
+        Op::RenameTable { .. } => "renameTable",
         Op::DropColumn { .. } => "dropColumn",
         Op::DropIndex { .. } => "dropIndex",
         Op::AlterColumnType { .. } => "alterColumnType",
@@ -4557,6 +4579,77 @@ mod tests {
         assert_eq!(
             a, b,
             "an empty PG expand must NOT mint a non-deterministic (random) plan version"
+        );
+    }
+
+    /// Build a one-op `renameTable` IR.
+    fn rename_table_ir(table: &str, to: &str) -> MigrationIr {
+        MigrationIr {
+            ir_version: 1,
+            name: "m".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::RenameTable {
+                table: table.into(),
+                to: to.into(),
+                schema: None,
+                existence_guard: None,
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        }
+    }
+
+    /// A whole-table rename lowers to a SINGLE direct `ALTER TABLE … RENAME TO …`
+    /// on the PG leg — schema-qualified SOURCE, BARE target — with the inverse
+    /// rename as `down`, and is `requires_approval` but NOT data-loss `destructive`.
+    /// It must NOT route through the online expand-contract path (no ADD COLUMN /
+    /// trigger / backfill). RED before the op existed (`Op::RenameTable` absent).
+    #[test]
+    fn rename_table_lowers_to_direct_alter_pg() {
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        let migs = author
+            .lower(&rename_table_ir("accounts", "members"), &LiveSchema::default())
+            .expect("lower renameTable (PG)");
+        assert_eq!(migs.len(), 1, "a table rename is ONE direct ALTER, not an expand-contract sequence");
+        let m = &migs[0];
+        assert_eq!(
+            m.up, r#"ALTER TABLE "app"."accounts" RENAME TO "members""#,
+            "PG: schema-qualified source, BARE rename target"
+        );
+        assert_eq!(
+            m.down.as_deref(),
+            Some(r#"ALTER TABLE "app"."members" RENAME TO "accounts""#),
+            "PG down is the inverse rename"
+        );
+        assert!(m.flags.requires_approval, "a table rename is backward-incompatible — operator-gated");
+        assert!(!m.flags.destructive, "a table rename is reversible — NOT data-loss destructive");
+        assert!(
+            !m.up.contains("ADD COLUMN") && !m.up.contains("TRIGGER"),
+            "a table rename must NOT route through the online column expand-contract path"
+        );
+    }
+
+    /// The SQLite leg: native `ALTER TABLE <old> RENAME TO <new>`, both names
+    /// UNqualified `main`, inverse `down`. RED before the op existed.
+    #[test]
+    fn rename_table_lowers_to_direct_alter_sqlite() {
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Sqlite);
+        let migs = author
+            .lower(&rename_table_ir("accounts", "members"), &LiveSchema::default())
+            .expect("lower renameTable (SQLite)");
+        assert_eq!(migs.len(), 1, "one direct ALTER on the SQLite leg too");
+        let m = &migs[0];
+        assert_eq!(
+            m.up, r#"ALTER TABLE "accounts" RENAME TO "members""#,
+            "SQLite: UNqualified main names (a schema-qualified ref would resolve to no table)"
+        );
+        assert_eq!(
+            m.down.as_deref(),
+            Some(r#"ALTER TABLE "members" RENAME TO "accounts""#),
+            "SQLite down is the inverse rename"
         );
     }
 }

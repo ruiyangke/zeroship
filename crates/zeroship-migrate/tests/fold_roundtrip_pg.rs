@@ -474,3 +474,79 @@ async fn fold_recovers_facets_pg() {
 
     teardown(&conn, &cfg).await;
 }
+
+/// **op.* table-rename follow-up — the REAL-PG round-trip for `Op::RenameTable`.**
+/// A whole-table rename is a SINGLE-deploy fast catalog ALTER (NOT the online
+/// column expand-contract), so — unlike `renameColumn` — its live end-state is
+/// EXACTLY what the fold reproduces. Apply a `createTable` then a `renameTable`
+/// through the REAL pipeline against `:5440`, then assert:
+///   (1) the table is renamed in the LIVE catalog (present under the new name,
+///       absent under the old), carrying its columns + index; AND
+///   (2) `fold_ops(create + rename) == snapshot_schema(live)`.
+///
+/// RED before this change: `Op::RenameTable` did not exist (the IR could not carry
+/// the op, the recorder had no `table().rename()`, and the lower/fold had no arm),
+/// so the doc would fail to load / lower and the fold would have no rename to replay.
+#[compio::test]
+async fn fold_equals_introspect_after_rename_table_pg() {
+    if !require_db() {
+        eprintln!("SKIP fold_equals_introspect_after_rename_table_pg (MIGRATE_REQUIRE_DB unset)");
+        return;
+    }
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+
+    let mut all_ops: Vec<Op> = Vec::new();
+
+    // (1) Create `accounts` with a couple columns + a secondary index.
+    let create = r#"{"ir_version":1,"name":"create_accounts","ops":[
+        {"op":"createTable","name":"accounts","columns":[
+            {"name":"email","type":"text","nullable":false},
+            {"name":"balance","type":"int","nullable":true}
+        ],
+        "indexes":[
+            {"name":"accounts_email_idx","columns":["email"]}
+        ]}
+    ]}"#;
+    all_ops.extend(apply_doc(&conn, &cfg, create, &registry(&[]), Approval::None).await);
+
+    // (2) Rename `accounts` → `members`. A table rename is `requires_approval`
+    //     (backward-incompatible), so it applies under `Approval::Approved`. The
+    //     registry still owns the SOURCE name (`accounts`) — the ownership gate
+    //     checks the existing table.
+    let rename = r#"{"ir_version":1,"name":"rename_accounts","ops":[
+        {"op":"renameTable","table":"accounts","to":"members"}
+    ]}"#;
+    all_ops.extend(
+        apply_doc(&conn, &cfg, rename, &registry(&[("accounts", APP)]), Approval::Approved).await,
+    );
+
+    // INTROSPECT the live schema after the rename.
+    let live = snapshot_schema(&conn, &cfg.project_schema)
+        .await
+        .expect("introspect after rename");
+
+    // (1) The catalog really renamed the table: `members` present, `accounts` gone,
+    //     with the columns + index carried across the rename.
+    assert!(live.tables.contains_key("members"), "renamed table present under the NEW name");
+    assert!(!live.tables.contains_key("accounts"), "OLD table name is gone in the live catalog");
+    let members = &live.tables["members"];
+    assert!(members.columns.iter().any(|c| c.name == "email"), "columns carried across the rename");
+    assert!(members.columns.iter().any(|c| c.name == "balance"), "all columns carried");
+    assert!(
+        members.indexes.iter().any(|i| i.name == "accounts_email_idx"),
+        "the secondary index survives the table rename (PG keeps index names across RENAME)"
+    );
+
+    // (2) The offline fold of the SAME op stream equals the live introspected snapshot.
+    let folded = fold_ops(&all_ops, SqlDialect::Postgres, &cfg.project_schema)
+        .expect("fold the create+rename offline");
+    assert_eq!(
+        canonicalize(folded),
+        canonicalize(live),
+        "fold_ops(create + renameTable) must equal the live introspected snapshot"
+    );
+
+    teardown(&conn, &cfg).await;
+}

@@ -179,6 +179,48 @@
           ]
         },
         {
+          "description": "`ALTER TABLE <old> RENAME TO <new>`.\n\nA whole-table rename is a FAST catalog-metadata operation (`pg_class`\nrelname swap on PG; a `sqlite_master` rewrite on SQLite) — NOT the\nonline expand-contract shape an `Op::RenameColumn` lowers to. The\nexpand-contract machinery exists to let old + new COLUMN names coexist\nacross a rolling deploy via trigger dual-write (a missing column breaks\nrunning code); there is no column-level dual-write that makes a renamed\nTABLE coexist under its old + new name, so a table rename is a single\ndirect `ALTER TABLE … RENAME TO …`. The down-migration is the inverse\nrename (`to` → `table`). Both names pass the identifier gate; `schema`\nschema-qualifies per the PR10 rules; `ifExists` guards the SOURCE table.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "The existing table being renamed (the OLD name).",
+              "type": "string"
+            },
+            "to": {
+              "description": "The new table name.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "**PR10** — the schema qualifier (§2.7).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "existenceGuard": {
+              "description": "**PR10** — the existence guard (`ifExists` legal here). Engine-\nsynthesized via a catalog probe; never a native `IF EXISTS`.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ExistenceGuard"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "renameTable"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "table",
+            "to"
+          ]
+        },
+        {
           "description": "`ALTER TABLE … ADD COLUMN`.",
           "type": "object",
           "properties": {

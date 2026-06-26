@@ -136,7 +136,10 @@ const UNKNOWN_OWNER: &str = "<unregistered>";
 fn op_target_table(op: &Op) -> Option<&str> {
     match op {
         Op::CreateTable { name, .. } => Some(name),
+        // The ownership gate checks the EXISTING (old) table — a rename of a table
+        // the deploying app does not own is refused on the source name.
         Op::DropTable { table, .. }
+        | Op::RenameTable { table, .. }
         | Op::AddColumn { table, .. }
         | Op::DropColumn { table, .. }
         | Op::CreateIndex { table, .. }

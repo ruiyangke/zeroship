@@ -843,6 +843,31 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
     },
+    /// `ALTER TABLE <old> RENAME TO <new>`.
+    ///
+    /// A whole-table rename is a FAST catalog-metadata operation (`pg_class`
+    /// relname swap on PG; a `sqlite_master` rewrite on SQLite) — NOT the
+    /// online expand-contract shape an `Op::RenameColumn` lowers to. The
+    /// expand-contract machinery exists to let old + new COLUMN names coexist
+    /// across a rolling deploy via trigger dual-write (a missing column breaks
+    /// running code); there is no column-level dual-write that makes a renamed
+    /// TABLE coexist under its old + new name, so a table rename is a single
+    /// direct `ALTER TABLE … RENAME TO …`. The down-migration is the inverse
+    /// rename (`to` → `table`). Both names pass the identifier gate; `schema`
+    /// schema-qualifies per the PR10 rules; `ifExists` guards the SOURCE table.
+    RenameTable {
+        /// The existing table being renamed (the OLD name).
+        table: String,
+        /// The new table name.
+        to: String,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifExists` legal here). Engine-
+        /// synthesized via a catalog probe; never a native `IF EXISTS`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
+    },
     /// `ALTER TABLE … ADD COLUMN`.
     AddColumn {
         /// Target table.
@@ -1121,7 +1146,10 @@ impl Op {
     pub fn touched_table(&self) -> Option<&str> {
         match self {
             Op::CreateTable { name, .. } => Some(name.as_str()),
+            // A table rename TOUCHES the existing (OLD) table — the interlock
+            // gates the table the op operates ON, which is the source name.
             Op::DropTable { table, .. }
+            | Op::RenameTable { table, .. }
             | Op::AddColumn { table, .. }
             | Op::DropColumn { table, .. }
             | Op::CreateIndex { table, .. }
@@ -1151,6 +1179,7 @@ impl Op {
         match self {
             Op::CreateTable { schema, .. }
             | Op::DropTable { schema, .. }
+            | Op::RenameTable { schema, .. }
             | Op::AddColumn { schema, .. }
             | Op::DropColumn { schema, .. }
             | Op::CreateIndex { schema, .. }
@@ -1175,6 +1204,7 @@ impl Op {
         match self {
             Op::CreateTable { existence_guard, .. }
             | Op::DropTable { existence_guard, .. }
+            | Op::RenameTable { existence_guard, .. }
             | Op::AddColumn { existence_guard, .. }
             | Op::DropColumn { existence_guard, .. }
             | Op::CreateIndex { existence_guard, .. }
@@ -1201,6 +1231,7 @@ impl Op {
             | Op::CreateIndex { .. }
             | Op::AddConstraint { .. } => Some(ExistenceGuard::IfNotExists),
             Op::DropTable { .. }
+            | Op::RenameTable { .. }
             | Op::DropColumn { .. }
             | Op::DropIndex { .. }
             | Op::AlterColumnType { .. }
@@ -1759,6 +1790,47 @@ mod tests {
         let fwd = CanonicalOpList(&[a.clone(), b.clone()]).canonical_bytes();
         let rev = CanonicalOpList(&[b, a]).canonical_bytes();
         assert_ne!(fwd, rev, "reorder must change the canonical bytes");
+    }
+
+    /// CHECKSUM STABILITY for an UNRELATED op across the table-rename addition: a
+    /// pre-existing op's canonical encoding must be IDENTICAL whether or not the new
+    /// `Op::RenameTable` variant follows it in the list. The op-list image is a
+    /// u64-BE op COUNT, then per op a u64-BE-length-prefixed JCS segment — so the
+    /// COUNT header differs between a 1-op and 2-op list, but the unrelated op's own
+    /// length-prefixed SEGMENT (the bytes after the 8-byte count header) must be
+    /// byte-identical. This proves appending a `renameTable` neither perturbs the
+    /// unrelated op's JCS encoding nor its `Checksum::of_ir` contribution. (RED
+    /// before `Op::RenameTable` existed: the test could not name the variant.)
+    #[test]
+    fn rename_table_does_not_perturb_unrelated_op_checksum_bytes() {
+        let unrelated = Op::AddColumn {
+            table: "t".into(),
+            column: "x".into(),
+            ty: ColType::Int,
+            nullable: None,
+            default: None,
+            vector_metric: None,
+            mask: None,
+            schema: None,
+            existence_guard: None,
+        };
+        let rename = Op::RenameTable {
+            table: "accounts".into(),
+            to: "members".into(),
+            schema: None,
+            existence_guard: None,
+        };
+        // Strip the 8-byte u64-BE op-COUNT header; the remainder begins with the
+        // unrelated op's own length-prefixed JCS segment.
+        let alone = CanonicalOpList(std::slice::from_ref(&unrelated)).canonical_bytes();
+        let with_rename = CanonicalOpList(&[unrelated.clone(), rename]).canonical_bytes();
+        let alone_seg = &alone[8..];
+        let with_rename_seg = &with_rename[8..];
+        assert!(
+            with_rename_seg.starts_with(alone_seg),
+            "the unrelated op's length-prefixed segment must be byte-identical whether or \
+             not a renameTable follows it — the new variant must not change its encoding"
+        );
     }
 
     #[test]

@@ -4495,6 +4495,25 @@ impl DeclarativeAuthor {
         )
     }
 
+    /// Render an `ALTER TABLE <old> RENAME TO <new>`.
+    ///
+    /// A whole-table rename is a FAST catalog-metadata operation (it is NOT the
+    /// online column expand-contract). It is NOT data-loss `destructive` (the
+    /// inverse rename in `down` fully reverses it), but it IS backward-incompatible
+    /// — it silently breaks every reader of the OLD table name — so it carries
+    /// `requires_approval` (never auto-applied), matching the `flags_for` MED-1 gate
+    /// that classifies a literal `RENAME TABLE` in a submitted `up`.
+    fn render_rename_table(&self, table: &str, to: &str) -> Migration {
+        let (up, down) = self.emitter().rename_table(table, to);
+        self.make(
+            &format!("rename_table_{table}_to_{to}"),
+            up,
+            Some(down),
+            MigrationFlags { requires_approval: true, ..MigrationFlags::default() },
+            Vec::new(),
+        )
+    }
+
     /// Render a destructive (gated) `DROP COLUMN`.
     ///
     /// PHASE 4 — SQLite ≥ 3.35 has native `ALTER TABLE … DROP COLUMN`; emit it
@@ -4741,6 +4760,9 @@ impl DeclarativeAuthor {
     pub(crate) fn lower_drop_table(&self, table: &str) -> LoweredUnit {
         single_stmt(self.render_drop_table(table))
     }
+    pub(crate) fn lower_rename_table(&self, table: &str, to: &str) -> LoweredUnit {
+        single_stmt(self.render_rename_table(table, to))
+    }
     pub(crate) fn lower_drop_column(&self, table: &str, col: &str) -> LoweredUnit {
         single_stmt(self.render_drop_column(table, col))
     }
@@ -4886,6 +4908,14 @@ trait DdlEmitter {
     /// Render the `up` of a `DROP TABLE` (qualification differs).
     fn drop_table_up(&self, table: &str) -> String;
 
+    /// Render an `ALTER TABLE <old> RENAME TO <new>` as `(up, down)`. The `down`
+    /// is the inverse rename (`new` → `old`). On PG the table-ref is
+    /// schema-qualified, but the RENAME TARGET is a BARE name — Postgres rejects a
+    /// schema-qualified target (`… RENAME TO "schema"."t"` is a syntax error); the
+    /// renamed table stays in the same schema. On SQLite both are unqualified
+    /// `main` names.
+    fn rename_table(&self, table: &str, to: &str) -> (String, String);
+
     /// Render the `up` of an `ALTER TABLE … DROP COLUMN …` (qualification differs).
     fn drop_column_up(&self, table: &str, col: &str) -> String;
 
@@ -5001,6 +5031,24 @@ impl DdlEmitter for PgEmitter {
 
     fn drop_table_up(&self, table: &str) -> String {
         format!("DROP TABLE {}", self.qualified(table))
+    }
+
+    fn rename_table(&self, table: &str, to: &str) -> (String, String) {
+        // The SOURCE table is schema-qualified; the TARGET is a BARE name (PG
+        // rejects a schema-qualified RENAME TARGET — the table stays in its schema).
+        (
+            format!(
+                "ALTER TABLE {} RENAME TO {}",
+                self.qualified(table),
+                quote_ident(to)
+            ),
+            // Inverse rename: the table now lives under `to`, rename it back.
+            format!(
+                "ALTER TABLE {} RENAME TO {}",
+                self.qualified(to),
+                quote_ident(table)
+            ),
+        )
     }
 
     fn drop_column_up(&self, table: &str, col: &str) -> String {
@@ -5153,6 +5201,16 @@ impl DdlEmitter for SqliteEmitter {
 
     fn drop_table_up(&self, table: &str) -> String {
         format!("DROP TABLE {}", quote_ident(table))
+    }
+
+    fn rename_table(&self, table: &str, to: &str) -> (String, String) {
+        // SQLite has native `ALTER TABLE <old> RENAME TO <new>` (a `main`-scoped
+        // metadata rewrite). Both names are UNqualified `main` names — a
+        // schema-qualified ref would resolve to no table. `down` is the inverse.
+        (
+            format!("ALTER TABLE {} RENAME TO {}", quote_ident(table), quote_ident(to)),
+            format!("ALTER TABLE {} RENAME TO {}", quote_ident(to), quote_ident(table)),
+        )
     }
 
     fn drop_column_up(&self, table: &str, col: &str) -> String {

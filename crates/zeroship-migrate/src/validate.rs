@@ -508,8 +508,12 @@ pub fn validate_op_scoped(
             };
             validate_column_facets(&view, target_dialect, op_index, ts_location)
         }
-        // Ops with no embedded expression slot.
+        // Ops with no embedded expression slot. (`RenameTable` carries only its
+        // old/new table NAMES — no Expr — so the schema-ident + guard-direction
+        // gate in `validate_op_schema_and_guard` above is the whole check, and the
+        // render-time `quote_ident` is the injection-safe identifier seam.)
         Op::DropTable { .. }
+        | Op::RenameTable { .. }
         | Op::DropColumn { .. }
         | Op::AlterColumnNullability { .. }
         | Op::RenameColumn { .. }
