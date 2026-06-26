@@ -1867,6 +1867,18 @@ impl Op {
             | Op::DropFunction { schema, .. } => schema.as_deref(),
             // VENDOR — these operate on the schema/role/database NAMESPACE itself
             // (the `name`/`roles` is NOT a schema qualifier), so no qualifier.
+            //
+            // NOTE (vendor review LOW-6): `Grant`/`Revoke` return `None` even though
+            // a `GrantTarget::Table { schema }` carries an INNER target schema. That
+            // inner schema is therefore NOT surfaced to the PR10 cross-schema
+            // allowlist gate — a grant's target-schema is gated by the CAPABILITY
+            // flag (`allow_grant`, refused entirely under Confined) + the
+            // least-privilege migrator role at apply, not by the `schema()`
+            // allowlist walk. This is sound under the operator-trusted Platform
+            // posture (grants are an operator act over the allowlisted platform
+            // schemas), but it is recorded here so a reviewer knows the grant TARGET
+            // schema is not re-checked against `SchemaScope::Allowlist`. Surfacing it
+            // is a deferred hardening (would need a multi-schema return shape).
             Op::CreateSchema { .. }
             | Op::DropSchema { .. }
             | Op::DropExtension { .. }

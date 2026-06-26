@@ -153,6 +153,12 @@ pub enum CastTarget {
     Boolean,
     /// `blob` (`BYTEA` on PG)
     Blob,
+    /// `uuid` (PG-native `uuid`; `text` on SQLite, which has no uuid type).
+    /// Needed for the VENDOR policy predicates — the 0025 tenant-isolation
+    /// policy casts `current_setting('zeroship.tenant_app', true)::uuid`, so a
+    /// faithful port of `pg_get_expr(polqual)` requires the real `::uuid` cast,
+    /// not a `::text` substitute (vendor spec §2.10 / §5.3).
+    Uuid,
 }
 
 /// The CLOSED expression AST node (§3.3.1). Internally tagged on `"node"`,

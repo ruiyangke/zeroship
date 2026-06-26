@@ -284,13 +284,17 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
         }
         Op::AlterRole { name, set_search_path, reset_search_path } => {
             let qname = qid(name)?;
+            // An `alterRole` carrying NEITHER a `setSearchPath` nor an explicit
+            // `resetSearchPath` has no instruction. Fail CLOSED (vendor review
+            // LOW-5): an instruction-less alter must NOT silently fabricate a
+            // destructive `RESET search_path` (which would wipe a role's pinned
+            // search_path the author never asked to touch).
             let up = if reset_search_path.unwrap_or(false) {
                 format!("ALTER ROLE {qname} RESET search_path")
-            } else if let Some(sp) = set_search_path {
+            } else if let Some(sp) = set_search_path.as_ref().filter(|s| !s.is_empty()) {
                 format!("ALTER ROLE {qname} SET search_path = {}", search_path_list(sp)?)
             } else {
-                // No-op alter — render a harmless RESET so the statement is valid.
-                format!("ALTER ROLE {qname} RESET search_path")
+                return Err(VendorError::EmptyList { what: "alterRole instruction (setSearchPath or resetSearchPath)" });
             };
             vec![VendorStatement { name: format!("alter_role_{name}"), up, down: None }]
         }
