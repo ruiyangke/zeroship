@@ -171,3 +171,59 @@ export type ForEach = "row" | "statement";
  * The closed trigger-body raise levels.
  */
 export type RaiseLevel = "abort" | "fail" | "ignore" | "rollback";
+
+/**
+ * A closed join kind in the SELECT subset.
+ */
+export type JoinKind = "inner" | "left";
+
+/**
+ * Direction for `ORDER BY`.
+ */
+export type OrderDir = "asc" | "desc";
+
+/**
+ * **VENDOR (`@zeroship/migrate/pg`)** — the CLOSED privilege lexicon for
+ * `Op::Grant`/`Op::Revoke` (vendor spec §2.3). A CLOSED enum, so serde REJECTS an
+ * out-of-set token at DESERIALIZE — a hand-crafted `.ir.json` cannot smuggle an
+ * injection-shaped privilege string into the GRANT render seam (the
+ * `RefAction`/`IndexMethod` precedent). `All` renders `ALL PRIVILEGES`; the rest
+ * render their SQL keyword. Camel/lower-cased on the wire.
+ */
+export type Privilege =
+  | "all"
+  | "select"
+  | "insert"
+  | "update"
+  | "delete"
+  | "truncate"
+  | "references"
+  | "trigger"
+  | "usage"
+  | "connect"
+  | "create"
+  | "execute"
+  | "temporary";
+
+/**
+ * **VENDOR** — the CLOSED `CREATE POLICY … FOR <cmd>` lexicon.
+ */
+export type PolicyCmd = "all" | "select" | "insert" | "update" | "delete";
+
+/**
+ * **VENDOR** — the CLOSED function-argument mode lexicon.
+ */
+export type FuncArgMode = "in" | "out" | "inout";
+
+/**
+ * **VENDOR** — the CLOSED `CREATE FUNCTION … LANGUAGE` lexicon. A deliberately
+ * 2-set: `plpgsql`/`sql` ONLY — an untrusted PL (`plpythonu`/`plperlu`/`c`) is
+ * REJECTED at DESERIALIZE (serde unknown-variant) BEFORE the body deny-list scan
+ * even runs (vendor spec §2.6 / §3.3).
+ */
+export type FuncLanguage = "plpgsql" | "sql";
+
+/**
+ * **VENDOR** — the CLOSED function-volatility lexicon.
+ */
+export type FuncVolatility = "volatile" | "stable" | "immutable";

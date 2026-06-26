@@ -1,5 +1,5 @@
 {
-  "ir_version": 1,
+  "ir_version": 4,
   "name": "ddl_rename_table",
   "owner_app": "app_corpus",
   "ops": [

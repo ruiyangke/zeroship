@@ -175,6 +175,8 @@ fn op_target_table(op: &Op) -> Option<&str> {
         | Op::DropOwnedBy { .. }
         | Op::Grant { .. }
         | Op::Revoke { .. }
+        | Op::CreateView { .. }
+        | Op::DropView { .. }
         | Op::CreateFunction { .. }
         | Op::DropFunction { .. }
         | Op::PgRaw { .. } => None,

@@ -55,7 +55,11 @@ const TS = {
   Op: [
     "createTable", "dropTable", "renameTable", "addColumn", "dropColumn", "createIndex",
     "dropIndex", "alterColumnType", "alterColumnNullability", "renameColumn", "addConstraint",
-    "dropConstraint", "insert", "update", "delete", "backfill", "createTrigger", "dropTrigger",
+    "dropConstraint", "insert", "update", "delete", "backfill", "createView", "dropView",
+    "createTrigger", "dropTrigger", "createSchema", "dropSchema", "createExtension",
+    "dropExtension", "createRole", "alterRole", "dropRole", "dropOwnedBy", "grant",
+    "revoke", "enableRls", "forceRls", "disableRls", "noForceRls", "createPolicy",
+    "dropPolicy", "createFunction", "dropFunction", "pgRaw",
   ].sort(),
   // Expr node tags.
   Expr: ["colRef", "literal", "binOp", "unaryOp", "case", "fnCall", "fnSynth", "cast"].sort(),
@@ -70,10 +74,15 @@ const TS = {
   // §A2 — trigger action/body tags.
   TriggerAction: ["executeFunction", "body"].sort(),
   TriggerStmt: ["insert", "update", "delete", "select", "raise"].sort(),
+  // §A1 — structured view body tags.
+  ViewQuery: ["structured", "raw"].sort(),
+  SelectItem: ["colRef", "expr"].sort(),
+  OrderItem: ["colRef", "expr"].sort(),
+  GrantTarget: ["table", "schema", "sequence", "database"].sort(),
   // The closed string-enums (generated into enums.ts).
   BinaryOp: ["eq", "ne", "lt", "le", "gt", "ge", "and", "or", "add", "sub", "mul", "div", "concat"].sort(),
   UnaryOp: ["not", "isNull", "isNotNull", "isTrue", "isFalse"].sort(),
-  ScalarFn: ["coalesce", "nullif", "lower", "upper", "trim", "length", "abs"].sort(),
+  ScalarFn: ["coalesce", "nullif", "lower", "upper", "trim", "length", "abs", "currentSetting", "currentUser"].sort(),
   SynthFn: ["concatWs", "splitPart", "now", "genRandomUuid"].sort(),
   SynthDefaultFn: ["now", "genRandomUuid"].sort(),
   CastTarget: ["text", "integer", "real", "boolean", "blob", "uuid"].sort(),
@@ -86,6 +95,16 @@ const TS = {
   TriggerEvent: ["insert", "update", "delete", "truncate"].sort(),
   ForEach: ["row", "statement"].sort(),
   RaiseLevel: ["abort", "fail", "ignore", "rollback"].sort(),
+  JoinKind: ["inner", "left"].sort(),
+  OrderDir: ["asc", "desc"].sort(),
+  Privilege: [
+    "all", "select", "insert", "update", "delete", "truncate", "references",
+    "trigger", "usage", "connect", "create", "execute", "temporary",
+  ].sort(),
+  PolicyCmd: ["all", "select", "insert", "update", "delete"].sort(),
+  FuncArgMode: ["in", "out", "inout"].sort(),
+  FuncLanguage: ["plpgsql", "sql"].sort(),
+  FuncVolatility: ["volatile", "stable", "immutable"].sort(),
 };
 
 // **PR10 review F4** — the per-`Op` FIELD-presence map the hand-authored `ir.ts`
@@ -114,8 +133,32 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   update: ["batch", "schema", "set", "table", "where"].sort(),
   delete: ["limit", "schema", "table", "where"].sort(),
   backfill: ["batchSize", "cursorColumn", "filter", "name", "schema", "set", "table"].sort(),
+  createView: ["columns", "materialized", "name", "query", "replace", "schema"].sort(),
+  dropView: ["ifExists", "materialized", "name", "schema"].sort(),
   createTrigger: ["action", "events", "forEach", "name", "schema", "table", "timing", "when"].sort(),
   dropTrigger: ["ifExists", "name", "schema", "table"].sort(),
+  createSchema: ["authorization", "ifNotExists", "name"].sort(),
+  dropSchema: ["cascade", "ifExists", "name"].sort(),
+  createExtension: ["ifNotExists", "name", "schema"].sort(),
+  dropExtension: ["ifExists", "name"].sort(),
+  createRole: [
+    "bypassRls", "createDb", "createRole", "ifNotExists", "inRole", "login",
+    "name", "password", "setSearchPath", "superuser",
+  ].sort(),
+  alterRole: ["name", "resetSearchPath", "setSearchPath"].sort(),
+  dropRole: ["ifExists", "name"].sort(),
+  dropOwnedBy: ["roles"].sort(),
+  grant: ["on", "privileges", "to", "withGrantOption"].sort(),
+  revoke: ["from", "on", "privileges"].sort(),
+  enableRls: ["schema", "table"].sort(),
+  forceRls: ["schema", "table"].sort(),
+  disableRls: ["schema", "table"].sort(),
+  noForceRls: ["schema", "table"].sort(),
+  createPolicy: ["forCmd", "name", "schema", "table", "to", "using", "withCheck"].sort(),
+  dropPolicy: ["ifExists", "name", "schema", "table"].sort(),
+  createFunction: ["args", "body", "language", "name", "replace", "returns", "schema", "volatility"].sort(),
+  dropFunction: ["argTypes", "ifExists", "name", "schema"].sort(),
+  pgRaw: ["binds", "sql"].sort(),
 };
 
 test("Op variant tags match the schema", () => {
@@ -139,6 +182,16 @@ test("trigger action/body tags match the schema", () => {
   assert.deepEqual(variantTags(schema.$defs.TriggerStmt, "stmt"), TS.TriggerStmt);
 });
 
+test("view query/body tags match the schema", () => {
+  assert.deepEqual(variantTags(schema.$defs.ViewQuery, "kind"), TS.ViewQuery);
+  assert.deepEqual(variantTags(schema.$defs.SelectItem, "kind"), TS.SelectItem);
+  assert.deepEqual(variantTags(schema.$defs.OrderItem, "kind"), TS.OrderItem);
+});
+
+test("vendor grant target tags match the schema", () => {
+  assert.deepEqual(variantTags(schema.$defs.GrantTarget, "kind"), TS.GrantTarget);
+});
+
 test("closed string-enum tokens match the schema", () => {
   for (const name of [
     "BinaryOp",
@@ -152,6 +205,13 @@ test("closed string-enum tokens match the schema", () => {
     "TriggerEvent",
     "ForEach",
     "RaiseLevel",
+    "JoinKind",
+    "OrderDir",
+    "Privilege",
+    "PolicyCmd",
+    "FuncArgMode",
+    "FuncLanguage",
+    "FuncVolatility",
   ] as const) {
     assert.deepEqual(enumTokens(schema.$defs[name]), (TS as any)[name], `${name} tokens drifted`);
   }
@@ -184,9 +244,21 @@ test("every Op variant's field set matches the schema (no removed/missing fields
 
 // **PR10** — explicit assertion that the removed native `ifExists` is GONE from
 // the schema (the intentional wire break), so a future re-introduction is caught.
-test("no Op variant carries the removed native ifExists field", () => {
+test("legacy guardable Op variants do not carry the removed native ifExists field", () => {
   const schemaFields = opFieldsByTag(schema.$defs.Op, "op");
   for (const [tag, fields] of Object.entries(schemaFields)) {
+    if (![
+      "dropTable",
+      "renameTable",
+      "dropColumn",
+      "dropIndex",
+      "alterColumnType",
+      "alterColumnNullability",
+      "renameColumn",
+      "dropConstraint",
+    ].includes(tag)) {
+      continue;
+    }
     assert.ok(!fields.includes("ifExists"), `Op "${tag}" must not carry the removed ifExists`);
   }
 });

@@ -951,6 +951,101 @@
           ]
         },
         {
+          "description": "`CREATE [OR REPLACE] VIEW` / `CREATE MATERIALIZED VIEW`.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "View name.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "The schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "columns": {
+              "description": "Optional explicit view column list.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "query": {
+              "description": "The view body.",
+              "$ref": "#/$defs/ViewQuery"
+            },
+            "replace": {
+              "description": "`CREATE OR REPLACE VIEW` on Postgres; SQLite lowers to drop+create.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "materialized": {
+              "description": "PostgreSQL materialized view. Requires `VendorCapability::MaterializedView`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "createView"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name",
+            "query"
+          ]
+        },
+        {
+          "description": "`DROP [MATERIALIZED] VIEW [IF EXISTS]`.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "View name.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "The schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ifExists": {
+              "description": "`IF EXISTS`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "materialized": {
+              "description": "Drop a PostgreSQL materialized view.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "dropView"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name"
+          ]
+        },
+        {
           "description": "**VENDOR** — `CREATE SCHEMA [IF NOT EXISTS] <name> [AUTHORIZATION <role>]`.",
           "type": "object",
           "properties": {
@@ -2996,6 +3091,328 @@
       "format": "uint64",
       "minimum": 0,
       "maximum": 9007199254740991
+    },
+    "ViewQuery": {
+      "description": "The closed view-body query model: either the cross-dialect structured SELECT\nsubset or the operator-gated raw SELECT escape.",
+      "oneOf": [
+        {
+          "description": "A closed, engine-rendered SELECT subset.",
+          "type": "object",
+          "properties": {
+            "select": {
+              "description": "The structured SELECT AST.",
+              "$ref": "#/$defs/SelectAst"
+            },
+            "kind": {
+              "type": "string",
+              "const": "structured"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "select"
+          ]
+        },
+        {
+          "description": "A raw read-only SELECT body. Requires `VendorCapability::RawViewBody`.",
+          "type": "object",
+          "properties": {
+            "sql": {
+              "description": "The raw SELECT SQL body (no wrapping `CREATE VIEW`).",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "raw"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "sql"
+          ]
+        }
+      ]
+    },
+    "SelectAst": {
+      "description": "A closed SELECT subset for portable view bodies.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "description": "The single FROM relation.",
+          "$ref": "#/$defs/TableRef"
+        },
+        "projection": {
+          "description": "Projection list. Empty means `*`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SelectItem"
+          },
+          "default": []
+        },
+        "joins": {
+          "description": "INNER/LEFT joins.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Join"
+          }
+        },
+        "where": {
+          "description": "Optional WHERE predicate.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Expr"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "orderBy": {
+          "description": "Optional ORDER BY.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/OrderItem"
+          }
+        },
+        "limit": {
+          "description": "Optional LIMIT (JS-safe-integer bounded on deserialize).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SafeU64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "from"
+      ]
+    },
+    "TableRef": {
+      "description": "A table reference in the closed SELECT subset.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Table name.",
+          "type": "string"
+        },
+        "schema": {
+          "description": "Optional schema qualifier. Omitted means the view op's effective schema.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "alias": {
+          "description": "Optional table alias.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    },
+    "SelectItem": {
+      "description": "A SELECT-list item.",
+      "oneOf": [
+        {
+          "description": "A column reference, optionally qualified by a table/alias.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Optional table/alias qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "description": "Column name.",
+              "type": "string"
+            },
+            "alias": {
+              "description": "Optional output alias.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "colRef"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
+        },
+        {
+          "description": "A closed expression in the SELECT-list.",
+          "type": "object",
+          "properties": {
+            "expr": {
+              "description": "The expression.",
+              "$ref": "#/$defs/Expr"
+            },
+            "alias": {
+              "description": "Optional output alias.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "expr"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "expr"
+          ]
+        }
+      ]
+    },
+    "Join": {
+      "description": "One JOIN in the closed SELECT subset.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "Join kind.",
+          "$ref": "#/$defs/JoinKind"
+        },
+        "table": {
+          "description": "Joined table.",
+          "$ref": "#/$defs/TableRef"
+        },
+        "on": {
+          "description": "Closed ON predicate.",
+          "$ref": "#/$defs/Expr"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "table",
+        "on"
+      ]
+    },
+    "JoinKind": {
+      "description": "A closed join kind in the SELECT subset.",
+      "oneOf": [
+        {
+          "description": "`INNER JOIN`.",
+          "type": "string",
+          "const": "inner"
+        },
+        {
+          "description": "`LEFT JOIN`.",
+          "type": "string",
+          "const": "left"
+        }
+      ]
+    },
+    "OrderItem": {
+      "description": "One ORDER BY item.",
+      "oneOf": [
+        {
+          "description": "Order by a column reference.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Optional table/alias qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "description": "Column name.",
+              "type": "string"
+            },
+            "dir": {
+              "description": "Optional direction.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OrderDir"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "colRef"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
+        },
+        {
+          "description": "Order by a closed expression.",
+          "type": "object",
+          "properties": {
+            "expr": {
+              "description": "The expression.",
+              "$ref": "#/$defs/Expr"
+            },
+            "dir": {
+              "description": "Optional direction.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OrderDir"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "expr"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "expr"
+          ]
+        }
+      ]
+    },
+    "OrderDir": {
+      "description": "Direction for `ORDER BY`.",
+      "oneOf": [
+        {
+          "description": "Ascending order.",
+          "type": "string",
+          "const": "asc"
+        },
+        {
+          "description": "Descending order.",
+          "type": "string",
+          "const": "desc"
+        }
+      ]
     },
     "Privilege": {
       "description": "**VENDOR (`@zeroship/migrate/pg`)** — the CLOSED privilege lexicon for\n`Op::Grant`/`Op::Revoke` (vendor spec §2.3). A CLOSED enum, so serde REJECTS an\nout-of-set token at DESERIALIZE — a hand-crafted `.ir.json` cannot smuggle an\ninjection-shaped privilege string into the GRANT render seam (the\n`RefAction`/`IndexMethod` precedent). `All` renders `ALL PRIVILEGES`; the rest\nrender their SQL keyword. Camel/lower-cased on the wire.",

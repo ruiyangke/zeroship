@@ -23,9 +23,16 @@ import type {
   CmpOp,
   ExistenceGuard,
   ForEach,
+  FuncArgMode,
+  FuncLanguage,
+  FuncVolatility,
   IndexMethod,
+  JoinKind,
   OnUnmet,
   OnlinePhase,
+  OrderDir,
+  PolicyCmd,
+  Privilege,
   RaiseLevel,
   RefAction,
   ScalarFn,
@@ -42,9 +49,16 @@ export type {
   CmpOp,
   ExistenceGuard,
   ForEach,
+  FuncArgMode,
+  FuncLanguage,
+  FuncVolatility,
   IndexMethod,
+  JoinKind,
   OnUnmet,
   OnlinePhase,
+  OrderDir,
+  PolicyCmd,
+  Privilege,
   RaiseLevel,
   RefAction,
   ScalarFn,
@@ -203,6 +217,57 @@ export type TriggerStmt =
   | { stmt: "select"; expr: Expr }
   | { stmt: "raise"; level: RaiseLevel; message: string; errcode?: string | null };
 
+/** §A1 — a view body is either the closed, portable SelectAst subset or an
+ *  operator-gated raw SELECT body. */
+export type ViewQuery =
+  | { kind: "structured"; select: SelectAst }
+  | { kind: "raw"; sql: string };
+
+/** §3.1 — the closed SELECT subset rendered by the engine for structured views. */
+export interface SelectAst {
+  from: TableRef;
+  /** Empty means `*`. */
+  projection: SelectItem[];
+  joins?: Join[];
+  where?: Expr | null;
+  orderBy?: OrderItem[] | null;
+  limit?: number | null;
+}
+
+export interface TableRef {
+  name: string;
+  schema?: string | null;
+  alias?: string | null;
+}
+
+export type SelectItem =
+  | { kind: "colRef"; table?: string | null; name: string; alias?: string | null }
+  | { kind: "expr"; expr: Expr; alias?: string | null };
+
+export interface Join {
+  kind: JoinKind;
+  table: TableRef;
+  on: Expr;
+}
+
+export type OrderItem =
+  | { kind: "colRef"; table?: string | null; name: string; dir?: OrderDir | null }
+  | { kind: "expr"; expr: Expr; dir?: OrderDir | null };
+
+/** **VENDOR** — one CREATE FUNCTION argument. */
+export interface FuncArg {
+  name?: string | null;
+  type: string;
+  mode?: FuncArgMode | null;
+}
+
+/** **VENDOR** — the closed GRANT/REVOKE target. */
+export type GrantTarget =
+  | { kind: "table"; names: string[]; schema?: string | null }
+  | { kind: "schema"; names: string[] }
+  | { kind: "sequence"; in: string }
+  | { kind: "database"; names: string[] };
+
 /** The CLOSED `op.*` operation enum (§2.3), internally tagged on `op`,
  *  camel-cased. NOTE the `del()` DSL function records the `"delete"` variant tag.
  *
@@ -242,6 +307,8 @@ export type Op =
   | { op: "update"; table: string; set: { [column: string]: Expr }; where?: Expr | null; batch?: IrBatch | null; schema?: string | null }
   | { op: "delete"; table: string; where: Expr; limit?: number | null; schema?: string | null }
   | { op: "backfill"; table: string; cursorColumn: string; batchSize: number; set: { [column: string]: Expr }; filter?: Expr | null; name: string; schema?: string | null }
+  | { op: "createView"; name: string; schema?: string | null; columns?: string[] | null; query: ViewQuery; replace?: boolean | null; materialized?: boolean | null }
+  | { op: "dropView"; name: string; schema?: string | null; ifExists?: boolean | null; materialized?: boolean | null }
   | {
       op: "createTrigger";
       name: string;
@@ -253,7 +320,57 @@ export type Op =
       action: TriggerAction;
       when?: Expr | null;
     }
-  | { op: "dropTrigger"; name: string; table: string; schema?: string | null; ifExists?: boolean | null };
+  | { op: "dropTrigger"; name: string; table: string; schema?: string | null; ifExists?: boolean | null }
+  | { op: "createSchema"; name: string; ifNotExists?: boolean | null; authorization?: string | null }
+  | { op: "dropSchema"; name: string; ifExists?: boolean | null; cascade?: boolean | null }
+  | { op: "createExtension"; name: string; ifNotExists?: boolean | null; schema?: string | null }
+  | { op: "dropExtension"; name: string; ifExists?: boolean | null }
+  | {
+      op: "createRole";
+      name: string;
+      login?: boolean | null;
+      password?: string | null;
+      bypassRls?: boolean | null;
+      createRole?: boolean | null;
+      createDb?: boolean | null;
+      superuser?: boolean | null;
+      inRole?: string[] | null;
+      setSearchPath?: string[] | null;
+      ifNotExists?: boolean | null;
+    }
+  | { op: "alterRole"; name: string; setSearchPath?: string[] | null; resetSearchPath?: boolean | null }
+  | { op: "dropRole"; name: string; ifExists?: boolean | null }
+  | { op: "dropOwnedBy"; roles: string[] }
+  | { op: "grant"; privileges: Privilege[]; on: GrantTarget; to: string[]; withGrantOption?: boolean | null }
+  | { op: "revoke"; privileges: Privilege[]; on: GrantTarget; from: string[] }
+  | { op: "enableRls"; table: string; schema?: string | null }
+  | { op: "forceRls"; table: string; schema?: string | null }
+  | { op: "disableRls"; table: string; schema?: string | null }
+  | { op: "noForceRls"; table: string; schema?: string | null }
+  | {
+      op: "createPolicy";
+      name: string;
+      table: string;
+      schema?: string | null;
+      forCmd: PolicyCmd;
+      to?: string[] | null;
+      using: Expr;
+      withCheck?: Expr | null;
+    }
+  | { op: "dropPolicy"; name: string; table: string; schema?: string | null; ifExists?: boolean | null }
+  | {
+      op: "createFunction";
+      name: string;
+      schema?: string | null;
+      args?: FuncArg[] | null;
+      returns: string;
+      language: FuncLanguage;
+      replace?: boolean | null;
+      volatility?: FuncVolatility | null;
+      body: string;
+    }
+  | { op: "dropFunction"; name: string; schema?: string | null; argTypes?: string[] | null; ifExists?: boolean | null }
+  | { op: "pgRaw"; sql: string; binds?: IrScalar[] };
 
 /** All-`Option` overrides of the migration flags. */
 export interface IrFlagsOverride {

@@ -61,6 +61,15 @@ const ENUM_DEFS = [
   "TriggerEvent",
   "ForEach",
   "RaiseLevel",
+  // §A1/§3.1 — closed SelectAst facets for structured view bodies.
+  "JoinKind",
+  "OrderDir",
+  // Vendor op closed facets used by the hand-authored full Op mirror.
+  "Privilege",
+  "PolicyCmd",
+  "FuncArgMode",
+  "FuncLanguage",
+  "FuncVolatility",
 ];
 
 const banner = `/* eslint-disable */

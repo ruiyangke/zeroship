@@ -21,6 +21,8 @@
 export {
   // the SOLE public authoring entry — the reusable fluent TableHandle
   table,
+  // cross-dialect view authoring entry — emits the closed SelectAst by default
+  view,
   // the immutable fluent column-type lexicon
   t,
   // the shared `@zeroship/db` lexicon bridge (PR5 goal A): lift a live-schema
@@ -51,6 +53,8 @@ export type {
   // the fluent handle + selector sub-handles
   TableHandle,
   TableOptions,
+  ViewHandle,
+  ViewOptions,
   ColumnRef,
   ForeignKeyRef,
   UniqueRef,
@@ -64,6 +68,10 @@ export type {
   UpdateArgs,
   DelArgs,
   BackfillArgs,
+  CreateViewArgs,
+  CreateRawViewArgs,
+  DropViewArgs,
+  ViewQueryBuilder,
   IndexMethod,
   RefAction,
   DeterminismFinding,
@@ -79,6 +87,14 @@ export type {
   Expr,
   IrBatch,
   IrScalar,
+  ViewQuery,
+  SelectAst,
+  TableRef,
+  SelectItem,
+  Join,
+  JoinKind,
+  OrderItem,
+  OrderDir,
 } from "./types.js";
 
 // The full generated dialect-neutral IR wire types (`Op`, `IrConstraint`,

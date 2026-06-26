@@ -36,8 +36,8 @@ use crate::drift::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, TableSnaps
 use crate::guard::{guard_for, GuardConfig, GuardError};
 use crate::ir::{
     ColType, ForEach, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrMask,
-    IndexMethod, MigrationIr, Op, RaiseLevel, RefAction, TriggerAction, TriggerEvent, TriggerStmt,
-    VectorMetric,
+    IndexMethod, Join, MigrationIr, Op, OrderDir, OrderItem, RaiseLevel, RefAction, SelectAst,
+    SelectItem, TableRef, TriggerAction, TriggerEvent, TriggerStmt, VectorMetric, ViewQuery,
 };
 use crate::migration::Migration;
 use crate::plan::{AppliedPlan, PlanStep, RenameStep};
@@ -536,6 +536,15 @@ pub enum IrLowerError {
         /// Stable unsupported-kind token (`triggerBody`, `executeFunction`, …).
         kind: &'static str,
         /// The target dialect that cannot render the facet/action.
+        dialect: SqlDialect,
+    },
+    /// A view facet is unsupported on the target dialect. Plain structured views
+    /// are cross-dialect core; materialized views are PostgreSQL-only.
+    #[error("IrAuthor::lower of view facet {kind:?} is unsupported on {dialect:?}")]
+    ViewUnsupported {
+        /// Stable unsupported-kind token (`materializedView`, …).
+        kind: &'static str,
+        /// The target dialect that cannot render the facet.
         dialect: SqlDialect,
     },
     /// **PR2** — a `renameColumn` whose IR-carried [`ColType`] does not match the
@@ -1616,6 +1625,13 @@ impl IrAuthor {
                     live_schema,
                 )?));
             }
+            // CROSS-DIALECT CORE views. Plain structured views require no vendor
+            // capability; raw bodies and materialized views are gated at validate
+            // and lower before this renderer runs.
+            Op::CreateView { .. } | Op::DropView { .. } => {
+                enforce_vendor_capability_at_lower(op, Some(&self.scope))?;
+                self.lower_view_op(op, &eff_schema, &decl)?
+            }
             // CROSS-DIALECT CORE triggers. The op is admitted without a vendor
             // capability; unsupported pieces are refused per dialect/action/facet.
             Op::CreateTrigger { .. } | Op::DropTrigger { .. } => {
@@ -1745,6 +1761,16 @@ impl IrAuthor {
                 Ok(vec![decl.lower_vendor_statement(&stmt.name, stmt.up, stmt.down)])
             }
         }
+    }
+
+    fn lower_view_op(
+        &self,
+        op: &Op,
+        eff_schema: &str,
+        decl: &DeclarativeAuthor,
+    ) -> Result<Vec<LoweredUnit>, IrLowerError> {
+        let stmt = render_view_op(op, eff_schema, self.dialect, Some(&self.scope))?;
+        Ok(vec![decl.lower_vendor_statements(&stmt.name, stmt.up, stmt.down)])
     }
 
     /// **§PR6a — lower a DML op** (`insert`/`update`/`del`/`backfill`) into a
@@ -2025,9 +2051,7 @@ impl IrAuthor {
 
         for (op_index, op) in ir.ops.iter().enumerate() {
             let op_kind = op_kind_tag(op);
-            if !matches!(self.dialect, SqlDialect::Sqlite) {
-                enforce_vendor_capability_at_lower(op, guard_scope.as_ref())?;
-            }
+            enforce_vendor_capability_at_lower(op, guard_scope.as_ref())?;
             // Lower this op (advancing `live_tables` for intra-IR FK inlining). A
             // lower failure aborts before any guarding — nothing applied. Each unit
             // carries its STRUCTURAL per-statement list (the exact statements the
@@ -2671,6 +2695,266 @@ fn split_up_fragments(up: &str) -> Vec<&str> {
     up.split(";\n").collect()
 }
 
+struct ViewStatement {
+    name: String,
+    up: Vec<String>,
+    down: Option<String>,
+}
+
+fn render_view_op(
+    op: &Op,
+    eff_schema: &str,
+    dialect: SqlDialect,
+    scope: Option<&crate::guard::SchemaScope>,
+) -> Result<ViewStatement, IrLowerError> {
+    match op {
+        Op::CreateView {
+            name,
+            columns,
+            query,
+            replace,
+            materialized,
+            ..
+        } => {
+            let materialized = materialized.unwrap_or(false);
+            if materialized && matches!(dialect, SqlDialect::Sqlite) {
+                return Err(IrLowerError::ViewUnsupported {
+                    kind: "materializedView",
+                    dialect,
+                });
+            }
+            let qname = view_object_name(name, eff_schema, dialect)?;
+            let cols = render_view_columns(columns.as_deref())?;
+            let query_sql = render_view_query(query, eff_schema, dialect, scope)?;
+            let mut create = String::from("CREATE ");
+            match dialect {
+                SqlDialect::Postgres => {
+                    if materialized {
+                        create.push_str("MATERIALIZED VIEW ");
+                    } else if replace.unwrap_or(false) {
+                        create.push_str("OR REPLACE VIEW ");
+                    } else {
+                        create.push_str("VIEW ");
+                    }
+                }
+                SqlDialect::Sqlite => create.push_str("VIEW "),
+            }
+            create.push_str(&qname);
+            create.push_str(&cols);
+            create.push_str(" AS ");
+            create.push_str(&query_sql);
+
+            let mut up = Vec::new();
+            if matches!(dialect, SqlDialect::Sqlite) && replace.unwrap_or(false) {
+                up.push(format!("DROP VIEW IF EXISTS {qname}"));
+            }
+            up.push(create);
+
+            let drop_kw = if materialized { "DROP MATERIALIZED VIEW" } else { "DROP VIEW" };
+            Ok(ViewStatement {
+                name: format!("create_view_{name}"),
+                up,
+                down: Some(format!("{drop_kw} IF EXISTS {qname}")),
+            })
+        }
+        Op::DropView { name, if_exists, materialized, .. } => {
+            let materialized = materialized.unwrap_or(false);
+            if materialized && matches!(dialect, SqlDialect::Sqlite) {
+                return Err(IrLowerError::ViewUnsupported {
+                    kind: "materializedView",
+                    dialect,
+                });
+            }
+            let qname = view_object_name(name, eff_schema, dialect)?;
+            let mut up = if materialized {
+                String::from("DROP MATERIALIZED VIEW ")
+            } else {
+                String::from("DROP VIEW ")
+            };
+            if if_exists.unwrap_or(false) {
+                up.push_str("IF EXISTS ");
+            }
+            up.push_str(&qname);
+            Ok(ViewStatement {
+                name: format!("drop_view_{name}"),
+                up: vec![up],
+                down: None,
+            })
+        }
+        _ => Err(IrLowerError::UnsupportedOp("non-view op routed to view renderer")),
+    }
+}
+
+fn render_view_query(
+    query: &ViewQuery,
+    eff_schema: &str,
+    dialect: SqlDialect,
+    scope: Option<&crate::guard::SchemaScope>,
+) -> Result<String, IrLowerError> {
+    match query {
+        ViewQuery::Structured { select } => render_select_ast(select, eff_schema, dialect),
+        ViewQuery::Raw { sql } => {
+            let target = match dialect {
+                SqlDialect::Postgres => crate::validate::Dialect::Postgres,
+                SqlDialect::Sqlite => crate::validate::Dialect::Sqlite,
+            };
+            crate::validate::validate_raw_view_body_sql(sql, target, 0, None, scope)
+                .map_err(|e| IrLowerError::DmlValidate(Box::new(e)))?;
+            Ok(sql.trim().trim_end_matches(';').trim().to_string())
+        }
+    }
+}
+
+fn render_select_ast(
+    select: &SelectAst,
+    eff_schema: &str,
+    dialect: SqlDialect,
+) -> Result<String, IrLowerError> {
+    let projection = if select.projection.is_empty() {
+        "*".to_string()
+    } else {
+        let items: Result<Vec<_>, _> = select
+            .projection
+            .iter()
+            .map(|item| render_select_item(item, dialect))
+            .collect();
+        items?.join(", ")
+    };
+    let mut sql = format!(
+        "SELECT {projection} FROM {}",
+        render_table_ref(&select.from, eff_schema, dialect)?
+    );
+    for join in &select.joins {
+        sql.push(' ');
+        sql.push_str(&render_join(join, eff_schema, dialect)?);
+    }
+    if let Some(pred) = &select.r#where {
+        sql.push_str(" WHERE ");
+        sql.push_str(&crate::dml::render_expr_inline(pred, dialect)?);
+    }
+    if let Some(order_by) = &select.order_by {
+        if !order_by.is_empty() {
+            let items: Result<Vec<_>, _> =
+                order_by.iter().map(|item| render_order_item(item, dialect)).collect();
+            sql.push_str(" ORDER BY ");
+            sql.push_str(&items?.join(", "));
+        }
+    }
+    if let Some(limit) = select.limit {
+        sql.push_str(&format!(" LIMIT {}", limit.get()));
+    }
+    Ok(sql)
+}
+
+fn render_join(
+    join: &Join,
+    eff_schema: &str,
+    dialect: SqlDialect,
+) -> Result<String, IrLowerError> {
+    Ok(format!(
+        "{} JOIN {} ON {}",
+        join.kind.as_sql(),
+        render_table_ref(&join.table, eff_schema, dialect)?,
+        crate::dml::render_expr_inline(&join.on, dialect)?
+    ))
+}
+
+fn render_select_item(item: &SelectItem, dialect: SqlDialect) -> Result<String, IrLowerError> {
+    let (mut sql, alias) = match item {
+        SelectItem::ColRef { table, name, alias } => (render_col_ref(table.as_deref(), name)?, alias),
+        SelectItem::Expr { expr, alias } => (crate::dml::render_expr_inline(expr, dialect)?, alias),
+    };
+    if let Some(alias) = alias {
+        sql.push_str(" AS ");
+        sql.push_str(&crate::dml::quote_bare_ident("column alias", alias)?);
+    }
+    Ok(sql)
+}
+
+fn render_order_item(item: &OrderItem, dialect: SqlDialect) -> Result<String, IrLowerError> {
+    let (mut sql, dir): (String, Option<OrderDir>) = match item {
+        OrderItem::ColRef { table, name, dir } => (render_col_ref(table.as_deref(), name)?, *dir),
+        OrderItem::Expr { expr, dir } => (crate::dml::render_expr_inline(expr, dialect)?, *dir),
+    };
+    if let Some(dir) = dir {
+        sql.push(' ');
+        sql.push_str(dir.as_sql());
+    }
+    Ok(sql)
+}
+
+fn render_col_ref(table: Option<&str>, name: &str) -> Result<String, IrLowerError> {
+    let qcol = crate::dml::quote_bare_ident("column", name)?;
+    if let Some(table) = table {
+        Ok(format!("{}.{}", crate::dml::quote_bare_ident("table alias", table)?, qcol))
+    } else {
+        Ok(qcol)
+    }
+}
+
+fn render_table_ref(
+    table: &TableRef,
+    eff_schema: &str,
+    dialect: SqlDialect,
+) -> Result<String, IrLowerError> {
+    let mut sql = match dialect {
+        SqlDialect::Postgres => {
+            let schema = table.schema.as_deref().unwrap_or(eff_schema);
+            format!(
+                "{}.{}",
+                quote_engine_ident_as_dml("schema", schema)?,
+                crate::dml::quote_bare_ident("table", &table.name)?
+            )
+        }
+        SqlDialect::Sqlite => {
+            if let Some(schema) = table.schema.as_deref() {
+                if !schema.eq_ignore_ascii_case(eff_schema) {
+                    return Err(IrLowerError::LowerCrossSchema(schema.to_string()));
+                }
+            }
+            crate::dml::quote_bare_ident("table", &table.name)?
+        }
+    };
+    if let Some(alias) = table.alias.as_deref() {
+        sql.push_str(" AS ");
+        sql.push_str(&crate::dml::quote_bare_ident("table alias", alias)?);
+    }
+    Ok(sql)
+}
+
+fn render_view_columns(columns: Option<&[String]>) -> Result<String, IrLowerError> {
+    let Some(columns) = columns else {
+        return Ok(String::new());
+    };
+    if columns.is_empty() {
+        return Ok(String::new());
+    }
+    let qcols: Result<Vec<_>, _> =
+        columns.iter().map(|c| crate::dml::quote_bare_ident("view column", c)).collect();
+    Ok(format!(" ({})", qcols?.join(", ")))
+}
+
+fn view_object_name(
+    name: &str,
+    eff_schema: &str,
+    dialect: SqlDialect,
+) -> Result<String, IrLowerError> {
+    match dialect {
+        SqlDialect::Postgres => Ok(format!(
+            "{}.{}",
+            quote_engine_ident_as_dml("schema", eff_schema)?,
+            crate::dml::quote_bare_ident("view", name)?
+        )),
+        SqlDialect::Sqlite => Ok(crate::dml::quote_bare_ident("view", name)?),
+    }
+}
+
+fn quote_engine_ident_as_dml(what: &'static str, ident: &str) -> Result<String, IrLowerError> {
+    crate::dml::quote_ident_checked(ident)
+        .map_err(|e| crate::dml::DmlError::InvalidIdentifier { what, value: e.value })
+        .map_err(IrLowerError::DmlAssemble)
+}
+
 fn render_sqlite_trigger_op(
     op: &Op,
     eff_schema: &str,
@@ -2953,18 +3237,20 @@ fn enforce_vendor_capability_at_lower(
     op: &Op,
     scope: Option<&crate::guard::SchemaScope>,
 ) -> Result<(), IrLowerError> {
-    let Some(capability) = op.vendor_capability() else {
+    let capabilities = op.vendor_capabilities();
+    if capabilities.is_empty() {
         return Ok(());
-    };
-    let caps = crate::capability::VendorCapabilities::from_scope(scope);
-    if caps.grants(capability) {
-        Ok(())
-    } else {
-        Err(IrLowerError::VendorCapabilityDenied {
-            op: op_kind_tag(op),
-            capability,
-        })
     }
+    let caps = crate::capability::VendorCapabilities::from_scope(scope);
+    for capability in capabilities {
+        if !caps.grants(capability) {
+            return Err(IrLowerError::VendorCapabilityDenied {
+                op: op_kind_tag(op),
+                capability,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Mint a DETERMINISTIC, STABLE [`MigrationId`] for a DML/backfill plan step
@@ -3091,6 +3377,8 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
         Op::Update { .. } => "update",
         Op::Delete { .. } => "delete",
         Op::Backfill { .. } => "backfill",
+        Op::CreateView { .. } => "createView",
+        Op::DropView { .. } => "dropView",
         // VENDOR (`@zeroship/migrate/pg`).
         Op::CreateSchema { .. } => "createSchema",
         Op::DropSchema { .. } => "dropSchema",

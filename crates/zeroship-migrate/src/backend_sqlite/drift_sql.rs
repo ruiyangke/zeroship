@@ -40,6 +40,7 @@ use std::collections::BTreeMap;
 
 use crate::drift::{
     ColumnSnapshot, ConstraintSnapshot, DriftError, IndexSnapshot, SchemaSnapshot, TableSnapshot,
+    ViewSnapshot,
 };
 
 use super::actor::{MigrationActor, SqliteActorError};
@@ -130,6 +131,7 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
     actor.set_mode(Mode::EngineJournal).await.map_err(drift_err)?;
 
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
+    let mut views: BTreeMap<String, ViewSnapshot> = BTreeMap::new();
 
     // Base tables of `main`, with their stored CREATE text (carries inline
     // sentinels). `type='table'` excludes views/indexes/triggers; the
@@ -218,6 +220,31 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
         );
     }
 
+    let view_rows = actor
+        .query(
+            "SELECT name, sql FROM main.sqlite_master \
+             WHERE type = 'view' \
+             ORDER BY name",
+        )
+        .await
+        .map_err(drift_err)?;
+    for r in &view_rows {
+        let name = cell(r, 0)?;
+        if is_internal(&name) {
+            continue;
+        }
+        let definition = if let Some(Some(sql)) = r.get(1) {
+            Some(sql.clone())
+        } else {
+            None
+        };
+        views.insert(name, ViewSnapshot {
+            materialized: false,
+            columns: None,
+            definition,
+        });
+    }
+
     // Per-table: columns (PRAGMA table_info), indexes (PRAGMA index_list / index_info),
     // and constraints synthesised from PRAGMA foreign_key_list + the PK / UNIQUE
     // index metadata.
@@ -249,7 +276,7 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
         t.constraints.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
-    Ok(SchemaSnapshot { tables })
+    Ok(SchemaSnapshot { tables, views })
 }
 
 /// Columns via `PRAGMA table_info(<t>)`. Columns: cid, name, type, notnull,

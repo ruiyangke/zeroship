@@ -35,10 +35,14 @@ import type {
   ColumnDef as ColumnDefType,
   ColumnRef,
   ConstraintRef,
+  CreateRawViewArgs,
   CreateTriggerArgs,
   CreateTableArgs,
+  CreateViewArgs,
   DelArgs,
   DeterminismFinding,
+  DropViewArgs,
+  Expr,
   ExprBuilder,
   ExprChain as ExprChainType,
   ExprFn,
@@ -48,18 +52,27 @@ import type {
   IdOptions,
   IndexRef,
   InsertArgs,
+  Join,
+  JoinKind,
   MaskOptions,
+  OrderItem,
   RefAction,
   Row,
   ScalarValue,
+  SelectAst,
+  SelectItem,
   TableHandle,
   TableOptions,
+  TableRef,
   TriggerBodyBuilder,
   TriggerStmt,
   TypeLexicon,
   UniqueRef,
   UpdateArgs,
   VectorOptions,
+  ViewHandle,
+  ViewOptions,
+  ViewQueryBuilder,
 } from "./types.js";
 
 import { TypeBuilder as DbTypeBuilder } from "@zeroship/db";
@@ -1077,6 +1090,235 @@ function recordBackfill(table: string, args: BackfillArgs): void {
   );
 }
 
+type SelectAstBuilder = ViewQueryBuilder & { __selectAst(): SelectAst };
+
+function normalizeTableRef(input: string | TableRef, what: string): TableRef {
+  if (typeof input === "string") return { name: input };
+  if (!input || typeof input !== "object") {
+    throw structuredError("OP_INVALID", `${what} must be a table name string or { name, schema?, alias? }`);
+  }
+  requireString(input.name, `${what}.name`);
+  if (input.schema !== undefined && input.schema !== null) requireString(input.schema, `${what}.schema`);
+  if (input.alias !== undefined && input.alias !== null) requireString(input.alias, `${what}.alias`);
+  return compact({ name: input.name, schema: input.schema ?? undefined, alias: input.alias ?? undefined }) as TableRef;
+}
+
+function viewExpr(slot: ExprFn | ExprChainType | Node): Expr {
+  return resolveExpr(slot)! as unknown as Expr;
+}
+
+function normalizeSelectItem(item: string | SelectItem | ExprFn | ExprChainType | Expr): SelectItem {
+  if (typeof item === "string") return { kind: "colRef", name: item };
+  if (typeof item === "function" || item instanceof ExprChainImpl) {
+    return { kind: "expr", expr: viewExpr(item as ExprFn | ExprChainType) };
+  }
+  if (item && typeof item === "object") {
+    const node = item as Node;
+    if (node.node !== undefined) return { kind: "expr", expr: viewExpr(node) };
+    if (node.kind === "colRef") {
+      requireString(node.name, "select item colRef.name");
+      if (node.table !== undefined && node.table !== null) requireString(node.table, "select item colRef.table");
+      if (node.alias !== undefined && node.alias !== null) requireString(node.alias, "select item colRef.alias");
+      return compact({
+        kind: "colRef",
+        table: node.table ?? undefined,
+        name: node.name,
+        alias: node.alias ?? undefined,
+      }) as SelectItem;
+    }
+    if (node.kind === "expr") {
+      if (node.alias !== undefined && node.alias !== null) requireString(node.alias, "select item expr.alias");
+      return compact({
+        kind: "expr",
+        expr: viewExpr(node.expr as ExprFn | ExprChainType | Node),
+        alias: node.alias ?? undefined,
+      }) as SelectItem;
+    }
+  }
+  throw structuredError("OP_INVALID", "select item must be a column name, expression, or SelectItem object");
+}
+
+function normalizeOrderDir(dir: unknown, what: string): "asc" | "desc" | undefined {
+  if (dir === undefined || dir === null) return undefined;
+  if (dir === "asc" || dir === "desc") return dir;
+  throw structuredError("OP_INVALID", `${what}.dir must be asc or desc`);
+}
+
+function normalizeOrderItem(item: string | OrderItem | ExprFn | ExprChainType | Expr): OrderItem {
+  if (typeof item === "string") return { kind: "colRef", name: item };
+  if (typeof item === "function" || item instanceof ExprChainImpl) {
+    return { kind: "expr", expr: viewExpr(item as ExprFn | ExprChainType) };
+  }
+  if (item && typeof item === "object") {
+    const node = item as Node;
+    if (node.node !== undefined) return { kind: "expr", expr: viewExpr(node) };
+    if (node.kind === "colRef") {
+      requireString(node.name, "order item colRef.name");
+      if (node.table !== undefined && node.table !== null) requireString(node.table, "order item colRef.table");
+      return compact({
+        kind: "colRef",
+        table: node.table ?? undefined,
+        name: node.name,
+        dir: normalizeOrderDir(node.dir, "order item colRef"),
+      }) as OrderItem;
+    }
+    if (node.kind === "expr") {
+      return compact({
+        kind: "expr",
+        expr: viewExpr(node.expr as ExprFn | ExprChainType | Node),
+        dir: normalizeOrderDir(node.dir, "order item expr"),
+      }) as OrderItem;
+    }
+  }
+  throw structuredError("OP_INVALID", "orderBy item must be a column name, expression, or OrderItem object");
+}
+
+function viewQueryBuilder(): SelectAstBuilder {
+  const state: {
+    from?: TableRef;
+    projection: SelectItem[];
+    joins: Join[];
+    where?: Expr;
+    orderBy?: OrderItem[];
+    limit?: number;
+  } = {
+    projection: [],
+    joins: [],
+  };
+
+  let builder: SelectAstBuilder;
+  builder = {
+    from(table: string | TableRef) {
+      state.from = normalizeTableRef(table, "view query from(table)");
+      return builder;
+    },
+    select(items: Array<string | SelectItem | ExprFn | ExprChainType | Expr>) {
+      if (!Array.isArray(items)) {
+        throw structuredError("OP_INVALID", "view query select(items): items must be an array");
+      }
+      state.projection = items.map(normalizeSelectItem);
+      return builder;
+    },
+    join(kind: JoinKind, table: string | TableRef, on: ExprFn | ExprChainType | Expr) {
+      if (kind !== "inner" && kind !== "left") {
+        throw structuredError("OP_INVALID", "view query join(kind): kind must be inner or left");
+      }
+      state.joins.push({
+        kind,
+        table: normalizeTableRef(table, "view query join(table)"),
+        on: viewExpr(on as ExprFn | ExprChainType | Node),
+      });
+      return builder;
+    },
+    innerJoin(table: string | TableRef, on: ExprFn | ExprChainType | Expr) {
+      return builder.join("inner", table, on);
+    },
+    leftJoin(table: string | TableRef, on: ExprFn | ExprChainType | Expr) {
+      return builder.join("left", table, on);
+    },
+    where(expr: ExprFn | ExprChainType | Expr) {
+      state.where = viewExpr(expr as ExprFn | ExprChainType | Node);
+      return builder;
+    },
+    orderBy(items: Array<string | OrderItem | ExprFn | ExprChainType | Expr>) {
+      if (!Array.isArray(items)) {
+        throw structuredError("OP_INVALID", "view query orderBy(items): items must be an array");
+      }
+      state.orderBy = items.map(normalizeOrderItem);
+      return builder;
+    },
+    limit(n: number) {
+      if (typeof n !== "number" || !Number.isInteger(n) || n < 0) {
+        throw structuredError("OP_INVALID", `view query limit(n): n must be a non-negative integer, got ${n}`);
+      }
+      state.limit = n;
+      return builder;
+    },
+    __selectAst() {
+      if (state.from === undefined) {
+        throw structuredError("OP_INVALID", "view query must call q.from(table)");
+      }
+      return compact({
+        from: state.from,
+        projection: state.projection,
+        joins: state.joins.length ? state.joins : undefined,
+        where: state.where,
+        orderBy: state.orderBy,
+        limit: state.limit,
+      }) as SelectAst;
+    },
+  };
+
+  return builder;
+}
+
+function isSelectAstBuilder(x: unknown): x is SelectAstBuilder {
+  return Boolean(x && typeof x === "object" && typeof (x as SelectAstBuilder).__selectAst === "function");
+}
+
+function isSelectAst(x: unknown): x is SelectAst {
+  return Boolean(x && typeof x === "object" && (x as SelectAst).from !== undefined);
+}
+
+function resolveSelectAst(as: CreateViewArgs["as"]): SelectAst {
+  if (typeof as === "function") {
+    const q = viewQueryBuilder();
+    const built = as(q) || q;
+    if (isSelectAstBuilder(built)) return built.__selectAst();
+    if (isSelectAst(built)) return built;
+  }
+  if (isSelectAstBuilder(as)) return as.__selectAst();
+  if (isSelectAst(as)) return as;
+  throw structuredError("OP_INVALID", "view.create({ as }) must be a query-builder callback or SelectAst");
+}
+
+function recordCreateView(name: string, args: CreateViewArgs & { schema?: string }): void {
+  if (!args || args.as === undefined) {
+    throw structuredError("OP_INVALID", "view(name).create({ as }) requires a structured SelectAst builder");
+  }
+  push(
+    compact({
+      op: "createView",
+      name,
+      schema: args.schema,
+      columns: args.columns,
+      query: { kind: "structured", select: resolveSelectAst(args.as) },
+      replace: args.replace,
+      materialized: args.materialized,
+    }),
+  );
+}
+
+function recordCreateRawView(name: string, args: CreateRawViewArgs & { schema?: string }): void {
+  if (!args || typeof args !== "object") {
+    throw structuredError("OP_INVALID", "view(name).createRaw({ sql }) needs an object");
+  }
+  requireString(args.sql, "view(name).createRaw({ sql })");
+  push(
+    compact({
+      op: "createView",
+      name,
+      schema: args.schema,
+      columns: args.columns,
+      query: { kind: "raw", sql: args.sql },
+      replace: args.replace,
+      materialized: args.materialized,
+    }),
+  );
+}
+
+function recordDropView(name: string, args: DropViewArgs & { schema?: string }): void {
+  push(
+    compact({
+      op: "dropView",
+      name,
+      schema: args.schema,
+      ifExists: args.ifExists,
+      materialized: args.materialized,
+    }),
+  );
+}
+
 const TRIGGER_RAISE_LEVELS = ["abort", "fail", "ignore", "rollback"] as const;
 
 function triggerBodyBuilder(): TriggerBodyBuilder {
@@ -1366,6 +1608,32 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
         schema: pickSchema(args, dflt),
         ifExists: args.ifExists,
       }));
+      return handle;
+    },
+  };
+
+  return handle;
+}
+
+export function view(name: string, opts: ViewOptions = {}): ViewHandle {
+  requireString(name, "view(name, …)");
+  const dflt = opts.schema;
+
+  const handle: ViewHandle = {
+    create(args) {
+      recordCreateView(name, { ...args, schema: pickSchema(args, dflt) });
+      return handle;
+    },
+    createRaw(args) {
+      recordCreateRawView(name, { ...args, schema: pickSchema(args, dflt) });
+      return handle;
+    },
+    drop(args = {}) {
+      recordDropView(name, {
+        ifExists: args.ifExists,
+        materialized: args.materialized,
+        schema: pickSchema(args, dflt),
+      });
       return handle;
     },
   };

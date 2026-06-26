@@ -1263,6 +1263,33 @@ impl SqlGuard {
     }
 }
 
+/// Run the same raw-body deny-list scanner used for function bodies over a raw
+/// view SELECT body. This is intentionally narrower than [`SqlGuard::check`]:
+/// callers separately assert that the body parses as exactly one top-level
+/// `SELECT`, then use this helper for the body reparse/string-literal/token
+/// backstops (`pg_read_file`, network functions, COPY PROGRAM, dynamic
+/// cross-schema text, etc.).
+///
+/// # Errors
+/// [`GuardError`] when the body scanner finds a denied token or cross-schema
+/// reference.
+pub(crate) fn check_raw_view_body_text(
+    body: &str,
+    raw: &str,
+    scope: Option<&SchemaScope>,
+) -> Result<(), GuardError> {
+    let schemas = scope
+        .cloned()
+        .unwrap_or_else(|| SchemaScope::Allowlist(Vec::new()));
+    let guard = SqlGuard::new(GuardConfig {
+        trust: TrustProfile::Confined,
+        schemas,
+        extension_allowlist: Vec::new(),
+        dialect: SqlDialect::Postgres,
+    });
+    guard.check_body_text(body, raw)
+}
+
 /// Scan a PL/pgSQL body's **bare string literals** for a cross-tenant schema
 /// name that `format('%I.…', s)`-style dynamic SQL would interpolate.
 ///

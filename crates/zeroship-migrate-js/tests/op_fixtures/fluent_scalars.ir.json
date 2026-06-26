@@ -1,5 +1,5 @@
 {
-  "ir_version": 1,
+  "ir_version": 4,
   "name": "fluent_scalars",
   "owner_app": "app_corpus",
   "ops": [

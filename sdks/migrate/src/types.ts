@@ -17,11 +17,19 @@ import type {
   Expr,
   IrBatch,
   IrScalar,
+  Join,
+  JoinKind,
   MaskKind,
+  OrderDir,
+  OrderItem,
   RaiseLevel,
+  SelectAst,
+  SelectItem,
+  TableRef,
   TriggerAction,
   TriggerStmt,
   VectorMetric,
+  ViewQuery,
 } from "./generated/ir.js";
 
 // Re-export the closed facet token unions from the wire layer (single source of
@@ -31,12 +39,20 @@ export type {
   Expr,
   IrBatch,
   IrScalar,
+  Join,
+  JoinKind,
   MaskKind,
+  OrderDir,
+  OrderItem,
   Classification,
   RaiseLevel,
+  SelectAst,
+  SelectItem,
+  TableRef,
   TriggerAction,
   TriggerStmt,
   VectorMetric,
+  ViewQuery,
 };
 
 /**
@@ -367,6 +383,57 @@ export interface DropTriggerArgs {
   name: string;
   ifExists?: boolean;
   schema?: string;
+}
+
+// ── `view()` entry + the closed SelectAst builder (§A1/§3.1) ──
+
+/** The options bag `view(name, opts?)` accepts. Carries the default `{ schema }`
+ *  every op the returned {@link ViewHandle} records is stamped with. */
+export interface ViewOptions {
+  schema?: string;
+}
+
+export type TableRefInput = string | TableRef;
+export type SelectProjectionItem = string | SelectItem | ExprFn | ExprChain | Expr;
+export type OrderByItem = string | OrderItem | ExprFn | ExprChain | Expr;
+
+export interface ViewQueryBuilder {
+  from(table: TableRefInput): ViewQueryBuilder;
+  select(items: SelectProjectionItem[]): ViewQueryBuilder;
+  join(kind: JoinKind, table: TableRefInput, on: ExprFn | ExprChain | Expr): ViewQueryBuilder;
+  innerJoin(table: TableRefInput, on: ExprFn | ExprChain | Expr): ViewQueryBuilder;
+  leftJoin(table: TableRefInput, on: ExprFn | ExprChain | Expr): ViewQueryBuilder;
+  where(expr: ExprFn | ExprChain | Expr): ViewQueryBuilder;
+  orderBy(items: OrderByItem[]): ViewQueryBuilder;
+  limit(n: number): ViewQueryBuilder;
+}
+
+export interface CreateViewArgs {
+  as: ((q: ViewQueryBuilder) => ViewQueryBuilder | SelectAst) | ViewQueryBuilder | SelectAst;
+  columns?: string[];
+  replace?: boolean;
+  materialized?: boolean;
+  schema?: string;
+}
+
+export interface CreateRawViewArgs {
+  sql: string;
+  columns?: string[];
+  replace?: boolean;
+  materialized?: boolean;
+  schema?: string;
+}
+
+export interface DropViewArgs {
+  ifExists?: boolean;
+  materialized?: boolean;
+  schema?: string;
+}
+
+export interface ViewHandle {
+  create(args: CreateViewArgs): ViewHandle;
+  createRaw(args: CreateRawViewArgs): ViewHandle;
+  drop(args?: DropViewArgs): ViewHandle;
 }
 
 // ── `table()` entry + the fluent handle (§3) ──
