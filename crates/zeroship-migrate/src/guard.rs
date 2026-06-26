@@ -680,9 +680,28 @@ impl SqlGuard {
             // GRANT / REVOKE / role-membership grants — privilege management.
             // ALLOW iff Platform (§4.1): the platform schema migrations grant
             // CONNECT/USAGE/etc. (0025/0027). Confined still hard-denies.
-            NodeEnum::GrantStmt(_)
-            | NodeEnum::GrantRoleStmt(_)
-            | NodeEnum::AlterDefaultPrivilegesStmt(_) => {
+            NodeEnum::GrantStmt(s) => {
+                if grant_stmt_grants_privileged_role(s) {
+                    return Err(denied(rule::PRIVILEGED_ROLE_GRANT, raw));
+                }
+                if self.cfg.trust() == TrustProfile::Platform {
+                    return Ok(());
+                }
+                return Err(denied(rule::PRIVILEGE_MANAGEMENT, raw));
+            }
+            NodeEnum::GrantRoleStmt(s) => {
+                if grant_role_stmt_grants_privileged_role(s) {
+                    return Err(denied(rule::PRIVILEGED_ROLE_GRANT, raw));
+                }
+                if self.cfg.trust() == TrustProfile::Platform {
+                    return Ok(());
+                }
+                return Err(denied(rule::PRIVILEGE_MANAGEMENT, raw));
+            }
+            NodeEnum::AlterDefaultPrivilegesStmt(s) => {
+                if alter_default_privileges_grants_privileged_role(s) {
+                    return Err(denied(rule::PRIVILEGED_ROLE_GRANT, raw));
+                }
                 if self.cfg.trust() == TrustProfile::Platform {
                     return Ok(());
                 }
@@ -1680,6 +1699,44 @@ fn role_grants_superuser(options: &[protobuf::Node]) -> bool {
             if d.defname.eq_ignore_ascii_case("superuser")
                 && def_elem_bool(d) == Some(true))
     })
+}
+
+fn grant_stmt_grants_privileged_role(stmt: &protobuf::GrantStmt) -> bool {
+    stmt.is_grant && stmt.grantees.iter().any(node_names_privileged_role)
+}
+
+fn grant_role_stmt_grants_privileged_role(stmt: &protobuf::GrantRoleStmt) -> bool {
+    stmt.is_grant
+        && (stmt.granted_roles.iter().any(node_names_privileged_role)
+            || stmt.grantee_roles.iter().any(node_names_privileged_role))
+}
+
+fn alter_default_privileges_grants_privileged_role(
+    stmt: &protobuf::AlterDefaultPrivilegesStmt,
+) -> bool {
+    stmt.action
+        .as_ref()
+        .is_some_and(grant_stmt_grants_privileged_role)
+}
+
+fn node_names_privileged_role(node: &protobuf::Node) -> bool {
+    match node.node.as_ref() {
+        Some(NodeEnum::RoleSpec(role)) => role_spec_names_privileged_role(role),
+        // GrantRoleStmt.granted_roles is represented as AccessPriv by the PG AST
+        // because of the GRANT privilege-vs-role grammar ambiguity.
+        Some(NodeEnum::AccessPriv(role)) => is_privileged_role_name(&role.priv_name),
+        Some(NodeEnum::String(s)) => is_privileged_role_name(&s.sval),
+        _ => false,
+    }
+}
+
+fn role_spec_names_privileged_role(role: &protobuf::RoleSpec) -> bool {
+    role.roletype == protobuf::RoleSpecType::RolespecCstring as i32
+        && is_privileged_role_name(&role.rolename)
+}
+
+fn is_privileged_role_name(name: &str) -> bool {
+    denylist::list_contains_ci(denylist::PRIVILEGED_ROLES, name)
 }
 
 /// True if a CREATE FUNCTION carries the `security` definer option.
@@ -2908,6 +2965,32 @@ mod tests {
         );
     }
 
+    // ---- CRITICAL (2026-06 adversarial review #1): host-reaching built-in role
+    // membership grants are RCE-equivalent and remain denied under Platform. RED
+    // pre-fix: the GrantStmt/GrantRoleStmt arm returned Ok(()) immediately for
+    // Platform, so `GRANT pg_execute_server_program TO …` passed.
+
+    #[test]
+    fn host_escape_role_grant_denied_even_under_platform() {
+        let g = platform_guard();
+        assert!(
+            g.check(r"GRANT SELECT ON TABLE zeroship.app_secrets TO zeroship_app")
+                .is_ok(),
+            "benign table GRANT must still pass under Platform"
+        );
+
+        for sql in [
+            r"GRANT pg_execute_server_program TO zeroship_app",
+            r#"GRANT "pg_read_server_files" TO zeroship_app"#,
+            r"GRANT zeroship_app TO pg_write_server_files",
+        ] {
+            assert!(
+                is_denied(&g, sql),
+                "host-reaching built-in role membership grant must be DENIED even under Platform: {sql}"
+            );
+        }
+    }
+
     // ---- HIGH-1 (vendor-pg review): raw vendor bodies still hit gate 2 ----
 
     #[test]
@@ -3014,7 +3097,7 @@ mod tests {
     }
 
     #[test]
-    fn vendor_role_op_is_denied_by_gate_two_without_platform_capability() {
+    fn vendor_role_op_is_refused_at_lower_without_platform_capability() {
         let guard_cfg = GuardConfig::confined("zeroship");
         let author = crate::ir_author::IrAuthor::new(
             "zeroship",
@@ -3039,24 +3122,50 @@ mod tests {
             &guard_cfg,
             &crate::ir_author::LiveSchema::default(),
         ) {
-            Err(crate::ir_author::IrGuardedLowerError::Denied(denial)) => {
-                assert_eq!(denial.op_kind, "createRole");
-                assert!(
-                    matches!(
-                        denial.source,
-                        GuardError::Denied {
-                            rule: rule::ROLE_MANAGEMENT,
-                            ..
-                        }
-                    ),
-                    "Confined gate-2 should still deny a role vendor op, got: {:?}",
-                    denial.source
-                );
+            Err(crate::ir_author::IrGuardedLowerError::Lower(
+                crate::ir_author::IrLowerError::VendorCapabilityDenied {
+                    op,
+                    capability,
+                },
+            )) => {
+                assert_eq!(op, "createRole");
+                assert_eq!(capability, crate::capability::VendorCapability::Role);
             }
             other => panic!(
-                "vendor createRole must be denied by gate-2 without Platform capability; got {other:?}"
+                "vendor createRole must be refused at lower without Platform capability; got {other:?}"
             ),
         }
+    }
+
+    #[test]
+    fn benign_vendor_policy_is_refused_at_lower_without_capability() {
+        let guard_cfg = GuardConfig::confined("zeroship");
+        let author =
+            crate::ir_author::IrAuthor::new("zeroship", "app_corpus", SqlDialect::Postgres);
+        let op = crate::ir::Op::CreatePolicy {
+            name: "tenant_isolation".into(),
+            table: "app_secrets".into(),
+            schema: None,
+            for_cmd: crate::ir::PolicyCmd::All,
+            to: None,
+            using: crate::expr::Expr::Literal {
+                value: crate::ir::IrScalar::Bool(true),
+            },
+            with_check: None,
+        };
+
+        assert!(
+            matches!(
+                author.lower_guarded(
+                    &vendor_ir(op),
+                    &guard_cfg,
+                    &crate::ir_author::LiveSchema::default(),
+                ),
+                Err(crate::ir_author::IrGuardedLowerError::Lower(_))
+            ),
+            "lower_guarded must re-enforce the vendor capability gate before rendering; \
+             the SQL guard alone would allow a benign same-schema CREATE POLICY"
+        );
     }
 
     // ---- T2: SchemaScope Single is byte-identical at the read sites ---------

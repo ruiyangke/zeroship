@@ -269,6 +269,10 @@ pub mod rule {
     /// Platform widens privilege *within* the DB, never *host* reach). Only
     /// Trusted (operator-owns-the-DB) skips the whole deny-list.
     pub const SUPERUSER_ROLE: &str = "superuser_role";
+    /// `GRANT <host-reaching built-in role> TO ...` or granting privileges to one
+    /// of those roles. These built-ins carry server-file / server-program reach
+    /// and are denied in all non-Trusted profiles, including Platform.
+    pub const PRIVILEGED_ROLE_GRANT: &str = "privileged_role_grant";
     pub const PRIVILEGE_MANAGEMENT: &str = "privilege_management";
     pub const FILE_ACCESS_FUNCTION: &str = "file_access_function";
     pub const NETWORK_FUNCTION: &str = "network_function";

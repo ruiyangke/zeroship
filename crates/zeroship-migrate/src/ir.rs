@@ -1699,14 +1699,16 @@ pub enum Op {
         if_exists: Option<bool>,
     },
     /// **VENDOR** — the gated raw-statement escape (`pg.sql\`…\``, vendor spec
-    /// §2.11). Records the verbatim SQL + typed binds. Operator-only and STILL
-    /// parse-scanned by the guard deny-list at lower; `${…}` interpolation slots
-    /// accept ONLY typed `IrScalar` binds, never identifiers/SQL — so even the
-    /// escape cannot do string-concatenation SQLi.
+    /// §2.11). Records the verbatim SQL + optional typed binds. Operator-only and
+    /// STILL parse-scanned by the guard deny-list at lower. Non-empty `binds` are
+    /// rejected at validate/lower/render until PgRaw has a real parameterized
+    /// executor path; values must not be inlined as SQL text.
     PgRaw {
         /// The verbatim SQL statement (no trailing `;`).
         sql: String,
-        /// The typed binds (never inlined — `${…}` ⇒ a positional placeholder).
+        /// Optional typed binds. Non-empty is currently unsupported and refused
+        /// fail-closed; retained in the wire shape for the future parameterized
+        /// PgRaw executor path.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         binds: Vec<IrScalar>,
     },

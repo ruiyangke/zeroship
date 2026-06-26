@@ -1744,7 +1744,7 @@
           ]
         },
         {
-          "description": "**VENDOR** — the gated raw-statement escape (`pg.sql\\`…\\``, vendor spec\n§2.11). Records the verbatim SQL + typed binds. Operator-only and STILL\nparse-scanned by the guard deny-list at lower; `${…}` interpolation slots\naccept ONLY typed `IrScalar` binds, never identifiers/SQL — so even the\nescape cannot do string-concatenation SQLi.",
+          "description": "**VENDOR** — the gated raw-statement escape (`pg.sql\\`…\\``, vendor spec\n§2.11). Records the verbatim SQL + optional typed binds. Operator-only and\nSTILL parse-scanned by the guard deny-list at lower. Non-empty `binds` are\nrejected at validate/lower/render until PgRaw has a real parameterized\nexecutor path; values must not be inlined as SQL text.",
           "type": "object",
           "properties": {
             "sql": {
@@ -1752,7 +1752,7 @@
               "type": "string"
             },
             "binds": {
-              "description": "The typed binds (never inlined — `${…}` ⇒ a positional placeholder).",
+              "description": "Optional typed binds. Non-empty is currently unsupported and refused\nfail-closed; retained in the wire shape for the future parameterized\nPgRaw executor path.",
               "type": "array",
               "items": {
                 "$ref": "#/$defs/IrScalar"

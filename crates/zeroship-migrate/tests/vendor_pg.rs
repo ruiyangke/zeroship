@@ -193,12 +193,15 @@ fn render_create_function_embeds_body_verbatim() {
 }
 
 #[test]
-fn render_pg_raw_is_verbatim() {
+fn pg_raw_non_empty_binds_are_rejected_until_parameterized_execution_exists() {
     let op = Op::PgRaw {
         sql: "SELECT set_config('zeroship.tenant_app', $1, false)".into(),
         binds: vec![IrScalar::Str("app_demo".into())],
     };
-    assert_eq!(render_up(&op), "SELECT set_config('zeroship.tenant_app', $1, false)");
+    assert!(
+        render_vendor_op(&op, SCHEMA).is_err(),
+        "PgRaw binds are a false contract until PgRaw executes as a parameterized plan step"
+    );
 }
 
 #[test]

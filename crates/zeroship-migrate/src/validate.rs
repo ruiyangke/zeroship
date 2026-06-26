@@ -547,6 +547,25 @@ pub fn validate_op_scoped(
             }
             Ok(())
         }
+        Op::PgRaw { binds, .. } if !binds.is_empty() => Err(AuthoringError {
+            code: CODE_UNSUPPORTED.to_string(),
+            kind: Some(UnsupportedKind::Op),
+            op_index,
+            ts_location: ts_location.map(str::to_string),
+            dialect: target_dialect,
+            reason: format!(
+                "pgRaw carries {} bind value(s), but the current vendor/raw DDL path \
+                 executes SQL as a batch statement and does not bind parameters. \
+                 Non-empty PgRaw.binds are rejected until a parameterized PgRaw plan \
+                 step exists.",
+                binds.len()
+            ),
+            suggested_fix: Some(
+                "remove interpolation from pg.sql for now, or wait for the \
+                 parameterized PgRaw executor path; do not inline untrusted values"
+                    .to_string(),
+            ),
+        }),
         // Ops with no embedded expression slot. (`RenameTable` carries only its
         // old/new table NAMES — no Expr — so the schema-ident + guard-direction
         // gate in `validate_op_schema_and_guard` above is the whole check, and the
