@@ -2220,6 +2220,17 @@
             }
           ]
         },
+        "lock_timeout_ms": {
+          "description": "Override for the optional `lock_timeout_ms` facet (JS-safe-integer\nbounded) — the per-deploy maintenance-window lock-acquisition budget.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SafeU64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "phase": {
           "description": "Override for the optional `phase` facet.",
           "anyOf": [

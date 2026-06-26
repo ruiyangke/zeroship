@@ -261,6 +261,10 @@ pub struct IrFlagsOverride {
     /// Override for the optional `timeout_ms` facet (JS-safe-integer bounded).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<SafeU64>,
+    /// Override for the optional `lock_timeout_ms` facet (JS-safe-integer
+    /// bounded) — the per-deploy maintenance-window lock-acquisition budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lock_timeout_ms: Option<SafeU64>,
     /// Override for the optional `phase` facet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<OnlinePhase>,

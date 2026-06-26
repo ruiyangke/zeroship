@@ -42,6 +42,7 @@ fn checksum_of_byte_stable_golden() {
         online: true,
         requires_approval: true,
         timeout_ms: Some(60_000),
+        lock_timeout_ms: None,
         phase: Some(OnlinePhase::Contract),
         repeatable: false,
         engine_goodie_ddl: false,
@@ -57,11 +58,15 @@ fn checksum_of_byte_stable_golden() {
         supersedes: &sups,
         preconditions: &[],
     };
-    // Hard-coded expected — captured from the pre-`fold_common` code. If this
-    // ever changes, the checksum wire format drifted (NOT allowed pre-launch
-    // without a deliberate, documented break).
+    // Hard-coded expected. Re-captured when the lock-safety envelope added the
+    // `lock_timeout_ms` facet to `MigrationFlags` — a DELIBERATE, documented
+    // flags-wire change (the new key joins the canonical-JSON flags image folded
+    // by `fold_common`, so the golden moved by construction; pre-launch this is
+    // allowed and every golden is updated in the SAME patch). If this ever
+    // changes WITHOUT a corresponding flags-shape change, the checksum wire
+    // format drifted unintentionally.
     const EXPECTED: &str =
-        "557930c15eac9181b2c094ae5f5d8325d7b2c127cfdef0cda55802d5481321b7";
+        "61075be9920f5cf0e7acde1de5981e6688001ed0ff5e1b7e0033aac560a402cf";
     assert_eq!(
         Checksum::of(&input).as_str(),
         EXPECTED,
@@ -93,6 +98,7 @@ fn checksum_of_ir_byte_stable_golden() {
         online: false,
         requires_approval: false,
         timeout_ms: Some(30_000),
+        lock_timeout_ms: None,
         phase: None,
         repeatable: false,
         engine_goodie_ddl: false,
@@ -121,9 +127,15 @@ fn checksum_of_ir_byte_stable_golden() {
     ];
     let deps = [dep()];
     let sups = [sup()];
-    // Hard-coded expected — captured once from the current of_ir wire format.
+    // Hard-coded expected — re-captured when the lock-safety envelope added the
+    // `lock_timeout_ms` facet to `MigrationFlags` (the new key joins the
+    // canonical-JSON flags image `fold_common` folds, so the `of_ir` golden
+    // moved by construction; a DELIBERATE, documented flags-wire change, every
+    // golden updated in the SAME patch). NB: `typed_checksum` (the JS-builder
+    // anchor) reuses this same Rust `MigrationFlags::default()` serialization, so
+    // there is no separate JS serializer to bump.
     const EXPECTED: &str =
-        "6b3ccb9486a7445409b75f047d1c88b9516526dcebdae34a48f63f3fb0ff797a";
+        "574786ab59c227338430708e3793658d57ef9bfbf360e93e518e325c83119ad9";
     assert_eq!(
         Checksum::of_ir(
             &CanonicalOpList(&ops),

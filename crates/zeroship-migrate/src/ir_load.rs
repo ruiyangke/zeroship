@@ -683,13 +683,19 @@ mod tests {
     /// If this hex changes, the hint-domain wire format drifted — the JS `op.*`
     /// author would emit a hint the engine rejects. Not allowed without a
     /// deliberate, matched break on both sides.
+    ///
+    /// Re-captured when the lock-safety envelope added `lock_timeout_ms` to
+    /// `MigrationFlags`: the hint domain folds `MigrationFlags::default()`, whose
+    /// canonical-JSON image gained the `lock_timeout_ms: null` key, so this hex
+    /// moved BY CONSTRUCTION. The JS author reuses this same Rust crate's
+    /// serialization, so both sides move together — a DELIBERATE, matched break.
     #[test]
     fn load_accepts_a_frozen_checksum_hint_golden() {
         // A fixed dropTable IR with all-default flags/deps/supersedes/precond.
         let ops = r#"[{"op":"dropTable","table":"users"}]"#;
         // Hard-coded literal — NOT computed by the function under test.
         const FROZEN_HINT: &str =
-            "94383de0064858b3bff63599509d674a111aaad6874630c4c584357032ae2ced";
+            "738ff1ea66b06b7a898a7521bff3fef30bf2c9f7050b11f4cfd84cb0e2661d52";
         let bytes = ir_json(ops, &format!(r#", "checksum": "{FROZEN_HINT}""#));
         let reg = registry(&[("users", "app_a")]);
         let loaded = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None)
