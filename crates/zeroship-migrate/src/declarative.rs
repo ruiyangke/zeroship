@@ -508,6 +508,14 @@ fn field_to_sdk_def(f: &FieldDescriptor) -> serde_json::Value {
     }
     if let Some(mask) = &f.mask {
         def.insert("mask".into(), mask.clone());
+    } else if f.encrypted.is_some() {
+        // Mirror the SDK's `t.encrypted()` builder: encrypted columns get the
+        // fail-safe full/pii mask unless the author explicitly overrides or opts
+        // out with `.mask({ kind: "none" })`.
+        def.insert(
+            "mask".into(),
+            serde_json::json!({ "kind": "full", "classification": "pii" }),
+        );
     }
     if let Some(lit) = &f.literal_value {
         def.insert("literalValue".into(), lit.clone());

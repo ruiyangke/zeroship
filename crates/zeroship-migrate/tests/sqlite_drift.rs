@@ -214,14 +214,14 @@ async fn mask_sentinel_recovered_from_sqlite_master() {
     let be = backend(&p);
     // The emitter writes the masked sibling column with an inline mask sentinel;
     // sqlite_master.sql preserves the comment verbatim. We hand-author the exact
-    // shape the emitter produces (a `<col>_masked TEXT NOT NULL /* __zsmask:... */`).
+    // shape the emitter produces (a nullable `<col>_masked TEXT /* __zsmask:... */`).
     be.apply_one_additive(
         &mig(
             "with_mask",
             "CREATE TABLE accounts (\
                 id INTEGER PRIMARY KEY, \
                 ssn BLOB, \
-                ssn_masked TEXT NOT NULL /* __zsmask:kind=last4,classification=pii */);",
+                ssn_masked TEXT /* __zsmask:kind=last4,classification=pii */);",
         ),
         "d",
     )

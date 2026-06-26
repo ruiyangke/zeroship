@@ -290,6 +290,14 @@ fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
         "an encrypted column must create its masked sibling on both paths"
     );
     assert!(
+        decl.iter().any(|(up, _)| up.contains(r#""secret_masked" text"#)),
+        "an encrypted nullable column's masked sibling must render nullable on PG"
+    );
+    assert!(
+        !decl.iter().any(|(up, _)| up.contains(r#""secret_masked" text NOT NULL"#)),
+        "an encrypted nullable column's masked sibling must not render NOT NULL on PG"
+    );
+    assert!(
         decl.iter().any(|(up, _)| up.contains("__zsmask:kind=full,classification=pii")),
         "the encrypted auto-mask sentinel must be emitted on both paths"
     );
@@ -1067,6 +1075,14 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
     assert!(
         decl.iter().any(|(up, _)| up.contains("secret_masked")),
         "an encrypted column must create its masked sibling on the SQLite leg too"
+    );
+    assert!(
+        decl.iter().any(|(up, _)| up.contains(r#""secret_masked" TEXT /* __zsmask:"#)),
+        "an encrypted nullable column's masked sibling must render nullable on SQLite"
+    );
+    assert!(
+        !decl.iter().any(|(up, _)| up.contains(r#""secret_masked" TEXT NOT NULL"#)),
+        "an encrypted nullable column's masked sibling must not render NOT NULL on SQLite"
     );
     assert!(
         decl.iter().any(|(up, _)| up.contains("__zsmask:kind=full,classification=pii")),

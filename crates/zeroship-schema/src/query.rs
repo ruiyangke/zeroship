@@ -769,7 +769,9 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
             // field carries a `.mask({...})` declaration (or the
             // auto-default mask attached to `t.encrypted(...)` columns)
             // AND the mask kind is NOT `"none"`, emit a sibling
-            // `<col>_masked TEXT NOT NULL` column alongside the parent.
+            // `<col>_masked TEXT` column alongside the parent. The sibling is
+            // engine-managed: raw inserts may omit it and the runtime mask-write
+            // pass fills it when the parent value is written.
             // The sibling stores the pre-computed masked representation
             // (e.g. `"***-**-6789"`) computed at INSERT/UPDATE time by
             // `crud::mask_pass::apply_mask_on_write`. Reads default to
@@ -804,10 +806,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
                     Some(s) => format!(" /* {s} */"),
                     None => String::new(),
                 };
-                columns.push(format!(
-                    "{} TEXT NOT NULL{inline_comment}",
-                    quote_ident(&sibling_col)
-                ));
+                columns.push(format!("{} TEXT{inline_comment}", quote_ident(&sibling_col)));
             }
 
             // B2 — append FOREIGN KEY clause when this is a ref. Inline
@@ -9678,8 +9677,8 @@ mod tests {
         assert_eq!(mask_sibling_column_for_field("ssn", &def), None);
     }
 
-    /// **DDL shape** — masked column emits parent + sibling
-    /// `<col>_masked TEXT NOT NULL`.
+    /// **DDL shape** — masked column emits parent + nullable sibling
+    /// `<col>_masked TEXT`.
     #[test]
     fn build_create_table_emits_sibling_for_masked_column() {
         let schema = serde_json::json!({
@@ -9692,8 +9691,12 @@ mod tests {
         let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
             .expect("build_create_table_with_fks ok");
         assert!(
-            sql.contains("\"ssn_masked\" TEXT NOT NULL"),
-            "expected sibling column with TEXT NOT NULL: {sql}"
+            sql.contains("\"ssn_masked\" TEXT"),
+            "expected sibling column with TEXT: {sql}"
+        );
+        assert!(
+            !sql.contains("\"ssn_masked\" TEXT NOT NULL"),
+            "masked sibling must be nullable / omittable: {sql}"
         );
         assert!(sql.contains("\"ssn\""), "parent column still present: {sql}");
         assert!(
@@ -9739,7 +9742,7 @@ mod tests {
         let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
             .expect("build_create_table_with_fks ok");
         assert!(
-            sql.contains("\"email_masked\" TEXT NOT NULL /* __zsmask:kind=email,classification=pii */"),
+            sql.contains("\"email_masked\" TEXT /* __zsmask:kind=email,classification=pii */"),
             "expected inline /* __zsmask:... */ comment on sibling: {sql}"
         );
     }
@@ -9819,8 +9822,12 @@ mod tests {
             "parent encrypted column stays BYTEA: {sql}"
         );
         assert!(
-            sql.contains("\"ssn_masked\" TEXT NOT NULL"),
+            sql.contains("\"ssn_masked\" TEXT"),
             "encrypted column with default mask emits sibling: {sql}"
+        );
+        assert!(
+            !sql.contains("\"ssn_masked\" TEXT NOT NULL"),
+            "encrypted masked sibling must be nullable / omittable: {sql}"
         );
     }
 
@@ -10882,7 +10889,7 @@ mod tests {
 
         // Mask sentinel rides inline on the `<col>_masked` sibling column.
         assert!(
-            sql.contains(r#""ssn_masked" TEXT NOT NULL /* __zsmask:"#),
+            sql.contains(r#""ssn_masked" TEXT /* __zsmask:"#),
             "mask sentinel must ride inline on the sibling: {sql}"
         );
         // Encryption: BLOB physical column + inline `zsenc:` sentinel.

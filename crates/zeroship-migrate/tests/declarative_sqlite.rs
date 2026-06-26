@@ -111,7 +111,7 @@ async fn descriptor_to_sqlite_apply_roundtrips_mask_and_encryption() {
     );
     // Mask + encryption sentinels ride inline (the SQLite wire).
     assert!(
-        create.up.contains(r#""ssn_masked" TEXT NOT NULL /* __zsmask:"#),
+        create.up.contains(r#""ssn_masked" TEXT /* __zsmask:"#),
         "mask sentinel must ride inline: {}",
         create.up
     );
@@ -961,7 +961,7 @@ async fn golden_sqlite_create_table_and_index() {
     let accounts_mig = golden_find(&migs, "create_table_accounts");
     assert_eq!(
         accounts_mig.up,
-        "CREATE TABLE IF NOT EXISTS \"accounts\" (\n  id TEXT PRIMARY KEY,\n  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  created_by TEXT NULL,\n  updated_by TEXT NULL,\n  version INTEGER NOT NULL DEFAULT 1,\n  deleted_at TEXT NULL,\n  \"title\" TEXT NOT NULL,\n  \"ssn\" TEXT,\n  \"ssn_masked\" TEXT NOT NULL /* __zsmask:kind=last4,classification=pii */,\n  \"secret\" BLOB /* zsenc:randomised:k1:string */,\n  \"owner\" TEXT,\n  CONSTRAINT \"owner_fkey\" FOREIGN KEY (\"owner\") REFERENCES \"users\" (id) ON DELETE RESTRICT ON UPDATE RESTRICT DEFERRABLE INITIALLY DEFERRED\n);\nCREATE INDEX IF NOT EXISTS \"accounts_deleted_at_idx\" ON \"accounts\" (\"deleted_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_updated_at_idx\" ON \"accounts\" (\"updated_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_created_by_idx\" ON \"accounts\" (\"created_by\")",
+        "CREATE TABLE IF NOT EXISTS \"accounts\" (\n  id TEXT PRIMARY KEY,\n  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  created_by TEXT NULL,\n  updated_by TEXT NULL,\n  version INTEGER NOT NULL DEFAULT 1,\n  deleted_at TEXT NULL,\n  \"title\" TEXT NOT NULL,\n  \"ssn\" TEXT,\n  \"ssn_masked\" TEXT /* __zsmask:kind=last4,classification=pii */,\n  \"secret\" BLOB /* zsenc:randomised:k1:string */,\n  \"secret_masked\" TEXT /* __zsmask:kind=full,classification=pii */,\n  \"owner\" TEXT,\n  CONSTRAINT \"owner_fkey\" FOREIGN KEY (\"owner\") REFERENCES \"users\" (id) ON DELETE RESTRICT ON UPDATE RESTRICT DEFERRABLE INITIALLY DEFERRED\n);\nCREATE INDEX IF NOT EXISTS \"accounts_deleted_at_idx\" ON \"accounts\" (\"deleted_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_updated_at_idx\" ON \"accounts\" (\"updated_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_created_by_idx\" ON \"accounts\" (\"created_by\")",
     );
     assert_eq!(accounts_mig.down.as_deref(), Some(r#"DROP TABLE "accounts""#));
 

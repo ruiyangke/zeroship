@@ -609,7 +609,7 @@ mod tests {
         let sql = "CREATE TABLE \"app\".\"users\" (\
             \"id\" TEXT PRIMARY KEY, \
             \"ssn\" BYTEA, \
-            \"ssn_masked\" TEXT NOT NULL /* __zsmask:kind=last4,classification=pii */)";
+            \"ssn_masked\" TEXT /* __zsmask:kind=last4,classification=pii */)";
         assert_eq!(
             recover_inline_sentinel(sql, "ssn_masked").as_deref(),
             Some("__zsmask:kind=last4,classification=pii")
