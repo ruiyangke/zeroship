@@ -306,9 +306,9 @@ export default {
 > ADD COLUMN renders the metric opclass / `__zsmask` sentinel). `idPrefix` does not
 > (an added column is never the system PK — fail-closed, above).
 
-> **Related surfaces not yet documented here:** the `gen-types` step (column types
-> generated from the op fold) and the apply-time `lock_timeout` knob (split from
-> `statement_timeout`) are live engine features awaiting a doc pass.
+These facets are also what the migration set carries into the generated types:
+the typed-id `prefix`, the vector `metric`, and the `mask` brand survive the op
+fold into `env.db.ts` (see [Generating types from the migration set](#generating-types-from-the-migration-set-gen-types)).
 
 ## Bridging a `@zeroship/db` field (`fromDb`)
 
@@ -358,6 +358,8 @@ table("audit_log").create({
 });
 
 table("scratch").drop({ ifExists: true, cascade: true });
+
+table("accounts").rename({ to: "members" }); // ALTER TABLE … RENAME TO … (PG + SQLite)
 ```
 
 `create({...})` is the one all-object form (no `build` callback): table-level
@@ -366,9 +368,23 @@ constraints and indexes are **fields**, and each carries a **required `name`**
 actions are `cascade | restrict | setNull | setDefault | noAction` (the index
 method set is `btree | gin | gist | ivfflat | hnsw | fts5`).
 
-> A table-level `.rename({ to })` is **not** available: there is no `renameTable`
-> op in the IR and no executor support for it (column rename is `.column().rename()`,
-> see [Online rename](#online-rename)).
+#### `.rename({ to })` — whole-table rename
+
+`table(name).rename({ to, ifExists?, schema? })` records a `renameTable` op
+(`Op::RenameTable`) that lowers to a single, **direct** `ALTER TABLE … RENAME TO
+…` on **both** Postgres and SQLite — a fast catalog-metadata change, **not** the
+online column expand-contract (a whole table has no per-column dual-write that
+lets it coexist under two names). Because the change is a pure metadata rename,
+it is **auto-reversible**: the engine emits the inverse `RENAME TO` as the
+down-migration, so a renaming-only migration needs no hand-written `down()`.
+
+The fold re-targets every **incoming** FK / `ref` reference to the new name (the
+offline mirror of what live PG does on `RENAME TO`), so a later migration may
+reference the table under its new name and the generated types resolve. `ifExists`
+guards the **source** table (presence-only — an `ifExists` rename of an absent
+table is a satisfied no-op, the same probe shape `.drop({ ifExists })` uses). This
+is distinct from `.column().rename()` (the online column rename, see
+[Online rename](#online-rename)).
 
 ### Columns — the `.column(name)` selector
 
@@ -959,6 +975,97 @@ Production go-live gating, post-PR9a:
 Until per-version approval scoping lands, the approved go-live surface stays
 test-only (the regression test above pins it); treat online `renameColumn` as a
 dev/CLI capability, not a shipped production deploy path.
+
+## Apply-time lock safety (`lock_timeout`)
+
+The apply path runs each migration under **two separate, deliberately-split
+timeouts** (the safe-migration lock-safety envelope — `strong_migrations` / Atlas
+PG101 & PG103). They bound different things:
+
+- **`statement_timeout`** (default **60s**) — how long a statement may **run**
+  once it holds its lock. A runaway DDL/DML is cancelled after this.
+- **`lock_timeout`** (default **3s**, short on purpose) — how long a statement
+  waits to **acquire** a lock before failing fast with `55P03
+  lock_not_available`. It is **NOT** folded into `statement_timeout`.
+
+Why the split matters: on a populated, live multi-tenant table a blocking DDL
+(e.g. an `ALTER TABLE` taking an `ACCESS EXCLUSIVE` lock) queues behind any
+long-running transaction holding a conflicting lock — and because it is itself
+waiting on `ACCESS EXCLUSIVE`, every subsequent query on that table queues behind
+*it*. That is a tenant-wide availability outage for the lifetime of the wait. A
+**short** `lock_timeout` makes the blocked DDL fail fast and roll back cleanly
+(the lock-timeout failure is retryable, never data-corrupting — the two-phase
+recovery handles the abort), freeing the table immediately; the operator retries
+during a quieter window. A long lock-acquisition budget would make the outage
+last that long.
+
+The 3s default is the **executor-wide** floor. A single migration that
+legitimately needs to wait longer — a planned maintenance-window change run
+during a quiet period where a brief stall is acceptable — raises **only its own**
+lock-acquisition budget via the per-migration `lock_timeout_ms` flag override
+(the `IrFlagsOverride.lock_timeout_ms` facet, mirroring the existing per-migration
+`timeout_ms` ceiling). The conservative fail-fast default stays in force for every
+other migration in the same deploy. Both timeout overrides are folded into the
+migration checksum, so changing one re-versions the migration like any other
+apply-relevant change.
+
+## Generating types from the migration set (`gen-types`)
+
+Migration-first: the op.* migration set is the source of truth for the schema, and
+the typed `env.db` surface is **generated from it** rather than from a separate
+`export default { schema }` object. The `zeroship-migrate-js gen-types` subcommand
+loads the committed `.ir.json` set in version order, **folds** it into a
+per-collection field map (the same fold the engine uses internally), and emits two
+artifacts:
+
+- **`schema.runtime.json`** — the `RuntimeSchemaDescriptor`: a
+  `Record<collection, Record<column, FieldDef>>` that formalises what the runtime's
+  `normalizeSchema` produces. It is content-addressed into the `.zship` artifact (a
+  manifest `runtime_descriptor` blob) so the runtime can read the schema without
+  re-evaluating a declared schema object.
+- **`env.db.ts`** — a generated `@zeroship/db` schema **module** reconstructing
+  `const schema = { … t.text() … } as const` of `t.*()` builder calls (the SDK type
+  inference keys only off the builder-call value expressions, so the emitter emits
+  builder calls, never a hand-rolled interface), plus a `declare module "zeroship"`
+  augmentation typing `env.db` from that schema.
+
+```bash
+# emit (writes both artifacts into the output dir)
+zeroship-migrate-js gen-types --dir migrations --out generated/zeroship
+
+# CI drift gate (no DB, no write): regenerate in memory and diff against the
+# committed artifacts — fails non-zero if they no longer track the migrations
+zeroship-migrate-js gen-types --dir migrations --out generated/zeroship --check
+```
+
+The declared-only facets ([Sensitive-data facets](#sensitive-data-facets)) survive
+the fold: the typed-id `prefix`, the vector `metric`, and the `mask` brand all flow
+into the generated `env.db.ts`, so `env.db.users.email` reads back as
+`MaskedValue<T>` purely from the migration history. Because `env.db.ts` is a real
+`.ts` module (not a `.d.ts`), `tsc` type-checks it like any source file — a
+generated type that does not compile is a hard build failure.
+
+The `@zeroship/vite-plugin` is a thin client of this same CLI: it regenerates the
+artifacts on dev-server boot and on any change under the migrations dir, and runs
+the `--check` drift gate on a production build. See
+[vite-plugin.md → Migration-first type generation](./vite-plugin.md#migration-first-type-generation-gen-types)
+for the build/watch wiring and the committed-but-outside-`include` placement.
+
+> **In progress (design — not yet shipped).** Two follow-on tracks extend this
+> surface; treat them as design references, not implemented features:
+> - **The `@zeroship/migrate/pg` vendor primitive layer** — a Postgres-only,
+>   operator-gated superset (grants/roles/policies/functions/triggers/extensions/RLS)
+>   so the platform's own privileged DDL can be authored in the DSL and the Liquibase
+>   changelog retired. Hard-gated to the Trusted/Platform profile, unreachable from a
+>   Confined creator migration by construction. Design:
+>   [docs/proposals/2026-06-25-vendor-pg-primitives.md](../proposals/2026-06-25-vendor-pg-primitives.md).
+> - **The migration-first runtime cutover (P4/P5)** — the runtime reads the generated
+>   `schema.runtime.json` descriptor directly and `export default { schema }` is
+>   deleted as the source of truth (the generated `env.db.ts` folds into the app's
+>   tsc `include`). Today the artifacts are generated, committed, and drift-gated but
+>   **not yet** wired into the typecheck or the runtime (they coexist with the declared
+>   schema). Design:
+>   [docs/proposals/2026-06-25-migration-first-schema.md](../proposals/2026-06-25-migration-first-schema.md).
 
 ## Offline SQL preview (`plan`)
 
