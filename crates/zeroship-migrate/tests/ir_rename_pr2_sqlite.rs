@@ -134,7 +134,7 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
                 ty: ColType::Text, // the e2e tables use text fields
                 nullable: Some(!f.required),
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None })
+                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None })
             .collect();
         let ir = MigrationIr {
             ir_version: 1,
@@ -310,7 +310,7 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
                     ty: ColType::Int,
                     nullable: Some(false),
                     default: None,
-                    unique: None, id_prefix: None, vector_metric: None, mask: None }],
+                    unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
                 constraints: vec![],
                 indexes: vec![],
                 schema: None,
@@ -478,6 +478,8 @@ fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
                 data_type: a_type,
                 nullable: true,
                 default: None,
+                generated: None,
+                identity: None,
                 encryption_sentinel: None,
                 comment_sentinel: None,
             }],

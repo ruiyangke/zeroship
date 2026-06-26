@@ -335,6 +335,8 @@ async fn introspect_columns(
             // mask/encryption sentinel into `comment_sentinel` (§2.7) so an encrypted
             // / masked column round-trips faithfully rather than dropping silently.
             default: None,
+            generated: None,
+            identity: None,
             encryption_sentinel: None,
             comment_sentinel: recover_inline_sentinel(stored_create_sql, &name),
         });

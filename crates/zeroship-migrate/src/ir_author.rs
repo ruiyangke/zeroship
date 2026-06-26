@@ -548,6 +548,20 @@ pub enum IrLowerError {
         /// The target dialect that cannot render the facet.
         dialect: SqlDialect,
     },
+    /// A column facet is unsupported on the target dialect. Generated/identity
+    /// columns are cross-dialect core with per-facet refusals (for example,
+    /// SQLite non-PK identity or Postgres virtual generated columns).
+    #[error(
+        "IrAuthor::lower of column facet {kind:?} is unsupported on {dialect:?}: {reason:?}"
+    )]
+    ColumnUnsupported {
+        /// Stable unsupported-kind token (`virtualColumn`, `identity`, …).
+        kind: &'static str,
+        /// The target dialect that cannot render the facet.
+        dialect: SqlDialect,
+        /// Optional precise reason.
+        reason: Option<&'static str>,
+    },
     /// **PR2** — a `renameColumn` whose IR-carried [`ColType`] does not match the
     /// LIVE `from` column's actual `data_type`. A pure online rename mirrors values
     /// across the two columns (PG dual-write `NEW.<to> := NEW.<from>`; the SQLite
@@ -1349,7 +1363,18 @@ impl IrAuthor {
                 live.insert(name.clone());
                 migs
             }
-            Op::AddColumn { table, column, ty, nullable, default, vector_metric, mask, .. } => {
+            Op::AddColumn {
+                table,
+                column,
+                ty,
+                nullable,
+                default,
+                vector_metric,
+                mask,
+                generated,
+                identity,
+                ..
+            } => {
                 // Fail-closed on a synth default (see the createTable arm): a
                 // user-authored `now()`/`genRandomUuid()` must NOT be silently dropped.
                 reject_synth_default(std::iter::once((column.as_str(), default.as_ref())))?;
@@ -1360,7 +1385,15 @@ impl IrAuthor {
                 // capture it so the ADD path lowers it too (otherwise the runtime mask
                 // read-pass has no sibling to write to; the bug the PG round-trip caught).
                 let (col, masked_sibling) = self.add_column_snapshot_with_sibling(
-                    table, column, ty, *nullable, default.as_ref(), *vector_metric, *mask,
+                    table,
+                    column,
+                    ty,
+                    *nullable,
+                    default.as_ref(),
+                    *vector_metric,
+                    *mask,
+                    generated.as_ref(),
+                    *identity,
                 )?;
                 // **PR10 Part B** — addColumn ifNotExists: verify (data_type, nullable)
                 // from the SAME shared-builder column snapshot the ADD renders from.
@@ -1508,7 +1541,8 @@ impl IrAuthor {
                 // Build the desired `ColumnSnapshot` via the SHARED builder (a
                 // one-field descriptor) so the emitted `data_type` is byte-identical
                 // to the differ's type mapping — never re-spelled (§6.5).
-                let col = self.add_column_snapshot(table, column, ty, None, None, None, None)?;
+                let col =
+                    self.add_column_snapshot(table, column, ty, None, None, None, None, None, None)?;
                 // **PR10 Part B** — alterColumnType ifExists: the SOURCE column must
                 // EXIST (presence-only — an alter intentionally CHANGES the shape, so
                 // there is nothing to shape-verify).
@@ -2155,6 +2189,9 @@ impl IrAuthor {
     ) -> Result<(), IrLowerError> {
         let mut changed = false;
         for c in columns {
+            if c.identity.is_some() {
+                continue;
+            }
             let (_, sibling) = self.add_column_snapshot_with_sibling(
                 table,
                 &c.name,
@@ -2163,6 +2200,8 @@ impl IrAuthor {
                 c.default.as_ref(),
                 c.vector_metric,
                 c.mask,
+                c.generated.as_ref(),
+                c.identity,
             )?;
             let Some(sibling) = sibling else {
                 continue;
@@ -2223,7 +2262,15 @@ impl IrAuthor {
         let is_sqlite = matches!(self.dialect, SqlDialect::Sqlite);
         for c in constraints {
             match &c.kind {
-                IrConstraintKind::Pk { .. } => {
+                IrConstraintKind::Pk { columns } => {
+                    if columns.as_slice() == ["id"]
+                        && snap
+                            .columns
+                            .iter()
+                            .any(|col| col.name == "id" && col.identity.is_some())
+                    {
+                        continue;
+                    }
                     // The platform owns the `id` PK; a user composite / per-column PK
                     // would emit a SECOND `PRIMARY KEY`, which both backends reject.
                     return Err(IrLowerError::UnsupportedOp(
@@ -2355,9 +2402,21 @@ impl IrAuthor {
         default: Option<&IrDefault>,
         vector_metric: Option<VectorMetric>,
         mask: Option<IrMask>,
+        generated: Option<&crate::ir::GeneratedCol>,
+        identity: Option<crate::ir::IdentityCol>,
     ) -> Result<ColumnSnapshot, IrLowerError> {
         Ok(self
-            .add_column_snapshot_with_sibling(table, column, ty, nullable, default, vector_metric, mask)?
+            .add_column_snapshot_with_sibling(
+                table,
+                column,
+                ty,
+                nullable,
+                default,
+                vector_metric,
+                mask,
+                generated,
+                identity,
+            )?
             .0)
     }
 
@@ -2378,7 +2437,16 @@ impl IrAuthor {
         default: Option<&IrDefault>,
         vector_metric: Option<VectorMetric>,
         mask: Option<IrMask>,
+        generated: Option<&crate::ir::GeneratedCol>,
+        identity: Option<crate::ir::IdentityCol>,
     ) -> Result<(ColumnSnapshot, Option<ColumnSnapshot>), IrLowerError> {
+        if matches!(self.dialect, SqlDialect::Sqlite) && identity.is_some() {
+            return Err(IrLowerError::ColumnUnsupported {
+                kind: "identity",
+                dialect: self.dialect,
+                reason: Some("non-PK identity has no sound SQLite emulation"),
+            });
+        }
         let field = ir_column_to_field(&IrColumn {
             name: column.to_string(),
             ty: ty.clone(),
@@ -2387,7 +2455,13 @@ impl IrAuthor {
             // **#173** — `id_prefix` stays `None` (an added column is never the system
             // PK); the vector metric + standalone mask ARE carried so the snapshot
             // renders the metric opclass / `__zsmask` sentinel.
-            unique: None, id_prefix: None, vector_metric, mask });
+            unique: None,
+            id_prefix: None,
+            vector_metric,
+            mask,
+            generated: generated.cloned(),
+            identity,
+        });
         let desc = CollectionDescriptor {
             name: table.to_string(),
             owner_app: self.decl.owner_app().to_string(),
@@ -2462,7 +2536,7 @@ impl IrAuthor {
         // `data_type` via the SHARED builder (the SAME spelling the differ's
         // `field_data_type` produces and the live introspection records). This is
         // the type the IR ASSERTS the column has.
-        let col = self.add_column_snapshot(table, to, ty, None, None, None, None)?;
+        let col = self.add_column_snapshot(table, to, ty, None, None, None, None, None, None)?;
         let ir_data_type = col.data_type.clone();
 
         // **AUTHORITATIVE IR-vs-live type reconciliation (HIGH/MED — both legs).**
@@ -3529,6 +3603,8 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         vector_dims,
         vector_metric: c.vector_metric.map(|m| m.as_token().to_string()),
         id_prefix: c.id_prefix.clone(),
+        generated: c.generated.clone(),
+        identity: c.identity,
         ..Default::default()
     }
 }
@@ -3553,7 +3629,8 @@ fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
     match ty {
         ColType::String => ("string".into(), None),
         ColType::Text => ("string".into(), None),
-        ColType::Int | ColType::BigInt => ("int".into(), None),
+        ColType::Int => ("int".into(), None),
+        ColType::BigInt => ("bigInt".into(), None),
         ColType::Float => ("number".into(), None),
         ColType::Bool => ("boolean".into(), None),
         ColType::Json => ("json".into(), None),
@@ -3772,7 +3849,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: Some(false),
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         if let Op::CreateTable { constraints, .. } = &mut ir.ops[0] {
             constraints.push(IrConstraint {
@@ -3814,7 +3891,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             *schema = Some("app2".into());
@@ -3856,7 +3933,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             // A case-VARIANT of the bound project schema — the gate folds it in.
@@ -3903,7 +3980,7 @@ mod tests {
                     ty: ColType::Int,
                     nullable: Some(false),
                     default: Some(IrDefault::Literal { value: IrScalar::Int(5) }),
-                    unique: None, id_prefix: None, vector_metric: None, mask: None },
+                    unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
                 // A bigint default beyond 2^53 — carried as a decimal STRING (the IR
                 // rejects a fractional/oversized JSON number), and `as_f64` would
                 // corrupt it; the verbatim string keeps it exact.
@@ -3914,7 +3991,7 @@ mod tests {
                     default: Some(IrDefault::Literal {
                         value: IrScalar::Decimal("9007199254740993".into()),
                     }),
-                    unique: None, id_prefix: None, vector_metric: None, mask: None },
+                    unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
                 TIrColumn {
                     name: "ratio".into(),
                     ty: ColType::Float,
@@ -3922,7 +3999,7 @@ mod tests {
                     default: Some(IrDefault::Literal {
                         value: IrScalar::Decimal("0.5".into()),
                     }),
-                    unique: None, id_prefix: None, vector_metric: None, mask: None },
+                    unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
             ],
         );
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
@@ -3959,7 +4036,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres)
             // Trusted CLI widens the scope to admit the connection default it binds.
@@ -3992,7 +4069,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         // No `with_schema_scope` ⇒ Confined `Single("app1")`; the op omits its own
         // qualifier, so the effective schema resolves to the foreign default "other".
@@ -4028,7 +4105,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         // The op itself names a FOREIGN schema "other" (≠ project "app1"); NO
         // connection default is bound, so this exercises the EXPLICIT-qualifier arm,
@@ -4064,7 +4141,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             *schema = Some("reporting".into());
@@ -4099,7 +4176,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             *schema = Some("reporting".into());
@@ -4135,7 +4212,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             // The op names the project schema explicitly — the implicit main target.
@@ -4278,7 +4355,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         if let Op::CreateTable { existence_guard, .. } = &mut ir.ops[0] {
             *existence_guard = Some(crate::ir::ExistenceGuard::IfNotExists);
@@ -4317,7 +4394,7 @@ mod tests {
                 ty: ColType::Encrypted { of: Box::new(ColType::String) },
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let guard_cfg = GuardConfig::confined("app".to_string());
@@ -4365,7 +4442,7 @@ mod tests {
                 ty: ColType::String,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         // Guard confined to "other" — the rendered `CREATE TABLE "app".…` is then a
@@ -4395,7 +4472,7 @@ mod tests {
                 ty: ColType::String,
                 nullable: Some(false),
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Sqlite);
         let guard_cfg = GuardConfig::confined_sqlite("app".to_string());
@@ -4434,7 +4511,7 @@ mod tests {
                 default: Some(IrDefault::Literal {
                     value: crate::ir::IrScalar::Str(nasty.into()),
                 }),
-                unique: None, id_prefix: None, vector_metric: None, mask: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let guard_cfg = GuardConfig::confined("app".to_string());
@@ -4594,6 +4671,8 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
+                    None,
                 )
                 .expect("ir add_column_snapshot");
 
@@ -4643,7 +4722,7 @@ mod tests {
                     ty: ColType::Text,
                     nullable: Some(false),
                     default: None,
-                    unique: None, id_prefix: None, vector_metric: None, mask: None },
+                    unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
             ];
 
             // IrAuthor's createTable snapshot (its real lowering seam: the private
@@ -4718,7 +4797,7 @@ mod tests {
                     ty: ColType::Timestamp,
                     nullable: None,
                     default: Some(IrDefault::Fn { r#fn: SynthDefaultFn::Now }),
-                    unique: None, id_prefix: None, vector_metric: None, mask: None }],
+                    unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
                 constraints: vec![],
                 indexes: vec![],
                 schema: None,
@@ -4751,6 +4830,8 @@ mod tests {
                 default: Some(IrDefault::Fn { r#fn: SynthDefaultFn::GenRandomUuid }),
                 vector_metric: None,
                 mask: None,
+                generated: None,
+                identity: None,
                 schema: None,
                 existence_guard: None,
             }],
@@ -4782,6 +4863,8 @@ mod tests {
                 default: Some(IrDefault::Literal { value: crate::ir::IrScalar::Str("x".into()) }),
                 vector_metric: None,
                 mask: None,
+                generated: None,
+                identity: None,
                 schema: None,
                 existence_guard: None,
             }],
@@ -5098,7 +5181,7 @@ mod tests {
             ty: ColType::Text,
             nullable: Some(false),
             default: None,
-            unique: None, id_prefix: None, vector_metric: None, mask: None }]);
+            unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }]);
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let plan = author.lower_plan(&ir, &LiveSchema::default()).expect("lower_plan");
 
@@ -5157,7 +5240,7 @@ mod tests {
             ty: ColType::Text,
             nullable: Some(false),
             default: None,
-            unique: None, id_prefix: None, vector_metric: None, mask: None }]);
+            unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }]);
         let pg = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
             .lower_plan(&ir, &LiveSchema::default())
             .expect("pg lower_plan");
@@ -5188,9 +5271,9 @@ mod tests {
     #[test]
     fn ir_plan_anchor_changes_when_op_list_changes() {
         let a = create_table_ir("t", vec![TIrColumn {
-            name: "c".into(), ty: ColType::Text, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None, mask: None }]);
+            name: "c".into(), ty: ColType::Text, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }]);
         let b = create_table_ir("t", vec![TIrColumn {
-            name: "c".into(), ty: ColType::Int, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None, mask: None }]);
+            name: "c".into(), ty: ColType::Int, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }]);
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let pa = author.lower_plan(&a, &LiveSchema::default()).expect("lower a");
         let pb = author.lower_plan(&b, &LiveSchema::default()).expect("lower b");

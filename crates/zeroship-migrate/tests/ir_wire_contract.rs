@@ -138,6 +138,8 @@ fn ir_column_facet_fields_are_camel_case() {
         id_prefix: Some("post".into()),
         vector_metric: Some(VectorMetric::Cosine),
         mask: None,
+        generated: None,
+        identity: None,
     };
     let v = serde_json::to_value(&col).unwrap();
     assert_eq!(v["idPrefix"], "post", "idPrefix is camelCase on the wire: {v}");
@@ -567,6 +569,8 @@ fn add_column_omits_absent_optionals() {
         default: None,
         vector_metric: None,
         mask: None,
+        generated: None,
+        identity: None,
         schema: None,
         existence_guard: None,
     };
@@ -620,7 +624,7 @@ fn nested_ir_column_index_constraint_omit_absent_optionals() {
         ty: ColType::Uuid,
         nullable: None,
         default: None,
-        unique: None, id_prefix: None, vector_metric: None, mask: None };
+        unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None };
     let cv = serde_json::to_value(&col).unwrap();
     let cobj = cv.as_object().unwrap();
     for absent in ["nullable", "default", "unique"] {
@@ -693,6 +697,8 @@ fn checksum_of_ir_matches_js_idiomatic_omitted_optionals() {
         default: None,
         vector_metric: None,
         mask: None,
+        generated: None,
+        identity: None,
         schema: None,
         existence_guard: None,
     };

@@ -276,6 +276,28 @@
                 }
               ]
             },
+            "generated": {
+              "description": "A generated/computed added column facet.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/GeneratedCol"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "identity": {
+              "description": "An identity added column facet. SQLite has no sound `ADD COLUMN`\nemulation for identity, so the SQLite validator refuses it.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/IdentityCol"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "schema": {
               "description": "**PR10** — the schema qualifier (§2.7).",
               "type": [
@@ -1935,6 +1957,28 @@
               "type": "null"
             }
           ]
+        },
+        "generated": {
+          "description": "A generated/computed column facet. The expression is closed structured\n[`Expr`] data, never raw SQL.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeneratedCol"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "identity": {
+          "description": "A SQL identity column facet. SQLite only has a sound emulation for the sole\ninteger primary-key case; other SQLite identity placements fail closed.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IdentityCol"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -2329,180 +2373,23 @@
         }
       ]
     },
-    "IrConstraint": {
-      "description": "A named table constraint.\n\n`kind` is a NESTED object (`{\"name\":…,\"kind\":{\"kind\":\"fk\",…}}`), NOT a\nflattened sibling — un-flattening makes [`deny_unknown_fields`] sound (serde\nforbids `flatten` + `deny_unknown_fields` together) and removes the\nflatten-merge ambiguity that made the generated JSON Schema lossy.",
+    "GeneratedCol": {
+      "description": "A generated/computed column facet.\n\nThe expression is the closed [`Expr`] AST. `stored = true` renders STORED;\n`stored = false` renders VIRTUAL on SQLite and is fail-closed on Postgres.",
       "type": "object",
       "properties": {
-        "name": {
-          "description": "Optional constraint name (engine-derived if absent).",
-          "type": [
-            "string",
-            "null"
-          ]
+        "expr": {
+          "description": "The generated-column expression.",
+          "$ref": "#/$defs/Expr"
         },
-        "kind": {
-          "description": "The constraint kind + its operands (a nested, internally-tagged object).",
-          "$ref": "#/$defs/IrConstraintKind"
+        "stored": {
+          "description": "`true` ⇒ STORED; `false` ⇒ VIRTUAL (SQLite only).",
+          "type": "boolean"
         }
       },
       "additionalProperties": false,
       "required": [
-        "kind"
-      ]
-    },
-    "IrConstraintKind": {
-      "description": "The kind of a table constraint. CLOSED enum, internally tagged on `\"kind\"`.",
-      "oneOf": [
-        {
-          "description": "PRIMARY KEY over the named columns.",
-          "type": "object",
-          "properties": {
-            "columns": {
-              "description": "The key columns.",
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "kind": {
-              "type": "string",
-              "const": "pk"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "columns"
-          ]
-        },
-        {
-          "description": "FOREIGN KEY referencing `(referencesTable.referencesColumns)`.",
-          "type": "object",
-          "properties": {
-            "columns": {
-              "description": "The referencing columns.",
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "referencesTable": {
-              "description": "The referenced table.",
-              "type": "string"
-            },
-            "referencesColumns": {
-              "description": "The referenced columns.",
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "onDelete": {
-              "description": "`ON DELETE` referential action (C1). Additive-optional: an absent\naction is checksum-neutral (`skip_serializing_if`), so a FK that sets\nno action serializes byte-identically to the pre-C1 wire image.",
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/RefAction"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "onUpdate": {
-              "description": "`ON UPDATE` referential action (C1). Additive-optional (see\n`on_delete`).",
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/RefAction"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "kind": {
-              "type": "string",
-              "const": "fk"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "columns",
-            "referencesTable",
-            "referencesColumns"
-          ]
-        },
-        {
-          "description": "UNIQUE over the named columns.",
-          "type": "object",
-          "properties": {
-            "columns": {
-              "description": "The unique columns.",
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "kind": {
-              "type": "string",
-              "const": "unique"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "columns"
-          ]
-        },
-        {
-          "description": "CHECK with a portable boolean expression (closed AST, never raw SQL).",
-          "type": "object",
-          "properties": {
-            "expr": {
-              "description": "The check expression (a boolean closed-AST node).",
-              "$ref": "#/$defs/Expr"
-            },
-            "kind": {
-              "type": "string",
-              "const": "check"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "expr"
-          ]
-        }
-      ]
-    },
-    "RefAction": {
-      "description": "The CLOSED referential-action lexicon for a FOREIGN KEY's `ON DELETE` /\n`ON UPDATE` clause (C1 — design §3.3). A CLOSED enum so the schema enumerates\nexactly the supported actions and serde REJECTS any out-of-set token at\nDESERIALIZE — a hand-crafted `.ir.json` cannot smuggle an arbitrary /\ninjection-shaped action string into the FK render seam. Camel-cased on the\nwire (`\"cascade\"`, `\"setNull\"`, `\"noAction\"`, …); the per-dialect SQL spelling\n(`SET NULL`, `NO ACTION`, …) is the render seam's job via\n[`zeroship_schema::query::normalize_fk_action`].",
-      "oneOf": [
-        {
-          "description": "`ON DELETE/UPDATE CASCADE`.",
-          "type": "string",
-          "const": "cascade"
-        },
-        {
-          "description": "`ON DELETE/UPDATE RESTRICT`.",
-          "type": "string",
-          "const": "restrict"
-        },
-        {
-          "description": "`ON DELETE/UPDATE SET NULL`.",
-          "type": "string",
-          "const": "setNull"
-        },
-        {
-          "description": "`ON DELETE/UPDATE SET DEFAULT`.",
-          "type": "string",
-          "const": "setDefault"
-        },
-        {
-          "description": "`ON DELETE/UPDATE NO ACTION` (the SQL default).",
-          "type": "string",
-          "const": "noAction"
-        }
+        "expr",
+        "stored"
       ]
     },
     "Expr": {
@@ -2938,6 +2825,196 @@
           "description": "`uuid` (PG-native `uuid`; `text` on SQLite, which has no uuid type).\nNeeded for the VENDOR policy predicates — the 0025 tenant-isolation\npolicy casts `current_setting('zeroship.tenant_app', true)::uuid`, so a\nfaithful port of `pg_get_expr(polqual)` requires the real `::uuid` cast,\nnot a `::text` substitute (vendor spec §2.10 / §5.3).",
           "type": "string",
           "const": "uuid"
+        }
+      ]
+    },
+    "IdentityCol": {
+      "description": "An identity column facet.\n\n`always = true` renders `GENERATED ALWAYS AS IDENTITY`; `false` renders\n`GENERATED BY DEFAULT AS IDENTITY`.",
+      "type": "object",
+      "properties": {
+        "always": {
+          "description": "`true` ⇒ ALWAYS; `false` ⇒ BY DEFAULT.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "always"
+      ]
+    },
+    "IrConstraint": {
+      "description": "A named table constraint.\n\n`kind` is a NESTED object (`{\"name\":…,\"kind\":{\"kind\":\"fk\",…}}`), NOT a\nflattened sibling — un-flattening makes [`deny_unknown_fields`] sound (serde\nforbids `flatten` + `deny_unknown_fields` together) and removes the\nflatten-merge ambiguity that made the generated JSON Schema lossy.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Optional constraint name (engine-derived if absent).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "The constraint kind + its operands (a nested, internally-tagged object).",
+          "$ref": "#/$defs/IrConstraintKind"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ]
+    },
+    "IrConstraintKind": {
+      "description": "The kind of a table constraint. CLOSED enum, internally tagged on `\"kind\"`.",
+      "oneOf": [
+        {
+          "description": "PRIMARY KEY over the named columns.",
+          "type": "object",
+          "properties": {
+            "columns": {
+              "description": "The key columns.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "pk"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "columns"
+          ]
+        },
+        {
+          "description": "FOREIGN KEY referencing `(referencesTable.referencesColumns)`.",
+          "type": "object",
+          "properties": {
+            "columns": {
+              "description": "The referencing columns.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "referencesTable": {
+              "description": "The referenced table.",
+              "type": "string"
+            },
+            "referencesColumns": {
+              "description": "The referenced columns.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "onDelete": {
+              "description": "`ON DELETE` referential action (C1). Additive-optional: an absent\naction is checksum-neutral (`skip_serializing_if`), so a FK that sets\nno action serializes byte-identically to the pre-C1 wire image.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RefAction"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "onUpdate": {
+              "description": "`ON UPDATE` referential action (C1). Additive-optional (see\n`on_delete`).",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RefAction"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "fk"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "columns",
+            "referencesTable",
+            "referencesColumns"
+          ]
+        },
+        {
+          "description": "UNIQUE over the named columns.",
+          "type": "object",
+          "properties": {
+            "columns": {
+              "description": "The unique columns.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "unique"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "columns"
+          ]
+        },
+        {
+          "description": "CHECK with a portable boolean expression (closed AST, never raw SQL).",
+          "type": "object",
+          "properties": {
+            "expr": {
+              "description": "The check expression (a boolean closed-AST node).",
+              "$ref": "#/$defs/Expr"
+            },
+            "kind": {
+              "type": "string",
+              "const": "check"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "expr"
+          ]
+        }
+      ]
+    },
+    "RefAction": {
+      "description": "The CLOSED referential-action lexicon for a FOREIGN KEY's `ON DELETE` /\n`ON UPDATE` clause (C1 — design §3.3). A CLOSED enum so the schema enumerates\nexactly the supported actions and serde REJECTS any out-of-set token at\nDESERIALIZE — a hand-crafted `.ir.json` cannot smuggle an arbitrary /\ninjection-shaped action string into the FK render seam. Camel-cased on the\nwire (`\"cascade\"`, `\"setNull\"`, `\"noAction\"`, …); the per-dialect SQL spelling\n(`SET NULL`, `NO ACTION`, …) is the render seam's job via\n[`zeroship_schema::query::normalize_fk_action`].",
+      "oneOf": [
+        {
+          "description": "`ON DELETE/UPDATE CASCADE`.",
+          "type": "string",
+          "const": "cascade"
+        },
+        {
+          "description": "`ON DELETE/UPDATE RESTRICT`.",
+          "type": "string",
+          "const": "restrict"
+        },
+        {
+          "description": "`ON DELETE/UPDATE SET NULL`.",
+          "type": "string",
+          "const": "setNull"
+        },
+        {
+          "description": "`ON DELETE/UPDATE SET DEFAULT`.",
+          "type": "string",
+          "const": "setDefault"
+        },
+        {
+          "description": "`ON DELETE/UPDATE NO ACTION` (the SQL default).",
+          "type": "string",
+          "const": "noAction"
         }
       ]
     },

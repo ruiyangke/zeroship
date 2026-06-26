@@ -84,6 +84,9 @@ pub const CODE_INVALID_ID_PREFIX: &str = "INVALID_ID_PREFIX";
 /// rule (the metric is meaningless without a vector type, and would otherwise be
 /// a silent dead field a hand-crafted artifact could ride in on).
 pub const CODE_VECTOR_METRIC_MISPLACED: &str = "VECTOR_METRIC_MISPLACED";
+/// A column carries mutually-exclusive facets (`default` + `generated`,
+/// `identity` + `generated`, etc.).
+pub const CODE_COLUMN_FACET_CONFLICT: &str = "COLUMN_FACET_CONFLICT";
 /// **VENDOR (`@zeroship/migrate/pg`)** — a privileged vendor op (role/grant/RLS/
 /// policy/trigger/function/extension/schema/`pg.sql`) whose required
 /// [`VendorCapability`](crate::capability::VendorCapability) is NOT granted by the
@@ -129,6 +132,10 @@ pub enum UnsupportedKind {
     Op,
     /// An unsupported EXPRESSION node.
     Expr,
+    /// A generated VIRTUAL column on a dialect that only supports STORED.
+    VirtualColumn,
+    /// An identity column placement/type that has no sound target-dialect render.
+    Identity,
 }
 
 impl UnsupportedKind {
@@ -138,6 +145,8 @@ impl UnsupportedKind {
         match self {
             UnsupportedKind::Op => "op",
             UnsupportedKind::Expr => "expr",
+            UnsupportedKind::VirtualColumn => "virtualColumn",
+            UnsupportedKind::Identity => "identity",
         }
     }
 }
@@ -416,13 +425,34 @@ pub fn validate_op_scoped(
             for c in constraints {
                 check_constraint(&c.kind, &scope)?;
             }
+            let pk_cols = constraints.iter().find_map(|c| match &c.kind {
+                IrConstraintKind::Pk { columns } => Some(columns.as_slice()),
+                _ => None,
+            });
             // **Migration-first P2a (§4)** — the per-column declared-only facets
             // (`id_prefix` / `vector_metric`) carry validate-time bounds: the IR's
             // threat model is a hand-crafted `.ir.json`, so a malformed/reserved
             // prefix or a misplaced metric is refused fail-closed BEFORE lower /
             // checksum, never deferred to a render surprise.
             for col in columns {
+                if let Some(generated) = &col.generated {
+                    validate_expr(
+                        &generated.expr,
+                        target_dialect,
+                        &scope,
+                        op_index,
+                        ts_location,
+                    )?;
+                }
                 validate_column_facets(col, target_dialect, op_index, ts_location)?;
+                validate_identity_placement(
+                    col,
+                    target_dialect,
+                    pk_cols,
+                    false,
+                    op_index,
+                    ts_location,
+                )?;
             }
             Ok(())
         }
@@ -514,18 +544,49 @@ pub fn validate_op_scoped(
         // [`validate_column_facets`]. (`id_prefix` cannot reach here — `Op::AddColumn` has
         // no slot; the recorder fail-closes it — so the prefix arm of the validator is a
         // no-op for this view.)
-        Op::AddColumn { column, ty, vector_metric, mask, .. } => {
+        Op::AddColumn {
+            table,
+            column,
+            ty,
+            nullable,
+            default,
+            vector_metric,
+            mask,
+            generated,
+            identity,
+            ..
+        } => {
+            if let Some(generated) = generated {
+                let scope = TargetScope::structural_only(table);
+                validate_expr(
+                    &generated.expr,
+                    target_dialect,
+                    &scope,
+                    op_index,
+                    ts_location,
+                )?;
+            }
             let view = crate::ir::IrColumn {
                 name: column.clone(),
                 ty: ty.clone(),
-                nullable: None,
-                default: None,
+                nullable: *nullable,
+                default: default.clone(),
                 unique: None,
                 id_prefix: None,
                 vector_metric: *vector_metric,
                 mask: *mask,
+                generated: generated.clone(),
+                identity: *identity,
             };
-            validate_column_facets(&view, target_dialect, op_index, ts_location)
+            validate_column_facets(&view, target_dialect, op_index, ts_location)?;
+            validate_identity_placement(
+                &view,
+                target_dialect,
+                None,
+                true,
+                op_index,
+                ts_location,
+            )
         }
         // VENDOR — a `createPolicy`'s `USING`/`WITH CHECK` predicates are CLOSED
         // `(c) => Expr` ASTs (vendor spec §2.4): validate them STRUCTURALLY (the
@@ -1248,6 +1309,78 @@ fn validate_column_facets(
         reason,
         suggested_fix: Some(fix),
     };
+    let unsupported = |kind: UnsupportedKind, reason: String, fix: String| AuthoringError {
+        code: CODE_UNSUPPORTED.to_string(),
+        kind: Some(kind),
+        op_index,
+        ts_location: ts_location.map(str::to_string),
+        dialect: target_dialect,
+        reason,
+        suggested_fix: Some(fix),
+    };
+
+    if col.generated.is_some() && col.default.is_some() {
+        return Err(mk(
+            CODE_COLUMN_FACET_CONFLICT,
+            format!(
+                "column {:?} is generated and also declares a default; generated columns \
+                 cannot have DEFAULT values",
+                col.name
+            ),
+            "remove either `.generated(...)` or `.default(...)` from the column".to_string(),
+        ));
+    }
+    if col.identity.is_some() && col.default.is_some() {
+        return Err(mk(
+            CODE_COLUMN_FACET_CONFLICT,
+            format!(
+                "column {:?} is an identity column and also declares a default; identity \
+                 columns cannot have DEFAULT values",
+                col.name
+            ),
+            "remove either `.identity(...)` or `.default(...)` from the column".to_string(),
+        ));
+    }
+    if col.identity.is_some() && col.generated.is_some() {
+        return Err(mk(
+            CODE_COLUMN_FACET_CONFLICT,
+            format!(
+                "column {:?} declares both identity and generated facets; SQL identity \
+                 and generated/computed columns are mutually exclusive",
+                col.name
+            ),
+            "remove either `.identity(...)` or `.generated(...)` from the column".to_string(),
+        ));
+    }
+
+    if matches!(target_dialect, Dialect::Postgres)
+        && matches!(col.generated.as_ref(), Some(generated) if !generated.stored)
+    {
+        return Err(unsupported(
+            UnsupportedKind::VirtualColumn,
+            format!(
+                "column {:?} requests a VIRTUAL generated column, but Postgres supports \
+                 generated columns only as STORED",
+                col.name
+            ),
+            "use `.generated(expr)` / `{ virtual: false }` for Postgres, or target SQLite"
+                .to_string(),
+        ));
+    }
+
+    if col.identity.is_some() && !matches!(col.ty, crate::ir::ColType::Int | crate::ir::ColType::BigInt)
+    {
+        return Err(unsupported(
+            UnsupportedKind::Identity,
+            format!(
+                "column {:?} declares identity on a non-integer type; identity is only \
+                 supported on int/bigInt columns",
+                col.name
+            ),
+            "declare the column as `t.integer().identity(...)` or `t.bigInt().identity(...)`"
+                .to_string(),
+        ));
+    }
 
     if let Some(prefix) = &col.id_prefix {
         // Charset + reserved deny-list — the runtime's single source of truth.
@@ -1292,6 +1425,54 @@ fn validate_column_facets(
     }
 
     Ok(())
+}
+
+fn validate_identity_placement(
+    col: &crate::ir::IrColumn,
+    target_dialect: Dialect,
+    pk_cols: Option<&[String]>,
+    is_add_column: bool,
+    op_index: usize,
+    ts_location: Option<&str>,
+) -> Result<(), AuthoringError> {
+    if col.identity.is_none() || !matches!(target_dialect, Dialect::Sqlite) {
+        return Ok(());
+    }
+    let err = |reason: String| AuthoringError {
+        code: CODE_UNSUPPORTED.to_string(),
+        kind: Some(UnsupportedKind::Identity),
+        op_index,
+        ts_location: ts_location.map(str::to_string),
+        dialect: target_dialect,
+        reason,
+        suggested_fix: Some(
+            "on SQLite, use identity only on the sole integer primary key, or remove \
+             `.identity(...)`"
+                .to_string(),
+        ),
+    };
+    if is_add_column {
+        return Err(err(
+            "identity: non-PK identity has no sound SQLite emulation; SQLite \
+             AUTOINCREMENT is only sound on an inline INTEGER PRIMARY KEY"
+                .to_string(),
+        ));
+    }
+    let Some(pk_cols) = pk_cols else {
+        return Err(err(format!(
+            "identity: column {:?} is not the declared primary key; non-PK identity \
+             has no sound SQLite emulation",
+            col.name
+        )));
+    };
+    if pk_cols.len() == 1 && pk_cols[0] == col.name {
+        return Ok(());
+    }
+    Err(err(format!(
+        "identity: column {:?} is part of {:?}, but SQLite identity is only sound \
+         for the sole integer primary key",
+        col.name, pk_cols
+    )))
 }
 
 /// **Apply/render-seam ColRef resolution (rule (c), MED).** Re-run the
@@ -2297,7 +2478,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
             constraints: vec![IrConstraint {
                 name: None,
                 kind: IrConstraintKind::Check {
@@ -2580,8 +2761,8 @@ mod tests {
             Op::CreateTable {
                 name: "users".into(),
                 columns: vec![
-                    IrColumn { name: "first".into(), ty: ColType::Text, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None, mask: None },
-                    IrColumn { name: "total".into(), ty: ColType::Int, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None, mask: None },
+                    IrColumn { name: "first".into(), ty: ColType::Text, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
+                    IrColumn { name: "total".into(), ty: ColType::Int, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
                 ],
                 constraints: vec![IrConstraint {
                     name: None,
@@ -2630,7 +2811,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
             constraints: vec![IrConstraint {
                 name: None,
                 kind: IrConstraintKind::Check {
@@ -2676,7 +2857,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
             constraints: vec![IrConstraint {
                 name: None,
                 kind: IrConstraintKind::Check {
@@ -2706,7 +2887,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
             constraints: vec![IrConstraint {
                 name: None,
                 kind: IrConstraintKind::Check {
@@ -2882,6 +3063,8 @@ mod tests {
                 unique: None,
                 id_prefix: Some(prefix.to_string()),
                 vector_metric: None, mask: None,
+                generated: None,
+                identity: None,
             }],
             constraints: vec![],
             indexes: vec![],
@@ -2946,6 +3129,8 @@ mod tests {
                 id_prefix: None,
                 vector_metric: Some(VectorMetric::Cosine),
                 mask: None,
+                generated: None,
+                identity: None,
             }],
             constraints: vec![],
             indexes: vec![],
@@ -2970,6 +3155,8 @@ mod tests {
                 id_prefix: None,
                 vector_metric: Some(VectorMetric::Cosine),
                 mask: None,
+                generated: None,
+                identity: None,
             }],
             constraints: vec![],
             indexes: vec![],

@@ -784,6 +784,8 @@ mod tests {
             data_type: dtype.to_string(),
             nullable,
             default: None,
+            generated: None,
+            identity: None,
             encryption_sentinel: None,
             comment_sentinel: None,
         }

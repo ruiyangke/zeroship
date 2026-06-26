@@ -36,6 +36,7 @@ use std::collections::BTreeMap;
 use compio_postgres::Client;
 
 use crate::db::ExecutorConfig;
+use crate::ir::IdentityCol;
 use crate::journal::{self, AppliedEntry, JournalError, Phase};
 use crate::migration::Migration;
 
@@ -255,6 +256,14 @@ pub struct ColumnSnapshot {
     /// type-level note). `None` ⇒ no default emitted; always `None` from
     /// introspection.
     pub default: Option<String>,
+    /// A generated/computed column expression rendered for the target dialect,
+    /// plus whether it is STORED or VIRTUAL. Emission-only, like `default`: live
+    /// introspection does not carry this expression into the structural snapshot,
+    /// so it is excluded from drift equality.
+    pub generated: Option<GeneratedColumnSnapshot>,
+    /// A SQL identity column facet. Emission-only: drift tracks the physical
+    /// column and primary-key constraint, not the sequence metadata.
+    pub identity: Option<IdentityCol>,
     /// **P4 HALF A** — the inline encryption sentinel to append after this
     /// column's type in CREATE / ADD COLUMN DDL, e.g.
     /// `/* zsenc:randomised:default:string */`. Emitted for a `t.encrypted(...)`
@@ -283,13 +292,25 @@ pub struct ColumnSnapshot {
     pub comment_sentinel: Option<String>,
 }
 
+/// Emission metadata for a generated/computed column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedColumnSnapshot {
+    /// The dialect-rendered closed expression body.
+    pub expr: String,
+    /// `true` ⇒ STORED; `false` ⇒ VIRTUAL.
+    pub stored: bool,
+}
+
 // `default` + the two sentinels are intentionally excluded from equality +
 // hashing — they are DDL-emission metadata, not drift attributes (see the type
 // doc). Comparing `default` would phantom-drift against Postgres' normalised
 // stored default; the sentinels are never introspected into the snapshot at all
 // (`snapshot_schema` leaves them `None`), so comparing them would make every
 // freshly-created encrypted/masked table phantom-drift against itself and break
-// the round-trip oracle.
+// the round-trip oracle. Generated/identity metadata follows the same policy:
+// the structural column + PK shape round-trips, while the expression/sequence
+// details remain emission metadata unless a future live-catalog facet recovers
+// them byte-exactly.
 impl PartialEq for ColumnSnapshot {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name

@@ -305,7 +305,18 @@ pub fn fold_ops(
                 // table that referenced it (review HIGH).
                 rewrite_incoming_fk_targets(&mut tables, project_schema, table, to);
             }
-            Op::AddColumn { table, column, ty, nullable, default, vector_metric, mask, .. } => {
+            Op::AddColumn {
+                table,
+                column,
+                ty,
+                nullable,
+                default,
+                vector_metric,
+                mask,
+                generated,
+                identity,
+                ..
+            } => {
                 let snap = table_mut(&mut tables, table)?;
                 if snap.columns.iter().any(|c| &c.name == column) {
                     return Err(FoldError::DuplicateColumn {
@@ -326,6 +337,8 @@ pub fn fold_ops(
                     default.as_ref(),
                     *vector_metric,
                     *mask,
+                    generated.as_ref(),
+                    *identity,
                     project_schema,
                     dialect,
                 )?;
@@ -454,7 +467,17 @@ pub fn fold_ops(
                 //   - the TARGET type carries a sentinel (plain→encrypted/masked), OR
                 //   - the SOURCE column carries one (encrypted/masked→anything).
                 let (new_col, _sibling) = add_column_snapshot(
-                    table, column, ty, None, None, None, None, project_schema, dialect,
+                    table,
+                    column,
+                    ty,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    project_schema,
+                    dialect,
                 )?;
                 let target_has_sentinel = new_col.encryption_sentinel.is_some()
                     || new_col.comment_sentinel.is_some();
@@ -670,9 +693,16 @@ fn add_column_snapshot(
     default: Option<&IrDefault>,
     vector_metric: Option<crate::ir::VectorMetric>,
     mask: Option<crate::ir::IrMask>,
+    generated: Option<&crate::ir::GeneratedCol>,
+    identity: Option<crate::ir::IdentityCol>,
     project_schema: &str,
     dialect: SqlDialect,
 ) -> Result<(ColumnSnapshot, Option<ColumnSnapshot>), FoldError> {
+    if matches!(dialect, SqlDialect::Sqlite) && identity.is_some() {
+        return Err(FoldError::Unsupported(
+            "addColumn identity on SQLite (non-PK identity has no sound SQLite emulation)",
+        ));
+    }
     let field = ir_column_to_field(&IrColumn {
         name: column.to_string(),
         ty: ty.clone(),
@@ -680,7 +710,13 @@ fn add_column_snapshot(
         default: default.cloned(),
         // **#173** — `id_prefix` stays `None` (an added column is never the system PK);
         // the vector metric + standalone mask ARE threaded so the snapshot renders them.
-        unique: None, id_prefix: None, vector_metric, mask });
+        unique: None,
+        id_prefix: None,
+        vector_metric,
+        mask,
+        generated: generated.cloned(),
+        identity,
+    });
     let desc = CollectionDescriptor {
         name: table.to_string(),
         owner_app: FOLD_OWNER_APP.to_string(),
@@ -750,7 +786,15 @@ fn fold_create_table_specs(
     let is_sqlite = matches!(dialect, SqlDialect::Sqlite);
     for c in constraints {
         match &c.kind {
-            IrConstraintKind::Pk { .. } => {
+            IrConstraintKind::Pk { columns } => {
+                if columns.as_slice() == ["id"]
+                    && snap
+                        .columns
+                        .iter()
+                        .any(|col| col.name == "id" && col.identity.is_some())
+                {
+                    continue;
+                }
                 return Err(FoldError::Unsupported(
                     "createTable user PRIMARY KEY (the platform owns the `id` primary key)",
                 ));
@@ -1339,7 +1383,18 @@ pub fn fold_to_field_defs(
                     }
                 }
             }
-            Op::AddColumn { table, column, ty, nullable, default, vector_metric, mask, .. } => {
+            Op::AddColumn {
+                table,
+                column,
+                ty,
+                nullable,
+                default,
+                vector_metric,
+                mask,
+                generated,
+                identity,
+                ..
+            } => {
                 if let Some(cols) = tables.get_mut(table) {
                     // **#173** — AddColumn carries no `id_prefix` (an added column is never
                     // the system PK), but it DOES carry the `vector_metric` + standalone
@@ -1355,6 +1410,8 @@ pub fn fold_to_field_defs(
                         id_prefix: None,
                         vector_metric: *vector_metric,
                         mask: *mask,
+                        generated: generated.clone(),
+                        identity: *identity,
                     });
                     cols.insert(column.clone(), field);
                 }
@@ -1749,6 +1806,8 @@ pub fn descriptors_to_create_ops(
                 id_prefix: f.id_prefix.clone(),
                 vector_metric,
                 mask,
+                generated: f.generated.clone(),
+                identity: f.identity,
             });
             // A `ref` column carries the FK target on its `ColType::Ref` (the brand)
             // AND its POLICY on a separate `Fk` constraint — the SAME split the
@@ -1898,7 +1957,10 @@ mod tests {
             default: None,
             unique: None,
             id_prefix: None,
-            vector_metric: None, mask: None,
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
         }
     }
 
@@ -1976,6 +2038,8 @@ mod tests {
             default: None,
             vector_metric: None,
             mask: None,
+            generated: None,
+            identity: None,
             schema: None,
             existence_guard: None,
         }
@@ -2310,6 +2374,8 @@ mod tests {
                 default: None,
                 vector_metric: None,
                 mask: None,
+                generated: None,
+                identity: None,
                 schema: None,
                 existence_guard: None,
             },
@@ -2492,6 +2558,8 @@ mod tests {
             id_prefix: None,
             vector_metric: None,
             mask: None,
+            generated: None,
+            identity: None,
         };
         let m = defs(&[
             create("accounts", vec![col("email", ColType::Text, false)]),
@@ -3161,13 +3229,25 @@ mod tests {
 
     /// The `ColumnSnapshot` build_table_snapshot produces for ONE field — the ground
     /// truth the fold's emission metadata must match.
-    fn builder_column(table: &str, column: &str, ty: ColType, nullable: bool, default: Option<IrDefault>) -> ColumnSnapshot {
+    fn builder_column(
+        table: &str,
+        column: &str,
+        ty: ColType,
+        nullable: bool,
+        default: Option<IrDefault>,
+    ) -> ColumnSnapshot {
         let field = ir_column_to_field(&IrColumn {
             name: column.to_string(),
             ty,
             nullable: Some(nullable),
             default,
-            unique: None, id_prefix: None, vector_metric: None, mask: None });
+            unique: None,
+            id_prefix: None,
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        });
         let desc = CollectionDescriptor {
             name: table.to_string(),
             owner_app: FOLD_OWNER_APP.to_string(),
@@ -3198,8 +3278,16 @@ mod tests {
                     name: "tier".to_string(),
                     ty: ColType::Text,
                     nullable: Some(false),
-                    default: Some(IrDefault::Literal { value: IrScalar::Str("beta".to_string()) }),
-                    unique: None, id_prefix: None, vector_metric: None, mask: None },
+                    default: Some(IrDefault::Literal {
+                        value: IrScalar::Str("beta".to_string()),
+                    }),
+                    unique: None,
+                    id_prefix: None,
+                    vector_metric: None,
+                    mask: None,
+                    generated: None,
+                    identity: None,
+                },
                 // An `int` column with a literal default — the snapshot's
                 // emission-only `default` IS what P2 gen-types reads, so it MUST
                 // render (regression: int defaults were silently dropped — the
@@ -3209,7 +3297,13 @@ mod tests {
                     ty: ColType::Int,
                     nullable: Some(false),
                     default: Some(IrDefault::Literal { value: IrScalar::Int(7) }),
-                    unique: None, id_prefix: None, vector_metric: None, mask: None },
+                    unique: None,
+                    id_prefix: None,
+                    vector_metric: None,
+                    mask: None,
+                    generated: None,
+                    identity: None,
+                },
                 // A `json` column always carries the `'{}'::jsonb` default (even with
                 // no explicit default) — a second independent emission-only golden.
                 col("meta", ColType::Json, true),
@@ -3280,6 +3374,8 @@ mod tests {
                 default: None,
                 vector_metric: None,
                 mask: None,
+                generated: None,
+                identity: None,
                 schema: None,
                 existence_guard: None,
             },
@@ -3362,7 +3458,10 @@ mod tests {
             default: None,
             unique: None,
             id_prefix: Some("post".into()),
-            vector_metric: None, mask: None,
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
         };
         let m = defs(&[create("posts", vec![id])]);
         let def = field_def(&m, "posts", "id");
@@ -3383,6 +3482,8 @@ mod tests {
             id_prefix: None,
             vector_metric: Some(crate::ir::VectorMetric::InnerProduct),
             mask: None,
+            generated: None,
+            identity: None,
         };
         let m = defs(&[create("docs", vec![embedding])]);
         let def = field_def(&m, "docs", "embedding");
@@ -3410,6 +3511,8 @@ mod tests {
                 kind: crate::ir::IrMaskKind::Last4,
                 classification: crate::ir::IrClassification::Spi,
             }),
+            generated: None,
+            identity: None,
         };
         let m = defs(&[create("people", vec![ssn])]);
         let def = field_def(&m, "people", "ssn");
@@ -3436,6 +3539,8 @@ mod tests {
                 kind: crate::ir::IrMaskKind::Last4,
                 classification: crate::ir::IrClassification::Pci,
             }),
+            generated: None,
+            identity: None,
         };
         let m = defs(&[create("vault", vec![secret])]);
         let def = field_def(&m, "vault", "secret");
@@ -3466,6 +3571,8 @@ mod tests {
                     kind: crate::ir::IrMaskKind::First4,
                     classification: crate::ir::IrClassification::Pci,
                 }),
+                generated: None,
+                identity: None,
                 schema: None,
                 existence_guard: None,
             },
@@ -3487,7 +3594,10 @@ mod tests {
             default: None,
             unique: None,
             id_prefix: None,
-            vector_metric: None, mask: None,
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
         };
         let m = defs(&[create("teams", vec![owner])]);
         let def = field_def(&m, "teams", "owner");
@@ -3665,7 +3775,10 @@ mod tests {
             default: None,
             unique: None,
             id_prefix: None,
-            vector_metric: None, mask: None,
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
         });
         assert_eq!(
             field.encrypted,
