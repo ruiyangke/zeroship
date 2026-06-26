@@ -405,6 +405,139 @@ impl VectorMetric {
     }
 }
 
+/// The CLOSED column-masking transform lexicon (`.mask({ kind })`), mirroring the
+/// SDK `MaskKind` union (`sdks/db/src/types.ts`) and the runtime/diff
+/// [`zeroship_schema::diff::MaskKind`] EXACTLY. A CLOSED enum — like every other IR
+/// token-set — so serde REJECTS an out-of-set kind at DESERIALIZE (a hand-crafted
+/// `.ir.json` cannot smuggle an arbitrary mask-kind string into the `__zsmask`
+/// sentinel render seam).
+///
+/// **Wire spelling.** Most variants are camelCase (`full`, `last4`, `name`, …); the
+/// two date forms are KEBAB (`date-year`, `date-decade`) to match the SDK wire form
+/// that `t.string().mask()` emits and that
+/// [`zeroship_schema::query::mask_sentinel_for_field`] reads via
+/// [`zeroship_schema::diff::MaskKind::from_sql`] (which accepts the kebab form). The
+/// on-DB sentinel itself uses the camelCase `as_sql` (`dateYear`/`dateDecade`); that
+/// spelling lives in the codec, NOT here — this enum carries the SDK/IR wire form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum IrMaskKind {
+    /// `"***"` — maximum redaction. The kernel default for an encrypted column.
+    Full,
+    /// `"***-**-6789"` — last 4 visible (SSN, card, phone).
+    Last4,
+    /// `"4111-****-…"` — first 4 visible (BIN/IIN preservation).
+    First4,
+    /// `"a****@example.com"` — preserve domain for analytics.
+    Email,
+    /// `"A. A***"` — initials (name fields).
+    Name,
+    /// `"1985-**-**"` — preserve year (age-bucket analytics).
+    #[serde(rename = "date-year")]
+    DateYear,
+    /// `"198?-**-**"` — preserve decade (coarser analytics).
+    #[serde(rename = "date-decade")]
+    DateDecade,
+    /// Explicit opt-out: no sibling, no mask wrap on read.
+    None,
+}
+
+impl IrMaskKind {
+    /// The SDK/IR-wire `kind` token (kebab for the two date forms; camelCase
+    /// otherwise). Kept in lock-step with the `serde` wire image above and aligned
+    /// with what [`zeroship_schema::diff::MaskKind::from_sql`] accepts.
+    #[must_use]
+    pub fn as_token(self) -> &'static str {
+        match self {
+            IrMaskKind::Full => "full",
+            IrMaskKind::Last4 => "last4",
+            IrMaskKind::First4 => "first4",
+            IrMaskKind::Email => "email",
+            IrMaskKind::Name => "name",
+            IrMaskKind::DateYear => "date-year",
+            IrMaskKind::DateDecade => "date-decade",
+            IrMaskKind::None => "none",
+        }
+    }
+}
+
+/// The CLOSED sensitivity-classification lexicon (`.mask({ classification })`),
+/// mirroring the SDK `Classification` union and [`zeroship_schema::diff::Classification`]
+/// EXACTLY. CLOSED so serde REJECTS an out-of-set token at DESERIALIZE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum IrClassification {
+    /// Usernames, display names, public profile data.
+    Public,
+    /// Full name, email, address, phone, IP, DOB — the encrypted-column default.
+    Pii,
+    /// SSN, driver's license, biometric (CPRA "sensitive PI").
+    Spi,
+    /// Health records, medical IDs (HIPAA scope).
+    Phi,
+    /// Card numbers, CVV, magnetic stripe (PCI-DSS scope).
+    Pci,
+    /// Platform-internal metadata, system-field overrides.
+    Internal,
+}
+
+impl IrClassification {
+    /// The SDK/IR-wire `classification` token (camelCase; all single words).
+    #[must_use]
+    pub fn as_token(self) -> &'static str {
+        match self {
+            IrClassification::Public => "public",
+            IrClassification::Pii => "pii",
+            IrClassification::Spi => "spi",
+            IrClassification::Phi => "phi",
+            IrClassification::Pci => "pci",
+            IrClassification::Internal => "internal",
+        }
+    }
+}
+
+/// A column-masking facet (`.mask({ kind, classification })`) carried on the IR.
+///
+/// **Why CARRIED, not recovered (unlike the runtime path).** The runtime recovers a
+/// mask from the LIVE `__zsmask` COMMENT sentinel on the `_masked` sibling
+/// (`crates/plugin-db .../introspect_schema.rs`). But the OFFLINE op fold
+/// ([`crate::fold_to_field_defs`]) and `gen-types` have NO live DB — there is no
+/// sentinel to read. So a STANDALONE `.mask()` on a plaintext column must be carried
+/// on the IR or it is DROPPED through author→generate→fold (the creator's
+/// `MaskedValue<T>` silently downgrades to `T`, and the runtime — which DOES read the
+/// sentinel — never gets a sentinel emitted because the op lower had no mask to emit).
+/// Carrying it closes BOTH the gen-types type-fidelity gap and the runtime
+/// masking-fidelity gap in one move (the lower stamps the `__zsmask` sentinel from
+/// this facet).
+///
+/// An ENCRYPTED column's fail-safe auto-mask (`{ full, pii }`) is IMPLIED by the
+/// `ColType::Encrypted` carrier (recovered in [`crate::ir_author::ir_column_to_field`]),
+/// so it is NOT carried here; an explicit `.mask()` here OVERRIDES that auto-mask.
+///
+/// Default-absent + `skip_serializing_if` so a column declaring no mask is
+/// BYTE-IDENTICAL on the wire and in the checksum to the pre-mask image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IrMask {
+    /// The masking transform (closed [`IrMaskKind`]).
+    pub kind: IrMaskKind,
+    /// The sensitivity classification (closed [`IrClassification`]).
+    pub classification: IrClassification,
+}
+
+impl IrMask {
+    /// Convert to the `{ kind, classification }` JSON sub-object that
+    /// [`crate::declarative::field_to_sdk_def`] / the `__zsmask` sentinel codec
+    /// ([`zeroship_schema::query::mask_sentinel_for_field`]) expect on `def.mask`.
+    #[must_use]
+    pub fn to_sdk_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "kind": self.kind.as_token(),
+            "classification": self.classification.as_token(),
+        })
+    }
+}
+
 /// A column definition inside a `createTable` / `addColumn` op.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -452,6 +585,18 @@ pub struct IrColumn {
     /// (`#[serde(rename = "vectorMetric")]`) and the design §4.
     #[serde(rename = "vectorMetric", skip_serializing_if = "Option::is_none")]
     pub vector_metric: Option<VectorMetric>,
+    /// A STANDALONE column mask (`t.string().mask({ kind, classification })`). Unlike
+    /// `id_prefix`/`vector_metric` (declared-only), a mask IS recoverable from the live
+    /// `__zsmask` sentinel by the RUNTIME — but the OFFLINE op fold + gen-types have no
+    /// live DB, so the facet is carried here to keep it through author→generate→fold
+    /// (and so the op lower emits the `__zsmask` sentinel the runtime later reads). An
+    /// encrypted column's auto-mask `{ full, pii }` is IMPLIED by the carrier and NOT
+    /// carried here; an explicit mask OVERRIDES it. Default-absent + `skip_serializing_if`
+    /// ⇒ a mask-less column is BYTE-IDENTICAL on the wire/checksum to the pre-mask image.
+    /// Bounded STRUCTURALLY by the closed [`IrMask`]/[`IrMaskKind`]/[`IrClassification`]
+    /// enums (serde rejects an out-of-set kind/classification at deserialize).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mask: Option<IrMask>,
 }
 
 /// The CLOSED referential-action lexicon for a FOREIGN KEY's `ON DELETE` /
@@ -713,6 +858,22 @@ pub enum Op {
         /// Structured default (typed literal or synth scalar) — never raw SQL.
         #[serde(skip_serializing_if = "Option::is_none")]
         default: Option<IrDefault>,
+        /// **#173** — the pgvector distance metric for a `t.vector(n, { metric })` added
+        /// column (the same DECLARED-ONLY facet `IrColumn` carries on createTable).
+        /// Meaningful on an added column (a vector ADD COLUMN renders the metric opclass),
+        /// so it is carried here. Validated to co-occur ONLY with a [`ColType::Vector`]
+        /// type (`validate_column_facets`). Default-absent + `skip_serializing_if` ⇒
+        /// byte-identical when absent. (No `id_prefix` slot: an added column is NEVER the
+        /// system PK, so a typed-id prefix is meaningless — the recorder keeps that
+        /// fail-closed.)
+        #[serde(rename = "vectorMetric", default, skip_serializing_if = "Option::is_none")]
+        vector_metric: Option<VectorMetric>,
+        /// **#173** — a STANDALONE column mask for a masked added column (the same facet
+        /// `IrColumn` carries). Meaningful on an added column (a masked ADD COLUMN emits
+        /// the `__zsmask` sentinel + `_masked` sibling). Default-absent +
+        /// `skip_serializing_if` ⇒ byte-identical when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mask: Option<IrMask>,
         /// **PR10** — the schema qualifier (§2.7).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
@@ -1579,6 +1740,8 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
+            vector_metric: None,
+            mask: None,
             schema: None,
             existence_guard: None,
         };
@@ -1588,6 +1751,8 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
+            vector_metric: None,
+            mask: None,
             schema: None,
             existence_guard: None,
         };
@@ -1780,7 +1945,7 @@ mod tests {
                 unique: None,
                 // The new P2a facets, both ABSENT (a plain `t.text()` column).
                 id_prefix: None,
-                vector_metric: None,
+                vector_metric: None, mask: None,
             }],
             constraints: vec![],
             indexes: vec![],
@@ -1802,6 +1967,13 @@ mod tests {
         assert!(
             !json.contains("vectorMetric"),
             "an absent vector_metric must NOT appear on the wire: {json}"
+        );
+        // #174 — the same byte-identity guarantee extends to the standalone `mask`
+        // facet: a mask-less column must NOT emit a `mask` key (skip_serializing_if),
+        // so the `t.text()` column stays byte-identical to the pre-mask image.
+        assert!(
+            !json.contains("mask"),
+            "an absent mask must NOT appear on the wire: {json}"
         );
     }
 
@@ -1873,6 +2045,8 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
+            vector_metric: None,
+            mask: None,
             schema: Some("app2".into()),
             existence_guard: None,
         };
@@ -1888,6 +2062,8 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
+            vector_metric: None,
+            mask: None,
             schema: None,
             existence_guard: None,
         };

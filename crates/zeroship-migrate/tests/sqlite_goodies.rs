@@ -103,6 +103,7 @@ async fn vector_field_applies_as_blob_and_redfiff_is_zero_drift() {
             ty: "vector".into(),
             vector_dims: Some(768),
             vector_metric: Some("cosine".into()),
+            mask: None,
             ..Default::default()
         }],
         indexes: vec![],
@@ -164,6 +165,7 @@ async fn vector_inner_product_metric_applies_no_metric_error_on_engine_path() {
             ty: "vector".into(),
             vector_dims: Some(3),
             vector_metric: Some("innerProduct".into()),
+            mask: None,
             ..Default::default()
         }],
         indexes: vec![],

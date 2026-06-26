@@ -403,7 +403,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None }],
+                unique: None, id_prefix: None, vector_metric: None, mask: None }],
             constraints: vec![],
             indexes: vec![],
             schema: None,

@@ -195,7 +195,7 @@ async fn apply(
 }
 
 fn col(name: &str, ty: ColType) -> IrColumn {
-    IrColumn { name: name.into(), ty, nullable: Some(true), default: None, unique: None, id_prefix: None, vector_metric: None }
+    IrColumn { name: name.into(), ty, nullable: Some(true), default: None, unique: None, id_prefix: None, vector_metric: None, mask: None }
 }
 
 /// Extract the `ExistenceGuardDrift` from a deep `EngineError`, or panic.
@@ -231,6 +231,8 @@ async fn add_column_ifnotexists_absent_runs() {
         ty: ColType::String,
         nullable: Some(true),
         default: None,
+        vector_metric: None,
+        mask: None,
         schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     });
@@ -258,6 +260,8 @@ async fn add_column_ifnotexists_present_matching_is_noop() {
         ty: ColType::String,
         nullable: Some(true),
         default: None,
+        vector_metric: None,
+        mask: None,
         schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     });
@@ -285,6 +289,8 @@ async fn add_column_ifnotexists_present_divergent_type_fails_closed() {
         ty: ColType::String,
         nullable: Some(true),
         default: None,
+        vector_metric: None,
+        mask: None,
         schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     });
@@ -391,7 +397,7 @@ async fn create_table_ifnotexists_fresh_creates_all_secondary_indexes_and_reruns
             ty: ColType::String,
             nullable: Some(true),
             default: None,
-            unique: Some(true), id_prefix: None, vector_metric: None }],
+            unique: Some(true), id_prefix: None, vector_metric: None, mask: None }],
         constraints: vec![],
         indexes: vec![],
         schema: None,
@@ -587,7 +593,7 @@ async fn create_table_ifnotexists_deferred_fk_reruns_idempotent() {
             ty: ColType::Ref { references: "people".into() },
             nullable: Some(true),
             default: None,
-            unique: None, id_prefix: None, vector_metric: None }],
+            unique: None, id_prefix: None, vector_metric: None, mask: None }],
         constraints: vec![],
         indexes: vec![],
         schema: None,

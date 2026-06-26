@@ -1116,6 +1116,7 @@ async fn vector_type_is_accepted_and_maps_to_vector_column() {
             ty: "vector".into(),
             vector_dims: Some(384),
             vector_metric: Some("cosine".into()),
+            mask: None,
             ..Default::default()
         }],
         indexes: vec![],
@@ -1153,6 +1154,7 @@ async fn t12_vector_field_models_ivfflat_ann_index_and_renders_using_ivfflat() {
             ty: "vector".into(),
             vector_dims: Some(384),
             vector_metric: Some("cosine".into()),
+            mask: None,
             ..Default::default()
         }],
         indexes: vec![],
@@ -1202,6 +1204,7 @@ async fn t12_l2_and_inner_product_metrics_pick_the_right_opclass() {
                 ty: "vector".into(),
                 vector_dims: Some(8),
                 vector_metric: Some(metric.into()),
+                mask: None,
                 ..Default::default()
             }],
             indexes: vec![],

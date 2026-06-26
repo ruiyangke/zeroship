@@ -198,9 +198,10 @@ pub use migration::{
 // `Checksum::of_ir` front door folds. There is NO `Raw`/`RawDown` (property A);
 // every transform/predicate is the closed [`expr::Expr`] AST.
 pub use ir::{
-    CanonicalOpList, ColType, IndexMethod, IrBatch, IrColumn, IrConstraint, IrConstraintKind,
-    IrDefault, IrFlagsOverride, IrIndex, IrScalar, IrVersionError, MigrationIr, Op, RefAction,
-    SafeU64, SynthDefaultFn, CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
+    CanonicalOpList, ColType, IndexMethod, IrBatch, IrClassification, IrColumn, IrConstraint,
+    IrConstraintKind, IrDefault, IrFlagsOverride, IrIndex, IrMask, IrMaskKind, IrScalar,
+    IrVersionError, MigrationIr, Op, RefAction, SafeU64, SynthDefaultFn, VectorMetric,
+    CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
 };
 // The fail-closed `.ir.json` load gate (§5.2/§5.3/§8.6): deserialize →
 // `ir_version` → `validate_ir` → server-stamped ownership → advisory checksum-hint
