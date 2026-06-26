@@ -949,6 +949,825 @@
             "set",
             "name"
           ]
+        },
+        {
+          "description": "**VENDOR** — `CREATE SCHEMA [IF NOT EXISTS] <name> [AUTHORIZATION <role>]`.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The schema name to create.",
+              "type": "string"
+            },
+            "ifNotExists": {
+              "description": "`IF NOT EXISTS`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "authorization": {
+              "description": "`AUTHORIZATION <role>`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "createSchema"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name"
+          ]
+        },
+        {
+          "description": "**VENDOR** — `DROP SCHEMA [IF EXISTS] <name> [CASCADE]`.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The schema name to drop.",
+              "type": "string"
+            },
+            "ifExists": {
+              "description": "`IF EXISTS`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "cascade": {
+              "description": "`CASCADE`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "dropSchema"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name"
+          ]
+        },
+        {
+          "description": "**VENDOR** — `CREATE EXTENSION [IF NOT EXISTS] <name> [WITH SCHEMA <schema>]`.\nStill allowlist-gated at the guard (`FORBIDDEN_EXTENSIONS` overrides in all\nprofiles).",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The extension name.",
+              "type": "string"
+            },
+            "ifNotExists": {
+              "description": "`IF NOT EXISTS`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "schema": {
+              "description": "`WITH SCHEMA <schema>`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "createExtension"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name"
+          ]
+        },
+        {
+          "description": "**VENDOR** — `DROP EXTENSION [IF EXISTS] <name>`.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The extension name.",
+              "type": "string"
+            },
+            "ifExists": {
+              "description": "`IF EXISTS`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "dropExtension"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name"
+          ]
+        },
+        {
+          "description": "**VENDOR** — `CREATE ROLE <name> [LOGIN] [PASSWORD '…'] [BYPASSRLS] …`. The\n`if_not_exists` is engine-synthesized (a `pg_roles` probe; there is no\nnative `CREATE ROLE IF NOT EXISTS`). `superuser: true` lowers `SUPERUSER`,\nwhich the deny-list STILL refuses in all profiles (privilege within the DB\nwidens; host reach never does, §3.4).",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The role name.",
+              "type": "string"
+            },
+            "login": {
+              "description": "`LOGIN`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "password": {
+              "description": "`PASSWORD '…'` (a dev secret — §3.6).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "bypassRls": {
+              "description": "`BYPASSRLS`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "createRole": {
+              "description": "`CREATEROLE`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "createDb": {
+              "description": "`CREATEDB`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "superuser": {
+              "description": "`SUPERUSER` (DENIED at render in all profiles).",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "inRole": {
+              "description": "`IN ROLE <r>, …`.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "setSearchPath": {
+              "description": "The `ALTER ROLE … SET search_path = …` the platform needs (synthesized\nas a follow-on statement).",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "ifNotExists": {
+              "description": "Engine-synthesized `pg_roles` existence probe (no native clause).",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "createRole"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name"
+          ]
+        },
+        {
+          "description": "**VENDOR** — `ALTER ROLE <name> SET search_path = …` / `RESET search_path`.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The role name.",
+              "type": "string"
+            },
+            "setSearchPath": {
+              "description": "`SET search_path = …`.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "resetSearchPath": {
+              "description": "`RESET search_path`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "alterRole"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name"
+          ]
+        },
+        {
+          "description": "**VENDOR** — `DROP ROLE [IF EXISTS] <name>`.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The role name.",
+              "type": "string"
+            },
+            "ifExists": {
+              "description": "`IF EXISTS`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "dropRole"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name"
+          ]
+        },
+        {
+          "description": "**VENDOR** — `DROP OWNED BY <role>, …` (the `0025` rollback construct).",
+          "type": "object",
+          "properties": {
+            "roles": {
+              "description": "The roles whose owned objects are dropped.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "op": {
+              "type": "string",
+              "const": "dropOwnedBy"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "roles"
+          ]
+        },
+        {
+          "description": "**VENDOR** — `GRANT <privs> ON <target> TO <roles> [WITH GRANT OPTION]`.",
+          "type": "object",
+          "properties": {
+            "privileges": {
+              "description": "The privileges (a closed [`Privilege`] set; `All` ⇒ `ALL PRIVILEGES`).",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Privilege"
+              }
+            },
+            "on": {
+              "description": "The grant target (closed, tagged).",
+              "$ref": "#/$defs/GrantTarget"
+            },
+            "to": {
+              "description": "The grantee roles (`\"public\"` is the reserved `PUBLIC` sentinel).",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "withGrantOption": {
+              "description": "`WITH GRANT OPTION`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "grant"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "privileges",
+            "on",
+            "to"
+          ]
+        },
+        {
+          "description": "**VENDOR** — `REVOKE <privs> ON <target> FROM <roles>`.",
+          "type": "object",
+          "properties": {
+            "privileges": {
+              "description": "The privileges (closed [`Privilege`] set).",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Privilege"
+              }
+            },
+            "on": {
+              "description": "The revoke target (closed, tagged).",
+              "$ref": "#/$defs/GrantTarget"
+            },
+            "from": {
+              "description": "The roles to revoke from (`\"public\"` is the reserved `PUBLIC` sentinel).",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "op": {
+              "type": "string",
+              "const": "revoke"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "privileges",
+            "on",
+            "from"
+          ]
+        },
+        {
+          "description": "**VENDOR** — `ALTER TABLE … ENABLE ROW LEVEL SECURITY`.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "The target table.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "The schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "enableRls"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "table"
+          ]
+        },
+        {
+          "description": "**VENDOR** — `ALTER TABLE … FORCE ROW LEVEL SECURITY`.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "The target table.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "The schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "forceRls"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "table"
+          ]
+        },
+        {
+          "description": "**VENDOR** — `ALTER TABLE … DISABLE ROW LEVEL SECURITY` (down-file).",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "The target table.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "The schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "disableRls"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "table"
+          ]
+        },
+        {
+          "description": "**VENDOR** — `ALTER TABLE … NO FORCE ROW LEVEL SECURITY` (down-file).",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "The target table.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "The schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "noForceRls"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "table"
+          ]
+        },
+        {
+          "description": "**VENDOR** — `CREATE POLICY <name> ON <table> FOR <cmd> TO <roles> USING\n(<using>) [WITH CHECK (<with_check>)]`. The predicate is a CLOSED `Expr`\nAST, NOT a string (vendor spec §2.4) — rendered via the Expr renderer.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The policy name.",
+              "type": "string"
+            },
+            "table": {
+              "description": "The target table.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "The schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "forCmd": {
+              "description": "`FOR <cmd>` (closed [`PolicyCmd`]; default `All`).",
+              "$ref": "#/$defs/PolicyCmd"
+            },
+            "to": {
+              "description": "`TO <roles>` (default `PUBLIC` when absent).",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "using": {
+              "description": "`USING (<predicate>)` — the closed-AST predicate.",
+              "$ref": "#/$defs/Expr"
+            },
+            "withCheck": {
+              "description": "`WITH CHECK (<predicate>)` — the closed-AST predicate.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "createPolicy"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name",
+            "table",
+            "forCmd",
+            "using"
+          ]
+        },
+        {
+          "description": "**VENDOR** — `DROP POLICY [IF EXISTS] <name> ON <table>`.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The policy name.",
+              "type": "string"
+            },
+            "table": {
+              "description": "The target table.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "The schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ifExists": {
+              "description": "`IF EXISTS`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "dropPolicy"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name",
+            "table"
+          ]
+        },
+        {
+          "description": "**VENDOR** — `CREATE TRIGGER <name> <timing> <events> ON <table> FOR EACH\n<forEach> [WHEN (<when>)] EXECUTE FUNCTION <execute>()`. `execute` is the\ncreated-function NAME (an identifier), NOT a body — the trigger op carries\nNO raw SQL. `when` is a CLOSED `Expr`.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The trigger name.",
+              "type": "string"
+            },
+            "table": {
+              "description": "The target table.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "The schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "timing": {
+              "description": "`BEFORE`/`AFTER`/`INSTEAD OF` (closed [`TriggerTiming`]).",
+              "$ref": "#/$defs/TriggerTiming"
+            },
+            "events": {
+              "description": "The events (`INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`, joined by `OR`).",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TriggerEvent"
+              }
+            },
+            "forEach": {
+              "description": "`FOR EACH ROW`/`STATEMENT` (closed [`ForEach`]).",
+              "$ref": "#/$defs/ForEach"
+            },
+            "execute": {
+              "description": "The function NAME to `EXECUTE FUNCTION` (an identifier — not a body).",
+              "type": "string"
+            },
+            "when": {
+              "description": "`WHEN (<predicate>)` — the closed-AST condition.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "createTrigger"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name",
+            "table",
+            "timing",
+            "events",
+            "forEach",
+            "execute"
+          ]
+        },
+        {
+          "description": "**VENDOR** — `DROP TRIGGER [IF EXISTS] <name> ON <table>`.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The trigger name.",
+              "type": "string"
+            },
+            "table": {
+              "description": "The target table.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "The schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ifExists": {
+              "description": "`IF EXISTS`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "dropTrigger"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name",
+            "table"
+          ]
+        },
+        {
+          "description": "**VENDOR** — `CREATE [OR REPLACE] FUNCTION <name>(<args>) RETURNS <returns>\nLANGUAGE <language> [VOLATILE|STABLE|IMMUTABLE] AS $$ <body> $$`. The `body`\nis the SINGLE raw-string escape in the whole DSL (vendor spec §2.6): a\nPL/pgSQL body is irreducibly arbitrary code, so it is operator-only and\nSTILL parse-scanned by the guard deny-list at lower. `language` is a closed\n2-set so an untrusted PL is rejected at deserialize.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The function name.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "The schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "args": {
+              "description": "The function arguments.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/$defs/FuncArg"
+              }
+            },
+            "returns": {
+              "description": "The return type NAME (`trigger`/`void`/a type).",
+              "type": "string"
+            },
+            "language": {
+              "description": "`LANGUAGE` (closed 2-set [`FuncLanguage`]).",
+              "$ref": "#/$defs/FuncLanguage"
+            },
+            "replace": {
+              "description": "`CREATE OR REPLACE`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "volatility": {
+              "description": "Volatility (closed [`FuncVolatility`]).",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FuncVolatility"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "body": {
+              "description": "The RAW PL/pgSQL / SQL body — the one genuine escape (§2.6).",
+              "type": "string"
+            },
+            "op": {
+              "type": "string",
+              "const": "createFunction"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name",
+            "returns",
+            "language",
+            "body"
+          ]
+        },
+        {
+          "description": "**VENDOR** — `DROP FUNCTION [IF EXISTS] <name>(<argTypes>)`.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The function name.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "The schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "argTypes": {
+              "description": "The argument types (to disambiguate an overload).",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "ifExists": {
+              "description": "`IF EXISTS`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "dropFunction"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name"
+          ]
+        },
+        {
+          "description": "**VENDOR** — the gated raw-statement escape (`pg.sql\\`…\\``, vendor spec\n§2.11). Records the verbatim SQL + typed binds. Operator-only and STILL\nparse-scanned by the guard deny-list at lower; `${…}` interpolation slots\naccept ONLY typed `IrScalar` binds, never identifiers/SQL — so even the\nescape cannot do string-concatenation SQLi.",
+          "type": "object",
+          "properties": {
+            "sql": {
+              "description": "The verbatim SQL statement (no trailing `;`).",
+              "type": "string"
+            },
+            "binds": {
+              "description": "The typed binds (never inlined — `${…}` ⇒ a positional placeholder).",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/IrScalar"
+              }
+            },
+            "op": {
+              "type": "string",
+              "const": "pgRaw"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "sql"
+          ]
         }
       ]
     },
@@ -1950,6 +2769,16 @@
           "description": "`abs(e)`",
           "type": "string",
           "const": "abs"
+        },
+        {
+          "description": "**VENDOR** — `current_setting('<name>', <missingOk>)` (vendor spec §2.10).\nA PG GUC read needed by the RLS policy predicates (`0025`'s\n`current_setting('zeroship.tenant_app', true)`). Pure, side-effect-free; it\nis PG-only and lowers only on PG (the containing vendor op is `PgOnly`). A\nclosed-AST `FnCall` node — NOT a raw escape.",
+          "type": "string",
+          "const": "currentSetting"
+        },
+        {
+          "description": "**VENDOR** — `current_user` (vendor spec §2.10). A nullary identity scalar;\nrenders WITHOUT parentheses (it is a reserved keyword, not a function call).",
+          "type": "string",
+          "const": "currentUser"
         }
       ]
     },
@@ -2162,6 +2991,350 @@
       "format": "uint64",
       "minimum": 0,
       "maximum": 9007199254740991
+    },
+    "Privilege": {
+      "description": "**VENDOR (`@zeroship/migrate/pg`)** — the CLOSED privilege lexicon for\n`Op::Grant`/`Op::Revoke` (vendor spec §2.3). A CLOSED enum, so serde REJECTS an\nout-of-set token at DESERIALIZE — a hand-crafted `.ir.json` cannot smuggle an\ninjection-shaped privilege string into the GRANT render seam (the\n`RefAction`/`IndexMethod` precedent). `All` renders `ALL PRIVILEGES`; the rest\nrender their SQL keyword. Camel/lower-cased on the wire.",
+      "oneOf": [
+        {
+          "description": "`ALL PRIVILEGES`.",
+          "type": "string",
+          "const": "all"
+        },
+        {
+          "description": "`SELECT`.",
+          "type": "string",
+          "const": "select"
+        },
+        {
+          "description": "`INSERT`.",
+          "type": "string",
+          "const": "insert"
+        },
+        {
+          "description": "`UPDATE`.",
+          "type": "string",
+          "const": "update"
+        },
+        {
+          "description": "`DELETE`.",
+          "type": "string",
+          "const": "delete"
+        },
+        {
+          "description": "`TRUNCATE`.",
+          "type": "string",
+          "const": "truncate"
+        },
+        {
+          "description": "`REFERENCES`.",
+          "type": "string",
+          "const": "references"
+        },
+        {
+          "description": "`TRIGGER`.",
+          "type": "string",
+          "const": "trigger"
+        },
+        {
+          "description": "`USAGE` (schema / sequence).",
+          "type": "string",
+          "const": "usage"
+        },
+        {
+          "description": "`CONNECT` (database).",
+          "type": "string",
+          "const": "connect"
+        },
+        {
+          "description": "`CREATE` (schema / database).",
+          "type": "string",
+          "const": "create"
+        },
+        {
+          "description": "`EXECUTE` (function).",
+          "type": "string",
+          "const": "execute"
+        },
+        {
+          "description": "`TEMPORARY` (database).",
+          "type": "string",
+          "const": "temporary"
+        }
+      ]
+    },
+    "GrantTarget": {
+      "description": "**VENDOR** — the CLOSED, internally-tagged GRANT/REVOKE target (vendor spec\n§2.3). Tagged on `\"kind\"`; each shape is closed + `deny_unknown_fields` so a\nhand-crafted artifact cannot smuggle an arbitrary object class.",
+      "oneOf": [
+        {
+          "description": "`… ON [schema.]<name>, …` (tables). The optional `schema` qualifies all\nnamed tables.",
+          "type": "object",
+          "properties": {
+            "names": {
+              "description": "The table names.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "schema": {
+              "description": "The schema qualifier (honored under Platform; gated under Confined).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "table"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "names"
+          ]
+        },
+        {
+          "description": "`… ON SCHEMA <name>, …`.",
+          "type": "object",
+          "properties": {
+            "names": {
+              "description": "The schema names.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "schema"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "names"
+          ]
+        },
+        {
+          "description": "`… ON ALL SEQUENCES IN SCHEMA <in>`.",
+          "type": "object",
+          "properties": {
+            "in": {
+              "description": "The schema whose sequences are targeted.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "sequence"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "in"
+          ]
+        },
+        {
+          "description": "`… ON DATABASE <name>, …`.",
+          "type": "object",
+          "properties": {
+            "names": {
+              "description": "The database names.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "database"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "names"
+          ]
+        }
+      ]
+    },
+    "PolicyCmd": {
+      "description": "**VENDOR** — the CLOSED `CREATE POLICY … FOR <cmd>` lexicon.",
+      "oneOf": [
+        {
+          "description": "`FOR ALL` (the default).",
+          "type": "string",
+          "const": "all"
+        },
+        {
+          "description": "`FOR SELECT`.",
+          "type": "string",
+          "const": "select"
+        },
+        {
+          "description": "`FOR INSERT`.",
+          "type": "string",
+          "const": "insert"
+        },
+        {
+          "description": "`FOR UPDATE`.",
+          "type": "string",
+          "const": "update"
+        },
+        {
+          "description": "`FOR DELETE`.",
+          "type": "string",
+          "const": "delete"
+        }
+      ]
+    },
+    "TriggerTiming": {
+      "description": "**VENDOR** — the CLOSED trigger-timing lexicon (`BEFORE`/`AFTER`/`INSTEAD OF`).",
+      "oneOf": [
+        {
+          "description": "`BEFORE`.",
+          "type": "string",
+          "const": "before"
+        },
+        {
+          "description": "`AFTER`.",
+          "type": "string",
+          "const": "after"
+        },
+        {
+          "description": "`INSTEAD OF`.",
+          "type": "string",
+          "const": "insteadOf"
+        }
+      ]
+    },
+    "TriggerEvent": {
+      "description": "**VENDOR** — the CLOSED trigger-event lexicon (`INSERT`/`UPDATE`/`DELETE`/\n`TRUNCATE`), joined by `OR` in `CREATE TRIGGER … BEFORE UPDATE OR DELETE`.",
+      "oneOf": [
+        {
+          "description": "`INSERT`.",
+          "type": "string",
+          "const": "insert"
+        },
+        {
+          "description": "`UPDATE`.",
+          "type": "string",
+          "const": "update"
+        },
+        {
+          "description": "`DELETE`.",
+          "type": "string",
+          "const": "delete"
+        },
+        {
+          "description": "`TRUNCATE`.",
+          "type": "string",
+          "const": "truncate"
+        }
+      ]
+    },
+    "ForEach": {
+      "description": "**VENDOR** — the CLOSED trigger `FOR EACH {ROW|STATEMENT}` lexicon.",
+      "oneOf": [
+        {
+          "description": "`FOR EACH ROW`.",
+          "type": "string",
+          "const": "row"
+        },
+        {
+          "description": "`FOR EACH STATEMENT`.",
+          "type": "string",
+          "const": "statement"
+        }
+      ]
+    },
+    "FuncArg": {
+      "description": "**VENDOR** — one `CREATE FUNCTION` argument (`{ name?, type, mode? }`). The\n`r#type` is a PG type NAME (a plain string, like `CreateFunction.returns`) — it\nis rendered into the signature verbatim and the WHOLE statement is then\n`pg_query`-parsed by the guard (vendor spec §4.4).",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Optional argument name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "description": "The argument's PG type name.",
+          "type": "string"
+        },
+        "mode": {
+          "description": "Optional argument mode (`in`/`out`/`inout`; default `in`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FuncArgMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ]
+    },
+    "FuncArgMode": {
+      "description": "**VENDOR** — the CLOSED function-argument mode lexicon.",
+      "oneOf": [
+        {
+          "description": "`IN` (the default).",
+          "type": "string",
+          "const": "in"
+        },
+        {
+          "description": "`OUT`.",
+          "type": "string",
+          "const": "out"
+        },
+        {
+          "description": "`INOUT`.",
+          "type": "string",
+          "const": "inout"
+        }
+      ]
+    },
+    "FuncLanguage": {
+      "description": "**VENDOR** — the CLOSED `CREATE FUNCTION … LANGUAGE` lexicon. A deliberately\n2-set: `plpgsql`/`sql` ONLY — an untrusted PL (`plpythonu`/`plperlu`/`c`) is\nREJECTED at DESERIALIZE (serde unknown-variant) BEFORE the body deny-list scan\neven runs (vendor spec §2.6 / §3.3).",
+      "oneOf": [
+        {
+          "description": "`LANGUAGE plpgsql`.",
+          "type": "string",
+          "const": "plpgsql"
+        },
+        {
+          "description": "`LANGUAGE sql`.",
+          "type": "string",
+          "const": "sql"
+        }
+      ]
+    },
+    "FuncVolatility": {
+      "description": "**VENDOR** — the CLOSED function-volatility lexicon.",
+      "oneOf": [
+        {
+          "description": "`VOLATILE`.",
+          "type": "string",
+          "const": "volatile"
+        },
+        {
+          "description": "`STABLE`.",
+          "type": "string",
+          "const": "stable"
+        },
+        {
+          "description": "`IMMUTABLE`.",
+          "type": "string",
+          "const": "immutable"
+        }
+      ]
     },
     "IrFlagsOverride": {
       "description": "All-`Option` mirror of [`MigrationFlags`] — the override carrier in the IR\n(§2.1). An absent key and an explicit `null` both mean \"no override\" here;\nthe derive-then-override MERGE is Wave C, NOT this type's job.",

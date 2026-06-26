@@ -559,6 +559,35 @@ pub fn fold_ops(
             }
             // DML: schema no-ops (rows, not shape).
             Op::Insert { .. } | Op::Update { .. } | Op::Delete { .. } | Op::Backfill { .. } => {}
+            // VENDOR (`@zeroship/migrate/pg`) — roles/grants/RLS/policies/triggers/
+            // functions/extensions/schemas/`pg.sql` are NOT table structure (vendor
+            // spec §4.6): they have no place in a table `SchemaSnapshot`, exactly
+            // like DML. Excluded from the structural fold (a no-contribution arm).
+            // The table-scoped vendor ops (RLS enable, policy, trigger ON a table)
+            // are orthogonal table FACETS — they do not change the table's
+            // column/constraint/index snapshot — so they contribute nothing here
+            // either. Vendor-object drift is a separate, later introspection concern.
+            Op::CreateSchema { .. }
+            | Op::DropSchema { .. }
+            | Op::CreateExtension { .. }
+            | Op::DropExtension { .. }
+            | Op::CreateRole { .. }
+            | Op::AlterRole { .. }
+            | Op::DropRole { .. }
+            | Op::DropOwnedBy { .. }
+            | Op::Grant { .. }
+            | Op::Revoke { .. }
+            | Op::EnableRls { .. }
+            | Op::ForceRls { .. }
+            | Op::DisableRls { .. }
+            | Op::NoForceRls { .. }
+            | Op::CreatePolicy { .. }
+            | Op::DropPolicy { .. }
+            | Op::CreateTrigger { .. }
+            | Op::DropTrigger { .. }
+            | Op::CreateFunction { .. }
+            | Op::DropFunction { .. }
+            | Op::PgRaw { .. } => {}
         }
     }
 

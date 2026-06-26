@@ -68,7 +68,7 @@ pub const EXPR_INVALID_NUMERIC: &str = "EXPR_INVALID_NUMERIC";
 /// engine that this build cannot faithfully interpret), per the AGENTS.md
 /// "wire-format versioning is code-evolution discipline, not user-compat" stance.
 /// A bump MUST be checksum-neutral for already-applied artifacts (§5.3).
-pub const CURRENT_IR_VERSION: u32 = 2;
+pub const CURRENT_IR_VERSION: u32 = 3;
 
 /// A [`MigrationIr`] declared an `ir_version` this engine build does not
 /// understand — a FUTURE version `> CURRENT_IR_VERSION` (§5.3, design line 888).
@@ -797,6 +797,290 @@ pub enum ExistenceGuard {
     IfExists,
 }
 
+/// **VENDOR (`@zeroship/migrate/pg`)** — the CLOSED privilege lexicon for
+/// `Op::Grant`/`Op::Revoke` (vendor spec §2.3). A CLOSED enum, so serde REJECTS an
+/// out-of-set token at DESERIALIZE — a hand-crafted `.ir.json` cannot smuggle an
+/// injection-shaped privilege string into the GRANT render seam (the
+/// `RefAction`/`IndexMethod` precedent). `All` renders `ALL PRIVILEGES`; the rest
+/// render their SQL keyword. Camel/lower-cased on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum Privilege {
+    /// `ALL PRIVILEGES`.
+    All,
+    /// `SELECT`.
+    Select,
+    /// `INSERT`.
+    Insert,
+    /// `UPDATE`.
+    Update,
+    /// `DELETE`.
+    Delete,
+    /// `TRUNCATE`.
+    Truncate,
+    /// `REFERENCES`.
+    References,
+    /// `TRIGGER`.
+    Trigger,
+    /// `USAGE` (schema / sequence).
+    Usage,
+    /// `CONNECT` (database).
+    Connect,
+    /// `CREATE` (schema / database).
+    Create,
+    /// `EXECUTE` (function).
+    Execute,
+    /// `TEMPORARY` (database).
+    Temporary,
+}
+
+impl Privilege {
+    /// The SQL keyword for this privilege (`All` ⇒ `ALL PRIVILEGES`).
+    #[must_use]
+    pub fn as_sql(self) -> &'static str {
+        match self {
+            Privilege::All => "ALL PRIVILEGES",
+            Privilege::Select => "SELECT",
+            Privilege::Insert => "INSERT",
+            Privilege::Update => "UPDATE",
+            Privilege::Delete => "DELETE",
+            Privilege::Truncate => "TRUNCATE",
+            Privilege::References => "REFERENCES",
+            Privilege::Trigger => "TRIGGER",
+            Privilege::Usage => "USAGE",
+            Privilege::Connect => "CONNECT",
+            Privilege::Create => "CREATE",
+            Privilege::Execute => "EXECUTE",
+            Privilege::Temporary => "TEMPORARY",
+        }
+    }
+}
+
+/// **VENDOR** — the CLOSED, internally-tagged GRANT/REVOKE target (vendor spec
+/// §2.3). Tagged on `"kind"`; each shape is closed + `deny_unknown_fields` so a
+/// hand-crafted artifact cannot smuggle an arbitrary object class.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum GrantTarget {
+    /// `… ON [schema.]<name>, …` (tables). The optional `schema` qualifies all
+    /// named tables.
+    Table {
+        /// The table names.
+        names: Vec<String>,
+        /// The schema qualifier (honored under Platform; gated under Confined).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+    },
+    /// `… ON SCHEMA <name>, …`.
+    Schema {
+        /// The schema names.
+        names: Vec<String>,
+    },
+    /// `… ON ALL SEQUENCES IN SCHEMA <in>`.
+    Sequence {
+        /// The schema whose sequences are targeted.
+        r#in: String,
+    },
+    /// `… ON DATABASE <name>, …`.
+    Database {
+        /// The database names.
+        names: Vec<String>,
+    },
+}
+
+/// **VENDOR** — the CLOSED trigger-timing lexicon (`BEFORE`/`AFTER`/`INSTEAD OF`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum TriggerTiming {
+    /// `BEFORE`.
+    Before,
+    /// `AFTER`.
+    After,
+    /// `INSTEAD OF`.
+    InsteadOf,
+}
+
+impl TriggerTiming {
+    /// The SQL spelling.
+    #[must_use]
+    pub fn as_sql(self) -> &'static str {
+        match self {
+            TriggerTiming::Before => "BEFORE",
+            TriggerTiming::After => "AFTER",
+            TriggerTiming::InsteadOf => "INSTEAD OF",
+        }
+    }
+}
+
+/// **VENDOR** — the CLOSED trigger-event lexicon (`INSERT`/`UPDATE`/`DELETE`/
+/// `TRUNCATE`), joined by `OR` in `CREATE TRIGGER … BEFORE UPDATE OR DELETE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum TriggerEvent {
+    /// `INSERT`.
+    Insert,
+    /// `UPDATE`.
+    Update,
+    /// `DELETE`.
+    Delete,
+    /// `TRUNCATE`.
+    Truncate,
+}
+
+impl TriggerEvent {
+    /// The SQL spelling.
+    #[must_use]
+    pub fn as_sql(self) -> &'static str {
+        match self {
+            TriggerEvent::Insert => "INSERT",
+            TriggerEvent::Update => "UPDATE",
+            TriggerEvent::Delete => "DELETE",
+            TriggerEvent::Truncate => "TRUNCATE",
+        }
+    }
+}
+
+/// **VENDOR** — the CLOSED trigger `FOR EACH {ROW|STATEMENT}` lexicon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ForEach {
+    /// `FOR EACH ROW`.
+    Row,
+    /// `FOR EACH STATEMENT`.
+    Statement,
+}
+
+impl ForEach {
+    /// The SQL spelling.
+    #[must_use]
+    pub fn as_sql(self) -> &'static str {
+        match self {
+            ForEach::Row => "ROW",
+            ForEach::Statement => "STATEMENT",
+        }
+    }
+}
+
+/// **VENDOR** — the CLOSED `CREATE POLICY … FOR <cmd>` lexicon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum PolicyCmd {
+    /// `FOR ALL` (the default).
+    All,
+    /// `FOR SELECT`.
+    Select,
+    /// `FOR INSERT`.
+    Insert,
+    /// `FOR UPDATE`.
+    Update,
+    /// `FOR DELETE`.
+    Delete,
+}
+
+impl PolicyCmd {
+    /// The SQL spelling.
+    #[must_use]
+    pub fn as_sql(self) -> &'static str {
+        match self {
+            PolicyCmd::All => "ALL",
+            PolicyCmd::Select => "SELECT",
+            PolicyCmd::Insert => "INSERT",
+            PolicyCmd::Update => "UPDATE",
+            PolicyCmd::Delete => "DELETE",
+        }
+    }
+}
+
+/// **VENDOR** — the CLOSED `CREATE FUNCTION … LANGUAGE` lexicon. A deliberately
+/// 2-set: `plpgsql`/`sql` ONLY — an untrusted PL (`plpythonu`/`plperlu`/`c`) is
+/// REJECTED at DESERIALIZE (serde unknown-variant) BEFORE the body deny-list scan
+/// even runs (vendor spec §2.6 / §3.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum FuncLanguage {
+    /// `LANGUAGE plpgsql`.
+    Plpgsql,
+    /// `LANGUAGE sql`.
+    Sql,
+}
+
+impl FuncLanguage {
+    /// The SQL spelling (the lower-case language token).
+    #[must_use]
+    pub fn as_sql(self) -> &'static str {
+        match self {
+            FuncLanguage::Plpgsql => "plpgsql",
+            FuncLanguage::Sql => "sql",
+        }
+    }
+}
+
+/// **VENDOR** — the CLOSED function-volatility lexicon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum FuncVolatility {
+    /// `VOLATILE`.
+    Volatile,
+    /// `STABLE`.
+    Stable,
+    /// `IMMUTABLE`.
+    Immutable,
+}
+
+impl FuncVolatility {
+    /// The SQL spelling.
+    #[must_use]
+    pub fn as_sql(self) -> &'static str {
+        match self {
+            FuncVolatility::Volatile => "VOLATILE",
+            FuncVolatility::Stable => "STABLE",
+            FuncVolatility::Immutable => "IMMUTABLE",
+        }
+    }
+}
+
+/// **VENDOR** — the CLOSED function-argument mode lexicon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum FuncArgMode {
+    /// `IN` (the default).
+    In,
+    /// `OUT`.
+    Out,
+    /// `INOUT`.
+    Inout,
+}
+
+impl FuncArgMode {
+    /// The SQL spelling.
+    #[must_use]
+    pub fn as_sql(self) -> &'static str {
+        match self {
+            FuncArgMode::In => "IN",
+            FuncArgMode::Out => "OUT",
+            FuncArgMode::Inout => "INOUT",
+        }
+    }
+}
+
+/// **VENDOR** — one `CREATE FUNCTION` argument (`{ name?, type, mode? }`). The
+/// `r#type` is a PG type NAME (a plain string, like `CreateFunction.returns`) — it
+/// is rendered into the signature verbatim and the WHOLE statement is then
+/// `pg_query`-parsed by the guard (vendor spec §4.4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FuncArg {
+    /// Optional argument name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The argument's PG type name.
+    #[serde(rename = "type")]
+    pub ty: String,
+    /// Optional argument mode (`in`/`out`/`inout`; default `in`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<FuncArgMode>,
+}
+
 /// The CLOSED `op.*` operation enum (§2.3), internally tagged on `"op"` and
 /// camel-cased (`{"op":"createTable", …}`). NO `untagged`, NO `flatten` on the
 /// enum itself — see the module-level note + the ADR.
@@ -1133,9 +1417,357 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
     },
+
+    // ──────────────────────────────────────────────────────────────────────
+    // VENDOR (`@zeroship/migrate/pg`) — Postgres-ONLY privileged primitives
+    // (vendor spec §4.1). Each is REFUSED fail-closed under a Confined capability
+    // set at validate AND at lower (gate 1 = capability gate; gate 2 = the
+    // rendered SQL hits the Confined deny-list). All are `dialect_scope = PgOnly`:
+    // a SQLite deploy of any of them is hard-rejected at load (§4.3). `password`,
+    // `body`, and `sql` are the only free `String` fields — the §3-gated raw
+    // surface, still parse-scanned by the guard deny-list.
+    // ──────────────────────────────────────────────────────────────────────
+    /// **VENDOR** — `CREATE SCHEMA [IF NOT EXISTS] <name> [AUTHORIZATION <role>]`.
+    CreateSchema {
+        /// The schema name to create.
+        name: String,
+        /// `IF NOT EXISTS`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        if_not_exists: Option<bool>,
+        /// `AUTHORIZATION <role>`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        authorization: Option<String>,
+    },
+    /// **VENDOR** — `DROP SCHEMA [IF EXISTS] <name> [CASCADE]`.
+    DropSchema {
+        /// The schema name to drop.
+        name: String,
+        /// `IF EXISTS`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        if_exists: Option<bool>,
+        /// `CASCADE`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cascade: Option<bool>,
+    },
+    /// **VENDOR** — `CREATE EXTENSION [IF NOT EXISTS] <name> [WITH SCHEMA <schema>]`.
+    /// Still allowlist-gated at the guard (`FORBIDDEN_EXTENSIONS` overrides in all
+    /// profiles).
+    CreateExtension {
+        /// The extension name.
+        name: String,
+        /// `IF NOT EXISTS`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        if_not_exists: Option<bool>,
+        /// `WITH SCHEMA <schema>`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+    },
+    /// **VENDOR** — `DROP EXTENSION [IF EXISTS] <name>`.
+    DropExtension {
+        /// The extension name.
+        name: String,
+        /// `IF EXISTS`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        if_exists: Option<bool>,
+    },
+    /// **VENDOR** — `CREATE ROLE <name> [LOGIN] [PASSWORD '…'] [BYPASSRLS] …`. The
+    /// `if_not_exists` is engine-synthesized (a `pg_roles` probe; there is no
+    /// native `CREATE ROLE IF NOT EXISTS`). `superuser: true` lowers `SUPERUSER`,
+    /// which the deny-list STILL refuses in all profiles (privilege within the DB
+    /// widens; host reach never does, §3.4).
+    CreateRole {
+        /// The role name.
+        name: String,
+        /// `LOGIN`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        login: Option<bool>,
+        /// `PASSWORD '…'` (a dev secret — §3.6).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
+        /// `BYPASSRLS`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bypass_rls: Option<bool>,
+        /// `CREATEROLE`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        create_role: Option<bool>,
+        /// `CREATEDB`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        create_db: Option<bool>,
+        /// `SUPERUSER` (DENIED at render in all profiles).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        superuser: Option<bool>,
+        /// `IN ROLE <r>, …`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        in_role: Option<Vec<String>>,
+        /// The `ALTER ROLE … SET search_path = …` the platform needs (synthesized
+        /// as a follow-on statement).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        set_search_path: Option<Vec<String>>,
+        /// Engine-synthesized `pg_roles` existence probe (no native clause).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        if_not_exists: Option<bool>,
+    },
+    /// **VENDOR** — `ALTER ROLE <name> SET search_path = …` / `RESET search_path`.
+    AlterRole {
+        /// The role name.
+        name: String,
+        /// `SET search_path = …`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        set_search_path: Option<Vec<String>>,
+        /// `RESET search_path`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reset_search_path: Option<bool>,
+    },
+    /// **VENDOR** — `DROP ROLE [IF EXISTS] <name>`.
+    DropRole {
+        /// The role name.
+        name: String,
+        /// `IF EXISTS`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        if_exists: Option<bool>,
+    },
+    /// **VENDOR** — `DROP OWNED BY <role>, …` (the `0025` rollback construct).
+    DropOwnedBy {
+        /// The roles whose owned objects are dropped.
+        roles: Vec<String>,
+    },
+    /// **VENDOR** — `GRANT <privs> ON <target> TO <roles> [WITH GRANT OPTION]`.
+    Grant {
+        /// The privileges (a closed [`Privilege`] set; `All` ⇒ `ALL PRIVILEGES`).
+        privileges: Vec<Privilege>,
+        /// The grant target (closed, tagged).
+        on: GrantTarget,
+        /// The grantee roles (`"public"` is the reserved `PUBLIC` sentinel).
+        to: Vec<String>,
+        /// `WITH GRANT OPTION`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        with_grant_option: Option<bool>,
+    },
+    /// **VENDOR** — `REVOKE <privs> ON <target> FROM <roles>`.
+    Revoke {
+        /// The privileges (closed [`Privilege`] set).
+        privileges: Vec<Privilege>,
+        /// The revoke target (closed, tagged).
+        on: GrantTarget,
+        /// The roles to revoke from (`"public"` is the reserved `PUBLIC` sentinel).
+        from: Vec<String>,
+    },
+    /// **VENDOR** — `ALTER TABLE … ENABLE ROW LEVEL SECURITY`.
+    EnableRls {
+        /// The target table.
+        table: String,
+        /// The schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+    },
+    /// **VENDOR** — `ALTER TABLE … FORCE ROW LEVEL SECURITY`.
+    ForceRls {
+        /// The target table.
+        table: String,
+        /// The schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+    },
+    /// **VENDOR** — `ALTER TABLE … DISABLE ROW LEVEL SECURITY` (down-file).
+    DisableRls {
+        /// The target table.
+        table: String,
+        /// The schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+    },
+    /// **VENDOR** — `ALTER TABLE … NO FORCE ROW LEVEL SECURITY` (down-file).
+    NoForceRls {
+        /// The target table.
+        table: String,
+        /// The schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+    },
+    /// **VENDOR** — `CREATE POLICY <name> ON <table> FOR <cmd> TO <roles> USING
+    /// (<using>) [WITH CHECK (<with_check>)]`. The predicate is a CLOSED `Expr`
+    /// AST, NOT a string (vendor spec §2.4) — rendered via the Expr renderer.
+    CreatePolicy {
+        /// The policy name.
+        name: String,
+        /// The target table.
+        table: String,
+        /// The schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// `FOR <cmd>` (closed [`PolicyCmd`]; default `All`).
+        for_cmd: PolicyCmd,
+        /// `TO <roles>` (default `PUBLIC` when absent).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<Vec<String>>,
+        /// `USING (<predicate>)` — the closed-AST predicate.
+        using: Expr,
+        /// `WITH CHECK (<predicate>)` — the closed-AST predicate.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        with_check: Option<Expr>,
+    },
+    /// **VENDOR** — `DROP POLICY [IF EXISTS] <name> ON <table>`.
+    DropPolicy {
+        /// The policy name.
+        name: String,
+        /// The target table.
+        table: String,
+        /// The schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// `IF EXISTS`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        if_exists: Option<bool>,
+    },
+    /// **VENDOR** — `CREATE TRIGGER <name> <timing> <events> ON <table> FOR EACH
+    /// <forEach> [WHEN (<when>)] EXECUTE FUNCTION <execute>()`. `execute` is the
+    /// created-function NAME (an identifier), NOT a body — the trigger op carries
+    /// NO raw SQL. `when` is a CLOSED `Expr`.
+    CreateTrigger {
+        /// The trigger name.
+        name: String,
+        /// The target table.
+        table: String,
+        /// The schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// `BEFORE`/`AFTER`/`INSTEAD OF` (closed [`TriggerTiming`]).
+        timing: TriggerTiming,
+        /// The events (`INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`, joined by `OR`).
+        events: Vec<TriggerEvent>,
+        /// `FOR EACH ROW`/`STATEMENT` (closed [`ForEach`]).
+        for_each: ForEach,
+        /// The function NAME to `EXECUTE FUNCTION` (an identifier — not a body).
+        execute: String,
+        /// `WHEN (<predicate>)` — the closed-AST condition.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        when: Option<Expr>,
+    },
+    /// **VENDOR** — `DROP TRIGGER [IF EXISTS] <name> ON <table>`.
+    DropTrigger {
+        /// The trigger name.
+        name: String,
+        /// The target table.
+        table: String,
+        /// The schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// `IF EXISTS`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        if_exists: Option<bool>,
+    },
+    /// **VENDOR** — `CREATE [OR REPLACE] FUNCTION <name>(<args>) RETURNS <returns>
+    /// LANGUAGE <language> [VOLATILE|STABLE|IMMUTABLE] AS $$ <body> $$`. The `body`
+    /// is the SINGLE raw-string escape in the whole DSL (vendor spec §2.6): a
+    /// PL/pgSQL body is irreducibly arbitrary code, so it is operator-only and
+    /// STILL parse-scanned by the guard deny-list at lower. `language` is a closed
+    /// 2-set so an untrusted PL is rejected at deserialize.
+    CreateFunction {
+        /// The function name.
+        name: String,
+        /// The schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// The function arguments.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        args: Option<Vec<FuncArg>>,
+        /// The return type NAME (`trigger`/`void`/a type).
+        returns: String,
+        /// `LANGUAGE` (closed 2-set [`FuncLanguage`]).
+        language: FuncLanguage,
+        /// `CREATE OR REPLACE`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replace: Option<bool>,
+        /// Volatility (closed [`FuncVolatility`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        volatility: Option<FuncVolatility>,
+        /// The RAW PL/pgSQL / SQL body — the one genuine escape (§2.6).
+        body: String,
+    },
+    /// **VENDOR** — `DROP FUNCTION [IF EXISTS] <name>(<argTypes>)`.
+    DropFunction {
+        /// The function name.
+        name: String,
+        /// The schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// The argument types (to disambiguate an overload).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arg_types: Option<Vec<String>>,
+        /// `IF EXISTS`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        if_exists: Option<bool>,
+    },
+    /// **VENDOR** — the gated raw-statement escape (`pg.sql\`…\``, vendor spec
+    /// §2.11). Records the verbatim SQL + typed binds. Operator-only and STILL
+    /// parse-scanned by the guard deny-list at lower; `${…}` interpolation slots
+    /// accept ONLY typed `IrScalar` binds, never identifiers/SQL — so even the
+    /// escape cannot do string-concatenation SQLi.
+    PgRaw {
+        /// The verbatim SQL statement (no trailing `;`).
+        sql: String,
+        /// The typed binds (never inlined — `${…}` ⇒ a positional placeholder).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        binds: Vec<IrScalar>,
+    },
 }
 
 impl Op {
+    /// Is this a VENDOR (`@zeroship/migrate/pg`) Postgres-only privileged op
+    /// (vendor spec §4.1)? The validator's capability gate + the SQLite
+    /// `PgOnly`-refusal key on this. EXHAUSTIVE over the closed [`Op`] set so a new
+    /// variant must consciously declare its vendor-ness (a missing arm is a compile
+    /// error).
+    #[must_use]
+    pub fn is_vendor(&self) -> bool {
+        self.vendor_capability().is_some()
+    }
+
+    /// The VENDOR capability this op REQUIRES, or `None` for a portable-core op
+    /// (vendor spec §3.2). The capability-composition gate
+    /// ([`crate::capability::VendorCapabilities`]) refuses the op fail-closed when
+    /// the active capability set does not grant this. EXHAUSTIVE over the closed
+    /// [`Op`] set.
+    #[must_use]
+    pub fn vendor_capability(&self) -> Option<crate::capability::VendorCapability> {
+        use crate::capability::VendorCapability as C;
+        match self {
+            // Portable core — no capability required.
+            Op::CreateTable { .. }
+            | Op::DropTable { .. }
+            | Op::RenameTable { .. }
+            | Op::AddColumn { .. }
+            | Op::DropColumn { .. }
+            | Op::CreateIndex { .. }
+            | Op::DropIndex { .. }
+            | Op::AlterColumnType { .. }
+            | Op::AlterColumnNullability { .. }
+            | Op::RenameColumn { .. }
+            | Op::AddConstraint { .. }
+            | Op::DropConstraint { .. }
+            | Op::Insert { .. }
+            | Op::Update { .. }
+            | Op::Delete { .. }
+            | Op::Backfill { .. } => None,
+            // Vendor — each maps to its capability flag.
+            Op::CreateSchema { .. } | Op::DropSchema { .. } => Some(C::Schema),
+            Op::CreateExtension { .. } | Op::DropExtension { .. } => Some(C::Extension),
+            Op::CreateRole { .. }
+            | Op::AlterRole { .. }
+            | Op::DropRole { .. }
+            | Op::DropOwnedBy { .. } => Some(C::Role),
+            Op::Grant { .. } | Op::Revoke { .. } => Some(C::Grant),
+            Op::EnableRls { .. }
+            | Op::ForceRls { .. }
+            | Op::DisableRls { .. }
+            | Op::NoForceRls { .. } => Some(C::Rls),
+            Op::CreatePolicy { .. } | Op::DropPolicy { .. } => Some(C::Policy),
+            Op::CreateTrigger { .. } | Op::DropTrigger { .. } => Some(C::Trigger),
+            Op::CreateFunction { .. } | Op::DropFunction { .. } => Some(C::Function),
+            Op::PgRaw { .. } => Some(C::RawSql),
+        }
+    }
+
     /// The table this op TARGETS — for the §2.0.3 cross-deploy pending-contract
     /// interlock's touched-set. EXHAUSTIVE over the closed [`Op`] set so a new op
     /// variant must consciously declare its table here (a missing arm is a compile
@@ -1170,6 +1802,29 @@ impl Op {
             // present it is the touched table, otherwise the op names only the
             // index (resolved against the live schema downstream).
             Op::DropIndex { table, .. } => table.as_deref(),
+            // VENDOR — table-scoped vendor ops (RLS / policy / trigger) touch their
+            // table; the database-/role-/schema-level ones touch no table.
+            Op::EnableRls { table, .. }
+            | Op::ForceRls { table, .. }
+            | Op::DisableRls { table, .. }
+            | Op::NoForceRls { table, .. }
+            | Op::CreatePolicy { table, .. }
+            | Op::DropPolicy { table, .. }
+            | Op::CreateTrigger { table, .. }
+            | Op::DropTrigger { table, .. } => Some(table.as_str()),
+            Op::CreateSchema { .. }
+            | Op::DropSchema { .. }
+            | Op::CreateExtension { .. }
+            | Op::DropExtension { .. }
+            | Op::CreateRole { .. }
+            | Op::AlterRole { .. }
+            | Op::DropRole { .. }
+            | Op::DropOwnedBy { .. }
+            | Op::Grant { .. }
+            | Op::Revoke { .. }
+            | Op::CreateFunction { .. }
+            | Op::DropFunction { .. }
+            | Op::PgRaw { .. } => None,
         }
     }
 
@@ -1197,6 +1852,31 @@ impl Op {
             | Op::Update { schema, .. }
             | Op::Delete { schema, .. }
             | Op::Backfill { schema, .. } => schema.as_deref(),
+            // VENDOR — ops carrying a schema QUALIFIER expose it for cross-schema
+            // confinement + effective-schema resolution.
+            Op::CreateExtension { schema, .. }
+            | Op::EnableRls { schema, .. }
+            | Op::ForceRls { schema, .. }
+            | Op::DisableRls { schema, .. }
+            | Op::NoForceRls { schema, .. }
+            | Op::CreatePolicy { schema, .. }
+            | Op::DropPolicy { schema, .. }
+            | Op::CreateTrigger { schema, .. }
+            | Op::DropTrigger { schema, .. }
+            | Op::CreateFunction { schema, .. }
+            | Op::DropFunction { schema, .. } => schema.as_deref(),
+            // VENDOR — these operate on the schema/role/database NAMESPACE itself
+            // (the `name`/`roles` is NOT a schema qualifier), so no qualifier.
+            Op::CreateSchema { .. }
+            | Op::DropSchema { .. }
+            | Op::DropExtension { .. }
+            | Op::CreateRole { .. }
+            | Op::AlterRole { .. }
+            | Op::DropRole { .. }
+            | Op::DropOwnedBy { .. }
+            | Op::Grant { .. }
+            | Op::Revoke { .. }
+            | Op::PgRaw { .. } => None,
         }
     }
 
@@ -1219,6 +1899,30 @@ impl Op {
             | Op::AddConstraint { existence_guard, .. }
             | Op::DropConstraint { existence_guard, .. } => *existence_guard,
             Op::Insert { .. } | Op::Update { .. } | Op::Delete { .. } | Op::Backfill { .. } => None,
+            // VENDOR — the existence guard is a NATIVE clause (`IF [NOT] EXISTS`) or
+            // an engine-synthesized `pg_roles` probe rendered inline by the vendor
+            // lowering, NOT the catalog-probe `ExistenceGuard` mechanism. None here.
+            Op::CreateSchema { .. }
+            | Op::DropSchema { .. }
+            | Op::CreateExtension { .. }
+            | Op::DropExtension { .. }
+            | Op::CreateRole { .. }
+            | Op::AlterRole { .. }
+            | Op::DropRole { .. }
+            | Op::DropOwnedBy { .. }
+            | Op::Grant { .. }
+            | Op::Revoke { .. }
+            | Op::EnableRls { .. }
+            | Op::ForceRls { .. }
+            | Op::DisableRls { .. }
+            | Op::NoForceRls { .. }
+            | Op::CreatePolicy { .. }
+            | Op::DropPolicy { .. }
+            | Op::CreateTrigger { .. }
+            | Op::DropTrigger { .. }
+            | Op::CreateFunction { .. }
+            | Op::DropFunction { .. }
+            | Op::PgRaw { .. } => None,
         }
     }
 
@@ -1243,6 +1947,28 @@ impl Op {
             | Op::RenameColumn { .. }
             | Op::DropConstraint { .. } => Some(ExistenceGuard::IfExists),
             Op::Insert { .. } | Op::Update { .. } | Op::Delete { .. } | Op::Backfill { .. } => None,
+            // VENDOR — vendor ops carry no `ExistenceGuard` (native clause instead).
+            Op::CreateSchema { .. }
+            | Op::DropSchema { .. }
+            | Op::CreateExtension { .. }
+            | Op::DropExtension { .. }
+            | Op::CreateRole { .. }
+            | Op::AlterRole { .. }
+            | Op::DropRole { .. }
+            | Op::DropOwnedBy { .. }
+            | Op::Grant { .. }
+            | Op::Revoke { .. }
+            | Op::EnableRls { .. }
+            | Op::ForceRls { .. }
+            | Op::DisableRls { .. }
+            | Op::NoForceRls { .. }
+            | Op::CreatePolicy { .. }
+            | Op::DropPolicy { .. }
+            | Op::CreateTrigger { .. }
+            | Op::DropTrigger { .. }
+            | Op::CreateFunction { .. }
+            | Op::DropFunction { .. }
+            | Op::PgRaw { .. } => None,
         }
     }
 }

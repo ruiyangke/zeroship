@@ -485,6 +485,29 @@ fn op_subject(op: &Op) -> String {
             quote_dotted(&[table])
         }
         Op::Backfill { table, .. } => quote_dotted(&[table]),
+        // VENDOR (`@zeroship/migrate/pg`) — the best-effort subject is the named
+        // object (schema / extension / role / function) or the table+name for the
+        // table-scoped RLS/policy/trigger ops.
+        Op::CreateSchema { name, .. }
+        | Op::DropSchema { name, .. }
+        | Op::CreateExtension { name, .. }
+        | Op::DropExtension { name, .. }
+        | Op::CreateRole { name, .. }
+        | Op::AlterRole { name, .. }
+        | Op::DropRole { name, .. }
+        | Op::CreateFunction { name, .. }
+        | Op::DropFunction { name, .. } => quote_dotted(&[name]),
+        Op::DropOwnedBy { roles } => quote_dotted(&[&roles.join(", ")]),
+        Op::Grant { .. } | Op::Revoke { .. } => quote_dotted(&["<grant>"]),
+        Op::EnableRls { table, .. }
+        | Op::ForceRls { table, .. }
+        | Op::DisableRls { table, .. }
+        | Op::NoForceRls { table, .. } => quote_dotted(&[table]),
+        Op::CreatePolicy { name, table, .. }
+        | Op::DropPolicy { name, table, .. }
+        | Op::CreateTrigger { name, table, .. }
+        | Op::DropTrigger { name, table, .. } => quote_dotted(&[table, name]),
+        Op::PgRaw { .. } => quote_dotted(&["<pgRaw>"]),
     }
 }
 

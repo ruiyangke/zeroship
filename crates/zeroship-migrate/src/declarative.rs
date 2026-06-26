@@ -4854,6 +4854,23 @@ impl DeclarativeAuthor {
         ))
     }
 
+    /// **VENDOR** — wrap a pre-rendered vendor statement
+    /// ([`crate::vendor::VendorStatement`]) into a journaled [`LoweredUnit`]. The
+    /// `up`/`down` SQL was structurally assembled by [`crate::vendor`] (identifiers
+    /// quoted, predicates rendered from the closed AST); this only stamps the
+    /// owner/checksum and routes it through the SAME `make` + `single_stmt` path
+    /// every other lowered unit uses, so the per-fragment guard at lower
+    /// ([`crate::ir_author::IrAuthor::lower_guarded`]) checks one statement per
+    /// fragment. Vendor DDL is transactional with default flags (vendor spec §4.4).
+    pub(crate) fn lower_vendor_statement(
+        &self,
+        name: &str,
+        up: String,
+        down: Option<String>,
+    ) -> LoweredUnit {
+        single_stmt(self.make(name, up, down, MigrationFlags::default(), Vec::new()))
+    }
+
     /// §6.4 — render a stand-alone `ALTER TABLE … ALTER COLUMN … TYPE …` the SAME
     /// way `diff` does (`render_alter_column_type`), from a [`ColumnSnapshot`]
     /// carrying the desired `data_type`. Byte-identical to the differ by

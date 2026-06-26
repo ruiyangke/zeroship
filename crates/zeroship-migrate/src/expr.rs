@@ -108,6 +108,15 @@ pub enum ScalarFn {
     Length,
     /// `abs(e)`
     Abs,
+    /// **VENDOR** — `current_setting('<name>', <missingOk>)` (vendor spec §2.10).
+    /// A PG GUC read needed by the RLS policy predicates (`0025`'s
+    /// `current_setting('zeroship.tenant_app', true)`). Pure, side-effect-free; it
+    /// is PG-only and lowers only on PG (the containing vendor op is `PgOnly`). A
+    /// closed-AST `FnCall` node — NOT a raw escape.
+    CurrentSetting,
+    /// **VENDOR** — `current_user` (vendor spec §2.10). A nullary identity scalar;
+    /// renders WITHOUT parentheses (it is a reserved keyword, not a function call).
+    CurrentUser,
 }
 
 /// The engine-SYNTHESIZED helpers (`FnSynth`) whose per-dialect lowering the

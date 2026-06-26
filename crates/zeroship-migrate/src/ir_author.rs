@@ -495,6 +495,23 @@ pub enum IrLowerError {
     /// builder.
     #[error("IrAuthor::lower of renameColumn failed: {0}")]
     RenameLower(String),
+    /// **VENDOR** — a vendor (`@zeroship/migrate/pg`) op was lowered against a
+    /// SQLite target. Every vendor primitive (roles/grants/RLS/policies/triggers/
+    /// functions/extensions/schemas/`pg.sql`) is `dialect_scope = PgOnly` and has no
+    /// SQLite analogue (vendor spec §4.3) — refused fail-closed at lower (the
+    /// validate gate already refuses it at load on a SQLite target). Carries the op
+    /// kind tag.
+    #[error(
+        "IrAuthor::lower of vendor op {0:?} is Postgres-only — the @zeroship/migrate/pg \
+         vendor primitives have no SQLite analogue (PgOnly); a SQLite deploy of them is \
+         refused fail-closed"
+    )]
+    VendorPgOnly(&'static str),
+    /// **VENDOR** — rendering a vendor op to its Postgres DDL failed (an invalid
+    /// identifier, an unrenderable policy/trigger predicate, an empty privilege/role
+    /// list). Carries the underlying [`crate::vendor::VendorError`].
+    #[error(transparent)]
+    Vendor(#[from] crate::vendor::VendorError),
     /// **PR2** — a `renameColumn` whose IR-carried [`ColType`] does not match the
     /// LIVE `from` column's actual `data_type`. A pure online rename mirrors values
     /// across the two columns (PG dual-write `NEW.<to> := NEW.<from>`; the SQLite
@@ -1572,6 +1589,45 @@ impl IrAuthor {
                     &eff_schema,
                     live_schema,
                 )?));
+            }
+            // VENDOR (`@zeroship/migrate/pg`) — render the privileged primitive to
+            // its Postgres DDL (vendor spec §4.4). Every vendor op is `PgOnly`: a
+            // SQLite target is refused fail-closed here (the validate gate already
+            // refuses it at load on SQLite, §4.3 — this is defense in depth). The
+            // capability gate (§3.2 gate 1) ran at validate; the rendered SQL hits
+            // the guard deny-list at `lower_guarded` (§3.2 gate 2). The rendered
+            // statements (one or more — a `createRole { setSearchPath }` is two)
+            // each become a journaled `LoweredUnit` so the per-fragment guard checks
+            // them individually.
+            Op::CreateSchema { .. }
+            | Op::DropSchema { .. }
+            | Op::CreateExtension { .. }
+            | Op::DropExtension { .. }
+            | Op::CreateRole { .. }
+            | Op::AlterRole { .. }
+            | Op::DropRole { .. }
+            | Op::DropOwnedBy { .. }
+            | Op::Grant { .. }
+            | Op::Revoke { .. }
+            | Op::EnableRls { .. }
+            | Op::ForceRls { .. }
+            | Op::DisableRls { .. }
+            | Op::NoForceRls { .. }
+            | Op::CreatePolicy { .. }
+            | Op::DropPolicy { .. }
+            | Op::CreateTrigger { .. }
+            | Op::DropTrigger { .. }
+            | Op::CreateFunction { .. }
+            | Op::DropFunction { .. }
+            | Op::PgRaw { .. } => {
+                if matches!(self.dialect, SqlDialect::Sqlite) {
+                    return Err(IrLowerError::VendorPgOnly(op_kind_tag(op)));
+                }
+                let stmts = crate::vendor::render_vendor_op(op, &eff_schema)?;
+                stmts
+                    .into_iter()
+                    .map(|s| decl.lower_vendor_statement(&s.name, s.up, s.down))
+                    .collect()
             }
         };
         // **PR9b — deterministic, reviewable version for a SCOPE-GATED destructive
@@ -2745,6 +2801,28 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
         Op::Update { .. } => "update",
         Op::Delete { .. } => "delete",
         Op::Backfill { .. } => "backfill",
+        // VENDOR (`@zeroship/migrate/pg`).
+        Op::CreateSchema { .. } => "createSchema",
+        Op::DropSchema { .. } => "dropSchema",
+        Op::CreateExtension { .. } => "createExtension",
+        Op::DropExtension { .. } => "dropExtension",
+        Op::CreateRole { .. } => "createRole",
+        Op::AlterRole { .. } => "alterRole",
+        Op::DropRole { .. } => "dropRole",
+        Op::DropOwnedBy { .. } => "dropOwnedBy",
+        Op::Grant { .. } => "grant",
+        Op::Revoke { .. } => "revoke",
+        Op::EnableRls { .. } => "enableRls",
+        Op::ForceRls { .. } => "forceRls",
+        Op::DisableRls { .. } => "disableRls",
+        Op::NoForceRls { .. } => "noForceRls",
+        Op::CreatePolicy { .. } => "createPolicy",
+        Op::DropPolicy { .. } => "dropPolicy",
+        Op::CreateTrigger { .. } => "createTrigger",
+        Op::DropTrigger { .. } => "dropTrigger",
+        Op::CreateFunction { .. } => "createFunction",
+        Op::DropFunction { .. } => "dropFunction",
+        Op::PgRaw { .. } => "pgRaw",
     }
 }
 
