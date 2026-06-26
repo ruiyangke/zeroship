@@ -25,7 +25,10 @@
 use compio_postgres::Client;
 use zeroship_migrate::{
     executor::ApplyError,
-    ir::{ColType, ExistenceGuard, IrColumn, IrConstraint, IrConstraintKind, MigrationIr, Op},
+    ir::{
+        ColType, ExistenceGuard, IrColumn, IrConstraint, IrConstraintKind, MigrationIr, Op,
+        SelectAst, SelectItem, TableRef, ViewQuery,
+    },
     ir_author::{IrAuthor, LiveSchema},
     plan::PlanStep,
     provision_migrator, role::deprovision_migrator, Approval, EngineError, ExecutorConfig,
@@ -132,6 +135,19 @@ async fn table_exists(conn: &Client, schema: &str, table: &str) -> bool {
         )
         .await
         .expect("query table");
+    !rows.is_empty()
+}
+
+async fn view_exists(conn: &Client, schema: &str, name: &str) -> bool {
+    let rows = conn
+        .query(
+            "SELECT 1 FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('v', 'm')",
+            &[&schema, &name],
+        )
+        .await
+        .expect("query view");
     !rows.is_empty()
 }
 
@@ -683,5 +699,67 @@ async fn drop_table_ifexists_absent_noops() {
     apply(&conn, &cfg, &steps).await.expect("drop absent table is a satisfied no-op");
     assert!(!table_exists(&conn, &cfg.project_schema, "ghost").await);
     assert!(journaled(&conn, &cfg, &v).await, "satisfied no-op journals");
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn drop_view_ifexists_present_runs_absent_noops() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+
+    apply(&conn, &cfg, &lower(&cfg, Op::CreateTable {
+        name: "t".into(),
+        columns: vec![col("name", ColType::String)],
+        constraints: vec![],
+        indexes: vec![],
+        schema: None,
+        existence_guard: None,
+    })).await.expect("create base table via migrator");
+
+    apply(&conn, &cfg, &lower(&cfg, Op::CreateView {
+        name: "active_v".into(),
+        schema: None,
+        columns: None,
+        query: ViewQuery::Structured {
+            select: SelectAst {
+                from: TableRef { name: "t".into(), schema: None, alias: None },
+                projection: vec![SelectItem::ColRef {
+                    table: None,
+                    name: "name".into(),
+                    alias: None,
+                }],
+                joins: vec![],
+                r#where: None,
+                order_by: None,
+                limit: None,
+            },
+        },
+        replace: None,
+        materialized: None,
+    })).await.expect("create view via migrator");
+    assert!(view_exists(&conn, &cfg.project_schema, "active_v").await, "view created");
+
+    let steps = lower(&cfg, Op::DropView {
+        name: "active_v".into(),
+        schema: None,
+        existence_guard: Some(ExistenceGuard::IfExists),
+        materialized: None,
+    });
+    let v = match &steps[0] { PlanStep::Ddl(m) => m.version.as_str().to_string(), _ => unreachable!() };
+    apply(&conn, &cfg, &steps).await.expect("drop present view runs");
+    assert!(!view_exists(&conn, &cfg.project_schema, "active_v").await, "view dropped");
+    assert!(journaled(&conn, &cfg, &v).await, "present drop journals");
+
+    let steps2 = lower(&cfg, Op::DropView {
+        name: "active_v".into(),
+        schema: None,
+        existence_guard: Some(ExistenceGuard::IfExists),
+        materialized: None,
+    });
+    let v2 = match &steps2[0] { PlanStep::Ddl(m) => m.version.as_str().to_string(), _ => unreachable!() };
+    apply(&conn, &cfg, &steps2).await.expect("drop absent view is a satisfied no-op");
+    assert!(!view_exists(&conn, &cfg.project_schema, "active_v").await, "view remains absent");
+    assert!(journaled(&conn, &cfg, &v2).await, "satisfied no-op journals");
     teardown(&conn, &cfg).await;
 }

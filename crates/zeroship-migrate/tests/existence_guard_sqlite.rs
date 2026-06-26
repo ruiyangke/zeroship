@@ -24,7 +24,10 @@
 use zeroship_migrate::backend::MigrationBackend;
 use zeroship_migrate::db::ExecutorConfig;
 use zeroship_migrate::executor::ApplyError;
-use zeroship_migrate::ir::{ColType, ExistenceGuard, IrColumn, MigrationIr, Op};
+use zeroship_migrate::ir::{
+    ColType, ExistenceGuard, IrColumn, MigrationIr, Op, SelectAst, SelectItem, TableRef,
+    ViewQuery,
+};
 use zeroship_migrate::ir_author::{IrAuthor, LiveSchema};
 use zeroship_migrate::journal::Phase;
 use zeroship_migrate::migration::Migration;
@@ -98,6 +101,17 @@ async fn table_exists(be: &SqliteBackend, table: &str) -> bool {
         ))
         .await
         .expect("sqlite_master");
+    !rows.is_empty()
+}
+
+async fn view_exists(be: &SqliteBackend, name: &str) -> bool {
+    let rows = be
+        .actor()
+        .query(&format!(
+            "SELECT name FROM main.sqlite_master WHERE type='view' AND name='{name}'"
+        ))
+        .await
+        .expect("sqlite_master view");
     !rows.is_empty()
 }
 
@@ -699,4 +713,72 @@ async fn drop_table_ifexists_absent_noops() {
     }
     assert!(!table_exists(&be, "ghost").await);
     assert!(journaled(&be, &v).await, "satisfied no-op journals");
+}
+
+#[compio::test]
+async fn drop_view_ifexists_present_runs_absent_noops() {
+    let p = paths("sq_drop_view");
+    let be = backend(&p);
+
+    for m in lower(Op::CreateTable {
+        name: "t".into(),
+        columns: vec![col("name", ColType::String)],
+        constraints: vec![],
+        indexes: vec![],
+        schema: None,
+        existence_guard: None,
+    }) {
+        apply_one(&be, &m).await.expect("create base table");
+    }
+
+    for m in lower(Op::CreateView {
+        name: "active_v".into(),
+        schema: None,
+        columns: None,
+        query: ViewQuery::Structured {
+            select: SelectAst {
+                from: TableRef { name: "t".into(), schema: None, alias: None },
+                projection: vec![SelectItem::ColRef {
+                    table: None,
+                    name: "name".into(),
+                    alias: None,
+                }],
+                joins: vec![],
+                r#where: None,
+                order_by: None,
+                limit: None,
+            },
+        },
+        replace: None,
+        materialized: None,
+    }) {
+        apply_one(&be, &m).await.expect("create view");
+    }
+    assert!(view_exists(&be, "active_v").await, "view created");
+
+    let migs = lower(Op::DropView {
+        name: "active_v".into(),
+        schema: None,
+        existence_guard: Some(ExistenceGuard::IfExists),
+        materialized: None,
+    });
+    let v = migs[0].version.as_str().to_string();
+    for m in &migs {
+        apply_one(&be, m).await.expect("drop present view runs");
+    }
+    assert!(!view_exists(&be, "active_v").await, "view dropped");
+    assert!(journaled(&be, &v).await, "present drop journals");
+
+    let migs2 = lower(Op::DropView {
+        name: "active_v".into(),
+        schema: None,
+        existence_guard: Some(ExistenceGuard::IfExists),
+        materialized: None,
+    });
+    let v2 = migs2[0].version.as_str().to_string();
+    for m in &migs2 {
+        apply_one(&be, m).await.expect("drop absent view is a satisfied no-op");
+    }
+    assert!(!view_exists(&be, "active_v").await, "view remains absent");
+    assert!(journaled(&be, &v2).await, "satisfied no-op journals");
 }

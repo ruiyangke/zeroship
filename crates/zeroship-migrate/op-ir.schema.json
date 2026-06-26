@@ -1020,11 +1020,15 @@
                 "null"
               ]
             },
-            "ifExists": {
-              "description": "`IF EXISTS`.",
-              "type": [
-                "boolean",
-                "null"
+            "existenceGuard": {
+              "description": "**PR10** — the existence guard (`ifExists` legal here). Engine-\nsynthesized via a catalog probe; never solely a native `IF EXISTS`.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ExistenceGuard"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "materialized": {
