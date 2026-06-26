@@ -17,7 +17,9 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use zeroship_migrate::ir::{ColType, IrColumn, IrIndex, MigrationIr, Op};
+use zeroship_migrate::ir::{
+    ColType, IrClassification, IrColumn, IrIndex, IrMask, IrMaskKind, MigrationIr, Op,
+};
 use zeroship_migrate::ir_author::IrAuthor;
 use zeroship_migrate::{
     CollectionDescriptor, DeclarativeAuthor, DesiredSchema, FieldDescriptor, IndexDescriptor,
@@ -235,7 +237,8 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
 fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
     // The sentinel trap (§6.5): an encrypted column. Both paths MUST carry the
     // byte-identical BYTEA type + the `/* zsenc:… */` inline sentinel + the
-    // `COMMENT ON COLUMN … 'zsenc:…'` side output — built by the shared kernel
+    // `COMMENT ON COLUMN … 'zsenc:…'` side output + the encrypted default-mask
+    // `<col>_masked` sibling / `__zsmask` sentinel — built by the shared kernel
     // (`zeroship_schema::{query,mask_codec}`), NEVER re-spelled in IrAuthor.
     let desc = CollectionDescriptor {
         name: "vault".into(),
@@ -244,6 +247,9 @@ fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
             name: "secret".into(),
             ty: "string".into(),
             encrypted: Some(serde_json::json!({})),
+            // Mirror the SDK's `t.encrypted()` normalized shape: encrypted columns
+            // carry the fail-safe full/pii mask unless explicitly opted out.
+            mask: Some(serde_json::json!({ "kind": "full", "classification": "pii" })),
             ..Default::default()
         }],
         indexes: vec![],
@@ -278,6 +284,68 @@ fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
     assert!(
         decl.iter().any(|(up, _)| up.contains("bytea")),
         "an encrypted column's physical type is BYTEA on both paths"
+    );
+    assert!(
+        decl.iter().any(|(up, _)| up.contains("secret_masked")),
+        "an encrypted column must create its masked sibling on both paths"
+    );
+    assert!(
+        decl.iter().any(|(up, _)| up.contains("__zsmask:kind=full,classification=pii")),
+        "the encrypted auto-mask sentinel must be emitted on both paths"
+    );
+}
+
+#[test]
+fn create_table_with_explicit_masked_column_render_is_byte_identical_pg() {
+    let desc = CollectionDescriptor {
+        name: "people".into(),
+        owner_app: OWNER.into(),
+        fields: vec![FieldDescriptor {
+            name: "ssn".into(),
+            ty: "string".into(),
+            mask: Some(serde_json::json!({
+                "kind": "last4",
+                "classification": "spi"
+            })),
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let ops = vec![Op::CreateTable {
+        name: "people".into(),
+        columns: vec![IrColumn {
+            name: "ssn".into(),
+            ty: ColType::String,
+            nullable: None,
+            default: None,
+            unique: None,
+            id_prefix: None,
+            vector_metric: None,
+            mask: Some(IrMask {
+                kind: IrMaskKind::Last4,
+                classification: IrClassification::Spi,
+            }),
+        }],
+        constraints: vec![],
+        indexes: vec![],
+        schema: None,
+        existence_guard: None,
+    }];
+
+    let decl = declarative_pairs(&[desc]);
+    let ir = ir_pairs(ops, &BTreeSet::new());
+
+    assert_eq!(
+        decl, ir,
+        "explicit-mask createTable render must be byte-identical across paths"
+    );
+    assert!(
+        decl.iter().any(|(up, _)| up.contains("ssn_masked")),
+        "an explicit masked column must create its masked sibling on both paths"
+    );
+    assert!(
+        decl.iter().any(|(up, _)| up.contains("__zsmask:kind=last4,classification=spi")),
+        "the explicit mask sentinel must be emitted on both paths"
     );
 }
 
@@ -968,6 +1036,7 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
             name: "secret".into(),
             ty: "string".into(),
             encrypted: Some(serde_json::json!({})),
+            mask: Some(serde_json::json!({ "kind": "full", "classification": "pii" })),
             ..Default::default()
         }],
         indexes: vec![],
@@ -994,6 +1063,68 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
     assert!(
         decl.iter().any(|(up, _)| up.contains("zsenc:")),
         "the encryption sentinel must be emitted on the SQLite leg too (shared-kernel source)"
+    );
+    assert!(
+        decl.iter().any(|(up, _)| up.contains("secret_masked")),
+        "an encrypted column must create its masked sibling on the SQLite leg too"
+    );
+    assert!(
+        decl.iter().any(|(up, _)| up.contains("__zsmask:kind=full,classification=pii")),
+        "the encrypted auto-mask sentinel must be emitted on the SQLite leg too"
+    );
+}
+
+#[test]
+fn create_table_with_explicit_masked_column_render_is_byte_identical_sqlite() {
+    let desc = CollectionDescriptor {
+        name: "people".into(),
+        owner_app: OWNER.into(),
+        fields: vec![FieldDescriptor {
+            name: "ssn".into(),
+            ty: "string".into(),
+            mask: Some(serde_json::json!({
+                "kind": "last4",
+                "classification": "spi"
+            })),
+            ..Default::default()
+        }],
+        indexes: vec![],
+    };
+    let ops = vec![Op::CreateTable {
+        name: "people".into(),
+        columns: vec![IrColumn {
+            name: "ssn".into(),
+            ty: ColType::String,
+            nullable: None,
+            default: None,
+            unique: None,
+            id_prefix: None,
+            vector_metric: None,
+            mask: Some(IrMask {
+                kind: IrMaskKind::Last4,
+                classification: IrClassification::Spi,
+            }),
+        }],
+        constraints: vec![],
+        indexes: vec![],
+        schema: None,
+        existence_guard: None,
+    }];
+
+    let decl = declarative_pairs_for(&[desc], SqlDialect::Sqlite);
+    let ir = ir_pairs_for(ops, &BTreeSet::new(), SqlDialect::Sqlite);
+
+    assert_eq!(
+        decl, ir,
+        "explicit-mask createTable render must be byte-identical across paths on SQLite"
+    );
+    assert!(
+        decl.iter().any(|(up, _)| up.contains("ssn_masked")),
+        "an explicit masked column must create its masked sibling on the SQLite leg"
+    );
+    assert!(
+        decl.iter().any(|(up, _)| up.contains("__zsmask:kind=last4,classification=spi")),
+        "the explicit mask sentinel must be emitted on the SQLite leg"
     );
 }
 

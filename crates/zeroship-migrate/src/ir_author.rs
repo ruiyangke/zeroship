@@ -1245,6 +1245,15 @@ impl IrAuthor {
                 reject_synth_default(columns.iter().map(|c| (c.name.as_str(), c.default.as_ref())))?;
                 let desc = self.create_table_descriptor(name, columns);
                 let mut snap = build_table_snapshot(&eff_schema, &desc, self.dialect)?;
+                // **#174 createTable parity** — keep the CREATE path on the same
+                // masked-sibling source as ADD COLUMN. `build_table_snapshot` normally
+                // injects `<col>_masked` from the descriptor's `mask` facet (including
+                // the encrypted auto-mask restored by `ir_column_to_field`), while the
+                // addColumn path captures it via `add_column_snapshot_with_sibling`.
+                // Reconcile the snapshot through that existing helper too, so a masked
+                // createTable column cannot regress to "parent only" while addColumn
+                // still emits the runtime-read sibling.
+                self.ensure_create_table_masked_siblings(name, columns, &mut snap)?;
                 // **PR15 (HIGH fix)** — fold the op's TABLE-LEVEL constraints +
                 // indexes into the snapshot so they actually LOWER to DDL (they were
                 // recorded into the IR by `create({ uniques, foreignKeys, indexes })`
@@ -1974,6 +1983,43 @@ impl IrAuthor {
             fields: columns.iter().map(ir_column_to_field).collect(),
             indexes: Vec::new(),
         }
+    }
+
+    /// Reuse the add-column snapshot builder's masked-sibling extraction for
+    /// `createTable`, then merge any missing sibling into the CREATE snapshot. This
+    /// is intentionally a guardrail over the shared descriptor builder, not a second
+    /// spelling of mask rules: `add_column_snapshot_with_sibling` itself routes
+    /// through `build_table_snapshot`.
+    fn ensure_create_table_masked_siblings(
+        &self,
+        table: &str,
+        columns: &[IrColumn],
+        snap: &mut TableSnapshot,
+    ) -> Result<(), IrLowerError> {
+        let mut changed = false;
+        for c in columns {
+            let (_, sibling) = self.add_column_snapshot_with_sibling(
+                table,
+                &c.name,
+                &c.ty,
+                c.nullable,
+                c.default.as_ref(),
+                c.vector_metric,
+                c.mask,
+            )?;
+            let Some(sibling) = sibling else {
+                continue;
+            };
+            if snap.columns.iter().any(|existing| existing.name == sibling.name) {
+                continue;
+            }
+            snap.columns.push(sibling);
+            changed = true;
+        }
+        if changed {
+            snap.columns.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        Ok(())
     }
 
     /// **PR15 (HIGH fix)** — fold a `createTable` op's TABLE-LEVEL constraints +
