@@ -11,9 +11,19 @@
 // contract source of truth (§6). This module imports the generated wire types
 // where a manual type wants to reference the exact serde shape.
 
-import type { ColType, Expr, IrBatch, IrScalar } from "./generated/ir.js";
+import type {
+  Classification,
+  ColType,
+  Expr,
+  IrBatch,
+  IrScalar,
+  MaskKind,
+  VectorMetric,
+} from "./generated/ir.js";
 
-export type { ColType, Expr, IrBatch, IrScalar };
+// Re-export the closed facet token unions from the wire layer (single source of
+// truth — the IR `ir.ts` mirrors the engine schema; the authoring surface re-exports).
+export type { ColType, Expr, IrBatch, IrScalar, MaskKind, Classification, VectorMetric };
 
 /**
  * **Supported as of op.* PR10 Part B** (executor-side catalog probe). The
@@ -36,6 +46,36 @@ export type IfNotExistsGuard = boolean;
  * — presence alone governs). A plain `boolean`. See {@link IfNotExistsGuard}.
  */
 export type IfExistsGuard = boolean;
+
+// ── Sensitive-data column facets (#173/#174) ──
+//
+// The closed token unions (`MaskKind` / `Classification` / `VectorMetric`) are
+// transcribed in the wire layer (`./generated/ir.ts`, mirroring the engine schema)
+// and re-exported above. The OPTION-BAG shapes the authoring `t.*` factories /
+// `.mask()` take live here.
+
+/** Options for `t.id({ prefix })` — the typed-id prefix (`usr_<base62>`-style
+ *  brand). DECLARED-ONLY: carried on `IrColumn.idPrefix` so the fold / gen-types
+ *  keep the brand. Bounded (charset/length/reserved deny-list) by the engine at
+ *  validate time. */
+export interface IdOptions {
+  prefix: string;
+}
+
+/** Options for `t.vector(n, { metric })` — the pgvector distance metric (closed
+ *  {@link VectorMetric} set). Omitted ⇒ the engine's opclass default. */
+export interface VectorOptions {
+  metric?: VectorMetric;
+}
+
+/** Options for `.mask({ kind, classification? })` — a STANDALONE column mask.
+ *  `kind` is REQUIRED (closed {@link MaskKind}); `classification` is optional and
+ *  DEFAULTS to `"pii"` (closed {@link Classification}). `kind: "none"` is the
+ *  explicit opt-out. */
+export interface MaskOptions {
+  kind: MaskKind;
+  classification?: Classification;
+}
 
 // ── The fluent column-type lexicon (`t.*`) → a chainable ColumnDef ──
 
@@ -65,14 +105,26 @@ export interface ColumnDef {
   primaryKey(): ColumnDef;
   /** Add a single-column `UNIQUE`. Returns a fresh def. */
   unique(): ColumnDef;
+  /**
+   * Declare a STANDALONE column mask (#174) — the field reads back as
+   * `MaskedValue<T>` and the op lower emits the `__zsmask` sentinel + `_masked`
+   * sibling (the same shape `t.encrypted()`'s auto-mask uses). `kind` is REQUIRED
+   * (closed {@link MaskKind}); `classification` is optional and DEFAULTS to `"pii"`
+   * (closed {@link Classification}). `kind: "none"` is the explicit opt-out. A
+   * `.mask()` on an ENCRYPTED column OVERRIDES the auto-mask. Returns a fresh def.
+   */
+  mask(opts: MaskOptions): ColumnDef;
 }
 
 /** The fluent `t.*` column-type lexicon (shared in shape with `@zeroship/db`).
  *  Canonical names only — the `string`/`int` aliases and the `{notNull,default}`
  *  options-bag overload are REMOVED (§7). */
 export interface TypeLexicon {
-  /** A conventional id: a non-null UUID PK defaulting to `gen_random_uuid()`. */
-  id(): ColumnDef;
+  /** A conventional id: a non-null UUID PK defaulting to `gen_random_uuid()`.
+   *  `t.id({ prefix })` records the typed-id prefix on `IrColumn.idPrefix` so the
+   *  fold / gen-types keep the `usr_<base62>`-style brand (declared-only in
+   *  `create()` — an added column is never the system PK). */
+  id(opts?: IdOptions): ColumnDef;
   text(): ColumnDef;
   /** Fixed-precision decimal (default (38, 9)). */
   numeric(precision?: number, scale?: number): ColumnDef;
@@ -83,7 +135,11 @@ export interface TypeLexicon {
   json(): ColumnDef;
   /** A foreign-key reference column (plain-string target — NOT live-schema-bound). */
   ref(targetTable: string): ColumnDef;
-  vector(n: number): ColumnDef;
+  /** A pgvector embedding column of dimensionality `n`. `t.vector(n, { metric })`
+   *  records the declared distance metric on `IrColumn.vectorMetric` (the closed
+   *  {@link VectorMetric} set), so the ivfflat/hnsw opclass renders the declared
+   *  metric instead of defaulting — a declared-only hint introspection can't recover. */
+  vector(n: number, opts?: VectorOptions): ColumnDef;
   geoPoint(): ColumnDef;
   /** 32-bit signed integer (canonical; the `int` alias is removed, §7). */
   integer(): ColumnDef;

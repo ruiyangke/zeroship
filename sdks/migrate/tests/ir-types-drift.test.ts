@@ -91,7 +91,9 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   createTable: ["columns", "constraints", "existenceGuard", "indexes", "name", "schema"].sort(),
   dropTable: ["cascade", "existenceGuard", "schema", "table"].sort(),
   renameTable: ["existenceGuard", "schema", "table", "to"].sort(),
-  addColumn: ["column", "default", "existenceGuard", "nullable", "schema", "table", "type"].sort(),
+  // #173/#174 — addColumn carries the `vectorMetric` + `mask` facets (NOT
+  // `idPrefix`: an added column is never the system PK).
+  addColumn: ["column", "default", "existenceGuard", "mask", "nullable", "schema", "table", "type", "vectorMetric"].sort(),
   dropColumn: ["column", "existenceGuard", "schema", "table"].sort(),
   createIndex: ["columns", "concurrently", "existenceGuard", "name", "schema", "table", "unique", "using", "where"].sort(),
   dropIndex: ["concurrently", "existenceGuard", "name", "schema", "table", "unique"].sort(),

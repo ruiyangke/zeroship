@@ -202,7 +202,7 @@ The shipped factories (`sdks/migrate/src/ops.ts`):
 
 | Factory | Column type |
 | --- | --- |
-| `t.id()` | a non-null `uuid` PK defaulting to `gen_random_uuid()` |
+| `t.id(opts?)` | a non-null `uuid` PK defaulting to `gen_random_uuid()`; `t.id({ prefix })` brands it as a typed id (`prefix_<base62>`) — see [Sensitive-data facets](#sensitive-data-facets) |
 | `t.text()` | text |
 | `t.integer()` | 32-bit integer |
 | `t.bigInt()` | 64-bit integer |
@@ -213,7 +213,7 @@ The shipped factories (`sdks/migrate/src/ops.ts`):
 | `t.uuid()` | uuid |
 | `t.bytes()` | byte array |
 | `t.json()` | json |
-| `t.vector(n)` | a pgvector column of dimensionality `n` |
+| `t.vector(n, opts?)` | a pgvector column of dimensionality `n`; `t.vector(n, { metric })` pins the distance metric — see [Sensitive-data facets](#sensitive-data-facets) |
 | `t.geoPoint()` | a geo point |
 | `t.ref(targetTable)` | a foreign-key reference (plain-string target) |
 | `t.encrypted({ of })` | an application-level encrypted column wrapping an inner type |
@@ -231,6 +231,7 @@ Chainable modifiers (`sdks/migrate/src/ops.ts`), each returning a fresh `ColumnD
 | `.primaryKey()` | mark the table primary key (implies `NOT NULL`) |
 | `.unique()` | add a single-column `UNIQUE` |
 | `.ref(targetTable)` | re-target the column as a foreign-key reference (plain-string target) |
+| `.mask({ kind, classification? })` | declare a standalone column mask (the field reads back as `MaskedValue<T>`) — see [Sensitive-data facets](#sensitive-data-facets) |
 
 ```ts
 import { table, t } from "@zeroship/migrate";
@@ -251,6 +252,63 @@ export default {
 
 `t.ref(target)` carries the target table as a plain string — it is never bound
 to the live schema (existence is validated at apply time).
+
+### Sensitive-data facets
+
+Three **declared-only** column facets carry intent the live catalog cannot
+recover. Each lands on the wire `IrColumn` in camelCase (`idPrefix` /
+`vectorMetric` / `mask`), is **closed** (the engine rejects an out-of-set token
+at deserialize, and the SDK gives a friendly `OP_INVALID` at authoring time), and
+is **checksum-neutral when absent** (a facet-less column is byte-identical to the
+pre-facet image).
+
+**`t.id({ prefix })` — typed-id brand.** Brands the primary key as a typed id
+(`prefix_<base62>`), e.g. `t.id({ prefix: "usr" })` → `usr_3kZ…`. Declared-only:
+the minted id is opaque text in the catalog, so the prefix is a mint-time input
+introspection cannot recover. It is valid **only in `create()`** — an added
+column is never the system PK, so `t.id({ prefix })` on `.column().add()` is a
+hard `OP_INVALID` (the prefix would otherwise be silently dropped).
+
+**`t.vector(n, { metric })` — pgvector distance metric.** Pins the ivfflat/hnsw
+operator class. Closed set: `cosine | l2 | innerProduct`. Declared-only (pgvector
+stores dimensions, not the search metric).
+
+**`.mask({ kind, classification? })` — standalone column mask.** The field reads
+back as `MaskedValue<T>`; the op lower emits the `__zsmask` sentinel + `_masked`
+sibling (the same shape `t.encrypted()`'s auto-mask uses; an explicit `.mask()`
+on an encrypted column **overrides** the auto-mask). `kind` is **required**;
+`classification` is **optional and defaults to `"pii"`**.
+
+| Facet | Closed token set | Default |
+| --- | --- | --- |
+| mask `kind` | `full \| last4 \| first4 \| email \| name \| date-year \| date-decade \| none` (`none` = opt-out) | — (required) |
+| mask `classification` | `public \| pii \| spi \| phi \| pci \| internal` | `pii` |
+| vector `metric` | `cosine \| l2 \| innerProduct` | engine default |
+
+```ts
+import { table, t } from "@zeroship/migrate";
+
+export default {
+  up() {
+    table("documents").create({
+      columns: {
+        id: t.id({ prefix: "doc" }),
+        embedding: t.vector(1536, { metric: "cosine" }),
+        ssn: t.text().mask({ kind: "last4", classification: "pci" }),
+        email: t.text().mask({ kind: "email" }), // classification defaults to "pii"
+      },
+    });
+  },
+};
+```
+
+> `vectorMetric` and `mask` also ride on `.column().add({ type })` (a vector / masked
+> ADD COLUMN renders the metric opclass / `__zsmask` sentinel). `idPrefix` does not
+> (an added column is never the system PK — fail-closed, above).
+
+> **Related surfaces not yet documented here:** the `gen-types` step (column types
+> generated from the op fold) and the apply-time `lock_timeout` knob (split from
+> `statement_timeout`) are live engine features awaiting a doc pass.
 
 ## Bridging a `@zeroship/db` field (`fromDb`)
 

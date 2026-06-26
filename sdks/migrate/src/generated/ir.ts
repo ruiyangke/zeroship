@@ -76,6 +76,36 @@ export type ColType =
   | { decimal: { precision: number; scale: number } }
   | { encrypted: { of: ColType } };
 
+/** The CLOSED pgvector distance-metric lexicon (P2a §4) — drives the ivfflat/hnsw
+ *  operator class. Camel-cased on the wire; faithful transcription of the schema
+ *  `VectorMetric` `oneOf` const set. A DECLARED-ONLY hint introspection cannot
+ *  recover, so it is carried on the column. */
+export type VectorMetric = "cosine" | "l2" | "innerProduct";
+
+/** The CLOSED column-masking transform lexicon (`.mask({ kind })`, #174) — faithful
+ *  transcription of the schema `IrMaskKind` `oneOf` const set. The two date forms
+ *  are KEBAB (`date-year`/`date-decade`); the rest are single camelCase words. */
+export type MaskKind =
+  | "full"
+  | "last4"
+  | "first4"
+  | "email"
+  | "name"
+  | "date-year"
+  | "date-decade"
+  | "none";
+
+/** The CLOSED sensitivity-classification lexicon (`.mask({ classification })`,
+ *  #174) — faithful transcription of the schema `IrClassification` `oneOf` const
+ *  set. */
+export type Classification = "public" | "pii" | "spi" | "phi" | "pci" | "internal";
+
+/** A standalone column-masking facet (`.mask({ kind, classification })`, #174). */
+export interface IrMask {
+  kind: MaskKind;
+  classification: Classification;
+}
+
 /** A column DEFAULT — a typed scalar literal OR a nullary synth scalar
  *  (`now`/`genRandomUuid`). Never raw SQL (property A). */
 export type IrDefault =
@@ -106,6 +136,14 @@ export interface IrColumn {
   nullable?: boolean | null;
   default?: IrDefault | null;
   unique?: boolean | null;
+  /** **P2a §2b** — the `t.id({ prefix })` typed-id prefix, a DECLARED-ONLY hint
+   *  introspection cannot recover. Camel-cased on the wire. Default-absent. */
+  idPrefix?: string | null;
+  /** **P2a §2b** — the `t.vector(n, { metric })` distance metric (closed
+   *  {@link VectorMetric}). Default-absent. */
+  vectorMetric?: VectorMetric | null;
+  /** **#174** — a STANDALONE column mask. Default-absent. */
+  mask?: IrMask | null;
 }
 
 /** The kind of a table constraint (closed, internally tagged on `kind`). */
@@ -157,7 +195,7 @@ export type Op =
   | { op: "createTable"; name: string; columns: IrColumn[]; constraints?: IrConstraint[]; indexes?: IrIndex[]; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "dropTable"; table: string; cascade?: boolean | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "renameTable"; table: string; to: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
-  | { op: "addColumn"; table: string; column: string; type: ColType; nullable?: boolean | null; default?: IrDefault | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "addColumn"; table: string; column: string; type: ColType; nullable?: boolean | null; default?: IrDefault | null; vectorMetric?: VectorMetric | null; mask?: IrMask | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "dropColumn"; table: string; column: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | {
       op: "createIndex";

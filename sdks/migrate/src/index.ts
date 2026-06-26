@@ -67,6 +67,13 @@ export type {
   IndexMethod,
   RefAction,
   DeterminismFinding,
+  // sensitive-data column facets (#173/#174/#178)
+  MaskKind,
+  Classification,
+  VectorMetric,
+  IdOptions,
+  VectorOptions,
+  MaskOptions,
   // re-exported generated IR wire types (ergonomics; goldens are the contract)
   ColType,
   Expr,

@@ -44,8 +44,10 @@ import type {
   FnNamespace,
   ForeignKeyRef,
   ForeignKeyReference,
+  IdOptions,
   IndexRef,
   InsertArgs,
+  MaskOptions,
   RefAction,
   Row,
   ScalarValue,
@@ -54,6 +56,7 @@ import type {
   TypeLexicon,
   UniqueRef,
   UpdateArgs,
+  VectorOptions,
 } from "./types.js";
 
 import { TypeBuilder as DbTypeBuilder } from "@zeroship/db";
@@ -177,22 +180,72 @@ function requireString(v: unknown, what: string): asserts v is string {
 
 // ── (B) The IMMUTABLE chainable `t.*` lexicon (§4) ──
 
+/** The CLOSED pgvector distance-metric token set (P2a §4) — the camelCase wire
+ *  spelling of the engine's `VectorMetric` enum. Mirrored here (lock-step with
+ *  `migrate_ops.js`) so `t.vector(n, { metric })` rejects an out-of-set metric
+ *  with a friendly client-side OP_INVALID; the engine's closed enum stays
+ *  authoritative. */
+const VECTOR_METRICS: readonly string[] = ["cosine", "l2", "innerProduct"];
+
+/** The CLOSED column-mask token sets (#174) — the SDK/IR WIRE spelling of the
+ *  engine's `IrMaskKind` / `IrClassification` enums. The two date kinds are KEBAB
+ *  (`date-year`/`date-decade`); the rest are single camelCase words. Mirrored here
+ *  (lock-step with `migrate_ops.js`) so `.mask({ kind, classification })` rejects an
+ *  out-of-set token with a friendly client-side OP_INVALID; the engine's closed
+ *  enums stay authoritative. */
+const MASK_KINDS: readonly string[] = [
+  "full",
+  "last4",
+  "first4",
+  "email",
+  "name",
+  "date-year",
+  "date-decade",
+  "none",
+];
+const MASK_CLASSIFICATIONS: readonly string[] = [
+  "public",
+  "pii",
+  "spi",
+  "phi",
+  "pci",
+  "internal",
+];
+
 class ColumnDefImpl implements ColumnDefType {
   readonly _type: ColType;
   readonly _nullable: boolean;
   readonly _default: unknown;
   readonly _primaryKey: boolean;
   readonly _unique: boolean;
+  // Migration-first P2a (§2b) declared-only facets carried on the IrColumn:
+  // the typed-id prefix (`t.id({prefix})`) and the pgvector distance metric
+  // (`t.vector(n, {metric})`). #174: a standalone column mask (`.mask({…})`).
+  // Absent ⇒ omitted on the wire.
+  readonly _idPrefix: string | undefined;
+  readonly _vectorMetric: string | undefined;
+  readonly _mask: { kind: string; classification: string } | undefined;
 
   constructor(
     colType: ColType,
-    fields?: { nullable?: boolean; default?: unknown; primaryKey?: boolean; unique?: boolean },
+    fields?: {
+      nullable?: boolean;
+      default?: unknown;
+      primaryKey?: boolean;
+      unique?: boolean;
+      idPrefix?: string;
+      vectorMetric?: string;
+      mask?: { kind: string; classification: string };
+    },
   ) {
     this._type = colType;
     this._nullable = fields?.nullable ?? true;
     this._default = fields?.default;
     this._primaryKey = fields?.primaryKey ?? false;
     this._unique = fields?.unique ?? false;
+    this._idPrefix = fields?.idPrefix;
+    this._vectorMetric = fields?.vectorMetric;
+    this._mask = fields?.mask;
   }
 
   /** Clone with the named fields overridden — the basis of immutability (§4). */
@@ -202,13 +255,28 @@ class ColumnDefImpl implements ColumnDefType {
     default?: unknown;
     primaryKey?: boolean;
     unique?: boolean;
+    idPrefix?: string;
+    vectorMetric?: string;
+    mask?: { kind: string; classification: string };
   }): ColumnDefImpl {
     return new ColumnDefImpl(over.type ?? this._type, {
       nullable: over.nullable ?? this._nullable,
       default: "default" in over ? over.default : this._default,
       primaryKey: over.primaryKey ?? this._primaryKey,
       unique: over.unique ?? this._unique,
+      idPrefix: "idPrefix" in over ? over.idPrefix : this._idPrefix,
+      vectorMetric: "vectorMetric" in over ? over.vectorMetric : this._vectorMetric,
+      mask: "mask" in over ? over.mask : this._mask,
     });
+  }
+
+  /** Internal: carry the typed-id prefix (`t.id({prefix})`). */
+  __withIdPrefix(prefix: string): ColumnDefImpl {
+    return this.with({ idPrefix: prefix });
+  }
+  /** Internal: carry the pgvector distance metric (`t.vector(n, {metric})`). */
+  __withVectorMetric(metric: string): ColumnDefImpl {
+    return this.with({ vectorMetric: metric });
   }
 
   notNull(): ColumnDefImpl {
@@ -228,6 +296,38 @@ class ColumnDefImpl implements ColumnDefType {
     return this.with({ unique: true });
   }
 
+  /** `.mask({ kind, classification? })` (#174) — declare a STANDALONE column mask so
+   *  the field reads back as `MaskedValue<T>` and the op lower emits the `__zsmask`
+   *  sentinel + `_masked` sibling. `kind` is REQUIRED (closed `MASK_KINDS`);
+   *  `classification` is optional and DEFAULTS to `"pii"` (closed
+   *  `MASK_CLASSIFICATIONS`). The closed-set checks mirror `t.vector(n, { metric })`:
+   *  a friendly client-side OP_INVALID over the SAME closed set the engine's enums
+   *  enforce authoritatively. */
+  mask(opts: MaskOptions): ColumnDefImpl {
+    if (opts === null || typeof opts !== "object") {
+      throw structuredError("OP_INVALID", "t.*.mask(opts): opts must be { kind, classification? }");
+    }
+    requireString(opts.kind, "t.*.mask({ kind })");
+    if (!MASK_KINDS.includes(opts.kind)) {
+      throw structuredError(
+        "OP_INVALID",
+        `t.*.mask({ kind }): kind must be one of ${MASK_KINDS.join(" | ")}, ` +
+          `got ${JSON.stringify(opts.kind)}`,
+        { kind: opts.kind },
+      );
+    }
+    const classification = opts.classification === undefined ? "pii" : opts.classification;
+    if (!MASK_CLASSIFICATIONS.includes(classification)) {
+      throw structuredError(
+        "OP_INVALID",
+        `t.*.mask({ classification }): classification must be one of ` +
+          `${MASK_CLASSIFICATIONS.join(" | ")}, got ${JSON.stringify(classification)}`,
+        { classification },
+      );
+    }
+    return this.with({ mask: { kind: opts.kind, classification } });
+  }
+
   __toIrColumn(name: string): Node {
     return compact({
       name,
@@ -240,13 +340,37 @@ class ColumnDefImpl implements ColumnDefType {
       // constraint. Suppress it (lock-step with the addColumn path + the differ,
       // which never emits a separate UNIQUE for the PK column).
       unique: this._unique && !this._primaryKey ? true : undefined,
+      // P2a/#174 — carry the declared-only facets onto the wire IrColumn (camelCase
+      // keys `idPrefix`/`vectorMetric`/`mask`, lock-step with `migrate_ops.js`).
+      // Absent ⇒ omitted (compact), so a plain column is byte-identical to the
+      // pre-facet image (checksum-neutral).
+      idPrefix: this._idPrefix,
+      vectorMetric: this._vectorMetric,
+      mask: this._mask,
     });
   }
   __toAddColumnTail(): Node {
+    // #173: a typed-id prefix on an ADDED column is meaningless (an added column is
+    // never the system PK) — `Op::AddColumn` has no `idPrefix` slot. Carrying it
+    // would SILENTLY drop the prefix on the wire (the one outcome the closed-contract
+    // discipline forbids); REFUSE it with a structured OP_INVALID, lock-step with
+    // `migrate_ops.js`.
+    if (this._idPrefix !== undefined) {
+      throw structuredError(
+        "OP_INVALID",
+        "a t.id({ prefix }) typed-id prefix can only be declared in create(); an added " +
+          "column is never the system primary key, so an addColumn carries no prefix slot",
+        { facet: "idPrefix" },
+      );
+    }
     return compact({
       type: this._type,
       nullable: this._nullable === false ? false : undefined,
       default: this._default,
+      // #173: carry the vector metric + standalone mask onto the addColumn op tail
+      // (camelCase keys, lock-step with `Op::AddColumn`). Absent ⇒ omitted (compact).
+      vectorMetric: this._vectorMetric,
+      mask: this._mask,
     });
   }
 }
@@ -285,7 +409,14 @@ function toIrDefault(value: ScalarValue | { fn: "now" | "genRandomUuid" }): Node
 }
 
 export const t: TypeLexicon = {
-  id: () => new ColumnDefImpl("uuid").primaryKey().default({ fn: "genRandomUuid" }),
+  id: (opts?: IdOptions) => {
+    let col = new ColumnDefImpl("uuid").primaryKey().default({ fn: "genRandomUuid" });
+    if (opts && opts.prefix !== undefined) {
+      requireString(opts.prefix, "t.id({ prefix })");
+      col = col.__withIdPrefix(opts.prefix);
+    }
+    return col;
+  },
   text: () => new ColumnDefImpl("text"),
   numeric: (precision = 38, scale = 9) =>
     new ColumnDefImpl({ decimal: { precision, scale } } as ColType),
@@ -298,11 +429,27 @@ export const t: TypeLexicon = {
     requireString(targetTable, "t.ref(target)");
     return new ColumnDefImpl({ ref: { references: targetTable } } as ColType);
   },
-  vector: (n) => {
+  vector: (n, opts?: VectorOptions) => {
     if (typeof n !== "number" || !Number.isInteger(n) || n <= 0) {
       throw structuredError("OP_INVALID", `t.vector(n): n must be a positive integer, got ${n}`);
     }
-    return new ColumnDefImpl({ vector: { vector: n } } as ColType);
+    let col = new ColumnDefImpl({ vector: { vector: n } } as ColType);
+    if (opts && opts.metric !== undefined) {
+      requireString(opts.metric, "t.vector(n, { metric })");
+      // LOW-1: a closed-set check on the metric token gives a friendly OP_INVALID at
+      // authoring time instead of a cryptic serde "unknown variant" at the Rust
+      // deserialize seam (the engine's closed `VectorMetric` enum stays authoritative).
+      if (!VECTOR_METRICS.includes(opts.metric)) {
+        throw structuredError(
+          "OP_INVALID",
+          `t.vector(n, { metric }): metric must be one of ${VECTOR_METRICS.join(" | ")}, ` +
+            `got ${JSON.stringify(opts.metric)}`,
+          { metric: opts.metric },
+        );
+      }
+      col = col.__withVectorMetric(opts.metric);
+    }
+    return col;
   },
   geoPoint: () => new ColumnDefImpl("geoPoint"),
   integer: () => new ColumnDefImpl("int"),
