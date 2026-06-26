@@ -153,6 +153,31 @@ fn op_target_table(op: &Op) -> Option<&str> {
         | Op::Delete { table, .. }
         | Op::Backfill { table, .. } => Some(table),
         Op::DropIndex { table, .. } => table.as_deref(),
+        // VENDOR — table-scoped vendor ops (RLS/policy/trigger) are ownership-checked
+        // against their table; the database-/role-/schema-level vendor ops have no
+        // table to check (they are operator-gated by the capability gate, not the
+        // per-table ownership pass).
+        Op::EnableRls { table, .. }
+        | Op::ForceRls { table, .. }
+        | Op::DisableRls { table, .. }
+        | Op::NoForceRls { table, .. }
+        | Op::CreatePolicy { table, .. }
+        | Op::DropPolicy { table, .. }
+        | Op::CreateTrigger { table, .. }
+        | Op::DropTrigger { table, .. } => Some(table),
+        Op::CreateSchema { .. }
+        | Op::DropSchema { .. }
+        | Op::CreateExtension { .. }
+        | Op::DropExtension { .. }
+        | Op::CreateRole { .. }
+        | Op::AlterRole { .. }
+        | Op::DropRole { .. }
+        | Op::DropOwnedBy { .. }
+        | Op::Grant { .. }
+        | Op::Revoke { .. }
+        | Op::CreateFunction { .. }
+        | Op::DropFunction { .. }
+        | Op::PgRaw { .. } => None,
     }
 }
 

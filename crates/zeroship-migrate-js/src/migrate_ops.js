@@ -559,6 +559,21 @@ export const cFn = {
   coalesce: (...args) => chain({ node: "fnCall", fn: "coalesce", args: args.map(exprArg) }),
   nullif: (a, b) => chain({ node: "fnCall", fn: "nullif", args: [exprArg(a), exprArg(b)] }),
 
+  // VENDOR (`@zeroship/migrate/pg`) scalars (vendor spec §2.10) — the GUC + identity
+  // functions the RLS policy / trigger predicates need (`0025`'s
+  // `current_setting('zeroship.tenant_app', true)`). Closed `fnCall` nodes, NOT a raw
+  // escape; PG-only (the containing vendor op is PgOnly). `currentSetting(name,
+  // missingOk?)` → `current_setting('…', <missingOk>)`; `currentUser()` → `current_user`.
+  currentSetting: (name, missingOk) =>
+    chain({
+      node: "fnCall",
+      fn: "currentSetting",
+      args: missingOk === undefined
+        ? [{ node: "literal", value: name }]
+        : [{ node: "literal", value: name }, { node: "literal", value: missingOk }],
+    }),
+  currentUser: () => chain({ node: "fnCall", fn: "currentUser", args: [] }),
+
   /** NULL-skipping `concat_ws` (PG) / `coalesce`-folded `||` (SQLite) — the safe
    *  join helper (§3.6). `sep` is a literal. */
   concatWs: (sep, ...parts) =>
@@ -1158,9 +1173,237 @@ export function table(name, opts = {}) {
       recordBackfill(name, { ...args, schema: pickSchema(args, dflt) });
       return handle;
     },
+
+    // ── VENDOR (`@zeroship/migrate/pg`) — table-scoped privileged primitives ──
+    // RLS / policies / triggers hang off the table handle (vendor spec §2.4/§2.5).
+    // Exposed always; the engine's capability gate refuses them fail-closed under
+    // a confined capability set. Each pushes a vendor op carrying the table.
+    enableRowLevelSecurity() {
+      push(compact({ op: "enableRls", table: name, schema: dflt }));
+      return handle;
+    },
+    forceRowLevelSecurity() {
+      push(compact({ op: "forceRls", table: name, schema: dflt }));
+      return handle;
+    },
+    disableRowLevelSecurity() {
+      push(compact({ op: "disableRls", table: name, schema: dflt }));
+      return handle;
+    },
+    noForceRowLevelSecurity() {
+      push(compact({ op: "noForceRls", table: name, schema: dflt }));
+      return handle;
+    },
+    createPolicy(args) {
+      requireString(args.name, ".createPolicy({ name })");
+      push(compact({
+        op: "createPolicy",
+        name: args.name,
+        table: name,
+        schema: pickSchema(args, dflt),
+        forCmd: args.for || "all",
+        to: args.to,
+        using: resolveExpr(args.using),
+        withCheck: resolveExpr(args.withCheck),
+      }));
+      return handle;
+    },
+    dropPolicy(args) {
+      requireString(args.name, ".dropPolicy({ name })");
+      push(compact({
+        op: "dropPolicy",
+        name: args.name,
+        table: name,
+        schema: pickSchema(args, dflt),
+        ifExists: args.ifExists,
+      }));
+      return handle;
+    },
+    createTrigger(args) {
+      requireString(args.name, ".createTrigger({ name })");
+      requireString(args.execute, ".createTrigger({ execute })");
+      push(compact({
+        op: "createTrigger",
+        name: args.name,
+        table: name,
+        schema: pickSchema(args, dflt),
+        timing: args.timing,
+        events: args.events,
+        forEach: args.forEach,
+        execute: args.execute,
+        when: resolveExpr(args.when),
+      }));
+      return handle;
+    },
+    dropTrigger(args) {
+      requireString(args.name, ".dropTrigger({ name })");
+      push(compact({
+        op: "dropTrigger",
+        name: args.name,
+        table: name,
+        schema: pickSchema(args, dflt),
+        ifExists: args.ifExists,
+      }));
+      return handle;
+    },
   };
 
   return handle;
+}
+
+// ===========================================================================
+// VENDOR (`@zeroship/migrate/pg`) — the standalone `pg.*` namespace for the
+// database-/role-/schema-level privileged primitives (vendor spec §2.1–2.6,
+// §2.11). These have no table handle to hang off. Each eagerly records a vendor
+// op onto the ambient recorder, byte-identically to the Rust `Op` wire shape
+// (internally-tagged camelCase; absent optionals OMITTED via `compact`). The
+// engine's capability gate refuses every one fail-closed under a confined
+// capability set; the rendered SQL is then deny-list-scanned at lower.
+// ===========================================================================
+export const pg = {
+  createSchema(args) {
+    requireString(args.name, "pg.createSchema({ name })");
+    return push(compact({
+      op: "createSchema",
+      name: args.name,
+      ifNotExists: args.ifNotExists,
+      authorization: args.authorization,
+    }));
+  },
+  dropSchema(args) {
+    requireString(args.name, "pg.dropSchema({ name })");
+    return push(compact({
+      op: "dropSchema",
+      name: args.name,
+      ifExists: args.ifExists,
+      cascade: args.cascade,
+    }));
+  },
+  createExtension(args) {
+    requireString(args.name, "pg.createExtension({ name })");
+    return push(compact({
+      op: "createExtension",
+      name: args.name,
+      ifNotExists: args.ifNotExists,
+      schema: args.schema,
+    }));
+  },
+  dropExtension(args) {
+    requireString(args.name, "pg.dropExtension({ name })");
+    return push(compact({ op: "dropExtension", name: args.name, ifExists: args.ifExists }));
+  },
+  createRole(args) {
+    requireString(args.name, "pg.createRole({ name })");
+    return push(compact({
+      op: "createRole",
+      name: args.name,
+      login: args.login,
+      password: args.password,
+      bypassRls: args.bypassRls,
+      createRole: args.createRole,
+      createDb: args.createDb,
+      superuser: args.superuser,
+      inRole: args.inRole,
+      setSearchPath: args.setSearchPath,
+      ifNotExists: args.ifNotExists,
+    }));
+  },
+  alterRole(args) {
+    requireString(args.name, "pg.alterRole({ name })");
+    return push(compact({
+      op: "alterRole",
+      name: args.name,
+      setSearchPath: args.setSearchPath,
+      resetSearchPath: args.resetSearchPath,
+    }));
+  },
+  dropRole(args) {
+    requireString(args.name, "pg.dropRole({ name })");
+    return push(compact({ op: "dropRole", name: args.name, ifExists: args.ifExists }));
+  },
+  dropOwnedBy(args) {
+    if (!Array.isArray(args.roles)) {
+      throw structuredError("OP_INVALID", "pg.dropOwnedBy({ roles }): roles must be an array");
+    }
+    return push(compact({ op: "dropOwnedBy", roles: args.roles }));
+  },
+  grant(args) {
+    return push(compact({
+      op: "grant",
+      privileges: args.privileges,
+      on: args.on,
+      to: args.to,
+      withGrantOption: args.withGrantOption,
+    }));
+  },
+  revoke(args) {
+    return push(compact({
+      op: "revoke",
+      privileges: args.privileges,
+      on: args.on,
+      from: args.from,
+    }));
+  },
+  createFunction(args) {
+    requireString(args.name, "pg.createFunction({ name })");
+    requireString(args.returns, "pg.createFunction({ returns })");
+    requireString(args.language, "pg.createFunction({ language })");
+    requireString(args.body, "pg.createFunction({ body })");
+    return push(compact({
+      op: "createFunction",
+      name: args.name,
+      schema: args.schema,
+      args: args.args,
+      returns: args.returns,
+      language: args.language,
+      replace: args.replace,
+      volatility: args.volatility,
+      body: args.body,
+    }));
+  },
+  dropFunction(args) {
+    requireString(args.name, "pg.dropFunction({ name })");
+    return push(compact({
+      op: "dropFunction",
+      name: args.name,
+      schema: args.schema,
+      argTypes: args.argTypes,
+      ifExists: args.ifExists,
+    }));
+  },
+  /** The gated raw-statement escape (`pg.sql\`…\``, vendor spec §2.11). A tagged
+   *  template whose interpolation slots accept ONLY typed binds (never identifiers
+   *  / SQL) — the binds become positional placeholders, the verbatim text is
+   *  embedded and `pg_query`-scanned by the guard at lower. */
+  sql(strings, ...binds) {
+    // Reassemble the template into a single statement, replacing each interpolation
+    // slot with a positional placeholder ($1, $2, …) so a bind can never be string-
+    // concatenated into the statement shape.
+    let out = strings[0];
+    for (let i = 0; i < binds.length; i++) {
+      out += `$${i + 1}` + strings[i + 1];
+    }
+    return push(compact({
+      op: "pgRaw",
+      sql: out,
+      binds: binds.length > 0 ? binds.map(scalarBind) : undefined,
+    }));
+  },
+};
+
+/** Coerce a `pg.sql` bind into the IR scalar wire form. Numbers/strings/bools pass
+ *  through; everything else is rejected fail-closed (a `pg.sql` bind is a typed
+ *  scalar, never an object/identifier). */
+function scalarBind(v) {
+  const t = typeof v;
+  if (t === "string" || t === "boolean") return v;
+  if (t === "number") {
+    if (!Number.isInteger(v)) {
+      throw structuredError("OP_INVALID", `pg.sql bind ${v} must be an integer scalar (use a decimal string for non-integers)`);
+    }
+    return v;
+  }
+  throw structuredError("OP_INVALID", `pg.sql bind must be a typed scalar (string/number/boolean); got ${t}`);
 }
 
 // ===========================================================================

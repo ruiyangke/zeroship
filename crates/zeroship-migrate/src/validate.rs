@@ -83,6 +83,15 @@ pub const CODE_INVALID_ID_PREFIX: &str = "INVALID_ID_PREFIX";
 /// rule (the metric is meaningless without a vector type, and would otherwise be
 /// a silent dead field a hand-crafted artifact could ride in on).
 pub const CODE_VECTOR_METRIC_MISPLACED: &str = "VECTOR_METRIC_MISPLACED";
+/// **VENDOR (`@zeroship/migrate/pg`)** — a privileged vendor op (role/grant/RLS/
+/// policy/trigger/function/extension/schema/`pg.sql`) whose required
+/// [`VendorCapability`](crate::capability::VendorCapability) is NOT granted by the
+/// active capability set (vendor spec §3.2). The Confined creator/AI posture
+/// grants NO vendor capability, so EVERY vendor op is refused fail-closed at
+/// validate, BEFORE lower — the #1 invariant (gate 1). The redundant lower gate
+/// (gate 2 — the rendered SQL hits the Confined deny-list) means a future refactor
+/// that drops this gate still fails closed.
+pub const CODE_VENDOR_OP_DENIED: &str = "VENDOR_OP_DENIED";
 
 /// The MAX byte length a `t.id({prefix})` prefix may carry (P2a §4). Mirrors the
 /// typed_id convention (`crates/core/src/typed_id.rs`: `usr`/`app`/`ses` are 3
@@ -367,6 +376,15 @@ pub fn validate_op_scoped(
     // walk. Fail-closed: a Confined cross-schema op never reaches lower.
     validate_op_schema_and_guard(op, target_dialect, op_index, ts_location, schema_scope)?;
 
+    // **VENDOR (`@zeroship/migrate/pg`)** — the capability-composition gate (vendor
+    // spec §3.2 gate 1), BEFORE any expression walk. A privileged vendor op is
+    // refused fail-closed when (a) the target is SQLite (every vendor op is
+    // `PgOnly`, §4.3), or (b) the active capability set — derived from the threaded
+    // [`SchemaScope`] — does not GRANT the op's required capability. The Confined
+    // creator/AI posture (`Single` scope) grants nothing, so every vendor op dies
+    // here; Platform/Trusted (`Allowlist`/`None`) grant the operator preset.
+    validate_vendor_op(op, target_dialect, op_index, ts_location, schema_scope)?;
+
     // A `Check` constraint's expr validates against the given scope.
     let check_constraint =
         |kind: &IrConstraintKind, scope: &TargetScope<'_>| -> Result<(), AuthoringError> {
@@ -508,18 +526,138 @@ pub fn validate_op_scoped(
             };
             validate_column_facets(&view, target_dialect, op_index, ts_location)
         }
+        // VENDOR — a `createPolicy`'s `USING`/`WITH CHECK` predicates are CLOSED
+        // `(c) => Expr` ASTs (vendor spec §2.4): validate them STRUCTURALLY (the
+        // (a)/(b)/(d) checks) against the policy's target table. The live column set
+        // is unknown at load (the table pre-exists), so structural-only here.
+        Op::CreatePolicy { table, using, with_check, .. } => {
+            let scope = TargetScope::structural_only(table);
+            validate_expr(using, target_dialect, &scope, op_index, ts_location)?;
+            if let Some(wc) = with_check {
+                validate_expr(wc, target_dialect, &scope, op_index, ts_location)?;
+            }
+            Ok(())
+        }
+        // VENDOR — a `createTrigger`'s `WHEN` condition is a CLOSED `(c) => Expr`
+        // (vendor spec §2.5): validate it structurally against the trigger's table.
+        Op::CreateTrigger { table, when, .. } => {
+            if let Some(w) = when {
+                let scope = TargetScope::structural_only(table);
+                validate_expr(w, target_dialect, &scope, op_index, ts_location)?;
+            }
+            Ok(())
+        }
         // Ops with no embedded expression slot. (`RenameTable` carries only its
         // old/new table NAMES — no Expr — so the schema-ident + guard-direction
         // gate in `validate_op_schema_and_guard` above is the whole check, and the
-        // render-time `quote_ident` is the injection-safe identifier seam.)
+        // render-time `quote_ident` is the injection-safe identifier seam.) The
+        // remaining VENDOR ops carry no embedded Expr — their privileged payload is
+        // closed sub-enums (`Privilege`/`TriggerTiming`/…) or the §3-gated raw
+        // `body`/`sql` strings (parse-scanned by the guard deny-list at lower).
         Op::DropTable { .. }
         | Op::RenameTable { .. }
         | Op::DropColumn { .. }
         | Op::AlterColumnNullability { .. }
         | Op::RenameColumn { .. }
         | Op::DropConstraint { .. }
-        | Op::Insert { .. } => Ok(()),
+        | Op::Insert { .. }
+        | Op::CreateSchema { .. }
+        | Op::DropSchema { .. }
+        | Op::CreateExtension { .. }
+        | Op::DropExtension { .. }
+        | Op::CreateRole { .. }
+        | Op::AlterRole { .. }
+        | Op::DropRole { .. }
+        | Op::DropOwnedBy { .. }
+        | Op::Grant { .. }
+        | Op::Revoke { .. }
+        | Op::EnableRls { .. }
+        | Op::ForceRls { .. }
+        | Op::DisableRls { .. }
+        | Op::NoForceRls { .. }
+        | Op::DropPolicy { .. }
+        | Op::DropTrigger { .. }
+        | Op::CreateFunction { .. }
+        | Op::DropFunction { .. }
+        | Op::PgRaw { .. } => Ok(()),
     }
+}
+
+/// **VENDOR (`@zeroship/migrate/pg`)** — the capability-composition gate (vendor
+/// spec §3.2 gate 1). For every VENDOR [`Op`](crate::ir::Op) variant:
+///
+/// 1. **SQLite refusal** — every vendor op is `dialect_scope = PgOnly` (no SQLite
+///    analogue, §4.3); a SQLite target is refused [`CODE_UNSUPPORTED`] `{kind:"op"}`
+///    at load, never silently skipped.
+/// 2. **Capability gate** — the active
+///    [`VendorCapabilities`](crate::capability::VendorCapabilities), derived from the
+///    threaded [`SchemaScope`](crate::guard::SchemaScope), must GRANT the op's
+///    required [`VendorCapability`](crate::capability::VendorCapability). The
+///    Confined `Single` scope grants nothing ⇒ every vendor op is
+///    [`CODE_VENDOR_OP_DENIED`]. The gate keys on the CAPABILITY FLAG
+///    (`caps.grants(cap)`), not on a hard-coded profile name.
+///
+/// A non-vendor op is a no-op here.
+fn validate_vendor_op(
+    op: &crate::ir::Op,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+    schema_scope: Option<&crate::guard::SchemaScope>,
+) -> Result<(), AuthoringError> {
+    let Some(cap) = op.vendor_capability() else {
+        return Ok(()); // portable-core op — not gated here.
+    };
+
+    // (1) SQLite — every vendor op is PgOnly. Refuse fail-closed at load.
+    if matches!(target_dialect, Dialect::Sqlite) {
+        return Err(AuthoringError {
+            code: CODE_UNSUPPORTED.to_string(),
+            kind: Some(UnsupportedKind::Op),
+            op_index,
+            ts_location: ts_location.map(str::to_string),
+            dialect: target_dialect,
+            reason: format!(
+                "the @zeroship/migrate/pg vendor op (capability {:?}) is Postgres-only — \
+                 roles/grants/RLS/policies/triggers/functions/extensions/schemas/pg.sql have \
+                 no SQLite analogue (PgOnly)",
+                cap.as_token()
+            ),
+            suggested_fix: Some(
+                "vendor primitives target Postgres only — deploy this migration against a \
+                 Postgres backend, or remove the @zeroship/migrate/pg op"
+                    .to_string(),
+            ),
+        });
+    }
+
+    // (2) The capability-composition gate. Derive the active capability set from the
+    // threaded scope (the operator-gated, non-spoofable trust signal) and key on the
+    // capability FLAG — never a hard-coded profile name.
+    let caps = crate::capability::VendorCapabilities::from_scope(schema_scope);
+    if !caps.grants(cap) {
+        return Err(AuthoringError {
+            code: CODE_VENDOR_OP_DENIED.to_string(),
+            kind: None,
+            op_index,
+            ts_location: ts_location.map(str::to_string),
+            dialect: target_dialect,
+            reason: format!(
+                "vendor PG primitive (op capability {:?}) requires the {} capability, which \
+                 the active (Confined creator) capability set does not grant — the privileged \
+                 @zeroship/migrate/pg primitives are unreachable from a confined migration by \
+                 construction (vendor spec §3.2)",
+                cap.as_token(),
+                cap.flag_name(),
+            ),
+            suggested_fix: Some(format!(
+                "author this privileged migration under the operator/platform capability set \
+                 (which composes {}), not the confined creator profile",
+                cap.flag_name(),
+            )),
+        });
+    }
+    Ok(())
 }
 
 /// **PR10** — validate an op's `schema` qualifier + existence-guard direction

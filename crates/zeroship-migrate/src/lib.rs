@@ -64,6 +64,7 @@ pub mod backend;
 pub mod backend_sqlite;
 pub mod backfill;
 pub mod baseline;
+pub mod capability;
 pub mod classify;
 pub mod db;
 pub mod declarative;
@@ -96,6 +97,7 @@ pub mod squash;
 pub mod status;
 pub mod submit;
 pub mod validate;
+pub mod vendor;
 
 // ---------------------------------------------------------------------------
 // Public API surface — re-exports (later plans depend on these names).

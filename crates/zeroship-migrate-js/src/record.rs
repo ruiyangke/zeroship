@@ -167,6 +167,16 @@ pub fn record_migration_to_ir_with_warnings(
             specifier: "@zeroship/migrate".into(),
             source: MIGRATE_OPS_JS.to_string(),
         },
+        // VENDOR — the privileged `@zeroship/migrate/pg` subpath is a thin
+        // re-export SHIM (NOT a second copy of migrate_ops.js): it `export { pg }
+        // from "@zeroship/migrate"`, so it shares the ONE recorder-state instance
+        // (a second module copy would carry its own `__active` and record into a
+        // dead buffer). The separate specifier makes the privileged surface
+        // lexically obvious in a migration's imports (vendor spec §2.0).
+        ModuleEntry {
+            specifier: "@zeroship/migrate/pg".into(),
+            source: r#"export { pg } from "@zeroship/migrate";"#.to_string(),
+        },
     ];
 
     let runtime = Runtime::builder().build();
@@ -306,6 +316,16 @@ pub fn lint_migration_determinism(
         ModuleEntry {
             specifier: "@zeroship/migrate".into(),
             source: MIGRATE_OPS_JS.to_string(),
+        },
+        // VENDOR — the privileged `@zeroship/migrate/pg` subpath is a thin
+        // re-export SHIM (NOT a second copy of migrate_ops.js): it `export { pg }
+        // from "@zeroship/migrate"`, so it shares the ONE recorder-state instance
+        // (a second module copy would carry its own `__active` and record into a
+        // dead buffer). The separate specifier makes the privileged surface
+        // lexically obvious in a migration's imports (vendor spec §2.0).
+        ModuleEntry {
+            specifier: "@zeroship/migrate/pg".into(),
+            source: r#"export { pg } from "@zeroship/migrate";"#.to_string(),
         },
     ];
 

@@ -361,6 +361,21 @@ fn scalar_fn_sql(f: ScalarFn) -> &'static str {
         ScalarFn::Trim => "trim",
         ScalarFn::Length => "length",
         ScalarFn::Abs => "abs",
+        // VENDOR scalars (vendor spec §2.10). `current_user` is a reserved keyword
+        // rendered WITHOUT parens — the FnCall render arms special-case it; this
+        // spelling is the fallback name.
+        ScalarFn::CurrentSetting => "current_setting",
+        ScalarFn::CurrentUser => "current_user",
+    }
+}
+
+/// Render an allow-listed [`ScalarFn`] call from its already-rendered argument
+/// fragments. Most are `<name>(<args>)`; the VENDOR `CurrentUser` is a bare
+/// reserved keyword with NO parens (PG rejects `current_user()`).
+fn render_scalar_fn_call(f: ScalarFn, args: &[String]) -> String {
+    match f {
+        ScalarFn::CurrentUser => "current_user".to_string(),
+        _ => format!("{}({})", scalar_fn_sql(f), args.join(", ")),
     }
 }
 
@@ -585,7 +600,7 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             for a in args {
                 rs.push(render_expr_bound(a, ctx)?);
             }
-            format!("{}({})", scalar_fn_sql(*r#fn), rs.join(", "))
+            render_scalar_fn_call(*r#fn, &rs)
         }
         Expr::FnSynth { r#fn, args } => render_synth_bound(*r#fn, args, ctx)?,
         Expr::Cast { operand, target } => {
@@ -679,7 +694,7 @@ fn render_expr_inline(expr: &Expr, dialect: SqlDialect) -> Result<String, DmlErr
         Expr::FnCall { r#fn, args } => {
             let rs: Result<Vec<_>, _> =
                 args.iter().map(|a| render_expr_inline(a, dialect)).collect();
-            format!("{}({})", scalar_fn_sql(*r#fn), rs?.join(", "))
+            render_scalar_fn_call(*r#fn, &rs?)
         }
         Expr::FnSynth { r#fn, args } => match r#fn {
             SynthFn::SplitPart => {
@@ -718,6 +733,24 @@ fn render_expr_inline(expr: &Expr, dialect: SqlDialect) -> Result<String, DmlErr
             )
         }
     })
+}
+
+/// **VENDOR** — render a CLOSED [`Expr`] predicate to an inline Postgres SQL
+/// fragment for the vendor `CREATE POLICY` `USING`/`WITH CHECK` and `CREATE
+/// TRIGGER` `WHEN` clauses (vendor spec §4.4). These DDL positions carry NO binds
+/// (a policy/trigger predicate is part of the catalog definition, not a
+/// parameterized statement), so the inline renderer is the right seam — a
+/// `ColRef` is its quoted identifier, a `Literal` an inline SQL literal, and the
+/// VENDOR `c.fn.currentSetting`/`currentUser` scalars render their PG form. The
+/// whole rendered statement is then `pg_query`-parsed by the guard, so the inline
+/// literals are re-validated by the real parser before any apply. PG dialect only
+/// (vendor predicates are `PgOnly`).
+///
+/// # Errors
+/// [`DmlError::UnrenderableExpr`] for an expression node that has no inline form
+/// (e.g. a `bytes` literal).
+pub(crate) fn render_predicate_pg(expr: &Expr) -> Result<String, DmlError> {
+    render_expr_inline(expr, SqlDialect::Postgres)
 }
 
 /// The `onConflict` facet of an `insert` (§3.4 / §9). PG-only.
