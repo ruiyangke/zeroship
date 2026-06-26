@@ -189,6 +189,13 @@ export function sha256Hex(bytes: Buffer): Sha256Hex {
  *  `.zeroship/`, which is gitignored) — see the P3/P5 note above. */
 export const GEN_TYPES_OUT_DEFAULT = "generated/zeroship";
 
+/** The runtime schema descriptor artifact filename `gen-types` emits into
+ *  `GEN_TYPES_OUT_DEFAULT`. MUST match the Rust
+ *  `zeroship_migrate_js::gen_types::RUNTIME_DESCRIPTOR_FILE` — the `.zship`
+ *  packer reads this file (when present) and carries it as the manifest's
+ *  content-addressed `runtime_descriptor` blob (migration-first P4a). */
+export const RUNTIME_DESCRIPTOR_FILE = "schema.runtime.json";
+
 /** The bare PATH name of the `gen-types` CLI — the same binary `recordViaCli`
  *  shells (migrations.ts `record`/`build`). When the binary is on `$PATH` (the
  *  natural `cargo install` location) but not in `node_modules/.bin`, the prod

@@ -149,6 +149,41 @@ pub struct Manifest {
     /// hash format + a path-safety check (no separators / traversal).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub migrations: Vec<MigrationFileEntry>,
+
+    /// The generated **runtime schema descriptor** carried by the `.zship`,
+    /// content-addressed exactly like a migration blob (`{hash}`).
+    ///
+    /// This is the `schema.runtime.json` artifact `gen-types` emits by folding
+    /// the migration set — a `Record<collection, Record<column, FieldDef>>` that
+    /// formalises what the runtime's `normalizeSchema` produces. In the
+    /// migration-first cutover (`docs/proposals/2026-06-25-migration-first-schema.md`)
+    /// the runtime stops reading `default.schema` off the user module (P4b) and
+    /// reads this descriptor instead — making the migration set the SOLE source
+    /// of schema truth.
+    ///
+    /// **P4a is purely additive: nothing reads this slot yet.** It only gives the
+    /// `.zship` the capacity to carry the descriptor so P4b can flip the runtime
+    /// read path. `None` (the default; `skip_serializing_if`) when the app ships
+    /// no migrations / no descriptor — pack still succeeds.
+    ///
+    /// `validate()` enforces the blob-hash format only; the descriptor's JSON
+    /// shape is the producer's (`gen-types`) and consumer's (P4b runtime) contract,
+    /// not this struct's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_descriptor: Option<RuntimeDescriptorEntry>,
+}
+
+/// The generated runtime schema descriptor carried by a `.zship`
+/// (`manifest.runtime_descriptor`).
+///
+/// Content-addressed exactly like [`MigrationFileEntry`]: `hash` is the sha256 of
+/// the `schema.runtime.json` blob body. There is no `name` — unlike migrations
+/// (whose filename is load-bearing for version/ordering), the descriptor is a
+/// single anonymous artifact reconstructed from its blob alone.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeDescriptorEntry {
+    /// sha256 hash (lowercase, 64 hex chars) of the `schema.runtime.json` blob.
+    pub hash: String,
 }
 
 /// One migration file carried by a `.zship` (`manifest.migrations[i]`).
@@ -185,6 +220,7 @@ impl Default for Manifest {
             metadata: ManifestMetadata::default(),
             exports: None,
             migrations: Vec::new(),
+            runtime_descriptor: None,
         }
     }
 }
@@ -370,6 +406,7 @@ impl Manifest {
             },
             exports: None,
             migrations: Vec::new(),
+            runtime_descriptor: None,
         }
     }
 
@@ -506,6 +543,19 @@ impl Manifest {
                     "migrations[].hash {hash:?} is duplicated across entries with \
                      different names; each migration blob must be referenced by one name",
                     hash = entry.hash
+                ));
+            }
+        }
+        // Runtime schema descriptor (migration-first cutover): the
+        // `schema.runtime.json` blob is content-addressed exactly like a
+        // migration body, so the only wire-format invariant is the hash format.
+        // The descriptor's JSON shape is the producer/consumer contract, not
+        // this struct's — `validate()` does not parse it.
+        if let Some(desc) = &self.runtime_descriptor {
+            if !is_sha256_hex(&desc.hash) {
+                return Err(format!(
+                    "runtime_descriptor.hash {hash:?} is not a lowercase 64-char sha256 hex",
+                    hash = desc.hash
                 ));
             }
         }
@@ -878,5 +928,50 @@ mod migration_validation_tests {
         ];
         let err = m.validate().unwrap_err();
         assert!(err.contains("duplicated"), "duplicate hash must be rejected, got {err}");
+    }
+
+    // ── Runtime schema descriptor slot (migration-first P4a) ─────────────────
+
+    #[test]
+    fn runtime_descriptor_defaults_none_and_omitted_on_wire() {
+        let m = base();
+        assert!(m.runtime_descriptor.is_none());
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(
+            !json.contains("runtime_descriptor"),
+            "absent descriptor must be omitted on the wire: {json}"
+        );
+        // A manifest without `runtime_descriptor` deserializes to None.
+        let back: Manifest = serde_json::from_str(&json).unwrap();
+        assert!(back.runtime_descriptor.is_none());
+    }
+
+    #[test]
+    fn runtime_descriptor_round_trips_byte_identical() {
+        let mut m = base();
+        let hash = "a".repeat(64);
+        m.runtime_descriptor = Some(RuntimeDescriptorEntry { hash: hash.clone() });
+        m.validate().expect("valid descriptor accepted");
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("runtime_descriptor"), "descriptor must serialize: {json}");
+        let back: Manifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.runtime_descriptor, m.runtime_descriptor,
+            "runtime_descriptor must round-trip byte-identical"
+        );
+        assert_eq!(back.runtime_descriptor.unwrap().hash, hash);
+    }
+
+    #[test]
+    fn rejects_bad_runtime_descriptor_hash() {
+        let mut m = base();
+        m.runtime_descriptor = Some(RuntimeDescriptorEntry {
+            hash: "NOTAHASH".into(),
+        });
+        let err = m.validate().unwrap_err();
+        assert!(
+            err.contains("runtime_descriptor.hash") && err.contains("sha256"),
+            "malformed descriptor hash must be rejected, got {err}"
+        );
     }
 }

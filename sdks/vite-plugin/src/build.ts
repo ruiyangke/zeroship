@@ -695,6 +695,13 @@ export function buildPlugin(
             resources: extras.resources,
             transformer: extras.transformer,
           },
+          // Carry the op.* migrations + the generated runtime schema descriptor
+          // (`schema.runtime.json`) the buildStart gen-types step emitted (P4a).
+          migrations: {
+            dir: options.migrations?.dir,
+            genTypesOut: options.migrations?.genTypesOut,
+            cliPath: options.migrations?.cliPath,
+          },
         });
       } catch (e) {
         console.error(`[zeroship] failed to emit .zship: ${(e as Error).message}`);

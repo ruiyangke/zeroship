@@ -155,6 +155,114 @@ describe("op.* migration discovery + bundling (A4)", () => {
   });
 });
 
+// Migration-first P4a — the runtime schema descriptor (`schema.runtime.json`)
+// the packer reads from the gen-types output dir and carries as the manifest's
+// content-addressed `runtime_descriptor` blob. Purely additive: nothing reads
+// it yet (P4b flips the runtime).
+describe("op.* runtime schema descriptor bundling (P4a)", () => {
+  // The exact JSON gen-types' schema.runtime.json holds:
+  // Record<collection, Record<column, FieldDef>>.
+  const DESCRIPTOR = `{
+  "notes": {
+    "title": { "type": "string" }
+  }
+}
+`;
+
+  test("emitZship carries runtime_descriptor + stages the descriptor blob", async () => {
+    const stem = "20240617123000_notes";
+    const fx = await makeFixture({
+      "dist/server/index.js":
+        "export default { fetch(){ return new Response('ok'); } }\n",
+      "dist/index.html": "<!doctype html><html></html>\n",
+      [`migrations/${stem}.ts`]: "export function up() {}\n",
+      [`migrations/${stem}.ir.json`]: COMMITTED_IR,
+      // The committed gen-types output (default dir `generated/zeroship`).
+      "generated/zeroship/schema.runtime.json": DESCRIPTOR,
+    });
+    try {
+      const onDisk = await fs.readFile(
+        join(fx.root, "generated", "zeroship", "schema.runtime.json")
+      );
+      const expectHash = sha256Hex(onDisk);
+
+      const res = await emitZship({
+        root: fx.root,
+        distDir: "dist",
+        silent: true,
+        builtAt: "2026-06-24T00:00:00Z",
+        userHasDefaultFetch: false,
+      });
+
+      assert.ok(
+        res.manifest.runtime_descriptor,
+        "manifest.runtime_descriptor must be set when schema.runtime.json exists"
+      );
+      assert.equal(
+        res.manifest.runtime_descriptor!.hash,
+        expectHash,
+        "the descriptor entry hash must equal the sha256 of the on-disk bytes"
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  test("no schema.runtime.json → runtime_descriptor undefined, pack still succeeds", async () => {
+    const stem = "20240617123000_notes";
+    const fx = await makeFixture({
+      "dist/server/index.js":
+        "export default { fetch(){ return new Response('ok'); } }\n",
+      "dist/index.html": "<!doctype html><html></html>\n",
+      [`migrations/${stem}.ts`]: "export function up() {}\n",
+      [`migrations/${stem}.ir.json`]: COMMITTED_IR,
+      // No generated/zeroship/schema.runtime.json on disk.
+    });
+    try {
+      const res = await emitZship({
+        root: fx.root,
+        distDir: "dist",
+        silent: true,
+        builtAt: "2026-06-24T00:00:00Z",
+        userHasDefaultFetch: false,
+      });
+      assert.equal(
+        res.manifest.runtime_descriptor,
+        undefined,
+        "absent descriptor must leave the slot undefined"
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  test("custom genTypesOut dir is honoured by the packer", async () => {
+    const fx = await makeFixture({
+      "dist/server/index.js":
+        "export default { fetch(){ return new Response('ok'); } }\n",
+      "dist/index.html": "<!doctype html><html></html>\n",
+      "custom/out/schema.runtime.json": DESCRIPTOR,
+    });
+    try {
+      const onDisk = await fs.readFile(
+        join(fx.root, "custom", "out", "schema.runtime.json")
+      );
+      const res = await emitZship({
+        root: fx.root,
+        distDir: "dist",
+        silent: true,
+        builtAt: "2026-06-24T00:00:00Z",
+        userHasDefaultFetch: false,
+        migrations: { genTypesOut: "custom/out" },
+      });
+      assert.ok(res.manifest.runtime_descriptor);
+      assert.equal(res.manifest.runtime_descriptor!.hash, sha256Hex(onDisk));
+    } finally {
+      await fx.cleanup();
+    }
+  });
+});
+
 // LOW #2 — exercise the recordViaCli CLI-shelling path: a `.ts` with NO committed
 // `.ir.json` must shell the (stub) CLI, which produces the committed artifact. Also
 // asserts (a) the LOCAL-vs-hosted arg fork and (b) a non-zero CLI exit surfaces as a

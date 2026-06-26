@@ -27,7 +27,11 @@ import { promisify } from "node:util";
 import { create as tarCreate } from "tar";
 import mime from "mime";
 
-import { discoverMigrations } from "./migrations.js";
+import {
+  discoverMigrations,
+  GEN_TYPES_OUT_DEFAULT,
+  RUNTIME_DESCRIPTOR_FILE,
+} from "./migrations.js";
 
 const brotliCompressAsync = promisify(brotliCompress);
 
@@ -97,6 +101,18 @@ interface Manifest {
    * control plane hands these to `zeroship-migrate` before go-live (§5.1).
    */
   migrations?: MigrationFileEntry[];
+  /**
+   * The generated runtime schema descriptor (`schema.runtime.json`) carried by
+   * the bundle (migration-first P4a). Content-addressed like a migration:
+   * `{ hash }` is the sha256 of the `gen-types`-emitted descriptor bytes,
+   * staged as a blob. `undefined` when the app ships no migrations / no
+   * descriptor. Mirrors the Rust `bundle::manifest::RuntimeDescriptorEntry`.
+   *
+   * **P4a is purely additive — nothing reads it yet.** It only gives the
+   * `.zship` the capacity to carry the descriptor so P4b can flip the runtime
+   * from `default.schema` to this artifact.
+   */
+  runtime_descriptor?: RuntimeDescriptorEntry;
 }
 
 /** One migration file carried by the `.zship` (`manifest.migrations[i]`). Mirrors
@@ -105,6 +121,14 @@ interface MigrationFileEntry {
   /** The committed `.ir.json` filename (bare; no path separators). */
   name: string;
   /** sha256 (lowercase, 64 hex) of the committed `.ir.json` blob. */
+  hash: Sha256Hex;
+}
+
+/** The runtime schema descriptor carried by the `.zship`
+ *  (`manifest.runtime_descriptor`). Mirrors the Rust
+ *  `bundle::manifest::RuntimeDescriptorEntry`. */
+interface RuntimeDescriptorEntry {
+  /** sha256 (lowercase, 64 hex) of the `schema.runtime.json` blob. */
   hash: Sha256Hex;
 }
 
@@ -198,6 +222,13 @@ export interface ZshipOptions {
         recorderUrl?: string;
         /** Path to the `zeroship-migrate-js` CLI (default on PATH). */
         cliPath?: string;
+        /**
+         * The `gen-types` output dir relative to `root` (default
+         * `GEN_TYPES_OUT_DEFAULT`). The packer reads
+         * `<genTypesOut>/schema.runtime.json` (when present) and carries it as
+         * the manifest's content-addressed `runtime_descriptor` blob (P4a).
+         */
+        genTypesOut?: string;
       };
 }
 
@@ -448,6 +479,28 @@ export async function emitZship(
         if (!blobsByHash.has(m.hash)) blobsByHash.set(m.hash, m.bytes);
       }
       log(`bundled ${migEntries.length} op.* migration(s)`);
+    }
+
+    // 8c. Carry the generated runtime schema descriptor (migration-first P4a).
+    //     `gen-types` emits `<genTypesOut>/schema.runtime.json` by folding the
+    //     migration set; the packer reads it VERBATIM, stages it as a content
+    //     blob (deduped by hash, exactly like a migration), and records
+    //     `manifest.runtime_descriptor = { hash }`. Absent (no migrations / not
+    //     yet generated) → the slot is left undefined; pack still succeeds. P4a
+    //     is purely additive: nothing reads this slot yet (P4b flips the runtime).
+    const genTypesOut = options.migrations?.genTypesOut ?? GEN_TYPES_OUT_DEFAULT;
+    const descriptorPath = resolve(root, genTypesOut, RUNTIME_DESCRIPTOR_FILE);
+    let descriptorBytes: Buffer | undefined;
+    try {
+      descriptorBytes = await fs.readFile(descriptorPath);
+    } catch {
+      descriptorBytes = undefined; // no descriptor → leave the slot undefined
+    }
+    if (descriptorBytes != null) {
+      const hash = sha256Hex(descriptorBytes);
+      manifest.runtime_descriptor = { hash };
+      if (!blobsByHash.has(hash)) blobsByHash.set(hash, descriptorBytes);
+      log(`bundled runtime schema descriptor (${RUNTIME_DESCRIPTOR_FILE})`);
     }
   }
 
@@ -821,6 +874,22 @@ function validateManifest(
     if (!blobsByHash.has(mig.hash)) {
       throw new Error(
         `zship: migration ${mig.name} hash ${mig.hash} has no corresponding blob`
+      );
+    }
+  }
+  // The runtime schema descriptor blob (migration-first P4a) — hash must be
+  // valid sha256 hex AND have a staged blob. Mirrors the Rust
+  // `crates/bundle/src/{manifest,unpack}.rs` descriptor checks.
+  if (m.runtime_descriptor != null) {
+    const h = m.runtime_descriptor.hash;
+    if (!isSha256Hex(h)) {
+      throw new Error(
+        `zship: runtime_descriptor hash ${h} is not lowercase 64-char sha256 hex`
+      );
+    }
+    if (!blobsByHash.has(h)) {
+      throw new Error(
+        `zship: runtime_descriptor hash ${h} has no corresponding blob`
       );
     }
   }

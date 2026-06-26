@@ -366,6 +366,22 @@ fn collect_expected_hashes(manifest: &Manifest) -> Result<HashSet<String>, Inges
         }
         out.insert(entry.hash.clone());
     }
+    // Runtime schema descriptor blob (migration-first cutover): the
+    // `schema.runtime.json` body is content-addressed like a migration. Gather
+    // its hash so step 8 asserts the blob was present in the tar. `validate()`
+    // already enforced the hash format; re-check here as defence in depth.
+    if let Some(desc) = &manifest.runtime_descriptor {
+        if !crate::blob::validate_hash_format(&desc.hash) {
+            return Err(IngestError::bad(
+                "invalid manifest",
+                format!(
+                    "runtime_descriptor.hash {hash:?} is not lowercase sha256 hex",
+                    hash = desc.hash
+                ),
+            ));
+        }
+        out.insert(desc.hash.clone());
+    }
     Ok(out)
 }
 
@@ -505,6 +521,29 @@ mod tests {
         let set = collect_expected_hashes(&m).unwrap();
         assert!(set.contains(&"e".repeat(64)), "first migration blob expected");
         assert!(set.contains(&"f".repeat(64)), "second migration blob expected");
+    }
+
+    #[test]
+    fn collect_expected_walks_runtime_descriptor_blob() {
+        // A manifest carrying a runtime schema descriptor: its blob hash must be
+        // in the expected set so ingest asserts it was present in the tar.
+        let desc = "9".repeat(64);
+        let m: Manifest = serde_json::from_value(json!({
+            "version": 1,
+            "rules": [],
+            "assets": {},
+            "runtime_assets": {},
+            "asset_version": 0,
+            "sourcemaps": {},
+            "runtime_descriptor": { "hash": desc },
+            "metadata": { "built_at": "2026-04-29T00:00:00Z" }
+        }))
+        .unwrap();
+        let set = collect_expected_hashes(&m).unwrap();
+        assert!(
+            set.contains(&"9".repeat(64)),
+            "runtime descriptor blob must be in the expected set"
+        );
     }
 
     #[test]
