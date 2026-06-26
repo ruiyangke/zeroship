@@ -1366,6 +1366,10 @@ pub fn flags_for(report: &GuardReport) -> MigrationFlags {
         // No per-migration timeout derivable from a single SQL blob; the author
         // sets it explicitly when a long backfill/index needs a higher ceiling.
         timeout_ms: None,
+        // Likewise the per-migration lock-acquisition budget (the maintenance-
+        // window override) is authoring-time, never inferred from a SQL blob —
+        // defaults to the SHORT executor-wide lock-safety default.
+        lock_timeout_ms: None,
         // A guard-derived flag set is for one-shot SQL; the online expand/contract
         // phase is set by the ExpandContractAuthor, never inferred from SQL.
         phase: None,

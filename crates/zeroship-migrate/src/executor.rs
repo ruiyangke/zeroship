@@ -476,6 +476,18 @@ fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
     m.flags.timeout_ms.unwrap_or_else(|| cfg.statement_timeout_ms())
 }
 
+/// The effective `lock_timeout` for a migration: its per-migration override
+/// ([`crate::migration::MigrationFlags::lock_timeout_ms`]) if set, else the
+/// SHORT executor-wide default (the lock-safety envelope, 3s). This is the
+/// per-deploy maintenance-window knob that makes the doc on
+/// [`crate::db::PgConfinement::lock_timeout`] honest: a single planned migration
+/// can legitimately raise ITS OWN lock-acquisition budget (run during a quiet
+/// window), while every other migration keeps the conservative fail-fast
+/// default. It mirrors [`effective_timeout_ms`] exactly.
+fn effective_lock_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
+    m.flags.lock_timeout_ms.unwrap_or_else(|| cfg.lock_timeout_ms())
+}
+
 /// `SET LOCAL …` clauses (transaction-scoped) for the **txn path** — they
 /// vanish at COMMIT/ROLLBACK, so nothing leaks onto the session (H2). Pins the
 /// project `search_path` (project schema **only** — the meta schema is
@@ -499,7 +511,7 @@ fn set_local_session_sql(
          SET LOCAL lock_timeout = {};",
         cfg.search_path_clause()?,
         effective_timeout_ms(cfg, m),
-        cfg.lock_timeout_ms(),
+        effective_lock_timeout_ms(cfg, m),
     ))
 }
 
@@ -541,7 +553,7 @@ pub(crate) async fn configure_session_non_txn(
         "SET search_path TO {}; SET statement_timeout = {}; SET lock_timeout = {};",
         cfg.search_path_clause()?,
         effective_timeout_ms(cfg, m),
-        cfg.lock_timeout_ms(),
+        effective_lock_timeout_ms(cfg, m),
     );
     conn.batch_execute(&stmt).await?;
     Ok(())
@@ -3409,6 +3421,11 @@ mod pg_confinement_shape_tests {
     /// PG confinement bracket is emitted from the grouped `cfg.pg` block,
     /// byte-identically to the pre-M2 flat shape: search_path = project schema
     /// (+ extension schema), and the mandatory timeouts in ms.
+    ///
+    /// This also pins the **lock-safety envelope** default: the DEFAULT
+    /// `lock_timeout` (3000 ms) is SHORT and SEPARATE from the long-running
+    /// `statement_timeout` (60000 ms). A regression that folded the two together
+    /// (or restored the old long 30000 ms lock_timeout) flips this assertion RED.
     #[test]
     fn pg_confinement_bracket_is_emitted_from_the_pg_block() {
         let cfg = ExecutorConfig::new("prj_x", "proj_x").with_migrator_role("migrator_proj_x");
@@ -3416,13 +3433,28 @@ mod pg_confinement_shape_tests {
 
         let session = set_local_session_sql(&cfg, &m).expect("session sql renders");
         // search_path is the project schema, then the `public` extension schema
-        // (the `new()` default) — pinned for confined resolution.
+        // (the `new()` default) — pinned for confined resolution. The
+        // statement_timeout is the long RUNNING budget (60s); the lock_timeout is
+        // the SHORT lock-ACQUISITION budget (3s) — split by construction.
         assert_eq!(
             session,
             "SET LOCAL search_path TO \"proj_x\", \"public\"; \
              SET LOCAL statement_timeout = 60000; \
-             SET LOCAL lock_timeout = 30000;",
-            "PG SET LOCAL session bracket must come from cfg.pg byte-identically"
+             SET LOCAL lock_timeout = 3000;",
+            "PG SET LOCAL session bracket must come from cfg.pg byte-identically, \
+             with a SHORT default lock_timeout split from the long statement_timeout"
+        );
+
+        // The lock-safety split is real: the short lock-acquisition budget must
+        // be strictly shorter than the long running-statement budget — never the
+        // same value (which would mean a blocking DDL waits the full statement
+        // budget to acquire its lock, the outage this envelope prevents).
+        assert!(
+            cfg.lock_timeout_ms() < cfg.statement_timeout_ms(),
+            "default lock_timeout ({} ms) must be strictly shorter than \
+             statement_timeout ({} ms) — the lock-safety envelope",
+            cfg.lock_timeout_ms(),
+            cfg.statement_timeout_ms(),
         );
 
         // The migrator role bracket comes from cfg.pg.migrator_role.
@@ -3430,6 +3462,41 @@ mod pg_confinement_shape_tests {
             .expect("role ident quotable")
             .expect("migrator role set");
         assert_eq!(role, "SET LOCAL ROLE \"migrator_proj_x\"");
+    }
+
+    /// The per-migration `lock_timeout_ms` override (the maintenance-window knob,
+    /// mirroring `timeout_ms`) is honoured by the txn-path session render: a
+    /// migration that sets its OWN lock budget renders THAT value, not the
+    /// executor-wide default — while a migration that sets none falls back to the
+    /// SHORT default. RED pre-change (the field did not exist and the render used
+    /// `cfg.lock_timeout_ms()` unconditionally).
+    #[test]
+    fn per_migration_lock_timeout_override_renders_over_default() {
+        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        // Default budget (3000 ms) when the migration sets no override.
+        let default_m = trivial_migration();
+        let default_session =
+            set_local_session_sql(&cfg, &default_m).expect("session sql renders");
+        assert!(
+            default_session.contains("SET LOCAL lock_timeout = 3000;"),
+            "no override ⇒ the SHORT executor default (3000 ms); got: {default_session}"
+        );
+
+        // An explicit per-migration override raises ONLY this migration's budget.
+        let mut override_m = trivial_migration();
+        override_m.flags.lock_timeout_ms = Some(7000);
+        let override_session =
+            set_local_session_sql(&cfg, &override_m).expect("session sql renders");
+        assert!(
+            override_session.contains("SET LOCAL lock_timeout = 7000;"),
+            "the per-migration lock_timeout_ms override (7000 ms) must win over the \
+             3000 ms default; got: {override_session}"
+        );
+        // The statement_timeout is untouched by the lock override.
+        assert!(
+            override_session.contains("SET LOCAL statement_timeout = 60000;"),
+            "the lock_timeout override must not perturb statement_timeout; got: {override_session}"
+        );
     }
 
     /// A default-constructed config (the SHAPE the SQLite engine builds via

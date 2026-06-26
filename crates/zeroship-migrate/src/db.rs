@@ -43,9 +43,40 @@ pub struct PgConfinement {
     /// schema so a creator migration can't touch its own history.
     pub meta_schema: String,
     /// Mandatory per-statement timeout (§1.5). Maps to `SET statement_timeout`.
+    /// Bounds how long a statement may **run**; a runaway DDL/DML is cancelled
+    /// after this. This is the long-running-statement budget (default 60s).
     pub statement_timeout: Duration,
-    /// Mandatory per-statement lock-acquisition timeout (§1.5). Maps to
-    /// `SET lock_timeout`.
+    /// Mandatory, **separate, SHORT** lock-ACQUISITION timeout (§1.5; the
+    /// safe-migration lock-safety envelope — strong_migrations / Atlas PG101 &
+    /// PG103). Maps to `SET lock_timeout`. This is NOT folded into
+    /// [`statement_timeout`](Self::statement_timeout): the two bound different
+    /// things.
+    ///
+    /// `lock_timeout` bounds only how long a statement waits to **acquire** a
+    /// lock before failing with `55P03 lock_not_available`; `statement_timeout`
+    /// bounds how long it **runs** once it holds the lock. On a populated, live
+    /// multi-tenant table a blocking DDL (e.g. `ALTER TABLE`) takes an
+    /// `ACCESS EXCLUSIVE` lock; if any long-running transaction holds a
+    /// conflicting lock, the DDL queues behind it — AND, because it is itself
+    /// waiting on an `ACCESS EXCLUSIVE` lock, every subsequent query on that
+    /// table queues behind the DDL. That is a tenant-wide availability outage
+    /// for the lifetime of the wait. A long (statement-class) `lock_timeout`
+    /// makes the outage last that long; a SHORT one makes the DDL fail fast
+    /// (`55P03`), roll back cleanly (the two-phase recovery handles the abort —
+    /// a lock-timeout failure is retryable, never data-corrupting), and free the
+    /// table immediately. The operator retries during a quieter window.
+    ///
+    /// Default: **3s** (`Duration::from_secs(3)`). Short enough that a blocking
+    /// DDL cannot stall a live tenant table for more than a few seconds, long
+    /// enough to absorb ordinary brief lock contention without spuriously
+    /// failing.
+    ///
+    /// This field is the executor-WIDE default. For a planned maintenance
+    /// window, a single migration raises ITS OWN lock-acquisition budget via the
+    /// per-migration override
+    /// [`crate::migration::MigrationFlags::lock_timeout_ms`] (mirrors
+    /// `timeout_ms`), so the conservative fail-fast default stays in force for
+    /// every other migration in the same deploy.
     pub lock_timeout: Duration,
     /// The least-privilege `migrator` role the apply flow runs each migration's
     /// DDL + journal writes under, via `SET ROLE` / `RESET ROLE` (design §1.3,
@@ -86,8 +117,14 @@ impl PgConfinement {
             meta_schema,
             // Conservative defaults; callers tune per deploy. Non-zero so a
             // runaway migration cannot hold locks indefinitely.
+            //
+            // The two are deliberately SPLIT (lock-safety envelope): a long
+            // RUNNING budget (60s) and a SHORT lock-ACQUISITION budget (3s) so a
+            // blocking DDL behind a conflicting lock fails fast (55P03) instead
+            // of stalling every query on a live tenant table. See the
+            // `lock_timeout` field doc for the full rationale.
             statement_timeout: Duration::from_secs(60),
-            lock_timeout: Duration::from_secs(30),
+            lock_timeout: Duration::from_secs(3),
             // Defaults to no SET ROLE; the platform sets this to the provisioned
             // `migrator_<project>` role. Tests opt in explicitly.
             migrator_role: None,

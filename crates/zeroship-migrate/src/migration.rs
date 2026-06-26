@@ -184,6 +184,17 @@ pub struct MigrationFlags {
     /// backfill or a big concurrent index sets its own higher ceiling so the
     /// conservative executor default does not kill it mid-flight.
     pub timeout_ms: Option<u64>,
+    /// Optional per-migration `lock_timeout`, in **milliseconds**. `None` falls
+    /// back to the SHORT executor-wide default
+    /// ([`crate::db::ExecutorConfig::lock_timeout`], 3s — the lock-safety
+    /// envelope). This is the per-deploy maintenance-window knob: a planned
+    /// migration that legitimately needs to wait longer to acquire its lock
+    /// (run during a quiet window where a brief stall is acceptable) raises ONLY
+    /// its own lock-acquisition budget, leaving the conservative fail-fast
+    /// default in force for every other migration. It is folded into the
+    /// checksum exactly like `timeout_ms`, and is bounded SHORT-by-default
+    /// precisely so this override is the *only* way a migration waits longer.
+    pub lock_timeout_ms: Option<u64>,
     /// The expand/contract phase of an `online` migration ([`OnlinePhase`]).
     /// `None` for an ordinary one-shot migration; `Some(Expand)` /
     /// `Some(Contract)` for the two halves of a zero-downtime expand-contract
@@ -235,6 +246,7 @@ impl Default for MigrationFlags {
             online: false,
             requires_approval: false,
             timeout_ms: None,
+            lock_timeout_ms: None,
             phase: None,
             repeatable: false,
             engine_goodie_ddl: false,
@@ -266,8 +278,9 @@ pub struct ChecksumInput<'a> {
     pub down: Option<&'a str>,
     /// Apply-time flags — all fold in. The six bools `transactional` /
     /// `destructive` / `online` / `requires_approval` / `repeatable` /
-    /// `engine_goodie_ddl`, plus the two OPTIONAL FACETS `timeout_ms`
-    /// (`Option<u64>`) and `phase` (`Option<OnlinePhase>`).
+    /// `engine_goodie_ddl`, plus the OPTIONAL FACETS `timeout_ms`
+    /// (`Option<u64>`), `lock_timeout_ms` (`Option<u64>`) and `phase`
+    /// (`Option<OnlinePhase>`).
     pub flags: &'a MigrationFlags,
     /// The declaring app (per-table ownership).
     pub owner_app: &'a str,
@@ -475,9 +488,11 @@ fn fold_common(
     preconditions: &[PreconditionCheck],
 ) {
     // flags — canonical JSON, length-prefixed. Covers transactional /
-    // destructive / online / requires_approval / timeout_ms / phase /
-    // repeatable / engine_goodie_ddl in one deterministic image, so any flip
-    // changes the hash.
+    // destructive / online / requires_approval / timeout_ms / lock_timeout_ms /
+    // phase / repeatable / engine_goodie_ddl in one deterministic image, so any
+    // flip changes the hash (an attacker cannot silently inflate the
+    // lock-acquisition budget past the fail-fast default without tripping the
+    // drift check).
     let flags_json =
         serde_json::to_string(flags).expect("MigrationFlags is infallibly serializable");
     hasher.update((flags_json.len() as u64).to_be_bytes());
@@ -743,6 +758,12 @@ mod tests {
         // timeout_ms change.
         let f_to = MigrationFlags { timeout_ms: Some(60_000), ..MigrationFlags::default() };
         assert_ne!(base, Checksum::of(&input(up, None, &f_to, owner, &[], &[], &[])), "timeout_ms change must change the checksum");
+        // lock_timeout_ms change — the per-deploy maintenance-window override
+        // folds into the tamper-evident checksum exactly like timeout_ms, so an
+        // attacker cannot silently inflate the lock-acquisition budget past the
+        // SHORT fail-fast default without tripping the drift check.
+        let f_lto = MigrationFlags { lock_timeout_ms: Some(30_000), ..MigrationFlags::default() };
+        assert_ne!(base, Checksum::of(&input(up, None, &f_lto, owner, &[], &[], &[])), "lock_timeout_ms change must change the checksum");
         // destructive flip.
         let f_destr = MigrationFlags { destructive: true, ..MigrationFlags::default() };
         assert_ne!(base, Checksum::of(&input(up, None, &f_destr, owner, &[], &[], &[])), "destructive flip must change the checksum");
