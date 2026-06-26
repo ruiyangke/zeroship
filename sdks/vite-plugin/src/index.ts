@@ -110,6 +110,13 @@ export interface ZeroshipOptions {
     /** Explicit path to the `zeroship-migrate-js` CLI (default: resolved from
      *  `ZEROSHIP_MIGRATE_JS_BIN` / `node_modules/.bin`). */
     cliPath?: string;
+    /** The declaring/deploying app (`app_…`) stamped on a recorded IR when the
+     *  build packer records a `.ts` lacking a committed `.ir.json` (default
+     *  `app_local`). Forwarded to the `.zship` packer's migration discovery. */
+    ownerApp?: string;
+    /** The hosted recorder URL (falls back to `ZEROSHIP_RECORDER_URL`).
+     *  Forwarded to the `.zship` packer's migration discovery. */
+    recorderUrl?: string;
   };
   /** RPC v2 (`docs/proposals/rpc.md` §1) — server-function discovery + emission. */
   rpc?: {

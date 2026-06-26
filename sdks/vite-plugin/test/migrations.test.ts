@@ -17,6 +17,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { emitZship } from "../src/zship.js";
 import { discoverMigrations, sha256Hex } from "../src/migrations.js";
+import { migrationsForEmit } from "../src/build.js";
 
 async function makeFixture(
   files: Record<string, string | Buffer>
@@ -481,6 +482,164 @@ describe("recordViaCli against the REAL zeroship-migrate-js binary (faithful e2e
         `the recorded IR must carry the createTable op; got: ${onDisk.toString("utf8")}`
       );
     } finally {
+      await fx.cleanup();
+    }
+  });
+});
+
+// LOW-1 (P4a review) — build.ts's `emitZship({ migrations })` call site must
+// forward the FULL migration sub-options. The earlier partial spread threaded
+// only dir/genTypesOut/cliPath and DROPPED ownerApp/recorderUrl, which the
+// packer's migration discovery (step 8b) consumes — silently breaking the
+// recorder arg-fork in production builds. These tests pin both the structural
+// forwarder and the end-to-end flow of those two fields to the recorder CLI.
+describe("build.ts migration sub-option forwarding (P4a LOW-1)", () => {
+  test("migrationsForEmit forwards ALL five fields (no partial spread)", () => {
+    const out = migrationsForEmit({
+      dir: "migrations",
+      genTypesOut: "generated/zeroship",
+      cliPath: "/bin/zeroship-migrate-js",
+      ownerApp: "app_owner123",
+      recorderUrl: "https://recorder.example/v1",
+    });
+    // The bug was that ownerApp/recorderUrl were silently absent — assert
+    // every field survives, not just the three the old spread copied.
+    assert.equal(out.dir, "migrations");
+    assert.equal(out.genTypesOut, "generated/zeroship");
+    assert.equal(out.cliPath, "/bin/zeroship-migrate-js");
+    assert.equal(out.ownerApp, "app_owner123", "ownerApp must be forwarded");
+    assert.equal(
+      out.recorderUrl,
+      "https://recorder.example/v1",
+      "recorderUrl must be forwarded"
+    );
+  });
+
+  test("migrationsForEmit on undefined yields an all-undefined object (defaults preserved)", () => {
+    const out = migrationsForEmit(undefined);
+    assert.deepEqual(out, {
+      dir: undefined,
+      genTypesOut: undefined,
+      cliPath: undefined,
+      ownerApp: undefined,
+      recorderUrl: undefined,
+    });
+  });
+
+  // Faithful e2e: drive the REAL emitZship → REAL discoverMigrations → REAL
+  // spawnSync of a stub recorder CLI, asserting the ownerApp/recorderUrl that
+  // build.ts now forwards actually reach the recorder arg-fork. A `.ts` with no
+  // committed `.ir.json` forces the record path; the stub logs its argv.
+  const STUB_STEM = "20240617123000_notes";
+  const STUB_BODY = [
+    "#!/usr/bin/env node",
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    "const args = process.argv.slice(2);",
+    "if (process.env.ARGS_LOG) fs.writeFileSync(process.env.ARGS_LOG, JSON.stringify(args));",
+    "const ir = JSON.parse(process.env.ZSTUB_IR);",
+    "const irText = JSON.stringify(ir, null, 2) + '\\n';",
+    "function writeFor(tsPath) {",
+    "  const dir = path.dirname(tsPath);",
+    "  const base = path.basename(tsPath).replace(/\\.ts$/, '');",
+    "  fs.writeFileSync(path.join(dir, base + '.ir.json'), irText);",
+    "}",
+    "if (args[0] === 'record') { writeFor(args[1]); }",
+    "else if (args[0] === 'build') {",
+    "  const di = args.indexOf('--dir'); const dir = args[di + 1];",
+    "  for (const n of fs.readdirSync(dir)) if (n.endsWith('.ts')) writeFor(path.join(dir, n));",
+    "} else { process.exit(2); }",
+    "",
+  ].join("\n");
+  const STUB_IR = {
+    ir_version: 1,
+    name: "notes",
+    ops: [{ op: "createTable", name: "notes", columns: [{ name: "title", type: "text" }] }],
+  };
+
+  test("emitZship forwards ownerApp to the recorder (LOCAL `record --owner-app`)", async () => {
+    const fx = await makeFixture({
+      "dist/server/index.js":
+        "export default { fetch(){ return new Response('ok'); } }\n",
+      "dist/index.html": "<!doctype html><html></html>\n",
+      [`migrations/${STUB_STEM}.ts`]: "export function up() {}\n",
+      "stub-cli.js": STUB_BODY,
+    });
+    const cliPath = join(fx.root, "stub-cli.js");
+    await fs.chmod(cliPath, 0o755);
+    const argsLog = join(fx.root, "args.json");
+    const saved = { ZSTUB_IR: process.env.ZSTUB_IR, ARGS_LOG: process.env.ARGS_LOG };
+    process.env.ZSTUB_IR = JSON.stringify(STUB_IR);
+    process.env.ARGS_LOG = argsLog;
+    try {
+      await emitZship({
+        root: fx.root,
+        distDir: "dist",
+        silent: true,
+        builtAt: "2026-06-24T00:00:00Z",
+        userHasDefaultFetch: false,
+        // Exactly the shape build.ts now forwards via migrationsForEmit.
+        migrations: { cliPath, ownerApp: "app_owner123" },
+      });
+      const args = JSON.parse(await fs.readFile(argsLog, "utf8")) as string[];
+      assert.equal(args[0], "record", "LOCAL fork shells `record`");
+      const oi = args.indexOf("--owner-app");
+      assert.ok(oi >= 0, "the forwarded ownerApp must reach the recorder");
+      assert.equal(
+        args[oi + 1],
+        "app_owner123",
+        "ownerApp value must NOT be dropped (the LOW-1 partial-spread bug)"
+      );
+    } finally {
+      if (saved.ZSTUB_IR === undefined) delete process.env.ZSTUB_IR;
+      else process.env.ZSTUB_IR = saved.ZSTUB_IR;
+      if (saved.ARGS_LOG === undefined) delete process.env.ARGS_LOG;
+      else process.env.ARGS_LOG = saved.ARGS_LOG;
+      await fx.cleanup();
+    }
+  });
+
+  test("emitZship forwards recorderUrl to the recorder (hosted `build --recorder-url`)", async () => {
+    const fx = await makeFixture({
+      "dist/server/index.js":
+        "export default { fetch(){ return new Response('ok'); } }\n",
+      "dist/index.html": "<!doctype html><html></html>\n",
+      [`migrations/${STUB_STEM}.ts`]: "export function up() {}\n",
+      "stub-cli.js": STUB_BODY,
+    });
+    const cliPath = join(fx.root, "stub-cli.js");
+    await fs.chmod(cliPath, 0o755);
+    const argsLog = join(fx.root, "args.json");
+    const saved = { ZSTUB_IR: process.env.ZSTUB_IR, ARGS_LOG: process.env.ARGS_LOG };
+    process.env.ZSTUB_IR = JSON.stringify(STUB_IR);
+    process.env.ARGS_LOG = argsLog;
+    try {
+      await emitZship({
+        root: fx.root,
+        distDir: "dist",
+        silent: true,
+        builtAt: "2026-06-24T00:00:00Z",
+        userHasDefaultFetch: false,
+        migrations: {
+          cliPath,
+          ownerApp: "app_owner123",
+          recorderUrl: "https://recorder.example/v1",
+        },
+      });
+      const args = JSON.parse(await fs.readFile(argsLog, "utf8")) as string[];
+      assert.equal(args[0], "build", "hosted fork shells `build`");
+      const ri = args.indexOf("--recorder-url");
+      assert.ok(ri >= 0, "the forwarded recorderUrl must reach the recorder");
+      assert.equal(
+        args[ri + 1],
+        "https://recorder.example/v1",
+        "recorderUrl value must NOT be dropped (the LOW-1 partial-spread bug)"
+      );
+    } finally {
+      if (saved.ZSTUB_IR === undefined) delete process.env.ZSTUB_IR;
+      else process.env.ZSTUB_IR = saved.ZSTUB_IR;
+      if (saved.ARGS_LOG === undefined) delete process.env.ARGS_LOG;
+      else process.env.ARGS_LOG = saved.ARGS_LOG;
       await fx.cleanup();
     }
   });
