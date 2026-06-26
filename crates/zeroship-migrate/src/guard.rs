@@ -2632,8 +2632,12 @@ mod tests {
     /// / `public`) + the two ported extensions. Minted via the `for_test` seam
     /// — the ONLY non-`platform_runner` path to a token, `#[cfg(test)]`-only.
     fn platform_guard() -> SqlGuard {
+        SqlGuard::new(platform_guard_config())
+    }
+
+    fn platform_guard_config() -> GuardConfig {
         let cap = OperatorCapability::for_test();
-        SqlGuard::new(GuardConfig::platform(
+        GuardConfig::platform(
             &cap,
             vec![
                 "zeroship".to_string(),
@@ -2641,11 +2645,33 @@ mod tests {
                 "public".to_string(),
             ],
             vec!["citext".to_string(), "uuid-ossp".to_string()],
-        ))
+        )
     }
 
     fn confined_guard() -> SqlGuard {
         SqlGuard::new(GuardConfig::confined("zeroship"))
+    }
+
+    fn vendor_ir(op: crate::ir::Op) -> crate::ir::MigrationIr {
+        crate::ir::MigrationIr {
+            ir_version: crate::ir::CURRENT_IR_VERSION,
+            name: "vendor_guard_probe".into(),
+            owner_app: "app_corpus".into(),
+            ops: vec![op],
+            flags: Default::default(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            checksum: None,
+        }
+    }
+
+    fn platform_author(guard_cfg: &GuardConfig) -> crate::ir_author::IrAuthor {
+        let scope = guard_cfg
+            .schema_scope()
+            .expect("Platform guard carries an allowlist scope");
+        crate::ir_author::IrAuthor::new("zeroship", "app_corpus", SqlDialect::Postgres)
+            .with_schema_scope(scope)
     }
 
     fn is_denied(g: &SqlGuard, sql: &str) -> bool {
@@ -2880,6 +2906,157 @@ mod tests {
             g.check(r#"CREATE ROLE "zeroship_auth" NOSUPERUSER LOGIN"#).is_ok(),
             "NOSUPERUSER must not trip the superuser deny"
         );
+    }
+
+    // ---- HIGH-1 (vendor-pg review): raw vendor bodies still hit gate 2 ----
+
+    #[test]
+    fn vendor_create_function_body_rce_is_denied_under_platform_guard() {
+        let guard_cfg = platform_guard_config();
+        let author = platform_author(&guard_cfg);
+        let op = crate::ir::Op::CreateFunction {
+            name: "audit_events_rce".into(),
+            schema: Some("zeroship".into()),
+            args: None,
+            returns: "void".into(),
+            language: crate::ir::FuncLanguage::Plpgsql,
+            replace: Some(true),
+            volatility: None,
+            body: "BEGIN COPY zeroship.audit_events TO PROGRAM 'sh -c id'; END;".into(),
+        };
+
+        match author.lower_guarded(
+            &vendor_ir(op),
+            &guard_cfg,
+            &crate::ir_author::LiveSchema::default(),
+        ) {
+            Err(crate::ir_author::IrGuardedLowerError::Denied(denial)) => {
+                assert_eq!(denial.op_kind, "createFunction");
+                assert!(
+                    matches!(
+                        denial.source,
+                        GuardError::Denied {
+                            rule: rule::BODY_INSPECTION,
+                            ..
+                        }
+                    ),
+                    "the PL/pgSQL body must be scanned, got: {:?}",
+                    denial.source
+                );
+            }
+            other => panic!(
+                "vendor createFunction with COPY PROGRAM in its body must be denied; got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn vendor_create_function_benign_body_is_allowed_under_platform_guard() {
+        let guard_cfg = platform_guard_config();
+        let author = platform_author(&guard_cfg);
+        let op = crate::ir::Op::CreateFunction {
+            name: "audit_events_note".into(),
+            schema: Some("zeroship".into()),
+            args: None,
+            returns: "void".into(),
+            language: crate::ir::FuncLanguage::Plpgsql,
+            replace: Some(true),
+            volatility: None,
+            body: "BEGIN RAISE NOTICE 'ok'; RETURN; END;".into(),
+        };
+
+        let (_steps, fragments) = author
+            .lower_guarded(
+                &vendor_ir(op),
+                &guard_cfg,
+                &crate::ir_author::LiveSchema::default(),
+            )
+            .expect("benign vendor createFunction body must pass the Platform guard");
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0].op_kind, "createFunction");
+        assert!(
+            fragments[0].sql.contains("RAISE NOTICE 'ok'"),
+            "the guarded fragment should be the rendered function statement: {:?}",
+            fragments[0]
+        );
+    }
+
+    #[test]
+    fn vendor_pg_raw_rce_is_denied_under_platform_guard() {
+        let guard_cfg = platform_guard_config();
+        let author = platform_author(&guard_cfg);
+        let op = crate::ir::Op::PgRaw {
+            sql: "COPY zeroship.audit_events TO PROGRAM 'sh -c id'".into(),
+            binds: Vec::new(),
+        };
+
+        match author.lower_guarded(
+            &vendor_ir(op),
+            &guard_cfg,
+            &crate::ir_author::LiveSchema::default(),
+        ) {
+            Err(crate::ir_author::IrGuardedLowerError::Denied(denial)) => {
+                assert_eq!(denial.op_kind, "pgRaw");
+                assert!(
+                    matches!(
+                        denial.source,
+                        GuardError::Denied {
+                            rule: rule::COPY_PROGRAM,
+                            ..
+                        }
+                    ),
+                    "pgRaw COPY PROGRAM should be caught by the AST deny-list, got: {:?}",
+                    denial.source
+                );
+            }
+            other => panic!("vendor pgRaw COPY PROGRAM must be denied; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vendor_role_op_is_denied_by_gate_two_without_platform_capability() {
+        let guard_cfg = GuardConfig::confined("zeroship");
+        let author = crate::ir_author::IrAuthor::new(
+            "zeroship",
+            "app_corpus",
+            SqlDialect::Postgres,
+        );
+        let op = crate::ir::Op::CreateRole {
+            name: "zeroship_auth".into(),
+            login: Some(true),
+            password: None,
+            bypass_rls: None,
+            create_role: None,
+            create_db: None,
+            superuser: None,
+            in_role: None,
+            set_search_path: None,
+            if_not_exists: None,
+        };
+
+        match author.lower_guarded(
+            &vendor_ir(op),
+            &guard_cfg,
+            &crate::ir_author::LiveSchema::default(),
+        ) {
+            Err(crate::ir_author::IrGuardedLowerError::Denied(denial)) => {
+                assert_eq!(denial.op_kind, "createRole");
+                assert!(
+                    matches!(
+                        denial.source,
+                        GuardError::Denied {
+                            rule: rule::ROLE_MANAGEMENT,
+                            ..
+                        }
+                    ),
+                    "Confined gate-2 should still deny a role vendor op, got: {:?}",
+                    denial.source
+                );
+            }
+            other => panic!(
+                "vendor createRole must be denied by gate-2 without Platform capability; got {other:?}"
+            ),
+        }
     }
 
     // ---- T2: SchemaScope Single is byte-identical at the read sites ---------
