@@ -37,6 +37,7 @@
 //! its own declared columns at load.
 
 use crate::expr::{CaseBranch, Expr, SynthFn};
+use pg_query::protobuf::node::Node as NodeEnum;
 
 // ── Canonical authoring-time error codes (§8.8) ─────────────────────────────
 // The taxonomy new validators add their code to. The op-vs-expr distinction is
@@ -370,7 +371,7 @@ pub fn validate_op_scoped(
     ts_location: Option<&str>,
     schema_scope: Option<&crate::guard::SchemaScope>,
 ) -> Result<(), AuthoringError> {
-    use crate::ir::{IrConstraintKind, Op, TriggerAction};
+    use crate::ir::{IrConstraintKind, Op, TriggerAction, ViewQuery};
 
     // **PR10** — schema confinement + guard-direction gate, BEFORE any expression
     // walk. Fail-closed: a Confined cross-schema op never reaches lower.
@@ -568,6 +569,33 @@ pub fn validate_op_scoped(
             }
             Ok(())
         }
+        // CROSS-DIALECT CORE views. A structured view body is the closed SelectAst
+        // subset and needs no vendor capability. A raw body is operator-gated above,
+        // then asserted to be exactly one read-only SELECT and re-scanned with the
+        // function-body deny-list before admission.
+        Op::CreateView { query, .. } => {
+            match query {
+                ViewQuery::Structured { select } => {
+                    validate_select_ast(
+                        select,
+                        target_dialect,
+                        op_index,
+                        ts_location,
+                        schema_scope,
+                    )?;
+                }
+                ViewQuery::Raw { sql } => {
+                    validate_raw_view_body_sql(
+                        sql,
+                        target_dialect,
+                        op_index,
+                        ts_location,
+                        schema_scope,
+                    )?;
+                }
+            }
+            Ok(())
+        }
         Op::PgRaw { binds, .. } if !binds.is_empty() => Err(AuthoringError {
             code: CODE_UNSUPPORTED.to_string(),
             kind: Some(UnsupportedKind::Op),
@@ -617,6 +645,7 @@ pub fn validate_op_scoped(
         | Op::NoForceRls { .. }
         | Op::DropPolicy { .. }
         | Op::DropTrigger { .. }
+        | Op::DropView { .. }
         | Op::CreateFunction { .. }
         | Op::DropFunction { .. }
         | Op::PgRaw { .. } => Ok(()),
@@ -645,29 +674,52 @@ fn validate_vendor_op(
     ts_location: Option<&str>,
     schema_scope: Option<&crate::guard::SchemaScope>,
 ) -> Result<(), AuthoringError> {
-    let Some(cap) = op.vendor_capability() else {
+    let caps = op.vendor_capabilities();
+    if caps.is_empty() {
         return Ok(()); // portable-core op — not gated here.
     };
 
-    // (1) SQLite — every vendor op is PgOnly. Refuse fail-closed at load.
-    if matches!(target_dialect, Dialect::Sqlite) {
+    // (1) SQLite — every vendor op except RawViewBody is PgOnly. Refuse
+    // fail-closed at load. RawViewBody is a raw surface but not PgOnly; SQLite can
+    // create plain views from a SELECT body.
+    if matches!(target_dialect, Dialect::Sqlite)
+        && caps
+            .iter()
+            .any(|cap| !matches!(cap, crate::capability::VendorCapability::RawViewBody))
+    {
+        let cap = caps
+            .iter()
+            .find(|cap| !matches!(cap, crate::capability::VendorCapability::RawViewBody))
+            .copied()
+            .expect("non-raw-view cap exists");
+        let (reason, fix) = if matches!(cap, crate::capability::VendorCapability::MaterializedView)
+        {
+            (
+                "materializedView: SQLite has no materialized views; materialized:true is PostgreSQL-only"
+                    .to_string(),
+                "drop materialized:true for SQLite, or target Postgres for this view".to_string(),
+            )
+        } else {
+            (
+                format!(
+                    "the @zeroship/migrate/pg vendor op (capability {:?}) is Postgres-only — \
+                     roles/grants/RLS/policies/triggers/functions/extensions/schemas/pg.sql have \
+                     no SQLite analogue (PgOnly)",
+                    cap.as_token()
+                ),
+                "vendor primitives target Postgres only — deploy this migration against a \
+                 Postgres backend, or remove the @zeroship/migrate/pg op"
+                    .to_string(),
+            )
+        };
         return Err(AuthoringError {
             code: CODE_UNSUPPORTED.to_string(),
             kind: Some(UnsupportedKind::Op),
             op_index,
             ts_location: ts_location.map(str::to_string),
             dialect: target_dialect,
-            reason: format!(
-                "the @zeroship/migrate/pg vendor op (capability {:?}) is Postgres-only — \
-                 roles/grants/RLS/policies/triggers/functions/extensions/schemas/pg.sql have \
-                 no SQLite analogue (PgOnly)",
-                cap.as_token()
-            ),
-            suggested_fix: Some(
-                "vendor primitives target Postgres only — deploy this migration against a \
-                 Postgres backend, or remove the @zeroship/migrate/pg op"
-                    .to_string(),
-            ),
+            reason,
+            suggested_fix: Some(fix),
         });
     }
 
@@ -675,27 +727,194 @@ fn validate_vendor_op(
     // threaded scope (the operator-gated, non-spoofable trust signal) and key on the
     // capability FLAG — never a hard-coded profile name.
     let caps = crate::capability::VendorCapabilities::from_scope(schema_scope);
-    if !caps.grants(cap) {
-        return Err(AuthoringError {
-            code: CODE_VENDOR_OP_DENIED.to_string(),
-            kind: None,
+    for cap in op.vendor_capabilities() {
+        if !caps.grants(cap) {
+            return Err(AuthoringError {
+                code: CODE_VENDOR_OP_DENIED.to_string(),
+                kind: None,
+                op_index,
+                ts_location: ts_location.map(str::to_string),
+                dialect: target_dialect,
+                reason: format!(
+                    "vendor PG primitive (op capability {:?}) requires the {} capability, which \
+                     the active (Confined creator) capability set does not grant — the privileged \
+                     @zeroship/migrate/pg primitives are unreachable from a confined migration by \
+                     construction (vendor spec §3.2)",
+                    cap.as_token(),
+                    cap.flag_name(),
+                ),
+                suggested_fix: Some(format!(
+                    "author this privileged migration under the operator/platform capability set \
+                     (which composes {}), not the confined creator profile",
+                    cap.flag_name(),
+                )),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn view_body_error(
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+    reason: String,
+    suggested_fix: &'static str,
+) -> AuthoringError {
+    AuthoringError {
+        code: CODE_UNSUPPORTED.to_string(),
+        kind: Some(UnsupportedKind::Op),
+        op_index,
+        ts_location: ts_location.map(str::to_string),
+        dialect: target_dialect,
+        reason,
+        suggested_fix: Some(suggested_fix.to_string()),
+    }
+}
+
+/// Validate a raw view body before it is admitted by `ViewQuery::Raw`.
+///
+/// The raw surface is deliberately narrower than `pg.sql`: it must be exactly one
+/// top-level `SELECT` (no DDL/DML utility statement, no semicolon-chained second
+/// statement, no `SELECT INTO`) and then it is fed through the same body
+/// reparse/string-literal/token deny-list used for function bodies.
+pub(crate) fn validate_raw_view_body_sql(
+    sql: &str,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+    schema_scope: Option<&crate::guard::SchemaScope>,
+) -> Result<(), AuthoringError> {
+    let parsed = pg_query::parse(sql).map_err(|e| {
+        view_body_error(
+            target_dialect,
             op_index,
-            ts_location: ts_location.map(str::to_string),
-            dialect: target_dialect,
-            reason: format!(
-                "vendor PG primitive (op capability {:?}) requires the {} capability, which \
-                 the active (Confined creator) capability set does not grant — the privileged \
-                 @zeroship/migrate/pg primitives are unreachable from a confined migration by \
-                 construction (vendor spec §3.2)",
-                cap.as_token(),
-                cap.flag_name(),
+            ts_location,
+            format!("raw viewBody SQL must parse as exactly one top-level SELECT: {e}"),
+            "rewrite the view body as a single SELECT, or use the structured SelectAst builder",
+        )
+    })?;
+    if parsed.protobuf.stmts.len() != 1 {
+        return Err(view_body_error(
+            target_dialect,
+            op_index,
+            ts_location,
+            format!(
+                "raw viewBody SQL must contain exactly one top-level SELECT statement; parsed {} statements",
+                parsed.protobuf.stmts.len()
             ),
-            suggested_fix: Some(format!(
-                "author this privileged migration under the operator/platform capability set \
-                 (which composes {}), not the confined creator profile",
-                cap.flag_name(),
-            )),
-        });
+            "remove semicolon-chained statements from the view body",
+        ));
+    }
+    let stmt = parsed
+        .protobuf
+        .stmts
+        .first()
+        .and_then(|raw| raw.stmt.as_ref())
+        .and_then(|stmt| stmt.node.as_ref());
+    let Some(NodeEnum::SelectStmt(select)) = stmt else {
+        return Err(view_body_error(
+            target_dialect,
+            op_index,
+            ts_location,
+            "raw viewBody SQL must be a single top-level SELECT; DDL, DML, COPY, and utility statements are refused".to_string(),
+            "rewrite the view body as a SELECT, or use the structured SelectAst builder",
+        ));
+    };
+    if select.into_clause.is_some() {
+        return Err(view_body_error(
+            target_dialect,
+            op_index,
+            ts_location,
+            "raw viewBody SQL uses SELECT INTO, which creates a table and is not a read-only view body".to_string(),
+            "drop the INTO clause; a view body must be read-only",
+        ));
+    }
+    crate::guard::check_raw_view_body_text(sql, sql, schema_scope).map_err(|e| {
+        view_body_error(
+            target_dialect,
+            op_index,
+            ts_location,
+            format!("raw viewBody SQL failed the read-only body scanner: {e}"),
+            "remove host/file/network/dynamic-SQL escape tokens from the view body",
+        )
+    })?;
+    Ok(())
+}
+
+fn validate_table_ref(
+    table: &crate::ir::TableRef,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+    schema_scope: Option<&crate::guard::SchemaScope>,
+) -> Result<(), AuthoringError> {
+    if let Some(schema) = table.schema.as_deref() {
+        if !is_safe_schema_ident(schema) {
+            return Err(AuthoringError {
+                code: CODE_INVALID_SCHEMA_IDENT.to_string(),
+                kind: None,
+                op_index,
+                ts_location: ts_location.map(str::to_string),
+                dialect: target_dialect,
+                reason: format!(
+                    "view SELECT table reference names schema {schema:?}, which is not a safe bare SQL identifier"
+                ),
+                suggested_fix: Some("use a plain identifier for the table schema".to_string()),
+            });
+        }
+        if let Some(scope) = schema_scope {
+            if !scope.permits(schema) {
+                return Err(AuthoringError {
+                    code: CODE_CROSS_SCHEMA.to_string(),
+                    kind: None,
+                    op_index,
+                    ts_location: ts_location.map(str::to_string),
+                    dialect: target_dialect,
+                    reason: format!(
+                        "view SELECT table reference names schema {schema:?}, which the active schema scope does not permit"
+                    ),
+                    suggested_fix: Some(
+                        "drop the table schema qualifier or use a schema permitted by the active capability scope"
+                            .to_string(),
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_select_ast(
+    select: &crate::ir::SelectAst,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+    schema_scope: Option<&crate::guard::SchemaScope>,
+) -> Result<(), AuthoringError> {
+    use crate::ir::{OrderItem, SelectItem};
+
+    validate_table_ref(&select.from, target_dialect, op_index, ts_location, schema_scope)?;
+    let scope = TargetScope::structural_only(&select.from.name);
+
+    for item in &select.projection {
+        if let SelectItem::Expr { expr, .. } = item {
+            validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+        }
+    }
+    for join in &select.joins {
+        validate_table_ref(&join.table, target_dialect, op_index, ts_location, schema_scope)?;
+        validate_expr(&join.on, target_dialect, &scope, op_index, ts_location)?;
+    }
+    if let Some(pred) = &select.r#where {
+        validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
+    }
+    if let Some(order_by) = &select.order_by {
+        for item in order_by {
+            if let OrderItem::Expr { expr, .. } = item {
+                validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+            }
+        }
     }
     Ok(())
 }

@@ -417,7 +417,7 @@ async fn diff_reports_missing_table_when_expected_has_an_extra() {
             stored_create_sql: None,
         },
     );
-    let expected = SchemaSnapshot { tables };
+    let expected = SchemaSnapshot { tables, ..Default::default() };
 
     let drift = diff_snapshots(&expected, &actual);
     assert_eq!(drift.missing_objects, vec!["audit".to_string()]);
@@ -447,7 +447,7 @@ async fn diff_reports_unexpected_table_for_out_of_band_creation() {
     // Expected = only users (shadow_oob is not declared).
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
     tables.insert("users".to_string(), actual.tables["users"].clone());
-    let expected = SchemaSnapshot { tables };
+    let expected = SchemaSnapshot { tables, ..Default::default() };
 
     let drift = diff_snapshots(&expected, &actual);
     assert!(drift.missing_objects.is_empty(), "{drift:?}");
@@ -487,7 +487,7 @@ async fn diff_reports_missing_and_unexpected_columns_within_a_shared_table() {
             stored_create_sql: None,
         },
     );
-    let expected = SchemaSnapshot { tables };
+    let expected = SchemaSnapshot { tables, ..Default::default() };
 
     let drift = diff_snapshots(&expected, &actual);
     assert_eq!(drift.missing_objects, vec!["users.declared_col".to_string()]);
@@ -602,7 +602,7 @@ async fn diff_reports_altered_column_data_type() {
             stored_create_sql: None,
         },
     );
-    let expected = SchemaSnapshot { tables };
+    let expected = SchemaSnapshot { tables, ..Default::default() };
 
     let drift = diff_snapshots(&expected, &actual);
     assert!(drift.missing_objects.is_empty(), "no missing: {drift:?}");
@@ -651,7 +651,7 @@ async fn diff_reports_altered_column_nullability() {
             stored_create_sql: None,
         },
     );
-    let expected = SchemaSnapshot { tables };
+    let expected = SchemaSnapshot { tables, ..Default::default() };
 
     let drift = diff_snapshots(&expected, &actual);
     assert!(drift.missing_objects.is_empty(), "{drift:?}");
@@ -707,7 +707,7 @@ async fn diff_reports_altered_index_uniqueness() {
             stored_create_sql: None,
         },
     );
-    let expected = SchemaSnapshot { tables };
+    let expected = SchemaSnapshot { tables, ..Default::default() };
 
     let drift = diff_snapshots(&expected, &actual);
     assert!(drift.missing_objects.is_empty(), "{drift:?}");
@@ -770,7 +770,7 @@ async fn diff_reports_altered_check_constraint_definition() {
             stored_create_sql: None,
         },
     );
-    let expected = SchemaSnapshot { tables };
+    let expected = SchemaSnapshot { tables, ..Default::default() };
 
     let drift = diff_snapshots(&expected, &actual);
     assert!(drift.missing_objects.is_empty(), "{drift:?}");
@@ -840,7 +840,7 @@ async fn t12_out_of_band_gin_index_surfaces_as_unexpected() {
             stored_create_sql: None,
         },
     );
-    let expected = SchemaSnapshot { tables };
+    let expected = SchemaSnapshot { tables, ..Default::default() };
 
     let drift = diff_snapshots(&expected, &actual);
     assert!(
@@ -899,7 +899,7 @@ async fn t12_btree_to_ivfflat_access_method_flip_is_reported() {
             stored_create_sql: None,
         },
     );
-    let expected = SchemaSnapshot { tables };
+    let expected = SchemaSnapshot { tables, ..Default::default() };
 
     let drift = diff_snapshots(&expected, &actual);
     assert!(drift.missing_objects.is_empty(), "{drift:?}");

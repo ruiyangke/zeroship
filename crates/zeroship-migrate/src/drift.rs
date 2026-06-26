@@ -452,6 +452,30 @@ impl PartialEq for TableSnapshot {
 }
 impl Eq for TableSnapshot {}
 
+/// A deterministic snapshot of a view-like top-level object.
+///
+/// View SQL text is intentionally carried only as diagnostic/introspection
+/// metadata today. Definitions are not compared because raw/structured SELECT
+/// rendering can differ textually while remaining semantically equivalent; the
+/// current structural contract tracks the object's presence and whether it is
+/// materialized.
+#[derive(Debug, Clone, Default)]
+pub struct ViewSnapshot {
+    /// Whether this is a materialized view (Postgres only).
+    pub materialized: bool,
+    /// Optional declared/output columns. Emission metadata for now.
+    pub columns: Option<Vec<String>>,
+    /// Optional live/declared definition text. Diagnostic metadata for now.
+    pub definition: Option<String>,
+}
+
+impl PartialEq for ViewSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.materialized == other.materialized
+    }
+}
+impl Eq for ViewSnapshot {}
+
 /// A deterministic snapshot of a project schema's structure.
 ///
 /// The map is keyed by table name and iterates in sorted order (a `BTreeMap`),
@@ -461,6 +485,8 @@ impl Eq for TableSnapshot {}
 pub struct SchemaSnapshot {
     /// Tables in the schema, keyed + ordered by name.
     pub tables: BTreeMap<String, TableSnapshot>,
+    /// Views in the schema, keyed + ordered by name.
+    pub views: BTreeMap<String, ViewSnapshot>,
 }
 
 /// One same-name object whose ATTRIBUTES diverge across the two snapshots.
@@ -571,6 +597,7 @@ pub async fn snapshot_schema(
     project_schema: &str,
 ) -> Result<SchemaSnapshot, DriftError> {
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
+    let mut views: BTreeMap<String, ViewSnapshot> = BTreeMap::new();
 
     // Base tables in the schema. `table_schema` is BOUND ($1), never interpolated.
     let table_rows = conn
@@ -590,6 +617,32 @@ pub async fn snapshot_schema(
             // PG recovers CHECK / generated / partial-index references from the
             // structured buckets (pg_get_constraintdef / pg_get_expr); no raw text.
             stored_create_sql: None,
+        });
+    }
+
+    // Plain and materialized views in the schema. Definitions are carried as
+    // diagnostic metadata but excluded from equality for now; materialized-ness is
+    // structural because SQLite cannot represent it and PG uses a distinct object
+    // class.
+    let view_rows = conn
+        .query(
+            "SELECT c.relname AS view_name, c.relkind, pg_get_viewdef(c.oid, true) AS definition \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relkind IN ('v', 'm') \
+             ORDER BY c.relname",
+            &[&project_schema],
+        )
+        .await?;
+    for r in &view_rows {
+        let name: String = r.get("view_name");
+        let relkind: i8 = r.get("relkind");
+        let materialized = matches!(u8::try_from(relkind).ok().map(char::from), Some('m'));
+        let definition: Option<String> = r.try_get("definition").ok().flatten();
+        views.insert(name, ViewSnapshot {
+            materialized,
+            columns: None,
+            definition,
         });
     }
 
@@ -749,7 +802,7 @@ pub async fn snapshot_schema(
         }
     }
 
-    Ok(SchemaSnapshot { tables })
+    Ok(SchemaSnapshot { tables, views })
 }
 
 /// Diff an **expected** snapshot against the **actual** (live) snapshot — a PURE
@@ -793,6 +846,30 @@ pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> Str
     for name in actual.tables.keys() {
         if !expected.tables.contains_key(name) {
             unexpected.push(name.clone());
+        }
+    }
+    for name in expected.views.keys() {
+        if !actual.views.contains_key(name) {
+            missing.push(format!("view {name}"));
+        }
+    }
+    for name in actual.views.keys() {
+        if !expected.views.contains_key(name) {
+            unexpected.push(format!("view {name}"));
+        }
+    }
+    for (name, exp_v) in &expected.views {
+        let Some(act_v) = actual.views.get(name) else {
+            continue;
+        };
+        if exp_v.materialized != act_v.materialized {
+            altered.push(AlteredObject {
+                table: name.clone(),
+                object: format!("view {name}"),
+                field: "materialized".to_string(),
+                expected: exp_v.materialized.to_string(),
+                actual: act_v.materialized.to_string(),
+            });
         }
     }
 

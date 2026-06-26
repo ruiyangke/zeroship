@@ -769,7 +769,7 @@ mod tests {
     fn snapshot_with(table: &str, t: TableSnapshot) -> SchemaSnapshot {
         let mut tables = BTreeMap::new();
         tables.insert(table.to_string(), t);
-        SchemaSnapshot { tables }
+        SchemaSnapshot { tables, ..Default::default() }
     }
 
     fn empty_table() -> TableSnapshot {

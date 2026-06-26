@@ -14,10 +14,12 @@
 //! - **All identifier fields are plain `String`** (§3.3): the IR carries NO
 //!   live-schema binding. Validation that those identifiers exist / are safe is
 //!   the apply/render-time structural validator ([`crate::validate`]), not here.
-//! - **There is NO raw-SQL escape** (property A, §0): no `Op::Raw`, no
-//!   `op.raw`/`op.sql`. Every transform / predicate is the CLOSED expression AST
-//!   ([`Expr`]), never a SQL string. Every byte of SQL the engine applies is
-//!   engine-rendered from this structured data.
+//! - **Raw SQL is admitted only in the three operator-gated islands** (§0.3):
+//!   [`Op::CreateFunction`] carries a PL/pgSQL/SQL `body`, [`Op::PgRaw`] carries a
+//!   last-resort raw statement, and [`ViewQuery::Raw`] carries a read-only raw view
+//!   SELECT body. Everything else is the CLOSED expression/query AST
+//!   ([`Expr`]/[`SelectAst`]) and every raw island is capability-gated +
+//!   parser/deny-list scanned before apply.
 //! - **[`IrScalar`] enforces the constrained numeric domain at DESERIALIZE
 //!   time** (§2.5): a fractional / exponential JS number, or an integer with
 //!   magnitude ≥ 2^53, is REJECTED with an `EXPR_INVALID_NUMERIC` error BEFORE
@@ -68,7 +70,7 @@ pub const EXPR_INVALID_NUMERIC: &str = "EXPR_INVALID_NUMERIC";
 /// engine that this build cannot faithfully interpret), per the AGENTS.md
 /// "wire-format versioning is code-evolution discipline, not user-compat" stance.
 /// A bump MUST be checksum-neutral for already-applied artifacts (§5.3).
-pub const CURRENT_IR_VERSION: u32 = 3;
+pub const CURRENT_IR_VERSION: u32 = 4;
 
 /// A [`MigrationIr`] declared an `ir_version` this engine build does not
 /// understand — a FUTURE version `> CURRENT_IR_VERSION` (§5.3, design line 888).
@@ -1191,6 +1193,164 @@ pub struct FuncArg {
     pub mode: Option<FuncArgMode>,
 }
 
+/// The closed view-body query model: either the cross-dialect structured SELECT
+/// subset or the operator-gated raw SELECT escape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ViewQuery {
+    /// A closed, engine-rendered SELECT subset.
+    Structured {
+        /// The structured SELECT AST.
+        select: SelectAst,
+    },
+    /// A raw read-only SELECT body. Requires `VendorCapability::RawViewBody`.
+    Raw {
+        /// The raw SELECT SQL body (no wrapping `CREATE VIEW`).
+        sql: String,
+    },
+}
+
+/// A closed SELECT subset for portable view bodies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SelectAst {
+    /// The single FROM relation.
+    pub from: TableRef,
+    /// Projection list. Empty means `*`.
+    #[serde(default)]
+    pub projection: Vec<SelectItem>,
+    /// INNER/LEFT joins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub joins: Vec<Join>,
+    /// Optional WHERE predicate.
+    #[serde(rename = "where", default, skip_serializing_if = "Option::is_none")]
+    pub r#where: Option<Expr>,
+    /// Optional ORDER BY.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_by: Option<Vec<OrderItem>>,
+    /// Optional LIMIT (JS-safe-integer bounded on deserialize).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<SafeU64>,
+}
+
+/// A table reference in the closed SELECT subset.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TableRef {
+    /// Table name.
+    pub name: String,
+    /// Optional schema qualifier. Omitted means the view op's effective schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    /// Optional table alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+}
+
+/// A SELECT-list item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum SelectItem {
+    /// A column reference, optionally qualified by a table/alias.
+    ColRef {
+        /// Optional table/alias qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        table: Option<String>,
+        /// Column name.
+        name: String,
+        /// Optional output alias.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alias: Option<String>,
+    },
+    /// A closed expression in the SELECT-list.
+    Expr {
+        /// The expression.
+        expr: Expr,
+        /// Optional output alias.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alias: Option<String>,
+    },
+}
+
+/// A closed join kind in the SELECT subset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum JoinKind {
+    /// `INNER JOIN`.
+    Inner,
+    /// `LEFT JOIN`.
+    Left,
+}
+
+impl JoinKind {
+    /// SQL spelling.
+    #[must_use]
+    pub fn as_sql(self) -> &'static str {
+        match self {
+            JoinKind::Inner => "INNER",
+            JoinKind::Left => "LEFT",
+        }
+    }
+}
+
+/// One JOIN in the closed SELECT subset.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Join {
+    /// Join kind.
+    pub kind: JoinKind,
+    /// Joined table.
+    pub table: TableRef,
+    /// Closed ON predicate.
+    pub on: Expr,
+}
+
+/// Direction for `ORDER BY`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum OrderDir {
+    /// Ascending order.
+    Asc,
+    /// Descending order.
+    Desc,
+}
+
+impl OrderDir {
+    /// SQL spelling.
+    #[must_use]
+    pub fn as_sql(self) -> &'static str {
+        match self {
+            OrderDir::Asc => "ASC",
+            OrderDir::Desc => "DESC",
+        }
+    }
+}
+
+/// One ORDER BY item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum OrderItem {
+    /// Order by a column reference.
+    ColRef {
+        /// Optional table/alias qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        table: Option<String>,
+        /// Column name.
+        name: String,
+        /// Optional direction.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dir: Option<OrderDir>,
+    },
+    /// Order by a closed expression.
+    Expr {
+        /// The expression.
+        expr: Expr,
+        /// Optional direction.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dir: Option<OrderDir>,
+    },
+}
+
 /// The CLOSED `op.*` operation enum (§2.3), internally tagged on `"op"` and
 /// camel-cased (`{"op":"createTable", …}`). NO `untagged`, NO `flatten` on the
 /// enum itself — see the module-level note + the ADR.
@@ -1528,6 +1688,40 @@ pub enum Op {
         schema: Option<String>,
     },
 
+    /// `CREATE [OR REPLACE] VIEW` / `CREATE MATERIALIZED VIEW`.
+    CreateView {
+        /// View name.
+        name: String,
+        /// The schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// Optional explicit view column list.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        columns: Option<Vec<String>>,
+        /// The view body.
+        query: ViewQuery,
+        /// `CREATE OR REPLACE VIEW` on Postgres; SQLite lowers to drop+create.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replace: Option<bool>,
+        /// PostgreSQL materialized view. Requires `VendorCapability::MaterializedView`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        materialized: Option<bool>,
+    },
+    /// `DROP [MATERIALIZED] VIEW [IF EXISTS]`.
+    DropView {
+        /// View name.
+        name: String,
+        /// The schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// `IF EXISTS`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        if_exists: Option<bool>,
+        /// Drop a PostgreSQL materialized view.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        materialized: Option<bool>,
+    },
+
     // ──────────────────────────────────────────────────────────────────────
     // VENDOR (`@zeroship/migrate/pg`) — Postgres-ONLY privileged primitives
     // (vendor spec §4.1). Each is REFUSED fail-closed under a Confined capability
@@ -1832,7 +2026,7 @@ impl Op {
     /// error).
     #[must_use]
     pub fn is_vendor(&self) -> bool {
-        self.vendor_capability().is_some()
+        !self.vendor_capabilities().is_empty()
     }
 
     /// The VENDOR capability this op REQUIRES, or `None` for a portable-core op
@@ -1842,6 +2036,14 @@ impl Op {
     /// [`Op`] set.
     #[must_use]
     pub fn vendor_capability(&self) -> Option<crate::capability::VendorCapability> {
+        self.vendor_capabilities().into_iter().next()
+    }
+
+    /// All VENDOR capabilities this op requires. Most ops require at most one; a
+    /// raw materialized view requires both the raw-view-body and materialized-view
+    /// capabilities.
+    #[must_use]
+    pub fn vendor_capabilities(&self) -> Vec<crate::capability::VendorCapability> {
         use crate::capability::VendorCapability as C;
         match self {
             // Portable core — no capability required.
@@ -1862,22 +2064,48 @@ impl Op {
             | Op::Delete { .. }
             | Op::Backfill { .. }
             | Op::CreateTrigger { .. }
-            | Op::DropTrigger { .. } => None,
+            | Op::DropTrigger { .. } => Vec::new(),
+            Op::CreateView {
+                query: ViewQuery::Structured { .. },
+                materialized,
+                ..
+            } if !materialized.unwrap_or(false) => Vec::new(),
+            Op::CreateView {
+                query,
+                materialized,
+                ..
+            } => {
+                let mut caps = Vec::new();
+                if matches!(query, ViewQuery::Raw { .. }) {
+                    caps.push(C::RawViewBody);
+                }
+                if materialized.unwrap_or(false) {
+                    caps.push(C::MaterializedView);
+                }
+                caps
+            }
+            Op::DropView { materialized, .. } => {
+                if materialized.unwrap_or(false) {
+                    vec![C::MaterializedView]
+                } else {
+                    Vec::new()
+                }
+            }
             // Vendor — each maps to its capability flag.
-            Op::CreateSchema { .. } | Op::DropSchema { .. } => Some(C::Schema),
-            Op::CreateExtension { .. } | Op::DropExtension { .. } => Some(C::Extension),
+            Op::CreateSchema { .. } | Op::DropSchema { .. } => vec![C::Schema],
+            Op::CreateExtension { .. } | Op::DropExtension { .. } => vec![C::Extension],
             Op::CreateRole { .. }
             | Op::AlterRole { .. }
             | Op::DropRole { .. }
-            | Op::DropOwnedBy { .. } => Some(C::Role),
-            Op::Grant { .. } | Op::Revoke { .. } => Some(C::Grant),
+            | Op::DropOwnedBy { .. } => vec![C::Role],
+            Op::Grant { .. } | Op::Revoke { .. } => vec![C::Grant],
             Op::EnableRls { .. }
             | Op::ForceRls { .. }
             | Op::DisableRls { .. }
-            | Op::NoForceRls { .. } => Some(C::Rls),
-            Op::CreatePolicy { .. } | Op::DropPolicy { .. } => Some(C::Policy),
-            Op::CreateFunction { .. } | Op::DropFunction { .. } => Some(C::Function),
-            Op::PgRaw { .. } => Some(C::RawSql),
+            | Op::NoForceRls { .. } => vec![C::Rls],
+            Op::CreatePolicy { .. } | Op::DropPolicy { .. } => vec![C::Policy],
+            Op::CreateFunction { .. } | Op::DropFunction { .. } => vec![C::Function],
+            Op::PgRaw { .. } => vec![C::RawSql],
         }
     }
 
@@ -1911,6 +2139,7 @@ impl Op {
             | Op::Update { table, .. }
             | Op::Delete { table, .. }
             | Op::Backfill { table, .. } => Some(table.as_str()),
+            Op::CreateView { .. } | Op::DropView { .. } => None,
             // The owning table is an optional dialect hint on a DROP INDEX; when
             // present it is the touched table, otherwise the op names only the
             // index (resolved against the live schema downstream).
@@ -1964,7 +2193,9 @@ impl Op {
             | Op::Insert { schema, .. }
             | Op::Update { schema, .. }
             | Op::Delete { schema, .. }
-            | Op::Backfill { schema, .. } => schema.as_deref(),
+            | Op::Backfill { schema, .. }
+            | Op::CreateView { schema, .. }
+            | Op::DropView { schema, .. } => schema.as_deref(),
             // VENDOR — ops carrying a schema QUALIFIER expose it for cross-schema
             // confinement + effective-schema resolution.
             Op::CreateExtension { schema, .. }
@@ -2023,7 +2254,12 @@ impl Op {
             | Op::RenameColumn { existence_guard, .. }
             | Op::AddConstraint { existence_guard, .. }
             | Op::DropConstraint { existence_guard, .. } => *existence_guard,
-            Op::Insert { .. } | Op::Update { .. } | Op::Delete { .. } | Op::Backfill { .. } => None,
+            Op::Insert { .. }
+            | Op::Update { .. }
+            | Op::Delete { .. }
+            | Op::Backfill { .. }
+            | Op::CreateView { .. }
+            | Op::DropView { .. } => None,
             // VENDOR — the existence guard is a NATIVE clause (`IF [NOT] EXISTS`) or
             // an engine-synthesized `pg_roles` probe rendered inline by the vendor
             // lowering, NOT the catalog-probe `ExistenceGuard` mechanism. None here.
@@ -2071,7 +2307,12 @@ impl Op {
             | Op::AlterColumnNullability { .. }
             | Op::RenameColumn { .. }
             | Op::DropConstraint { .. } => Some(ExistenceGuard::IfExists),
-            Op::Insert { .. } | Op::Update { .. } | Op::Delete { .. } | Op::Backfill { .. } => None,
+            Op::Insert { .. }
+            | Op::Update { .. }
+            | Op::Delete { .. }
+            | Op::Backfill { .. }
+            | Op::CreateView { .. }
+            | Op::DropView { .. } => None,
             // VENDOR — vendor ops carry no `ExistenceGuard` (native clause instead).
             Op::CreateSchema { .. }
             | Op::DropSchema { .. }

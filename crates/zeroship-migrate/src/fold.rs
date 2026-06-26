@@ -53,7 +53,9 @@ use crate::declarative::{
     build_table_snapshot, constraintdef_cols, ir_fk_constraint_snapshot, quote_ident_if_needed,
     CollectionDescriptor, DeclarativeError,
 };
-use crate::drift::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot};
+use crate::drift::{
+    ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot, ViewSnapshot,
+};
 use crate::ir::{
     ColType, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, Op, RefAction,
 };
@@ -77,6 +79,10 @@ pub enum FoldError {
     MissingTable(String),
     /// A `createTable` named a table already present.
     DuplicateTable(String),
+    /// A `createView` named a view already present.
+    DuplicateView(String),
+    /// A `dropView` named a view not present in the folded schema.
+    MissingView(String),
     /// An op targeted a column not present on its table.
     MissingColumn {
         /// The table.
@@ -135,6 +141,8 @@ impl std::fmt::Display for FoldError {
         match self {
             FoldError::MissingTable(t) => write!(f, "fold: table `{t}` does not exist"),
             FoldError::DuplicateTable(t) => write!(f, "fold: table `{t}` already exists"),
+            FoldError::DuplicateView(v) => write!(f, "fold: view `{v}` already exists"),
+            FoldError::MissingView(v) => write!(f, "fold: view `{v}` does not exist"),
             FoldError::MissingColumn { table, column } => {
                 write!(f, "fold: column `{table}.{column}` does not exist")
             }
@@ -230,12 +238,16 @@ pub fn fold_ops(
     project_schema: &str,
 ) -> Result<SchemaSnapshot, FoldError> {
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
+    let mut views: BTreeMap<String, ViewSnapshot> = BTreeMap::new();
 
     for op in ops {
         match op {
             Op::CreateTable { name, columns, constraints, indexes, .. } => {
                 if tables.contains_key(name) {
                     return Err(FoldError::DuplicateTable(name.clone()));
+                }
+                if views.contains_key(name) {
+                    return Err(FoldError::DuplicateView(name.clone()));
                 }
                 let desc = create_table_descriptor(name, columns);
                 let mut snap = build_table_snapshot(project_schema, &desc, dialect)?;
@@ -279,6 +291,9 @@ pub fn fold_ops(
                 //     — a rename cannot collide with a live table.
                 if tables.contains_key(to) {
                     return Err(FoldError::DuplicateTable(to.clone()));
+                }
+                if views.contains_key(to) {
+                    return Err(FoldError::DuplicateView(to.clone()));
                 }
                 let snap = tables
                     .remove(table)
@@ -557,6 +572,24 @@ pub fn fold_ops(
                     return Err(FoldError::MissingIndex(name.clone()));
                 }
             }
+            Op::CreateView { name, columns, materialized, .. } => {
+                if tables.contains_key(name) {
+                    return Err(FoldError::DuplicateTable(name.clone()));
+                }
+                if views.contains_key(name) {
+                    return Err(FoldError::DuplicateView(name.clone()));
+                }
+                views.insert(name.clone(), ViewSnapshot {
+                    materialized: materialized.unwrap_or(false),
+                    columns: columns.clone(),
+                    definition: None,
+                });
+            }
+            Op::DropView { name, .. } => {
+                if views.remove(name).is_none() {
+                    return Err(FoldError::MissingView(name.clone()));
+                }
+            }
             // DML: schema no-ops (rows, not shape).
             Op::Insert { .. } | Op::Update { .. } | Op::Delete { .. } | Op::Backfill { .. } => {}
             // VENDOR (`@zeroship/migrate/pg`) — roles/grants/RLS/policies/triggers/
@@ -591,7 +624,7 @@ pub fn fold_ops(
         }
     }
 
-    Ok(SchemaSnapshot { tables })
+    Ok(SchemaSnapshot { tables, views })
 }
 
 /// `&mut TableSnapshot` for `table`, or [`FoldError::MissingTable`] (fail-closed).

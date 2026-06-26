@@ -1667,7 +1667,7 @@ fn desired_snapshot_second_pass(
     // the snapshot.
     sqlite_schemas.retain(|table, _| tables.contains_key(table));
 
-    let snapshot = SchemaSnapshot { tables };
+    let snapshot = SchemaSnapshot { tables, ..Default::default() };
     Ok(DesiredSchema {
         snapshot,
         ownership,
@@ -4132,14 +4132,14 @@ impl DeclarativeAuthor {
         let mut sqlite_schemas: BTreeMap<String, serde_json::Value> = BTreeMap::new();
         sqlite_schemas.insert(table.to_string(), desired_schema_value);
         let desired = DesiredSchema {
-            snapshot: SchemaSnapshot { tables: desired_tables },
+            snapshot: SchemaSnapshot { tables: desired_tables, ..Default::default() },
             ownership,
             sqlite_schemas,
         };
 
         let mut live_tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
         live_tables.insert(table.to_string(), live_snapshot.clone());
-        let live = SchemaSnapshot { tables: live_tables };
+        let live = SchemaSnapshot { tables: live_tables, ..Default::default() };
         let mut live_ownership: HashMap<String, String> = HashMap::new();
         live_ownership.insert(table.to_string(), live_owner.to_string());
 
@@ -4869,6 +4869,20 @@ impl DeclarativeAuthor {
         down: Option<String>,
     ) -> LoweredUnit {
         single_stmt(self.make(name, up, down, MigrationFlags::default(), Vec::new()))
+    }
+
+    /// Like [`Self::lower_vendor_statement`], but preserves a structurally assembled
+    /// multi-statement vendor/core unit. The migration `up` is the canonical
+    /// `";\n"` join of the supplied statements, and the guarded-fragment path
+    /// checks each statement separately.
+    pub(crate) fn lower_vendor_statements(
+        &self,
+        name: &str,
+        statements: Vec<String>,
+        down: Option<String>,
+    ) -> LoweredUnit {
+        let up = statements.join(";\n");
+        (self.make(name, up, down, MigrationFlags::default(), Vec::new()), statements)
     }
 
     /// §6.4 — render a stand-alone `ALTER TABLE … ALTER COLUMN … TYPE …` the SAME

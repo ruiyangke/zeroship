@@ -45,6 +45,10 @@ pub enum VendorCapability {
     Function,
     /// The gated raw escape (`pg.sql`) ([`VendorCapabilities::allow_raw_sql`]).
     RawSql,
+    /// The gated raw view-body SELECT escape ([`VendorCapabilities::allow_raw_view_body`]).
+    RawViewBody,
+    /// PostgreSQL materialized views ([`VendorCapabilities::allow_materialized_view`]).
+    MaterializedView,
 }
 
 impl VendorCapability {
@@ -61,6 +65,8 @@ impl VendorCapability {
             VendorCapability::Policy => "policy",
             VendorCapability::Function => "function",
             VendorCapability::RawSql => "rawSql",
+            VendorCapability::RawViewBody => "rawViewBody",
+            VendorCapability::MaterializedView => "materializedView",
         }
     }
 
@@ -76,6 +82,8 @@ impl VendorCapability {
             VendorCapability::Policy => "allowPolicy",
             VendorCapability::Function => "allowFunction",
             VendorCapability::RawSql => "allowRawSql",
+            VendorCapability::RawViewBody => "allowRawViewBody",
+            VendorCapability::MaterializedView => "allowMaterializedView",
         }
     }
 }
@@ -104,6 +112,10 @@ pub struct VendorCapabilities {
     pub allow_function: bool,
     /// The gated raw-statement escape (`pg.sql`).
     pub allow_raw_sql: bool,
+    /// The gated raw view-body SELECT escape.
+    pub allow_raw_view_body: bool,
+    /// PostgreSQL materialized views.
+    pub allow_materialized_view: bool,
     /// Whether references to schemas OTHER than the (single) project schema are
     /// admitted (the multi-schema operator posture). Cross-schema confinement is
     /// ALSO enforced by [`SchemaScope`] at the existing PR10 gate; this flag is the
@@ -129,6 +141,8 @@ impl VendorCapabilities {
             allow_policy: false,
             allow_function: false,
             allow_raw_sql: false,
+            allow_raw_view_body: false,
+            allow_materialized_view: false,
             allow_cross_schema: false,
             schemas: Vec::new(),
         }
@@ -149,6 +163,8 @@ impl VendorCapabilities {
             allow_policy: true,
             allow_function: true,
             allow_raw_sql: true,
+            allow_raw_view_body: true,
+            allow_materialized_view: true,
             allow_cross_schema: true,
             schemas: Vec::new(),
         }
@@ -171,6 +187,8 @@ impl VendorCapabilities {
             allow_policy: true,
             allow_function: true,
             allow_raw_sql: false,
+            allow_raw_view_body: false,
+            allow_materialized_view: true,
             allow_cross_schema: true,
             schemas: Vec::new(),
         }
@@ -249,6 +267,8 @@ impl VendorCapabilities {
             VendorCapability::Policy => self.allow_policy,
             VendorCapability::Function => self.allow_function,
             VendorCapability::RawSql => self.allow_raw_sql,
+            VendorCapability::RawViewBody => self.allow_raw_view_body,
+            VendorCapability::MaterializedView => self.allow_materialized_view,
         }
     }
 }
@@ -269,6 +289,8 @@ mod tests {
             VendorCapability::Policy,
             VendorCapability::Function,
             VendorCapability::RawSql,
+            VendorCapability::RawViewBody,
+            VendorCapability::MaterializedView,
         ] {
             assert!(!c.grants(cap), "confined must NOT grant {cap:?}");
         }
@@ -286,6 +308,8 @@ mod tests {
             VendorCapability::Policy,
             VendorCapability::Function,
             VendorCapability::RawSql,
+            VendorCapability::RawViewBody,
+            VendorCapability::MaterializedView,
         ] {
             assert!(o.grants(cap), "operator must grant {cap:?}");
         }
@@ -296,8 +320,10 @@ mod tests {
         let l = VendorCapabilities::local();
         assert!(l.grants(VendorCapability::Function));
         assert!(l.grants(VendorCapability::Policy));
+        assert!(l.grants(VendorCapability::MaterializedView));
         assert!(!l.grants(VendorCapability::Role), "local must not mint roles");
         assert!(!l.grants(VendorCapability::RawSql), "local must not allow the raw escape");
+        assert!(!l.grants(VendorCapability::RawViewBody), "local must not allow raw view bodies");
     }
 
     #[test]
@@ -322,5 +348,6 @@ mod tests {
         // Trusted (None) → all caps.
         let trusted = VendorCapabilities::from_scope(None);
         assert!(trusted.grants(VendorCapability::RawSql));
+        assert!(trusted.grants(VendorCapability::RawViewBody));
     }
 }

@@ -2,7 +2,7 @@
 //! ir_version + checksum-neutrality faithful tests (vendor spec §6.1 PR-V1).
 //!
 //! Each test would FAIL pre-change (the Op variants, the capability gate, the
-//! vendor renderer, and `CURRENT_IR_VERSION == 3` did not exist), per
+//! vendor renderer, and the current IR version did not exist), per
 //! `feedback_regression_test_per_fix`.
 
 use zeroship_migrate::capability::{VendorCapabilities, VendorCapability};
@@ -446,16 +446,16 @@ fn out_of_set_trigger_timing_rejected_at_deserialize() {
     assert!(r.is_err(), "an out-of-set trigger timing must be rejected at deserialize");
 }
 
-// ── 5. ir_version 3 ─────────────────────────────────────────────────────────
+// ── 5. ir_version 4 ─────────────────────────────────────────────────────────
 
 #[test]
-fn ir_version_is_three() {
-    assert_eq!(CURRENT_IR_VERSION, 3);
+fn ir_version_is_current() {
+    assert_eq!(CURRENT_IR_VERSION, 4);
     // A future version is fail-closed; the current version validates.
     let mut ir = ir_with(vec![]);
-    ir.ir_version = 4;
+    ir.ir_version = CURRENT_IR_VERSION + 1;
     assert!(ir.check_ir_version().is_err(), "a future ir_version must be refused");
-    ir.ir_version = 3;
+    ir.ir_version = CURRENT_IR_VERSION;
     assert!(ir.check_ir_version().is_ok());
 }
 

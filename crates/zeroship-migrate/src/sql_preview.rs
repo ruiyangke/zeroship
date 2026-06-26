@@ -485,6 +485,7 @@ fn op_subject(op: &Op) -> String {
             quote_dotted(&[table])
         }
         Op::Backfill { table, .. } => quote_dotted(&[table]),
+        Op::CreateView { name, .. } | Op::DropView { name, .. } => quote_dotted(&[name]),
         // VENDOR (`@zeroship/migrate/pg`) — the best-effort subject is the named
         // object (schema / extension / role / function) or the table+name for the
         // table-scoped RLS/policy/trigger ops.
