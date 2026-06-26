@@ -1914,6 +1914,41 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
         global.set(scope, key.into(), f.into());
     }
 
+    // __zsRuntimeDescriptor — the migration-first cutover (P4b). When the
+    // deployed `.zship` carries a `manifest.runtime_descriptor`, the worker
+    // resolves its blob and stamps the JSON onto `RuntimeState`. We parse it
+    // here and expose the resulting `Record<collection, Record<column,
+    // FieldDef>>` object as a global so `@zeroship/bootstrap`'s entry sources
+    // the schema from the migration fold instead of `user.default.schema`.
+    // Absent (`None`) for apps that ship no migrations — the bootstrap entry
+    // then falls back to the declared `default.schema` (a transitional path;
+    // P5 deletes the fallback). A parse failure is logged and skipped so a
+    // corrupt descriptor degrades to the fallback rather than bricking boot.
+    {
+        let descriptor_json = {
+            let state: crate::state::SharedState = scope
+                .get_slot::<crate::state::SharedState>()
+                .expect("RuntimeState not in isolate slot")
+                .clone();
+            let json = state.borrow().runtime_descriptor.clone();
+            json
+        };
+        if let Some(json) = descriptor_json {
+            match v8::String::new(scope, &json).and_then(|s| v8::json::parse(scope, s)) {
+                Some(parsed) if parsed.is_object() => {
+                    let key = v8::String::new(scope, "__zsRuntimeDescriptor").unwrap();
+                    global.set(scope, key.into(), parsed);
+                }
+                _ => {
+                    tracing::warn!(
+                        "runtime: failed to parse manifest.runtime_descriptor JSON; \
+                         falling back to default.schema"
+                    );
+                }
+            }
+        }
+    }
+
     // __zs_bind_request_ctx / __zs_get_request_ctx — per-request ctx stash
     // for the PR 2 bootstrap. `__zs_bind_request_ctx(ctx)` stashes the
     // object under the current request_id; `__zs_get_request_ctx()` returns

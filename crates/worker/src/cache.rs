@@ -248,6 +248,7 @@ pub fn load_app(
     bundle_bytes: &[u8],
     app_limits: AppRuntimeLimits,
     deploy_hash: Option<&str>,
+    runtime_descriptor: Option<&str>,
 ) -> bool {
     let source = match std::str::from_utf8(bundle_bytes) {
         Ok(s) => s,
@@ -297,6 +298,11 @@ pub fn load_app(
             .limits(limits)
             .plugins(plugins)
             .app_id(app_id)
+            // **Migration-first cutover (P4b)** — hand the bundled
+            // `RuntimeSchemaDescriptor` JSON (resolved from
+            // `manifest.runtime_descriptor`'s blob by the caller) to the
+            // runtime, which exposes it as `globalThis.__zsRuntimeDescriptor`.
+            .runtime_descriptor(runtime_descriptor.map(str::to_string))
             .build();
 
         // Exit isolate so other isolates can be created/entered on this thread.

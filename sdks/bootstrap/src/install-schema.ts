@@ -129,6 +129,22 @@ export function resolveDbPlatform(
 /** A normalized schema mapping field names to their FieldDef. */
 export type NormalizedSchema = Record<string, FieldDef>;
 
+/**
+ * **Migration-first cutover (P4b)** — the bundled runtime schema source.
+ *
+ * The migration fold (`zeroship-migrate::fold_to_field_defs`, emitted as
+ * `schema.runtime.json` and carried in `manifest.runtime_descriptor`) is a
+ * `Record<collection, Record<column, FieldDef>>`: per-collection maps of
+ * already-resolved wire `FieldDef`s (snake_case columns, system fields
+ * included). When the runtime injects it as `globalThis.__zsRuntimeDescriptor`
+ * the bootstrap entry hands it to {@link installSchema} via
+ * {@link InstallSchemaOptions.descriptor}; it then supersedes the declared
+ * `default.schema` (t.* builders) as the source of truth. The declared object
+ * stays as a transitional fallback for apps that ship no migrations (P5
+ * deletes that fallback).
+ */
+export type RuntimeSchemaDescriptor = Record<string, Record<string, FieldDef>>;
+
 /** Input form: a record of TypeBuilder instances. Field values must be
  *  produced by the `t.*` API (`t.string()`, `t.number()`, etc.). */
 type SchemaFieldRecord = Record<string, TypeBuilder<unknown, boolean, any, any>>;
@@ -204,6 +220,19 @@ export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
 
   const fields = input as SchemaFieldRecord;
   for (const [key, rawVal] of Object.entries(fields)) {
+    // **Migration-first cutover (P4b)** — the bundled RuntimeSchemaDescriptor
+    // supplies platform-generated wire `FieldDef`s (not t.* builders). They
+    // legitimately carry system fields (id/created_at/version/…) the migration
+    // fold materialised, so they bypass the creator-facing system-field fence
+    // below (which guards only user-authored t.* schemas) AND the
+    // "must be a t.* builder" check. Pass them through verbatim. A TypeBuilder
+    // is never an `isFieldDef` candidate here (the `!isTypeBuilder` guard keeps
+    // user schemas on the strict path even if a builder exposed a string
+    // `type`).
+    if (!isTypeBuilder(rawVal) && isFieldDef(rawVal)) {
+      result[key] = { ...(rawVal as FieldDef) };
+      continue;
+    }
     // **P7 PR 1** — refuse creator-declared fields whose names collide
     // with the seven platform system fields. The Rust-side validator
     // (`validate_field_name_for_declaration`) enforces the same fence
@@ -920,6 +949,18 @@ export interface InstallSchemaOptions {
    * (the shape `@zeroship/db` unit-test mocks use), else skips.
    */
   platform?: DbPlatformHandle;
+
+  /**
+   * **Migration-first cutover (P4b)** — the bundled
+   * {@link RuntimeSchemaDescriptor} (the migration fold's wire-FieldDef map),
+   * resolved from `manifest.runtime_descriptor` and injected by the runtime as
+   * `globalThis.__zsRuntimeDescriptor`. When present (a non-empty object) it is
+   * the schema SOURCE OF TRUTH: `installSchema` plants Collection wrappers and
+   * runs the `registerModel` chain off it, IGNORING the declared `schemas`
+   * (t.* object) first argument. Absent → `installSchema` falls back to
+   * `schemas` (the transitional path; P5 removes the declared source).
+   */
+  descriptor?: RuntimeSchemaDescriptor;
 }
 
 const RESERVED_ENV_DB_NAMES = new Set<string>([
@@ -990,6 +1031,24 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   }
   const native = env;
   const namingStrategy = options?.naming ?? naming.snakeCase;
+
+  // **Migration-first cutover (P4b)** — pick the schema source. When the
+  // caller hands us a bundled RuntimeSchemaDescriptor (the migration fold's
+  // wire-FieldDef map), it is the source of truth and the declared `schemas`
+  // (t.* object) is ignored. Absent → fall back to `schemas` (the transitional
+  // default.schema path; P5 deletes the declared source entirely).
+  // `normalizeSchema` / `validateRefTargets` / `topoSortByRefs` / `model` all
+  // already operate on a FieldDef map, so the descriptor flows through the
+  // exact same machinery — only the per-field passthrough in `normalizeSchema`
+  // differs (descriptor FieldDefs skip the t.* / system-field fence).
+  const descriptor = options?.descriptor;
+  const source: T =
+    descriptor != null &&
+    typeof descriptor === "object" &&
+    Object.keys(descriptor).length > 0
+      ? (descriptor as unknown as T)
+      : schemas;
+
   const collections = {} as { [K in keyof T]: Collection<UnwrapSchema<T[K]>, K & string, T> };
 
   // **P9 PR 4** — registration (`registerModel`) target. In production
@@ -1016,7 +1075,8 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   // per-collection `registerModel` so the dev SQLite drop pass can tell a
   // not-yet-registered sibling (declared) from a genuinely-removed collection
   // (absent here). Computed once; stable across the topo-ordered chain.
-  const declaredCollectionNames: readonly string[] = Object.keys(schemas);
+  // Sourced from the descriptor when present (P4b), else the declared schema.
+  const declaredCollectionNames: readonly string[] = Object.keys(source);
 
   // **P9 PR 3** — capture the *native* `Db.transaction(callback, opts)`
   // method BEFORE the install loop overwrites `env.db.transaction` with
@@ -1041,9 +1101,9 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
     NATIVE_TX_KEY,
   ) as NativeTransactionFn | undefined;
 
-  validateRefTargets(schemas);
+  validateRefTargets(source);
 
-  for (const [name, rawSchema] of Object.entries(schemas)) {
+  for (const [name, rawSchema] of Object.entries(source)) {
     const isBuilder = rawSchema instanceof SchemaBuilder;
     const fields = isBuilder ? rawSchema.fields : rawSchema;
     const softDelete = isBuilder ? rawSchema.options.softDelete : false;
@@ -1062,12 +1122,12 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       ) as Collection<unknown, string, T>;
   }
 
-  const refOrder = topoSortByRefs(schemas as Record<string, unknown>);
+  const refOrder = topoSortByRefs(source as Record<string, unknown>);
   let chain: Promise<void> = Promise.resolve();
   for (const name of refOrder) {
     const col = (collections as Record<string, Collection<unknown, string, T>>)[name];
     if (!col) continue;
-    const rawSchema = schemas[name as keyof T];
+    const rawSchema = source[name as keyof T];
     const fields =
       isSchemaBuilder(rawSchema) ? rawSchema.fields : rawSchema;
     const normalized = normalizeSchema(fields as Parameters<typeof normalizeSchema>[0]);

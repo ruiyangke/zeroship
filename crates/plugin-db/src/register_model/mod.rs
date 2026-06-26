@@ -189,6 +189,19 @@ async fn exec_register_model(
         // readiness (`mark_model_registered`) + the declared cache (`cache_schema`)
         // on the returned `Ok(())`, preserving the metadata-readiness contract
         // above WITHOUT any CREATE/ALTER. `_pg` is bound only to select the arm.
+        //
+        // **Migration-first cutover (P4b).** The `schema` value this arm
+        // receives (and that the dispatch caller stamps into `cache_schema`)
+        // now originates from the bundled `RuntimeSchemaDescriptor` (the
+        // migration fold's wire-FieldDef map), not the declared `default.schema`
+        // t.* object: the runtime injects the descriptor as
+        // `globalThis.__zsRuntimeDescriptor` and `installSchema` runs the
+        // `registerModel` chain off it. So the declared-only hints the PG CRUD
+        // passes read out of the cache (`t.id(prefix)` idPrefix, encrypted /
+        // mask facets) come from the fold — higher fidelity than the old
+        // declared object — while this arm stays a pure no-op (no DDL). The
+        // descriptor path is PG/`.zship`-only; SQLite dev (below) still receives
+        // the declared schema and diffs it against live state.
         (Some(_pg), _) => Ok(()),
         // SQLite dev tier (P6b): drive the security-hardened migration engine
         // (journal / versioning / drift / 12-step rebuild / baseline / dev

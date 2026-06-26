@@ -285,3 +285,96 @@ describe("@zeroship/bootstrap __platform routing (P9 PR 4)", () => {
     assert.deepEqual(envCalls, ["items"], "fallback to env.registerModel for the mock shape");
   });
 });
+
+describe("installSchema — P4b migration-first descriptor source", () => {
+  // The bundled RuntimeSchemaDescriptor (`schema.runtime.json`,
+  // Record<collection, Record<column, FieldDef>>) becomes the schema source
+  // of truth when handed to installSchema via `options.descriptor`. These
+  // pin: (a) collections + registerModel come FROM the descriptor (not the
+  // declared t.* object), with platform system fields passing through the
+  // normaliser fence; (b) an absent / empty descriptor falls back to the
+  // declared schema. Each FAILS pre-P4b (the `descriptor` option did not
+  // exist; installSchema always sourced from the first argument).
+  function makeMockNative(calls: Array<{ name: string; schema: Record<string, unknown> }>) {
+    return {
+      registerModel(name: string, schema: Record<string, unknown>) {
+        calls.push({ name, schema });
+        return Promise.resolve();
+      },
+      transaction(cb: (raw: unknown) => unknown) { return cb(undefined); },
+      collection(_n: string) { return { async find() { return []; } }; },
+    } as unknown as ZeroshipDb;
+  }
+
+  test("sources collections FROM the descriptor, ignoring the declared t.* object", async () => {
+    const calls: Array<{ name: string; schema: Record<string, unknown> }> = [];
+    const native = makeMockNative(calls);
+    // Descriptor: platform-generated wire FieldDefs (snake_case columns,
+    // system fields included). DIFFERENT collection name than the declared
+    // object so the source is unambiguous.
+    const descriptor = {
+      posts: {
+        id: { type: "id", idPrefix: "post" },
+        title: { type: "string", required: true },
+        created_at: { type: "date" },
+      },
+    };
+    const { ready } = installSchema(
+      // Declared t.* object — MUST be ignored when the descriptor is present.
+      { todos: { title: t.string().required() } } as never,
+      native,
+      { descriptor } as never,
+    );
+    await ready;
+
+    const handle = native as unknown as Record<string, unknown>;
+    assert.ok(handle.posts, "descriptor collection `posts` planted on env.db");
+    assert.equal(
+      handle.todos,
+      undefined,
+      "declared `todos` must NOT be planted when a descriptor supersedes it",
+    );
+    assert.deepEqual(
+      calls.map((c) => c.name),
+      ["posts"],
+      "registerModel runs off the descriptor collections",
+    );
+    // Platform system fields (id/created_at) survive the normaliser fence
+    // and reach registerModel — they're not creator-declared collisions.
+    const reg = calls[0].schema;
+    assert.ok("id" in reg && "title" in reg && "created_at" in reg,
+      `descriptor system fields survive to registerModel: ${JSON.stringify(Object.keys(reg))}`);
+    assert.equal(
+      (reg.id as { idPrefix?: string }).idPrefix,
+      "post",
+      "the descriptor's t.id(prefix) idPrefix passes through to the cache feed",
+    );
+  });
+
+  test("falls back to the declared schema when no descriptor is supplied", async () => {
+    const calls: Array<{ name: string; schema: Record<string, unknown> }> = [];
+    const native = makeMockNative(calls);
+    const { ready } = installSchema(
+      { todos: { title: t.string().required() } },
+      native,
+    );
+    await ready;
+    const handle = native as unknown as Record<string, unknown>;
+    assert.ok(handle.todos, "declared `todos` planted in the no-descriptor fallback");
+    assert.deepEqual(calls.map((c) => c.name), ["todos"]);
+  });
+
+  test("falls back to the declared schema when the descriptor is an empty object", async () => {
+    const calls: Array<{ name: string; schema: Record<string, unknown> }> = [];
+    const native = makeMockNative(calls);
+    const { ready } = installSchema(
+      { todos: { title: t.string().required() } },
+      native,
+      { descriptor: {} } as never,
+    );
+    await ready;
+    const handle = native as unknown as Record<string, unknown>;
+    assert.ok(handle.todos, "empty descriptor -> declared fallback");
+    assert.deepEqual(calls.map((c) => c.name), ["todos"]);
+  });
+});

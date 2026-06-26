@@ -191,13 +191,29 @@ export function devEntry(options: DevEntryOptions): DevEntry {
   async function registerSchema(mod: unknown): Promise<void> {
     const defaultExport =
       (mod && typeof mod === "object" && (mod as { default?: unknown }).default) || null;
-    const schema =
+    const declaredSchema =
       (defaultExport &&
         typeof defaultExport === "object" &&
         (defaultExport as { schema?: unknown }).schema &&
         typeof (defaultExport as { schema?: unknown }).schema === "object")
         ? (defaultExport as { schema: unknown }).schema
         : undefined;
+
+    // **Migration-first cutover (P4b)** — prefer the bundled
+    // RuntimeSchemaDescriptor if the runtime injected one as
+    // `globalThis.__zsRuntimeDescriptor`. In self-contained dev (Vite +
+    // SQLite) no descriptor is bundled, so this is normally absent and the
+    // declared `default.schema` remains the source (which the SQLite-dev
+    // engine then diffs against live state). Honored here for symmetry with
+    // the production runtime-entry so a descriptor, if present, wins.
+    const descriptor = (globalThis as unknown as {
+      __zsRuntimeDescriptor?: Record<string, Record<string, unknown>>;
+    }).__zsRuntimeDescriptor;
+    const hasDescriptor =
+      descriptor != null &&
+      typeof descriptor === "object" &&
+      Object.keys(descriptor).length > 0;
+    const schema = hasDescriptor ? descriptor : declaredSchema;
 
     if (!schema) {
       schemaInstalled = true;
@@ -233,7 +249,11 @@ export function devEntry(options: DevEntryOptions): DevEntry {
       const { ready } = installSchema(
         schema as Parameters<typeof installSchema>[0],
         envDb as Parameters<typeof installSchema>[1],
-        { platform } as Parameters<typeof installSchema>[2],
+        {
+          platform,
+          // **P4b** — in descriptor mode this is the source of truth.
+          descriptor: hasDescriptor ? descriptor : undefined,
+        } as Parameters<typeof installSchema>[2],
       );
       schemaReady = (async () => {
         await ready;

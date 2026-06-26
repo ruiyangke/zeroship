@@ -337,6 +337,197 @@ import "@zeroship/db/internal";
 }
 
 #[test]
+fn init_script_sources_schema_from_runtime_descriptor_when_present() {
+    // **Migration-first cutover (P4b).** When the deploy carries a bundled
+    // `RuntimeSchemaDescriptor` (the migration fold's wire-FieldDef map), the
+    // worker stamps it onto the runtime via `RuntimeBuilder::runtime_descriptor`
+    // and `setup_globals` exposes it as `globalThis.__zsRuntimeDescriptor`. The
+    // bootstrap's `runtime-entry` must then install the schema FROM the
+    // descriptor — IGNORING `user.default.schema`.
+    //
+    // We give the user a DIFFERENT declared schema (`{ todos }`) than the
+    // injected descriptor (`{ posts }`), stub `installSchema` to capture the
+    // collection keys it was handed, and assert it saw `["posts"]` (the
+    // descriptor) — not `["todos"]` (the declared object).
+    //
+    // RED before P4b: neither the global injection nor the runtime-entry's
+    // descriptor read existed, so the captured keys would be `["todos"]`.
+    init_v8();
+
+    let user_src = r#"
+import * as _zsUser from "./__user__.js";  // anchor
+const _procedures = { readCaptured };
+function readCaptured() {
+    return globalThis.__zsCapturedSchema ?? null;
+}
+async function _zsRpcAndRespond(name, input) {
+    const fn = _procedures[name];
+    if (typeof fn !== "function") {
+        return new Response(JSON.stringify({ message: "Method not found", name: "Error", code: "NOT_FOUND" }), { status: 404 });
+    }
+    const result = await fn(input);
+    return new Response(JSON.stringify({ json: result === undefined ? null : result }), {
+        status: 200, headers: { "content-type": "application/json" },
+    });
+}
+async function _zsFetch(request) {
+    const url = new URL(request.url);
+    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
+    return await _zsRpcAndRespond(id, undefined);
+}
+export default {
+    fetch: _zsFetch,
+    rpc: (name, input) => _procedures[name](input),
+    // Declared schema — MUST be ignored in favour of the injected descriptor.
+    schema: { todos: { id: { type: "id" } } },
+};
+"#;
+
+    let stub_bootstrap = r#"
+export function installSchema(schema, _env, _options) {
+    globalThis.__zsCapturedSchema = JSON.stringify({
+        keys: Object.keys(schema),
+    });
+    return { collections: {}, ready: Promise.resolve() };
+}
+"#;
+    let stub_db_internal = r#"
+export function _flushPendingMaskPolicy() { return null; }
+"#;
+    let pre_init = r#"
+import "@zeroship/bootstrap/install-schema";
+import "@zeroship/db/internal";
+"#;
+
+    let user_with_preinit = format!("{pre_init}\n{user_src}");
+    let modules = vec![
+        ModuleEntry { specifier: "index.js".into(), source: user_with_preinit },
+        ModuleEntry { specifier: "@zeroship/bootstrap/install-schema".into(), source: stub_bootstrap.into() },
+        ModuleEntry { specifier: "@zeroship/db/internal".into(), source: stub_db_internal.into() },
+    ];
+
+    // The bundled descriptor: a DIFFERENT collection (`posts`) than the
+    // declared `todos`, carrying platform system fields the fold materialised.
+    let descriptor =
+        r#"{"posts":{"id":{"type":"id","idPrefix":"post"},"title":{"type":"string","required":true},"created_at":{"type":"date"}}}"#;
+
+    let runtime = Runtime::builder()
+        .modules(modules)
+        .plugin(DummyDbPlugin)
+        .runtime_descriptor(Some(descriptor.to_string()))
+        .build();
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler(
+        "POST",
+        "http://localhost/__zeroship/v1/readCaptured",
+        &[("content-type".into(), "application/json".into())],
+        "",
+        &env,
+        ctx,
+    );
+    let body = match outcome {
+        FetchOutcome::Response { status, body, .. } => {
+            assert!((200..300).contains(&status), "non-2xx: status={status} body={body}");
+            body
+        }
+        _ => panic!("expected sync Response"),
+    };
+    // installSchema was handed the descriptor's collections (`posts`), NOT the
+    // declared `todos`.
+    assert!(body.contains(r#"\"keys\":[\"posts\"]"#),
+        "expected installSchema sourced from the descriptor (posts), got: {body}");
+    assert!(!body.contains("todos"),
+        "the declared `todos` schema must NOT reach installSchema in descriptor mode: {body}");
+}
+
+#[test]
+fn init_script_falls_back_to_default_schema_without_descriptor() {
+    // **Migration-first cutover (P4b) — the transitional fallback.** An app
+    // that ships NO migrations carries no `manifest.runtime_descriptor`, so the
+    // runtime injects no `globalThis.__zsRuntimeDescriptor`. The bootstrap
+    // entry must then fall back to the declared `user.default.schema` and still
+    // install it — keeping no-migration apps working during the cutover (P5
+    // deletes this fallback).
+    init_v8();
+
+    let user_src = r#"
+import * as _zsUser from "./__user__.js";  // anchor
+const _procedures = { readCaptured };
+function readCaptured() {
+    return globalThis.__zsCapturedSchema ?? null;
+}
+async function _zsRpcAndRespond(name, input) {
+    const fn = _procedures[name];
+    if (typeof fn !== "function") {
+        return new Response(JSON.stringify({ message: "Method not found", name: "Error", code: "NOT_FOUND" }), { status: 404 });
+    }
+    const result = await fn(input);
+    return new Response(JSON.stringify({ json: result === undefined ? null : result }), {
+        status: 200, headers: { "content-type": "application/json" },
+    });
+}
+async function _zsFetch(request) {
+    const url = new URL(request.url);
+    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
+    return await _zsRpcAndRespond(id, undefined);
+}
+export default {
+    fetch: _zsFetch,
+    rpc: (name, input) => _procedures[name](input),
+    schema: { todos: { id: { type: "id" } } },
+};
+"#;
+    let stub_bootstrap = r#"
+export function installSchema(schema, _env, _options) {
+    globalThis.__zsCapturedSchema = JSON.stringify({ keys: Object.keys(schema) });
+    return { collections: {}, ready: Promise.resolve() };
+}
+"#;
+    let stub_db_internal = r#"
+export function _flushPendingMaskPolicy() { return null; }
+"#;
+    let pre_init = r#"
+import "@zeroship/bootstrap/install-schema";
+import "@zeroship/db/internal";
+"#;
+
+    let user_with_preinit = format!("{pre_init}\n{user_src}");
+    let modules = vec![
+        ModuleEntry { specifier: "index.js".into(), source: user_with_preinit },
+        ModuleEntry { specifier: "@zeroship/bootstrap/install-schema".into(), source: stub_bootstrap.into() },
+        ModuleEntry { specifier: "@zeroship/db/internal".into(), source: stub_db_internal.into() },
+    ];
+
+    // No descriptor on the builder — the global stays unset; fall back to
+    // default.schema.
+    let runtime = Runtime::builder()
+        .modules(modules)
+        .plugin(DummyDbPlugin)
+        .runtime_descriptor(None)
+        .build();
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler(
+        "POST",
+        "http://localhost/__zeroship/v1/readCaptured",
+        &[("content-type".into(), "application/json".into())],
+        "",
+        &env,
+        ctx,
+    );
+    let body = match outcome {
+        FetchOutcome::Response { status, body, .. } => {
+            assert!((200..300).contains(&status), "non-2xx: status={status} body={body}");
+            body
+        }
+        _ => panic!("expected sync Response"),
+    };
+    assert!(body.contains(r#"\"keys\":[\"todos\"]"#),
+        "without a descriptor, installSchema must source the declared default.schema (todos): {body}");
+}
+
+#[test]
 fn bootstrap_module_lacks_legacy_schema_init_symbols() {
     // Stage 4 cleanup: the synthetic SSR entry no longer publishes
     // `__zsSchemaInit`. The runtime bootstrap doesn't either — its

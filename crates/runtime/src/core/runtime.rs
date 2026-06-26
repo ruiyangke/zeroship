@@ -421,6 +421,12 @@ pub struct RuntimeBuilder {
     /// Lives on the builder (not `RuntimeLimits`) because it's a runtime
     /// scheduling knob, not a per-request cap.
     idle_gc_after_ms: Option<u64>,
+    /// **Migration-first cutover (P4b)** — the bundled `RuntimeSchemaDescriptor`
+    /// JSON the worker resolves from `manifest.runtime_descriptor`'s blob.
+    /// Exposed to JS as `globalThis.__zsRuntimeDescriptor` so the bootstrap
+    /// entry sources the schema from the migration fold. `None` for apps
+    /// without a descriptor (transitional `default.schema` fallback).
+    runtime_descriptor: Option<String>,
 }
 
 impl RuntimeBuilder {
@@ -503,6 +509,15 @@ impl RuntimeBuilder {
         self
     }
 
+    /// **Migration-first cutover (P4b)** — set the bundled
+    /// `RuntimeSchemaDescriptor` JSON (`schema.runtime.json`). Exposed to JS
+    /// as `globalThis.__zsRuntimeDescriptor`; the bootstrap entry installs
+    /// the schema from it instead of `user.default.schema` when present.
+    pub fn runtime_descriptor(mut self, descriptor: Option<String>) -> Self {
+        self.runtime_descriptor = descriptor;
+        self
+    }
+
     /// Build the runtime. Panics on V8 init failure (same as the underlying
     /// `v8::Isolate::new` call — not newly fallible here).
     pub fn build(self) -> Runtime {
@@ -521,6 +536,7 @@ impl RuntimeBuilder {
             self.plugins,
             app_id,
             idle_gc_after,
+            self.runtime_descriptor,
         );
         Runtime {
             inner: Rc::new(RefCell::new(inner)),
@@ -752,6 +768,7 @@ impl RuntimeInner {
         plugins: Vec<Arc<dyn NativePlugin>>,
         app_id: Option<uuid::Uuid>,
         idle_gc_after: Duration,
+        runtime_descriptor: Option<String>,
     ) -> Self {
         init_v8();
 
@@ -854,6 +871,9 @@ impl RuntimeInner {
 
         // Create RuntimeState (no server_handle -- compio, not tokio)
         let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(env_vars, None)));
+        // **Migration-first cutover (P4b)** — stash the bundled descriptor so
+        // `setup_globals` can expose it as `globalThis.__zsRuntimeDescriptor`.
+        state.borrow_mut().runtime_descriptor = runtime_descriptor;
         isolate.set_slot(state.clone());
 
         let context = {
