@@ -387,10 +387,13 @@ export interface DropTriggerArgs {
 
 // ── `view()` entry + the closed SelectAst builder (§A1/§3.1) ──
 
-/** The options bag `view(name, opts?)` accepts. Carries the default `{ schema }`
- *  every op the returned {@link ViewHandle} records is stamped with. */
+/** The options bag `view(name, opts?)` accepts. Carries the default
+ *  `{ schema, columns }` every op the returned {@link ViewHandle} records is
+ *  stamped with where applicable. Inline `create({ columns })` /
+ *  `createRaw({ columns })` overrides the handle default. */
 export interface ViewOptions {
   schema?: string;
+  columns?: string[];
 }
 
 export type TableRefInput = string | TableRef;

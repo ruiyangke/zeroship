@@ -1188,7 +1188,7 @@ function recordDropView(name, args) {
       op: "dropView",
       name,
       schema: args.schema,
-      ifExists: args.ifExists,
+      existenceGuard: ifExistsGuard(args.ifExists),
       materialized: args.materialized,
     }),
   );
@@ -1307,6 +1307,11 @@ function resolveTriggerAction(args) {
 /** Per-op-wins-over-table-default schema precedence (§3/§4). */
 function pickSchema(perCall, dflt) {
   if (perCall && perCall.schema !== undefined) return perCall.schema;
+  return dflt;
+}
+
+function pickViewColumns(perCall, dflt) {
+  if (perCall && perCall.columns !== undefined) return perCall.columns;
   return dflt;
 }
 
@@ -1543,14 +1548,23 @@ export function table(name, opts = {}) {
 export function view(name, opts = {}) {
   requireString(name, "view(name, …)");
   const dflt = opts.schema;
+  const dfltColumns = opts.columns;
 
   const handle = {
     create(args) {
-      recordCreateView(name, { ...args, schema: pickSchema(args, dflt) });
+      recordCreateView(name, {
+        ...args,
+        schema: pickSchema(args, dflt),
+        columns: pickViewColumns(args, dfltColumns),
+      });
       return handle;
     },
     createRaw(args) {
-      recordCreateRawView(name, { ...args, schema: pickSchema(args, dflt) });
+      recordCreateRawView(name, {
+        ...args,
+        schema: pickSchema(args, dflt),
+        columns: pickViewColumns(args, dfltColumns),
+      });
       return handle;
     },
     drop(args = {}) {

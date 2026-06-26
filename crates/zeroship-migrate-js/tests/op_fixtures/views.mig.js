@@ -2,8 +2,7 @@ import { view } from "@zeroship/migrate";
 
 export default {
   up() {
-    view("active_users", { schema: "app" }).create({
-      columns: ["id", "email"],
+    view("active_users", { schema: "app", columns: ["id", "email"] }).create({
       replace: true,
       as: (q) => q
         .from("users")
@@ -15,6 +14,6 @@ export default {
       sql: "SELECT id, email FROM users WHERE deleted_at IS NULL",
     });
 
-    view("old_users").drop({ ifExists: true });
+    view("old_users", { schema: "app" }).drop({ ifExists: true });
   },
 };

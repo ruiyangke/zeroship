@@ -1313,7 +1313,7 @@ function recordDropView(name: string, args: DropViewArgs & { schema?: string }):
       op: "dropView",
       name,
       schema: args.schema,
-      ifExists: args.ifExists,
+      existenceGuard: ifExistsGuard(args.ifExists),
       materialized: args.materialized,
     }),
   );
@@ -1429,6 +1429,14 @@ function resolveTriggerAction(args: CreateTriggerArgs): Node {
  *  an omitted key (or an explicit `undefined`) keeps the table default. */
 function pickSchema(perCall: { schema?: string } | undefined, dflt: string | undefined): string | undefined {
   if (perCall && perCall.schema !== undefined) return perCall.schema;
+  return dflt;
+}
+
+function pickViewColumns(
+  perCall: { columns?: string[] } | undefined,
+  dflt: string[] | undefined,
+): string[] | undefined {
+  if (perCall && perCall.columns !== undefined) return perCall.columns;
   return dflt;
 }
 
@@ -1618,14 +1626,23 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
 export function view(name: string, opts: ViewOptions = {}): ViewHandle {
   requireString(name, "view(name, …)");
   const dflt = opts.schema;
+  const dfltColumns = opts.columns;
 
   const handle: ViewHandle = {
     create(args) {
-      recordCreateView(name, { ...args, schema: pickSchema(args, dflt) });
+      recordCreateView(name, {
+        ...args,
+        schema: pickSchema(args, dflt),
+        columns: pickViewColumns(args, dfltColumns),
+      });
       return handle;
     },
     createRaw(args) {
-      recordCreateRawView(name, { ...args, schema: pickSchema(args, dflt) });
+      recordCreateRawView(name, {
+        ...args,
+        schema: pickSchema(args, dflt),
+        columns: pickViewColumns(args, dfltColumns),
+      });
       return handle;
     },
     drop(args = {}) {

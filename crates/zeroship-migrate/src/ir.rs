@@ -1714,9 +1714,10 @@ pub enum Op {
         /// The schema qualifier.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
-        /// `IF EXISTS`.
+        /// **PR10** — the existence guard (`ifExists` legal here). Engine-
+        /// synthesized via a catalog probe; never solely a native `IF EXISTS`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        if_exists: Option<bool>,
+        existence_guard: Option<ExistenceGuard>,
         /// Drop a PostgreSQL materialized view.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         materialized: Option<bool>,
@@ -2253,13 +2254,13 @@ impl Op {
             | Op::AlterColumnNullability { existence_guard, .. }
             | Op::RenameColumn { existence_guard, .. }
             | Op::AddConstraint { existence_guard, .. }
-            | Op::DropConstraint { existence_guard, .. } => *existence_guard,
+            | Op::DropConstraint { existence_guard, .. }
+            | Op::DropView { existence_guard, .. } => *existence_guard,
             Op::Insert { .. }
             | Op::Update { .. }
             | Op::Delete { .. }
             | Op::Backfill { .. }
-            | Op::CreateView { .. }
-            | Op::DropView { .. } => None,
+            | Op::CreateView { .. } => None,
             // VENDOR — the existence guard is a NATIVE clause (`IF [NOT] EXISTS`) or
             // an engine-synthesized `pg_roles` probe rendered inline by the vendor
             // lowering, NOT the catalog-probe `ExistenceGuard` mechanism. None here.
@@ -2306,13 +2307,13 @@ impl Op {
             | Op::AlterColumnType { .. }
             | Op::AlterColumnNullability { .. }
             | Op::RenameColumn { .. }
-            | Op::DropConstraint { .. } => Some(ExistenceGuard::IfExists),
+            | Op::DropConstraint { .. }
+            | Op::DropView { .. } => Some(ExistenceGuard::IfExists),
             Op::Insert { .. }
             | Op::Update { .. }
             | Op::Delete { .. }
             | Op::Backfill { .. }
-            | Op::CreateView { .. }
-            | Op::DropView { .. } => None,
+            | Op::CreateView { .. } => None,
             // VENDOR — vendor ops carry no `ExistenceGuard` (native clause instead).
             Op::CreateSchema { .. }
             | Op::DropSchema { .. }
@@ -3201,6 +3202,13 @@ mod tests {
         // The camelCase native spelling is likewise gone.
         let json2 = r#"{"op":"dropTable","table":"t","ifExists":true}"#;
         assert!(serde_json::from_str::<Op>(json2).is_err(), "native ifExists bool is gone too");
+
+        let json3 = r#"{"op":"dropView","name":"v","if_exists":true}"#;
+        let err = serde_json::from_str::<Op>(json3).unwrap_err();
+        assert!(
+            err.to_string().contains("if_exists") || err.to_string().contains("unknown field"),
+            "DropView must reject the removed if_exists field too, got: {err}"
+        );
     }
 
     /// `schema` round-trips and is OMITTED on the wire when absent (the

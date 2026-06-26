@@ -542,6 +542,7 @@ fn probe_kind(p: &crate::guard_probe::GuardProbe) -> &'static str {
         GuardProbe::Column { .. } => "column",
         GuardProbe::Index { .. } => "index",
         GuardProbe::Constraint { .. } => "constraint",
+        GuardProbe::View { .. } => "view",
         GuardProbe::ColumnPresence { .. } => "column-presence",
     }
 }
@@ -555,6 +556,7 @@ fn guard_dir(m: &crate::migration::Migration) -> ExistenceGuard {
         | Some(GuardProbe::Column { direction, .. })
         | Some(GuardProbe::Index { direction, .. })
         | Some(GuardProbe::Constraint { direction, .. })
+        | Some(GuardProbe::View { direction, .. })
         | Some(GuardProbe::ColumnPresence { direction, .. }) => *direction,
         None => GuardDir::IfNotExists,
     };

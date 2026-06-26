@@ -209,6 +209,18 @@ pub enum GuardProbe {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expect_definition: Option<String>,
     },
+    /// `dropView ifExists`: presence-only on the top-level view name. Definitions
+    /// are not compared because view SQL text is diagnostic metadata in
+    /// [`SchemaSnapshot`]; the drop guard only decides present → run, absent →
+    /// journaled no-op.
+    View {
+        /// The effective schema.
+        schema: String,
+        /// The view name.
+        name: String,
+        /// Guard direction.
+        direction: GuardDir,
+    },
     /// `alterColumnType` / `alterColumnNullability` / `renameColumn` `ifExists`:
     /// the SOURCE column must EXIST (presence-only — an alter/rename intentionally
     /// CHANGES the shape, so there is no shape to verify).
@@ -234,6 +246,7 @@ impl GuardProbe {
             | GuardProbe::Column { schema, .. }
             | GuardProbe::Index { schema, .. }
             | GuardProbe::Constraint { schema, .. }
+            | GuardProbe::View { schema, .. }
             | GuardProbe::ColumnPresence { schema, .. } => schema,
         }
     }
@@ -307,6 +320,7 @@ pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, dialect: SqlDialect) ->
                 live,
             )
         }
+        GuardProbe::View { name, direction, .. } => decide_view(name, *direction, live),
         GuardProbe::ColumnPresence { table, column, .. } => {
             // Always IfExists. Source column must EXIST → RunBare; absent → Noop.
             if column_present(live, table, column) {
@@ -314,6 +328,19 @@ pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, dialect: SqlDialect) ->
             } else {
                 GuardVerdict::SatisfiedNoop
             }
+        }
+    }
+}
+
+fn decide_view(name: &str, direction: GuardDir, live: &SchemaSnapshot) -> GuardVerdict {
+    let present = live.views.contains_key(name);
+    match direction {
+        GuardDir::IfExists => {
+            // dropView: presence-only.
+            if present { GuardVerdict::RunBare } else { GuardVerdict::SatisfiedNoop }
+        }
+        GuardDir::IfNotExists => {
+            if present { GuardVerdict::SatisfiedNoop } else { GuardVerdict::RunBare }
         }
     }
 }

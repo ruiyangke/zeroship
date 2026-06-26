@@ -66,6 +66,20 @@ fn drop_table_fields_are_camel_case() {
         serde_json::from_str::<Op>(r#"{"op":"dropTable","table":"t","if_exists":true}"#).is_err(),
         "the removed if_exists field must be rejected"
     );
+
+    let view: Op =
+        serde_json::from_str(r#"{"op":"dropView","name":"v","existenceGuard":"ifExists"}"#)
+            .unwrap();
+    match view {
+        Op::DropView { existence_guard, .. } => {
+            assert_eq!(existence_guard, Some(ExistenceGuard::IfExists));
+        }
+        _ => panic!("expected DropView"),
+    }
+    assert!(
+        serde_json::from_str::<Op>(r#"{"op":"dropView","name":"v","if_exists":true}"#).is_err(),
+        "DropView must reject the removed if_exists field"
+    );
 }
 
 #[test]

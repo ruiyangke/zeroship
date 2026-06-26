@@ -276,8 +276,8 @@ export type GrantTarget =
  *  Confined), and every GUARDABLE DDL variant additionally carries an optional
  *  `existenceGuard?`. The DML ops (`insert`/`update`/`delete`/`backfill`) carry
  *  `schema?` but NO `existenceGuard?` (DML has no existence semantics). The
- *  removed native `ifExists?: boolean` on `dropTable`/`dropColumn`/`dropIndex` is
- *  GONE (the intentional wire break) — the guard is now the uniform
+ *  removed native `ifExists?: boolean` on `dropTable`/`dropColumn`/`dropIndex`/
+ *  `dropView` is GONE (the intentional wire break) — the guard is now the uniform
  *  `existenceGuard?` token. */
 export type Op =
   | { op: "createTable"; name: string; columns: IrColumn[]; constraints?: IrConstraint[]; indexes?: IrIndex[]; schema?: string | null; existenceGuard?: ExistenceGuard | null }
@@ -308,7 +308,7 @@ export type Op =
   | { op: "delete"; table: string; where: Expr; limit?: number | null; schema?: string | null }
   | { op: "backfill"; table: string; cursorColumn: string; batchSize: number; set: { [column: string]: Expr }; filter?: Expr | null; name: string; schema?: string | null }
   | { op: "createView"; name: string; schema?: string | null; columns?: string[] | null; query: ViewQuery; replace?: boolean | null; materialized?: boolean | null }
-  | { op: "dropView"; name: string; schema?: string | null; ifExists?: boolean | null; materialized?: boolean | null }
+  | { op: "dropView"; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null; materialized?: boolean | null }
   | {
       op: "createTrigger";
       name: string;

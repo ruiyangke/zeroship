@@ -134,7 +134,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   delete: ["limit", "schema", "table", "where"].sort(),
   backfill: ["batchSize", "cursorColumn", "filter", "name", "schema", "set", "table"].sort(),
   createView: ["columns", "materialized", "name", "query", "replace", "schema"].sort(),
-  dropView: ["ifExists", "materialized", "name", "schema"].sort(),
+  dropView: ["existenceGuard", "materialized", "name", "schema"].sort(),
   createTrigger: ["action", "events", "forEach", "name", "schema", "table", "timing", "when"].sort(),
   dropTrigger: ["ifExists", "name", "schema", "table"].sort(),
   createSchema: ["authorization", "ifNotExists", "name"].sort(),
@@ -256,6 +256,7 @@ test("legacy guardable Op variants do not carry the removed native ifExists fiel
       "alterColumnNullability",
       "renameColumn",
       "dropConstraint",
+      "dropView",
     ].includes(tag)) {
       continue;
     }

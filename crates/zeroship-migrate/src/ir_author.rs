@@ -35,9 +35,10 @@ use crate::declarative::{
 use crate::drift::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, TableSnapshot};
 use crate::guard::{guard_for, GuardConfig, GuardError};
 use crate::ir::{
-    ColType, ForEach, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrMask,
-    IndexMethod, Join, MigrationIr, Op, OrderDir, OrderItem, RaiseLevel, RefAction, SelectAst,
-    SelectItem, TableRef, TriggerAction, TriggerEvent, TriggerStmt, VectorMetric, ViewQuery,
+    ColType, ExistenceGuard, ForEach, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex,
+    IrMask, IndexMethod, Join, MigrationIr, Op, OrderDir, OrderItem, RaiseLevel, RefAction,
+    SelectAst, SelectItem, TableRef, TriggerAction, TriggerEvent, TriggerStmt, VectorMetric,
+    ViewQuery,
 };
 use crate::migration::Migration;
 use crate::plan::{AppliedPlan, PlanStep, RenameStep};
@@ -1628,8 +1629,19 @@ impl IrAuthor {
             // CROSS-DIALECT CORE views. Plain structured views require no vendor
             // capability; raw bodies and materialized views are gated at validate
             // and lower before this renderer runs.
-            Op::CreateView { .. } | Op::DropView { .. } => {
+            Op::CreateView { .. } => {
                 enforce_vendor_capability_at_lower(op, Some(&self.scope))?;
+                self.lower_view_op(op, &eff_schema, &decl)?
+            }
+            Op::DropView { name, .. } => {
+                enforce_vendor_capability_at_lower(op, Some(&self.scope))?;
+                if let Some(g) = guard {
+                    probe = Some(crate::guard_probe::GuardProbe::View {
+                        schema: eff_schema.clone(),
+                        name: name.clone(),
+                        direction: g.into(),
+                    });
+                }
                 self.lower_view_op(op, &eff_schema, &decl)?
             }
             // CROSS-DIALECT CORE triggers. The op is admitted without a vendor
@@ -2757,7 +2769,7 @@ fn render_view_op(
                 down: Some(format!("{drop_kw} IF EXISTS {qname}")),
             })
         }
-        Op::DropView { name, if_exists, materialized, .. } => {
+        Op::DropView { name, existence_guard, materialized, .. } => {
             let materialized = materialized.unwrap_or(false);
             if materialized && matches!(dialect, SqlDialect::Sqlite) {
                 return Err(IrLowerError::ViewUnsupported {
@@ -2771,7 +2783,7 @@ fn render_view_op(
             } else {
                 String::from("DROP VIEW ")
             };
-            if if_exists.unwrap_or(false) {
+            if matches!(existence_guard, Some(ExistenceGuard::IfExists)) {
                 up.push_str("IF EXISTS ");
             }
             up.push_str(&qname);

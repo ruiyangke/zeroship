@@ -605,6 +605,40 @@ fn twin_drop_table_carries_schema_and_guard() {
     assert_guard(op, "ifExists");
 }
 
+/// `view(name, { schema, columns })` mirrors the table handle's config pattern:
+/// the handle schema stamps create/drop, handle columns stamp create, and
+/// `drop({ ifExists })` records the CORE existenceGuard token.
+#[test]
+fn twin_view_handle_config_and_drop_guard() {
+    let src = r#"
+        import { view } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            const v = view("active_users", { schema: "zeroship", columns: ["id", "email"] });
+            v.create({ as: (q) => q.from("users").select(["id", "email"]) });
+            v.drop({ ifExists: true });
+        }};
+    "#;
+    let ir = record(src, "view_handle_config_guard");
+    let ops = ops(&ir);
+    let create = &ops[0];
+    assert_eq!(create.get("op").and_then(|v| v.as_str()), Some("createView"));
+    assert_schema(create, "zeroship");
+    assert_eq!(
+        create.get("columns"),
+        Some(&serde_json::json!(["id", "email"])),
+        "handle columns must stamp createView unless inline columns override; got {create:#}",
+    );
+
+    let drop = &ops[1];
+    assert_eq!(drop.get("op").and_then(|v| v.as_str()), Some("dropView"));
+    assert_schema(drop, "zeroship");
+    assert_guard(drop, "ifExists");
+    assert!(
+        drop.get("ifExists").is_none(),
+        "legacy native ifExists bool must not be recorded on dropView: {drop:#}"
+    );
+}
+
 /// `dropColumn(table, column, { schema, ifExists })` records the schema qualifier
 /// + the `ifExists` drop-family guard. PR10 review LOW — coverage-hole closure.
 #[test]

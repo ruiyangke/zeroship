@@ -269,7 +269,7 @@ fn fold_records_views_and_drop_removes_them() {
     let drop = Op::DropView {
         name: "active_users".to_string(),
         schema: None,
-        if_exists: Some(true),
+        existence_guard: Some(zeroship_migrate::ir::ExistenceGuard::IfExists),
         materialized: None,
     };
     let folded = fold_ops(&[create, drop], SqlDialect::Postgres, SCHEMA).unwrap();
