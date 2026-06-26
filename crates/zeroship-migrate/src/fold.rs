@@ -50,8 +50,8 @@
 use std::collections::BTreeMap;
 
 use crate::declarative::{
-    build_table_snapshot, constraintdef_cols, ir_fk_constraint_snapshot, CollectionDescriptor,
-    DeclarativeError,
+    build_table_snapshot, constraintdef_cols, ir_fk_constraint_snapshot, quote_ident_if_needed,
+    CollectionDescriptor, DeclarativeError,
 };
 use crate::drift::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot};
 use crate::ir::{
@@ -169,6 +169,48 @@ impl From<DeclarativeError> for FoldError {
     }
 }
 
+/// Rewrite every INCOMING FK `definition` in OTHER tables to follow a table
+/// rename — the offline mirror of what live PG does on `ALTER TABLE … RENAME TO`.
+///
+/// **Why this is required (review HIGH).** A FK `definition` embeds the referenced
+/// table by name (`FOREIGN KEY (col) REFERENCES <schema>.<target>(id) …`, built by
+/// [`crate::declarative::ir_fk_constraint_snapshot`]). Live PG renders that body
+/// via `pg_get_constraintdef(oid)`, which resolves the referenced relation by OID,
+/// so after `RENAME TO` the referencing FK reports the NEW name. If the fold left
+/// the FK pointing at the OLD name, `fold_ops != snapshot_schema(live)` for EVERY
+/// table that had an incoming FK — a permanent phantom drift, and `gen-types` would
+/// emit a `ref` to a non-existent collection. SQLite ≥3.25 likewise auto-updates FK
+/// references on table rename (the engine never sets `legacy_alter_table`), so the
+/// rewrite is correct on both legs.
+///
+/// The referenced-table token is uniquely spelled `REFERENCES <schema_q>.<old_q>(`
+/// (schema + target both `quote_ident_if_needed`-quoted, immediately followed by the
+/// `(id)` column list), so a substring swap of that exact prefix is precise — it
+/// cannot collide with the local-column list (which precedes `REFERENCES`) or with a
+/// same-named column. Only `FOREIGN KEY` constraints carry a `REFERENCES`, so the
+/// scan is scoped to them.
+fn rewrite_incoming_fk_targets(
+    tables: &mut BTreeMap<String, TableSnapshot>,
+    project_schema: &str,
+    renamed: &str,
+    new_name: &str,
+) {
+    let schema_q = quote_ident_if_needed(project_schema);
+    let old_ref = format!("REFERENCES {schema_q}.{}(", quote_ident_if_needed(renamed));
+    let new_ref = format!("REFERENCES {schema_q}.{}(", quote_ident_if_needed(new_name));
+    // Walk EVERY table — including the renamed table's own (already-moved) entry,
+    // which may carry a SELF-FK (`REFERENCES <old>`) that live PG also re-targets
+    // to the new name by OID. The `old_ref` token cannot appear in any other table
+    // unless it references the renamed table, so a blanket scan is safe.
+    for t in tables.values_mut() {
+        for c in &mut t.constraints {
+            if c.kind == "FOREIGN KEY" && c.definition.contains(&old_ref) {
+                c.definition = c.definition.replace(&old_ref, &new_ref);
+            }
+        }
+    }
+}
+
 /// Replay an ordered [`Op`] list into the current logical [`SchemaSnapshot`].
 /// Pure, offline, NO DB I/O — the offline companion of the live
 /// [`snapshot_schema`](crate::drift::snapshot_schema).
@@ -242,6 +284,11 @@ pub fn fold_ops(
                     .remove(table)
                     .ok_or_else(|| FoldError::MissingTable(table.clone()))?;
                 tables.insert(to.clone(), snap);
+                // Live PG/SQLite re-target every INCOMING FK to the renamed table by
+                // OID, so the FK `definition` in OTHER tables now reports the NEW
+                // name. Mirror that, or the renamed table phantom-drifts for every
+                // table that referenced it (review HIGH).
+                rewrite_incoming_fk_targets(&mut tables, project_schema, table, to);
             }
             Op::AddColumn { table, column, ty, nullable, default, vector_metric, mask, .. } => {
                 let snap = table_mut(&mut tables, table)?;
@@ -1215,6 +1262,19 @@ pub fn fold_to_field_defs(
                 }
                 if let Some(f) = fks.remove(table) {
                     fks.insert(to.clone(), f);
+                }
+                // INCOMING references must follow the rename for gen-types too:
+                // every OTHER table's `ref` column whose target is the renamed table
+                // points at a now-dead collection name. Re-target it to the new name
+                // so the emitted TS `ref` resolves (review HIGH — the gen-types twin
+                // of the `fold_ops` incoming-FK rewrite). A self-ref (a `ref` column
+                // in the renamed table pointing at itself) is re-targeted too.
+                for cols in tables.values_mut() {
+                    for f in cols.values_mut() {
+                        if f.ty == "ref" && f.references.as_deref() == Some(table.as_str()) {
+                            f.references = Some(to.clone());
+                        }
+                    }
                 }
             }
             Op::AddColumn { table, column, ty, nullable, default, vector_metric, mask, .. } => {
@@ -2230,6 +2290,159 @@ mod tests {
         ])
         .unwrap_err();
         assert_eq!(err, FoldError::DuplicateTable("members".to_string()));
+    }
+
+    #[test]
+    fn rename_table_rewrites_incoming_fk_definition() {
+        // REGRESSION (review HIGH): a table rename must re-target every INCOMING FK
+        // `definition` in OTHER tables to the new name — the offline mirror of live
+        // PG re-rendering the FK by OID after `RENAME TO`. Pre-fix the rename re-keyed
+        // only the renamed table's own entry, so `orders`'s FK kept the dead `accounts`
+        // name and `fold_ops` phantom-drifted against live for every incoming FK.
+        let fk = IrConstraint {
+            name: Some("orders_account_fk".to_string()),
+            kind: IrConstraintKind::Fk {
+                columns: vec!["account_id".to_string()],
+                references_table: "accounts".to_string(),
+                references_columns: vec!["id".to_string()],
+                on_delete: None,
+                on_update: None,
+            },
+        };
+        let snap = fold(&[
+            create("accounts", vec![col("email", ColType::Text, false)]),
+            create("orders", vec![col("account_id", ColType::Text, true)]),
+            Op::AddConstraint {
+                table: "orders".to_string(),
+                constraint: fk,
+                schema: None,
+                existence_guard: None,
+            },
+            rename_table("accounts", "members"),
+        ])
+        .unwrap();
+        let def = &snap.tables["orders"]
+            .constraints
+            .iter()
+            .find(|c| c.name == "orders_account_fk")
+            .expect("the incoming FK survives the target rename")
+            .definition;
+        assert!(
+            def.contains(&format!("REFERENCES {SCHEMA}.members(id)")),
+            "the incoming FK definition re-targets the NEW name: {def}"
+        );
+        assert!(
+            !def.contains("accounts"),
+            "the dead OLD name no longer appears in the incoming FK: {def}"
+        );
+
+        // PARITY ORACLE (scoped to the FK body): the rewritten incoming FK
+        // `definition` must be byte-identical to authoring the FK against `members`
+        // in the first place — what live PG reports post-rename. (The whole-snapshot
+        // is NOT compared: PG preserves the renamed table's INDEX NAMES across a
+        // RENAME — `accounts_*_idx`, not `members_*_idx` — so the index buckets
+        // legitimately differ from a fresh `members` create. See the round-trip test
+        // `fold_equals_introspect_after_rename_table_pg`, which asserts the index name
+        // survives the rename on live PG.)
+        let direct = fold(&[
+            create("members", vec![col("email", ColType::Text, false)]),
+            create("orders", vec![col("account_id", ColType::Text, true)]),
+            Op::AddConstraint {
+                table: "orders".to_string(),
+                constraint: IrConstraint {
+                    name: Some("orders_account_fk".to_string()),
+                    kind: IrConstraintKind::Fk {
+                        columns: vec!["account_id".to_string()],
+                        references_table: "members".to_string(),
+                        references_columns: vec!["id".to_string()],
+                        on_delete: None,
+                        on_update: None,
+                    },
+                },
+                schema: None,
+                existence_guard: None,
+            },
+        ])
+        .unwrap();
+        let direct_def = &direct.tables["orders"]
+            .constraints
+            .iter()
+            .find(|c| c.name == "orders_account_fk")
+            .unwrap()
+            .definition;
+        assert_eq!(
+            def, direct_def,
+            "the rewritten FK body is byte-identical to authoring the FK against the new name"
+        );
+    }
+
+    #[test]
+    fn rename_table_rewrites_self_referencing_fk_definition() {
+        // A SELF-FK on the renamed table is re-targeted too (live PG rewrites it by
+        // OID). `nodes(parent_id → nodes)` renamed to `tree` must read `REFERENCES
+        // tree`, not the dead `nodes`.
+        let self_fk = IrConstraint {
+            name: Some("nodes_parent_fk".to_string()),
+            kind: IrConstraintKind::Fk {
+                columns: vec!["parent_id".to_string()],
+                references_table: "nodes".to_string(),
+                references_columns: vec!["id".to_string()],
+                on_delete: None,
+                on_update: None,
+            },
+        };
+        let snap = fold(&[
+            create("nodes", vec![col("parent_id", ColType::Text, true)]),
+            Op::AddConstraint {
+                table: "nodes".to_string(),
+                constraint: self_fk,
+                schema: None,
+                existence_guard: None,
+            },
+            rename_table("nodes", "tree"),
+        ])
+        .unwrap();
+        let def = &snap.tables["tree"]
+            .constraints
+            .iter()
+            .find(|c| c.name == "nodes_parent_fk")
+            .expect("the self-FK survives the rename")
+            .definition;
+        assert!(
+            def.contains(&format!("REFERENCES {SCHEMA}.tree(id)")) && !def.contains("nodes"),
+            "the self-FK re-targets the new name: {def}"
+        );
+    }
+
+    #[test]
+    fn rename_table_rewrites_incoming_ref_target_for_gen_types() {
+        // REGRESSION (review HIGH, gen-types twin): `fold_to_field_defs` must re-target
+        // the INCOMING `ref` column in OTHER tables to the renamed table's new name, or
+        // gen-types emits a TS `ref` to a non-existent collection. Pre-fix the arm
+        // re-keyed only the renamed table's own column map, leaving `orders.account_id`
+        // pointing at the dead `accounts`.
+        let account_ref = IrColumn {
+            name: "account_id".into(),
+            ty: ColType::Ref { references: "accounts".into() },
+            nullable: Some(true),
+            default: None,
+            unique: None,
+            id_prefix: None,
+            vector_metric: None,
+            mask: None,
+        };
+        let m = defs(&[
+            create("accounts", vec![col("email", ColType::Text, false)]),
+            create("orders", vec![account_ref]),
+            rename_table("accounts", "members"),
+        ]);
+        let def = field_def(&m, "orders", "account_id");
+        assert_eq!(def.get("type").and_then(|v| v.as_str()), Some("ref"));
+        assert_eq!(
+            def.get("refTarget").and_then(|v| v.as_str()),
+            Some("members"),
+            "the incoming ref column re-targets the renamed table's NEW name: {def}"
+        );
     }
 
     #[test]
