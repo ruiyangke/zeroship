@@ -212,6 +212,28 @@
                 }
               ]
             },
+            "vectorMetric": {
+              "description": "**#173** — the pgvector distance metric for a `t.vector(n, { metric })` added\ncolumn (the same DECLARED-ONLY facet `IrColumn` carries on createTable).\nMeaningful on an added column (a vector ADD COLUMN renders the metric opclass),\nso it is carried here. Validated to co-occur ONLY with a [`ColType::Vector`]\ntype (`validate_column_facets`). Default-absent + `skip_serializing_if` ⇒\nbyte-identical when absent. (No `id_prefix` slot: an added column is NEVER the\nsystem PK, so a typed-id prefix is meaningless — the recorder keeps that\nfail-closed.)",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/VectorMetric"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mask": {
+              "description": "**#173** — a STANDALONE column mask for a masked added column (the same facet\n`IrColumn` carries). Meaningful on an added column (a masked ADD COLUMN emits\nthe `__zsmask` sentinel + `_masked` sibling). Default-absent +\n`skip_serializing_if` ⇒ byte-identical when absent.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/IrMask"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "schema": {
               "description": "**PR10** — the schema qualifier (§2.7).",
               "type": [
@@ -924,6 +946,35 @@
             "boolean",
             "null"
           ]
+        },
+        "idPrefix": {
+          "description": "**Migration-first P2a (§2b)** — the `t.id({ prefix })` typed-id prefix, a\nDECLARED-ONLY hint DB introspection cannot recover (the minted\n`usr_<base62>` id is opaque text in the catalog; the prefix is a mint-time\ninput, not a stored column attribute). Carried so gen-types — and the\nruntime, once P5 deletes the declared-schema cache — keep the typed-id brand.\nDefault-absent + `skip_serializing_if` so a column that declares no prefix is\nBYTE-IDENTICAL on the wire and in the checksum to the pre-P2a image. Bounded\nat validate-time ([`crate::validate`]) to the `typed_id` charset/length + the\nreserved-prefix deny-list (a hand-crafted `.ir.json` is the threat model).\n\nCamel-cased on the wire (`\"idPrefix\"`) — the op-region nested-field\nconvention (`ir_wire_contract`, asserted by\n`ir_column_facet_fields_are_camel_case`); this aligns the spelling with the\n`FieldDescriptor.id_prefix` (`#[serde(rename = \"idPrefix\")]`, `declarative.rs`)\nand the design §4, so the same concept is spelled ONE way across IR↔descriptor.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vectorMetric": {
+          "description": "**Migration-first P2a (§2b)** — the `t.vector(n, { metric })` distance\nmetric, the other DECLARED-ONLY hint introspection cannot recover. Bounded\nSTRUCTURALLY by the closed [`VectorMetric`] enum (serde rejects an out-of-set\nmetric at deserialize); the validator additionally asserts it co-occurs only\nwith a [`ColType::Vector`] column. Default-absent + `skip_serializing_if`, so\nchecksum-neutral for a non-vector / metric-less column.\n\nCamel-cased on the wire (`\"vectorMetric\"`) — same op-region convention as\n`idPrefix`, aligning with `FieldDescriptor.vector_metric`\n(`#[serde(rename = \"vectorMetric\")]`) and the design §4.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VectorMetric"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mask": {
+          "description": "A STANDALONE column mask (`t.string().mask({ kind, classification })`). Unlike\n`id_prefix`/`vector_metric` (declared-only), a mask IS recoverable from the live\n`__zsmask` sentinel by the RUNTIME — but the OFFLINE op fold + gen-types have no\nlive DB, so the facet is carried here to keep it through author→generate→fold\n(and so the op lower emits the `__zsmask` sentinel the runtime later reads). An\nencrypted column's auto-mask `{ full, pii }` is IMPLIED by the carrier and NOT\ncarried here; an explicit mask OVERRIDES it. Default-absent + `skip_serializing_if`\n⇒ a mask-less column is BYTE-IDENTICAL on the wire/checksum to the pre-mask image.\nBounded STRUCTURALLY by the closed [`IrMask`]/[`IrMaskKind`]/[`IrClassification`]\nenums (serde rejects an out-of-set kind/classification at deserialize).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IrMask"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -1196,6 +1247,125 @@
           "description": "`gen_random_uuid()`, evaluated at apply time.",
           "type": "string",
           "const": "genRandomUuid"
+        }
+      ]
+    },
+    "VectorMetric": {
+      "description": "The CLOSED pgvector distance-metric lexicon (P2a §4). A `t.vector(n, { metric })`\ncolumn carries one of these; it drives the ivfflat/hnsw operator class\n(`vector_cosine_ops` / `vector_l2_ops` / `vector_ip_ops`). A CLOSED enum — like\nevery other IR token-set — so serde REJECTS an out-of-set metric at DESERIALIZE\n(a hand-crafted `.ir.json` cannot smuggle an arbitrary metric string into the\nopclass render seam). Camel-cased on the wire (`\"cosine\"`, `\"l2\"`,\n`\"innerProduct\"`), matching the SDK `vectorMetric` spelling\n(`declarative::vector_opclass`).\n\n**Migration-first P2a (§2b):** the search metric is a DECLARED-ONLY hint DB\nintrospection cannot recover (pgvector encodes dims, not the search metric; the\nopclass is an index choice not reliably reversible to the declared metric), so\n— unlike every recoverable facet — it is CARRIED on the column.",
+      "oneOf": [
+        {
+          "description": "Cosine distance (`vector_cosine_ops`).",
+          "type": "string",
+          "const": "cosine"
+        },
+        {
+          "description": "L2 / Euclidean distance (`vector_l2_ops`).",
+          "type": "string",
+          "const": "l2"
+        },
+        {
+          "description": "Inner product (`vector_ip_ops`).",
+          "type": "string",
+          "const": "innerProduct"
+        }
+      ]
+    },
+    "IrMask": {
+      "description": "A column-masking facet (`.mask({ kind, classification })`) carried on the IR.\n\n**Why CARRIED, not recovered (unlike the runtime path).** The runtime recovers a\nmask from the LIVE `__zsmask` COMMENT sentinel on the `_masked` sibling\n(`crates/plugin-db .../introspect_schema.rs`). But the OFFLINE op fold\n([`crate::fold_to_field_defs`]) and `gen-types` have NO live DB — there is no\nsentinel to read. So a STANDALONE `.mask()` on a plaintext column must be carried\non the IR or it is DROPPED through author→generate→fold (the creator's\n`MaskedValue<T>` silently downgrades to `T`, and the runtime — which DOES read the\nsentinel — never gets a sentinel emitted because the op lower had no mask to emit).\nCarrying it closes BOTH the gen-types type-fidelity gap and the runtime\nmasking-fidelity gap in one move (the lower stamps the `__zsmask` sentinel from\nthis facet).\n\nAn ENCRYPTED column's fail-safe auto-mask (`{ full, pii }`) is IMPLIED by the\n`ColType::Encrypted` carrier (recovered in [`crate::ir_author::ir_column_to_field`]),\nso it is NOT carried here; an explicit `.mask()` here OVERRIDES that auto-mask.\n\nDefault-absent + `skip_serializing_if` so a column declaring no mask is\nBYTE-IDENTICAL on the wire and in the checksum to the pre-mask image.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "The masking transform (closed [`IrMaskKind`]).",
+          "$ref": "#/$defs/IrMaskKind"
+        },
+        "classification": {
+          "description": "The sensitivity classification (closed [`IrClassification`]).",
+          "$ref": "#/$defs/IrClassification"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "classification"
+      ]
+    },
+    "IrMaskKind": {
+      "description": "The CLOSED column-masking transform lexicon (`.mask({ kind })`), mirroring the\nSDK `MaskKind` union (`sdks/db/src/types.ts`) and the runtime/diff\n[`zeroship_schema::diff::MaskKind`] EXACTLY. A CLOSED enum — like every other IR\ntoken-set — so serde REJECTS an out-of-set kind at DESERIALIZE (a hand-crafted\n`.ir.json` cannot smuggle an arbitrary mask-kind string into the `__zsmask`\nsentinel render seam).\n\n**Wire spelling.** Most variants are camelCase (`full`, `last4`, `name`, …); the\ntwo date forms are KEBAB (`date-year`, `date-decade`) to match the SDK wire form\nthat `t.string().mask()` emits and that\n[`zeroship_schema::query::mask_sentinel_for_field`] reads via\n[`zeroship_schema::diff::MaskKind::from_sql`] (which accepts the kebab form). The\non-DB sentinel itself uses the camelCase `as_sql` (`dateYear`/`dateDecade`); that\nspelling lives in the codec, NOT here — this enum carries the SDK/IR wire form.",
+      "oneOf": [
+        {
+          "description": "`\"***\"` — maximum redaction. The kernel default for an encrypted column.",
+          "type": "string",
+          "const": "full"
+        },
+        {
+          "description": "`\"***-**-6789\"` — last 4 visible (SSN, card, phone).",
+          "type": "string",
+          "const": "last4"
+        },
+        {
+          "description": "`\"4111-****-…\"` — first 4 visible (BIN/IIN preservation).",
+          "type": "string",
+          "const": "first4"
+        },
+        {
+          "description": "`\"a****@example.com\"` — preserve domain for analytics.",
+          "type": "string",
+          "const": "email"
+        },
+        {
+          "description": "`\"A. A***\"` — initials (name fields).",
+          "type": "string",
+          "const": "name"
+        },
+        {
+          "description": "`\"1985-**-**\"` — preserve year (age-bucket analytics).",
+          "type": "string",
+          "const": "date-year"
+        },
+        {
+          "description": "`\"198?-**-**\"` — preserve decade (coarser analytics).",
+          "type": "string",
+          "const": "date-decade"
+        },
+        {
+          "description": "Explicit opt-out: no sibling, no mask wrap on read.",
+          "type": "string",
+          "const": "none"
+        }
+      ]
+    },
+    "IrClassification": {
+      "description": "The CLOSED sensitivity-classification lexicon (`.mask({ classification })`),\nmirroring the SDK `Classification` union and [`zeroship_schema::diff::Classification`]\nEXACTLY. CLOSED so serde REJECTS an out-of-set token at DESERIALIZE.",
+      "oneOf": [
+        {
+          "description": "Usernames, display names, public profile data.",
+          "type": "string",
+          "const": "public"
+        },
+        {
+          "description": "Full name, email, address, phone, IP, DOB — the encrypted-column default.",
+          "type": "string",
+          "const": "pii"
+        },
+        {
+          "description": "SSN, driver's license, biometric (CPRA \"sensitive PI\").",
+          "type": "string",
+          "const": "spi"
+        },
+        {
+          "description": "Health records, medical IDs (HIPAA scope).",
+          "type": "string",
+          "const": "phi"
+        },
+        {
+          "description": "Card numbers, CVV, magnetic stripe (PCI-DSS scope).",
+          "type": "string",
+          "const": "pci"
+        },
+        {
+          "description": "Platform-internal metadata, system-field overrides.",
+          "type": "string",
+          "const": "internal"
         }
       ]
     },
