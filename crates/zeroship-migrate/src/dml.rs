@@ -147,6 +147,12 @@ fn quote_ident(what: &'static str, ident: &str) -> Result<String, DmlError> {
     Ok(escape_quote_ident(ident))
 }
 
+/// Public-in-crate wrapper for author-supplied bare identifiers. Trigger-body
+/// rendering needs the same strict table/column/name gate as the DML assembler.
+pub(crate) fn quote_bare_ident(what: &'static str, ident: &str) -> Result<String, DmlError> {
+    quote_ident(what, ident)
+}
+
 /// A render-seam rejection of an **engine-supplied identifier** (project schema,
 /// migrator role, meta schema, …) — the single fail-closed gate every engine
 /// quoting seam routes through ([`quote_ident_checked`]). Distinct from
@@ -312,13 +318,19 @@ pub fn sqlite_placeholder(n: usize) -> String {
 /// NULL renders as the keyword. Bytes are not inline-renderable in the backfill
 /// path (they have no portable inline literal form across both dialects) → a
 /// fail-closed error.
-fn inline_literal(s: &IrScalar) -> Result<String, DmlError> {
+/// Render a SQL string literal using the canonical single-quote escape.
+#[must_use]
+pub(crate) fn sql_string_literal(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+pub(crate) fn inline_literal(s: &IrScalar) -> Result<String, DmlError> {
     Ok(match s {
         IrScalar::Null => "NULL".to_string(),
         IrScalar::Bool(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
         IrScalar::Int(i) => i.to_string(),
         IrScalar::Decimal(d) => d.clone(),
-        IrScalar::Str(s) => format!("'{}'", s.replace('\'', "''")),
+        IrScalar::Str(s) => sql_string_literal(s),
         IrScalar::Bytes(_) => {
             return Err(DmlError::UnrenderableExpr(
                 "a bytes literal is not inline-renderable in a backfill transform \
@@ -673,7 +685,7 @@ fn render_unary(op: UnaryOp, operand: &str) -> String {
 /// ([`inline_literal`], guard-revalidated downstream); operators / functions /
 /// casts render the same SQL spelling as the bound path. NO binds — the backfill
 /// executor pages the statement and cannot carry positional binds.
-fn render_expr_inline(expr: &Expr, dialect: SqlDialect) -> Result<String, DmlError> {
+pub(crate) fn render_expr_inline(expr: &Expr, dialect: SqlDialect) -> Result<String, DmlError> {
     Ok(match expr {
         Expr::ColRef { name } => quote_ident("column", name)?,
         Expr::Literal { value } => inline_literal(value)?,
@@ -758,6 +770,11 @@ fn render_expr_inline(expr: &Expr, dialect: SqlDialect) -> Result<String, DmlErr
 /// (e.g. a `bytes` literal).
 pub(crate) fn render_predicate_pg(expr: &Expr) -> Result<String, DmlError> {
     render_expr_inline(expr, SqlDialect::Postgres)
+}
+
+/// Render a CLOSED trigger/view/check predicate to inline SQLite SQL.
+pub(crate) fn render_predicate_sqlite(expr: &Expr) -> Result<String, DmlError> {
+    render_expr_inline(expr, SqlDialect::Sqlite)
 }
 
 /// The `onConflict` facet of an `insert` (§3.4 / §9). PG-only.

@@ -888,7 +888,7 @@ pub enum GrantTarget {
     },
 }
 
-/// **VENDOR** — the CLOSED trigger-timing lexicon (`BEFORE`/`AFTER`/`INSTEAD OF`).
+/// The CLOSED trigger-timing lexicon (`BEFORE`/`AFTER`/`INSTEAD OF`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum TriggerTiming {
@@ -912,8 +912,9 @@ impl TriggerTiming {
     }
 }
 
-/// **VENDOR** — the CLOSED trigger-event lexicon (`INSERT`/`UPDATE`/`DELETE`/
-/// `TRUNCATE`), joined by `OR` in `CREATE TRIGGER … BEFORE UPDATE OR DELETE`.
+/// The CLOSED trigger-event lexicon (`INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`),
+/// joined by `OR` in `CREATE TRIGGER … BEFORE UPDATE OR DELETE`. `TRUNCATE`
+/// renders on Postgres and is refused on SQLite as a per-facet unsupported shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum TriggerEvent {
@@ -940,7 +941,8 @@ impl TriggerEvent {
     }
 }
 
-/// **VENDOR** — the CLOSED trigger `FOR EACH {ROW|STATEMENT}` lexicon.
+/// The CLOSED trigger `FOR EACH {ROW|STATEMENT}` lexicon. `STATEMENT` renders on
+/// Postgres and is refused on SQLite as a per-facet unsupported shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum ForEach {
@@ -957,6 +959,114 @@ impl ForEach {
         match self {
             ForEach::Row => "ROW",
             ForEach::Statement => "STATEMENT",
+        }
+    }
+}
+
+/// The per-dialect trigger action model. Postgres triggers execute a named
+/// function; SQLite triggers carry an inline, closed statement body.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum TriggerAction {
+    /// `EXECUTE FUNCTION <name>()` (Postgres render; SQLite refuses).
+    ExecuteFunction {
+        /// Function name. Rendered as an identifier in the effective schema.
+        name: String,
+    },
+    /// Inline trigger body statements (SQLite render; Postgres refuses).
+    Body {
+        /// Closed trigger statements rendered between `BEGIN` and `END`.
+        statements: Vec<TriggerStmt>,
+    },
+}
+
+/// A closed SQLite trigger body statement. DML-shaped variants reuse the existing
+/// DML payload fields where they make sense inside a trigger body; `Raise` is the
+/// closed replacement for raw trigger-body error text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "stmt", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum TriggerStmt {
+    /// `INSERT INTO … VALUES …` with typed scalar rows.
+    Insert {
+        /// Target table.
+        table: String,
+        /// Column list.
+        columns: Vec<String>,
+        /// Rows, each a positional list of typed scalars.
+        rows: Vec<Vec<IrScalar>>,
+        /// Optional schema qualifier. On SQLite, non-main schemas are refused at
+        /// the normal lower schema gate before render.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+    },
+    /// `UPDATE … SET … WHERE …`.
+    Update {
+        /// Target table.
+        table: String,
+        /// Column → closed-AST assignment.
+        set: BTreeMap<String, Expr>,
+        /// Optional WHERE predicate.
+        #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
+        r#where: Option<Expr>,
+        /// Optional schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+    },
+    /// `DELETE FROM … WHERE …`.
+    Delete {
+        /// Target table.
+        table: String,
+        /// The WHERE predicate.
+        #[serde(rename = "where")]
+        r#where: Expr,
+        /// Optional LIMIT (JS-safe-integer bounded).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        limit: Option<SafeU64>,
+        /// Optional schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+    },
+    /// `SELECT <expr>`.
+    Select {
+        /// Closed expression rendered inline.
+        expr: Expr,
+    },
+    /// `SELECT RAISE(<level>, '<message>')` on SQLite.
+    Raise {
+        /// SQLite raise action.
+        level: RaiseLevel,
+        /// Error message rendered through the SQL string-literal seam.
+        message: String,
+        /// Optional SQLSTATE token for future PG body lowering; validated as a
+        /// five-character SQLSTATE token even though PG body lowering is refused.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        errcode: Option<String>,
+    },
+}
+
+/// The closed trigger-body raise levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum RaiseLevel {
+    /// SQLite `RAISE(ABORT, …)`.
+    Abort,
+    /// SQLite `RAISE(FAIL, …)`.
+    Fail,
+    /// SQLite `RAISE(IGNORE)`.
+    Ignore,
+    /// SQLite `RAISE(ROLLBACK, …)`.
+    Rollback,
+}
+
+impl RaiseLevel {
+    /// SQLite's uppercase token spelling.
+    #[must_use]
+    pub fn as_sqlite_sql(self) -> &'static str {
+        match self {
+            RaiseLevel::Abort => "ABORT",
+            RaiseLevel::Fail => "FAIL",
+            RaiseLevel::Ignore => "IGNORE",
+            RaiseLevel::Rollback => "ROLLBACK",
         }
     }
 }
@@ -1619,10 +1729,9 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         if_exists: Option<bool>,
     },
-    /// **VENDOR** — `CREATE TRIGGER <name> <timing> <events> ON <table> FOR EACH
-    /// <forEach> [WHEN (<when>)] EXECUTE FUNCTION <execute>()`. `execute` is the
-    /// created-function NAME (an identifier), NOT a body — the trigger op carries
-    /// NO raw SQL. `when` is a CLOSED `Expr`.
+    /// `CREATE TRIGGER <name> <timing> <events> ON <table> FOR EACH <forEach>
+    /// [WHEN (<when>)] <action>`. The action is per-dialect: Postgres executes a
+    /// named function; SQLite carries a closed inline statement body. No raw SQL.
     CreateTrigger {
         /// The trigger name.
         name: String,
@@ -1637,13 +1746,14 @@ pub enum Op {
         events: Vec<TriggerEvent>,
         /// `FOR EACH ROW`/`STATEMENT` (closed [`ForEach`]).
         for_each: ForEach,
-        /// The function NAME to `EXECUTE FUNCTION` (an identifier — not a body).
-        execute: String,
+        /// The per-dialect action.
+        action: TriggerAction,
         /// `WHEN (<predicate>)` — the closed-AST condition.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         when: Option<Expr>,
     },
-    /// **VENDOR** — `DROP TRIGGER [IF EXISTS] <name> ON <table>`.
+    /// `DROP TRIGGER [IF EXISTS] <name> ON <table>` on Postgres;
+    /// `DROP TRIGGER [IF EXISTS] <name>` on SQLite.
     DropTrigger {
         /// The trigger name.
         name: String,
@@ -1750,7 +1860,9 @@ impl Op {
             | Op::Insert { .. }
             | Op::Update { .. }
             | Op::Delete { .. }
-            | Op::Backfill { .. } => None,
+            | Op::Backfill { .. }
+            | Op::CreateTrigger { .. }
+            | Op::DropTrigger { .. } => None,
             // Vendor — each maps to its capability flag.
             Op::CreateSchema { .. } | Op::DropSchema { .. } => Some(C::Schema),
             Op::CreateExtension { .. } | Op::DropExtension { .. } => Some(C::Extension),
@@ -1764,7 +1876,6 @@ impl Op {
             | Op::DisableRls { .. }
             | Op::NoForceRls { .. } => Some(C::Rls),
             Op::CreatePolicy { .. } | Op::DropPolicy { .. } => Some(C::Policy),
-            Op::CreateTrigger { .. } | Op::DropTrigger { .. } => Some(C::Trigger),
             Op::CreateFunction { .. } | Op::DropFunction { .. } => Some(C::Function),
             Op::PgRaw { .. } => Some(C::RawSql),
         }

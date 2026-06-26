@@ -370,7 +370,7 @@ pub fn validate_op_scoped(
     ts_location: Option<&str>,
     schema_scope: Option<&crate::guard::SchemaScope>,
 ) -> Result<(), AuthoringError> {
-    use crate::ir::{IrConstraintKind, Op};
+    use crate::ir::{IrConstraintKind, Op, TriggerAction};
 
     // **PR10** — schema confinement + guard-direction gate, BEFORE any expression
     // walk. Fail-closed: a Confined cross-schema op never reaches lower.
@@ -538,12 +538,33 @@ pub fn validate_op_scoped(
             }
             Ok(())
         }
-        // VENDOR — a `createTrigger`'s `WHEN` condition is a CLOSED `(c) => Expr`
-        // (vendor spec §2.5): validate it structurally against the trigger's table.
-        Op::CreateTrigger { table, when, .. } => {
+        // CROSS-DIALECT CORE — trigger `WHEN` + body statements are CLOSED ASTs.
+        // Dialect-impossible actions/facets are refused per facet, not by a
+        // whole-construct vendor gate.
+        Op::CreateTrigger { table, events, for_each, when, action, .. } => {
+            validate_trigger_dialect(
+                events,
+                *for_each,
+                action,
+                target_dialect,
+                op_index,
+                ts_location,
+            )?;
             if let Some(w) = when {
                 let scope = TargetScope::structural_only(table);
                 validate_expr(w, target_dialect, &scope, op_index, ts_location)?;
+            }
+            if let TriggerAction::Body { statements } = action {
+                for stmt in statements {
+                    validate_trigger_stmt(
+                        stmt,
+                        table,
+                        target_dialect,
+                        op_index,
+                        ts_location,
+                        schema_scope,
+                    )?;
+                }
             }
             Ok(())
         }
@@ -786,6 +807,178 @@ fn validate_op_schema_and_guard(
         }
     }
     Ok(())
+}
+
+fn unsupported_trigger(
+    kind: &'static str,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+    reason: String,
+    suggested_fix: String,
+) -> AuthoringError {
+    AuthoringError {
+        code: CODE_UNSUPPORTED.to_string(),
+        kind: Some(UnsupportedKind::Op),
+        op_index,
+        ts_location: ts_location.map(str::to_string),
+        dialect: target_dialect,
+        reason: format!("{kind}: {reason}"),
+        suggested_fix: Some(suggested_fix),
+    }
+}
+
+fn validate_trigger_dialect(
+    events: &[crate::ir::TriggerEvent],
+    for_each: crate::ir::ForEach,
+    action: &crate::ir::TriggerAction,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+) -> Result<(), AuthoringError> {
+    match (target_dialect, action) {
+        (Dialect::Postgres, crate::ir::TriggerAction::Body { .. }) => {
+            return Err(unsupported_trigger(
+                "triggerBody",
+                target_dialect,
+                op_index,
+                ts_location,
+                "Postgres triggers must execute a named trigger function; the closed inline body form renders only on SQLite".to_string(),
+                "use action: { kind: \"executeFunction\", name: \"...\" } and create the trigger function separately".to_string(),
+            ));
+        }
+        (Dialect::Sqlite, crate::ir::TriggerAction::ExecuteFunction { .. }) => {
+            return Err(unsupported_trigger(
+                "executeFunction",
+                target_dialect,
+                op_index,
+                ts_location,
+                "SQLite has no CREATE TRIGGER EXECUTE FUNCTION form".to_string(),
+                "use action: { kind: \"body\", statements: [...] } for SQLite triggers".to_string(),
+            ));
+        }
+        _ => {}
+    }
+
+    if matches!(target_dialect, Dialect::Sqlite)
+        && events.iter().any(|e| matches!(e, crate::ir::TriggerEvent::Truncate))
+    {
+        return Err(unsupported_trigger(
+            "triggerEventTruncate",
+            target_dialect,
+            op_index,
+            ts_location,
+            "SQLite has no TRUNCATE trigger event".to_string(),
+            "remove the truncate event for SQLite, or target Postgres for this trigger".to_string(),
+        ));
+    }
+
+    if matches!(target_dialect, Dialect::Sqlite)
+        && matches!(for_each, crate::ir::ForEach::Statement)
+    {
+        return Err(unsupported_trigger(
+            "forEachStatement",
+            target_dialect,
+            op_index,
+            ts_location,
+            "SQLite triggers are row-level only".to_string(),
+            "use forEach: \"row\" for SQLite, or target Postgres for statement-level triggers".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_trigger_stmt(
+    stmt: &crate::ir::TriggerStmt,
+    outer_table: &str,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+    schema_scope: Option<&crate::guard::SchemaScope>,
+) -> Result<(), AuthoringError> {
+    let validate_schema = |schema: Option<&str>| -> Result<(), AuthoringError> {
+        let Some(schema) = schema else {
+            return Ok(());
+        };
+        if !is_safe_schema_ident(schema) {
+            return Err(AuthoringError {
+                code: CODE_INVALID_SCHEMA_IDENT.to_string(),
+                kind: None,
+                op_index,
+                ts_location: ts_location.map(str::to_string),
+                dialect: target_dialect,
+                reason: format!(
+                    "trigger body statement schema qualifier {schema:?} is not a safe bare SQL identifier"
+                ),
+                suggested_fix: Some("use a plain schema identifier or omit the nested schema qualifier".to_string()),
+            });
+        }
+        if let Some(scope) = schema_scope {
+            if !scope.permits(schema) {
+                return Err(AuthoringError {
+                    code: CODE_CROSS_SCHEMA.to_string(),
+                    kind: None,
+                    op_index,
+                    ts_location: ts_location.map(str::to_string),
+                    dialect: target_dialect,
+                    reason: format!(
+                        "trigger body statement names schema {schema:?}, which is outside the active schema scope"
+                    ),
+                    suggested_fix: Some(
+                        "omit the nested schema qualifier or use the permitted project schema".to_string(),
+                    ),
+                });
+            }
+        }
+        Ok(())
+    };
+
+    match stmt {
+        crate::ir::TriggerStmt::Insert { schema, .. } => validate_schema(schema.as_deref()),
+        crate::ir::TriggerStmt::Update { table, set, r#where, schema } => {
+            validate_schema(schema.as_deref())?;
+            let scope = TargetScope::structural_only(table);
+            for rhs in set.values() {
+                validate_expr(rhs, target_dialect, &scope, op_index, ts_location)?;
+            }
+            if let Some(pred) = r#where {
+                validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
+            }
+            Ok(())
+        }
+        crate::ir::TriggerStmt::Delete { table, r#where, schema, .. } => {
+            validate_schema(schema.as_deref())?;
+            let scope = TargetScope::structural_only(table);
+            validate_expr(r#where, target_dialect, &scope, op_index, ts_location)
+        }
+        crate::ir::TriggerStmt::Select { expr } => {
+            let scope = TargetScope::structural_only(outer_table);
+            validate_expr(expr, target_dialect, &scope, op_index, ts_location)
+        }
+        crate::ir::TriggerStmt::Raise { errcode, .. } => {
+            if let Some(code) = errcode {
+                let valid = code.len() == 5 && code.chars().all(|c| c.is_ascii_alphanumeric());
+                if !valid {
+                    return Err(AuthoringError {
+                        code: CODE_UNSUPPORTED.to_string(),
+                        kind: Some(UnsupportedKind::Op),
+                        op_index,
+                        ts_location: ts_location.map(str::to_string),
+                        dialect: target_dialect,
+                        reason: format!(
+                            "raise errcode {code:?} is not a five-character SQLSTATE token"
+                        ),
+                        suggested_fix: Some(
+                            "use a five-character SQLSTATE such as \"P0001\", or omit errcode"
+                                .to_string(),
+                        ),
+                    });
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 /// **PR10** — a safe bare SQL identifier for a schema qualifier (§2.7): non-empty,

@@ -20,7 +20,7 @@
 //! This module is render-only; it assumes the op already passed both gates.
 
 use crate::dml::{quote_ident_checked, render_predicate_pg, DmlError, IdentQuoteError};
-use crate::ir::{GrantTarget, Op, Privilege};
+use crate::ir::{GrantTarget, Op, Privilege, TriggerAction};
 
 /// A single rendered vendor statement: a name (for the journaled `Migration`), the
 /// forward SQL (no trailing `;`), and the reverse SQL (or `None` for an
@@ -63,6 +63,12 @@ pub enum VendorError {
     PgRawBindsUnsupported {
         /// Number of supplied bind values.
         count: usize,
+    },
+    /// A trigger action is not renderable on Postgres.
+    #[error("vendor render: trigger action {kind} is unsupported on Postgres")]
+    UnsupportedTriggerAction {
+        /// Stable unsupported-kind token.
+        kind: &'static str,
     },
 }
 
@@ -389,7 +395,7 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
             vec![VendorStatement { name: format!("drop_policy_{name}_{table}"), up, down: None }]
         }
         // ── Triggers ─────────────────────────────────────────────────────────
-        Op::CreateTrigger { name, table, timing, events, for_each, execute, when, .. } => {
+        Op::CreateTrigger { name, table, timing, events, for_each, action, when, .. } => {
             if events.is_empty() {
                 return Err(VendorError::EmptyList { what: "trigger events" });
             }
@@ -405,9 +411,16 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
             if let Some(w) = when {
                 up.push_str(&format!(" WHEN ({})", predicate(w)?));
             }
-            // `execute` is the function NAME — quoted, schema-qualified to the
-            // effective schema (the platform functions live in the same schema).
-            up.push_str(&format!(" EXECUTE FUNCTION {}()", qualified(eff_schema, execute)?));
+            match action {
+                TriggerAction::ExecuteFunction { name } => {
+                    // The function name is quoted and schema-qualified to the
+                    // effective schema (the platform functions live there).
+                    up.push_str(&format!(" EXECUTE FUNCTION {}()", qualified(eff_schema, name)?));
+                }
+                TriggerAction::Body { .. } => {
+                    return Err(VendorError::UnsupportedTriggerAction { kind: "triggerBody" });
+                }
+            }
             vec![VendorStatement {
                 name: format!("create_trigger_{name}_{table}"),
                 up,

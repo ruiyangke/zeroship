@@ -1529,7 +1529,7 @@
           ]
         },
         {
-          "description": "**VENDOR** — `CREATE TRIGGER <name> <timing> <events> ON <table> FOR EACH\n<forEach> [WHEN (<when>)] EXECUTE FUNCTION <execute>()`. `execute` is the\ncreated-function NAME (an identifier), NOT a body — the trigger op carries\nNO raw SQL. `when` is a CLOSED `Expr`.",
+          "description": "`CREATE TRIGGER <name> <timing> <events> ON <table> FOR EACH <forEach>\n[WHEN (<when>)] <action>`. The action is per-dialect: Postgres executes a\nnamed function; SQLite carries a closed inline statement body. No raw SQL.",
           "type": "object",
           "properties": {
             "name": {
@@ -1562,9 +1562,9 @@
               "description": "`FOR EACH ROW`/`STATEMENT` (closed [`ForEach`]).",
               "$ref": "#/$defs/ForEach"
             },
-            "execute": {
-              "description": "The function NAME to `EXECUTE FUNCTION` (an identifier — not a body).",
-              "type": "string"
+            "action": {
+              "description": "The per-dialect action.",
+              "$ref": "#/$defs/TriggerAction"
             },
             "when": {
               "description": "`WHEN (<predicate>)` — the closed-AST condition.",
@@ -1590,11 +1590,11 @@
             "timing",
             "events",
             "forEach",
-            "execute"
+            "action"
           ]
         },
         {
-          "description": "**VENDOR** — `DROP TRIGGER [IF EXISTS] <name> ON <table>`.",
+          "description": "`DROP TRIGGER [IF EXISTS] <name> ON <table>` on Postgres;\n`DROP TRIGGER [IF EXISTS] <name>` on SQLite.",
           "type": "object",
           "properties": {
             "name": {
@@ -3195,7 +3195,7 @@
       ]
     },
     "TriggerTiming": {
-      "description": "**VENDOR** — the CLOSED trigger-timing lexicon (`BEFORE`/`AFTER`/`INSTEAD OF`).",
+      "description": "The CLOSED trigger-timing lexicon (`BEFORE`/`AFTER`/`INSTEAD OF`).",
       "oneOf": [
         {
           "description": "`BEFORE`.",
@@ -3215,7 +3215,7 @@
       ]
     },
     "TriggerEvent": {
-      "description": "**VENDOR** — the CLOSED trigger-event lexicon (`INSERT`/`UPDATE`/`DELETE`/\n`TRUNCATE`), joined by `OR` in `CREATE TRIGGER … BEFORE UPDATE OR DELETE`.",
+      "description": "The CLOSED trigger-event lexicon (`INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`),\njoined by `OR` in `CREATE TRIGGER … BEFORE UPDATE OR DELETE`. `TRUNCATE`\nrenders on Postgres and is refused on SQLite as a per-facet unsupported shape.",
       "oneOf": [
         {
           "description": "`INSERT`.",
@@ -3240,7 +3240,7 @@
       ]
     },
     "ForEach": {
-      "description": "**VENDOR** — the CLOSED trigger `FOR EACH {ROW|STATEMENT}` lexicon.",
+      "description": "The CLOSED trigger `FOR EACH {ROW|STATEMENT}` lexicon. `STATEMENT` renders on\nPostgres and is refused on SQLite as a per-facet unsupported shape.",
       "oneOf": [
         {
           "description": "`FOR EACH ROW`.",
@@ -3251,6 +3251,264 @@
           "description": "`FOR EACH STATEMENT`.",
           "type": "string",
           "const": "statement"
+        }
+      ]
+    },
+    "TriggerAction": {
+      "description": "The per-dialect trigger action model. Postgres triggers execute a named\nfunction; SQLite triggers carry an inline, closed statement body.",
+      "oneOf": [
+        {
+          "description": "`EXECUTE FUNCTION <name>()` (Postgres render; SQLite refuses).",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Function name. Rendered as an identifier in the effective schema.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "executeFunction"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
+        },
+        {
+          "description": "Inline trigger body statements (SQLite render; Postgres refuses).",
+          "type": "object",
+          "properties": {
+            "statements": {
+              "description": "Closed trigger statements rendered between `BEGIN` and `END`.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TriggerStmt"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "body"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "statements"
+          ]
+        }
+      ]
+    },
+    "TriggerStmt": {
+      "description": "A closed SQLite trigger body statement. DML-shaped variants reuse the existing\nDML payload fields where they make sense inside a trigger body; `Raise` is the\nclosed replacement for raw trigger-body error text.",
+      "oneOf": [
+        {
+          "description": "`INSERT INTO … VALUES …` with typed scalar rows.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "columns": {
+              "description": "Column list.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "rows": {
+              "description": "Rows, each a positional list of typed scalars.",
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/IrScalar"
+                }
+              }
+            },
+            "schema": {
+              "description": "Optional schema qualifier. On SQLite, non-main schemas are refused at\nthe normal lower schema gate before render.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "stmt": {
+              "type": "string",
+              "const": "insert"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "stmt",
+            "table",
+            "columns",
+            "rows"
+          ]
+        },
+        {
+          "description": "`UPDATE … SET … WHERE …`.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "set": {
+              "description": "Column → closed-AST assignment.",
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Expr"
+              }
+            },
+            "where": {
+              "description": "Optional WHERE predicate.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "schema": {
+              "description": "Optional schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "stmt": {
+              "type": "string",
+              "const": "update"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "stmt",
+            "table",
+            "set"
+          ]
+        },
+        {
+          "description": "`DELETE FROM … WHERE …`.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "where": {
+              "description": "The WHERE predicate.",
+              "$ref": "#/$defs/Expr"
+            },
+            "limit": {
+              "description": "Optional LIMIT (JS-safe-integer bounded).",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SafeU64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "schema": {
+              "description": "Optional schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "stmt": {
+              "type": "string",
+              "const": "delete"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "stmt",
+            "table",
+            "where"
+          ]
+        },
+        {
+          "description": "`SELECT <expr>`.",
+          "type": "object",
+          "properties": {
+            "expr": {
+              "description": "Closed expression rendered inline.",
+              "$ref": "#/$defs/Expr"
+            },
+            "stmt": {
+              "type": "string",
+              "const": "select"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "stmt",
+            "expr"
+          ]
+        },
+        {
+          "description": "`SELECT RAISE(<level>, '<message>')` on SQLite.",
+          "type": "object",
+          "properties": {
+            "level": {
+              "description": "SQLite raise action.",
+              "$ref": "#/$defs/RaiseLevel"
+            },
+            "message": {
+              "description": "Error message rendered through the SQL string-literal seam.",
+              "type": "string"
+            },
+            "errcode": {
+              "description": "Optional SQLSTATE token for future PG body lowering; validated as a\nfive-character SQLSTATE token even though PG body lowering is refused.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "stmt": {
+              "type": "string",
+              "const": "raise"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "stmt",
+            "level",
+            "message"
+          ]
+        }
+      ]
+    },
+    "RaiseLevel": {
+      "description": "The closed trigger-body raise levels.",
+      "oneOf": [
+        {
+          "description": "SQLite `RAISE(ABORT, …)`.",
+          "type": "string",
+          "const": "abort"
+        },
+        {
+          "description": "SQLite `RAISE(FAIL, …)`.",
+          "type": "string",
+          "const": "fail"
+        },
+        {
+          "description": "SQLite `RAISE(IGNORE)`.",
+          "type": "string",
+          "const": "ignore"
+        },
+        {
+          "description": "SQLite `RAISE(ROLLBACK, …)`.",
+          "type": "string",
+          "const": "rollback"
         }
       ]
     },
