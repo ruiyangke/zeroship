@@ -27,6 +27,8 @@ pub fn resolve_native<'s>(
         "node:async_hooks" => Some(crate::node::async_hooks::synthetic_module(scope)),
         "node:buffer" => Some(crate::node::buffer::synthetic_module(scope)),
         "node:crypto" => Some(crate::node::crypto::synthetic_module(scope)),
+        "node:events" => Some(crate::node::events::synthetic_module(scope)),
+        "node:net" if net_module_allowed(scope) => Some(crate::node::net::synthetic_module(scope)),
         "node:zlib" => Some(crate::node::zlib::synthetic_module(scope)),
         "node:os" => Some(crate::node::os::synthetic_module(scope)),
         "node:path" => Some(crate::node::path::synthetic_module(scope)),
@@ -37,17 +39,21 @@ pub fn resolve_native<'s>(
 
 /// True if `specifier` is a runtime-owned native module — used to
 /// short-circuit "Cannot resolve" errors before we surface them.
-pub fn is_native(specifier: &str) -> bool {
-    matches!(
-        specifier,
-        "node:async_hooks"
-            | "node:buffer"
-            | "node:crypto"
-            | "node:os"
-            | "node:path"
-            | "node:util"
-            | "node:zlib"
-    )
+pub fn is_native(scope: &mut v8::PinScope<'_, '_>, specifier: &str) -> bool {
+    match specifier {
+        "node:net" => net_module_allowed(scope),
+        _ => matches!(
+            specifier,
+            "node:async_hooks"
+                | "node:buffer"
+                | "node:crypto"
+                | "node:events"
+                | "node:os"
+                | "node:path"
+                | "node:util"
+                | "node:zlib"
+        ),
+    }
 }
 
 /// Install `globalThis.__zeroshipNodeBuiltin(specifier)` — the dev-only
@@ -118,4 +124,11 @@ pub(crate) fn empty_resolve<'a>(
     _referrer: v8::Local<'a, v8::Module>,
 ) -> Option<v8::Local<'a, v8::Module>> {
     None
+}
+
+fn net_module_allowed(scope: &mut v8::PinScope<'_, '_>) -> bool {
+    let Some(state) = scope.get_slot::<crate::state::SharedState>() else {
+        return false;
+    };
+    state.borrow().net_policy.module_allowed()
 }

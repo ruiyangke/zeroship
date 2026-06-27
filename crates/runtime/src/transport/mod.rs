@@ -7,4 +7,5 @@
 
 pub mod client;
 pub mod handler;
+pub mod net_policy;
 pub mod ssrf;

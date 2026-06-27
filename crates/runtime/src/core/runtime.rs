@@ -96,6 +96,7 @@ use crate::state::{
     DispatchResult, OpResult, ResolveValue, RuntimeState, SharedState, SpawnedTimer,
     TimerResult,
 };
+use crate::transport::net_policy::NetPolicy;
 
 use crate::channel::{
     self, CancelFlag, ResultSender,
@@ -417,6 +418,7 @@ pub struct RuntimeBuilder {
     limits: RuntimeLimits,
     plugins: Vec<Arc<dyn NativePlugin>>,
     app_id: Option<uuid::Uuid>,
+    net_policy: NetPolicy,
     /// Idle-GC threshold override (ms). `None` → `DEFAULT_IDLE_GC_AFTER`.
     /// Lives on the builder (not `RuntimeLimits`) because it's a runtime
     /// scheduling knob, not a per-request cap.
@@ -494,6 +496,13 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Set the raw TCP policy for `node:net`. The default is
+    /// `NetPolicy::Denied`, which makes `node:net` unresolvable.
+    pub fn net_policy(mut self, policy: NetPolicy) -> Self {
+        self.net_policy = policy;
+        self
+    }
+
     /// Idle-GC threshold in milliseconds. After this much quiet time the
     /// per-isolate ticker fires a low-memory hint so V8 reclaims the
     /// high-water-mark working set. Default `30000` (30s); see
@@ -520,6 +529,7 @@ impl RuntimeBuilder {
             limits.heap_limit_bytes,
             self.plugins,
             app_id,
+            self.net_policy,
             idle_gc_after,
         );
         Runtime {
@@ -751,6 +761,7 @@ impl RuntimeInner {
         heap_limit_bytes: Option<usize>,
         plugins: Vec<Arc<dyn NativePlugin>>,
         app_id: Option<uuid::Uuid>,
+        net_policy: NetPolicy,
         idle_gc_after: Duration,
     ) -> Self {
         init_v8();
@@ -854,6 +865,7 @@ impl RuntimeInner {
 
         // Create RuntimeState (no server_handle -- compio, not tokio)
         let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(env_vars, None)));
+        state.borrow_mut().set_net_policy(net_policy);
         isolate.set_slot(state.clone());
 
         let context = {
@@ -2337,6 +2349,44 @@ impl RuntimeInner {
                 // Clear the per-turn WS identity so it never bleeds into a
                 // subsequent non-WS turn on this isolate.
                 self.state.borrow_mut().executing_ws_user = None;
+
+                if self.check_v8_terminated() {
+                    self.clear_executing_request();
+                    self.drain_new_tasks_into(work);
+                    return;
+                }
+
+                for (id, req, settled) in settled_results {
+                    self.send_settled_reply_any(id, req, settled, std::time::Duration::ZERO);
+                }
+
+                self.cleanup_cancelled_requests();
+                self.clear_executing_request();
+                self.drain_new_tasks_into(work);
+            }
+            OpResult::SocketEvent { socket_id } => {
+                let state_clone = self.state.clone();
+                {
+                    let mut s = self.state.borrow_mut();
+                    s.executing_request_id = None;
+                    s.executing_request_cancel = None;
+                    #[cfg(feature = "runtime_native_websocket")]
+                    {
+                        s.executing_ws_user = None;
+                    }
+                }
+
+                self.arm_cpu_timer();
+                let settled_results = enter_v8!(self, |scope| {
+                    crate::node::net::dispatch::dispatch_pending_socket_events(
+                        scope,
+                        &state_clone,
+                        socket_id,
+                    );
+                    scope.perform_microtask_checkpoint();
+                    collect_settled_promises(scope, &mut self.pending_requests)
+                });
+                self.disarm_cpu_timer();
 
                 if self.check_v8_terminated() {
                     self.clear_executing_request();

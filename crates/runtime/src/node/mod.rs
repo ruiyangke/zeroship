@@ -13,6 +13,8 @@
 pub mod async_hooks;
 pub mod buffer;
 pub mod crypto;
+pub mod events;
+pub mod net;
 pub mod os;
 pub mod path;
 pub mod util;

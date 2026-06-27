@@ -614,6 +614,26 @@ pub struct RuntimeState {
     #[cfg(feature = "runtime_native_websocket")]
     pub native_ws_wrappers: HashMap<u32, v8::Global<v8::Object>>,
 
+    /// Raw TCP policy for `node:net`. Default is `Denied`, which also
+    /// makes the synthetic module unresolvable.
+    pub net_policy: crate::transport::net_policy::NetPolicy,
+    /// Native `node:net.Socket` states, keyed by native socket id.
+    pub native_sockets: HashMap<
+        u32,
+        std::rc::Rc<std::cell::RefCell<crate::node::net::state::NativeSocketState>>,
+    >,
+    /// Monotonically increasing native socket id counter.
+    pub next_native_socket_id: u32,
+    /// Cached JS `Socket` facade per native socket id. The native host
+    /// object is only the kernel handle; events are emitted on this
+    /// EventEmitter facade.
+    pub native_socket_wrappers: HashMap<u32, v8::Global<v8::Object>>,
+    /// Per-runtime concurrent raw TCP sockets that have passed the
+    /// connect-time policy check and have not yet closed.
+    pub active_native_sockets: u32,
+    /// Per-runtime accepted outbound bytes for Allowlist egress ceiling.
+    pub native_net_egress_bytes: u64,
+
     /// Per-isolate time origin for `performance.now()`. Set once at Runtime
     /// creation. Prevents cross-app timing side-channels.
     pub perf_epoch: std::time::Instant,
@@ -694,9 +714,20 @@ impl RuntimeState {
             #[cfg(feature = "runtime_native_websocket")]
             native_ws_wrappers: HashMap::new(),
 
+            net_policy: crate::transport::net_policy::NetPolicy::Denied,
+            native_sockets: HashMap::new(),
+            next_native_socket_id: 1,
+            native_socket_wrappers: HashMap::new(),
+            active_native_sockets: 0,
+            native_net_egress_bytes: 0,
+
             perf_epoch: std::time::Instant::now(),
             pump_notify_tx: None,
         }
+    }
+
+    pub fn set_net_policy(&mut self, policy: crate::transport::net_policy::NetPolicy) {
+        self.net_policy = policy;
     }
 
     /// Register a promise passed to `ctx.waitUntil(p)`. The promise is
@@ -1013,6 +1044,10 @@ pub enum OpResult {
     /// to be no-ops). See `websocket_native::network::drain_events`.
     #[cfg(feature = "runtime_native_websocket")]
     WebSocketEvent { ws_id: u32 },
+    /// A native `node:net.Socket` event is ready for EventEmitter
+    /// dispatch on the V8 thread. Payload is queued under
+    /// `RuntimeState::native_sockets[socket_id].events`.
+    SocketEvent { socket_id: u32 },
 }
 
 // ---------------------------------------------------------------------------

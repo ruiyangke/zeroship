@@ -162,7 +162,7 @@ pub fn load_modules(
                 // here so the resolve callback finds it pre-instantiation.
                 // Synthetic modules have no imports, so we don't queue
                 // them for further discovery.
-                if super::native_modules::is_native(&import_specifier) {
+                if super::native_modules::is_native(scope, &import_specifier) {
                     if !registry.borrow().compiled.contains_key(&import_specifier) {
                         let m = super::native_modules::resolve_native(scope, &import_specifier)
                             .expect("is_native true but resolve_native returned None");
