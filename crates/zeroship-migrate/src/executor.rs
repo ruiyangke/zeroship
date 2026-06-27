@@ -1281,7 +1281,7 @@ async fn execute_pending<B: MigrationBackend>(
 ///
 /// A repeatable is ALWAYS transactional (replace-style `CREATE OR REPLACE …`,
 /// `down: None`), so it never takes the non-txn two-phase path. Its `supersedes`
-/// is always empty, so the `completed` event is stamped the ordinary `kind='apply'`.
+/// is always empty, and the `completed` event is stamped `kind='repeatable'`.
 ///
 /// The destructive/approval gate is enforced uniformly at the top of [`apply`]
 /// over the FULL set, so a (rare) destructive repeatable without approval is
