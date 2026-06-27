@@ -944,35 +944,7 @@ fn ddl_to_information_schema(ddl: &str) -> String {
 /// `text` → `real`, i.e. string → number) still maps to two DIFFERENT canonical
 /// tokens and IS detected.
 pub fn sqlite_canonical_type(data_type: &str) -> &'static str {
-    let lower = data_type.trim().to_ascii_lowercase();
-    // Parameterised extension types keep their DDL spelling in the snapshot
-    // (`vector(384)`, `geography(POINT, 4326)`); both emit BLOB on SQLite.
-    if lower.starts_with("vector(")
-        || lower == "vector"
-        || lower.starts_with("geography(")
-        || lower.starts_with("geometry(")
-    {
-        return "blob";
-    }
-    match lower.as_str() {
-        // TEXT affinity: PG `text`/`jsonb`/`timestamp with time zone`/`date`
-        // (date→TIMESTAMPTZ, calendarDate→DATE on PG; both → SQLite TEXT), and the
-        // live SQLite `text` token itself.
-        "text" | "jsonb" | "json" | "timestamp with time zone" | "timestamptz" | "date" => "text",
-        // REAL affinity: PG `double precision` (`t.number()`), and live `real`.
-        "double precision" | "float8" | "real" => "real",
-        // INTEGER affinity: PG `boolean`/`integer` (and `bigint`), and live `integer`.
-        "boolean" | "integer" | "bigint" | "int8" | "int4" | "int" => "integer",
-        // NUMERIC affinity: PG `numeric` (a numeric `t.literal()`), and live `numeric`.
-        "numeric" | "decimal" => "numeric",
-        // BLOB affinity: PG `bytea` (encrypted / `t.bytes()`), and live `blob`.
-        "bytea" | "blob" => "blob",
-        // Unknown / future spelling: fall back to TEXT (SQLite's catch-all affinity,
-        // matching the emitter's `_ => TEXT` arm). An unrecognised pair still
-        // compares equal-to-equal by its own lowercased form first (see the caller),
-        // so this fallback only collapses genuinely unmapped tokens.
-        _ => "text",
-    }
+    zeroship_schema::query::sqlite_canonical_type(data_type)
 }
 
 /// Single-quote a SQL string literal (double embedded quotes). Mirrors

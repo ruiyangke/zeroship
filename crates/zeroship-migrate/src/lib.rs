@@ -68,6 +68,7 @@ pub mod capability;
 pub mod classify;
 pub mod db;
 pub mod declarative;
+mod dialect_renderer;
 pub mod dml;
 pub mod drift;
 pub mod fold;

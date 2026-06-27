@@ -105,15 +105,61 @@ pub enum SqlDialect {
     Sqlite,
 }
 
+/// Dialect-specific schema/DDL spelling.
+///
+/// This trait deliberately has no default methods: adding a third dialect must
+/// provide every spelling explicitly. The single exhaustive dispatch match lives
+/// in [`renderer`], so a new [`SqlDialect`] variant breaks there at compile time
+/// and forces the missing renderer to be wired before the crate can build.
+pub trait SchemaRenderer {
+    fn dialect(&self) -> SqlDialect;
+    fn encrypted_column_bind_placeholder(&self, n: usize) -> String;
+    fn wrap_encrypted_param(&self, b64_value: String) -> String;
+    fn system_field_columns(&self) -> Vec<String>;
+    fn system_field_indexes(
+        &self,
+        app_id: &str,
+        collection: &str,
+        sqlite_scope: SqliteEmitScope,
+    ) -> Vec<String>;
+    fn foreign_key_target(&self, app_id: &str, target: &str) -> String;
+    fn column_type(&self, def: &serde_json::Value) -> String;
+    fn json_object_default(&self) -> String;
+    fn json_array_default(&self) -> String;
+    fn current_timestamp_expr(&self) -> &'static str;
+    fn column_comment_statements(
+        &self,
+        app_id: &str,
+        collection: &str,
+        schema: &serde_json::Value,
+    ) -> Vec<String>;
+    fn canonical_type(&self, raw: &str) -> String;
+}
+
+struct PostgresSchemaRenderer;
+struct SqliteSchemaRenderer;
+
+static POSTGRES_SCHEMA_RENDERER: PostgresSchemaRenderer = PostgresSchemaRenderer;
+static SQLITE_SCHEMA_RENDERER: SqliteSchemaRenderer = SqliteSchemaRenderer;
+
+/// Return the schema renderer for a dialect.
+///
+/// This is the only schema-crate `SqlDialect` dispatch match for renderer
+/// selection. Adding a third dialect intentionally breaks this match until that
+/// dialect's renderer is implemented and wired.
+pub fn renderer(dialect: SqlDialect) -> &'static dyn SchemaRenderer {
+    match dialect {
+        SqlDialect::Postgres => &POSTGRES_SCHEMA_RENDERER,
+        SqlDialect::Sqlite => &SQLITE_SCHEMA_RENDERER,
+    }
+}
+
 impl SqlDialect {
     /// Build the placeholder SQL fragment for an encrypted-column
     /// parameter at position `n` (1-indexed). PG wraps the placeholder
     /// in a `decode(...)::bytea` cast; SQLite emits a bare `$N`.
     pub fn encrypted_column_bind_placeholder(self, n: usize) -> String {
-        match self {
-            Self::Postgres => format!("decode(${n}, 'base64')::bytea"),
-            Self::Sqlite => format!("${n}"),
-        }
+        renderer(self).encrypted_column_bind_placeholder(n)
     }
 
     /// Wrap an encrypted-column base64 param value with the
@@ -123,10 +169,248 @@ impl SqlDialect {
     /// prepends [`SQLITE_ENC_BLOB_PREFIX`] so the session actor can
     /// route the param through a binary bind.
     pub fn wrap_encrypted_param(self, b64_value: String) -> String {
-        match self {
-            Self::Postgres => b64_value,
-            Self::Sqlite => format!("{SQLITE_ENC_BLOB_PREFIX}{b64_value}"),
+        renderer(self).wrap_encrypted_param(b64_value)
+    }
+}
+
+impl SchemaRenderer for PostgresSchemaRenderer {
+    fn dialect(&self) -> SqlDialect {
+        SqlDialect::Postgres
+    }
+
+    fn encrypted_column_bind_placeholder(&self, n: usize) -> String {
+        format!("decode(${n}, 'base64')::bytea")
+    }
+
+    fn wrap_encrypted_param(&self, b64_value: String) -> String {
+        b64_value
+    }
+
+    fn system_field_columns(&self) -> Vec<String> {
+        let (ts_type, ts_default) = ("TIMESTAMPTZ", "NOW()");
+        vec![
+            "id TEXT PRIMARY KEY".to_string(),
+            format!("created_at {ts_type} NOT NULL DEFAULT {ts_default}"),
+            format!("updated_at {ts_type} NOT NULL DEFAULT {ts_default}"),
+            "created_by TEXT NULL".to_string(),
+            "updated_by TEXT NULL".to_string(),
+            "version INTEGER NOT NULL DEFAULT 1".to_string(),
+            format!("deleted_at {ts_type} NULL"),
+        ]
+    }
+
+    fn system_field_indexes(
+        &self,
+        app_id: &str,
+        collection: &str,
+        _sqlite_scope: SqliteEmitScope,
+    ) -> Vec<String> {
+        const SYSTEM_INDEXED_COLS: &[&str] = &["deleted_at", "updated_at", "created_by"];
+        SYSTEM_INDEXED_COLS
+            .iter()
+            .map(|col| {
+                let idx_name = index_name(collection, &[col], /* unique = */ false);
+                format!(
+                    "CREATE INDEX IF NOT EXISTS {} ON {}.{} ({})",
+                    quote_ident(&idx_name),
+                    quote_ident(app_id),
+                    quote_ident(collection),
+                    quote_ident(col),
+                )
+            })
+            .collect()
+    }
+
+    fn foreign_key_target(&self, app_id: &str, target: &str) -> String {
+        format!("{}.{}", quote_ident(app_id), quote_ident(target))
+    }
+
+    fn column_type(&self, def: &serde_json::Value) -> String {
+        if def.get("encrypted").is_some() {
+            return "BYTEA".to_string();
         }
+
+        let zs_type = def.get("type").and_then(|t| t.as_str());
+
+        if zs_type == Some("vector") {
+            let dims = def
+                .get("vectorDims")
+                .and_then(serde_json::Value::as_i64)
+                .filter(|d| *d > 0 && *d <= 16000)
+                .unwrap_or(0);
+            if dims > 0 {
+                return format!("vector({dims})");
+            }
+            return "vector".to_string();
+        }
+
+        if zs_type == Some("geoPoint") {
+            return "geography(POINT, 4326)".to_string();
+        }
+
+        def_to_pg_type(def).to_string()
+    }
+
+    fn json_object_default(&self) -> String {
+        "DEFAULT '{}'::jsonb".to_string()
+    }
+
+    fn json_array_default(&self) -> String {
+        "DEFAULT '[]'::jsonb".to_string()
+    }
+
+    fn current_timestamp_expr(&self) -> &'static str {
+        "NOW()"
+    }
+
+    fn column_comment_statements(
+        &self,
+        app_id: &str,
+        collection: &str,
+        schema: &serde_json::Value,
+    ) -> Vec<String> {
+        let mut statements = build_mask_sentinel_comments(app_id, collection, schema);
+        statements.extend(build_encryption_sentinel_comments(app_id, collection, schema));
+        statements
+    }
+
+    fn canonical_type(&self, raw: &str) -> String {
+        raw.to_string()
+    }
+}
+
+impl SchemaRenderer for SqliteSchemaRenderer {
+    fn dialect(&self) -> SqlDialect {
+        SqlDialect::Sqlite
+    }
+
+    fn encrypted_column_bind_placeholder(&self, n: usize) -> String {
+        format!("${n}")
+    }
+
+    fn wrap_encrypted_param(&self, b64_value: String) -> String {
+        format!("{SQLITE_ENC_BLOB_PREFIX}{b64_value}")
+    }
+
+    fn system_field_columns(&self) -> Vec<String> {
+        let (ts_type, ts_default) = ("TEXT", "CURRENT_TIMESTAMP");
+        vec![
+            "id TEXT PRIMARY KEY".to_string(),
+            format!("created_at {ts_type} NOT NULL DEFAULT {ts_default}"),
+            format!("updated_at {ts_type} NOT NULL DEFAULT {ts_default}"),
+            "created_by TEXT NULL".to_string(),
+            "updated_by TEXT NULL".to_string(),
+            "version INTEGER NOT NULL DEFAULT 1".to_string(),
+            format!("deleted_at {ts_type} NULL"),
+        ]
+    }
+
+    fn system_field_indexes(
+        &self,
+        app_id: &str,
+        collection: &str,
+        sqlite_scope: SqliteEmitScope,
+    ) -> Vec<String> {
+        const SYSTEM_INDEXED_COLS: &[&str] = &["deleted_at", "updated_at", "created_by"];
+        SYSTEM_INDEXED_COLS
+            .iter()
+            .map(|col| {
+                let idx_name = index_name(collection, &[col], /* unique = */ false);
+                if sqlite_scope == SqliteEmitScope::MainUnqualified {
+                    format!(
+                        "CREATE INDEX IF NOT EXISTS {} ON {} ({})",
+                        quote_ident(&idx_name),
+                        quote_ident(collection),
+                        quote_ident(col),
+                    )
+                } else {
+                    format!(
+                        "CREATE INDEX IF NOT EXISTS {}.{} ON {} ({})",
+                        quote_ident(app_id),
+                        quote_ident(&idx_name),
+                        quote_ident(collection),
+                        quote_ident(col),
+                    )
+                }
+            })
+            .collect()
+    }
+
+    fn foreign_key_target(&self, _app_id: &str, target: &str) -> String {
+        quote_ident(target)
+    }
+
+    fn column_type(&self, def: &serde_json::Value) -> String {
+        if def.get("encrypted").is_some() {
+            return "BLOB".to_string();
+        }
+
+        let zs_type = def.get("type").and_then(|t| t.as_str());
+
+        if zs_type == Some("vector") {
+            return "BLOB".to_string();
+        }
+
+        if zs_type == Some("geoPoint") {
+            return "BLOB".to_string();
+        }
+
+        match zs_type {
+            Some("string") => "TEXT".to_string(),
+            Some("number") => "REAL".to_string(),
+            Some("boolean") => "INTEGER".to_string(),
+            Some("date") => "TEXT".to_string(),
+            Some("calendarDate") => "TEXT".to_string(),
+            Some("json") | Some("object") | Some("array") | Some("union") => {
+                "TEXT".to_string()
+            }
+            Some("ref") => "TEXT".to_string(),
+            Some("literal") => match def.get("literalValue") {
+                Some(serde_json::Value::Number(_)) => "NUMERIC".to_string(),
+                Some(serde_json::Value::Bool(_)) => "INTEGER".to_string(),
+                _ => "TEXT".to_string(),
+            },
+            Some("bigint") | Some("int8") | Some("integer") | Some("int") | Some("int4") => {
+                "INTEGER".to_string()
+            }
+            _ => "TEXT".to_string(),
+        }
+    }
+
+    fn json_object_default(&self) -> String {
+        "DEFAULT '{}'".to_string()
+    }
+
+    fn json_array_default(&self) -> String {
+        "DEFAULT '[]'".to_string()
+    }
+
+    fn current_timestamp_expr(&self) -> &'static str {
+        "CURRENT_TIMESTAMP"
+    }
+
+    fn column_comment_statements(
+        &self,
+        _app_id: &str,
+        _collection: &str,
+        _schema: &serde_json::Value,
+    ) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn canonical_type(&self, raw: &str) -> String {
+        sqlite_canonical_type(raw).to_string()
+    }
+}
+
+#[cfg(test)]
+mod schema_renderer_tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_returns_expected_schema_renderer() {
+        assert_eq!(renderer(SqlDialect::Postgres).dialect(), SqlDialect::Postgres);
+        assert_eq!(renderer(SqlDialect::Sqlite).dialect(), SqlDialect::Sqlite);
     }
 }
 
@@ -940,19 +1224,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     let mut statements: Vec<String> = vec![create_table];
     statements.extend(system_index_stmts);
 
-    if matches!(dialect, SqlDialect::Postgres) {
-        let comment_stmts = build_mask_sentinel_comments(app_id, collection, schema);
-        statements.extend(comment_stmts);
-        // **P4 HALF B** — PG discards the inline `/* zsenc:… */` comment baked
-        // into the column DDL at parse time, so an encrypted column's metadata
-        // would be unrecoverable by `read_live_schema` (the runtime data-access
-        // introspection). Emit a `COMMENT ON COLUMN <col> IS 'zsenc:…'` carrying
-        // the same `zsenc` body so plugin-db recovers mode/keyId/wraps from
-        // `pg_description` at runtime — the parity with how `__zsmask` rides on
-        // the masked sibling's comment. SQLite keeps the inline form.
-        let enc_comment_stmts = build_encryption_sentinel_comments(app_id, collection, schema);
-        statements.extend(enc_comment_stmts);
-    }
+    statements.extend(renderer(dialect).column_comment_statements(app_id, collection, schema));
 
     Ok(statements)
 }
@@ -1011,19 +1283,7 @@ pub fn build_encryption_sentinel_comments(
 /// is transparent to the FK emitter (FK column TYPE narrowing
 /// cascades in PR 3).
 fn build_system_field_columns(dialect: SqlDialect) -> Vec<String> {
-    let (ts_type, ts_default) = match dialect {
-        SqlDialect::Postgres => ("TIMESTAMPTZ", "NOW()"),
-        SqlDialect::Sqlite => ("TEXT", "CURRENT_TIMESTAMP"),
-    };
-    vec![
-        "id TEXT PRIMARY KEY".to_string(),
-        format!("created_at {ts_type} NOT NULL DEFAULT {ts_default}"),
-        format!("updated_at {ts_type} NOT NULL DEFAULT {ts_default}"),
-        "created_by TEXT NULL".to_string(),
-        "updated_by TEXT NULL".to_string(),
-        "version INTEGER NOT NULL DEFAULT 1".to_string(),
-        format!("deleted_at {ts_type} NULL"),
-    ]
+    renderer(dialect).system_field_columns()
 }
 
 /// **P7 PR 2** — emit the three implicit B-tree indexes the platform
@@ -1052,46 +1312,7 @@ fn build_system_field_indexes(
     dialect: SqlDialect,
     sqlite_scope: SqliteEmitScope,
 ) -> Vec<String> {
-    // The three columns the platform auto-indexes. `id` is implicitly
-    // indexed by the PK constraint; `version` is deliberately skipped
-    // (thrashing — bumped on every UPDATE).
-    const SYSTEM_INDEXED_COLS: &[&str] = &["deleted_at", "updated_at", "created_by"];
-    SYSTEM_INDEXED_COLS
-        .iter()
-        .map(|col| {
-            let idx_name = index_name(collection, &[col], /* unique = */ false);
-            match dialect {
-                SqlDialect::Postgres => format!(
-                    "CREATE INDEX IF NOT EXISTS {} ON {}.{} ({})",
-                    quote_ident(&idx_name),
-                    quote_ident(app_id),
-                    quote_ident(collection),
-                    quote_ident(col),
-                ),
-                // `MainUnqualified` (the migrate engine, `main` IS the app file):
-                // drop the `<app_id>` qualifier from the index name. SQLite places
-                // the schema on the index name, not the table, so the qualifier we
-                // drop is on `<idx_name>`.
-                SqlDialect::Sqlite if sqlite_scope == SqliteEmitScope::MainUnqualified => {
-                    format!(
-                        "CREATE INDEX IF NOT EXISTS {} ON {} ({})",
-                        quote_ident(&idx_name),
-                        quote_ident(collection),
-                        quote_ident(col),
-                    )
-                }
-                // `AttachAlias` (plugin-db runtime): the file is ATTACHed under the
-                // `<app_id>` alias, so the index name is `"<app_id>"."<idx>"`.
-                SqlDialect::Sqlite => format!(
-                    "CREATE INDEX IF NOT EXISTS {}.{} ON {} ({})",
-                    quote_ident(app_id),
-                    quote_ident(&idx_name),
-                    quote_ident(collection),
-                    quote_ident(col),
-                ),
-            }
-        })
-        .collect()
+    renderer(dialect).system_field_indexes(app_id, collection, sqlite_scope)
 }
 
 /// Build an `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` statement (B2).
@@ -1180,13 +1401,7 @@ fn build_fk_clause(
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
 
-    let target_qualified = match dialect {
-        SqlDialect::Postgres => format!("{}.{}", quote_ident(app_id), quote_ident(target)),
-        // SQLite rejects schema-qualified parent-table names inside
-        // REFERENCES clauses, even when the CREATE TABLE itself targets
-        // an attached database alias.
-        SqlDialect::Sqlite => quote_ident(target),
-    };
+    let target_qualified = renderer(dialect).foreign_key_target(app_id, target);
     let deferrable_clause = if deferrable {
         " DEFERRABLE INITIALLY DEFERRED"
     } else {
@@ -2041,63 +2256,7 @@ fn field_to_column_for_dialect(
 /// `DOUBLE PRECISION`, `TIMESTAMPTZ`, …); callers that need the
 /// `information_schema.data_type` spelling translate it themselves.
 pub fn def_to_column_type_for_dialect(def: &serde_json::Value, dialect: SqlDialect) -> String {
-    if def.get("encrypted").is_some() {
-        return match dialect {
-            SqlDialect::Postgres => "BYTEA".to_string(),
-            SqlDialect::Sqlite => "BLOB".to_string(),
-        };
-    }
-
-    let zs_type = def.get("type").and_then(|t| t.as_str());
-
-    if zs_type == Some("vector") {
-        return match dialect {
-            SqlDialect::Postgres => {
-                let dims = def
-                    .get("vectorDims")
-                    .and_then(serde_json::Value::as_i64)
-                    .filter(|d| *d > 0 && *d <= 16000)
-                    .unwrap_or(0);
-                if dims > 0 {
-                    format!("vector({dims})")
-                } else {
-                    "vector".to_string()
-                }
-            }
-            SqlDialect::Sqlite => "BLOB".to_string(),
-        };
-    }
-
-    if zs_type == Some("geoPoint") {
-        return match dialect {
-            SqlDialect::Postgres => "geography(POINT, 4326)".to_string(),
-            SqlDialect::Sqlite => "BLOB".to_string(),
-        };
-    }
-
-    match dialect {
-        SqlDialect::Postgres => def_to_pg_type(def).to_string(),
-        SqlDialect::Sqlite => match zs_type {
-            Some("string") => "TEXT".to_string(),
-            Some("number") => "REAL".to_string(),
-            Some("boolean") => "INTEGER".to_string(),
-            Some("date") => "TEXT".to_string(),
-            Some("calendarDate") => "TEXT".to_string(),
-            Some("json") | Some("object") | Some("array") | Some("union") => {
-                "TEXT".to_string()
-            }
-            Some("ref") => "TEXT".to_string(),
-            Some("literal") => match def.get("literalValue") {
-                Some(serde_json::Value::Number(_)) => "NUMERIC".to_string(),
-                Some(serde_json::Value::Bool(_)) => "INTEGER".to_string(),
-                _ => "TEXT".to_string(),
-            },
-            Some("bigint") | Some("int8") | Some("integer") | Some("int") | Some("int4") => {
-                "INTEGER".to_string()
-            }
-            _ => "TEXT".to_string(),
-        },
-    }
+    renderer(dialect).column_type(def)
 }
 
 /// C2 — emit per-variant CHECK constraints for a flat-expanded
@@ -2328,6 +2487,43 @@ fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
     }
 }
 
+/// Canonicalise a column type to the SQLite affinity token used when comparing
+/// PG-spelled desired snapshots against live SQLite declared types.
+#[must_use]
+pub fn sqlite_canonical_type(data_type: &str) -> &'static str {
+    let lower = data_type.trim().to_ascii_lowercase();
+    // Parameterised extension types keep their DDL spelling in the snapshot
+    // (`vector(384)`, `geography(POINT, 4326)`); both emit BLOB on SQLite.
+    if lower.starts_with("vector(")
+        || lower == "vector"
+        || lower.starts_with("geography(")
+        || lower.starts_with("geometry(")
+    {
+        return "blob";
+    }
+    match lower.as_str() {
+        // TEXT affinity: PG `text`/`jsonb`/`timestamp with time zone`/`date`
+        // (date→TIMESTAMPTZ, calendarDate→DATE on PG; both → SQLite TEXT), and the
+        // live SQLite `text` token itself.
+        "text" | "jsonb" | "json" | "timestamp with time zone" | "timestamptz" | "date" => {
+            "text"
+        }
+        // REAL affinity: PG `double precision` (`t.number()`), and live `real`.
+        "double precision" | "float8" | "real" => "real",
+        // INTEGER affinity: PG `boolean`/`integer` (and `bigint`), and live `integer`.
+        "boolean" | "integer" | "bigint" | "int8" | "int4" | "int" => "integer",
+        // NUMERIC affinity: PG `numeric` (a numeric `t.literal()`), and live `numeric`.
+        "numeric" | "decimal" => "numeric",
+        // BLOB affinity: PG `bytea` (encrypted / `t.bytes()`), and live `blob`.
+        "bytea" | "blob" => "blob",
+        // Unknown / future spelling: fall back to TEXT (SQLite's catch-all affinity,
+        // matching the emitter's `_ => TEXT` arm). An unrecognised pair still
+        // compares equal-to-equal by its own lowercased form first (see the caller),
+        // so this fallback only collapses genuinely unmapped tokens.
+        _ => "text",
+    }
+}
+
 /// Generate column constraints from field definition.
 fn def_to_constraints(field: &str, def: &serde_json::Value) -> String {
     def_to_constraints_for_dialect(field, def, SqlDialect::Postgres)
@@ -2370,27 +2566,15 @@ fn def_to_constraints_for_dialect(
                     parts.push(format!("DEFAULT {b}"));
                 }
             }
-            Some("json") | Some("object") => parts.push(match dialect {
-                SqlDialect::Postgres => "DEFAULT '{}'::jsonb".to_string(),
-                SqlDialect::Sqlite => "DEFAULT '{}'".to_string(),
-            }),
-            Some("array") => parts.push(match dialect {
-                SqlDialect::Postgres => "DEFAULT '[]'::jsonb".to_string(),
-                SqlDialect::Sqlite => "DEFAULT '[]'".to_string(),
-            }),
+            Some("json") | Some("object") => parts.push(renderer(dialect).json_object_default()),
+            Some("array") => parts.push(renderer(dialect).json_array_default()),
             _ => {}
         }
     } else {
         // Default defaults for json/object/array
         match def.get("type").and_then(|t| t.as_str()) {
-            Some("json") | Some("object") => parts.push(match dialect {
-                SqlDialect::Postgres => "DEFAULT '{}'::jsonb".to_string(),
-                SqlDialect::Sqlite => "DEFAULT '{}'".to_string(),
-            }),
-            Some("array") => parts.push(match dialect {
-                SqlDialect::Postgres => "DEFAULT '[]'::jsonb".to_string(),
-                SqlDialect::Sqlite => "DEFAULT '[]'".to_string(),
-            }),
+            Some("json") | Some("object") => parts.push(renderer(dialect).json_object_default()),
+            Some("array") => parts.push(renderer(dialect).json_array_default()),
             _ => {}
         }
     }
@@ -3443,10 +3627,7 @@ pub fn build_set_clauses_with_system_fields(
     // dispatch AND legacy direct callers) since the pre-PR-4 contract
     // already emitted `updated_at = NOW()` on every UPDATE.
     if !autobump.skip_updated_at && !already_has_updated_at {
-        let ts_expr = match dialect {
-            SqlDialect::Postgres => "NOW()",
-            SqlDialect::Sqlite => "CURRENT_TIMESTAMP",
-        };
+        let ts_expr = renderer(dialect).current_timestamp_expr();
         set_clauses.push(format!("\"updated_at\" = {ts_expr}"));
     }
 
@@ -3833,10 +4014,7 @@ pub fn build_delete_one_with_dialect(
 /// path. Mirrors the same lookup
 /// [`build_set_clauses_with_system_fields`] does for `updated_at`.
 fn now_expr(dialect: SqlDialect) -> &'static str {
-    match dialect {
-        SqlDialect::Postgres => "NOW()",
-        SqlDialect::Sqlite => "CURRENT_TIMESTAMP",
-    }
+    renderer(dialect).current_timestamp_expr()
 }
 
 /// **P7 PR 5** — compose the SET clauses for a soft-delete: the
