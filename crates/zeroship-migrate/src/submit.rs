@@ -383,6 +383,10 @@ fn denial(e: &GuardError) -> (String, String) {
             "sqlite_raw_sql_rejected".to_string(),
             "raw SQL not accepted on the Confined SQLite path".to_string(),
         ),
+        GuardError::MysqlRawSqlRejected => (
+            "mysql_raw_sql_rejected".to_string(),
+            "raw SQL not accepted on the render-only MySQL path".to_string(),
+        ),
     }
 }
 

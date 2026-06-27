@@ -32,6 +32,9 @@ fn assert_denied(sql: &str) {
         Err(GuardError::SqliteRawSqlRejected) => {
             panic!("PG guard returned SqliteRawSqlRejected for: {sql}")
         }
+        Err(GuardError::MysqlRawSqlRejected) => {
+            panic!("PG guard returned MysqlRawSqlRejected for: {sql}")
+        }
         Ok(report) => panic!("expected DENY but PASSED for: {sql}\n  report: {report:?}"),
     }
 }

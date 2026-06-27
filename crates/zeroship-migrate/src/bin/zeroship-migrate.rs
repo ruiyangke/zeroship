@@ -79,7 +79,7 @@ struct Cli {
     database_url: Option<String>,
 
     /// Force the database engine, overriding DSN-shape auto-detection: `pg` |
-    /// `sqlite`. Resolves an ambiguous bare-path DSN; ERRORS if it contradicts an
+    /// `sqlite` | `mysql`. Resolves an ambiguous bare-path DSN; ERRORS if it contradicts an
     /// unambiguous DSN scheme (e.g. `--engine sqlite` with a `postgres://` URL).
     /// Precedence (highest first): this flag, then `ZEROSHIP_MIGRATE_ENGINE`, then
     /// `engine` in the config. Absent means DSN auto-detect (no behaviour change for
@@ -196,13 +196,15 @@ impl ProfileArg {
     }
 }
 
-/// The CLI engine-override flag value (`--engine pg|sqlite`).
+/// The CLI engine-override flag value (`--engine pg|sqlite|mysql`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum EngineArg {
     /// Force the Postgres backend.
     Pg,
     /// Force the `SQLite` backend.
     Sqlite,
+    /// Force the MySQL render-only dialect.
+    Mysql,
 }
 
 impl From<EngineArg> for EngineKind {
@@ -210,6 +212,7 @@ impl From<EngineArg> for EngineKind {
         match e {
             EngineArg::Pg => Self::Postgres,
             EngineArg::Sqlite => Self::Sqlite,
+            EngineArg::Mysql => Self::Mysql,
         }
     }
 }
@@ -222,7 +225,8 @@ impl EngineArg {
         match s.trim().to_ascii_lowercase().as_str() {
             "pg" | "postgres" | "postgresql" => Ok(Self::Pg),
             "sqlite" => Ok(Self::Sqlite),
-            other => Err(format!("invalid engine {other:?} (allowed: pg, sqlite)")),
+            "mysql" | "mysql8" | "mariadb" => Ok(Self::Mysql),
+            other => Err(format!("invalid engine {other:?} (allowed: pg, sqlite, mysql)")),
         }
     }
 }
@@ -269,7 +273,7 @@ enum Command {
     /// APPLIES on a throwaway). Loads `.sql` (Flyway/dbmate) and/or `.ir.json`
     /// (creator) artifacts from `--dir`; opens NO DB connection.
     Plan {
-        /// Render for this dialect (`pg` | `sqlite`). Default: the `--engine`
+        /// Render for this dialect (`pg` | `sqlite` | `mysql`). Default: the `--engine`
         /// override if present, else `pg`. NO DB connection is opened to pick it.
         #[arg(long, value_enum)]
         dialect: Option<EngineArg>,
@@ -663,6 +667,7 @@ fn run_plan_preview(
 
     let dialect = match chosen {
         Some(EngineArg::Sqlite) => SqlDialect::Sqlite,
+        Some(EngineArg::Mysql) => SqlDialect::Mysql,
         // `--dialect pg`, `--engine pg`, or unset all render the PG leg (the default
         // operator target). NO DSN probe.
         _ => SqlDialect::Postgres,
@@ -790,6 +795,7 @@ async fn run_dump(cfg: &RunConfig, schema_file: &Path) -> Result<(), String> {
         Engine::Sqlite(app) => platform_runner::dump_schema_sqlite(&app)
             .await
             .map_err(|e| e.to_string())?,
+        Engine::Mysql => return Err(RunError::MysqlLiveExecUnimplemented.to_string()),
         Engine::Unsupported => return Err(RunError::UnsupportedEngine.to_string()),
     };
 
@@ -1123,9 +1129,17 @@ mod tests {
             effective_engine(&cli, &layer).expect("engine"),
             Some(EngineKind::Sqlite)
         );
+        let mysql_layer = FileEnvLayer {
+            engine: Some("mysql".to_string()),
+            ..FileEnvLayer::default()
+        };
+        assert_eq!(
+            effective_engine(&cli, &mysql_layer).expect("engine"),
+            Some(EngineKind::Mysql)
+        );
         // An invalid layer engine is a clear error (not a silent ignore).
         let bad = FileEnvLayer {
-            engine: Some("mysql".to_string()),
+            engine: Some("oracle".to_string()),
             ..FileEnvLayer::default()
         };
         assert!(effective_engine(&cli, &bad).is_err());

@@ -6,7 +6,8 @@
 //!
 //! 1. GOLDEN: a representative migration set (createTable + addColumn + a guarded
 //!    addColumn + a one-shot insert/update + an online renameColumn) renders to a
-//!    byte-stable golden for BOTH dialects (`tests/golden/sql_preview_{pg,sqlite}.txt`).
+//!    byte-stable golden for all preview dialects
+//!    (`tests/golden/sql_preview_{pg,sqlite,mysql}.txt`).
 //! 2. FAITHFULNESS: the rendered DDL/DML is byte-identical to the SQL the engine
 //!    actually lowers (`IrAuthor::lower_steps` `Migration.up` / `PlanStep::Dml.template`)
 //!    — the preview is a surfacing layer, NOT a re-implementation.
@@ -52,6 +53,39 @@ const REPRESENTATIVE_IR: &str = r#"{
   ]
 }"#;
 
+/// MySQL-specific render proof: the portable IR pieces MySQL can render in phase 1
+/// lower to valid MySQL 8 DDL/DML without opening a database.
+const MYSQL_FEATURE_IR: &str = r#"{
+  "ir_version": 1,
+  "name": "mysql_feature",
+  "ops": [
+    {"op":"createTable","name":"teams","columns":[
+      {"name":"id","type":"int","nullable":false,"identity":{"always":true}},
+      {"name":"name","type":"text","nullable":false},
+      {"name":"name_lc","type":"string",
+        "generated":{"expr":{"node":"fnCall","fn":"lower","args":[{"node":"colRef","name":"name"}]},"stored":true}}
+    ],"constraints":[
+      {"name":"teams_pkey","kind":{"kind":"pk","columns":["id"]}}
+    ]},
+    {"op":"createTable","name":"members","columns":[
+      {"name":"id","type":"int","nullable":false,"identity":{"always":true}},
+      {"name":"team_id","type":"int","nullable":false},
+      {"name":"email","type":"text","nullable":false}
+    ],"constraints":[
+      {"name":"members_pkey","kind":{"kind":"pk","columns":["id"]}},
+      {"name":"members_team_fk","kind":{"kind":"fk","columns":["team_id"],
+        "referencesTable":"teams","referencesColumns":["id"],"onDelete":"cascade"}}
+    ],"indexes":[{"name":"members_team_id_idx","columns":["team_id"]}]},
+    {"op":"createView","name":"active_teams","replace":true,
+      "query":{"kind":"structured","select":{"from":{"name":"teams"},
+        "projection":[{"kind":"colRef","name":"id"},{"kind":"colRef","name":"name"}],
+        "where":{"node":"unaryOp","op":"isNull","operand":{"node":"colRef","name":"deleted_at"}}}}},
+    {"op":"insert","table":"teams",
+      "columns":["id","created_at","updated_at","version","name"],
+      "rows":[[1,"2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,"Core"]]}
+  ]
+}"#;
+
 fn opts() -> PreviewOpts {
     PreviewOpts { default_schema: "public".to_string(), owner_app: "app_preview".to_string() }
 }
@@ -85,6 +119,11 @@ fn golden_sqlite() {
     assert_golden("sql_preview_sqlite.txt", &render_representative(SqlDialect::Sqlite));
 }
 
+#[test]
+fn golden_mysql() {
+    assert_golden("sql_preview_mysql.txt", &render_representative(SqlDialect::Mysql));
+}
+
 /// FAITHFULNESS — every rendered DDL/DML statement is byte-identical to the SQL the
 /// engine actually lowers (`Migration.up` / `PlanStep::Dml.template`). We lower the
 /// DB-INDEPENDENT ops (drop the online rename, which is runtime-resolved) and assert
@@ -98,6 +137,11 @@ fn faithful_to_lowered_sql_pg() {
 #[test]
 fn faithful_to_lowered_sql_sqlite() {
     faithful_to_lowered_sql(SqlDialect::Sqlite);
+}
+
+#[test]
+fn faithful_to_lowered_sql_mysql() {
+    faithful_to_lowered_sql(SqlDialect::Mysql);
 }
 
 fn faithful_to_lowered_sql(dialect: SqlDialect) {
@@ -143,6 +187,35 @@ fn faithful_to_lowered_sql(dialect: SqlDialect) {
             other => panic!("unexpected step in DB-independent IR: {other:?}"),
         }
     }
+}
+
+#[test]
+fn mysql_feature_preview_renders_mysql8_sql() {
+    let out = render_ir_json_sql(MYSQL_FEATURE_IR, SqlDialect::Mysql, &opts())
+        .expect("MySQL feature fixture renders offline");
+    assert!(out.contains("CREATE TABLE `public`.`teams`"), "{out}");
+    assert!(out.contains("`id` INT AUTO_INCREMENT PRIMARY KEY"), "{out}");
+    assert!(
+        out.contains("GENERATED ALWAYS AS (lower(`name`)) STORED"),
+        "{out}"
+    );
+    assert!(out.contains("CREATE INDEX `members_team_id_idx`"), "{out}");
+    assert!(
+        out.contains(
+            "ALTER TABLE `public`.`members` ADD CONSTRAINT `members_team_fk` \
+             FOREIGN KEY (`team_id`) REFERENCES `public`.`teams` (`id`) \
+             ON UPDATE RESTRICT ON DELETE CASCADE"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "CREATE OR REPLACE VIEW `public`.`active_teams` AS SELECT `id`, `name` \
+             FROM `public`.`teams` WHERE (`deleted_at` IS NULL)"
+        ),
+        "{out}"
+    );
+    assert!(out.contains("VALUES (?, ?, ?, ?, ?)"), "{out}");
 }
 
 /// NO FABRICATION (the load-bearing witness) — an online `renameColumn` is labeled
@@ -278,7 +351,11 @@ fn render_succeeds_without_a_dsn() {
     std::env::remove_var("DATABASE_URL");
     let pg = render_ir_json_sql(REPRESENTATIVE_IR, SqlDialect::Postgres, &opts());
     let sqlite = render_ir_json_sql(REPRESENTATIVE_IR, SqlDialect::Sqlite, &opts());
-    assert!(pg.is_ok() && sqlite.is_ok(), "offline render must not need a DSN");
+    let mysql = render_ir_json_sql(REPRESENTATIVE_IR, SqlDialect::Mysql, &opts());
+    assert!(
+        pg.is_ok() && sqlite.is_ok() && mysql.is_ok(),
+        "offline render must not need a DSN"
+    );
 }
 
 /// `render_plan_sql` — the single-plan renderer (symmetric with `render_set_sql`,
@@ -409,6 +486,27 @@ fn cli_plan_prints_and_exits_zero_offline() {
     assert!(stdout.contains("offline SQL preview") || stdout.contains("-- plan"), "stdout:\n{stdout}");
     assert!(stdout.contains(RUNTIME_RESOLVED), "the rename must be labeled:\n{stdout}");
     assert!(stdout.contains("CREATE TABLE"), "renderable DDL must be shown:\n{stdout}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn cli_plan_mysql_engine_prints_and_exits_zero_offline() {
+    let dir = tempdir_with(&[("001_create.ir.json", MYSQL_FEATURE_IR)]);
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_zeroship-migrate"))
+        .args(["--engine", "mysql", "plan", "--dir"])
+        .arg(&dir)
+        .env_remove("DATABASE_URL")
+        .output()
+        .expect("spawn zeroship-migrate");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "plan must exit 0 offline; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("(dialect: mysql)"), "stdout:\n{stdout}");
+    assert!(stdout.contains("AUTO_INCREMENT"), "stdout:\n{stdout}");
+    assert!(stdout.contains("CREATE OR REPLACE VIEW"), "stdout:\n{stdout}");
     std::fs::remove_dir_all(&dir).ok();
 }
 

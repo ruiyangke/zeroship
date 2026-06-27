@@ -139,19 +139,35 @@ pub enum DmlError {
 /// name is rejected, so an injection through an identifier slot cannot reach the
 /// DB. Bare-identifier validation mirrors [`crate::backfill::BackfillSpec`].
 fn quote_ident(what: &'static str, ident: &str) -> Result<String, DmlError> {
+    quote_ident_for_dialect(what, ident, SqlDialect::Postgres)
+}
+
+pub(crate) fn quote_ident_for_dialect(
+    what: &'static str,
+    ident: &str,
+    dialect: SqlDialect,
+) -> Result<String, DmlError> {
     let ok = !ident.is_empty()
         && ident.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
         && ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     if !ok {
         return Err(DmlError::InvalidIdentifier { what, value: ident.to_string() });
     }
-    Ok(escape_quote_ident(ident))
+    Ok(escape_quote_ident_for_dialect(ident, dialect))
 }
 
 /// Public-in-crate wrapper for author-supplied bare identifiers. Trigger-body
 /// rendering needs the same strict table/column/name gate as the DML assembler.
 pub(crate) fn quote_bare_ident(what: &'static str, ident: &str) -> Result<String, DmlError> {
     quote_ident(what, ident)
+}
+
+pub(crate) fn quote_bare_ident_for_dialect(
+    what: &'static str,
+    ident: &str,
+    dialect: SqlDialect,
+) -> Result<String, DmlError> {
+    quote_ident_for_dialect(what, ident, dialect)
 }
 
 /// A render-seam rejection of an **engine-supplied identifier** (project schema,
@@ -190,13 +206,20 @@ pub struct IdentQuoteError {
 /// safely by escaping, **byte-identically** to a bare
 /// `format!("\"{}\"", x.replace('"', "\"\""))`.
 pub(crate) fn quote_ident_checked(ident: &str) -> Result<String, IdentQuoteError> {
+    quote_ident_checked_for_dialect(ident, SqlDialect::Postgres)
+}
+
+pub(crate) fn quote_ident_checked_for_dialect(
+    ident: &str,
+    dialect: SqlDialect,
+) -> Result<String, IdentQuoteError> {
     if ident.is_empty() {
         return Err(IdentQuoteError { reason: "empty", value: ident.to_string() });
     }
     if ident.contains('\0') {
         return Err(IdentQuoteError { reason: "contains NUL", value: ident.to_string() });
     }
-    Ok(escape_quote_ident(ident))
+    Ok(escape_quote_ident_for_dialect(ident, dialect))
 }
 
 /// The ONE raw double-quote escape primitive for the whole crate: double every
@@ -224,6 +247,13 @@ pub(crate) fn quote_ident_checked(ident: &str) -> Result<String, IdentQuoteError
 /// (`validate_ident`) may call this directly.
 pub(crate) fn escape_quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+pub(crate) fn escape_quote_ident_for_dialect(ident: &str, dialect: SqlDialect) -> String {
+    match dialect {
+        SqlDialect::Postgres | SqlDialect::Sqlite => escape_quote_ident(ident),
+        SqlDialect::Mysql => format!("`{}`", ident.replace('`', "``")),
+    }
 }
 
 /// Qualify a validated bare table name for the target dialect.
@@ -276,6 +306,7 @@ pub fn placeholder(dialect: SqlDialect, n: usize) -> String {
     match dialect {
         SqlDialect::Postgres => format!("${n}"),
         SqlDialect::Sqlite => sqlite_placeholder(n),
+        SqlDialect::Mysql => "?".to_string(),
     }
 }
 
@@ -485,7 +516,7 @@ impl BindCtx {
 /// statement structure is fixed by the AST shape, never by a literal's content.
 fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError> {
     Ok(match expr {
-        Expr::ColRef { name } => quote_ident("column", name)?,
+        Expr::ColRef { name } => quote_ident_for_dialect("column", name, ctx.dialect)?,
         Expr::Literal { value } => ctx.push_bind(scalar_to_bind(value)),
         Expr::BinOp { op, lhs, rhs } => {
             let l = render_expr_bound(lhs, ctx)?;
@@ -575,7 +606,7 @@ fn render_unary(op: UnaryOp, operand: &str) -> String {
 /// executor pages the statement and cannot carry positional binds.
 pub(crate) fn render_expr_inline(expr: &Expr, dialect: SqlDialect) -> Result<String, DmlError> {
     Ok(match expr {
-        Expr::ColRef { name } => quote_ident("column", name)?,
+        Expr::ColRef { name } => quote_ident_for_dialect("column", name, dialect)?,
         Expr::Literal { value } => inline_literal(value)?,
         Expr::BinOp { op, lhs, rhs } => {
             let l = render_expr_inline(lhs, dialect)?;
@@ -707,7 +738,7 @@ pub fn assemble_insert(
     }
     let qtable = qualify_table(project_schema, dialect, table)?;
     let qcols: Result<Vec<_>, _> =
-        columns.iter().map(|c| quote_ident("column", c)).collect();
+        columns.iter().map(|c| quote_ident_for_dialect("column", c, dialect)).collect();
     let qcols = qcols?;
 
     let mut ctx = BindCtx::new(dialect);
@@ -754,7 +785,7 @@ fn render_on_conflict(oc: &OnConflict, ctx: &mut BindCtx) -> Result<String, DmlE
         });
     }
     let qcols: Result<Vec<_>, _> =
-        oc.columns.iter().map(|c| quote_ident("column", c)).collect();
+        oc.columns.iter().map(|c| quote_ident_for_dialect("column", c, ctx.dialect)).collect();
     let target = format!("ON CONFLICT ({})", qcols?.join(", "));
     match &oc.do_update {
         None => Ok(format!(" {target} DO NOTHING")),
@@ -765,7 +796,7 @@ fn render_on_conflict(oc: &OnConflict, ctx: &mut BindCtx) -> Result<String, DmlE
             // BTreeMap ⇒ deterministic column order (canonical).
             let mut assigns = Vec::with_capacity(set.len());
             for (col, val) in set {
-                let qc = quote_ident("column", col)?;
+                let qc = quote_ident_for_dialect("column", col, ctx.dialect)?;
                 let ph = ctx.push_bind(scalar_to_bind(val));
                 assigns.push(format!("{qc} = {ph}"));
             }
@@ -795,7 +826,7 @@ pub fn assemble_update(
     // BTreeMap ⇒ deterministic, canonical assignment order.
     let mut assigns = Vec::with_capacity(set.len());
     for (col, rhs) in set {
-        let qc = quote_ident("column", col)?;
+        let qc = quote_ident_for_dialect("column", col, dialect)?;
         let r = render_expr_bound(rhs, &mut ctx)?;
         assigns.push(format!("{qc} = {r}"));
     }
@@ -849,6 +880,10 @@ pub fn assemble_delete(
                  (SELECT ctid FROM {qtable} WHERE {w} LIMIT {ph})"
             )
         }
+        (SqlDialect::Mysql, Some(n)) => {
+            let ph = ctx.push_bind(BindValue::Int(i64::try_from(n).unwrap_or(i64::MAX)));
+            format!("DELETE FROM {qtable} WHERE {w} LIMIT {ph}")
+        }
     };
     Ok(AssembledDml { template, binds: ctx.binds })
 }
@@ -882,7 +917,7 @@ pub fn assemble_backfill_clauses(
     // BTreeMap ⇒ canonical order.
     let mut assigns = Vec::with_capacity(set.len());
     for (col, rhs) in set {
-        let qc = quote_ident("column", col)?;
+        let qc = quote_ident_for_dialect("column", col, dialect)?;
         let r = render_expr_inline(rhs, dialect)?;
         assigns.push(format!("{qc} = {r}"));
     }

@@ -76,6 +76,7 @@ fn dialect_label(d: SqlDialect) -> &'static str {
     match d {
         SqlDialect::Postgres => "postgres",
         SqlDialect::Sqlite => "sqlite",
+        SqlDialect::Mysql => "mysql",
     }
 }
 
@@ -204,6 +205,7 @@ pub fn render_ir_json_sql(
     let target = match dialect {
         SqlDialect::Postgres => crate::validate::Dialect::Postgres,
         SqlDialect::Sqlite => crate::validate::Dialect::Sqlite,
+        SqlDialect::Mysql => crate::validate::Dialect::Mysql,
     };
     crate::validate::validate_ir(&ir, target, &[])
         .map_err(|e| format!("validate .ir.json: {e}"))?;
