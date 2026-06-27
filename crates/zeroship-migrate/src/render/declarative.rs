@@ -41,8 +41,8 @@ use serde::Deserialize;
 
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use crate::model::snapshot::{
-    ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot, IndexSnapshot, SchemaSnapshot,
-    TableSnapshot,
+    ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot, IndexElementSnapshot,
+    IndexSnapshot, SchemaSnapshot, TableSnapshot,
 };
 use crate::render::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
@@ -339,6 +339,63 @@ fn has_generated_or_identity(t: &TableSnapshot) -> bool {
 
 fn has_inline_checks(t: &TableSnapshot) -> bool {
     t.columns.iter().any(|c| !c.inline_checks.is_empty())
+}
+
+fn render_index_elements_pg(idx: &IndexSnapshot, opclass_suffix: &str) -> String {
+    let elements = if idx.elements.is_empty() {
+        idx.columns
+            .iter()
+            .map(|c| IndexElementSnapshot::column(c.clone()))
+            .collect::<Vec<_>>()
+    } else {
+        idx.elements.clone()
+    };
+    elements
+        .iter()
+        .map(|element| match element {
+            IndexElementSnapshot::Column(c) => format!("{}{opclass_suffix}", quote_ident(c)),
+            IndexElementSnapshot::Expr(expr) => format!("({expr})"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_index_elements_sqlite(idx: &IndexSnapshot) -> String {
+    let elements = if idx.elements.is_empty() {
+        idx.columns
+            .iter()
+            .map(|c| IndexElementSnapshot::column(c.clone()))
+            .collect::<Vec<_>>()
+    } else {
+        idx.elements.clone()
+    };
+    elements
+        .iter()
+        .map(|element| match element {
+            IndexElementSnapshot::Column(c) => quote_ident(c),
+            IndexElementSnapshot::Expr(expr) => format!("({expr})"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_index_elements_mysql(idx: &IndexSnapshot) -> String {
+    let elements = if idx.elements.is_empty() {
+        idx.columns
+            .iter()
+            .map(|c| IndexElementSnapshot::column(c.clone()))
+            .collect::<Vec<_>>()
+    } else {
+        idx.elements.clone()
+    };
+    elements
+        .iter()
+        .map(|element| match element {
+            IndexElementSnapshot::Column(c) => mysql_quote_ident(c),
+            IndexElementSnapshot::Expr(expr) => format!("({expr})"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// A lowered migration paired with its STRUCTURAL per-statement list — the exact
@@ -1063,6 +1120,7 @@ fn field_check_constraints(table: &str, f: &FieldDescriptor) -> Vec<ConstraintSn
                 name: check_constraint_name(table, &f.name, "range"),
                 kind: "CHECK".into(),
                 definition: def,
+                comment: None,
             });
         }
     }
@@ -1074,6 +1132,7 @@ fn field_check_constraints(table: &str, f: &FieldDescriptor) -> Vec<ConstraintSn
                 name: check_constraint_name(table, &f.name, "lit"),
                 kind: "CHECK".into(),
                 definition: format!("CHECK ({col} = {rendered})"),
+                comment: None,
             });
         }
     }
@@ -1086,6 +1145,7 @@ fn field_check_constraints(table: &str, f: &FieldDescriptor) -> Vec<ConstraintSn
                 name: check_constraint_name(table, &f.name, "enum"),
                 kind: "CHECK".into(),
                 definition: format!("CHECK ({col} IN ({}))", rendered.join(", ")),
+                comment: None,
             });
         }
     }
@@ -1493,6 +1553,7 @@ pub(crate) fn build_table_snapshot(
             name: format!("{}_pkey", d.name),
             kind: "PRIMARY KEY".into(),
             definition: "PRIMARY KEY (id)".into(),
+            comment: None,
         });
         // A PRIMARY KEY also materialises an IMPLICIT unique index named
         // `<table>_pkey` (pg_index reports it). The live snapshot always carries
@@ -1688,6 +1749,7 @@ pub(crate) fn build_table_snapshot(
                             f.on_update.as_deref(),
                             f.deferrable.unwrap_or(true),
                         ),
+                        comment: None,
                     });
                 }
             }
@@ -1751,6 +1813,7 @@ pub(crate) fn build_table_snapshot(
             columns,
             indexes,
             constraints,
+            comment: None,
             stored_create_sql: None,
         })
 }
@@ -1909,7 +1972,7 @@ pub(crate) fn ir_fk_constraint_snapshot(
         on_update,
         true,
     );
-    ConstraintSnapshot { name, kind: "FOREIGN KEY".to_string(), definition }
+    ConstraintSnapshot { name, kind: "FOREIGN KEY".to_string(), definition, comment: None }
 }
 
 // ---------------------------------------------------------------------------
@@ -1952,9 +2015,11 @@ fn vector_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapsh
         name: non_unique_index_name(table, &f.name),
         unique: false,
         columns: vec![f.name.clone()],
+        elements: vec![IndexElementSnapshot::column(f.name.clone())],
         access_method: "ivfflat".to_string(),
-        expression: None,
+        predicate: None,
         opclass: Some(vector_opclass(f.vector_metric.as_deref()).to_string()),
+        comment: None,
     })
 }
 
@@ -1976,9 +2041,11 @@ fn geo_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapshot>
         name: non_unique_index_name(table, &f.name),
         unique: false,
         columns: vec![f.name.clone()],
+        elements: vec![IndexElementSnapshot::column(f.name.clone())],
         access_method: "gist".to_string(),
-        expression: None,
+        predicate: None,
         opclass: None,
+        comment: None,
     })
 }
 
@@ -2050,14 +2117,17 @@ fn fts_objects_pg(
         identity: None,
         encryption_sentinel: None,
         comment_sentinel: None,
+        comment: None,
     };
     let idx = IndexSnapshot {
         name: fts_index_name(table),
         unique: false,
         columns: vec![fts_column_name().to_string()],
+        elements: vec![IndexElementSnapshot::column(fts_column_name())],
         access_method: "gin".to_string(),
-        expression: None,
+        predicate: None,
         opclass: None,
+        comment: None,
     };
     Some((col, idx))
 }
@@ -2103,10 +2173,12 @@ fn fts_index_snapshot_sqlite(
     Some(IndexSnapshot {
         name: sqlite_fts_vtable_name(table),
         unique: false,
+        elements: cols.iter().cloned().map(IndexElementSnapshot::column).collect(),
         columns: cols,
         access_method: SQLITE_FTS5_ACCESS_METHOD.to_string(),
-        expression: None,
+        predicate: None,
         opclass: None,
+        comment: None,
     })
 }
 
@@ -5377,12 +5449,7 @@ impl DdlEmitter for PgEmitter {
             .as_deref()
             .map(|oc| format!(" {oc}"))
             .unwrap_or_default();
-        let col_list = idx
-            .columns
-            .iter()
-            .map(|c| format!("{}{opclass_suffix}", quote_ident(c)))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let col_list = render_index_elements_pg(idx, &opclass_suffix);
         // ivfflat takes a `WITH (lists = N)` storage parameter.
         let with_clause = if idx.access_method == "ivfflat" {
             " WITH (lists = 100)"
@@ -5391,9 +5458,14 @@ impl DdlEmitter for PgEmitter {
         };
         (
             format!(
-                "CREATE {unique}INDEX IF NOT EXISTS {} ON {}{using} ({col_list}){with_clause}",
+                "CREATE {unique}INDEX IF NOT EXISTS {} ON {}{using} ({col_list}){}{}",
                 quote_ident(&idx.name),
                 self.qualified(table),
+                with_clause,
+                idx.predicate
+                    .as_deref()
+                    .map(|p| format!(" WHERE {p}"))
+                    .unwrap_or_default(),
             ),
             format!("DROP INDEX IF EXISTS {}", self.qualified(&idx.name)),
         )
@@ -5608,12 +5680,7 @@ impl DdlEmitter for SqliteEmitter {
             return sqlite_fts5_create_teardown(table, &idx.columns);
         }
         let unique = if idx.unique { "UNIQUE " } else { "" };
-        let col_list = idx
-            .columns
-            .iter()
-            .map(|c| quote_ident(c))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let col_list = render_index_elements_sqlite(idx);
         // PHASE 4 — SQLite indexes are UNqualified (`main` = the app file), and
         // SQLite has no `USING <method>` / `WITH (lists=…)` (those PG access-method
         // clauses are emitted only on the PG arm; a SQLite B-tree is the only kind
@@ -5621,9 +5688,13 @@ impl DdlEmitter for SqliteEmitter {
         // index name nor the table.
         (
             format!(
-                "CREATE {unique}INDEX IF NOT EXISTS {} ON {} ({col_list})",
+                "CREATE {unique}INDEX IF NOT EXISTS {} ON {} ({col_list}){}",
                 quote_ident(&idx.name),
                 quote_ident(table),
+                idx.predicate
+                    .as_deref()
+                    .map(|p| format!(" WHERE {p}"))
+                    .unwrap_or_default(),
             ),
             format!("DROP INDEX IF EXISTS {}", quote_ident(&idx.name)),
         )
@@ -5704,17 +5775,16 @@ impl DdlEmitter for MysqlEmitter {
 
     fn create_index(&self, table: &str, idx: &IndexSnapshot) -> (String, String) {
         let unique = if idx.unique { "UNIQUE " } else { "" };
-        let col_list = idx
-            .columns
-            .iter()
-            .map(|c| mysql_quote_ident(c))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let col_list = render_index_elements_mysql(idx);
         (
             format!(
-                "CREATE {unique}INDEX {} ON {} ({col_list})",
+                "CREATE {unique}INDEX {} ON {} ({col_list}){}",
                 mysql_quote_ident(&idx.name),
                 self.qualified(table),
+                idx.predicate
+                    .as_deref()
+                    .map(|p| format!(" WHERE {p}"))
+                    .unwrap_or_default(),
             ),
             format!(
                 "DROP INDEX {} ON {}",

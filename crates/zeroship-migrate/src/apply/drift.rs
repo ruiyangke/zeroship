@@ -39,8 +39,8 @@ use crate::conn::ExecutorConfig;
 use crate::apply::journal::{self, AppliedEntry, JournalError, Phase};
 use crate::model::migration::Migration;
 use crate::model::snapshot::{
-    ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, NamedTypeSnapshot, SchemaSnapshot,
-    SequenceSnapshot, TableSnapshot, ViewSnapshot,
+    ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, NamedTypeSnapshot,
+    SchemaSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
 
 // ---------------------------------------------------------------------------
@@ -333,6 +333,17 @@ fn canonical_extension_type(format_type: &str) -> String {
     trimmed.to_string()
 }
 
+fn split_column_catalog_comment(comment: Option<String>) -> (Option<String>, Option<String>) {
+    match comment {
+        Some(comment) if is_internal_column_comment_sentinel(&comment) => (None, Some(comment)),
+        other => (other, None),
+    }
+}
+
+fn is_internal_column_comment_sentinel(comment: &str) -> bool {
+    comment.starts_with("__zsmask:") || comment.starts_with("zsenc:")
+}
+
 pub async fn snapshot_schema(
     conn: &Client,
     project_schema: &str,
@@ -344,9 +355,11 @@ pub async fn snapshot_schema(
     // Base tables in the schema. `table_schema` is BOUND ($1), never interpolated.
     let table_rows = conn
         .query(
-            "SELECT table_name FROM information_schema.tables \
-             WHERE table_schema = $1 AND table_type = 'BASE TABLE' \
-             ORDER BY table_name",
+            "SELECT c.relname AS table_name, obj_description(c.oid, 'pg_class') AS comment \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') \
+             ORDER BY c.relname",
             &[&project_schema],
         )
         .await?;
@@ -356,6 +369,7 @@ pub async fn snapshot_schema(
             columns: Vec::new(),
             indexes: Vec::new(),
             constraints: Vec::new(),
+            comment: r.try_get("comment").ok().flatten(),
             // PG recovers CHECK / generated / partial-index references from the
             // structured buckets (pg_get_constraintdef / pg_get_expr); no raw text.
             stored_create_sql: None,
@@ -368,7 +382,8 @@ pub async fn snapshot_schema(
     // class.
     let view_rows = conn
         .query(
-            "SELECT c.relname AS view_name, c.relkind, pg_get_viewdef(c.oid, true) AS definition \
+            "SELECT c.relname AS view_name, c.relkind, pg_get_viewdef(c.oid, true) AS definition, \
+                    obj_description(c.oid, 'pg_class') AS comment \
              FROM pg_class c \
              JOIN pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = $1 AND c.relkind IN ('v', 'm') \
@@ -385,12 +400,13 @@ pub async fn snapshot_schema(
             materialized,
             columns: None,
             definition,
+            comment: r.try_get("comment").ok().flatten(),
         });
     }
 
     let type_rows = conn
         .query(
-            "SELECT t.typname AS type_name, t.typtype \
+            "SELECT t.typname AS type_name, t.typtype, obj_description(t.oid, 'pg_type') AS comment \
              FROM pg_type t \
              JOIN pg_namespace n ON n.oid = t.typnamespace \
              WHERE n.nspname = $1 AND t.typtype IN ('e', 'd') \
@@ -409,6 +425,7 @@ pub async fn snapshot_schema(
             r.get("type_name"),
             NamedTypeSnapshot {
                 kind: kind.to_string(),
+                comment: r.try_get("comment").ok().flatten(),
             },
         );
     }
@@ -426,7 +443,8 @@ pub async fn snapshot_schema(
     let col_rows = conn
         .query(
             "SELECT c.table_name, c.column_name, c.data_type, c.is_nullable, \
-                    format_type(a.atttypid, a.atttypmod) AS format_type \
+                    format_type(a.atttypid, a.atttypmod) AS format_type, \
+                    col_description(rel.oid, a.attnum) AS comment \
              FROM information_schema.columns c \
              JOIN pg_namespace n ON n.nspname = c.table_schema \
              JOIN pg_class rel ON rel.relname = c.table_name AND rel.relnamespace = n.oid \
@@ -449,14 +467,18 @@ pub async fn snapshot_schema(
             } else {
                 data_type
             };
+            let (comment, comment_sentinel) =
+                split_column_catalog_comment(r.try_get("comment").ok().flatten());
             t.columns.push(ColumnSnapshot {
                 name: r.get("column_name"),
                 data_type,
                 nullable: nullable.eq_ignore_ascii_case("YES"),
-                // Introspection never carries a default or a sentinel — those
-                // are emission-only metadata (see the `ColumnSnapshot` type
-                // doc). The masked-sibling/encrypted COLUMN itself round-trips;
-                // its sentinel is not a snapshot attribute.
+                // Defaults and inline encryption sentinels are emission-only.
+                // COMMENT-based runtime sentinels are classified into
+                // `comment_sentinel` so they do not drift against user-authored
+                // catalog comments.
+                comment,
+                comment_sentinel,
                 ..Default::default()
             });
         }
@@ -467,18 +489,15 @@ pub async fn snapshot_schema(
     // leading `indnkeyatts` entries of `indkey`) are recovered IN ORDER by
     // `unnest(indkey) WITH ORDINALITY` joined to `pg_attribute`, so a composite
     // / custom-named index carries its real column list (recovering columns from
-    // the index NAME is unsound — 1a). Expression keys (`attnum = 0`) and any
+    // the index NAME is unsound — 1a). Expression keys (`attnum = 0`) are kept
+    // in an ordered `elements` list via `pg_get_indexdef(index, ord)`, and any
     // INCLUDE columns (ordinal beyond `indnkeyatts`) are excluded.
     //
     // The ACCESS METHOD is recovered from `pg_am.amname` (`am.amname`) so a
     // GIN/GiST/ivfflat/hnsw index round-trips as that kind and a method FLIP is
-    // surfaced (#index-method-drift). The EXPRESSION / PREDICATE text is recovered
-    // via `pg_get_expr(indexprs, indrelid)` / `pg_get_expr(indpred, indrelid)`:
-    // an FTS `to_tsvector(...)` index or a partial index has no plain `indkey`
-    // columns, so without this it would phantom-DROP and be re-created on every
-    // diff (#fts-declarative). `pg_get_expr` renders the canonical, re-parse-stable
-    // spelling, so a desired snapshot the author builds with the SAME spelling
-    // re-diffs to zero.
+    // surfaced (#index-method-drift). The partial predicate text is recovered via
+    // `pg_get_expr(indpred, indrelid)`; expression keys are ordered elements, not
+    // folded into the predicate string.
     //
     // INVALID indexes are intentionally absent from the structural snapshot. They
     // are not usable implementations of a declared index, and treating them as
@@ -487,9 +506,21 @@ pub async fn snapshot_schema(
     let idx_rows = conn
         .query(
             "SELECT c.relname AS table_name, ic.relname AS index_name, x.indisunique, \
-                    am.amname AS access_method, \
-                    pg_get_expr(x.indexprs, x.indrelid) AS index_expr, \
+                    am.amname AS access_method, obj_description(ic.oid, 'pg_class') AS comment, \
                     pg_get_expr(x.indpred, x.indrelid) AS index_pred, \
+                    ( \
+                      SELECT array_agg( \
+                        CASE \
+                          WHEN k.attnum = 0 THEN 'expr:' || pg_get_indexdef(x.indexrelid, k.ord::int, true) \
+                          ELSE 'col:' || att.attname \
+                        END \
+                        ORDER BY k.ord \
+                      ) \
+                      FROM unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) \
+                      LEFT JOIN pg_attribute att \
+                        ON att.attrelid = x.indrelid AND att.attnum = k.attnum \
+                      WHERE k.ord <= x.indnkeyatts \
+                    ) AS elements, \
                     ( \
                       SELECT array_agg(att.attname ORDER BY k.ord) \
                       FROM unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) \
@@ -517,27 +548,30 @@ pub async fn snapshot_schema(
             // `array_agg` over an empty/all-expression key set is SQL NULL → an
             // empty column list (a wholly-expression index has no plain columns).
             let columns: Vec<String> = r.try_get("columns").unwrap_or_default();
-            // Fold the (optional) expression + (optional) partial predicate into
-            // one comparable string. `pg_get_expr` returns NULL for a plain
-            // column index → `None`. When both are present (an expression partial
-            // index) they are joined `<expr> WHERE <pred>` so the round-trip /
-            // drift compare sees the whole shape.
-            let index_expr: Option<String> = r.try_get("index_expr").ok().flatten();
-            let index_pred: Option<String> = r.try_get("index_pred").ok().flatten();
-            let expression = match (index_expr, index_pred) {
-                (Some(e), Some(p)) => Some(format!("{e} WHERE {p}")),
-                (Some(e), None) => Some(e),
-                (None, Some(p)) => Some(format!("WHERE {p}")),
-                (None, None) => None,
+            let element_tokens: Vec<String> = r.try_get("elements").unwrap_or_default();
+            let elements = if element_tokens.is_empty() {
+                columns.iter().cloned().map(IndexElementSnapshot::column).collect()
+            } else {
+                element_tokens
+                    .into_iter()
+                    .filter_map(|token| {
+                        token
+                            .strip_prefix("col:")
+                            .map(IndexElementSnapshot::column)
+                            .or_else(|| token.strip_prefix("expr:").map(IndexElementSnapshot::expr))
+                    })
+                    .collect()
             };
             t.indexes.push(IndexSnapshot {
                 name: r.get("index_name"),
                 unique: r.get("indisunique"),
+                elements,
                 columns,
                 access_method: r.get("access_method"),
-                expression,
+                predicate: r.try_get("index_pred").ok().flatten(),
                 // Emission-only; never recovered from the catalog.
                 opclass: None,
+                comment: r.try_get("comment").ok().flatten(),
             });
         }
     }
@@ -552,7 +586,8 @@ pub async fn snapshot_schema(
     let constraint_rows = conn
         .query(
             "SELECT c.relname AS table_name, con.conname AS constraint_name, \
-                    con.contype AS contype, pg_get_constraintdef(con.oid) AS definition \
+                    con.contype AS contype, pg_get_constraintdef(con.oid) AS definition, \
+                    obj_description(con.oid, 'pg_constraint') AS comment \
              FROM pg_constraint con \
              JOIN pg_class c ON c.oid = con.conrelid \
              JOIN pg_namespace n ON n.oid = con.connamespace \
@@ -582,13 +617,14 @@ pub async fn snapshot_schema(
                 name: r.get("constraint_name"),
                 kind: kind.to_string(),
                 definition,
+                comment: r.try_get("comment").ok().flatten(),
             });
         }
     }
 
     let seq_rows = conn
         .query(
-            "SELECT c.relname AS sequence_name \
+            "SELECT c.relname AS sequence_name, obj_description(c.oid, 'pg_class') AS comment \
              FROM pg_class c \
              JOIN pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = $1 AND c.relkind = 'S' \
@@ -604,7 +640,12 @@ pub async fn snapshot_schema(
         .await?;
     let mut sequences = std::collections::BTreeMap::new();
     for r in &seq_rows {
-        sequences.insert(r.get("sequence_name"), SequenceSnapshot::default());
+        sequences.insert(
+            r.get("sequence_name"),
+            SequenceSnapshot {
+                comment: r.try_get("comment").ok().flatten(),
+            },
+        );
     }
 
     Ok(SchemaSnapshot {
@@ -786,8 +827,20 @@ fn diff_attrs(
             });
         }
     };
+    let format_index_elements = |elements: &[IndexElementSnapshot]| {
+        elements
+            .iter()
+            .map(|element| match element {
+                IndexElementSnapshot::Column(name) => format!("col:{name}"),
+                IndexElementSnapshot::Expr(expr) => format!("expr:{expr}"),
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
 
-    // Columns: data_type + nullable.
+    push("table", "comment", exp_t.comment.as_deref().unwrap_or(""), act_t.comment.as_deref().unwrap_or(""));
+
+    // Columns: data_type + nullable + catalog comment.
     let act_cols: BTreeMap<&str, &ColumnSnapshot> =
         act_t.columns.iter().map(|c| (c.name.as_str(), c)).collect();
     for ec in &exp_t.columns {
@@ -800,10 +853,11 @@ fn diff_attrs(
                 &ec.nullable.to_string(),
                 &ac.nullable.to_string(),
             );
+            push(&obj, "comment", ec.comment.as_deref().unwrap_or(""), ac.comment.as_deref().unwrap_or(""));
         }
     }
 
-    // Indexes: unique + columns. A same-name index whose covered columns changed
+    // Indexes: unique + elements + predicate + comments. A same-name index whose covered columns changed
     // out-of-band (REINDEX over a different column set, or a name reused for a
     // different shape) is surfaced by the `columns` compare — the name-only diff
     // cannot see it (1a).
@@ -814,6 +868,12 @@ fn diff_attrs(
             let obj = format!("index {}", ei.name);
             push(&obj, "unique", &ei.unique.to_string(), &ai.unique.to_string());
             push(&obj, "columns", &ei.columns.join(","), &ai.columns.join(","));
+            push(
+                &obj,
+                "elements",
+                &format_index_elements(&ei.elements),
+                &format_index_elements(&ai.elements),
+            );
             // Access-method drift (#index-method-drift): a same-name index whose
             // `pg_am` kind changed out-of-band — e.g. someone dropped the ANN
             // ivfflat and re-created a plain btree under the same name, or vice
@@ -824,17 +884,10 @@ fn diff_attrs(
             if !ei.access_method.is_empty() {
                 push(&obj, "access_method", &ei.access_method, &ai.access_method);
             }
-            // Expression / partial-predicate drift: an FTS `to_tsvector(...)`
-            // index or a partial index whose expression was rewritten
-            // out-of-band. `None` on the expected side opts out.
-            if let Some(exp_expr) = &ei.expression {
-                push(
-                    &obj,
-                    "expression",
-                    exp_expr,
-                    ai.expression.as_deref().unwrap_or(""),
-                );
+            if let Some(exp_pred) = &ei.predicate {
+                push(&obj, "predicate", exp_pred, ai.predicate.as_deref().unwrap_or(""));
             }
+            push(&obj, "comment", ei.comment.as_deref().unwrap_or(""), ai.comment.as_deref().unwrap_or(""));
         }
     }
 
@@ -855,6 +908,7 @@ fn diff_attrs(
             {
                 push(&obj, "definition", &ec.definition, &ac.definition);
             }
+            push(&obj, "comment", ec.comment.as_deref().unwrap_or(""), ac.comment.as_deref().unwrap_or(""));
         }
     }
 }

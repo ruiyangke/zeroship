@@ -173,7 +173,7 @@ async fn create_table_level_unique_fk_and_index_apply_on_pg() {
                 "referencesTable":"teams","referencesColumns":["id"]}}
         ],
         "indexes":[
-            {"name":"m_team_idx","columns":["team_id"]}
+            {"name":"m_team_idx","columns":[{"kind":"column","name":"team_id"}]}
         ]}
     ]}"#;
     author_and_apply(

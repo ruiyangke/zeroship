@@ -18,7 +18,8 @@
 use std::collections::{BTreeSet, HashMap};
 
 use zeroship_migrate::model::ir::{
-    ColType, IrClassification, IrColumn, IrIndex, IrMask, IrMaskKind, MigrationIr, Op,
+    ColType, IndexElement, IrClassification, IrColumn, IrIndex, IrMask, IrMaskKind, MigrationIr,
+    Op,
 };
 use zeroship_migrate::render::lower::IrAuthor;
 use zeroship_migrate::{
@@ -34,8 +35,13 @@ fn empty_table_snapshot() -> TableSnapshot {
         columns: vec![],
         indexes: vec![],
         constraints: vec![],
+        comment: None,
         stored_create_sql: None,
     }
+}
+
+fn idx_col(name: &str) -> IndexElement {
+    IndexElement::Column { name: name.to_string() }
 }
 
 const SCHEMA: &str = "app";
@@ -449,7 +455,7 @@ fn create_index_render_is_byte_identical_pg() {
 
     let ops = vec![Op::CreateIndex {
         table: "events".into(),
-        columns: vec!["kind".into(), "at".into()],
+        columns: vec![idx_col("kind"), idx_col("at")],
         name: Some("events_kind_at_idx".into()),
         unique: None,
         using: None,
@@ -1281,7 +1287,7 @@ fn create_index_render_is_byte_identical_sqlite() {
 
     let ops = vec![Op::CreateIndex {
         table: "events".into(),
-        columns: vec!["kind".into(), "at".into()],
+        columns: vec![idx_col("kind"), idx_col("at")],
         name: Some("events_kind_at_idx".into()),
         unique: None,
         using: None,

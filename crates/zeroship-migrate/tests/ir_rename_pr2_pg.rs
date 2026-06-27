@@ -131,9 +131,11 @@ fn live_with_column(table: &str, column: &str, data_type: &str) -> LiveSchema {
             identity: None,
             encryption_sentinel: None,
             comment_sentinel: None,
+            comment: None,
         }],
         indexes: vec![],
         constraints: vec![],
+        comment: None,
         stored_create_sql: None,
     };
     let mut live = LiveSchema::default();
@@ -723,6 +725,7 @@ fn ir_renamecolumn_pg_rejects_rename_to_existing_column() {
                 identity: None,
                 encryption_sentinel: None,
                 comment_sentinel: None,
+                comment: None,
             },
             ColumnSnapshot {
                 name: "addr".into(),
@@ -735,10 +738,12 @@ fn ir_renamecolumn_pg_rejects_rename_to_existing_column() {
                 identity: None,
                 encryption_sentinel: None,
                 comment_sentinel: None,
+                comment: None,
             },
         ],
         indexes: vec![],
         constraints: vec![],
+        comment: None,
         stored_create_sql: None,
     };
     let mut live = LiveSchema::default();

@@ -26,6 +26,7 @@ export {
   pgEnum,
   pgDomain,
   sequence,
+  comment,
   // the immutable fluent column-type lexicon
   t,
   // the shared `@zeroship/db` lexicon bridge (PR5 goal A): lift a live-schema
@@ -71,6 +72,10 @@ export type {
   ExclusionElementArg,
   ExclusionConstraintArgs,
   ExclusionAddArgs,
+  IndexElement,
+  IndexElementArg,
+  CommentTarget,
+  CommentTargetArg,
   EnumHandle,
   DomainHandle,
   SequenceHandle,

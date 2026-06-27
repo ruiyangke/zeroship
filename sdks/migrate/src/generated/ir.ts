@@ -211,11 +211,28 @@ export type ColumnOrExpr =
   | { kind: "column"; name: string }
   | { kind: "expr"; expr: Expr };
 
+/** Index target: a column name or a closed expression AST. */
+export type IndexElement =
+  | { kind: "column"; name: string }
+  | { kind: "expr"; expr: Expr };
+
 /** One `(target WITH operator)` element in an exclusion constraint. */
 export interface ExclusionElement {
   target: ColumnOrExpr;
   operator: ExclusionOperator;
 }
+
+/** COMMENT ON target. Function comments are name-only in this IR; overloaded
+ *  function signatures are intentionally not modeled. */
+export type CommentTarget =
+  | { kind: "table"; schema?: string | null; name: string }
+  | { kind: "column"; schema?: string | null; table: string; name: string }
+  | { kind: "index"; schema?: string | null; name: string }
+  | { kind: "constraint"; schema?: string | null; table: string; name: string }
+  | { kind: "view"; schema?: string | null; name: string }
+  | { kind: "type"; schema?: string | null; name: string }
+  | { kind: "sequence"; schema?: string | null; name: string }
+  | { kind: "function"; schema?: string | null; name: string };
 
 /** A named table constraint (the `kind` is a nested internally-tagged object). */
 export interface IrConstraint {
@@ -232,7 +249,7 @@ export interface SequenceOwnedBy {
 /** An index definition inside a `createTable` op. */
 export interface IrIndex {
   name?: string | null;
-  columns: string[];
+  columns: IndexElement[];
   unique?: boolean | null;
   using?: IndexMethod | null;
   where?: Expr | null;
@@ -336,7 +353,7 @@ export type Op =
   | {
       op: "createIndex";
       table: string;
-      columns: string[];
+      columns: IndexElement[];
       name?: string | null;
       unique?: boolean | null;
       using?: IndexMethod | null;
@@ -387,6 +404,7 @@ export type Op =
       ownedBy?: SequenceOwnedBy | null;
     }
   | { op: "dropSequence"; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "comment"; target: CommentTarget; comment?: string | null }
   | {
       op: "createTrigger";
       name: string;

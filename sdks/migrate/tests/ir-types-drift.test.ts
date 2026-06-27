@@ -61,7 +61,7 @@ const TS = {
     "createSchema", "dropSchema", "createExtension", "dropExtension", "createRole",
     "alterRole", "dropRole", "dropOwnedBy", "grant", "revoke", "enableRls", "forceRls",
     "disableRls", "noForceRls", "createPolicy", "dropPolicy", "createFunction",
-    "dropFunction", "pgRaw",
+    "dropFunction", "comment", "pgRaw",
   ].sort(),
   // Expr node tags.
   Expr: ["colRef", "literal", "binOp", "unaryOp", "case", "fnCall", "fnSynth", "cast"].sort(),
@@ -81,6 +81,8 @@ const TS = {
   SelectItem: ["colRef", "expr"].sort(),
   OrderItem: ["colRef", "expr"].sort(),
   GrantTarget: ["table", "schema", "sequence", "database"].sort(),
+  IndexElement: ["column", "expr"].sort(),
+  CommentTarget: ["table", "column", "index", "constraint", "view", "type", "sequence", "function"].sort(),
   // The closed string-enums (generated into enums.ts).
   BinaryOp: ["eq", "ne", "lt", "le", "gt", "ge", "and", "or", "add", "sub", "mul", "div", "concat"].sort(),
   UnaryOp: ["not", "isNull", "isNotNull", "isTrue", "isFalse"].sort(),
@@ -169,6 +171,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   dropPolicy: ["ifExists", "name", "schema", "table"].sort(),
   createFunction: ["args", "body", "language", "name", "replace", "returns", "schema", "volatility"].sort(),
   dropFunction: ["argTypes", "ifExists", "name", "schema"].sort(),
+  comment: ["comment", "target"].sort(),
   pgRaw: ["binds", "sql"].sort(),
 };
 
@@ -201,6 +204,11 @@ test("view query/body tags match the schema", () => {
 
 test("vendor grant target tags match the schema", () => {
   assert.deepEqual(variantTags(schema.$defs.GrantTarget, "kind"), TS.GrantTarget);
+});
+
+test("index element and comment target tags match the schema", () => {
+  assert.deepEqual(variantTags(schema.$defs.IndexElement, "kind"), TS.IndexElement);
+  assert.deepEqual(variantTags(schema.$defs.CommentTarget, "kind"), TS.CommentTarget);
 });
 
 test("closed string-enum tokens match the schema", () => {

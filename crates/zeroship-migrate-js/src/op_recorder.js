@@ -73,7 +73,7 @@ try {
   // influence it. The Rust child STAMPS owner_app onto this envelope after eval, from
   // the server-injected, ownership-cross-checked app_id. The JS half only emits ops.
   const envelope = {
-    ir_version: 4,
+    ir_version: 5,
     name: resolveName(mod),
     ops,
   };

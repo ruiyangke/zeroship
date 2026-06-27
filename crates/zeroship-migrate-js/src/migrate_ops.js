@@ -507,6 +507,10 @@ export function pgEnum(name, values, args = {}) {
       recordDropEnum(name, dropArgs);
       return handle;
     },
+    comment(text, commentArgs = {}) {
+      recordComment({ kind: "type", name, schema: commentArgs.schema }, text);
+      return handle;
+    },
   };
   return handle;
 }
@@ -521,6 +525,10 @@ export function pgDomain(name) {
     },
     drop(args = {}) {
       recordDropDomain(name, args);
+      return handle;
+    },
+    comment(text, commentArgs = {}) {
+      recordComment({ kind: "type", name, schema: commentArgs.schema }, text);
       return handle;
     },
   };
@@ -541,6 +549,10 @@ export function sequence(name) {
     },
     drop(args = {}) {
       recordDropSequence(name, args);
+      return handle;
+    },
+    comment(text, commentArgs = {}) {
+      recordComment({ kind: "sequence", name, schema: commentArgs.schema }, text);
       return handle;
     },
   };
@@ -857,6 +869,47 @@ function recordDropSequence(name, args = {}) {
   );
 }
 
+function recordComment(target, text) {
+  if (text !== null && typeof text !== "string") {
+    throw structuredError("OP_INVALID", "comment text must be a string or null");
+  }
+  push(
+    compact({
+      op: "comment",
+      target: commentTargetToIr(target),
+      comment: text,
+    }),
+  );
+}
+
+function commentTargetToIr(target) {
+  if (!target || typeof target !== "object") {
+    throw structuredError("OP_INVALID", "comment target must be a closed target object");
+  }
+  switch (target.kind) {
+    case "table":
+    case "index":
+    case "view":
+    case "type":
+    case "sequence":
+    case "function":
+      requireString(target.name, `comment target ${target.kind}.name`);
+      return compact({ kind: target.kind, schema: target.schema, name: target.name });
+    case "column":
+    case "constraint":
+      requireString(target.table, `comment target ${target.kind}.table`);
+      requireString(target.name, `comment target ${target.kind}.name`);
+      return compact({
+        kind: target.kind,
+        schema: target.schema,
+        table: target.table,
+        name: target.name,
+      });
+    default:
+      throw structuredError("OP_INVALID", `unsupported comment target kind ${target.kind}`);
+  }
+}
+
 // ===========================================================================
 // (D) The internal op-construction helpers (the single source of truth). These
 // build + push the EXACT canonical op object the Rust closed `Op` enum /
@@ -911,7 +964,7 @@ function recordCreateTable(name, args) {
     indexes.push(
       compact({
         name: idx.name,
-        columns: idx.columns,
+        columns: idx.columns.map(indexElementToIr),
         unique: idx.unique,
         using: idx.using,
         where: resolveExpr(idx.where),
@@ -1161,6 +1214,31 @@ function exclusionTargetToIr(target) {
   return { kind: "expr", expr };
 }
 
+function indexElementToIr(element) {
+  if (typeof element === "string") {
+    requireString(element, "index element column");
+    return { kind: "column", name: element };
+  }
+  if (element && typeof element === "object" && "kind" in element) {
+    if (element.kind === "column") {
+      requireString(element.name, "index column element name");
+      return { kind: "column", name: element.name };
+    }
+    if (element.kind === "expr") {
+      const expr = resolveExpr(element.expr);
+      if (!expr) {
+        throw structuredError("OP_INVALID", "index expr element needs { kind: \"expr\", expr }");
+      }
+      return { kind: "expr", expr };
+    }
+  }
+  const expr = resolveExpr(element);
+  if (!expr) {
+    throw structuredError("OP_INVALID", "index element must be a column name or expression");
+  }
+  return { kind: "expr", expr };
+}
+
 function recordAddExclusion(table, name, args) {
   push(
     compact({
@@ -1187,13 +1265,13 @@ function recordDropConstraint(table, name, args) {
 
 function recordCreateIndex(table, name, args) {
   if (!Array.isArray(args.columns)) {
-    throw structuredError("OP_INVALID", ".index(name).add needs { columns: string[] }");
+    throw structuredError("OP_INVALID", ".index(name).add needs { columns: IndexElementArg[] }");
   }
   push(
     compact({
       op: "createIndex",
       table,
-      columns: args.columns,
+      columns: args.columns.map(indexElementToIr),
       name,
       unique: args.unique,
       using: args.using,
@@ -1608,6 +1686,10 @@ function requireColumnDef(x, where) {
   }
 }
 
+export function comment(target, text) {
+  recordComment(target, text);
+}
+
 export function table(name, opts = {}) {
   requireString(name, "table(name, …)");
   const dflt = opts.schema;
@@ -1632,6 +1714,10 @@ export function table(name, opts = {}) {
         ifExists: args.ifExists,
         schema: pickSchema(args, dflt),
       });
+      return handle;
+    },
+    comment(text, args = {}) {
+      recordComment({ kind: "table", name, schema: pickSchema(args, dflt) }, text);
       return handle;
     },
 
@@ -1664,6 +1750,11 @@ export function table(name, opts = {}) {
         alter(args) {
           terminateSelector(id);
           recordAlterColumn(name, col, { ...args, schema: pickSchema(args, dflt) });
+          return handle;
+        },
+        comment(text, args = {}) {
+          terminateSelector(id);
+          recordComment({ kind: "column", table: name, name: col, schema: pickSchema(args, dflt) }, text);
           return handle;
         },
       };
@@ -1723,6 +1814,11 @@ export function table(name, opts = {}) {
           recordDropConstraint(name, cName, { ifExists: args.ifExists, schema: pickSchema(args, dflt) });
           return handle;
         },
+        comment(text, args = {}) {
+          terminateSelector(id);
+          recordComment({ kind: "constraint", table: name, name: cName, schema: pickSchema(args, dflt) }, text);
+          return handle;
+        },
       };
     },
 
@@ -1744,6 +1840,11 @@ export function table(name, opts = {}) {
             unique: args.unique,
             schema: pickSchema(args, dflt),
           });
+          return handle;
+        },
+        comment(text, args = {}) {
+          terminateSelector(id);
+          recordComment({ kind: "index", name: idxName, schema: pickSchema(args, dflt) }, text);
           return handle;
         },
       };
@@ -1871,6 +1972,10 @@ export function view(name, opts = {}) {
         materialized: args.materialized,
         schema: pickSchema(args, dflt),
       });
+      return handle;
+    },
+    comment(text, args = {}) {
+      recordComment({ kind: "view", name, schema: pickSchema(args, dflt) }, text);
       return handle;
     },
   };

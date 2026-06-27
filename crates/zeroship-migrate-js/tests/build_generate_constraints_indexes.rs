@@ -19,7 +19,9 @@
 //!     lowering injects them) — they are never re-emitted nor flagged.
 
 use zeroship_migrate::render::declarative::DesiredSchema;
-use zeroship_migrate::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot};
+use zeroship_migrate::{
+    ColumnSnapshot, ConstraintSnapshot, IndexElement, IndexSnapshot, SchemaSnapshot, TableSnapshot,
+};
 use zeroship_migrate_js::{generate_ops, ScaffoldError};
 
 const APP: &str = "app_med1";
@@ -63,6 +65,7 @@ fn generate_synthesizes_plain_user_index() {
             IndexSnapshot::btree("members_email_idx", false, vec!["email".into()]),
         ],
         constraints: vec![],
+        comment: None,
         stored_create_sql: None,
     };
     let desired = desired_from(table, t);
@@ -90,7 +93,7 @@ fn generate_synthesizes_plain_user_index() {
     );
     let (idx_table, idx_cols, idx_name) = &create_indexes[0];
     assert_eq!(idx_table, "members");
-    assert_eq!(idx_cols, &vec!["email".to_string()]);
+    assert_eq!(idx_cols, &vec![IndexElement::Column { name: "email".to_string() }]);
     assert_eq!(idx_name.as_deref(), Some("members_email_idx"));
     // The emitted .ts mirrors the synthesized index via the fluent surface:
     // `table("members").index("members_email_idx").add({ columns: ["email"] })`.
@@ -116,14 +119,17 @@ fn generate_fails_closed_on_user_constraint() {
                 name: "orders_pkey".into(),
                 kind: "PRIMARY KEY".into(),
                 definition: "PRIMARY KEY (id)".into(),
+                comment: None,
             },
             // user FK — definition text only; must fail closed.
             ConstraintSnapshot {
                 name: "user_id_fkey".into(),
                 kind: "FOREIGN KEY".into(),
                 definition: "FOREIGN KEY (user_id) REFERENCES \"app\".users(id)".into(),
+                comment: None,
             },
         ],
+        comment: None,
         stored_create_sql: None,
     };
     let desired = desired_from(table, t);
@@ -154,6 +160,7 @@ fn generate_fails_closed_on_non_btree_index() {
             ann,
         ],
         constraints: vec![],
+        comment: None,
         stored_create_sql: None,
     };
     let desired = desired_from(table, t);
@@ -182,7 +189,9 @@ fn generate_plain_table_still_works() {
             name: "widgets_pkey".into(),
             kind: "PRIMARY KEY".into(),
             definition: "PRIMARY KEY (id)".into(),
+            comment: None,
         }],
+        comment: None,
         stored_create_sql: None,
     };
     let desired = desired_from(table, t);

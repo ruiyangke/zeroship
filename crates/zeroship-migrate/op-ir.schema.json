@@ -380,10 +380,10 @@
               "type": "string"
             },
             "columns": {
-              "description": "Indexed columns.",
+              "description": "Indexed key elements (plain columns or closed expressions).",
               "type": "array",
               "items": {
-                "type": "string"
+                "$ref": "#/$defs/IndexElement"
               }
             },
             "name": {
@@ -457,6 +457,32 @@
             "op",
             "table",
             "columns"
+          ]
+        },
+        {
+          "description": "`COMMENT ON <object> IS <text|NULL>`.",
+          "type": "object",
+          "properties": {
+            "target": {
+              "description": "Comment target object.",
+              "$ref": "#/$defs/CommentTarget"
+            },
+            "comment": {
+              "description": "Comment text. `None` renders `IS NULL` and clears an existing comment.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "comment"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "target"
           ]
         },
         {
@@ -3632,10 +3658,10 @@
           ]
         },
         "columns": {
-          "description": "Indexed columns.",
+          "description": "Indexed key elements (plain columns or closed expressions).",
           "type": "array",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/IndexElement"
           }
         },
         "unique": {
@@ -3671,6 +3697,49 @@
       "additionalProperties": false,
       "required": [
         "columns"
+      ]
+    },
+    "IndexElement": {
+      "description": "A CLOSED index key element. An index key is either a quoted column name or a\nclosed expression AST rendered by the dialect expression renderer; never raw\nSQL. This intentionally mirrors [`ColumnOrExpr`] for exclusion constraints,\nbut uses the index-specific name because future index-only facets can be\nadded here without widening exclusion elements.",
+      "oneOf": [
+        {
+          "description": "A table column key.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Column name.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "column"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
+        },
+        {
+          "description": "A closed expression key.",
+          "type": "object",
+          "properties": {
+            "expr": {
+              "description": "Expression AST.",
+              "$ref": "#/$defs/Expr"
+            },
+            "kind": {
+              "type": "string",
+              "const": "expr"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "expr"
+          ]
+        }
       ]
     },
     "IndexMethod": {
@@ -3720,6 +3789,229 @@
           "description": "Run the drop/alter only if the target object is PRESENT; if ABSENT it is a\njournaled satisfied no-op (a drop has no shape to verify — presence alone\ngoverns). Legal on the drop*/rename/alter family\n(`dropTable`/`dropColumn`/`dropIndex`/`dropConstraint`/`renameColumn`/`alterColumn*`).",
           "type": "string",
           "const": "ifExists"
+        }
+      ]
+    },
+    "CommentTarget": {
+      "description": "CLOSED target shape for `COMMENT ON`. Only object identifiers and a comment\nliteral are carried; PostgreSQL's function comments normally require an\nargument-type signature for overloaded functions, but the IR intentionally\nmodels only the function name. Function comments are therefore rendered only\nfor unambiguous `FUNCTION name` references and are not folded into the\nsnapshot.",
+      "oneOf": [
+        {
+          "description": "`COMMENT ON TABLE`.",
+          "type": "object",
+          "properties": {
+            "schema": {
+              "description": "Optional schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "description": "Table name.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "table"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
+        },
+        {
+          "description": "`COMMENT ON COLUMN`.",
+          "type": "object",
+          "properties": {
+            "schema": {
+              "description": "Optional schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "table": {
+              "description": "Table name.",
+              "type": "string"
+            },
+            "name": {
+              "description": "Column name.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "column"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "table",
+            "name"
+          ]
+        },
+        {
+          "description": "`COMMENT ON INDEX`.",
+          "type": "object",
+          "properties": {
+            "schema": {
+              "description": "Optional schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "description": "Index name.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "index"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
+        },
+        {
+          "description": "`COMMENT ON CONSTRAINT ... ON ...`.",
+          "type": "object",
+          "properties": {
+            "schema": {
+              "description": "Optional schema qualifier for the owning table.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "table": {
+              "description": "Owning table.",
+              "type": "string"
+            },
+            "name": {
+              "description": "Constraint name.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "constraint"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "table",
+            "name"
+          ]
+        },
+        {
+          "description": "`COMMENT ON VIEW`.",
+          "type": "object",
+          "properties": {
+            "schema": {
+              "description": "Optional schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "description": "View name.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "view"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
+        },
+        {
+          "description": "`COMMENT ON TYPE` (enum/domain).",
+          "type": "object",
+          "properties": {
+            "schema": {
+              "description": "Optional schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "description": "Type name.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "type"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
+        },
+        {
+          "description": "`COMMENT ON SEQUENCE`.",
+          "type": "object",
+          "properties": {
+            "schema": {
+              "description": "Optional schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "description": "Sequence name.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "sequence"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
+        },
+        {
+          "description": "`COMMENT ON FUNCTION`.",
+          "type": "object",
+          "properties": {
+            "schema": {
+              "description": "Optional schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "description": "Function name. PostgreSQL overload signatures are intentionally not\nmodelled because an argument-type list would otherwise become a raw SQL\npassthrough string.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "function"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
         }
       ]
     },

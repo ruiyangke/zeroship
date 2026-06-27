@@ -16,7 +16,8 @@ use compio_postgres::Client;
 use zeroship_migrate::apply::drift::snapshot_schema;
 use zeroship_migrate::render::declarative::{desired_snapshot, DeclarativeAuthor, DesiredSchema};
 use zeroship_migrate::{
-    Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, SqlDialect,
+    Approval, ExecutorConfig, GuardConfig, IndexElement, IrAuthor, LiveSchema, MigrationEngine,
+    SqlDialect,
 };
 use zeroship_migrate_js::recorder_service::recorder_child_path;
 use zeroship_migrate_js::{
@@ -270,7 +271,11 @@ async fn generate_index_bearing_schema_redifs_to_zero_on_pg() {
     // The unique index over `email` MUST be synthesized as a standalone createIndex.
     use zeroship_migrate::model::ir::Op;
     assert!(
-        gen.ir.ops.iter().any(|o| matches!(o, Op::CreateIndex { columns, .. } if columns == &vec!["email".to_string()])),
+        gen.ir.ops.iter().any(|o| matches!(
+            o,
+            Op::CreateIndex { columns, .. }
+                if columns == &vec![IndexElement::Column { name: "email".to_string() }]
+        )),
         "the unique-field index must be synthesized as a createIndex op; ops: {:?}",
         gen.ir.ops
     );
@@ -330,6 +335,7 @@ async fn generate_emits_machine_readable_backfill_todo() {
         ],
         indexes: vec![],
         constraints: vec![],
+        comment: None,
         stored_create_sql: None,
     };
     desired_tbl.columns.sort_by(|a, b| a.name.cmp(&b.name));
@@ -350,6 +356,7 @@ async fn generate_emits_machine_readable_backfill_todo() {
         }],
         indexes: vec![],
         constraints: vec![],
+        comment: None,
         stored_create_sql: None,
     };
     live_tbl.columns.sort_by(|a, b| a.name.cmp(&b.name));

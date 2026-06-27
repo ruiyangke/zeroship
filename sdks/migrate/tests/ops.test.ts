@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { t, table, lintDeterminism } from "../src/index.js";
+import { t, table, comment, lintDeterminism } from "../src/index.js";
 // The build-evaluator recorder seam (not part of the public surface).
 import { __begin, __drain } from "../src/ops.js";
 
@@ -246,6 +246,58 @@ test("the (c) => Expr builder constructs the closed AST", () => {
   assert.equal(set.b.fn, "concatWs");
   assert.equal(set.d.node, "case");
   assert.equal(ops[0].where.op, "and");
+});
+
+test("index columns normalize to closed column/expression elements", () => {
+  const ops = record(() =>
+    table("users").index("users_email_lower_idx").add({
+      columns: ["email", { kind: "expr", expr: (c) => c.fn.lower(c("email")) }],
+      where: (c) => c("active").isTrue(),
+    }),
+  );
+  assert.deepEqual(ops[0].columns, [
+    { kind: "column", name: "email" },
+    {
+      kind: "expr",
+      expr: { node: "fnCall", fn: "lower", args: [{ node: "colRef", name: "email" }] },
+    },
+  ]);
+  assert.deepEqual(ops[0].where, {
+    node: "unaryOp",
+    op: "isTrue",
+    operand: { node: "colRef", name: "active" },
+  });
+});
+
+test("comment records closed COMMENT ON targets through handles and top-level API", () => {
+  const ops = record(() => {
+    table("users", { schema: "app" }).comment("User accounts");
+    table("users").column("email").comment(null);
+    table("users").index("users_email_idx").comment("Email lookup", { schema: "idx" });
+    comment({ kind: "function", schema: "app", name: "normalize_email" }, "Normalize email");
+  });
+  assert.deepEqual(ops, [
+    {
+      op: "comment",
+      target: { kind: "table", schema: "app", name: "users" },
+      comment: "User accounts",
+    },
+    {
+      op: "comment",
+      target: { kind: "column", table: "users", name: "email" },
+      comment: null,
+    },
+    {
+      op: "comment",
+      target: { kind: "index", schema: "idx", name: "users_email_idx" },
+      comment: "Email lookup",
+    },
+    {
+      op: "comment",
+      target: { kind: "function", schema: "app", name: "normalize_email" },
+      comment: "Normalize email",
+    },
+  ]);
 });
 
 test("backfill defaults cursorColumn to 'id' and batchSize to the engine default", () => {

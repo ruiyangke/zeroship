@@ -13,7 +13,7 @@
 use zeroship_migrate::{
     Checksum, ChecksumInput, MigrationFlags, MigrationId, OnlinePhase,
 };
-use zeroship_migrate::model::ir::{CanonicalOpList, IrColumn, IrScalar, Op};
+use zeroship_migrate::model::ir::{CanonicalOpList, IndexElement, IrColumn, IrScalar, Op};
 
 // ---------------------------------------------------------------------------
 // Fixed, deterministic ids — `MigrationId` parses any well-formed `mig_…` id,
@@ -385,7 +385,7 @@ fn checksum_of_ir_is_identical_across_dialect_renders() {
     let owner = "app_portable";
     let ops = vec![Op::CreateIndex {
         table: "users".into(),
-        columns: vec!["email".into()],
+        columns: vec![IndexElement::Column { name: "email".into() }],
         name: None,
         unique: Some(true),
         using: None,

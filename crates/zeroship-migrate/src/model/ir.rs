@@ -88,7 +88,7 @@ pub const EXPR_INVALID_NUMERIC: &str = "EXPR_INVALID_NUMERIC";
 /// engine that this build cannot faithfully interpret), per the AGENTS.md
 /// "wire-format versioning is code-evolution discipline, not user-compat" stance.
 /// A bump MUST be checksum-neutral for already-applied artifacts (§5.3).
-pub const CURRENT_IR_VERSION: u32 = 4;
+pub const CURRENT_IR_VERSION: u32 = 5;
 
 fn deserialize_present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
@@ -753,6 +753,26 @@ pub enum ColumnOrExpr {
     },
 }
 
+/// A CLOSED index key element. An index key is either a quoted column name or a
+/// closed expression AST rendered by the dialect expression renderer; never raw
+/// SQL. This intentionally mirrors [`ColumnOrExpr`] for exclusion constraints,
+/// but uses the index-specific name because future index-only facets can be
+/// added here without widening exclusion elements.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum IndexElement {
+    /// A table column key.
+    Column {
+        /// Column name.
+        name: String,
+    },
+    /// A closed expression key.
+    Expr {
+        /// Expression AST.
+        expr: Expr,
+    },
+}
+
 /// CLOSED exclusion access-method set. PostgreSQL supports more methods, but the
 /// IR only admits the audited methods below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -921,8 +941,8 @@ pub struct IrIndex {
     /// Optional index name (engine-derived if absent).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Indexed columns.
-    pub columns: Vec<String>,
+    /// Indexed key elements (plain columns or closed expressions).
+    pub columns: Vec<IndexElement>,
     /// Whether the index is UNIQUE.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unique: Option<bool>,
@@ -932,6 +952,121 @@ pub struct IrIndex {
     /// Partial-index predicate (a closed-AST node, never raw SQL).
     #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
     pub r#where: Option<Expr>,
+}
+
+/// CLOSED target shape for `COMMENT ON`. Only object identifiers and a comment
+/// literal are carried; PostgreSQL's function comments normally require an
+/// argument-type signature for overloaded functions, but the IR intentionally
+/// models only the function name. Function comments are therefore rendered only
+/// for unambiguous `FUNCTION name` references and are not folded into the
+/// snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum CommentTarget {
+    /// `COMMENT ON TABLE`.
+    Table {
+        /// Optional schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// Table name.
+        name: String,
+    },
+    /// `COMMENT ON COLUMN`.
+    Column {
+        /// Optional schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// Table name.
+        table: String,
+        /// Column name.
+        name: String,
+    },
+    /// `COMMENT ON INDEX`.
+    Index {
+        /// Optional schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// Index name.
+        name: String,
+    },
+    /// `COMMENT ON CONSTRAINT ... ON ...`.
+    Constraint {
+        /// Optional schema qualifier for the owning table.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// Owning table.
+        table: String,
+        /// Constraint name.
+        name: String,
+    },
+    /// `COMMENT ON VIEW`.
+    View {
+        /// Optional schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// View name.
+        name: String,
+    },
+    /// `COMMENT ON TYPE` (enum/domain).
+    Type {
+        /// Optional schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// Type name.
+        name: String,
+    },
+    /// `COMMENT ON SEQUENCE`.
+    Sequence {
+        /// Optional schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// Sequence name.
+        name: String,
+    },
+    /// `COMMENT ON FUNCTION`.
+    Function {
+        /// Optional schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// Function name. PostgreSQL overload signatures are intentionally not
+        /// modelled because an argument-type list would otherwise become a raw SQL
+        /// passthrough string.
+        name: String,
+    },
+}
+
+impl CommentTarget {
+    /// The schema qualifier carried by this target, if any.
+    #[must_use]
+    pub fn schema(&self) -> Option<&str> {
+        match self {
+            CommentTarget::Table { schema, .. }
+            | CommentTarget::Column { schema, .. }
+            | CommentTarget::Index { schema, .. }
+            | CommentTarget::Constraint { schema, .. }
+            | CommentTarget::View { schema, .. }
+            | CommentTarget::Type { schema, .. }
+            | CommentTarget::Sequence { schema, .. }
+            | CommentTarget::Function { schema, .. } => schema.as_deref(),
+        }
+    }
+
+    /// The table whose metadata this comment mutates, when the target is
+    /// table-scoped. Index comments do not carry an owning-table hint in the IR.
+    #[must_use]
+    pub fn touched_table(&self) -> Option<&str> {
+        match self {
+            CommentTarget::Table { name, .. } | CommentTarget::Column { table: name, .. } => {
+                Some(name.as_str())
+            }
+            CommentTarget::Constraint { table, .. } => Some(table.as_str()),
+            CommentTarget::Index { .. }
+            | CommentTarget::View { .. }
+            | CommentTarget::Type { .. }
+            | CommentTarget::Sequence { .. }
+            | CommentTarget::Function { .. } => None,
+        }
+    }
 }
 
 /// **PR6a** — the optional `insert { onConflict }` upsert clause (§3.4 / §9). A
@@ -1685,8 +1820,8 @@ pub enum Op {
     CreateIndex {
         /// Target table.
         table: String,
-        /// Indexed columns.
-        columns: Vec<String>,
+        /// Indexed key elements (plain columns or closed expressions).
+        columns: Vec<IndexElement>,
         /// Optional index name.
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
@@ -1708,6 +1843,14 @@ pub enum Op {
         /// **PR10** — the existence guard (`ifNotExists` legal here).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
+    },
+    /// `COMMENT ON <object> IS <text|NULL>`.
+    Comment {
+        /// Comment target object.
+        target: CommentTarget,
+        /// Comment text. `None` renders `IS NULL` and clears an existing comment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        comment: Option<String>,
     },
     /// `DROP INDEX [CONCURRENTLY]`.
     DropIndex {
@@ -2432,7 +2575,8 @@ impl Op {
             | Op::DropDomain { .. }
             | Op::CreateSequence { .. }
             | Op::AlterSequence { .. }
-            | Op::DropSequence { .. } => Vec::new(),
+            | Op::DropSequence { .. }
+            | Op::Comment { .. } => Vec::new(),
             Op::CreateView {
                 query: ViewQuery::Structured { .. },
                 materialized,
@@ -2516,6 +2660,7 @@ impl Op {
             | Op::CreateSequence { .. }
             | Op::AlterSequence { .. }
             | Op::DropSequence { .. } => None,
+            Op::Comment { target, .. } => target.touched_table(),
             // The owning table is an optional dialect hint on a DROP INDEX; when
             // present it is the touched table, otherwise the op names only the
             // index (resolved against the live schema downstream).
@@ -2579,6 +2724,7 @@ impl Op {
             | Op::CreateSequence { schema, .. }
             | Op::AlterSequence { schema, .. }
             | Op::DropSequence { schema, .. } => schema.as_deref(),
+            Op::Comment { target, .. } => target.schema(),
             // VENDOR — ops carrying a schema QUALIFIER expose it for cross-schema
             // confinement + effective-schema resolution.
             Op::CreateExtension { schema, .. }
@@ -2645,6 +2791,7 @@ impl Op {
             | Op::Update { .. }
             | Op::Delete { .. }
             | Op::Backfill { .. }
+            | Op::Comment { .. }
             | Op::CreateView { .. }
             | Op::CreateEnum { .. }
             | Op::CreateDomain { .. }
@@ -2705,6 +2852,7 @@ impl Op {
             | Op::Update { .. }
             | Op::Delete { .. }
             | Op::Backfill { .. }
+            | Op::Comment { .. }
             | Op::CreateView { .. }
             | Op::CreateEnum { .. }
             | Op::CreateDomain { .. }

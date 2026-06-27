@@ -1,5 +1,5 @@
 {
-  "ir_version": 4,
+  "ir_version": 5,
   "name": "sequences_exclusion",
   "owner_app": "app_corpus",
   "ops": [

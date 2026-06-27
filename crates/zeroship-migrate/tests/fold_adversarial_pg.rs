@@ -150,7 +150,7 @@ async fn drop_column_cascades_dependent_index() {
 
     let reg = registry(&[("t", APP)]);
     let idx = r#"{"ir_version":1,"name":"mkidx","ops":[
-        {"op":"createIndex","table":"t","columns":["b"],"name":"t_b_idx"}
+        {"op":"createIndex","table":"t","columns":[{"kind":"column","name":"b"}],"name":"t_b_idx"}
     ]}"#;
     all.extend(apply_doc(&conn, &cfg, idx, &reg, Approval::None).await);
 
@@ -313,7 +313,7 @@ async fn drop_fk_constraint_keeps_same_named_user_index() {
 
     // Create an INDEPENDENT user index that SHARES the FK's name (PG allows this).
     let mk_idx = r#"{"ir_version":1,"name":"mkidx","ops":[
-        {"op":"createIndex","table":"child","columns":["note"],"name":"shared_name"}
+        {"op":"createIndex","table":"child","columns":[{"kind":"column","name":"note"}],"name":"shared_name"}
     ]}"#;
     all.extend(apply_doc(&conn, &cfg, mk_idx, &reg, Approval::None).await);
 

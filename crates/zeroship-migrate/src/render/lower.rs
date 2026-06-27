@@ -36,13 +36,16 @@ use crate::render::renderer::{Capability, DialectSupports};
 use crate::model::expr::Expr;
 use crate::guard::{guard_for, GuardConfig, GuardError};
 use crate::model::ir::{
-    ColType, ColumnOrExpr, ExclusionElement, ExclusionMethod, ExclusionOperator, ExistenceGuard,
-    ForEach, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrMask, IndexMethod,
-    Join, MigrationIr, Op, OrderDir, OrderItem, RaiseLevel, RefAction, SelectAst, SelectItem,
-    SequenceOwnedBy, TableRef, TriggerAction, TriggerEvent, TriggerStmt, VectorMetric, ViewQuery,
+    ColType, ColumnOrExpr, CommentTarget, ExclusionElement, ExclusionMethod, ExclusionOperator,
+    ExistenceGuard, ForEach, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrDefault,
+    IrIndex, IrMask, IndexMethod, Join, MigrationIr, Op, OrderDir, OrderItem, RaiseLevel,
+    RefAction, SelectAst, SelectItem, SequenceOwnedBy, TableRef, TriggerAction, TriggerEvent,
+    TriggerStmt, VectorMetric, ViewQuery,
 };
 use crate::model::migration::Migration;
-use crate::model::snapshot::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, TableSnapshot};
+use crate::model::snapshot::{
+    ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, TableSnapshot,
+};
 use crate::render::plan::AppliedPlan;
 use crate::render::step::{PlanStep, RenameStep};
 use zeroship_schema::query::SqlDialect;
@@ -1623,6 +1626,10 @@ impl IrAuthor {
                 let stmt = render_sequence_op(op, &eff_schema, self.dialect)?;
                 vec![decl.lower_vendor_statement(&stmt.name, stmt.up, stmt.down)]
             }
+            Op::Comment { .. } => {
+                let stmt = render_comment_op(op, &eff_schema, self.dialect)?;
+                vec![decl.lower_vendor_statement(&stmt.name, stmt.up, None)]
+            }
             Op::CreateTable { name, columns, constraints, indexes, .. } => {
                 // A column carrying a SYNTH default (`now()`/`genRandomUuid()`) must
                 // FAIL CLOSED, not silently lower with NO default. `ir_default_to_value`
@@ -1759,8 +1766,16 @@ impl IrAuthor {
                 }
                 units
             }
-            Op::CreateIndex { table, columns, name, unique, using, .. } => {
-                let idx = create_index_snapshot(table, columns, name.as_deref(), *unique, *using);
+            Op::CreateIndex { table, columns, name, unique, using, r#where, .. } => {
+                let idx = create_index_snapshot(
+                    table,
+                    columns,
+                    name.as_deref(),
+                    *unique,
+                    *using,
+                    r#where.as_ref(),
+                    self.dialect,
+                )?;
                 // **PR10 Part B** — createIndex ifNotExists: verify (unique, columns)
                 // from the SAME index snapshot the CREATE renders from.
                 if let Some(g) = guard {
@@ -2732,6 +2747,7 @@ impl IrAuthor {
                             "UNIQUE ({})",
                             crate::render::declarative::constraintdef_cols(columns)
                         ),
+                        comment: None,
                     });
                 }
                 IrConstraintKind::Exclusion { elements, .. } => {
@@ -2750,26 +2766,27 @@ impl IrAuthor {
                         name,
                         kind: "EXCLUDE".to_string(),
                         definition,
+                        comment: None,
                     });
                 }
             }
         }
         for ix in indexes {
-            if ix.r#where.is_some() {
-                // A partial-index predicate is a closed-AST Expr — Wave-C renderer.
-                return Err(IrLowerError::ExprRenderDeferred("createTable index where"));
-            }
             let access = ix.using.map_or("btree", index_method_access);
             if !self.dialect.supports(Capability::NonBtreeIndexMethod) && access != "btree" {
                 return Err(IrLowerError::UnsupportedOp(
                     "createTable non-btree index `using` on SQLite (later wave)",
                 ));
             }
-            let name = ix.name.clone().unwrap_or_else(|| {
-                crate::plan::author::cap_ident_name(&format!("{table}_{}_idx", ix.columns.join("_")))
-            });
-            let mut snap_idx =
-                IndexSnapshot::btree(name, ix.unique.unwrap_or(false), ix.columns.clone());
+            let mut snap_idx = create_index_snapshot(
+                table,
+                &ix.columns,
+                ix.name.as_deref(),
+                ix.unique,
+                ix.using,
+                ix.r#where.as_ref(),
+                self.dialect,
+            )?;
             snap_idx.access_method = access.to_string();
             snap.indexes.push(snap_idx);
         }
@@ -3145,6 +3162,7 @@ impl IrAuthor {
                     columns: Vec::new(),
                     indexes: Vec::new(),
                     constraints: Vec::new(),
+                    comment: None,
                     stored_create_sql: None,
                 };
                 self.decl
@@ -3352,6 +3370,11 @@ struct SequenceStatement {
     down: Option<String>,
 }
 
+struct CommentStatement {
+    name: String,
+    up: String,
+}
+
 fn render_sequence_op(
     op: &Op,
     eff_schema: &str,
@@ -3467,6 +3490,86 @@ fn render_sequence_op(
         }
         _ => Err(IrLowerError::UnsupportedOp("non-sequence op routed to sequence renderer")),
     }
+}
+
+fn render_comment_op(
+    op: &Op,
+    eff_schema: &str,
+    dialect: SqlDialect,
+) -> Result<CommentStatement, IrLowerError> {
+    if !dialect.supports(Capability::CommentOn) {
+        return Err(IrLowerError::UnsupportedOp("COMMENT ON is PostgreSQL-only"));
+    }
+    let Op::Comment { target, comment } = op else {
+        return Err(IrLowerError::UnsupportedOp("non-comment op routed to comment renderer"));
+    };
+    let object = render_comment_target(target, eff_schema)?;
+    let value = comment
+        .as_deref()
+        .map(crate::render::dml::sql_string_literal)
+        .unwrap_or_else(|| "NULL".to_string());
+    Ok(CommentStatement {
+        name: format!("comment_{}", comment_target_name_part(target)),
+        up: format!("COMMENT ON {object} IS {value}"),
+    })
+}
+
+fn comment_target_name_part(target: &CommentTarget) -> String {
+    match target {
+        CommentTarget::Table { name, .. }
+        | CommentTarget::Index { name, .. }
+        | CommentTarget::View { name, .. }
+        | CommentTarget::Type { name, .. }
+        | CommentTarget::Sequence { name, .. }
+        | CommentTarget::Function { name, .. } => name.clone(),
+        CommentTarget::Column { table, name, .. }
+        | CommentTarget::Constraint { table, name, .. } => format!("{table}_{name}"),
+    }
+}
+
+fn pg_comment_qname(kind: &'static str, schema: &str, name: &str) -> Result<String, IrLowerError> {
+    Ok(format!(
+        "{}.{}",
+        quote_engine_ident("schema", schema)?,
+        quote_engine_ident(kind, name)?
+    ))
+}
+
+fn render_comment_target(
+    target: &CommentTarget,
+    eff_schema: &str,
+) -> Result<String, IrLowerError> {
+    let schema = target.schema().unwrap_or(eff_schema);
+    Ok(match target {
+        CommentTarget::Table { name, .. } => {
+            format!("TABLE {}", pg_comment_qname("table", schema, name)?)
+        }
+        CommentTarget::Column { table, name, .. } => format!(
+            "COLUMN {}.{}",
+            pg_comment_qname("table", schema, table)?,
+            quote_engine_ident("column", name)?
+        ),
+        CommentTarget::Index { name, .. } => {
+            format!("INDEX {}", pg_comment_qname("index", schema, name)?)
+        }
+        CommentTarget::Constraint { table, name, .. } => format!(
+            "CONSTRAINT {} ON {}",
+            quote_engine_ident("constraint", name)?,
+            pg_comment_qname("table", schema, table)?
+        ),
+        CommentTarget::View { name, .. } => {
+            format!("VIEW {}", pg_comment_qname("view", schema, name)?)
+        }
+        CommentTarget::Type { name, .. } => {
+            format!("TYPE {}", pg_comment_qname("type", schema, name)?)
+        }
+        CommentTarget::Sequence { name, .. } => {
+            format!("SEQUENCE {}", pg_comment_qname("sequence", schema, name)?)
+        }
+        CommentTarget::Function { name, .. } => {
+            format!("FUNCTION {}", pg_comment_qname("function", schema, name)?)
+        }
+    })
 }
 
 fn render_sequence_optional_bound(
@@ -4168,6 +4271,7 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
         Op::CreateSequence { .. } => "createSequence",
         Op::AlterSequence { .. } => "alterSequence",
         Op::DropSequence { .. } => "dropSequence",
+        Op::Comment { .. } => "comment",
         // VENDOR (`@zeroship/migrate/pg`).
         Op::CreateSchema { .. } => "createSchema",
         Op::DropSchema { .. } => "dropSchema",
@@ -4201,21 +4305,52 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
 /// `createIndex` op through the SAME index-shaping the lower uses (no re-spell).
 pub(crate) fn create_index_snapshot(
     table: &str,
-    columns: &[String],
+    columns: &[IndexElement],
     name: Option<&str>,
     unique: Option<bool>,
     using: Option<IndexMethod>,
-) -> IndexSnapshot {
+    predicate: Option<&Expr>,
+    dialect: SqlDialect,
+) -> Result<IndexSnapshot, IrLowerError> {
+    if dialect == SqlDialect::Mysql && columns.iter().any(|e| matches!(e, IndexElement::Expr { .. }))
+    {
+        return Err(IrLowerError::UnsupportedOp(
+            "createIndex expression elements are not supported on MySQL",
+        ));
+    }
+    let mut plain_columns = Vec::new();
+    let mut elements = Vec::with_capacity(columns.len());
+    let mut name_parts = Vec::with_capacity(columns.len());
+    for element in columns {
+        match element {
+            IndexElement::Column { name } => {
+                plain_columns.push(name.clone());
+                elements.push(IndexElementSnapshot::column(name.clone()));
+                name_parts.push(name.clone());
+            }
+            IndexElement::Expr { expr } => {
+                let rendered = crate::render::dml::render_expr_inline(expr, dialect)
+                    .map_err(IrLowerError::DmlAssemble)?;
+                elements.push(IndexElementSnapshot::expr(rendered));
+                name_parts.push("expr".to_string());
+            }
+        }
+    }
     let idx_name = name.map_or_else(
-        || crate::plan::author::cap_ident_name(&format!("{table}_{}_idx", columns.join("_"))),
+        || crate::plan::author::cap_ident_name(&format!("{table}_{}_idx", name_parts.join("_"))),
         ToString::to_string,
     );
     let unique = unique.unwrap_or(false);
-    let mut idx = IndexSnapshot::btree(idx_name, unique, columns.to_vec());
+    let mut idx = IndexSnapshot::btree(idx_name, unique, plain_columns);
+    idx.elements = elements;
+    idx.predicate = predicate
+        .map(|expr| crate::render::dml::render_expr_inline(expr, dialect))
+        .transpose()
+        .map_err(IrLowerError::DmlAssemble)?;
     if let Some(m) = using {
         idx.access_method = index_method_access(m).to_string();
     }
-    idx
+    Ok(idx)
 }
 
 /// Map an [`IrColumn`] to the [`FieldDescriptor`] the shared snapshot-builder

@@ -26,8 +26,8 @@
 use compio_postgres::Client;
 use zeroship_migrate::{
     model::ir::{
-        ColType, ExistenceGuard, IrColumn, IrConstraint, IrConstraintKind, MigrationIr, Op,
-        SelectAst, SelectItem, TableRef, ViewQuery,
+        ColType, ExistenceGuard, IndexElement, IrColumn, IrConstraint, IrConstraintKind,
+        MigrationIr, Op, SelectAst, SelectItem, TableRef, ViewQuery,
     },
     render::lower::{IrAuthor, LiveSchema},
     ApplyError, Approval, EngineError,
@@ -532,7 +532,7 @@ async fn create_index_ifnotexists_present_unique_flip_fails_closed() {
 
     let steps = lower(&cfg, Op::CreateIndex {
         table: "t".into(),
-        columns: vec!["email".into()],
+        columns: vec![IndexElement::Column { name: "email".into() }],
         name: Some("t_email_idx".into()),
         unique: Some(true),
         using: None,
@@ -588,7 +588,7 @@ async fn create_index_ifnotexists_invalid_concurrent_residue_recovers_not_noops(
 
     let mut steps = lower(&cfg, Op::CreateIndex {
         table: "t".into(),
-        columns: vec!["email".into()],
+        columns: vec![IndexElement::Column { name: "email".into() }],
         name: Some("t_email_idx".into()),
         unique: Some(false),
         using: None,

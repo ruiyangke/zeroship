@@ -59,7 +59,8 @@ use crate::model::snapshot::{
 };
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::model::ir::{
-    ColType, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, Op, RefAction,
+    ColType, CommentTarget, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, Op,
+    RefAction,
 };
 use crate::render::lower::{
     create_index_snapshot, derived_constraint_name, derived_exclusion_constraint_name,
@@ -309,6 +310,7 @@ pub fn fold_ops(
                         name.clone(),
                         NamedTypeSnapshot {
                             kind: "enum".to_string(),
+                            comment: None,
                         },
                     );
                 }
@@ -340,6 +342,7 @@ pub fn fold_ops(
                         name.clone(),
                         NamedTypeSnapshot {
                             kind: "domain".to_string(),
+                            comment: None,
                         },
                     );
                 }
@@ -753,8 +756,17 @@ pub fn fold_ops(
                     snap.indexes.retain(|i| &i.name != name);
                 }
             }
-            Op::CreateIndex { table, columns, name, unique, using, .. } => {
-                let idx = create_index_snapshot(table, columns, name.as_deref(), *unique, *using);
+            Op::CreateIndex { table, columns, name, unique, using, r#where, .. } => {
+                let idx = create_index_snapshot(
+                    table,
+                    columns,
+                    name.as_deref(),
+                    *unique,
+                    *using,
+                    r#where.as_ref(),
+                    dialect,
+                )
+                .map_err(fold_lower_error)?;
                 let snap = table_mut(&mut tables, table)?;
                 if snap.indexes.iter().any(|i| i.name == idx.name) {
                     return Err(FoldError::DuplicateIndex(idx.name));
@@ -801,6 +813,7 @@ pub fn fold_ops(
                     materialized: materialized.unwrap_or(false),
                     columns: columns.clone(),
                     definition: None,
+                    comment: None,
                 });
             }
             Op::DropView { name, .. } => {
@@ -810,6 +823,16 @@ pub fn fold_ops(
             }
             // DML: schema no-ops (rows, not shape).
             Op::Insert { .. } | Op::Update { .. } | Op::Delete { .. } | Op::Backfill { .. } => {}
+            Op::Comment { target, comment } => {
+                apply_comment(
+                    &mut tables,
+                    &mut views,
+                    &mut named_type_snapshots,
+                    &mut sequences,
+                    target,
+                    comment.clone(),
+                )?;
+            }
             // VENDOR (`@zeroship/migrate/pg`) — roles/grants/RLS/policies/triggers/
             // functions/extensions/schemas/`pg.sql` are NOT table structure (vendor
             // spec §4.6): they have no place in a table `SchemaSnapshot`, exactly
@@ -858,6 +881,83 @@ fn table_mut<'a>(
     tables
         .get_mut(table)
         .ok_or_else(|| FoldError::MissingTable(table.to_string()))
+}
+
+fn apply_comment(
+    tables: &mut BTreeMap<String, TableSnapshot>,
+    views: &mut BTreeMap<String, ViewSnapshot>,
+    named_types: &mut BTreeMap<String, NamedTypeSnapshot>,
+    sequences: &mut BTreeMap<String, SequenceSnapshot>,
+    target: &CommentTarget,
+    comment: Option<String>,
+) -> Result<(), FoldError> {
+    match target {
+        CommentTarget::Table { name, .. } => {
+            table_mut(tables, name)?.comment = comment;
+        }
+        CommentTarget::Column { table, name, .. } => {
+            let snap = table_mut(tables, table)?;
+            let col =
+                snap.columns
+                    .iter_mut()
+                    .find(|c| c.name == *name)
+                    .ok_or_else(|| FoldError::MissingColumn {
+                        table: table.clone(),
+                        column: name.clone(),
+                    })?;
+            col.comment = comment;
+        }
+        CommentTarget::Index { name, .. } => {
+            let mut found = false;
+            for table in tables.values_mut() {
+                if let Some(idx) = table.indexes.iter_mut().find(|i| i.name == *name) {
+                    idx.comment = comment.clone();
+                    found = true;
+                }
+            }
+            if !found {
+                return Err(FoldError::MissingIndex(name.clone()));
+            }
+        }
+        CommentTarget::Constraint { table, name, .. } => {
+            let snap = table_mut(tables, table)?;
+            let constraint = snap
+                .constraints
+                .iter_mut()
+                .find(|c| c.name == *name)
+                .ok_or_else(|| FoldError::MissingConstraint {
+                    table: table.clone(),
+                    name: name.clone(),
+                })?;
+            constraint.comment = comment;
+        }
+        CommentTarget::View { name, .. } => {
+            let view = views
+                .get_mut(name)
+                .ok_or_else(|| FoldError::MissingView(name.clone()))?;
+            view.comment = comment;
+        }
+        CommentTarget::Type { name, .. } => {
+            let ty = named_types
+                .get_mut(name)
+                .ok_or_else(|| FoldError::NamedTypeMissing {
+                    kind: "type",
+                    name: name.clone(),
+                })?;
+            ty.comment = comment;
+        }
+        CommentTarget::Sequence { name, .. } => {
+            let seq = sequences
+                .get_mut(name)
+                .ok_or_else(|| FoldError::MissingSequence(name.clone()))?;
+            seq.comment = comment;
+        }
+        // PostgreSQL function comments require a signature for overloaded
+        // functions. The IR intentionally carries only a function name, so
+        // function comments render but are not folded into SchemaSnapshot.
+        CommentTarget::Function { .. } => {}
+    }
+    Ok(())
 }
 
 /// The `CollectionDescriptor` for a `createTable` op — the SAME bridge
@@ -1190,6 +1290,7 @@ fn fold_create_table_specs(
                             // authored render. Drift tracks EXCLUDE by presence/name +
                             // kind only, matching `snapshot_schema`.
                             definition: String::new(),
+                            comment: None,
                         },
                         index: None,
                     },
@@ -1198,20 +1299,22 @@ fn fold_create_table_specs(
         }
     }
     for ix in indexes {
-        if ix.r#where.is_some() {
-            return Err(FoldError::ExprDeferred("createTable index where"));
-        }
         let access = ix.using.map_or("btree", index_method_access);
         if !dialect.supports(Capability::NonBtreeIndexMethod) && access != "btree" {
             return Err(FoldError::Unsupported(
                 "createTable non-btree index `using` on SQLite (later wave)",
             ));
         }
-        let name = ix.name.clone().unwrap_or_else(|| {
-            crate::plan::author::cap_ident_name(&format!("{table}_{}_idx", ix.columns.join("_")))
-        });
-        let mut snap_idx =
-            IndexSnapshot::btree(name, ix.unique.unwrap_or(false), ix.columns.clone());
+        let mut snap_idx = create_index_snapshot(
+            table,
+            &ix.columns,
+            ix.name.as_deref(),
+            ix.unique,
+            ix.using,
+            ix.r#where.as_ref(),
+            dialect,
+        )
+        .map_err(fold_lower_error)?;
         snap_idx.access_method = access.to_string();
         if snap.indexes.iter().any(|i| i.name == snap_idx.name) {
             return Err(FoldError::DuplicateIndex(snap_idx.name));
@@ -1297,6 +1400,7 @@ fn unique_constraint(name: &str, columns: &[String]) -> FoldedConstraint {
             name: name.to_string(),
             kind: "UNIQUE".to_string(),
             definition: format!("UNIQUE ({})", constraintdef_cols(columns)),
+            comment: None,
         },
         index: Some(IndexSnapshot::btree(name.to_string(), true, columns.to_vec())),
     }
@@ -1386,6 +1490,7 @@ fn add_constraint_snapshot(
                     // render. Drift tracks EXCLUDE by presence/name + kind only,
                     // matching `snapshot_schema`.
                     definition: String::new(),
+                    comment: None,
                 },
                 index: None,
             })
@@ -2305,7 +2410,7 @@ fn json_value_to_ir_scalar_default(v: &serde_json::Value) -> crate::model::ir::I
 mod tests {
     use super::*;
     use crate::model::expr::Expr;
-    use crate::model::ir::IrScalar;
+    use crate::model::ir::{IndexElement, IrScalar};
 
     const SCHEMA: &str = "proj_test";
 
@@ -3213,7 +3318,10 @@ mod tests {
     fn create_index(table: &str, name: Option<&str>, cols: &[&str], unique: bool) -> Op {
         Op::CreateIndex {
             table: table.to_string(),
-            columns: cols.iter().map(ToString::to_string).collect(),
+            columns: cols
+                .iter()
+                .map(|col| IndexElement::Column { name: (*col).to_string() })
+                .collect(),
             name: name.map(ToString::to_string),
             unique: Some(unique),
             using: None,
@@ -3341,7 +3449,7 @@ mod tests {
             ],
             indexes: vec![IrIndex {
                 name: Some("m_team_idx".to_string()),
-                columns: vec!["team_id".to_string()],
+                columns: vec![IndexElement::Column { name: "team_id".to_string() }],
                 unique: None,
                 using: None,
                 r#where: None,
@@ -3570,7 +3678,7 @@ mod tests {
             Vec::new(),
             vec![IrIndex {
                 name: Some("t_doc_idx".to_string()),
-                columns: vec!["doc".to_string()],
+                columns: vec![IndexElement::Column { name: "doc".to_string() }],
                 unique: None,
                 using: Some(crate::model::ir::IndexMethod::Gin),
                 r#where: None,

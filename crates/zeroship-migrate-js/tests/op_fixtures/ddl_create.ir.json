@@ -1,5 +1,5 @@
 {
-  "ir_version": 4,
+  "ir_version": 5,
   "name": "ddl_create",
   "owner_app": "app_corpus",
   "ops": [
@@ -39,7 +39,10 @@
       "op": "createIndex",
       "table": "orders",
       "columns": [
-        "total"
+        {
+          "kind": "column",
+          "name": "total"
+        }
       ],
       "name": "orders_total_idx"
     },

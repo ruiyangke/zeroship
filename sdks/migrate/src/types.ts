@@ -14,9 +14,11 @@
 import type {
   Classification,
   ColType,
+  CommentTarget,
   Expr,
   ExclusionMethod,
   ExclusionOperator,
+  IndexElement,
   IrBatch,
   IrScalar,
   Join,
@@ -39,9 +41,11 @@ import type {
 // truth — the IR `ir.ts` mirrors the engine schema; the authoring surface re-exports).
 export type {
   ColType,
+  CommentTarget,
   Expr,
   ExclusionMethod,
   ExclusionOperator,
+  IndexElement,
   IrBatch,
   IrScalar,
   Join,
@@ -220,6 +224,7 @@ export interface EnumHandle {
   readonly values: readonly string[];
   create(args?: CreateEnumArgs): EnumHandle;
   drop(args?: DropEnumArgs): EnumHandle;
+  comment(text: string | null, args?: { schema?: string }): EnumHandle;
 }
 
 export interface CreateDomainArgs {
@@ -239,6 +244,7 @@ export interface DomainHandle {
   readonly name: string;
   create(args: CreateDomainArgs): DomainHandle;
   drop(args?: DropDomainArgs): DomainHandle;
+  comment(text: string | null, args?: { schema?: string }): DomainHandle;
 }
 
 export interface SequenceOwnedBy {
@@ -279,6 +285,7 @@ export interface SequenceHandle {
   create(args?: CreateSequenceArgs): SequenceHandle;
   alter(args: AlterSequenceArgs): SequenceHandle;
   drop(args?: DropSequenceArgs): SequenceHandle;
+  comment(text: string | null, args?: { schema?: string }): SequenceHandle;
 }
 
 // ── Scalars / rows ──
@@ -559,6 +566,7 @@ export interface ViewHandle {
   create(args: CreateViewArgs): ViewHandle;
   createRaw(args: CreateRawViewArgs): ViewHandle;
   drop(args?: DropViewArgs): ViewHandle;
+  comment(text: string | null, args?: { schema?: string }): ViewHandle;
 }
 
 // ── `table()` entry + the fluent handle (§3) ──
@@ -575,6 +583,23 @@ export interface TableOptions {
 }
 
 export type ExclusionTarget = string | ExprFn | ExprChain | Expr;
+export type IndexElementArg =
+  | string
+  | ExprFn
+  | ExprChain
+  | Expr
+  | { kind: "column"; name: string }
+  | { kind: "expr"; expr: ExprFn | ExprChain | Expr };
+
+export type CommentTargetArg =
+  | { kind: "table"; name: string; schema?: string }
+  | { kind: "column"; table: string; name: string; schema?: string }
+  | { kind: "index"; name: string; schema?: string }
+  | { kind: "constraint"; table: string; name: string; schema?: string }
+  | { kind: "view"; name: string; schema?: string }
+  | { kind: "type"; name: string; schema?: string }
+  | { kind: "sequence"; name: string; schema?: string }
+  | { kind: "function"; name: string; schema?: string };
 
 export interface ExclusionElementArg {
   target: ExclusionTarget;
@@ -639,7 +664,7 @@ export interface CreateTableArgs {
   exclusions?: Array<{ name: string } & ExclusionConstraintArgs>;
   indexes?: Array<{
     name: string;
-    columns: string[];
+    columns: IndexElementArg[];
     unique?: boolean;
     using?: IndexMethod;
     /** DEFERRED at apply — a partial-index predicate is a closed-AST `expr`
@@ -664,6 +689,7 @@ export interface ColumnRef {
   /** Named ⇒ no from/to swap. `type` is the column's type after rename. */
   rename(args: { to: string; type: ColumnDef; schema?: string }): TableHandle;
   alter(args: { type?: ColumnDef; nullable?: boolean; using?: ExprFn; schema?: string }): TableHandle;
+  comment(text: string | null, args?: { schema?: string }): TableHandle;
 }
 
 /** The `.foreignKey(name)` selector sub-handle (§3.3). */
@@ -698,12 +724,13 @@ export interface ExclusionRef {
  *  name; its only terminal is `.drop`. */
 export interface ConstraintRef {
   drop(args?: { ifExists?: boolean; schema?: string }): TableHandle;
+  comment(text: string | null, args?: { schema?: string }): TableHandle;
 }
 
 /** The `.index(name)` selector sub-handle (§3.4). */
 export interface IndexRef {
   add(args: {
-    columns: string[];
+    columns: IndexElementArg[];
     unique?: boolean;
     using?: IndexMethod;
     where?: ExprFn;
@@ -719,6 +746,7 @@ export interface IndexRef {
    * a plain, reversible drop.
    */
   drop(args?: { ifExists?: boolean; concurrently?: boolean; unique?: boolean; schema?: string }): TableHandle;
+  comment(text: string | null, args?: { schema?: string }): TableHandle;
 }
 
 /**
@@ -743,6 +771,7 @@ export interface TableHandle {
    *  online column expand-contract; `ifExists` guards the source table). Records a
    *  `renameTable` Op; the engine emits the inverse rename as the down-migration. */
   rename(args: { to: string; ifExists?: boolean; schema?: string }): TableHandle;
+  comment(text: string | null, args?: { schema?: string }): TableHandle;
 
   // §3.2/§3.3/§3.4 — selectors for named sub-objects
   column(name: string): ColumnRef;

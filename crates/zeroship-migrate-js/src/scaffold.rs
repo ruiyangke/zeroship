@@ -8,14 +8,16 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use zeroship_migrate::model::ir::{
-    ColType, IrColumn, IrDefault, Op, SynthDefaultFn, CURRENT_IR_VERSION, SYSTEM_FIELD_NAMES,
+    ColType, IndexElement, IrColumn, IrDefault, Op, SynthDefaultFn, CURRENT_IR_VERSION,
+    SYSTEM_FIELD_NAMES,
 };
 use zeroship_migrate::plan::loader::{is_valid_migration_name, suggest_migration_name};
 use zeroship_migrate::render::declarative::{
     is_system_managed_constraint, is_system_managed_index, DesiredSchema,
 };
 use zeroship_migrate::{
-    ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, MigrationIr, SchemaSnapshot, TableSnapshot,
+    ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, MigrationIr,
+    SchemaSnapshot, TableSnapshot,
 };
 
 /// A scaffold / generate error.
@@ -210,8 +212,8 @@ fn system_default_for(_col_name: &str, _ty: &ColType) -> Option<IrDefault> {
 /// CLOSED if it is not a portable plain index. Only a `btree` access-method,
 /// column-list, non-partial / non-expression index is synthesizable; a non-btree
 /// method (vector ANN / GIN / GiST / FTS5) or an expression / partial index carries
-/// shape (`access_method` / `expression`) the portable `createIndex` op cannot
-/// reproduce — so rather than drop it silently (breaking re-diff-to-zero), reject.
+/// shape the portable scaffold path cannot faithfully re-author from catalog SQL —
+/// so rather than drop it silently (breaking re-diff-to-zero), reject.
 fn synth_index_op(table: &str, idx: &IndexSnapshot) -> Result<Op, ScaffoldError> {
     let method = idx.access_method.trim().to_ascii_lowercase();
     if method != "btree" {
@@ -221,7 +223,12 @@ fn synth_index_op(table: &str, idx: &IndexSnapshot) -> Result<Op, ScaffoldError>
             reason: format!("non-btree access method {:?}", idx.access_method),
         });
     }
-    if idx.expression.is_some() {
+    if idx.predicate.is_some()
+        || idx
+            .elements
+            .iter()
+            .any(|element| matches!(element, IndexElementSnapshot::Expr(_)))
+    {
         return Err(ScaffoldError::UnsupportedIndex {
             table: table.to_string(),
             name: idx.name.clone(),
@@ -236,9 +243,30 @@ fn synth_index_op(table: &str, idx: &IndexSnapshot) -> Result<Op, ScaffoldError>
             reason: "no key columns".to_string(),
         });
     }
+    let columns = if idx.elements.is_empty() {
+        idx.columns
+            .iter()
+            .cloned()
+            .map(|name| IndexElement::Column { name })
+            .collect()
+    } else {
+        idx.elements
+            .iter()
+            .map(|element| match element {
+                IndexElementSnapshot::Column(name) => {
+                    Ok(IndexElement::Column { name: name.clone() })
+                }
+                IndexElementSnapshot::Expr(_) => Err(ScaffoldError::UnsupportedIndex {
+                    table: table.to_string(),
+                    name: idx.name.clone(),
+                    reason: "expression / partial index".to_string(),
+                }),
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
     Ok(Op::CreateIndex {
         table: table.to_string(),
-        columns: idx.columns.clone(),
+        columns,
         name: Some(idx.name.clone()),
         unique: if idx.unique { Some(true) } else { None },
         using: None,
@@ -586,12 +614,31 @@ fn render_op_call(op: &Op) -> String {
             format!("table({}).column({}).drop();", js_str(table), js_str(column))
         }
         Op::CreateIndex { table, columns, name, unique, .. } => {
-            let cols: Vec<String> = columns.iter().map(|c| js_str(c)).collect();
+            let cols: Vec<String> = columns
+                .iter()
+                .map(|c| match c {
+                    IndexElement::Column { name } => js_str(name),
+                    IndexElement::Expr { expr } => format!(
+                        "{{ kind: \"expr\", expr: {} }}",
+                        serde_json::to_string(expr).expect("Expr serializes")
+                    ),
+                })
+                .collect();
             // The index NAME is the selector argument (name-first); `columns`/`unique`
             // ride the args object. The synth path always names the index.
             let idx_name = name
                 .clone()
-                .unwrap_or_else(|| format!("{table}_{}_idx", columns.join("_")));
+                .unwrap_or_else(|| {
+                    let parts = columns
+                        .iter()
+                        .map(|c| match c {
+                            IndexElement::Column { name } => name.as_str(),
+                            IndexElement::Expr { .. } => "expr",
+                        })
+                        .collect::<Vec<_>>()
+                        .join("_");
+                    format!("{table}_{parts}_idx")
+                });
             let mut args = format!("columns: [{}]", cols.join(", "));
             if *unique == Some(true) {
                 args.push_str(", unique: true");

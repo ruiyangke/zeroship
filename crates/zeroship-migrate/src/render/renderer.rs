@@ -35,6 +35,7 @@ pub(crate) enum Capability {
     MaterializedDomainType,
     Sequence,
     ExclusionConstraint,
+    CommentOn,
 }
 
 pub(crate) trait DialectSupports {
@@ -66,6 +67,7 @@ impl DialectSupports for SqlDialect {
                 Capability::MaterializedDomainType => true,
                 Capability::Sequence => true,
                 Capability::ExclusionConstraint => true,
+                Capability::CommentOn => true,
             },
             SqlDialect::Sqlite => match cap {
                 Capability::NonPkIdentity => false,
@@ -89,6 +91,7 @@ impl DialectSupports for SqlDialect {
                 Capability::MaterializedDomainType => false,
                 Capability::Sequence => false,
                 Capability::ExclusionConstraint => false,
+                Capability::CommentOn => false,
             },
             SqlDialect::Mysql => match cap {
                 Capability::NonPkIdentity => false,
@@ -112,6 +115,7 @@ impl DialectSupports for SqlDialect {
                 Capability::MaterializedDomainType => false,
                 Capability::Sequence => false,
                 Capability::ExclusionConstraint => false,
+                Capability::CommentOn => false,
             },
         }
     }
@@ -825,6 +829,7 @@ mod tests {
         Capability::TriggerBody,
         Capability::Sequence,
         Capability::ExclusionConstraint,
+        Capability::CommentOn,
     ];
 
     #[test]
@@ -865,6 +870,7 @@ mod tests {
                     (Capability::TriggerBody, false),
                     (Capability::Sequence, true),
                     (Capability::ExclusionConstraint, true),
+                    (Capability::CommentOn, true),
                 ],
             ),
             (
@@ -889,6 +895,7 @@ mod tests {
                     (Capability::TriggerBody, true),
                     (Capability::Sequence, false),
                     (Capability::ExclusionConstraint, false),
+                    (Capability::CommentOn, false),
                 ],
             ),
             (
@@ -913,6 +920,7 @@ mod tests {
                     (Capability::TriggerBody, true),
                     (Capability::Sequence, false),
                     (Capability::ExclusionConstraint, false),
+                    (Capability::CommentOn, false),
                 ],
             ),
         ];

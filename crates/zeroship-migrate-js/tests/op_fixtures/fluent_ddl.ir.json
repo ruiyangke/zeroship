@@ -1,5 +1,5 @@
 {
-  "ir_version": 4,
+  "ir_version": 5,
   "name": "fluent_ddl",
   "owner_app": "app_corpus",
   "ops": [
@@ -201,7 +201,10 @@
         {
           "name": "memberships_account_idx",
           "columns": [
-            "account_id"
+            {
+              "kind": "column",
+              "name": "account_id"
+            }
           ]
         }
       ]
@@ -303,7 +306,10 @@
       "op": "createIndex",
       "table": "accounts",
       "columns": [
-        "email"
+        {
+          "kind": "column",
+          "name": "email"
+        }
       ],
       "name": "accounts_active_email_idx",
       "unique": true,

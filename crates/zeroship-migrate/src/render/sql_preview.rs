@@ -42,7 +42,7 @@
 
 use std::fmt::Write as _;
 
-use crate::model::ir::{ExistenceGuard, MigrationIr, Op};
+use crate::model::ir::{CommentTarget, ExistenceGuard, MigrationIr, Op};
 use crate::render::lower::{op_kind_tag, IrAuthor, IrLowerError, LiveSchema};
 use crate::render::plan::AppliedPlan;
 use crate::render::step::{BindValue, PlanStep, RenameStep};
@@ -496,6 +496,16 @@ fn op_subject(op: &Op) -> String {
         }
         Op::Backfill { table, .. } => quote_dotted(&[table]),
         Op::CreateView { name, .. } | Op::DropView { name, .. } => quote_dotted(&[name]),
+        Op::Comment { target, .. } => match target {
+            CommentTarget::Table { name, .. }
+            | CommentTarget::Index { name, .. }
+            | CommentTarget::View { name, .. }
+            | CommentTarget::Type { name, .. }
+            | CommentTarget::Sequence { name, .. }
+            | CommentTarget::Function { name, .. } => quote_dotted(&[name]),
+            CommentTarget::Column { table, name, .. }
+            | CommentTarget::Constraint { table, name, .. } => quote_dotted(&[table, name]),
+        },
         // VENDOR (`@zeroship/migrate/pg`) — the best-effort subject is the named
         // object (schema / extension / role / function) or the table+name for the
         // table-scoped RLS/policy/trigger ops.

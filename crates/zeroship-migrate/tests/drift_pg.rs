@@ -10,8 +10,8 @@ use compio_postgres::Client;
 use zeroship_migrate::model::migration::Checksum;
 use zeroship_migrate::{
     apply, check_checksum_drift, diff_snapshots, rollback, snapshot_schema, Approval, ColumnSnapshot,
-    ConstraintSnapshot, ExecutorConfig, IndexSnapshot, Migration, MigrationFlags, MigrationId,
-    RollbackRequest, RollbackTarget, SchemaSnapshot, TableSnapshot,
+    ConstraintSnapshot, ExecutorConfig, IndexElementSnapshot, IndexSnapshot, Migration,
+    MigrationFlags, MigrationId, RollbackRequest, RollbackTarget, SchemaSnapshot, TableSnapshot,
 };
 
 const DEFAULT_DSN: &str =
@@ -414,6 +414,7 @@ async fn diff_reports_missing_table_when_expected_has_an_extra() {
             }],
             indexes: Vec::new(),
             constraints: Vec::new(),
+            comment: None,
             stored_create_sql: None,
         },
     );
@@ -484,6 +485,7 @@ async fn diff_reports_missing_and_unexpected_columns_within_a_shared_table() {
             ],
             indexes: Vec::new(),
             constraints: Vec::new(),
+            comment: None,
             stored_create_sql: None,
         },
     );
@@ -560,6 +562,7 @@ async fn diff_of_identical_snapshots_is_clean() {
         name: "x".into(),
         kind: "CHECK".into(),
         definition: "CHECK (true)".into(),
+        comment: None,
     };
 
     drop_schemas(&conn, &cfg).await;
@@ -599,6 +602,7 @@ async fn diff_reports_altered_column_data_type() {
             }],
             indexes: Vec::new(),
             constraints: Vec::new(),
+            comment: None,
             stored_create_sql: None,
         },
     );
@@ -648,6 +652,7 @@ async fn diff_reports_altered_column_nullability() {
             }],
             indexes: Vec::new(),
             constraints: Vec::new(),
+            comment: None,
             stored_create_sql: None,
         },
     );
@@ -697,13 +702,16 @@ async fn diff_reports_altered_index_uniqueness() {
                 // Same column set as live (email) — so the ONLY altered field is
                 // `unique`, keeping this test's single-altered assertion exact.
                 columns: vec!["email".into()],
+                elements: vec![IndexElementSnapshot::column("email")],
                 // Same access method as live (btree) so `access_method` is NOT a
                 // second altered field; isolates the `unique` flip.
                 access_method: "btree".into(),
-                expression: None,
+                predicate: None,
                 opclass: None,
+                comment: None,
             }],
             constraints: Vec::new(),
+            comment: None,
             stored_create_sql: None,
         },
     );
@@ -766,7 +774,9 @@ async fn diff_reports_altered_check_constraint_definition() {
                 name: "users_age_chk".into(),
                 kind: "CHECK".into(),
                 definition: "CHECK ((age > 0))".into(),
+                comment: None,
             }],
+            comment: None,
             stored_create_sql: None,
         },
     );
@@ -834,7 +844,9 @@ async fn exclusion_constraint_reintrospection_does_not_false_drift_or_tamper() {
                 name: "bookings_no_overlap".into(),
                 kind: "EXCLUDE".into(),
                 definition: r#"EXCLUDE USING gist ("period" WITH &&)"#.into(),
+                comment: None,
             }],
+            comment: None,
             stored_create_sql: None,
         },
     );
@@ -885,11 +897,11 @@ async fn t12_out_of_band_gin_index_surfaces_as_unexpected() {
     assert_eq!(live_idx.access_method, "gin");
     assert!(
         live_idx
-            .expression
-            .as_deref()
-            .is_some_and(|e| e.contains("to_tsvector")),
+            .elements
+            .iter()
+            .any(|element| matches!(element, IndexElementSnapshot::Expr(e) if e.contains("to_tsvector"))),
         "the expression index must recover its expr: {:?}",
-        live_idx.expression
+        live_idx.elements
     );
 
     // EXPECTED: the table with NO indexes declared → the GIN index is unexpected.
@@ -900,6 +912,7 @@ async fn t12_out_of_band_gin_index_surfaces_as_unexpected() {
             columns: actual.tables["docs"].columns.clone(),
             indexes: Vec::new(),
             constraints: Vec::new(),
+            comment: None,
             stored_create_sql: None,
         },
     );
@@ -954,11 +967,14 @@ async fn t12_btree_to_ivfflat_access_method_flip_is_reported() {
                 name: "items_embedding_idx".into(),
                 unique: false,
                 columns: vec!["embedding".into()],
+                elements: vec![IndexElementSnapshot::column("embedding")],
                 access_method: "ivfflat".into(),
-                expression: None,
+                predicate: None,
                 opclass: Some("vector_cosine_ops".into()),
+                comment: None,
             }],
             constraints: Vec::new(),
+            comment: None,
             stored_create_sql: None,
         },
     );
@@ -1015,11 +1031,147 @@ async fn t12_fts_expression_index_re_diffs_clean() {
         .find(|i| i.name == "pages_fts")
         .expect("the FTS expression index is introspected");
     assert_eq!(idx.access_method, "gin");
-    assert!(idx.expression.is_some(), "expr captured: {idx:?}");
+    assert!(
+        idx.elements.iter().any(|element| matches!(element, IndexElementSnapshot::Expr(_))),
+        "expr captured: {idx:?}"
+    );
 
     // Self-diff is clean — the expression is not a phantom drift.
     let drift = diff_snapshots(&snap, &snap);
     assert!(drift.is_clean(), "expression index phantom-drifted: {drift:?}");
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn partial_and_expression_indexes_reintrospect_without_false_drift() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let sch = &cfg.project_schema;
+    conn.batch_execute(&format!(
+        "CREATE TABLE \"{sch}\".\"users\" (email text, active boolean);
+         CREATE INDEX users_active_idx ON \"{sch}\".\"users\" (active) WHERE active IS TRUE;
+         CREATE INDEX users_email_lower_idx ON \"{sch}\".\"users\" (email, lower(email))
+             WHERE active IS TRUE;"
+    ))
+    .await
+    .expect("seed partial/expression indexes");
+
+    let snap = snapshot_schema(&conn, sch).await.expect("snap");
+    let users = snap.tables.get("users").expect("users table");
+    let partial = users
+        .indexes
+        .iter()
+        .find(|i| i.name == "users_active_idx")
+        .expect("partial index introspected");
+    assert!(
+        partial
+            .predicate
+            .as_deref()
+            .is_some_and(|p| p.contains("active") && p.contains("TRUE")),
+        "partial predicate recovered: {partial:?}"
+    );
+    assert_eq!(partial.elements, vec![IndexElementSnapshot::column("active")]);
+
+    let expr = users
+        .indexes
+        .iter()
+        .find(|i| i.name == "users_email_lower_idx")
+        .expect("expression index introspected");
+    assert!(
+        expr.elements
+            .iter()
+            .any(|element| matches!(element, IndexElementSnapshot::Expr(e) if e.contains("lower"))),
+        "expression element recovered: {expr:?}"
+    );
+    assert!(
+        expr.predicate
+            .as_deref()
+            .is_some_and(|p| p.contains("active") && p.contains("TRUE")),
+        "expression index predicate recovered: {expr:?}"
+    );
+
+    let drift = diff_snapshots(&snap, &snap);
+    assert!(drift.is_clean(), "partial/expression indexes phantom-drifted: {drift:?}");
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn comment_metadata_reintrospects_and_clears_without_false_drift() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let sch = &cfg.project_schema;
+    conn.batch_execute(&format!(
+        "CREATE TABLE \"{sch}\".\"users\" (
+             email text NOT NULL,
+             active boolean,
+             CONSTRAINT users_email_uq UNIQUE (email)
+         );
+         CREATE INDEX users_active_idx ON \"{sch}\".\"users\" (active);
+         COMMENT ON TABLE \"{sch}\".\"users\" IS 'User accounts';
+         COMMENT ON COLUMN \"{sch}\".\"users\".\"email\" IS 'Login email';
+         COMMENT ON INDEX \"{sch}\".\"users_active_idx\" IS 'Active lookup';
+         COMMENT ON CONSTRAINT \"users_email_uq\" ON \"{sch}\".\"users\" IS 'Email uniqueness';"
+    ))
+    .await
+    .expect("seed comments");
+
+    let snap = snapshot_schema(&conn, sch).await.expect("snap with comments");
+    let users = snap.tables.get("users").expect("users table");
+    assert_eq!(users.comment.as_deref(), Some("User accounts"));
+    assert_eq!(
+        users
+            .columns
+            .iter()
+            .find(|c| c.name == "email")
+            .and_then(|c| c.comment.as_deref()),
+        Some("Login email")
+    );
+    assert_eq!(
+        users
+            .indexes
+            .iter()
+            .find(|i| i.name == "users_active_idx")
+            .and_then(|i| i.comment.as_deref()),
+        Some("Active lookup")
+    );
+    assert_eq!(
+        users
+            .constraints
+            .iter()
+            .find(|c| c.name == "users_email_uq")
+            .and_then(|c| c.comment.as_deref()),
+        Some("Email uniqueness")
+    );
+    let drift = diff_snapshots(&snap, &snap);
+    assert!(drift.is_clean(), "comment metadata phantom-drifted: {drift:?}");
+
+    conn.batch_execute(&format!(
+        "COMMENT ON TABLE \"{sch}\".\"users\" IS NULL;
+         COMMENT ON COLUMN \"{sch}\".\"users\".\"email\" IS NULL;"
+    ))
+    .await
+    .expect("clear comments");
+    let cleared = snapshot_schema(&conn, sch).await.expect("snap after clear");
+    let users = cleared.tables.get("users").expect("users table");
+    assert_eq!(users.comment, None);
+    assert_eq!(
+        users
+            .columns
+            .iter()
+            .find(|c| c.name == "email")
+            .and_then(|c| c.comment.as_deref()),
+        None
+    );
 
     drop_schemas(&conn, &cfg).await;
 }

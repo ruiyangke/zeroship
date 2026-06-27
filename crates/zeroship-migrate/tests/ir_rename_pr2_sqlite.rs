@@ -484,9 +484,11 @@ fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
                 identity: None,
                 encryption_sentinel: None,
                 comment_sentinel: None,
+                comment: None,
             }],
             indexes: vec![],
             constraints: vec![],
+            comment: None,
             stored_create_sql: None,
         },
     );

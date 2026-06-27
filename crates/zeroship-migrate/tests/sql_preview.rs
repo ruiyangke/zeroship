@@ -40,7 +40,7 @@ const REPRESENTATIVE_IR: &str = r#"{
     ]},
     {"op":"addColumn","table":"codes","column":"note","type":"text","nullable":true},
     {"op":"addColumn","table":"codes","column":"flag","type":"bool","nullable":true,"existenceGuard":"ifNotExists"},
-    {"op":"createIndex","table":"codes","name":"codes_label_idx","columns":["label"]},
+    {"op":"createIndex","table":"codes","name":"codes_label_idx","columns":[{"kind":"column","name":"label"}]},
     {"op":"insert","table":"codes",
       "columns":["id","created_at","updated_at","version","code","label"],
       "rows":[["c1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,200,"ok"]]},
@@ -75,7 +75,7 @@ const MYSQL_FEATURE_IR: &str = r#"{
       {"name":"members_pkey","kind":{"kind":"pk","columns":["id"]}},
       {"name":"members_team_fk","kind":{"kind":"fk","columns":["team_id"],
         "referencesTable":"teams","referencesColumns":["id"],"onDelete":"cascade"}}
-    ],"indexes":[{"name":"members_team_id_idx","columns":["team_id"]}]},
+    ],"indexes":[{"name":"members_team_id_idx","columns":[{"kind":"column","name":"team_id"}]}]},
     {"op":"createView","name":"active_teams","replace":true,
       "query":{"kind":"structured","select":{"from":{"name":"teams"},
         "projection":[{"kind":"colRef","name":"id"},{"kind":"colRef","name":"name"}],

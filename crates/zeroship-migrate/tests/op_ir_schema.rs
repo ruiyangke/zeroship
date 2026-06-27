@@ -97,6 +97,7 @@ fn op_variant_names_from_schema() {
         "update",
         "delete",
         "backfill",
+        "comment",
         "createView",
         "dropView",
         "createEnum",

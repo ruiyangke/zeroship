@@ -453,13 +453,18 @@ fn decide_index(
                 return GuardVerdict::RunBare; // absent → create it.
             };
             // Present: prove (unique, columns) equality. An expression / partial
-            // index fails closed (`expression`): the IR createIndex carries a
-            // column-list (no rendered `pg_get_expr` form) so equivalence cannot be
-            // proven.
-            if live_idx.expression.is_some() {
+            // index fails closed: this probe contract carries only a plain
+            // column-list expectation, so expression/predicate equivalence cannot
+            // be proven here.
+            if live_idx.predicate.is_some()
+                || live_idx
+                    .elements
+                    .iter()
+                    .any(|element| matches!(element, crate::model::snapshot::IndexElementSnapshot::Expr(_)))
+            {
                 return drift(
                     &format!("index {name}"),
-                    "expression",
+                    "elements",
                     "<plain column-list index>",
                     "<expression/partial index — cannot prove equivalence>",
                 );
@@ -643,7 +648,7 @@ fn drift(object: &str, field: &str, expected: &str, actual: &str) -> GuardVerdic
 mod tests {
     use super::*;
     use crate::model::snapshot::{
-        ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, TableSnapshot,
+        ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, TableSnapshot,
     };
     use std::collections::BTreeMap;
 
@@ -669,6 +674,7 @@ mod tests {
             identity: None,
             encryption_sentinel: None,
             comment_sentinel: None,
+            comment: None,
         }
     }
 
@@ -687,6 +693,7 @@ mod tests {
             columns: Vec::new(),
             indexes: Vec::new(),
             constraints: Vec::new(),
+            comment: None,
             stored_create_sql: None,
         }
     }
@@ -909,11 +916,11 @@ mod tests {
         };
         let mut t = empty_table();
         let mut idx = IndexSnapshot::btree("users_lower_idx".to_string(), false, Vec::new());
-        idx.expression = Some("lower(email)".into());
+        idx.elements = vec![IndexElementSnapshot::expr("lower(email)")];
         t.indexes.push(idx);
         match decide_pg(&probe, &snapshot_with("users", t)) {
-            GuardVerdict::FailDrift(d) => assert_eq!(d.field, "expression"),
-            v => panic!("expected FailDrift(expression) for partial/expression index, got {v:?}"),
+            GuardVerdict::FailDrift(d) => assert_eq!(d.field, "elements"),
+            v => panic!("expected FailDrift(elements) for partial/expression index, got {v:?}"),
         }
     }
 
@@ -924,6 +931,7 @@ mod tests {
             name: name.to_string(),
             kind: kind.to_string(),
             definition: definition.to_string(),
+            comment: None,
         }
     }
 
