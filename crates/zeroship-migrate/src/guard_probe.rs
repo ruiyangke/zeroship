@@ -72,7 +72,7 @@
 
 use crate::drift::SchemaSnapshot;
 use crate::ir::ExistenceGuard;
-use zeroship_schema::query::SqlDialect;
+use zeroship_schema::query::{renderer as schema_renderer, SqlDialect};
 
 /// One declared column's verifiable shape for a `createTable ifNotExists`
 /// [`GuardProbe::Table`] probe. Built from the SAME shared snapshot the CREATE
@@ -525,13 +525,8 @@ fn column_shape_divergence(shape: &ExpectColumnShape<'_>) -> Option<GuardVerdict
     // to the SQLite affinity the emitter would have written, AND the already-SQLite
     // live token folded to the same canonical form). On PG, compare the raw
     // `information_schema` spellings unchanged.
-    let dtypes_match = match dialect {
-        SqlDialect::Postgres => expect_dtype == live_dtype,
-        SqlDialect::Sqlite => {
-            crate::declarative::sqlite_canonical_type(expect_dtype)
-                == crate::declarative::sqlite_canonical_type(live_dtype)
-        }
-    };
+    let renderer = schema_renderer(dialect);
+    let dtypes_match = renderer.canonical_type(expect_dtype) == renderer.canonical_type(live_dtype);
     if !dtypes_match {
         return Some(drift(
             &format!("column {table}.{column}"),

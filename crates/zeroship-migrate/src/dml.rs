@@ -240,31 +240,7 @@ fn qualify_table(
     dialect: SqlDialect,
     table: &str,
 ) -> Result<String, DmlError> {
-    let t = quote_ident("table", table)?;
-    match dialect {
-        // L1 self-defense (PR10b): the project schema is engine-supplied (never
-        // author-supplied) on every current path — under the Confined posture it
-        // is the app id (a UUIDv7, e.g. `019efd94-…`, which carries `-`), so it
-        // is NOT a bare `[A-Za-z_][A-Za-z0-9_]*` identifier and MUST NOT go
-        // through `quote_ident` (that would reject every real deploy). It is
-        // emitted exactly as the rest of the engine emits the schema —
-        // escape-and-quote (`author::quote_ident` / `backfill` / `role`):
-        // `"<schema with "" doubled>"`. The render seam still does not blindly
-        // trust the caller: `quote_ident_checked` (the ONE shared engine seam)
-        // fails closed on the bytes that double-quote escaping cannot neutralise
-        // (empty / NUL, which PG rejects in an identifier outright). For a
-        // quote-free schema the output is byte-identical to the prior `format!`,
-        // so the dml goldens stay green.
-        SqlDialect::Postgres => Ok(format!(
-            "{}.{}",
-            quote_ident_checked(project_schema).map_err(|e| DmlError::InvalidIdentifier {
-                what: "schema",
-                value: e.value,
-            })?,
-            t
-        )),
-        SqlDialect::Sqlite => Ok(t),
-    }
+    crate::dialect_renderer::renderer(dialect).qualify_table(project_schema, table)
 }
 
 /// Map an [`IrScalar`] to a [`BindValue`] for native parameter binding — the
@@ -394,67 +370,21 @@ fn render_scalar_fn_call(f: ScalarFn, args: &[String]) -> String {
 /// The portable cast-target SQL type per dialect (§3.3.1). `blob` is `BYTEA` on
 /// PG / `BLOB` on SQLite; the rest share spelling.
 fn cast_target_sql(target: crate::expr::CastTarget, dialect: SqlDialect) -> &'static str {
-    use crate::expr::CastTarget;
-    match (target, dialect) {
-        (CastTarget::Text, _) => "text",
-        (CastTarget::Integer, _) => "integer",
-        (CastTarget::Real, _) => "real",
-        (CastTarget::Boolean, SqlDialect::Postgres) => "boolean",
-        // SQLite has no boolean type; a `cast(x as boolean)` is not portable and
-        // must be rejected upstream — but keep the spelling total here behind the
-        // structural validator's gate. SQLite stores booleans as integers.
-        (CastTarget::Boolean, SqlDialect::Sqlite) => "integer",
-        (CastTarget::Blob, SqlDialect::Postgres) => "bytea",
-        (CastTarget::Blob, SqlDialect::Sqlite) => "blob",
-        (CastTarget::Uuid, SqlDialect::Postgres) => "uuid",
-        // SQLite has no uuid type; uuids are stored as text. The vendor policy
-        // predicates that use `::uuid` are PgOnly (the containing vendor op is
-        // refused on a SQLite target at validate, §4.3), so this arm only fires
-        // for a portable-core `.cast("uuid")` on SQLite — render `text`, the
-        // portable storage spelling (mirrors `boolean`→`integer` above).
-        (CastTarget::Uuid, SqlDialect::Sqlite) => "text",
-    }
+    crate::dialect_renderer::renderer(dialect).cast_target(target)
 }
 
 /// Render a `c.fn.concatWs(delim, a, b, …)` per dialect (§9): PG `concat_ws`;
 /// SQLite has no `concat_ws`, so it lowers to a NULL-skipping fold over `||` using
 /// the pinned, portable shape. The args are already rendered fragments.
 fn render_concat_ws(rendered: &[String], dialect: SqlDialect) -> String {
-    // rendered[0] is the delimiter; rendered[1..] are the values.
-    match dialect {
-        SqlDialect::Postgres => format!("concat_ws({})", rendered.join(", ")),
-        SqlDialect::Sqlite => {
-            // NULL-skipping join: coalesce each value with '' joined by the
-            // delimiter would re-introduce empty fields; the pinned SQLite shape
-            // for concat_ws is a fold that skips NULLs. We use the standard
-            // equivalent: trim away the delimiter that a leading NULL would leave.
-            // For the bounded value count we emit the explicit
-            // `substr(<acc>, len(delim)+1)` head-trim of a `||`-fold where each
-            // value contributes `delim || value` only when not NULL.
-            let delim = &rendered[0];
-            let values = &rendered[1..];
-            // acc = '' ; for each v: acc = acc || (case when v is null then '' else delim||v end)
-            // then strip the single leading delim.
-            let mut fold = String::from("''");
-            for v in values {
-                fold = format!(
-                    "({fold} || (CASE WHEN ({v}) IS NULL THEN '' ELSE ({delim}) || ({v}) END))"
-                );
-            }
-            // Strip the leading delimiter (length of the delim literal). Using
-            // substr with instr-free fixed-prefix removal is only correct when the
-            // delim is a fixed literal; concatWs's delim is a Literal by the op
-            // shape, so this holds. We strip `length(delim)` leading chars.
-            format!("substr({fold}, length({delim}) + 1)")
-        }
-    }
+    crate::dialect_renderer::renderer(dialect).render_concat_ws(rendered)
 }
 
 /// The MAX literal part index `c.fn.splitPart` admits — the O(2ⁿ) inline-unroll
 /// bound (§9, `~17 KB` at `n=8`). MUST equal
 /// [`crate::validate::SPLIT_PART_MAX_N`] — the validator gates the envelope and
 /// this renderer assumes it; a fixture pins their equality.
-const SPLIT_PART_MAX_N: i64 = crate::validate::SPLIT_PART_MAX_N;
+pub(crate) const SPLIT_PART_MAX_N: i64 = crate::validate::SPLIT_PART_MAX_N;
 
 /// Render the PINNED `c.fn.splitPart(col, d, n)` per dialect (§9), given the
 /// already-rendered `col_sql` fragment and the raw delimiter + `n` IR args. The
@@ -524,42 +454,7 @@ fn render_split_part(
         }
     };
 
-    match dialect {
-        SqlDialect::Postgres => {
-            // PG's split_part is multi-char-capable and takes any positive n — the
-            // full delimiter string, '-escaped, rendered verbatim. This is the
-            // dialect_scope=PgOnly escape (§2.4.1/§9): the envelope does NOT apply.
-            let d = format!("'{}'", delim.replace('\'', "''"));
-            Ok(format!("split_part({col_sql}, {d}, {n})"))
-        }
-        SqlDialect::Sqlite => {
-            // ENVELOPE (SQLite only): single-ASCII-byte delim, 1 ≤ n ≤ MAX_N.
-            let bytes = delim.as_bytes();
-            if bytes.len() != 1 || bytes[0] >= 0x80 {
-                return Err(DmlError::UnrenderableExpr(format!(
-                    "c.fn.splitPart delimiter must be a single ASCII character (one byte, \
-                     code point < 0x80) to lower portably on SQLite; got {delim:?}"
-                )));
-            }
-            if n > SPLIT_PART_MAX_N {
-                return Err(DmlError::UnrenderableExpr(format!(
-                    "c.fn.splitPart part index n must be in 1..={SPLIT_PART_MAX_N} \
-                     (the proven inline-unroll bound) to lower portably on SQLite; got {n}"
-                )));
-            }
-            let dc = char::from(bytes[0]);
-            // Single-ASCII delimiter as an inline SQL string literal (`'` → `''`).
-            let d = if dc == '\'' { "''''".to_string() } else { format!("'{dc}'") };
-            // cur₀ = (col || 'd') — the sentinel-terminated string.
-            let mut cur = format!("({col_sql} || {d})");
-            // curᵢ = substr(curᵢ₋₁, instr(curᵢ₋₁, 'd') + 1), i = 1 … n−1.
-            for _ in 1..n {
-                cur = format!("substr({cur}, instr({cur}, {d}) + 1)");
-            }
-            // result = substr(cur_{n-1}, 1, instr(cur_{n-1}, 'd') − 1).
-            Ok(format!("substr({cur}, 1, instr({cur}, {d}) - 1)"))
-        }
-    }
+    crate::dialect_renderer::renderer(dialect).render_split_part(col_sql, delim, n)
 }
 
 /// A bind accumulator carried through the parameterized render walk: it owns the
@@ -642,16 +537,8 @@ fn render_synth_bound(f: SynthFn, args: &[Expr], ctx: &mut BindCtx) -> Result<St
             }
             Ok(render_concat_ws(&rs, ctx.dialect))
         }
-        SynthFn::Now => Ok(match ctx.dialect {
-            SqlDialect::Postgres => "now()".to_string(),
-            SqlDialect::Sqlite => "CURRENT_TIMESTAMP".to_string(),
-        }),
-        SynthFn::GenRandomUuid => Ok(match ctx.dialect {
-            SqlDialect::Postgres => "gen_random_uuid()".to_string(),
-            // SQLite has no native UUID; the portable shape is a hex-randomblob
-            // composition. Pinned, deterministic SHAPE (not value).
-            SqlDialect::Sqlite => "lower(hex(randomblob(16)))".to_string(),
-        }),
+        SynthFn::Now => Ok(crate::dialect_renderer::renderer(ctx.dialect).synth_now()),
+        SynthFn::GenRandomUuid => Ok(crate::dialect_renderer::renderer(ctx.dialect).synth_uuid()),
         SynthFn::SplitPart => {
             // splitPart(col, delim, n): the column arg may itself be a ColRef or an
             // in-AST sub-expression — render it (binding any nested Literals), then
@@ -735,14 +622,8 @@ pub(crate) fn render_expr_inline(expr: &Expr, dialect: SqlDialect) -> Result<Str
                     args.iter().map(|a| render_expr_inline(a, dialect)).collect();
                 render_concat_ws(&rs?, dialect)
             }
-            SynthFn::Now => match dialect {
-                SqlDialect::Postgres => "now()".to_string(),
-                SqlDialect::Sqlite => "CURRENT_TIMESTAMP".to_string(),
-            },
-            SynthFn::GenRandomUuid => match dialect {
-                SqlDialect::Postgres => "gen_random_uuid()".to_string(),
-                SqlDialect::Sqlite => "lower(hex(randomblob(16)))".to_string(),
-            },
+            SynthFn::Now => crate::dialect_renderer::renderer(dialect).synth_now(),
+            SynthFn::GenRandomUuid => crate::dialect_renderer::renderer(dialect).synth_uuid(),
         },
         Expr::Cast { operand, target } => {
             format!(

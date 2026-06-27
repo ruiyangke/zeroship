@@ -1785,28 +1785,12 @@ impl IrAuthor {
         eff_schema: &str,
         decl: &DeclarativeAuthor,
     ) -> Result<Vec<LoweredUnit>, IrLowerError> {
-        match self.dialect {
-            SqlDialect::Postgres => {
-                let stmts = match crate::vendor::render_vendor_op(op, eff_schema) {
-                    Ok(stmts) => stmts,
-                    Err(crate::vendor::VendorError::UnsupportedTriggerAction { kind }) => {
-                        return Err(IrLowerError::TriggerUnsupported {
-                            kind,
-                            dialect: SqlDialect::Postgres,
-                        });
-                    }
-                    Err(e) => return Err(IrLowerError::Vendor(e)),
-                };
-                Ok(stmts
-                    .into_iter()
-                    .map(|s| decl.lower_vendor_statement(&s.name, s.up, s.down))
-                    .collect())
-            }
-            SqlDialect::Sqlite => {
-                let stmt = render_sqlite_trigger_op(op, eff_schema)?;
-                Ok(vec![decl.lower_vendor_statement(&stmt.name, stmt.up, stmt.down)])
-            }
-        }
+        let stmts = crate::dialect_renderer::renderer(self.dialect)
+            .render_trigger_op(op, eff_schema)?;
+        Ok(stmts
+            .into_iter()
+            .map(|s| decl.lower_vendor_statement(&s.name, s.up, s.down))
+            .collect())
     }
 
     fn lower_view_op(
@@ -2803,37 +2787,19 @@ fn render_view_op(
             ..
         } => {
             let materialized = materialized.unwrap_or(false);
-            if materialized && matches!(dialect, SqlDialect::Sqlite) {
-                return Err(IrLowerError::ViewUnsupported {
-                    kind: "materializedView",
-                    dialect,
-                });
-            }
-            let qname = view_object_name(name, eff_schema, dialect)?;
+            let renderer = crate::dialect_renderer::renderer(dialect);
+            renderer.validate_view_materialized(materialized)?;
+            let qname = renderer.view_object_name(name, eff_schema)?;
             let cols = render_view_columns(columns.as_deref())?;
             let query_sql = render_view_query(query, eff_schema, dialect, scope)?;
-            let mut create = String::from("CREATE ");
-            match dialect {
-                SqlDialect::Postgres => {
-                    if materialized {
-                        create.push_str("MATERIALIZED VIEW ");
-                    } else if replace.unwrap_or(false) {
-                        create.push_str("OR REPLACE VIEW ");
-                    } else {
-                        create.push_str("VIEW ");
-                    }
-                }
-                SqlDialect::Sqlite => create.push_str("VIEW "),
-            }
+            let replace = replace.unwrap_or(false);
+            let mut create = renderer.view_create_prefix(materialized, replace)?;
             create.push_str(&qname);
             create.push_str(&cols);
             create.push_str(" AS ");
             create.push_str(&query_sql);
 
-            let mut up = Vec::new();
-            if matches!(dialect, SqlDialect::Sqlite) && replace.unwrap_or(false) {
-                up.push(format!("DROP VIEW IF EXISTS {qname}"));
-            }
+            let mut up = renderer.view_replace_prelude(&qname, replace);
             up.push(create);
 
             let drop_kw = if materialized { "DROP MATERIALIZED VIEW" } else { "DROP VIEW" };
@@ -2845,13 +2811,9 @@ fn render_view_op(
         }
         Op::DropView { name, existence_guard, materialized, .. } => {
             let materialized = materialized.unwrap_or(false);
-            if materialized && matches!(dialect, SqlDialect::Sqlite) {
-                return Err(IrLowerError::ViewUnsupported {
-                    kind: "materializedView",
-                    dialect,
-                });
-            }
-            let qname = view_object_name(name, eff_schema, dialect)?;
+            let renderer = crate::dialect_renderer::renderer(dialect);
+            renderer.validate_view_materialized(materialized)?;
+            let qname = renderer.view_object_name(name, eff_schema)?;
             let mut up = if materialized {
                 String::from("DROP MATERIALIZED VIEW ")
             } else {
@@ -2983,29 +2945,7 @@ fn render_table_ref(
     eff_schema: &str,
     dialect: SqlDialect,
 ) -> Result<String, IrLowerError> {
-    let mut sql = match dialect {
-        SqlDialect::Postgres => {
-            let schema = table.schema.as_deref().unwrap_or(eff_schema);
-            format!(
-                "{}.{}",
-                quote_engine_ident_as_dml("schema", schema)?,
-                crate::dml::quote_bare_ident("table", &table.name)?
-            )
-        }
-        SqlDialect::Sqlite => {
-            if let Some(schema) = table.schema.as_deref() {
-                if !schema.eq_ignore_ascii_case(eff_schema) {
-                    return Err(IrLowerError::LowerCrossSchema(schema.to_string()));
-                }
-            }
-            crate::dml::quote_bare_ident("table", &table.name)?
-        }
-    };
-    if let Some(alias) = table.alias.as_deref() {
-        sql.push_str(" AS ");
-        sql.push_str(&crate::dml::quote_bare_ident("table alias", alias)?);
-    }
-    Ok(sql)
+    crate::dialect_renderer::renderer(dialect).render_table_ref(table, eff_schema)
 }
 
 fn render_view_columns(columns: Option<&[String]>) -> Result<String, IrLowerError> {
@@ -3020,28 +2960,7 @@ fn render_view_columns(columns: Option<&[String]>) -> Result<String, IrLowerErro
     Ok(format!(" ({})", qcols?.join(", ")))
 }
 
-fn view_object_name(
-    name: &str,
-    eff_schema: &str,
-    dialect: SqlDialect,
-) -> Result<String, IrLowerError> {
-    match dialect {
-        SqlDialect::Postgres => Ok(format!(
-            "{}.{}",
-            quote_engine_ident_as_dml("schema", eff_schema)?,
-            crate::dml::quote_bare_ident("view", name)?
-        )),
-        SqlDialect::Sqlite => Ok(crate::dml::quote_bare_ident("view", name)?),
-    }
-}
-
-fn quote_engine_ident_as_dml(what: &'static str, ident: &str) -> Result<String, IrLowerError> {
-    crate::dml::quote_ident_checked(ident)
-        .map_err(|e| crate::dml::DmlError::InvalidIdentifier { what, value: e.value })
-        .map_err(IrLowerError::DmlAssemble)
-}
-
-fn render_sqlite_trigger_op(
+pub(crate) fn render_sqlite_trigger_op(
     op: &Op,
     eff_schema: &str,
 ) -> Result<crate::vendor::VendorStatement, IrLowerError> {
