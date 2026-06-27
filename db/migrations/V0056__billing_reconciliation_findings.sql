@@ -109,7 +109,7 @@ BEGIN
        OR NEW.stripe_value IS DISTINCT FROM OLD.stripe_value THEN
         RAISE EXCEPTION 'billing_reconciliation_findings frozen columns are immutable — only resolved_at/severity may change';
     END IF;
-    -- resolved_at is set-once: NULL → a timestamp. A resolved finding never un-resolves.
+
     IF OLD.resolved_at IS NOT NULL AND NEW.resolved_at IS DISTINCT FROM OLD.resolved_at THEN
         RAISE EXCEPTION 'billing_reconciliation_findings.resolved_at is set-once (a resolved finding stays resolved)';
     END IF;

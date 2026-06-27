@@ -84,7 +84,7 @@ BEGIN
     IF TG_OP = 'DELETE' THEN
         RAISE EXCEPTION 'refunds are append-only (no DELETE) — correct via a true-up / re-charge';
     END IF;
-    -- Money + identity columns are FROZEN at claim.
+
     IF NEW.id <> OLD.id
        OR NEW.invoice_id <> OLD.invoice_id
        OR NEW.amount_cents <> OLD.amount_cents
@@ -96,9 +96,9 @@ BEGIN
        OR NEW.request_fingerprint <> OLD.request_fingerprint THEN
         RAISE EXCEPTION 'refund % money/identity columns are frozen — only the status lifecycle may progress', OLD.id;
     END IF;
-    -- Status lifecycle: a STRICT progression. A terminal status (failed/canceled) is final;
-    -- issued may only go to a terminal failure (the charge.refund.updated reversal); pending
-    -- may go to issued OR a terminal failure. A same-status no-op UPDATE is allowed.
+
+
+
     IF NEW.status <> OLD.status THEN
         IF NOT (
                (OLD.status = 'pending' AND NEW.status IN ('issued','failed','canceled'))
@@ -122,13 +122,13 @@ $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION zeroship.refunds_no_over_refund() RETURNS trigger AS $fn$
 DECLARE cash BIGINT; sum_cash BIGINT; sum_credit BIGINT;
 BEGIN
-    -- A row being INSERTed/flipped INTO a failed/canceled state never counts.
+
     IF NEW.status IN ('failed','canceled') THEN
         RETURN NEW;
     END IF;
     SELECT COALESCE(SUM(amount_cents), 0) INTO cash
       FROM zeroship.invoice_payments WHERE invoice_id = NEW.invoice_id;
-    -- Only COUNTING refunds (not failed/canceled) consume the cap.
+
     SELECT COALESCE(SUM(amount_cents) FILTER (WHERE destination = 'cash'),   0),
            COALESCE(SUM(amount_cents) FILTER (WHERE destination = 'credit'), 0)
       INTO sum_cash, sum_credit

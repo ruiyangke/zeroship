@@ -116,12 +116,12 @@ CREATE INDEX auth_audit_event_idx ON zeroship.audit_events (event_type, occurred
 CREATE OR REPLACE FUNCTION zeroship.audit_events_block_tamper()
  RETURNS trigger AS $$
  BEGIN
-     -- Append-only: UPDATE and TRUNCATE are always rejected. The one sanctioned
-     -- DELETE is the retention sweep (auth::cron::audit_retention), which flags
-     -- its connection with `SET zeroship.audit_retention = 'on'` before deleting
-     -- expired rows. App handlers never set that GUC (and can't via a
-     -- parameterised query), so the tamper guard still holds against application
-     -- code and SQL injection.
+
+
+
+
+
+
      IF TG_OP = 'DELETE'
         AND current_setting('zeroship.audit_retention', true) = 'on' THEN
          RETURN OLD;
