@@ -126,7 +126,7 @@ impl PgConfinement {
             statement_timeout: Duration::from_secs(60),
             lock_timeout: Duration::from_secs(3),
             // Defaults to no SET ROLE; the platform sets this to the provisioned
-            // `migrator_<project>` role. Tests opt in explicitly.
+            // deterministic per-project migrator role. Tests opt in explicitly.
             migrator_role: None,
             // Extension types/functions (pgvector `vector`, PostGIS `geography`)
             // live in `public` on the platform/dev image. Resolution-only; the

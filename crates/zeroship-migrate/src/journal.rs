@@ -261,8 +261,8 @@ pub struct PendingContract {
     pub contract_versions: Vec<String>,
 }
 
-/// The fields of a `pending` pending-contract obligation row, bundled so
-/// [`record_pending_contract`] takes one descriptor (keeping the arg count down).
+/// The fields of a `pending` pending-contract obligation row, bundled so the
+/// writer takes one descriptor (keeping the arg count down).
 #[derive(Debug, Clone, Copy)]
 pub struct PendingContractRecord<'a> {
     /// The table the rename targets (bare name).
@@ -1141,18 +1141,6 @@ pub async fn outstanding_pending_contracts(
 /// re-open after a resolve would legitimately append a new `pending` row, but the
 /// rename id is deterministic so that never happens in practice).
 ///
-/// Admin-run; the migrator cannot reach this table.
-///
-/// # Errors
-/// [`JournalError::Db`] on insert failure.
-pub async fn record_pending_contract(
-    conn: &Client,
-    cfg: &ExecutorConfig,
-    rec: PendingContractRecord<'_>,
-) -> Result<(), JournalError> {
-    record_pending_contract_with_recovery(conn, cfg, rec, None).await
-}
-
 /// Open a cross-deploy pending-contract obligation AND, when a
 /// [`DeployRecoveryScope`] is supplied, its deploy-scoped recovery marker — in ONE
 /// transaction (PR9e).
@@ -1164,9 +1152,8 @@ pub async fn record_pending_contract(
 /// auto crash-recovery leg's JOIN can never miss one.
 ///
 /// With `scope = None` this is exactly the routine (`.sql` / non-deploy / resolve /
-/// abort) write: a single autocommit obligation INSERT with no marker — identical to
-/// the pre-PR9e [`record_pending_contract`]. The deploy path passes
-/// `Some(DeployRecoveryScope { deploy_id })`.
+/// abort) write: a single autocommit obligation INSERT with no marker. The deploy
+/// path passes `Some(DeployRecoveryScope { deploy_id })`.
 ///
 /// Both INSERTs are admin-side (same `Client`, same role), under the held project
 /// lock and the immutability trigger.
@@ -1801,9 +1788,8 @@ mod tests {
     }
 
     /// The cross-deploy pending-contract `state`/`resolution` wire contract is
-    /// byte-exact: the `schema_pending_contracts` CHECK constraints, the writers
-    /// (`record_pending_contract`/`resolve_pending_contract`), and the
-    /// net-state reader (`outstanding_pending_contracts`) all interpolate these
+    /// byte-exact: the `schema_pending_contracts` CHECK constraints, the writers,
+    /// and the net-state reader (`outstanding_pending_contracts`) all interpolate these
     /// literals from this single typed source (§2.0.3). A drift here would
     /// silently un-gate the interlock (a `pending` row never read back). Pin them.
     #[test]

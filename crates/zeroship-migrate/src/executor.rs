@@ -1109,8 +1109,7 @@ async fn apply_locked<B: MigrationBackend>(
     // branch. The guard is selected for `cfg`'s dialect (which equals
     // `backend.dialect()`) via [`guard_for`], so it carries the apply's project +
     // trust profile from `cfg.guard_config()` (the trust profile lives on
-    // `ExecutorConfig`, not the backend, hence `guard_for(cfg.guard_config())`
-    // rather than `backend.guard()` here — same seam, config-correct):
+    // `ExecutorConfig`, not the backend):
     //   - Postgres → `PgGuard` (libpg_query deny-list) — byte-identical to the
     //     pre-seam `SqlGuard::new(cfg.guard_config())`;
     //   - SQLite → `SqliteDescriptorGuard` — the trusted descriptor-diff path

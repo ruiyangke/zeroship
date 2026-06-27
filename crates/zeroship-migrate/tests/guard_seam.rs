@@ -17,8 +17,8 @@
 //!   refuses with `SqliteRawSqlRejected` rather than mis-parsing — the defensive
 //!   property the engine no longer relies on (it routes SQLite through
 //!   `SqliteDescriptorGuard`), kept as a backstop for the wrong caller.
-//! - `guard_for` / `backend.guard()` select the right per-engine guard by
-//!   dialect, with no by-name SQLite knowledge in the core.
+//! - `guard_for` selects the right per-engine guard by dialect, with no by-name
+//!   SQLite knowledge in the core.
 
 use zeroship_migrate::guard::{
     guard_for, GuardConfig, GuardError, MigrationGuard, PgGuard, SqlGuard, SqliteDescriptorGuard,

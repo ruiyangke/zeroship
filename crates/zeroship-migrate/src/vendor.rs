@@ -70,6 +70,10 @@ pub enum VendorError {
         /// Stable unsupported-kind token.
         kind: &'static str,
     },
+    /// `CREATE ROLE IF NOT EXISTS` is synthesized with an opaque PL/pgSQL DO
+    /// wrapper; SUPERUSER must never be hidden inside that body.
+    #[error("vendor render: createRole cannot combine superuser:true with ifNotExists:true")]
+    SuperuserIfNotExistsUnsupported,
 }
 
 /// Quote an identifier through the crate's single seam, mapping the error.
@@ -238,6 +242,9 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
             set_search_path,
             if_not_exists,
         } => {
+            if superuser.unwrap_or(false) && if_not_exists.unwrap_or(false) {
+                return Err(VendorError::SuperuserIfNotExistsUnsupported);
+            }
             let qname = qid(name)?;
             let mut opts = String::new();
             if login.unwrap_or(false) {

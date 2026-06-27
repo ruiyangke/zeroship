@@ -2069,16 +2069,6 @@ impl Op {
         !self.vendor_capabilities().is_empty()
     }
 
-    /// The VENDOR capability this op REQUIRES, or `None` for a portable-core op
-    /// (vendor spec §3.2). The capability-composition gate
-    /// ([`crate::capability::VendorCapabilities`]) refuses the op fail-closed when
-    /// the active capability set does not grant this. EXHAUSTIVE over the closed
-    /// [`Op`] set.
-    #[must_use]
-    pub fn vendor_capability(&self) -> Option<crate::capability::VendorCapability> {
-        self.vendor_capabilities().into_iter().next()
-    }
-
     /// All VENDOR capabilities this op requires. Most ops require at most one; a
     /// raw materialized view requires both the raw-view-body and materialized-view
     /// capabilities.

@@ -1189,8 +1189,7 @@ async fn pr9e_combined_write_failure_rolls_back_both_rows() {
 
 // PR9e — with NO recovery scope (the routine `.sql` / resolve / abort caller), the
 // combined write degrades to a single autocommit obligation INSERT and writes NO
-// marker — identical to the pre-PR9e `record_pending_contract`. This pins the
-// fail-closed default (R2): `None` ⇒ no marker.
+// marker. This pins the fail-closed default (R2): `None` ⇒ no marker.
 #[compio::test]
 async fn pr9e_no_scope_writes_obligation_only_no_marker() {
     let conn = pg().await;

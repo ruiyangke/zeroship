@@ -676,6 +676,26 @@ pub fn validate_op_scoped(
                     .to_string(),
             ),
         }),
+        Op::CreateRole { superuser, if_not_exists, .. }
+            if superuser.unwrap_or(false) && if_not_exists.unwrap_or(false) =>
+        {
+            Err(AuthoringError {
+                code: CODE_UNSUPPORTED.to_string(),
+                kind: Some(UnsupportedKind::Op),
+                op_index,
+                ts_location: ts_location.map(str::to_string),
+                dialect: target_dialect,
+                reason: "createRole cannot combine superuser:true with ifNotExists:true; \
+                         the idempotent form requires a PL/pgSQL DO wrapper and SUPERUSER \
+                         must never be hidden inside an opaque body"
+                    .to_string(),
+                suggested_fix: Some(
+                    "remove superuser:true; zeroship Platform migrations may create bounded \
+                     roles, but must not mint Postgres superusers"
+                        .to_string(),
+                ),
+            })
+        }
         // Ops with no embedded expression slot. (`RenameTable` carries only its
         // old/new table NAMES — no Expr — so the schema-ident + guard-direction
         // gate in `validate_op_schema_and_guard` above is the whole check, and the

@@ -499,7 +499,7 @@ impl SqlGuard {
         // (libpg_query below); it is the PG arm of the per-engine
         // [`MigrationGuard`] seam ([`PgGuard`] wraps it). The engine never selects
         // `SqlGuard` for SQLite — it routes through [`SqliteDescriptorGuard`] (via
-        // [`guard_for`] / `backend.guard()`), the trusted descriptor-diff path.
+        // [`guard_for`]), the trusted descriptor-diff path.
         // This arm is the defensive fail-closed for the *wrong caller*: if a raw,
         // untrusted SQLite string is ever handed to the PG guard (a SQLite-keyed
         // `GuardConfig`), `libpg_query` cannot vet it, so we reject rather than
@@ -541,7 +541,7 @@ impl SqlGuard {
             // full-tree walks (dangerous funcs + every schema reference). This
             // sidesteps `node.nodes()`, whose hand-written traversal skips
             // column DEFAULT / CHECK / VALUES / RULE-action subtrees.
-            let json = serde_json::to_value(raw_stmt).unwrap_or(Value::Null);
+            let json = guard_stmt_json(raw_stmt, &raw)?;
             self.check_node(node, &json, &raw)?;
         }
 
@@ -1165,7 +1165,7 @@ impl SqlGuard {
             for raw_stmt in &parsed.protobuf.stmts {
                 if let Some(inner) = raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref()) {
                     let inner_raw = stmt_text(body, raw_stmt);
-                    let json = serde_json::to_value(raw_stmt).unwrap_or(Value::Null);
+                    let json = guard_stmt_json(raw_stmt, &inner_raw)?;
                     // Recurse with the inner statement's own text for accurate
                     // error reporting.
                     self.check_node(inner, &json, &inner_raw)?;
@@ -1179,7 +1179,7 @@ impl SqlGuard {
             if let Ok(parsed) = pg_query::parse(&literal) {
                 for raw_stmt in &parsed.protobuf.stmts {
                     if let Some(inner) = raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref()) {
-                        let json = serde_json::to_value(raw_stmt).unwrap_or(Value::Null);
+                        let json = guard_stmt_json(raw_stmt, &literal)?;
                         self.check_node(inner, &json, &literal)?;
                     }
                 }
@@ -1203,11 +1203,14 @@ impl SqlGuard {
         // Under Platform (§4.2) the role-management + search_path needles are
         // relaxed — 0025's bootstrap DO-block legitimately EXECUTEs
         // `CREATE ROLE …` / `ALTER ROLE … SET search_path …` — but `ALTER
-        // SYSTEM` STAYS hard in BOTH profiles (it has no place in any
-        // migration). The recursion arm (a) has already admitted the genuinely
-        // parsed CREATE ROLE / GRANT nodes under Platform; this token scan is
-        // the lexical backstop, so relaxing exactly these needles is the
-        // surgical change.
+        // SYSTEM` and `SUPERUSER` STAY hard in BOTH profiles (neither has any
+        // place in any migration). The recursion arm (a) has already admitted
+        // the genuinely parsed CREATE ROLE / GRANT nodes under Platform; this
+        // token scan is the lexical backstop for PL/pgSQL bodies that do not
+        // parse as top-level SQL.
+        if body_contains_superuser_role_escalation(&lower) {
+            return Err(denied(rule::BODY_INSPECTION, raw));
+        }
         let platform = self.cfg.trust() == TrustProfile::Platform;
         let needles: &[&str] = if platform {
             &["alter system"]
@@ -1486,8 +1489,8 @@ pub struct GuardOutcome {
 }
 
 /// The **per-engine line-1 defense**, behind a trait so the core engine never
-/// selects it by dialect (`if dialect == Sqlite`) — it asks `backend.guard()` /
-/// [`guard_for`] and runs whatever line-1 that engine brings.
+/// selects it by dialect (`if dialect == Sqlite`) — it asks [`guard_for`] and
+/// runs whatever line-1 that engine brings.
 ///
 /// - **Postgres** ([`PgGuard`]) — the libpg_query parse + deny-list + classify +
 ///   analyze ([`SqlGuard`]), mapped onto the neutral [`GuardOutcome`].
@@ -1585,10 +1588,7 @@ impl MigrationGuard for SqliteDescriptorGuard {
 }
 
 /// Select the per-engine line-1 [`MigrationGuard`] for a [`GuardConfig`]'s
-/// dialect — the read-only `plan()` path (which has a [`GuardConfig`] but no
-/// live backend). The apply path uses
-/// [`MigrationBackend::guard`](crate::backend::MigrationBackend::guard) instead,
-/// which returns the same per-engine guard from the live backend.
+/// dialect.
 ///
 /// Postgres → [`PgGuard`] (libpg_query deny-list); SQLite → [`SqliteDescriptorGuard`]
 /// (trusted descriptor path). This replaces the `if dialect == Sqlite` branch in
@@ -2563,6 +2563,10 @@ fn json_string_node(v: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+fn guard_stmt_json<T: serde::Serialize>(raw_stmt: &T, raw: &str) -> Result<Value, GuardError> {
+    serde_json::to_value(raw_stmt).map_err(|_| denied(rule::INTERNAL_GUARD_ERROR, raw))
+}
+
 /// Build a [`GuardError::Denied`].
 fn denied(rule: &'static str, statement: &str) -> GuardError {
     GuardError::Denied {
@@ -2684,6 +2688,14 @@ fn word_present(haystack: &str, needle: &str) -> bool {
 
 const fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn body_contains_superuser_role_escalation(lower: &str) -> bool {
+    word_present(lower, "superuser")
+        && (lower.contains("create role")
+            || lower.contains("create user")
+            || lower.contains("alter role")
+            || lower.contains("alter user"))
 }
 
 /// Slice the original source for a statement using its byte offsets.
@@ -2989,6 +3001,92 @@ mod tests {
         assert!(
             g.check(r#"CREATE ROLE "zeroship_auth" NOSUPERUSER LOGIN"#).is_ok(),
             "NOSUPERUSER must not trip the superuser deny"
+        );
+    }
+
+    #[test]
+    fn superuser_role_in_if_not_exists_do_wrap_denied_even_under_platform() {
+        let g = platform_guard();
+        let sql = r#"DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'evil') THEN
+                CREATE ROLE "evil" SUPERUSER;
+            END IF;
+        END $$"#;
+
+        match g.check(sql) {
+            Err(GuardError::Denied { rule: r, .. }) => assert!(
+                r == rule::SUPERUSER_ROLE || r == rule::BODY_INSPECTION,
+                "DO-wrapped SUPERUSER must deny via superuser/body rule, got rule={r}"
+            ),
+            other => panic!("DO-wrapped SUPERUSER must be DENIED under Platform; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vendor_if_not_exists_superuser_role_op_is_refused_under_platform() {
+        let guard_cfg = platform_guard_config();
+        let author = platform_author(&guard_cfg);
+        let op = crate::ir::Op::CreateRole {
+            name: "evil".into(),
+            login: Some(true),
+            password: None,
+            bypass_rls: None,
+            create_role: None,
+            create_db: None,
+            superuser: Some(true),
+            in_role: None,
+            set_search_path: None,
+            if_not_exists: Some(true),
+        };
+
+        match author.lower_guarded(
+            &vendor_ir(op),
+            &guard_cfg,
+            &crate::ir_author::LiveSchema::default(),
+        ) {
+            Err(_) => {}
+            Ok((_steps, fragments)) => panic!(
+                "vendor createRole(superuser + ifNotExists) must be refused; got fragments={fragments:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn superuser_role_in_platform_do_body_token_scan_is_denied() {
+        let g = platform_guard();
+        let sql = r"DO $$ BEGIN
+            EXECUTE format('ALTER ROLE %I SUPERUSER', 'zeroship_auth');
+        END $$";
+
+        match g.check(sql) {
+            Err(GuardError::Denied { rule: r, .. }) => assert!(
+                r == rule::SUPERUSER_ROLE || r == rule::BODY_INSPECTION,
+                "DO body SUPERUSER token must deny via superuser/body rule, got rule={r}"
+            ),
+            other => panic!("DO body SUPERUSER token must be DENIED under Platform; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn guard_statement_json_serialization_error_fails_closed() {
+        struct BadSerialize;
+
+        impl serde::Serialize for BadSerialize {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(serde::ser::Error::custom("forced serialization failure"))
+            }
+        }
+
+        assert!(
+            serde_json::to_value(&BadSerialize).is_err(),
+            "test precondition: BadSerialize must fail JSON serialization"
+        );
+        assert!(
+            guard_stmt_json(&BadSerialize, "SELECT 1").is_err(),
+            "guard must deny-by-default on statement JSON serialization failure"
         );
     }
 

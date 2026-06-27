@@ -637,8 +637,8 @@ async fn dry_run_teardown_survives_a_body_panic() {
     let tok = token();
     let cfg = cfg_for(&tok);
     // A unique prefix so we observe ONLY this test's shadow DB.
-    let unique = format!("zsmig_panic_{}_", token().replace('_', ""));
-    let unique_prefix: String = unique.chars().take(40).collect();
+    let unique_tail: String = token().replace('_', "").chars().rev().take(8).collect();
+    let unique_prefix = format!("zp{unique_tail}");
     let scfg = ShadowConfig {
         admin_dsn: dsn(),
         db_name_prefix: unique_prefix.clone(),
@@ -692,11 +692,11 @@ async fn dry_run_teardown_survives_a_body_panic() {
 // down, and never the real project's role.
 // ---------------------------------------------------------------------------
 
-/// H1 regression. A dry-run must NOT leave any `migrator_*` role behind, and must
-/// NEVER provision the REAL project's role (`migrator_<project_id>`). Pre-fix the
+/// H1 regression. A dry-run must NOT leave any shadow migrator role behind, and must
+/// NEVER provision the REAL project's migrator role. Pre-fix the
 /// shadow called `provision_migrator` with the real `cfg` (creating
-/// `migrator_<project_id>`, cluster-global, surviving DROP DATABASE) and never
-/// dropped it — RED here without the test-harness `cleanup_role` crutch.
+/// the real project role, cluster-global, surviving DROP DATABASE) and never
+/// dropped it.
 #[compio::test]
 async fn dry_run_provisions_unique_shadow_role_and_drops_it() {
     let admin = pg().await;
@@ -707,14 +707,14 @@ async fn dry_run_provisions_unique_shadow_role_and_drops_it() {
 
     // A UNIQUE shadow prefix so the role-leak count is scoped to THIS test (the
     // global `migrator_%` count races with parallel sibling dry-runs).
-    let unique = format!("zsmig_h1_{}_", token().replace('_', ""));
-    let unique_prefix: String = unique.chars().take(40).collect();
+    let unique_tail: String = token().replace('_', "").chars().rev().take(8).collect();
+    let unique_prefix = format!("zh{unique_tail}");
     let scfg = ShadowConfig {
         admin_dsn: dsn(),
         db_name_prefix: unique_prefix.clone(),
     };
-    // The shadow's role is `migrator_<shadow_db>`, and the shadow DB starts with
-    // `unique_prefix` — so its role starts with `migrator_<unique_prefix>`.
+    // The role derivation keeps the first readable bytes of the shadow DB name
+    // before its hash suffix, so a short unique DB prefix scopes this check.
     let shadow_role_prefix = format!("migrator_{unique_prefix}");
 
     let m = mig(

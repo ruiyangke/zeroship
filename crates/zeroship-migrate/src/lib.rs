@@ -167,8 +167,8 @@ pub(crate) use guard::OperatorCapability;
 pub use journal::{
     applied, applied_count, ensure_journal, history as journal_history,
     latest_completed_checksums, net_rolled_back, outstanding_pending_contracts,
-    record_baseline, record_completed, record_pending_contract, record_rolled_back,
-    record_started, resolve_pending_contract, superseded_versions, AppliedEntry, HistoryEvent,
+    record_baseline, record_completed, record_rolled_back, record_started,
+    resolve_pending_contract, superseded_versions, AppliedEntry, HistoryEvent,
     HistoryKind, JournalError, JournaledKind, PendingContract, PendingContractRecord,
     PendingState, Phase, Resolution, RolledBackEntry,
 };
