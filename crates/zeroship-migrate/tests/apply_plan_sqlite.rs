@@ -353,14 +353,10 @@ async fn sqlite_rename_opens_no_obligation_and_never_gates_a_follow_on_deploy() 
         .await
         .expect("sqlite rebuild rename applies");
 
-    // Deliverable 7: NO obligation is ever opened on SQLite.
-    let outstanding = be
-        .outstanding_pending_contracts(&exec_cfg())
-        .await
-        .expect("read outstanding on sqlite");
+    // Deliverable 7: SQLite structurally has no pending-contract capability.
     assert!(
-        outstanding.is_empty(),
-        "a SQLite rebuild rename opens NO pending-contract obligation"
+        be.pending_contracts().is_none(),
+        "a SQLite rebuild rename has NO pending-contract partition"
     );
 
     // A follow-on deploy that TOUCHES the just-renamed `people` table is NOT gated

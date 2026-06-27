@@ -198,11 +198,13 @@ pub async fn status_via_backend<B: crate::backend::MigrationBackend>(
     let pending: Vec<MigrationId> = ordered.iter().map(|m| m.version.clone()).collect();
 
     // §2.0.3 / §2.0.4 — outstanding pending contracts + blocked plans, read
-    // through the neutral trait. On SQLite this is ALWAYS empty (no pending
-    // partition, Deliverable 7), so the interlock can never false-gate a SQLite
-    // deploy; the helper still runs so any PG-backed caller of this generic path
-    // gets the same surfacing.
-    let outstanding = backend.outstanding_pending_contracts(cfg).await?;
+    // through the neutral capability. If the backend has no pending-contract
+    // capability, this is structurally empty and can never false-gate a deploy.
+    let outstanding = if let Some(pending_contracts) = backend.pending_contracts() {
+        pending_contracts.outstanding_pending_contracts(cfg).await?
+    } else {
+        Vec::new()
+    };
     let (pending_contracts, blocked) = derive_pending_contract_status(&outstanding, migrations);
 
     Ok(MigrationStatus {

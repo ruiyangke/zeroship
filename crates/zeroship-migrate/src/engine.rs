@@ -911,7 +911,10 @@ impl MigrationEngine {
         // some obligations does not re-drive them (idempotent). Under the held lock
         // (the in-process leg) this is consistent; on the standalone `Acquire` leg
         // `apply_plan_resolving` takes the lock per obligation below.
-        let outstanding = backend
+        let Some(pending_contracts) = backend.pending_contracts() else {
+            return Ok(Vec::new());
+        };
+        let outstanding = pending_contracts
             .outstanding_pending_contracts(exec_cfg)
             .await
             .map_err(|e| {
@@ -1037,10 +1040,14 @@ impl MigrationEngine {
         // an obligation is DISCHARGED after the steps apply (a `resolved='applied'` row
         // appended, §2.0.3 item 1), not refused — applying the REAL contract is exactly
         // how the table becomes clear.
-        let outstanding = backend
-            .outstanding_pending_contracts(exec_cfg)
-            .await
-            .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
+        let outstanding = if let Some(pending_contracts) = backend.pending_contracts() {
+            pending_contracts
+                .outstanding_pending_contracts(exec_cfg)
+                .await
+                .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?
+        } else {
+            Vec::new()
+        };
         // **PR9b L1 — discharge hardening: re-author-compare, not version-id alone.**
         // The `up` SQL each `Ddl` step carries, keyed by version. The contract-apply
         // recognition below re-authors the obligation's C1/C2 from its stored identity
@@ -1464,24 +1471,26 @@ impl MigrationEngine {
                         // obligation-vs-marker crash window structurally. `None` on the
                         // routine path is identical to the pre-PR9e single autocommit
                         // INSERT.
-                        backend
-                            .record_pending_contract_with_recovery(
-                                exec_cfg,
-                                crate::journal::PendingContractRecord {
-                                    table,
-                                    from_col: from,
-                                    to_col: to,
-                                    ty,
-                                    pending_version: &pending_version,
-                                    plan_version: &plan_version,
-                                    contract_versions: &contract_versions,
-                                    by: applied_by,
-                                },
-                                recovery_scope.copied(),
-                            )
-                            .await
-                            .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
-                        recorded_this_deploy.insert(pending_version.clone());
+                        if let Some(pending_contracts) = backend.pending_contracts() {
+                            pending_contracts
+                                .record_pending_contract_with_recovery(
+                                    exec_cfg,
+                                    crate::journal::PendingContractRecord {
+                                        table,
+                                        from_col: from,
+                                        to_col: to,
+                                        ty,
+                                        pending_version: &pending_version,
+                                        plan_version: &plan_version,
+                                        contract_versions: &contract_versions,
+                                        by: applied_by,
+                                    },
+                                    recovery_scope.copied(),
+                                )
+                                .await
+                                .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
+                            recorded_this_deploy.insert(pending_version.clone());
+                        }
                         // PR9d MED — surface the FULL obligation descriptor so the
                         // control loop's same-deploy recovery can re-author its abort
                         // from these exact identity facts (table/from/to/ty + versions),
@@ -1568,16 +1577,18 @@ impl MigrationEngine {
         // so a later deploy reads the obligation as discharged and no longer refuses
         // the table. This is the routine deploy-N+1 contract-apply path (§2.0.2); the
         // `resolve-pending --apply` CLI is the operator's manual equivalent.
-        for pc in &discharging {
-            backend
-                .resolve_pending_contract(
-                    exec_cfg,
-                    pc,
-                    crate::journal::Resolution::Applied,
-                    applied_by,
-                )
-                .await
-                .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
+        if let Some(pending_contracts) = backend.pending_contracts() {
+            for pc in &discharging {
+                pending_contracts
+                    .resolve_pending_contract(
+                        exec_cfg,
+                        pc,
+                        crate::journal::Resolution::Applied,
+                        applied_by,
+                    )
+                    .await
+                    .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
+            }
         }
 
         // **§2.0.3 — EXPLICIT resolution (the `resolve-pending` path).** All steps
@@ -1585,11 +1596,13 @@ impl MigrationEngine {
         // chosen resolution (`applied`/`aborted`). Resolve-AFTER-apply (inside the
         // held lock) is fail-closed: an apply failure above returned early, leaving
         // the obligation OUTSTANDING — never a resolved-but-not-applied fail-open.
-        for (pc, resolution) in explicit_resolve {
-            backend
-                .resolve_pending_contract(exec_cfg, pc, *resolution, applied_by)
-                .await
-                .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
+        if let Some(pending_contracts) = backend.pending_contracts() {
+            for (pc, resolution) in explicit_resolve {
+                pending_contracts
+                    .resolve_pending_contract(exec_cfg, pc, *resolution, applied_by)
+                    .await
+                    .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
+            }
         }
 
         Ok(DeclarativeDeployOutcome {

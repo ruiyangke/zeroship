@@ -37,6 +37,9 @@
 //! native `async fn` in trait (Rust ≥ 1.75) is used directly — no boxing, no
 //! `dyn`, no `async-trait` allocation on the apply hot path.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use compio_postgres::Client;
 
 use crate::backend_sqlite::SqliteRebuildSpec;
@@ -48,16 +51,13 @@ use crate::journal::{self, AppliedEntry, JournalError};
 use crate::migration::Migration;
 use zeroship_schema::query::SqlDialect;
 
-/// The session GUCs / settings the executor must restore on exit so its
-/// per-apply settings never leak onto the pooled/long-lived connection (H2).
+/// The Postgres session GUCs the backend restores on exit so its per-apply
+/// settings never leak onto the pooled/long-lived connection (H2).
 ///
-/// Dialect-neutral by construction: an owned snapshot the backend produces and
-/// later consumes. The Postgres impl carries the three GUC strings
-/// (`statement_timeout`/`lock_timeout`/`search_path`); a SQLite impl would carry
-/// whatever its session restore needs (or nothing). The generic executor never
-/// inspects the contents — it only round-trips the value back to the backend.
+/// The generic executor sees this only as
+/// [`MigrationBackend::SessionSnapshot`] and never inspects the fields.
 #[derive(Debug, Clone, Default)]
-pub struct SessionSnapshot {
+pub struct PgSessionSnapshot {
     /// PG `statement_timeout` GUC text (e.g. `"60s"`). Empty for a backend that
     /// has no such setting.
     pub statement_timeout: String,
@@ -65,6 +65,77 @@ pub struct SessionSnapshot {
     pub lock_timeout: String,
     /// PG `search_path` GUC text.
     pub search_path: String,
+}
+
+pub type JournalFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, JournalError>> + 'a>>;
+
+/// Cross-deploy pending-contract obligations capability.
+///
+/// Backends return `Some(&dyn CrossDeployObligations)` only when they can open
+/// and discharge cross-deploy obligations. If
+/// [`MigrationBackend::pending_contracts`] returns `None`, this capability is
+/// structurally absent: reads are empty and writes are no-ops/unreachable routing
+/// for that backend.
+pub trait CrossDeployObligations {
+    /// Read the OUTSTANDING cross-deploy pending-contract obligations (§2.0.3) —
+    /// the apply-time interlock read-back + the `status` orphan/blocked source.
+    /// No-op iff [`MigrationBackend::pending_contracts`] is `None`.
+    fn outstanding_pending_contracts<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+    ) -> JournalFuture<'a, Vec<journal::PendingContract>>;
+
+    /// Open a `pending` cross-deploy obligation AND, when a
+    /// [`journal::DeployRecoveryScope`] is supplied, its `in_progress`
+    /// deploy-scoped recovery marker — in ONE transaction (PR9e). No-op iff
+    /// [`MigrationBackend::pending_contracts`] is `None`.
+    fn record_pending_contract_with_recovery<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+        rec: journal::PendingContractRecord<'a>,
+        scope: Option<journal::DeployRecoveryScope<'a>>,
+    ) -> JournalFuture<'a, ()>;
+
+    /// Discharge an obligation by APPENDING a `resolved` row (never a delete —
+    /// history is append-only). No-op iff [`MigrationBackend::pending_contracts`]
+    /// is `None`.
+    fn resolve_pending_contract<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+        pc: &'a journal::PendingContract,
+        resolution: journal::Resolution,
+        by: &'a str,
+    ) -> JournalFuture<'a, ()>;
+
+    /// Promote a WHOLE deploy's recovery markers to `committed` in ONE atomic
+    /// transaction (PR9e). No-op iff [`MigrationBackend::pending_contracts`] is
+    /// `None`.
+    fn mark_deploy_recovery_committed_batch<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+        deploy_id: &'a str,
+        pending_versions: &'a [String],
+        by: &'a str,
+    ) -> JournalFuture<'a, ()>;
+
+    /// Mark a deploy-scoped recovery obligation `reconciled` (APPEND a
+    /// `reconciled` row). No-op iff [`MigrationBackend::pending_contracts`] is
+    /// `None`.
+    fn mark_deploy_recovery_reconciled<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+        deploy_id: &'a str,
+        pending_version: &'a str,
+        by: &'a str,
+    ) -> JournalFuture<'a, ()>;
+
+    /// Read the net-`in_progress` deploy-recovery markers whose obligation is
+    /// still outstanding. Empty iff [`MigrationBackend::pending_contracts`] is
+    /// `None`.
+    fn outstanding_deploy_recoveries<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+    ) -> JournalFuture<'a, Vec<journal::DeployRecovery>>;
 }
 
 /// The dialect seam over execution I/O, journal I/O, parse-time non-txn
@@ -75,6 +146,11 @@ pub struct SessionSnapshot {
 /// verbatim, so the existing PG suite is the regression bar.
 #[allow(async_fn_in_trait)]
 pub trait MigrationBackend {
+    /// Opaque backend-owned session state. The generic executor only
+    /// round-trips this value from [`snapshot_session`](Self::snapshot_session)
+    /// to [`restore_session`](Self::restore_session).
+    type SessionSnapshot;
+
     /// The SQL dialect this backend targets. Drives the dialect-boundary rejects
     /// in the generic body (e.g. `transaction:false` on SQLite, design §2.3/L3).
     fn dialect(&self) -> SqlDialect;
@@ -107,15 +183,16 @@ pub trait MigrationBackend {
     async fn release_project_lock(&self, project_id: &str) -> Result<(), ApplyError>;
 
     /// Snapshot the session settings the apply will override, for restore on exit.
-    async fn snapshot_session(&self) -> Result<SessionSnapshot, ApplyError>;
+    async fn snapshot_session(&self) -> Result<Self::SessionSnapshot, ApplyError>;
 
     /// Restore the settings captured by [`snapshot_session`](Self::snapshot_session).
-    /// Includes the leading unconditional `RESET ROLE` (PG).
-    async fn restore_session(&self, snap: &SessionSnapshot) -> Result<(), ApplyError>;
+    /// Includes the leading unconditional role reset where the backend has roles.
+    async fn restore_session(&self, snap: &Self::SessionSnapshot) -> Result<(), ApplyError>;
 
-    /// Drop any per-apply privilege confinement back to the connecting role
-    /// (PG `RESET ROLE`), unconditionally. Best-effort: logs on failure, never
-    /// fails the apply (mirrors the pre-seam `apply` L1 backstop).
+    /// Drop any per-apply privilege confinement back to the connecting role,
+    /// unconditionally. Postgres runs `RESET ROLE`; SQLite no-ops; a session-role
+    /// backend supplies its own reset verb. Best-effort: logs on failure, never
+    /// fails the apply.
     async fn reset_role_best_effort(&self);
 
     // -- per-migration confined apply ---------------------------------------
@@ -178,80 +255,14 @@ pub trait MigrationBackend {
         cfg: &ExecutorConfig,
     ) -> Result<std::collections::HashMap<String, String>, JournalError>;
 
-    // -- cross-deploy pending-contract obligations (§2.0.3) -----------------
-
-    /// Read the OUTSTANDING cross-deploy pending-contract obligations (§2.0.3) —
-    /// the apply-time interlock read-back + the `status` orphan/blocked source.
+    /// The cross-deploy pending-contract capability (§2.0.3).
     ///
-    /// **SQLite returns an empty set unconditionally.** A `SqliteRebuild` rename
-    /// is one atomic offline step with NO `pending_contract` partition (§2.0.2),
-    /// so SQLite never opens an obligation; the interlock therefore can never
-    /// false-gate a SQLite deploy (Deliverable 7).
-    async fn outstanding_pending_contracts(
-        &self,
-        cfg: &ExecutorConfig,
-    ) -> Result<Vec<journal::PendingContract>, JournalError>;
-
-    /// Open a `pending` cross-deploy obligation AND, when a
-    /// [`journal::DeployRecoveryScope`] is supplied, its `in_progress` deploy-scoped
-    /// recovery marker — in ONE transaction (PR9e). This is the engine-stamped write
-    /// that closes the obligation-vs-marker crash window: the obligation row and its
-    /// recovery marker commit atomically or not at all, so every outstanding
-    /// obligation ALWAYS has a marker. With `scope = None`, only the obligation
-    /// row is written. Admin-written.
-    /// SQLite no-ops the recovery half (no online rename ⇒ no half-state).
-    async fn record_pending_contract_with_recovery(
-        &self,
-        cfg: &ExecutorConfig,
-        rec: journal::PendingContractRecord<'_>,
-        scope: Option<journal::DeployRecoveryScope<'_>>,
-    ) -> Result<(), JournalError>;
-
-    /// Discharge an obligation by APPENDING a `resolved` row (never a delete —
-    /// history is append-only). Admin-written. SQLite no-ops.
-    async fn resolve_pending_contract(
-        &self,
-        cfg: &ExecutorConfig,
-        pc: &journal::PendingContract,
-        resolution: journal::Resolution,
-        by: &str,
-    ) -> Result<(), JournalError>;
-
-    // -- deploy-scoped recovery markers (PR9d MED / PR9e) -------------------
-
-    /// Promote a WHOLE deploy's recovery markers to `committed` in ONE atomic
-    /// transaction (PR9e). Called on the deploy SUCCESS arm: it promotes every
-    /// net-`in_progress` marker this deploy opened to net-`committed`, the
-    /// crash-vs-legit-pending discriminator. A net-`committed` marker means the deploy
-    /// went go-live (the obligation is legitimately pending), so the crash-recovery
-    /// leg never aborts it. Either ALL of this deploy's markers promote or none do —
-    /// and a promotion failure leaves them net-`in_progress` (the recoverable /
-    /// fail-safe state). Admin-written. SQLite no-ops.
-    async fn mark_deploy_recovery_committed_batch(
-        &self,
-        cfg: &ExecutorConfig,
-        deploy_id: &str,
-        pending_versions: &[String],
-        by: &str,
-    ) -> Result<(), JournalError>;
-
-    /// Mark a deploy-scoped recovery obligation `reconciled` (APPEND a `reconciled`
-    /// row) — CLOSE the marker after a same-deploy abort or a crash-recovery abort.
-    /// Admin-written. SQLite no-ops.
-    async fn mark_deploy_recovery_reconciled(
-        &self,
-        cfg: &ExecutorConfig,
-        deploy_id: &str,
-        pending_version: &str,
-        by: &str,
-    ) -> Result<(), JournalError>;
-
-    /// Read the net-`in_progress` deploy-recovery markers whose obligation is still
-    /// outstanding (the crash-recovery resume input). SQLite returns empty.
-    async fn outstanding_deploy_recoveries(
-        &self,
-        cfg: &ExecutorConfig,
-    ) -> Result<Vec<journal::DeployRecovery>, JournalError>;
+    /// `Some(&dyn CrossDeployObligations)` for a backend that can open and
+    /// discharge pending-contract rows and deploy-recovery markers. `None` for a
+    /// backend that structurally has no cross-deploy obligation partition; for
+    /// such a backend pending-contract reads are empty and writes are no-ops by
+    /// construction.
+    fn pending_contracts(&self) -> Option<&dyn CrossDeployObligations>;
 
     // -- DB-coupled validation / introspection ------------------------------
 
@@ -566,6 +577,8 @@ impl<'a> PostgresBackend<'a> {
 }
 
 impl MigrationBackend for PostgresBackend<'_> {
+    type SessionSnapshot = PgSessionSnapshot;
+
     fn dialect(&self) -> SqlDialect {
         SqlDialect::Postgres
     }
@@ -582,11 +595,11 @@ impl MigrationBackend for PostgresBackend<'_> {
         crate::executor::pg::release_project_lock(self.conn, project_id).await
     }
 
-    async fn snapshot_session(&self) -> Result<SessionSnapshot, ApplyError> {
+    async fn snapshot_session(&self) -> Result<Self::SessionSnapshot, ApplyError> {
         crate::executor::pg::snapshot_session(self.conn).await
     }
 
-    async fn restore_session(&self, snap: &SessionSnapshot) -> Result<(), ApplyError> {
+    async fn restore_session(&self, snap: &Self::SessionSnapshot) -> Result<(), ApplyError> {
         crate::executor::pg::restore_session(self.conn, snap).await
     }
 
@@ -658,67 +671,6 @@ impl MigrationBackend for PostgresBackend<'_> {
         cfg: &ExecutorConfig,
     ) -> Result<std::collections::HashMap<String, String>, JournalError> {
         journal::latest_completed_checksums(self.conn, cfg).await
-    }
-
-    async fn outstanding_pending_contracts(
-        &self,
-        cfg: &ExecutorConfig,
-    ) -> Result<Vec<journal::PendingContract>, JournalError> {
-        journal::outstanding_pending_contracts(self.conn, cfg).await
-    }
-
-    async fn record_pending_contract_with_recovery(
-        &self,
-        cfg: &ExecutorConfig,
-        rec: journal::PendingContractRecord<'_>,
-        scope: Option<journal::DeployRecoveryScope<'_>>,
-    ) -> Result<(), JournalError> {
-        journal::record_pending_contract_with_recovery(self.conn, cfg, rec, scope).await
-    }
-
-    async fn resolve_pending_contract(
-        &self,
-        cfg: &ExecutorConfig,
-        pc: &journal::PendingContract,
-        resolution: journal::Resolution,
-        by: &str,
-    ) -> Result<(), JournalError> {
-        journal::resolve_pending_contract(self.conn, cfg, pc, resolution, by).await
-    }
-
-    async fn mark_deploy_recovery_committed_batch(
-        &self,
-        cfg: &ExecutorConfig,
-        deploy_id: &str,
-        pending_versions: &[String],
-        by: &str,
-    ) -> Result<(), JournalError> {
-        journal::mark_deploy_recovery_committed_batch(
-            self.conn,
-            cfg,
-            deploy_id,
-            pending_versions,
-            by,
-        )
-        .await
-    }
-
-    async fn mark_deploy_recovery_reconciled(
-        &self,
-        cfg: &ExecutorConfig,
-        deploy_id: &str,
-        pending_version: &str,
-        by: &str,
-    ) -> Result<(), JournalError> {
-        journal::mark_deploy_recovery_reconciled(self.conn, cfg, deploy_id, pending_version, by)
-            .await
-    }
-
-    async fn outstanding_deploy_recoveries(
-        &self,
-        cfg: &ExecutorConfig,
-    ) -> Result<Vec<journal::DeployRecovery>, JournalError> {
-        journal::outstanding_deploy_recoveries(self.conn, cfg).await
     }
 
     async fn check_checksum_drift(
@@ -896,6 +848,10 @@ impl MigrationBackend for PostgresBackend<'_> {
         Some(&self.shadow)
     }
 
+    fn pending_contracts(&self) -> Option<&dyn CrossDeployObligations> {
+        Some(self)
+    }
+
     async fn baseline_one(
         &self,
         cfg: &ExecutorConfig,
@@ -907,5 +863,82 @@ impl MigrationBackend for PostgresBackend<'_> {
         // and `pg_advisory_lock` stay private to this backend; the neutral
         // `BaselineOutcome`/`BaselineError` are what cross the trait surface.
         crate::baseline::baseline(self.conn, cfg, m, applied_by).await
+    }
+}
+
+impl CrossDeployObligations for PostgresBackend<'_> {
+    fn outstanding_pending_contracts<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+    ) -> JournalFuture<'a, Vec<journal::PendingContract>> {
+        Box::pin(async move { journal::outstanding_pending_contracts(self.conn, cfg).await })
+    }
+
+    fn record_pending_contract_with_recovery<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+        rec: journal::PendingContractRecord<'a>,
+        scope: Option<journal::DeployRecoveryScope<'a>>,
+    ) -> JournalFuture<'a, ()> {
+        Box::pin(async move {
+            journal::record_pending_contract_with_recovery(self.conn, cfg, rec, scope).await
+        })
+    }
+
+    fn resolve_pending_contract<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+        pc: &'a journal::PendingContract,
+        resolution: journal::Resolution,
+        by: &'a str,
+    ) -> JournalFuture<'a, ()> {
+        Box::pin(async move {
+            journal::resolve_pending_contract(self.conn, cfg, pc, resolution, by).await
+        })
+    }
+
+    fn mark_deploy_recovery_committed_batch<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+        deploy_id: &'a str,
+        pending_versions: &'a [String],
+        by: &'a str,
+    ) -> JournalFuture<'a, ()> {
+        Box::pin(async move {
+            journal::mark_deploy_recovery_committed_batch(
+                self.conn,
+                cfg,
+                deploy_id,
+                pending_versions,
+                by,
+            )
+            .await
+        })
+    }
+
+    fn mark_deploy_recovery_reconciled<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+        deploy_id: &'a str,
+        pending_version: &'a str,
+        by: &'a str,
+    ) -> JournalFuture<'a, ()> {
+        Box::pin(async move {
+            journal::mark_deploy_recovery_reconciled(
+                self.conn,
+                cfg,
+                deploy_id,
+                pending_version,
+                by,
+            )
+            .await
+        })
+    }
+
+    fn outstanding_deploy_recoveries<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+    ) -> JournalFuture<'a, Vec<journal::DeployRecovery>> {
+        Box::pin(async move { journal::outstanding_deploy_recoveries(self.conn, cfg).await })
     }
 }

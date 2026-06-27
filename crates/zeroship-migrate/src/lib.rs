@@ -106,7 +106,7 @@ pub mod vendor;
 
 pub use analyze::{analyze, analyze_migration, Advisory, Severity};
 pub use approval::{Approval, ApprovalScope};
-pub use backend::{MigrationBackend, PostgresBackend, SessionSnapshot};
+pub use backend::{CrossDeployObligations, MigrationBackend, PgSessionSnapshot, PostgresBackend};
 pub use backend_sqlite::{RebuildError, SqliteActorError, SqliteBackend, SqliteRebuildSpec};
 pub use baseline::{BaselineError, BaselineOutcome};
 pub use backfill::{
@@ -141,8 +141,8 @@ pub use drift::{
     OrphanJournal, SchemaSnapshot, StructuralDrift, TableSnapshot, ViewSnapshot,
 };
 pub use executor::{
-    apply, rollback, ApplyError, ApplyOutcome, LockMode, PreconditionVerdict, RollbackError,
-    RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,
+    apply, rollback, ApplyError, ApplyOutcome, BackendError, LockMode, PreconditionVerdict,
+    RollbackError, RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,
 };
 // **Migration-first P1** — the OFFLINE ops→snapshot fold (the keystone). Pure, no
 // DB: replay an ordered `Op` list into the EXISTING `SchemaSnapshot` (drift.rs),

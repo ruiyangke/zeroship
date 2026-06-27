@@ -108,6 +108,7 @@ impl DialectSupports for SqlDialect {
 /// [`renderer`], so a third [`SqlDialect`] variant breaks there at compile time
 /// until its renderer is implemented and wired.
 pub(crate) trait DmlRenderer {
+    fn quote_ident(&self, ident: &str) -> String;
     fn qualify_table(&self, project_schema: &str, table: &str) -> Result<String, DmlError>;
     fn cast_target(&self, target: CastTarget) -> &'static str;
     fn render_concat_ws(&self, rendered: &[String]) -> String;
@@ -151,6 +152,10 @@ fn quote_engine_ident_as_dml(what: &'static str, ident: &str) -> Result<String, 
 }
 
 impl DmlRenderer for PostgresDmlRenderer {
+    fn quote_ident(&self, ident: &str) -> String {
+        dml::escape_quote_ident(ident)
+    }
+
     fn qualify_table(&self, project_schema: &str, table: &str) -> Result<String, DmlError> {
         let t = dml::quote_bare_ident("table", table)?;
         Ok(format!(
@@ -277,6 +282,10 @@ impl DmlRenderer for PostgresDmlRenderer {
 }
 
 impl DmlRenderer for SqliteDmlRenderer {
+    fn quote_ident(&self, ident: &str) -> String {
+        dml::escape_quote_ident(ident)
+    }
+
     fn qualify_table(&self, _project_schema: &str, table: &str) -> Result<String, DmlError> {
         dml::quote_bare_ident("table", table)
     }
@@ -417,6 +426,10 @@ impl DmlRenderer for SqliteDmlRenderer {
 }
 
 impl DmlRenderer for MysqlDmlRenderer {
+    fn quote_ident(&self, ident: &str) -> String {
+        zeroship_schema::query::mysql_quote_ident(ident)
+    }
+
     fn qualify_table(&self, project_schema: &str, table: &str) -> Result<String, DmlError> {
         let t = dml::quote_bare_ident_for_dialect("table", table, SqlDialect::Mysql)?;
         Ok(format!(
