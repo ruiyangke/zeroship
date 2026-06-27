@@ -57,70 +57,60 @@
 //! so it is plain synchronous logic — no tokio/compio — and exhaustively
 //! unit-testable without a database (`tests/guard_security.rs`).
 
-pub mod analyze;
+pub mod analysis;
+pub mod apply;
 pub mod approval;
-pub mod author;
-pub mod backend;
-pub mod backend_sqlite;
-pub mod backfill;
-pub mod baseline;
-pub mod capability;
-pub mod classify;
-pub mod db;
-pub mod declarative;
-mod dialect_renderer;
-pub mod dml;
-pub mod drift;
-pub mod fold;
+pub mod command;
+pub mod conn;
 pub mod engine;
-pub mod expand_contract;
-pub mod executor;
-pub mod expr;
 #[doc(hidden)]
 pub mod fault;
 pub mod guard;
-pub mod guard_probe;
-pub mod ir;
-pub mod ir_apply;
-pub mod ir_author;
-pub mod ir_load;
-pub mod journal;
-pub mod loader;
-pub mod manifest;
-pub mod migration;
-pub mod pending;
+pub mod model;
+pub mod ops;
 pub mod plan;
-pub mod precondition;
-pub mod role;
-pub mod shadow;
-pub mod sql_preview;
-pub mod squash;
-pub mod status;
-pub mod submit;
-pub mod validate;
-pub mod vendor;
+pub mod render;
+
+pub use analysis::{analyze, classify};
+pub use apply::{backend, baseline, drift, executor, journal, role};
+pub use apply::backend::sqlite as backend_sqlite;
+pub use command::ir_apply;
+pub use conn as db;
+pub use model::{
+    capability, expr, ir, load as ir_load, migration, precondition, validate,
+};
+pub use ops::{backfill, expand_contract, shadow, squash, status, submit};
+pub use plan::{author, loader, manifest, pending};
+pub use render::{
+    declarative, dml, existence_probe as guard_probe, fold, lower as ir_author, sql_preview,
+    vendor,
+};
 
 // ---------------------------------------------------------------------------
 // Public API surface — re-exports (later plans depend on these names).
 // ---------------------------------------------------------------------------
 
-pub use analyze::{analyze, analyze_migration, Advisory, Severity};
+pub use analysis::analyze::{analyze, analyze_migration, Advisory, Severity};
 pub use approval::{Approval, ApprovalScope};
-pub use backend::{CrossDeployObligations, MigrationBackend, PgSessionSnapshot, PostgresBackend};
-pub use backend_sqlite::{RebuildError, SqliteActorError, SqliteBackend, SqliteRebuildSpec};
-pub use baseline::{BaselineError, BaselineOutcome};
-pub use backfill::{
+pub use apply::backend::{
+    CrossDeployObligations, MigrationBackend, PgSessionSnapshot, PostgresBackend,
+};
+pub use apply::backend::sqlite::{
+    RebuildError, SqliteActorError, SqliteBackend, SqliteRebuildSpec,
+};
+pub use apply::baseline::{BaselineError, BaselineOutcome};
+pub use ops::backfill::{
     backfill_progress, ensure_backfill_progress, list_backfills, run_backfill,
     run_backfill_bounded, BackfillError, BackfillOutcome, BackfillProgress, BackfillSpec,
 };
-pub use author::{
+pub use plan::author::{
     AuthorError, AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor,
 };
-pub use classify::{
+pub use analysis::classify::{
     classify, relations_touched, DdlKind, OwnershipNeed, ParseError, StatementClass,
     TouchedRelation,
 };
-pub use declarative::{
+pub use render::declarative::{
     desired_snapshot, desired_snapshot_for_dialect, dsl_to_pg_data_type, sqlite_canonical_type,
     CollectionDescriptor, DeclarativeAuthor, DeclarativeError, DeclarativePlan, DesiredSchema,
     FieldDescriptor, IndexDescriptor, RenameHint, SqliteRebuild,
@@ -130,17 +120,17 @@ pub use engine::{
     DeclarativeDeployPlan, EngineError, MigrationEngine, MigrationPlan, OnlineError,
     PlannedMigration, RollbackEngineError,
 };
-pub use expand_contract::{
+pub use ops::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent, OnlineSchemaChange,
     PgOnline,
 };
-pub use db::{connect, ConnectError, ExecutorConfig, PgConfinement};
-pub use drift::{
+pub use conn::{connect, ConnectError, ExecutorConfig, PgConfinement};
+pub use apply::drift::{
     check_checksum_drift, diff_snapshots, snapshot_schema, AlteredObject, ChecksumDrift,
     ChecksumDriftReport, ColumnSnapshot, ConstraintSnapshot, DriftError, DriftReport, IndexSnapshot,
     NamedTypeSnapshot, OrphanJournal, SchemaSnapshot, StructuralDrift, TableSnapshot, ViewSnapshot,
 };
-pub use executor::{
+pub use apply::executor::{
     apply, rollback, ApplyError, ApplyOutcome, BackendError, LockMode, PreconditionVerdict,
     RollbackError, RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,
 };
@@ -148,7 +138,7 @@ pub use executor::{
 // DB: replay an ordered `Op` list into the EXISTING `SchemaSnapshot` (drift.rs),
 // the offline companion of `snapshot_schema`. Later phases (`gen-types`) emit the
 // `env.db` types + runtime descriptor from this. See `fold.rs`.
-pub use fold::{
+pub use render::fold::{
     descriptors_to_create_ops, fold_ops, fold_to_field_defs, recover_check_facet, FoldError,
     ProduceError, RecoveredCheck,
 };
@@ -161,10 +151,10 @@ pub use guard::{
 pub use zeroship_schema::query::SqlDialect;
 // `OperatorCapability` the TYPE is re-exported crate-wide so the `platform(...)`
 // and `trusted(...)` constructors can name it in their signatures; its `new()`
-// mint stays private to `guard::platform_runner` (design §4.1 / §5).
+// mint stays private to `command::runner` (design §4.1 / §5).
 #[allow(unused_imports)]
 pub(crate) use guard::OperatorCapability;
-pub use journal::{
+pub use apply::journal::{
     applied, applied_count, ensure_journal, history as journal_history,
     latest_completed_checksums, net_rolled_back, outstanding_pending_contracts,
     record_baseline, record_completed, record_rolled_back, record_started,
@@ -173,26 +163,26 @@ pub use journal::{
     PendingState, Phase, Resolution, RolledBackEntry,
 };
 // The §8.8 structured pending-contract interlock payloads (§2.0.3 / §2.0.4).
-pub use pending::{
+pub use plan::pending::{
     ActionPayload, DependencyPendingContract, OrphanedPendingContract, PendingContractRefusal,
     CODE_DEPENDENCY_PENDING_CONTRACT, CODE_ORPHANED_PENDING_CONTRACT,
     CODE_TABLE_HAS_PENDING_CONTRACT,
 };
-pub use loader::{
+pub use plan::loader::{
     load_dir, load_dir_migrations, migration_id_for_version, new_dbmate_migration,
     repeatable_id_for_name, LoaderError, PLATFORM_OWNER_APP,
 };
-pub use squash::{squash, SquashError, SquashOutcome};
-pub use status::{
+pub use ops::squash::{squash, SquashError, SquashOutcome};
+pub use ops::status::{
     history, status, BlockedPlan, MigrationStatus, PendingContractStatus, StatusError,
 };
-pub use submit::{
+pub use ops::submit::{
     submit_migration, Submission, SubmissionOutcome, SubmitError,
 };
-pub use manifest::{
+pub use plan::manifest::{
     compute_manifest, verify_manifest, ManifestError, ManifestHash, MismatchKind,
 };
-pub use migration::{
+pub use model::migration::{
     Checksum, ChecksumInput, IdError, Migration, MigrationFlags, MigrationId, OnlinePhase,
     MIGRATION_PREFIX,
 };
@@ -200,7 +190,7 @@ pub use migration::{
 // `Op` enum, the constrained numeric scalar, and the canonical op-list the
 // `Checksum::of_ir` front door folds. There is NO `Raw`/`RawDown` (property A);
 // every transform/predicate is the closed [`expr::Expr`] AST.
-pub use ir::{
+pub use model::ir::{
     CanonicalOpList, ColType, GeneratedCol, IdentityCol, IndexMethod, IrBatch, IrClassification,
     IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrFlagsOverride, IrIndex, IrMask,
     IrMaskKind, IrScalar, IrVersionError, MigrationIr, Op, RefAction, SafeU64, SynthDefaultFn,
@@ -210,7 +200,7 @@ pub use ir::{
 // `ir_version` → `validate_ir` → server-stamped ownership → advisory checksum-hint
 // compare. The loader's IR branch ([`ir_author::IrAuthor::load_and_lower`]) runs
 // this gate and then lowers the validated, owned IR to migrations (§7.2).
-pub use ir_load::{
+pub use model::load::{
     enforce_ir_ownership, hint_domain_uncomputable_field, load_ir_document,
     recompute_hint_domain_checksum, IrLoadError,
 };
@@ -218,23 +208,23 @@ pub use ir_load::{
 // bundle's `.ir.json` set against a SQLite backend, building the SQLite-dialect
 // LiveSchema from the app's descriptor set so an IR `renameColumn` lowers + applies
 // via `rebuild_one` end-to-end.
-pub use ir_apply::{
+pub use command::ir_apply::{
     apply_bundle_ir_sqlite, apply_bundle_ir_sqlite_catalog, SqliteIrApplyError,
     SqliteIrApplyOutcome,
 };
 // The IR-path DDL Lower phase (§6/§6.4/§6.5): compiles a validated, ownership-
 // checked `MigrationIr` to migrations, reusing the SHARED snapshot-builder +
 // declarative render seam so its SQL is byte-identical to the differ's path.
-pub use ir_author::{
+pub use render::lower::{
     FragmentGuardDenied, GuardedFragment, IrAuthor, IrGuardedLowerError, IrLowerError, LiveSchema,
     LoadAndLowerError, LoadAndLowerGuardedError, LoweredArtifact,
 };
 // The closed expression AST (§3.3.1) the IR's transform/predicate positions
 // carry. Constructed in JS, serialized as data, NEVER parsed from text.
-pub use expr::{BinaryOp, CaseBranch, CastTarget, Expr, ScalarFn, SynthFn, UnaryOp};
+pub use model::expr::{BinaryOp, CaseBranch, CastTarget, Expr, ScalarFn, SynthFn, UnaryOp};
 // The STRUCTURAL expression-AST validator + the structured-error envelope
 // (§3.3.1.1 / §8.8). No parser, no fuzzer — a pure allow-list walk.
-pub use validate::{
+pub use model::validate::{
     validate_expr, validate_ir, validate_ir_resolved, validate_op, validate_op_resolved,
     AuthoringError, Dialect as ValidatorDialect, TargetScope, UnsupportedKind,
     CODE_COLUMN_FACET_CONFLICT, CODE_DIALECT_SCOPE_PGONLY, CODE_EXPR_NOT_PORTABLE,
@@ -251,17 +241,17 @@ pub use plan::{
 // DB-free surfacing/formatting layer over the SQL `IrAuthor::lower_*` already
 // lowers; DB-state-dependent ops are labeled `-- [runtime-resolved]`, never
 // fabricated.
-pub use sql_preview::{
+pub use render::sql_preview::{
     render_ir_json_sql, render_plan_sql, render_set_sql, PreviewOpts, RUNTIME_RESOLVED,
 };
-pub use precondition::{
+pub use model::precondition::{
     evaluate as evaluate_precondition, CmpOp, OnUnmet, Precondition, PreconditionCheck,
     PreconditionError,
 };
-pub use role::{deprovision_migrator, migrator_role_name, provision_migrator, RoleError};
-pub use shadow::{
+pub use apply::role::{deprovision_migrator, migrator_role_name, provision_migrator, RoleError};
+pub use ops::shadow::{
     dry_run, dry_run_declarative, dry_run_incremental, sweep_leaked_shadows, DryRunError,
     DryRunReport, MigrationResult, PgShadow, ShadowConfig, ShadowDryRun,
 };
 #[doc(hidden)]
-pub use shadow::arm_panic_after_provision;
+pub use ops::shadow::arm_panic_after_provision;

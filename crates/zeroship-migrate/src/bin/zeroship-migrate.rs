@@ -2,8 +2,8 @@
 //!
 //! A dbmate-like, generic-by-default migration tool. `main` is a THIN arg-parser:
 //! it parses flags with `clap`, builds a
-//! [`RunConfig`](zeroship_migrate::guard::platform_runner::RunConfig)-equivalent,
-//! and delegates to the `guard::platform_runner::run_*` functions — the ONLY place
+//! [`RunConfig`](zeroship_migrate::command::runner::RunConfig)-equivalent,
+//! and delegates to the `command::runner::run_*` functions — the ONLY place
 //! the `OperatorCapability` token is minted (the §5 trust invariant). `main` never
 //! touches the guard internals or mints a capability itself.
 //!
@@ -29,11 +29,11 @@ use clap::{Parser, Subcommand};
 
 // The runner module is `pub(crate)`; the bin is part of the same crate so it can
 // reach it. External crates cannot — the token mint stays confined.
-use zeroship_migrate::guard::platform_runner::{
-    self, default_platform_extensions, default_platform_schemas, Engine, EngineKind, RunConfig,
-    RunError, RunProfile, RunReport,
+use zeroship_migrate::command::runner::{
+    self as platform_runner, default_platform_extensions, default_platform_schemas, Engine,
+    EngineKind, RunConfig, RunError, RunProfile, RunReport,
 };
-use zeroship_migrate::loader::{
+use zeroship_migrate::plan::loader::{
     is_valid_migration_name, new_dbmate_migration, suggest_migration_name,
 };
 
@@ -650,7 +650,7 @@ fn run_new(dir: &Path, name: &str) -> Result<(), String> {
 /// `plan --sql` — the OFFLINE per-dialect SQL plan preview (PR14). Loads `.sql`
 /// (Flyway/dbmate) and/or `.ir.json` (creator) artifacts from `dir`, renders the
 /// exact SQL the engine WOULD run via the pure, DB-free
-/// [`zeroship_migrate::sql_preview`] surfacing layer, and prints it to stdout. DB-
+/// [`zeroship_migrate::render::sql_preview`] surfacing layer, and prints it to stdout. DB-
 /// state-dependent ops print `-- [runtime-resolved]` labels, never fabricated SQL.
 ///
 /// Opens NO DB connection (a unit/integration test asserts this offline path). The
@@ -662,7 +662,7 @@ fn run_plan_preview(
     chosen: Option<EngineArg>,
     _layer: &FileEnvLayer,
 ) -> ExitCode {
-    use zeroship_migrate::sql_preview::{render_ir_json_sql, render_set_sql, PreviewOpts};
+    use zeroship_migrate::render::sql_preview::{render_ir_json_sql, render_set_sql, PreviewOpts};
     use zeroship_schema::query::SqlDialect;
 
     let dialect = match chosen {
@@ -721,7 +721,7 @@ fn run_plan_preview(
     // The `.sql` (Flyway/dbmate) leg: `load_dir` lowers each to a single-step plan
     // (no DB), then the set renderer formats them.
     if has_sql {
-        match zeroship_migrate::loader::load_dir(dir) {
+        match zeroship_migrate::plan::loader::load_dir(dir) {
             Ok(plans) => {
                 output.push_str(&render_set_sql(&plans, dialect, &opts));
             }

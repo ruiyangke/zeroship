@@ -1,5 +1,5 @@
 //! Faithful PG tests for the `zeroship-migrate` CLI runner functions (Phase 3,
-//! design §9). Drives the REAL `guard::platform_runner::run_*` functions (not a
+//! design §9). Drives the REAL `command::runner::run_*` functions (not a
 //! spawned process, not a shim) against a real Postgres on :5440.
 //!
 //! Each test uses a UNIQUE platform schema + meta schema (token-suffixed) so it
@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use compio_postgres::Client;
-use zeroship_migrate::guard::platform_runner::{
+use zeroship_migrate::command::runner::{
     run_migrate, run_status, run_validate, RunConfig, RunProfile, RunReport,
 };
 
