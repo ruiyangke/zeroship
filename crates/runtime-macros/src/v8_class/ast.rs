@@ -36,6 +36,10 @@ pub(crate) struct ClassMethod<'a> {
     /// `#[v8_name = "..."]` on the method. Lets us install
     /// `delete_(&mut self)` under the JS name `delete`, etc.
     pub(crate) js_name: String,
+    /// Method-level `#[cfg(...)]` attrs copied onto generated callbacks
+    /// and install statements so cfg-gated Rust methods do not leave
+    /// behind unconditional V8 bindings.
+    pub(crate) cfg_attrs: Vec<&'a syn::Attribute>,
     /// `#[v8_getter(same_object)]` — WebIDL `[SameObject]` semantics:
     /// the getter must return THE SAME JS object across reads on the
     /// same wrapper instance. The macro caches via a V8 private symbol

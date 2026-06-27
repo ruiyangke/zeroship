@@ -4,9 +4,13 @@ use std::io;
 
 use crate::state::SharedState;
 
-use super::driver::{TlsOptions, WriteCmd};
+#[cfg(feature = "runtime_native_websocket")]
+use super::driver::TlsOptions;
+use super::driver::WriteCmd;
+#[cfg(feature = "runtime_native_websocket")]
+use super::registry::pending_data_events;
 use super::registry::{
-    lookup_native_socket_state, pending_data_events, push_error_and_close, push_event, SocketEvent,
+    lookup_native_socket_state, push_error_and_close, push_event, SocketEvent,
 };
 
 pub(crate) const HIGH_WATER_MARK: u64 = 16 * 1024;

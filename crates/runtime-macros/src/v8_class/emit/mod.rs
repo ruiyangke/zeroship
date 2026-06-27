@@ -22,7 +22,7 @@ use syn::ItemImpl;
 
 use super::fastcall::gen_fastcall_callback;
 use super::shared::class_config::ClassConfig;
-use super::MethodKind;
+use super::{ClassMethod, MethodKind};
 use constructor::{gen_constructor_callback, gen_default_constructor_callback};
 use getter::gen_same_object_getter_callback;
 use method::{gen_async_method_callback, gen_method_callback};
@@ -74,11 +74,14 @@ pub(super) fn assemble_tokens(cfg: &ClassConfig, stripped_impl: &ItemImpl) -> To
     let regular = cfg.regular();
     let callbacks: Vec<TokenStream2> = regular
         .iter()
-        .map(|m| match m.kind {
-            MethodKind::AsyncMethod => gen_async_method_callback(cfg, m),
-            MethodKind::Getter if m.same_object => gen_same_object_getter_callback(cfg, m),
-            MethodKind::StaticMethod | MethodKind::StaticGetter => gen_static_callback(cfg, m),
-            _ => gen_method_callback(cfg, m),
+        .map(|m| {
+            let callback = match m.kind {
+                MethodKind::AsyncMethod => gen_async_method_callback(cfg, m),
+                MethodKind::Getter if m.same_object => gen_same_object_getter_callback(cfg, m),
+                MethodKind::StaticMethod | MethodKind::StaticGetter => gen_static_callback(cfg, m),
+                _ => gen_method_callback(cfg, m),
+            };
+            with_method_cfg(m, callback)
         })
         .collect();
 
@@ -90,7 +93,9 @@ pub(super) fn assemble_tokens(cfg: &ClassConfig, stripped_impl: &ItemImpl) -> To
     let fastcall_callbacks: Vec<TokenStream2> = regular
         .iter()
         .filter(|m| m.fastcall)
-        .filter_map(|m| gen_fastcall_callback(class_ty, cfg.state_ty, m))
+        .filter_map(|m| {
+            gen_fastcall_callback(class_ty, cfg.state_ty, m).map(|cb| with_method_cfg(m, cb))
+        })
         .collect();
 
     let constructor_callback = match cfg.constructor() {
@@ -133,5 +138,13 @@ pub(super) fn assemble_tokens(cfg: &ClassConfig, stripped_impl: &ItemImpl) -> To
         // `<Class>::__zs_install_iterable_methods` helper called from
         // `<Class>::install`. No-op when the attribute is absent.
         #iterable_codegen
+    }
+}
+
+fn with_method_cfg(m: &ClassMethod<'_>, tokens: TokenStream2) -> TokenStream2 {
+    let cfg_attrs = &m.cfg_attrs;
+    quote! {
+        #(#cfg_attrs)*
+        #tokens
     }
 }

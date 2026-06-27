@@ -331,6 +331,7 @@ fn gen_install_prototype_methods(cfg: &ClassConfig) -> TokenStream2 {
                 Some(gen_proto_accessor_set(
                     class_ty,
                     &m.js_name,
+                    &m.cfg_attrs,
                     &accessor_pairs,
                     &fastcall_by_jsname,
                 ))
@@ -354,11 +355,13 @@ fn gen_proto_method_set(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 
     let js_name = m.js_name.clone();
     let name = &m.func.sig.ident;
     let cb = method_callback_ident(class_ty, name);
+    let cfg_attrs = &m.cfg_attrs;
     let scope_tok = quote! { scope };
     let key_init = must_str(&scope_tok, &quote! { #js_name });
     if m.fastcall {
         let cfn = fastcall_cfn_ident(class_ty, name);
         quote! {
+            #(#cfg_attrs)*
             {
                 let __key = #key_init;
                 // Wire the slow callback as the FunctionCallback
@@ -385,6 +388,7 @@ fn gen_proto_method_set(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 
         }
     } else {
         quote! {
+            #(#cfg_attrs)*
             {
                 let __key = #key_init;
                 let __fn_tmpl = v8::FunctionTemplate::new(scope, #cb);
@@ -401,6 +405,7 @@ fn gen_proto_method_set(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 
 fn gen_proto_accessor_set(
     class_ty: &syn::Ident,
     js_name: &str,
+    cfg_attrs: &[&syn::Attribute],
     accessor_pairs: &HashMap<String, (Option<TokenStream2>, Option<TokenStream2>)>,
     fastcall_by_jsname: &HashMap<String, &ClassMethod>,
 ) -> TokenStream2 {
@@ -445,6 +450,7 @@ fn gen_proto_accessor_set(
     let scope_tok = quote! { scope };
     let key_init = must_str(&scope_tok, &quote! { #js_name });
     quote! {
+        #(#cfg_attrs)*
         {
             let __key = #key_init;
             #getter_tokens
@@ -479,6 +485,7 @@ fn gen_install_static_methods(cfg: &ClassConfig) -> TokenStream2 {
         .iter()
         .filter_map(|m| {
             let js_name = m.js_name.clone();
+            let cfg_attrs = &m.cfg_attrs;
             match m.kind {
                 MethodKind::StaticMethod => {
                     let name = &m.func.sig.ident;
@@ -486,6 +493,7 @@ fn gen_install_static_methods(cfg: &ClassConfig) -> TokenStream2 {
                     let scope_tok = quote! { scope };
                     let key_init = must_str(&scope_tok, &quote! { #js_name });
                     Some(quote! {
+                        #(#cfg_attrs)*
                         {
                             let __key = #key_init;
                             let __fn_tmpl = v8::FunctionTemplate::new(scope, #cb);
@@ -509,6 +517,7 @@ fn gen_install_static_methods(cfg: &ClassConfig) -> TokenStream2 {
                     let scope_tok = quote! { scope };
                     let key_init = must_str(&scope_tok, &quote! { #js_name });
                     Some(quote! {
+                        #(#cfg_attrs)*
                         {
                             let __key = #key_init;
                             let __getter_tmpl = v8::FunctionTemplate::new(scope, #cb);

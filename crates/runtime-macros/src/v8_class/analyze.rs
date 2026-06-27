@@ -186,6 +186,11 @@ fn collect_methods(input: &ItemImpl) -> Result<Vec<ClassMethod<'_>>, TokenStream
                     .map_err(|e| e.to_compile_error())?
                     .unwrap_or_else(|| func.sig.ident.to_string());
                 let mut_recv = has_mut_self(func);
+                let cfg_attrs = func
+                    .attrs
+                    .iter()
+                    .filter(|attr| attr.path().is_ident("cfg"))
+                    .collect();
 
                 // Compile-time guard: `#[v8_async_method]` + `&mut self`
                 // is unsound under V8 re-entry. The future captures a
@@ -340,6 +345,7 @@ fn collect_methods(input: &ItemImpl) -> Result<Vec<ClassMethod<'_>>, TokenStream
                     func,
                     mut_receiver: mut_recv,
                     js_name,
+                    cfg_attrs,
                     same_object: same_object_flag,
                     fastcall: fastcall_flag,
                     reject_shared_names,

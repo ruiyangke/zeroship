@@ -18,11 +18,14 @@ use crate::transport::byte_pump::{
 };
 
 use super::caps::decrement_buffered_amount;
+#[cfg(feature = "runtime_native_websocket")]
 use super::connect::CONNECT_TIMEOUT;
 use super::registry::{
-    SocketEvent, lookup_native_socket_state, mark_socket_activity, pending_data_events,
-    push_close_once, push_error_and_close, push_event,
+    SocketEvent, lookup_native_socket_state, mark_socket_activity, push_close_once,
+    push_error_and_close, push_event,
 };
+#[cfg(feature = "runtime_native_websocket")]
+use super::registry::pending_data_events;
 
 const READ_CHUNK_SIZE: usize = 16 * 1024;
 

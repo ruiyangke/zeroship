@@ -9,7 +9,9 @@ use crate::state::SharedState;
 use crate::transport::byte_pump::SocketStream;
 
 use super::caps::release_socket_slot;
-use super::driver::{TlsOptions, WriteCmd, apply_keep_alive, run_socket_driver};
+#[cfg(feature = "runtime_native_websocket")]
+use super::driver::TlsOptions;
+use super::driver::{WriteCmd, apply_keep_alive, run_socket_driver};
 use super::registry::{
     SocketEvent, lookup_native_socket_state, mark_socket_activity, push_error_and_close,
     push_event,
