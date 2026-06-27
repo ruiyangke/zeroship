@@ -1,12 +1,17 @@
 #![allow(unsafe_code)]
 
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
 use compio_tls::TlsAcceptor;
+use rcgen::{
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose,
+};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
@@ -16,29 +21,44 @@ use zeroship_runtime::{
 };
 
 struct EnvGuard {
-    prev_dev: Option<std::ffi::OsString>,
+    prev: Vec<(&'static str, Option<std::ffi::OsString>)>,
 }
 
 impl EnvGuard {
     fn set(dev: bool) -> Self {
-        let prev_dev = std::env::var_os("ZEROSHIP_DEV");
+        Self::set_with_native_roots(dev, None)
+    }
+
+    fn set_with_native_roots(dev: bool, cert_file: Option<&Path>) -> Self {
+        let keys = ["ZEROSHIP_DEV", "SSL_CERT_FILE", "SSL_CERT_DIR"];
+        let prev = keys
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect::<Vec<_>>();
         unsafe {
             if dev {
                 std::env::set_var("ZEROSHIP_DEV", "1");
             } else {
                 std::env::remove_var("ZEROSHIP_DEV");
             }
+            match cert_file {
+                Some(path) => std::env::set_var("SSL_CERT_FILE", path),
+                None => std::env::remove_var("SSL_CERT_FILE"),
+            }
+            std::env::remove_var("SSL_CERT_DIR");
         }
-        Self { prev_dev }
+        Self { prev }
     }
 }
 
 impl Drop for EnvGuard {
     fn drop(&mut self) {
         unsafe {
-            match &self.prev_dev {
-                Some(v) => std::env::set_var("ZEROSHIP_DEV", v),
-                None => std::env::remove_var("ZEROSHIP_DEV"),
+            for (key, val) in &self.prev {
+                match val {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
             }
         }
     }
@@ -102,6 +122,65 @@ fn test_cert() -> TestCert {
         acceptor: TlsAcceptor::from(Arc::new(cfg)),
         seen_sni,
     }
+}
+
+fn ca_signed_test_cert() -> TestCert {
+    let mut ca_params = CertificateParams::new(Vec::new()).unwrap();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, "zeroship test root");
+    ca_params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+    ca_params.key_usages.push(KeyUsagePurpose::KeyCertSign);
+    ca_params.key_usages.push(KeyUsagePurpose::CrlSign);
+    let ca_key = KeyPair::generate().unwrap();
+    let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+    let issuer = Issuer::new(ca_params, ca_key);
+
+    let leaf_key = KeyPair::generate().unwrap();
+    let mut leaf_params = CertificateParams::new(vec!["db.local.test".to_string()]).unwrap();
+    leaf_params
+        .distinguished_name
+        .push(DnType::CommonName, "db.local.test");
+    leaf_params
+        .extended_key_usages
+        .push(ExtendedKeyUsagePurpose::ServerAuth);
+    leaf_params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+    leaf_params.use_authority_key_identifier_extension = true;
+    let leaf_cert = leaf_params.signed_by(&leaf_key, &issuer).unwrap();
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    let key = CertifiedKey::from_der(
+        vec![CertificateDer::from(leaf_cert.der().to_vec())],
+        PrivateKeyDer::Pkcs8(leaf_key.serialize_der().into()),
+        &provider,
+    )
+    .unwrap();
+    let seen_sni = Arc::new(Mutex::new(Vec::new()));
+    let resolver = RecordingResolver {
+        key: Arc::new(key),
+        seen_sni: seen_sni.clone(),
+    };
+    let cfg = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(resolver));
+    TestCert {
+        ca_pem: ca_cert.pem(),
+        acceptor: TlsAcceptor::from(Arc::new(cfg)),
+        seen_sni,
+    }
+}
+
+fn ca_pem_only(common_name: &str) -> String {
+    let mut ca_params = CertificateParams::new(Vec::new()).unwrap();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, common_name);
+    ca_params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+    ca_params.key_usages.push(KeyUsagePurpose::KeyCertSign);
+    ca_params.key_usages.push(KeyUsagePurpose::CrlSign);
+    let ca_key = KeyPair::generate().unwrap();
+    ca_params.self_signed(&ca_key).unwrap().pem()
 }
 
 fn assert_seen_sni(cert: &TestCert, expected: &str) {
@@ -354,6 +433,90 @@ return new Promise((resolve) => {{
     });
     assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
     assert_eq!(result.body, "secure:true:true:null;data=hello");
+}
+
+#[test]
+fn custom_ca_replaces_native_roots_instead_of_augmenting_them() {
+    let _lock = lock_env();
+    let cert = ca_signed_test_cert();
+    let native_roots_path = std::env::temp_dir().join(format!(
+        "zeroship-native-roots-{}-{}.pem",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("node_tls")
+    ));
+    std::fs::write(&native_roots_path, cert.ca_pem.as_bytes()).unwrap();
+
+    let wrong_ca_json = serde_json::to_string(&ca_pem_only("zeroship wrong test root")).unwrap();
+    let good_ca_json = serde_json::to_string(&cert.ca_pem).unwrap();
+
+    let (wrong, good) = {
+        let _env = EnvGuard::set_with_native_roots(true, Some(&native_roots_path));
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let addr = spawn_tls_server(cert.clone(), TlsServerMode::DirectEcho).await;
+            let wrong = run_js_module(
+                tls_module(&format!(
+                    r#"
+return new Promise((resolve) => {{
+    const s = tls.connect({{
+        host: "127.0.0.1",
+        port: {},
+        servername: "db.local.test",
+        ca: {},
+    }});
+    s.on("secureConnect", () => resolve("unexpected-secure"));
+    s.on("error", (err) => resolve(`error:${{err.code}}:${{err.message}}`));
+    s.on("close", () => {{}});
+    setTimeout(() => resolve("timeout"), 3000);
+}});
+"#,
+                    addr.port(),
+                    wrong_ca_json
+                )),
+                allowlist(addr, 4),
+                Duration::from_secs(5),
+            )
+            .await;
+            let good = run_js_module(
+                tls_module(&format!(
+                    r#"
+return new Promise((resolve) => {{
+    const s = tls.connect({{
+        host: "127.0.0.1",
+        port: {},
+        servername: "db.local.test",
+        ca: {},
+    }});
+    let data = "";
+    s.on("secureConnect", () => s.write("pin"));
+    s.on("data", (chunk) => {{
+        data += chunk.toString();
+        s.end();
+    }});
+    s.on("close", () => resolve(`data=${{data}}`));
+    s.on("error", (err) => resolve(`error:${{err.code}}:${{err.message}}`));
+    setTimeout(() => resolve(`timeout:data=${{data}}`), 3000);
+}});
+"#,
+                    addr.port(),
+                    good_ca_json
+                )),
+                allowlist(addr, 4),
+                Duration::from_secs(5),
+            )
+            .await;
+            (wrong, good)
+        })
+    };
+    let _ = std::fs::remove_file(&native_roots_path);
+
+    assert_eq!(wrong.status, 200, "unexpected wrong status/body: {}", wrong.body);
+    assert!(
+        wrong.body.contains("error:ERR_TLS_HANDSHAKE"),
+        "custom ca must reject a server chained only to native roots, got: {}",
+        wrong.body
+    );
+    assert_eq!(good.status, 200, "unexpected good status/body: {}", good.body);
+    assert_eq!(good.body, "data=pin");
 }
 
 #[test]

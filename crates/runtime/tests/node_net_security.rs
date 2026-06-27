@@ -575,6 +575,105 @@ return await new Promise((resolve) => {{
 }
 
 #[test]
+fn egress_ceiling_resets_between_dispatches() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
+    let (first, second) = compio::runtime::Runtime::new().unwrap().block_on(async {
+        let addr = spawn_tcp_server(ServerMode::Echo).await;
+        let modules = vec![ModuleEntry {
+            specifier: "index.js".to_string(),
+            source: format!(
+                r#"
+import net from "node:net";
+
+function tripCap() {{
+  return new Promise((resolve) => {{
+    const s = new net.Socket();
+    let error = "";
+    s.on("connect", () => {{
+      s.write("a".repeat(40));
+      s.write("b".repeat(40));
+    }});
+    s.on("error", (err) => {{ error = `${{err.code}}:${{err.message}}`; }});
+    s.on("close", (hadError) => resolve(`trip:error=${{error}};close=${{hadError}}`));
+    s.connect({}, "127.0.0.1");
+    setTimeout(() => resolve(`trip:timeout:error=${{error}}`), 3000);
+  }});
+}}
+
+function smallWrite() {{
+  return new Promise((resolve) => {{
+    const s = new net.Socket();
+    let data = "";
+    s.on("connect", () => s.write("ok"));
+    s.on("data", (chunk) => {{
+      data += chunk.toString();
+      s.end();
+    }});
+    s.on("error", (err) => resolve(`small:error:${{err.code}}:${{err.message}}`));
+    s.on("close", () => resolve(`small:data=${{data}}`));
+    try {{
+      s.connect({}, "127.0.0.1");
+    }} catch (err) {{
+      resolve(`small:throw:${{err.code}}:${{err.message}}`);
+    }}
+    setTimeout(() => resolve(`small:timeout:data=${{data}}`), 3000);
+  }});
+}}
+
+export default {{
+  async fetch(req) {{
+    const path = new URL(req.url).pathname;
+    return new Response(path === "/trip" ? await tripCap() : await smallWrite());
+  }},
+}};
+"#,
+                addr.port(),
+                addr.port()
+            ),
+        }];
+        let runtime = Runtime::builder()
+            .modules(modules)
+            .net_policy(allowlist("127.0.0.1", addr.port(), 4, 64))
+            .build();
+        runtime.start_pump();
+
+        let env = EnvSnapshot::empty();
+        let first = runtime.call_fetch_handler(
+            "GET",
+            "http://localhost/trip",
+            &[],
+            "",
+            &env,
+            RequestCtx::new(CancelFlag::new()),
+        );
+        let first = drive_fetch_outcome(first, Duration::from_secs(5)).await;
+
+        let second = runtime.call_fetch_handler(
+            "GET",
+            "http://localhost/small",
+            &[],
+            "",
+            &env,
+            RequestCtx::new(CancelFlag::new()),
+        );
+        let second = drive_fetch_outcome(second, Duration::from_secs(5)).await;
+        (first, second)
+    });
+
+    assert_eq!(first.status, 200, "unexpected first status/body: {}", first.body);
+    assert!(
+        first.body.contains("ERR_NET_EGRESS_CAP") && first.body.contains("close=true"),
+        "first dispatch should trip egress cap, got: {}",
+        first.body
+    );
+    assert_eq!(
+        second.body, "small:data=ok",
+        "second dispatch should not inherit the prior egress-exhausted latch"
+    );
+}
+
+#[test]
 fn global_socket_ceiling_rejects_past_process_cap() {
     let _lock = lock_env();
     let _env = EnvGuard::set(&[

@@ -14,6 +14,7 @@ use compio::net::TcpStream;
 use compio_tls::TlsStream;
 use futures::channel::mpsc;
 use futures::future::{Either, select};
+use futures::SinkExt;
 use futures::StreamExt;
 use socket2::{SockRef, TcpKeepalive};
 
@@ -129,6 +130,12 @@ pub fn free_native_socket_state(state: &SharedState, socket_id: u32) {
     let mut s = state.borrow_mut();
     s.native_sockets.remove(&socket_id);
     s.native_socket_wrappers.remove(&socket_id);
+}
+
+pub fn reset_dispatch_egress(state: &SharedState) {
+    let mut s = state.borrow_mut();
+    s.native_net_egress_bytes = 0;
+    s.native_net_egress_exhausted = false;
 }
 
 pub fn lookup_native_socket_state(
@@ -808,13 +815,249 @@ impl AsyncWrite for SocketStream {
     }
 }
 
-enum DriverAction {
+enum TlsDriverAction {
     ReadCompleted(compio::buf::BufResult<usize, Vec<u8>>),
     Command(Option<WriteCmd>),
     ReadPermit(bool),
 }
 
 async fn run_socket_driver(
+    state: SharedState,
+    socket_id: u32,
+    stream: SocketStream,
+    rx: mpsc::Receiver<WriteCmd>,
+) {
+    match stream {
+        SocketStream::Plain(tcp) => run_plain_driver(state, socket_id, tcp, rx).await,
+        #[cfg(feature = "runtime_native_websocket")]
+        SocketStream::Tls(tls) => run_tls_driver(state, socket_id, SocketStream::Tls(tls), rx).await,
+        SocketStream::Closed => run_tls_driver(state, socket_id, SocketStream::Closed, rx).await,
+    }
+}
+
+enum PlainReadAction {
+    ReadCompleted(compio::buf::BufResult<usize, Vec<u8>>),
+    Control(Option<PlainControl>),
+    ReadPermit(bool),
+}
+
+enum PlainControl {
+    #[cfg(feature = "runtime_native_websocket")]
+    StartTls,
+    CommandClosed,
+}
+
+enum PlainReadExit {
+    #[cfg(feature = "runtime_native_websocket")]
+    StartTls,
+    Closed,
+}
+
+enum PlainCommandExit {
+    #[cfg(feature = "runtime_native_websocket")]
+    StartTls {
+        opts: TlsOptions,
+        rx: mpsc::Receiver<WriteCmd>,
+    },
+    Closed,
+}
+
+async fn run_plain_driver(
+    state: SharedState,
+    socket_id: u32,
+    tcp: TcpStream,
+    rx: mpsc::Receiver<WriteCmd>,
+) {
+    let tcp = Rc::new(tcp);
+    let (writer_tx, writer_rx) = mpsc::channel::<WriteCmd>(128);
+    let (control_tx, control_rx) = mpsc::unbounded::<PlainControl>();
+
+    let writer_handle = {
+        let state = state.clone();
+        let tcp = tcp.clone();
+        compio::runtime::spawn(crate::panic_util::guard(
+            "node-net-plain-writer",
+            async move {
+                run_plain_writer_loop(&state, socket_id, tcp, writer_rx).await;
+            },
+        ))
+    };
+
+    let command_handle = compio::runtime::spawn(crate::panic_util::guard(
+        "node-net-plain-command-router",
+        run_plain_command_router(rx, writer_tx, control_tx),
+    ));
+
+    let read_exit = run_plain_reader_loop(&state, socket_id, tcp.clone(), control_rx).await;
+    match read_exit {
+        #[cfg(feature = "runtime_native_websocket")]
+        PlainReadExit::StartTls => {
+            let command_exit = command_handle
+                .await
+                .unwrap_or(Some(PlainCommandExit::Closed))
+                .unwrap_or(PlainCommandExit::Closed);
+            let _ = writer_handle.await;
+            let PlainCommandExit::StartTls { opts, rx } = command_exit else {
+                finish_plain_driver_close(&state, socket_id, tcp).await;
+                return;
+            };
+            let tcp = match Rc::try_unwrap(tcp) {
+                Ok(tcp) => tcp,
+                Err(_) => {
+                    push_error_and_close(
+                        &state,
+                        socket_id,
+                        "STARTTLS upgrade failed: TCP stream still shared".to_string(),
+                        "ERR_TLS_HANDSHAKE",
+                    );
+                    return;
+                }
+            };
+            let Some(tls) = start_tls_on_tcp(&state, socket_id, tcp, opts).await else {
+                return;
+            };
+            run_tls_driver(state, socket_id, SocketStream::Tls(tls), rx).await;
+        }
+        PlainReadExit::Closed => {
+            finish_plain_driver_close(&state, socket_id, tcp).await;
+            let _ = command_handle.await;
+            let _ = writer_handle.await;
+        }
+    }
+}
+
+async fn run_plain_command_router(
+    mut rx: mpsc::Receiver<WriteCmd>,
+    mut writer_tx: mpsc::Sender<WriteCmd>,
+    control_tx: mpsc::UnboundedSender<PlainControl>,
+) -> PlainCommandExit {
+    while let Some(cmd) = rx.next().await {
+        match cmd {
+            #[cfg(feature = "runtime_native_websocket")]
+            WriteCmd::StartTls(opts) => {
+                drop(writer_tx);
+                let _ = control_tx.unbounded_send(PlainControl::StartTls);
+                return PlainCommandExit::StartTls { opts, rx };
+            }
+            other => {
+                if writer_tx.send(other).await.is_err() {
+                    return PlainCommandExit::Closed;
+                }
+            }
+        }
+    }
+    drop(writer_tx);
+    let _ = control_tx.unbounded_send(PlainControl::CommandClosed);
+    PlainCommandExit::Closed
+}
+
+async fn run_plain_writer_loop(
+    state: &SharedState,
+    socket_id: u32,
+    tcp: Rc<TcpStream>,
+    mut rx: mpsc::Receiver<WriteCmd>,
+) {
+    let mut writer = TcpWriteHalf { tcp };
+    while let Some(cmd) = rx.next().await {
+        if !handle_plain_writer_command(state, socket_id, &mut writer, cmd).await {
+            return;
+        }
+    }
+}
+
+async fn run_plain_reader_loop(
+    state: &SharedState,
+    socket_id: u32,
+    tcp: Rc<TcpStream>,
+    mut control_rx: mpsc::UnboundedReceiver<PlainControl>,
+) -> PlainReadExit {
+    let mut reader = TcpReadHalf { tcp };
+    let socket_state = match lookup_native_socket_state(state, socket_id) {
+        Some(s) => s,
+        None => return PlainReadExit::Closed,
+    };
+
+    loop {
+        if socket_state.borrow().destroyed {
+            break;
+        }
+
+        let action = if recv_ready_now(&socket_state) {
+            let chunk = vec![0u8; READ_CHUNK_SIZE];
+            let read_fut = AsyncRead::read(&mut reader, chunk);
+            let control_fut = control_rx.next();
+            let read_fut = std::pin::pin!(read_fut);
+            let control_fut = std::pin::pin!(control_fut);
+            match select(read_fut, control_fut).await {
+                Either::Left((res, _)) => PlainReadAction::ReadCompleted(res),
+                Either::Right((control, _)) => PlainReadAction::Control(control),
+            }
+        } else {
+            let permit_fut = await_recv_ready(&socket_state);
+            let control_fut = control_rx.next();
+            let permit_fut = std::pin::pin!(permit_fut);
+            let control_fut = std::pin::pin!(control_fut);
+            match select(permit_fut, control_fut).await {
+                Either::Left((ready, _)) => PlainReadAction::ReadPermit(ready),
+                Either::Right((control, _)) => PlainReadAction::Control(control),
+            }
+        };
+
+        match action {
+            PlainReadAction::ReadPermit(true) => continue,
+            PlainReadAction::ReadPermit(false) => break,
+            #[cfg(feature = "runtime_native_websocket")]
+            PlainReadAction::Control(Some(PlainControl::StartTls)) => {
+                return PlainReadExit::StartTls;
+            }
+            PlainReadAction::Control(Some(PlainControl::CommandClosed)) | PlainReadAction::Control(None) => break,
+            PlainReadAction::ReadCompleted(res) => {
+                let n = match res.0 {
+                    Ok(n) => n,
+                    Err(e) => {
+                        push_error_and_close(
+                            state,
+                            socket_id,
+                            format!("read error: {e}"),
+                            "ERR_NET_READ",
+                        );
+                        break;
+                    }
+                };
+                if n == 0 {
+                    if let Some(socket) = lookup_native_socket_state(state, socket_id) {
+                        socket.borrow_mut().write_tx = None;
+                    }
+                    push_event(state, socket_id, SocketEvent::End);
+                    break;
+                }
+                let chunk = res.1;
+                let data = chunk.as_slice()[..n].to_vec();
+                if let Some(socket) = lookup_native_socket_state(state, socket_id) {
+                    socket.borrow_mut().bytes_read += n as u64;
+                }
+                mark_socket_activity(state);
+                push_event(state, socket_id, SocketEvent::Data(data));
+            }
+        }
+    }
+
+    PlainReadExit::Closed
+}
+
+async fn finish_plain_driver_close(state: &SharedState, socket_id: u32, tcp: Rc<TcpStream>) {
+    let mut writer = TcpWriteHalf { tcp };
+    let _ = writer.shutdown().await;
+    if let Some(socket) = lookup_native_socket_state(state, socket_id) {
+        socket.borrow_mut().write_tx = None;
+    }
+    let had_error = lookup_native_socket_state(state, socket_id)
+        .map(|s| s.borrow().had_error)
+        .unwrap_or(false);
+    push_close_once(state, socket_id, had_error);
+}
+
+async fn run_tls_driver(
     state: SharedState,
     socket_id: u32,
     mut stream: SocketStream,
@@ -837,8 +1080,8 @@ async fn run_socket_driver(
             let read_fut = std::pin::pin!(read_fut);
             let recv_fut = std::pin::pin!(recv_fut);
             match select(read_fut, recv_fut).await {
-                Either::Left((res, _)) => DriverAction::ReadCompleted(res),
-                Either::Right((cmd, _)) => DriverAction::Command(cmd),
+                Either::Left((res, _)) => TlsDriverAction::ReadCompleted(res),
+                Either::Right((cmd, _)) => TlsDriverAction::Command(cmd),
             }
         } else {
             let permit_fut = await_recv_ready(&socket_state);
@@ -846,21 +1089,21 @@ async fn run_socket_driver(
             let permit_fut = std::pin::pin!(permit_fut);
             let recv_fut = std::pin::pin!(recv_fut);
             match select(permit_fut, recv_fut).await {
-                Either::Left((ready, _)) => DriverAction::ReadPermit(ready),
-                Either::Right((cmd, _)) => DriverAction::Command(cmd),
+                Either::Left((ready, _)) => TlsDriverAction::ReadPermit(ready),
+                Either::Right((cmd, _)) => TlsDriverAction::Command(cmd),
             }
         };
 
         match action {
-            DriverAction::ReadPermit(true) => continue,
-            DriverAction::ReadPermit(false) => break,
-            DriverAction::Command(Some(cmd)) => {
+            TlsDriverAction::ReadPermit(true) => continue,
+            TlsDriverAction::ReadPermit(false) => break,
+            TlsDriverAction::Command(Some(cmd)) => {
                 if !handle_driver_command(&state, socket_id, &mut stream, cmd).await {
                     break;
                 }
             }
-            DriverAction::Command(None) => break,
-            DriverAction::ReadCompleted(res) => {
+            TlsDriverAction::Command(None) => break,
+            TlsDriverAction::ReadCompleted(res) => {
                 let n = match res.0 {
                     Ok(n) => n,
                     Err(e) => {
@@ -901,6 +1144,103 @@ async fn run_socket_driver(
     push_close_once(&state, socket_id, had_error);
 }
 
+struct TcpReadHalf {
+    tcp: Rc<TcpStream>,
+}
+
+impl AsyncRead for TcpReadHalf {
+    async fn read<B: IoBufMut>(&mut self, buf: B) -> compio::buf::BufResult<usize, B> {
+        let r: &TcpStream = &self.tcp;
+        let mut r = r;
+        r.read(buf).await
+    }
+}
+
+struct TcpWriteHalf {
+    tcp: Rc<TcpStream>,
+}
+
+impl AsyncWrite for TcpWriteHalf {
+    async fn write<T: IoBuf>(&mut self, buf: T) -> compio::buf::BufResult<usize, T> {
+        let w: &TcpStream = &self.tcp;
+        let mut w = w;
+        w.write(buf).await
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        let w: &TcpStream = &self.tcp;
+        let mut w = w;
+        w.shutdown().await
+    }
+}
+
+async fn write_driver_data<W>(
+    state: &SharedState,
+    socket_id: u32,
+    stream: &mut W,
+    bytes: Vec<u8>,
+) -> bool
+where
+    W: AsyncWrite + Unpin,
+{
+    let n = bytes.len() as u64;
+    let res = stream.write_all(bytes).await;
+    if let Err(e) = res.0 {
+        push_error_and_close(
+            state,
+            socket_id,
+            format!("write error: {e}"),
+            "ERR_NET_WRITE",
+        );
+        return false;
+    }
+    if let Err(e) = stream.flush().await {
+        push_error_and_close(
+            state,
+            socket_id,
+            format!("write flush error: {e}"),
+            "ERR_NET_WRITE",
+        );
+        return false;
+    }
+    if let Some(socket) = lookup_native_socket_state(state, socket_id) {
+        let mut s = socket.borrow_mut();
+        s.bytes_written = s.bytes_written.saturating_add(n);
+    }
+    mark_socket_activity(state);
+    decrement_buffered_amount(state, socket_id, n);
+    true
+}
+
+async fn handle_plain_writer_command(
+    state: &SharedState,
+    socket_id: u32,
+    stream: &mut TcpWriteHalf,
+    cmd: WriteCmd,
+) -> bool {
+    match cmd {
+        WriteCmd::Data(bytes) => write_driver_data(state, socket_id, stream, bytes).await,
+        WriteCmd::End => {
+            let _ = stream.shutdown().await;
+            true
+        }
+        WriteCmd::SetNoDelay(on) => {
+            let _ = stream.tcp.set_nodelay(on);
+            true
+        }
+        WriteCmd::SetKeepAlive(on, initial_delay_ms) => {
+            let _ = apply_keep_alive(stream.tcp.as_ref(), on, initial_delay_ms);
+            true
+        }
+        #[cfg(feature = "runtime_native_websocket")]
+        WriteCmd::StartTls(_) => true,
+    }
+}
+
 async fn handle_driver_command(
     state: &SharedState,
     socket_id: u32,
@@ -908,35 +1248,7 @@ async fn handle_driver_command(
     cmd: WriteCmd,
 ) -> bool {
     match cmd {
-        WriteCmd::Data(bytes) => {
-            let n = bytes.len() as u64;
-            let res = stream.write_all(bytes).await;
-            if let Err(e) = res.0 {
-                push_error_and_close(
-                    state,
-                    socket_id,
-                    format!("write error: {e}"),
-                    "ERR_NET_WRITE",
-                );
-                return false;
-            }
-            if let Err(e) = stream.flush().await {
-                push_error_and_close(
-                    state,
-                    socket_id,
-                    format!("write flush error: {e}"),
-                    "ERR_NET_WRITE",
-                );
-                return false;
-            }
-            if let Some(socket) = lookup_native_socket_state(state, socket_id) {
-                let mut s = socket.borrow_mut();
-                s.bytes_written = s.bytes_written.saturating_add(n);
-            }
-            mark_socket_activity(state);
-            decrement_buffered_amount(state, socket_id, n);
-            true
-        }
+        WriteCmd::Data(bytes) => write_driver_data(state, socket_id, stream, bytes).await,
         WriteCmd::End => {
             let _ = stream.shutdown().await;
             true
@@ -998,6 +1310,30 @@ async fn start_tls_in_driver(
         }
     };
 
+    let Some(tls) = start_tls_on_tcp(state, socket_id, tcp, opts).await else {
+        return false;
+    };
+    *stream = SocketStream::Tls(tls);
+    true
+}
+
+#[cfg(feature = "runtime_native_websocket")]
+async fn start_tls_on_tcp(
+    state: &SharedState,
+    socket_id: u32,
+    tcp: TcpStream,
+    opts: TlsOptions,
+) -> Option<TlsStream<TcpStream>> {
+    if pending_data_events(state, socket_id) {
+        push_error_and_close(
+            state,
+            socket_id,
+            "STARTTLS upgrade refused with pending plaintext bytes".to_string(),
+            "ERR_TLS_HANDSHAKE",
+        );
+        return None;
+    }
+
     let connector_opts = crate::transport::tls::TlsConnectorOptions {
         reject_unauthorized: opts.reject_unauthorized,
         ca_pem: opts.ca_pem.clone(),
@@ -1011,7 +1347,7 @@ async fn start_tls_in_driver(
                 format!("TLS connector failed: {e}"),
                 "ERR_TLS_HANDSHAKE",
             );
-            return false;
+            return None;
         }
     };
 
@@ -1029,7 +1365,7 @@ async fn start_tls_in_driver(
                 format!("TLS handshake failed: {e}"),
                 "ERR_TLS_HANDSHAKE",
             );
-            return false;
+            return None;
         }
         Err(_) => {
             push_error_and_close(
@@ -1038,11 +1374,10 @@ async fn start_tls_in_driver(
                 "TLS handshake timed out".to_string(),
                 "ERR_TLS_HANDSHAKE",
             );
-            return false;
+            return None;
         }
     };
 
-    *stream = SocketStream::Tls(tls);
     if let Some(socket) = lookup_native_socket_state(state, socket_id) {
         socket.borrow_mut().encrypted = true;
     }
@@ -1058,7 +1393,7 @@ async fn start_tls_in_driver(
             },
         },
     );
-    true
+    Some(tls)
 }
 
 fn decrement_buffered_amount(state: &SharedState, socket_id: u32, n: u64) {

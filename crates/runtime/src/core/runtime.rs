@@ -1580,6 +1580,7 @@ impl RuntimeInner {
     ) -> crate::FetchOutcome {
         // Reset the idle-GC clock — every request entry is "activity".
         self.last_request_ts.set(Instant::now());
+        crate::node::net::state::reset_dispatch_egress(&self.state);
 
         // Stash the env JSON on state so the very first `ensure_initialized`
         // builds the composite env object (plugin namespaces + scalar JSON)

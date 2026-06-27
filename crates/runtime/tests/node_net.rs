@@ -4,8 +4,9 @@ use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
-use compio::io::{AsyncRead, AsyncWriteExt};
+use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
+use socket2::SockRef;
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::{
     EnvSnapshot, FetchOutcome, HostPort, ModuleEntry, NetPolicy, RequestCtx, Runtime, SettledFetch,
@@ -67,6 +68,7 @@ enum ServerMode {
     Echo,
     Idle,
     SendOnConnect(&'static [u8]),
+    FullDuplexStress { send_bytes: usize, read_bytes: usize },
 }
 
 async fn spawn_tcp_server(mode: ServerMode) -> SocketAddr {
@@ -109,6 +111,30 @@ async fn handle_test_connection(mut stream: TcpStream, mode: ServerMode) {
         ServerMode::SendOnConnect(bytes) => {
             let _ = stream.write_all(bytes.to_vec()).await;
             compio::time::sleep(Duration::from_secs(30)).await;
+        }
+        ServerMode::FullDuplexStress { send_bytes, read_bytes } => {
+            let sock = SockRef::from(&stream);
+            let _ = sock.set_recv_buffer_size(4096);
+            let _ = sock.set_send_buffer_size(4096);
+
+            if stream.write_all(vec![b's'; send_bytes]).await.0.is_err() {
+                return;
+            }
+            if stream.flush().await.is_err() {
+                return;
+            }
+
+            let mut remaining = read_bytes;
+            let mut buf = vec![0u8; 4096];
+            while remaining > 0 {
+                let compio::BufResult(read, next_buf) = stream.read(buf).await;
+                buf = next_buf;
+                let n = match read {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                remaining = remaining.saturating_sub(n);
+            }
         }
     }
 }
@@ -469,6 +495,136 @@ return new Promise((resolve) => {{
     });
     assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
     assert_eq!(result.body, "writeOk=false;drain=true");
+}
+
+#[test]
+fn plain_tcp_full_duplex_large_read_while_large_write_completes() {
+    const SERVER_BYTES: usize = 4 * 1024 * 1024;
+    const CLIENT_BYTES: usize = 1024 * 1024;
+
+    let _lock = lock_env();
+    let _env = EnvGuard::set(true, None);
+    let result = compio::runtime::Runtime::new().unwrap().block_on(async {
+        let addr = spawn_tcp_server(ServerMode::FullDuplexStress {
+            send_bytes: SERVER_BYTES,
+            read_bytes: CLIENT_BYTES,
+        })
+        .await;
+        run_net_js(
+            &format!(
+                r#"
+return new Promise((resolve) => {{
+    const s = new net.Socket();
+    let got = 0;
+    let sawDrain = false;
+    let done = false;
+    function maybeDone() {{
+        if (!done && got >= {} && s.bytesWritten >= {}) {{
+            done = true;
+            s.end();
+            resolve(`got=${{got}};written=${{s.bytesWritten}};drain=${{sawDrain}}`);
+        }}
+    }}
+    s.on("connect", () => {{
+        const ok = s.write("x".repeat({}));
+        if (ok) sawDrain = true;
+        maybeDone();
+    }});
+    s.on("drain", () => {{
+        sawDrain = true;
+        maybeDone();
+    }});
+    s.on("data", (chunk) => {{
+        got += chunk.length;
+        maybeDone();
+    }});
+    s.on("close", () => maybeDone());
+    s.on("error", (err) => resolve(`error:${{err.code}}:${{err.message}};got=${{got}};written=${{s.bytesWritten}}`));
+    s.connect({}, "127.0.0.1");
+    setTimeout(() => resolve(`timeout;got=${{got}};written=${{s.bytesWritten}};drain=${{sawDrain}}`), 6000);
+}});
+"#,
+                SERVER_BYTES,
+                CLIENT_BYTES,
+                CLIENT_BYTES,
+                addr.port()
+            ),
+            allowlist(addr, 4),
+            Duration::from_secs(8),
+        )
+        .await
+    });
+    assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
+    assert!(
+        result.body.contains(&format!("got={SERVER_BYTES}"))
+            && result.body.contains(&format!("written={CLIENT_BYTES}"))
+            && !result.body.contains("timeout"),
+        "expected concurrent read/write completion, got: {}",
+        result.body
+    );
+}
+
+#[test]
+fn closed_sockets_free_native_registry_entries() {
+    const SOCKETS: usize = 200;
+
+    let _lock = lock_env();
+    let _env = EnvGuard::set(true, None);
+    let result = compio::runtime::Runtime::new().unwrap().block_on(async {
+        let addr = spawn_tcp_server(ServerMode::Idle).await;
+        let modules = vec![ModuleEntry {
+            specifier: "index.js".to_string(),
+            source: wrap_module(
+                r#"import net from "node:net";"#,
+                &format!(
+                    r#"
+for (let i = 0; i < {}; i++) {{
+    await new Promise((resolve) => {{
+        const s = new net.Socket();
+        s.on("connect", () => s.destroy());
+        s.on("close", () => resolve("close"));
+        s.on("error", (err) => resolve("error:" + err.code));
+        s.connect({}, "127.0.0.1");
+        setTimeout(() => resolve("timeout"), 1000);
+    }});
+}}
+return "done";
+"#,
+                    SOCKETS,
+                    addr.port()
+                ),
+            ),
+        }];
+        let runtime = Runtime::builder()
+            .modules(modules)
+            .net_policy(allowlist(addr, 8))
+            .build();
+        runtime.start_pump();
+        let baseline = {
+            let state = runtime.state();
+            let s = state.borrow();
+            (s.native_sockets.len(), s.native_socket_wrappers.len())
+        };
+
+        let env = EnvSnapshot::empty();
+        let ctx = RequestCtx::new(CancelFlag::new());
+        let outcome = runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx);
+        let result = drive_fetch_outcome(outcome, Duration::from_secs(15)).await;
+
+        let after = {
+            let state = runtime.state();
+            let s = state.borrow();
+            (s.native_sockets.len(), s.native_socket_wrappers.len())
+        };
+        (result, baseline, after)
+    });
+    let (result, baseline, after) = result;
+    assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
+    assert_eq!(result.body, "done");
+    assert_eq!(
+        after, baseline,
+        "closed sockets must not leave native registry entries behind"
+    );
 }
 
 #[test]

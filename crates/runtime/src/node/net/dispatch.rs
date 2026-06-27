@@ -13,6 +13,9 @@ pub fn dispatch_pending_socket_events(
     if events.is_empty() {
         return;
     }
+    let has_close = events
+        .iter()
+        .any(|event| matches!(event, SocketEvent::Close { .. }));
 
     let wrapper_g = {
         let s = state.borrow();
@@ -25,6 +28,10 @@ pub fn dispatch_pending_socket_events(
 
     for event in events {
         dispatch_one(scope, wrapper, event);
+    }
+
+    if has_close {
+        state::free_native_socket_state(state, socket_id);
     }
 }
 

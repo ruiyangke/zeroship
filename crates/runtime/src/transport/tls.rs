@@ -36,10 +36,6 @@ pub fn build_tls_connector(opts: &TlsConnectorOptions) -> io::Result<TlsConnecto
     }
 
     let mut root_store = RootCertStore::empty();
-    let rustls_native_certs::CertificateResult { certs, errors: _errors, .. } =
-        rustls_native_certs::load_native_certs();
-    let _ = root_store.add_parsable_certificates(certs);
-
     if let Some(ca_pem) = opts.ca_pem.as_deref() {
         let certs = parse_ca_certs(ca_pem)?;
         let added = root_store.add_parsable_certificates(certs);
@@ -49,6 +45,10 @@ pub fn build_tls_connector(opts: &TlsConnectorOptions) -> io::Result<TlsConnecto
                 "ca did not contain any parseable certificates",
             ));
         }
+    } else {
+        let rustls_native_certs::CertificateResult { certs, errors: _errors, .. } =
+            rustls_native_certs::load_native_certs();
+        let _ = root_store.add_parsable_certificates(certs);
     }
 
     if root_store.is_empty() {
