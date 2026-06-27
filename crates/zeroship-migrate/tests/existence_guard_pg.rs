@@ -13,7 +13,8 @@
 //! - createTable ifNotExists: absent → creates; present+matching → no-op;
 //!   present+extra-live-column → fail closed naming `columns`.
 //! - createIndex ifNotExists: absent → create; present+matching → no-op;
-//!   present+unique-flip → fail closed naming `unique`.
+//!   present+unique-flip → fail closed naming `unique`; invalid index residue
+//!   from a crashed CONCURRENTLY build → recover/rebuild instead of no-op.
 //! - addConstraint(unique) ifNotExists: absent → create; present same-name+same-kind
 //!   → FailDrift naming `definition` (MED finding: NOT a silent noop);
 //!   present same-name+DIFFERENT-kind → FailDrift naming `kind`.
@@ -31,8 +32,8 @@ use zeroship_migrate::{
     },
     ir_author::{IrAuthor, LiveSchema},
     plan::PlanStep,
-    provision_migrator, role::deprovision_migrator, Approval, EngineError, ExecutorConfig,
-    MigrationEngine,
+    provision_migrator, record_started, role::deprovision_migrator, Approval, EngineError,
+    ExecutorConfig, MigrationEngine,
 };
 use zeroship_schema::query::SqlDialect;
 
@@ -111,6 +112,38 @@ async fn index_exists(conn: &Client, schema: &str, table: &str, index: &str) -> 
         )
         .await
         .expect("query pg_indexes");
+    !rows.is_empty()
+}
+
+async fn index_validity(conn: &Client, schema: &str, index: &str) -> Vec<bool> {
+    conn
+        .query(
+            "SELECT x.indisvalid \
+             FROM pg_index x \
+             JOIN pg_class c ON c.oid = x.indexrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = $2 \
+             ORDER BY c.relname",
+            &[&schema, &index],
+        )
+        .await
+        .expect("query index validity")
+        .into_iter()
+        .map(|r| r.get::<_, bool>("indisvalid"))
+        .collect()
+}
+
+async fn inflight_exists(conn: &Client, cfg: &ExecutorConfig, version: &str) -> bool {
+    let rows = conn
+        .query(
+            &format!(
+                "SELECT 1 FROM \"{}\".schema_migrations_inflight WHERE version = $1",
+                cfg.pg.meta_schema
+            ),
+            &[&version],
+        )
+        .await
+        .expect("query inflight");
     !rows.is_empty()
 }
 
@@ -511,6 +544,101 @@ async fn create_index_ifnotexists_present_unique_flip_fails_closed() {
     let err = apply(&conn, &cfg, &steps).await.expect_err("unique flip fails closed");
     let (_, field, _) = expect_drift(err);
     assert_eq!(field, "unique");
+    teardown(&conn, &cfg).await;
+}
+
+/// A crashed `CREATE INDEX CONCURRENTLY` leaves an INVALID index with the target
+/// name plus a `started` marker. The guard probe must NOT count that invalid
+/// catalog entry as "present+matching": it must return `RunBare`, allowing the
+/// two-phase recovery path to drop the invalid residue and rebuild the index.
+///
+/// RED pre-fix: the shared snapshot included `indisvalid=false`, so the guard
+/// returned `SatisfiedNoop`; `record_completed` cleared inflight and left the
+/// invalid index permanently behind.
+#[compio::test]
+async fn create_index_ifnotexists_invalid_concurrent_residue_recovers_not_noops() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+
+    apply(&conn, &cfg, &lower(&cfg, Op::CreateTable {
+        name: "t".into(),
+        columns: vec![col("email", ColType::String)],
+        constraints: vec![],
+        indexes: vec![],
+        schema: None,
+        existence_guard: None,
+    }))
+    .await
+    .expect("create base table via migrator");
+
+    conn.batch_execute(&format!(
+        "CREATE INDEX t_email_idx ON \"{s}\".t (email); \
+         UPDATE pg_index SET indisvalid = false \
+          WHERE indexrelid = '\"{s}\".t_email_idx'::regclass",
+        s = cfg.project_schema
+    ))
+    .await
+    .expect("seed invalid index residue");
+    assert_eq!(
+        index_validity(&conn, &cfg.project_schema, "t_email_idx").await,
+        vec![false],
+        "test setup must start with one invalid index"
+    );
+
+    let mut steps = lower(&cfg, Op::CreateIndex {
+        table: "t".into(),
+        columns: vec!["email".into()],
+        name: Some("t_email_idx".into()),
+        unique: Some(false),
+        using: None,
+        r#where: None,
+        concurrently: Some(true),
+        schema: None,
+        existence_guard: Some(ExistenceGuard::IfNotExists),
+    });
+    let (version, name, checksum) = match &mut steps[0] {
+        PlanStep::Ddl(m) => {
+            m.flags.transactional = false;
+            m.checksum =
+                zeroship_migrate::Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(m));
+            assert!(
+                !m.flags.transactional,
+                "test setup must force transaction:false for the two-phase non-txn path"
+            );
+            (
+                m.version.as_str().to_string(),
+                m.name.clone(),
+                m.checksum.as_str().to_string(),
+            )
+        }
+        _ => unreachable!(),
+    };
+    record_started(
+        &conn,
+        &cfg,
+        &version,
+        &name,
+        &checksum,
+        "app_test",
+    )
+    .await
+    .expect("seed crashed started marker");
+
+    apply(&conn, &cfg, &steps)
+        .await
+        .expect("guarded concurrent index recovers and rebuilds");
+
+    assert_eq!(
+        index_validity(&conn, &cfg.project_schema, "t_email_idx").await,
+        vec![true],
+        "recovery must leave exactly one valid index"
+    );
+    assert!(journaled(&conn, &cfg, &version).await, "version journaled completed");
+    assert!(
+        !inflight_exists(&conn, &cfg, &version).await,
+        "completed recovery must clear the started marker"
+    );
     teardown(&conn, &cfg).await;
 }
 

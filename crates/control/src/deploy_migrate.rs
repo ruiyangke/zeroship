@@ -962,7 +962,10 @@ async fn prevalidate_bundle_scope(
     //     only now NOTHING commits ahead of the refusal.
     let exec_cfg = ExecutorConfig::new(app_id.to_string(), app_id.to_string());
     let backend = PostgresBackend::new(conn);
-    let outstanding = backend
+    let pending_contracts = backend
+        .pending_contracts()
+        .expect("pg backend exposes cross-deploy obligations");
+    let outstanding = pending_contracts
         .outstanding_pending_contracts(&exec_cfg)
         .await
         .map_err(|e| DeployMigrateError::Apply(EngineError::Apply(ApplyError::Journal(e))))?;
@@ -1206,6 +1209,9 @@ async fn apply_bundle_ir_migrations(
     // Run the whole file loop under the held lock, capturing the result so the lock
     // is released on EVERY path (success/error/early-return) before we surface it.
     let loop_result: Result<(), DeployMigrateError> = async {
+        let pending_contracts = backend
+            .pending_contracts()
+            .expect("pg backend exposes cross-deploy obligations");
         // CRASH-RECOVERY leg — reconcile any prior-deploy `in_progress` recovery
         // markers whose obligation is STILL outstanding (a process death between an
         // EXPAND commit and the in-process abort of an EARLIER deploy, OR a `committed`
@@ -1214,14 +1220,14 @@ async fn apply_bundle_ir_migrations(
         // marked `reconciled` only after the abort succeeds. This runs FIRST so the
         // new bundle never applies on top of a half-renamed table from a crashed
         // prior deploy.
-        let prior = backend
+        let prior = pending_contracts
             .outstanding_deploy_recoveries(exec_cfg)
             .await
             .map_err(|e| DeployMigrateError::Apply(EngineError::Apply(ApplyError::Journal(e))))?;
         if !prior.is_empty() {
             let prior_pvs: std::collections::BTreeSet<&str> =
                 prior.iter().map(|r| r.pending_version.as_str()).collect();
-            let outstanding = backend
+            let outstanding = pending_contracts
                 .outstanding_pending_contracts(exec_cfg)
                 .await
                 .map_err(|e| DeployMigrateError::Apply(EngineError::Apply(ApplyError::Journal(e))))?;
@@ -1240,7 +1246,7 @@ async fn apply_bundle_ir_migrations(
                 .await
                 .map_err(DeployMigrateError::from)?;
             for r in &prior {
-                backend
+                pending_contracts
                     .mark_deploy_recovery_reconciled(
                         exec_cfg,
                         &r.deploy_id,
@@ -1395,6 +1401,9 @@ async fn apply_bundle_ir_migrations(
     // AFTER the release.
     let mut recovery_result: Result<(), DeployMigrateError> = Ok(());
     if !opened_this_deploy.is_empty() {
+        let pending_contracts = backend
+            .pending_contracts()
+            .expect("pg backend exposes cross-deploy obligations");
         match &loop_result {
             Err(orig) if zeroship_migrate::fault::trip(
                 zeroship_migrate::fault::points::DEPLOY_BEFORE_INPROCESS_ABORT,
@@ -1435,7 +1444,7 @@ async fn apply_bundle_ir_migrations(
                 {
                     Ok(_) => {
                         for pc in &opened_this_deploy {
-                            if let Err(e) = backend
+                            if let Err(e) = pending_contracts
                                 .mark_deploy_recovery_reconciled(
                                     exec_cfg,
                                     &deploy_id,
@@ -1523,7 +1532,7 @@ async fn apply_bundle_ir_migrations(
                         "fault-injection: simulated `committed` promotion failure".into(),
                     ))
                 } else {
-                    backend
+                    pending_contracts
                         .mark_deploy_recovery_committed_batch(
                             exec_cfg,
                             &deploy_id,
