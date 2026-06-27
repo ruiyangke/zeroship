@@ -59,7 +59,7 @@ pub fn disarm_all() {
 /// # Errors
 /// [`crate::executor::ApplyError::Backend`] tagged `fault-injection: <point>` when
 /// the armed fault fires.
-pub fn trip(point: &str) -> Result<(), crate::executor::ApplyError> {
+pub fn trip(point: &str) -> Result<(), crate::apply::executor::ApplyError> {
     if !ARMED.load(Ordering::Relaxed) {
         return Ok(());
     }
@@ -78,7 +78,7 @@ pub fn trip(point: &str) -> Result<(), crate::executor::ApplyError> {
             ARMED.store(false, Ordering::SeqCst);
         }
         drop(reg);
-        return Err(crate::executor::ApplyError::Backend(format!(
+        return Err(crate::apply::executor::ApplyError::Backend(format!(
             "fault-injection: simulated crash at boundary '{point}'"
         )));
     }

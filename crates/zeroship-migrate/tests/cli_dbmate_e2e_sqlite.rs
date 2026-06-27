@@ -473,7 +473,7 @@ fn cli_validate_on_sqlite_clean_passes_then_flags_drift_and_destructive() {
 #[test]
 fn sqlite_shadow_dry_run_blames_the_real_failing_migration_with_success_prefix() {
     use std::time::Duration;
-    use zeroship_migrate::guard::platform_runner::{
+    use zeroship_migrate::command::runner::{
         run_validate, RunConfig, RunProfile, RunReport,
     };
 

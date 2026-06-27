@@ -1,5 +1,5 @@
 //! PR9a — the `resolve-pending --apply|--abort` CLI runner, faithful e2e on REAL
-//! Postgres (`:5440`). Drives the REAL `guard::platform_runner::run_resolve_pending`
+//! Postgres (`:5440`). Drives the REAL `command::runner::run_resolve_pending`
 //! (not a spawned process, not a shim) against a real obligation the engine wrote.
 //!
 //! - `--apply` discharges the obligation: the deferred contract (drop dual-write
@@ -16,7 +16,7 @@
 
 use compio_postgres::Client;
 use zeroship_migrate::drift::{ColumnSnapshot, TableSnapshot};
-use zeroship_migrate::guard::platform_runner::{
+use zeroship_migrate::command::runner::{
     run_resolve_pending, RunConfig, RunError, RunProfile, RunReport,
 };
 use zeroship_migrate::ir::{ColType, IrFlagsOverride, MigrationIr, Op};

@@ -4,7 +4,7 @@
 //! schema is the one Liquibase used to build — namespaces, roles, RLS policies,
 //! trigger functions, and key tables.
 //!
-//! This drives the REAL `guard::platform_runner::run_migrate` (not a shim, not a
+//! This drives the REAL `command::runner::run_migrate` (not a shim, not a
 //! spawned process) so the port is guarded by the same engine + guard the compose
 //! `migrate` service will run. The privileged DDL in these files (CREATE ROLE /
 //! GRANT / CREATE SCHEMA / ENABLE RLS / CREATE POLICY) is EXACTLY why the run must
@@ -21,7 +21,7 @@
 use std::path::PathBuf;
 
 use compio_postgres::Client;
-use zeroship_migrate::guard::platform_runner::{
+use zeroship_migrate::command::runner::{
     run_migrate, run_rollback, run_status, RunConfig, RunProfile, RunReport,
 };
 
@@ -261,7 +261,7 @@ async fn ported_changelog_applies_under_platform_and_materializes_the_schema() {
 // `DROP TABLE`s it. So rolling back exactly one step removes `metering_exports`
 // without disturbing the rest of the schema.
 //
-// Drives the REAL `guard::platform_runner::run_rollback` (not a shim, not a spawned
+// Drives the REAL `command::runner::run_rollback` (not a shim, not a spawned
 // process) so the compose `migrate` service's rollback path is guarded by the same
 // engine + guard. Rollback is destructive ⇒ the run uses `yes = true` (the runner's
 // own --yes gate is exercised independently in `cli_platform_pg.rs`).
