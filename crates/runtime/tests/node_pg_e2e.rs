@@ -1,8 +1,9 @@
 #![allow(unsafe_code)]
 
 use std::net::TcpStream as StdTcpStream;
+use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::{
@@ -76,7 +77,7 @@ async fn run_pg_js(module_src: String, max_wait: Duration) -> JsResult {
         .net_policy(
             NetPolicy::allowlist(
                 vec![HostPort::new(PG_HOST, PG_PORT)],
-                8,
+                32,
                 8 * 1024 * 1024,
             )
             .unwrap(),
@@ -145,6 +146,29 @@ async fn drive_fetch_outcome(outcome: FetchOutcome, max_wait: Duration) -> JsRes
 }
 
 fn require_pg_port() {
+    if StdTcpStream::connect((PG_HOST, PG_PORT)).is_ok() {
+        return;
+    }
+
+    let output = Command::new("docker")
+        .args(["start", "appbase-migrate-postgres-1"])
+        .output()
+        .unwrap_or_else(|err| panic!("failed to spawn docker start appbase-migrate-postgres-1: {err}"));
+    assert!(
+        output.status.success(),
+        "failed to start appbase-migrate-postgres-1 for pg e2e\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(45) {
+        if StdTcpStream::connect((PG_HOST, PG_PORT)).is_ok() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
     StdTcpStream::connect((PG_HOST, PG_PORT)).unwrap_or_else(|err| {
         panic!(
             "headline pg e2e requires live Postgres at {PG_HOST}:{PG_PORT}; \
@@ -185,9 +209,13 @@ async function main() {{
     const client = new Client(config);
     await client.connect();
     const headline = await client.query("SELECT 42::int AS n, 'ok' AS s");
-    await client.end();
 
-    const pool = new Pool({{ ...config, max: 2, idleTimeoutMillis: 1000 }});
+    const pool = new Pool({{ ...config, max: 10, idleTimeoutMillis: 1000 }});
+    const concurrent = await Promise.all(
+        Array.from({{ length: 25 }}, (_, i) =>
+            pool.query("SELECT $1::int AS n, ($1::int * 2)::int AS doubled", [i])
+        )
+    );
     const pooled = await pool.connect();
     let roundtrip;
     try {{
@@ -199,10 +227,50 @@ async function main() {{
         await pool.end();
     }}
 
+    const large = await client.query("SELECT generate_series(1, 50000)::int AS n");
+
+    await client.query("CREATE TEMP TABLE zs_pg_txn_e2e (id int PRIMARY KEY, label text)");
+    await client.query("BEGIN");
+    await client.query("INSERT INTO zs_pg_txn_e2e (id, label) VALUES ($1, $2)", [11, "txn-ok"]);
+    const inTxn = await client.query("SELECT id, label FROM zs_pg_txn_e2e WHERE id = $1", [11]);
+    await client.query("COMMIT");
+    const afterCommit = await client.query("SELECT count(*)::int AS count FROM zs_pg_txn_e2e");
+
+    const listener = new Client(config);
+    const notifier = new Client(config);
+    const channel = "zs_pg_e2e_" + Date.now();
+    await listener.connect();
+    await notifier.connect();
+    const notificationPromise = new Promise((resolve, reject) => {{
+        const timer = setTimeout(() => reject(new Error("LISTEN/NOTIFY timed out")), 5000);
+        listener.on("notification", (msg) => {{
+            clearTimeout(timer);
+            resolve({{ channel: msg.channel, payload: msg.payload }});
+        }});
+    }});
+    await listener.query(`LISTEN ${{channel}}`);
+    await notifier.query("SELECT pg_notify($1, $2)", [channel, "hello-push"]);
+    const notification = await notificationPromise;
+    await listener.end();
+    await notifier.end();
+
+    await client.end();
+
     return {{
-        nextTickObserved: ordering.includes("tick"),
+        nextTickOrdering: ordering,
         headline: headline.rows,
+        concurrent: concurrent.map((r) => r.rows[0]),
         pool: roundtrip.rows,
+        large: {{
+            rowCount: large.rowCount,
+            first: large.rows[0].n,
+            last: large.rows[large.rows.length - 1].n,
+        }},
+        transaction: {{
+            inTxn: inTxn.rows,
+            afterCommit: afterCommit.rows,
+        }},
+        notification,
     }};
 }}
 
@@ -246,8 +314,37 @@ export default {{
         "pool temp-table roundtrip mismatch: {body}"
     );
     assert_eq!(
-        body.get("nextTickObserved"),
-        Some(&serde_json::Value::Bool(true)),
-        "process.nextTick did not run during pg fixture: {body}"
+        body.get("nextTickOrdering"),
+        Some(&serde_json::json!(["tick", "promise"])),
+        "process.nextTick did not run before Promise microtasks: {body}"
+    );
+    assert_eq!(
+        body.get("concurrent"),
+        Some(&serde_json::json!(
+            (0..25)
+                .map(|i| serde_json::json!({ "n": i, "doubled": i * 2 }))
+                .collect::<Vec<_>>()
+        )),
+        "concurrent pool query results mismatch: {body}"
+    );
+    assert_eq!(
+        body.get("large"),
+        Some(&serde_json::json!({ "rowCount": 50000, "first": 1, "last": 50000 })),
+        "large result-set mismatch: {body}"
+    );
+    assert_eq!(
+        body.pointer("/transaction/inTxn"),
+        Some(&serde_json::json!([{ "id": 11, "label": "txn-ok" }])),
+        "transaction in-flight row mismatch: {body}"
+    );
+    assert_eq!(
+        body.pointer("/transaction/afterCommit"),
+        Some(&serde_json::json!([{ "count": 1 }])),
+        "transaction commit row mismatch: {body}"
+    );
+    assert_eq!(
+        body.pointer("/notification/payload"),
+        Some(&serde_json::Value::String("hello-push".to_string())),
+        "LISTEN/NOTIFY payload mismatch: {body}"
     );
 }

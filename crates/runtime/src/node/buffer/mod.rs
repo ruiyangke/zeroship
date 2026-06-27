@@ -819,8 +819,31 @@ const BUFFER_JS: &str = r#"
     return true;
   }
 
+  function makeCallableBuffer(BufferClass) {
+    function NodeBuffer(arg, encodingOrOffset, length) {
+      if (typeof arg === "number") return BufferClass.alloc(arg);
+      return BufferClass.from(arg, encodingOrOffset, length);
+    }
+    Object.setPrototypeOf(NodeBuffer, BufferClass);
+    Object.defineProperty(NodeBuffer, "prototype", {
+      value: BufferClass.prototype,
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    });
+    Object.defineProperty(BufferClass.prototype, "constructor", {
+      value: NodeBuffer,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+    return NodeBuffer;
+  }
+
+  const NodeBuffer = makeCallableBuffer(Buffer);
+
   return {
-    Buffer,
+    Buffer: NodeBuffer,
     kMaxLength,
     INSPECT_MAX_BYTES: 50,
     constants,

@@ -246,7 +246,7 @@ pub fn load_modules(
             }
         };
 
-        scope.perform_microtask_checkpoint();
+        crate::core::init::perform_microtask_checkpoint(scope);
 
         if let Some(exc) = sync_exc {
             let local = v8::Local::new(scope, &exc);
@@ -275,19 +275,22 @@ pub fn load_modules(
 
     if let Some(rej) = eval_rejection {
         let local = v8::Local::new(scope, &rej);
+        let error = local.to_rust_string_lossy(scope);
+        let mut detail = error.clone();
         tracing::error!(
-            error = %local.to_rust_string_lossy(scope),
+            error = %error,
             "v8 evaluate rejected"
         );
         if let Some(obj) = local.to_object(scope) {
             let stack_key = v8::String::new(scope, "stack").unwrap();
             if let Some(stack_val) = obj.get(scope, stack_key.into()) {
                 if !stack_val.is_undefined() {
+                    detail = stack_val.to_rust_string_lossy(scope);
                     tracing::error!(stack = %stack_val.to_rust_string_lossy(scope), "v8 evaluate rejected stack");
                 }
             }
         }
-        return Err(format!("Evaluate rejected: {entrypoint}"));
+        return Err(format!("Evaluate rejected: {entrypoint}: {detail}"));
     }
 
     // Extract the namespace.

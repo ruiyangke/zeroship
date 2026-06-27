@@ -1201,6 +1201,14 @@ fn console_log_callback(
     }
 }
 
+fn process_stdio_write_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    rv.set(v8::Boolean::new(scope, true).into());
+}
+
 #[cfg(test)]
 mod console_tests {
     use super::*;
@@ -1249,6 +1257,32 @@ fn queue_microtask_callback(
     let undefined = v8::undefined(scope);
     resolver.resolve(scope, undefined.into());
     promise.then(scope, func);
+}
+
+pub(crate) fn perform_microtask_checkpoint(scope: &mut v8::PinScope) {
+    for _ in 0..1024 {
+        let had_next_ticks_before = drain_next_ticks(scope);
+        scope.perform_microtask_checkpoint();
+        let had_next_ticks_after = drain_next_ticks(scope);
+        if !had_next_ticks_before && !had_next_ticks_after {
+            break;
+        }
+    }
+}
+
+fn drain_next_ticks(scope: &mut v8::PinScope) -> bool {
+    let global = scope.get_current_context().global(scope);
+    let key = v8::String::new(scope, "__zsDrainNextTicks").unwrap();
+    let Some(value) = global.get(scope, key.into()) else {
+        return false;
+    };
+    let Ok(func) = v8::Local::<v8::Function>::try_from(value) else {
+        return false;
+    };
+    let undefined = v8::undefined(scope).into();
+    func.call(scope, undefined, &[])
+        .map(|v| v.boolean_value(scope))
+        .unwrap_or(false)
 }
 
 // ===========================================================================
@@ -1935,21 +1969,74 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
             process.set(scope, key.into(), arch.into());
         }
 
-        // process.nextTick — Node-only. langgraph's Pregel state machine
-        // schedules task transitions via nextTick; without it, agent.invoke
-        // never advances past the first node and the Promise never settles.
-        // Map onto queueMicrotask which is the closest semantic match.
+        // process.stdout / process.stderr — imported Node packages often
+        // probe stdio metadata during module initialization (for example
+        // `debug` checks `process.stderr.fd` before deciding whether to
+        // emit ANSI colors). Apps cannot write to host stdio directly, so
+        // writes are accepted and ignored.
+        {
+            let install_stream = |scope: &mut v8::PinScope<'_, '_>,
+                                  process: v8::Local<v8::Object>,
+                                  name: &str,
+                                  fd: i32| {
+                let stream = v8::Object::new(scope);
+
+                let fd_key = v8::String::new(scope, "fd").unwrap();
+                let fd_value = v8::Integer::new(scope, fd);
+                stream.set(scope, fd_key.into(), fd_value.into());
+
+                let is_tty_key = v8::String::new(scope, "isTTY").unwrap();
+                let is_tty = v8::Boolean::new(scope, false);
+                stream.set(scope, is_tty_key.into(), is_tty.into());
+
+                let write_key = v8::String::new(scope, "write").unwrap();
+                let write_fn = v8::Function::new(scope, process_stdio_write_callback).unwrap();
+                stream.set(scope, write_key.into(), write_fn.into());
+
+                let name_key = v8::String::new(scope, name).unwrap();
+                process.set(scope, name_key.into(), stream.into());
+            };
+
+            install_stream(scope, process, "stdout", 1);
+            install_stream(scope, process, "stderr", 2);
+        }
+
+        // process.nextTick — Node-only. Keep a separate queue so the
+        // runtime can drain it before V8 Promise microtasks, matching the
+        // ordering real npm drivers expect.
         {
             let src = v8::String::new(
                 scope,
-                "(p, qm) => { p.nextTick = function(fn) { var args = Array.prototype.slice.call(arguments, 1); qm(function() { fn.apply(null, args); }); }; }",
+                r#"(p, g) => {
+                  const q = [];
+                  let draining = false;
+                  p.nextTick = function(fn) {
+                    if (typeof fn !== "function") throw new TypeError("process.nextTick callback must be a function");
+                    q.push([fn, Array.prototype.slice.call(arguments, 1)]);
+                  };
+                  g.__zsDrainNextTicks = function() {
+                    if (draining || q.length === 0) return false;
+                    draining = true;
+                    let didWork = false;
+                    try {
+                      let guard = 0;
+                      while (q.length > 0) {
+                        if (++guard > 10000) throw new Error("process.nextTick queue exceeded 10000 callbacks");
+                        const item = q.shift();
+                        didWork = true;
+                        item[0].apply(undefined, item[1]);
+                      }
+                    } finally {
+                      draining = false;
+                    }
+                    return didWork;
+                  };
+                }"#,
             ).unwrap();
             let script = v8::Script::compile(scope, src, None).unwrap();
             let factory: v8::Local<v8::Function> = script.run(scope).unwrap().try_into().unwrap();
-            let qm_key = v8::String::new(scope, "queueMicrotask").unwrap();
-            let qm = global.get(scope, qm_key.into()).unwrap();
             let undef = v8::undefined(scope).into();
-            factory.call(scope, undef, &[process.into(), qm]);
+            factory.call(scope, undef, &[process.into(), global.into()]);
         }
 
         let process_key = v8::String::new(scope, "process").unwrap();

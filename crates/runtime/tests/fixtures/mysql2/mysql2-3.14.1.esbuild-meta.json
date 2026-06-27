@@ -1,0 +1,2754 @@
+{
+  "inputs": {
+    "node_modules/.pnpm/sqlstring@2.3.3/node_modules/sqlstring/lib/SqlString.js": {
+      "bytes": 5865,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/sqlstring@2.3.3/node_modules/sqlstring/index.js": {
+      "bytes": 45,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/sqlstring@2.3.3/node_modules/sqlstring/lib/SqlString.js",
+          "kind": "require-call",
+          "original": "./lib/SqlString"
+        }
+      ],
+      "format": "cjs"
+    },
+    "shims/events.js": {
+      "bytes": 169,
+      "imports": [
+        {
+          "path": "node:events",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:events",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "format": "esm"
+    },
+    "node_modules/.pnpm/lru.min@1.1.4/node_modules/lru.min/lib/index.js": {
+      "bytes": 8919,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/parser_cache.js": {
+      "bytes": 1381,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/lru.min@1.1.4/node_modules/lru.min/lib/index.js",
+          "kind": "require-call",
+          "original": "lru.min"
+        }
+      ],
+      "format": "cjs"
+    },
+    "shims/process.js": {
+      "bytes": 472,
+      "imports": [],
+      "format": "esm"
+    },
+    "shims/net.js": {
+      "bytes": 347,
+      "imports": [
+        {
+          "path": "node:net",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:net",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "format": "esm"
+    },
+    "shims/tls.js": {
+      "bytes": 185,
+      "imports": [
+        {
+          "path": "node:tls",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:tls",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "format": "esm"
+    },
+    "shims/timers.js": {
+      "bytes": 607,
+      "imports": [],
+      "format": "esm"
+    },
+    "shims/stream.js": {
+      "bytes": 1875,
+      "imports": [
+        {
+          "path": "node:events",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:buffer",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "format": "esm"
+    },
+    "node_modules/.pnpm/denque@2.1.0/node_modules/denque/index.js": {
+      "bytes": 12497,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/errors.js": {
+      "bytes": 184575,
+      "imports": [],
+      "format": "cjs"
+    },
+    "shims/buffer.js": {
+      "bytes": 206,
+      "imports": [
+        {
+          "path": "node:buffer",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:buffer",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "format": "esm"
+    },
+    "node_modules/.pnpm/long@5.3.2/node_modules/long/umd/index.js": {
+      "bytes": 50994,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/safer-buffer@2.1.2/node_modules/safer-buffer/safer.js": {
+      "bytes": 2110,
+      "imports": [
+        {
+          "path": "shims/buffer.js",
+          "kind": "require-call",
+          "original": "buffer"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/lib/bom-handling.js": {
+      "bytes": 1109,
+      "imports": [],
+      "format": "cjs"
+    },
+    "shims/string_decoder.js": {
+      "bytes": 300,
+      "imports": [],
+      "format": "esm"
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/internal.js": {
+      "bytes": 6309,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/safer-buffer@2.1.2/node_modules/safer-buffer/safer.js",
+          "kind": "require-call",
+          "original": "safer-buffer"
+        },
+        {
+          "path": "shims/string_decoder.js",
+          "kind": "require-call",
+          "original": "string_decoder"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/utf32.js": {
+      "bytes": 9982,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/safer-buffer@2.1.2/node_modules/safer-buffer/safer.js",
+          "kind": "require-call",
+          "original": "safer-buffer"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/utf16.js": {
+      "bytes": 5502,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/safer-buffer@2.1.2/node_modules/safer-buffer/safer.js",
+          "kind": "require-call",
+          "original": "safer-buffer"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/utf7.js": {
+      "bytes": 9283,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/safer-buffer@2.1.2/node_modules/safer-buffer/safer.js",
+          "kind": "require-call",
+          "original": "safer-buffer"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/sbcs-codec.js": {
+      "bytes": 2191,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/safer-buffer@2.1.2/node_modules/safer-buffer/safer.js",
+          "kind": "require-call",
+          "original": "safer-buffer"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/sbcs-data.js": {
+      "bytes": 5116,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/sbcs-data-generated.js": {
+      "bytes": 32034,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/dbcs-codec.js": {
+      "bytes": 23065,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/safer-buffer@2.1.2/node_modules/safer-buffer/safer.js",
+          "kind": "require-call",
+          "original": "safer-buffer"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/shiftjis.json": {
+      "bytes": 23782,
+      "imports": []
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/eucjp.json": {
+      "bytes": 41064,
+      "imports": []
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/cp936.json": {
+      "bytes": 47320,
+      "imports": []
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/gbk-added.json": {
+      "bytes": 1247,
+      "imports": []
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/gb18030-ranges.json": {
+      "bytes": 2216,
+      "imports": []
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/cp949.json": {
+      "bytes": 38122,
+      "imports": []
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/cp950.json": {
+      "bytes": 42356,
+      "imports": []
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/big5-added.json": {
+      "bytes": 17717,
+      "imports": []
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/dbcs-data.js": {
+      "bytes": 9389,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/shiftjis.json",
+          "kind": "require-call",
+          "original": "./tables/shiftjis.json"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/eucjp.json",
+          "kind": "require-call",
+          "original": "./tables/eucjp.json"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/cp936.json",
+          "kind": "require-call",
+          "original": "./tables/cp936.json"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/cp936.json",
+          "kind": "require-call",
+          "original": "./tables/cp936.json"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/gbk-added.json",
+          "kind": "require-call",
+          "original": "./tables/gbk-added.json"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/cp936.json",
+          "kind": "require-call",
+          "original": "./tables/cp936.json"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/gbk-added.json",
+          "kind": "require-call",
+          "original": "./tables/gbk-added.json"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/gb18030-ranges.json",
+          "kind": "require-call",
+          "original": "./tables/gb18030-ranges.json"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/cp949.json",
+          "kind": "require-call",
+          "original": "./tables/cp949.json"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/cp950.json",
+          "kind": "require-call",
+          "original": "./tables/cp950.json"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/cp950.json",
+          "kind": "require-call",
+          "original": "./tables/cp950.json"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/big5-added.json",
+          "kind": "require-call",
+          "original": "./tables/big5-added.json"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/index.js": {
+      "bytes": 733,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/internal.js",
+          "kind": "require-call",
+          "original": "./internal"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/utf32.js",
+          "kind": "require-call",
+          "original": "./utf32"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/utf16.js",
+          "kind": "require-call",
+          "original": "./utf16"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/utf7.js",
+          "kind": "require-call",
+          "original": "./utf7"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/sbcs-codec.js",
+          "kind": "require-call",
+          "original": "./sbcs-codec"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/sbcs-data.js",
+          "kind": "require-call",
+          "original": "./sbcs-data"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/sbcs-data-generated.js",
+          "kind": "require-call",
+          "original": "./sbcs-data-generated"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/dbcs-codec.js",
+          "kind": "require-call",
+          "original": "./dbcs-codec"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/dbcs-data.js",
+          "kind": "require-call",
+          "original": "./dbcs-data"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/lib/streams.js": {
+      "bytes": 3380,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/safer-buffer@2.1.2/node_modules/safer-buffer/safer.js",
+          "kind": "require-call",
+          "original": "safer-buffer"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/lib/index.js": {
+      "bytes": 6321,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/safer-buffer@2.1.2/node_modules/safer-buffer/safer.js",
+          "kind": "require-call",
+          "original": "safer-buffer"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/lib/bom-handling.js",
+          "kind": "require-call",
+          "original": "./bom-handling"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/index.js",
+          "kind": "require-call",
+          "original": "../encodings"
+        },
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/lib/streams.js",
+          "kind": "require-call",
+          "original": "./streams"
+        },
+        {
+          "path": "shims/stream.js",
+          "kind": "require-call",
+          "original": "stream"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/string.js": {
+      "bytes": 1348,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/lib/index.js",
+          "kind": "require-call",
+          "original": "iconv-lite"
+        },
+        {
+          "path": "node_modules/.pnpm/lru.min@1.1.4/node_modules/lru.min/lib/index.js",
+          "kind": "require-call",
+          "original": "lru.min"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/types.js": {
+      "bytes": 2791,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js": {
+      "bytes": 25214,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/errors.js",
+          "kind": "require-call",
+          "original": "../constants/errors.js"
+        },
+        {
+          "path": "shims/buffer.js",
+          "kind": "require-call",
+          "original": "buffer"
+        },
+        {
+          "path": "node_modules/.pnpm/long@5.3.2/node_modules/long/umd/index.js",
+          "kind": "require-call",
+          "original": "long"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/string.js",
+          "kind": "require-call",
+          "original": "../parsers/string.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/types.js",
+          "kind": "require-call",
+          "original": "../constants/types.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packet_parser.js": {
+      "bytes": 6025,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "./packets/packet.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/auth_next_factor.js": {
+      "bytes": 918,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "../packets/packet"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/auth_switch_request.js": {
+      "bytes": 1056,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "../packets/packet"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/auth_switch_request_more_data.js": {
+      "bytes": 793,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "../packets/packet"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/auth_switch_response.js": {
+      "bytes": 707,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "../packets/packet"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/binary_row.js": {
+      "bytes": 3279,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/types.js",
+          "kind": "require-call",
+          "original": "../constants/types"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "../packets/packet"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/commands.js": {
+      "bytes": 748,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/binlog_dump.js": {
+      "bytes": 984,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "../packets/packet"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/commands.js",
+          "kind": "require-call",
+          "original": "../constants/commands"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/client.js": {
+      "bytes": 2453,
+      "imports": [],
+      "format": "cjs"
+    },
+    "shims/crypto.js": {
+      "bytes": 430,
+      "imports": [
+        {
+          "path": "node:crypto",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:crypto",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "format": "esm"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/auth_41.js": {
+      "bytes": 2332,
+      "imports": [
+        {
+          "path": "shims/crypto.js",
+          "kind": "require-call",
+          "original": "crypto"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/charset_encodings.js": {
+      "bytes": 3456,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/change_user.js": {
+      "bytes": 3308,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/commands.js",
+          "kind": "require-call",
+          "original": "../constants/commands.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/client.js",
+          "kind": "require-call",
+          "original": "../constants/client.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "../packets/packet.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/auth_41.js",
+          "kind": "require-call",
+          "original": "../auth_41.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/charset_encodings.js",
+          "kind": "require-call",
+          "original": "../constants/charset_encodings.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/close_statement.js": {
+      "bytes": 454,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "../packets/packet"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/commands.js",
+          "kind": "require-call",
+          "original": "../constants/commands"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/field_flags.js": {
+      "bytes": 923,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/column_definition.js": {
+      "bytes": 9935,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "../packets/packet"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/string.js",
+          "kind": "require-call",
+          "original": "../parsers/string"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/charset_encodings.js",
+          "kind": "require-call",
+          "original": "../constants/charset_encodings.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/types.js",
+          "kind": "require-call",
+          "original": "../constants/types.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/field_flags.js",
+          "kind": "require-call",
+          "original": "../constants/field_flags.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/cursor.js": {
+      "bytes": 103,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/execute.js": {
+      "bytes": 6603,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/cursor.js",
+          "kind": "require-call",
+          "original": "../constants/cursor"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/commands.js",
+          "kind": "require-call",
+          "original": "../constants/commands"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/types.js",
+          "kind": "require-call",
+          "original": "../constants/types"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "../packets/packet"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/charset_encodings.js",
+          "kind": "require-call",
+          "original": "../constants/charset_encodings.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/handshake.js": {
+      "bytes": 3917,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "../packets/packet"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/client.js",
+          "kind": "require-call",
+          "original": "../constants/client.js"
+        },
+        {
+          "path": "shims/crypto.js",
+          "kind": "require-call",
+          "original": "crypto"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/handshake_response.js": {
+      "bytes": 5045,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/client.js",
+          "kind": "require-call",
+          "original": "../constants/client.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/charset_encodings.js",
+          "kind": "require-call",
+          "original": "../constants/charset_encodings.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "../packets/packet.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/auth_41.js",
+          "kind": "require-call",
+          "original": "../auth_41.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/prepare_statement.js": {
+      "bytes": 800,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "../packets/packet"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/commands.js",
+          "kind": "require-call",
+          "original": "../constants/commands"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/string.js",
+          "kind": "require-call",
+          "original": "../parsers/string.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/charset_encodings.js",
+          "kind": "require-call",
+          "original": "../constants/charset_encodings.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/prepared_statement_header.js": {
+      "bytes": 375,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/query.js": {
+      "bytes": 775,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "../packets/packet.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/commands.js",
+          "kind": "require-call",
+          "original": "../constants/commands.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/string.js",
+          "kind": "require-call",
+          "original": "../parsers/string.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/charset_encodings.js",
+          "kind": "require-call",
+          "original": "../constants/charset_encodings.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/register_slave.js": {
+      "bytes": 1629,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "../packets/packet"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/commands.js",
+          "kind": "require-call",
+          "original": "../constants/commands"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/server_status.js": {
+      "bytes": 1536,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/encoding_charset.js": {
+      "bytes": 703,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/session_track.js": {
+      "bytes": 281,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/resultset_header.js": {
+      "bytes": 4926,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "./packet.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/client.js",
+          "kind": "require-call",
+          "original": "../constants/client.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/server_status.js",
+          "kind": "require-call",
+          "original": "../constants/server_status.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/encoding_charset.js",
+          "kind": "require-call",
+          "original": "../constants/encoding_charset.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/session_track.js",
+          "kind": "require-call",
+          "original": "../constants/session_track.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/ssl_request.js": {
+      "bytes": 633,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/client.js",
+          "kind": "require-call",
+          "original": "../constants/client"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "../packets/packet"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/text_row.js": {
+      "bytes": 1200,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "../packets/packet"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/index.js": {
+      "bytes": 4650,
+      "imports": [
+        {
+          "path": "shims/process.js",
+          "kind": "require-call",
+          "original": "process"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/auth_next_factor.js",
+          "kind": "require-call",
+          "original": "./auth_next_factor"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/auth_switch_request.js",
+          "kind": "require-call",
+          "original": "./auth_switch_request"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/auth_switch_request_more_data.js",
+          "kind": "require-call",
+          "original": "./auth_switch_request_more_data"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/auth_switch_response.js",
+          "kind": "require-call",
+          "original": "./auth_switch_response"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/binary_row.js",
+          "kind": "require-call",
+          "original": "./binary_row"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/binlog_dump.js",
+          "kind": "require-call",
+          "original": "./binlog_dump"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/change_user.js",
+          "kind": "require-call",
+          "original": "./change_user"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/close_statement.js",
+          "kind": "require-call",
+          "original": "./close_statement"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/column_definition.js",
+          "kind": "require-call",
+          "original": "./column_definition"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/execute.js",
+          "kind": "require-call",
+          "original": "./execute"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/handshake.js",
+          "kind": "require-call",
+          "original": "./handshake"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/handshake_response.js",
+          "kind": "require-call",
+          "original": "./handshake_response"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/prepare_statement.js",
+          "kind": "require-call",
+          "original": "./prepare_statement"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/prepared_statement_header.js",
+          "kind": "require-call",
+          "original": "./prepared_statement_header"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/query.js",
+          "kind": "require-call",
+          "original": "./query"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/register_slave.js",
+          "kind": "require-call",
+          "original": "./register_slave"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/resultset_header.js",
+          "kind": "require-call",
+          "original": "./resultset_header"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/ssl_request.js",
+          "kind": "require-call",
+          "original": "./ssl_request"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/text_row.js",
+          "kind": "require-call",
+          "original": "./text_row"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "./packet"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/command.js": {
+      "bytes": 1258,
+      "imports": [
+        {
+          "path": "shims/events.js",
+          "kind": "require-call",
+          "original": "events"
+        },
+        {
+          "path": "shims/timers.js",
+          "kind": "require-call",
+          "original": "timers"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/auth_plugins/sha256_password.js": {
+      "bytes": 1690,
+      "imports": [
+        {
+          "path": "shims/crypto.js",
+          "kind": "require-call",
+          "original": "crypto"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/auth_41.js",
+          "kind": "require-call",
+          "original": "../auth_41"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/auth_plugins/caching_sha2_password.js": {
+      "bytes": 3264,
+      "imports": [
+        {
+          "path": "shims/crypto.js",
+          "kind": "require-call",
+          "original": "crypto"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/auth_41.js",
+          "kind": "require-call",
+          "original": "../auth_41"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/auth_plugins/mysql_native_password.js": {
+      "bytes": 904,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/auth_41.js",
+          "kind": "require-call",
+          "original": "../auth_41.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/auth_plugins/mysql_clear_password.js": {
+      "bytes": 457,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/auth_switch.js": {
+      "bytes": 3640,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/index.js",
+          "kind": "require-call",
+          "original": "../packets/index.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/auth_plugins/sha256_password.js",
+          "kind": "require-call",
+          "original": "../auth_plugins/sha256_password"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/auth_plugins/caching_sha2_password.js",
+          "kind": "require-call",
+          "original": "../auth_plugins/caching_sha2_password.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/auth_plugins/mysql_native_password.js",
+          "kind": "require-call",
+          "original": "../auth_plugins/mysql_native_password.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/auth_plugins/mysql_clear_password.js",
+          "kind": "require-call",
+          "original": "../auth_plugins/mysql_clear_password.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "shims/zlib.js": {
+      "bytes": 375,
+      "imports": [
+        {
+          "path": "node:zlib",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:zlib",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "format": "esm"
+    },
+    "shims/util.js": {
+      "bytes": 571,
+      "imports": [
+        {
+          "path": "node:util",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:util",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "format": "esm"
+    },
+    "node_modules/.pnpm/seq-queue@0.0.5/node_modules/seq-queue/lib/seq-queue.js": {
+      "bytes": 4364,
+      "imports": [
+        {
+          "path": "shims/events.js",
+          "kind": "require-call",
+          "original": "events"
+        },
+        {
+          "path": "shims/util.js",
+          "kind": "require-call",
+          "original": "util"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/seq-queue@0.0.5/node_modules/seq-queue/index.js": {
+      "bytes": 44,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/seq-queue@0.0.5/node_modules/seq-queue/lib/seq-queue.js",
+          "kind": "require-call",
+          "original": "./lib/seq-queue"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/compressed_protocol.js": {
+      "bytes": 4536,
+      "imports": [
+        {
+          "path": "shims/zlib.js",
+          "kind": "require-call",
+          "original": "zlib"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packet_parser.js",
+          "kind": "require-call",
+          "original": "./packet_parser.js"
+        },
+        {
+          "path": "node_modules/.pnpm/seq-queue@0.0.5/node_modules/seq-queue/index.js",
+          "kind": "require-call",
+          "original": "seq-queue"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/client_handshake.js": {
+      "bytes": 8547,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/command.js",
+          "kind": "require-call",
+          "original": "./command.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/index.js",
+          "kind": "require-call",
+          "original": "../packets/index.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/client.js",
+          "kind": "require-call",
+          "original": "../constants/client.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/charset_encodings.js",
+          "kind": "require-call",
+          "original": "../constants/charset_encodings.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/auth_41.js",
+          "kind": "require-call",
+          "original": "../auth_41.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/auth_switch.js",
+          "kind": "require-call",
+          "original": "./auth_switch"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/compressed_protocol.js",
+          "kind": "require-call",
+          "original": "../compressed_protocol.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/server_handshake.js": {
+      "bytes": 6621,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/commands.js",
+          "kind": "require-call",
+          "original": "../constants/commands.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/errors.js",
+          "kind": "require-call",
+          "original": "../constants/errors.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/command.js",
+          "kind": "require-call",
+          "original": "./command.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/index.js",
+          "kind": "require-call",
+          "original": "../packets/index.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/charsets.js": {
+      "bytes": 10509,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/helpers.js": {
+      "bytes": 2213,
+      "imports": [
+        {
+          "path": "<runtime>",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/is-property@1.0.2/node_modules/is-property/is-property.js": {
+      "bytes": 11014,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/generate-function@2.3.1/node_modules/generate-function/index.js": {
+      "bytes": 3210,
+      "imports": [
+        {
+          "path": "shims/util.js",
+          "kind": "require-call",
+          "original": "util"
+        },
+        {
+          "path": "node_modules/.pnpm/is-property@1.0.2/node_modules/is-property/is-property.js",
+          "kind": "require-call",
+          "original": "is-property"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/text_parser.js": {
+      "bytes": 6941,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/types.js",
+          "kind": "require-call",
+          "original": "../constants/types.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/charsets.js",
+          "kind": "require-call",
+          "original": "../constants/charsets.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/helpers.js",
+          "kind": "require-call",
+          "original": "../helpers"
+        },
+        {
+          "path": "node_modules/.pnpm/generate-function@2.3.1/node_modules/generate-function/index.js",
+          "kind": "require-call",
+          "original": "generate-function"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/parser_cache.js",
+          "kind": "require-call",
+          "original": "./parser_cache.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/static_text_parser.js": {
+      "bytes": 4961,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/types.js",
+          "kind": "require-call",
+          "original": "../constants/types.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/charsets.js",
+          "kind": "require-call",
+          "original": "../constants/charsets.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/helpers.js",
+          "kind": "require-call",
+          "original": "../helpers"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/query.js": {
+      "bytes": 10347,
+      "imports": [
+        {
+          "path": "shims/process.js",
+          "kind": "require-call",
+          "original": "process"
+        },
+        {
+          "path": "shims/timers.js",
+          "kind": "require-call",
+          "original": "timers"
+        },
+        {
+          "path": "shims/stream.js",
+          "kind": "require-call",
+          "original": "stream"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/command.js",
+          "kind": "require-call",
+          "original": "./command.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/index.js",
+          "kind": "require-call",
+          "original": "../packets/index.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/text_parser.js",
+          "kind": "require-call",
+          "original": "../parsers/text_parser.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/static_text_parser.js",
+          "kind": "require-call",
+          "original": "../parsers/static_text_parser.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/server_status.js",
+          "kind": "require-call",
+          "original": "../constants/server_status.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/close_statement.js": {
+      "bytes": 361,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/command.js",
+          "kind": "require-call",
+          "original": "./command"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/index.js",
+          "kind": "require-call",
+          "original": "../packets/index.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/binary_parser.js": {
+      "bytes": 7524,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/field_flags.js",
+          "kind": "require-call",
+          "original": "../constants/field_flags.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/charsets.js",
+          "kind": "require-call",
+          "original": "../constants/charsets.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/types.js",
+          "kind": "require-call",
+          "original": "../constants/types.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/helpers.js",
+          "kind": "require-call",
+          "original": "../helpers"
+        },
+        {
+          "path": "node_modules/.pnpm/generate-function@2.3.1/node_modules/generate-function/index.js",
+          "kind": "require-call",
+          "original": "generate-function"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/parser_cache.js",
+          "kind": "require-call",
+          "original": "./parser_cache.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/static_binary_parser.js": {
+      "bytes": 7503,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/field_flags.js",
+          "kind": "require-call",
+          "original": "../constants/field_flags.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/charsets.js",
+          "kind": "require-call",
+          "original": "../constants/charsets.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/types.js",
+          "kind": "require-call",
+          "original": "../constants/types.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/helpers.js",
+          "kind": "require-call",
+          "original": "../helpers"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/execute.js": {
+      "bytes": 3915,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/command.js",
+          "kind": "require-call",
+          "original": "./command.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/query.js",
+          "kind": "require-call",
+          "original": "./query.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/index.js",
+          "kind": "require-call",
+          "original": "../packets/index.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/binary_parser.js",
+          "kind": "require-call",
+          "original": "../parsers/binary_parser.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/static_binary_parser.js",
+          "kind": "require-call",
+          "original": "../parsers/static_binary_parser.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/prepare.js": {
+      "bytes": 4050,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/index.js",
+          "kind": "require-call",
+          "original": "../packets/index.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/command.js",
+          "kind": "require-call",
+          "original": "./command.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/close_statement.js",
+          "kind": "require-call",
+          "original": "./close_statement.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/execute.js",
+          "kind": "require-call",
+          "original": "./execute.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/ping.js": {
+      "bytes": 817,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/command.js",
+          "kind": "require-call",
+          "original": "./command"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/commands.js",
+          "kind": "require-call",
+          "original": "../constants/commands"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "../packets/packet"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/register_slave.js": {
+      "bytes": 592,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/command.js",
+          "kind": "require-call",
+          "original": "./command"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/index.js",
+          "kind": "require-call",
+          "original": "../packets"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/binlog_query_statusvars.js": {
+      "bytes": 3516,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/binlog_dump.js": {
+      "bytes": 2921,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/command.js",
+          "kind": "require-call",
+          "original": "./command"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/index.js",
+          "kind": "require-call",
+          "original": "../packets"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/binlog_query_statusvars.js",
+          "kind": "require-call",
+          "original": "../packets/binlog_query_statusvars.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/change_user.js": {
+      "bytes": 2704,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/command.js",
+          "kind": "require-call",
+          "original": "./command.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/index.js",
+          "kind": "require-call",
+          "original": "../packets/index.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/client.js",
+          "kind": "require-call",
+          "original": "../constants/client"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/client_handshake.js",
+          "kind": "require-call",
+          "original": "./client_handshake.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/charset_encodings.js",
+          "kind": "require-call",
+          "original": "../constants/charset_encodings.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/quit.js": {
+      "bytes": 575,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/command.js",
+          "kind": "require-call",
+          "original": "./command.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/commands.js",
+          "kind": "require-call",
+          "original": "../constants/commands.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js",
+          "kind": "require-call",
+          "original": "../packets/packet.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/index.js": {
+      "bytes": 697,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/client_handshake.js",
+          "kind": "require-call",
+          "original": "./client_handshake.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/server_handshake.js",
+          "kind": "require-call",
+          "original": "./server_handshake.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/query.js",
+          "kind": "require-call",
+          "original": "./query.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/prepare.js",
+          "kind": "require-call",
+          "original": "./prepare.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/close_statement.js",
+          "kind": "require-call",
+          "original": "./close_statement.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/execute.js",
+          "kind": "require-call",
+          "original": "./execute.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/ping.js",
+          "kind": "require-call",
+          "original": "./ping.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/register_slave.js",
+          "kind": "require-call",
+          "original": "./register_slave.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/binlog_dump.js",
+          "kind": "require-call",
+          "original": "./binlog_dump.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/change_user.js",
+          "kind": "require-call",
+          "original": "./change_user.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/quit.js",
+          "kind": "require-call",
+          "original": "./quit.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "shims/url.js": {
+      "bytes": 493,
+      "imports": [],
+      "format": "esm"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/package.json": {
+      "bytes": 2443,
+      "imports": []
+    },
+    "node_modules/.pnpm/aws-ssl-profiles@1.1.2/node_modules/aws-ssl-profiles/lib/profiles/ca/defaults.js": {
+      "bytes": 214342,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/aws-ssl-profiles@1.1.2/node_modules/aws-ssl-profiles/lib/profiles/ca/proxies.js": {
+      "bytes": 7605,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/aws-ssl-profiles@1.1.2/node_modules/aws-ssl-profiles/lib/index.js": {
+      "bytes": 438,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/aws-ssl-profiles@1.1.2/node_modules/aws-ssl-profiles/lib/profiles/ca/defaults.js",
+          "kind": "require-call",
+          "original": "./profiles/ca/defaults.js"
+        },
+        {
+          "path": "node_modules/.pnpm/aws-ssl-profiles@1.1.2/node_modules/aws-ssl-profiles/lib/profiles/ca/proxies.js",
+          "kind": "require-call",
+          "original": "./profiles/ca/proxies.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/ssl_profiles.js": {
+      "bytes": 223,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/aws-ssl-profiles@1.1.2/node_modules/aws-ssl-profiles/lib/index.js",
+          "kind": "require-call",
+          "original": "aws-ssl-profiles"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/connection_config.js": {
+      "bytes": 9580,
+      "imports": [
+        {
+          "path": "shims/url.js",
+          "kind": "require-call",
+          "original": "url"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/client.js",
+          "kind": "require-call",
+          "original": "./constants/client"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/charsets.js",
+          "kind": "require-call",
+          "original": "./constants/charsets"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/package.json",
+          "kind": "require-call",
+          "original": "../package.json"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/ssl_profiles.js",
+          "kind": "require-call",
+          "original": "./constants/ssl_profiles.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/named-placeholders@1.1.6/node_modules/named-placeholders/index.js": {
+      "bytes": 4366,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/lru.min@1.1.4/node_modules/lru.min/lib/index.js",
+          "kind": "require-call",
+          "original": "lru.min"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/base/connection.js": {
+      "bytes": 28563,
+      "imports": [
+        {
+          "path": "shims/net.js",
+          "kind": "require-call",
+          "original": "net"
+        },
+        {
+          "path": "shims/tls.js",
+          "kind": "require-call",
+          "original": "tls"
+        },
+        {
+          "path": "shims/timers.js",
+          "kind": "require-call",
+          "original": "timers"
+        },
+        {
+          "path": "shims/events.js",
+          "kind": "require-call",
+          "original": "events"
+        },
+        {
+          "path": "shims/stream.js",
+          "kind": "require-call",
+          "original": "stream"
+        },
+        {
+          "path": "node_modules/.pnpm/denque@2.1.0/node_modules/denque/index.js",
+          "kind": "require-call",
+          "original": "denque"
+        },
+        {
+          "path": "node_modules/.pnpm/sqlstring@2.3.3/node_modules/sqlstring/index.js",
+          "kind": "require-call",
+          "original": "sqlstring"
+        },
+        {
+          "path": "node_modules/.pnpm/lru.min@1.1.4/node_modules/lru.min/lib/index.js",
+          "kind": "require-call",
+          "original": "lru.min"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packet_parser.js",
+          "kind": "require-call",
+          "original": "../packet_parser.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/index.js",
+          "kind": "require-call",
+          "original": "../packets/index.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/index.js",
+          "kind": "require-call",
+          "original": "../commands/index.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/connection_config.js",
+          "kind": "require-call",
+          "original": "../connection_config.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/charset_encodings.js",
+          "kind": "require-call",
+          "original": "../constants/charset_encodings.js"
+        },
+        {
+          "path": "node_modules/.pnpm/named-placeholders@1.1.6/node_modules/named-placeholders/index.js",
+          "kind": "require-call",
+          "original": "named-placeholders"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/base/pool_connection.js": {
+      "bytes": 1685,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/base/connection.js",
+          "kind": "require-call",
+          "original": "./connection.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/make_done_cb.js": {
+      "bytes": 448,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/prepared_statement_info.js": {
+      "bytes": 694,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/make_done_cb.js",
+          "kind": "require-call",
+          "original": "./make_done_cb.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/inherit_events.js": {
+      "bytes": 753,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/connection.js": {
+      "bytes": 5648,
+      "imports": [
+        {
+          "path": "shims/events.js",
+          "kind": "require-call",
+          "original": "events"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/prepared_statement_info.js",
+          "kind": "require-call",
+          "original": "./prepared_statement_info.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/make_done_cb.js",
+          "kind": "require-call",
+          "original": "./make_done_cb.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/inherit_events.js",
+          "kind": "require-call",
+          "original": "./inherit_events.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/base/connection.js",
+          "kind": "require-call",
+          "original": "../base/connection.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/pool_connection.js": {
+      "bytes": 436,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/connection.js",
+          "kind": "require-call",
+          "original": "./connection.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/base/pool_connection.js",
+          "kind": "require-call",
+          "original": "../base/pool_connection.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/pool_connection.js": {
+      "bytes": 328,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/base/pool_connection.js",
+          "kind": "require-call",
+          "original": "./base/pool_connection.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/pool_connection.js",
+          "kind": "require-call",
+          "original": "./promise/pool_connection.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/base/pool.js": {
+      "bytes": 6289,
+      "imports": [
+        {
+          "path": "shims/process.js",
+          "kind": "require-call",
+          "original": "process"
+        },
+        {
+          "path": "node_modules/.pnpm/sqlstring@2.3.3/node_modules/sqlstring/index.js",
+          "kind": "require-call",
+          "original": "sqlstring"
+        },
+        {
+          "path": "shims/events.js",
+          "kind": "require-call",
+          "original": "events"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/pool_connection.js",
+          "kind": "require-call",
+          "original": "../pool_connection.js"
+        },
+        {
+          "path": "node_modules/.pnpm/denque@2.1.0/node_modules/denque/index.js",
+          "kind": "require-call",
+          "original": "denque"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/base/connection.js",
+          "kind": "require-call",
+          "original": "./connection.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/pool.js": {
+      "bytes": 2974,
+      "imports": [
+        {
+          "path": "shims/events.js",
+          "kind": "require-call",
+          "original": "events"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/make_done_cb.js",
+          "kind": "require-call",
+          "original": "./make_done_cb.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/pool_connection.js",
+          "kind": "require-call",
+          "original": "./pool_connection.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/inherit_events.js",
+          "kind": "require-call",
+          "original": "./inherit_events.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/base/pool.js",
+          "kind": "require-call",
+          "original": "../base/pool.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/pool.js": {
+      "bytes": 246,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/base/pool.js",
+          "kind": "require-call",
+          "original": "./base/pool.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/pool.js",
+          "kind": "require-call",
+          "original": "./promise/pool.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/pool_config.js": {
+      "bytes": 860,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/connection_config.js",
+          "kind": "require-call",
+          "original": "./connection_config.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/connection.js": {
+      "bytes": 294,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/base/connection.js",
+          "kind": "require-call",
+          "original": "./base/connection.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/connection.js",
+          "kind": "require-call",
+          "original": "./promise/connection.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/pool_cluster.js": {
+      "bytes": 8340,
+      "imports": [
+        {
+          "path": "shims/process.js",
+          "kind": "require-call",
+          "original": "process"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/pool.js",
+          "kind": "require-call",
+          "original": "./pool.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/pool_config.js",
+          "kind": "require-call",
+          "original": "./pool_config.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/connection.js",
+          "kind": "require-call",
+          "original": "./connection.js"
+        },
+        {
+          "path": "shims/events.js",
+          "kind": "require-call",
+          "original": "events"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/create_connection.js": {
+      "bytes": 260,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/connection.js",
+          "kind": "require-call",
+          "original": "./connection.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/connection_config.js",
+          "kind": "require-call",
+          "original": "./connection_config.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/create_pool.js": {
+      "bytes": 216,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/pool.js",
+          "kind": "require-call",
+          "original": "./pool.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/pool_config.js",
+          "kind": "require-call",
+          "original": "./pool_config.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/create_pool_cluster.js": {
+      "bytes": 176,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/pool_cluster.js",
+          "kind": "require-call",
+          "original": "./pool_cluster.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/pool_cluster.js": {
+      "bytes": 1528,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/pool_connection.js",
+          "kind": "require-call",
+          "original": "./pool_connection"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/make_done_cb.js",
+          "kind": "require-call",
+          "original": "./make_done_cb"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/promise.js": {
+      "bytes": 6312,
+      "imports": [
+        {
+          "path": "node_modules/.pnpm/sqlstring@2.3.3/node_modules/sqlstring/index.js",
+          "kind": "require-call",
+          "original": "sqlstring"
+        },
+        {
+          "path": "shims/events.js",
+          "kind": "require-call",
+          "original": "events"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/parser_cache.js",
+          "kind": "require-call",
+          "original": "./lib/parsers/parser_cache.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/pool_cluster.js",
+          "kind": "require-call",
+          "original": "./lib/pool_cluster.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/create_connection.js",
+          "kind": "require-call",
+          "original": "./lib/create_connection.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/create_pool.js",
+          "kind": "require-call",
+          "original": "./lib/create_pool.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/create_pool_cluster.js",
+          "kind": "require-call",
+          "original": "./lib/create_pool_cluster.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/connection.js",
+          "kind": "require-call",
+          "original": "./lib/promise/connection.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/pool.js",
+          "kind": "require-call",
+          "original": "./lib/promise/pool.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/make_done_cb.js",
+          "kind": "require-call",
+          "original": "./lib/promise/make_done_cb.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/pool_connection.js",
+          "kind": "require-call",
+          "original": "./lib/promise/pool_connection.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/inherit_events.js",
+          "kind": "require-call",
+          "original": "./lib/promise/inherit_events.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/pool_cluster.js",
+          "kind": "require-call",
+          "original": "./lib/promise/pool_cluster"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/types.js",
+          "kind": "require-call",
+          "original": "./lib/constants/types.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/charsets.js",
+          "kind": "require-call",
+          "original": "./lib/constants/charsets.js"
+        },
+        {
+          "path": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/charset_encodings.js",
+          "kind": "require-call",
+          "original": "./lib/constants/charset_encodings.js"
+        }
+      ],
+      "format": "cjs"
+    }
+  },
+  "outputs": {
+    "mysql2-3.14.1.bundle.mjs": {
+      "imports": [
+        {
+          "path": "node:events",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:events",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:net",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:net",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:tls",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:tls",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:events",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:buffer",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:buffer",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:buffer",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:crypto",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:crypto",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:zlib",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:zlib",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:util",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:util",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "exports": [
+        "default"
+      ],
+      "entryPoint": "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/promise.js",
+      "inputs": {
+        "node_modules/.pnpm/sqlstring@2.3.3/node_modules/sqlstring/lib/SqlString.js": {
+          "bytesInOutput": 6448
+        },
+        "node_modules/.pnpm/sqlstring@2.3.3/node_modules/sqlstring/index.js": {
+          "bytesInOutput": 177
+        },
+        "shims/events.js": {
+          "bytesInOutput": 383
+        },
+        "node_modules/.pnpm/lru.min@1.1.4/node_modules/lru.min/lib/index.js": {
+          "bytesInOutput": 8633
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/parser_cache.js": {
+          "bytesInOutput": 1687
+        },
+        "shims/process.js": {
+          "bytesInOutput": 811
+        },
+        "shims/net.js": {
+          "bytesInOutput": 679
+        },
+        "shims/tls.js": {
+          "bytesInOutput": 398
+        },
+        "shims/timers.js": {
+          "bytesInOutput": 1104
+        },
+        "shims/stream.js": {
+          "bytesInOutput": 2499
+        },
+        "node_modules/.pnpm/denque@2.1.0/node_modules/denque/index.js": {
+          "bytesInOutput": 10738
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/errors.js": {
+          "bytesInOutput": 199767
+        },
+        "shims/buffer.js": {
+          "bytesInOutput": 440
+        },
+        "node_modules/.pnpm/long@5.3.2/node_modules/long/umd/index.js": {
+          "bytesInOutput": 32637
+        },
+        "node_modules/.pnpm/safer-buffer@2.1.2/node_modules/safer-buffer/safer.js": {
+          "bytesInOutput": 2377
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/lib/bom-handling.js": {
+          "bytesInOutput": 1257
+        },
+        "shims/string_decoder.js": {
+          "bytesInOutput": 619
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/internal.js": {
+          "bytesInOutput": 5118
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/utf32.js": {
+          "bytesInOutput": 7856
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/utf16.js": {
+          "bytesInOutput": 4546
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/utf7.js": {
+          "bytesInOutput": 7467
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/sbcs-codec.js": {
+          "bytesInOutput": 2128
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/sbcs-data.js": {
+          "bytesInOutput": 7108
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/sbcs-data-generated.js": {
+          "bytesInOutput": 61965
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/dbcs-codec.js": {
+          "bytesInOutput": 16501
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/shiftjis.json": {
+          "bytesInOutput": 46922
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/eucjp.json": {
+          "bytesInOutput": 81258
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/cp936.json": {
+          "bytesInOutput": 90771
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/gbk-added.json": {
+          "bytesInOutput": 2270
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/gb18030-ranges.json": {
+          "bytesInOutput": 2821
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/cp949.json": {
+          "bytesInOutput": 72784
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/cp950.json": {
+          "bytesInOutput": 83806
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/tables/big5-added.json": {
+          "bytesInOutput": 36658
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/dbcs-data.js": {
+          "bytesInOutput": 10086
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/encodings/index.js": {
+          "bytesInOutput": 675
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/lib/streams.js": {
+          "bytesInOutput": 3056
+        },
+        "node_modules/.pnpm/iconv-lite@0.6.3/node_modules/iconv-lite/lib/index.js": {
+          "bytesInOutput": 4815
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/string.js": {
+          "bytesInOutput": 1530
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/types.js": {
+          "bytesInOutput": 2413
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/packet.js": {
+          "bytesInOutput": 24927
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packet_parser.js": {
+          "bytesInOutput": 6126
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/auth_next_factor.js": {
+          "bytesInOutput": 1127
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/auth_switch_request.js": {
+          "bytesInOutput": 1127
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/auth_switch_request_more_data.js": {
+          "bytesInOutput": 971
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/auth_switch_response.js": {
+          "bytesInOutput": 869
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/binary_row.js": {
+          "bytesInOutput": 3027
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/commands.js": {
+          "bytesInOutput": 1001
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/binlog_dump.js": {
+          "bytesInOutput": 996
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/client.js": {
+          "bytesInOutput": 1146
+        },
+        "shims/crypto.js": {
+          "bytesInOutput": 858
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/auth_41.js": {
+          "bytesInOutput": 1938
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/charset_encodings.js": {
+          "bytesInOutput": 4777
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/change_user.js": {
+          "bytesInOutput": 3556
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/close_statement.js": {
+          "bytesInOutput": 653
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/field_flags.js": {
+          "bytesInOutput": 582
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/column_definition.js": {
+          "bytesInOutput": 8918
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/cursor.js": {
+          "bytesInOutput": 271
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/execute.js": {
+          "bytesInOutput": 6174
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/handshake.js": {
+          "bytesInOutput": 4124
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/handshake_response.js": {
+          "bytesInOutput": 5515
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/prepare_statement.js": {
+          "bytesInOutput": 991
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/prepared_statement_header.js": {
+          "bytesInOutput": 557
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/query.js": {
+          "bytesInOutput": 936
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/register_slave.js": {
+          "bytesInOutput": 1690
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/server_status.js": {
+          "bytesInOutput": 814
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/encoding_charset.js": {
+          "bytesInOutput": 961
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/session_track.js": {
+          "bytesInOutput": 463
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/resultset_header.js": {
+          "bytesInOutput": 4623
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/ssl_request.js": {
+          "bytesInOutput": 799
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/text_row.js": {
+          "bytesInOutput": 1398
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/index.js": {
+          "bytesInOutput": 4446
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/command.js": {
+          "bytesInOutput": 1536
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/auth_plugins/sha256_password.js": {
+          "bytesInOutput": 1877
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/auth_plugins/caching_sha2_password.js": {
+          "bytesInOutput": 3429
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/auth_plugins/mysql_native_password.js": {
+          "bytesInOutput": 1049
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/auth_plugins/mysql_clear_password.js": {
+          "bytesInOutput": 633
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/auth_switch.js": {
+          "bytesInOutput": 3514
+        },
+        "shims/zlib.js": {
+          "bytesInOutput": 772
+        },
+        "shims/util.js": {
+          "bytesInOutput": 1102
+        },
+        "node_modules/.pnpm/seq-queue@0.0.5/node_modules/seq-queue/lib/seq-queue.js": {
+          "bytesInOutput": 3634
+        },
+        "node_modules/.pnpm/seq-queue@0.0.5/node_modules/seq-queue/index.js": {
+          "bytesInOutput": 178
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/compressed_protocol.js": {
+          "bytesInOutput": 3939
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/client_handshake.js": {
+          "bytesInOutput": 6936
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/server_handshake.js": {
+          "bytesInOutput": 5951
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/charsets.js": {
+          "bytesInOutput": 11870
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/helpers.js": {
+          "bytesInOutput": 1656
+        },
+        "node_modules/.pnpm/is-property@1.0.2/node_modules/is-property/is-property.js": {
+          "bytesInOutput": 11185
+        },
+        "node_modules/.pnpm/generate-function@2.3.1/node_modules/generate-function/index.js": {
+          "bytesInOutput": 4017
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/text_parser.js": {
+          "bytesInOutput": 6919
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/static_text_parser.js": {
+          "bytesInOutput": 5093
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/query.js": {
+          "bytesInOutput": 10806
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/close_statement.js": {
+          "bytesInOutput": 560
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/binary_parser.js": {
+          "bytesInOutput": 7627
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/parsers/static_binary_parser.js": {
+          "bytesInOutput": 7067
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/execute.js": {
+          "bytesInOutput": 3546
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/prepare.js": {
+          "bytesInOutput": 4378
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/ping.js": {
+          "bytesInOutput": 844
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/register_slave.js": {
+          "bytesInOutput": 845
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/packets/binlog_query_statusvars.js": {
+          "bytesInOutput": 3706
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/binlog_dump.js": {
+          "bytesInOutput": 3184
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/change_user.js": {
+          "bytesInOutput": 2374
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/quit.js": {
+          "bytesInOutput": 771
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/commands/index.js": {
+          "bytesInOutput": 855
+        },
+        "shims/url.js": {
+          "bytesInOutput": 721
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/package.json": {
+          "bytesInOutput": 2841
+        },
+        "node_modules/.pnpm/aws-ssl-profiles@1.1.2/node_modules/aws-ssl-profiles/lib/profiles/ca/defaults.js": {
+          "bytesInOutput": 178516
+        },
+        "node_modules/.pnpm/aws-ssl-profiles@1.1.2/node_modules/aws-ssl-profiles/lib/profiles/ca/proxies.js": {
+          "bytesInOutput": 6340
+        },
+        "node_modules/.pnpm/aws-ssl-profiles@1.1.2/node_modules/aws-ssl-profiles/lib/index.js": {
+          "bytesInOutput": 588
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/constants/ssl_profiles.js": {
+          "bytesInOutput": 264
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/connection_config.js": {
+          "bytesInOutput": 9177
+        },
+        "node_modules/.pnpm/named-placeholders@1.1.6/node_modules/named-placeholders/index.js": {
+          "bytesInOutput": 4831
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/base/connection.js": {
+          "bytesInOutput": 26904
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/base/pool_connection.js": {
+          "bytesInOutput": 1590
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/make_done_cb.js": {
+          "bytesInOutput": 665
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/prepared_statement_info.js": {
+          "bytesInOutput": 970
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/inherit_events.js": {
+          "bytesInOutput": 949
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/connection.js": {
+          "bytesInOutput": 6359
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/pool_connection.js": {
+          "bytesInOutput": 637
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/pool_connection.js": {
+          "bytesInOutput": 493
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/base/pool.js": {
+          "bytesInOutput": 6762
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/pool.js": {
+          "bytesInOutput": 3482
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/pool.js": {
+          "bytesInOutput": 389
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/pool_config.js": {
+          "bytesInOutput": 987
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/connection.js": {
+          "bytesInOutput": 449
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/pool_cluster.js": {
+          "bytesInOutput": 9512
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/create_connection.js": {
+          "bytesInOutput": 426
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/create_pool.js": {
+          "bytesInOutput": 368
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/create_pool_cluster.js": {
+          "bytesInOutput": 347
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/lib/promise/pool_cluster.js": {
+          "bytesInOutput": 1865
+        },
+        "node_modules/.pnpm/mysql2@3.14.1/node_modules/mysql2/promise.js": {
+          "bytesInOutput": 6619
+        }
+      },
+      "bytes": 1326977
+    }
+  }
+}

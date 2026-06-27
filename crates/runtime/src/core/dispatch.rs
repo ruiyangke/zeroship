@@ -436,7 +436,7 @@ pub fn resolve_op(
                 r.reject(scope, err_msg);
             }
         }
-        scope.perform_microtask_checkpoint();
+        crate::core::init::perform_microtask_checkpoint(scope);
     }
 }
 
@@ -458,7 +458,7 @@ pub fn reject_op(
             .unwrap_or_else(|| v8::String::new(scope, "unknown error").unwrap());
         let exception = v8::Exception::error(scope, msg);
         r.reject(scope, exception);
-        scope.perform_microtask_checkpoint();
+        crate::core::init::perform_microtask_checkpoint(scope);
     }
 }
 
@@ -482,7 +482,7 @@ pub fn fire_timer_callback(
         let func = v8::Local::new(scope, &cb.callback);
         let undefined = v8::undefined(scope).into();
         func.call(scope, undefined, &[]);
-        scope.perform_microtask_checkpoint();
+        crate::core::init::perform_microtask_checkpoint(scope);
 
         // setInterval: re-insert so next fire can retrieve it
         if cb.interval.is_some() {

@@ -10,7 +10,7 @@
 //! ## Surface (Node 22)
 //!
 //! Covered: `format`, `inspect` (+ `colors` / `styles` stubs),
-//! `promisify`, `callbackify`, `deprecate`, `types.*` predicates,
+//! `inherits`, `promisify`, `callbackify`, `deprecate`, `types.*` predicates,
 //! `isDeepStrictEqual`, `parseArgs` (long-form `--flag value` only),
 //! and re-exports of `TextEncoder` / `TextDecoder` from `globalThis`.
 //!
@@ -44,6 +44,7 @@ fn export_names() -> &'static [&'static str] {
         "format",
         "formatWithOptions",
         "inspect",
+        "inherits",
         "promisify",
         "callbackify",
         "deprecate",
@@ -240,6 +241,14 @@ const JS_SOURCE: &str = r#"
     inspect.styles = Object.create(null);
     inspect.defaultOptions = { depth: 2, breakLength: 80, maxArrayLength: 100 };
     inspect.custom = Symbol.for("nodejs.util.inspect.custom");
+
+    function inherits(ctor, superCtor) {
+        if (ctor === undefined || ctor === null) throw new TypeError("The constructor to 'inherits' must not be null or undefined");
+        if (superCtor === undefined || superCtor === null) throw new TypeError("The super constructor to 'inherits' must not be null or undefined");
+        if (superCtor.prototype === undefined) throw new TypeError("The super constructor to 'inherits' must have a prototype");
+        ctor.super_ = superCtor;
+        Object.setPrototypeOf(ctor.prototype, superCtor.prototype);
+    }
 
     // ── promisify / callbackify ─────────────────────────────────────────
     const kCustom = Symbol.for("util.promisify.custom");
@@ -439,7 +448,7 @@ const JS_SOURCE: &str = r#"
 
     return {
         format, formatWithOptions, inspect,
-        promisify, callbackify, deprecate,
+        inherits, promisify, callbackify, deprecate,
         types, isDeepStrictEqual, parseArgs,
         TextEncoder, TextDecoder,
     };

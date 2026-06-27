@@ -316,7 +316,7 @@ impl Runtime {
             let context = v8::Local::new(handle_scope, &context_global);
             let scope = &mut v8::ContextScope::new(handle_scope, context);
             let r = f(scope);
-            scope.perform_microtask_checkpoint();
+            crate::core::init::perform_microtask_checkpoint(scope);
             r
         };
         if entered_for_scope {
@@ -663,7 +663,7 @@ macro_rules! enter_v8 {
         let context = v8::Local::new(handle_scope, &$this.context);
         let $scope = &mut v8::ContextScope::new(handle_scope, context);
         let __result = { $body };
-        $scope.perform_microtask_checkpoint();
+        crate::core::init::perform_microtask_checkpoint($scope);
         __result
     }};
 }
@@ -847,6 +847,7 @@ impl RuntimeInner {
         let heap_max = heap_limit_bytes.unwrap_or(DEFAULT_HEAP);
         let params = v8::CreateParams::default().heap_limits(0, heap_max);
         let mut isolate = v8::Isolate::new(params);
+        isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
 
         // Register near-heap-limit callback. V8 invokes this when the
         // configured heap cap is approached. The callback's return
@@ -2351,7 +2352,7 @@ impl RuntimeInner {
                             run(scope, &state);
                         }
                     }
-                    scope.perform_microtask_checkpoint();
+                    crate::core::init::perform_microtask_checkpoint(scope);
                     collect_settled_promises(scope, &mut self.pending_requests)
                 });
                 self.disarm_cpu_timer();
@@ -2423,7 +2424,7 @@ impl RuntimeInner {
                     crate::websocket_native::dispatch::dispatch_pending_ws_events(
                         scope, &state_clone, ws_id,
                     );
-                    scope.perform_microtask_checkpoint();
+                    crate::core::init::perform_microtask_checkpoint(scope);
                     collect_settled_promises(scope, &mut self.pending_requests)
                 });
                 self.disarm_cpu_timer();
@@ -2465,7 +2466,7 @@ impl RuntimeInner {
                         &state_clone,
                         socket_id,
                     );
-                    scope.perform_microtask_checkpoint();
+                    crate::core::init::perform_microtask_checkpoint(scope);
                     collect_settled_promises(scope, &mut self.pending_requests)
                 });
                 self.disarm_cpu_timer();
@@ -3199,7 +3200,7 @@ fn call_fetch_fast_inner(
         }
     };
 
-    scope.perform_microtask_checkpoint();
+    crate::core::init::perform_microtask_checkpoint(scope);
 
     if let Some(exc_global) = caught_exception {
         let exc_local = v8::Local::new(scope, &exc_global);
@@ -3532,7 +3533,7 @@ fn call_rpc_inner<'s>(
         None => invoke(scope),
     };
 
-    scope.perform_microtask_checkpoint();
+    crate::core::init::perform_microtask_checkpoint(scope);
 
     if let Some(exc_global) = caught_exception {
         let exc_local = v8::Local::new(scope, &exc_global);
@@ -3680,7 +3681,7 @@ fn call_fetch_inner(
         }
     };
 
-    scope.perform_microtask_checkpoint();
+    crate::core::init::perform_microtask_checkpoint(scope);
 
     if let Some(exc_global) = caught_exception {
         let exc_local = v8::Local::new(scope, &exc_global);
