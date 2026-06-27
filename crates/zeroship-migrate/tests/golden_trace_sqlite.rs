@@ -19,8 +19,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zeroship_migrate::backend_sqlite::Mode;
-use zeroship_migrate::journal::Phase;
+use zeroship_migrate::apply::backend::sqlite::Mode;
+use zeroship_migrate::apply::journal::Phase;
 use zeroship_migrate::{
     desired_snapshot, Approval, ApprovalScope, CollectionDescriptor, DeclarativeApplyError,
     DeclarativeAuthor, DeclarativeDeployOutcome, DeclarativeDeployPlan, EngineError,
@@ -289,14 +289,14 @@ async fn golden_g_sqlite_pg_rename_fails_closed() {
             &be,
             &cfg,
             "deployer",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await;
     assert!(
         matches!(
             res,
             Err(DeclarativeApplyError::Plain(EngineError::Apply(
-                zeroship_migrate::executor::ApplyError::Backend(_)
+                zeroship_migrate::apply::executor::ApplyError::Backend(_)
             )))
         ),
         "a PG expand-contract rename on a SQLite backend must FAIL CLOSED (routing bug), got {res:?}"

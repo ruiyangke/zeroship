@@ -5,7 +5,7 @@
 //! that at *sub-step* granularity — mid-step, after a DDL/data statement but
 //! before/after its journal row, between an online rename's E1/E2/E3 phases,
 //! mid-backfill-batch — the executor consults this seam at named boundaries and
-//! aborts the in-flight step (returning [`ApplyError`]) when a fault is armed for
+//! aborts the in-flight step (returning [`crate::apply::executor::ApplyError`]) when a fault is armed for
 //! that boundary. Aborting mid-transaction is behaviorally identical to a process
 //! crash there: the open transaction rolls back, exactly as it would on a real
 //! crash, and the resume runs the same recovery path.
@@ -52,12 +52,12 @@ pub fn disarm_all() {
     ARMED.store(false, Ordering::SeqCst);
 }
 
-/// The executor's boundary check: returns an injected [`ApplyError`] (a simulated
+/// The executor's boundary check: returns an injected [`crate::apply::executor::ApplyError`] (a simulated
 /// crash) iff a fault is armed for `point` and its countdown has reached zero;
 /// otherwise `Ok(())`. The common (unarmed) case is a single relaxed load.
 ///
 /// # Errors
-/// [`crate::executor::ApplyError::Backend`] tagged `fault-injection: <point>` when
+/// [`crate::apply::executor::ApplyError::Backend`] tagged `fault-injection: <point>` when
 /// the armed fault fires.
 pub fn trip(point: &str) -> Result<(), crate::apply::executor::ApplyError> {
     if !ARMED.load(Ordering::Relaxed) {

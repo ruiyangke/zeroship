@@ -7,7 +7,7 @@
 //!   zeroship-migrate migrate --dir <db/migrations> --database-url <DSN> --profile platform
 //!
 //! exactly as the compose service does (design §9 "Compose service swap"), so the
-//! real CLI arg surface (`clap` parse → `run_config` → `platform_runner::run_*`)
+//! real CLI arg surface (`clap` parse → `run_config` → `command::runner::run_*`)
 //! is exercised in addition to the engine. The bin path is the cargo-provided
 //! `CARGO_BIN_EXE_zeroship-migrate`, i.e. the freshly-built `target/<profile>/
 //! zeroship-migrate`.

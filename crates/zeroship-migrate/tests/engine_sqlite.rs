@@ -22,14 +22,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zeroship_migrate::journal::{JournaledKind, Phase};
-use zeroship_migrate::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
+use zeroship_migrate::apply::journal::{JournaledKind, Phase};
+use zeroship_migrate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
 use zeroship_migrate::{
     desired_snapshot, Approval, CollectionDescriptor, DeclarativeAuthor, DeclarativeApplyError,
     DryRunError, EngineError, ExecutorConfig, FieldDescriptor, GuardConfig, IndexDescriptor,
     MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot, ShadowConfig, SqliteBackend,
 };
-use zeroship_migrate::backend_sqlite::Mode;
+use zeroship_migrate::apply::backend::sqlite::Mode;
 use zeroship_schema::query::SqlDialect;
 
 const PROJECT: &str = "prj_demo";

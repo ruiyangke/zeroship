@@ -7,7 +7,7 @@
 //! the schema already exists, so re-running `CREATE TABLE …` would error. The
 //! baseline's `up` *documents* the current schema (a FRESH rebuild could run it),
 //! but on the existing DB it is recorded-not-run. Future migrations then apply on
-//! top normally ([`crate::executor::apply`]).
+//! top normally ([`crate::apply::executor::apply`]).
 //!
 //! # Safety (design §1, §5)
 //!
@@ -23,7 +23,7 @@
 //! - **Privileged.** Baseline is an operator/admin operation (not creator
 //!   self-service): it runs as the ADMIN (it journals, which the migrator role has
 //!   no grant for) under the project advisory lock, serialized against every other
-//!   migration activity exactly like [`apply`](crate::executor::apply).
+//!   migration activity exactly like [`apply`](crate::apply::executor::apply).
 //! - **Append-only journal preserved.** The baseline event is an ordinary
 //!   immutable `completed` row stamped `kind = 'baseline'`; nothing is updated or
 //!   deleted.
@@ -96,12 +96,12 @@ pub enum BaselineError {
         existing: String,
     },
     /// A dialect-neutral backend failure from a NON-Postgres
-    /// [`MigrationBackend::baseline_one`](crate::backend::MigrationBackend::baseline_one)
+    /// [`MigrationBackend::baseline_one`](crate::apply::backend::MigrationBackend::baseline_one)
     /// impl (e.g. the SQLite actor). The Postgres impl never produces this arm —
     /// its errors flow through the typed [`Db`](Self::Db)/[`Journal`](Self::Journal)/
     /// guard/first-entry arms above; only an engine whose internals are not
     /// `compio_postgres`-typed maps its own error string into here, mirroring
-    /// [`ApplyError::Backend`](crate::executor::ApplyError::Backend).
+    /// [`ApplyError::Backend`](crate::apply::executor::ApplyError::Backend).
     #[error("baseline backend error: {0}")]
     Backend(String),
 }
@@ -110,9 +110,9 @@ pub enum BaselineError {
 /// — a `completed` journal event WITHOUT running its `up`.
 ///
 /// This is the **Postgres impl behind**
-/// [`MigrationBackend::baseline_one`](crate::backend::MigrationBackend::baseline_one)
+/// [`MigrationBackend::baseline_one`](crate::apply::backend::MigrationBackend::baseline_one)
 /// (multi-engine abstraction L5): it is `pub(crate)`, reached only through
-/// [`PostgresBackend::baseline_one`](crate::backend::PostgresBackend), which keeps the
+/// [`PostgresBackend::baseline_one`](crate::apply::backend::PostgresBackend), which keeps the
 /// `&Client`/`pg_advisory_lock` confined to the PG backend. There is no longer a
 /// top-level PG-`&Client`-typed `baseline` on the public surface; callers go through
 /// `backend.baseline_one(…)`.

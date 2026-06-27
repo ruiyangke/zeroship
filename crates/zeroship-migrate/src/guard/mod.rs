@@ -28,6 +28,7 @@ use pg_query::protobuf::AlterTableType;
 
 use crate::analysis::analyze::Advisory;
 use crate::analysis::classify::{classify, DdlKind, ParseError, StatementClass};
+use crate::model::capability::OperatorCapability;
 use crate::model::migration::MigrationFlags;
 use crate::model::policy::{SchemaScope, TrustProfile};
 use zeroship_schema::query::SqlDialect;
@@ -37,34 +38,26 @@ use serde_json::Value;
 /// The in-crate enforcement primitive for the OPERATOR-gated profiles —
 /// `Platform` (the zeroship internal posture) AND `Trusted` (the public
 /// dbmate-like posture) — (design §4.1, HIGH-1). A zero-sized capability token
-/// whose ONLY constructor (`new`) is private to the [`platform_runner`]
-/// submodule.
+/// owned by [`crate::model::capability`].
 ///
 /// [`GuardConfig::platform`] / [`GuardConfig::trusted`] and
-/// [`crate::db::ExecutorConfig::platform`] / [`crate::db::ExecutorConfig::trusted`]
-/// take a `&OperatorCapability`, so the ability to produce `Platform`/`Trusted`
-/// is gated on *holding a token you can only get inside `platform_runner`* —
-/// not on a `pub(crate)` function any in-crate module could call. This is what
-/// upgrades the in-crate trust story from "reviewed convention" to "by
-/// construction": `submit`/`engine`/`executor`/… cannot mint a token, so they
-/// cannot mint a privileged profile. The TYPE is re-exported crate-wide (so the
-/// `platform()`/`trusted()` ctors can name it in their signatures); the
-/// constructor is NOT. The token is GENERIC across the two operator profiles
-/// because both share the identical security model: the operator running the
-/// binary holds it; no creator path can.
-pub use crate::command::runner as platform_runner;
-
-pub(crate) use crate::command::runner::OperatorCapability;
-
+/// [`crate::conn::ExecutorConfig::platform`] /
+/// [`crate::conn::ExecutorConfig::trusted`] take a `&OperatorCapability`, so the
+/// ability to produce `Platform`/`Trusted` is gated on holding a token minted by
+/// an operator-side named seam. The token is generic across the two operator
+/// profiles because both share the identical security model: the operator
+/// running the binary holds it; no creator path can.
+///
 /// Per-guard configuration (design §4.1).
 ///
 /// All fields are **private**: a `GuardConfig` is obtained ONLY through
 /// [`GuardConfig::confined`] (the safe default anyone may construct),
 /// [`GuardConfig::platform`], or [`GuardConfig::trusted`] (both require an
 /// [`OperatorCapability`] token). This is what makes the §5 trust invariant
-/// statically true — an external crate cannot write a
+/// true at the public boundary — an external crate cannot write a
 /// `GuardConfig { trust: Platform, .. }` / `{ trust: Trusted, .. }` literal, and
-/// no in-crate module can produce `Platform`/`Trusted` without the token.
+/// in-crate operator code produces `Platform`/`Trusted` through named token-mint
+/// seams.
 #[derive(Debug, Clone)]
 pub struct GuardConfig {
     /// PRIVATE. The trust posture. Settable only through `confined()`/`platform()`.
@@ -188,13 +181,10 @@ impl GuardConfig {
         self
     }
 
-    /// Platform profile. REQUIRES a [`OperatorCapability`] token (mintable only
-    /// in `platform_runner`), so neither an external crate (cannot name
-    /// `Platform` nor construct the token) NOR an in-crate module (cannot
-    /// construct the token) can produce a Platform guard outside the operator
-    /// runner. The `_cap` arg is the in-crate enforcement; `#[non_exhaustive]`
-    /// on [`TrustProfile`] is the external enforcement. This is the single place
-    /// `TrustProfile::Platform` is named.
+    /// Platform profile. REQUIRES a [`OperatorCapability`] token, minted by
+    /// operator-side named seams. The `_cap` arg is the in-crate enforcement;
+    /// `#[non_exhaustive]` on [`TrustProfile`] is the external enforcement. This
+    /// is the single place `TrustProfile::Platform` is named.
     #[must_use]
     pub(crate) fn platform(
         _cap: &OperatorCapability,
@@ -331,7 +321,7 @@ impl Default for GuardConfig {
 /// (they require a `&OperatorCapability` that cannot be named):
 ///
 /// ```compile_fail
-/// use zeroship_migrate::guard::OperatorCapability;
+/// use zeroship_migrate::model::capability::OperatorCapability;
 /// fn _needs_a_token(_c: &OperatorCapability) {}
 /// ```
 ///
@@ -401,7 +391,7 @@ pub struct GuardReport {
     /// **Advisory-only:** these never deny or gate (the deny-list +
     /// least-privilege role own security; the engine gate owns data-loss
     /// approval). They enrich the report so the AI/creator sees the operational
-    /// footgun and the safer alternative. See [`crate::analyze`].
+    /// footgun and the safer alternative. See [`crate::analysis::analyze`].
     pub advisories: Vec<Advisory>,
 }
 
@@ -1496,7 +1486,7 @@ impl MigrationGuard for PgGuard {
 /// The SQLite line-1: the descriptor-diff path is **trusted by construction**.
 ///
 /// SQLite migrations are produced ONLY by the declarative differ
-/// ([`crate::declarative::DeclarativeAuthor::diff`]) — there is no raw-SQL SQLite
+/// ([`crate::render::declarative::DeclarativeAuthor::diff`]) — there is no raw-SQL SQLite
 /// author. libpg_query cannot parse SQLite, so there is no string deny-list to
 /// run; the line-1 vet is the descriptor emitter at the author boundary and the
 /// line-2 defense is the `SqliteBackend`'s runtime authorizer applied per
@@ -2655,7 +2645,7 @@ fn stmt_text(sql: &str, raw_stmt: &protobuf::RawStmt) -> String {
 // pinned separately by the `tests/trybuild_*` compile-fail tests, T8).
 //
 // Coverage map:
-//   T11  — capability minting is `platform_runner`-only (the in-crate seam).
+//   T11  — capability minting is named-seam-only by convention.
 //   T4   — Platform widening is correct AND bounded (privileged constructs pass;
 //          RCE/host-escape/cross-schema-to-creator still denied).
 //   T4b  — DO-block privileged DDL applies under Platform; the RCE token-scan
@@ -2668,8 +2658,8 @@ mod tests {
     use super::*;
 
     /// A Platform guard over the real port allowlist (`zeroship` / `oauth_hydra`
-    /// / `public`) + the two ported extensions. Minted via the `for_test` seam
-    /// — the ONLY non-`platform_runner` path to a token, `#[cfg(test)]`-only.
+    /// / `public`) + the two ported extensions. Minted via the `for_test` seam,
+    /// which is `#[cfg(test)]`-only.
     fn platform_guard() -> SqlGuard {
         SqlGuard::new(platform_guard_config())
     }
@@ -2752,12 +2742,12 @@ mod tests {
         );
     }
 
-    // ---- T11: capability minting is platform_runner-only -------------------
+    // ---- T11: capability minting uses named seams --------------------------
 
-    /// The capability type is constructible from the in-crate test seam (proving
-    /// `platform_runner` can mint it) — and the doc/`pub(super)` `new` is the
-    /// production mint. No other module has a path to `new()`: the `for_test`
-    /// seam is `#[cfg(test)]`-gated and the production `new` is `pub(super)`.
+    /// The capability type is constructible from the in-crate test seam. The
+    /// production mints are named seams (`command::runner` for CLI configs and
+    /// `model::capability::mint_shadow_operator_capability` for shadow dry-runs);
+    /// `for_test` is `#[cfg(test)]`-gated.
     #[test]
     fn t11_platform_capability_mints_only_via_runner_seam() {
         let cap = OperatorCapability::for_test();
@@ -2772,10 +2762,9 @@ mod tests {
             vec![],
         );
         assert_eq!(ecfg.guard_config().trust(), TrustProfile::Platform);
-        // NOTE: `OperatorCapability::new` is `pub(super)` to `platform_runner`,
-        // so NO sibling module (incl. this test) can call it directly — only
-        // the `#[cfg(test)] for_test` seam, which delegates to it, is reachable.
-        // The external un-nameability is pinned by tests/trybuild_* (T8).
+        // NOTE: `OperatorCapability::new` is crate-private. Production code uses
+        // named mint seams; tests use the `#[cfg(test)] for_test` seam. The
+        // external un-nameability is pinned by tests/trybuild_* (T8).
     }
 
     // ---- T4: Platform widening is correct AND bounded ----------------------

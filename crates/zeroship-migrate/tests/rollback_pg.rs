@@ -1,7 +1,7 @@
 //! Faithful rollback (Plan 5 §5) tests against a REAL Postgres (no shims).
 //!
 //! Rollback is data-integrity-critical, so these run the real path: `apply` to
-//! seed state, then `executor::rollback` / `engine::rollback`, asserting on the
+//! seed state, then `apply::executor::rollback` / `engine::rollback`, asserting on the
 //! actual schema (tables dropped), the append-only journal (`rolled_back` events,
 //! `applied()` net state), the down's guard + role defenses, and re-applicability.
 //!
@@ -13,14 +13,14 @@
 use std::time::Duration;
 
 use compio_postgres::Client;
-use zeroship_migrate::executor::{
+use zeroship_migrate::apply::executor::{
     rollback, RollbackError, RollbackOptions, RollbackRequest, RollbackTarget,
 };
-use zeroship_migrate::migration::Checksum;
-use zeroship_migrate::role::deprovision_migrator;
+use zeroship_migrate::model::migration::Checksum;
+use zeroship_migrate::apply::role::deprovision_migrator;
 use zeroship_migrate::{
-    apply, ensure_journal, journal, migrator_role_name, provision_migrator, Approval,
-    ExecutorConfig, Migration, MigrationEngine, MigrationFlags, MigrationId, Phase,
+    apply, ensure_journal, migrator_role_name, provision_migrator, Approval, ExecutorConfig,
+    Migration, MigrationEngine, MigrationFlags, MigrationId, Phase,
 };
 
 const DEFAULT_DSN: &str =
@@ -139,7 +139,7 @@ async fn index_exists(conn: &Client, schema: &str, index: &str) -> bool {
 
 /// The set of net-applied versions (latest event completed), ascending.
 async fn applied_versions(conn: &Client, cfg: &ExecutorConfig) -> Vec<String> {
-    journal::applied(conn, cfg)
+    apply::journal::applied(conn, cfg)
         .await
         .expect("read journal")
         .into_iter()

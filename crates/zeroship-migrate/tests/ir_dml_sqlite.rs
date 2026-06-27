@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zeroship_migrate::{
-    executor::LockMode, Approval, ExecutorConfig, IrAuthor, IrLowerError, LiveSchema,
+    apply::executor::LockMode, Approval, ExecutorConfig, IrAuthor, IrLowerError, LiveSchema,
     MigrationEngine, SqlDialect, SqliteBackend,
 };
 
@@ -72,19 +72,19 @@ async fn lower_and_apply(
         .expect("lower the .ir.json on SQLite");
     let engine = MigrationEngine::new();
     let plan = zeroship_migrate::AppliedPlan {
-        version: zeroship_migrate::migration::MigrationId::generate(),
+        version: zeroship_migrate::model::migration::MigrationId::generate(),
         name: "dml".into(),
         steps: migrations.into_iter().map(zeroship_migrate::PlanStep::Ddl).collect(),
-        checksum: zeroship_migrate::migration::Checksum::of(&zeroship_migrate::migration::ChecksumInput {
+        checksum: zeroship_migrate::model::migration::Checksum::of(&zeroship_migrate::model::migration::ChecksumInput {
             up: "x",
             down: None,
-            flags: &zeroship_migrate::migration::MigrationFlags::default(),
+            flags: &zeroship_migrate::model::migration::MigrationFlags::default(),
             owner_app: APP,
             depends_on: &[],
             supersedes: &[],
             preconditions: &[],
         }),
-        flags: zeroship_migrate::migration::MigrationFlags::default(),
+        flags: zeroship_migrate::model::migration::MigrationFlags::default(),
         dialect_scope: zeroship_migrate::DialectScope::Both,
         rollbackable: false,
         owner_app: APP.into(),
@@ -107,10 +107,10 @@ async fn lower_plan_and_apply(
     approval: Approval,
 ) -> zeroship_migrate::engine::DeclarativeDeployOutcome {
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
-    let document = zeroship_migrate::ir_load::load_ir_document(
+    let document = zeroship_migrate::model::load::load_ir_document(
         ir,
         APP,
-        zeroship_migrate::validate::Dialect::Sqlite,
+        zeroship_migrate::model::validate::Dialect::Sqlite,
         reg,
         None,
     )
@@ -374,10 +374,10 @@ async fn on_conflict_rejected_on_sqlite() {
          "onConflict":{"columns":["code"]}}
     ]}"#;
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
-    let document = zeroship_migrate::ir_load::load_ir_document(
+    let document = zeroship_migrate::model::load::load_ir_document(
         ir,
         APP,
-        zeroship_migrate::validate::Dialect::Sqlite,
+        zeroship_migrate::model::validate::Dialect::Sqlite,
         &registry(&[("codes", APP)]),
         None,
     )
@@ -386,7 +386,7 @@ async fn on_conflict_rejected_on_sqlite() {
         .lower_plan(&document, &LiveSchema::default())
         .expect_err("onConflict must be rejected on SQLite");
     assert!(
-        matches!(err, IrLowerError::DmlAssemble(zeroship_migrate::dml::DmlError::OnConflictNotPortable { .. })),
+        matches!(err, IrLowerError::DmlAssemble(zeroship_migrate::render::dml::DmlError::OnConflictNotPortable { .. })),
         "expected OnConflictNotPortable, got {err:?}"
     );
 }
@@ -404,10 +404,10 @@ async fn batched_backfill_portable_on_sqlite() {
          "set":{"label":{"node":"literal","value":"x"}},"name":"fill_labels"}
     ]}"#;
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
-    let document = zeroship_migrate::ir_load::load_ir_document(
+    let document = zeroship_migrate::model::load::load_ir_document(
         ir,
         APP,
-        zeroship_migrate::validate::Dialect::Sqlite,
+        zeroship_migrate::model::validate::Dialect::Sqlite,
         &registry(&[("codes", APP)]),
         None,
     )
@@ -548,10 +548,10 @@ async fn unresolved_colref_rejected_at_apply_seam_on_sqlite() {
              "rhs":{"node":"literal","value":1}}}
     ]}"#;
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
-    let document = zeroship_migrate::ir_load::load_ir_document(
+    let document = zeroship_migrate::model::load::load_ir_document(
         bad,
         APP,
-        zeroship_migrate::validate::Dialect::Sqlite,
+        zeroship_migrate::model::validate::Dialect::Sqlite,
         &registry(&[("codes", APP)]),
         None,
     )
@@ -586,10 +586,10 @@ async fn malformed_set_identifier_rejected_on_sqlite() {
          "set":{"label\"; DROP TABLE codes; --":{"node":"literal","value":"x"}}}
     ]}"#;
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
-    let document = zeroship_migrate::ir_load::load_ir_document(
+    let document = zeroship_migrate::model::load::load_ir_document(
         bad_ident_ir,
         APP,
-        zeroship_migrate::validate::Dialect::Sqlite,
+        zeroship_migrate::model::validate::Dialect::Sqlite,
         &registry(&[("codes", APP)]),
         None,
     )
@@ -598,7 +598,7 @@ async fn malformed_set_identifier_rejected_on_sqlite() {
         .lower_plan(&document, &LiveSchema::default())
         .expect_err("a malformed set-column identifier must be rejected at assembly");
     assert!(
-        matches!(err, IrLowerError::DmlAssemble(zeroship_migrate::dml::DmlError::InvalidIdentifier { .. })),
+        matches!(err, IrLowerError::DmlAssemble(zeroship_migrate::render::dml::DmlError::InvalidIdentifier { .. })),
         "expected InvalidIdentifier, got {err:?}"
     );
 }

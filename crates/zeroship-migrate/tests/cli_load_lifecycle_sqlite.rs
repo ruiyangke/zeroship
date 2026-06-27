@@ -70,7 +70,7 @@ fn run_bin_in(cwd: &Path, args: &[&str]) -> (bool, String, String) {
 
 /// Does table `T` exist on `main` of the given SQLite app file?
 fn table_exists(app_file: &str, table: &str) -> bool {
-    use zeroship_migrate::backend_sqlite::Mode;
+    use zeroship_migrate::apply::backend::sqlite::Mode;
     use zeroship_migrate::SqliteBackend;
     let app = PathBuf::from(app_file);
     let journal = {
@@ -252,7 +252,7 @@ fn cli_load_refuses_already_managed_db() {
 
 /// Count user objects on `main` (excluding internal `sqlite_*`).
 fn main_user_object_count(app_file: &str) -> i64 {
-    use zeroship_migrate::backend_sqlite::Mode;
+    use zeroship_migrate::apply::backend::sqlite::Mode;
     use zeroship_migrate::SqliteBackend;
     let app = PathBuf::from(app_file);
     let journal = {
@@ -354,7 +354,7 @@ fn cli_load_onto_populated_main_without_journal_is_refused_on_sqlite() {
     let tgt_s = tgt.to_str().unwrap().to_string();
     let tgt_url = format!("sqlite:{tgt_s}");
     {
-        use zeroship_migrate::backend_sqlite::Mode;
+        use zeroship_migrate::apply::backend::sqlite::Mode;
         use zeroship_migrate::SqliteBackend;
         let app = PathBuf::from(&tgt_s);
         let journal = {

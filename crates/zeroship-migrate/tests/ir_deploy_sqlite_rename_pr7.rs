@@ -15,8 +15,8 @@
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zeroship_migrate::backend_sqlite::Mode;
-use zeroship_migrate::declarative::{CollectionDescriptor, FieldDescriptor};
+use zeroship_migrate::apply::backend::sqlite::Mode;
+use zeroship_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor};
 use zeroship_migrate::{
     apply_bundle_ir_sqlite, Approval, ExecutorConfig, GuardConfig, MigrationBackend, SqliteBackend,
     SqliteIrApplyError,
@@ -169,7 +169,7 @@ async fn deploy_renamecolumn_completes_as_rebuild_on_real_sqlite() {
     assert!(
         applied
             .iter()
-            .filter(|e| matches!(e.phase, zeroship_migrate::journal::Phase::Completed))
+            .filter(|e| matches!(e.phase, zeroship_migrate::apply::journal::Phase::Completed))
             .count()
             >= 2,
         "both the createTable and the rebuild are journaled completed"
@@ -336,7 +336,7 @@ fn descriptor_unique(table: &str, field: &str, index: &str) -> CollectionDescrip
             required: true,
             ..Default::default()
         }],
-        indexes: vec![zeroship_migrate::declarative::IndexDescriptor {
+        indexes: vec![zeroship_migrate::render::declarative::IndexDescriptor {
             name: index.into(),
             columns: vec![field.into()],
             unique: true,

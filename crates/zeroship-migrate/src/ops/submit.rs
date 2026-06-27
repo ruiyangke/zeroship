@@ -5,7 +5,7 @@
 //! `up` SQL, an optional `down`, and a little metadata. [`submit_migration`] runs
 //! it through the FULL security stack — **ingest → guard → lint → live-seeded
 //! dry-run → gate → apply** — and never lets any one of those steps be skipped or
-//! its verdict forged. The submitter cannot reach [`crate::executor::apply`] (nor
+//! its verdict forged. The submitter cannot reach [`crate::apply::executor::apply`] (nor
 //! the engine gate) except through this funnel.
 //!
 //! # The whole point: the submitter cannot lie about danger
@@ -48,7 +48,7 @@
 //! `supersedes`, `preconditions`) and is computed identically every call for the
 //! same script — it deliberately EXCLUDES `version` and `name`. Before applying,
 //! [`submit_migration`] reads the journal's net-applied checksums
-//! ([`journal::applied`](crate::journal::applied)); if this submission's checksum
+//! ([`journal::applied`](crate::apply::journal::applied)); if this submission's checksum
 //! is already net-applied it returns [`SubmissionOutcome::NoOp`] WITHOUT a second
 //! journal apply. (Name is intentionally not part of the key: a re-submit that
 //! only renames the human label is the same applied unit.)
@@ -57,7 +57,7 @@
 //!
 //! The dedup is over the journal's **net-applied** checksums — a checksum whose
 //! LATEST journal event is `completed` (see
-//! [`journal::applied`](crate::journal::applied)). A migration that was applied and
+//! [`journal::applied`](crate::apply::journal::applied)). A migration that was applied and
 //! then ROLLED BACK is no longer net-applied, so resubmitting the IDENTICAL script
 //! after a rollback **RE-APPLIES** it (it is NOT a [`SubmissionOutcome::NoOp`]).
 //! This is intended: the rolled-back unit is gone from the live schema and the
@@ -121,7 +121,8 @@ use crate::apply::executor::{self, LockMode};
 use crate::guard::{flags_for, GuardConfig, GuardError, SqlGuard};
 use crate::apply::journal::{self, JournalError};
 use crate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
-use crate::ops::shadow::{dry_run_incremental, DryRunError, ShadowConfig};
+use crate::apply::backend::{DryRunError, ShadowConfig};
+use crate::apply::backend::postgres::shadow::dry_run_incremental;
 
 /// A client-submitted migration script (raw SQL + light metadata).
 ///
@@ -284,7 +285,7 @@ impl MigrationEngine {
 }
 
 /// Fail-closed ownership enforcement for the submit path (HIGH-2) — the adapter
-/// peer of [`declarative::enforce_ownership`](crate::declarative).
+/// peer of [`declarative::enforce_ownership`](crate::render::declarative).
 ///
 /// For each ownership-relevant relation the `up` touches (extracted from the SAME
 /// real-Postgres parse the guard uses, via
@@ -737,10 +738,10 @@ mod low1_two_guard_coupling_pg {
 
     use crate::approval::Approval;
     use crate::conn::ExecutorConfig;
-    use crate::command::runner::OperatorCapability;
+    use crate::model::capability::OperatorCapability;
     use crate::apply::journal::ensure_journal;
     use crate::apply::role::{deprovision_migrator, migrator_role_name, provision_migrator};
-    use crate::ops::shadow::ShadowConfig;
+    use crate::apply::backend::ShadowConfig;
     use crate::ops::submit::{submit_migration, Submission, SubmissionOutcome};
 
     const DEFAULT_DSN: &str =
@@ -768,8 +769,8 @@ mod low1_two_guard_coupling_pg {
 
     /// Mint a **Platform** `ExecutorConfig` over a unique schema/meta — the exact
     /// shape a hostile/buggy caller would have to forge to weaken the submit path.
-    /// Uses the `#[cfg(test)]` `for_test` token seam (the only non-`platform_runner`
-    /// path to a token; unreachable from an integration test).
+    /// Uses the `#[cfg(test)]` `for_test` token seam; unreachable from an
+    /// integration test.
     fn platform_cfg(tok: &str) -> ExecutorConfig {
         let cap = OperatorCapability::for_test();
         let schema = format!("proj_{tok}");

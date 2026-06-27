@@ -14,14 +14,14 @@
 //! [`plan`](crate::engine::MigrationEngine::plan) →
 //! [`guard`](crate::guard::SqlGuard) →
 //! [`gate`](crate::engine::MigrationEngine::apply) →
-//! [`executor::apply`](crate::executor::apply) pipeline. There is no DDL bypass.
+//! [`executor::apply`](crate::apply::executor::apply) pipeline. There is no DDL bypass.
 //!
 //! # Trust boundary
 //!
 //! Descriptor field/table names and types are **untrusted** (a prompt-injectable
 //! AI authored them). They are validated at the author boundary
 //! ([`validate_ident`] / [`validate_type`], mirroring
-//! [`crate::expand_contract`]) AND re-checked by the guard as the second line.
+//! [`crate::render::expand_contract`]) AND re-checked by the guard as the second line.
 //!
 //! # Type-mapping provenance (shared-truth-to-extract-later)
 //!
@@ -60,7 +60,7 @@ fn mysql_qualified(schema: &str, object: &str) -> String {
 }
 
 /// Quote a Postgres identifier (double embedded quotes, wrap in `"`). Mirrors
-/// [`crate::author`]'s quoting so emitted SQL is injection-safe even past the
+/// [`crate::plan::author`]'s quoting so emitted SQL is injection-safe even past the
 /// author-boundary `validate_ident` (defense in depth — the guard is line two).
 fn quote_ident(ident: &str) -> String {
     crate::render::dml::escape_quote_ident(ident)
@@ -130,7 +130,7 @@ pub(crate) fn quote_ident_if_needed(ident: &str) -> String {
 /// quoting ([`quote_ident_if_needed`]: bare for a safe lowercase ident, double-
 /// quoted for reserved/mixed-case). This is the SINGLE source of the constraintdef
 /// body spelling: BOTH the offline fold ([`crate::fold`]) and the IR lower's
-/// snapshot half ([`crate::ir_author`]) consume it, so the folded and the
+/// snapshot half ([`crate::render::lower`]) consume it, so the folded and the
 /// lower-emitted UNIQUE/PK `definition` cannot drift (an unconditional quote would
 /// phantom-diff `UNIQUE ("handle")` against the catalog's `UNIQUE (handle)`).
 pub(crate) fn constraintdef_cols(cols: &[String]) -> String {
@@ -343,7 +343,7 @@ fn has_inline_checks(t: &TableSnapshot) -> bool {
 
 /// A lowered migration paired with its STRUCTURAL per-statement list — the exact
 /// statements whose `join(";\n")` is the migration's `up`. The IR guard-per-
-/// statement lower ([`crate::ir_author::IrAuthor::lower_guarded`]) guards each TRUE
+/// statement lower ([`crate::render::lower::IrAuthor::lower_guarded`]) guards each TRUE
 /// statement and asserts the reassembly invariant `join(statements) == up`
 /// STRUCTURALLY, so it never re-splits the `up` on a textual `;\n` — a string-
 /// literal column DEFAULT whose value itself contains `;\n` (e.g. `DEFAULT 'a;\nb'`)
@@ -408,7 +408,7 @@ pub struct FieldDescriptor {
     pub deferrable: Option<bool>,
     /// For a `literal` field (#3), the single accepted value (`literalValue` on the
     /// wire `FieldDef`). Drives both the column's primitive type
-    /// (text/numeric/boolean — see [`literal_pg_data_type`]) and a
+    /// (text/numeric/boolean — see `literal_pg_data_type`) and a
     /// `CHECK (<col> = <value>)` constraint (mirrors plugin-db's
     /// `query.rs:2091/2185`).
     #[serde(rename = "literalValue", default)]
@@ -554,7 +554,7 @@ pub struct CollectionDescriptor {
 ///
 /// When a hint matches an actual drop+add pair (and the types are compatible),
 /// the differ routes that pair through the zero-downtime expand-contract path
-/// ([`ExpandContractAuthor::RenameColumn`](crate::expand_contract)) instead of
+/// ([`ExpandContractAuthor::RenameColumn`](crate::render::expand_contract)) instead of
 /// emitting drop+add — the column's data is preserved by the dual-write +
 /// backfill sequence, and the destructive `DROP COLUMN <from>` is gated.
 ///
@@ -953,7 +953,7 @@ fn field_text_is_legitimate(f: &FieldDescriptor) -> bool {
 /// (`vector(N)`/`geography(...)`) keep their DDL spelling. `information_schema`
 /// reports `USER-DEFINED` for those, so `snapshot_schema` recovers their precise
 /// spelling from `pg_catalog.format_type` and canonicalises it back to this DDL
-/// form (see [`crate::drift::snapshot_schema`] / `canonical_extension_type`) —
+/// form (see [`crate::apply::drift::snapshot_schema`] / `canonical_extension_type`) —
 /// the round-trip is real when the extension is installed (T13 for geoPoint).
 fn ddl_to_information_schema(ddl: &str) -> String {
     match ddl.to_ascii_uppercase().as_str() {
@@ -976,7 +976,7 @@ fn ddl_to_information_schema(ddl: &str) -> String {
 /// Canonicalise a column `data_type` to the SQLite type-affinity token used to
 /// compare a DESIRED snapshot (PG-spelled, from [`ddl_to_information_schema`])
 /// against a LIVE snapshot REAL-introspected from SQLite
-/// ([`crate::backend_sqlite::drift_sql::snapshot_schema`], which returns the
+/// (`sqlite::drift_sql::snapshot_schema`, which returns the
 /// lowercased SQLite declared type).
 ///
 /// # Why this exists
@@ -1119,7 +1119,7 @@ fn check_constraint_name(table: &str, field: &str, kind: &str) -> String {
 ///     precision decimals AND bigints ≥ 2^53 as a string (the IR rejects an
 ///     oversized/fractional JSON number at parse). `as_f64` returns `None` for a
 ///     JSON string and would corrupt a >2^53 bigint anyway, so we emit the string
-///     verbatim — re-validated as a plain numeric literal ([`crate::ir::
+///     verbatim — re-validated as a plain numeric literal ([`crate::model::ir::
 ///     is_decimal_string`]) so nothing else can inject raw text into the DDL.
 fn numeric_default_literal(v: &serde_json::Value) -> Option<String> {
     if let Some(i) = v.as_i64() {
@@ -1221,23 +1221,6 @@ fn system_field_columns() -> Vec<ColumnSnapshot> {
     ]
 }
 
-/// The seven platform-managed system-field NAMES, in canonical order — the single
-/// source of truth shared by [`system_field_columns`] (which stamps types onto
-/// them) and the IR validator's `createTable` rule-(c) scope
-/// (`validate.rs`), so a Check / partial-index predicate referencing a system
-/// field (`WHERE deleted_at IS NULL`, a Check on `id`/`created_at`) resolves
-/// instead of being rejected. Kept BYTE-IDENTICAL to the names produced by
-/// [`system_field_columns`] (a debug-assert in tests enforces the tie).
-pub const SYSTEM_FIELD_NAMES: [&str; 7] = [
-    "id",
-    "created_at",
-    "updated_at",
-    "created_by",
-    "updated_by",
-    "version",
-    "deleted_at",
-];
-
 /// The columns the platform auto-indexes on every table (#6). Mirrors
 /// plugin-db's `build_system_field_indexes` (`query.rs:900`): `deleted_at`
 /// (soft-delete filtering), `updated_at` (cursor-paged reads), `created_by`
@@ -1266,7 +1249,7 @@ fn system_field_indexes(table: &str) -> Vec<IndexSnapshot> {
 
 /// Deterministic name for a non-unique single-column index
 /// (`<table>_<col>_idx`), matching plugin-db's `index_name(table, &[col], false)`
-/// and NAMEDATALEN-capped via [`crate::author::cap_ident_name`] so a long
+/// and NAMEDATALEN-capped via [`crate::plan::author::cap_ident_name`] so a long
 /// table+col round-trips to the same (truncated) live name.
 fn non_unique_index_name(table: &str, col: &str) -> String {
     crate::plan::author::cap_ident_name(&format!("{table}_{col}_idx"))
@@ -1340,7 +1323,7 @@ impl DesiredSchema {
 /// - **indexes** carry the declared named indexes plus a unique index per
 ///   `unique: true` field.
 ///
-/// The snapshot is the same shape [`snapshot_schema`](crate::drift::snapshot_schema)
+/// The snapshot is the same shape [`snapshot_schema`](crate::apply::drift::snapshot_schema)
 /// produces from the live DB, so a freshly-created table introspects to a
 /// byte-equal snapshot (zero drift) — that equality is the P0 type-fidelity
 /// proof.
@@ -1476,7 +1459,7 @@ pub fn desired_snapshot_for_dialect(
 ///
 /// This is the single source of truth for the default / system-field / sentinel
 /// logic. BOTH the declarative differ ([`desired_snapshot_for_dialect`], unchanged
-/// behavior) and the IR path ([`crate::ir_author::IrAuthor`]) call it, so the
+/// behavior) and the IR path ([`crate::render::lower::IrAuthor`]) call it, so the
 /// per-column/per-index construction exists in exactly ONE place (§6.5). The
 /// extraction is BYTE-PRESERVING: the differ produces a byte-identical snapshot
 /// before and after the lift (a refactor-safety fixture asserts this).
@@ -1877,7 +1860,7 @@ pub fn is_system_managed_constraint(table: &str, constraint_name: &str) -> bool 
 /// Deterministic name for a per-field unique index (`<table>_<field>_key`,
 /// matching the Postgres convention so the desired snapshot round-trips to the
 /// live one a `CREATE UNIQUE INDEX` of this name produces). Capped to ≤63 bytes
-/// via [`crate::author::cap_ident_name`] (1c) — an un-capped name would be
+/// via [`crate::plan::author::cap_ident_name`] (1c) — an un-capped name would be
 /// truncated server-side on CREATE, so the desired (full) name would never match
 /// the live (truncated) name and a re-diff would churn DROP+CREATE forever.
 fn unique_index_name(table: &str, field: &str) -> String {
@@ -2243,7 +2226,7 @@ fn reject_cross_app_ref(table: &str, target: &str) -> Result<(), DeclarativeErro
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DeclarativeError {
     /// A descriptor name/type was not a safe bare identifier / type at the
-    /// author boundary (mirrors [`crate::expand_contract`]'s `validate_ident` /
+    /// author boundary (mirrors [`crate::render::expand_contract`]'s `validate_ident` /
     /// `validate_type`). Nothing is generated.
     #[error("invalid descriptor: {0}")]
     Invalid(String),
@@ -2555,9 +2538,9 @@ pub enum DeclarativeError {
 ///
 /// A column rename is an **online, multi-deploy** operation, not a single
 /// statement. Its [`ExpandContractPlan`] is more than a list of `Migration`s: it
-/// also carries the [`BackfillSpec`](crate::render::plan::BackfillSpec) that mirrors
+/// also carries the [`BackfillSpec`](crate::model::backfill::BackfillSpec) that mirrors
 /// **pre-existing** rows from `<from>` into `<to>`. E3's `up` is only a `SELECT 1`
-/// marker — the actual data copy is [`run_backfill`](crate::ops::backfill::run_backfill),
+/// marker — the actual data copy is [`run_backfill`](crate::apply::backend::postgres::backfill::run_backfill),
 /// driven exclusively by [`run_expand`](crate::engine::MigrationEngine::run_expand).
 ///
 /// If the rename were flattened into the plain migration set (`out.extend(plan.all())`)
@@ -2605,7 +2588,7 @@ pub struct DeclarativePlan {
 /// and the now-generic
 /// [`apply_declarative`](crate::engine::MigrationEngine::apply_declarative) drives
 /// each through
-/// [`MigrationBackend::rebuild_one`](crate::backend::MigrationBackend::rebuild_one)
+/// [`MigrationBackend::rebuild_one`](crate::apply::backend::MigrationBackend::rebuild_one)
 /// under the destructive/approval gate (the journal migration is `destructive +
 /// requires_approval`, so an un-approved rebuild is refused before any DDL). The old
 /// `plan_declarative` fail-close (`SqliteRebuildRequired`) is gone. The direct,
@@ -2717,8 +2700,8 @@ impl DeclarativePlan {
 /// The declarative differ — turns a desired/live snapshot pair into the
 /// migrations that reconcile them (P1 additive + P2 destructive-gated).
 ///
-/// A [`MigrationAuthor`](crate::author::MigrationAuthor)-family author: it
-/// reuses [`DeterministicAuthor`] rendering where possible and emits
+/// A [`MigrationAuthor`](crate::plan::author::MigrationAuthor)-family author: it
+/// reuses [`crate::plan::author::DeterministicAuthor`] rendering where possible and emits
 /// [`Migration`]s with correct [`MigrationFlags`]. It validates every descriptor
 /// name/type at its boundary and relies on the guard as the second line.
 #[derive(Debug, Clone)]
@@ -2799,7 +2782,7 @@ impl DeclarativeAuthor {
     }
 
     /// The deploying app (`app_…`) this author stamps on emitted migrations.
-    /// Used by [`crate::ir_author::IrAuthor`] to stamp the descriptor owner.
+    /// Used by [`crate::render::lower::IrAuthor`] to stamp the descriptor owner.
     #[must_use]
     pub(crate) fn owner_app(&self) -> &str {
         &self.owner_app
@@ -2878,11 +2861,11 @@ impl DeclarativeAuthor {
     ///   recreating the index), so it flows through ungated, the same as an
     ///   additive op. A **UNIQUE** index DROP, however, silently removes a
     ///   data-integrity guarantee (#4), so it is classified `destructive +
-    ///   requires_approval` (gated, like DROP COLUMN) — see [`render_drop_index`].
+    ///   requires_approval` (gated, like DROP COLUMN) — see `render_drop_index`.
     ///
     /// P3 (rename, opt-in) routes a **hinted** drop+add pair through the
     /// zero-downtime expand-contract sequence
-    /// ([`ExpandContractAuthor::RenameColumn`](crate::expand_contract)) instead of
+    /// ([`ExpandContractAuthor::RenameColumn`](crate::render::expand_contract)) instead of
     /// emitting an independent drop + add. A rename is emitted ONLY when a
     /// [`RenameHint`] explicitly names the `(table, from→to)` pair AND `from` is a
     /// live-only column AND `to` is a desired-only column AND their types match.
@@ -4073,7 +4056,7 @@ impl DeclarativeAuthor {
     ///   through [`ExpandContractAuthor::author`] — the SAME author the declarative
     ///   diff path calls, so the E1..C2 ids + intra-chain `depends_on` are authored
     ///   identically (§2.6.1). The returned [`ExpandContractPlan`] is wrapped
-    ///   verbatim into [`RenameStep::PgExpandContract`].
+    ///   verbatim into [`crate::render::step::RenameStep::PgExpandContract`].
     ///
     /// - **SQLite** ⇒ synthesize the DESIRED post-rename inputs the differ's
     ///   12-step rebuild planner consumes — the live `TableSnapshot` with the
@@ -4084,7 +4067,7 @@ impl DeclarativeAuthor {
     ///   field-key rename, and a [`RenameHint`] — and route them through
     ///   [`Self::diff`]. The diff yields exactly ONE [`SqliteRebuild`] (a rename
     ///   always needs a rebuild on SQLite), wrapped into
-    ///   [`RenameStep::SqliteRebuild`]. NO PG type string is ever passed to this leg
+    ///   [`crate::render::step::RenameStep::SqliteRebuild`]. NO PG type string is ever passed to this leg
     ///   — the affinity comes from the SDK Value, which the caller built from the
     ///   dialect-neutral `ColType`.
     ///
@@ -4409,7 +4392,7 @@ impl DeclarativeAuthor {
         //
         // **PR15 (HIGH fix)** — a `createTable({ uniques })` table-level UNIQUE
         // (folded into the snapshot as a `UNIQUE` `ConstraintSnapshot` by
-        // `ir_author::create_table_descriptor`'s spec-fold) is inlined here as a
+        // `render::lower::create_table_descriptor`'s spec-fold) is inlined here as a
         // `CONSTRAINT <name> <definition>` clause, the SAME shape a stand-alone
         // `addConstraint(unique)` renders (`UNIQUE (cols)`), so a table built with
         // a named unique round-trips against the live catalog. CHECK is inlined the
@@ -4928,7 +4911,7 @@ impl DeclarativeAuthor {
         snapshot: &TableSnapshot,
         sqlite_schema: &serde_json::Value,
         live_tables: &std::collections::BTreeSet<String>,
-        guard: Option<crate::render::existence_probe::GuardDir>,
+        guard: Option<crate::model::probe::GuardDir>,
     ) -> Result<Vec<LoweredUnit>, DeclarativeError> {
         let is_sqlite = matches!(self.dialect, SqlDialect::Sqlite);
         let mut inline_fks: Vec<&ConstraintSnapshot> = Vec::new();
@@ -5017,14 +5000,14 @@ impl DeclarativeAuthor {
             // the PG-spelled snapshot data_type to the SQLite affinity at compare time,
             // so a `timestamp with time zone`/`jsonb`/`text` snapshot no longer
             // false-drifts against a live `text` affinity.
-            mig.existence_guard = Some(crate::render::existence_probe::GuardProbe::Table {
+            mig.existence_guard = Some(crate::model::probe::GuardProbe::Table {
                 schema: self.project_schema.clone(),
                 table: table.to_string(),
                 direction: dir,
                 expect_columns: snapshot
                     .columns
                     .iter()
-                    .map(|c| crate::render::existence_probe::ExpectColumn {
+                    .map(|c| crate::model::probe::ExpectColumn {
                         name: c.name.clone(),
                         data_type: c.data_type.clone(),
                         nullable: c.nullable,
@@ -5050,7 +5033,7 @@ impl DeclarativeAuthor {
                 // Object-scoped probe for THIS index — absent → CREATE; present with
                 // the same (unique, columns) → idempotent SatisfiedNoop; divergent →
                 // FailDrift. Never SatisfiedNoop'd by the table's presence alone.
-                idx_mig.existence_guard = Some(crate::render::existence_probe::GuardProbe::Index {
+                idx_mig.existence_guard = Some(crate::model::probe::GuardProbe::Index {
                     schema: self.project_schema.clone(),
                     table: table.to_string(),
                     name: idx.name.clone(),
@@ -5076,7 +5059,7 @@ impl DeclarativeAuthor {
                 // SatisfiedNoop (a re-run of the guarded `createTable ifNotExists` over a
                 // forward/cyclic-reference schema succeeds instead of hard-FailDrift); a
                 // re-pointed / changed FK is still FailDrift. An absent one RunBare.
-                fk_mig.existence_guard = Some(crate::render::existence_probe::GuardProbe::Constraint {
+                fk_mig.existence_guard = Some(crate::model::probe::GuardProbe::Constraint {
                     schema: self.project_schema.clone(),
                     table: table.to_string(),
                     name: fk.name.clone(),
@@ -5196,12 +5179,12 @@ impl DeclarativeAuthor {
     }
 
     /// **VENDOR** — wrap a pre-rendered vendor statement
-    /// ([`crate::vendor::VendorStatement`]) into a journaled [`LoweredUnit`]. The
-    /// `up`/`down` SQL was structurally assembled by [`crate::vendor`] (identifiers
+    /// ([`crate::render::vendor::VendorStatement`]) into a journaled [`LoweredUnit`]. The
+    /// `up`/`down` SQL was structurally assembled by [`crate::render::vendor`] (identifiers
     /// quoted, predicates rendered from the closed AST); this only stamps the
     /// owner/checksum and routes it through the SAME `make` + `single_stmt` path
     /// every other lowered unit uses, so the per-fragment guard at lower
-    /// ([`crate::ir_author::IrAuthor::lower_guarded`]) checks one statement per
+    /// ([`crate::render::lower::IrAuthor::lower_guarded`]) checks one statement per
     /// fragment. Vendor DDL is transactional with default flags (vendor spec §4.4).
     pub(crate) fn lower_vendor_statement(
         &self,
@@ -5796,7 +5779,7 @@ fn destructive_flags() -> MigrationFlags {
 /// is written `TIMESTAMPTZ` (both round-trip to the same `information_schema`
 /// type). All others are spelled identically (lowercased is valid DDL).
 ///
-/// `pub(crate)` so [`crate::ir_author::IrAuthor`] derives the IR `renameColumn`'s
+/// `pub(crate)` so [`crate::render::lower::IrAuthor`] derives the IR `renameColumn`'s
 /// PG `OnlineIntent` column type the SAME way the declarative rename path does
 /// (live `data_type` → `ddl_type`), preserving E1's `ADD COLUMN <to> <ty>`
 /// byte-equality between the two paths (§2.6.1).
@@ -5810,7 +5793,7 @@ pub(crate) fn ddl_type(data_type: &str) -> &str {
 
 /// Validate a bare SQL identifier at the author boundary: non-empty, starts with
 /// a letter/underscore, only `[A-Za-z0-9_]`. Mirrors
-/// [`crate::expand_contract`]'s `validate_ident`. Rejects schema-qualifiers
+/// [`crate::render::expand_contract`]'s `validate_ident`. Rejects schema-qualifiers
 /// (`control.users`), quote-injection (`t"; DROP …`), whitespace, punctuation.
 fn validate_ident(what: &str, value: &str) -> Result<(), DeclarativeError> {
     let mut chars = value.chars();
@@ -5825,7 +5808,7 @@ fn validate_ident(what: &str, value: &str) -> Result<(), DeclarativeError> {
 }
 
 /// Validate a Postgres type spelling spliced into DDL: no statement separator
-/// `;`, balanced parentheses. Mirrors [`crate::expand_contract`]'s
+/// `;`, balanced parentheses. Mirrors [`crate::render::expand_contract`]'s
 /// `validate_type` (accepts `numeric(10,2)`, rejects `text; DROP …` and
 /// `numeric(10`).
 fn validate_type(ty: &str) -> Result<(), DeclarativeError> {
@@ -6182,7 +6165,8 @@ mod snapshot_builder_refactor_safety_tests {
 
 #[cfg(test)]
 mod system_field_names_tie_tests {
-    use super::{system_field_columns, SYSTEM_FIELD_NAMES};
+    use super::system_field_columns;
+    use crate::model::ir::SYSTEM_FIELD_NAMES;
 
     // The shared-source guarantee (MED): the IR validator's createTable rule-(c)
     // scope unions SYSTEM_FIELD_NAMES, which MUST stay byte-identical (and in the

@@ -86,7 +86,7 @@ async fn drop_schemas(conn: &Client, cfg: &ExecutorConfig) {
             cfg.project_schema, cfg.pg.meta_schema
         ))
         .await;
-    let _ = zeroship_migrate::role::deprovision_migrator(conn, cfg).await;
+    let _ = zeroship_migrate::apply::role::deprovision_migrator(conn, cfg).await;
 }
 
 /// Seed a table `widgets(id int PK, val int, normalized text)` with `n` rows,

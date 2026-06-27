@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zeroship_migrate::backend_sqlite::Mode;
+use zeroship_migrate::apply::backend::sqlite::Mode;
 use zeroship_migrate::{PlanStep, RenameStep};
 use zeroship_migrate::{
     desired_snapshot, Approval, CollectionDescriptor, DeclarativeAuthor, ExecutorConfig,
@@ -132,7 +132,7 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
             &be,
             &exec_cfg(),
             "deployer",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("apply_plan drives the SQLite rebuild");
@@ -175,7 +175,7 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
         applied
             .iter()
             .any(|e| e.version == rebuild_version
-                && matches!(e.phase, zeroship_migrate::journal::Phase::Completed)),
+                && matches!(e.phase, zeroship_migrate::apply::journal::Phase::Completed)),
         "the rebuild migration's version is journaled completed"
     );
 
@@ -189,7 +189,7 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
             &be,
             &exec_cfg(),
             "deployer",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("re-run");
@@ -279,7 +279,7 @@ async fn rebuild_first_plan_against_fresh_journal_bootstraps_it() {
             &be,
             &exec_cfg(),
             "deployer",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("a rebuild-first plan against a fresh journal must bootstrap it up front");
@@ -348,7 +348,7 @@ async fn sqlite_rename_opens_no_obligation_and_never_gates_a_follow_on_deploy() 
             &be,
             &exec_cfg(),
             "deployer",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("sqlite rebuild rename applies");
@@ -362,23 +362,23 @@ async fn sqlite_rename_opens_no_obligation_and_never_gates_a_follow_on_deploy() 
     // A follow-on deploy that TOUCHES the just-renamed `people` table is NOT gated
     // (on PG this would be refused while a contract is pending; on SQLite there is
     // no pending partition, so it proceeds — the interlock is structurally PG-only).
-    let add = zeroship_migrate::migration::Migration {
-        version: zeroship_migrate::migration::MigrationId::generate(),
+    let add = zeroship_migrate::model::migration::Migration {
+        version: zeroship_migrate::model::migration::MigrationId::generate(),
         name: "add_people_label".into(),
         up: "ALTER TABLE people ADD COLUMN label text".into(),
         down: None,
-        checksum: zeroship_migrate::migration::Checksum::of(
-            &zeroship_migrate::migration::ChecksumInput {
+        checksum: zeroship_migrate::model::migration::Checksum::of(
+            &zeroship_migrate::model::migration::ChecksumInput {
                 up: "addlabel",
                 down: None,
-                flags: &zeroship_migrate::migration::MigrationFlags::default(),
+                flags: &zeroship_migrate::model::migration::MigrationFlags::default(),
                 owner_app: APP,
                 depends_on: &[],
                 supersedes: &[],
                 preconditions: &[],
             },
         ),
-        flags: zeroship_migrate::migration::MigrationFlags::default(),
+        flags: zeroship_migrate::model::migration::MigrationFlags::default(),
         owner_app: APP.into(),
         depends_on: vec![],
         supersedes: vec![],
@@ -393,7 +393,7 @@ async fn sqlite_rename_opens_no_obligation_and_never_gates_a_follow_on_deploy() 
             &be,
             &exec_cfg(),
             "deployer",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("a follow-on touch of the renamed table is NEVER gated on SQLite");

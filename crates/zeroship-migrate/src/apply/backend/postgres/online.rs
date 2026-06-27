@@ -1,13 +1,13 @@
-//! Expand-contract execution seam.
+//! Postgres online schema-change capability.
 
+use crate::apply::backend::capability::{BackfillSpec, OnlineSchemaChange};
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use crate::render::expand_contract::{
     qualified, quote_ident, ExpandContractAuthor, ExpandContractError, OnlineIntent,
 };
-use crate::render::plan::BackfillSpec;
 use crate::render::step::PlanStep;
 
-/// Re-author the ABORT DDL for an outstanding online-rename obligation as plain,
+/// Re-author the abort DDL for an outstanding online-rename obligation as plain,
 /// phase-less [`PlanStep::Ddl`] steps.
 pub fn build_abort_steps(
     project_schema: &str,
@@ -73,32 +73,6 @@ fn abort_plain_ddl(name: &str, up: String, destructive: bool) -> Migration {
     m
 }
 
-/// The online schema-change capability — the dialect-neutral seam the generic
-/// declarative apply path uses to drive a zero-downtime online operation.
-#[allow(clippy::module_name_repetitions)]
-pub trait OnlineSchemaChange {
-    /// Drive ONE online intent's EXPAND.
-    #[allow(clippy::too_many_arguments)]
-    fn run_online<'a>(
-        &'a self,
-        intent: &'a OnlineIntent,
-        expand: &'a [Migration],
-        backfill: &'a BackfillSpec,
-        approval: crate::approval::Approval,
-        scope: &'a crate::approval::ApprovalScope,
-        trigger_version: &'a MigrationId,
-        cfg: &'a crate::conn::ExecutorConfig,
-        applied_by: &'a str,
-        lock_mode: crate::apply::executor::LockMode,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<crate::apply::executor::ApplyOutcome, crate::engine::OnlineError>,
-                > + 'a,
-        >,
-    >;
-}
-
 /// Run the Postgres EXPAND sequence verbatim.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_expand_pg(
@@ -134,7 +108,10 @@ pub(crate) async fn run_expand_pg(
     let mut outcome =
         executor::apply_with_lock(conn, cfg, head, approval, applied_by, lock_mode).await?;
     crate::fault::trip(crate::fault::points::EXPAND_BETWEEN_E2_AND_BACKFILL)?;
-    crate::ops::backfill::run_backfill(conn, cfg, backfill, approval, applied_by).await?;
+    crate::apply::backend::postgres::backfill::run_backfill(
+        conn, cfg, backfill, approval, applied_by,
+    )
+    .await?;
     let e3_outcome = executor::apply_with_lock(
         conn,
         cfg,

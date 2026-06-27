@@ -704,7 +704,7 @@ async fn idempotent_resubmit_is_a_noop() {
 /// # Why this is RED pre-fix and GREEN post-fix
 ///
 /// PRE-FIX: the checksum dedup read ran with NO lock held; the project advisory
-/// lock was taken only later inside `executor::apply`, which dedups PENDING by
+/// lock was taken only later inside `apply::executor::apply`, which dedups PENDING by
 /// VERSION (each call mints a fresh `MigrationId`). So both submissions passed the
 /// unlocked dedup and both reached apply. The `CREATE TABLE` has no
 /// `IF NOT EXISTS`, so the second apply fails on the real DB (table already

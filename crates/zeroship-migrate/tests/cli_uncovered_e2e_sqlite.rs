@@ -53,7 +53,7 @@ fn run_bin(args: &[&str]) -> (bool, String, String) {
 
 /// Does table `T` exist on `main` of the given SQLite app file?
 fn table_exists(app_file: &str, table: &str) -> bool {
-    use zeroship_migrate::backend_sqlite::Mode;
+    use zeroship_migrate::apply::backend::sqlite::Mode;
     use zeroship_migrate::SqliteBackend;
     let app = PathBuf::from(app_file);
     let journal = {

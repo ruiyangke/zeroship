@@ -48,7 +48,7 @@
 //!   distinct across the update.
 //! - **E3 backfills on the table's PRIMARY KEY**, never on `<to>` (the column
 //!   being populated): the backfill engine requires a UNIQUE/NOT-NULL cursor and
-//!   forbids paging on the column it mutates (see [`crate::backfill`]). E3
+//!   forbids paging on the column it mutates (see [`crate::apply::backend::postgres::backfill`]). E3
 //!   depends on E2 so the trigger is live before the backfill runs — otherwise a
 //!   concurrent write between backfill batches could land in `<from>` only and
 //!   be lost.
@@ -60,10 +60,10 @@
 //! All emitted SQL is **project-schema-qualified** and **byte-stable** across
 //! re-authoring (the function/trigger/index names are deterministic functions of
 //! the table + column names), so re-authoring the same intent yields identical
-//! `Expand` checksums — exactly like [`crate::author`]'s index-name determinism.
+//! `Expand` checksums — exactly like [`crate::plan::author`]'s index-name determinism.
 
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId, OnlinePhase};
-use crate::render::plan::BackfillSpec;
+use crate::model::backfill::BackfillSpec;
 
 /// A high-level online-migration intent the [`ExpandContractAuthor`] expands
 /// into an ordered, phased [`Migration`] sequence.
@@ -107,7 +107,7 @@ pub struct ExpandContractPlan {
     /// C1, C2 in order (drop trigger/function, drop old column).
     pub contract: Vec<Migration>,
     /// The structured backfill spec for E3, to be driven by
-    /// [`run_backfill`](crate::backfill::run_backfill) during orchestration.
+    /// [`run_backfill`](crate::apply::backend::postgres::backfill::run_backfill) during orchestration.
     pub backfill: BackfillSpec,
     /// The version of the E2 trigger migration — the dependency every contract
     /// step and the gate keys on as "the expand". Carried out so the
@@ -115,7 +115,7 @@ pub struct ExpandContractPlan {
     pub trigger_version: MigrationId,
     /// The neutral [`OnlineIntent`] this plan was authored from. Carried so the
     /// generic declarative apply path hands the **intent** (not the PG-DDL plan)
-    /// to the [`OnlineSchemaChange`] seam (H1) — the Postgres impl ignores it and
+    /// to the [`OnlineSchemaChange`](crate::apply::backend::OnlineSchemaChange) seam (H1) — the Postgres impl ignores it and
     /// runs the pre-authored [`expand`](Self::expand) steps verbatim, while a
     /// future engine lowers the intent to its own native online DDL.
     pub intent: OnlineIntent,
@@ -131,13 +131,13 @@ impl ExpandContractPlan {
 }
 
 /// Quote a Postgres identifier (double embedded quotes, wrap in `"`). Mirrors
-/// [`crate::author`]'s quoting so output is injection-safe.
+/// [`crate::plan::author`]'s quoting so output is injection-safe.
 pub(crate) fn quote_ident(ident: &str) -> String {
     crate::render::dml::escape_quote_ident(ident)
 }
 
 /// Validate a bare SQL identifier: non-empty, starts with a letter/underscore,
-/// and contains only `[A-Za-z0-9_]`. Mirrors [`crate::backfill`]'s `validate_ident`
+/// and contains only `[A-Za-z0-9_]`. Mirrors [`crate::apply::backend::postgres::backfill`]'s `validate_ident`
 /// so `table`/`from`/`to` are safe-by-construction at the AUTHOR boundary — not
 /// only safe-by-quoting downstream. Rejects schema-qualified names
 /// (`control.users`), quote-injection (`t"; DROP …`), whitespace, punctuation.
@@ -232,14 +232,14 @@ fn rename_id_seed(
 }
 
 /// The Postgres identifier length limit (`NAMEDATALEN - 1`), in bytes. Mirrors
-/// [`crate::author`]'s constant: an over-long name is silently truncated
+/// [`crate::plan::author`]'s constant: an over-long name is silently truncated
 /// server-side, desyncing the name we emit in `up`/`down`. We cap it ourselves.
 const PG_MAX_IDENT_BYTES: usize = 63;
 
 /// Deterministically derive the dual-write function name for a rename, capped to
 /// Postgres's 63-byte identifier limit. Stable across re-authoring (so the
 /// `down` and the orchestrator target the same object), with a hash suffix to
-/// disambiguate over-long natural names — mirroring [`crate::author`]'s
+/// disambiguate over-long natural names — mirroring [`crate::plan::author`]'s
 /// `index_name` discipline.
 fn dual_write_fn_name(table: &str, from: &str, to: &str) -> String {
     capped_name(&format!("zsdw_{table}_{from}_{to}_fn"))
@@ -254,7 +254,7 @@ fn dual_write_trg_name(table: &str, from: &str, to: &str) -> String {
 /// Cap a natural name to ≤63 bytes deterministically: verbatim when it fits,
 /// else a readable prefix + a 10-hex-char hash of the full natural name (so
 /// distinct long inputs stay distinct). Identical algorithm to
-/// [`crate::author`]'s `index_name`, factored for the function/trigger names.
+/// [`crate::plan::author`]'s `index_name`, factored for the function/trigger names.
 fn capped_name(natural: &str) -> String {
     use sha2::{Digest, Sha256};
     if natural.len() <= PG_MAX_IDENT_BYTES {
@@ -276,7 +276,7 @@ fn capped_name(natural: &str) -> String {
 /// The deterministic, no-AI author for the canonical online column-rename
 /// expand-contract sequence (design §5, Plan 8 v1).
 ///
-/// Like [`crate::author::DeterministicAuthor`], it emits provably-shaped,
+/// Like [`crate::plan::author::DeterministicAuthor`], it emits provably-shaped,
 /// project-schema-qualified SQL with correct [`MigrationFlags`] — but for the
 /// *multi-deploy phased* online pattern, not the trivial additive set. The SQL
 /// is byte-stable across re-authoring so the `Expand` checksums are reproducible.
@@ -290,7 +290,7 @@ fn capped_name(natural: &str) -> String {
 /// `ADD CONSTRAINT … CHECK (<to> IS NOT NULL) NOT VALID` → `VALIDATE CONSTRAINT`
 /// pair (a separate intent, not part of the rename). This author's output
 /// therefore contains no `SET NOT NULL` by construction — the lint is "we don't
-/// emit the dangerous form", enforced by [`tests`] (no `SET NOT NULL` substring).
+/// emit the dangerous form", enforced by tests (no `SET NOT NULL` substring).
 #[derive(Debug, Clone)]
 pub struct ExpandContractAuthor {
     /// The project schema every emitted statement is qualified into.
@@ -693,7 +693,7 @@ fn build_dual_write_sql(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::expand_contract::run_expand_pg;
+    use crate::apply::backend::postgres::online::run_expand_pg;
 
     fn author() -> ExpandContractAuthor {
         ExpandContractAuthor::new("proj_acme", "app_acme")

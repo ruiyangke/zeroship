@@ -14,12 +14,12 @@
 //! a unique project id → unique migrator role), so the shared DB stays clean.
 
 use compio_postgres::Client;
-use zeroship_migrate::executor::ApplyError;
-use zeroship_migrate::migration::Checksum;
-use zeroship_migrate::precondition::{CmpOp, Precondition, PreconditionCheck};
+use zeroship_migrate::apply::executor::ApplyError;
+use zeroship_migrate::model::migration::Checksum;
+use zeroship_migrate::model::precondition::{CmpOp, Precondition, PreconditionCheck};
 use zeroship_migrate::{
     apply, applied, ensure_journal, evaluate_precondition as evaluate, migrator_role_name,
-    provision_migrator, role::deprovision_migrator, Approval, ExecutorConfig, Migration,
+    provision_migrator, apply::role::deprovision_migrator, Approval, ExecutorConfig, Migration,
     MigrationFlags, MigrationId, PreconditionError,
 };
 
@@ -119,7 +119,7 @@ async fn applied_versions(conn: &Client, cfg: &ExecutorConfig) -> Vec<String> {
         .await
         .expect("read journal")
         .into_iter()
-        .filter(|e| matches!(e.phase, zeroship_migrate::journal::Phase::Completed))
+        .filter(|e| matches!(e.phase, zeroship_migrate::apply::journal::Phase::Completed))
         .map(|e| e.version)
         .collect();
     v.sort();

@@ -1,4 +1,4 @@
-//! The SQLite [`MigrationBackend`](crate::backend::MigrationBackend) impl
+//! The SQLite [`MigrationBackend`](crate::apply::backend::MigrationBackend) impl
 //! (SQLite-parity design §2, P2: confinement folded in).
 //!
 //! `SqliteBackend` is the security core for SQLite migrations. It owns a
@@ -111,25 +111,25 @@ impl SqliteBackend {
     }
 
     /// Run (or resume) a SQLite **batched backfill** directly (the SQLite analog of
-    /// [`crate::backfill::run_backfill_bounded`], §2.3.1) — the checkpointed /
+    /// [`crate::apply::backend::postgres::backfill::run_backfill_bounded`], §2.3.1) — the checkpointed /
     /// crash-fuzz seam tests drive. `set_clause` / `filter` are the inline SQL the
-    /// shared assembler ([`crate::dml::assemble_backfill_clauses`]) renders; the
+    /// shared assembler ([`crate::render::dml::assemble_backfill_clauses`]) renders; the
     /// executor-internal direct seam has NO approval gate (the generic executor
     /// gates approval before reaching the backend's `run_backfill_step`). Stops after
     /// at most `max_batches` committed batches (`None` = run to completion).
     ///
     /// # Errors
-    /// [`crate::backfill::BackfillError`] on a malformed spec, an unsafe cursor
+    /// [`crate::apply::backend::BackfillError`] on a malformed spec, an unsafe cursor
     /// column, a cursor-column mutation, a resumable batch failure, or a poisoned
     /// connection.
     pub async fn run_backfill_bounded_sqlite(
         &self,
-        spec: &crate::render::plan::BackfillSpec,
+        spec: &crate::model::backfill::BackfillSpec,
         set_clause: &str,
         filter: Option<&str>,
         applied_by: &str,
         max_batches: Option<u64>,
-    ) -> Result<crate::ops::backfill::BackfillOutcome, crate::ops::backfill::BackfillError> {
+    ) -> Result<crate::apply::backend::BackfillOutcome, crate::apply::backend::BackfillError> {
         backfill_sql::run_backfill_bounded(
             &self.actor,
             spec,
@@ -145,7 +145,7 @@ impl SqliteBackend {
     /// `rolled_back` event, atomically. The direct executor-internal seam (no
     /// approval gate; the generic executor gates approval before reaching here).
     /// A rebuild-needing `down` is refused with
-    /// [`RollbackError::SqliteRebuildRequired`](crate::executor::RollbackError::SqliteRebuildRequired);
+    /// [`RollbackError::SqliteRebuildRequired`](crate::apply::executor::RollbackError::SqliteRebuildRequired);
     /// the rebuild is P3b.
     ///
     /// # Errors
@@ -175,7 +175,7 @@ impl SqliteBackend {
     /// generic [`apply_declarative`](crate::engine::MigrationEngine::apply_declarative),
     /// which classifies the rebuild's `destructive + requires_approval` journal
     /// migration and refuses an un-approved rebuild BEFORE calling down into
-    /// [`MigrationBackend::rebuild_one`](crate::backend::MigrationBackend::rebuild_one)
+    /// [`MigrationBackend::rebuild_one`](crate::apply::backend::MigrationBackend::rebuild_one)
     /// (which forwards here). So a caller reaching THIS inherent method directly
     /// (tests) has bypassed that gate and MUST gate approval itself; callers going
     /// through the engine get the gate for free.
@@ -631,7 +631,7 @@ impl MigrationBackend for SqliteBackend {
     async fn run_backfill_step(
         &self,
         _cfg: &ExecutorConfig,
-        spec: &crate::render::plan::BackfillSpec,
+        spec: &crate::model::backfill::BackfillSpec,
         approval: crate::approval::Approval,
         _scope: &crate::approval::ApprovalScope,
         applied_by: &str,
@@ -740,7 +740,7 @@ impl MigrationBackend for SqliteBackend {
         Ok(true)
     }
 
-    fn online(&self) -> Option<&dyn crate::ops::expand_contract::OnlineSchemaChange> {
+    fn online(&self) -> Option<&dyn crate::apply::backend::OnlineSchemaChange> {
         // SQLite has NO online schema-change capability: a SQLite declarative rename
         // is routed to a `rebuild_one` (the 12-step offline rebuild), never
         // expand-contract, so `plan.renames` is structurally EMPTY on the SQLite leg
@@ -750,7 +750,7 @@ impl MigrationBackend for SqliteBackend {
         None
     }
 
-    fn shadow(&self) -> Option<&dyn crate::ops::shadow::ShadowDryRun> {
+    fn shadow(&self) -> Option<&dyn crate::apply::backend::ShadowDryRun> {
         // SQLite has NO shadow dry-run capability (C3) — a DELIBERATE capability
         // gap, not a silent hole. The SQLite dev path applies only TRUSTED
         // descriptor-generated DDL (there is no untrusted/raw SQLite author whose

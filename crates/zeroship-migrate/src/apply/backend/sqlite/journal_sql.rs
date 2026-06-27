@@ -171,7 +171,7 @@ pub(crate) async fn apply_one_additive(
 
 /// **PR10 Part B** — journal `m` as a `completed`, `kind='apply'` event WITHOUT
 /// running its `up` DDL: the SQLite arm of an existence-guard
-/// [`SatisfiedNoop`](crate::guard_probe::GuardVerdict::SatisfiedNoop). The guarded
+/// [`SatisfiedNoop`](crate::render::existence_probe::GuardVerdict::SatisfiedNoop). The guarded
 /// object already has the declared shape (`ifNotExists`) or is already absent
 /// (`ifExists`), so the `up` is a no-op, but the version must still LAND so a
 /// re-deploy sees it net-applied and skips it via normal pending computation.
@@ -247,9 +247,9 @@ pub(crate) async fn journal_satisfied_noop(
 /// Record `m` as the SQLite project's **baseline** — a `kind='baseline'`,
 /// `completed` journal event WITHOUT running its `up` (the adoption path,
 /// design §5 / H3). This is the SQLite arm behind the single neutral
-/// [`MigrationBackend::baseline_one`](crate::backend::MigrationBackend::baseline_one)
+/// [`MigrationBackend::baseline_one`](crate::apply::backend::MigrationBackend::baseline_one)
 /// (multi-engine abstraction L5); it returns the dialect-neutral
-/// [`BaselineOutcome`](crate::baseline::BaselineOutcome), the same shape the PG arm
+/// [`BaselineOutcome`](crate::apply::baseline::BaselineOutcome), the same shape the PG arm
 /// returns, so no SQLite-specific outcome type crosses the trait.
 ///
 /// The motivating case (H3): a dev developer who ran the OLD `run_sqlite_pipeline`

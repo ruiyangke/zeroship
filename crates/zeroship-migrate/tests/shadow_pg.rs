@@ -23,7 +23,7 @@ use std::time::Duration;
 use compio_postgres::Client;
 use futures::FutureExt;
 use zeroship_migrate::guard::GuardConfig;
-use zeroship_migrate::migration::Checksum;
+use zeroship_migrate::model::migration::Checksum;
 use zeroship_migrate::{
     PostgresBackend,
     deprovision_migrator, dry_run, dry_run_declarative, migrator_role_name, provision_migrator,

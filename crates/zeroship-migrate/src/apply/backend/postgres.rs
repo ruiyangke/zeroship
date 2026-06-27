@@ -1,10 +1,15 @@
 //! Postgres [`MigrationBackend`](super::MigrationBackend) implementation.
 
+pub mod backfill;
+pub mod online;
+pub mod shadow;
+
 use compio_postgres::Client;
 
 use super::{
     CrossDeployObligations, JournalFuture, MigrationBackend, PgSessionSnapshot,
 };
+use super::capability::{BackfillSpec, OnlineSchemaChange, ShadowDryRun};
 use crate::apply::baseline::{BaselineError, BaselineOutcome};
 use crate::apply::drift::DriftError;
 use crate::apply::executor::{ApplyError, RollbackError};
@@ -12,7 +17,7 @@ use crate::apply::journal::{self, AppliedEntry, JournalError};
 use crate::conn::ExecutorConfig;
 use crate::model::migration::{Migration, MigrationId};
 use crate::model::snapshot::SchemaSnapshot;
-use crate::render::plan::{BackfillSpec, SqliteRebuildSpec};
+use crate::render::plan::SqliteRebuildSpec;
 use crate::render::step::BindValue;
 use zeroship_schema::query::SqlDialect;
 
@@ -20,8 +25,8 @@ use zeroship_schema::query::SqlDialect;
 #[derive(Debug)]
 pub struct PostgresBackend<'a> {
     conn: &'a Client,
-    online: crate::ops::expand_contract::PgOnline<'a>,
-    shadow: crate::ops::shadow::PgShadow<'a>,
+    online: online::PgOnline<'a>,
+    shadow: shadow::PgShadow<'a>,
 }
 
 impl<'a> PostgresBackend<'a> {
@@ -30,8 +35,8 @@ impl<'a> PostgresBackend<'a> {
     pub fn new(conn: &'a Client) -> Self {
         Self {
             conn,
-            online: crate::ops::expand_contract::PgOnline::new(conn),
-            shadow: crate::ops::shadow::PgShadow::new(conn),
+            online: online::PgOnline::new(conn),
+            shadow: shadow::PgShadow::new(conn),
         }
     }
 }
@@ -199,7 +204,7 @@ impl MigrationBackend for PostgresBackend<'_> {
         applied_by: &str,
         _lock_mode: crate::apply::executor::LockMode,
     ) -> Result<crate::apply::executor::ApplyOutcome, ApplyError> {
-        let outcome = crate::ops::backfill::run_backfill(self.conn, cfg, spec, approval, applied_by)
+        let outcome = backfill::run_backfill(self.conn, cfg, spec, approval, applied_by)
             .await
             .map_err(|e| ApplyError::Backend(format!("backfill step failed: {e}")))?;
         let applied = if outcome.complete {
@@ -260,11 +265,11 @@ impl MigrationBackend for PostgresBackend<'_> {
         Ok(true)
     }
 
-    fn online(&self) -> Option<&dyn crate::ops::expand_contract::OnlineSchemaChange> {
+    fn online(&self) -> Option<&dyn OnlineSchemaChange> {
         Some(&self.online)
     }
 
-    fn shadow(&self) -> Option<&dyn crate::ops::shadow::ShadowDryRun> {
+    fn shadow(&self) -> Option<&dyn ShadowDryRun> {
         Some(&self.shadow)
     }
 

@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zeroship_migrate::{
-    executor::LockMode, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
+    apply::executor::LockMode, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
     LoadAndLowerError, MigrationEngine, SqlDialect, SqliteBackend,
 };
 
@@ -201,7 +201,7 @@ async fn ir_json_out_of_envelope_splitpart_refused_on_sqlite() {
         LoadAndLowerError::Load(zeroship_migrate::IrLoadError::Validate(ae)) => {
             assert_eq!(
                 ae.code,
-                zeroship_migrate::validate::CODE_EXPR_NOT_PORTABLE,
+                zeroship_migrate::model::validate::CODE_EXPR_NOT_PORTABLE,
                 "the SQLite-out-of-envelope splitPart is EXPR_NOT_PORTABLE; got {:?}",
                 ae.code
             );

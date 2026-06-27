@@ -106,14 +106,14 @@ pub enum RoleError {
     /// An engine-supplied identifier (role / project schema / meta schema /
     /// extension schema) was not quotable (empty or NUL-bearing) at a render
     /// seam — fail-closed rather than interpolate it. Maps
-    /// [`crate::dml::IdentQuoteError`].
+    /// [`crate::render::dml::IdentQuoteError`].
     #[error("role provisioning: {0}")]
     IdentQuote(#[from] crate::render::dml::IdentQuoteError),
 }
 
 /// Quote a SQL identifier (double embedded quotes, wrap in `"`), so a schema /
 /// role name is never interpolated as raw SQL. Routes through the ONE crate-shared
-/// engine seam ([`crate::dml::quote_ident_checked`]) — byte-identical to (and
+/// engine seam ([`crate::render::dml::quote_ident_checked`]) — byte-identical to (and
 /// uniformly self-defending with) `author`/`backfill`/`journal`/`dml`: fail-closed
 /// on an empty / NUL identifier.
 fn quote_ident(ident: &str) -> Result<String, RoleError> {

@@ -32,7 +32,7 @@ use std::path::PathBuf;
 
 use compio_postgres::Client;
 use zeroship_migrate::{
-    desired_snapshot, provision_migrator, role::deprovision_migrator, snapshot_schema, Approval,
+    desired_snapshot, provision_migrator, apply::role::deprovision_migrator, snapshot_schema, Approval,
     ApprovalScope, CollectionDescriptor, DeclarativeApplyError, DeclarativeAuthor,
     DeclarativeDeployOutcome, DesiredSchema, EngineError, ExecutorConfig, FieldDescriptor,
     GuardConfig, MigrationEngine, RenameHint, SchemaSnapshot,
@@ -231,7 +231,7 @@ async fn oracle_apply(
     conn: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
-    use zeroship_migrate::backend::MigrationBackend;
+    use zeroship_migrate::apply::backend::MigrationBackend;
     // Pre-re-point gate (transcribed): a denied plain plan never applies; a
     // destructive plain plan needs approval.
     if !plan.plain.denied.is_empty() {

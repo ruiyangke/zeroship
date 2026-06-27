@@ -7,13 +7,13 @@
 //! checksum or lowering runs:
 //!
 //! 1. **deserialize** the bytes into the typed [`MigrationIr`] — the closed `Op`/
-//!    `Expr` AST + the constrained [`IrScalar`](crate::ir::IrScalar) numeric
+//!    `Expr` AST + the constrained [`IrScalar`](crate::model::ir::IrScalar) numeric
 //!    domain reject a malformed/lossy/unknown-node artifact at this step (§2.5,
 //!    §3.3.1.1).
 //! 2. **`ir_version` fail-closed** ([`MigrationIr::check_ir_version`]): a FUTURE
 //!    wire-format version this engine build does not understand is refused
 //!    (§5.3, design line 888).
-//! 3. **structural validation** ([`validate::validate_ir`]): the authoritative
+//! 3. **structural validation** ([`crate::model::validate::validate_ir`]): the authoritative
 //!    structural gate over EVERY embedded `Expr` slot for the deploy-target
 //!    dialect (§3.3.1.1) — out-of-envelope `splitPart`, an unresolved `ColRef` in
 //!    a self-contained `createTable`, a non-portable shape.
@@ -47,7 +47,7 @@ pub enum IrLoadError {
     /// malformed JSON document, an unknown op/expr node tag, an out-of-domain
     /// numeric scalar (§2.5), or a non-nullary synth default (§4.3). Carries the
     /// serde message (which embeds the structured code, e.g.
-    /// [`EXPR_INVALID_NUMERIC`](crate::ir::EXPR_INVALID_NUMERIC), for matching).
+    /// [`EXPR_INVALID_NUMERIC`](crate::model::ir::EXPR_INVALID_NUMERIC), for matching).
     #[error("malformed .ir.json: {0}")]
     Deserialize(String),
     /// The artifact declared a FUTURE `ir_version` this engine cannot interpret
@@ -125,7 +125,7 @@ const UNKNOWN_OWNER: &str = "<unregistered>";
 /// ownership-checkable target and returns `None`.
 ///
 /// **A bare-name `DropIndex` (`table: None`) is REJECTED UPSTREAM fail-closed**
-/// by [`crate::validate::validate_op`] (§8.6: a name-only index drop is not
+/// by [`crate::model::validate::validate_op`] (§8.6: a name-only index drop is not
 /// ownership-checkable, so it would let a migration drop another app's index by
 /// name). So by the time this function runs, every `DropIndex` reaching the
 /// ownership pass carries a `table` hint and IS ownership-checked. The `None` arm
@@ -262,7 +262,7 @@ pub fn enforce_ir_ownership(
 /// **PR1 only folds the SUBSET it can compute faithfully**: the op region (which
 /// fully determines the artifact's logical content) + preconditions + the
 /// dialect-neutral DEFAULT flags + EMPTY deps/supersedes. The
-/// [`IrFlagsOverride`](crate::ir::IrFlagsOverride)→[`MigrationFlags`] and
+/// [`IrFlagsOverride`](crate::model::ir::IrFlagsOverride)→[`MigrationFlags`] and
 /// `String`→`MigrationId` merges are a later wave, so this recompute is ONLY
 /// valid for an IR whose `flags`/`depends_on`/`supersedes` are at their
 /// defaults — the caller MUST gate on that ([`hint_domain_uncomputable_field`])
@@ -304,9 +304,9 @@ pub fn recompute_hint_domain_checksum(ir: &MigrationIr) -> Checksum {
 /// a PG-specific SQL spelling. Editing the authoring `.ts` changes the op list ⇒
 /// changes this checksum ⇒ the executor's net-applied drift gate aborts
 /// (`drift.rs` compares the journaled checksum to the lowered `Migration.checksum`,
-/// which the IR Lower stamps with THIS value — see [`crate::ir_author::IrAuthor::lower_plan`]).
+/// which the IR Lower stamps with THIS value — see [`crate::render::lower::IrAuthor::lower_plan`]).
 ///
-/// **PR1 flags scope.** The [`IrFlagsOverride`](crate::ir::IrFlagsOverride)→
+/// **PR1 flags scope.** The [`IrFlagsOverride`](crate::model::ir::IrFlagsOverride)→
 /// [`MigrationFlags`] and `String`→`MigrationId` merges are a later wave, so this
 /// folds the DEFAULT flags + EMPTY deps/supersedes — IDENTICAL to the hint domain
 /// (so the hint compare and the journaled anchor never disagree on a default-flags

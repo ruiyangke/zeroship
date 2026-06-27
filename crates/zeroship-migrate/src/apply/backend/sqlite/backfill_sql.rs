@@ -38,11 +38,11 @@
 //!
 //! - The per-batch `UPDATE … RETURNING` is run via
 //!   [`MigrationActor::query_params`], binding the cursor + limit through the SAME
-//!   native `?n` protocol (`crate::dml::sqlite_placeholder` /
+//!   native `?n` protocol (`crate::render::dml::sqlite_placeholder` /
 //!   [`SqliteBind`](super::actor::SqliteBind)) the one-shot DML assembler uses — the
 //!   two never fork a divergent `?n`-binding copy.
 //! - The authored `set` / `filter` SQL strings come from
-//!   [`crate::dml::assemble_backfill_clauses`] (the SAME assembler the PG path
+//!   [`crate::render::dml::assemble_backfill_clauses`] (the SAME assembler the PG path
 //!   uses), which renders the closed-AST transform — including the §9
 //!   `c.fn.splitPart` lowering — to inline SQL, `''`-escaping every string literal.
 //!   The whole assembled statement runs under the hardened authorizer (the SQLite
@@ -58,8 +58,8 @@
 //! transform + name), so a re-authored backfill gets a fresh id and does not resume
 //! against an incompatible cursor.
 
-use crate::ops::backfill::{BackfillError, BackfillOutcome};
-use crate::render::plan::BackfillSpec;
+use crate::apply::backend::{BackfillError, BackfillOutcome};
+use crate::model::backfill::BackfillSpec;
 use crate::render::dml::sqlite_placeholder;
 
 use super::actor::{MigrationActor, SqliteActorError};
@@ -328,7 +328,7 @@ fn build_window_max_sql(
 }
 
 /// Run (or resume) a SQLite batched backfill, the SQLite analog of
-/// [`crate::backfill::run_backfill`]. Pages `spec.table` by `spec.cursor_column` in
+/// [`crate::apply::backend::postgres::backfill::run_backfill`]. Pages `spec.table` by `spec.cursor_column` in
 /// `spec.batch_size` chunks, each its own committed transaction, resumable from the
 /// committed progress cursor. `max_batches` bounds the run (`None` = run to
 /// completion) — the checkpoint/crash-fuzz seam.

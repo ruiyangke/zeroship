@@ -2,9 +2,9 @@
 //! §PR6a / §2.3 / §3.3.1.1 / §9).
 //!
 //! `IrAuthor::lower` compiles the DDL ops (`createTable`/`alter*`/…) into the
-//! same [`Migration`](crate::migration::Migration) shape the declarative differ
+//! same [`Migration`](crate::model::migration::Migration) shape the declarative differ
 //! emits. This module is the peer for the **DML** ops — `insert` / `update` /
-//! `del` / `backfill` — and for the closed expression AST ([`crate::expr::Expr`])
+//! `del` / `backfill` — and for the closed expression AST ([`crate::model::expr::Expr`])
 //! they carry in their `set` / `where` / `filter` positions.
 //!
 //! # Two rendering modes, one source of truth
@@ -22,8 +22,8 @@
 //!    bind-safety property). The expression renderer ([`render_expr_bound`]) walks
 //!    the closed AST and appends a placeholder for each [`Expr::Literal`].
 //!
-//! 2. **Batched backfill** ([`assemble_backfill`]). The existing
-//!    [`BackfillSpec`](crate::render::plan::BackfillSpec) executor (PG `backfill.rs`)
+//! 2. **Batched backfill** (`assemble_backfill`). The existing
+//!    [`BackfillSpec`](crate::model::backfill::BackfillSpec) executor (PG `backfill.rs`)
 //!    consumes a `set_clause` / `filter` SQL *string* (it assembles a windowed
 //!    `UPDATE … WHERE cursor > $last … AND (<filter>)` and guard-checks the WHOLE
 //!    statement). A backfill expression references the row's own columns and is
@@ -55,7 +55,7 @@
 //! - A **batched** `backfill` (and an `update { batch }`) targets the
 //!   `BackfillSpec` executor, PORTABLE on BOTH backends since PR6b: PG via the
 //!   writable-CTE windowed `UPDATE` (`backfill.rs`), SQLite via the batched
-//!   per-batch-txn executor (`backend_sqlite::backfill_sql`, §2.3.1). The inline
+//!   per-batch-txn executor (`apply::backend::sqlite::backfill_sql`, §2.3.1). The inline
 //!   `set`/`filter` differ per dialect (the §9 `c.fn.splitPart` lowering,
 //!   NULL-skipping `concatWs`); the `BackfillSpec` shape is uniform.
 //!
@@ -66,7 +66,7 @@
 //! (here, PR6a) and the PR6b batched-backfill SQLite executor both emit positional
 //! placeholders — so the two PRs never fork a divergent copy of the `?n`-binding
 //! logic (§PR6a "ONE SQLite-DML-assembly module"). The transport-safe bind mirror
-//! ([`crate::backend_sqlite::actor::SqliteBind`]) is likewise the single
+//! ([`crate::apply::backend::sqlite::actor::SqliteBind`]) is likewise the single
 //! value-binding path the SQLite executor uses.
 
 use std::collections::BTreeMap;
@@ -79,7 +79,7 @@ use crate::model::ir::IrScalar;
 use crate::render::step::BindValue;
 
 /// A failure assembling a DML op into a statement (template + binds, or a backfill
-/// spec). Distinct from the structural [`crate::validate::AuthoringError`]
+/// spec). Distinct from the structural [`crate::model::validate::AuthoringError`]
 /// (which gates the expression AST *before* assembly): this carries the
 /// assembler-level rejections — a malformed identifier, an empty insert, an
 /// expression node the renderer cannot lower, and the two SQLite portability
@@ -137,7 +137,7 @@ pub enum DmlError {
 /// Validate a bare SQL identifier and double-quote it (`"` → `""`). The ONLY
 /// identifier-emission path the assembler uses — a schema-qualified / malformed
 /// name is rejected, so an injection through an identifier slot cannot reach the
-/// DB. Bare-identifier validation mirrors [`crate::render::plan::BackfillSpec`].
+/// DB. Bare-identifier validation mirrors [`crate::model::backfill::BackfillSpec`].
 fn quote_ident(what: &'static str, ident: &str) -> Result<String, DmlError> {
     quote_ident_for_dialect(what, ident, SqlDialect::Postgres)
 }
@@ -228,10 +228,10 @@ pub(crate) fn quote_ident_checked_for_dialect(
 /// `zeroship-migrate` routes through it, either DIRECTLY (the author-boundary
 /// helpers, whose input is already gated by an upstream `validate_ident`:
 /// `declarative` / `shadow` / `expand_contract` / `precondition`'s structured-check
-/// `quote_ident` / `ir_author` / `backend_sqlite`) or via the fail-closed engine
+/// `quote_ident` / `render::lower` / `apply::backend::sqlite`) or via the fail-closed engine
 /// wrapper [`quote_ident_checked`] (every **engine-supplied** identifier render
 /// seam — project schema, migrator role, meta schema, recovery index name — in
-/// `db` / `executor` / `precondition` / `baseline` / `command::runner` /
+/// `conn` / `executor` / `precondition` / `baseline` / `command::runner` /
 /// `author` / `backfill` / `role` / `journal`). Centralising it keeps every render
 /// seam byte-identical and makes the "no remaining bare escape seam" claim
 /// *structurally* true — enforced by [`no_bare_escape_seam_outside_dml`] below.
@@ -411,7 +411,7 @@ fn render_concat_ws(rendered: &[String], dialect: SqlDialect) -> String {
 
 /// The MAX literal part index `c.fn.splitPart` admits — the O(2ⁿ) inline-unroll
 /// bound (§9, `~17 KB` at `n=8`). MUST equal
-/// [`crate::validate::SPLIT_PART_MAX_N`] — the validator gates the envelope and
+/// [`crate::model::validate::SPLIT_PART_MAX_N`] — the validator gates the envelope and
 /// this renderer assumes it; a fixture pins their equality.
 pub(crate) const SPLIT_PART_MAX_N: i64 = crate::model::validate::SPLIT_PART_MAX_N;
 
@@ -906,7 +906,8 @@ pub fn assemble_delete(
     Ok(AssembledDml { template, binds: ctx.binds })
 }
 
-/// The rendered backfill clauses (the SQL strings the [`BackfillSpec`] carries).
+/// The rendered backfill clauses (the SQL strings the
+/// [`BackfillSpec`](crate::model::backfill::BackfillSpec) carries).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackfillClauses {
     /// The `SET` body (e.g. `"normalized" = lower("raw")`).
@@ -916,10 +917,10 @@ pub struct BackfillClauses {
 }
 
 /// Assemble a `backfill` op's `set` / `filter` into the inline SQL strings the
-/// [`BackfillSpec`](crate::render::plan::BackfillSpec) executor consumes. Renders for
+/// [`BackfillSpec`](crate::model::backfill::BackfillSpec) executor consumes. Renders for
 /// EITHER dialect (PR6b): the inline transform is dialect-rendered (the §9
 /// `c.fn.splitPart` lowering, NULL-skipping `concatWs`), and the PG (`backfill.rs`)
-/// or SQLite (`backend_sqlite::backfill_sql`) executor consumes the result.
+/// or SQLite (`apply::backend::sqlite::backfill_sql`) executor consumes the result.
 ///
 /// # Errors
 /// [`DmlError`] on a malformed identifier / empty `set` / an unrenderable node.
@@ -995,12 +996,15 @@ mod tests {
         let canonical = quote_ident_checked(schema).unwrap();
         // author (infallible-on-valid wrapper) — maps to its own error on failure.
         assert_eq!(crate::plan::author::quote_ident_for_test(schema).unwrap(), canonical);
-        assert_eq!(crate::ops::backfill::quote_ident_for_test(schema).unwrap(), canonical);
+        assert_eq!(
+            crate::apply::backend::postgres::backfill::quote_ident_for_test(schema).unwrap(),
+            canonical
+        );
         assert_eq!(crate::apply::role::quote_ident_for_test(schema).unwrap(), canonical);
         assert_eq!(crate::apply::journal::quote_ident_for_test(schema).unwrap(), canonical);
         // …and they fail closed uniformly on a NUL too.
         assert!(crate::plan::author::quote_ident_for_test("a\0b").is_err());
-        assert!(crate::ops::backfill::quote_ident_for_test("a\0b").is_err());
+        assert!(crate::apply::backend::postgres::backfill::quote_ident_for_test("a\0b").is_err());
         assert!(crate::apply::role::quote_ident_for_test("a\0b").is_err());
         assert!(crate::apply::journal::quote_ident_for_test("a\0b").is_err());
     }
@@ -1015,7 +1019,7 @@ mod tests {
     ///
     /// RED before this fix: 15+ render sites across `executor` / `precondition` /
     /// `baseline` / `command::runner` / `expand_contract` / `shadow` /
-    /// `declarative` / `db` / `ir_author` / `backend_sqlite` carried their own
+    /// `declarative` / `db` / `render::lower` / `apply::backend::sqlite` carried their own
     /// inline `replace('"', "\"\"")`, so this scan would have found bare seams
     /// outside `dml.rs` and FAILED. After the fix only `dml.rs` (the helper + this
     /// test's own needle strings) contains the pattern.

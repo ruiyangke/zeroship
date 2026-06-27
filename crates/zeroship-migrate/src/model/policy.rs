@@ -14,7 +14,7 @@
 /// *harmless* — there is no `pub` API that accepts it and no way to build a
 /// privileged `GuardConfig`. Within the crate, `Platform`/`Trusted` are
 /// produced ONLY inside [`GuardConfig::platform`] / [`GuardConfig::trusted`] /
-/// [`crate::db::ExecutorConfig::platform`] / [`crate::db::ExecutorConfig::trusted`],
+/// [`crate::conn::ExecutorConfig::platform`] / [`crate::conn::ExecutorConfig::trusted`],
 /// each of which REQUIRES the token (below) — so in-crate code (`submit`/`engine`)
 /// cannot mint either without holding the token (§5). `#[non_exhaustive]`
 /// remains valuable: it keeps the variant set evolvable and forces external
@@ -23,7 +23,7 @@
 /// [`GuardConfig`]: crate::guard::GuardConfig
 /// [`GuardConfig::platform`]: crate::guard::GuardConfig::platform
 /// [`GuardConfig::trusted`]: crate::guard::GuardConfig::trusted
-/// [`OperatorCapability`]: crate::guard::OperatorCapability
+/// [`OperatorCapability`]: crate::model::capability::OperatorCapability
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TrustProfile {
@@ -34,7 +34,7 @@ pub enum TrustProfile {
     /// schema allowlist). Constructed ONLY by `GuardConfig::platform` /
     /// `ExecutorConfig::platform`, which require an [`OperatorCapability`] token.
     ///
-    /// [`OperatorCapability`]: crate::guard::OperatorCapability
+    /// [`OperatorCapability`]: crate::model::capability::OperatorCapability
     Platform,
     /// **No untrusted boundary at all** — the public dbmate-like CLI posture
     /// where the operator owns the database. The deny-list / cross-schema /
@@ -47,7 +47,7 @@ pub enum TrustProfile {
     /// `ExecutorConfig::trusted`, which require an [`OperatorCapability`] token —
     /// `submit_migration` and any external crate can NEVER reach it.
     ///
-    /// [`OperatorCapability`]: crate::guard::OperatorCapability
+    /// [`OperatorCapability`]: crate::model::capability::OperatorCapability
     /// [`flags_for`]: crate::guard::flags_for
     Trusted,
 }
@@ -58,7 +58,7 @@ pub enum TrustProfile {
 /// (one allowed schema; everything else is a `CrossSchema` violation), matched
 /// CASE-INSENSITIVELY. A case-variant qualifier (`'APP1'` under `'app1'`) is
 /// admitted, then canonicalized to `project_schema` at render
-/// ([`crate::ir_author::IrAuthor::effective_schema`]) so gate and render never
+/// ([`crate::render::lower::IrAuthor::effective_schema`]) so gate and render never
 /// diverge. `Allowlist` is the **Platform** shape: a reference passes iff its
 /// schema is (case-insensitively) a member of the allowlist.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,11 +78,11 @@ impl SchemaScope {
     /// - `Allowlist(v)` ⇒ `schema` case-folds to a member of `v`.
     ///
     /// **Gate/render agreement (review F2).** The match is case-INsensitive, but
-    /// the render seam ([`crate::declarative::quote_ident`]) is byte-verbatim. So a
+    /// the render seam (`quote_ident`) is byte-verbatim. So a
     /// case-VARIANT qualifier the gate accepts (`'APP1'` under project `'app1'`)
     /// MUST be canonicalized to `project_schema` before render, or the op would land
     /// in a DIFFERENT case-sensitive Postgres schema than the one the gate blessed.
-    /// That canonicalization lives in [`crate::ir_author::IrAuthor::effective_schema`]
+    /// That canonicalization lives in [`crate::render::lower::IrAuthor::effective_schema`]
     /// — this `permits` only decides admission, never the rendered casing.
     #[must_use]
     pub fn permits(&self, schema: &str) -> bool {

@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 
-use zeroship_migrate::expr::{BinaryOp, Expr, UnaryOp};
+use zeroship_migrate::model::expr::{BinaryOp, Expr, UnaryOp};
 use zeroship_migrate::guard::GuardConfig;
-use zeroship_migrate::ir::{
+use zeroship_migrate::model::ir::{
     IrFlagsOverride, MigrationIr, Op, OrderDir, OrderItem, SelectAst, SelectItem, TableRef,
     ViewQuery, CURRENT_IR_VERSION,
 };
-use zeroship_migrate::ir_author::{IrAuthor, IrGuardedLowerError, IrLowerError, LiveSchema};
-use zeroship_migrate::validate::{
+use zeroship_migrate::render::lower::{IrAuthor, IrGuardedLowerError, IrLowerError, LiveSchema};
+use zeroship_migrate::model::validate::{
     validate_ir_scoped, Dialect, CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
 };
 use zeroship_migrate::{fold_ops, SchemaScope, SchemaSnapshot, ViewSnapshot};
@@ -166,7 +166,7 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
     assert!(matches!(
         err,
         IrGuardedLowerError::Lower(IrLowerError::VendorCapabilityDenied {
-            capability: zeroship_migrate::capability::VendorCapability::RawViewBody,
+            capability: zeroship_migrate::model::capability::VendorCapability::RawViewBody,
             ..
         })
     ));
@@ -270,7 +270,7 @@ fn fold_records_views_and_drop_removes_them() {
     let drop = Op::DropView {
         name: "active_users".to_string(),
         schema: None,
-        existence_guard: Some(zeroship_migrate::ir::ExistenceGuard::IfExists),
+        existence_guard: Some(zeroship_migrate::model::ir::ExistenceGuard::IfExists),
         materialized: None,
     };
     let folded = fold_ops(&[create, drop], SqlDialect::Postgres, SCHEMA).unwrap();

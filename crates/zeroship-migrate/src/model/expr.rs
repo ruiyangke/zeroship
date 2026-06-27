@@ -6,7 +6,7 @@
 //! the `.ir.json` as data. **It is NEVER parsed from text** — there is no lexer,
 //! no Pratt parser, no `libpg_query`, and therefore no Rust-vs-JS parser drift
 //! and no differential fuzzer (HIGH-1 dissolved, §3.3.1.1). Validation is a
-//! purely STRUCTURAL allow-list check over this enum ([`crate::validate`]).
+//! purely STRUCTURAL allow-list check over this enum ([`crate::model::validate`]).
 //!
 //! The variants are exactly:
 //!
@@ -22,11 +22,11 @@
 //!   (`UNSUPPORTED { kind: "expr" }` at load), there is no "unknown function"
 //!   parse path because there is no text to parse.
 //! - The numeric domain of a [`Literal`](Expr::Literal) is the constrained
-//!   [`IrScalar`](crate::ir::IrScalar) — a fractional/exponential/`>=2^53` value
+//!   [`IrScalar`](crate::model::ir::IrScalar) — a fractional/exponential/`>=2^53` value
 //!   is rejected at DESERIALIZE before any checksum runs (§2.5).
 //!
 //! NB: the per-dialect *rendering* of an `Expr` is the engine's job (Wave C /
-//! PR6a) — this module is the data + (with [`crate::validate`]) the structural
+//! PR6a) — this module is the data + (with [`crate::model::validate`]) the structural
 //! gate. Nothing here renders SQL.
 
 use schemars::JsonSchema;
@@ -163,9 +163,12 @@ pub enum CastTarget {
 
 /// The CLOSED expression AST node (§3.3.1). Internally tagged on `"node"`,
 /// camel-cased (`{"node":"colRef","name":"first"}`). NO `untagged`, NO `flatten`
-/// — same discipline as [`Op`](crate::ir::Op), so schemars derives a clean
+/// — same discipline as [`Op`](crate::model::ir::Op), so schemars derives a clean
 /// discriminated union and serde rejects any out-of-set node tag at deserialize.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(
+    description = "The CLOSED expression AST node (§3.3.1). Internally tagged on `\"node\"`,\ncamel-cased (`{\"node\":\"colRef\",\"name\":\"first\"}`). NO `untagged`, NO `flatten`\n— same discipline as [`Op`](crate::ir::Op), so schemars derives a clean\ndiscriminated union and serde rejects any out-of-set node tag at deserialize."
+)]
 #[serde(tag = "node", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
 pub enum Expr {
     /// A column reference (`c("name")`). The name is a plain string, resolved

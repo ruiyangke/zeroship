@@ -46,8 +46,8 @@ use crate::guard::{GuardError, SqlGuard};
 use crate::apply::journal::{self, AppliedEntry, JournalError, Phase};
 use crate::model::migration::{Migration, MigrationId};
 
-/// The Postgres leaf operations the [`PostgresBackend`](crate::backend::PostgresBackend)
-/// drives the [`MigrationBackend`](crate::backend::MigrationBackend) trait
+/// The Postgres leaf operations the [`PostgresBackend`](crate::apply::backend::PostgresBackend)
+/// drives the [`MigrationBackend`](crate::apply::backend::MigrationBackend) trait
 /// through. These are the EXACT pre-seam executor functions — the dialect-coupled
 /// session/lock/txn/up/down/parse/precondition leaves — re-exported under one
 /// path so the backend impl can name them without exposing them crate-wide as
@@ -287,7 +287,7 @@ pub enum ApplyError {
     /// A pending squash migration (`supersedes = [v1..vN]`) was about to run its
     /// `up`, but ALL of `[v1..vN]` are already net-applied — running `S.up` would
     /// re-create existing objects (double-apply). On an existing DB the squash must
-    /// be recorded WITHOUT running its `up` via [`crate::squash`]; apply refuses
+    /// be recorded WITHOUT running its `up` via [`crate::ops::squash`]; apply refuses
     /// here before any execution. Nothing was applied.
     #[error(
         "squash migration {version} cannot be applied: all the versions it supersedes are already \
@@ -300,7 +300,7 @@ pub enum ApplyError {
     /// A pending squash migration (`supersedes = [v1..vN]`) has a PARTIAL overlap
     /// with the journal: some but not all of `[v1..vN]` are net-applied. A squash
     /// may only run on a FRESH set (none applied) or be recorded on a fully-applied
-    /// set (all applied via [`crate::squash`]); a partial set is an inconsistent
+    /// set (all applied via [`crate::ops::squash`]); a partial set is an inconsistent
     /// state. Refused before any execution; nothing was applied.
     #[error(
         "squash migration {version} has a partial overlap: {applied} of {total} superseded \
@@ -334,7 +334,7 @@ pub enum ApplyError {
         shared: String,
     },
     /// A pending migration carried a precondition (v3 Plan D) with
-    /// [`OnUnmet::Halt`](crate::precondition::OnUnmet::Halt) that was UNMET (it
+    /// [`OnUnmet::Halt`](crate::model::precondition::OnUnmet::Halt) that was UNMET (it
     /// evaluated false), or a precondition that could not be evaluated at all (a
     /// guard-denied / malformed `SqlBoolean`, an invalid identifier). Fail-closed:
     /// the whole apply is aborted before this migration's `up` runs, and NOTHING
@@ -365,7 +365,7 @@ pub enum ApplyError {
     /// same supplied set (v3 Plan E re-critic #3d). Repeatables run AFTER all
     /// versioned migrations, so a once-only migration can never have a repeatable
     /// dependency satisfied in order. This is a DEDICATED error (not the misleading
-    /// [`MissingDependency`] the partition would otherwise raise). Refused in the
+    /// `MissingDependency` the partition would otherwise raise). Refused in the
     /// pre-flight before any execution; nothing was applied.
     #[error(
         "once-only migration {version} may not depend on repeatable {dependency}: a repeatable \
@@ -403,8 +403,8 @@ pub enum ApplyError {
     /// the target object ALREADY PRESENT with a shape that DIVERGES from (or cannot
     /// be proven equal to) the declared one. This is a fail-closed drift error — the
     /// catalog probe ran under the held advisory lock + open txn and
-    /// [`decide`](crate::guard_probe::decide) returned
-    /// [`FailDrift`](crate::guard_probe::GuardVerdict::FailDrift); the transaction
+    /// [`decide`](crate::render::existence_probe::decide) returned
+    /// [`FailDrift`](crate::render::existence_probe::GuardVerdict::FailDrift); the transaction
     /// was rolled back and NOTHING was applied or journaled. Never a silent skip
     /// over a divergence (the whole point of the guard). Surfaces to the deploy
     /// path's creator-facing error like any other [`ApplyError`].
@@ -428,7 +428,7 @@ pub enum ApplyError {
     },
     /// An engine-supplied identifier (project schema / migrator role / meta schema)
     /// was not quotable (empty or NUL-bearing) at a render seam — fail-closed
-    /// rather than interpolate it. Maps [`crate::dml::IdentQuoteError`]; the
+    /// rather than interpolate it. Maps [`crate::render::dml::IdentQuoteError`]; the
     /// meta-schema journal-write seams route the same byte-logic through
     /// [`JournalError`] (which also carries this `From`).
     #[error("apply: {0}")]
@@ -524,17 +524,17 @@ pub(crate) async fn restore_session(
 }
 
 /// The effective `statement_timeout` for a migration: its per-migration
-/// override ([`crate::migration::MigrationFlags::timeout_ms`], H3) if set, else
+/// override ([`crate::model::migration::MigrationFlags::timeout_ms`], H3) if set, else
 /// the executor-wide default.
 fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
     m.flags.timeout_ms.unwrap_or_else(|| cfg.statement_timeout_ms())
 }
 
 /// The effective `lock_timeout` for a migration: its per-migration override
-/// ([`crate::migration::MigrationFlags::lock_timeout_ms`]) if set, else the
+/// ([`crate::model::migration::MigrationFlags::lock_timeout_ms`]) if set, else the
 /// SHORT executor-wide default (the lock-safety envelope, 3s). This is the
 /// per-deploy maintenance-window knob that makes the doc on
-/// [`crate::db::PgConfinement::lock_timeout`] honest: a single planned migration
+/// [`crate::conn::PgConfinement::lock_timeout`] honest: a single planned migration
 /// can legitimately raise ITS OWN lock-acquisition budget (run during a quiet
 /// window), while every other migration keeps the conservative fail-fast
 /// default. It mirrors [`effective_timeout_ms`] exactly.
@@ -574,7 +574,7 @@ fn set_local_session_sql(
 /// caller `RESET ROLE`s before the journal write (C1).
 ///
 /// The migrator role is an engine-supplied identifier, so it is quoted through
-/// the ONE shared engine seam ([`crate::dml::quote_ident_checked`]) — fail-closed
+/// the ONE shared engine seam ([`crate::render::dml::quote_ident_checked`]) — fail-closed
 /// on an empty / NUL name, byte-identical to the prior `escape_quote_ident` for
 /// every real role.
 fn set_local_role_sql(
@@ -742,7 +742,7 @@ fn non_transactional_down_reason(down: &str) -> Option<String> {
 ///
 /// `approval` is the caller's approval decision. This is the executor's OWN
 /// defense-in-depth approval gate (design §1.6): if any pending migration is
-/// flagged [`destructive`](crate::migration::MigrationFlags::destructive) and
+/// flagged [`destructive`](crate::model::migration::MigrationFlags::destructive) and
 /// `approval != Approval::Approved`, the apply is refused with
 /// [`ApplyError::ApprovalRequired`] before any migration executes — independent
 /// of (and additional to) the engine's gate, so a caller driving [`apply`]
@@ -1491,7 +1491,7 @@ fn order_repeatables<'a>(
 /// The verdict of evaluating a migration's preconditions (v3 Plan D).
 ///
 /// `pub` because it is the return type of
-/// [`MigrationBackend::evaluate_preconditions`](crate::backend::MigrationBackend::evaluate_preconditions)
+/// [`MigrationBackend::evaluate_preconditions`](crate::apply::backend::MigrationBackend::evaluate_preconditions)
 /// — the preconditions seam rides through the (public) trait so the generic
 /// apply body never holds a concrete connection. The variants carry no data; a
 /// consumer can only match on the apply/skip decision.
@@ -1506,7 +1506,7 @@ pub enum PreconditionVerdict {
 
 /// The per-migration precondition verdict loop now lives in
 /// [`crate::apply::precondition::evaluate_all`] — the **Postgres** leaf reached only via
-/// [`MigrationBackend::evaluate_preconditions`](crate::backend::MigrationBackend::evaluate_preconditions)
+/// [`MigrationBackend::evaluate_preconditions`](crate::apply::backend::MigrationBackend::evaluate_preconditions)
 /// (multi-engine abstraction C3). The generic apply body calls the backend method
 /// (`backend.evaluate_preconditions(cfg, m)`); it holds no `&Client` and runs no
 /// `pg_query` / `information_schema` query directly.
@@ -1610,7 +1610,7 @@ fn check_expand_contract_gate(
 ///   from both the supplied set and the journal.
 /// - [`ApplyError::DependencyCycle`] — the pending edges form a cycle.
 ///
-/// `pub(crate)` so the read-only status API ([`crate::status`]) computes its
+/// `pub(crate)` so the read-only status API ([`crate::ops::status`]) computes its
 /// `pending` list in the **exact same topo order** apply uses — there is one
 /// pending-ordering implementation, never a re-derived one.
 pub(crate) fn order_pending<'a>(
@@ -1651,7 +1651,7 @@ pub(crate) fn order_pending<'a>(
 /// The SHARED canonical ordering core (M2): a deterministic, **version-tiebroken
 /// topological sort** of `nodes` over their `depends_on` edges. Both the apply
 /// path ([`order_pending`]) and the integrity manifest ([`canonical_set_order`],
-/// folded by [`crate::manifest::compute_manifest`]) order through this one
+/// folded by [`crate::plan::manifest::compute_manifest`]) order through this one
 /// implementation, so the order the manifest blesses can NEVER diverge from the
 /// order the executor runs.
 ///
@@ -1733,7 +1733,7 @@ fn topo_order_version_tiebroken<'a>(
 }
 
 /// The CANONICAL EXECUTED ORDER of a FULL supplied set (M2), used by
-/// [`crate::manifest::compute_manifest`] to fold the manifest over the order the
+/// [`crate::plan::manifest::compute_manifest`] to fold the manifest over the order the
 /// executor will actually run — NOT the cosmetic slice order.
 ///
 /// This is [`topo_order_version_tiebroken`] over the WHOLE set with NO journal
@@ -1772,7 +1772,7 @@ pub(crate) fn canonical_set_order(migrations: &[Migration]) -> Vec<&Migration> {
 /// A version `v_i` is satisfied-by-supersession when a squash `S` (with `v_i ∈
 /// S.supersedes`) is either:
 /// - **net-applied in the journal** (`journal_superseded`, read via
-///   [`crate::journal::superseded_versions`]); or
+///   [`crate::apply::journal::superseded_versions`]); or
 /// - **present in the supplied set** — whether already net-applied OR pending. A
 ///   pending `S` will run its `up` THIS batch, so its superseded versions must not
 ///   also run (`order_pending` excludes them); an already-applied `S` is also
@@ -1781,7 +1781,7 @@ pub(crate) fn canonical_set_order(migrations: &[Migration]) -> Vec<&Migration> {
 ///
 /// The squash `S` itself is never added to the result (it is not superseded by
 /// itself; it runs or is already applied). Used by both [`apply_locked`] and the
-/// read-only [`crate::status`] so their "pending" views agree.
+/// read-only [`crate::ops::status`] so their "pending" views agree.
 pub(crate) fn compute_superseded(
     migrations: &[Migration],
     journal_superseded: &[String],
@@ -1851,7 +1851,7 @@ fn check_no_overlapping_squashes(
 /// the set and NOT net-applied) requires that NONE of `[v1..vN]` are SATISFIED —
 /// the fresh-DB path, where `S.up` builds the schema and the superseded versions
 /// are skipped. If ALL of `[v1..vN]` are satisfied, `S.up` would re-create existing
-/// objects (double-apply): the correct path is [`crate::squash`] (record the
+/// objects (double-apply): the correct path is [`crate::ops::squash`] (record the
 /// supersession WITHOUT running `up`), so apply refuses with
 /// [`ApplyError::SquashAlreadyApplied`]. A PARTIAL set (some but not all satisfied)
 /// is an inconsistent state refused with [`ApplyError::SquashPartialOverlap`].
@@ -1870,7 +1870,7 @@ fn check_no_overlapping_squashes(
 ///
 /// # Errors
 /// - [`ApplyError::SquashAlreadyApplied`] — a pending squash whose superseded set
-///   is fully satisfied (use [`crate::squash`] instead of apply).
+///   is fully satisfied (use [`crate::ops::squash`] instead of apply).
 /// - [`ApplyError::SquashPartialOverlap`] — a pending squash whose superseded set
 ///   is partially satisfied.
 fn check_squash_all_or_none(
@@ -2195,7 +2195,7 @@ pub(crate) async fn apply_transactional(
 
 /// Transactional apply of a single **parameterized DML** step (`op.*` DSL §2.3.2)
 /// — the PG executor behind
-/// [`MigrationBackend::run_dml_step`](crate::backend::MigrationBackend::run_dml_step).
+/// [`MigrationBackend::run_dml_step`](crate::apply::backend::MigrationBackend::run_dml_step).
 ///
 /// Mirrors [`apply_transactional`]'s `BEGIN; SET LOCAL …; SET LOCAL ROLE; <stmt>;
 /// RESET ROLE; INSERT journal; COMMIT` discipline, but the statement is the DML
@@ -2785,7 +2785,7 @@ pub enum RollbackError {
     Journal(#[from] JournalError),
     /// An engine-supplied identifier (migrator role / project schema / meta schema)
     /// was not quotable (empty or NUL-bearing) at a render seam — fail-closed
-    /// rather than interpolate it. Maps [`crate::dml::IdentQuoteError`].
+    /// rather than interpolate it. Maps [`crate::render::dml::IdentQuoteError`].
     #[error("rollback: {0}")]
     IdentQuote(#[from] crate::render::dml::IdentQuoteError),
     /// A dialect-level backend error whose message is already the intended
@@ -2822,7 +2822,7 @@ pub enum RollbackError {
     /// otherwise fail LATE inside the transaction with Postgres `25001`
     /// ("cannot run inside a transaction block"), surfacing as a confusing
     /// [`DownFailed`](RollbackError::DownFailed). We detect it up-front (same
-    /// classifier apply uses, [`crate::classify`]) and refuse the WHOLE rollback
+    /// classifier apply uses, [`crate::classify()`]) and refuse the WHOLE rollback
     /// before any `down` runs — nothing is rolled back. The safe path is
     /// **roll-forward**: author a compensating migration (its own non-transactional
     /// `up` goes through apply's two-phase non-txn path).
@@ -3479,7 +3479,7 @@ mod pg_confinement_shape_tests {
     //! Pins the M2 confinement refactor: the **PG** apply leaf still emits its
     //! `SET LOCAL search_path` / `SET LOCAL ROLE` / `SET LOCAL statement_timeout`
     //! and `SET LOCAL lock_timeout` bracket from the
-    //! [`PgConfinement`](crate::db::PgConfinement) block (now grouped under
+    //! [`PgConfinement`](crate::conn::PgConfinement) block (now grouped under
     //! `cfg.pg`, not flat on the neutral config), and a default (SQLite-shaped
     //! construction reuses this same `new`) carries the INERT PG confinement —
     //! never PG role/cross-schema confinement of its own.
@@ -3858,7 +3858,7 @@ mod order_tests {
 #[allow(clippy::future_not_send)] // compio single-thread runtime; the stack is !Send by design.
 mod trusted_apply_pg {
     use super::*;
-    use crate::guard::OperatorCapability;
+    use crate::model::capability::OperatorCapability;
     use crate::apply::journal;
     use crate::model::migration::migration_id_for_version;
     use crate::model::migration::{Checksum, ChecksumInput, MigrationFlags};

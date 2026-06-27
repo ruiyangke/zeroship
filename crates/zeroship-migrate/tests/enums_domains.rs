@@ -2,8 +2,8 @@ use zeroship_migrate::{
     BinaryOp, ColType, Expr, IrColumn, IrDefault, IrFlagsOverride, IrScalar, IrAuthor,
     IrLowerError, LiveSchema, MigrationIr, Op, CURRENT_IR_VERSION,
 };
-use zeroship_migrate::guard_probe::{GuardDir, GuardProbe};
-use zeroship_migrate::ir::ExistenceGuard;
+use zeroship_migrate::{GuardDir, GuardProbe};
+use zeroship_migrate::model::ir::ExistenceGuard;
 use zeroship_schema::query::SqlDialect;
 
 const SCHEMA: &str = "app";

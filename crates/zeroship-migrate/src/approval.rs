@@ -3,7 +3,7 @@
 //!
 //! [`Approval`] lived in [`crate::engine`] originally, where it gated only the
 //! public [`MigrationEngine`](crate::engine::MigrationEngine) surface. But the
-//! executor ([`crate::executor::apply`] / [`crate::executor::rollback`]) is itself
+//! executor ([`crate::apply::executor::apply`] / [`crate::apply::executor::rollback`]) is itself
 //! a public entry point a caller (or a rollback→reapply retry loop) can drive
 //! directly, bypassing the engine gate. The executor already re-runs the guard +
 //! the least-privilege role rather than trusting the engine; the approval gate is

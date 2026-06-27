@@ -22,8 +22,8 @@
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zeroship_migrate::backend_sqlite::Mode;
-use zeroship_migrate::declarative::{CollectionDescriptor, FieldDescriptor};
+use zeroship_migrate::apply::backend::sqlite::Mode;
+use zeroship_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor};
 use zeroship_migrate::{
     apply_bundle_ir_sqlite, apply_bundle_ir_sqlite_catalog, Approval, ExecutorConfig, GuardConfig,
     SqliteBackend, SqliteIrApplyError,

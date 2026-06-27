@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zeroship_migrate::backend_sqlite::Mode;
+use zeroship_migrate::apply::backend::sqlite::Mode;
 use zeroship_migrate::{
     desired_snapshot, CollectionDescriptor, DeclarativeAuthor, FieldDescriptor, IndexDescriptor,
     Migration, RebuildError, SchemaSnapshot, SqliteBackend, SqliteRebuild, SqliteRebuildSpec,
@@ -214,7 +214,7 @@ async fn type_change_rebuild_preserves_data_and_recreates_index() {
     let v = rb.migration.version.as_str();
     assert!(
         net.iter().any(|e| e.version == v
-            && e.phase == zeroship_migrate::journal::Phase::Completed),
+            && e.phase == zeroship_migrate::apply::journal::Phase::Completed),
         "the rebuild must be journaled completed"
     );
 
@@ -1572,7 +1572,7 @@ async fn drop_foreign_key_via_rebuild_removes_the_fk() {
 // ---------------------------------------------------------------------------
 
 fn simple_migration(name: &str, up: &str) -> Migration {
-    use zeroship_migrate::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
+    use zeroship_migrate::model::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
     let flags = MigrationFlags::default();
     let checksum = Checksum::of(&ChecksumInput {
         up,
@@ -1718,7 +1718,7 @@ async fn rebuild_one_seam_refuses_destructive_rebuild_outside_version_scope() {
 
 /// A destructive journal migration for a directly-constructed rebuild spec.
 fn rebuild_migration(table: &str, spec: &SqliteRebuildSpec) -> Migration {
-    use zeroship_migrate::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
+    use zeroship_migrate::model::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
     let flags = MigrationFlags {
         destructive: true,
         requires_approval: true,

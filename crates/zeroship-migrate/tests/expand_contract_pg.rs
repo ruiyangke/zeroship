@@ -12,9 +12,9 @@
 //! test runs in its OWN meta + project schema (unique token) for isolation.
 
 use compio_postgres::Client;
-use zeroship_migrate::executor::{ApplyError, LockMode, RollbackRequest, RollbackTarget};
+use zeroship_migrate::apply::executor::{ApplyError, LockMode, RollbackRequest, RollbackTarget};
 use zeroship_migrate::{
-    apply, migrator_role_name, provision_migrator, rollback, role::deprovision_migrator,
+    apply, migrator_role_name, provision_migrator, rollback, apply::role::deprovision_migrator,
     run_backfill, Approval, ApprovalScope, BackfillSpec, Checksum, ExecutorConfig, ExpandContractAuthor,
     ExpandContractPlan, GuardConfig, Migration, MigrationBackend, MigrationFlags, MigrationId,
     MigrationEngine, OnlineIntent, OnlinePhase, PostgresBackend, RawSqlAuthor, SqlGuard,

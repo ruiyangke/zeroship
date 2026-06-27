@@ -4,7 +4,7 @@
 //! (`ExistenceGuard::{IfNotExists,IfExists}` on every DDL op) but DEFERRED guard
 //! EXECUTION — every guarded op was REFUSED fail-closed at lower. This module is
 //! the execution: a render-time-resolved, dialect-neutral [`GuardProbe`] is stamped
-//! onto each lowered [`Migration`](crate::migration::Migration); at apply time the
+//! onto each lowered [`Migration`](crate::model::migration::Migration); at apply time the
 //! executor reads the LIVE catalog under the ALREADY-HELD project advisory lock +
 //! the open per-step transaction, and [`decide`] returns a [`GuardVerdict`]:
 //!
@@ -49,7 +49,7 @@
 //!   zone` / `jsonb` / `uuid`→`text` snapshot vs a `text` live affinity,
 //!   `double precision`→`real`, `bytea`→`blob`). The SQLite leg of [`decide`] folds
 //!   BOTH the declared and the live data_type through
-//!   [`crate::declarative::sqlite_canonical_type`] — the SAME affinity fold the
+//!   [`crate::render::declarative::sqlite_canonical_type`] — the SAME affinity fold the
 //!   declarative DIFFER uses — so a clean guarded `createTable`/`addColumn` re-run is
 //!   idempotent for every type, while a genuine affinity change (string→number, i.e.
 //!   `text` vs `real`) still maps to two distinct canonical tokens and IS a
@@ -70,193 +70,9 @@
 //! addConstraint kind), so they are byte-comparable against the introspected
 //! [`SchemaSnapshot`](crate::model::snapshot::SchemaSnapshot).
 
+use crate::model::probe::{ExpectColumn, GuardDir, GuardProbe};
 use crate::model::snapshot::SchemaSnapshot;
-use crate::model::ir::ExistenceGuard;
 use zeroship_schema::query::{renderer as schema_renderer, SqlDialect};
-
-/// One declared column's verifiable shape for a `createTable ifNotExists`
-/// [`GuardProbe::Table`] probe. Built from the SAME shared snapshot the CREATE
-/// renders from, so the `data_type`/`nullable` strings are byte-comparable against
-/// introspection.
-///
-/// **F1/F3** — both legs verify presence + the canonical column *affinity*
-/// (data_type folded through [`crate::declarative::sqlite_canonical_type`] on the
-/// SQLite leg, raw `information_schema` on PG) + nullability. They deliberately do
-/// NOT carry the un-collapsed SDK facet: a `createTable`/`addColumn ifNotExists`
-/// re-run over a present-matching object is the idempotent case and is a
-/// `SatisfiedNoop` — the within-text-affinity facet blind spot is a documented SQLite
-/// divergence the DIFFER also accepts (and carries no provable physical divergence on
-/// SQLite). See the module-level F1 note.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ExpectColumn {
-    /// Column name.
-    pub name: String,
-    /// The introspectable data-type spelling (PG type / SQLite affinity).
-    pub data_type: String,
-    /// Declared nullability.
-    pub nullable: bool,
-}
-
-/// The guard DIRECTION carried on a probe (a 1:1 copy of [`ExistenceGuard`], kept
-/// local so the probe module owns its decision vocabulary; `ExistenceGuard` is
-/// `Copy` and converts in via [`From`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum GuardDir {
-    /// Run only if the target object is ABSENT (`create*`/`add*`).
-    IfNotExists,
-    /// Run only if the target object is PRESENT (`drop*`/`rename`/`alter*`).
-    IfExists,
-}
-
-impl From<ExistenceGuard> for GuardDir {
-    fn from(g: ExistenceGuard) -> Self {
-        match g {
-            ExistenceGuard::IfNotExists => GuardDir::IfNotExists,
-            ExistenceGuard::IfExists => GuardDir::IfExists,
-        }
-    }
-}
-
-/// A render-time-resolved, dialect-neutral descriptor of WHAT to probe and WHICH
-/// shape to verify. Built in `lower_one_op` from the op (which already has the
-/// columns/type/nullable/eff_schema in hand) and stamped onto each lowered
-/// [`Migration`](crate::migration::Migration). NOT folded into the migration
-/// checksum (the IR-path anchor `Checksum::of_ir` over the op-list already covers
-/// the guard); see `migration.rs`.
-///
-/// Derives `Serialize`/`Deserialize` only so `Migration` can keep its derives —
-/// the field is `skip_serializing_if = "Option::is_none"`, so the on-disk `.sql`
-/// / golden wire is unchanged (it is never set on those paths) and the in-memory
-/// plan round-trips.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum GuardProbe {
-    /// `createTable ifNotExists` (`expect_columns` = the declared
-    /// `(name, data_type, nullable)`) or `dropTable ifExists` (empty
-    /// `expect_columns` — presence-only).
-    Table {
-        /// The effective schema the table lives in.
-        schema: String,
-        /// The table name.
-        table: String,
-        /// Guard direction.
-        direction: GuardDir,
-        /// The declared columns to shape-verify (`ifNotExists`); empty for the
-        /// presence-only `ifExists` drop.
-        expect_columns: Vec<ExpectColumn>,
-    },
-    /// `addColumn ifNotExists` (`expect` = `Some((data_type, nullable))`) or
-    /// `dropColumn ifExists` (`expect` = `None`, presence-only).
-    Column {
-        /// The effective schema.
-        schema: String,
-        /// The table the column belongs to.
-        table: String,
-        /// The column name.
-        column: String,
-        /// Guard direction.
-        direction: GuardDir,
-        /// The declared `(data_type, nullable)` to verify (`ifNotExists`); `None`
-        /// for the presence-only `ifExists` drop. The SQLite leg compares the
-        /// canonical affinity (`sqlite_canonical_type` fold), consistent with the
-        /// differ; PG compares the raw `information_schema` spelling.
-        expect: Option<(String, bool)>,
-    },
-    /// `createIndex ifNotExists` (`expect` = `Some((unique, columns))`) or
-    /// `dropIndex ifExists` (`expect` = `None`, presence-only).
-    Index {
-        /// The effective schema.
-        schema: String,
-        /// The table the index covers.
-        table: String,
-        /// The index name.
-        name: String,
-        /// Guard direction.
-        direction: GuardDir,
-        /// The declared `(unique, columns)` to verify (`ifNotExists`); `None` for
-        /// the presence-only `ifExists` drop.
-        expect: Option<(bool, Vec<String>)>,
-    },
-    /// `addConstraint … ifNotExists` (`expect_kind` = the declared catalog kind:
-    /// `"PRIMARY KEY"` / `"FOREIGN KEY"` / `"UNIQUE"` / `"CHECK"`) or
-    /// `dropConstraint ifExists` (`expect_kind` = `None`, presence-only).
-    Constraint {
-        /// The effective schema.
-        schema: String,
-        /// The table the constraint is on.
-        table: String,
-        /// The constraint name.
-        name: String,
-        /// Guard direction.
-        direction: GuardDir,
-        /// The declared catalog kind to compare (`ifNotExists`); `None` for the
-        /// presence-only `ifExists` drop. NOTE: a PRESENT same-name constraint
-        /// under `ifNotExists` is `FailDrift` even on a kind MATCH **when
-        /// `expect_definition` is `None`** — the live `pg_get_constraintdef` body
-        /// cannot be proven equal to an IR-authored un-normalized constraint body,
-        /// so we refuse rather than skip (see the module docs).
-        expect_kind: Option<String>,
-        /// **F2 fix** — the declared constraint definition in the EXACT
-        /// `pg_get_constraintdef` spelling, set ONLY when the authoring path can
-        /// produce a byte-comparable body (the `createTable` deferred-FK unit, whose
-        /// `definition` is built by [`crate::declarative::fk_definition_pg`] to round-
-        /// trip byte-for-byte against the live catalog). When `Some`, a PRESENT
-        /// same-name + same-kind constraint is structurally compared: a byte-equal
-        /// live definition is an idempotent `SatisfiedNoop` (a re-run of the guarded
-        /// `createTable ifNotExists` is idempotent); a divergent one is `FailDrift`
-        /// naming `definition`. `None` on the stand-alone `addConstraint ifNotExists`
-        /// path (the IR carries an un-normalized body that CANNOT be proven equal —
-        /// the MED fail-closed rule applies) and on the presence-only `ifExists` drop.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        expect_definition: Option<String>,
-    },
-    /// `dropView ifExists`: presence-only on the top-level view name. Definitions
-    /// are not compared because view SQL text is diagnostic metadata in
-    /// [`SchemaSnapshot`]; the drop guard only decides present → run, absent →
-    /// journaled no-op.
-    View {
-        /// The effective schema.
-        schema: String,
-        /// The view name.
-        name: String,
-        /// Guard direction.
-        direction: GuardDir,
-    },
-    /// `dropSequence ifExists`: presence-only on a standalone sequence name.
-    Sequence {
-        /// The effective schema.
-        schema: String,
-        /// The sequence name.
-        name: String,
-        /// Guard direction.
-        direction: GuardDir,
-    },
-    /// `dropEnum ifExists` / `dropDomain ifExists`: presence-only on a schema-level
-    /// named type, with the object class verified so a same-name different type
-    /// fails closed rather than being silently skipped.
-    NamedType {
-        /// The effective schema.
-        schema: String,
-        /// The named type.
-        name: String,
-        /// `"enum"` or `"domain"`.
-        kind: String,
-        /// Guard direction.
-        direction: GuardDir,
-    },
-    /// `alterColumnType` / `alterColumnNullability` / `renameColumn` `ifExists`:
-    /// the SOURCE column must EXIST (presence-only — an alter/rename intentionally
-    /// CHANGES the shape, so there is no shape to verify).
-    ColumnPresence {
-        /// The effective schema.
-        schema: String,
-        /// The table the column belongs to.
-        table: String,
-        /// The source column name.
-        column: String,
-        /// Guard direction (always `IfExists` for this variant).
-        direction: GuardDir,
-    },
-}
 
 impl GuardProbe {
     /// The effective schema this probe reads — the `snapshot_schema` argument the
@@ -319,7 +135,7 @@ pub enum GuardVerdict {
 /// `numeric`/`blob`). A raw `expect != live` compare therefore false-drifts on EVERY
 /// non-text-affinity type on SQLite (a `timestamp with time zone` snapshot vs a
 /// `text` live affinity, etc.). On the SQLite leg we therefore canonicalize BOTH
-/// sides through [`crate::declarative::sqlite_canonical_type`] — the SAME affinity
+/// sides through [`crate::render::declarative::sqlite_canonical_type`] — the SAME affinity
 /// fold the differ uses (`declarative.rs`) — so a guarded `createTable`/`addColumn`
 /// re-run is idempotent for every type, while a real affinity change still diverges.
 #[must_use]
@@ -556,7 +372,7 @@ struct ExpectColumnShape<'a> {
 /// type on SQLite (a `timestamp with time zone` / `jsonb` / `uuid`→`text` snapshot
 /// vs a `text` live affinity, `double precision`→`real`, `bytea`→`blob`, …). On the
 /// SQLite leg we therefore fold BOTH sides through
-/// [`crate::declarative::sqlite_canonical_type`] — the SAME affinity fold the
+/// [`crate::render::declarative::sqlite_canonical_type`] — the SAME affinity fold the
 /// declarative differ uses — so a clean guarded re-run is idempotent for every
 /// type, while a real affinity change (`text` vs `real`, i.e. string→number) still
 /// maps to two DIFFERENT canonical tokens and IS a divergence. On PG both sides are

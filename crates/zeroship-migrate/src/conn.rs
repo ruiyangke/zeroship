@@ -22,7 +22,7 @@ pub enum ConnectError {
 /// strategy inputs that are PG-shaped and meaningless to a non-PG engine
 /// (multi-engine abstraction M2, design §2.3 / §1.5).
 ///
-/// These are NOT engine-agnostic. The PG apply leaf (`crate::executor::pg`)
+/// These are NOT engine-agnostic. The PG apply leaf (`crate::apply::executor::pg`)
 /// reads them to emit its confinement bracket — `SET LOCAL search_path` (built
 /// from `project_schema` + `extension_schemas`), `SET LOCAL ROLE <migrator>`,
 /// and the mandatory `SET LOCAL statement_timeout` / `lock_timeout` — plus the
@@ -74,7 +74,7 @@ pub struct PgConfinement {
     /// This field is the executor-WIDE default. For a planned maintenance
     /// window, a single migration raises ITS OWN lock-acquisition budget via the
     /// per-migration override
-    /// [`crate::migration::MigrationFlags::lock_timeout_ms`] (mirrors
+    /// [`crate::model::migration::MigrationFlags::lock_timeout_ms`] (mirrors
     /// `timeout_ms`), so the conservative fail-fast default stays in force for
     /// every other migration in the same deploy.
     pub lock_timeout: Duration,
@@ -83,7 +83,7 @@ pub struct PgConfinement {
     /// the **line-2** DB-privilege defense). `None` runs as the connecting
     /// (admin) role — used only by tests / single-tenant dev where the role
     /// model is not provisioned. In the platform this is always `Some`,
-    /// matching a role created by [`crate::role::provision_migrator`].
+    /// matching a role created by [`crate::apply::role::provision_migrator`].
     pub migrator_role: Option<String>,
     /// The schema(s) that host shared **extension types/functions** the engine
     /// emits UNQUALIFIED (e.g. pgvector's `vector(N)`, `PostGIS`'s
@@ -186,7 +186,7 @@ pub struct ExecutorConfig {
     /// [`GuardConfig`](crate::guard::GuardConfig) without a fresh out-of-band mint
     /// — the holder already proved operator legitimacy when it constructed this
     /// config. `None` for every Confined config.
-    pub(crate) operator_cap: Option<crate::guard::OperatorCapability>,
+    pub(crate) operator_cap: Option<crate::model::capability::OperatorCapability>,
 }
 
 impl ExecutorConfig {
@@ -245,7 +245,7 @@ impl ExecutorConfig {
     }
 
     /// Build a **Platform** executor config (design §4.1 / §5). REQUIRES a
-    /// [`OperatorCapability`](crate::guard::OperatorCapability) token, mintable
+    /// [`OperatorCapability`](crate::model::capability::OperatorCapability) token, mintable
     /// only inside `command::runner`, so neither the control plane
     /// (external; cannot name `Platform` nor mint the token) nor any in-crate
     /// module (`submit`/`engine`; cannot mint the token) can flip the executor
@@ -256,7 +256,7 @@ impl ExecutorConfig {
     /// Phase 3); the token is the in-crate enforcement primitive.
     #[must_use]
     pub(crate) fn platform(
-        cap: &crate::guard::OperatorCapability,
+        cap: &crate::model::capability::OperatorCapability,
         project_id: impl Into<String>,
         project_schema: impl Into<String>,
         schemas: Vec<String>,
@@ -272,7 +272,7 @@ impl ExecutorConfig {
 
     /// Build a **Trusted** executor config — the public dbmate-like posture
     /// (Track A). REQUIRES an
-    /// [`OperatorCapability`](crate::guard::OperatorCapability) token, EXACTLY
+    /// [`OperatorCapability`](crate::model::capability::OperatorCapability) token, EXACTLY
     /// like [`ExecutorConfig::platform`], mintable only inside
     /// `command::runner`. So neither the control plane (external; cannot
     /// name `Trusted` nor mint the token) nor any in-crate creator-path module
@@ -290,7 +290,7 @@ impl ExecutorConfig {
     /// CLI, Phase A2); the token is the in-crate enforcement primitive.
     #[must_use]
     pub(crate) fn trusted(
-        cap: &crate::guard::OperatorCapability,
+        cap: &crate::model::capability::OperatorCapability,
         project_id: impl Into<String>,
         project_schema: impl Into<String>,
     ) -> Self {
@@ -304,7 +304,7 @@ impl ExecutorConfig {
         cfg
     }
 
-    /// Set the least-privilege [`migrator_role`](Self::migrator_role) the apply
+    /// Set the least-privilege `migrator_role` the apply
     /// flow runs migrations under. Builder convenience.
     #[must_use]
     pub fn with_migrator_role(mut self, role: impl Into<String>) -> Self {
@@ -336,14 +336,14 @@ impl ExecutorConfig {
     ///
     /// Every element is an **engine-supplied** identifier (project schema, platform
     /// schemas, extension schemas), so each is rendered through the ONE shared
-    /// engine seam ([`crate::dml::quote_ident_checked`]) — fail-closed on an empty
+    /// engine seam ([`crate::render::dml::quote_ident_checked`]) — fail-closed on an empty
     /// / NUL name, byte-identical to the prior `escape_quote_ident` for every real
     /// schema. So the whole quoting surface (not just the DDL/journal seams) is
     /// uniformly self-defending.
     ///
     /// # Errors
     ///
-    /// [`crate::dml::IdentQuoteError`] if any configured schema is empty or carries
+    /// [`crate::render::dml::IdentQuoteError`] if any configured schema is empty or carries
     /// a NUL byte (an engine-internal misconfiguration; never reachable from a
     /// well-formed `ExecutorConfig`).
     pub(crate) fn search_path_clause(&self) -> Result<String, crate::render::dml::IdentQuoteError> {
@@ -390,7 +390,7 @@ impl ExecutorConfig {
 /// Open a migrator connection and spawn its driver loop on the compio runtime.
 ///
 /// Mirrors the `connect` + `spawn(conn.run()).detach()` pattern used across
-/// `crates/control` and `crates/auth`: the [`Connection`] half must be driven
+/// `crates/control` and `crates/auth`: the `Connection` half must be driven
 /// for the [`Client`] to make progress, and on compio it runs as a detached
 /// task on the current runtime.
 ///

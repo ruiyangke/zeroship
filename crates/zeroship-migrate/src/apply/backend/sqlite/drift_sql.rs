@@ -1,8 +1,8 @@
 //! SQLite live-schema introspection for drift (SQLite-parity design §2.7 / §2.5.1).
 //!
 //! Produces the SAME dialect-agnostic [`SchemaSnapshot`](crate::model::snapshot::SchemaSnapshot)
-//! the Postgres path returns, so [`check_checksum_drift`](crate::drift::check_checksum_drift)
-//! and [`diff_snapshots`](crate::drift::diff_snapshots) work unchanged across both
+//! the Postgres path returns, so [`check_checksum_drift`](crate::apply::drift::check_checksum_drift)
+//! and [`diff_snapshots`](crate::apply::drift::diff_snapshots) work unchanged across both
 //! dialects. The PG path reads `information_schema` + `pg_catalog`; this reads
 //! `sqlite_master` + `PRAGMA table_info` / `PRAGMA index_list` / `PRAGMA index_info`
 //! / `PRAGMA foreign_key_list` of the connection's `main` database (the app file).

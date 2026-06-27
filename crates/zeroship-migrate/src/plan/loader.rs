@@ -2,7 +2,7 @@
 //! `.sql` files into an ordered list of [`Migration`]s the engine can plan +
 //! apply under the **Platform** profile.
 //!
-//! This is the Phase-2 peer of [`crate::submit`]: where `submit_migration`
+//! This is the Phase-2 peer of [`crate::ops::submit`]: where `submit_migration`
 //! ingests ONE client-authored script, the loader ingests a whole **directory**
 //! of operator-authored platform-schema files. Like `submit`, it builds each
 //! [`Migration`] with **server-derived flags** (never author-declared) — the
@@ -65,7 +65,7 @@ use crate::model::migration::{
 /// The fixed `owner_app` sentinel stamped on every loaded platform migration.
 ///
 /// Platform migrations are not owned by any creator app; ownership enforcement
-/// (the `submit` path's [`enforce_ownership`](crate::submit)) does not apply to
+/// (the `submit` path's [`enforce_ownership`](crate::ops::submit)) does not apply to
 /// the Platform profile. The sentinel is folded into the [`Checksum`] like any
 /// other `owner_app`, so it is part of the tamper-evident unit.
 pub const PLATFORM_OWNER_APP: &str = "platform";
@@ -155,7 +155,7 @@ pub enum LoaderError {
 ///
 /// **CANONICAL: this is the ONLY id mapping for repeatables.** A repeatable carries
 /// no version, but its identity MUST be stable across loads: the re-run oracle
-/// ([`apply_repeatables`](crate::executor)) keys its re-run-on-change decision on
+/// ([`apply_repeatables`](crate::apply::executor)) keys its re-run-on-change decision on
 /// the journal `version` column (`SELECT … WHERE kind='repeatable'`,
 /// `journal::latest_completed_checksums`). A freshly-random id per load (the bug
 /// this fixes) would make an UNCHANGED `R__` file re-apply on EVERY deploy
@@ -469,7 +469,7 @@ pub fn new_dbmate_migration(timestamp: &str, name: &str) -> (String, String) {
 
 /// Build the [`MigrationFlags`] for a file's `up` SQL, **trust-independently**.
 ///
-/// Mirrors [`submit_migration`](crate::submit::submit_migration)'s server-side
+/// Mirrors [`submit_migration`](crate::ops::submit::submit_migration)'s server-side
 /// flag derivation — `destructive`/`transactional`/`requires_approval` come from
 /// [`flags_for`], layered with the authoring-only `repeatable` facet from the
 /// `R__` filename. But where `submit` runs the full deny-list guard to obtain the
@@ -528,7 +528,7 @@ fn flags_for_file_opts(
 /// order under their `Ord`, so the engine's executor ordering sees the loaded set
 /// already in apply order with no reordering surprise.
 ///
-/// Each migration is built mirroring [`crate::submit`]:
+/// Each migration is built mirroring [`crate::ops::submit`]:
 /// - `version` = [`migration_id_for_version`] of the parsed numeric prefix (a
 ///   deterministic [`MigrationId`]) — repeatables, which carry no version, get a
 ///   freshly-minted [`MigrationId::generate`] (they are identified by checksum +

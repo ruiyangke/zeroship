@@ -11,11 +11,11 @@
 use std::time::Duration;
 
 use compio_postgres::Client;
-use zeroship_migrate::executor::ApplyError;
-use zeroship_migrate::migration::Checksum;
-use zeroship_migrate::squash::SquashError;
+use zeroship_migrate::apply::executor::ApplyError;
+use zeroship_migrate::model::migration::Checksum;
+use zeroship_migrate::ops::squash::SquashError;
 use zeroship_migrate::{
-    apply, ensure_journal, journal, squash, status, Approval, ExecutorConfig, Migration,
+    apply, ensure_journal, squash, status, Approval, ExecutorConfig, Migration,
     MigrationFlags, MigrationId, PostgresBackend,
 };
 
@@ -260,7 +260,7 @@ async fn fresh_db_squash_runs_up_once_and_skips_superseded() {
     }
     // S.up ran exactly ONCE: the journal has a single completed row for S, and
     // none for v1..v3 (they were superseded, never journaled).
-    let applied = journal::applied(&conn, &cfg).await.expect("applied");
+    let applied = apply::journal::applied(&conn, &cfg).await.expect("applied");
     let versions: Vec<&str> = applied.iter().map(|e| e.version.as_str()).collect();
     assert!(versions.contains(&s.version.as_str()));
     assert!(versions.contains(&v4.as_str()));
@@ -505,7 +505,7 @@ async fn chained_squash_over_superseded_prefix_is_already_applied_not_double_run
         "only S1 runs; v1/v2 superseded"
     );
     // Confirm v1/v2 are NOT journaled (they live only as supersession edges).
-    let applied = journal::applied(&conn, &cfg).await.expect("applied");
+    let applied = apply::journal::applied(&conn, &cfg).await.expect("applied");
     let versions: Vec<&str> = applied.iter().map(|e| e.version.as_str()).collect();
     assert!(versions.contains(&s1.version.as_str()));
     assert!(!versions.contains(&v1.as_str()), "v1 not journaled");
@@ -848,7 +848,7 @@ async fn superseded_versions_ignores_edges_of_non_squash_versions() {
         .expect("insert edge");
     }
 
-    let superseded = journal::superseded_versions(&conn, &cfg)
+    let superseded = apply::journal::superseded_versions(&conn, &cfg)
         .await
         .expect("superseded_versions");
 

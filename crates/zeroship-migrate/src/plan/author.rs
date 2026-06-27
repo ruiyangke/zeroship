@@ -2,7 +2,7 @@
 //!
 //! A migration's `up`/`down` SQL is produced by a pluggable **author**, then
 //! handed to the engine for the SAME `plan` (lint) → `gate` (approval) →
-//! [`executor::apply`](crate::executor::apply) (guard + least-priv role)
+//! [`executor::apply`](crate::apply::executor::apply) (guard + least-priv role)
 //! treatment regardless of where it came from. Two authors ship in v1:
 //!
 //! - [`DeterministicAuthor`] — a BOUNDED set of trivial **additive** ops
@@ -109,7 +109,7 @@ pub enum AuthorRequest {
 }
 
 /// Quote a Postgres identifier (double embedded quotes, wrap in `"`). Routes
-/// through the ONE crate-shared engine seam ([`crate::dml::quote_ident_checked`])
+/// through the ONE crate-shared engine seam ([`crate::render::dml::quote_ident_checked`])
 /// so author output is byte-identical to (and uniformly self-defending with) the
 /// executor/role/journal quoting — fail-closed on an empty / NUL identifier
 /// (which `"`-doubling cannot neutralise) rather than silently emitting it.
@@ -155,7 +155,7 @@ pub(crate) const PG_MAX_IDENT_BYTES: usize = 63;
 /// (`declarative::unique_index_name`) use, so an over-long generated index name
 /// can never desync `up`/`down`/on-disk (which would cause CREATE/DROP churn —
 /// the emitted full name ≠ the server-truncated live name on a re-diff). Mirrors
-/// the sanitize/truncate discipline of [`crate::role::migrator_role_name`].
+/// the sanitize/truncate discipline of [`crate::apply::role::migrator_role_name`].
 pub(crate) fn cap_ident_name(natural: &str) -> String {
     use sha2::{Digest, Sha256};
     if natural.len() <= PG_MAX_IDENT_BYTES {

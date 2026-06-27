@@ -20,9 +20,9 @@
 //! Regenerate the goldens with `UPDATE_PREVIEW_GOLDENS=1 cargo test -p zeroship-migrate
 //! --test sql_preview`.
 
-use zeroship_migrate::ir_author::{IrAuthor, LiveSchema};
+use zeroship_migrate::render::lower::{IrAuthor, LiveSchema};
 use zeroship_migrate::PlanStep;
-use zeroship_migrate::sql_preview::{
+use zeroship_migrate::render::sql_preview::{
     render_ir_json_sql, render_plan_sql, render_set_sql, PreviewOpts, RUNTIME_RESOLVED,
 };
 use zeroship_migrate::MigrationIr;
@@ -298,7 +298,7 @@ fn sql_dir_renders_offline() {
     let dir = tempdir_with(&[
         ("V0001__widgets.sql", "CREATE TABLE widgets (id text primary key);\n"),
     ]);
-    let plans = zeroship_migrate::loader::load_dir(&dir).expect("loads .sql offline");
+    let plans = zeroship_migrate::plan::loader::load_dir(&dir).expect("loads .sql offline");
     let out = render_set_sql(&plans, SqlDialect::Postgres, &opts());
     assert!(out.contains("CREATE TABLE widgets (id text primary key)"), "{out}");
     assert!(out.contains("-- preview:"), "carries a summary line:\n{out}");
@@ -317,7 +317,7 @@ fn raw_sql_caption_does_not_claim_a_transformed_dialect() {
         "V0001__legacy.sql",
         "CREATE TABLE legacy (id SERIAL PRIMARY KEY, name text);\n",
     )]);
-    let plans = zeroship_migrate::loader::load_dir(&dir).expect("loads .sql offline");
+    let plans = zeroship_migrate::plan::loader::load_dir(&dir).expect("loads .sql offline");
     // Render the PG-only raw SQL under the SQLITE dialect request.
     let out = render_set_sql(&plans, SqlDialect::Sqlite, &opts());
 
@@ -419,7 +419,7 @@ fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
     // Borrow a real, fully-formed AppliedPlan via the offline `.sql` loader, then swap
     // its single DDL step for the OnlineRename step (the only piece under test).
     let dir = tempdir_with(&[("V0001__seed.sql", "CREATE TABLE codes (id text primary key);\n")]);
-    let mut plan = zeroship_migrate::loader::load_dir(&dir)
+    let mut plan = zeroship_migrate::plan::loader::load_dir(&dir)
         .expect("loads .sql offline")
         .pop()
         .expect("one plan");

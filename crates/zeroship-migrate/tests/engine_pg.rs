@@ -1,7 +1,7 @@
 //! Faithful `MigrationEngine` pipeline tests against a REAL Postgres (no shims).
 //!
 //! Exercises the full public API end-to-end: author -> plan -> gate(approval) ->
-//! `executor::apply`, with the least-privilege migrator role provisioned and the
+//! `apply::executor::apply`, with the least-privilege migrator role provisioned and the
 //! apply running under it (the Plan-3 path). The engine gate is asserted to be
 //! ADDITIONAL to the executor's own guard + role (defense in depth): a denied
 //! plan applies nothing, a destructive plan needs approval, and a real table
@@ -15,8 +15,8 @@
 use compio_postgres::Client;
 use zeroship_migrate::{
     PostgresBackend,
-    author::{AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor},
-    provision_migrator, role::deprovision_migrator, Approval, EngineError, ExecutorConfig,
+    plan::author::{AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor},
+    provision_migrator, apply::role::deprovision_migrator, Approval, EngineError, ExecutorConfig,
     GuardConfig, Migration, MigrationEngine, MigrationId, migrator_role_name,
 };
 

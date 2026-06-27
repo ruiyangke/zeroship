@@ -14,10 +14,10 @@
 //!   the effect is already present) and records the `S → v_i` supersession edges.
 //!   The old `v1..vN` events remain (immutable); `S` supersedes them.
 //! - **Fresh DB** (none of `[v1..vN]` applied) — an ordinary
-//!   [`apply`](crate::executor::apply) of a set containing `S` runs `S.up` once and
+//!   [`apply`](crate::apply::executor::apply) of a set containing `S` runs `S.up` once and
 //!   SKIPS `v1..vN` (the executor's pending computation treats a version superseded
 //!   by an applied/being-applied squash as satisfied — see
-//!   [`crate::executor::compute_superseded`]). `v1..vN` are never double-applied,
+//!   [`crate::apply::executor::compute_superseded`]). `v1..vN` are never double-applied,
 //!   and a later migration that `depends_on` a superseded version is satisfied by
 //!   `S`.
 //!
@@ -26,12 +26,12 @@
 //! A squash is consistent only at the two extremes of its superseded set:
 //! - **ALL** of `[v1..vN]` net-applied ⇒ [`squash`] records the supersession
 //!   (baseline-style, no `up` run);
-//! - **NONE** applied ⇒ the fresh path through [`apply`](crate::executor::apply)
+//! - **NONE** applied ⇒ the fresh path through [`apply`](crate::apply::executor::apply)
 //!   runs `S.up`.
 //!
 //! A **partial** overlap (some but not all of `[v1..vN]` applied) is an
 //! inconsistent state and is refused — both here ([`SquashError::PartialOverlap`])
-//! and in the executor ([`crate::executor::ApplyError::SquashPartialOverlap`]).
+//! and in the executor ([`crate::apply::executor::ApplyError::SquashPartialOverlap`]).
 //!
 //! # Safety (design §1)
 //!
@@ -66,7 +66,7 @@ pub struct SquashOutcome {
 pub enum SquashError {
     /// A **dialect-neutral** backend error — the project lock acquire/release or
     /// the supersession journal write failed behind the
-    /// [`MigrationBackend`](crate::backend::MigrationBackend) seam. The payload is
+    /// [`MigrationBackend`](crate::apply::backend::MigrationBackend) seam. The payload is
     /// the backend's own error rendered to a string (PG `db error: …` / a non-PG
     /// `backend error: …`), so squash never leaks a `compio_postgres::Error` on its
     /// public surface. This folds the former dialect-specific `Db(compio_postgres::
@@ -100,7 +100,7 @@ pub enum SquashError {
     /// Not every version in `supersedes` is net-applied — this is the existing-DB
     /// path, which records the supersession only when ALL `[v1..vN]` are already
     /// applied. NONE applied is the FRESH path (use
-    /// [`apply`](crate::executor::apply), which runs `S.up`); a partial set is the
+    /// [`apply`](crate::apply::executor::apply), which runs `S.up`); a partial set is the
     /// inconsistent [`PartialOverlap`](SquashError::PartialOverlap). Nothing was
     /// journaled.
     #[error(
@@ -142,7 +142,7 @@ pub enum SquashError {
 /// its `up` (the effect of `[v1..vN]` is already present), and records the `S →
 /// v_i` supersession edges — all as ADMIN, under the project advisory lock.
 /// Idempotent if `S` is already net-applied. Refuses unless ALL of
-/// `S.supersedes` are net-applied (NONE = use [`apply`](crate::executor::apply);
+/// `S.supersedes` are net-applied (NONE = use [`apply`](crate::apply::executor::apply);
 /// partial = inconsistent).
 ///
 /// `applied_by` is the actor recorded in the journal (operator / admin).
@@ -153,7 +153,7 @@ pub enum SquashError {
 /// - [`SquashError::NotAllApplied`] / [`SquashError::PartialOverlap`] — the
 ///   superseded set is not fully net-applied.
 /// - [`SquashError::Backend`] / [`SquashError::Journal`] — infrastructure failures
-///   behind the [`MigrationBackend`](crate::backend::MigrationBackend) seam (the
+///   behind the [`MigrationBackend`](crate::apply::backend::MigrationBackend) seam (the
 ///   project lock, the journal reads, the supersession write).
 ///
 /// # The backend seam (multi-engine abstraction C3)
@@ -167,7 +167,7 @@ pub enum SquashError {
 /// and the supersession write
 /// ([`record_squash`](MigrationBackend::record_squash)) all route through the
 /// trait. NO `compio_postgres::Client` / `pg_advisory_lock` / `pg_query` appears
-/// here; the PG specifics stay inside [`PostgresBackend`](crate::backend::PostgresBackend).
+/// here; the PG specifics stay inside [`PostgresBackend`](crate::apply::backend::PostgresBackend).
 /// The PG path is byte-identical: the PG lock SQL, guard, and `record_baseline`
 /// write are the EXACT pre-seam code, now reached through the backend.
 pub async fn squash<B: MigrationBackend>(

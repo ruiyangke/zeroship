@@ -30,7 +30,7 @@ use clap::{Parser, Subcommand};
 // The runner module is `pub(crate)`; the bin is part of the same crate so it can
 // reach it. External crates cannot — the token mint stays confined.
 use zeroship_migrate::command::runner::{
-    self as platform_runner, default_platform_extensions, default_platform_schemas, Engine,
+    self as command_runner, default_platform_extensions, default_platform_schemas, Engine,
     EngineKind, RunConfig, RunError, RunProfile, RunReport,
 };
 use zeroship_migrate::plan::loader::{
@@ -792,7 +792,7 @@ async fn run_dump(cfg: &RunConfig, schema_file: &Path) -> Result<(), String> {
     // honours `--engine` via `resolve_engine` (a conflict is an honest error).
     let mut schema = match cfg.resolve_engine().map_err(|e| e.to_string())? {
         Engine::Postgres => dump_schema_pg(&cfg.database_url)?,
-        Engine::Sqlite(app) => platform_runner::dump_schema_sqlite(&app)
+        Engine::Sqlite(app) => command_runner::dump_schema_sqlite(&app)
             .await
             .map_err(|e| e.to_string())?,
         Engine::Mysql => return Err(RunError::MysqlLiveExecUnimplemented.to_string()),
@@ -805,7 +805,7 @@ async fn run_dump(cfg: &RunConfig, schema_file: &Path) -> Result<(), String> {
     // trailer is SELF-CONTAINED: `load` reconstructs the journal from the trailer
     // alone (M1+M2), never re-deriving checksum/name from `--dir`. Tab-delimited so
     // a name with spaces round-trips. Identical shape for BOTH engines.
-    let entries = platform_runner::run_dump_trailer(cfg)
+    let entries = command_runner::run_dump_trailer(cfg)
         .await
         .map_err(|e| format!("read journal for dump trailer: {e}"))?;
     schema.push_str("\n-- zeroship-migrate schema_migrations\n");
@@ -885,7 +885,7 @@ async fn main() -> ExitCode {
 
     // `wait` polls the DSN; no migration load. Handle it directly.
     if let Command::Wait { timeout_secs } = &cli.command {
-        let res = platform_runner::run_wait(
+        let res = command_runner::run_wait(
             &cfg.database_url,
             cfg.engine_override,
             Duration::from_secs(*timeout_secs),
@@ -931,7 +931,7 @@ async fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        return match platform_runner::run_load(&cfg, &content).await {
+        return match command_runner::run_load(&cfg, &content).await {
             Ok(report) => {
                 println!("load: replayed {}", path.display());
                 print_report(&report);
@@ -945,15 +945,15 @@ async fn main() -> ExitCode {
     }
 
     let result = match &cli.command {
-        Command::Migrate | Command::Up => platform_runner::run_migrate(&cfg).await,
-        Command::Down => platform_runner::run_down(&cfg).await,
-        Command::Status => platform_runner::run_status(&cfg).await,
-        Command::Validate => platform_runner::run_validate(&cfg).await,
+        Command::Migrate | Command::Up => command_runner::run_migrate(&cfg).await,
+        Command::Down => command_runner::run_down(&cfg).await,
+        Command::Status => command_runner::run_status(&cfg).await,
+        Command::Validate => command_runner::run_validate(&cfg).await,
         Command::Rollback { to, steps } => {
-            platform_runner::run_rollback(&cfg, *to, *steps).await
+            command_runner::run_rollback(&cfg, *to, *steps).await
         }
         Command::ResolvePending { apply, abort, acknowledge_shadow_data_loss, version } => {
-            platform_runner::run_resolve_pending(
+            command_runner::run_resolve_pending(
                 &cfg,
                 version,
                 *apply,
@@ -978,7 +978,7 @@ async fn main() -> ExitCode {
             // `--lint`: opt-in, non-blocking advisories for migrate/up/validate.
             if cli.lint && matches!(cli.command, Command::Migrate | Command::Up | Command::Validate)
             {
-                match platform_runner::lint_advisories(&cfg) {
+                match command_runner::lint_advisories(&cfg) {
                     Ok(pairs) => print_lint(&pairs),
                     Err(e) => eprintln!("zeroship-migrate: lint: {e}"),
                 }

@@ -42,7 +42,7 @@
 //!
 //! # Where this is evaluated — the backend seam (multi-engine abstraction C3)
 //!
-//! [`crate::executor::apply`] evaluates a pending migration's preconditions
+//! [`crate::apply::executor::apply`] evaluates a pending migration's preconditions
 //! **inside the apply flow, under the project advisory lock**, immediately before
 //! the migration's `up` — so the state a precondition checks is stable for the
 //! apply. All evaluation is read-only (catalog reads + a single read-only
@@ -52,10 +52,10 @@
 //! ([`validate_single_select`], `pg_query::parse` — "is this a safe single
 //! SELECT?") and the EVALUATION ([`evaluate`], `information_schema` catalog reads +
 //! the `&Client`-bound `SqlBoolean` run) are PG-dialect-specific, so they live
-//! BEHIND the [`MigrationBackend`](crate::backend::MigrationBackend) seam: the
+//! BEHIND the [`MigrationBackend`](crate::apply::backend::MigrationBackend) seam: the
 //! generic apply path calls
-//! [`backend.evaluate_preconditions`](crate::backend::MigrationBackend::evaluate_preconditions),
-//! and only [`PostgresBackend`](crate::backend::PostgresBackend) routes into this
+//! [`backend.evaluate_preconditions`](crate::apply::backend::MigrationBackend::evaluate_preconditions),
+//! and only [`PostgresBackend`](crate::apply::backend::PostgresBackend) routes into this
 //! module (via [`evaluate_all`], which folds the per-check verdict loop). The
 //! SQLite backend validates/evaluates in its own dialect (descriptor migrations
 //! carry no preconditions, so it fails closed on a declared one). No `pg_query` /
@@ -127,7 +127,7 @@ pub enum PreconditionError {
     },
     /// An engine-supplied identifier (project schema / migrator role) was not
     /// quotable (empty or NUL-bearing) at a render seam — fail-closed rather than
-    /// interpolate it. Maps [`crate::dml::IdentQuoteError`].
+    /// interpolate it. Maps [`crate::render::dml::IdentQuoteError`].
     #[error("precondition: {0}")]
     IdentQuote(#[from] crate::render::dml::IdentQuoteError),
 }
@@ -208,7 +208,7 @@ pub async fn evaluate(
 
 /// Evaluate ALL of a migration's preconditions (v3 Plan D), in declaration order,
 /// BEFORE its `up` runs — the **Postgres** precondition path behind
-/// [`PostgresBackend::evaluate_preconditions`](crate::backend::PostgresBackend),
+/// [`PostgresBackend::evaluate_preconditions`](crate::apply::backend::PostgresBackend),
 /// reached only via the backend seam (multi-engine abstraction C3). Folds the
 /// former generic-executor `evaluate_preconditions` loop into the PG leaf, so the
 /// `&Client` + per-check `pg_query`/`information_schema` evaluation never sits in

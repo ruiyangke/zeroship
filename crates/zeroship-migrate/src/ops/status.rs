@@ -8,7 +8,7 @@
 //!
 //! This module emits NO DDL and mutates nothing — it surfaces journal state. It
 //! reuses the journal's NET-state reader ([`journal::applied`]) and the
-//! executor's pending-ordering ([`crate::executor::order_pending`]) so status's
+//! executor's pending-ordering ([`crate::apply::executor::order_pending`]) so status's
 //! view of "applied" and "pending" is byte-for-byte the view apply itself uses.
 
 use std::collections::HashMap;
@@ -36,7 +36,7 @@ pub struct MigrationStatus {
     /// [`journal::applied`]'s entries (version, checksum, phase).
     pub applied: Vec<AppliedEntry>,
     /// Versions in the supplied set that are NOT net-applied, in the SAME
-    /// topological order apply will run them ([`crate::executor::order_pending`]).
+    /// topological order apply will run them ([`crate::apply::executor::order_pending`]).
     /// A rolled-back version that is still in the set reappears here.
     pub pending: Vec<MigrationId>,
     /// Versions whose latest event is a rollback (net rolled-back), with the
@@ -61,7 +61,7 @@ pub struct MigrationStatus {
 /// [`status`] (§2.0.3). `orphaned` is computed against the supplied migration set:
 /// an obligation whose `pending_version` is NOT among the supplied set's versions
 /// is orphaned (the rename was removed after its EXPAND applied) and emits the
-/// [`OrphanedPendingContract`](crate::pending::OrphanedPendingContract) payload.
+/// [`OrphanedPendingContract`](crate::plan::pending::OrphanedPendingContract) payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingContractStatus {
     /// The table whose online-rename contract is outstanding.
@@ -151,7 +151,7 @@ pub async fn status(
 }
 
 /// Backend-generic [`status`]: compute the [`MigrationStatus`] over ANY
-/// [`MigrationBackend`](crate::backend::MigrationBackend), reading net journal
+/// [`MigrationBackend`](crate::apply::backend::MigrationBackend), reading net journal
 /// state through the trait (`ensure_journal` + `applied` + `superseded_versions`)
 /// rather than a PG `&Client`. This is the multi-engine peer of [`status`] — the
 /// public CLI's SQLite leg routes here, where the PG leg keeps the

@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use compio_postgres::Client;
-use zeroship_migrate::migration::Checksum;
+use zeroship_migrate::model::migration::Checksum;
 use zeroship_migrate::{
     apply, check_checksum_drift, diff_snapshots, rollback, snapshot_schema, Approval, ColumnSnapshot,
     ConstraintSnapshot, ExecutorConfig, IndexSnapshot, Migration, MigrationFlags, MigrationId,
@@ -205,7 +205,7 @@ async fn apply_aborts_on_checksum_drift_using_the_shared_check() {
     assert!(
         matches!(
             err,
-            zeroship_migrate::executor::ApplyError::ChecksumDrift { .. }
+            zeroship_migrate::apply::executor::ApplyError::ChecksumDrift { .. }
         ),
         "got {err:?}"
     );

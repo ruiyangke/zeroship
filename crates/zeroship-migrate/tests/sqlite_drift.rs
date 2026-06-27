@@ -5,10 +5,10 @@
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zeroship_migrate::backend::MigrationBackend;
-use zeroship_migrate::db::ExecutorConfig;
-use zeroship_migrate::drift::diff_snapshots;
-use zeroship_migrate::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::conn::ExecutorConfig;
+use zeroship_migrate::apply::drift::diff_snapshots;
+use zeroship_migrate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
 use zeroship_migrate::SqliteBackend;
 
 struct Paths {

@@ -19,11 +19,11 @@ use zeroship_migrate::{ColumnSnapshot, TableSnapshot};
 use zeroship_migrate::command::runner::{
     run_resolve_pending, RunConfig, RunError, RunProfile, RunReport,
 };
-use zeroship_migrate::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
-use zeroship_migrate::ir_author::{IrAuthor, LiveSchema};
+use zeroship_migrate::model::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
+use zeroship_migrate::render::lower::{IrAuthor, LiveSchema};
 use zeroship_migrate::{PlanStep, RenameStep};
 use zeroship_migrate::{
-    provision_migrator, role::deprovision_migrator, Approval, ExecutorConfig, MigrationEngine,
+    provision_migrator, apply::role::deprovision_migrator, Approval, ExecutorConfig, MigrationEngine,
     PostgresBackend, SqlDialect,
 };
 
@@ -185,26 +185,26 @@ async fn seed_pending_rename(conn: &Client, cfg: &ExecutorConfig) -> String {
     let engine = MigrationEngine::new();
     let be = PostgresBackend::new(conn);
 
-    let create = zeroship_migrate::migration::Migration {
-        version: zeroship_migrate::migration::MigrationId::generate(),
+    let create = zeroship_migrate::model::migration::Migration {
+        version: zeroship_migrate::model::migration::MigrationId::generate(),
         name: "create_members".into(),
         up: format!(
             "CREATE TABLE {s}.members (id bigint PRIMARY KEY, email text); \
              INSERT INTO {s}.members (id, email) VALUES (1,'ada@x.test')"
         ),
         down: None,
-        checksum: zeroship_migrate::migration::Checksum::of(
-            &zeroship_migrate::migration::ChecksumInput {
+        checksum: zeroship_migrate::model::migration::Checksum::of(
+            &zeroship_migrate::model::migration::ChecksumInput {
                 up: "create_members",
                 down: None,
-                flags: &zeroship_migrate::migration::MigrationFlags::default(),
+                flags: &zeroship_migrate::model::migration::MigrationFlags::default(),
                 owner_app: "app_test",
                 depends_on: &[],
                 supersedes: &[],
                 preconditions: &[],
             },
         ),
-        flags: zeroship_migrate::migration::MigrationFlags::default(),
+        flags: zeroship_migrate::model::migration::MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: vec![],
         supersedes: vec![],
@@ -218,7 +218,7 @@ async fn seed_pending_rename(conn: &Client, cfg: &ExecutorConfig) -> String {
             &be,
             cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("create members");
@@ -241,7 +241,7 @@ async fn seed_pending_rename(conn: &Client, cfg: &ExecutorConfig) -> String {
             &be,
             cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("expand applies, contract pending");

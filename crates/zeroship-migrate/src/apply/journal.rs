@@ -198,7 +198,7 @@ impl PendingState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolution {
     /// The deferred contract (C1 drop trigger + C2 drop old column) was applied
-    /// under [`Approval::Approved`](crate::executor::Approval) — the rename
+    /// under [`Approval::Approved`](crate::approval::Approval::Approved) — the rename
     /// completed.
     Applied,
     /// The pending contract was aborted: the shadow (`to`) column + the dual-write
@@ -250,7 +250,7 @@ pub struct PendingContract {
     /// plan-level supplied set never exposes — so orphan/blocked do NOT key on it.
     pub pending_version: String,
     /// The rename's PLAN-GROUP version (the `PgExpandContract` plan's E1-anchored
-    /// id, `ir_author::plan_step_version`). This is the STABLE identity the SUPPLIED
+    /// id, `render::lower::plan_step_version`). This is the STABLE identity the SUPPLIED
     /// migration set carries (a re-lowered IR's `lower_plan().version`) and an
     /// author's `depends_on` references, so `status`'s orphan (§2.0.3 item 3) and
     /// blocked (§2.0.4) surfacing keys on THIS — not the deep E2 `pending_version`
@@ -333,7 +333,7 @@ pub enum JournalError {
     #[error("journal db error: {0}")]
     Db(#[from] compio_postgres::Error),
     /// A **dialect-neutral** journal backend error — used by non-Postgres
-    /// [`MigrationBackend`](crate::backend::MigrationBackend) impls (e.g.
+    /// [`MigrationBackend`](crate::apply::backend::MigrationBackend) impls (e.g.
     /// `SqliteBackend`) whose journal lives in SQLite, not Postgres, so they
     /// cannot produce a `compio_postgres::Error`. The payload is the backend's
     /// own error string. The Postgres journal helpers never construct this arm.
@@ -354,14 +354,14 @@ pub enum JournalError {
     BadEventKind(String),
     /// An engine-supplied identifier (the meta schema or a derived trigger name)
     /// was not quotable (empty or NUL-bearing) at a render seam — fail-closed
-    /// rather than interpolate it. Maps [`crate::dml::IdentQuoteError`].
+    /// rather than interpolate it. Maps [`crate::render::dml::IdentQuoteError`].
     #[error("journal render: {0}")]
     IdentQuote(#[from] crate::render::dml::IdentQuoteError),
 }
 
 /// Quote a SQL identifier by doubling embedded quotes and wrapping in
 /// double-quotes, so a schema name is never interpolated as raw SQL. Routes
-/// through the ONE crate-shared engine seam ([`crate::dml::quote_ident_checked`])
+/// through the ONE crate-shared engine seam ([`crate::render::dml::quote_ident_checked`])
 /// — byte-identical to (and uniformly self-defending with)
 /// `author`/`backfill`/`role`/`dml`: fail-closed on an empty / NUL identifier.
 fn quote_ident(ident: &str) -> Result<String, JournalError> {
@@ -508,7 +508,7 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
     //     deterministic per rename (§2.0.1), used by the engine interlock's
     //     idempotent-skip + self-EXPAND exemption + the `resolve-pending` lookup;
     //     `plan_version` is the rename's PLAN-GROUP version (the PgExpandContract
-    //     plan's E1-anchored id, `ir_author::plan_step_version`) — the STABLE
+    //     plan's E1-anchored id, `render::lower::plan_step_version`) — the STABLE
     //     identity the SUPPLIED migration set carries (a re-lowered IR's
     //     `lower_plan().version`) and an author's `depends_on` references, so
     //     `status`'s orphan/blocked surfacing keys on THIS, not the deep E2
@@ -1496,7 +1496,7 @@ pub async fn outstanding_deploy_recoveries(
 
 /// Count the number of versions the journal currently records as **net-applied**
 /// (latest event per version is `completed`) — the first-entry test for
-/// [`crate::baseline`].
+/// [`crate::apply::baseline`].
 ///
 /// Baseline is a FIRST-entry operation: you cannot baseline a DB the engine
 /// already manages. This counts net-applied versions exactly as [`applied`]
@@ -1582,7 +1582,7 @@ pub async fn superseded_versions(
 /// Read the **latest `completed` checksum per version** from the journal of
 /// record (v3 Plan E — repeatables).
 ///
-/// A repeatable migration ([`MigrationFlags::repeatable`](crate::migration::MigrationFlags::repeatable))
+/// A repeatable migration ([`MigrationFlags::repeatable`](crate::model::migration::MigrationFlags::repeatable))
 /// has a STABLE identity (its `version`/name never changes across edits) and is
 /// re-applied whenever its definition checksum changes. Each re-apply appends a
 /// fresh `completed` event for the same version (append-only), so a repeatable
@@ -1663,9 +1663,9 @@ pub struct BaselineRecord<'a> {
 /// meta-schema grant), exactly like [`record_completed`]. `exec_ms` is recorded as
 /// 0 (no SQL ran).
 ///
-/// This is the journal-without-running primitive shared by [`crate::baseline`]
+/// This is the journal-without-running primitive shared by [`crate::apply::baseline`]
 /// (the adoption path: the schema already physically exists, so the `up` is
-/// recorded not run) and [`crate::squash`]'s existing-DB path (a supersession: the
+/// recorded not run) and [`crate::ops::squash`]'s existing-DB path (a supersession: the
 /// effect of `[v1..vN]` is already present, so the squash's `up` is recorded not
 /// run). #3 fix: the `completed` row + every supersession edge are inserted in ONE
 /// transaction THIS function brackets (`BEGIN … COMMIT`, ROLLBACK on any error), so
