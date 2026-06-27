@@ -6,6 +6,7 @@
 //! - `handler` — kernel bridge for inbound HTTP requests routed into V8
 
 pub mod client;
+pub mod byte_pump;
 pub mod handler;
 pub mod net_policy;
 pub mod ssrf;

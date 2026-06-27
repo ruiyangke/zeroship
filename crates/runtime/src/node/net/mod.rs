@@ -2,7 +2,11 @@
 
 #![allow(unsafe_code)]
 
+mod caps;
+mod connect;
 pub mod dispatch;
+mod driver;
+mod registry;
 pub mod socket;
 pub mod state;
 

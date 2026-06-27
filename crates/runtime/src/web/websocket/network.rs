@@ -86,10 +86,8 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::task::Waker;
 
-use compio::buf::IoBuf;
 use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use compio::net::TcpStream;
-use compio_tls::TlsStream;
 use futures::channel::mpsc;
 use futures::StreamExt;
 
@@ -100,6 +98,9 @@ use super::frame_writer::{
 use super::handshake::{Established, EstablishedStream, HandshakeError, HandshakeOptions};
 use super::{WebSocketImpl, WsFrame};
 use crate::state::{OpResult, SharedState};
+use crate::transport::byte_pump::{
+    self, EventQueue, RecvBackpressure, SelectAction, SocketStream, TcpReadHalf, TcpWriteHalf,
+};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -131,7 +132,7 @@ pub enum WsEvent {
 /// and the V8-thread dispatch arm.
 pub struct NativeWsState {
     pub events: VecDeque<WsEvent>,
-    pub recv_backpressure_waker: Option<Waker>,
+    pub recv_backpressure_waker: Option<std::task::Waker>,
     pub cancel: bool,
     pub cancel_reason: String,
     pub connect_waker: Option<Waker>,
@@ -193,15 +194,20 @@ impl NativeWsState {
     }
 }
 
-const RECV_BACKPRESSURE_CAP: usize = 256;
-const RECV_BACKPRESSURE_RESUME: usize = 128;
+impl RecvBackpressure for NativeWsState {
+    fn queued_event_len(&self) -> usize {
+        self.events.len()
+    }
 
-/// Outcome of one iteration of the TLS driver's `select` between a
-/// network read and a user send. Used to break the borrow on `tls`
-/// before writing.
-enum Action {
-    ReadCompleted(compio::buf::BufResult<usize, Vec<u8>>),
-    RecvCompleted(Option<WsFrame>),
+    fn recv_backpressure_waker_mut(&mut self) -> &mut Option<std::task::Waker> {
+        &mut self.recv_backpressure_waker
+    }
+}
+
+impl EventQueue<WsEvent> for NativeWsState {
+    fn events_mut(&mut self) -> &mut VecDeque<WsEvent> {
+        &mut self.events
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -264,62 +270,19 @@ pub fn push_event_pub(state: &SharedState, ws_id: u32, event: WsEvent) {
         return;
     }
 
-    {
-        let mut s = ws.borrow_mut();
-        if let Some(log) = s.event_log.as_mut() {
-            log.push(event.clone());
-        }
-        s.events.push_back(event);
+    if let Some(log) = ws.borrow_mut().event_log.as_mut() {
+        log.push(event.clone());
     }
-
-    let id = ws_id;
-    let fut: std::pin::Pin<Box<dyn std::future::Future<Output = OpResult>>> =
-        Box::pin(async move { OpResult::WebSocketEvent { ws_id: id } });
-    {
-        let mut s = state.borrow_mut();
-        s.spawned_ops.push(fut);
-    }
-
-    let notify = state.borrow().pump_notify_tx.clone();
-    if let Some(mut tx) = notify {
-        let _ = tx.try_send(());
-    }
+    byte_pump::enqueue_event(&ws, event);
+    byte_pump::schedule_event_op(state, OpResult::WebSocketEvent { ws_id });
 }
 
 async fn await_recv_drain(ws_state: &Rc<RefCell<NativeWsState>>) {
-    use std::future::poll_fn;
-    poll_fn(|cx| {
-        let mut s = ws_state.borrow_mut();
-        if s.events.len() < RECV_BACKPRESSURE_CAP {
-            std::task::Poll::Ready(())
-        } else {
-            s.recv_backpressure_waker = Some(cx.waker().clone());
-            std::task::Poll::Pending
-        }
-    })
-    .await
+    let _ = byte_pump::await_recv_ready(ws_state).await;
 }
 
 pub fn drain_events(state: &SharedState, ws_id: u32) -> Vec<WsEvent> {
-    let Some(ws) = lookup_native_ws_state(state, ws_id) else {
-        return Vec::new();
-    };
-    let drained: Vec<WsEvent> = {
-        let mut s = ws.borrow_mut();
-        s.events.drain(..).collect()
-    };
-    let waker = {
-        let mut s = ws.borrow_mut();
-        if s.events.len() < RECV_BACKPRESSURE_RESUME {
-            s.recv_backpressure_waker.take()
-        } else {
-            None
-        }
-    };
-    if let Some(w) = waker {
-        w.wake();
-    }
-    drained
+    byte_pump::drain_events(lookup_native_ws_state(state, ws_id))
 }
 
 // ---------------------------------------------------------------------------
@@ -471,7 +434,7 @@ async fn run_socket_driver(
             run_tls_driver(
                 state,
                 ws_id,
-                tls,
+                SocketStream::Tls(tls),
                 leftover,
                 rx,
                 tx,
@@ -505,7 +468,7 @@ async fn run_plain_driver(
         let tcp = tcp.clone();
         let tx_for_reader = tx.clone();
         async move {
-            let r = TcpReadHalf { tcp };
+            let r = TcpReadHalf::new(tcp);
             run_reader_loop(
                 &state,
                 ws_id,
@@ -523,7 +486,7 @@ async fn run_plain_driver(
         let state = state.clone();
         let tcp = tcp.clone();
         async move {
-            let w = TcpWriteHalf { tcp };
+            let w = TcpWriteHalf::new(tcp);
             run_writer_loop(&state, ws_id, w, rx).await;
         }
     };
@@ -550,15 +513,13 @@ async fn run_plain_driver(
 async fn run_tls_driver(
     state: SharedState,
     ws_id: u32,
-    mut tls: TlsStream<TcpStream>,
+    mut stream: SocketStream,
     leftover: Vec<u8>,
     mut rx: mpsc::UnboundedReceiver<WsFrame>,
     _tx: mpsc::UnboundedSender<WsFrame>,
     max_frame_size: usize,
     max_message_size: usize,
 ) {
-    use futures::future::{select, Either};
-
     let mut reader = FrameReader::new(max_frame_size, max_message_size);
     let mut read_buffer: Vec<u8> = leftover;
     let ws_state = match lookup_native_ws_state(&state, ws_id) {
@@ -599,13 +560,13 @@ async fn run_tls_driver(
                         // handshake.
                         while let Some(f) = internal_outbound.pop_front() {
                             if let Err(e) =
-                                write_frame(&mut tls, &state, ws_id, f, &mut sent_close).await
+                                write_frame(&mut stream, &state, ws_id, f, &mut sent_close).await
                             {
                                 fail_connection(&state, ws_id, format!("write error: {e}"));
                                 return;
                             }
                         }
-                        let _ = tls.shutdown().await;
+                        let _ = stream.shutdown().await;
                         return;
                     }
                     continue;
@@ -617,7 +578,7 @@ async fn run_tls_driver(
                 Ok(StepResult::NeedMoreBytes) => break,
                 Err(e) => {
                     fail_connection(&state, ws_id, e);
-                    let _ = tls.shutdown().await;
+                    let _ = stream.shutdown().await;
                     return;
                 }
             }
@@ -626,7 +587,7 @@ async fn run_tls_driver(
         // Drain pending internal_outbound BEFORE waiting for either
         // a network read OR a user send.
         while let Some(f) = internal_outbound.pop_front() {
-            if let Err(e) = write_frame(&mut tls, &state, ws_id, f, &mut sent_close).await {
+            if let Err(e) = write_frame(&mut stream, &state, ws_id, f, &mut sent_close).await {
                 fail_connection(&state, ws_id, format!("write error: {e}"));
                 return;
             }
@@ -650,24 +611,12 @@ async fn run_tls_driver(
         // surviver before the write, we release the borrow. The cost
         // is a wasted io_uring submission per recv-wins iteration
         // (typically <1 syscall — the cancellation is async).
-        let chunk = vec![0u8; 4096];
-        let action = {
-            let read_fut = AsyncRead::read(&mut tls, chunk);
-            let recv_fut = rx.next();
-            let read_fut = std::pin::pin!(read_fut);
-            let recv_fut = std::pin::pin!(recv_fut);
-            match select(read_fut, recv_fut).await {
-                Either::Left((res, _surviving_recv)) => Action::ReadCompleted(res),
-                Either::Right((maybe_frame, _surviving_read)) => {
-                    Action::RecvCompleted(maybe_frame)
-                }
-            }
-        };
+        let action = byte_pump::select_read_or_command_ready(&mut stream, rx.next(), 4096).await;
         // Both futures are dropped here — the `&mut tls` borrow is
         // released and we can write below.
 
         match action {
-            Action::ReadCompleted(res) => {
+            SelectAction::ReadCompleted(res) => {
                 let n = match res.0 {
                     Ok(n) => n,
                     Err(e) => {
@@ -682,7 +631,7 @@ async fn run_tls_driver(
                 let chunk = res.1;
                 read_buffer.extend_from_slice(&chunk.as_slice()[..n]);
             }
-            Action::RecvCompleted(maybe_frame) => {
+            SelectAction::Command(maybe_frame) => {
                 let Some(frame) = maybe_frame else {
                     if !sent_close {
                         let close = WsFrame::Close {
@@ -690,7 +639,7 @@ async fn run_tls_driver(
                             reason: String::new(),
                         };
                         if let Err(e) =
-                            write_frame(&mut tls, &state, ws_id, close, &mut sent_close).await
+                            write_frame(&mut stream, &state, ws_id, close, &mut sent_close).await
                         {
                             fail_connection(&state, ws_id, format!("write error: {e}"));
                             return;
@@ -701,7 +650,7 @@ async fn run_tls_driver(
                     }
                     continue;
                 };
-                if let Err(e) = write_frame(&mut tls, &state, ws_id, frame, &mut sent_close).await {
+                if let Err(e) = write_frame(&mut stream, &state, ws_id, frame, &mut sent_close).await {
                     fail_connection(&state, ws_id, format!("write error: {e}"));
                     return;
                 }
@@ -709,10 +658,11 @@ async fn run_tls_driver(
                     break;
                 }
             }
+            SelectAction::ReadPermit(_) => unreachable!("ready select never yields read permit"),
         }
     }
 
-    let _ = tls.shutdown().await;
+    let _ = stream.shutdown().await;
     if let Some(ws) = lookup_native_ws_state(&state, ws_id) {
         ws.borrow_mut().send_tx = None;
     }
@@ -765,47 +715,6 @@ fn handle_frame_tls(
             // before shutdown.
             false
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Plain-TCP read/write halves (shared `Rc<TcpStream>`)
-// ---------------------------------------------------------------------------
-
-struct TcpReadHalf {
-    tcp: Rc<TcpStream>,
-}
-
-impl AsyncRead for TcpReadHalf {
-    async fn read<B: compio::buf::IoBufMut>(
-        &mut self,
-        buf: B,
-    ) -> compio::buf::BufResult<usize, B> {
-        let r: &TcpStream = &self.tcp;
-        let mut r = r;
-        r.read(buf).await
-    }
-}
-
-struct TcpWriteHalf {
-    tcp: Rc<TcpStream>,
-}
-
-impl AsyncWrite for TcpWriteHalf {
-    async fn write<T: IoBuf>(&mut self, buf: T) -> compio::buf::BufResult<usize, T> {
-        let w: &TcpStream = &self.tcp;
-        let mut w = w;
-        w.write(buf).await
-    }
-
-    async fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-
-    async fn shutdown(&mut self) -> std::io::Result<()> {
-        let w: &TcpStream = &self.tcp;
-        let mut w = w;
-        w.shutdown().await
     }
 }
 

@@ -2397,8 +2397,6 @@ impl RuntimeInner {
                 // (the network task pushes one OpResult per event,
                 // but the drain takes them all at once — extras
                 // resolve as no-op drains).
-                let state_clone = self.state.clone();
-
                 // Re-establish THIS connection's authenticated identity for
                 // the WS turn. WS events aren't attributed to a request id,
                 // so without this `env.auth.getUser()` inside an `onmessage`
@@ -2412,80 +2410,83 @@ impl RuntimeInner {
                 // `auth::current_user` resolves the request-id-keyed user
                 // before the WS fallback — a stale id left over from a prior
                 // turn would otherwise win and leak the wrong identity.
-                {
-                    let mut s = self.state.borrow_mut();
-                    s.executing_request_id = None;
-                    s.executing_request_cancel = None;
-                    s.executing_ws_user = s.ws_user.get(&ws_id).cloned();
-                }
-
-                self.arm_cpu_timer();
-                let settled_results = enter_v8!(self, |scope| {
-                    crate::websocket_native::dispatch::dispatch_pending_ws_events(
-                        scope, &state_clone, ws_id,
-                    );
-                    crate::core::init::perform_microtask_checkpoint(scope);
-                    collect_settled_promises(scope, &mut self.pending_requests)
-                });
-                self.disarm_cpu_timer();
-
-                // Clear the per-turn WS identity so it never bleeds into a
-                // subsequent non-WS turn on this isolate.
-                self.state.borrow_mut().executing_ws_user = None;
-
-                if self.check_v8_terminated() {
-                    self.clear_executing_request();
-                    self.drain_new_tasks_into(work);
-                    return;
-                }
-
-                for (id, req, settled) in settled_results {
-                    self.send_settled_reply_any(id, req, settled, std::time::Duration::ZERO);
-                }
-
-                self.cleanup_cancelled_requests();
-                self.clear_executing_request();
-                self.drain_new_tasks_into(work);
+                self.dispatch_native_turn(
+                    work,
+                    |state| {
+                        let mut s = state.borrow_mut();
+                        s.executing_request_id = None;
+                        s.executing_request_cancel = None;
+                        s.executing_ws_user = s.ws_user.get(&ws_id).cloned();
+                    },
+                    |scope, state| {
+                        crate::websocket_native::dispatch::dispatch_pending_ws_events(
+                            scope, state, ws_id,
+                        );
+                    },
+                );
             }
             OpResult::SocketEvent { socket_id } => {
-                let state_clone = self.state.clone();
-                {
-                    let mut s = self.state.borrow_mut();
-                    s.executing_request_id = None;
-                    s.executing_request_cancel = None;
-                    #[cfg(feature = "runtime_native_websocket")]
-                    {
-                        s.executing_ws_user = None;
-                    }
-                }
-
-                self.arm_cpu_timer();
-                let settled_results = enter_v8!(self, |scope| {
-                    crate::node::net::dispatch::dispatch_pending_socket_events(
-                        scope,
-                        &state_clone,
-                        socket_id,
-                    );
-                    crate::core::init::perform_microtask_checkpoint(scope);
-                    collect_settled_promises(scope, &mut self.pending_requests)
-                });
-                self.disarm_cpu_timer();
-
-                if self.check_v8_terminated() {
-                    self.clear_executing_request();
-                    self.drain_new_tasks_into(work);
-                    return;
-                }
-
-                for (id, req, settled) in settled_results {
-                    self.send_settled_reply_any(id, req, settled, std::time::Duration::ZERO);
-                }
-
-                self.cleanup_cancelled_requests();
-                self.clear_executing_request();
-                self.drain_new_tasks_into(work);
+                self.dispatch_native_turn(
+                    work,
+                    |state| {
+                        let mut s = state.borrow_mut();
+                        s.executing_request_id = None;
+                        s.executing_request_cancel = None;
+                        #[cfg(feature = "runtime_native_websocket")]
+                        {
+                            s.executing_ws_user = None;
+                        }
+                    },
+                    |scope, state| {
+                        crate::node::net::dispatch::dispatch_pending_socket_events(
+                            scope, state, socket_id,
+                        );
+                    },
+                );
             }
         }
+    }
+
+    fn dispatch_native_turn<Prep, Dispatch>(
+        &mut self,
+        work: &mut AsyncWork,
+        prep: Prep,
+        dispatch: Dispatch,
+    ) where
+        Prep: FnOnce(&SharedState),
+        Dispatch: FnOnce(&mut v8::PinScope, &SharedState),
+    {
+        let state_clone = self.state.clone();
+        prep(&self.state);
+
+        self.arm_cpu_timer();
+        let settled_results = enter_v8!(self, |scope| {
+            dispatch(scope, &state_clone);
+            crate::core::init::perform_microtask_checkpoint(scope);
+            collect_settled_promises(scope, &mut self.pending_requests)
+        });
+        self.disarm_cpu_timer();
+
+        // Clear any per-turn WS identity so it never bleeds into a subsequent
+        // non-WS turn on this isolate.
+        #[cfg(feature = "runtime_native_websocket")]
+        {
+            self.state.borrow_mut().executing_ws_user = None;
+        }
+
+        if self.check_v8_terminated() {
+            self.clear_executing_request();
+            self.drain_new_tasks_into(work);
+            return;
+        }
+
+        for (id, req, settled) in settled_results {
+            self.send_settled_reply_any(id, req, settled, std::time::Duration::ZERO);
+        }
+
+        self.cleanup_cancelled_requests();
+        self.clear_executing_request();
+        self.drain_new_tasks_into(work);
     }
 
     /// Handle a timer firing (pump path). Enters V8 to fire the callback,
