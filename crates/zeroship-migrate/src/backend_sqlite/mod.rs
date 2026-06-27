@@ -28,7 +28,7 @@ mod rollback_sql;
 
 use std::collections::HashMap;
 
-use crate::backend::{MigrationBackend, SessionSnapshot};
+use crate::backend::MigrationBackend;
 use crate::baseline::{BaselineError, BaselineOutcome};
 use crate::db::ExecutorConfig;
 use crate::drift::{ChecksumDriftReport, DriftError, SchemaSnapshot};
@@ -349,6 +349,8 @@ fn journal_err(e: SqliteActorError) -> JournalError {
 }
 
 impl MigrationBackend for SqliteBackend {
+    type SessionSnapshot = ();
+
     fn dialect(&self) -> SqlDialect {
         SqlDialect::Sqlite
     }
@@ -370,13 +372,13 @@ impl MigrationBackend for SqliteBackend {
         Ok(())
     }
 
-    async fn snapshot_session(&self) -> Result<SessionSnapshot, ApplyError> {
+    async fn snapshot_session(&self) -> Result<Self::SessionSnapshot, ApplyError> {
         // No GUCs / session settings to restore on SQLite — confinement is by
-        // authorizer state, not by per-session SET LOCAL. Empty snapshot.
-        Ok(SessionSnapshot::default())
+        // authorizer state, not by per-session SET LOCAL.
+        Ok(())
     }
 
-    async fn restore_session(&self, _snap: &SessionSnapshot) -> Result<(), ApplyError> {
+    async fn restore_session(&self, _snap: &Self::SessionSnapshot) -> Result<(), ApplyError> {
         Ok(())
     }
 
@@ -515,76 +517,6 @@ impl MigrationBackend for SqliteBackend {
         journal_sql::latest_completed_checksums(&self.actor)
             .await
             .map_err(journal_err)
-    }
-
-    // -- cross-deploy pending-contract obligations (§2.0.3) -----------------
-    //
-    // SQLite has NO pending-contract partition (Deliverable 7): a `SqliteRebuild`
-    // rename is one atomic offline step, fully applied in its own deploy (§2.0.2),
-    // so SQLite never OPENS an obligation. The read-back is therefore always empty
-    // and the write paths are no-ops — the §2.0.3 interlock can never false-gate a
-    // SQLite deploy, and `resolve-pending` is structurally a PG-only command.
-
-    async fn outstanding_pending_contracts(
-        &self,
-        _cfg: &ExecutorConfig,
-    ) -> Result<Vec<crate::journal::PendingContract>, JournalError> {
-        Ok(Vec::new())
-    }
-
-    async fn record_pending_contract_with_recovery(
-        &self,
-        _cfg: &ExecutorConfig,
-        _rec: crate::journal::PendingContractRecord<'_>,
-        _scope: Option<crate::journal::DeployRecoveryScope<'_>>,
-    ) -> Result<(), JournalError> {
-        // SQLite has no online-rename pending partition AND no half-state to recover,
-        // so both the obligation and the recovery marker are no-ops (the recovery
-        // `scope` is ignored — PR9e R4 fail-closed default).
-        Ok(())
-    }
-
-    async fn resolve_pending_contract(
-        &self,
-        _cfg: &ExecutorConfig,
-        _pc: &crate::journal::PendingContract,
-        _resolution: crate::journal::Resolution,
-        _by: &str,
-    ) -> Result<(), JournalError> {
-        Ok(())
-    }
-
-    // -- deploy-scoped recovery markers (PR9d MED) --------------------------
-    //
-    // SQLite never opens a pending-contract obligation (no online rename — a
-    // `SqliteRebuild` is one atomic offline step), so there is no same-deploy
-    // half-state to recover: all three markers are no-ops / empty.
-
-    async fn mark_deploy_recovery_committed_batch(
-        &self,
-        _cfg: &ExecutorConfig,
-        _deploy_id: &str,
-        _pending_versions: &[String],
-        _by: &str,
-    ) -> Result<(), JournalError> {
-        Ok(())
-    }
-
-    async fn mark_deploy_recovery_reconciled(
-        &self,
-        _cfg: &ExecutorConfig,
-        _deploy_id: &str,
-        _pending_version: &str,
-        _by: &str,
-    ) -> Result<(), JournalError> {
-        Ok(())
-    }
-
-    async fn outstanding_deploy_recoveries(
-        &self,
-        _cfg: &ExecutorConfig,
-    ) -> Result<Vec<crate::journal::DeployRecovery>, JournalError> {
-        Ok(Vec::new())
     }
 
     // -- DB-coupled validation / introspection ------------------------------
@@ -827,6 +759,13 @@ impl MigrationBackend for SqliteBackend {
         // untrusted/prod non-PG engine WOULD provide one. Returning
         // `None` is honest: the engine's `dry_run` surfaces the explicit
         // `DryRunError::ShadowUnsupported`, never a fake "dry-run passed".
+        None
+    }
+
+    fn pending_contracts(&self) -> Option<&dyn crate::backend::CrossDeployObligations> {
+        // SQLite has no cross-deploy pending-contract partition: a rebuild rename
+        // is one atomic offline step, so there is no obligation to open or
+        // recover. Generic callers treat `None` as empty/no-op.
         None
     }
 

@@ -1118,7 +1118,9 @@ async fn pr9e_obligation_and_marker_commit_atomically() {
 
     let contract_versions = vec!["c1".to_string(), "c2".to_string()];
     let scope = zeroship_migrate::journal::DeployRecoveryScope { deploy_id: "dep_pr9e_1" };
-    be.record_pending_contract_with_recovery(
+    be.pending_contracts()
+        .expect("Postgres pending-contract capability")
+        .record_pending_contract_with_recovery(
         &cfg,
         sample_record("pv_pr9e_1", &contract_versions),
         Some(scope),
@@ -1166,6 +1168,8 @@ async fn pr9e_combined_write_failure_rolls_back_both_rows() {
     let contract_versions = vec!["c1".to_string()];
     let scope = zeroship_migrate::journal::DeployRecoveryScope { deploy_id: "dep_pr9e_2" };
     let err = be
+        .pending_contracts()
+        .expect("Postgres pending-contract capability")
         .record_pending_contract_with_recovery(
             &cfg,
             sample_record("pv_pr9e_2", &contract_versions),
@@ -1201,7 +1205,9 @@ async fn pr9e_no_scope_writes_obligation_only_no_marker() {
         .expect("bootstrap journal");
 
     let contract_versions = vec!["c1".to_string()];
-    be.record_pending_contract_with_recovery(
+    be.pending_contracts()
+        .expect("Postgres pending-contract capability")
+        .record_pending_contract_with_recovery(
         &cfg,
         sample_record("pv_pr9e_3", &contract_versions),
         None,

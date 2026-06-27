@@ -250,10 +250,7 @@ pub(crate) fn escape_quote_ident(ident: &str) -> String {
 }
 
 pub(crate) fn escape_quote_ident_for_dialect(ident: &str, dialect: SqlDialect) -> String {
-    match dialect {
-        SqlDialect::Postgres | SqlDialect::Sqlite => escape_quote_ident(ident),
-        SqlDialect::Mysql => format!("`{}`", ident.replace('`', "``")),
-    }
+    crate::dialect_renderer::renderer(dialect).quote_ident(ident)
 }
 
 /// Qualify a validated bare table name for the target dialect.

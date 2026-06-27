@@ -174,7 +174,23 @@ async fn as_migrator(conn: &Client, role: &str, sql: &str) -> Result<(), compio_
 /// Assert a DB error is `insufficient_privilege` (SQLSTATE 42501) — the
 /// signature of line-2 confinement. The opaque `Error` Display is just
 /// "db error"; the real signal is the SQLSTATE on the underlying `DbError`.
-fn assert_permission_denied(err: &compio_postgres::Error, ctx: &str) {
+fn postgres_error<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+    ctx: &str,
+) -> &'a compio_postgres::Error {
+    if let Some(pg) = err.downcast_ref::<compio_postgres::Error>() {
+        return pg;
+    }
+    if let Some(backend) = err.downcast_ref::<zeroship_migrate::BackendError>() {
+        if let Some(pg) = backend.downcast_ref::<compio_postgres::Error>() {
+            return pg;
+        }
+    }
+    panic!("{ctx}: expected a Postgres driver error, got {err:?}");
+}
+
+fn assert_permission_denied(err: &(dyn std::error::Error + 'static), ctx: &str) {
+    let err = postgres_error(err, ctx);
     let code = err.code();
     let detail = err
         .as_db_error()
@@ -793,7 +809,7 @@ async fn migration_up_cannot_forge_journal_via_unqualified_insert() {
     };
     // Either permission-denied (grant revoked) or relation-not-found (meta off the
     // search_path) — both prove the forge cannot land.
-    let code = source.code();
+    let code = postgres_error(source, "unqualified journal forge").code();
     assert!(
         code == Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
             || code == Some(&compio_postgres::error::SqlState::UNDEFINED_TABLE),
@@ -966,7 +982,7 @@ async fn migration_up_cannot_delete_inflight_markers() {
     let zeroship_migrate::ApplyError::MigrationFailed { source, .. } = &err else {
         panic!("expected MigrationFailed, got {err:?}");
     };
-    let code = source.code();
+    let code = postgres_error(source, "inflight DELETE").code();
     assert!(
         code == Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
             || code == Some(&compio_postgres::error::SqlState::UNDEFINED_TABLE),

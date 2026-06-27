@@ -258,7 +258,10 @@ async fn forged_contract_versionids_with_innocuous_sql_do_not_discharge() {
         .expect("expand applies + opens obligation");
 
     // Sanity: the obligation is outstanding, the dual-write trigger + `email` are live.
-    let outstanding = be
+    let pending_contracts = be
+        .pending_contracts()
+        .expect("Postgres pending-contract capability");
+    let outstanding = pending_contracts
         .outstanding_pending_contracts(&cfg)
         .await
         .expect("read outstanding");
@@ -314,7 +317,7 @@ async fn forged_contract_versionids_with_innocuous_sql_do_not_discharge() {
 
     // FAIL CLOSED: the obligation is STILL outstanding, the trigger + `email` still live
     // (the forged plan applied nothing and discharged nothing).
-    let still = be
+    let still = pending_contracts
         .outstanding_pending_contracts(&cfg)
         .await
         .expect("read outstanding after forged attempt");

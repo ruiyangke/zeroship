@@ -854,7 +854,12 @@ pub async fn run_resolve_pending(
     // for the contract apply; the obligation read here is consistent because the
     // command is single-actor and the obligation table is admin-only.
     backend.ensure_journal(&exec_cfg).await?;
-    let outstanding = backend.outstanding_pending_contracts(&exec_cfg).await?;
+    let pending_contracts = backend
+        .pending_contracts()
+        .expect("Postgres backend exposes pending-contract capability");
+    let outstanding = pending_contracts
+        .outstanding_pending_contracts(&exec_cfg)
+        .await?;
     let Some(pc) = outstanding
         .iter()
         .find(|pc| pc.pending_version == version)

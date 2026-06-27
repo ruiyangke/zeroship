@@ -1038,6 +1038,9 @@ async fn cross_schema_down_is_permission_denied_by_the_migrator_role() {
     let RollbackError::DownFailed { source, .. } = &err else {
         panic!("expected DownFailed (permission denied), got {err:?}");
     };
+    let source = source
+        .downcast_ref::<compio_postgres::Error>()
+        .expect("DownFailed source remains the original Postgres driver error");
     assert_eq!(
         source.code(),
         Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE),

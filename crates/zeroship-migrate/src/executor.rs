@@ -32,13 +32,15 @@
 //! Runs out-of-band at deploy, async on compio — ZERO tokio.
 
 use std::collections::HashMap;
+use std::error::Error;
+use std::fmt;
 use std::time::Instant;
 
 use compio_postgres::Client;
 use pg_query::protobuf::node::Node as NodeEnum;
 
 use crate::approval::Approval;
-use crate::backend::{MigrationBackend, PostgresBackend, SessionSnapshot};
+use crate::backend::{MigrationBackend, PgSessionSnapshot, PostgresBackend};
 use crate::db::ExecutorConfig;
 use crate::guard::{GuardError, SqlGuard};
 use crate::journal::{self, AppliedEntry, JournalError, Phase};
@@ -111,22 +113,65 @@ impl ApplyOutcome {
     }
 }
 
+/// Opaque driver/transport error carried by the dialect-neutral executor.
+///
+/// Postgres stores the original [`compio_postgres::Error`] inside this wrapper,
+/// so callers that need PG-specific details can downcast. Non-PG backends can
+/// carry their own structured error type without forcing `ApplyError` /
+/// `RollbackError` to name a Postgres driver in their public shape.
+#[derive(Debug)]
+pub struct BackendError(Box<dyn Error + Send + Sync + 'static>);
+
+impl BackendError {
+    /// Wrap any backend driver/transport error without stringifying it.
+    pub fn new<E>(error: E) -> Self
+    where
+        E: Error + Send + Sync + 'static,
+    {
+        Self(Box::new(error))
+    }
+
+    /// Recover a concrete backend error type when a caller intentionally needs
+    /// backend-specific details, such as a Postgres SQLSTATE in tests.
+    #[must_use]
+    pub fn downcast_ref<E>(&self) -> Option<&E>
+    where
+        E: Error + Send + Sync + 'static,
+    {
+        self.0.downcast_ref::<E>()
+    }
+}
+
+impl fmt::Display for BackendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl Error for BackendError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
+impl From<compio_postgres::Error> for BackendError {
+    fn from(error: compio_postgres::Error) -> Self {
+        Self::new(error)
+    }
+}
+
 /// Error from [`apply`].
 #[derive(Debug, thiserror::Error)]
 pub enum ApplyError {
-    /// A database error outside a guarded/journaled step.
+    /// A database/driver error outside a guarded/journaled step.
     #[error("db error: {0}")]
-    Db(#[from] compio_postgres::Error),
+    Db(#[source] BackendError),
     /// A journal operation failed.
     #[error(transparent)]
     Journal(#[from] JournalError),
-    /// A **dialect-neutral** backend error — used by non-Postgres
-    /// [`MigrationBackend`](crate::backend::MigrationBackend) impls (e.g.
-    /// `SqliteBackend`) that cannot produce a `compio_postgres::Error`. The
-    /// payload is the backend's own error rendered to a string, so the generic
-    /// executor body and callers can surface it without the trait leaking a
-    /// PG-specific error type. The Postgres impl never constructs this arm (it
-    /// keeps using [`ApplyError::Db`]), so its behavior is byte-identical.
+    /// A dialect-level backend error whose message is already the intended
+    /// operator-facing text. Use [`ApplyError::Db`] /
+    /// [`ApplyError::MigrationFailed`] for structured driver/transport failures.
     #[error("backend error: {0}")]
     Backend(String),
     /// A migration requested the **non-transactional** path (`transaction:false`)
@@ -350,9 +395,9 @@ pub enum ApplyError {
     MigrationFailed {
         /// The failing migration's version.
         version: String,
-        /// The DB error from the failed statement.
+        /// The backend driver/transport error from the failed statement.
         #[source]
-        source: compio_postgres::Error,
+        source: BackendError,
     },
     /// **PR10 Part B** — a guarded migration's `ifNotExists` existence guard found
     /// the target object ALREADY PRESENT with a shape that DIVERGES from (or cannot
@@ -388,6 +433,12 @@ pub enum ApplyError {
     /// [`JournalError`] (which also carries this `From`).
     #[error("apply: {0}")]
     IdentQuote(#[from] crate::dml::IdentQuoteError),
+}
+
+impl From<compio_postgres::Error> for ApplyError {
+    fn from(error: compio_postgres::Error) -> Self {
+        Self::Db(error.into())
+    }
 }
 
 /// A stable i64 advisory-lock key from the project id, mirroring the
@@ -427,7 +478,7 @@ pub(crate) async fn release_project_lock(conn: &Client, project_id: &str) -> Res
 /// Read the session GUCs we are about to override, so they can be restored when
 /// `apply` finishes. Uses `current_setting(name)` (text form, exactly what `SET`
 /// round-trips).
-pub(crate) async fn snapshot_session(conn: &Client) -> Result<SessionSnapshot, ApplyError> {
+pub(crate) async fn snapshot_session(conn: &Client) -> Result<PgSessionSnapshot, ApplyError> {
     let row = conn
         .query_one(
             "SELECT current_setting('statement_timeout') AS st, \
@@ -436,7 +487,7 @@ pub(crate) async fn snapshot_session(conn: &Client) -> Result<SessionSnapshot, A
             &[],
         )
         .await?;
-    Ok(SessionSnapshot {
+    Ok(PgSessionSnapshot {
         statement_timeout: row.get("st"),
         lock_timeout: row.get("lt"),
         search_path: row.get("sp"),
@@ -447,7 +498,10 @@ pub(crate) async fn snapshot_session(conn: &Client) -> Result<SessionSnapshot, A
 /// value, false)` so the *value* is a bound literal, not interpolated SQL
 /// (the snapshot strings are server-provided, but we keep the parameterized
 /// path regardless).
-pub(crate) async fn restore_session(conn: &Client, snap: &SessionSnapshot) -> Result<(), ApplyError> {
+pub(crate) async fn restore_session(
+    conn: &Client,
+    snap: &PgSessionSnapshot,
+) -> Result<(), ApplyError> {
     // RESET ROLE first: belt-and-suspenders behind `apply`'s unconditional
     // `RESET ROLE` (L1). The non-txn path's `SET ROLE` mutates the session, so
     // drop back to the admin role before anything else, ensuring the executor's
@@ -1035,7 +1089,7 @@ async fn apply_locked<B: MigrationBackend>(
         .check_checksum_drift(cfg, all_migrations)
         .await
         .map_err(|e| match e {
-            crate::drift::DriftError::Db(db) => ApplyError::Db(db),
+            crate::drift::DriftError::Db(db) => ApplyError::Db(db.into()),
             crate::drift::DriftError::Journal(j) => ApplyError::Journal(j),
             crate::drift::DriftError::Backend(b) => ApplyError::Backend(b),
         })?;
@@ -1984,7 +2038,7 @@ pub(crate) async fn apply_transactional(
     // the `<up>` only.
     if let Err(e) = conn.batch_execute(&session_sql).await {
         let _ = conn.batch_execute("ROLLBACK").await;
-        return Err(ApplyError::Db(e));
+        return Err(ApplyError::Db(e.into()));
     }
 
     // **PR10 Part B — existence-guard catalog probe (no TOCTOU).** If this migration
@@ -2010,7 +2064,7 @@ pub(crate) async fn apply_transactional(
                 let _ = conn.batch_execute("ROLLBACK").await;
                 // Reuse the same DriftError → ApplyError mapping `apply_locked` uses.
                 return Err(match e {
-                    crate::drift::DriftError::Db(db) => ApplyError::Db(db),
+                    crate::drift::DriftError::Db(db) => ApplyError::Db(db.into()),
                     crate::drift::DriftError::Journal(j) => ApplyError::Journal(j),
                     crate::drift::DriftError::Backend(b) => ApplyError::Backend(b),
                 });
@@ -2057,7 +2111,7 @@ pub(crate) async fn apply_transactional(
         if let Some(set_role) = &role_sql {
             if let Err(e) = conn.batch_execute(set_role.as_str()).await {
                 let _ = conn.batch_execute("ROLLBACK").await;
-                return Err(ApplyError::Db(e));
+                return Err(ApplyError::Db(e.into()));
             }
         }
 
@@ -2069,7 +2123,7 @@ pub(crate) async fn apply_transactional(
             }
             return Err(ApplyError::MigrationFailed {
                 version: m.version.as_str().to_string(),
-                source: e,
+                source: e.into(),
             });
         }
 
@@ -2080,7 +2134,7 @@ pub(crate) async fn apply_transactional(
         if cfg.pg.migrator_role.is_some() {
             if let Err(e) = conn.batch_execute("RESET ROLE").await {
                 let _ = conn.batch_execute("ROLLBACK").await;
-                return Err(ApplyError::Db(e));
+                return Err(ApplyError::Db(e.into()));
             }
         }
     }
@@ -2209,14 +2263,14 @@ pub(crate) async fn apply_dml_transactional(
     // COMMIT/ROLLBACK).
     if let Err(e) = conn.batch_execute(&set_local).await {
         let _ = conn.batch_execute("ROLLBACK").await;
-        return Err(ApplyError::Db(e));
+        return Err(ApplyError::Db(e.into()));
     }
     // Drop to the migrator role for the DML ONLY (line-2 confinement); RESET
     // before the journal write so the journal stays unforgeable by the step.
     if let Some(set_role) = &role_sql {
         if let Err(e) = conn.batch_execute(set_role.as_str()).await {
             let _ = conn.batch_execute("ROLLBACK").await;
-            return Err(ApplyError::Db(e));
+            return Err(ApplyError::Db(e.into()));
         }
     }
     if let Err(e) = conn.execute_text_params(template, &params).await {
@@ -2225,13 +2279,13 @@ pub(crate) async fn apply_dml_transactional(
         }
         return Err(ApplyError::MigrationFailed {
             version: version.to_string(),
-            source: e,
+            source: e.into(),
         });
     }
     if cfg.pg.migrator_role.is_some() {
         if let Err(e) = conn.batch_execute("RESET ROLE").await {
             let _ = conn.batch_execute("ROLLBACK").await;
-            return Err(ApplyError::Db(e));
+            return Err(ApplyError::Db(e.into()));
         }
     }
     // Fault seam (test-only): a simulated crash AFTER the DML statement ran but
@@ -2328,23 +2382,84 @@ pub(crate) async fn apply_non_transactional(
 ) -> Result<bool, ApplyError> {
     let version = m.version.as_str();
 
-    // **PR10 Part B — guarded ops never reach the non-txn path (fail-closed).** The
-    // existence-guard probe is wired ONLY into the transactional apply (the probe
-    // must read the catalog inside the same txn that runs the `up`, under the held
-    // lock, for no-TOCTOU). Guarded ops are pure DDL with `flags.transactional=true`
-    // (the guarded IR `createIndex` arm never emits CONCURRENTLY), so they always
-    // route through `apply_transactional`. If one ever reaches here, refuse rather
-    // than apply the bare op with its guard unhonored.
-    debug_assert!(
-        m.existence_guard.is_none(),
-        "a guarded migration must not reach the non-transactional apply path"
-    );
-    if m.existence_guard.is_some() {
-        return Err(ApplyError::Backend(format!(
-            "migration {version} carries an existence guard but reached the \
-             non-transactional apply path, where the guard probe is not wired \
-             (refused fail-closed — the guard is never silently dropped)"
-        )));
+    // Existence-guard catalog probe, under the held project lock. The no-TOCTOU
+    // guarantee comes from the plan lock, not from being inside the transactional
+    // apply path, so the two-phase path honors the same probe before it writes an
+    // inflight marker or runs the bare `up`.
+    if let Some(probe) = &m.existence_guard {
+        let probe_started = Instant::now();
+        let live = match crate::drift::snapshot_schema(conn, probe.schema()).await {
+            Ok(s) => s,
+            Err(e) => {
+                return Err(match e {
+                    crate::drift::DriftError::Db(db) => ApplyError::Db(db.into()),
+                    crate::drift::DriftError::Journal(j) => ApplyError::Journal(j),
+                    crate::drift::DriftError::Backend(b) => ApplyError::Backend(b),
+                });
+            }
+        };
+        match crate::guard_probe::decide(
+            probe,
+            &live,
+            zeroship_schema::query::SqlDialect::Postgres,
+        ) {
+            crate::guard_probe::GuardVerdict::RunBare => { /* continue below */ }
+            crate::guard_probe::GuardVerdict::SatisfiedNoop => {
+                let exec_ms =
+                    i64::try_from(probe_started.elapsed().as_millis()).unwrap_or(i64::MAX);
+                if supersedes.is_empty() {
+                    journal::record_completed(
+                        conn,
+                        cfg,
+                        journal::CompletedRecord {
+                            version,
+                            name: &m.name,
+                            checksum: m.checksum.as_str(),
+                            applied_by,
+                            exec_ms,
+                            kind: "apply",
+                        },
+                    )
+                    .await?;
+                } else {
+                    conn.batch_execute("BEGIN").await?;
+                    let finalize = async {
+                        journal::record_completed(
+                            conn,
+                            cfg,
+                            journal::CompletedRecord {
+                                version,
+                                name: &m.name,
+                                checksum: m.checksum.as_str(),
+                                applied_by,
+                                exec_ms,
+                                kind: "squash",
+                            },
+                        )
+                        .await?;
+                        insert_supersedes_edges(conn, cfg, version, supersedes).await
+                    }
+                    .await;
+                    if let Err(e) = finalize {
+                        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+                            tracing::warn!(error = %rb, version = %version, "zeroship-migrate: ROLLBACK failed after a guarded non-txn satisfied-noop finalize error");
+                        }
+                        return Err(ApplyError::Journal(e));
+                    }
+                    conn.batch_execute("COMMIT").await?;
+                }
+                return Ok(false);
+            }
+            crate::guard_probe::GuardVerdict::FailDrift(d) => {
+                return Err(ApplyError::ExistenceGuardDrift {
+                    version: version.to_string(),
+                    object: d.object,
+                    field: d.field,
+                    expected: d.expected,
+                    actual: d.actual,
+                });
+            }
+        }
     }
 
     // Journal / inflight I/O runs as the ADMIN (C1): the migrator's grant on the
@@ -2395,13 +2510,13 @@ pub(crate) async fn apply_non_transactional(
             // If RESET ROLE itself fails, surface it (apply's restore_session is
             // the L1 backstop). Prefer surfacing the up's error if it failed.
             if up_result.is_ok() {
-                return Err(ApplyError::Db(e));
+                return Err(ApplyError::Db(e.into()));
             }
         }
     }
     up_result.map_err(|e| ApplyError::MigrationFailed {
         version: version.to_string(),
-        source: e,
+        source: e.into(),
     })?;
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
 
@@ -2662,9 +2777,9 @@ impl RollbackOutcome {
 /// Error from [`rollback`].
 #[derive(Debug, thiserror::Error)]
 pub enum RollbackError {
-    /// A database error outside a guarded/journaled step.
+    /// A database/driver error outside a guarded/journaled step.
     #[error("db error: {0}")]
-    Db(#[from] compio_postgres::Error),
+    Db(#[source] BackendError),
     /// A journal operation failed.
     #[error(transparent)]
     Journal(#[from] JournalError),
@@ -2673,9 +2788,8 @@ pub enum RollbackError {
     /// rather than interpolate it. Maps [`crate::dml::IdentQuoteError`].
     #[error("rollback: {0}")]
     IdentQuote(#[from] crate::dml::IdentQuoteError),
-    /// A **dialect-neutral** backend error (non-Postgres
-    /// [`MigrationBackend`](crate::backend::MigrationBackend) impls). See
-    /// [`ApplyError::Backend`]. The Postgres impl never constructs this arm.
+    /// A dialect-level backend error whose message is already the intended
+    /// operator-facing text. See [`ApplyError::Backend`].
     #[error("backend error: {0}")]
     Backend(String),
     /// Rollback was requested with [`Approval::None`]. A `down` is inherently
@@ -2766,9 +2880,9 @@ pub enum RollbackError {
     DownFailed {
         /// The failing migration's version.
         version: String,
-        /// The DB error from the failed `down`.
+        /// The backend driver/transport error from the failed `down`.
         #[source]
-        source: compio_postgres::Error,
+        source: BackendError,
     },
     /// The `depends_on` edges among the versions selected for rollback form a
     /// cycle, so no reverse-topological order exists. This should be impossible if
@@ -2834,6 +2948,12 @@ pub enum RollbackError {
         /// What specifically requires the rebuild.
         reason: String,
     },
+}
+
+impl From<compio_postgres::Error> for RollbackError {
+    fn from(error: compio_postgres::Error) -> Self {
+        Self::Db(error.into())
+    }
 }
 
 /// Roll back applied migrations to a [`RollbackTarget`] (design §5).
@@ -3294,14 +3414,14 @@ pub(crate) async fn rollback_one_transactional(
     // Pin search_path + mandatory timeouts (SET LOCAL — vanish at COMMIT/ROLLBACK).
     if let Err(e) = conn.batch_execute(&session_sql).await {
         let _ = conn.batch_execute("ROLLBACK").await;
-        return Err(RollbackError::Db(e));
+        return Err(RollbackError::Db(e.into()));
     }
     // Drop to the migrator role for the `<down>` ONLY (line-2 confinement). RESET
     // ROLE before the journal append so the admin writes the rolled_back event.
     if let Some(set_role) = &role_sql {
         if let Err(e) = conn.batch_execute(set_role.as_str()).await {
             let _ = conn.batch_execute("ROLLBACK").await;
-            return Err(RollbackError::Db(e));
+            return Err(RollbackError::Db(e.into()));
         }
     }
     // Run the `<down>` as the migrator.
@@ -3311,7 +3431,7 @@ pub(crate) async fn rollback_one_transactional(
         }
         return Err(RollbackError::DownFailed {
             version: m.version.as_str().to_string(),
-            source: e,
+            source: e.into(),
         });
     }
     // RESET ROLE back to admin — still inside the txn — so the journal append runs
@@ -3319,7 +3439,7 @@ pub(crate) async fn rollback_one_transactional(
     if cfg.pg.migrator_role.is_some() {
         if let Err(e) = conn.batch_execute("RESET ROLE").await {
             let _ = conn.batch_execute("ROLLBACK").await;
-            return Err(RollbackError::Db(e));
+            return Err(RollbackError::Db(e.into()));
         }
     }
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
