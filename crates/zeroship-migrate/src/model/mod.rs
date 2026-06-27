@@ -3,5 +3,7 @@ pub mod expr;
 pub mod ir;
 pub mod load;
 pub mod migration;
+pub mod policy;
 pub mod precondition;
+pub mod snapshot;
 pub mod validate;

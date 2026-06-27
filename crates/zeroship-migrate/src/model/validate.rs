@@ -54,7 +54,7 @@ pub const CODE_EXPR_NOT_PORTABLE: &str = "EXPR_NOT_PORTABLE";
 pub const CODE_DIALECT_SCOPE_PGONLY: &str = "DIALECT_SCOPE_PGONLY";
 /// An op-function called outside an active recorder (§3.1) — emitted JS-side.
 pub const CODE_OP_OUTSIDE_RECORDER: &str = "OP_OUTSIDE_RECORDER";
-/// **PR10** — an op naming a `schema` the active [`SchemaScope`](crate::guard::SchemaScope)
+/// **PR10** — an op naming a `schema` the active [`SchemaScope`](crate::model::policy::SchemaScope)
 /// does not permit (§2.7). The Confined creator profile pins the project schema:
 /// an explicit `schema != project_schema` is REFUSED at validate-time, fail-closed,
 /// BEFORE lower — additional and EARLIER than the migrator-role 42501 + the
@@ -344,7 +344,7 @@ pub fn validate_ir_scoped(
     ir: &crate::model::ir::MigrationIr,
     target_dialect: Dialect,
     ts_locations: &[Option<String>],
-    schema_scope: Option<&crate::guard::SchemaScope>,
+    schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), AuthoringError> {
     for (op_index, op) in ir.ops.iter().enumerate() {
         let ts = ts_locations.get(op_index).and_then(Option::as_deref);
@@ -371,7 +371,7 @@ pub fn validate_op(
 }
 
 /// **PR10** — [`validate_op`] threaded with the active
-/// [`SchemaScope`](crate::guard::SchemaScope) (§2.7). Runs the schema/guard gate
+/// [`SchemaScope`](crate::model::policy::SchemaScope) (§2.7). Runs the schema/guard gate
 /// FIRST, then the per-op expression-slot checks.
 ///
 /// # Errors
@@ -381,7 +381,7 @@ pub fn validate_op_scoped(
     target_dialect: Dialect,
     op_index: usize,
     ts_location: Option<&str>,
-    schema_scope: Option<&crate::guard::SchemaScope>,
+    schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::{IrConstraintKind, Op, TriggerAction, ViewQuery};
 
@@ -755,7 +755,7 @@ pub fn validate_op_scoped(
 ///    at load, never silently skipped.
 /// 2. **Capability gate** — the active
 ///    [`VendorCapabilities`](crate::capability::VendorCapabilities), derived from the
-///    threaded [`SchemaScope`](crate::guard::SchemaScope), must GRANT the op's
+///    threaded [`SchemaScope`](crate::model::policy::SchemaScope), must GRANT the op's
 ///    required [`VendorCapability`](crate::capability::VendorCapability). The
 ///    Confined `Single` scope grants nothing ⇒ every vendor op is
 ///    [`CODE_VENDOR_OP_DENIED`]. The gate keys on the CAPABILITY FLAG
@@ -767,7 +767,7 @@ fn validate_vendor_op(
     target_dialect: Dialect,
     op_index: usize,
     ts_location: Option<&str>,
-    schema_scope: Option<&crate::guard::SchemaScope>,
+    schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), AuthoringError> {
     let caps = op.vendor_capabilities();
     if caps.is_empty() {
@@ -878,7 +878,7 @@ pub(crate) fn validate_raw_view_body_sql(
     target_dialect: Dialect,
     op_index: usize,
     ts_location: Option<&str>,
-    schema_scope: Option<&crate::guard::SchemaScope>,
+    schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), AuthoringError> {
     let parsed = pg_query::parse(sql).map_err(|e| {
         view_body_error(
@@ -942,7 +942,7 @@ fn validate_table_ref(
     target_dialect: Dialect,
     op_index: usize,
     ts_location: Option<&str>,
-    schema_scope: Option<&crate::guard::SchemaScope>,
+    schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), AuthoringError> {
     if let Some(schema) = table.schema.as_deref() {
         if !is_safe_schema_ident(schema) {
@@ -985,7 +985,7 @@ fn validate_select_ast(
     target_dialect: Dialect,
     op_index: usize,
     ts_location: Option<&str>,
-    schema_scope: Option<&crate::guard::SchemaScope>,
+    schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::{OrderItem, SelectItem};
 
@@ -1033,7 +1033,7 @@ fn validate_op_schema_and_guard(
     target_dialect: Dialect,
     op_index: usize,
     ts_location: Option<&str>,
-    schema_scope: Option<&crate::guard::SchemaScope>,
+    schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), AuthoringError> {
     let mk = |code: &str, reason: String, fix: String| AuthoringError {
         code: code.to_string(),
@@ -1061,7 +1061,7 @@ fn validate_op_schema_and_guard(
         if let Some(scope) = schema_scope {
             if !scope.permits(schema) {
                 let (reason, fix) = match scope {
-                    crate::guard::SchemaScope::Single(project) => (
+                    crate::model::policy::SchemaScope::Single(project) => (
                         format!(
                             "this migration is CONFINED to its project schema {project:?}, \
                              but op names a different schema {schema:?} — a cross-schema \
@@ -1074,7 +1074,7 @@ fn validate_op_schema_and_guard(
                              schema: {project:?}"
                         ),
                     ),
-                    crate::guard::SchemaScope::Allowlist(allowed) => (
+                    crate::model::policy::SchemaScope::Allowlist(allowed) => (
                         format!(
                             "op names schema {schema:?}, which is not in the permitted \
                              platform schema allow-list {allowed:?}"
@@ -1223,7 +1223,7 @@ fn validate_trigger_stmt(
     target_dialect: Dialect,
     op_index: usize,
     ts_location: Option<&str>,
-    schema_scope: Option<&crate::guard::SchemaScope>,
+    schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), AuthoringError> {
     let validate_schema = |schema: Option<&str>| -> Result<(), AuthoringError> {
         let Some(schema) = schema else {
@@ -2636,7 +2636,7 @@ mod tests {
     /// project schema, or omits it, passes.
     #[test]
     fn confined_cross_schema_op_is_refused_at_validate() {
-        use crate::guard::SchemaScope;
+        use crate::model::policy::SchemaScope;
         let cross = ir_with(vec![Op::DropTable {
             table: "t".into(),
             cascade: None,
@@ -2671,7 +2671,7 @@ mod tests {
     /// PLATFORM (`Allowlist`) refuses a schema outside its allow-list (§2.7).
     #[test]
     fn trusted_honors_any_schema_platform_gates_to_allowlist() {
-        use crate::guard::SchemaScope;
+        use crate::model::policy::SchemaScope;
         let foreign = ir_with(vec![Op::DropTable {
             table: "t".into(),
             cascade: None,

@@ -57,113 +57,12 @@
 
 use compio_postgres::Client;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::approval::Approval;
 use crate::conn::ExecutorConfig;
 use crate::guard::{GuardError, SqlGuard};
 use crate::apply::journal::JournalError;
-
-/// The structured definition of a large-table backfill (design §5).
-///
-/// The creator/AI supplies the **target** ([`table`](Self::table)), the ordered
-/// key to page by ([`cursor_column`](Self::cursor_column)), the
-/// [`batch_size`](Self::batch_size), the per-row transform
-/// ([`set_clause`](Self::set_clause)), and an optional row
-/// [`filter`](Self::filter). The engine owns everything else — the cursor-window
-/// predicate, the parameter binding, the loop control — so the authored input
-/// can never escape the target table or inject into the loop control.
-#[derive(Debug, Clone)]
-pub struct BackfillSpec {
-    /// The **effective** (already gate-approved) schema the backfill targets — the
-    /// schema the windowed `UPDATE` qualifies into, the `search_path` anchors on,
-    /// and the catalog introspection probes. NOT necessarily the deploy-time
-    /// `ExecutorConfig::project_schema`:
-    ///
-    /// - **Confined** (zeroship creator): the cross-schema scope gate at lower
-    ///   (`IrAuthor::permits`) refuses any FOREIGN qualifier *before* the backfill
-    ///   is lowered, so this is always `== cfg.project_schema` — every render is
-    ///   byte-identical to the pre-#149 hardcoded project pin.
-    /// - **Trusted / Platform** (operator-token-gated general CLI): the scope
-    ///   widens, so a gate-approved foreign schema flows through here and the
-    ///   backfill runs cross-schema (the executor's own guard is profile-derived,
-    ///   so a cross-schema ref is only emitted under a guard that permits it).
-    ///
-    /// Set at lower from `IrAuthor`'s `eff_schema` (§2.7), which has already passed
-    /// the scope gate — so this field is never an unvetted author input.
-    pub schema: String,
-    /// The target table — a bare (unqualified) identifier in the [`schema`](Self::schema).
-    /// Validated as a real identifier and quoted; a schema-qualified or otherwise
-    /// malformed name is rejected ([`BackfillError::InvalidIdentifier`]). The
-    /// engine pins `search_path` to [`schema`](Self::schema), so the resolved table
-    /// is always the intended one.
-    pub table: String,
-    /// The ordered, unique-ish key to page by (the table's primary key or another
-    /// strictly-ordered column). Validated as an identifier and quoted. The engine
-    /// pages `WHERE cursor_column > $last ORDER BY cursor_column ASC LIMIT
-    /// batch_size`, so it must be totally ordered for the window to make progress
-    /// and not skip rows.
-    pub cursor_column: String,
-    /// Rows per batch. Each batch updates at most this many rows in its own
-    /// transaction. Must be non-zero ([`BackfillError::InvalidBatchSize`]).
-    pub batch_size: u32,
-    /// The authored per-row transform — the body of the `UPDATE … SET <here>`
-    /// (e.g. `normalized = lower(raw)`, `seq = seq + 1`,
-    /// `full_name = first || ' ' || last`). It may reference the row's own
-    /// columns. The engine assembles it into the full statement and **guard-checks
-    /// the assembled `UPDATE`** before running, so this is validated exactly like a
-    /// migration `up` — a cross-schema / dangerous transform is denied.
-    pub set_clause: String,
-    /// An optional authored row filter — extra `WHERE` conjunct AND-ed onto the
-    /// engine's cursor window (e.g. `normalized IS NULL` to touch only un-backfilled
-    /// rows). `None` backfills every row. Combined as `… AND (<filter>)` and
-    /// included in the guard-checked assembled statement.
-    pub filter: Option<String>,
-    /// A human-readable name for the backfill (used in the progress row + an
-    /// optional stable id seed). E.g. `"normalize_emails"`.
-    pub name: String,
-}
-
-impl BackfillSpec {
-    /// A stable identity for this backfill, used as the progress-row PK so a
-    /// resumed run finds its own progress. Derived from the target schema + table,
-    /// cursor column, the authored transform + filter, and the name — so changing
-    /// the transform yields a *different* backfill id (a re-authored backfill does
-    /// not silently resume against an old, incompatible cursor).
-    ///
-    /// #149: the **schema** is in the hash (canonical position, right after the
-    /// name) so two otherwise-identical backfills targeting the same table in
-    /// DIFFERENT schemas (`app_a.users` vs `app_b.users`, now reachable under
-    /// Trusted) get DISTINCT ids and cannot alias each other's progress row on
-    /// crash-resume.
-    ///
-    /// Stability is **going forward**, not across the #149 boundary: because the
-    /// schema is now folded into the SHA256 input, a backfill's id DIFFERS from the
-    /// one the pre-#149 code computed for the same transform (which hashed no
-    /// schema). That is acceptable pre-launch — there are no production progress
-    /// rows for the new id to orphan (a stranded old-id row would just mean a
-    /// re-authored backfill restarts from the top, which is exactly-once-safe). For
-    /// any FIXED engine version the id is fully deterministic: same schema (under
-    /// Confined, always the project schema) + same transform ⇒ same id, so an
-    /// in-flight backfill always resumes against its own progress row.
-    #[must_use]
-    pub fn backfill_id(&self) -> String {
-        let mut h = Sha256::new();
-        for field in [
-            self.name.as_str(),
-            self.schema.as_str(),
-            self.table.as_str(),
-            self.cursor_column.as_str(),
-            self.set_clause.as_str(),
-            self.filter.as_deref().unwrap_or("\u{0}<none>"),
-        ] {
-            h.update((field.len() as u64).to_be_bytes());
-            h.update(field.as_bytes());
-        }
-        h.update(self.batch_size.to_be_bytes());
-        format!("bf_{}", hex::encode(&h.finalize()[..16]))
-    }
-}
+use crate::render::plan::BackfillSpec;
 
 /// What [`run_backfill`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -21,10 +21,10 @@
 //! Every assertion is against the real applied schema + the real journal.
 
 use compio_postgres::Client;
-use zeroship_migrate::drift::{ColumnSnapshot, TableSnapshot};
+use zeroship_migrate::{ColumnSnapshot, TableSnapshot};
 use zeroship_migrate::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
 use zeroship_migrate::ir_author::{IrAuthor, LiveSchema};
-use zeroship_migrate::plan::PlanStep;
+use zeroship_migrate::PlanStep;
 use zeroship_migrate::{
     provision_migrator, role::deprovision_migrator, ApplyError, Approval, ApprovalScope,
     DeclarativeApplyError, EngineError, ExecutorConfig, MigrationEngine, PostgresBackend,

@@ -27,11 +27,10 @@
 
 use compio_postgres::Client;
 use zeroship_migrate::{
-    backfill::BackfillSpec,
     migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId},
-    plan::{AppliedPlan, BindValue, NotSingleStep, PlanStep, RenameStep},
-    provision_migrator, role::deprovision_migrator, Approval, DeclarativeApplyError, EngineError,
-    ExecutorConfig, ExpandContractAuthor, GuardConfig, MigrationEngine, OnlineIntent,
+    provision_migrator, role::deprovision_migrator, Approval, AppliedPlan, BackfillSpec,
+    BindValue, DeclarativeApplyError, EngineError, ExecutorConfig, ExpandContractAuthor,
+    GuardConfig, MigrationEngine, NotSingleStep, OnlineIntent, PlanStep, RenameStep,
 };
 
 const DEFAULT_DSN: &str =

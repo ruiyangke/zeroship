@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use zeroship_migrate::expr::{BinaryOp, Expr, UnaryOp};
-use zeroship_migrate::guard::{GuardConfig, SchemaScope};
+use zeroship_migrate::guard::GuardConfig;
 use zeroship_migrate::ir::{
     IrFlagsOverride, MigrationIr, Op, OrderDir, OrderItem, SelectAst, SelectItem, TableRef,
     ViewQuery, CURRENT_IR_VERSION,
@@ -10,7 +10,7 @@ use zeroship_migrate::ir_author::{IrAuthor, IrGuardedLowerError, IrLowerError, L
 use zeroship_migrate::validate::{
     validate_ir_scoped, Dialect, CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
 };
-use zeroship_migrate::{fold_ops, SchemaSnapshot, ViewSnapshot};
+use zeroship_migrate::{fold_ops, SchemaScope, SchemaSnapshot, ViewSnapshot};
 use zeroship_schema::query::SqlDialect;
 
 const SCHEMA: &str = "app";

@@ -71,10 +71,10 @@ async fn lower_and_apply(
         .load_and_lower(ir, APP, reg, &LiveSchema::default())
         .expect("lower the .ir.json on SQLite");
     let engine = MigrationEngine::new();
-    let plan = zeroship_migrate::plan::AppliedPlan {
+    let plan = zeroship_migrate::AppliedPlan {
         version: zeroship_migrate::migration::MigrationId::generate(),
         name: "dml".into(),
-        steps: migrations.into_iter().map(zeroship_migrate::plan::PlanStep::Ddl).collect(),
+        steps: migrations.into_iter().map(zeroship_migrate::PlanStep::Ddl).collect(),
         checksum: zeroship_migrate::migration::Checksum::of(&zeroship_migrate::migration::ChecksumInput {
             up: "x",
             down: None,
@@ -85,7 +85,7 @@ async fn lower_and_apply(
             preconditions: &[],
         }),
         flags: zeroship_migrate::migration::MigrationFlags::default(),
-        dialect_scope: zeroship_migrate::plan::DialectScope::Both,
+        dialect_scope: zeroship_migrate::DialectScope::Both,
         rollbackable: false,
         owner_app: APP.into(),
         depends_on: vec![],
@@ -398,7 +398,7 @@ async fn on_conflict_rejected_on_sqlite() {
 /// rejected at lower; it must now succeed.
 #[compio::test]
 async fn batched_backfill_portable_on_sqlite() {
-    use zeroship_migrate::plan::PlanStep;
+    use zeroship_migrate::PlanStep;
     let ir = r#"{"ir_version":1,"name":"bf","ops":[
         {"op":"backfill","table":"codes","cursorColumn":"code","batchSize":100,
          "set":{"label":{"node":"literal","value":"x"}},"name":"fill_labels"}

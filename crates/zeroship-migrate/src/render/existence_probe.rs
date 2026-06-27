@@ -68,9 +68,9 @@
 //! by the SAME shared snapshot builders the lowering arms call
 //! (`build_table_snapshot` / `add_column_snapshot` / `create_index_snapshot` / the
 //! addConstraint kind), so they are byte-comparable against the introspected
-//! [`SchemaSnapshot`](crate::drift::SchemaSnapshot).
+//! [`SchemaSnapshot`](crate::model::snapshot::SchemaSnapshot).
 
-use crate::apply::drift::SchemaSnapshot;
+use crate::model::snapshot::SchemaSnapshot;
 use crate::model::ir::ExistenceGuard;
 use zeroship_schema::query::{renderer as schema_renderer, SqlDialect};
 
@@ -801,7 +801,9 @@ fn drift(object: &str, field: &str, expected: &str, actual: &str) -> GuardVerdic
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::apply::drift::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, TableSnapshot};
+    use crate::model::snapshot::{
+        ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, TableSnapshot,
+    };
     use std::collections::BTreeMap;
 
     /// `decide` on the PG leg (raw `information_schema` compare).

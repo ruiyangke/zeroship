@@ -16,10 +16,11 @@
 use compio_postgres::Client;
 use zeroship_migrate::executor::ApplyError;
 use zeroship_migrate::migration::Checksum;
-use zeroship_migrate::precondition::{evaluate, CmpOp, Precondition, PreconditionCheck};
+use zeroship_migrate::precondition::{CmpOp, Precondition, PreconditionCheck};
 use zeroship_migrate::{
-    apply, applied, ensure_journal, migrator_role_name, provision_migrator,
-    role::deprovision_migrator, Approval, ExecutorConfig, Migration, MigrationFlags, MigrationId,
+    apply, applied, ensure_journal, evaluate_precondition as evaluate, migrator_role_name,
+    provision_migrator, role::deprovision_migrator, Approval, ExecutorConfig, Migration,
+    MigrationFlags, MigrationId, PreconditionError,
 };
 
 const DEFAULT_DSN: &str =
@@ -242,7 +243,7 @@ fn structured_check_rejects_identifier_injection() {
         assert!(
             matches!(
                 err,
-                zeroship_migrate::precondition::PreconditionError::InvalidIdentifier { what: "table", .. }
+                PreconditionError::InvalidIdentifier { what: "table", .. }
             ),
             "got {err:?}"
         );
@@ -261,7 +262,7 @@ fn structured_check_rejects_identifier_injection() {
         .unwrap_err();
         assert!(matches!(
             err,
-            zeroship_migrate::precondition::PreconditionError::InvalidIdentifier { what: "table", .. }
+            PreconditionError::InvalidIdentifier { what: "table", .. }
         ));
 
         // An injected COLUMN name.
@@ -277,7 +278,7 @@ fn structured_check_rejects_identifier_injection() {
         .unwrap_err();
         assert!(matches!(
             err,
-            zeroship_migrate::precondition::PreconditionError::InvalidIdentifier { what: "column", .. }
+            PreconditionError::InvalidIdentifier { what: "column", .. }
         ));
 
         drop_schemas(&conn, &cfg).await;
@@ -891,7 +892,7 @@ fn sql_boolean_legitimate_read_only_preconditions_still_pass() {
         )
         .await;
         assert!(
-            !matches!(res, Err(zeroship_migrate::precondition::PreconditionError::NotABooleanSelect { .. })),
+            !matches!(res, Err(PreconditionError::NotABooleanSelect { .. })),
             "currval is read-only and must pass the shape gate, got {res:?}"
         );
 

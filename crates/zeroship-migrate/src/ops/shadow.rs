@@ -83,7 +83,8 @@ use crate::approval::Approval;
 use crate::apply::backend::PostgresBackend;
 use crate::conn::{connect_with_handle, ConnectError, ExecutorConfig};
 use crate::render::declarative::{DeclarativeAuthor, DesiredSchema};
-use crate::apply::drift::{diff_snapshots, snapshot_schema, DriftError, SchemaSnapshot, StructuralDrift};
+use crate::apply::drift::{diff_snapshots, snapshot_schema, DriftError, StructuralDrift};
+use crate::model::snapshot::SchemaSnapshot;
 use crate::engine::{DeclarativeDeployPlan, EngineError, MigrationEngine};
 use crate::apply::executor::{self, ApplyError};
 use crate::guard::{GuardConfig, SqlGuard};
@@ -351,7 +352,7 @@ fn panic_seam_armed() -> bool {
 /// DATABASE, not a schema).
 fn shadow_executor_cfg(cfg: &ExecutorConfig, shadow_db: &str) -> Result<ExecutorConfig, RoleError> {
     match cfg.trust {
-        crate::guard::TrustProfile::Platform => {
+        crate::model::policy::TrustProfile::Platform => {
             // Platform source: mirror the operator-side admin-connection apply (§8).
             // Mint a token via the CONFINED `platform_runner` seam (the shadow harness
             // is operator-side, like the CLI runners). NO migrator role / SET ROLE, and
@@ -373,7 +374,7 @@ fn shadow_executor_cfg(cfg: &ExecutorConfig, shadow_db: &str) -> Result<Executor
             sc.pg.migrator_role = None;
             Ok(sc)
         }
-        crate::guard::TrustProfile::Trusted => {
+        crate::model::policy::TrustProfile::Trusted => {
             // Trusted source (public dbmate-like posture): mirror the
             // connecting-role apply faithfully so the dry-run does NOT re-deny SQL
             // the real Trusted apply allows. Same operator token mint seam, NO

@@ -1,6 +1,6 @@
 //! SQLite live-schema introspection for drift (SQLite-parity design §2.7 / §2.5.1).
 //!
-//! Produces the SAME dialect-agnostic [`SchemaSnapshot`](crate::drift::SchemaSnapshot)
+//! Produces the SAME dialect-agnostic [`SchemaSnapshot`](crate::model::snapshot::SchemaSnapshot)
 //! the Postgres path returns, so [`check_checksum_drift`](crate::drift::check_checksum_drift)
 //! and [`diff_snapshots`](crate::drift::diff_snapshots) work unchanged across both
 //! dialects. The PG path reads `information_schema` + `pg_catalog`; this reads
@@ -32,15 +32,15 @@
 //! keeps comments in the stored schema text, unlike PG which discards them at
 //! parse). [`recover_inline_sentinel`] pulls the `__zsmask:` / `zsenc:` body for a
 //! given column out of that stored text into the snapshot's
-//! [`comment_sentinel`](crate::drift::ColumnSnapshot::comment_sentinel), so a
+//! [`comment_sentinel`](crate::model::snapshot::ColumnSnapshot::comment_sentinel), so a
 //! masked/encrypted column round-trips faithfully rather than being silently
 //! dropped to a plain column.
 
 use std::collections::BTreeMap;
 
-use crate::apply::drift::{
-    ColumnSnapshot, ConstraintSnapshot, DriftError, IndexSnapshot, SchemaSnapshot, TableSnapshot,
-    ViewSnapshot,
+use crate::apply::drift::DriftError;
+use crate::model::snapshot::{
+    ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot, ViewSnapshot,
 };
 
 use super::actor::{MigrationActor, SqliteActorError};

@@ -34,10 +34,9 @@ use std::time::{Duration, Instant};
 use compio_postgres::Client;
 use zeroship_migrate::{
     migration::{Checksum, ChecksumInput, Migration, MigrationFlags},
-    plan::PlanStep,
     provision_migrator,
     role::deprovision_migrator,
-    Approval, ExecutorConfig, MigrationEngine,
+    Approval, ExecutorConfig, MigrationEngine, PlanStep,
 };
 
 const DEFAULT_DSN: &str =

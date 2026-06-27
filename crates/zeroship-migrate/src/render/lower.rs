@@ -33,7 +33,6 @@ use crate::render::declarative::{
     FieldDescriptor, LoweredUnit,
 };
 use crate::render::renderer::{Capability, DialectSupports};
-use crate::apply::drift::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, TableSnapshot};
 use crate::model::expr::Expr;
 use crate::guard::{guard_for, GuardConfig, GuardError};
 use crate::model::ir::{
@@ -43,7 +42,9 @@ use crate::model::ir::{
     ViewQuery,
 };
 use crate::model::migration::Migration;
-use crate::plan::{AppliedPlan, PlanStep, RenameStep};
+use crate::model::snapshot::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, TableSnapshot};
+use crate::render::plan::AppliedPlan;
+use crate::render::step::{PlanStep, RenameStep};
 use zeroship_schema::query::SqlDialect;
 
 /// The result of lowering ONE IR op (§2.0 / §2.6.1). A DDL op lowers to a list of
@@ -107,7 +108,7 @@ pub(crate) struct DomainDef {
 }
 
 /// The LIVE-schema facts the IR-path Lower phase consults — the IR-path peer of
-/// the full [`crate::drift::SchemaSnapshot`] the differ diffs against.
+/// the full [`crate::model::snapshot::SchemaSnapshot`] the differ diffs against.
 ///
 /// The differ reads BOTH "which tables already exist" (drives FK inline-vs-defer)
 /// and "is THIS index UNIQUE in the live catalog" (drives the `render_drop_index`
@@ -144,7 +145,7 @@ pub struct LiveSchema {
     /// ty}`). Empty ⇒ a SQLite `renameColumn` whose table's structure is absent
     /// fails closed ([`IrLowerError::SqliteRenameNeedsLiveTable`]), never silently
     /// emitting a wrong rebuild.
-    pub table_snapshots: std::collections::BTreeMap<String, crate::apply::drift::TableSnapshot>,
+    pub table_snapshots: std::collections::BTreeMap<String, crate::model::snapshot::TableSnapshot>,
     /// **PR2 — the SQLite `renameColumn` rebuild facts.** The live per-table SDK
     /// schema `Value` (`table → registerModel-shaped JSON`), the SAME shape
     /// [`crate::declarative::DesiredSchema`]'s `sqlite_schemas` carries. The SQLite
@@ -387,7 +388,7 @@ pub struct IrAuthor {
     /// Platform/Trusted CLI widens it explicitly via
     /// [`with_schema_scope`](Self::with_schema_scope) when it sets a multi-schema or
     /// search-path-driven default.
-    scope: crate::guard::SchemaScope,
+    scope: crate::model::policy::SchemaScope,
 }
 
 /// A failure lowering an IR op to SQL.
@@ -989,7 +990,7 @@ impl IrAuthor {
             // Confined-by-default scope: a `default_schema` set later is admitted
             // ONLY if it case-folds to the project schema unless a Platform/Trusted
             // CLI explicitly widens via `with_schema_scope` (§2.7 review MED).
-            scope: crate::guard::SchemaScope::Single(project_schema.clone()),
+            scope: crate::model::policy::SchemaScope::Single(project_schema.clone()),
             project_schema,
             dialect,
             default_schema: None,
@@ -1020,13 +1021,13 @@ impl IrAuthor {
     /// the connection [`default_schema`](Self::default_schema) is validated against
     /// (§2.7). The default scope is the Confined `Single(project_schema)`; a
     /// Platform/Trusted CLI that sets a multi-schema or foreign-search-path default
-    /// calls this with the matching [`crate::guard::SchemaScope`] (typically
+    /// calls this with the matching [`crate::model::policy::SchemaScope`] (typically
     /// [`crate::guard::GuardConfig::schema_scope`]) so the default it then binds is
     /// admitted by the same scope the op-level cross-schema gate uses. Leaving the
     /// scope at its Confined default and binding a foreign `default_schema` is
     /// refused fail-closed at lower.
     #[must_use]
-    pub fn with_schema_scope(mut self, scope: crate::guard::SchemaScope) -> Self {
+    pub fn with_schema_scope(mut self, scope: crate::model::policy::SchemaScope) -> Self {
         self.scope = scope;
         self
     }
@@ -1036,7 +1037,7 @@ impl IrAuthor {
     /// → else the dialect default (`project_schema`).
     ///
     /// **Confined gate/render agreement (review F2).** The Confined cross-schema
-    /// VALIDATE gate ([`crate::guard::SchemaScope::permits`]) accepts an op `schema`
+    /// VALIDATE gate ([`crate::model::policy::SchemaScope::permits`]) accepts an op `schema`
     /// that matches `project_schema` CASE-INSENSITIVELY (`'APP1'` passes under
     /// project `'app1'`). The render seam (`quote_ident`) is byte-verbatim, so
     /// rendering the op's casing would emit `"APP1"."t"` — a DIFFERENT,
@@ -1101,7 +1102,7 @@ impl IrAuthor {
         // pin the schema-confinement scope to the bound project schema (§2.7), so a
         // cross-schema op is refused at validate-time here too (defense in depth for
         // any caller that does not go through `load_and_lower_guarded`).
-        let scope = crate::guard::SchemaScope::Single(self.project_schema.clone());
+        let scope = crate::model::policy::SchemaScope::Single(self.project_schema.clone());
         let ir =
             crate::model::load::load_ir_document(bytes, deploying_app, target, registry, Some(&scope))
                 .map_err(LoadAndLowerError::Load)?;
@@ -1290,7 +1291,7 @@ impl IrAuthor {
             // identity flags are the default set (the per-dialect transactional/
             // concurrently divergence is a render concern, NOT the identity — §2.4).
             flags: crate::model::migration::MigrationFlags::default(),
-            dialect_scope: crate::plan::DialectScope::Both,
+            dialect_scope: crate::render::step::DialectScope::Both,
             rollbackable,
             owner_app: ir.owner_app.clone(),
             depends_on: Vec::new(),
@@ -2318,7 +2319,7 @@ impl IrAuthor {
 
     /// Lower a `backfill` (or batched `update`) into a [`PlanStep::Backfill`]. The
     /// `set`/`filter` render to INLINE SQL strings ([`crate::dml::assemble_backfill_clauses`])
-    /// the [`crate::backfill::BackfillSpec`] executor consumes (it guard-checks /
+    /// the [`crate::render::plan::BackfillSpec`] executor consumes (it guard-checks /
     /// authorizer-vets the assembled `UPDATE` before any batch).
     ///
     /// **PORTABLE on BOTH backends** since PR6b: PG via the writable-CTE windowed
@@ -2328,7 +2329,7 @@ impl IrAuthor {
     /// `concatWs`, etc. differ per dialect) — but both legs consume the same
     /// `BackfillSpec` shape, so the plan step is uniform.
     ///
-    /// **#149** — the backfill EXECUTOR ([`crate::backfill::BackfillSpec`]) now
+    /// **#149** — the backfill EXECUTOR ([`crate::render::plan::BackfillSpec`]) now
     /// carries a per-spec `schema`, so a schema-qualified batched backfill/update
     /// RUNS (it no longer fails closed at lower). The spec's `schema` is set from
     /// `eff_schema` (§2.7), which the cross-schema scope gate (`permits`) has
@@ -2372,7 +2373,7 @@ impl IrAuthor {
             crate::render::dml::assemble_backfill_clauses(self.dialect, table, set, filter)
                 .map_err(IrLowerError::DmlAssemble)?;
         let batch_size = u32::try_from(batch_size).unwrap_or(u32::MAX).max(1);
-        let spec = crate::ops::backfill::BackfillSpec {
+        let spec = crate::render::plan::BackfillSpec {
             schema: eff_schema.to_string(),
             table: table.to_string(),
             cursor_column: cursor_column.to_string(),
@@ -3081,7 +3082,7 @@ impl IrAuthor {
                 // `{table, from, to, ty}` and needs no live table SHAPE; the type was
                 // already reconciled above, so pass empties for the unused snapshot/
                 // schema slots.
-                let empty_snapshot = crate::apply::drift::TableSnapshot {
+                let empty_snapshot = crate::model::snapshot::TableSnapshot {
                     columns: Vec::new(),
                     indexes: Vec::new(),
                     constraints: Vec::new(),
@@ -3272,7 +3273,7 @@ fn render_view_op(
     op: &Op,
     eff_schema: &str,
     dialect: SqlDialect,
-    scope: Option<&crate::guard::SchemaScope>,
+    scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<ViewStatement, IrLowerError> {
     match op {
         Op::CreateView {
@@ -3334,7 +3335,7 @@ fn render_view_query(
     query: &ViewQuery,
     eff_schema: &str,
     dialect: SqlDialect,
-    scope: Option<&crate::guard::SchemaScope>,
+    scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<String, IrLowerError> {
     match query {
         ViewQuery::Structured { select } => render_select_ast(select, eff_schema, dialect),
@@ -3747,11 +3748,11 @@ fn plan_step_version(step: &PlanStep) -> crate::model::migration::MigrationId {
 /// violated; the deterministic id keeps the system honest rather than silently
 /// non-deterministic.
 fn empty_expand_sentinel_id(
-    ec: &crate::ops::expand_contract::ExpandContractPlan,
+    ec: &crate::render::expand_contract::ExpandContractPlan,
 ) -> crate::model::migration::MigrationId {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    let crate::ops::expand_contract::OnlineIntent::RenameColumn { table, from, to, ty } = &ec.intent;
+    let crate::render::expand_contract::OnlineIntent::RenameColumn { table, from, to, ty } = &ec.intent;
     for field in [table.as_str(), from.as_str(), to.as_str(), ty.as_str()] {
         h.update((field.len() as u64).to_be_bytes());
         h.update(field.as_bytes());
@@ -3774,7 +3775,7 @@ fn plan_step_version_empty_expand_sentinel(step: &PlanStep) -> crate::model::mig
 
 fn enforce_vendor_capability_at_lower(
     op: &Op,
-    scope: Option<&crate::guard::SchemaScope>,
+    scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), IrLowerError> {
     let capabilities = op.vendor_capabilities();
     if capabilities.is_empty() {
@@ -3811,7 +3812,7 @@ fn dml_step_version(
     owner: &str,
     kind: &str,
     template: &str,
-    binds: &[crate::plan::BindValue],
+    binds: &[crate::render::step::BindValue],
 ) -> crate::model::migration::MigrationId {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -3828,11 +3829,11 @@ fn dml_step_version(
         // lists hash differently (the same content folding the same id is the
         // idempotency property).
         let (tag, body): (u8, Vec<u8>) = match b {
-            crate::plan::BindValue::Null => (0, Vec::new()),
-            crate::plan::BindValue::Bool(v) => (1, vec![u8::from(*v)]),
-            crate::plan::BindValue::Int(v) => (2, v.to_be_bytes().to_vec()),
-            crate::plan::BindValue::Decimal(s) => (3, s.as_bytes().to_vec()),
-            crate::plan::BindValue::Text(s) => (4, s.as_bytes().to_vec()),
+            crate::render::step::BindValue::Null => (0, Vec::new()),
+            crate::render::step::BindValue::Bool(v) => (1, vec![u8::from(*v)]),
+            crate::render::step::BindValue::Int(v) => (2, v.to_be_bytes().to_vec()),
+            crate::render::step::BindValue::Decimal(s) => (3, s.as_bytes().to_vec()),
+            crate::render::step::BindValue::Text(s) => (4, s.as_bytes().to_vec()),
         };
         h.update([tag]);
         h.update((body.len() as u64).to_be_bytes());
@@ -4404,7 +4405,7 @@ mod tests {
         // a foreign schema — the cross-schema confinement gate refuses it first), so the
         // scope ADMITS "app2"; the test then proves the qualified render, not the gate.
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres).with_schema_scope(
-            crate::guard::SchemaScope::Allowlist(vec!["app1".into(), "app2".into()]),
+            crate::model::policy::SchemaScope::Allowlist(vec!["app1".into(), "app2".into()]),
         );
         let migs = author.lower(&ir, &LiveSchema::default()).expect("lower");
         let create = migs.iter().find(|m| m.up.contains("CREATE TABLE")).expect("create");
@@ -4543,7 +4544,7 @@ mod tests {
         );
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres)
             // Trusted CLI widens the scope to admit the connection default it binds.
-            .with_schema_scope(crate::guard::SchemaScope::Allowlist(vec!["dflt".into()]))
+            .with_schema_scope(crate::model::policy::SchemaScope::Allowlist(vec!["dflt".into()]))
             .with_default_schema(Some("dflt".into()));
         let migs = author.lower(&ir, &LiveSchema::default()).expect("lower");
         let create = migs.iter().find(|m| m.up.contains("CREATE TABLE")).expect("create");
@@ -4650,7 +4651,7 @@ mod tests {
             *schema = Some("reporting".into());
         }
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres)
-            .with_schema_scope(crate::guard::SchemaScope::Allowlist(vec![
+            .with_schema_scope(crate::model::policy::SchemaScope::Allowlist(vec![
                 "app1".into(),
                 "reporting".into(),
             ]));
@@ -4691,7 +4692,7 @@ mod tests {
         // it first), so widen the scope to ADMIT "reporting" — the test then exercises
         // the SQLite functional limit (no auto-ATTACH), not the confinement boundary.
         let author = IrAuthor::new("app", "app_a", SqlDialect::Sqlite).with_schema_scope(
-            crate::guard::SchemaScope::Allowlist(vec!["app".into(), "reporting".into()]),
+            crate::model::policy::SchemaScope::Allowlist(vec!["app".into(), "reporting".into()]),
         );
         let err = author.lower(&ir, &LiveSchema::default()).unwrap_err();
         match err {
@@ -4755,7 +4756,7 @@ mod tests {
     fn schema_qualified_backfill_runs_cross_schema_pg() {
         let ir = backfill_ir(Some("app2"));
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres).with_schema_scope(
-            crate::guard::SchemaScope::Allowlist(vec!["app1".into(), "app2".into()]),
+            crate::model::policy::SchemaScope::Allowlist(vec!["app1".into(), "app2".into()]),
         );
         let steps = author
             .lower_steps(&ir, &LiveSchema::default())
@@ -4787,7 +4788,7 @@ mod tests {
         ]}"#;
         let ir: MigrationIr = serde_json::from_str(json).expect("batched update IR parses");
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres).with_schema_scope(
-            crate::guard::SchemaScope::Allowlist(vec!["app1".into(), "app2".into()]),
+            crate::model::policy::SchemaScope::Allowlist(vec!["app1".into(), "app2".into()]),
         );
         let steps = author
             .lower_steps(&ir, &LiveSchema::default())
@@ -5818,7 +5819,7 @@ mod tests {
     // SAME file yields the SAME ids (idempotent re-deploy).
     #[test]
     fn dml_step_version_folds_op_index_yet_stays_deterministic() {
-        use crate::plan::BindValue;
+        use crate::render::step::BindValue;
         let binds = [BindValue::Int(7), BindValue::Text("dup".into())];
         let v0 = dml_step_version(0, "app_a", "update", "UPDATE t SET …", &binds);
         let v0_again = dml_step_version(0, "app_a", "update", "UPDATE t SET …", &binds);
@@ -5848,7 +5849,7 @@ mod tests {
     // the two computed ids are EQUAL (deterministic) rather than random.
     #[test]
     fn plan_step_version_empty_pg_expand_is_deterministic_not_random() {
-        use crate::ops::expand_contract::{ExpandContractPlan, OnlineIntent};
+        use crate::render::expand_contract::{ExpandContractPlan, OnlineIntent};
         // A degenerate (internally-invalid) ExpandContractPlan with NO expand steps.
         let degenerate = ExpandContractPlan {
             intent: OnlineIntent::RenameColumn {
@@ -5859,7 +5860,7 @@ mod tests {
             },
             expand: Vec::new(),
             contract: Vec::new(),
-            backfill: crate::ops::backfill::BackfillSpec {
+            backfill: crate::render::plan::BackfillSpec {
                 schema: "app".into(),
                 table: "t".into(),
                 cursor_column: "id".into(),

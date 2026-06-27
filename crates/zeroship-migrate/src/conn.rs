@@ -170,7 +170,7 @@ pub struct ExecutorConfig {
     /// this crate — can neither name `Platform`/`Trusted` (the enum is
     /// `#[non_exhaustive]`) nor reach the constructors: it cannot flip the
     /// executor into a privileged profile.
-    pub(crate) trust: crate::guard::TrustProfile,
+    pub(crate) trust: crate::model::policy::TrustProfile,
     /// PRIVATE (`pub(crate)`). The schema allowlist a Platform guard permits
     /// references to (e.g. `zeroship` / `oauth_hydra` / `public`). Empty for
     /// Confined (the `project_schema` is the sole permitted schema there) and for
@@ -206,7 +206,7 @@ impl ExecutorConfig {
             pg: PgConfinement::new(meta_schema),
             // Confined by default — the creator path. `Platform` is reachable
             // ONLY via `ExecutorConfig::platform` (token-gated, §4.1).
-            trust: crate::guard::TrustProfile::Confined,
+            trust: crate::model::policy::TrustProfile::Confined,
             platform_schemas: Vec::new(),
             platform_exts: Vec::new(),
             operator_cap: None,
@@ -230,12 +230,12 @@ impl ExecutorConfig {
     #[must_use]
     pub(crate) fn guard_config(&self) -> crate::guard::GuardConfig {
         match (self.trust, self.operator_cap.as_ref()) {
-            (crate::guard::TrustProfile::Platform, Some(cap)) => crate::guard::GuardConfig::platform(
+            (crate::model::policy::TrustProfile::Platform, Some(cap)) => crate::guard::GuardConfig::platform(
                 cap,
                 self.platform_schemas.clone(),
                 self.platform_exts.clone(),
             ),
-            (crate::guard::TrustProfile::Trusted, Some(cap)) => {
+            (crate::model::policy::TrustProfile::Trusted, Some(cap)) => {
                 crate::guard::GuardConfig::trusted(cap)
             }
             // Confined, or a (never-constructed) privileged-without-token: fail
@@ -263,7 +263,7 @@ impl ExecutorConfig {
         extensions: Vec<String>,
     ) -> Self {
         let mut cfg = Self::new(project_id, project_schema);
-        cfg.trust = crate::guard::TrustProfile::Platform;
+        cfg.trust = crate::model::policy::TrustProfile::Platform;
         cfg.platform_schemas = schemas;
         cfg.platform_exts = extensions;
         cfg.operator_cap = Some(cap.clone());
@@ -295,7 +295,7 @@ impl ExecutorConfig {
         project_schema: impl Into<String>,
     ) -> Self {
         let mut cfg = Self::new(project_id, project_schema);
-        cfg.trust = crate::guard::TrustProfile::Trusted;
+        cfg.trust = crate::model::policy::TrustProfile::Trusted;
         // No schema allowlist, no extension allowlist — Trusted has no
         // confinement and no deny-list; these stay inert/empty.
         cfg.operator_cap = Some(cap.clone());
@@ -349,7 +349,7 @@ impl ExecutorConfig {
     pub(crate) fn search_path_clause(&self) -> Result<String, crate::render::dml::IdentQuoteError> {
         let quote = |s: &str| crate::render::dml::quote_ident_checked(s);
         match self.trust {
-            crate::guard::TrustProfile::Platform if !self.platform_schemas.is_empty() => self
+            crate::model::policy::TrustProfile::Platform if !self.platform_schemas.is_empty() => self
                 .platform_schemas
                 .iter()
                 .map(|s| quote(s))

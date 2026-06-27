@@ -16,14 +16,14 @@
 //!    [`assemble_delete`]). Every authored VALUE — an `insert` row scalar, an
 //!    `update SET` literal, a `where`-predicate literal — is emitted as a NATIVE
 //!    placeholder (`$n` on Postgres, `?n` on SQLite) carried on a
-//!    [`PlanStep::Dml`](crate::plan::PlanStep::Dml) `binds` vector, NEVER
+//!    [`PlanStep::Dml`](crate::render::step::PlanStep::Dml) `binds` vector, NEVER
 //!    string-interpolated. So a value containing a quote / semicolon / comment
 //!    cannot change the *shape* of the statement on either backend (§2.3.2 the
 //!    bind-safety property). The expression renderer ([`render_expr_bound`]) walks
 //!    the closed AST and appends a placeholder for each [`Expr::Literal`].
 //!
 //! 2. **Batched backfill** ([`assemble_backfill`]). The existing
-//!    [`BackfillSpec`](crate::backfill::BackfillSpec) executor (PG `backfill.rs`)
+//!    [`BackfillSpec`](crate::render::plan::BackfillSpec) executor (PG `backfill.rs`)
 //!    consumes a `set_clause` / `filter` SQL *string* (it assembles a windowed
 //!    `UPDATE … WHERE cursor > $last … AND (<filter>)` and guard-checks the WHOLE
 //!    statement). A backfill expression references the row's own columns and is
@@ -76,7 +76,7 @@ use zeroship_schema::query::SqlDialect;
 
 use crate::model::expr::{BinaryOp, Expr, ScalarFn, SynthFn, UnaryOp};
 use crate::model::ir::IrScalar;
-use crate::plan::BindValue;
+use crate::render::step::BindValue;
 
 /// A failure assembling a DML op into a statement (template + binds, or a backfill
 /// spec). Distinct from the structural [`crate::validate::AuthoringError`]
@@ -137,7 +137,7 @@ pub enum DmlError {
 /// Validate a bare SQL identifier and double-quote it (`"` → `""`). The ONLY
 /// identifier-emission path the assembler uses — a schema-qualified / malformed
 /// name is rejected, so an injection through an identifier slot cannot reach the
-/// DB. Bare-identifier validation mirrors [`crate::backfill::BackfillSpec`].
+/// DB. Bare-identifier validation mirrors [`crate::render::plan::BackfillSpec`].
 fn quote_ident(what: &'static str, ident: &str) -> Result<String, DmlError> {
     quote_ident_for_dialect(what, ident, SqlDialect::Postgres)
 }
@@ -718,7 +718,7 @@ pub struct OnConflict {
 }
 
 /// The assembled one-shot DML statement: the placeholder template + ordered binds.
-/// Fed straight into [`PlanStep::Dml`](crate::plan::PlanStep::Dml).
+/// Fed straight into [`PlanStep::Dml`](crate::render::step::PlanStep::Dml).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AssembledDml {
     /// The placeholder SQL (`$n`/`?n` — never an inlined value).
@@ -916,7 +916,7 @@ pub struct BackfillClauses {
 }
 
 /// Assemble a `backfill` op's `set` / `filter` into the inline SQL strings the
-/// [`BackfillSpec`](crate::backfill::BackfillSpec) executor consumes. Renders for
+/// [`BackfillSpec`](crate::render::plan::BackfillSpec) executor consumes. Renders for
 /// EITHER dialect (PR6b): the inline transform is dialect-rendered (the §9
 /// `c.fn.splitPart` lowering, NULL-skipping `concatWs`), and the PG (`backfill.rs`)
 /// or SQLite (`backend_sqlite::backfill_sql`) executor consumes the result.

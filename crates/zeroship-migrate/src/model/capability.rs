@@ -13,7 +13,7 @@
 //!
 //! The operator asked for a capability-COMPOSITION model so the gate is
 //! orthogonal to the trust-profile machinery: the existing
-//! [`crate::guard::TrustProfile`] (`Confined`/`Platform`/`Trusted`) MAPS onto
+//! [`crate::model::policy::TrustProfile`] (`Confined`/`Platform`/`Trusted`) MAPS onto
 //! NAMED PRESETS ([`VendorCapabilities::confined`] / [`operator`] / [`local`]),
 //! but the gate keys on `caps.allow_role`, never on `trust == Confined`. A future
 //! "local dev" or "CI" posture can compose its own flag set without touching the
@@ -22,7 +22,7 @@
 //! [`operator`]: VendorCapabilities::operator
 //! [`local`]: VendorCapabilities::local
 
-use crate::guard::{SchemaScope, TrustProfile};
+use crate::model::policy::{SchemaScope, TrustProfile};
 
 /// The CLOSED set of vendor capabilities a privileged op can require (vendor spec
 /// §3.2). Each [`crate::ir::Op`] vendor variant maps to one or more of these via
@@ -207,7 +207,7 @@ impl VendorCapabilities {
     }
 
     /// Derive the capability set from the validate-layer
-    /// [`SchemaScope`](crate::guard::SchemaScope) the loader threads (vendor spec
+    /// [`SchemaScope`](crate::model::policy::SchemaScope) the loader threads (vendor spec
     /// §3.2). The scope is produced ONLY by the operator-gated `GuardConfig` ctors,
     /// so it is a faithful, non-spoofable trust signal:
     /// - `None` ⇒ **Trusted** (the public dbmate posture) ⇒ [`operator`](Self::operator).

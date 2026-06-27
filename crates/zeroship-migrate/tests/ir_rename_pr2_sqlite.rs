@@ -28,7 +28,7 @@ use zeroship_migrate::declarative::{
 use zeroship_migrate::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
 use zeroship_migrate::ir_author::{IrAuthor, IrLowerError, LiveSchema};
 use zeroship_migrate::backend_sqlite::Mode;
-use zeroship_migrate::plan::{PlanStep, RenameStep};
+use zeroship_migrate::{PlanStep, RenameStep};
 use zeroship_migrate::{
     executor::LockMode, Approval, ExecutorConfig, MigrationBackend, MigrationEngine, SqlDialect,
     SqliteBackend,
@@ -457,7 +457,7 @@ fn renamecolumn_sqlite_fails_closed_without_live_table_structure() {
 // This keeps the rebuild-needs-whole-shape guard exercised after the type gate.
 #[test]
 fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
-    use zeroship_migrate::drift::{ColumnSnapshot, TableSnapshot};
+    use zeroship_migrate::{ColumnSnapshot, TableSnapshot};
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let ir = rename_ir("ghost", "a", "b", ColType::Text);
     // Carry the live `from` column TYPE (so the type gate passes — text == text),

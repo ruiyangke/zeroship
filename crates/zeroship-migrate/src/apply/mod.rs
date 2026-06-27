@@ -3,4 +3,5 @@ pub mod baseline;
 pub mod drift;
 pub mod executor;
 pub mod journal;
+pub mod precondition;
 pub mod role;

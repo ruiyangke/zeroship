@@ -29,7 +29,7 @@
 //!    and a mismatch is a hard error (genuine drift / tamper). The engine is
 //!    authoritative; the hint is advisory and need not be present.
 //!
-//! Lowering the validated IR to an executable [`AppliedPlan`](crate::plan::AppliedPlan)
+//! Lowering the validated IR to an executable [`AppliedPlan`](crate::render::plan::AppliedPlan)
 //! (`IrAuthor::lower`, the §6.5 snapshot-builder + per-dialect DDL render) is the
 //! next wave; this module is the load + gate that MUST run first.
 
@@ -374,7 +374,7 @@ pub fn load_ir_document(
     deploying_app: &str,
     target_dialect: Dialect,
     registry: &BTreeMap<String, String>,
-    schema_scope: Option<&crate::guard::SchemaScope>,
+    schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<MigrationIr, IrLoadError> {
     // 1. deserialize (closed AST + numeric domain reject malformed/lossy here).
     let mut ir: MigrationIr =

@@ -16,6 +16,9 @@ use crate::model::precondition::PreconditionCheck;
 /// other entity uses, disjoint from every other prefix in `typed_id`.
 pub const MIGRATION_PREFIX: &str = "mig";
 
+/// Numeric file versions fit in the high 48 bits of the deterministic UUID image.
+pub(crate) const VERSION_CEILING: u64 = 1u64 << 48;
+
 /// Error parsing a [`MigrationId`] from a string.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IdError {
@@ -122,6 +125,21 @@ impl MigrationId {
         }
         ms
     }
+}
+
+/// Derive a deterministic, order-preserving [`MigrationId`] from a numeric file
+/// version by placing the version in the high 48 bits of the UUID image.
+#[must_use]
+pub fn migration_id_for_version(version: u64) -> MigrationId {
+    debug_assert!(
+        version < VERSION_CEILING,
+        "file version {version} exceeds the 48-bit ordering field"
+    );
+    let mut bytes = [0u8; 16];
+    bytes[0..6].copy_from_slice(&version.to_be_bytes()[2..8]);
+    let uuid = uuid::Uuid::from_bytes(bytes);
+    MigrationId::parse(&format!("mig_{}", typed_id::uuid_to_base62(&uuid)))
+        .expect("derived id is a valid mig_ typed id")
 }
 
 /// The phase of a zero-downtime **expand-contract** online migration (design

@@ -7,7 +7,6 @@
 
 use zeroship_migrate::capability::{VendorCapabilities, VendorCapability};
 use zeroship_migrate::expr::{CastTarget, Expr, ScalarFn};
-use zeroship_migrate::guard::SchemaScope;
 use zeroship_migrate::ir::{
     CanonicalOpList, ForEach, FuncLanguage, GrantTarget, IrScalar, MigrationIr, Op, PolicyCmd,
     Privilege, RaiseLevel, TriggerAction, TriggerEvent, TriggerStmt, TriggerTiming,
@@ -16,6 +15,7 @@ use zeroship_migrate::ir::{
 use zeroship_migrate::validate::{
     validate_ir_scoped, Dialect, CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
 };
+use zeroship_migrate::SchemaScope;
 use zeroship_migrate::vendor::render_vendor_op;
 use zeroship_migrate::{Checksum, GuardConfig, IrAuthor, LiveSchema, MigrationFlags, SqlDialect};
 

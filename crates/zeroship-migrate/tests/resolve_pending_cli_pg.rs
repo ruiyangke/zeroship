@@ -15,13 +15,13 @@
 //! Each test uses a unique schema/meta so it never collides.
 
 use compio_postgres::Client;
-use zeroship_migrate::drift::{ColumnSnapshot, TableSnapshot};
+use zeroship_migrate::{ColumnSnapshot, TableSnapshot};
 use zeroship_migrate::command::runner::{
     run_resolve_pending, RunConfig, RunError, RunProfile, RunReport,
 };
 use zeroship_migrate::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
 use zeroship_migrate::ir_author::{IrAuthor, LiveSchema};
-use zeroship_migrate::plan::{PlanStep, RenameStep};
+use zeroship_migrate::{PlanStep, RenameStep};
 use zeroship_migrate::{
     provision_migrator, role::deprovision_migrator, Approval, ExecutorConfig, MigrationEngine,
     PostgresBackend, SqlDialect,

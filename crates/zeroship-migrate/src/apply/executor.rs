@@ -1505,7 +1505,7 @@ pub enum PreconditionVerdict {
 }
 
 /// The per-migration precondition verdict loop now lives in
-/// [`crate::precondition::evaluate_all`] — the **Postgres** leaf reached only via
+/// [`crate::apply::precondition::evaluate_all`] — the **Postgres** leaf reached only via
 /// [`MigrationBackend::evaluate_preconditions`](crate::backend::MigrationBackend::evaluate_preconditions)
 /// (multi-engine abstraction C3). The generic apply body calls the backend method
 /// (`backend.evaluate_preconditions(cfg, m)`); it holds no `&Client` and runs no
@@ -2215,7 +2215,7 @@ pub(crate) async fn apply_dml_transactional(
     version: &str,
     name: &str,
     template: &str,
-    binds: &[crate::plan::BindValue],
+    binds: &[crate::render::step::BindValue],
     owner_app: &str,
     applied_by: &str,
 ) -> Result<(), ApplyError> {
@@ -2234,11 +2234,11 @@ pub(crate) async fn apply_dml_transactional(
     let params: Vec<Option<String>> = binds
         .iter()
         .map(|b| match b {
-            crate::plan::BindValue::Null => None,
-            crate::plan::BindValue::Bool(v) => Some(if *v { "true".to_string() } else { "false".to_string() }),
-            crate::plan::BindValue::Int(v) => Some(v.to_string()),
-            crate::plan::BindValue::Decimal(s) => Some(s.clone()),
-            crate::plan::BindValue::Text(s) => Some(s.clone()),
+            crate::render::step::BindValue::Null => None,
+            crate::render::step::BindValue::Bool(v) => Some(if *v { "true".to_string() } else { "false".to_string() }),
+            crate::render::step::BindValue::Int(v) => Some(v.to_string()),
+            crate::render::step::BindValue::Decimal(s) => Some(s.clone()),
+            crate::render::step::BindValue::Text(s) => Some(s.clone()),
         })
         .collect();
 
@@ -3860,7 +3860,7 @@ mod trusted_apply_pg {
     use super::*;
     use crate::guard::OperatorCapability;
     use crate::apply::journal;
-    use crate::plan::loader::migration_id_for_version;
+    use crate::model::migration::migration_id_for_version;
     use crate::model::migration::{Checksum, ChecksumInput, MigrationFlags};
 
     const DEFAULT_DSN: &str =

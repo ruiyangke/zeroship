@@ -32,9 +32,9 @@ use crate::apply::executor::{
     self, ApplyError, ApplyOutcome, LockMode, RollbackError, RollbackOutcome, RollbackRequest,
 };
 use crate::guard::{GuardConfig, GuardError, GuardOutcome};
-use crate::plan::manifest::{compute_manifest, verify_manifest, ManifestError, ManifestHash};
 use crate::model::migration::Migration;
-use crate::plan::{PlanStep, RenameStep};
+use crate::plan::manifest::{compute_manifest, verify_manifest, ManifestError, ManifestHash};
+use crate::render::step::{PlanStep, RenameStep};
 
 /// Sentinel touched-set entry meaning "this deploy touches a table I cannot
 /// NAME" (§2.0.3). The lowering folds it in when a `dropIndex` omits its
@@ -259,8 +259,8 @@ impl MigrationEngine {
     /// # A declarative rename is an online, multi-deploy op (C1)
     ///
     /// A hinted rename is NOT folded into the linted plain plan: a rename's
-    /// [`ExpandContractPlan`](crate::expand_contract::ExpandContractPlan) carries a
-    /// [`BackfillSpec`](crate::backfill::BackfillSpec) that must run the REAL
+    /// [`ExpandContractPlan`](crate::render::expand_contract::ExpandContractPlan) carries a
+    /// [`BackfillSpec`](crate::render::plan::BackfillSpec) that must run the REAL
     /// pre-existing-row mirror (see [`run_expand`](Self::run_expand)). Flattening
     /// it through the plain `plan` → `apply` path would discard the backfill and
     /// the contract `DROP COLUMN <from>` would then destroy un-mirrored rows. So
@@ -289,7 +289,7 @@ impl MigrationEngine {
     pub fn plan_declarative(
         &self,
         desired: &crate::render::declarative::DesiredSchema,
-        live: &crate::apply::drift::SchemaSnapshot,
+        live: &crate::model::snapshot::SchemaSnapshot,
         live_ownership: &std::collections::HashMap<String, String>,
         author: &crate::render::declarative::DeclarativeAuthor,
         hints: &[crate::render::declarative::RenameHint],
@@ -634,7 +634,7 @@ impl MigrationEngine {
         // refusal of a second renameColumn on the pending table (its EXPAND step
         // names the table) and never under-fires for the SQLite leg (always empty
         // outstanding set). See §2.0.3 item 2.
-        let touched: Vec<String> = crate::plan::tables_touched_by(steps).into_iter().collect();
+        let touched: Vec<String> = crate::render::step::tables_touched_by(steps).into_iter().collect();
         self.apply_plan_with_touched(
             steps, &touched, approval, backend, exec_cfg, applied_by, lock_mode,
         )
@@ -1107,7 +1107,7 @@ impl MigrationEngine {
             // pending table is caught even when the caller passes an empty slice.
             let mut touched: std::collections::BTreeSet<String> =
                 touched_tables.iter().cloned().collect();
-            touched.extend(crate::plan::tables_touched_by(steps));
+            touched.extend(crate::render::step::tables_touched_by(steps));
             // The lowering folds in [`TOUCHES_UNKNOWN`] when a `dropIndex` omits its
             // owning-table hint AND the live schema cannot resolve the index's owner
             // — meaning this deploy touches a table the lowering could not name. Fail
@@ -1431,7 +1431,7 @@ impl MigrationEngine {
                     // id; the intent carries table/from/to/ty). Admin-written via the
                     // backend (the migrator has no meta-schema grant) so a creator
                     // migration cannot forge or suppress it.
-                    let crate::ops::expand_contract::OnlineIntent::RenameColumn {
+                    let crate::render::expand_contract::OnlineIntent::RenameColumn {
                         table, from, to, ty,
                     } = &rename.intent;
                     let pending_version = rename.trigger_version.as_str().to_string();
@@ -2012,7 +2012,7 @@ impl MigrationEngine {
     ///
     /// The sequence is deliberately NOT "apply all of `plan.expand` then
     /// backfill": E3 (the backfill-marker migration) must be journaled **after**
-    /// [`run_backfill`](crate::backfill::run_backfill) succeeds, never before —
+    /// [`run_backfill`](crate::ops::backfill::run_backfill) succeeds, never before —
     /// otherwise the gate would let the destructive `DROP COLUMN` (which
     /// `depends_on` E3) run while pre-existing rows are still un-mirrored, losing
     /// data. So:
@@ -2038,7 +2038,7 @@ impl MigrationEngine {
     ///   backfill is resumable on a re-run).
     pub async fn run_expand(
         &self,
-        plan: &crate::ops::expand_contract::ExpandContractPlan,
+        plan: &crate::render::expand_contract::ExpandContractPlan,
         approval: Approval,
         conn: &Client,
         exec_cfg: &ExecutorConfig,
@@ -2057,7 +2057,7 @@ impl MigrationEngine {
     /// project advisory lock for the whole deploy, so each inner apply here must
     /// NOT re-acquire/re-release it.
     ///
-    /// The backfill ([`run_backfill`](crate::backfill::run_backfill)) is
+    /// The backfill ([`run_backfill`](crate::ops::backfill::run_backfill)) is
     /// unaffected by the mode: it uses a per-batch **transaction-scoped**
     /// `pg_advisory_xact_lock`, which is re-entrant within the session that
     /// already holds the session-scoped project lock (it succeeds immediately and
@@ -2066,7 +2066,7 @@ impl MigrationEngine {
     /// through the backfill too, without ever freeing the project lock.
     async fn run_expand_with_lock(
         &self,
-        plan: &crate::ops::expand_contract::ExpandContractPlan,
+        plan: &crate::render::expand_contract::ExpandContractPlan,
         approval: Approval,
         conn: &Client,
         exec_cfg: &ExecutorConfig,
@@ -2133,11 +2133,11 @@ pub fn recognizes_contract_apply(
     // SAME re-author `platform_runner.rs` does at `resolve-pending`). The
     // `owner_app` does not affect the contract `up` text, so any stable value is
     // fine for the comparison.
-    let author = crate::ops::expand_contract::ExpandContractAuthor::new(
+    let author = crate::render::expand_contract::ExpandContractAuthor::new(
         project_schema.to_string(),
         "discharge-recognize",
     );
-    let Ok(plan) = author.author(&crate::ops::expand_contract::OnlineIntent::RenameColumn {
+    let Ok(plan) = author.author(&crate::render::expand_contract::OnlineIntent::RenameColumn {
         table: pc.table.clone(),
         from: pc.from_col.clone(),
         to: pc.to_col.clone(),
@@ -2170,7 +2170,7 @@ pub struct DeclarativeDeployPlan {
     /// [`apply`](MigrationEngine::apply).
     pub plain: MigrationPlan,
     /// The online renames, each a full
-    /// [`ExpandContractPlan`](crate::expand_contract::ExpandContractPlan)
+    /// [`ExpandContractPlan`](crate::render::expand_contract::ExpandContractPlan)
     /// (expand migs + `BackfillSpec` + contract migs). Driven through
     /// [`run_expand`](MigrationEngine::run_expand), NOT the plain `apply`.
     ///
@@ -2178,7 +2178,7 @@ pub struct DeclarativeDeployPlan {
     /// [`rebuilds`](Self::rebuilds) entry (an offline rebuild copying `to ← from`),
     /// never expand-contract — so [`run_expand`](MigrationEngine::run_expand) is never
     /// reached on a SQLite backend (P6a CONDITION ii / H1).
-    pub renames: Vec<crate::ops::expand_contract::ExpandContractPlan>,
+    pub renames: Vec<crate::render::expand_contract::ExpandContractPlan>,
     /// **P6a (SQLite only)** — the existing-table changes SQLite has no native
     /// `ALTER` for (type / nullability change, column rename, ADD/DROP CONSTRAINT,
     /// FK redefinition), each a structured 12-step table rebuild
@@ -2198,7 +2198,7 @@ impl DeclarativeDeployPlan {
     /// `migration`s, in order) PLUS, for each rename in
     /// [`renames`](Self::renames), that rename's expand migrations AND its
     /// (deferred) contract migrations — i.e. each rename's full
-    /// [`ExpandContractPlan::all`](crate::expand_contract::ExpandContractPlan::all)
+    /// [`ExpandContractPlan::all`](crate::render::expand_contract::ExpandContractPlan::all)
     /// (expand then contract). This is the SET the integrity manifest is computed
     /// over: a declarative deploy applies the plain set + every rename's expand at
     /// deploy N and the renames' contract at deploy N+1, so the stamp must cover
@@ -2247,7 +2247,7 @@ impl DeclarativeDeployPlan {
     /// in memory and no serialization is needed. If they are split across a
     /// boundary, the plan must be carried as-is; note that
     /// [`DeclarativeDeployPlan`] is deliberately NOT `serde`-serializable today
-    /// (its [`GuardReport`]/[`BackfillSpec`](crate::backfill::BackfillSpec) members
+    /// (its [`GuardReport`]/[`BackfillSpec`](crate::render::plan::BackfillSpec) members
     /// are not, and deriving it would
     /// cascade invasively) — so a split-boundary control plane either keeps the
     /// generated plan in a server-side store keyed by an opaque token, or
@@ -2420,7 +2420,7 @@ mod tests {
 
     #[test]
     fn expand_contract_rename_set_plans_with_zero_denials() {
-        use crate::ops::expand_contract::{ExpandContractAuthor, OnlineIntent};
+        use crate::render::expand_contract::{ExpandContractAuthor, OnlineIntent};
         let plan_in = ExpandContractAuthor::new("proj_acme", "app_acme")
             .author(&OnlineIntent::RenameColumn {
                 table: "users".into(),

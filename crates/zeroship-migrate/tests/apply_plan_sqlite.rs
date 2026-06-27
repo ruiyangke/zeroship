@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zeroship_migrate::backend_sqlite::Mode;
-use zeroship_migrate::plan::{PlanStep, RenameStep};
+use zeroship_migrate::{PlanStep, RenameStep};
 use zeroship_migrate::{
     desired_snapshot, Approval, CollectionDescriptor, DeclarativeAuthor, ExecutorConfig,
     FieldDescriptor, MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot, SqliteBackend,

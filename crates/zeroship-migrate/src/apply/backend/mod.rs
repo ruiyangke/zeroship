@@ -37,20 +37,23 @@
 //! native `async fn` in trait (Rust ≥ 1.75) is used directly — no boxing, no
 //! `dyn`, no `async-trait` allocation on the apply hot path.
 
+pub mod postgres;
 pub mod sqlite;
+
+pub use postgres::PostgresBackend;
 
 use std::future::Future;
 use std::pin::Pin;
 
-use compio_postgres::Client;
-
-use crate::apply::backend::sqlite::SqliteRebuildSpec;
 use crate::apply::baseline::{BaselineError, BaselineOutcome};
 use crate::conn::ExecutorConfig;
-use crate::apply::drift::{DriftError, SchemaSnapshot};
+use crate::apply::drift::DriftError;
 use crate::apply::executor::{ApplyError, RollbackError};
 use crate::apply::journal::{self, AppliedEntry, JournalError};
 use crate::model::migration::Migration;
+use crate::model::snapshot::SchemaSnapshot;
+use crate::render::plan::{BackfillSpec, SqliteRebuildSpec};
+use crate::render::step::BindValue;
 use zeroship_schema::query::SqlDialect;
 
 /// The Postgres session GUCs the backend restores on exit so its per-apply
@@ -285,7 +288,7 @@ pub trait MigrationBackend {
 
     /// Evaluate a migration's preconditions read-only under the apply lock.
     /// Behind the trait so the generic body never holds a concrete connection;
-    /// the PG impl delegates to [`crate::precondition::evaluate`].
+    /// the PG impl delegates to [`crate::apply::precondition::evaluate`].
     async fn evaluate_preconditions(
         &self,
         cfg: &ExecutorConfig,
@@ -340,7 +343,7 @@ pub trait MigrationBackend {
     /// rebuild on a populated table is destructive (drop + recreate + copy), so when
     /// `m.flags.destructive` (always true for a `SqliteRebuild` by construction,
     /// [`crate::declarative`]) the `scope` must admit `m.version` — mirroring
-    /// [`PlanStep::approval_scope_version`](crate::plan::PlanStep::approval_scope_version)'s
+    /// [`PlanStep::approval_scope_version`](crate::render::step::PlanStep::approval_scope_version)'s
     /// rule. The engine's `apply_plan` gate runs first; this is the independent
     /// executor-layer check so a direct seam caller (driving `rebuild_one` without the
     /// engine) cannot bypass the per-version scope. Refused with
@@ -361,7 +364,7 @@ pub trait MigrationBackend {
     ) -> Result<(), ApplyError>;
 
     /// Drive a single **batched data backfill** step (`op.*` DSL §2.0,
-    /// [`PlanStep::Backfill`](crate::plan::PlanStep::Backfill)) through the
+    /// [`PlanStep::Backfill`](crate::render::step::PlanStep::Backfill)) through the
     /// dialect seam, journaling the spec's marker version. On Postgres this
     /// delegates to the existing [`run_backfill`](crate::backfill::run_backfill)
     /// (writable-CTE windowed `UPDATE`). On SQLite the batched-backfill executor
@@ -382,7 +385,7 @@ pub trait MigrationBackend {
     ///
     /// **PR9b — per-version approval scope (executor-layer defense in depth).** A
     /// standalone batched backfill is a NON-destructive data transform
-    /// ([`PlanStep::approval_scope_version`](crate::plan::PlanStep::approval_scope_version)
+    /// ([`PlanStep::approval_scope_version`](crate::render::step::PlanStep::approval_scope_version)
     /// returns `None` for `Backfill`), so the per-version scope never refuses it — the
     /// `scope` is threaded for seam-signature symmetry with the destructive seam
     /// methods (and forward-proofing) and consulted only if a backfill ever becomes
@@ -392,7 +395,7 @@ pub trait MigrationBackend {
     async fn run_backfill_step(
         &self,
         cfg: &ExecutorConfig,
-        spec: &crate::ops::backfill::BackfillSpec,
+        spec: &BackfillSpec,
         approval: crate::approval::Approval,
         scope: &crate::approval::ApprovalScope,
         applied_by: &str,
@@ -400,7 +403,7 @@ pub trait MigrationBackend {
     ) -> Result<crate::apply::executor::ApplyOutcome, ApplyError>;
 
     /// Drive a single **parameterized DML** step (`op.*` DSL §2.3.2,
-    /// [`PlanStep::Dml`](crate::plan::PlanStep::Dml)) through the dialect seam.
+    /// [`PlanStep::Dml`](crate::render::step::PlanStep::Dml)) through the dialect seam.
     /// The `template` is executed with `binds` bound NATIVELY (`$n` on PG, `?n`
     /// on SQLite) — never string-interpolated, so a bind value can never alter
     /// statement structure. The step is journaled under `version` (its
@@ -425,7 +428,7 @@ pub trait MigrationBackend {
     /// **PR9b — per-version approval scope (executor-layer defense in depth).** On top
     /// of the coarse approval gate, a destructive DML runs ONLY if `scope` admits its
     /// `version` — mirroring
-    /// [`PlanStep::approval_scope_version`](crate::plan::PlanStep::approval_scope_version)'s
+    /// [`PlanStep::approval_scope_version`](crate::render::step::PlanStep::approval_scope_version)'s
     /// rule for `Dml`. So a direct seam caller driving `run_dml_step` with blanket
     /// [`Approval::Approved`] but an [`ApprovalScope::Versions`] set that omits this
     /// `version` is refused with [`ApplyError::ApprovalNotScoped`] BEFORE the template
@@ -452,7 +455,7 @@ pub trait MigrationBackend {
         version: &crate::model::migration::MigrationId,
         name: &str,
         template: &str,
-        binds: &[crate::plan::BindValue],
+        binds: &[BindValue],
         destructive: bool,
         owner_app: &str,
         approval: crate::approval::Approval,
@@ -543,404 +546,4 @@ pub trait MigrationBackend {
         m: &Migration,
         applied_by: &str,
     ) -> Result<BaselineOutcome, BaselineError>;
-}
-
-/// The Postgres [`MigrationBackend`] — P1's first and only impl.
-///
-/// Holds a borrowed [`Client`]; every method is the EXACT pre-seam executor /
-/// journal / drift code, moved here verbatim. This is the regression bar: the
-/// entire existing PG suite must pass unchanged.
-#[derive(Debug)]
-pub struct PostgresBackend<'a> {
-    conn: &'a Client,
-    /// The Postgres online schema-change capability returned by
-    /// [`online`](MigrationBackend::online). Holds the SAME borrowed
-    /// [`Client`] as `conn` (a private field — the connection never crosses the
-    /// neutral trait surface), driving the expand-contract rename path.
-    online: crate::ops::expand_contract::PgOnline<'a>,
-    /// The Postgres shadow dry-run capability returned by
-    /// [`shadow`](MigrationBackend::shadow). Holds the SAME borrowed [`Client`] as
-    /// `conn` (a private field — the connection never crosses the neutral trait
-    /// surface) as its **admin** connection (the `CREATE DATABASE`/`DROP DATABASE`
-    /// issuer), driving the throwaway-shadow-DB dry-run (C3).
-    shadow: crate::ops::shadow::PgShadow<'a>,
-}
-
-impl<'a> PostgresBackend<'a> {
-    /// Wrap a migrator connection as the Postgres backend.
-    #[must_use]
-    pub fn new(conn: &'a Client) -> Self {
-        Self {
-            conn,
-            online: crate::ops::expand_contract::PgOnline::new(conn),
-            shadow: crate::ops::shadow::PgShadow::new(conn),
-        }
-    }
-}
-
-impl MigrationBackend for PostgresBackend<'_> {
-    type SessionSnapshot = PgSessionSnapshot;
-
-    fn dialect(&self) -> SqlDialect {
-        SqlDialect::Postgres
-    }
-
-    fn ddl_is_transactional(&self) -> bool {
-        true
-    }
-
-    async fn acquire_project_lock(&self, project_id: &str) -> Result<(), ApplyError> {
-        crate::apply::executor::pg::acquire_project_lock(self.conn, project_id).await
-    }
-
-    async fn release_project_lock(&self, project_id: &str) -> Result<(), ApplyError> {
-        crate::apply::executor::pg::release_project_lock(self.conn, project_id).await
-    }
-
-    async fn snapshot_session(&self) -> Result<Self::SessionSnapshot, ApplyError> {
-        crate::apply::executor::pg::snapshot_session(self.conn).await
-    }
-
-    async fn restore_session(&self, snap: &Self::SessionSnapshot) -> Result<(), ApplyError> {
-        crate::apply::executor::pg::restore_session(self.conn, snap).await
-    }
-
-    async fn reset_role_best_effort(&self) {
-        if let Err(e) = self.conn.batch_execute("RESET ROLE").await {
-            tracing::warn!(error = %e, "zeroship-migrate: failed to RESET ROLE after apply (L1)");
-        }
-    }
-
-    async fn apply_one(
-        &self,
-        cfg: &ExecutorConfig,
-        m: &Migration,
-        applied_by: &str,
-        had_inflight: bool,
-        supersedes: &[&str],
-        kind: &str,
-    ) -> Result<bool, ApplyError> {
-        if kind != "repeatable" && self.uses_two_phase_path(m) {
-            crate::apply::executor::pg::configure_session_non_txn(self.conn, cfg, m).await?;
-            crate::apply::executor::pg::apply_non_transactional(
-                self.conn,
-                cfg,
-                m,
-                applied_by,
-                had_inflight,
-                supersedes,
-            )
-            .await
-        } else {
-            crate::apply::executor::pg::apply_transactional(
-                self.conn, cfg, m, applied_by, supersedes, kind,
-            )
-            .await?;
-            Ok(false)
-        }
-    }
-
-    async fn rollback_one_transactional(
-        &self,
-        cfg: &ExecutorConfig,
-        m: &Migration,
-        applied_by: &str,
-    ) -> Result<(), RollbackError> {
-        crate::apply::executor::pg::rollback_one_transactional(self.conn, cfg, m, applied_by).await
-    }
-
-    fn validate_non_txn(&self, m: &Migration) -> Result<(), ApplyError> {
-        crate::apply::executor::pg::validate_non_txn_idempotent(m)
-    }
-
-    async fn ensure_journal(&self, cfg: &ExecutorConfig) -> Result<(), JournalError> {
-        journal::ensure_journal(self.conn, cfg).await
-    }
-
-    async fn applied(&self, cfg: &ExecutorConfig) -> Result<Vec<AppliedEntry>, JournalError> {
-        journal::applied(self.conn, cfg).await
-    }
-
-    async fn superseded_versions(
-        &self,
-        cfg: &ExecutorConfig,
-    ) -> Result<Vec<String>, JournalError> {
-        journal::superseded_versions(self.conn, cfg).await
-    }
-
-    async fn latest_completed_checksums(
-        &self,
-        cfg: &ExecutorConfig,
-    ) -> Result<std::collections::HashMap<String, String>, JournalError> {
-        journal::latest_completed_checksums(self.conn, cfg).await
-    }
-
-    async fn check_checksum_drift(
-        &self,
-        cfg: &ExecutorConfig,
-        migrations: &[Migration],
-    ) -> Result<crate::apply::drift::ChecksumDriftReport, DriftError> {
-        crate::apply::drift::check_checksum_drift(self.conn, cfg, migrations).await
-    }
-
-    async fn snapshot_schema(
-        &self,
-        cfg: &ExecutorConfig,
-    ) -> Result<SchemaSnapshot, DriftError> {
-        crate::apply::drift::snapshot_schema(self.conn, &cfg.project_schema).await
-    }
-
-    async fn evaluate_preconditions(
-        &self,
-        cfg: &ExecutorConfig,
-        m: &Migration,
-    ) -> Result<crate::apply::executor::PreconditionVerdict, ApplyError> {
-        // The PG precondition leaf: validation (`pg_query`) + evaluation
-        // (`information_schema` + the `&Client`-bound `SqlBoolean` run) are all
-        // contained in `precondition`, reached ONLY through this backend method —
-        // the generic apply body holds no connection and runs no `pg_query` (C3).
-        crate::model::precondition::evaluate_all(self.conn, cfg, m).await
-    }
-
-    async fn record_squash(
-        &self,
-        cfg: &ExecutorConfig,
-        squash_migration: &Migration,
-        applied_by: &str,
-        supersedes: &[&str],
-    ) -> Result<(), ApplyError> {
-        // Delegate verbatim to the existing PG squash journal write: a `completed`
-        // `kind='squash'` row + the supersession edges, in ONE `BEGIN … COMMIT`
-        // (`record_baseline`'s #3 atomicity). The `&Client` stays private to this
-        // backend; the dialect-neutral `ApplyError` is what crosses the surface.
-        crate::apply::journal::record_baseline(
-            self.conn,
-            cfg,
-            crate::apply::journal::BaselineRecord {
-                version: squash_migration.version.as_str(),
-                name: &squash_migration.name,
-                checksum: squash_migration.checksum.as_str(),
-                applied_by,
-                kind: "squash",
-                supersedes,
-            },
-        )
-        .await
-        .map_err(ApplyError::Journal)
-    }
-
-    async fn rebuild_one(
-        &self,
-        spec: &SqliteRebuildSpec,
-        _m: &Migration,
-        _scope: &crate::approval::ApprovalScope,
-        _applied_by: &str,
-    ) -> Result<(), ApplyError> {
-        // PG never produces a `SqliteRebuild` (its declarative differ uses native
-        // `ALTER` / expand-contract, not the 12-step rebuild). A rebuild reaching the
-        // Postgres backend is a routing bug — fail closed with a clear error rather
-        // than silently passing.
-        Err(ApplyError::Backend(format!(
-            "postgres backend: SQLite table rebuild requested for '{}' — the PG differ \
-             never produces rebuilds (routing bug)",
-            spec.table
-        )))
-    }
-
-    async fn run_backfill_step(
-        &self,
-        cfg: &ExecutorConfig,
-        spec: &crate::ops::backfill::BackfillSpec,
-        approval: crate::approval::Approval,
-        _scope: &crate::approval::ApprovalScope,
-        applied_by: &str,
-        _lock_mode: crate::apply::executor::LockMode,
-    ) -> Result<crate::apply::executor::ApplyOutcome, ApplyError> {
-        // PG: the existing writable-CTE windowed-UPDATE backfill. Its per-batch
-        // `pg_advisory_xact_lock` is re-entrant under the held project lock, so the
-        // `lock_mode` carried by the caller need not be re-applied here (the whole
-        // deploy is already serialized — §2.0.3(1)). On completion the backfill's
-        // marker version is journaled by `run_backfill` itself.
-        let outcome = crate::ops::backfill::run_backfill(self.conn, cfg, spec, approval, applied_by)
-            .await
-            .map_err(|e| ApplyError::Backend(format!("backfill step failed: {e}")))?;
-        // Surface the backfill's journaled marker as an applied version when it
-        // completed this run; a resumed-but-incomplete backfill reports nothing
-        // applied (the marker lands only on completion).
-        let applied = if outcome.complete {
-            vec![spec.name.clone()]
-        } else {
-            Vec::new()
-        };
-        Ok(crate::apply::executor::ApplyOutcome {
-            applied,
-            skipped: Vec::new(),
-            recovered: Vec::new(),
-        })
-    }
-
-    async fn run_dml_step(
-        &self,
-        cfg: &ExecutorConfig,
-        version: &crate::model::migration::MigrationId,
-        name: &str,
-        template: &str,
-        binds: &[crate::plan::BindValue],
-        destructive: bool,
-        owner_app: &str,
-        approval: crate::approval::Approval,
-        scope: &crate::approval::ApprovalScope,
-        applied_by: &str,
-        _lock_mode: crate::apply::executor::LockMode,
-    ) -> Result<bool, ApplyError> {
-        // Defense-in-depth: a destructive DML (a `delete`) needs explicit approval,
-        // mirroring the per-Migration gate in `apply_with_lock_backend`. The engine's
-        // `apply_plan` gate runs first; this is the independent executor-layer check
-        // so a direct seam caller cannot bypass it. Refuse BEFORE touching the journal
-        // or the template, so a refused destructive DML applies NOTHING.
-        if destructive && approval != crate::approval::Approval::Approved {
-            return Err(ApplyError::ApprovalRequired);
-        }
-        // **PR9b per-version scope (executor-layer defense in depth).** Even under
-        // blanket `Approval::Approved`, a destructive DML runs ONLY if `scope` admits
-        // its `version` — the executor-layer mirror of the engine's per-version scope
-        // gate, keyed on the same rule as `PlanStep::approval_scope_version` for `Dml`.
-        // So a direct seam caller cannot bypass the per-version scope by driving this
-        // method with an empty/omitting `Versions` set. Fail-closed: refuse BEFORE the
-        // journal or the template, so a non-scoped destructive DML applies NOTHING.
-        if destructive && !scope.admits(version.as_str()) {
-            return Err(ApplyError::ApprovalNotScoped {
-                version: version.as_str().to_string(),
-            });
-        }
-        // Net-applied-skip: if this sub-version is already journaled `completed`,
-        // the re-run is a no-op (idempotency, §2.0.1).
-        let already: bool = self
-            .applied(cfg)
-            .await
-            .map_err(ApplyError::Journal)?
-            .into_iter()
-            .filter(|e| matches!(e.phase, crate::apply::journal::Phase::Completed))
-            .any(|e| e.version == version.as_str());
-        if already {
-            return Ok(false);
-        }
-        crate::apply::executor::apply_dml_transactional(
-            self.conn,
-            cfg,
-            version.as_str(),
-            name,
-            template,
-            binds,
-            owner_app,
-            applied_by,
-        )
-        .await?;
-        Ok(true)
-    }
-
-    fn online(&self) -> Option<&dyn crate::ops::expand_contract::OnlineSchemaChange> {
-        Some(&self.online)
-    }
-
-    fn shadow(&self) -> Option<&dyn crate::ops::shadow::ShadowDryRun> {
-        // Postgres CAN dry-run untrusted/AI-authored DDL against a throwaway shadow
-        // DATABASE before the durable apply. The `PgShadow` owns the admin `Client`
-        // privately; the connection never crosses this neutral surface (C3).
-        Some(&self.shadow)
-    }
-
-    fn pending_contracts(&self) -> Option<&dyn CrossDeployObligations> {
-        Some(self)
-    }
-
-    async fn baseline_one(
-        &self,
-        cfg: &ExecutorConfig,
-        m: &Migration,
-        applied_by: &str,
-    ) -> Result<BaselineOutcome, BaselineError> {
-        // Delegate verbatim to the existing PG baseline body (guard → advisory lock →
-        // first-entry/idempotency → `kind='baseline'` journal write). The `&Client`
-        // and `pg_advisory_lock` stay private to this backend; the neutral
-        // `BaselineOutcome`/`BaselineError` are what cross the trait surface.
-        crate::apply::baseline::baseline(self.conn, cfg, m, applied_by).await
-    }
-}
-
-impl CrossDeployObligations for PostgresBackend<'_> {
-    fn outstanding_pending_contracts<'a>(
-        &'a self,
-        cfg: &'a ExecutorConfig,
-    ) -> JournalFuture<'a, Vec<journal::PendingContract>> {
-        Box::pin(async move { journal::outstanding_pending_contracts(self.conn, cfg).await })
-    }
-
-    fn record_pending_contract_with_recovery<'a>(
-        &'a self,
-        cfg: &'a ExecutorConfig,
-        rec: journal::PendingContractRecord<'a>,
-        scope: Option<journal::DeployRecoveryScope<'a>>,
-    ) -> JournalFuture<'a, ()> {
-        Box::pin(async move {
-            journal::record_pending_contract_with_recovery(self.conn, cfg, rec, scope).await
-        })
-    }
-
-    fn resolve_pending_contract<'a>(
-        &'a self,
-        cfg: &'a ExecutorConfig,
-        pc: &'a journal::PendingContract,
-        resolution: journal::Resolution,
-        by: &'a str,
-    ) -> JournalFuture<'a, ()> {
-        Box::pin(async move {
-            journal::resolve_pending_contract(self.conn, cfg, pc, resolution, by).await
-        })
-    }
-
-    fn mark_deploy_recovery_committed_batch<'a>(
-        &'a self,
-        cfg: &'a ExecutorConfig,
-        deploy_id: &'a str,
-        pending_versions: &'a [String],
-        by: &'a str,
-    ) -> JournalFuture<'a, ()> {
-        Box::pin(async move {
-            journal::mark_deploy_recovery_committed_batch(
-                self.conn,
-                cfg,
-                deploy_id,
-                pending_versions,
-                by,
-            )
-            .await
-        })
-    }
-
-    fn mark_deploy_recovery_reconciled<'a>(
-        &'a self,
-        cfg: &'a ExecutorConfig,
-        deploy_id: &'a str,
-        pending_version: &'a str,
-        by: &'a str,
-    ) -> JournalFuture<'a, ()> {
-        Box::pin(async move {
-            journal::mark_deploy_recovery_reconciled(
-                self.conn,
-                cfg,
-                deploy_id,
-                pending_version,
-                by,
-            )
-            .await
-        })
-    }
-
-    fn outstanding_deploy_recoveries<'a>(
-        &'a self,
-        cfg: &'a ExecutorConfig,
-    ) -> JournalFuture<'a, Vec<journal::DeployRecovery>> {
-        Box::pin(async move { journal::outstanding_deploy_recoveries(self.conn, cfg).await })
-    }
 }

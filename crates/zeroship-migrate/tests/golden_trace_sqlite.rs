@@ -22,9 +22,10 @@ use tempfile::TempDir;
 use zeroship_migrate::backend_sqlite::Mode;
 use zeroship_migrate::journal::Phase;
 use zeroship_migrate::{
-    desired_snapshot, drift::SchemaSnapshot, Approval, ApprovalScope, CollectionDescriptor, DeclarativeApplyError,
-    DeclarativeAuthor, DeclarativeDeployOutcome, DeclarativeDeployPlan, EngineError, ExecutorConfig,
-    FieldDescriptor, GuardConfig, MigrationBackend, MigrationEngine, RenameHint, SqliteBackend,
+    desired_snapshot, Approval, ApprovalScope, CollectionDescriptor, DeclarativeApplyError,
+    DeclarativeAuthor, DeclarativeDeployOutcome, DeclarativeDeployPlan, EngineError,
+    ExecutorConfig, FieldDescriptor, GuardConfig, MigrationBackend, MigrationEngine, RenameHint,
+    SchemaSnapshot, SqliteBackend,
 };
 use zeroship_schema::query::SqlDialect;
 
@@ -258,7 +259,7 @@ async fn golden_b_sqlite_rename_rebuild() {
 
 #[compio::test]
 async fn golden_g_sqlite_pg_rename_fails_closed() {
-    use zeroship_migrate::plan::{PlanStep, RenameStep};
+    use zeroship_migrate::{PlanStep, RenameStep};
     use zeroship_migrate::ExpandContractAuthor;
     use zeroship_migrate::OnlineIntent;
 

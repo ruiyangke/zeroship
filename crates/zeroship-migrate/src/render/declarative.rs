@@ -39,16 +39,16 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Deserialize;
 
-use crate::render::renderer::{Capability, DialectSupports};
-use crate::apply::drift::{
+use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
+use crate::model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot, IndexSnapshot, SchemaSnapshot,
     TableSnapshot,
 };
-use crate::ops::expand_contract::{
+use crate::render::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
 };
-use crate::apply::backend::sqlite::SqliteRebuildSpec;
-use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
+use crate::render::plan::SqliteRebuildSpec;
+use crate::render::renderer::{Capability, DialectSupports};
 use zeroship_schema::query::{SqlDialect, SqliteEmitScope};
 
 fn mysql_quote_ident(ident: &str) -> String {
@@ -2555,9 +2555,9 @@ pub enum DeclarativeError {
 ///
 /// A column rename is an **online, multi-deploy** operation, not a single
 /// statement. Its [`ExpandContractPlan`] is more than a list of `Migration`s: it
-/// also carries the [`BackfillSpec`](crate::backfill::BackfillSpec) that mirrors
+/// also carries the [`BackfillSpec`](crate::render::plan::BackfillSpec) that mirrors
 /// **pre-existing** rows from `<from>` into `<to>`. E3's `up` is only a `SELECT 1`
-/// marker — the actual data copy is [`run_backfill`](crate::backfill::run_backfill),
+/// marker — the actual data copy is [`run_backfill`](crate::ops::backfill::run_backfill),
 /// driven exclusively by [`run_expand`](crate::engine::MigrationEngine::run_expand).
 ///
 /// If the rename were flattened into the plain migration set (`out.extend(plan.all())`)
@@ -4064,7 +4064,7 @@ impl DeclarativeAuthor {
 
     /// **PR2 — the cross-subsystem `renameColumn` bridge (§2.6 / §2.6.1 / §2.6.2).**
     /// Lower ONE IR `renameColumn` op into its dialect-chosen
-    /// [`RenameStep`](crate::plan::RenameStep), REUSING the existing destination
+    /// [`RenameStep`](crate::render::step::RenameStep), REUSING the existing destination
     /// authors verbatim so the IR path inherits their version-stable ids:
     ///
     /// - **Postgres** ⇒ build the [`OnlineIntent::RenameColumn`] with the PG type
@@ -4111,7 +4111,7 @@ impl DeclarativeAuthor {
         live_snapshot: &TableSnapshot,
         live_sqlite_schema: &serde_json::Value,
         live_owner: &str,
-    ) -> Result<crate::plan::RenameStep, DeclarativeError> {
+    ) -> Result<crate::render::step::RenameStep, DeclarativeError> {
         match self.dialect {
             SqlDialect::Postgres => {
                 // The PG expand-contract author IS the id authority (§2.6.1): the
@@ -4131,7 +4131,7 @@ impl DeclarativeAuthor {
                             "renameColumn expand-contract author rejected '{table}.{from}→{to}': {e}"
                         ))
                     })?;
-                Ok(crate::plan::RenameStep::PgExpandContract(plan))
+                Ok(crate::render::step::RenameStep::PgExpandContract(plan))
             }
             SqlDialect::Sqlite => {
                 let rebuild = self.sqlite_rename_rebuild(
@@ -4142,7 +4142,7 @@ impl DeclarativeAuthor {
                     live_sqlite_schema,
                     live_owner,
                 )?;
-                Ok(crate::plan::RenameStep::SqliteRebuild(rebuild))
+                Ok(crate::render::step::RenameStep::SqliteRebuild(rebuild))
             }
             SqlDialect::Mysql => Err(DeclarativeError::UnsupportedInV1(
                 "renameColumn is not live-rendered for MySQL in render-only Phase 1".to_string(),
