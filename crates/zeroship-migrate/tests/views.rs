@@ -257,6 +257,7 @@ fn fold_records_views_and_drop_removes_them() {
         materialized: false,
         columns: None,
         definition: None,
+        comment: None,
     });
     assert_eq!(
         folded,

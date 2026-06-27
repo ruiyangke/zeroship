@@ -40,7 +40,8 @@ use std::collections::BTreeMap;
 
 use crate::apply::drift::DriftError;
 use crate::model::snapshot::{
-    ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot, ViewSnapshot,
+    ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, SchemaSnapshot,
+    TableSnapshot, ViewSnapshot,
 };
 
 use super::actor::{MigrationActor, SqliteActorError};
@@ -189,10 +190,12 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
                     IndexSnapshot {
                         name: name.clone(),
                         unique: false,
+                        elements: columns.iter().cloned().map(IndexElementSnapshot::column).collect(),
                         columns,
                         access_method: "fts5".to_string(),
-                        expression: None,
+                        predicate: None,
                         opclass: None,
+                        comment: None,
                     },
                 ));
                 continue;
@@ -212,6 +215,7 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
                 columns: Vec::new(),
                 indexes: Vec::new(),
                 constraints: Vec::new(),
+                comment: None,
                 // H1 — carry the verbatim CREATE text so the DROP-COLUMN rebuild
                 // router can detect CHECK / generated / partial-index references the
                 // structured PRAGMA buckets do not surface.
@@ -242,6 +246,7 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
             materialized: false,
             columns: None,
             definition,
+            comment: None,
         });
     }
 
@@ -345,6 +350,7 @@ async fn introspect_columns(
             ddl_type_override: None,
             inline_checks: Vec::new(),
             comment_sentinel: recover_inline_sentinel(stored_create_sql, &name),
+            comment: None,
         });
     }
     // Synthesise the PRIMARY KEY constraint from table_info (matching the PG
@@ -358,6 +364,7 @@ async fn introspect_columns(
             name: format!("pk_{table}"),
             kind: "PRIMARY KEY".to_string(),
             definition: format!("PRIMARY KEY ({})", cols.join(", ")),
+            comment: None,
         });
     }
     Ok(())
@@ -385,9 +392,16 @@ async fn introspect_indexes_and_unique(
         .await
         .map_err(drift_err)?;
 
-    // (name, unique, origin, columns) gathered first so we can borrow the table
-    // mutably once.
-    let mut gathered: Vec<(String, bool, String, Vec<String>)> = Vec::new();
+    struct GatheredIndex {
+        name: String,
+        unique: bool,
+        origin: String,
+        columns: Vec<String>,
+        elements: Vec<IndexElementSnapshot>,
+        predicate: Option<String>,
+    }
+
+    let mut gathered: Vec<GatheredIndex> = Vec::new();
     for r in &idx_rows {
         // index_list columns: 0=seq 1=name 2=unique 3=origin 4=partial
         let name = cell(r, 1)?;
@@ -405,18 +419,42 @@ async fn introspect_indexes_and_unique(
                 columns.push(col.clone());
             }
         }
-        gathered.push((name, unique, origin.trim().to_string(), columns));
+        let sql_rows = actor
+            .query(&format!(
+                "SELECT sql FROM main.sqlite_master WHERE type = 'index' AND name = {}",
+                lit(&name)
+            ))
+            .await
+            .map_err(drift_err)?;
+        let create_sql = sql_rows.first().and_then(|r| r.first()).and_then(Clone::clone);
+        let (elements, predicate) = create_sql
+            .as_deref()
+            .and_then(parse_sqlite_index_shape)
+            .unwrap_or_else(|| {
+                (
+                    columns.iter().cloned().map(IndexElementSnapshot::column).collect(),
+                    None,
+                )
+            });
+        gathered.push(GatheredIndex {
+            name,
+            unique,
+            origin: origin.trim().to_string(),
+            columns,
+            elements,
+            predicate,
+        });
     }
 
     let Some(t) = tables.get_mut(table) else {
         return Ok(());
     };
-    for (name, unique, origin, columns) in gathered {
+    for index in gathered {
         // A PRIMARY KEY auto-index (origin 'pk') is already surfaced as a constraint
         // from `table_info` (the authoritative PK source, which also covers the rowid
         // PK that has no index_list entry). Skip it here entirely so the PK is not
         // double-counted and the `sqlite_autoindex_*` name never leaks.
-        if origin == "pk" {
+        if index.origin == "pk" {
             continue;
         }
         // A UNIQUE-constraint auto-index (origin 'u') is a CONSTRAINT, surfaced in the
@@ -424,38 +462,214 @@ async fn introspect_indexes_and_unique(
         // pg_constraint row, not a pg_index row in the index bucket). Its name is the
         // SQLite-internal `sqlite_autoindex_*`, which we must not leak as a creator
         // index.
-        if origin == "u" {
+        if index.origin == "u" {
             t.constraints.push(ConstraintSnapshot {
-                name: name.clone(),
+                name: index.name.clone(),
                 kind: "UNIQUE".to_string(),
                 // A faithful, re-parse-stable definition shape: the constraint kind
                 // over its ordered key columns. (SQLite has no `pg_get_constraintdef`;
                 // this canonical spelling is the closest faithful round-trip form.)
-                definition: format!("UNIQUE ({})", columns.join(", ")),
+                definition: format!("UNIQUE ({})", index.columns.join(", ")),
+                comment: None,
             });
             // Do NOT also push it into the index bucket if it is a SQLite auto-index;
             // an explicit `CREATE UNIQUE INDEX` (origin 'c') is handled below.
-            if name.starts_with("sqlite_autoindex_") {
+            if index.name.starts_with("sqlite_autoindex_") {
                 continue;
             }
         }
         // A real index (CREATE INDEX, origin 'c') — and an explicitly-named UNIQUE
         // index that is not a sqlite_autoindex — is an IndexSnapshot.
-        if is_internal(&name) {
+        if is_internal(&index.name) {
             continue;
         }
         t.indexes.push(IndexSnapshot {
-            name,
-            unique,
-            columns,
+            name: index.name,
+            unique: index.unique,
+            elements: index.elements,
+            columns: index.columns,
             // SQLite indexes are b-tree (the only built-in index AM). fts5/vec0 are
             // vtables, not indexes, and surface as tables; see the divergences doc.
             access_method: "btree".to_string(),
-            expression: None,
+            predicate: index.predicate,
             opclass: None,
+            comment: None,
         });
     }
     Ok(())
+}
+
+fn parse_sqlite_index_shape(sql: &str) -> Option<(Vec<IndexElementSnapshot>, Option<String>)> {
+    let lower = sql.to_ascii_lowercase();
+    let on = lower.find(" on ")?;
+    let open = find_char_outside_quotes(sql, '(', on + 4)?;
+    let close = find_matching_paren(sql, open)?;
+    let inner = &sql[open + 1..close];
+    let elements = split_top_level_commas(inner)
+        .into_iter()
+        .filter_map(|part| parse_sqlite_index_element(part.trim()))
+        .collect::<Vec<_>>();
+    let tail = sql[close + 1..].trim();
+    let predicate = tail
+        .get(..5)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("where"))
+        .map(|_| tail[5..].trim().to_string())
+        .filter(|s| !s.is_empty());
+    Some((elements, predicate))
+}
+
+fn parse_sqlite_index_element(part: &str) -> Option<IndexElementSnapshot> {
+    let part = part.trim();
+    if part.is_empty() {
+        return None;
+    }
+    if let Some(inner) = strip_single_outer_parens(part) {
+        return Some(IndexElementSnapshot::expr(inner.trim().to_string()));
+    }
+    parse_sqlite_quoted_ident(part)
+        .map(IndexElementSnapshot::column)
+        .or_else(|| Some(IndexElementSnapshot::column(part.to_string())))
+}
+
+fn parse_sqlite_quoted_ident(s: &str) -> Option<String> {
+    let mut chars = s.chars();
+    if chars.next()? != '"' {
+        return None;
+    }
+    let mut out = String::new();
+    let mut rest = chars.peekable();
+    while let Some(c) = rest.next() {
+        if c == '"' {
+            if matches!(rest.peek(), Some('"')) {
+                rest.next();
+                out.push('"');
+                continue;
+            }
+            if rest.next().is_none() {
+                return Some(out);
+            }
+            return None;
+        }
+        out.push(c);
+    }
+    None
+}
+
+fn strip_single_outer_parens(s: &str) -> Option<&str> {
+    if !s.starts_with('(') {
+        return None;
+    }
+    let close = find_matching_paren(s, 0)?;
+    if close == s.len() - 1 {
+        Some(&s[1..close])
+    } else {
+        None
+    }
+}
+
+fn find_char_outside_quotes(s: &str, needle: char, from: usize) -> Option<usize> {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, ch)) = chars.next() {
+        if i < from {
+            continue;
+        }
+        match ch {
+            '\'' if !in_double => {
+                if in_single && matches!(chars.peek(), Some((_, '\''))) {
+                    chars.next();
+                } else {
+                    in_single = !in_single;
+                }
+            }
+            '"' if !in_single => {
+                if in_double && matches!(chars.peek(), Some((_, '"'))) {
+                    chars.next();
+                } else {
+                    in_double = !in_double;
+                }
+            }
+            _ if ch == needle && !in_single && !in_double => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_matching_paren(s: &str, open: usize) -> Option<usize> {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut depth = 0_usize;
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, ch)) = chars.next() {
+        if i < open {
+            continue;
+        }
+        match ch {
+            '\'' if !in_double => {
+                if in_single && matches!(chars.peek(), Some((_, '\''))) {
+                    chars.next();
+                } else {
+                    in_single = !in_single;
+                }
+            }
+            '"' if !in_single => {
+                if in_double && matches!(chars.peek(), Some((_, '"'))) {
+                    chars.next();
+                } else {
+                    in_double = !in_double;
+                }
+            }
+            '(' if !in_single && !in_double => depth += 1,
+            ')' if !in_single && !in_double => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_top_level_commas(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0_usize;
+    let mut depth = 0_usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, ch)) = chars.next() {
+        match ch {
+            '\'' if !in_double => {
+                if in_single && matches!(chars.peek(), Some((_, '\''))) {
+                    chars.next();
+                } else {
+                    in_single = !in_single;
+                }
+            }
+            '"' if !in_single => {
+                if in_double && matches!(chars.peek(), Some((_, '"'))) {
+                    chars.next();
+                } else {
+                    in_double = !in_double;
+                }
+            }
+            '(' if !in_single && !in_double => depth += 1,
+            ')' if !in_single && !in_double => {
+                depth = depth.saturating_sub(1);
+            }
+            ',' if depth == 0 && !in_single && !in_double => {
+                out.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out
 }
 
 /// Foreign keys via `PRAGMA foreign_key_list(<t>)` → one `FOREIGN KEY`
@@ -515,6 +729,7 @@ async fn introspect_foreign_keys(
                 ref_table,
                 to_cols.join(", ")
             ),
+            comment: None,
         });
     }
     Ok(())

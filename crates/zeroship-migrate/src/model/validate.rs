@@ -297,11 +297,12 @@ pub fn validate_expr(
 /// expression positions and calls [`validate_expr`] per node with the enclosing
 /// op's index + single target table as scope:
 ///
-/// - `createTable` — each `IrIndex.where` partial-index predicate + each
-///   `Check` constraint `expr` (scoped to the table's own declared columns, so
-///   rule (c) `ColRef` resolution runs against them).
-/// - `createIndex` — the `where` partial-index predicate (closed AST since the
-///   property-A fix).
+/// - `createTable` — each `IrIndex` element expression, each `IrIndex.where`
+///   partial-index predicate + each `Check` constraint `expr` (scoped to the
+///   table's own declared columns, so rule (c) `ColRef` resolution runs against
+///   them).
+/// - `createIndex` — each index element expression + the `where` partial-index
+///   predicate (closed AST since the property-A fix).
 /// - `alterColumnType` — the `using` cast expression (closed AST since the
 ///   property-A fix).
 /// - `addConstraint` — a `Check` constraint `expr`.
@@ -389,7 +390,9 @@ pub fn validate_op_scoped(
     ts_location: Option<&str>,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), AuthoringError> {
-    use crate::model::ir::{ColumnOrExpr, IrConstraintKind, Op, TriggerAction, ViewQuery};
+    use crate::model::ir::{
+        ColumnOrExpr, IndexElement, IrConstraintKind, Op, TriggerAction, ViewQuery,
+    };
 
     // **PR10** — schema confinement + guard-direction gate, BEFORE any expression
     // walk. Fail-closed: a Confined cross-schema op never reaches lower.
@@ -434,6 +437,20 @@ pub fn validate_op_scoped(
             Ok(())
         };
 
+    let check_index_element =
+        |element: &IndexElement, scope: &TargetScope<'_>| -> Result<(), AuthoringError> {
+            match element {
+                IndexElement::Column { name } => {
+                    let col = crate::model::expr::Expr::ColRef { name: name.clone() };
+                    validate_expr(&col, target_dialect, scope, op_index, ts_location)?;
+                }
+                IndexElement::Expr { expr } => {
+                    validate_expr(expr, target_dialect, scope, op_index, ts_location)?;
+                }
+            }
+            Ok(())
+        };
+
     match op {
         Op::CreateTable { name, columns, constraints, indexes, .. } => {
             // A createTable is self-contained: resolve ColRefs against its own
@@ -448,6 +465,9 @@ pub fn validate_op_scoped(
             cols.extend(columns.iter().map(|c| c.name.clone()));
             let scope = TargetScope::new(name, &cols);
             for ix in indexes {
+                for element in &ix.columns {
+                    check_index_element(element, &scope)?;
+                }
                 if let Some(pred) = &ix.r#where {
                     validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
                 }
@@ -486,11 +506,14 @@ pub fn validate_op_scoped(
             }
             Ok(())
         }
-        Op::CreateIndex { table, r#where, .. } => {
-            // The partial-index predicate. The live column set is not known at
-            // load (the table pre-exists), so structural-only here.
+        Op::CreateIndex { table, columns, r#where, .. } => {
+            // The index elements and partial-index predicate. The live column set
+            // is not known at load (the table pre-exists), so structural-only here.
+            let scope = TargetScope::structural_only(table);
+            for element in columns {
+                check_index_element(element, &scope)?;
+            }
             if let Some(pred) = r#where {
-                let scope = TargetScope::structural_only(table);
                 validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
             }
             Ok(())
@@ -753,6 +776,7 @@ pub fn validate_op_scoped(
         | Op::CreateSequence { .. }
         | Op::AlterSequence { .. }
         | Op::DropSequence { .. }
+        | Op::Comment { .. }
         | Op::Insert { .. }
         | Op::CreateSchema { .. }
         | Op::DropSchema { .. }
@@ -2061,7 +2085,7 @@ impl Ctx<'_> {
 mod tests {
     use super::*;
     use crate::model::expr::{BinaryOp, CastTarget, Expr, ScalarFn, SynthFn, UnaryOp};
-    use crate::model::ir::IrScalar;
+    use crate::model::ir::{IndexElement, IrScalar};
 
     fn cols() -> Vec<String> {
         vec!["name".into(), "first".into(), "last".into(), "total".into()]
@@ -2857,7 +2881,7 @@ mod tests {
                 }],
                 indexes: vec![IrIndex {
                     name: None,
-                    columns: vec!["first".into()],
+                    columns: vec![IndexElement::Column { name: "first".into() }],
                     unique: None,
                     using: None,
                     r#where: Some(Expr::UnaryOp {
@@ -2905,7 +2929,7 @@ mod tests {
             }],
             indexes: vec![IrIndex {
                 name: None,
-                columns: vec!["first".into()],
+                columns: vec![IndexElement::Column { name: "first".into() }],
                 unique: Some(true),
                 using: None,
                 // the canonical soft-delete partial-unique predicate
@@ -3016,7 +3040,7 @@ mod tests {
         // must now reach it. An out-of-envelope splitPart there must reject.
         let ir = ir_with(vec![Op::CreateIndex {
             table: "users".into(),
-            columns: vec!["a".into()],
+            columns: vec![IndexElement::Column { name: "a".into() }],
             name: None,
             unique: None,
             using: None,

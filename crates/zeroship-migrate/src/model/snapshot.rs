@@ -73,10 +73,15 @@ pub struct ColumnSnapshot {
     ///     the encryption metadata from `pg_description` at runtime.
     ///
     /// Built by the shared codecs ([`zeroship_schema::mask_codec`]) — never
-    /// re-spelled here. Emission-only — EXCLUDED from `PartialEq` / `Eq` /
-    /// `Hash` (introspection never reads COMMENTs into the snapshot; the
-    /// encrypted/masked COLUMN itself round-trips as a plain column).
+    /// re-spelled here. EXCLUDED from `PartialEq` / `Eq` / `Hash`: desired
+    /// snapshots use it to emit runtime metadata, and PostgreSQL introspection
+    /// classifies matching catalog comments back into this field instead of the
+    /// user-facing `comment` facet.
     pub comment_sentinel: Option<String>,
+    /// User-authored catalog comment on this column. Unlike `comment_sentinel`,
+    /// this is drift-comparable metadata folded from `Op::Comment` and recovered
+    /// from PostgreSQL `pg_description`.
+    pub comment: Option<String>,
 }
 
 /// Emission metadata for a generated/computed column.
@@ -105,6 +110,7 @@ impl std::fmt::Debug for ColumnSnapshot {
             .field("identity", &self.identity)
             .field("encryption_sentinel", &self.encryption_sentinel)
             .field("comment_sentinel", &self.comment_sentinel)
+            .field("comment", &self.comment)
             .finish()
     }
 }
@@ -114,6 +120,7 @@ impl PartialEq for ColumnSnapshot {
         self.name == other.name
             && self.data_type == other.data_type
             && self.nullable == other.nullable
+            && self.comment == other.comment
     }
 }
 impl Eq for ColumnSnapshot {}
@@ -122,7 +129,75 @@ impl std::hash::Hash for ColumnSnapshot {
         self.name.hash(state);
         self.data_type.hash(state);
         self.nullable.hash(state);
+        self.comment.hash(state);
     }
+}
+
+/// One ordered key element of an index snapshot. The expression arm stores the
+/// dialect-rendered expression text produced from a closed [`crate::model::expr::Expr`]
+/// or recovered from catalog introspection.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum IndexElementSnapshot {
+    /// Plain column key.
+    Column(String),
+    /// Expression key.
+    Expr(String),
+}
+
+impl IndexElementSnapshot {
+    /// Plain column key.
+    #[must_use]
+    pub fn column(name: impl Into<String>) -> Self {
+        Self::Column(name.into())
+    }
+
+    /// Expression key.
+    #[must_use]
+    pub fn expr(expr: impl Into<String>) -> Self {
+        Self::Expr(expr.into())
+    }
+}
+
+fn canonical_index_sql_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '"' {
+            out.push(ch);
+            continue;
+        }
+        let mut ident = String::new();
+        let mut raw_inner = String::new();
+        let mut closed = false;
+        while let Some(c) = chars.next() {
+            if c == '"' {
+                if matches!(chars.peek(), Some('"')) {
+                    chars.next();
+                    ident.push('"');
+                    raw_inner.push_str("\"\"");
+                } else {
+                    closed = true;
+                    break;
+                }
+            } else {
+                ident.push(c);
+                raw_inner.push(c);
+            }
+        }
+        let safe_bare = !ident.is_empty()
+            && ident.starts_with(|c: char| c == '_' || c.is_ascii_lowercase())
+            && ident.chars().all(|c| c == '_' || c.is_ascii_lowercase() || c.is_ascii_digit());
+        if closed && safe_bare {
+            out.push_str(&ident);
+        } else {
+            out.push('"');
+            out.push_str(&raw_inner);
+            if closed {
+                out.push('"');
+            }
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// One index of a table, as introspected from `pg_catalog`.
@@ -141,20 +216,22 @@ pub struct IndexSnapshot {
     /// `true` if it enforces uniqueness.
     pub unique: bool,
     /// The KEY columns the index covers, in index order (the leading
-    /// `indnkeyatts` attributes — INCLUDE columns and expression keys are
-    /// excluded).
+    /// plain-column attributes). Expression keys are represented in `elements`.
     pub columns: Vec<String>,
+    /// Ordered key elements, including both plain columns and expression keys.
+    pub elements: Vec<IndexElementSnapshot>,
     /// The index ACCESS METHOD (`pg_am.amname`): `btree` (the default), `gin`
     /// (FTS over a tsvector), `gist` (spatial / geography), `ivfflat` / `hnsw`
     /// (pgvector ANN), etc.
     pub access_method: String,
-    /// The index EXPRESSION / PREDICATE text, when the index is over an
-    /// expression or is partial. `None` for a plain column-list index.
-    pub expression: Option<String>,
+    /// Partial-index predicate text, when present.
+    pub predicate: Option<String>,
     /// **Emission-only** per-column operator class for an `ivfflat`/`hnsw` ANN
     /// index (`vector_cosine_ops`, `vector_l2_ops`, `vector_ip_ops`). `None` for
     /// every plain / GIN / GiST index. NOT a drift attribute.
     pub opclass: Option<String>,
+    /// User-authored catalog comment on this index.
+    pub comment: Option<String>,
 }
 
 impl PartialEq for IndexSnapshot {
@@ -162,8 +239,18 @@ impl PartialEq for IndexSnapshot {
         self.name == other.name
             && self.unique == other.unique
             && self.columns == other.columns
+            && self.elements.len() == other.elements.len()
+            && self.elements.iter().zip(&other.elements).all(|(a, b)| match (a, b) {
+                (IndexElementSnapshot::Column(a), IndexElementSnapshot::Column(b)) => a == b,
+                (IndexElementSnapshot::Expr(a), IndexElementSnapshot::Expr(b)) => {
+                    canonical_index_sql_text(a) == canonical_index_sql_text(b)
+                }
+                _ => false,
+            })
             && self.access_method == other.access_method
-            && self.expression == other.expression
+            && self.predicate.as_deref().map(canonical_index_sql_text)
+                == other.predicate.as_deref().map(canonical_index_sql_text)
+            && self.comment == other.comment
     }
 }
 impl Eq for IndexSnapshot {}
@@ -172,8 +259,21 @@ impl std::hash::Hash for IndexSnapshot {
         self.name.hash(state);
         self.unique.hash(state);
         self.columns.hash(state);
+        for element in &self.elements {
+            match element {
+                IndexElementSnapshot::Column(name) => {
+                    0_u8.hash(state);
+                    name.hash(state);
+                }
+                IndexElementSnapshot::Expr(expr) => {
+                    1_u8.hash(state);
+                    canonical_index_sql_text(expr).hash(state);
+                }
+            }
+        }
         self.access_method.hash(state);
-        self.expression.hash(state);
+        self.predicate.as_deref().map(canonical_index_sql_text).hash(state);
+        self.comment.hash(state);
     }
 }
 
@@ -185,10 +285,12 @@ impl IndexSnapshot {
         Self {
             name: name.into(),
             unique,
+            elements: columns.iter().cloned().map(IndexElementSnapshot::Column).collect(),
             columns,
             access_method: "btree".to_string(),
-            expression: None,
+            predicate: None,
             opclass: None,
+            comment: None,
         }
     }
 }
@@ -209,6 +311,8 @@ pub struct ConstraintSnapshot {
     /// Empty for `EXCLUDE`: PG canonicalizes exclusion definitions differently from
     /// the closed IR renderer, and drift tracks those constraints by name + kind.
     pub definition: String,
+    /// User-authored catalog comment on this constraint.
+    pub comment: Option<String>,
 }
 
 /// A live table's structure (deterministic ordering throughout).
@@ -220,6 +324,8 @@ pub struct TableSnapshot {
     pub indexes: Vec<IndexSnapshot>,
     /// Constraints, ordered by name.
     pub constraints: Vec<ConstraintSnapshot>,
+    /// User-authored catalog comment on this table.
+    pub comment: Option<String>,
     /// **Introspection-only** verbatim `CREATE TABLE` text (`SQLite`
     /// `sqlite_master.sql`). `None` on the Postgres path and on author-built
     /// desired snapshots. EXCLUDED from equality / hashing.
@@ -231,6 +337,7 @@ impl PartialEq for TableSnapshot {
         self.columns == other.columns
             && self.indexes == other.indexes
             && self.constraints == other.constraints
+            && self.comment == other.comment
     }
 }
 impl Eq for TableSnapshot {}
@@ -244,11 +351,14 @@ pub struct ViewSnapshot {
     pub columns: Option<Vec<String>>,
     /// Optional live/declared definition text. Diagnostic metadata for now.
     pub definition: Option<String>,
+    /// User-authored catalog comment on this view.
+    pub comment: Option<String>,
 }
 
 impl PartialEq for ViewSnapshot {
     fn eq(&self, other: &Self) -> bool {
         self.materialized == other.materialized
+            && self.comment == other.comment
     }
 }
 impl Eq for ViewSnapshot {}
@@ -257,7 +367,10 @@ impl Eq for ViewSnapshot {}
 /// existence-only for now; option-level sequence drift can be added once live
 /// introspection and offline fold both carry the same normalized attributes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SequenceSnapshot {}
+pub struct SequenceSnapshot {
+    /// User-authored catalog comment on this sequence.
+    pub comment: Option<String>,
+}
 
 /// A deterministic snapshot of a project schema's structure.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -279,4 +392,6 @@ pub struct SchemaSnapshot {
 pub struct NamedTypeSnapshot {
     /// `"enum"` or `"domain"`.
     pub kind: String,
+    /// User-authored catalog comment on this enum/domain.
+    pub comment: Option<String>,
 }

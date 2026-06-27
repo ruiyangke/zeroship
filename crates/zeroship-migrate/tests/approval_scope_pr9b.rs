@@ -160,6 +160,7 @@ fn live_members() -> LiveSchema {
                 identity: None,
                 encryption_sentinel: None,
                 comment_sentinel: None,
+                comment: None,
             },
             ColumnSnapshot {
                 name: "legacy".into(),
@@ -172,10 +173,12 @@ fn live_members() -> LiveSchema {
                 identity: None,
                 encryption_sentinel: None,
                 comment_sentinel: None,
+                comment: None,
             },
         ],
         indexes: vec![],
         constraints: vec![],
+        comment: None,
         stored_create_sql: None,
     };
     let mut live = LiveSchema::default();

@@ -256,7 +256,7 @@ async fn fold_equals_introspect_pg() {
                 "referencesTable":"parents","referencesColumns":["id"],"onDelete":"cascade"}}
         ],
         "indexes":[
-            {"name":"users_age_x_idx","columns":["age"]}
+            {"name":"users_age_x_idx","columns":[{"kind":"column","name":"age"}]}
         ]}
     ]}"#;
     all_ops.extend(
@@ -355,7 +355,7 @@ async fn fold_equals_introspect_pg() {
 
     // (7) createIndex, then dropIndex it.
     let mk_idx = r#"{"ir_version":1,"name":"mk_idx","ops":[
-        {"op":"createIndex","table":"users","columns":["nickname"],"name":"users_nick_idx"}
+        {"op":"createIndex","table":"users","columns":[{"kind":"column","name":"nickname"}],"name":"users_nick_idx"}
     ]}"#;
     all_ops.extend(apply_doc(&conn, &cfg, mk_idx, &full, Approval::None).await);
 
@@ -517,7 +517,7 @@ async fn fold_equals_introspect_after_rename_table_pg() {
             {"name":"balance","type":"int","nullable":true}
         ],
         "indexes":[
-            {"name":"accounts_email_idx","columns":["email"]}
+            {"name":"accounts_email_idx","columns":[{"kind":"column","name":"email"}]}
         ]}
     ]}"#;
     all_ops.extend(apply_doc(&conn, &cfg, create, &registry(&[]), Approval::None).await);

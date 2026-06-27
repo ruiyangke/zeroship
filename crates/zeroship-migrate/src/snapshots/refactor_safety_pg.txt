@@ -11,6 +11,7 @@ TableSnapshot {
             identity: None,
             encryption_sentinel: None,
             comment_sentinel: None,
+            comment: None,
         },
         ColumnSnapshot {
             name: "author",
@@ -21,6 +22,7 @@ TableSnapshot {
             identity: None,
             encryption_sentinel: None,
             comment_sentinel: None,
+            comment: None,
         },
         ColumnSnapshot {
             name: "created_at",
@@ -31,6 +33,7 @@ TableSnapshot {
             identity: None,
             encryption_sentinel: None,
             comment_sentinel: None,
+            comment: None,
         },
         ColumnSnapshot {
             name: "created_by",
@@ -41,6 +44,7 @@ TableSnapshot {
             identity: None,
             encryption_sentinel: None,
             comment_sentinel: None,
+            comment: None,
         },
         ColumnSnapshot {
             name: "deleted_at",
@@ -51,6 +55,7 @@ TableSnapshot {
             identity: None,
             encryption_sentinel: None,
             comment_sentinel: None,
+            comment: None,
         },
         ColumnSnapshot {
             name: "id",
@@ -61,6 +66,7 @@ TableSnapshot {
             identity: None,
             encryption_sentinel: None,
             comment_sentinel: None,
+            comment: None,
         },
         ColumnSnapshot {
             name: "secret",
@@ -75,6 +81,7 @@ TableSnapshot {
             comment_sentinel: Some(
                 "zsenc:randomised:default:string",
             ),
+            comment: None,
         },
         ColumnSnapshot {
             name: "secret_masked",
@@ -85,6 +92,7 @@ TableSnapshot {
             identity: None,
             encryption_sentinel: None,
             comment_sentinel: None,
+            comment: None,
         },
         ColumnSnapshot {
             name: "slug",
@@ -95,6 +103,7 @@ TableSnapshot {
             identity: None,
             encryption_sentinel: None,
             comment_sentinel: None,
+            comment: None,
         },
         ColumnSnapshot {
             name: "title",
@@ -105,6 +114,7 @@ TableSnapshot {
             identity: None,
             encryption_sentinel: None,
             comment_sentinel: None,
+            comment: None,
         },
         ColumnSnapshot {
             name: "updated_at",
@@ -115,6 +125,7 @@ TableSnapshot {
             identity: None,
             encryption_sentinel: None,
             comment_sentinel: None,
+            comment: None,
         },
         ColumnSnapshot {
             name: "updated_by",
@@ -125,6 +136,7 @@ TableSnapshot {
             identity: None,
             encryption_sentinel: None,
             comment_sentinel: None,
+            comment: None,
         },
         ColumnSnapshot {
             name: "version",
@@ -135,6 +147,7 @@ TableSnapshot {
             identity: None,
             encryption_sentinel: None,
             comment_sentinel: None,
+            comment: None,
         },
         ColumnSnapshot {
             name: "views",
@@ -147,6 +160,7 @@ TableSnapshot {
             identity: None,
             encryption_sentinel: None,
             comment_sentinel: None,
+            comment: None,
         },
     ],
     indexes: [
@@ -156,9 +170,15 @@ TableSnapshot {
             columns: [
                 "__fts",
             ],
+            elements: [
+                Column(
+                    "__fts",
+                ),
+            ],
             access_method: "gin",
-            expression: None,
+            predicate: None,
             opclass: None,
+            comment: None,
         },
         IndexSnapshot {
             name: "articles_author_slug_idx",
@@ -167,9 +187,18 @@ TableSnapshot {
                 "author",
                 "slug",
             ],
+            elements: [
+                Column(
+                    "author",
+                ),
+                Column(
+                    "slug",
+                ),
+            ],
             access_method: "btree",
-            expression: None,
+            predicate: None,
             opclass: None,
+            comment: None,
         },
         IndexSnapshot {
             name: "articles_created_by_idx",
@@ -177,9 +206,15 @@ TableSnapshot {
             columns: [
                 "created_by",
             ],
+            elements: [
+                Column(
+                    "created_by",
+                ),
+            ],
             access_method: "btree",
-            expression: None,
+            predicate: None,
             opclass: None,
+            comment: None,
         },
         IndexSnapshot {
             name: "articles_deleted_at_idx",
@@ -187,9 +222,15 @@ TableSnapshot {
             columns: [
                 "deleted_at",
             ],
+            elements: [
+                Column(
+                    "deleted_at",
+                ),
+            ],
             access_method: "btree",
-            expression: None,
+            predicate: None,
             opclass: None,
+            comment: None,
         },
         IndexSnapshot {
             name: "articles_pkey",
@@ -197,9 +238,15 @@ TableSnapshot {
             columns: [
                 "id",
             ],
+            elements: [
+                Column(
+                    "id",
+                ),
+            ],
             access_method: "btree",
-            expression: None,
+            predicate: None,
             opclass: None,
+            comment: None,
         },
         IndexSnapshot {
             name: "articles_slug_key",
@@ -207,9 +254,15 @@ TableSnapshot {
             columns: [
                 "slug",
             ],
+            elements: [
+                Column(
+                    "slug",
+                ),
+            ],
             access_method: "btree",
-            expression: None,
+            predicate: None,
             opclass: None,
+            comment: None,
         },
         IndexSnapshot {
             name: "articles_updated_at_idx",
@@ -217,9 +270,15 @@ TableSnapshot {
             columns: [
                 "updated_at",
             ],
+            elements: [
+                Column(
+                    "updated_at",
+                ),
+            ],
             access_method: "btree",
-            expression: None,
+            predicate: None,
             opclass: None,
+            comment: None,
         },
     ],
     constraints: [
@@ -227,12 +286,15 @@ TableSnapshot {
             name: "articles_pkey",
             kind: "PRIMARY KEY",
             definition: "PRIMARY KEY (id)",
+            comment: None,
         },
         ConstraintSnapshot {
             name: "author_fkey",
             kind: "FOREIGN KEY",
             definition: "FOREIGN KEY (author) REFERENCES app.authors(id) ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED",
+            comment: None,
         },
     ],
+    comment: None,
     stored_create_sql: None,
 }

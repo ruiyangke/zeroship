@@ -121,9 +121,11 @@ fn live_with_column(table: &str, column: &str, data_type: &str) -> LiveSchema {
             identity: None,
             encryption_sentinel: None,
             comment_sentinel: None,
+            comment: None,
         }],
         indexes: vec![],
         constraints: vec![],
+        comment: None,
         stored_create_sql: None,
     };
     let mut live = LiveSchema::default();
@@ -980,14 +982,8 @@ async fn bare_name_dropindex_on_pending_table_is_refused() {
     // Live snapshot carrying the index on `members` so the owner resolves.
     let mut live = live_with_column("members", "email", "text");
     if let Some(snap) = live.table_snapshots.get_mut("members") {
-        snap.indexes.push(IndexSnapshot {
-            name: "idx_members_email".into(),
-            columns: vec!["email".into()],
-            unique: false,
-            access_method: "btree".into(),
-            expression: None,
-            opclass: None,
-        });
+        snap.indexes
+            .push(IndexSnapshot::btree("idx_members_email", false, vec!["email".into()]));
     }
     let resolved = IrAuthor::resolved_touched_tables(&drop_ir, &live);
     assert!(

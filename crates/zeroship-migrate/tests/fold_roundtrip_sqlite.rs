@@ -149,7 +149,7 @@ async fn fold_equals_introspect_sqlite() {
             {"name":"done","type":"bool","nullable":false}
         ],
         "indexes":[
-            {"name":"notes_rank_idx","columns":["rank"]}
+            {"name":"notes_rank_idx","columns":[{"kind":"column","name":"rank"}]}
         ]}
     ]}"#;
     all_ops.extend(apply_doc(&be, notes, &registry(&[]), &live_tables, Approval::None).await);
@@ -171,7 +171,7 @@ async fn fold_equals_introspect_sqlite() {
 
     // (4) createIndex, then dropIndex it.
     let mk_idx = r#"{"ir_version":1,"name":"mk_idx","ops":[
-        {"op":"createIndex","table":"notes","columns":["tag"],"name":"notes_tag_idx"}
+        {"op":"createIndex","table":"notes","columns":[{"kind":"column","name":"tag"}],"name":"notes_tag_idx"}
     ]}"#;
     all_ops.extend(apply_doc(&be, mk_idx, &full, &live_tables, Approval::None).await);
 

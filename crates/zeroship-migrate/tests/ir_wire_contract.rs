@@ -27,7 +27,7 @@
 //!   / `IrIndex.using` are the closed `IndexMethod` enum — a raw-SQL string or an
 //!   out-of-set method is rejected at load (code-critic HIGH + MED).
 
-use zeroship_migrate::model::ir::{CanonicalOpList, IrScalar, MigrationIr, Op};
+use zeroship_migrate::model::ir::{CanonicalOpList, IndexElement, IrScalar, MigrationIr, Op};
 use zeroship_migrate::EXPR_INVALID_NUMERIC;
 
 // ----------------------------------------------------------------------------
@@ -357,7 +357,7 @@ fn create_index_where_is_a_closed_expr_not_raw_sql() {
     // A `createIndex` with a partial-index predicate authored as the closed AST
     // the JS `createIndex({where:(c)=>Expr})` emits — it MUST round-trip into a
     // typed `Expr`, exactly like IrIndex.where inside createTable.
-    let json = r#"{"op":"createIndex","table":"t","columns":["a"],
+    let json = r#"{"op":"createIndex","table":"t","columns":[{"kind":"column","name":"a"}],
         "where":{"node":"binOp","op":"gt","lhs":{"node":"colRef","name":"a"},
                  "rhs":{"node":"literal","value":0}}}"#;
     let op: Op = serde_json::from_str(json).unwrap();
@@ -382,7 +382,7 @@ fn create_index_where_rejects_raw_sql_string() {
     // A raw SQL string in the partial-index predicate slot is the exact
     // injection surface property A exists to eliminate — it must NOT deserialize
     // (a String is not a valid Expr node object).
-    let json = r#"{"op":"createIndex","table":"t","columns":["a"],
+    let json = r#"{"op":"createIndex","table":"t","columns":[{"kind":"column","name":"a"}],
         "where":"a > 0 OR 1=1"}"#;
     let err = serde_json::from_str::<Op>(json).unwrap_err();
     assert!(
@@ -399,13 +399,13 @@ fn create_index_using_is_a_closed_method_enum() {
     // |"fts5", design line 648) — an arbitrary/injection-shaped string must NOT
     // deserialize, and a valid member round-trips.
     use zeroship_migrate::model::ir::IndexMethod;
-    let ok = r#"{"op":"createIndex","table":"t","columns":["a"],"using":"gin"}"#;
+    let ok = r#"{"op":"createIndex","table":"t","columns":[{"kind":"column","name":"a"}],"using":"gin"}"#;
     let op: Op = serde_json::from_str(ok).unwrap();
     match op {
         Op::CreateIndex { using, .. } => assert_eq!(using, Some(IndexMethod::Gin)),
         _ => panic!("expected CreateIndex"),
     }
-    let bad = r#"{"op":"createIndex","table":"t","columns":["a"],
+    let bad = r#"{"op":"createIndex","table":"t","columns":[{"kind":"column","name":"a"}],
         "using":"btree; DROP TABLE users"}"#;
     let err = serde_json::from_str::<Op>(bad).unwrap_err();
     assert!(
@@ -415,12 +415,35 @@ fn create_index_using_is_a_closed_method_enum() {
 }
 
 #[test]
+fn create_index_element_rejects_unknown_fields() {
+    let json = r#"{"op":"createIndex","table":"t",
+        "columns":[{"kind":"column","name":"a","rawSql":"lower(a)"}]}"#;
+    let err = serde_json::from_str::<Op>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("rawSql") || err.to_string().contains("unknown field"),
+        "an unknown field on IndexElement must be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn comment_target_rejects_unknown_fields() {
+    let json = r#"{"op":"comment",
+        "target":{"kind":"table","name":"users","rawSql":"pg_class"},
+        "comment":"Users"}"#;
+    let err = serde_json::from_str::<Op>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("rawSql") || err.to_string().contains("unknown field"),
+        "an unknown field on CommentTarget must be rejected, got: {err}"
+    );
+}
+
+#[test]
 fn create_table_index_using_is_a_closed_method_enum() {
     // The same closed-enum guard applies to IrIndex.using inside createTable.
     use zeroship_migrate::model::ir::IndexMethod;
     let ok = r#"{"op":"createTable","name":"t","columns":[
         {"name":"a","type":"int"}],
-        "indexes":[{"columns":["a"],"using":"hnsw"}]}"#;
+        "indexes":[{"columns":[{"kind":"column","name":"a"}],"using":"hnsw"}]}"#;
     let op: Op = serde_json::from_str(ok).unwrap();
     match op {
         Op::CreateTable { indexes, .. } => {
@@ -430,7 +453,7 @@ fn create_table_index_using_is_a_closed_method_enum() {
     }
     let bad = r#"{"op":"createTable","name":"t","columns":[
         {"name":"a","type":"int"}],
-        "indexes":[{"columns":["a"],"using":"evilmethod"}]}"#;
+        "indexes":[{"columns":[{"kind":"column","name":"a"}],"using":"evilmethod"}]}"#;
     let err = serde_json::from_str::<Op>(bad).unwrap_err();
     assert!(
         err.to_string().contains("unknown variant"),
@@ -595,7 +618,7 @@ fn add_column_omits_absent_optionals() {
 fn create_index_omits_all_absent_optionals() {
     let op = Op::CreateIndex {
         table: "users".into(),
-        columns: vec!["email".into()],
+        columns: vec![IndexElement::Column { name: "email".into() }],
         name: None,
         unique: None,
         using: None,
@@ -633,7 +656,7 @@ fn nested_ir_column_index_constraint_omit_absent_optionals() {
     // IrIndex name/unique/using/where absent.
     let ix = IrIndex {
         name: None,
-        columns: vec!["id".into()],
+        columns: vec![IndexElement::Column { name: "id".into() }],
         unique: None,
         using: None,
         r#where: None,

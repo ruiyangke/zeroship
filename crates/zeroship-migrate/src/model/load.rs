@@ -153,6 +153,7 @@ fn op_target_table(op: &Op) -> Option<&str> {
         | Op::Delete { table, .. }
         | Op::Backfill { table, .. } => Some(table),
         Op::DropIndex { table, .. } => table.as_deref(),
+        Op::Comment { target, .. } => target.touched_table(),
         // VENDOR — table-scoped vendor ops (RLS/policy/trigger) are ownership-checked
         // against their table; the database-/role-/schema-level vendor ops have no
         // table to check (they are operator-gated by the capability gate, not the

@@ -4,9 +4,9 @@ use serde_json::json;
 use zeroship_migrate::model::ir::ExistenceGuard;
 use zeroship_migrate::render::lower::{IrAuthor, IrLowerError};
 use zeroship_migrate::{
-    fold_ops, BinaryOp, ColType, ColumnOrExpr, ExclusionElement, ExclusionMethod,
-    ExclusionOperator, Expr, IrConstraint, IrConstraintKind, IrScalar, LiveSchema, MigrationIr,
-    Op, ScalarFn, SequenceOwnedBy,
+    fold_ops, BinaryOp, ColType, ColumnOrExpr, CommentTarget, ExclusionElement,
+    ExclusionMethod, ExclusionOperator, Expr, IndexElement, IrConstraint, IrConstraintKind,
+    IrScalar, LiveSchema, MigrationIr, Op, ScalarFn, SequenceOwnedBy, UnaryOp,
 };
 use zeroship_schema::query::SqlDialect;
 
@@ -129,6 +129,252 @@ fn fold_tracks_sequence_existence_and_drop() {
     )
     .expect("fold drop");
     assert!(!dropped.sequences.contains_key("invoice_seq"));
+}
+
+#[test]
+fn postgres_renders_comment_on_all_structured_targets() {
+    let migrations = lower(
+        vec![
+            Op::Comment {
+                target: CommentTarget::Table {
+                    schema: Some("app".into()),
+                    name: "accounts".into(),
+                },
+                comment: Some("Accounts' table".into()),
+            },
+            Op::Comment {
+                target: CommentTarget::Column {
+                    schema: None,
+                    table: "users".into(),
+                    name: "email".into(),
+                },
+                comment: Some("Login email".into()),
+            },
+            Op::Comment {
+                target: CommentTarget::Index { schema: None, name: "users_email_idx".into() },
+                comment: Some("Email lookup".into()),
+            },
+            Op::Comment {
+                target: CommentTarget::Constraint {
+                    schema: None,
+                    table: "users".into(),
+                    name: "users_email_uq".into(),
+                },
+                comment: Some("Email uniqueness".into()),
+            },
+            Op::Comment {
+                target: CommentTarget::View { schema: None, name: "active_users".into() },
+                comment: Some("Active users".into()),
+            },
+            Op::Comment {
+                target: CommentTarget::Type { schema: None, name: "user_status".into() },
+                comment: Some("Allowed states".into()),
+            },
+            Op::Comment {
+                target: CommentTarget::Sequence { schema: None, name: "invoice_seq".into() },
+                comment: None,
+            },
+            Op::Comment {
+                target: CommentTarget::Function {
+                    schema: None,
+                    name: "normalize_email".into(),
+                },
+                comment: Some("Normalize email".into()),
+            },
+        ],
+        SqlDialect::Postgres,
+        &BTreeSet::new(),
+    );
+    let up: Vec<&str> = migrations.iter().map(|m| m.up.as_str()).collect();
+    assert_eq!(
+        up,
+        vec![
+            r#"COMMENT ON TABLE "app"."accounts" IS 'Accounts'' table'"#,
+            r#"COMMENT ON COLUMN "app"."users"."email" IS 'Login email'"#,
+            r#"COMMENT ON INDEX "app"."users_email_idx" IS 'Email lookup'"#,
+            r#"COMMENT ON CONSTRAINT "users_email_uq" ON "app"."users" IS 'Email uniqueness'"#,
+            r#"COMMENT ON VIEW "app"."active_users" IS 'Active users'"#,
+            r#"COMMENT ON TYPE "app"."user_status" IS 'Allowed states'"#,
+            r#"COMMENT ON SEQUENCE "app"."invoice_seq" IS NULL"#,
+            r#"COMMENT ON FUNCTION "app"."normalize_email" IS 'Normalize email'"#,
+        ]
+    );
+    assert!(migrations.iter().all(|m| m.down.is_none()));
+}
+
+#[test]
+fn sqlite_and_mysql_fail_closed_on_comment_on() {
+    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+        let err = IrAuthor::new(SCHEMA, OWNER, dialect)
+            .lower(
+                &ir(vec![Op::Comment {
+                    target: CommentTarget::Table { schema: None, name: "users".into() },
+                    comment: Some("Users".into()),
+                }]),
+                &LiveSchema::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            IrLowerError::UnsupportedOp("COMMENT ON is PostgreSQL-only")
+        ));
+    }
+}
+
+#[test]
+fn fold_tracks_and_clears_table_and_column_comments() {
+    let base: MigrationIr = serde_json::from_str(
+        r#"{"ir_version":1,"name":"comments","ops":[
+            {"op":"createTable","name":"users","columns":[
+                {"name":"email","type":"text","nullable":false}
+            ]}
+        ]}"#,
+    )
+    .unwrap();
+
+    let mut set_ops = base.ops.clone();
+    set_ops.push(Op::Comment {
+        target: CommentTarget::Table { schema: None, name: "users".into() },
+        comment: Some("User accounts".into()),
+    });
+    set_ops.push(Op::Comment {
+        target: CommentTarget::Column {
+            schema: None,
+            table: "users".into(),
+            name: "email".into(),
+        },
+        comment: Some("Login email".into()),
+    });
+
+    let folded = fold_ops(&set_ops, SqlDialect::Postgres, SCHEMA).expect("fold set comments");
+    let users = folded.tables.get("users").expect("users table");
+    assert_eq!(users.comment.as_deref(), Some("User accounts"));
+    assert_eq!(
+        users
+            .columns
+            .iter()
+            .find(|c| c.name == "email")
+            .and_then(|c| c.comment.as_deref()),
+        Some("Login email")
+    );
+
+    let mut cleared_ops = set_ops;
+    cleared_ops.push(Op::Comment {
+        target: CommentTarget::Table { schema: None, name: "users".into() },
+        comment: None,
+    });
+    cleared_ops.push(Op::Comment {
+        target: CommentTarget::Column {
+            schema: None,
+            table: "users".into(),
+            name: "email".into(),
+        },
+        comment: None,
+    });
+    let cleared = fold_ops(&cleared_ops, SqlDialect::Postgres, SCHEMA).expect("fold clear comments");
+    let users = cleared.tables.get("users").expect("users table");
+    assert_eq!(users.comment, None);
+    assert_eq!(
+        users
+            .columns
+            .iter()
+            .find(|c| c.name == "email")
+            .and_then(|c| c.comment.as_deref()),
+        None
+    );
+}
+
+fn idx_col(name: &str) -> IndexElement {
+    IndexElement::Column { name: name.to_string() }
+}
+
+fn lower_email_expr() -> Expr {
+    Expr::FnCall { r#fn: ScalarFn::Lower, args: vec![Expr::col("email")] }
+}
+
+fn active_true_expr() -> Expr {
+    Expr::UnaryOp { op: UnaryOp::IsTrue, operand: Box::new(Expr::col("active")) }
+}
+
+#[test]
+fn postgres_and_sqlite_render_partial_index_where() {
+    let op = Op::CreateIndex {
+        table: "users".into(),
+        columns: vec![idx_col("active")],
+        name: Some("users_active_idx".into()),
+        unique: None,
+        using: None,
+        r#where: Some(active_true_expr()),
+        concurrently: None,
+        schema: None,
+        existence_guard: None,
+    };
+    let live = BTreeSet::from(["users".to_string()]);
+
+    let pg = lower(vec![op.clone()], SqlDialect::Postgres, &live);
+    assert_eq!(
+        pg[0].up,
+        r#"CREATE INDEX IF NOT EXISTS "users_active_idx" ON "app"."users" ("active") WHERE ("active" IS TRUE)"#
+    );
+
+    let sqlite = lower(vec![op], SqlDialect::Sqlite, &live);
+    assert_eq!(
+        sqlite[0].up,
+        r#"CREATE INDEX IF NOT EXISTS "users_active_idx" ON "users" ("active") WHERE ("active" IS TRUE)"#
+    );
+}
+
+#[test]
+fn postgres_and_sqlite_render_expression_index_elements() {
+    let op = Op::CreateIndex {
+        table: "users".into(),
+        columns: vec![idx_col("email"), IndexElement::Expr { expr: lower_email_expr() }],
+        name: Some("users_email_lower_idx".into()),
+        unique: None,
+        using: None,
+        r#where: Some(active_true_expr()),
+        concurrently: None,
+        schema: None,
+        existence_guard: None,
+    };
+    let live = BTreeSet::from(["users".to_string()]);
+
+    let pg = lower(vec![op.clone()], SqlDialect::Postgres, &live);
+    assert_eq!(
+        pg[0].up,
+        r#"CREATE INDEX IF NOT EXISTS "users_email_lower_idx" ON "app"."users" ("email", (lower("email"))) WHERE ("active" IS TRUE)"#
+    );
+
+    let sqlite = lower(vec![op], SqlDialect::Sqlite, &live);
+    assert_eq!(
+        sqlite[0].up,
+        r#"CREATE INDEX IF NOT EXISTS "users_email_lower_idx" ON "users" ("email", (lower("email"))) WHERE ("active" IS TRUE)"#
+    );
+}
+
+#[test]
+fn mysql_fail_closes_on_expression_index_elements() {
+    let live = BTreeSet::from(["users".to_string()]);
+    let err = IrAuthor::new(SCHEMA, OWNER, SqlDialect::Mysql)
+        .lower(
+            &ir(vec![Op::CreateIndex {
+                table: "users".into(),
+                columns: vec![IndexElement::Expr { expr: lower_email_expr() }],
+                name: Some("users_email_lower_idx".into()),
+                unique: None,
+                using: None,
+                r#where: None,
+                concurrently: None,
+                schema: None,
+                existence_guard: None,
+            }]),
+            &LiveSchema::from(&live),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        IrLowerError::UnsupportedOp("createIndex expression elements are not supported on MySQL")
+    ));
 }
 
 fn exclusion_constraint() -> IrConstraint {

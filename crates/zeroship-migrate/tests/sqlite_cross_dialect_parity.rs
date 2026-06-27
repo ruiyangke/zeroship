@@ -33,9 +33,9 @@ use zeroship_migrate::model::ir::{
 use zeroship_migrate::{
     provision_migrator, apply::role::deprovision_migrator, Approval, BinaryOp, ColType, ColumnOrExpr,
     ExclusionElement, ExclusionMethod, ExclusionOperator, Expr, GeneratedCol, GuardConfig,
-    IdentityCol, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrFlagsOverride, IrIndex,
-    IrLowerError, IrScalar, IrAuthor, LiveSchema, MigrationEngine, MigrationIr, Op, RefAction,
-    SequenceOwnedBy, SqliteBackend, CURRENT_IR_VERSION,
+    IdentityCol, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrDefault,
+    IrFlagsOverride, IrIndex, IrLowerError, IrScalar, IrAuthor, LiveSchema, MigrationEngine,
+    MigrationIr, Op, RefAction, SequenceOwnedBy, SqliteBackend, CURRENT_IR_VERSION,
 };
 use zeroship_migrate::{ExecutorConfig, SchemaScope};
 use zeroship_schema::query::SqlDialect;
@@ -260,7 +260,10 @@ fn common_ops() -> Vec<Op> {
             constraints: vec![pk_id()],
             indexes: vec![IrIndex {
                 name: Some("orders_account_status_active_idx".to_string()),
-                columns: vec!["account_id".to_string(), "status".to_string()],
+                columns: vec![
+                    IndexElement::Column { name: "account_id".to_string() },
+                    IndexElement::Column { name: "status".to_string() },
+                ],
                 unique: Some(false),
                 using: None,
                 r#where: None,

@@ -360,7 +360,7 @@ async fn deploy_understated_unique_drop_refused_on_real_sqlite() {
     let v1 = [descriptor_unique("users", "email", "users_email_uniq")];
     let create = r#"{"ir_version":1,"name":"create_users","ops":[
         {"op":"createTable","name":"users","columns":[{"name":"email","type":"text","nullable":false}]},
-        {"op":"createIndex","table":"users","columns":["email"],"name":"users_email_uniq","unique":true}
+        {"op":"createIndex","table":"users","columns":[{"kind":"column","name":"email"}],"name":"users_email_uniq","unique":true}
     ]}"#;
     write_ir(&p, "0001_create_users.ir.json", create);
     apply_bundle_ir_sqlite(
