@@ -3,9 +3,9 @@
 //! The privileged `@zeroship/migrate/pg` primitives (roles, grants, RLS/policies,
 //! functions, extensions, schemas, the gated raw escape) are gated NOT
 //! by a hard-coded "platform" profile name but by a **composition of boolean
-//! capability flags** + a schema allowlist. A vendor op declares the ONE
-//! [`VendorCapability`] it needs ([`crate::ir::Op::vendor_capability`]); the active
-//! [`VendorCapabilities`] set either grants it (the op lowers) or REFUSES it
+//! capability flags** + a schema allowlist. A vendor op declares the closed set of
+//! [`VendorCapability`] values it needs ([`crate::ir::Op::vendor_capabilities`]); the active
+//! [`VendorCapabilities`] set either grants them (the op lowers) or REFUSES it
 //! fail-closed at validate ([`crate::validate`]) AND again at lower (the rendered
 //! SQL hits the Confined deny-list, §3.2 gate 2).
 //!
@@ -25,8 +25,8 @@
 use crate::guard::{SchemaScope, TrustProfile};
 
 /// The CLOSED set of vendor capabilities a privileged op can require (vendor spec
-/// §3.2). Each [`crate::ir::Op`] vendor variant maps to exactly one of these via
-/// [`crate::ir::Op::vendor_capability`].
+/// §3.2). Each [`crate::ir::Op`] vendor variant maps to one or more of these via
+/// [`crate::ir::Op::vendor_capabilities`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VendorCapability {
     /// `CREATE/DROP EXTENSION` ([`VendorCapabilities::allow_extension`]).

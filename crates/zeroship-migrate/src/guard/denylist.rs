@@ -8,25 +8,6 @@
 //! identifiers/keywords are case-insensitive, and an attacker would otherwise
 //! bypass with `PLPYTHONU` vs `plpythonu`.
 
-/// Procedural languages that are *untrusted*.
-///
-/// They can escape the SQL sandbox into the host (filesystem, network, shell).
-/// Only trusted PLs (`plpgsql`, `sql`) are permitted; everything else — incl.
-/// anything ending in `u` (the Postgres convention for an untrusted variant) —
-/// is denied by the guard's deny-by-default language rule.
-pub const UNTRUSTED_LANGUAGES: &[&str] = &[
-    "plpythonu",
-    "plpython2u",
-    "plpython3u",
-    "plperlu",
-    "pltclu",
-    "plr",
-    "plsh",
-    "plv8", // executes arbitrary JS in-process
-    "c",
-    "internal",
-];
-
 /// Languages explicitly trusted for creator/AI-authored migrations.
 pub const TRUSTED_LANGUAGES: &[&str] = &["plpgsql", "sql"];
 
@@ -283,6 +264,7 @@ pub mod rule {
     pub const LOAD_LIBRARY: &str = "load_library";
     pub const UNRECOGNIZED_DANGEROUS: &str = "unrecognized_dangerous_construct";
     pub const BODY_INSPECTION: &str = "dangerous_construct_in_body";
+    pub const INTERNAL_GUARD_ERROR: &str = "internal_guard_error";
     /// `CREATE/ALTER FUNCTION … SECURITY DEFINER` — runs with the definer's
     /// (migrator) privileges, an escalation primitive once installed.
     pub const SECURITY_DEFINER: &str = "security_definer_function";
@@ -312,18 +294,4 @@ pub fn list_contains_ci(list: &[&str], needle: &str) -> bool {
 #[must_use]
 pub fn is_trusted_language(lang: &str) -> bool {
     list_contains_ci(TRUSTED_LANGUAGES, lang)
-}
-
-/// Is `lang` untrusted?
-///
-/// Deny-by-default: only the explicitly [`TRUSTED_LANGUAGES`] (`plpgsql`,
-/// `sql`) are trusted; every other language — listed or not — is untrusted.
-#[must_use]
-pub fn is_untrusted_language(lang: &str) -> bool {
-    let l = lang.to_ascii_lowercase();
-    if is_trusted_language(&l) {
-        return false;
-    }
-    // Anything not explicitly trusted is untrusted: only plpgsql/sql pass.
-    true
 }

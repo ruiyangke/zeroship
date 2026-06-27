@@ -79,16 +79,6 @@ pub trait MigrationBackend {
     /// in the generic body (e.g. `transaction:false` on SQLite, design §2.3/L3).
     fn dialect(&self) -> SqlDialect;
 
-    /// The **per-engine line-1 guard** (multi-engine abstraction P0, design
-    /// §2.2 L3). The generic apply path runs `backend.guard().check(up)` over
-    /// every pending migration in the FIRST PASS — no `if dialect == Sqlite`, no
-    /// inline `SqlGuard::new`. Postgres returns a [`PgGuard`](crate::guard::PgGuard)
-    /// (libpg_query deny-list); SQLite returns a
-    /// [`SqliteDescriptorGuard`](crate::guard::SqliteDescriptorGuard) (the trusted
-    /// descriptor-diff path). The returned [`GuardOutcome`](crate::guard::GuardOutcome)
-    /// / [`GuardError`](crate::guard::GuardError) are dialect-neutral.
-    fn guard(&self) -> &dyn crate::guard::MigrationGuard;
-
     // -- connection / session I/O -------------------------------------------
 
     /// Acquire the project apply-serialization lock (PG `pg_advisory_lock`).
@@ -198,22 +188,13 @@ pub trait MigrationBackend {
         cfg: &ExecutorConfig,
     ) -> Result<Vec<journal::PendingContract>, JournalError>;
 
-    /// Open a `pending` cross-deploy obligation (§2.0.3 item 1). Admin-written; the
-    /// migrator cannot reach the meta schema (deny-by-absence). SQLite no-ops (it
-    /// has no pending partition).
-    async fn record_pending_contract(
-        &self,
-        cfg: &ExecutorConfig,
-        rec: journal::PendingContractRecord<'_>,
-    ) -> Result<(), JournalError>;
-
     /// Open a `pending` cross-deploy obligation AND, when a
     /// [`journal::DeployRecoveryScope`] is supplied, its `in_progress` deploy-scoped
     /// recovery marker — in ONE transaction (PR9e). This is the engine-stamped write
     /// that closes the obligation-vs-marker crash window: the obligation row and its
     /// recovery marker commit atomically or not at all, so every outstanding
-    /// obligation ALWAYS has a marker. With `scope = None` it is identical to
-    /// [`record_pending_contract`](Self::record_pending_contract). Admin-written.
+    /// obligation ALWAYS has a marker. With `scope = None`, only the obligation
+    /// row is written. Admin-written.
     /// SQLite no-ops the recovery half (no online rename ⇒ no half-state).
     async fn record_pending_contract_with_recovery(
         &self,
@@ -555,21 +536,6 @@ pub trait MigrationBackend {
 #[derive(Debug)]
 pub struct PostgresBackend<'a> {
     conn: &'a Client,
-    /// The per-engine line-1 guard returned by [`guard`](MigrationBackend::guard).
-    /// This is the **dialect contract** guard (it answers "what is PG's line-1?")
-    /// and carries a [`PgGuard`](crate::guard::PgGuard).
-    ///
-    /// NOTE: the executor's per-apply FIRST PASS does NOT consult this stored
-    /// guard for its denials — the apply config (the project schema + the
-    /// `Confined`/`Platform`/`Trusted` trust profile) lives on the per-call
-    /// [`ExecutorConfig`], not the backend, so the executor selects the
-    /// config-correct guard with
-    /// [`guard_for(cfg.guard_config())`](crate::guard::guard_for) (the same
-    /// `MigrationGuard` seam, dialect-selected). This field is the default
-    /// project-agnostic Confined PG guard so `guard()` has a concrete value to
-    /// borrow; the trust/project that actually gates an apply always comes from
-    /// `cfg`.
-    guard: crate::guard::PgGuard,
     /// The Postgres online schema-change capability returned by
     /// [`online`](MigrationBackend::online). Holds the SAME borrowed
     /// [`Client`] as `conn` (a private field — the connection never crosses the
@@ -589,9 +555,6 @@ impl<'a> PostgresBackend<'a> {
     pub fn new(conn: &'a Client) -> Self {
         Self {
             conn,
-            guard: crate::guard::PgGuard::from_config(crate::guard::GuardConfig::confined(
-                String::new(),
-            )),
             online: crate::expand_contract::PgOnline::new(conn),
             shadow: crate::shadow::PgShadow::new(conn),
         }
@@ -601,10 +564,6 @@ impl<'a> PostgresBackend<'a> {
 impl MigrationBackend for PostgresBackend<'_> {
     fn dialect(&self) -> SqlDialect {
         SqlDialect::Postgres
-    }
-
-    fn guard(&self) -> &dyn crate::guard::MigrationGuard {
-        &self.guard
     }
 
     async fn acquire_project_lock(&self, project_id: &str) -> Result<(), ApplyError> {
@@ -703,14 +662,6 @@ impl MigrationBackend for PostgresBackend<'_> {
         cfg: &ExecutorConfig,
     ) -> Result<Vec<journal::PendingContract>, JournalError> {
         journal::outstanding_pending_contracts(self.conn, cfg).await
-    }
-
-    async fn record_pending_contract(
-        &self,
-        cfg: &ExecutorConfig,
-        rec: journal::PendingContractRecord<'_>,
-    ) -> Result<(), JournalError> {
-        journal::record_pending_contract(self.conn, cfg, rec).await
     }
 
     async fn record_pending_contract_with_recovery(

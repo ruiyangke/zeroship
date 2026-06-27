@@ -13,10 +13,11 @@
 //!
 //! # Role model — `NOLOGIN` + `SET ROLE` (not a login role)
 //!
-//! `provision_migrator` creates `migrator_<project>` as **`NOLOGIN`**. The
+//! `provision_migrator` creates a deterministic `migrator_<project>_<hash>` role
+//! as **`NOLOGIN`**. The
 //! executor connects as the privileged admin/control role and runs each
-//! migration under `SET ROLE migrator_<project>` (with `RESET ROLE` on exit,
-//! scoped exactly like the executor's H2 session-GUC restore). This is chosen
+//! migration under `SET ROLE` for that role (with `RESET ROLE` on exit, scoped
+//! exactly like the executor's H2 session-GUC restore). This is chosen
 //! over a `LOGIN` role because:
 //!
 //! - **No per-role passwords / secrets.** A login role needs a credential to be
@@ -88,6 +89,8 @@
 //! Schema ownership is only (re)assigned when it differs.
 
 use compio_postgres::Client;
+use sha2::{Digest, Sha256};
+use zeroship_core::typed_id::base62_encode_bytes;
 
 use crate::db::ExecutorConfig;
 
@@ -168,10 +171,10 @@ async fn exec_retry(admin: &Client, sql: &str) -> Result<(), compio_postgres::Er
 
 /// Derive the deterministic migrator role name for a project.
 ///
-/// `migrator_<project_id>` with the project id sanitized to the Postgres
-/// identifier charset (`[a-z0-9_]`); any other char becomes `_`. The result is
-/// always quoted at use sites, so this is defense-in-depth, not the sole
-/// injection guard.
+/// `migrator_<readable-prefix>_<hash>` with the project id sanitized to the
+/// Postgres identifier charset (`[a-z0-9_]`) and disambiguated by a base62
+/// SHA-256 suffix over the raw project id. The result is always quoted at use
+/// sites, so this is defense-in-depth, not the sole injection guard.
 ///
 /// # Errors
 /// [`RoleError::BadRoleName`] if the project id sanitizes to an empty string.
@@ -189,9 +192,19 @@ pub fn migrator_role_name(project_id: &str) -> Result<String, RoleError> {
     if sanitized.is_empty() {
         return Err(RoleError::BadRoleName(project_id.to_string()));
     }
-    // Postgres identifiers max 63 bytes; keep room for the prefix.
-    let truncated: String = sanitized.chars().take(50).collect();
-    Ok(format!("migrator_{truncated}"))
+    let suffix = base62_encode_bytes(&Sha256::digest(project_id.as_bytes()));
+    const PREFIX: &str = "migrator_";
+    const SEP_LEN: usize = 1;
+    const PG_MAX_IDENT_BYTES: usize = 63;
+    let prefix_budget = PG_MAX_IDENT_BYTES
+        .saturating_sub(PREFIX.len())
+        .saturating_sub(SEP_LEN)
+        .saturating_sub(suffix.len());
+    if prefix_budget == 0 {
+        return Err(RoleError::BadRoleName(project_id.to_string()));
+    }
+    let readable: String = sanitized.chars().take(prefix_budget).collect();
+    Ok(format!("{PREFIX}{readable}_{suffix}"))
 }
 
 /// Idempotently provision the least-privilege `migrator` role for a project
@@ -379,4 +392,22 @@ pub async fn deprovision_migrator(admin: &Client, cfg: &ExecutorConfig) -> Resul
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::migrator_role_name;
+
+    #[test]
+    fn migrator_role_name_is_injective_across_lossy_sanitization() {
+        let a = migrator_role_name("app_Alice").expect("role name");
+        let b = migrator_role_name("app_alice").expect("role name");
+
+        assert_ne!(
+            a, b,
+            "case-distinct project ids must not collapse to one migrator role"
+        );
+        assert!(a.len() <= 63, "postgres role name must fit in an identifier: {a}");
+        assert!(b.len() <= 63, "postgres role name must fit in an identifier: {b}");
+    }
 }

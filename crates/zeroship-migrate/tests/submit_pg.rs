@@ -74,10 +74,8 @@ fn cfg_for(tok: &str) -> ExecutorConfig {
 /// A shadow config with a UNIQUE db-name prefix, so the leaked-shadow assertion is
 /// scoped to ONE test and never races sibling tests.
 fn unique_shadow_cfg() -> (ShadowConfig, String) {
-    let prefix: String = format!("zsmig_sub_{}_", token().replace('_', ""))
-        .chars()
-        .take(40)
-        .collect();
+    let unique_tail: String = token().replace('_', "").chars().rev().take(8).collect();
+    let prefix = format!("zs{unique_tail}_");
     (
         ShadowConfig {
             admin_dsn: dsn(),
@@ -162,13 +160,11 @@ async fn shadow_db_count(conn: &Client, prefix: &str) -> i64 {
     rows[0].get::<_, i64>("n")
 }
 
-/// Count leaked shadow migrator roles (the shadow role is `migrator_<shadow_db>`,
-/// derived from the shadow DB name which is `<prefix>…`).
+/// Count leaked shadow migrator roles. The role derivation keeps only a short
+/// readable prefix before the hash suffix, so match the retained prefix.
 async fn shadow_role_count(conn: &Client, prefix: &str) -> i64 {
-    // migrator_role_name prefixes the role with "zsmig_" + sanitized project id; the
-    // shadow project id IS the shadow db name (`<prefix>…`). Match any role whose
-    // name embeds the unique shadow prefix.
-    let like = format!("%{prefix}%");
+    let readable: String = prefix.chars().take(10).collect();
+    let like = format!("migrator_{readable}%");
     let rows = conn
         .query(
             "SELECT count(*)::bigint AS n FROM pg_roles WHERE rolname LIKE $1",
