@@ -53,6 +53,7 @@ use crate::declarative::{
     build_table_snapshot, constraintdef_cols, ir_fk_constraint_snapshot, quote_ident_if_needed,
     CollectionDescriptor, DeclarativeError,
 };
+use crate::dialect_renderer::{Capability, DialectSupports};
 use crate::drift::{
     ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot, ViewSnapshot,
 };
@@ -698,7 +699,7 @@ fn add_column_snapshot(
     project_schema: &str,
     dialect: SqlDialect,
 ) -> Result<(ColumnSnapshot, Option<ColumnSnapshot>), FoldError> {
-    if matches!(dialect, SqlDialect::Sqlite) && identity.is_some() {
+    if !dialect.supports(Capability::NonPkIdentity) && identity.is_some() {
         return Err(FoldError::Unsupported(
             "addColumn identity on SQLite (non-PK identity has no sound SQLite emulation)",
         ));
@@ -783,7 +784,6 @@ fn fold_create_table_specs(
     indexes: &[IrIndex],
     dialect: SqlDialect,
 ) -> Result<(), FoldError> {
-    let is_sqlite = matches!(dialect, SqlDialect::Sqlite);
     for c in constraints {
         match &c.kind {
             IrConstraintKind::Pk { columns } => {
@@ -809,7 +809,7 @@ fn fold_create_table_specs(
                 on_delete,
                 on_update,
             } => {
-                if is_sqlite {
+                if !dialect.supports(Capability::TableLevelForeignKey) {
                     return Err(FoldError::Unsupported(
                         "createTable table-level FOREIGN KEY on SQLite (the SQLite \
                          CREATE renders from the descriptor; a table-level FK is not \
@@ -843,7 +843,7 @@ fn fold_create_table_specs(
                 push_folded_constraint(table, snap, FoldedConstraint { constraint: fk, index: None })?;
             }
             IrConstraintKind::Unique { columns } => {
-                if is_sqlite {
+                if !dialect.supports(Capability::TableLevelUnique) {
                     return Err(FoldError::Unsupported(
                         "createTable table-level UNIQUE on SQLite (the SQLite CREATE \
                          renders from the descriptor; a table-level UNIQUE is not \
@@ -863,7 +863,7 @@ fn fold_create_table_specs(
             return Err(FoldError::ExprDeferred("createTable index where"));
         }
         let access = ix.using.map_or("btree", index_method_access);
-        if is_sqlite && access != "btree" {
+        if !dialect.supports(Capability::NonBtreeIndexMethod) && access != "btree" {
             return Err(FoldError::Unsupported(
                 "createTable non-btree index `using` on SQLite (later wave)",
             ));
