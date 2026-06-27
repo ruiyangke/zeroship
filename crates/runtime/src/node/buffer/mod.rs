@@ -44,6 +44,13 @@
 
 #![allow(unsafe_code)]
 
+mod encoding;
+mod native;
+
+pub use native::{
+    emit_buffer, emit_output, emit_string, emit_uint8array, extract_input,
+};
+
 /// Mint a synthetic ESM record for `node:buffer`. Called from
 /// `core::native_modules::resolve_native`.
 pub fn synthetic_module<'s>(

@@ -4,10 +4,10 @@ use std::io;
 
 use crate::state::SharedState;
 
-#[cfg(feature = "runtime_native_websocket")]
+#[cfg(feature = "runtime_tls")]
 use super::driver::TlsOptions;
 use super::driver::WriteCmd;
-#[cfg(feature = "runtime_native_websocket")]
+#[cfg(feature = "runtime_tls")]
 use super::registry::pending_data_events;
 use super::registry::{
     lookup_native_socket_state, push_error_and_close, push_event, SocketEvent,
@@ -196,7 +196,7 @@ pub fn queue_end(state: &SharedState, socket_id: u32) -> Result<(), String> {
         .map_err(|e| format!("end queue closed: {e:?}"))
 }
 
-#[cfg(feature = "runtime_native_websocket")]
+#[cfg(feature = "runtime_tls")]
 pub fn queue_start_tls(
     state: &SharedState,
     socket_id: u32,

@@ -6,10 +6,9 @@
 //!
 //! # Module layout
 //!
-//! - `buffer` — Buffer / Uint8Array / DataView / ArrayBuffer / string
-//!   input coercion + Buffer-shaped output emission.
-//! - `encoding` — utf8 / hex / base64 / base64url / latin1 / binary /
-//!   ascii / utf16le named-encoding registry.
+//! - Buffer / Uint8Array / DataView / ArrayBuffer / string input coercion
+//!   and Buffer-shaped output emission live in `node::buffer` so every
+//!   Node surface uses the same Buffer layer.
 //! - `hash` — `Hash` class + `createHash(name, options?)` factory.
 //! - `hmac` — `Hmac` class + `createHmac(name, key, options?)`.
 //! - `random` — `randomBytes`, `randomFillSync`, `randomInt`,
@@ -29,8 +28,6 @@
 //!
 //! Resolved by `core::native_modules::resolve_native`.
 
-pub mod buffer;
-pub mod encoding;
 pub mod hash;
 pub mod hmac;
 pub mod kdf;

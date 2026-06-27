@@ -10,12 +10,9 @@ pub use super::caps::{
     queue_end, queue_write, reserve_socket_slot, reset_dispatch_egress, set_keep_alive,
     set_no_delay,
 };
-#[cfg(feature = "runtime_native_websocket")]
+#[cfg(feature = "runtime_tls")]
 pub use super::caps::queue_start_tls;
-pub use super::connect::spawn_connect_task;
-#[cfg(feature = "runtime_native_websocket")]
-pub use super::connect::spawn_tls_connect_task;
-#[cfg(feature = "runtime_native_websocket")]
+#[cfg(feature = "runtime_tls")]
 pub use super::driver::TlsOptions;
 pub use super::driver::WriteCmd;
 pub use super::registry::{

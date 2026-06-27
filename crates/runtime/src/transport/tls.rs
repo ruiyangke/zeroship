@@ -1,6 +1,6 @@
 //! Shared rustls connector construction for WebSocket and `node:tls`.
 
-#![cfg(feature = "runtime_native_websocket")]
+#![cfg(feature = "runtime_tls")]
 
 use std::io;
 use std::sync::Arc;

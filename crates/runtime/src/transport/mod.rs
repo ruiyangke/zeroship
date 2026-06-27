@@ -10,5 +10,5 @@ pub mod byte_pump;
 pub mod handler;
 pub mod net_policy;
 pub mod ssrf;
-#[cfg(feature = "runtime_native_websocket")]
+#[cfg(feature = "runtime_tls")]
 pub mod tls;

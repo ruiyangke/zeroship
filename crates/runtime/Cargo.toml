@@ -43,9 +43,8 @@ futures = { workspace = true }
 compio = { workspace = true, features = ["time", "macros", "bytes"] }
 
 # Native WebSocket framer (RFC 6455 — in-tree decoder/encoder + raw
-# compio TCP / compio-tls TLS. compio-ws kept ONLY for its TLS connector
-# helper; we hand-roll the HTTP handshake so the framer owns the
-# leftover bytes after the 101 response.)
+# compio TCP/TLS. compio-ws remains feature-gated with native WebSocket;
+# TLS itself is shared by wss:// and `node:tls`.
 compio-ws = { workspace = true, optional = true }
 compio-tls = { workspace = true, optional = true }
 # Native trust roots for wss:// and node:tls. Direct dep — used in
@@ -102,7 +101,8 @@ path = "src/core/echo_server.rs"
 # in `embed/websocket.js`. Tests that reach into the polyfill's per-WS
 # state (state.websockets HashMap) and were not yet migrated to native
 # can opt out via `--no-default-features`.
-default = ["runtime_native_websocket"]
+default = ["runtime_tls", "runtime_native_websocket"]
+runtime_tls = ["dep:compio-tls", "dep:rustls-native-certs"]
 # Per docs/proposals/websocket-native.md D-25 (cutover cadence):
 #  Landing 1: native behind feature flag, polyfill default — current.
 #  Landing 2: flip default to native; polyfill remains as fallback.
@@ -111,7 +111,7 @@ default = ["runtime_native_websocket"]
 # `globalThis.WebSocket`; native classes are NOT installed.
 # When ON: native classes install BEFORE the polyfill runs, and the
 # polyfill detects this and skips its WebSocket assignment.
-runtime_native_websocket = ["dep:compio-ws", "dep:compio-tls", "dep:rustls-native-certs"]
+runtime_native_websocket = ["runtime_tls", "dep:compio-ws"]
 # Strict-throws path for `binaryType` setter on unknown values. v2 D-7
 # default is silent-no-op (matches undici, workerd, the WPT test); the
 # strict path is preserved behind this feature only for WPT-update tracking.

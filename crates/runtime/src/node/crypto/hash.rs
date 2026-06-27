@@ -10,7 +10,7 @@
 
 #![allow(unsafe_code)]
 
-use super::buffer;
+use crate::node::buffer;
 use crate::crypto_ops::digest::{DigestContext, KernelHashAlgo};
 use crate::crypto_ops::error::KernelError;
 use crate::state::OpError;

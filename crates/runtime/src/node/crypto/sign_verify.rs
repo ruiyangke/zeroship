@@ -17,7 +17,7 @@
 
 #![allow(unsafe_code)]
 
-use super::buffer;
+use crate::node::buffer;
 use super::key_object::{self, KeyObjectState};
 use crate::web::crypto::crypto_key;
 use crate::web::crypto::key_material::{

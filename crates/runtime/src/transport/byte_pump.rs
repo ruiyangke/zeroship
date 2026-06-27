@@ -15,7 +15,7 @@ use std::task::Waker;
 use compio::buf::{IoBuf, IoBufMut};
 use compio::io::{AsyncRead, AsyncWrite};
 use compio::net::TcpStream;
-#[cfg(feature = "runtime_native_websocket")]
+#[cfg(feature = "runtime_tls")]
 use compio_tls::TlsStream;
 use futures::future::{Either, select};
 
@@ -111,7 +111,7 @@ where
 #[allow(clippy::large_enum_variant)]
 pub enum SocketStream {
     Plain(TcpStream),
-    #[cfg(feature = "runtime_native_websocket")]
+    #[cfg(feature = "runtime_tls")]
     Tls(TlsStream<TcpStream>),
     Closed,
 }
@@ -120,7 +120,7 @@ impl AsyncRead for SocketStream {
     async fn read<B: IoBufMut>(&mut self, buf: B) -> compio::buf::BufResult<usize, B> {
         match self {
             SocketStream::Plain(tcp) => tcp.read(buf).await,
-            #[cfg(feature = "runtime_native_websocket")]
+            #[cfg(feature = "runtime_tls")]
             SocketStream::Tls(tls) => tls.read(buf).await,
             SocketStream::Closed => compio::buf::BufResult(
                 Err(io::Error::new(io::ErrorKind::BrokenPipe, "socket closed")),
@@ -134,7 +134,7 @@ impl AsyncWrite for SocketStream {
     async fn write<T: IoBuf>(&mut self, buf: T) -> compio::buf::BufResult<usize, T> {
         match self {
             SocketStream::Plain(tcp) => tcp.write(buf).await,
-            #[cfg(feature = "runtime_native_websocket")]
+            #[cfg(feature = "runtime_tls")]
             SocketStream::Tls(tls) => tls.write(buf).await,
             SocketStream::Closed => compio::buf::BufResult(
                 Err(io::Error::new(io::ErrorKind::BrokenPipe, "socket closed")),
@@ -146,7 +146,7 @@ impl AsyncWrite for SocketStream {
     async fn flush(&mut self) -> std::io::Result<()> {
         match self {
             SocketStream::Plain(_) => Ok(()),
-            #[cfg(feature = "runtime_native_websocket")]
+            #[cfg(feature = "runtime_tls")]
             SocketStream::Tls(tls) => tls.flush().await,
             SocketStream::Closed => Ok(()),
         }
@@ -155,7 +155,7 @@ impl AsyncWrite for SocketStream {
     async fn shutdown(&mut self) -> std::io::Result<()> {
         match self {
             SocketStream::Plain(tcp) => tcp.shutdown().await,
-            #[cfg(feature = "runtime_native_websocket")]
+            #[cfg(feature = "runtime_tls")]
             SocketStream::Tls(tls) => tls.shutdown().await,
             SocketStream::Closed => Ok(()),
         }

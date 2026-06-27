@@ -27,7 +27,7 @@
 
 #![allow(unsafe_code)]
 
-use super::buffer;
+use crate::node::buffer;
 use crate::web::crypto::crypto_key;
 use crate::web::crypto::helpers::{base64url_decode, base64url_encode};
 use crate::web::crypto::jwk as wc_jwk;

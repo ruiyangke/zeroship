@@ -11,7 +11,7 @@
 
 #![allow(unsafe_code)]
 
-use super::buffer;
+use crate::node::buffer;
 use crate::crypto_ops::digest::KernelHashAlgo;
 use crate::crypto_ops::error::KernelError;
 use crate::crypto_ops::hmac::HmacContext;

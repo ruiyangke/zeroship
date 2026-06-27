@@ -26,7 +26,7 @@
 
 mod compress;
 
-use crate::node::crypto::buffer;
+use crate::node::buffer;
 use crate::node::crypto::random_callback_helpers::schedule_node_cb;
 
 /// Mint a synthetic ESM record for `node:zlib`. Called from

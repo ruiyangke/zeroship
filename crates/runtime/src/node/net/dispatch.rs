@@ -55,7 +55,7 @@ fn dispatch_one(
             emit(scope, wrapper, "secureConnect", &[]);
         }
         SocketEvent::Data(bytes) => {
-            let buf = crate::node::crypto::buffer::emit_buffer(scope, &bytes);
+            let buf = crate::node::buffer::emit_buffer(scope, &bytes);
             emit(scope, wrapper, "data", &[buf]);
         }
         SocketEvent::Drain => emit(scope, wrapper, "drain", &[]),

@@ -11,12 +11,11 @@
 
 #![allow(unsafe_code)]
 
-use super::buffer;
 use super::key_object::{self, KeyObjectState};
+use crate::state::OpError;
 use crate::web::crypto::key_material::{
     KeyMaterial, KeyType, NamedCurve, RsaPrivateComponents, RsaPublicComponents,
 };
-use crate::state::OpError;
 
 // ---------------------------------------------------------------------------
 // generateKeySync(type, options) -> KeyObject

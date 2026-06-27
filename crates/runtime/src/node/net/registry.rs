@@ -247,7 +247,7 @@ pub fn destroy_socket(state: &SharedState, socket_id: u32) {
     push_close_once(state, socket_id, false);
 }
 
-#[cfg(feature = "runtime_native_websocket")]
+#[cfg(feature = "runtime_tls")]
 pub(super) fn pending_data_events(state: &SharedState, socket_id: u32) -> bool {
     lookup_native_socket_state(state, socket_id)
         .map(|socket| {

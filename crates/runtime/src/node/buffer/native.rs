@@ -19,7 +19,7 @@
 //! - `emit_output(scope, bytes, encoding?)` — emit Buffer when
 //!   `encoding` is None, else the appropriate string encoding.
 
-use super::encoding::{self, Encoding};
+use super::encoding;
 use crate::state::OpError;
 
 /// Coerce a JS value to bytes. Per Node's input rule:

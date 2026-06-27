@@ -1,7 +1,7 @@
 //! Native synthetic `node:tls` over compio_tls.
 
 #![allow(unsafe_code)]
-#![cfg(feature = "runtime_native_websocket")]
+#![cfg(feature = "runtime_tls")]
 
 const TLS_JS: &str = include_str!("tls.js");
 

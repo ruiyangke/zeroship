@@ -5,6 +5,9 @@
 //! forwards connect/read/write control into [`super::state`].
 
 use crate::state::{OpError, SharedState};
+use super::connect::{authorize_connect, capability_violation, ConnectKind};
+#[cfg(feature = "runtime_tls")]
+use super::connect::{authorize_start_tls, validate_tls_policy};
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{
     v8_class, v8_constructor, v8_getter, v8_method, v8_name, v8_to_string_tag,
@@ -57,35 +60,14 @@ impl NativeSocket {
         host: String,
         port: u32,
     ) -> Result<(), OpError> {
-        validate_connect_kind(scope, "node:net.connect")?;
-        let port = u16::try_from(port).map_err(|_| {
-            OpError::range_error("Socket.connect port must be between 0 and 65535")
-        })?;
-        if port == 0 {
-            return Err(OpError::range_error(
-                "Socket.connect port must be between 1 and 65535",
-            ));
-        }
-        {
-            let s = self.state.borrow();
-            let socket = s
-                .native_sockets
-                .get(&self.socket_id)
-                .ok_or_else(|| OpError::node("ERR_SOCKET_CLOSED", "Socket is closed"))?
-                .borrow();
-            if socket.connecting || socket.connected {
-                return Err(OpError::node("EISCONN", "Socket is already connecting or connected"));
-            }
-            if !s.net_policy.module_allowed() {
-                return Err(capability_violation("node:net capability denied"));
-            }
-            if !s.net_policy.allows_host_port(&host, port) {
-                return Err(capability_violation(format!(
-                    "node:net connect denied for {host}:{port}"
-                )));
-            }
-        }
-
+        let target = authorize_connect(
+            scope,
+            &self.state,
+            self.socket_id,
+            host,
+            port,
+            ConnectKind::Net,
+        )?;
         super::state::reserve_socket_slot(&self.state, self.socket_id).map_err(|e| {
             if e.contains("cap") {
                 OpError::node("EMFILE", e)
@@ -93,18 +75,18 @@ impl NativeSocket {
                 capability_violation(e)
             }
         })?;
-        super::state::spawn_connect_task(self.state.clone(), self.socket_id, host, port);
+        super::connect::spawn_connect_task(self.state.clone(), self.socket_id, target);
         Ok(())
     }
 
-    #[cfg(feature = "runtime_native_websocket")]
+    #[cfg(feature = "runtime_tls")]
     #[v8_method]
     #[v8_name = "validateTls"]
     fn validate_tls(&self, reject_unauthorized: bool) -> Result<(), OpError> {
-        validate_tls_policy(&self.state, reject_unauthorized)
+        validate_tls_policy(reject_unauthorized)
     }
 
-    #[cfg(feature = "runtime_native_websocket")]
+    #[cfg(feature = "runtime_tls")]
     #[v8_method]
     #[v8_name = "connectTls"]
     fn connect_tls(
@@ -116,36 +98,16 @@ impl NativeSocket {
         reject_unauthorized: bool,
         ca_pem: Option<String>,
     ) -> Result<(), OpError> {
-        validate_connect_kind(scope, "node:tls.connect")?;
-        let port = u16::try_from(port).map_err(|_| {
-            OpError::range_error("tls.connect port must be between 0 and 65535")
-        })?;
-        if port == 0 {
-            return Err(OpError::range_error(
-                "tls.connect port must be between 1 and 65535",
-            ));
-        }
-        validate_tls_policy(&self.state, reject_unauthorized)?;
-        {
-            let s = self.state.borrow();
-            let socket = s
-                .native_sockets
-                .get(&self.socket_id)
-                .ok_or_else(|| OpError::node("ERR_SOCKET_CLOSED", "Socket is closed"))?
-                .borrow();
-            if socket.connecting || socket.connected {
-                return Err(OpError::node("EISCONN", "Socket is already connecting or connected"));
-            }
-            if !s.net_policy.module_allowed() {
-                return Err(capability_violation("node:tls capability denied"));
-            }
-            if !s.net_policy.allows_host_port(&host, port) {
-                return Err(capability_violation(format!(
-                    "node:tls connect denied for {host}:{port}"
-                )));
-            }
-        }
-
+        let target = authorize_connect(
+            scope,
+            &self.state,
+            self.socket_id,
+            host,
+            port,
+            ConnectKind::Tls {
+                reject_unauthorized,
+            },
+        )?;
         super::state::reserve_socket_slot(&self.state, self.socket_id).map_err(|e| {
             if e.contains("cap") {
                 OpError::node("EMFILE", e)
@@ -153,11 +115,10 @@ impl NativeSocket {
                 capability_violation(e)
             }
         })?;
-        super::state::spawn_tls_connect_task(
+        super::connect::spawn_tls_connect_task(
             self.state.clone(),
             self.socket_id,
-            host,
-            port,
+            target,
             super::state::TlsOptions {
                 servername,
                 reject_unauthorized,
@@ -167,7 +128,7 @@ impl NativeSocket {
         Ok(())
     }
 
-    #[cfg(feature = "runtime_native_websocket")]
+    #[cfg(feature = "runtime_tls")]
     #[v8_method]
     #[v8_name = "startTls"]
     fn start_tls(
@@ -177,8 +138,7 @@ impl NativeSocket {
         reject_unauthorized: bool,
         ca_pem: Option<String>,
     ) -> Result<(), OpError> {
-        validate_connect_kind(scope, "node:tls.startTls")?;
-        validate_tls_policy(&self.state, reject_unauthorized)?;
+        authorize_start_tls(scope, reject_unauthorized)?;
         super::state::queue_start_tls(
             &self.state,
             self.socket_id,
@@ -198,7 +158,7 @@ impl NativeSocket {
         data: v8::Local<v8::Value>,
         encoding: Option<String>,
     ) -> Result<bool, OpError> {
-        let bytes = crate::node::crypto::buffer::extract_input(scope, data, encoding.as_deref())?;
+        let bytes = crate::node::buffer::extract_input(scope, data, encoding.as_deref())?;
         super::state::queue_write(&self.state, self.socket_id, bytes)
             .map_err(|e| OpError::node("ERR_SOCKET_CLOSED", e))
     }
@@ -329,47 +289,4 @@ pub fn install_native<'s>(
     let key = v8::String::new(scope, "__zsNativeSocket").unwrap();
     global.set(scope, key.into(), ctor.into());
     Some(ctor)
-}
-
-fn capability_violation(message: impl Into<String>) -> OpError {
-    OpError::coded("capability_violation", message.into(), None::<String>)
-}
-
-fn validate_connect_kind(scope: &mut v8::PinScope, violated: &str) -> Result<(), OpError> {
-    use crate::rpc::ProcedureKind;
-
-    let Some(kind) = crate::rpc::current_kind() else {
-        return Ok(());
-    };
-    let wrapper = match kind {
-        ProcedureKind::Query => "query",
-        ProcedureKind::Mutation => "mutation",
-        ProcedureKind::Action | ProcedureKind::Stream | ProcedureKind::Subscription => {
-            return Ok(());
-        }
-    };
-    let remediation = "Move raw socket access into an action/stream/subscription handler or a trusted platform context.";
-    let violation =
-        crate::rpc::build_capability_violation(scope, wrapper, violated, remediation);
-    Err(OpError::js_value(
-        scope,
-        violation.into(),
-        format!("capability_violation: {wrapper} handlers cannot call {violated}"),
-    ))
-}
-
-#[cfg(feature = "runtime_native_websocket")]
-fn validate_tls_policy(_state: &SharedState, reject_unauthorized: bool) -> Result<(), OpError> {
-    if reject_unauthorized {
-        return Ok(());
-    }
-    let allowed = std::env::var_os("ZEROSHIP_DEV").is_some();
-    if allowed {
-        Ok(())
-    } else {
-        Err(OpError::node(
-            "ERR_TLS_REJECT_UNAUTHORIZED_DISABLED",
-            "rejectUnauthorized:false is only allowed when ZEROSHIP_DEV is set",
-        ))
-    }
 }

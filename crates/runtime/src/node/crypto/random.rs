@@ -7,7 +7,7 @@
 //! (`crate::crypto::fast_random`) which amortises one syscall over
 //! many small fills.
 
-use super::buffer;
+use crate::node::buffer;
 use crate::state::OpError;
 
 const HEX: &[u8; 16] = b"0123456789abcdef";

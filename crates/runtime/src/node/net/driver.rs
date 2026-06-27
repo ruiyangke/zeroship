@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use compio::io::{AsyncWrite, AsyncWriteExt};
 use compio::net::TcpStream;
-#[cfg(feature = "runtime_native_websocket")]
+#[cfg(feature = "runtime_tls")]
 use compio_tls::TlsStream;
 use futures::SinkExt;
 use futures::StreamExt;
@@ -18,18 +18,18 @@ use crate::transport::byte_pump::{
 };
 
 use super::caps::decrement_buffered_amount;
-#[cfg(feature = "runtime_native_websocket")]
+#[cfg(feature = "runtime_tls")]
 use super::connect::CONNECT_TIMEOUT;
 use super::registry::{
     SocketEvent, lookup_native_socket_state, mark_socket_activity, push_close_once,
     push_error_and_close, push_event,
 };
-#[cfg(feature = "runtime_native_websocket")]
+#[cfg(feature = "runtime_tls")]
 use super::registry::pending_data_events;
 
 const READ_CHUNK_SIZE: usize = 16 * 1024;
 
-#[cfg(feature = "runtime_native_websocket")]
+#[cfg(feature = "runtime_tls")]
 #[derive(Debug, Clone)]
 pub struct TlsOptions {
     pub servername: String,
@@ -43,7 +43,7 @@ pub enum WriteCmd {
     End,
     SetNoDelay(bool),
     SetKeepAlive(bool, u64),
-    #[cfg(feature = "runtime_native_websocket")]
+    #[cfg(feature = "runtime_tls")]
     StartTls(TlsOptions),
 }
 
@@ -55,7 +55,7 @@ pub(super) async fn run_socket_driver(
 ) {
     match stream {
         SocketStream::Plain(tcp) => run_plain_driver(state, socket_id, tcp, rx).await,
-        #[cfg(feature = "runtime_native_websocket")]
+        #[cfg(feature = "runtime_tls")]
         SocketStream::Tls(tls) => {
             run_tls_driver(state, socket_id, SocketStream::Tls(tls), rx).await
         }
@@ -64,19 +64,19 @@ pub(super) async fn run_socket_driver(
 }
 
 enum PlainControl {
-    #[cfg(feature = "runtime_native_websocket")]
+    #[cfg(feature = "runtime_tls")]
     StartTls,
     CommandClosed,
 }
 
 enum PlainReadExit {
-    #[cfg(feature = "runtime_native_websocket")]
+    #[cfg(feature = "runtime_tls")]
     StartTls,
     Closed,
 }
 
 enum PlainCommandExit {
-    #[cfg(feature = "runtime_native_websocket")]
+    #[cfg(feature = "runtime_tls")]
     StartTls {
         opts: TlsOptions,
         rx: mpsc::Receiver<WriteCmd>,
@@ -112,7 +112,7 @@ async fn run_plain_driver(
 
     let read_exit = run_plain_reader_loop(&state, socket_id, tcp.clone(), control_rx).await;
     match read_exit {
-        #[cfg(feature = "runtime_native_websocket")]
+        #[cfg(feature = "runtime_tls")]
         PlainReadExit::StartTls => {
             let command_exit = command_handle
                 .await
@@ -155,7 +155,7 @@ async fn run_plain_command_router(
 ) -> PlainCommandExit {
     while let Some(cmd) = rx.next().await {
         match cmd {
-            #[cfg(feature = "runtime_native_websocket")]
+            #[cfg(feature = "runtime_tls")]
             WriteCmd::StartTls(opts) => {
                 drop(writer_tx);
                 let _ = control_tx.unbounded_send(PlainControl::StartTls);
@@ -215,7 +215,7 @@ async fn run_plain_reader_loop(
         match action {
             SelectAction::ReadPermit(true) => continue,
             SelectAction::ReadPermit(false) => break,
-            #[cfg(feature = "runtime_native_websocket")]
+            #[cfg(feature = "runtime_tls")]
             SelectAction::Command(Some(PlainControl::StartTls)) => {
                 return PlainReadExit::StartTls;
             }
@@ -399,7 +399,7 @@ async fn handle_plain_writer_command(
             let _ = apply_keep_alive(stream.tcp.as_ref(), on, initial_delay_ms);
             true
         }
-        #[cfg(feature = "runtime_native_websocket")]
+        #[cfg(feature = "runtime_tls")]
         WriteCmd::StartTls(_) => true,
     }
 }
@@ -428,12 +428,12 @@ async fn handle_driver_command(
             }
             true
         }
-        #[cfg(feature = "runtime_native_websocket")]
+        #[cfg(feature = "runtime_tls")]
         WriteCmd::StartTls(opts) => start_tls_in_driver(state, socket_id, stream, opts).await,
     }
 }
 
-#[cfg(feature = "runtime_native_websocket")]
+#[cfg(feature = "runtime_tls")]
 async fn start_tls_in_driver(
     state: &SharedState,
     socket_id: u32,
@@ -480,7 +480,7 @@ async fn start_tls_in_driver(
     true
 }
 
-#[cfg(feature = "runtime_native_websocket")]
+#[cfg(feature = "runtime_tls")]
 async fn start_tls_on_tcp(
     state: &SharedState,
     socket_id: u32,

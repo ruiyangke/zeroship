@@ -14,7 +14,7 @@
 //! scrypt is in the design (Stage B FFI inventory) but requires
 //! aws-lc-sys raw FFI; not yet wired here.
 
-use super::buffer;
+use crate::node::buffer;
 use crate::crypto_ops::digest::KernelHashAlgo;
 use crate::crypto_ops::error::KernelError;
 use crate::crypto_ops::kdf;
