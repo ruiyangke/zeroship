@@ -72,6 +72,7 @@
 use std::time::Instant;
 
 use crate::model::migration::Migration;
+use crate::render::plan::SqliteRebuildSpec;
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
@@ -139,71 +140,6 @@ pub enum RebuildError {
         /// What went wrong (the rollback/FK-restore failure detail).
         detail: String,
     },
-}
-
-/// The fully-resolved specification for ONE table rebuild (design §2.4). The
-/// differ builds this from the desired-vs-live diff; the backend executes it.
-///
-/// Everything here is engine-constructed from validated descriptors + live
-/// introspection — never raw creator SQL. The `new_table_create` is the shared
-/// emitter's output (carrying inline goodie sentinels + FKs), already rewritten to
-/// the TEMP name. The `copy_columns` are the column names present in BOTH the old
-/// and new shapes (the safe intersection to copy); the `recreate_objects` are the
-/// table's indexes / triggers / dependent views captured verbatim from
-/// `sqlite_master` so they survive the swap.
-#[derive(Debug, Clone)]
-pub struct SqliteRebuildSpec {
-    /// The existing table being rebuilt (the final name; the new table is renamed
-    /// INTO this).
-    pub table: String,
-    /// The temp name the new table is created under, then renamed FROM. Engine-
-    /// chosen (`<table>__zsrebuild`), never creator input.
-    pub tmp_table: String,
-    /// The new table's `CREATE TABLE <tmp> (...)` DDL — the shared
-    /// Sqlite/MainUnqualified emitter's output (goodie sentinels + FKs), with the
-    /// table identifier already the TEMP name. UNqualified (`main` = the app file).
-    pub new_table_create: String,
-    /// The columns to copy from the old table into the new one, as `(dest, src)`
-    /// pairs of BARE (unquoted) identifiers — emitted as
-    /// `INSERT INTO <new> (dest…) SELECT src… FROM <old>`. For a plain kept column
-    /// `dest == src`; for a column RENAME the pair maps `to ← from` so the data
-    /// follows the rename. A dropped column is absent (excluded from both lists); an
-    /// added column is absent (it takes its DEFAULT/NULL from the new CREATE).
-    pub copy_columns: Vec<(String, String)>,
-    /// EXTRA dependent DDL to replay AFTER the rename, on top of the verbatim
-    /// objects the executor captures from the live `sqlite_master` itself (C2). The
-    /// executor is the source of truth for the table's OWN indexes/triggers: it
-    /// snapshots their `sql` TEXT verbatim before the `DROP TABLE` and replays it
-    /// after the rename, so partial/expression/collation/DESC index attributes and
-    /// creator triggers are preserved exactly. The differ therefore leaves this
-    /// EMPTY for the table's own objects. It remains as an explicit escape hatch for
-    /// direct-spec callers/tests; each entry is a single CREATE replayed under
-    /// CreatorUp on `main`. A replay failure FAILS CLOSED
-    /// ([`RebuildError::DependentReplayFailed`]) — never silently lost.
-    pub recreate_objects: Vec<String>,
-    /// **H1** — the BARE names of columns being DROPPED by this rebuild (live
-    /// columns absent from the new shape, excluding a rename's `from`). A captured
-    /// dependent (index / trigger) whose verbatim DDL references one of these
-    /// columns CANNOT be replayed after the swap (the column no longer exists) — so
-    /// the executor SKIPS replaying it (the dependent is intentionally dropped WITH
-    /// the column, the data-preserving outcome). Empty for a rebuild that drops no
-    /// column (type / nullability / rename / FK-set change), where every captured
-    /// dependent is replayed verbatim as before.
-    pub dropped_columns: Vec<String>,
-    /// A human-readable description of what change drove the rebuild (for the
-    /// journal name + diagnostics), e.g. `alter column age type integer → text`.
-    pub reason: String,
-}
-
-impl SqliteRebuildSpec {
-    /// The engine-chosen temp-table name for `table`. A fixed ASCII suffix that can
-    /// never collide with a creator table (creator identifiers cannot contain the
-    /// `__zsrebuild` reserved infix in practice; and the rebuild drops it within the
-    /// same transaction so it never persists).
-    #[must_use]
-    pub fn tmp_name(table: &str) -> String {
-        format!("{table}__zsrebuild")
-    }
 }
 
 /// Double-quote a SQLite identifier (escaping embedded quotes). Engine-controlled

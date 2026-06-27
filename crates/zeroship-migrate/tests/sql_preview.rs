@@ -21,7 +21,7 @@
 //! --test sql_preview`.
 
 use zeroship_migrate::ir_author::{IrAuthor, LiveSchema};
-use zeroship_migrate::plan::PlanStep;
+use zeroship_migrate::PlanStep;
 use zeroship_migrate::sql_preview::{
     render_ir_json_sql, render_plan_sql, render_set_sql, PreviewOpts, RUNTIME_RESOLVED,
 };
@@ -401,7 +401,7 @@ fn render_plan_sql_surfaces_lowered_ddl_offline() {
 /// `ALTER … RENAME`, no `CREATE TRIGGER`, no uncommented expand DDL) may leak.
 #[test]
 fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
-    use zeroship_migrate::plan::{PlanStep, RenameStep};
+    use zeroship_migrate::{PlanStep, RenameStep};
     use zeroship_migrate::{ExpandContractAuthor, OnlineIntent};
 
     // Author a REAL PG expand-contract plan via the same author the engine uses, so

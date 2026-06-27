@@ -319,7 +319,7 @@ async fn generate_index_bearing_schema_redifs_to_zero_on_pg() {
 /// The TODO-backfill marker is emitted for a NON-NULL column add with no default.
 #[compio::test]
 async fn generate_emits_machine_readable_backfill_todo() {
-    use zeroship_migrate::drift::{ColumnSnapshot, SchemaSnapshot, TableSnapshot};
+    use zeroship_migrate::{ColumnSnapshot, SchemaSnapshot, TableSnapshot};
 
     // Desired: a table with a NON-NULL `priority` column and no default.
     // Live: the SAME table WITHOUT `priority` (so it's an addColumn).

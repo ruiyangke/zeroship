@@ -32,10 +32,10 @@ use std::path::PathBuf;
 
 use compio_postgres::Client;
 use zeroship_migrate::{
-    desired_snapshot, drift::SchemaSnapshot, provision_migrator, role::deprovision_migrator,
-    snapshot_schema, Approval, ApprovalScope, CollectionDescriptor, DeclarativeApplyError, DeclarativeAuthor,
+    desired_snapshot, provision_migrator, role::deprovision_migrator, snapshot_schema, Approval,
+    ApprovalScope, CollectionDescriptor, DeclarativeApplyError, DeclarativeAuthor,
     DeclarativeDeployOutcome, DesiredSchema, EngineError, ExecutorConfig, FieldDescriptor,
-    GuardConfig, MigrationEngine, RenameHint,
+    GuardConfig, MigrationEngine, RenameHint, SchemaSnapshot,
 };
 
 const DEFAULT_DSN: &str =

@@ -26,13 +26,13 @@
 //! real obligation table.
 
 use compio_postgres::Client;
-use zeroship_migrate::drift::{ColumnSnapshot, TableSnapshot};
+use zeroship_migrate::{ColumnSnapshot, TableSnapshot};
 use zeroship_migrate::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
 use zeroship_migrate::ir_author::{IrAuthor, LiveSchema};
-use zeroship_migrate::plan::{PlanStep, RenameStep};
+use zeroship_migrate::{PlanStep, RenameStep};
 use zeroship_migrate::{
-    provision_migrator, role::deprovision_migrator, Approval, ExecutorConfig, MigrationBackend,
-    MigrationEngine, PendingContractRecord, PostgresBackend, SqlDialect,
+    provision_migrator, role::deprovision_migrator, Approval, ExecutorConfig, ExpandContractPlan,
+    MigrationBackend, MigrationEngine, PendingContractRecord, PostgresBackend, SqlDialect,
 };
 
 const DEFAULT_DSN: &str =
@@ -161,7 +161,7 @@ fn lower_pg_rename(
     to: &str,
     ty: ColType,
     live: &LiveSchema,
-) -> zeroship_migrate::expand_contract::ExpandContractPlan {
+) -> ExpandContractPlan {
     let author = IrAuthor::new(cfg.project_schema.clone(), "app_test", SqlDialect::Postgres);
     let ir = rename_ir(table, from, to, ty);
     let steps = author.lower_steps(&ir, live).expect("PG rename lowers");
@@ -239,7 +239,7 @@ async fn expand_email_rename(
     engine: &MigrationEngine,
     be: &PostgresBackend<'_>,
     cfg: &ExecutorConfig,
-) -> zeroship_migrate::expand_contract::ExpandContractPlan {
+) -> ExpandContractPlan {
     let live = live_with_column("members", "email", "text");
     let ec = lower_pg_rename(cfg, "members", "email", "email_address", ColType::Text, &live);
     let steps = vec![PlanStep::OnlineRename(RenameStep::PgExpandContract(ec.clone()))];
@@ -932,7 +932,7 @@ async fn dependent_plan_on_different_table_is_refused_at_apply() {
 /// the drop applied despite the outstanding contract.
 #[compio::test]
 async fn bare_name_dropindex_on_pending_table_is_refused() {
-    use zeroship_migrate::drift::IndexSnapshot;
+    use zeroship_migrate::IndexSnapshot;
 
     let conn = pg().await;
     let cfg = cfg_for(&token());

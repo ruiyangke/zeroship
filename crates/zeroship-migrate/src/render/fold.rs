@@ -53,11 +53,11 @@ use crate::render::declarative::{
     build_table_snapshot, constraintdef_cols, ir_fk_constraint_snapshot, quote_ident_if_needed,
     CollectionDescriptor, DeclarativeError,
 };
-use crate::render::renderer::{Capability, DialectSupports};
-use crate::apply::drift::{
+use crate::model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, NamedTypeSnapshot, SchemaSnapshot,
     TableSnapshot, ViewSnapshot,
 };
+use crate::render::renderer::{Capability, DialectSupports};
 use crate::model::ir::{
     ColType, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, Op, RefAction,
 };

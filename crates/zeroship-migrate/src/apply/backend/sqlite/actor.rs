@@ -156,7 +156,7 @@ enum Command {
 }
 
 /// **PR6a** — a typed value bound NATIVELY to a `?n` placeholder of a one-shot
-/// DML statement. A transport-safe (`Send`) mirror of [`crate::plan::BindValue`]
+/// DML statement. A transport-safe (`Send`) mirror of [`crate::render::step::BindValue`]
 /// the actor binds via rusqlite's parameter API — never interpolated, so a bind
 /// value can never alter the statement shape (§2.3.2). `Decimal`/`Text` are bound
 /// as TEXT (the column affinity coerces; the IR numeric domain is i64 +
@@ -174,15 +174,15 @@ pub enum SqliteBind {
 }
 
 impl SqliteBind {
-    /// Map a plan [`BindValue`](crate::plan::BindValue) to its transport mirror.
+    /// Map a plan [`BindValue`](crate::render::step::BindValue) to its transport mirror.
     #[must_use]
-    pub fn from_bind(b: &crate::plan::BindValue) -> Self {
+    pub fn from_bind(b: &crate::render::step::BindValue) -> Self {
         match b {
-            crate::plan::BindValue::Null => SqliteBind::Null,
-            crate::plan::BindValue::Bool(v) => SqliteBind::Bool(*v),
-            crate::plan::BindValue::Int(v) => SqliteBind::Int(*v),
-            crate::plan::BindValue::Decimal(s) => SqliteBind::Text(s.clone()),
-            crate::plan::BindValue::Text(s) => SqliteBind::Text(s.clone()),
+            crate::render::step::BindValue::Null => SqliteBind::Null,
+            crate::render::step::BindValue::Bool(v) => SqliteBind::Bool(*v),
+            crate::render::step::BindValue::Int(v) => SqliteBind::Int(*v),
+            crate::render::step::BindValue::Decimal(s) => SqliteBind::Text(s.clone()),
+            crate::render::step::BindValue::Text(s) => SqliteBind::Text(s.clone()),
         }
     }
 

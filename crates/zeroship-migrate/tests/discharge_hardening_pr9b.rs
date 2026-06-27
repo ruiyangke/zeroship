@@ -15,13 +15,13 @@
 //! column. POST-FIX it is refused.
 
 use compio_postgres::Client;
-use zeroship_migrate::drift::{ColumnSnapshot, TableSnapshot};
+use zeroship_migrate::{ColumnSnapshot, TableSnapshot};
 use zeroship_migrate::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
 use zeroship_migrate::ir_author::{IrAuthor, LiveSchema};
-use zeroship_migrate::plan::{PlanStep, RenameStep};
+use zeroship_migrate::{PlanStep, RenameStep};
 use zeroship_migrate::{
-    provision_migrator, role::deprovision_migrator, Approval, ExecutorConfig, MigrationBackend,
-    MigrationEngine, PostgresBackend, SqlDialect,
+    provision_migrator, role::deprovision_migrator, Approval, ExecutorConfig, ExpandContractPlan,
+    MigrationBackend, MigrationEngine, PostgresBackend, SqlDialect,
 };
 
 const DEFAULT_DSN: &str =
@@ -139,7 +139,7 @@ fn lower_pg_rename(
     from: &str,
     to: &str,
     live: &LiveSchema,
-) -> zeroship_migrate::expand_contract::ExpandContractPlan {
+) -> ExpandContractPlan {
     let author = IrAuthor::new(cfg.project_schema.clone(), "app_test", SqlDialect::Postgres);
     let ir = MigrationIr {
         ir_version: 1,

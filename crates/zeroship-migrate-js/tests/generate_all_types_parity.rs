@@ -20,9 +20,10 @@
 use std::path::Path;
 
 use zeroship_migrate::declarative::DesiredSchema;
-use zeroship_migrate::drift::{ColumnSnapshot, SchemaSnapshot, TableSnapshot};
 use zeroship_migrate::ir::{CanonicalOpList, ColType, Op};
-use zeroship_migrate::{Checksum, MigrationFlags, MigrationIr};
+use zeroship_migrate::{
+    Checksum, ColumnSnapshot, MigrationFlags, MigrationIr, SchemaSnapshot, TableSnapshot,
+};
 use zeroship_migrate_js::recorder_service::recorder_child_path;
 use zeroship_migrate_js::{build_migrations, generate_ops, RecordVia, ResourceBudget};
 

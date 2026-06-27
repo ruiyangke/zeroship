@@ -58,7 +58,8 @@
 //! transform + name), so a re-authored backfill gets a fresh id and does not resume
 //! against an incompatible cursor.
 
-use crate::ops::backfill::{BackfillOutcome, BackfillError, BackfillSpec};
+use crate::ops::backfill::{BackfillError, BackfillOutcome};
+use crate::render::plan::BackfillSpec;
 use crate::render::dml::sqlite_placeholder;
 
 use super::actor::{MigrationActor, SqliteActorError};

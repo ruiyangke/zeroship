@@ -30,17 +30,19 @@ use std::collections::HashMap;
 
 use crate::apply::backend::MigrationBackend;
 use crate::apply::baseline::{BaselineError, BaselineOutcome};
-use crate::conn::ExecutorConfig;
-use crate::apply::drift::{ChecksumDriftReport, DriftError, SchemaSnapshot};
+use crate::apply::drift::{ChecksumDriftReport, DriftError};
 use crate::apply::executor::{ApplyError, PreconditionVerdict, RollbackError};
 use crate::apply::journal::{AppliedEntry, JournalError};
+use crate::conn::ExecutorConfig;
 use crate::model::migration::Migration;
+use crate::model::snapshot::SchemaSnapshot;
+use crate::render::plan::SqliteRebuildSpec;
 use zeroship_schema::query::SqlDialect;
 
 pub use actor::{MigrationActor, SqliteActorError};
 pub use authorizer::Mode;
 pub use journal_sql::LoadedVersion;
-pub use rebuild_sql::{RebuildError, SqliteRebuildSpec};
+pub use rebuild_sql::RebuildError;
 
 /// The SQLite [`MigrationBackend`]. Holds the dedicated hardened migration actor
 /// for ONE tenant. Construct via [`SqliteBackend::open`].
@@ -122,7 +124,7 @@ impl SqliteBackend {
     /// connection.
     pub async fn run_backfill_bounded_sqlite(
         &self,
-        spec: &crate::ops::backfill::BackfillSpec,
+        spec: &crate::render::plan::BackfillSpec,
         set_clause: &str,
         filter: Option<&str>,
         applied_by: &str,
@@ -629,7 +631,7 @@ impl MigrationBackend for SqliteBackend {
     async fn run_backfill_step(
         &self,
         _cfg: &ExecutorConfig,
-        spec: &crate::ops::backfill::BackfillSpec,
+        spec: &crate::render::plan::BackfillSpec,
         approval: crate::approval::Approval,
         _scope: &crate::approval::ApprovalScope,
         applied_by: &str,
@@ -680,7 +682,7 @@ impl MigrationBackend for SqliteBackend {
         version: &crate::model::migration::MigrationId,
         name: &str,
         template: &str,
-        binds: &[crate::plan::BindValue],
+        binds: &[crate::render::step::BindValue],
         destructive: bool,
         owner_app: &str,
         approval: crate::approval::Approval,

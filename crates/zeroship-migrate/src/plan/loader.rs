@@ -57,7 +57,10 @@ use zeroship_core::typed_id;
 use crate::analysis::analyze::analyze;
 use crate::analysis::classify::{classify, ParseError};
 use crate::guard::{flags_for, GuardReport};
-use crate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
+use crate::model::migration::{
+    migration_id_for_version, Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
+    VERSION_CEILING,
+};
 
 /// The fixed `owner_app` sentinel stamped on every loaded platform migration.
 ///
@@ -66,11 +69,6 @@ use crate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags
 /// the Platform profile. The sentinel is folded into the [`Checksum`] like any
 /// other `owner_app`, so it is part of the tamper-evident unit.
 pub const PLATFORM_OWNER_APP: &str = "platform";
-
-/// The 48-bit ceiling for a file version (the high six bytes of the derived
-/// UUID). A numeric prefix this large is unreachable in practice (the platform
-/// ships ~57 files); the loader rejects it as [`LoaderError::VersionOutOfRange`].
-const VERSION_CEILING: u64 = 1u64 << 48;
 
 /// A failure of the file loader.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -150,62 +148,6 @@ pub enum LoaderError {
         /// The offending dbmate filename.
         name: String,
     },
-}
-
-/// Derive a deterministic, ORDER-PRESERVING [`MigrationId`] from a numeric file
-/// version (design §6.2, Option A).
-///
-/// **CANONICAL: this is the ONLY version→id mapping; nothing else mints platform
-/// migration ids.**
-///
-/// # Bit layout (128-bit UUID)
-///
-/// The numeric `version` occupies the **HIGH 48 bits** — the same six bytes
-/// `UUIDv7` uses for its big-endian millisecond timestamp
-/// ([`MigrationId::timestamp_ms`](crate::migration::MigrationId::timestamp_ms))
-/// — and the **low 80 bits are ZERO**. So a larger version ⇒ a larger 128-bit
-/// integer ⇒ a lexicographically larger 22-char base62 string ⇒ a larger
-/// [`MigrationId`] under its derived `Ord`.
-///
-/// # The load-bearing invariant
-///
-/// "String `Ord` == numeric version order" holds **only because
-/// [`typed_id::uuid_to_base62`] is a FIXED-22-char encoding of the 128-bit UUID
-/// as a single big-endian integer over an ASCENDING alphabet**
-/// (`BASE62 = "0123456789ABC…xyz"`, sorted so lexicographic order matches numeric
-/// order — `crates/core/src/typed_id.rs:10-12,27-38`). Because the width is fixed
-/// (22) and the alphabet ascends, `a < b` as 128-bit integers ⇒
-/// `base62(a) < base62(b)` lexicographically, which is exactly the
-/// [`MigrationId`] `Ord` (a `String` newtype with a derived `Ord`,
-/// `migration.rs:35`). **If a future refactor swapped in a variable-width or
-/// non-ascending base62 encoder, this ordering would silently break.** The
-/// round-trip test [`tests::version_derivation_is_order_preserving`] pins the
-/// invariant so that change fails loudly.
-///
-/// # Determinism + range
-///
-/// Same `version` ⇒ same id every load (required for re-run identity +
-/// checksum-drift detection). `version >= 2^48` is **unreachable** for the real
-/// port (≤ 0057, ceiling ~2.8e14); callers that parse a prefix already bound it,
-/// and a `debug_assert!` documents the contract.
-///
-/// # Panics
-///
-/// Never in practice: the derived 16-byte UUID always base62-encodes to a valid
-/// `mig_<22-char>` id that [`MigrationId::parse`] accepts.
-#[must_use]
-pub fn migration_id_for_version(version: u64) -> MigrationId {
-    debug_assert!(
-        version < VERSION_CEILING,
-        "file version {version} exceeds the 48-bit ordering field"
-    );
-    let mut bytes = [0u8; 16];
-    // The high 48 bits = the low six bytes of the big-endian u64 version.
-    bytes[0..6].copy_from_slice(&version.to_be_bytes()[2..8]);
-    // The low 80 bits stay zero.
-    let uuid = uuid::Uuid::from_bytes(bytes);
-    MigrationId::parse(&format!("mig_{}", typed_id::uuid_to_base62(&uuid)))
-        .expect("derived id is a valid mig_ typed id")
 }
 
 /// Derive a deterministic, STABLE [`MigrationId`] for a REPEATABLE (`R__<desc>`)
@@ -603,7 +545,7 @@ fn flags_for_file_opts(
 ///
 /// [`LoaderError`] on an unrecognized filename, an orphan `.down.sql`, a duplicate
 /// `V<NNNN>`, an out-of-range version, an unparseable body, or an I/O fault.
-pub fn load_dir(dir: impl AsRef<Path>) -> Result<Vec<crate::plan::AppliedPlan>, LoaderError> {
+pub fn load_dir(dir: impl AsRef<Path>) -> Result<Vec<crate::render::plan::AppliedPlan>, LoaderError> {
     // `load_dir` is the platform **Flyway** loader: it returns `Vec<AppliedPlan>`,
     // a `.sql` file lowering to a **single-step plan** via the
     // `AppliedPlan::single_step()` facade (one `Ddl` step), preserving the
@@ -618,13 +560,13 @@ pub fn load_dir(dir: impl AsRef<Path>) -> Result<Vec<crate::plan::AppliedPlan>, 
     let migrations = load_dir_migrations(dir)?;
     Ok(migrations
         .into_iter()
-        .map(crate::plan::AppliedPlan::single_step)
+        .map(crate::render::plan::AppliedPlan::single_step)
         .collect())
 }
 
 /// The `Vec<Migration>` form of [`load_dir`] — the directory read + version-order
 /// grammar pass that produces the raw [`Migration`]s, before they are wrapped
-/// into single-step [`AppliedPlan`](crate::plan::AppliedPlan)s. Retained as the
+/// into single-step [`AppliedPlan`](crate::render::plan::AppliedPlan)s. Retained as the
 /// internal core (and for any caller that still needs the flat `Migration` set,
 /// e.g. the integrity-manifest fold), so the wrap into plans is a thin shell.
 pub fn load_dir_migrations(dir: impl AsRef<Path>) -> Result<Vec<Migration>, LoaderError> {

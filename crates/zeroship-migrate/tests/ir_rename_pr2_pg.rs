@@ -23,13 +23,13 @@
 //! + the real journal.
 
 use compio_postgres::Client;
-use zeroship_migrate::drift::{ColumnSnapshot, TableSnapshot};
+use zeroship_migrate::{ColumnSnapshot, TableSnapshot};
 use zeroship_migrate::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
 use zeroship_migrate::ir_author::{IrAuthor, IrLowerError, LiveSchema};
-use zeroship_migrate::plan::{PlanStep, RenameStep};
+use zeroship_migrate::{PlanStep, RenameStep};
 use zeroship_migrate::{
     provision_migrator, role::deprovision_migrator, Approval, ExecutorConfig, MigrationEngine,
-    OnlineIntent, PostgresBackend, SqlDialect,
+    ExpandContractPlan, OnlineIntent, PostgresBackend, SqlDialect,
 };
 
 const DEFAULT_DSN: &str =
@@ -173,7 +173,7 @@ fn lower_pg_rename(
     to: &str,
     ty: ColType,
     live: &LiveSchema,
-) -> zeroship_migrate::expand_contract::ExpandContractPlan {
+) -> ExpandContractPlan {
     let author = IrAuthor::new(cfg.project_schema.clone(), "app_test", SqlDialect::Postgres);
     let ir = rename_ir(table, from, to, ty);
     let steps = author.lower_steps(&ir, live).expect("PG rename lowers");
@@ -644,7 +644,7 @@ fn ir_renamecolumn_pg_renders_neutral_type_as_pg_string_in_online_intent() {
 // (no DB).
 #[test]
 fn ir_renamecolumn_pg_in_flight_rename_is_not_rollbackable() {
-    use zeroship_migrate::plan::AppliedPlan;
+    use zeroship_migrate::AppliedPlan;
     let cfg = cfg_for("inflight_rollback_pg");
     let live = live_with_column("users", "email", "text");
     let ec = lower_pg_rename(&cfg, "users", "email", "email_address", ColType::Text, &live);
@@ -894,7 +894,7 @@ fn ir_renamecolumn_pg_e1_to_c2_shape_byte_equal_to_declarative_rename() {
     // The intra-chain `depends_on` TOPOLOGY is identical: rebuild each plan's
     // dependency edges as POSITIONS within (expand ++ contract), so the freshly
     // minted versions are abstracted away and only the edge structure is compared.
-    let edges = |ec: &zeroship_migrate::expand_contract::ExpandContractPlan| {
+    let edges = |ec: &ExpandContractPlan| {
         let all: Vec<&zeroship_migrate::migration::Migration> =
             ec.expand.iter().chain(ec.contract.iter()).collect();
         let pos = |v: &zeroship_migrate::migration::MigrationId| {

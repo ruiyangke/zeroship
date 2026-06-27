@@ -839,7 +839,7 @@ async fn collect_bundle_facts(
             for t in &lowered.touched_tables {
                 touched.insert(t.clone());
             }
-            for t in zeroship_migrate::plan::tables_touched_by(&lowered.plan.steps) {
+            for t in zeroship_migrate::tables_touched_by(&lowered.plan.steps) {
                 touched.insert(t);
             }
             // Fold this file's lowered migrations into the combined reviewed set (the

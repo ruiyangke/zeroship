@@ -868,7 +868,7 @@ mod low1_two_guard_coupling_pg {
         // role management. If this were Confined the test would be vacuous.
         assert_eq!(
             cfg.guard_config().trust(),
-            crate::guard::TrustProfile::Platform,
+            crate::model::policy::TrustProfile::Platform,
             "the config under test must be Platform for the coupling proof to be meaningful"
         );
 
@@ -1000,7 +1000,7 @@ mod low1_two_guard_coupling_pg {
         // the deny-list. If this were Confined the test would be vacuous.
         assert_eq!(
             cfg.guard_config().trust(),
-            crate::guard::TrustProfile::Trusted,
+            crate::model::policy::TrustProfile::Trusted,
             "the config under test must be Trusted for the coupling proof to be meaningful"
         );
 

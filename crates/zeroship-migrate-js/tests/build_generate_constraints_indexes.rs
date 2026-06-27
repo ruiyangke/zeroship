@@ -19,15 +19,13 @@
 //!     lowering injects them) — they are never re-emitted nor flagged.
 
 use zeroship_migrate::declarative::DesiredSchema;
-use zeroship_migrate::drift::{
-    ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot,
-};
+use zeroship_migrate::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot};
 use zeroship_migrate_js::{generate_ops, ScaffoldError};
 
 const APP: &str = "app_med1";
 
-fn col(name: &str, ty: &str, nullable: bool) -> zeroship_migrate::drift::ColumnSnapshot {
-    zeroship_migrate::drift::ColumnSnapshot {
+fn col(name: &str, ty: &str, nullable: bool) -> ColumnSnapshot {
+    ColumnSnapshot {
         name: name.into(),
         data_type: ty.into(),
         nullable,

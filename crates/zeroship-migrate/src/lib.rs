@@ -95,13 +95,11 @@ pub use approval::{Approval, ApprovalScope};
 pub use apply::backend::{
     CrossDeployObligations, MigrationBackend, PgSessionSnapshot, PostgresBackend,
 };
-pub use apply::backend::sqlite::{
-    RebuildError, SqliteActorError, SqliteBackend, SqliteRebuildSpec,
-};
+pub use apply::backend::sqlite::{RebuildError, SqliteActorError, SqliteBackend};
 pub use apply::baseline::{BaselineError, BaselineOutcome};
 pub use ops::backfill::{
     backfill_progress, ensure_backfill_progress, list_backfills, run_backfill,
-    run_backfill_bounded, BackfillError, BackfillOutcome, BackfillProgress, BackfillSpec,
+    run_backfill_bounded, BackfillError, BackfillOutcome, BackfillProgress,
 };
 pub use plan::author::{
     AuthorError, AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor,
@@ -120,15 +118,14 @@ pub use engine::{
     DeclarativeDeployPlan, EngineError, MigrationEngine, MigrationPlan, OnlineError,
     PlannedMigration, RollbackEngineError,
 };
-pub use ops::expand_contract::{
-    ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent, OnlineSchemaChange,
-    PgOnline,
+pub use ops::expand_contract::{OnlineSchemaChange, PgOnline};
+pub use render::expand_contract::{
+    ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
 };
 pub use conn::{connect, ConnectError, ExecutorConfig, PgConfinement};
 pub use apply::drift::{
     check_checksum_drift, diff_snapshots, snapshot_schema, AlteredObject, ChecksumDrift,
-    ChecksumDriftReport, ColumnSnapshot, ConstraintSnapshot, DriftError, DriftReport, IndexSnapshot,
-    NamedTypeSnapshot, OrphanJournal, SchemaSnapshot, StructuralDrift, TableSnapshot, ViewSnapshot,
+    ChecksumDriftReport, DriftError, DriftReport, OrphanJournal, StructuralDrift,
 };
 pub use apply::executor::{
     apply, rollback, ApplyError, ApplyOutcome, BackendError, LockMode, PreconditionVerdict,
@@ -144,8 +141,9 @@ pub use render::fold::{
 };
 pub use guard::{
     flags_for, guard_for, GuardConfig, GuardError, GuardOutcome, GuardReport, MigrationGuard,
-    PgGuard, SchemaScope, SqlGuard, SqliteDescriptorGuard, TrustProfile,
+    PgGuard, SqlGuard, SqliteDescriptorGuard,
 };
+pub use model::policy::{SchemaScope, TrustProfile};
 // The deploy-target dialect (§2.4.1) — re-exported so the control-plane deploy
 // path can thread it into `IrAuthor::new` without depending on `zeroship-schema`.
 pub use zeroship_schema::query::SqlDialect;
@@ -169,8 +167,8 @@ pub use plan::pending::{
     CODE_TABLE_HAS_PENDING_CONTRACT,
 };
 pub use plan::loader::{
-    load_dir, load_dir_migrations, migration_id_for_version, new_dbmate_migration,
-    repeatable_id_for_name, LoaderError, PLATFORM_OWNER_APP,
+    load_dir, load_dir_migrations, new_dbmate_migration, repeatable_id_for_name, LoaderError,
+    PLATFORM_OWNER_APP,
 };
 pub use ops::squash::{squash, SquashError, SquashOutcome};
 pub use ops::status::{
@@ -183,8 +181,12 @@ pub use plan::manifest::{
     compute_manifest, verify_manifest, ManifestError, ManifestHash, MismatchKind,
 };
 pub use model::migration::{
-    Checksum, ChecksumInput, IdError, Migration, MigrationFlags, MigrationId, OnlinePhase,
-    MIGRATION_PREFIX,
+    migration_id_for_version, Checksum, ChecksumInput, IdError, Migration, MigrationFlags,
+    MigrationId, OnlinePhase, MIGRATION_PREFIX,
+};
+pub use model::snapshot::{
+    ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot, IndexSnapshot, NamedTypeSnapshot,
+    SchemaSnapshot, TableSnapshot, ViewSnapshot,
 };
 // The `op.*` portable IR (§2.1/§2.3/§2.5): the migration document, the closed
 // `Op` enum, the constrained numeric scalar, and the canonical op-list the
@@ -234,9 +236,8 @@ pub use model::validate::{
 // (re-exported from `engine`, unchanged): these are the net-new ordered
 // EXECUTION artifact + its steps. `+AppliedPlan, +PlanStep, +RenameStep` added;
 // `MigrationPlan` kept.
-pub use plan::{
-    AppliedPlan, BindValue, DialectScope, NotSingleStep, PlanStep, RenameStep,
-};
+pub use render::plan::{AppliedPlan, BackfillSpec, NotSingleStep, SqliteRebuildSpec};
+pub use render::step::{tables_touched_by, BindValue, DialectScope, PlanStep, RenameStep};
 // PR14 — the OFFLINE `--sql` plan preview (operator go-live review). A pure,
 // DB-free surfacing/formatting layer over the SQL `IrAuthor::lower_*` already
 // lowers; DB-state-dependent ops are labeled `-- [runtime-resolved]`, never
@@ -244,10 +245,8 @@ pub use plan::{
 pub use render::sql_preview::{
     render_ir_json_sql, render_plan_sql, render_set_sql, PreviewOpts, RUNTIME_RESOLVED,
 };
-pub use model::precondition::{
-    evaluate as evaluate_precondition, CmpOp, OnUnmet, Precondition, PreconditionCheck,
-    PreconditionError,
-};
+pub use apply::precondition::{evaluate as evaluate_precondition, PreconditionError};
+pub use model::precondition::{CmpOp, OnUnmet, Precondition, PreconditionCheck};
 pub use apply::role::{deprovision_migrator, migrator_role_name, provision_migrator, RoleError};
 pub use ops::shadow::{
     dry_run, dry_run_declarative, dry_run_incremental, sweep_leaked_shadows, DryRunError,

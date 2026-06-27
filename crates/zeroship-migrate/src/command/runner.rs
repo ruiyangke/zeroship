@@ -26,8 +26,8 @@ use crate::engine::{EngineError, MigrationEngine, MigrationPlan, RollbackEngineE
 use crate::apply::executor::{
     ApplyOutcome, RollbackError, RollbackOutcome, RollbackRequest, RollbackTarget,
 };
-use crate::plan::loader::{load_dir, migration_id_for_version, LoaderError};
-use crate::model::migration::MigrationId;
+use crate::model::migration::{migration_id_for_version, MigrationId};
+use crate::plan::loader::{load_dir, LoaderError};
 use crate::ops::status::{status, status_via_backend, MigrationStatus, StatusError};
 use crate::Approval;
 
@@ -303,11 +303,11 @@ pub enum RunError {
     /// (a Flyway/dbmate `.sql` always lowers to one `Ddl` step — asserted by the
     /// single-step-shape precondition test) and exists for defense in depth.
     #[error("plan shape: {0}")]
-    NotSingleStep(#[from] crate::plan::NotSingleStep),
+    NotSingleStep(#[from] crate::render::plan::NotSingleStep),
 }
 
 /// Load the migration directory and project each [`AppliedPlan`] down to its one
-/// `&Migration` through the [`single_step_migration`](crate::plan::AppliedPlan::single_step_migration)
+/// `&Migration` through the [`single_step_migration`](crate::render::plan::AppliedPlan::single_step_migration)
 /// facade (`op.*` DSL §5.2). The platform Flyway-mode runner operates over
 /// `Migration` and never touches `PlanStep`/`RenameStep`, so it stays decoupled
 /// from plan-shape evolution; the facade fails closed if a platform changelog
@@ -881,12 +881,12 @@ pub async fn run_resolve_pending(
     // Fresh `MigrationId`s are fine: these are net-new journal entries (the
     // original C1/C2 were never applied), and we discharge the obligation
     // explicitly below (NOT via the engine's contract-version match).
-    let author = crate::ops::expand_contract::ExpandContractAuthor::new(
+    let author = crate::render::expand_contract::ExpandContractAuthor::new(
         exec_cfg.project_schema.clone(),
         "resolve-pending",
     );
     let plan = author
-        .author(&crate::ops::expand_contract::OnlineIntent::RenameColumn {
+        .author(&crate::render::expand_contract::OnlineIntent::RenameColumn {
             table: pc.table.clone(),
             from: pc.from_col.clone(),
             to: pc.to_col.clone(),
@@ -897,7 +897,7 @@ pub async fn run_resolve_pending(
     // --apply: C1 (drop trigger+fn) then C2 (drop old column) — the full contract.
     // --abort: C1 (drop trigger+fn) then drop the SHADOW (`to`) column (E1's down),
     //          leaving `from` intact (pre-rename shape).
-    let (steps, resolution): (Vec<crate::plan::PlanStep>, crate::apply::journal::Resolution) = if apply {
+    let (steps, resolution): (Vec<crate::render::step::PlanStep>, crate::apply::journal::Resolution) = if apply {
         let c1 = plan
             .contract
             .first()
@@ -908,12 +908,12 @@ pub async fn run_resolve_pending(
             .ok_or_else(|| RunError::ResolvePending("contract has no C2 step".to_string()))?;
         (
             vec![
-                crate::plan::PlanStep::Ddl(plain_ddl(
+                crate::render::step::PlanStep::Ddl(plain_ddl(
                     &format!("resolve_apply_c1_{}", pc.table),
                     c1.up.clone(),
                     false,
                 )),
-                crate::plan::PlanStep::Ddl(plain_ddl(
+                crate::render::step::PlanStep::Ddl(plain_ddl(
                     &format!("resolve_apply_c2_{}", pc.table),
                     c2.up.clone(),
                     true,
@@ -2141,7 +2141,8 @@ mod tests {
     use super::*;
     use crate::engine::PlannedMigration;
     use crate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
-    use crate::guard::{GuardOutcome, TrustProfile};
+    use crate::guard::GuardOutcome;
+    use crate::model::policy::TrustProfile;
 
     fn mk_migration(version: u64, destructive: bool, requires_approval: bool) -> Migration {
         let flags = MigrationFlags {

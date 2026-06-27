@@ -31,9 +31,8 @@ use zeroship_migrate::{
         SelectAst, SelectItem, TableRef, ViewQuery,
     },
     ir_author::{IrAuthor, LiveSchema},
-    plan::PlanStep,
     provision_migrator, record_started, role::deprovision_migrator, Approval, EngineError,
-    ExecutorConfig, MigrationEngine,
+    ExecutorConfig, MigrationEngine, PlanStep,
 };
 use zeroship_schema::query::SqlDialect;
 

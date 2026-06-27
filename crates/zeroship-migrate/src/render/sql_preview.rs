@@ -44,7 +44,8 @@ use std::fmt::Write as _;
 
 use crate::model::ir::{ExistenceGuard, MigrationIr, Op};
 use crate::render::lower::{op_kind_tag, IrAuthor, IrLowerError, LiveSchema};
-use crate::plan::{AppliedPlan, BindValue, PlanStep, RenameStep};
+use crate::render::plan::AppliedPlan;
+use crate::render::step::{BindValue, PlanStep, RenameStep};
 use zeroship_schema::query::SqlDialect;
 
 /// The label prefix every runtime-resolved line carries — the single sentinel the

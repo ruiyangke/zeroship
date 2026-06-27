@@ -10,12 +10,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use zeroship_migrate::declarative::{
     is_system_managed_constraint, is_system_managed_index, DesiredSchema, SYSTEM_FIELD_NAMES,
 };
-use zeroship_migrate::drift::{
-    ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot,
-};
 use zeroship_migrate::ir::{ColType, IrColumn, IrDefault, Op, SynthDefaultFn};
 use zeroship_migrate::loader::{is_valid_migration_name, suggest_migration_name};
-use zeroship_migrate::MigrationIr;
+use zeroship_migrate::{
+    ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, MigrationIr, SchemaSnapshot, TableSnapshot,
+};
 
 /// A scaffold / generate error.
 #[derive(Debug, thiserror::Error)]
