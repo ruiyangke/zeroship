@@ -11,7 +11,8 @@
 use compio_postgres::Client;
 use zeroship_migrate::migration::Checksum;
 use zeroship_migrate::{
-    apply, executor::ApplyError, Approval, ExecutorConfig, Migration, MigrationFlags, MigrationId,
+    apply, check_checksum_drift, executor::ApplyError, Approval, ExecutorConfig, Migration,
+    MigrationFlags, MigrationId,
 };
 
 const DEFAULT_DSN: &str =
@@ -124,6 +125,27 @@ async fn completed_events(conn: &Client, cfg: &ExecutorConfig, version: &str) ->
         .await
         .expect("count completed events");
     row.get("n")
+}
+
+/// Read the latest completed journal kind for one migration identity.
+async fn latest_completed_kind(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    version: &str,
+) -> Option<String> {
+    let row = conn
+        .query_opt(
+            &format!(
+                "SELECT kind FROM \"{}\".schema_migrations \
+                 WHERE version = $1 AND phase = 'completed' \
+                 ORDER BY event_seq DESC LIMIT 1",
+                cfg.pg.meta_schema
+            ),
+            &[&version],
+        )
+        .await
+        .expect("read latest completed kind");
+    row.and_then(|r| r.get::<_, Option<String>>("kind"))
 }
 
 /// Run a one-row scalar `int` (`int4`) query against the project (returns the
@@ -310,6 +332,87 @@ async fn repeatables_run_after_versioned_pending() {
     );
 
     drop_schemas(&conn, &cfg).await;
+}
+
+/// P2a regression: repeatables are ALWAYS applied transactionally, even if the
+/// loaded SQL is classified as non-transactional (`flags.transactional=false`).
+/// The apply must journal `kind='repeatable'`, never the two-phase path's
+/// hardcoded `kind='apply'`, or the next drift check treats the repeatable as a
+/// kind-mismatch tamper.
+#[compio::test]
+async fn classified_non_transactional_repeatable_is_journaled_repeatable_and_redeploys_clean() {
+    use zeroship_migrate::loader::load_dir_migrations;
+
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    let schema = cfg.project_schema.clone();
+
+    let dir = loader_tempdir();
+    write_loader_file(
+        &dir,
+        "V1__create_enum.sql",
+        &format!("CREATE TYPE \"{schema}\".mood AS ENUM ('sad');"),
+    );
+    write_loader_file(
+        &dir,
+        "R__add_enum_value.sql",
+        &format!("ALTER TYPE \"{schema}\".mood ADD VALUE IF NOT EXISTS 'ok';"),
+    );
+
+    let migs = load_dir_migrations(&dir).expect("load enum repeatable");
+    let rep = migs
+        .iter()
+        .find(|m| m.flags.repeatable)
+        .expect("loaded repeatable present");
+    assert!(
+        !rep.flags.transactional,
+        "ALTER TYPE ADD VALUE must be classified as non-transactional"
+    );
+    let rep_id = rep.version.as_str().to_string();
+
+    let out1 = apply(&conn, &cfg, &migs, Approval::None, "actor")
+        .await
+        .expect("first apply with non-transactional-classified repeatable");
+    assert!(
+        out1.applied.contains(&rep_id),
+        "first deploy must apply the repeatable"
+    );
+    assert_eq!(
+        latest_completed_kind(&conn, &cfg, &rep_id).await.as_deref(),
+        Some("repeatable"),
+        "repeatable apply must journal kind='repeatable', not kind='apply'"
+    );
+
+    let drift = check_checksum_drift(&conn, &cfg, &migs)
+        .await
+        .expect("checksum drift check after repeatable apply");
+    assert!(
+        drift.is_clean(),
+        "a correctly journaled repeatable must not report tamper drift: {drift:?}"
+    );
+
+    let out2 = apply(&conn, &cfg, &migs, Approval::None, "actor")
+        .await
+        .expect("unchanged redeploy must pass the drift gate");
+    assert!(
+        !out2.applied.contains(&rep_id),
+        "unchanged repeatable must be skipped on redeploy"
+    );
+    assert!(
+        out2.skipped.contains(&rep_id),
+        "unchanged repeatable must be reported skipped"
+    );
+    assert_eq!(
+        completed_events(&conn, &cfg, &rep_id).await,
+        1,
+        "unchanged redeploy must not append another repeatable journal row"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------------

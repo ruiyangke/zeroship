@@ -87,11 +87,14 @@ pub trait MigrationBackend {
 
     /// Whether a migration must take the two-phase non-transactional apply path.
     ///
-    /// Existing Postgres/SQLite behavior reduces exactly to
-    /// `!m.flags.transactional` because both backends report transactional DDL. A
-    /// future auto-commit DDL backend forces this path regardless of the
-    /// per-migration flag.
+    /// Existing Postgres/SQLite behavior reduces to `!m.flags.transactional`
+    /// for versioned migrations because both backends report transactional DDL.
+    /// Repeatables are always forced through the transactional apply path,
+    /// matching the pre-P2a invariant.
     fn uses_two_phase_path(&self, m: &Migration) -> bool {
+        if m.flags.repeatable {
+            return false;
+        }
         !self.ddl_is_transactional() || !m.flags.transactional
     }
 
@@ -602,7 +605,7 @@ impl MigrationBackend for PostgresBackend<'_> {
         supersedes: &[&str],
         kind: &str,
     ) -> Result<bool, ApplyError> {
-        if self.uses_two_phase_path(m) {
+        if kind != "repeatable" && self.uses_two_phase_path(m) {
             crate::executor::pg::configure_session_non_txn(self.conn, cfg, m).await?;
             crate::executor::pg::apply_non_transactional(
                 self.conn,
