@@ -29,6 +29,8 @@ pub fn resolve_native<'s>(
         "node:crypto" => Some(crate::node::crypto::synthetic_module(scope)),
         "node:events" => Some(crate::node::events::synthetic_module(scope)),
         "node:net" if net_module_allowed(scope) => Some(crate::node::net::synthetic_module(scope)),
+        #[cfg(feature = "runtime_native_websocket")]
+        "node:tls" if net_module_allowed(scope) => Some(crate::node::tls::synthetic_module(scope)),
         "node:zlib" => Some(crate::node::zlib::synthetic_module(scope)),
         "node:os" => Some(crate::node::os::synthetic_module(scope)),
         "node:path" => Some(crate::node::path::synthetic_module(scope)),
@@ -42,6 +44,8 @@ pub fn resolve_native<'s>(
 pub fn is_native(scope: &mut v8::PinScope<'_, '_>, specifier: &str) -> bool {
     match specifier {
         "node:net" => net_module_allowed(scope),
+        #[cfg(feature = "runtime_native_websocket")]
+        "node:tls" => net_module_allowed(scope),
         _ => matches!(
             specifier,
             "node:async_hooks"

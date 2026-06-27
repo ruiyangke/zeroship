@@ -36,6 +36,17 @@ fn dispatch_one(
     match event {
         SocketEvent::Connect => emit(scope, wrapper, "connect", &[]),
         SocketEvent::Ready => emit(scope, wrapper, "ready", &[]),
+        SocketEvent::SecureConnect {
+            authorized,
+            authorization_error,
+        } => {
+            set_bool(scope, wrapper, "authorized", authorized);
+            match authorization_error {
+                Some(err) => set_string(scope, wrapper, "authorizationError", &err),
+                None => set_null(scope, wrapper, "authorizationError"),
+            }
+            emit(scope, wrapper, "secureConnect", &[]);
+        }
         SocketEvent::Data(bytes) => {
             let buf = crate::node::crypto::buffer::emit_buffer(scope, &bytes);
             emit(scope, wrapper, "data", &[buf]);
@@ -77,6 +88,34 @@ fn emit(
     event_args.push(event_name.into());
     event_args.extend_from_slice(args);
     let _ = emit_fn.call(scope, wrapper.into(), &event_args);
+}
+
+fn set_bool(
+    scope: &mut v8::PinScope,
+    wrapper: v8::Local<v8::Object>,
+    key: &str,
+    value: bool,
+) {
+    let key = v8::String::new(scope, key).unwrap();
+    let value = v8::Boolean::new(scope, value);
+    let _ = wrapper.set(scope, key.into(), value.into());
+}
+
+fn set_string(
+    scope: &mut v8::PinScope,
+    wrapper: v8::Local<v8::Object>,
+    key: &str,
+    value: &str,
+) {
+    let key = v8::String::new(scope, key).unwrap();
+    let value = v8::String::new(scope, value).unwrap();
+    let _ = wrapper.set(scope, key.into(), value.into());
+}
+
+fn set_null(scope: &mut v8::PinScope, wrapper: v8::Local<v8::Object>, key: &str) {
+    let key = v8::String::new(scope, key).unwrap();
+    let value = v8::null(scope);
+    let _ = wrapper.set(scope, key.into(), value.into());
 }
 
 fn build_error<'s>(

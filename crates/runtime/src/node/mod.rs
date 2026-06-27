@@ -17,5 +17,7 @@ pub mod events;
 pub mod net;
 pub mod os;
 pub mod path;
+#[cfg(feature = "runtime_native_websocket")]
+pub mod tls;
 pub mod util;
 pub mod zlib;

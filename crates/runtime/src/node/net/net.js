@@ -34,15 +34,19 @@
   class Socket extends EventEmitter {
     constructor(_opts = undefined) {
       super();
-      this._native = new NativeSocket();
+      const opts = _opts && typeof _opts === "object" ? _opts : {};
+      const adopted = opts.__zsNativeSocket;
+      const adoptedFrom = opts.__zsAdoptFrom;
+      this._native = adopted || new NativeSocket();
       this._native.attach(this);
       this.__zsEmit = EventEmitter.prototype.emit;
-      this.connecting = false;
-      this.destroyed = false;
-      this.pending = true;
-      this.readyState = "closed";
+      this.connecting = adoptedFrom ? Boolean(adoptedFrom.connecting) : false;
+      this.destroyed = adoptedFrom ? Boolean(adoptedFrom.destroyed) : false;
+      this.pending = adoptedFrom ? Boolean(adoptedFrom.pending) : true;
+      this.readyState = adoptedFrom ? String(adoptedFrom.readyState || "open") : "closed";
       this._timeoutId = null;
       this._encoding = null;
+      this._encryptedOverride = undefined;
       this._pendingWrites = [];
       this._pendingBytes = 0;
       this._pendingEnd = false;
@@ -214,6 +218,12 @@
     get remotePort() { return this._native.remotePort; }
     get bytesRead() { return this._native.bytesRead; }
     get bytesWritten() { return this._native.bytesWritten; }
+    get encrypted() {
+      return this._encryptedOverride === undefined
+        ? Boolean(this._native.encrypted)
+        : Boolean(this._encryptedOverride);
+    }
+    set encrypted(value) { this._encryptedOverride = Boolean(value); }
   }
 
   function createConnection(...args) {

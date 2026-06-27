@@ -91,6 +91,96 @@ impl NativeSocket {
         Ok(())
     }
 
+    #[cfg(feature = "runtime_native_websocket")]
+    #[v8_method]
+    #[v8_name = "validateTls"]
+    fn validate_tls(&self, reject_unauthorized: bool) -> Result<(), OpError> {
+        validate_tls_policy(&self.state, reject_unauthorized)
+    }
+
+    #[cfg(feature = "runtime_native_websocket")]
+    #[v8_method]
+    #[v8_name = "connectTls"]
+    fn connect_tls(
+        &self,
+        host: String,
+        port: u32,
+        servername: String,
+        reject_unauthorized: bool,
+        ca_pem: Option<String>,
+    ) -> Result<(), OpError> {
+        let port = u16::try_from(port).map_err(|_| {
+            OpError::range_error("tls.connect port must be between 0 and 65535")
+        })?;
+        if port == 0 {
+            return Err(OpError::range_error(
+                "tls.connect port must be between 1 and 65535",
+            ));
+        }
+        validate_tls_policy(&self.state, reject_unauthorized)?;
+        {
+            let s = self.state.borrow();
+            let socket = s
+                .native_sockets
+                .get(&self.socket_id)
+                .ok_or_else(|| OpError::node("ERR_SOCKET_CLOSED", "Socket is closed"))?
+                .borrow();
+            if socket.connecting || socket.connected {
+                return Err(OpError::node("EISCONN", "Socket is already connecting or connected"));
+            }
+            if !s.net_policy.module_allowed() {
+                return Err(capability_violation("node:tls capability denied"));
+            }
+            if !s.net_policy.allows_host_port(&host, port) {
+                return Err(capability_violation(format!(
+                    "node:tls connect denied for {host}:{port}"
+                )));
+            }
+        }
+
+        super::state::reserve_socket_slot(&self.state, self.socket_id).map_err(|e| {
+            if e.contains("cap") {
+                OpError::node("EMFILE", e)
+            } else {
+                capability_violation(e)
+            }
+        })?;
+        super::state::spawn_tls_connect_task(
+            self.state.clone(),
+            self.socket_id,
+            host,
+            port,
+            super::state::TlsOptions {
+                servername,
+                reject_unauthorized,
+                ca_pem,
+            },
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "runtime_native_websocket")]
+    #[v8_method]
+    #[v8_name = "startTls"]
+    fn start_tls(
+        &self,
+        servername: String,
+        reject_unauthorized: bool,
+        ca_pem: Option<String>,
+    ) -> Result<(), OpError> {
+        validate_tls_policy(&self.state, reject_unauthorized)?;
+        super::state::queue_start_tls(
+            &self.state,
+            self.socket_id,
+            super::state::TlsOptions {
+                servername,
+                reject_unauthorized,
+                ca_pem,
+            },
+        )
+        .map_err(|e| OpError::node("ERR_TLS_HANDSHAKE", e))
+    }
+
     #[v8_method]
     fn write(
         &self,
@@ -208,6 +298,16 @@ impl NativeSocket {
             .map(|s| s.borrow().bytes_written.min(u32::MAX as u64) as u32)
             .unwrap_or(0)
     }
+
+    #[v8_getter]
+    fn encrypted(&self) -> bool {
+        self.state
+            .borrow()
+            .native_sockets
+            .get(&self.socket_id)
+            .map(|s| s.borrow().encrypted)
+            .unwrap_or(false)
+    }
 }
 
 pub fn install_native<'s>(
@@ -223,4 +323,24 @@ pub fn install_native<'s>(
 
 fn capability_violation(message: impl Into<String>) -> OpError {
     OpError::coded("capability_violation", message.into(), None::<String>)
+}
+
+#[cfg(feature = "runtime_native_websocket")]
+fn validate_tls_policy(state: &SharedState, reject_unauthorized: bool) -> Result<(), OpError> {
+    if reject_unauthorized {
+        return Ok(());
+    }
+    let allowed = std::env::var_os("ZEROSHIP_DEV").is_some()
+        || matches!(
+            state.borrow().net_policy,
+            crate::transport::net_policy::NetPolicy::Trusted { .. }
+        );
+    if allowed {
+        Ok(())
+    } else {
+        Err(OpError::node(
+            "ERR_TLS_REJECT_UNAUTHORIZED_DISABLED",
+            "rejectUnauthorized:false is only allowed in Trusted or ZEROSHIP_DEV runtimes",
+        ))
+    }
 }

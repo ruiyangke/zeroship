@@ -48,8 +48,8 @@ compio = { workspace = true, features = ["time", "macros", "bytes"] }
 # leftover bytes after the 101 response.)
 compio-ws = { workspace = true, optional = true }
 compio-tls = { workspace = true, optional = true }
-# Native trust roots for the wss:// handshake. Direct dep — used in
-# `websocket_native::handshake::build_tls_connector`.
+# Native trust roots for wss:// and node:tls. Direct dep — used in
+# `transport::tls::build_tls_connector`.
 rustls-native-certs = { version = "0.8", optional = true }
 
 # HTTP client (fetch)
@@ -124,6 +124,7 @@ runtime_legacy_websocket = []
 # `#[v8_constructor(post_init = ...)]` error spans for malformed shapes
 # (MAC-02, design `docs/proposals/macro-constructor-post-init.md` §6.2).
 trybuild = "1.0"
+rcgen = "0.14"
 # Wave F (RPC v2 phase 1): microbench for `default.rpc(...)` dispatch.
 criterion = { workspace = true }
 

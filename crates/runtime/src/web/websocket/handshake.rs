@@ -49,7 +49,7 @@ use base64::Engine;
 use compio::buf::IoBuf;
 use compio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use compio::net::TcpStream;
-use compio_tls::{TlsConnector, TlsStream};
+use compio_tls::TlsStream;
 use sha1::{Digest, Sha1};
 
 use super::constants::RFC6455_GUID;
@@ -264,7 +264,10 @@ pub async fn run_handshake(
                 .await
                 .map_err(HandshakeError::Connect)?;
             let _ = tcp.set_nodelay(true);
-            let connector = build_tls_connector()?;
+            let connector = crate::transport::tls::build_tls_connector(
+                &crate::transport::tls::TlsConnectorOptions::default(),
+            )
+            .map_err(HandshakeError::Tls)?;
             let tls = connector
                 .connect(&host, tcp)
                 .await
@@ -337,34 +340,6 @@ fn build_request_bytes(
     }
     req.push_str("\r\n");
     req.into_bytes()
-}
-
-// ---------------------------------------------------------------------------
-// Build a rustls TLS connector (mirrors compio_ws's defaults).
-// ---------------------------------------------------------------------------
-
-fn build_tls_connector() -> Result<TlsConnector, HandshakeError> {
-    use rustls::{ClientConfig, RootCertStore};
-    use std::sync::Arc;
-
-    let mut root_store = RootCertStore::empty();
-    let rustls_native_certs::CertificateResult { certs, errors: _errors, .. } =
-        rustls_native_certs::load_native_certs();
-    // Non-fatal: even if some certs fail to parse, we may still have a
-    // valid trust store. We surface a hard error only when the result
-    // set is empty — see below.
-    if certs.is_empty() {
-        return Err(HandshakeError::Tls(io::Error::new(
-            io::ErrorKind::NotFound,
-            "no native root CA certificates found",
-        )));
-    }
-    let _ = root_store.add_parsable_certificates(certs);
-
-    let cfg = ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-    Ok(TlsConnector::from(Arc::new(cfg)))
 }
 
 // ---------------------------------------------------------------------------

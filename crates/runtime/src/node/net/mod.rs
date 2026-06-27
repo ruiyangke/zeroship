@@ -26,13 +26,7 @@ fn evaluate<'s>(
 ) -> Option<v8::Local<'s, v8::Value>> {
     v8::callback_scope!(unsafe scope, context);
 
-    crate::node::events::ensure_event_emitter(scope)?;
-    socket::install_native(scope)?;
-
-    let src = v8::String::new(scope, NET_JS)?;
-    let script = v8::Script::compile(scope, src, None)?;
-    let ns_val = script.run(scope)?;
-    let ns = v8::Local::<v8::Object>::try_from(ns_val).ok()?;
+    let ns = ensure_net_namespace(scope)?;
 
     for name in export_names() {
         if *name == "default" {
@@ -48,6 +42,29 @@ fn evaluate<'s>(
     let _ = module.set_synthetic_module_export(scope, default_key, ns.into());
 
     Some(v8::undefined(scope).into())
+}
+
+pub(crate) fn ensure_net_namespace<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    let ns_key = v8::String::new(scope, "__zsNetNs").unwrap();
+    if let Some(existing) = global.get(scope, ns_key.into()) {
+        if existing.is_object() {
+            return v8::Local::<v8::Object>::try_from(existing).ok();
+        }
+    }
+
+    crate::node::events::ensure_event_emitter(scope)?;
+    socket::install_native(scope)?;
+
+    let src = v8::String::new(scope, NET_JS)?;
+    let script = v8::Script::compile(scope, src, None)?;
+    let ns_val = script.run(scope)?;
+    let ns = v8::Local::<v8::Object>::try_from(ns_val).ok()?;
+    global.set(scope, ns_key.into(), ns.into());
+    Some(ns)
 }
 
 fn export_names() -> &'static [&'static str] {
