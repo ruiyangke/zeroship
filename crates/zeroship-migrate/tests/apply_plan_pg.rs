@@ -27,8 +27,8 @@
 
 use compio_postgres::Client;
 use zeroship_migrate::{
-    migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId},
-    provision_migrator, role::deprovision_migrator, Approval, AppliedPlan, BackfillSpec,
+    model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId},
+    provision_migrator, apply::role::deprovision_migrator, Approval, AppliedPlan, BackfillSpec,
     BindValue, DeclarativeApplyError, EngineError, ExecutorConfig, ExpandContractAuthor,
     GuardConfig, MigrationEngine, NotSingleStep, OnlineIntent, PlanStep, RenameStep,
 };
@@ -197,7 +197,7 @@ async fn single_step_ddl_plan_applies_like_a_migration() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("single-step DDL plan applies");
@@ -221,7 +221,7 @@ async fn single_step_ddl_plan_applies_like_a_migration() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("re-run");
@@ -266,7 +266,7 @@ async fn two_ddl_step_plan_applies_in_order() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("two-step plan applies");
@@ -320,7 +320,7 @@ async fn standalone_dml_step_applies_and_is_idempotent() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("ddl + dml plan applies");
@@ -355,7 +355,7 @@ async fn standalone_dml_step_applies_and_is_idempotent() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("re-run dml");
@@ -388,7 +388,7 @@ async fn standalone_dml_step_applies_and_is_idempotent() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("evil bind applies as a literal");
@@ -455,7 +455,7 @@ async fn ddl_backfill_ddl_interleave_applies_in_order() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("ddl->backfill->ddl interleave applies");
@@ -524,7 +524,7 @@ async fn multi_backfill_plan_runs_each_in_order() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("multi-backfill plan applies");
@@ -698,7 +698,7 @@ fn generated_flyway_dirs_always_lower_to_single_step_plans() {
 
 #[compio::test]
 async fn golden_trace_declarative_refusal_and_idempotent_reapply() {
-    use zeroship_migrate::author::{AuthorRequest, Column, DeterministicAuthor, MigrationAuthor};
+    use zeroship_migrate::plan::author::{AuthorRequest, Column, DeterministicAuthor, MigrationAuthor};
 
     let conn = pg().await;
     let cfg = cfg_for(&token());
@@ -863,7 +863,7 @@ async fn apply_whole(conn: &Client, cfg: &ExecutorConfig, steps: &[PlanStep]) ->
             &zeroship_migrate::PostgresBackend::new(conn),
             cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .is_ok()
@@ -1050,7 +1050,7 @@ async fn destructive_dml_is_refused_without_approval_and_applies_nothing() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("additive create applies");
@@ -1073,7 +1073,7 @@ async fn destructive_dml_is_refused_without_approval_and_applies_nothing() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await;
     assert!(
@@ -1104,7 +1104,7 @@ async fn destructive_dml_is_refused_without_approval_and_applies_nothing() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("destructive DML applies under approval");
@@ -1164,7 +1164,7 @@ async fn run_dml_step_seam_refuses_destructive_dml_without_approval() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("additive create applies");
@@ -1187,7 +1187,7 @@ async fn run_dml_step_seam_refuses_destructive_dml_without_approval() {
             Approval::None,
             &zeroship_migrate::ApprovalScope::All,
             "app_test",
-            zeroship_migrate::executor::LockMode::AlreadyHeld,
+            zeroship_migrate::apply::executor::LockMode::AlreadyHeld,
         )
         .await;
     assert!(
@@ -1221,7 +1221,7 @@ async fn run_dml_step_seam_refuses_destructive_dml_without_approval() {
             Approval::Approved,
             &zeroship_migrate::ApprovalScope::All,
             "app_test",
-            zeroship_migrate::executor::LockMode::AlreadyHeld,
+            zeroship_migrate::apply::executor::LockMode::AlreadyHeld,
         )
         .await
         .expect("the seam applies a destructive DML under approval");
@@ -1282,7 +1282,7 @@ async fn run_dml_step_seam_refuses_destructive_dml_outside_version_scope() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("additive create applies");
@@ -1306,7 +1306,7 @@ async fn run_dml_step_seam_refuses_destructive_dml_outside_version_scope() {
             Approval::Approved,
             &ApprovalScope::Versions(std::collections::BTreeSet::new()),
             "app_test",
-            zeroship_migrate::executor::LockMode::AlreadyHeld,
+            zeroship_migrate::apply::executor::LockMode::AlreadyHeld,
         )
         .await;
     assert!(
@@ -1349,7 +1349,7 @@ async fn run_dml_step_seam_refuses_destructive_dml_outside_version_scope() {
             Approval::Approved,
             &ApprovalScope::Versions(admitted),
             "app_test",
-            zeroship_migrate::executor::LockMode::AlreadyHeld,
+            zeroship_migrate::apply::executor::LockMode::AlreadyHeld,
         )
         .await
         .expect("the seam applies a destructive DML whose version is in scope");
@@ -1403,7 +1403,7 @@ async fn dml_first_plan_holds_the_project_lock_for_the_whole_deploy() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("create target table");
@@ -1451,7 +1451,7 @@ async fn dml_first_plan_holds_the_project_lock_for_the_whole_deploy() {
                 &zeroship_migrate::PostgresBackend::new(&c3),
                 &cfg_owned,
                 "app_test",
-                zeroship_migrate::executor::LockMode::Acquire,
+                zeroship_migrate::apply::executor::LockMode::Acquire,
             )
             .await
             .expect("dml-first deploy eventually applies");
@@ -1576,7 +1576,7 @@ async fn apply_plan_online_rename_defers_contract_to_pending_contract() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("create users");
@@ -1603,7 +1603,7 @@ async fn apply_plan_online_rename_defers_contract_to_pending_contract() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("online rename expand applies via apply_plan");
@@ -1663,7 +1663,7 @@ async fn apply_plan_online_rename_defers_contract_to_pending_contract() {
 // `owner_app`.
 //
 // Pre-fix, `apply_dml_transactional` hard-coded `owner_app:
-// crate::loader::PLATFORM_OWNER_APP` in the journal `ChecksumInput` regardless of
+// crate::plan::loader::PLATFORM_OWNER_APP` in the journal `ChecksumInput` regardless of
 // the step's actual declaring app, so two DML steps with an IDENTICAL
 // `(template, binds)` authored by DIFFERENT `owner_app`s hashed to the SAME
 // journal checksum — wrong multi-tenant identity/attribution (the hole PR6a's
@@ -1739,7 +1739,7 @@ async fn dml_journal_checksum_binds_the_declaring_owner_app() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "deployer",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("both DML steps apply");
@@ -1767,7 +1767,7 @@ async fn dml_journal_checksum_binds_the_declaring_owner_app() {
 // (`apply_with_lock_backend` → `apply_locked` → `ensure_journal`). So a
 // standalone plan whose FIRST step is `Dml`/`Backfill`/`OnlineRename`, applied
 // against a FRESH DB with NO journal, made its first journal touch a READ
-// (`journal::applied` SELECT on a non-existent meta schema) → "relation does not
+// (`apply::journal::applied` SELECT on a non-existent meta schema) → "relation does not
 // exist". The shipped declarative path always ran a DDL batch first so it never
 // hit this, but `apply_plan` is public API PR1/PR6a consume with exactly these
 // net-new Dml-first shapes.
@@ -1814,7 +1814,7 @@ async fn dml_first_plan_against_fresh_db_bootstraps_the_journal() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("a Dml-first plan against a fresh DB must bootstrap the journal up front");
@@ -1846,7 +1846,7 @@ async fn engine_apply_create(conn: &Client, cfg: &ExecutorConfig, s: &str) {
             &zeroship_migrate::PostgresBackend::new(conn),
             cfg,
             "deployer",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("create target table");

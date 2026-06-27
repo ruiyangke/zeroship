@@ -19,11 +19,11 @@
 use std::collections::HashMap;
 
 use compio_postgres::Client;
-use zeroship_migrate::executor::{RollbackRequest, RollbackTarget};
+use zeroship_migrate::apply::executor::{RollbackRequest, RollbackTarget};
 use zeroship_migrate::{
     PostgresBackend,
     desired_snapshot, diff_snapshots, history, migrator_role_name, provision_migrator,
-    role::deprovision_migrator, snapshot_schema, squash, status, Approval, Checksum, ChecksumInput,
+    apply::role::deprovision_migrator, snapshot_schema, squash, status, Approval, Checksum, ChecksumInput,
     CollectionDescriptor, DeclarativeApplyError, EngineError, ExecutorConfig, FieldDescriptor,
     GuardConfig, HistoryKind, Migration, MigrationEngine, MigrationFlags, MigrationId, RawSqlAuthor,
     RenameHint, SchemaSnapshot, ShadowConfig,

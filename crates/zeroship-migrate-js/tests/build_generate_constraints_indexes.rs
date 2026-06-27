@@ -18,7 +18,7 @@
 //!     constraint, the three system-field indexes) are SKIPPED (the CREATE-TABLE
 //!     lowering injects them) — they are never re-emitted nor flagged.
 
-use zeroship_migrate::declarative::DesiredSchema;
+use zeroship_migrate::render::declarative::DesiredSchema;
 use zeroship_migrate::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot};
 use zeroship_migrate_js::{generate_ops, ScaffoldError};
 
@@ -70,7 +70,7 @@ fn generate_synthesizes_plain_user_index() {
 
     let gen = generate_ops("add_members", APP, &desired, &live).expect("generate");
 
-    use zeroship_migrate::ir::Op;
+    use zeroship_migrate::model::ir::Op;
     let create_indexes: Vec<_> = gen
         .ir
         .ops
@@ -189,7 +189,7 @@ fn generate_plain_table_still_works() {
     let live = SchemaSnapshot::default();
     let gen = generate_ops("add_widgets", APP, &desired, &live).expect("generate");
     assert!(!gen.is_empty);
-    use zeroship_migrate::ir::Op;
+    use zeroship_migrate::model::ir::Op;
     // Exactly ONE createTable, NO standalone createIndex (pkey skipped).
     assert_eq!(
         gen.ir.ops.iter().filter(|o| matches!(o, Op::CreateIndex { .. })).count(),

@@ -27,11 +27,11 @@
 
 use compio_postgres::Client;
 use zeroship_migrate::{ColumnSnapshot, TableSnapshot};
-use zeroship_migrate::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
-use zeroship_migrate::ir_author::{IrAuthor, LiveSchema};
+use zeroship_migrate::model::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
+use zeroship_migrate::render::lower::{IrAuthor, LiveSchema};
 use zeroship_migrate::{PlanStep, RenameStep};
 use zeroship_migrate::{
-    provision_migrator, role::deprovision_migrator, Approval, ExecutorConfig, ExpandContractPlan,
+    provision_migrator, apply::role::deprovision_migrator, Approval, ExecutorConfig, ExpandContractPlan,
     MigrationBackend, MigrationEngine, PendingContractRecord, PostgresBackend, SqlDialect,
 };
 
@@ -185,7 +185,7 @@ fn relower_plan_version(
     to: &str,
     ty: ColType,
     live: &LiveSchema,
-) -> zeroship_migrate::migration::MigrationId {
+) -> zeroship_migrate::model::migration::MigrationId {
     let author = IrAuthor::new(cfg.project_schema.clone(), "app_test", SqlDialect::Postgres);
     let ir = rename_ir(table, from, to, ty);
     author.lower_plan(&ir, live).expect("PG rename re-lowers").version
@@ -194,26 +194,26 @@ fn relower_plan_version(
 /// Build the `members(id, email)` table + seed, via a plain Ddl plan.
 async fn create_members(engine: &MigrationEngine, be: &PostgresBackend<'_>, cfg: &ExecutorConfig) {
     let s = q(&cfg.project_schema);
-    let m = zeroship_migrate::migration::Migration {
-        version: zeroship_migrate::migration::MigrationId::generate(),
+    let m = zeroship_migrate::model::migration::Migration {
+        version: zeroship_migrate::model::migration::MigrationId::generate(),
         name: "create_members".into(),
         up: format!(
             "CREATE TABLE {s}.members (id bigint PRIMARY KEY, email text); \
              INSERT INTO {s}.members (id, email) VALUES (1,'ada@x.test'),(2,'gr@x.test')"
         ),
         down: None,
-        checksum: zeroship_migrate::migration::Checksum::of(
-            &zeroship_migrate::migration::ChecksumInput {
+        checksum: zeroship_migrate::model::migration::Checksum::of(
+            &zeroship_migrate::model::migration::ChecksumInput {
                 up: "create_members",
                 down: None,
-                flags: &zeroship_migrate::migration::MigrationFlags::default(),
+                flags: &zeroship_migrate::model::migration::MigrationFlags::default(),
                 owner_app: "app_test",
                 depends_on: &[],
                 supersedes: &[],
                 preconditions: &[],
             },
         ),
-        flags: zeroship_migrate::migration::MigrationFlags::default(),
+        flags: zeroship_migrate::model::migration::MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: vec![],
         supersedes: vec![],
@@ -227,7 +227,7 @@ async fn create_members(engine: &MigrationEngine, be: &PostgresBackend<'_>, cfg:
             be,
             cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("create members");
@@ -250,7 +250,7 @@ async fn expand_email_rename(
             be,
             cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("expand applies");
@@ -261,23 +261,23 @@ async fn expand_email_rename(
 /// so the engine interlock sees the table as touched even for plain DDL).
 fn addcolumn_step(cfg: &ExecutorConfig, table: &str, column: &str) -> (PlanStep, Vec<String>) {
     let s = q(&cfg.project_schema);
-    let m = zeroship_migrate::migration::Migration {
-        version: zeroship_migrate::migration::MigrationId::generate(),
+    let m = zeroship_migrate::model::migration::Migration {
+        version: zeroship_migrate::model::migration::MigrationId::generate(),
         name: format!("add_{column}"),
         up: format!("ALTER TABLE {s}.{table} ADD COLUMN {column} text"),
         down: None,
-        checksum: zeroship_migrate::migration::Checksum::of(
-            &zeroship_migrate::migration::ChecksumInput {
+        checksum: zeroship_migrate::model::migration::Checksum::of(
+            &zeroship_migrate::model::migration::ChecksumInput {
                 up: "addcol",
                 down: None,
-                flags: &zeroship_migrate::migration::MigrationFlags::default(),
+                flags: &zeroship_migrate::model::migration::MigrationFlags::default(),
                 owner_app: "app_test",
                 depends_on: &[],
                 supersedes: &[],
                 preconditions: &[],
             },
         ),
-        flags: zeroship_migrate::migration::MigrationFlags::default(),
+        flags: zeroship_migrate::model::migration::MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: vec![],
         supersedes: vec![],
@@ -351,7 +351,7 @@ async fn deploy_touching_pending_table_is_refused_with_executable_payload() {
             &be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect_err("a deploy touching the pending table must be refused");
@@ -404,7 +404,7 @@ async fn second_rename_on_pending_table_is_refused() {
             &be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect_err("a second rename on the pending table must be refused");
@@ -459,7 +459,7 @@ async fn re_running_expand_is_a_noop_no_duplicate_obligation() {
             &be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("re-run expand is a no-op");
@@ -504,9 +504,9 @@ async fn lowering_same_ir_bytes_twice_is_byte_identical() {
     let bytes = serde_json::to_string(&ir).expect("serialize IR");
 
     let load_lower = |b: &str| -> (
-        zeroship_migrate::migration::MigrationId,
+        zeroship_migrate::model::migration::MigrationId,
         Vec<String>,
-        zeroship_migrate::migration::MigrationId,
+        zeroship_migrate::model::migration::MigrationId,
     ) {
         let ir: MigrationIr = serde_json::from_str(b).expect("load IR");
         let author = IrAuthor::new(cfg.project_schema.clone(), "app_test", SqlDialect::Postgres);
@@ -551,7 +551,7 @@ async fn contract_apply_discharges_obligation_and_clears_the_table() {
             &be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("contract applies and discharges");
@@ -592,7 +592,7 @@ async fn contract_apply_discharges_obligation_and_clears_the_table() {
             &be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("a later op on the cleared table is no longer refused");
@@ -655,23 +655,23 @@ async fn orphaned_pending_contract_is_surfaced_by_status_as_distinct_state() {
     // plan-level set never carries) — every healthy in-flight rename looked
     // orphaned. We assert with the re-lowered plan version (a faithful supplied
     // entry), proving the fix keys on the identity the real set exposes.
-    let present = zeroship_migrate::migration::Migration {
+    let present = zeroship_migrate::model::migration::Migration {
         version: plan_version.clone(),
         name: "rename_email_to_email_address".into(),
         up: "SELECT 1".into(),
         down: None,
-        checksum: zeroship_migrate::migration::Checksum::of(
-            &zeroship_migrate::migration::ChecksumInput {
+        checksum: zeroship_migrate::model::migration::Checksum::of(
+            &zeroship_migrate::model::migration::ChecksumInput {
                 up: "x",
                 down: None,
-                flags: &zeroship_migrate::migration::MigrationFlags::default(),
+                flags: &zeroship_migrate::model::migration::MigrationFlags::default(),
                 owner_app: "app_test",
                 depends_on: &[],
                 supersedes: &[],
                 preconditions: &[],
             },
         ),
-        flags: zeroship_migrate::migration::MigrationFlags::default(),
+        flags: zeroship_migrate::model::migration::MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: vec![],
         supersedes: vec![],
@@ -714,23 +714,23 @@ async fn dependent_plan_blocks_on_a_pending_contract_dependency() {
         relower_plan_version(&cfg, "members", "email", "email_address", ColType::Text, &live);
 
     // Plan B declares depends_on: [A's PLAN version] (A = the pending online rename).
-    let b = zeroship_migrate::migration::Migration {
-        version: zeroship_migrate::migration::MigrationId::generate(),
+    let b = zeroship_migrate::model::migration::Migration {
+        version: zeroship_migrate::model::migration::MigrationId::generate(),
         name: "plan_b".into(),
         up: "SELECT 1".into(),
         down: None,
-        checksum: zeroship_migrate::migration::Checksum::of(
-            &zeroship_migrate::migration::ChecksumInput {
+        checksum: zeroship_migrate::model::migration::Checksum::of(
+            &zeroship_migrate::model::migration::ChecksumInput {
                 up: "b",
                 down: None,
-                flags: &zeroship_migrate::migration::MigrationFlags::default(),
+                flags: &zeroship_migrate::model::migration::MigrationFlags::default(),
                 owner_app: "app_test",
                 depends_on: std::slice::from_ref(&a_plan_version),
                 supersedes: &[],
                 preconditions: &[],
             },
         ),
-        flags: zeroship_migrate::migration::MigrationFlags::default(),
+        flags: zeroship_migrate::model::migration::MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: vec![a_plan_version.clone()],
         supersedes: vec![],
@@ -768,7 +768,7 @@ async fn dependent_plan_blocks_on_a_pending_contract_dependency() {
             &be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("A's contract applies");
@@ -809,7 +809,7 @@ async fn deploy_touching_unrelated_table_proceeds() {
             &be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("an unrelated-table deploy proceeds despite the pending contract");
@@ -864,7 +864,7 @@ async fn dependent_plan_on_different_table_is_refused_at_apply() {
             &be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect_err("B depends_on A (pending) must be REFUSED at apply, even on a different table");
@@ -897,7 +897,7 @@ async fn dependent_plan_on_different_table_is_refused_at_apply() {
             &be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("A's contract applies");
@@ -910,7 +910,7 @@ async fn dependent_plan_on_different_table_is_refused_at_apply() {
             &be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("after A's contract, B unblocks and applies (roll-forward)");
@@ -998,23 +998,23 @@ async fn bare_name_dropindex_on_pending_table_is_refused() {
     // The drop step (a plain Ddl; the actual SQL is irrelevant — the refusal fires
     // on the touched-set before any apply). Feed the RESOLVED touched-set.
     let drop_step = {
-        let m = zeroship_migrate::migration::Migration {
-            version: zeroship_migrate::migration::MigrationId::generate(),
+        let m = zeroship_migrate::model::migration::Migration {
+            version: zeroship_migrate::model::migration::MigrationId::generate(),
             name: "drop_idx".into(),
             up: format!("DROP INDEX {s}.idx_members_email"),
             down: None,
-            checksum: zeroship_migrate::migration::Checksum::of(
-                &zeroship_migrate::migration::ChecksumInput {
+            checksum: zeroship_migrate::model::migration::Checksum::of(
+                &zeroship_migrate::model::migration::ChecksumInput {
                     up: "dropidx",
                     down: None,
-                    flags: &zeroship_migrate::migration::MigrationFlags::default(),
+                    flags: &zeroship_migrate::model::migration::MigrationFlags::default(),
                     owner_app: "app_test",
                     depends_on: &[],
                     supersedes: &[],
                     preconditions: &[],
                 },
             ),
-            flags: zeroship_migrate::migration::MigrationFlags::default(),
+            flags: zeroship_migrate::model::migration::MigrationFlags::default(),
             owner_app: "app_test".into(),
             depends_on: vec![],
             supersedes: vec![],
@@ -1031,7 +1031,7 @@ async fn bare_name_dropindex_on_pending_table_is_refused() {
             &be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect_err("a bare-name dropIndex on the pending table must be refused");
@@ -1119,7 +1119,7 @@ async fn pr9e_obligation_and_marker_commit_atomically() {
         .expect("bootstrap journal");
 
     let contract_versions = vec!["c1".to_string(), "c2".to_string()];
-    let scope = zeroship_migrate::journal::DeployRecoveryScope { deploy_id: "dep_pr9e_1" };
+    let scope = zeroship_migrate::apply::journal::DeployRecoveryScope { deploy_id: "dep_pr9e_1" };
     be.pending_contracts()
         .expect("Postgres pending-contract capability")
         .record_pending_contract_with_recovery(
@@ -1168,7 +1168,7 @@ async fn pr9e_combined_write_failure_rolls_back_both_rows() {
         .expect("drop recovery table to force the marker INSERT to fail");
 
     let contract_versions = vec!["c1".to_string()];
-    let scope = zeroship_migrate::journal::DeployRecoveryScope { deploy_id: "dep_pr9e_2" };
+    let scope = zeroship_migrate::apply::journal::DeployRecoveryScope { deploy_id: "dep_pr9e_2" };
     let err = be
         .pending_contracts()
         .expect("Postgres pending-contract capability")

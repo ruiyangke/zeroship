@@ -4,9 +4,9 @@
 //! functions, extensions, schemas, the gated raw escape) are gated NOT
 //! by a hard-coded "platform" profile name but by a **composition of boolean
 //! capability flags** + a schema allowlist. A vendor op declares the closed set of
-//! [`VendorCapability`] values it needs ([`crate::ir::Op::vendor_capabilities`]); the active
+//! [`VendorCapability`] values it needs ([`crate::model::ir::Op::vendor_capabilities`]); the active
 //! [`VendorCapabilities`] set either grants them (the op lowers) or REFUSES it
-//! fail-closed at validate ([`crate::validate`]) AND again at lower (the rendered
+//! fail-closed at validate ([`crate::model::validate`]) AND again at lower (the rendered
 //! SQL hits the Confined deny-list, §3.2 gate 2).
 //!
 //! # Why flags, not a profile name
@@ -24,9 +24,43 @@
 
 use crate::model::policy::{SchemaScope, TrustProfile};
 
+/// A zero-sized operator capability token.
+///
+/// The token type lives with the capability model so lower guard/config code can
+/// name it without depending on the operator runner. Production code mints it
+/// through the named seams in this module; command/runner is the only real caller
+/// for operator CLI configs, and the shadow harness uses
+/// [`mint_shadow_operator_capability`] to mirror an already-operator-approved
+/// source config.
+#[derive(Debug, Clone)]
+pub(crate) struct OperatorCapability(());
+
+impl OperatorCapability {
+    /// Crate-private mint. Callers should use the named runner/shadow seams rather
+    /// than minting ad hoc tokens.
+    pub(crate) const fn new() -> Self {
+        Self(())
+    }
+
+    /// **Test-only `pub(crate)` seam.** Lets in-crate tests exercise the
+    /// operator-gated profiles without exposing a production mint to external
+    /// crates.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn for_test() -> Self {
+        Self::new()
+    }
+}
+
+/// Mint an [`OperatorCapability`] for the operator-side shadow dry-run harness.
+#[must_use]
+pub(crate) const fn mint_shadow_operator_capability() -> OperatorCapability {
+    OperatorCapability::new()
+}
+
 /// The CLOSED set of vendor capabilities a privileged op can require (vendor spec
-/// §3.2). Each [`crate::ir::Op`] vendor variant maps to one or more of these via
-/// [`crate::ir::Op::vendor_capabilities`].
+/// §3.2). Each [`crate::model::ir::Op`] vendor variant maps to one or more of these via
+/// [`crate::model::ir::Op::vendor_capabilities`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VendorCapability {
     /// `CREATE/DROP EXTENSION` ([`VendorCapabilities::allow_extension`]).
@@ -224,17 +258,17 @@ impl VendorCapabilities {
     /// `None` maps to the FULL [`operator`](Self::operator) capability set
     /// because `None` is produced EXCLUSIVELY by a **Trusted** `GuardConfig`
     /// (`GuardConfig::schema_scope` returns `None` only for `TrustProfile::Trusted`,
-    /// `guard.rs`), and a Trusted config can be minted ONLY with an
-    /// `OperatorCapability` token inside `platform_runner` — never from a
-    /// creator-reachable path. Every CREATOR entry threads `Some(Single(_))`
+    /// `guard.rs`), and a Trusted config requires an `OperatorCapability` token
+    /// minted through an operator-side named seam — never from a creator-reachable
+    /// path. Every CREATOR entry threads `Some(Single(_))`
     /// explicitly: `IrAuthor::load_and_lower` pins
-    /// `Some(SchemaScope::Single(project_schema))` (`ir_author.rs`), and
+    /// `Some(SchemaScope::Single(project_schema))` (`render::lower`), and
     /// `load_and_lower_guarded` derives the scope from a `GuardConfig::confined`
     /// the submit ingress forces (`submit.rs`) ⇒ `Some(Single)`. So no
     /// creator-reachable call ever passes `None` here.
     ///
     /// This is pinned by an end-to-end test (`vendor_via_creator_load_path_is_denied`
-    /// in `ir_author.rs`): a vendor op loaded through the Confined creator entry is
+    /// in `render::lower`): a vendor op loaded through the Confined creator entry is
     /// refused `VENDOR_OP_DENIED`, proving the creator path's scope is `Single`,
     /// never the `None` that would grant operator caps. A FUTURE caller that
     /// hands `None` to the validate layer for a creator IR would be granting full

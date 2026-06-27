@@ -3,7 +3,8 @@
 //! A migration authored in the JS `op.*` DSL is compiled (in the JS builder) to
 //! a small, dialect-NEUTRAL JSON document — the **`.ir.json`** — whose Rust
 //! mirror is [`MigrationIr`]. The engine loads it, lowers each [`Op`] to dialect
-//! SQL (Wave C), and checksums the canonical op-list ([`Checksum::of_ir`]).
+//! SQL (Wave C), and checksums the canonical op-list
+//! ([`crate::model::migration::Checksum::of_ir`]).
 //!
 //! # Design choices baked into the types
 //!
@@ -13,7 +14,7 @@
 //!   emits directly. See `docs/decisions/2026-06-23-op-ir-serde-repr.md`.
 //! - **All identifier fields are plain `String`** (§3.3): the IR carries NO
 //!   live-schema binding. Validation that those identifiers exist / are safe is
-//!   the apply/render-time structural validator ([`crate::validate`]), not here.
+//!   the apply/render-time structural validator ([`crate::model::validate`]), not here.
 //! - **Raw SQL is admitted only in the three operator-gated islands** (§0.3):
 //!   [`Op::CreateFunction`] carries a PL/pgSQL/SQL `body`, [`Op::PgRaw`] carries a
 //!   last-resort raw statement, and [`ViewQuery::Raw`] carries a read-only raw view
@@ -30,7 +31,8 @@
 //!   This is the cross-impl-determinism contract behind the single-checksum
 //!   invariant (§2.5, spec line 1267): an idiomatic JS `op.*` builder drops an
 //!   unset key (`JSON.stringify` omits `undefined`), so the Rust serialization
-//!   that [`CanonicalOpList::canonical_bytes`] folds into [`Checksum::of_ir`]
+//!   that [`CanonicalOpList::canonical_bytes`] folds into
+//!   [`crate::model::migration::Checksum::of_ir`]
 //!   must produce the SAME omitted-key image — otherwise the identical logical
 //!   migration would hash differently on the two sides. Deserialize still ACCEPTS
 //!   an explicit `null` for an optional (a tolerant input), and it canonicalizes
@@ -50,8 +52,24 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::model::expr::{Expr, SynthFn};
-use crate::model::migration::OnlinePhase;
+#[allow(unused_imports)]
+use crate::model::migration::{Checksum, MigrationFlags, OnlinePhase};
 use crate::model::precondition::PreconditionCheck;
+
+/// Platform-managed system fields injected by the declarative renderer.
+pub const SYSTEM_FIELD_NAMES: [&str; 7] = [
+    "id",
+    "created_at",
+    "updated_at",
+    "created_by",
+    "updated_by",
+    "version",
+    "deleted_at",
+];
+
+#[cfg(doc)]
+#[doc(hidden)]
+fn deny_unknown_fields() {}
 
 /// 2^53 — the boundary of exact integer representation in an IEEE-754 double
 /// (the JS `number` type). An integer with magnitude ≥ this can be silently
@@ -104,7 +122,14 @@ pub struct IrVersionError {
 ///
 /// A JS author carries these as a `number`; `JSON.stringify` of an integer
 /// `>= 2^53` is lossy, so the SAME logical migration would otherwise produce a
-/// different typed value (and a different [`Checksum::of_ir`](crate::migration::Checksum::of_ir))
+#[cfg_attr(
+    doc,
+    doc = "different typed value (and a different [`Checksum::of_ir`](crate::model::migration::Checksum::of_ir))"
+)]
+#[cfg_attr(
+    not(doc),
+    doc = "different typed value (and a different [`Checksum::of_ir`](crate::migration::Checksum::of_ir))"
+)]
 /// on the two sides. Bounding them here closes that cross-impl divergence — and
 /// rejects a hostile `.ir.json` that smuggles an out-of-range count past the
 /// loader BEFORE any checksum runs.
@@ -222,7 +247,7 @@ impl MigrationIr {
     /// Fail-closed `ir_version` bound check (§5.3, design line 888): reject a
     /// FUTURE `ir_version` (`> CURRENT_IR_VERSION`) this engine build cannot
     /// faithfully interpret. The loader's `.ir.json` branch MUST call this AFTER
-    /// deserialize and BEFORE [`Checksum::of_ir`](crate::migration::Checksum::of_ir)
+    /// deserialize and BEFORE [`Checksum::of_ir`](crate::model::migration::Checksum::of_ir)
     /// and `IrAuthor::lower` — a newer-engine artifact is never silently
     /// mis-applied by an older engine.
     ///
@@ -419,7 +444,7 @@ pub enum VectorMetric {
 
 impl VectorMetric {
     /// The SDK `vectorMetric` token (the camelCase spelling
-    /// [`crate::declarative::vector_opclass`] maps to the ivfflat/hnsw opclass).
+    /// `vector_opclass` maps to the ivfflat/hnsw opclass).
     /// Kept in lock-step with the `serde(rename_all = "camelCase")` wire image.
     #[must_use]
     pub fn as_token(self) -> &'static str {
@@ -537,7 +562,14 @@ impl IrClassification {
 /// this facet).
 ///
 /// An ENCRYPTED column's fail-safe auto-mask (`{ full, pii }`) is IMPLIED by the
-/// `ColType::Encrypted` carrier (recovered in [`crate::ir_author::ir_column_to_field`]),
+#[cfg_attr(
+    doc,
+    doc = "`ColType::Encrypted` carrier (recovered in [`crate::render::lower::ir_column_to_field`]),"
+)]
+#[cfg_attr(
+    not(doc),
+    doc = "`ColType::Encrypted` carrier (recovered in [`crate::ir_author::ir_column_to_field`]),"
+)]
 /// so it is NOT carried here; an explicit `.mask()` here OVERRIDES that auto-mask.
 ///
 /// Default-absent + `skip_serializing_if` so a column declaring no mask is
@@ -553,7 +585,7 @@ pub struct IrMask {
 
 impl IrMask {
     /// Convert to the `{ kind, classification }` JSON sub-object that
-    /// [`crate::declarative::field_to_sdk_def`] / the `__zsmask` sentinel codec
+    /// `field_to_sdk_def` / the `__zsmask` sentinel codec
     /// ([`zeroship_schema::query::mask_sentinel_for_field`]) expect on `def.mask`.
     #[must_use]
     pub fn to_sdk_json(self) -> serde_json::Value {
@@ -613,7 +645,14 @@ pub struct IrColumn {
     /// runtime, once P5 deletes the declared-schema cache — keep the typed-id brand.
     /// Default-absent + `skip_serializing_if` so a column that declares no prefix is
     /// BYTE-IDENTICAL on the wire and in the checksum to the pre-P2a image. Bounded
-    /// at validate-time ([`crate::validate`]) to the `typed_id` charset/length + the
+    #[cfg_attr(
+        doc,
+        doc = "at validate-time ([`crate::model::validate`]) to the `typed_id` charset/length + the"
+    )]
+    #[cfg_attr(
+        not(doc),
+        doc = "at validate-time ([`crate::validate`]) to the `typed_id` charset/length + the"
+    )]
     /// reserved-prefix deny-list (a hand-crafted `.ir.json` is the threat model).
     ///
     /// Camel-cased on the wire (`"idPrefix"`) — the op-region nested-field
@@ -1511,7 +1550,14 @@ pub enum OrderItem {
 /// pinned/refused under Confined; §2.7) and, where guardable, an optional
 /// `existence_guard: Option<ExistenceGuard>`. Both are omitted-when-absent on the
 /// wire (`skip_serializing_if = "Option::is_none"`), so they fold into
-/// [`Checksum::of_ir`](crate::migration::Checksum::of_ir) ONLY when present and are
+#[cfg_attr(
+    doc,
+    doc = "[`Checksum::of_ir`](crate::model::migration::Checksum::of_ir) ONLY when present and are"
+)]
+#[cfg_attr(
+    not(doc),
+    doc = "[`Checksum::of_ir`](crate::migration::Checksum::of_ir) ONLY when present and are"
+)]
 /// checksum-neutral when unset — preserving the cross-impl single-checksum invariant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
@@ -2895,7 +2941,7 @@ impl JsonSchema for IrScalar {
 }
 
 /// A borrowed view over a migration's ordered op-list, the input to
-/// [`Checksum::of_ir`](crate::migration::Checksum::of_ir).
+/// [`Checksum::of_ir`](crate::model::migration::Checksum::of_ir).
 ///
 /// Its [`canonical_bytes`](CanonicalOpList::canonical_bytes) method produces the
 /// §2.4-point-2 byte image: each `Op` is serialized to `serde_json::Value`,
@@ -2909,7 +2955,7 @@ pub struct CanonicalOpList<'a>(pub &'a [Op]);
 impl CanonicalOpList<'_> {
     /// The canonical byte image of the op-list region (§2.4 point 2): a u64-BE
     /// op count, then for each op its JCS-encoded UTF-8 bytes, length-prefixed
-    /// with a u64-BE length. Folded by [`Checksum::of_ir`] in place of the
+    /// with a u64-BE length. Folded by [`crate::model::migration::Checksum::of_ir`] in place of the
     /// up/down region.
     ///
     /// # Panics

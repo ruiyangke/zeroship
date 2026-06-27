@@ -19,8 +19,8 @@
 
 use std::path::Path;
 
-use zeroship_migrate::declarative::DesiredSchema;
-use zeroship_migrate::ir::{CanonicalOpList, ColType, Op};
+use zeroship_migrate::model::ir::{CanonicalOpList, ColType, Op};
+use zeroship_migrate::render::declarative::DesiredSchema;
 use zeroship_migrate::{
     Checksum, ColumnSnapshot, MigrationFlags, MigrationIr, SchemaSnapshot, TableSnapshot,
 };

@@ -48,11 +48,12 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use zeroship_migrate::declarative::{
+use zeroship_migrate::apply::drift::snapshot_schema;
+use zeroship_migrate::conn;
+use zeroship_migrate::model::migration::Migration;
+use zeroship_migrate::render::declarative::{
     desired_snapshot, DeclarativeAuthor, DeclarativeError,
 };
-use zeroship_migrate::drift::snapshot_schema;
-use zeroship_migrate::migration::Migration;
 
 use crate::eval::{eval_schema_to_ir, EvalError};
 
@@ -117,7 +118,7 @@ pub async fn generate_migration(
     let desired = desired_snapshot(project_schema, &descriptors)?;
 
     // 3. Introspect the LIVE schema.
-    let client = zeroship_migrate::db::connect(database_url)
+    let client = conn::connect(database_url)
         .await
         .map_err(|e| GenerateError::Db(e.to_string()))?;
     let live = snapshot_schema(&client, project_schema)

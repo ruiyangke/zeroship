@@ -161,7 +161,7 @@ pub fn analyze_migration(migration: &Migration) -> Vec<Advisory> {
 ///
 /// This is the **plan-aware** seam (review finding #8): the per-statement
 /// [`analyze`] only sees one statement and so suppresses `FK_WITHOUT_INDEX` only
-/// for an index in the SAME statement. A [`crate::declarative::DeclarativePlan`]
+/// for an index in the SAME statement. A [`crate::render::declarative::DeclarativePlan`]
 /// aggregates this across *every* migration (plus the desired snapshot) so an FK
 /// whose covering index is created in a SEPARATE migration of the same plan is no
 /// longer flagged. [`analyze`] itself is unchanged — it has no plan view.

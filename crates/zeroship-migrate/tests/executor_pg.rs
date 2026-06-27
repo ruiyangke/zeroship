@@ -13,10 +13,10 @@ use std::time::Duration;
 
 use compio_postgres::Client;
 use zeroship_migrate::{
-    apply, ensure_journal, executor::ApplyError, journal, Approval, ExecutorConfig, Migration,
+    apply, apply::executor::ApplyError, ensure_journal, Approval, ExecutorConfig, Migration,
     MigrationFlags, MigrationId,
 };
-use zeroship_migrate::migration::Checksum;
+use zeroship_migrate::model::migration::Checksum;
 
 const DEFAULT_DSN: &str =
     "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_migrate_test";
@@ -141,7 +141,7 @@ async fn table_exists(conn: &Client, schema: &str, table: &str) -> bool {
 }
 
 async fn journal_count(conn: &Client, cfg: &ExecutorConfig) -> i64 {
-    let entries = journal::applied(conn, cfg).await.expect("read journal");
+    let entries = apply::journal::applied(conn, cfg).await.expect("read journal");
     i64::try_from(entries.len()).unwrap()
 }
 
@@ -225,10 +225,10 @@ async fn journal_is_one_events_table_with_native_pk_order() {
     // the latest event per version. Apply v: an `applied` event; then a `rolled_back`
     // event — net state = pending (no completed entry).
     let v = MigrationId::generate();
-    journal::record_completed(
+    apply::journal::record_completed(
         &conn,
         &cfg,
-        journal::CompletedRecord {
+        apply::journal::CompletedRecord {
             version: v.as_str(),
             name: "n",
             checksum: "c1",
@@ -240,19 +240,19 @@ async fn journal_is_one_events_table_with_native_pk_order() {
     .await
     .expect("applied event");
     // After the applied event, net-state has v as completed.
-    let net = journal::applied(&conn, &cfg).await.expect("applied");
+    let net = apply::journal::applied(&conn, &cfg).await.expect("applied");
     assert!(
-        net.iter().any(|e| e.version == v.as_str() && e.phase == journal::Phase::Completed),
+        net.iter().any(|e| e.version == v.as_str() && e.phase == apply::journal::Phase::Completed),
         "v is net-applied after the applied event"
     );
 
-    journal::record_rolled_back(&conn, &cfg, v.as_str(), "n", "c1", "actor", 2)
+    apply::journal::record_rolled_back(&conn, &cfg, v.as_str(), "n", "c1", "actor", 2)
         .await
         .expect("rolled_back event");
     // The latest event (rolled_back) wins → v is NOT net-applied.
-    let net = journal::applied(&conn, &cfg).await.expect("applied after rollback");
+    let net = apply::journal::applied(&conn, &cfg).await.expect("applied after rollback");
     assert!(
-        !net.iter().any(|e| e.version == v.as_str() && e.phase == journal::Phase::Completed),
+        !net.iter().any(|e| e.version == v.as_str() && e.phase == apply::journal::Phase::Completed),
         "the latest event (rolled_back) wins → v is pending again (net-state preserved)"
     );
 
@@ -297,10 +297,10 @@ async fn journal_bootstrap_is_idempotent() {
 
     ensure_journal(&conn, &cfg).await.expect("first bootstrap");
     // Seed a row so we can prove re-bootstrap does not wipe it.
-    journal::record_completed(
+    apply::journal::record_completed(
         &conn,
         &cfg,
-        journal::CompletedRecord {
+        apply::journal::CompletedRecord {
             version: "mig_keepit",
             name: "keep",
             checksum: "deadbeef",
@@ -331,10 +331,10 @@ async fn journal_immutability_trigger_rejects_update_and_delete() {
     drop_schemas(&conn, &cfg).await;
     ensure_journal(&conn, &cfg).await.expect("bootstrap");
 
-    journal::record_completed(
+    apply::journal::record_completed(
         &conn,
         &cfg,
-        journal::CompletedRecord {
+        apply::journal::CompletedRecord {
             version: "mig_immut",
             name: "n",
             checksum: "csum",
@@ -382,10 +382,10 @@ async fn journal_immutability_trigger_rejects_truncate() {
     drop_schemas(&conn, &cfg).await;
     ensure_journal(&conn, &cfg).await.expect("bootstrap");
 
-    journal::record_completed(
+    apply::journal::record_completed(
         &conn,
         &cfg,
-        journal::CompletedRecord {
+        apply::journal::CompletedRecord {
             version: "mig_trunc",
             name: "n",
             checksum: "csum",
@@ -737,7 +737,7 @@ async fn non_transactional_recovers_from_crashed_started_marker() {
     ))
     .await
     .expect("mark index invalid");
-    journal::record_started(
+    apply::journal::record_started(
         &conn,
         &cfg,
         m.version.as_str(),
@@ -826,7 +826,7 @@ async fn m2_non_txn_recovery_rearms_inflight_marker_before_rerun() {
 
     // Seed a lone `started` marker (no completed row) → the apply takes the
     // recovery path (`had_inflight = true`).
-    journal::record_started(
+    apply::journal::record_started(
         &conn,
         &cfg,
         m.version.as_str(),
@@ -865,7 +865,7 @@ async fn m2_non_txn_recovery_rearms_inflight_marker_before_rerun() {
          (M2) so a second crash re-enters recovery; pre-fix it was lost"
     );
     // And no COMPLETED row was journaled (the up failed). We query the completed
-    // table directly — `journal::applied` deliberately surfaces the lone `started`
+    // table directly — `apply::journal::applied` deliberately surfaces the lone `started`
     // inflight marker as an entry too, so it cannot distinguish a re-armed marker
     // from a completed row.
     let completed = conn
@@ -938,7 +938,7 @@ async fn recovery_does_not_drop_unrelated_invalid_index() {
     ))
     .await
     .expect("mark both invalid");
-    journal::record_started(
+    apply::journal::record_started(
         &conn,
         &cfg,
         m.version.as_str(),
@@ -1140,7 +1140,7 @@ async fn c1_non_txn_recovery_idempotent_for_valid_index_and_lone_started_marker(
     ))
     .await
     .expect("create valid index");
-    journal::record_started(
+    apply::journal::record_started(
         &conn,
         &cfg,
         m.version.as_str(),
@@ -1207,7 +1207,7 @@ async fn c2_non_txn_recovery_idempotent_for_alter_type_add_value() {
     ))
     .await
     .expect("add enum value");
-    journal::record_started(
+    apply::journal::record_started(
         &conn,
         &cfg,
         m.version.as_str(),
@@ -1342,7 +1342,7 @@ async fn nontxn_bare_dml_is_rejected_and_recovery_cannot_double_apply() {
     ))
     .await
     .expect("simulate the committed (pre-crash) insert");
-    journal::record_started(
+    apply::journal::record_started(
         &conn,
         &cfg,
         m.version.as_str(),
@@ -1617,7 +1617,7 @@ async fn executor_apply_refuses_destructive_batch_without_approval() {
 
 #[compio::test]
 async fn executor_rollback_refuses_without_approval() {
-    use zeroship_migrate::executor::{rollback, RollbackError, RollbackRequest, RollbackTarget};
+    use zeroship_migrate::apply::executor::{rollback, RollbackError, RollbackRequest, RollbackTarget};
 
     let conn = pg().await;
     let tok = token();
@@ -1706,7 +1706,7 @@ async fn ensure_journal_and_apply_under_hyphenated_uuid_schema() {
         "table created in the hyphenated per-app schema"
     );
     assert_eq!(
-        journal::applied_count(&conn, &cfg).await.expect("applied_count"),
+        apply::journal::applied_count(&conn, &cfg).await.expect("applied_count"),
         1,
         "the migration is journaled in the hyphenated meta schema"
     );

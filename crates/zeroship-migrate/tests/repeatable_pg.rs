@@ -9,9 +9,9 @@
 //! the test runbook). Each test runs in its own meta + project schema.
 
 use compio_postgres::Client;
-use zeroship_migrate::migration::Checksum;
+use zeroship_migrate::model::migration::Checksum;
 use zeroship_migrate::{
-    apply, check_checksum_drift, executor::ApplyError, Approval, ExecutorConfig, Migration,
+    apply, check_checksum_drift, apply::executor::ApplyError, Approval, ExecutorConfig, Migration,
     MigrationFlags, MigrationId,
 };
 
@@ -341,7 +341,7 @@ async fn repeatables_run_after_versioned_pending() {
 /// kind-mismatch tamper.
 #[compio::test]
 async fn classified_non_transactional_repeatable_is_journaled_repeatable_and_redeploys_clean() {
-    use zeroship_migrate::loader::load_dir_migrations;
+    use zeroship_migrate::plan::loader::load_dir_migrations;
 
     let conn = pg().await;
     let tok = token();
@@ -674,7 +674,7 @@ async fn repeatable_cross_schema_up_is_guard_denied() {
     );
 
     // Nothing journaled (the denial fires before any execution).
-    let applied = zeroship_migrate::journal::applied(&conn, &cfg)
+    let applied = zeroship_migrate::apply::journal::applied(&conn, &cfg)
         .await
         .unwrap_or_default();
     assert!(applied.is_empty(), "a guard-denied repeatable journals nothing");
@@ -715,7 +715,7 @@ async fn repeatable_with_supersedes_is_rejected() {
     );
 
     // Nothing journaled — the rejection precedes any execution.
-    let applied = zeroship_migrate::journal::applied(&conn, &cfg)
+    let applied = zeroship_migrate::apply::journal::applied(&conn, &cfg)
         .await
         .unwrap_or_default();
     assert!(applied.is_empty(), "a rejected malformed set journals nothing");
@@ -807,7 +807,7 @@ async fn repeatable_with_down_is_rejected() {
 /// re-applied on EVERY load (accruing a phantom journal event each time).
 #[compio::test]
 async fn loaded_repeatable_is_stable_across_reloads() {
-    use zeroship_migrate::loader::load_dir_migrations;
+    use zeroship_migrate::plan::loader::load_dir_migrations;
 
     let conn = pg().await;
     let tok = token();

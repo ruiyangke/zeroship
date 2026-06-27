@@ -5,18 +5,18 @@
 //! vendor renderer, and the current IR version did not exist), per
 //! `feedback_regression_test_per_fix`.
 
-use zeroship_migrate::capability::{VendorCapabilities, VendorCapability};
-use zeroship_migrate::expr::{CastTarget, Expr, ScalarFn};
-use zeroship_migrate::ir::{
+use zeroship_migrate::model::capability::{VendorCapabilities, VendorCapability};
+use zeroship_migrate::model::expr::{CastTarget, Expr, ScalarFn};
+use zeroship_migrate::model::ir::{
     CanonicalOpList, ForEach, FuncLanguage, GrantTarget, IrScalar, MigrationIr, Op, PolicyCmd,
     Privilege, RaiseLevel, TriggerAction, TriggerEvent, TriggerStmt, TriggerTiming,
     CURRENT_IR_VERSION,
 };
-use zeroship_migrate::validate::{
+use zeroship_migrate::model::validate::{
     validate_ir_scoped, Dialect, CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
 };
 use zeroship_migrate::SchemaScope;
-use zeroship_migrate::vendor::render_vendor_op;
+use zeroship_migrate::render::vendor::render_vendor_op;
 use zeroship_migrate::{Checksum, GuardConfig, IrAuthor, LiveSchema, MigrationFlags, SqlDialect};
 
 const SCHEMA: &str = "zeroship";
@@ -128,7 +128,7 @@ fn render_enable_rls() {
 fn render_create_policy_with_closed_predicate() {
     // app_id = current_setting('zeroship.tenant_app', true)::text  (the 0025 shape).
     let predicate = Expr::BinOp {
-        op: zeroship_migrate::expr::BinaryOp::Eq,
+        op: zeroship_migrate::model::expr::BinaryOp::Eq,
         lhs: Box::new(Expr::col("app_id")),
         rhs: Box::new(Expr::Cast {
             operand: Box::new(Expr::FnCall {
@@ -293,7 +293,7 @@ fn pg_body_trigger_lower_refuses_with_trigger_body_kind() {
         .lower(&ir, &LiveSchema::default())
         .expect_err("PG Body trigger must fail closed at lower");
     match err {
-        zeroship_migrate::ir_author::IrLowerError::TriggerUnsupported { kind, dialect } => {
+        zeroship_migrate::render::lower::IrLowerError::TriggerUnsupported { kind, dialect } => {
             assert_eq!(kind, "triggerBody");
             assert_eq!(dialect, SqlDialect::Postgres);
         }

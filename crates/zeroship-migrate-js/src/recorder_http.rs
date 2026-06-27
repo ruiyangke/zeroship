@@ -253,7 +253,7 @@ fn checksum_of_ir_envelope(ir_json: &str) -> Result<String, String> {
         #[serde(default)]
         ir: Option<serde_json::Value>,
     }
-    use zeroship_migrate::ir::CanonicalOpList;
+    use zeroship_migrate::model::ir::CanonicalOpList;
     use zeroship_migrate::{Checksum, MigrationFlags, MigrationIr};
 
     let env: Env = serde_json::from_str(ir_json).map_err(|e| e.to_string())?;

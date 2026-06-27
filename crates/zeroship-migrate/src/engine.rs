@@ -1,23 +1,23 @@
 //! The public `MigrationEngine` API — `plan` (lint/preview) → `gate` (approval)
-//! → [`executor::apply`](crate::executor::apply) (guard + role) (design §3 / §1.6).
+//! → [`executor::apply`](crate::apply::executor::apply) (guard + role) (design §3 / §1.6).
 //!
 //! This is the surface a caller (control plane / CLI / builder) drives. The
 //! pieces beneath it — the [`SqlGuard`](crate::guard::SqlGuard), the Postgres
-//! [`apply`](crate::executor::apply) flow, the least-privilege
-//! [`migrator` role](crate::role) — are already built; the engine *composes*
+//! [`apply`](crate::apply::executor::apply) flow, the least-privilege
+//! [`migrator` role](crate::apply::role) — are already built; the engine *composes*
 //! them into the documented pipeline:
 //!
-//! 1. an **author** (see [`crate::author`]) produces the [`Migration`]s;
+//! 1. an **author** (see [`crate::plan::author`]) produces the [`Migration`]s;
 //! 2. [`MigrationEngine::plan`] runs the guard over every migration **read-only**
 //!    (no DB) and returns a [`MigrationPlan`] — the dry-run / preview (scenario
 //!    45): which migrations are destructive, which require approval, and which
 //!    are *denied* (un-appliable);
 //! 3. [`MigrationEngine::apply`] is the **gate**: it refuses a plan with any
 //!    denial, refuses a destructive plan without explicit [`Approval::Approved`],
-//!    and otherwise delegates to [`executor::apply`](crate::executor::apply).
+//!    and otherwise delegates to [`executor::apply`](crate::apply::executor::apply).
 //!
 //! **Defense in depth — the gate is additional, not a replacement.**
-//! [`executor::apply`](crate::executor::apply) *re-runs* the guard over every
+//! [`executor::apply`](crate::apply::executor::apply) *re-runs* the guard over every
 //! pending `up` and runs the DDL under the least-privilege `migrator` role
 //! (lines 1 & 2 of §1). The engine gate is a third check layered in front: even
 //! if a caller hand-built a plan, the executor still independently denies the
@@ -131,14 +131,14 @@ pub enum EngineError {
     /// from relative to the trusted [`ManifestHash`] stamped at build/review time.
     /// Refused by [`MigrationEngine::apply_verified`] **before** the advisory lock
     /// or any DDL: NOTHING was applied. Carries the
-    /// [`ManifestError`](crate::manifest::ManifestError) diagnostic.
+    /// [`ManifestError`](crate::plan::manifest::ManifestError) diagnostic.
     #[error(transparent)]
     Manifest(#[from] ManifestError),
     /// **Fail-closed cross-deploy pending-contract refusal (§2.0.3 item 2).** The
     /// deploy's op list touches a table with an OUTSTANDING online-rename contract
     /// from a prior deploy. The read-back runs inside the held project lock (so it
     /// is not a TOCTOU, §2.0.3 item 4); the deploy applies NOTHING. Carries the
-    /// structured [`PendingContractRefusal`](crate::pending::PendingContractRefusal)
+    /// structured [`PendingContractRefusal`](crate::plan::pending::PendingContractRefusal)
     /// (§8.8) whose `apply_action` names the exact `migrate resolve-pending --apply`
     /// remedy. The human message is the projection of the payload.
     #[error("{0}")]
@@ -151,7 +151,7 @@ pub enum EngineError {
     /// not cover — the §2.0.4 "double-bind"). The read-back runs inside the held
     /// project lock (so it is not a TOCTOU, §2.0.3 item 4); the deploy applies
     /// NOTHING. Carries the structured
-    /// [`DependencyPendingContract`](crate::pending::DependencyPendingContract)
+    /// [`DependencyPendingContract`](crate::plan::pending::DependencyPendingContract)
     /// (§8.8) whose `remediation` is `apply_dependency_contract`. Roll-forward (not
     /// deadlock): applying A's contract unblocks B.
     #[error("{0}")]
@@ -187,7 +187,7 @@ impl MigrationEngine {
     /// Lint + preview a migration set **read-only** (no DB) — the dry-run /
     /// plan phase (design scenario 45).
     ///
-    /// Runs the [`SqlGuard`] over every migration's `up`. A guard **denial** is
+    /// Runs the [`crate::guard::SqlGuard`] over every migration's `up`. A guard **denial** is
     /// recorded in [`MigrationPlan::denied`] (and the migration is *not* added to
     /// `items`), so a caller sees **every** problem in the set at once rather
     /// than aborting on the first. `destructive` / `requires_approval` are `true`
@@ -243,14 +243,14 @@ impl MigrationEngine {
     /// lint the generated migrations into a [`MigrationPlan`] (v3 Plan A).
     ///
     /// This is the declarative entry point: it runs
-    /// [`DeclarativeAuthor::diff`](crate::declarative::DeclarativeAuthor::diff)
+    /// [`DeclarativeAuthor::diff`](crate::render::declarative::DeclarativeAuthor::diff)
     /// (additive ops + destructive-gated drops, with author-boundary name/type
-    /// validation) and then feeds the result through the EXISTING [`plan`] —
+    /// validation) and then feeds the result through the EXISTING [`plan`](Self::plan) —
     /// so the generated SQL gets the same guard treatment as any other author's
     /// output (no bypass). A destructive drop in the diff makes the plan
     /// `requires_approval`, exactly as a hand-authored drop would.
     ///
-    /// `hints` are the OPT-IN [`RenameHint`](crate::declarative::RenameHint)s
+    /// `hints` are the OPT-IN [`RenameHint`](crate::render::declarative::RenameHint)s
     /// (P3): each routes a hinted drop+add pair through the zero-downtime
     /// expand-contract rename sequence instead of an independent drop + add.
     /// Without a matching hint a drop+add stays two independent ops — the differ
@@ -260,7 +260,7 @@ impl MigrationEngine {
     ///
     /// A hinted rename is NOT folded into the linted plain plan: a rename's
     /// [`ExpandContractPlan`](crate::render::expand_contract::ExpandContractPlan) carries a
-    /// [`BackfillSpec`](crate::render::plan::BackfillSpec) that must run the REAL
+    /// [`BackfillSpec`](crate::model::backfill::BackfillSpec) that must run the REAL
     /// pre-existing-row mirror (see [`run_expand`](Self::run_expand)). Flattening
     /// it through the plain `plan` → `apply` path would discard the backfill and
     /// the contract `DROP COLUMN <from>` would then destroy un-mirrored rows. So
@@ -277,10 +277,10 @@ impl MigrationEngine {
     /// only when `live_ownership` confirms the deploying app owns that table; an
     /// other-owned or ownership-unknown live table being dropped fails closed
     /// (refused) rather than authoring a destructive foreign drop. See
-    /// [`DeclarativeAuthor::diff`](crate::declarative::DeclarativeAuthor::diff).
+    /// [`DeclarativeAuthor::diff`](crate::render::declarative::DeclarativeAuthor::diff).
     ///
     /// # Errors
-    /// [`DeclarativeError`](crate::declarative::DeclarativeError) if the diff
+    /// [`DeclarativeError`](crate::render::declarative::DeclarativeError) if the diff
     /// hits an unsupported op, an unmatched/type-mismatched rename hint, an
     /// invalid descriptor name/type at the author boundary, or a refused drop
     /// (`NotTableOwner` / `DropOfUnownedTable` — fail-closed drop ownership). A
@@ -322,7 +322,7 @@ impl MigrationEngine {
     ///    guard + least-privilege role); then
     /// 2. for each rename, drives the **expand** through
     ///    [`run_expand`](Self::run_expand) — which applies E1 (ADD COLUMN) + E2
-    ///    (dual-write trigger), runs the REAL [`run_backfill`] mirroring every
+    ///    (dual-write trigger), runs the REAL [`run_backfill`](crate::apply::backend::postgres::backfill::run_backfill) mirroring every
     ///    pre-existing `<from>` value into `<to>`, and journals E3 **only after**
     ///    the backfill succeeds (Plan-8 data-integrity ordering); and
     /// 3. collects every rename's **contract** (DROP TRIGGER C1 + DROP COLUMN
@@ -459,7 +459,7 @@ impl MigrationEngine {
     ///
     /// `expected` MUST come from a TRUSTED source (the control plane, stamping at
     /// build / review time and holding it out-of-band), NOT from the same bundle
-    /// the plan arrived in — see [`crate::manifest`]'s trust model and
+    /// the plan arrived in — see [`crate::plan::manifest`]'s trust model and
     /// [`apply_verified`](Self::apply_verified).
     ///
     /// # Errors
@@ -583,13 +583,13 @@ impl MigrationEngine {
     /// IR `op.*` path. It is plan-shape-neutral: it dispatches by step kind,
     /// reusing the existing downstream primitives unchanged as execution
     /// destinations —
-    /// [`apply_with_lock_backend`](crate::executor::apply_with_lock_backend) for
-    /// DDL, [`run_online`](crate::expand_contract::OnlineSchemaChange::run_online)
+    /// [`apply_with_lock_backend`](crate::apply::executor::apply_with_lock_backend) for
+    /// DDL, [`run_online`](crate::apply::backend::OnlineSchemaChange::run_online)
     /// for a PG online rename (with the `pending_contract` partition),
-    /// [`rebuild_one`](crate::backend::MigrationBackend::rebuild_one) for a SQLite
+    /// [`rebuild_one`](crate::apply::backend::MigrationBackend::rebuild_one) for a SQLite
     /// rebuild rename, and the data-step seams
-    /// ([`run_backfill_step`](crate::backend::MigrationBackend::run_backfill_step) /
-    /// [`run_dml_step`](crate::backend::MigrationBackend::run_dml_step)).
+    /// ([`run_backfill_step`](crate::apply::backend::MigrationBackend::run_backfill_step) /
+    /// [`run_dml_step`](crate::apply::backend::MigrationBackend::run_dml_step)).
     ///
     /// # Lock discipline
     /// `lock_mode` is threaded into every sub-batch. The declarative caller holds
@@ -644,7 +644,7 @@ impl MigrationEngine {
     /// As [`apply_plan`](Self::apply_plan), but with the caller-supplied
     /// **touched-table set** for the §2.0.3 cross-deploy pending-contract
     /// interlock. The IR deploy path passes its op-list touched-set
-    /// ([`LoweredArtifact::touched_tables`](crate::ir_author::LoweredArtifact)) so
+    /// ([`LoweredArtifact::touched_tables`](crate::render::lower::LoweredArtifact)) so
     /// the refusal catches ANY op (DDL or DML) touching a table with an
     /// outstanding pending contract — not just the structurally-typed
     /// `OnlineRename` steps. The step-derived set (the `OnlineRename` intent
@@ -783,7 +783,7 @@ impl MigrationEngine {
     /// - its table is EXEMPTED from the touched-table refusal (these drops ARE the
     ///   resolution of that obligation, not a new op fighting it);
     /// - on SUCCESS only, the obligation is discharged by APPENDING a `resolved`
-    ///   row with the supplied [`Resolution`](crate::journal::Resolution)
+    ///   row with the supplied [`Resolution`](crate::apply::journal::Resolution)
     ///   (`applied`/`aborted`) — fail-closed: an apply failure leaves the
     ///   obligation OUTSTANDING (never resolved-but-not-applied).
     ///
@@ -874,7 +874,7 @@ impl MigrationEngine {
     /// For each obligation in `obligations` that is STILL outstanding (read back
     /// under the held lock — so an obligation already discharged by an earlier resume
     /// attempt is skipped, making this idempotent on crash-resume), re-author the
-    /// SHARED abort DDL ([`crate::expand_contract::build_abort_steps`]: C1 drop
+    /// SHARED abort DDL ([`crate::apply::backend::postgres::online::build_abort_steps`]: C1 drop
     /// trigger+fn, then `DROP COLUMN IF EXISTS <to>` — both idempotent) and run it
     /// through [`apply_plan_resolving`](Self::apply_plan_resolving), EXEMPTING the
     /// obligation from the touched-table refusal (its drops ARE its resolution) and
@@ -932,7 +932,10 @@ impl MigrationEngine {
                 // applied it) — nothing to do. Idempotent.
                 continue;
             }
-            let steps = crate::ops::expand_contract::build_abort_steps(&exec_cfg.project_schema, pc)
+            let steps = crate::apply::backend::postgres::online::build_abort_steps(
+                &exec_cfg.project_schema,
+                pc,
+            )
                 .map_err(|e| {
                     DeclarativeApplyError::Plain(EngineError::Apply(ApplyError::Backend(
                         format!("re-author same-deploy abort: {e}"),
@@ -1060,7 +1063,7 @@ impl MigrationEngine {
         // whose Ddl steps actually RUN the real C1 (drop trigger+fn) + C2 (drop column)
         // un-gates the table. The author's `up` text is byte-stable and independent of
         // `owner_app` (it names table/trigger/column only), so an exact string compare
-        // is sound (it mirrors `platform_runner.rs`'s deterministic re-author).
+        // is sound (it mirrors `command::runner`'s deterministic re-author).
         let ddl_up_by_version: std::collections::BTreeMap<&str, &str> = steps
             .iter()
             .filter_map(|s| match s {
@@ -1439,7 +1442,7 @@ impl MigrationEngine {
                     // SUPPLIED set / `depends_on` key on for orphan/blocked (§2.0.3
                     // item 3 / §2.0.4). It is E1's deterministic id (the
                     // `PgExpandContract` plan anchors its plan version on E1, see
-                    // `ir_author::plan_step_version`). Deterministic per rename
+                    // `render::lower::plan_step_version`). Deterministic per rename
                     // (§2.0.1), so a re-lowered IR reproduces it — which is exactly
                     // what `status` re-derives from the supplied set to decide
                     // orphan/present. Fail closed if the author somehow produced an
@@ -1619,7 +1622,7 @@ impl MigrationEngine {
     ///    (never apply — a denied batch applies *nothing*);
     /// 2. if [`MigrationPlan::requires_approval`] and `approval != Approved` ⇒
     ///    [`EngineError::ApprovalRequired`] (nothing applied);
-    /// 3. otherwise delegate to [`executor::apply`](crate::executor::apply),
+    /// 3. otherwise delegate to [`executor::apply`](crate::apply::executor::apply),
     ///    which **independently re-runs the guard** over every pending `up` and
     ///    runs the DDL under the least-privilege `migrator` role — defense in
     ///    depth, not bypassed by this gate.
@@ -1760,7 +1763,7 @@ impl MigrationEngine {
     /// (v3 Plan F — the pre-apply gate).
     ///
     /// This is the trusted-deploy entry point. Before ANY apply work — before the
-    /// guard/approval gate, before [`executor::apply`](crate::executor::apply)
+    /// guard/approval gate, before [`executor::apply`](crate::apply::executor::apply)
     /// acquires the project advisory lock, before a single statement of DDL runs —
     /// it recomputes the integrity manifest over the SUPPLIED `migrations` (in the
     /// given order) and compares it to `expected`:
@@ -1791,7 +1794,7 @@ impl MigrationEngine {
     /// shipped alongside them, and the check would then verify a tampered set
     /// against its own tampered hash (vacuously passing). The manifest is a check
     /// of *the bundle* against *an independently-held expectation*. See
-    /// [`crate::manifest`].
+    /// [`crate::plan::manifest`].
     ///
     /// # What set is verified — the RAW supplied set, before any filtering (M1)
     ///
@@ -1894,7 +1897,7 @@ impl MigrationEngine {
 
     /// Dry-run a migration batch against a throwaway **shadow DATABASE** clone
     /// (v3 Plan C) — routed through the backend's
-    /// [`ShadowDryRun`](crate::shadow::ShadowDryRun) capability (C3).
+    /// [`ShadowDryRun`](crate::apply::backend::ShadowDryRun) capability (C3).
     ///
     /// Previews the FULL batch against a faithful copy (same `project_schema`
     /// name, confined migrator role, the UNMODIFIED [`executor::apply`] path)
@@ -1903,30 +1906,30 @@ impl MigrationEngine {
     /// recommendation is mandatory for destructive / AI-authored sets); this
     /// method is the primitive.
     ///
-    /// The dry-run goes through [`backend.shadow()`](crate::backend::MigrationBackend::shadow)
+    /// The dry-run goes through [`backend.shadow()`](crate::apply::backend::MigrationBackend::shadow)
     /// rather than a raw `&Client`, so no PG-driver type appears on this surface.
     /// A backend with no shadow capability (e.g. SQLite — its DDL is trusted +
     /// dev-recoverable) yields the explicit
-    /// [`DryRunError::ShadowUnsupported`](crate::shadow::DryRunError::ShadowUnsupported),
+    /// [`DryRunError::ShadowUnsupported`](crate::apply::backend::DryRunError::ShadowUnsupported),
     /// NOT a false-success report: the caller must never believe a dry-run happened
     /// when it did not.
     ///
     /// # Errors
-    /// - [`crate::shadow::DryRunError::ShadowUnsupported`] — the backend has no
+    /// - [`crate::apply::backend::DryRunError::ShadowUnsupported`] — the backend has no
     ///   shadow dry-run capability.
-    /// - other [`crate::shadow::DryRunError`] — a harness failure (CREATE/DROP
+    /// - other [`crate::apply::backend::DryRunError`] — a harness failure (CREATE/DROP
     ///   DATABASE, the shadow connection, role provisioning). A *migration* failing
-    ///   is not an error — it is reported in the [`crate::shadow::DryRunReport`].
+    ///   is not an error — it is reported in the [`crate::apply::backend::DryRunReport`].
     pub async fn dry_run<B: MigrationBackend>(
         &self,
         backend: &B,
         migrations: &[Migration],
         exec_cfg: &ExecutorConfig,
-        shadow_cfg: &crate::ops::shadow::ShadowConfig,
+        shadow_cfg: &crate::apply::backend::ShadowConfig,
         applied_by: &str,
-    ) -> Result<crate::ops::shadow::DryRunReport, crate::ops::shadow::DryRunError> {
+    ) -> Result<crate::apply::backend::DryRunReport, crate::apply::backend::DryRunError> {
         let Some(shadow) = backend.shadow() else {
-            return Err(crate::ops::shadow::DryRunError::ShadowUnsupported);
+            return Err(crate::apply::backend::DryRunError::ShadowUnsupported);
         };
         shadow
             .dry_run(migrations, exec_cfg, shadow_cfg, applied_by)
@@ -1935,41 +1938,41 @@ impl MigrationEngine {
 
     /// Dry-run a DECLARATIVE deploy plan against a shadow DATABASE, validating
     /// the resulting schema against the desired snapshot (v3 Plan C, Phase 2) —
-    /// routed through the backend's [`ShadowDryRun`](crate::shadow::ShadowDryRun)
+    /// routed through the backend's [`ShadowDryRun`](crate::apply::backend::ShadowDryRun)
     /// capability (C3).
     ///
     /// Like [`dry_run`](Self::dry_run), a backend with no shadow capability yields
-    /// the explicit [`DryRunError::ShadowUnsupported`](crate::shadow::DryRunError::ShadowUnsupported),
+    /// the explicit [`DryRunError::ShadowUnsupported`](crate::apply::backend::DryRunError::ShadowUnsupported),
     /// never a false-success report.
     ///
     /// # Errors
-    /// - [`crate::shadow::DryRunError::ShadowUnsupported`] — the backend has no
+    /// - [`crate::apply::backend::DryRunError::ShadowUnsupported`] — the backend has no
     ///   shadow dry-run capability.
-    /// - other [`crate::shadow::DryRunError`] — a harness failure.
+    /// - other [`crate::apply::backend::DryRunError`] — a harness failure.
     pub async fn dry_run_declarative<B: MigrationBackend>(
         &self,
         backend: &B,
         plan: &DeclarativeDeployPlan,
         desired: &crate::render::declarative::DesiredSchema,
         exec_cfg: &ExecutorConfig,
-        shadow_cfg: &crate::ops::shadow::ShadowConfig,
+        shadow_cfg: &crate::apply::backend::ShadowConfig,
         applied_by: &str,
-    ) -> Result<crate::ops::shadow::DryRunReport, crate::ops::shadow::DryRunError> {
+    ) -> Result<crate::apply::backend::DryRunReport, crate::apply::backend::DryRunError> {
         let Some(shadow) = backend.shadow() else {
-            return Err(crate::ops::shadow::DryRunError::ShadowUnsupported);
+            return Err(crate::apply::backend::DryRunError::ShadowUnsupported);
         };
         shadow
             .dry_run_declarative(plan, desired, exec_cfg, shadow_cfg, applied_by)
             .await
     }
 
-    /// Roll back applied migrations to a [`RollbackTarget`] through the gate
+    /// Roll back applied migrations to a [`crate::apply::executor::RollbackTarget`] through the gate
     /// (design §5).
     ///
     /// A `down` is privileged SQL that typically **reverses** schema (drops the
     /// objects an `up` created), so rollback is treated as destructive: it
     /// **requires [`Approval::Approved`]** — the AI never auto-rolls-back. Given
-    /// approval, it delegates to [`executor::rollback`](crate::executor::rollback),
+    /// approval, it delegates to [`executor::rollback`](crate::apply::executor::rollback),
     /// which **independently** runs every `down` through the guard and under the
     /// least-privilege `migrator` role (defense in depth, identical to the up
     /// path), refuses to cross an irreversible (`down: None`) migration unless
@@ -2012,20 +2015,20 @@ impl MigrationEngine {
     ///
     /// The sequence is deliberately NOT "apply all of `plan.expand` then
     /// backfill": E3 (the backfill-marker migration) must be journaled **after**
-    /// [`run_backfill`](crate::ops::backfill::run_backfill) succeeds, never before —
+    /// [`run_backfill`](crate::apply::backend::postgres::backfill::run_backfill) succeeds, never before —
     /// otherwise the gate would let the destructive `DROP COLUMN` (which
     /// `depends_on` E3) run while pre-existing rows are still un-mirrored, losing
     /// data. So:
     ///
     /// 1. apply E1 (`ADD COLUMN`) + E2 (`CREATE FUNCTION`/`TRIGGER`) — the
     ///    dual-write trigger is now live, so every concurrent write mirrors;
-    /// 2. [`run_backfill`] mirrors the pre-existing rows (`<to> := <from>` paged
+    /// 2. [`run_backfill`](crate::apply::backend::postgres::backfill::run_backfill) mirrors the pre-existing rows (`<to> := <from>` paged
     ///    on the PK), resumable, bounded — the trigger covers anything written
     ///    during it;
     /// 3. apply E3 (the no-op backfill marker) — this records the backfill's
     ///    completion in the journal, so the gate now sees the expand complete.
     ///
-    /// E1+E2 and E3 each go through [`apply`](crate::executor::apply) (guard +
+    /// E1+E2 and E3 each go through [`apply`](crate::apply::executor::apply) (guard +
     /// least-privilege role + journal), and the backfill goes through its own
     /// guarded, role-bracketed batches. `approval` must be
     /// [`Approval::Approved`] (the backfill mutates data).
@@ -2057,7 +2060,7 @@ impl MigrationEngine {
     /// project advisory lock for the whole deploy, so each inner apply here must
     /// NOT re-acquire/re-release it.
     ///
-    /// The backfill ([`run_backfill`](crate::ops::backfill::run_backfill)) is
+    /// The backfill ([`run_backfill`](crate::apply::backend::postgres::backfill::run_backfill)) is
     /// unaffected by the mode: it uses a per-batch **transaction-scoped**
     /// `pg_advisory_xact_lock`, which is re-entrant within the session that
     /// already holds the session-scoped project lock (it succeeds immediately and
@@ -2074,15 +2077,15 @@ impl MigrationEngine {
         lock_mode: LockMode,
     ) -> Result<ApplyOutcome, OnlineError> {
         // The E1+E2 → backfill → E3-journaled-LAST sequence lives in ONE place
-        // ([`run_expand_pg`](crate::ops::expand_contract::run_expand_pg)) so the public
-        // `&Client` API here and the [`PgOnline`](crate::ops::expand_contract::PgOnline)
+        // ([`run_expand_pg`](crate::apply::backend::postgres::online::run_expand_pg)) so the public
+        // `&Client` API here and the [`PgOnline`](crate::apply::backend::postgres::online::PgOnline)
         // capability seam share byte-identical behavior (M3).
         // The standalone `run_expand` is a TRUSTED single-actor surface (the same
         // posture as the dev CLI `--yes` / rollback), so it passes
         // [`ApprovalScope::All`] — the EXPAND's per-version scope is enforced
         // (fail-closed) only on the new out-of-band approved-apply path, which drives
         // the engine's declarative spine with an explicit `Versions` scope (PR9b).
-        crate::ops::expand_contract::run_expand_pg(
+        crate::apply::backend::postgres::online::run_expand_pg(
             conn,
             &plan.expand,
             &plan.backfill,
@@ -2130,7 +2133,7 @@ pub fn recognizes_contract_apply(
         return false;
     }
     // Re-author deterministically from the obligation's stored identity facts (the
-    // SAME re-author `platform_runner.rs` does at `resolve-pending`). The
+    // SAME re-author `command::runner` does at `resolve-pending`). The
     // `owner_app` does not affect the contract `up` text, so any stable value is
     // fine for the comparison.
     let author = crate::render::expand_contract::ExpandContractAuthor::new(
@@ -2182,8 +2185,8 @@ pub struct DeclarativeDeployPlan {
     /// **P6a (SQLite only)** — the existing-table changes SQLite has no native
     /// `ALTER` for (type / nullability change, column rename, ADD/DROP CONSTRAINT,
     /// FK redefinition), each a structured 12-step table rebuild
-    /// ([`SqliteRebuild`](crate::declarative::SqliteRebuild)). Driven through
-    /// [`MigrationBackend::rebuild_one`](crate::backend::MigrationBackend::rebuild_one)
+    /// ([`SqliteRebuild`](crate::render::declarative::SqliteRebuild)). Driven through
+    /// [`MigrationBackend::rebuild_one`](crate::apply::backend::MigrationBackend::rebuild_one)
     /// by [`apply_declarative`](MigrationEngine::apply_declarative), under the
     /// destructive/approval gate (the paired migration is `destructive +
     /// requires_approval`). ALWAYS empty on the PG dialect.
@@ -2247,7 +2250,7 @@ impl DeclarativeDeployPlan {
     /// in memory and no serialization is needed. If they are split across a
     /// boundary, the plan must be carried as-is; note that
     /// [`DeclarativeDeployPlan`] is deliberately NOT `serde`-serializable today
-    /// (its [`GuardReport`]/[`BackfillSpec`](crate::render::plan::BackfillSpec) members
+    /// (its [`crate::guard::GuardReport`]/[`BackfillSpec`](crate::model::backfill::BackfillSpec) members
     /// are not, and deriving it would
     /// cascade invasively) — so a split-boundary control plane either keeps the
     /// generated plan in a server-side store keyed by an opaque token, or
@@ -2329,7 +2332,7 @@ pub enum OnlineError {
     /// expand incomplete (the contract stays blocked) and the backfill is
     /// resumable on a re-run.
     #[error(transparent)]
-    Backfill(#[from] crate::ops::backfill::BackfillError),
+    Backfill(#[from] crate::apply::backend::BackfillError),
 }
 
 #[cfg(test)]

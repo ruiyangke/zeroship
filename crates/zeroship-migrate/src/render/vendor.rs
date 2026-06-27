@@ -1,21 +1,21 @@
 //! The VENDOR (`@zeroship/migrate/pg`) Postgres render seam (vendor spec §4.4).
 //!
-//! Renders the privileged vendor [`Op`](crate::ir::Op) variants to **structured**
+//! Renders the privileged vendor [`Op`](crate::model::ir::Op) variants to **structured**
 //! Postgres DDL: identifiers double-quoted via the crate's single quoting seam
 //! ([`quote_ident_checked`]), policy/trigger predicates rendered from the CLOSED
-//! [`Expr`](crate::expr::Expr) AST via the existing inline renderer
+//! [`Expr`](crate::model::expr::Expr) AST via the existing inline renderer
 //! ([`render_predicate_pg`]) — **never string concatenation**. The function `body`
 //! and the `pg.sql` escape are the two raw-string fields: they are embedded
 //! VERBATIM and the WHOLE rendered statement is then `pg_query`-parsed by the
 //! guard at the lower seam (so the body is scanned, vendor spec §3.3).
 //!
 //! Every vendor op is `dialect_scope = PgOnly`: this module only renders Postgres,
-//! and the lower seam ([`crate::ir_author`]) hard-rejects a SQLite target before
+//! and the lower seam ([`crate::render::lower`]) hard-rejects a SQLite target before
 //! reaching here (vendor spec §4.3). The render is pure (no DB, no live schema).
 //!
 //! # NOT in this module
 //!
-//! The capability GATE (vendor spec §3.2) lives in [`crate::validate`]
+//! The capability GATE (vendor spec §3.2) lives in [`crate::model::validate`]
 //! (`VENDOR_OP_DENIED` at load) + the rendered-SQL deny-list (the guard at lower).
 //! This module is render-only; it assumes the op already passed both gates.
 

@@ -96,6 +96,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use uuid::Uuid;
+use zeroship_migrate::apply::journal::{DeployRecoveryScope, JournalError, PendingContract};
+use zeroship_migrate::plan::pending::PendingContractRefusal;
 use zeroship_migrate::{
     compute_manifest, connect, load_dir_migrations, provision_migrator, recognizes_contract_apply,
     Approval, ApprovalScope, ApplyError, ConnectError, DeclarativeApplyError, DriftError,
@@ -989,10 +991,7 @@ async fn prevalidate_bundle_scope(
             }
             if facts.touched.contains(&pc.table) {
                 return Err(DeployMigrateError::from(EngineError::PendingContract(
-                    zeroship_migrate::pending::PendingContractRefusal::new(
-                        pc.table.clone(),
-                        pc.pending_version.clone(),
-                    ),
+                    PendingContractRefusal::new(pc.table.clone(), pc.pending_version.clone()),
                 )));
             }
         }
@@ -1204,7 +1203,7 @@ async fn apply_bundle_ir_migrations(
     // All under the SINGLE whole-deploy project lock acquired above, so it is
     // race-free. SQLite no-ops every recovery method (no online rename ⇒ no half-state).
     let deploy_id = Uuid::now_v7().to_string();
-    let mut opened_this_deploy: Vec<zeroship_migrate::journal::PendingContract> = Vec::new();
+    let mut opened_this_deploy: Vec<PendingContract> = Vec::new();
 
     // Run the whole file loop under the held lock, capturing the result so the lock
     // is released on EVERY path (success/error/early-return) before we surface it.
@@ -1334,7 +1333,7 @@ async fn apply_bundle_ir_migrations(
                 // transaction (engine-stamped). Every outstanding obligation then
                 // ALWAYS has a marker — the obligation-vs-marker crash window
                 // (PR9d-rev finding 1) is structurally closed.
-                Some(&zeroship_migrate::journal::DeployRecoveryScope {
+                Some(&DeployRecoveryScope {
                     deploy_id: &deploy_id,
                 }),
             )
@@ -1528,7 +1527,7 @@ async fn apply_bundle_ir_migrations(
                 )
                 .is_err()
                 {
-                    Err(zeroship_migrate::journal::JournalError::Backend(
+                    Err(JournalError::Backend(
                         "fault-injection: simulated `committed` promotion failure".into(),
                     ))
                 } else {

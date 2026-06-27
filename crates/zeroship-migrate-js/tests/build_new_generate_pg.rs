@@ -13,8 +13,8 @@ use std::fs;
 use std::path::Path;
 
 use compio_postgres::Client;
-use zeroship_migrate::declarative::{desired_snapshot, DeclarativeAuthor};
-use zeroship_migrate::drift::snapshot_schema;
+use zeroship_migrate::apply::drift::snapshot_schema;
+use zeroship_migrate::render::declarative::{desired_snapshot, DeclarativeAuthor, DesiredSchema};
 use zeroship_migrate::{
     Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, SqlDialect,
 };
@@ -268,7 +268,7 @@ async fn generate_index_bearing_schema_redifs_to_zero_on_pg() {
     let gen = generate_ops("create_accounts", APP, &desired, &live0).expect("generate ops");
     assert!(!gen.is_empty);
     // The unique index over `email` MUST be synthesized as a standalone createIndex.
-    use zeroship_migrate::ir::Op;
+    use zeroship_migrate::model::ir::Op;
     assert!(
         gen.ir.ops.iter().any(|o| matches!(o, Op::CreateIndex { columns, .. } if columns == &vec!["email".to_string()])),
         "the unique-field index must be synthesized as a createIndex op; ops: {:?}",
@@ -335,7 +335,7 @@ async fn generate_emits_machine_readable_backfill_todo() {
     desired_tbl.columns.sort_by(|a, b| a.name.cmp(&b.name));
     let mut dsnap = SchemaSnapshot::default();
     dsnap.tables.insert("tasks".into(), desired_tbl);
-    let desired = zeroship_migrate::declarative::DesiredSchema {
+    let desired = DesiredSchema {
         snapshot: dsnap,
         ownership: [("tasks".to_string(), APP.to_string())].into_iter().collect(),
         sqlite_schemas: Default::default(),
@@ -372,7 +372,7 @@ async fn generate_emits_machine_readable_backfill_todo() {
 
 /// The directly-derived IR's typed-value checksum (the `Checksum::of_ir` anchor).
 fn direct_checksum(ir: &zeroship_migrate::MigrationIr) -> String {
-    use zeroship_migrate::ir::CanonicalOpList;
+    use zeroship_migrate::model::ir::CanonicalOpList;
     use zeroship_migrate::{Checksum, MigrationFlags};
     Checksum::of_ir(
         &CanonicalOpList(&ir.ops),

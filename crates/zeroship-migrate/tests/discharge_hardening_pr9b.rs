@@ -16,11 +16,11 @@
 
 use compio_postgres::Client;
 use zeroship_migrate::{ColumnSnapshot, TableSnapshot};
-use zeroship_migrate::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
-use zeroship_migrate::ir_author::{IrAuthor, LiveSchema};
+use zeroship_migrate::model::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
+use zeroship_migrate::render::lower::{IrAuthor, LiveSchema};
 use zeroship_migrate::{PlanStep, RenameStep};
 use zeroship_migrate::{
-    provision_migrator, role::deprovision_migrator, Approval, ExecutorConfig, ExpandContractPlan,
+    provision_migrator, apply::role::deprovision_migrator, Approval, ExecutorConfig, ExpandContractPlan,
     MigrationBackend, MigrationEngine, PostgresBackend, SqlDialect,
 };
 
@@ -167,24 +167,24 @@ fn lower_pg_rename(
 }
 
 /// A plain Ddl step with the GIVEN version but the GIVEN (innocuous) `up` SQL.
-fn forged_ddl(version: &zeroship_migrate::migration::MigrationId, up: &str) -> PlanStep {
-    PlanStep::Ddl(zeroship_migrate::migration::Migration {
+fn forged_ddl(version: &zeroship_migrate::model::migration::MigrationId, up: &str) -> PlanStep {
+    PlanStep::Ddl(zeroship_migrate::model::migration::Migration {
         version: version.clone(),
         name: "forged_contract_step".into(),
         up: up.to_string(),
         down: None,
-        checksum: zeroship_migrate::migration::Checksum::of(
-            &zeroship_migrate::migration::ChecksumInput {
+        checksum: zeroship_migrate::model::migration::Checksum::of(
+            &zeroship_migrate::model::migration::ChecksumInput {
                 up,
                 down: None,
-                flags: &zeroship_migrate::migration::MigrationFlags::default(),
+                flags: &zeroship_migrate::model::migration::MigrationFlags::default(),
                 owner_app: "app_test",
                 depends_on: &[],
                 supersedes: &[],
                 preconditions: &[],
             },
         ),
-        flags: zeroship_migrate::migration::MigrationFlags::default(),
+        flags: zeroship_migrate::model::migration::MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: vec![],
         supersedes: vec![],
@@ -206,26 +206,26 @@ async fn forged_contract_versionids_with_innocuous_sql_do_not_discharge() {
     let s = q(&cfg.project_schema);
 
     // Create members(id, email) + seed.
-    let create = zeroship_migrate::migration::Migration {
-        version: zeroship_migrate::migration::MigrationId::generate(),
+    let create = zeroship_migrate::model::migration::Migration {
+        version: zeroship_migrate::model::migration::MigrationId::generate(),
         name: "create_members".into(),
         up: format!(
             "CREATE TABLE {s}.members (id bigint PRIMARY KEY, email text); \
              INSERT INTO {s}.members (id, email) VALUES (1,'a@x.test')"
         ),
         down: None,
-        checksum: zeroship_migrate::migration::Checksum::of(
-            &zeroship_migrate::migration::ChecksumInput {
+        checksum: zeroship_migrate::model::migration::Checksum::of(
+            &zeroship_migrate::model::migration::ChecksumInput {
                 up: "create_members",
                 down: None,
-                flags: &zeroship_migrate::migration::MigrationFlags::default(),
+                flags: &zeroship_migrate::model::migration::MigrationFlags::default(),
                 owner_app: "app_test",
                 depends_on: &[],
                 supersedes: &[],
                 preconditions: &[],
             },
         ),
-        flags: zeroship_migrate::migration::MigrationFlags::default(),
+        flags: zeroship_migrate::model::migration::MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: vec![],
         supersedes: vec![],
@@ -239,7 +239,7 @@ async fn forged_contract_versionids_with_innocuous_sql_do_not_discharge() {
             &be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("create members");
@@ -254,7 +254,7 @@ async fn forged_contract_versionids_with_innocuous_sql_do_not_discharge() {
             &be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("expand applies + opens obligation");
@@ -302,7 +302,7 @@ async fn forged_contract_versionids_with_innocuous_sql_do_not_discharge() {
             &be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await;
     match result {
@@ -372,7 +372,7 @@ async fn forged_contract_versionids_with_innocuous_sql_do_not_discharge() {
             &be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await;
     assert!(

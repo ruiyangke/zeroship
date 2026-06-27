@@ -24,11 +24,11 @@
 
 use compio_postgres::Client;
 use zeroship_migrate::{ColumnSnapshot, TableSnapshot};
-use zeroship_migrate::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
-use zeroship_migrate::ir_author::{IrAuthor, IrLowerError, LiveSchema};
+use zeroship_migrate::model::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
+use zeroship_migrate::render::lower::{IrAuthor, IrLowerError, LiveSchema};
 use zeroship_migrate::{PlanStep, RenameStep};
 use zeroship_migrate::{
-    provision_migrator, role::deprovision_migrator, Approval, ExecutorConfig, MigrationEngine,
+    provision_migrator, apply::role::deprovision_migrator, Approval, ExecutorConfig, MigrationEngine,
     ExpandContractPlan, OnlineIntent, PostgresBackend, SqlDialect,
 };
 
@@ -199,26 +199,26 @@ async fn ir_renamecolumn_applies_as_pg_online_dual_write_through_apply_plan() {
     // Create users(id, email) THROUGH apply_plan (migrator role owns it).
     engine
         .apply_plan(
-            &[PlanStep::Ddl(zeroship_migrate::migration::Migration {
-                version: zeroship_migrate::migration::MigrationId::generate(),
+            &[PlanStep::Ddl(zeroship_migrate::model::migration::Migration {
+                version: zeroship_migrate::model::migration::MigrationId::generate(),
                 name: "create_users".into(),
                 up: format!(
                     "CREATE TABLE {s}.users (id bigint PRIMARY KEY, email text); \
                      INSERT INTO {s}.users (id, email) VALUES (1,'a@x.test'),(2,'b@x.test')"
                 ),
                 down: None,
-                checksum: zeroship_migrate::migration::Checksum::of(
-                    &zeroship_migrate::migration::ChecksumInput {
+                checksum: zeroship_migrate::model::migration::Checksum::of(
+                    &zeroship_migrate::model::migration::ChecksumInput {
                         up: "create_users",
                         down: None,
-                        flags: &zeroship_migrate::migration::MigrationFlags::default(),
+                        flags: &zeroship_migrate::model::migration::MigrationFlags::default(),
                         owner_app: "app_test",
                         depends_on: &[],
                         supersedes: &[],
                         preconditions: &[],
                     },
                 ),
-                flags: zeroship_migrate::migration::MigrationFlags::default(),
+                flags: zeroship_migrate::model::migration::MigrationFlags::default(),
                 owner_app: "app_test".into(),
                 depends_on: vec![],
                 supersedes: vec![],
@@ -229,7 +229,7 @@ async fn ir_renamecolumn_applies_as_pg_online_dual_write_through_apply_plan() {
             &PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("create users");
@@ -249,7 +249,7 @@ async fn ir_renamecolumn_applies_as_pg_online_dual_write_through_apply_plan() {
             &PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("IR online rename expand applies via apply_plan");
@@ -319,26 +319,26 @@ async fn ir_renamecolumn_pg_fully_applied_rename_reverses_via_inverse_rename() {
     // create members(id, email) + seed.
     engine
         .apply_plan(
-            &[PlanStep::Ddl(zeroship_migrate::migration::Migration {
-                version: zeroship_migrate::migration::MigrationId::generate(),
+            &[PlanStep::Ddl(zeroship_migrate::model::migration::Migration {
+                version: zeroship_migrate::model::migration::MigrationId::generate(),
                 name: "create_members".into(),
                 up: format!(
                     "CREATE TABLE {s}.members (id bigint PRIMARY KEY, email text); \
                      INSERT INTO {s}.members (id, email) VALUES (1,'ada@x.test'),(2,'gr@x.test')"
                 ),
                 down: None,
-                checksum: zeroship_migrate::migration::Checksum::of(
-                    &zeroship_migrate::migration::ChecksumInput {
+                checksum: zeroship_migrate::model::migration::Checksum::of(
+                    &zeroship_migrate::model::migration::ChecksumInput {
                         up: "create_members",
                         down: None,
-                        flags: &zeroship_migrate::migration::MigrationFlags::default(),
+                        flags: &zeroship_migrate::model::migration::MigrationFlags::default(),
                         owner_app: "app_test",
                         depends_on: &[],
                         supersedes: &[],
                         preconditions: &[],
                     },
                 ),
-                flags: zeroship_migrate::migration::MigrationFlags::default(),
+                flags: zeroship_migrate::model::migration::MigrationFlags::default(),
                 owner_app: "app_test".into(),
                 depends_on: vec![],
                 supersedes: vec![],
@@ -349,7 +349,7 @@ async fn ir_renamecolumn_pg_fully_applied_rename_reverses_via_inverse_rename() {
             &pg_be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("create members");
@@ -361,7 +361,7 @@ async fn ir_renamecolumn_pg_fully_applied_rename_reverses_via_inverse_rename() {
     let expand_steps = vec![PlanStep::OnlineRename(RenameStep::PgExpandContract(ec))];
     engine
         .apply_plan(&expand_steps, Approval::Approved, &pg_be, &cfg, "app_test",
-            zeroship_migrate::executor::LockMode::Acquire)
+            zeroship_migrate::apply::executor::LockMode::Acquire)
         .await
         .expect("expand applies");
 
@@ -372,7 +372,7 @@ async fn ir_renamecolumn_pg_fully_applied_rename_reverses_via_inverse_rename() {
         contract.into_iter().map(PlanStep::Ddl).collect();
     engine
         .apply_plan(&contract_steps, Approval::Approved, &pg_be, &cfg, "app_test",
-            zeroship_migrate::executor::LockMode::Acquire)
+            zeroship_migrate::apply::executor::LockMode::Acquire)
         .await
         .expect("contract applies (fully-applied rename)");
     assert!(
@@ -392,7 +392,7 @@ async fn ir_renamecolumn_pg_fully_applied_rename_reverses_via_inverse_rename() {
     let rev_steps = vec![PlanStep::OnlineRename(RenameStep::PgExpandContract(rev))];
     engine
         .apply_plan(&rev_steps, Approval::Approved, &pg_be, &cfg, "app_test",
-            zeroship_migrate::executor::LockMode::Acquire)
+            zeroship_migrate::apply::executor::LockMode::Acquire)
         .await
         .expect("reverse rename expand applies");
     // Complete the reverse contract (drop email_address).
@@ -400,7 +400,7 @@ async fn ir_renamecolumn_pg_fully_applied_rename_reverses_via_inverse_rename() {
         rev_contract.into_iter().map(PlanStep::Ddl).collect();
     engine
         .apply_plan(&rev_contract_steps, Approval::Approved, &pg_be, &cfg, "app_test",
-            zeroship_migrate::executor::LockMode::Acquire)
+            zeroship_migrate::apply::executor::LockMode::Acquire)
         .await
         .expect("reverse contract applies");
 
@@ -453,26 +453,26 @@ async fn ir_renamecolumn_pg_crash_resumes_roll_forward() {
 
     engine
         .apply_plan(
-            &[PlanStep::Ddl(zeroship_migrate::migration::Migration {
-                version: zeroship_migrate::migration::MigrationId::generate(),
+            &[PlanStep::Ddl(zeroship_migrate::model::migration::Migration {
+                version: zeroship_migrate::model::migration::MigrationId::generate(),
                 name: "create_acct".into(),
                 up: format!(
                     "CREATE TABLE {s}.acct (id bigint PRIMARY KEY, handle text); \
                      INSERT INTO {s}.acct (id, handle) VALUES (1,'ada'),(2,'grace')"
                 ),
                 down: None,
-                checksum: zeroship_migrate::migration::Checksum::of(
-                    &zeroship_migrate::migration::ChecksumInput {
+                checksum: zeroship_migrate::model::migration::Checksum::of(
+                    &zeroship_migrate::model::migration::ChecksumInput {
                         up: "create_acct",
                         down: None,
-                        flags: &zeroship_migrate::migration::MigrationFlags::default(),
+                        flags: &zeroship_migrate::model::migration::MigrationFlags::default(),
                         owner_app: "app_test",
                         depends_on: &[],
                         supersedes: &[],
                         preconditions: &[],
                     },
                 ),
-                flags: zeroship_migrate::migration::MigrationFlags::default(),
+                flags: zeroship_migrate::model::migration::MigrationFlags::default(),
                 owner_app: "app_test".into(),
                 depends_on: vec![],
                 supersedes: vec![],
@@ -483,7 +483,7 @@ async fn ir_renamecolumn_pg_crash_resumes_roll_forward() {
             &PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("create acct");
@@ -508,7 +508,7 @@ async fn ir_renamecolumn_pg_crash_resumes_roll_forward() {
             &PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await;
     assert!(
@@ -527,7 +527,7 @@ async fn ir_renamecolumn_pg_crash_resumes_roll_forward() {
             &PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("resume after the simulated crash must converge");
@@ -803,7 +803,7 @@ fn ir_renamecolumn_pg_fails_closed_without_live_from_column() {
 fn ir_renamecolumn_pg_vector_extension_type_gate_round_trips() {
     let cfg = cfg_for("vector_gate_pg");
     // The live `embedding` column introspects to the canonical `vector(3)` spelling
-    // (exactly what `drift::canonical_extension_type` recovers from `format_type`).
+    // (exactly what `apply::drift::canonical_extension_type` recovers from `format_type`).
     let live = live_with_column("docs", "embedding", "vector(3)");
     let ec = lower_pg_rename(
         &cfg,
@@ -881,7 +881,7 @@ fn ir_renamecolumn_pg_e1_to_c2_shape_byte_equal_to_declarative_rename() {
 
     // The expand + contract sequences have the same LENGTH + per-step
     // (name, up, down, flags) tuple — byte-identical authored SQL.
-    let shape = |m: &zeroship_migrate::migration::Migration| {
+    let shape = |m: &zeroship_migrate::model::migration::Migration| {
         (m.name.clone(), m.up.clone(), m.down.clone(), m.flags)
     };
     let ir_expand: Vec<_> = ir_ec.expand.iter().map(shape).collect();
@@ -895,9 +895,9 @@ fn ir_renamecolumn_pg_e1_to_c2_shape_byte_equal_to_declarative_rename() {
     // dependency edges as POSITIONS within (expand ++ contract), so the freshly
     // minted versions are abstracted away and only the edge structure is compared.
     let edges = |ec: &ExpandContractPlan| {
-        let all: Vec<&zeroship_migrate::migration::Migration> =
+        let all: Vec<&zeroship_migrate::model::migration::Migration> =
             ec.expand.iter().chain(ec.contract.iter()).collect();
-        let pos = |v: &zeroship_migrate::migration::MigrationId| {
+        let pos = |v: &zeroship_migrate::model::migration::MigrationId| {
             all.iter().position(|m| &m.version == v)
         };
         all.iter()

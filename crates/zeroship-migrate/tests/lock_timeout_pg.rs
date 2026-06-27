@@ -33,9 +33,9 @@ use std::time::{Duration, Instant};
 
 use compio_postgres::Client;
 use zeroship_migrate::{
-    migration::{Checksum, ChecksumInput, Migration, MigrationFlags},
+    model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags},
     provision_migrator,
-    role::deprovision_migrator,
+    apply::role::deprovision_migrator,
     Approval, ExecutorConfig, MigrationEngine, PlanStep,
 };
 
@@ -229,7 +229,7 @@ async fn blocking_ddl_fails_fast_when_conflicting_lock_held() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("create live table via migration (migrator owns it)");
@@ -268,7 +268,7 @@ async fn blocking_ddl_fails_fast_when_conflicting_lock_held() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await;
     let elapsed = started.elapsed();
@@ -336,7 +336,7 @@ async fn same_ddl_succeeds_when_no_conflicting_lock() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("create live table via migration (migrator owns it)");
@@ -363,7 +363,7 @@ async fn same_ddl_succeeds_when_no_conflicting_lock() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("DDL applies cleanly with no conflicting lock");
@@ -415,7 +415,7 @@ async fn per_migration_lock_timeout_override_fires_over_long_default() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("create live table via migration (migrator owns it)");
@@ -456,7 +456,7 @@ async fn per_migration_lock_timeout_override_fires_over_long_default() {
             &zeroship_migrate::PostgresBackend::new(&conn),
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await;
     let elapsed = started.elapsed();

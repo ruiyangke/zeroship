@@ -16,14 +16,14 @@
 //! bytes that run no longer match the bytes that were guarded + checksummed) AND
 //! an injection surface (rewriting untrusted SQL). So the shadow is a throwaway
 //! **DATABASE** that carries the SAME `project_schema` name and runs the
-//! **UNMODIFIED** [`executor::apply`](crate::executor::apply) path — exact bytes,
+//! **UNMODIFIED** [`executor::apply`](crate::apply::executor::apply) path — exact bytes,
 //! exact guard, exact least-privilege migrator role, exact checksums.
 //!
 //! # Flow ([`dry_run`], Mode A — full replay)
 //!
 //! 1. `CREATE DATABASE <prefix><rand>` on the admin connection;
 //! 2. open a SECOND compio-postgres session to the shadow DB (its run-loop is a
-//!    detached compio task, mirroring [`crate::db::connect`]);
+//!    detached compio task, mirroring [`crate::conn::connect`]);
 //! 3. `CREATE SCHEMA "<project_schema>"` + [`provision_migrator`] on the shadow;
 //! 4. run the UNMODIFIED `executor::apply(shadow, cfg, migrations,
 //!    Approval::Approved, applied_by)` — **full replay**: the shadow journal is
@@ -80,134 +80,19 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::analysis::analyze::Advisory;
 use crate::approval::Approval;
-use crate::apply::backend::PostgresBackend;
-use crate::conn::{connect_with_handle, ConnectError, ExecutorConfig};
+use crate::apply::backend::capability::{
+    DryRunError, DryRunReport, MigrationResult, SeedError, ShadowConfig, ShadowDryRun,
+};
+use super::PostgresBackend;
+use crate::conn::{connect_with_handle, ExecutorConfig};
 use crate::render::declarative::{DeclarativeAuthor, DesiredSchema};
-use crate::apply::drift::{diff_snapshots, snapshot_schema, DriftError, StructuralDrift};
+use crate::apply::drift::{diff_snapshots, snapshot_schema};
 use crate::model::snapshot::SchemaSnapshot;
-use crate::engine::{DeclarativeDeployPlan, EngineError, MigrationEngine};
+use crate::engine::{DeclarativeDeployPlan, MigrationEngine};
 use crate::apply::executor::{self, ApplyError};
 use crate::guard::{GuardConfig, SqlGuard};
 use crate::model::migration::Migration;
 use crate::apply::role::{deprovision_migrator, migrator_role_name, provision_migrator, RoleError};
-
-/// Where + how to provision a throwaway shadow database.
-#[derive(Debug, Clone)]
-pub struct ShadowConfig {
-    /// A DSN for an **admin** connection whose role has `CREATEDB` (it issues the
-    /// `CREATE DATABASE` / `DROP DATABASE`). Its `dbname` is swapped to the
-    /// randomly-named shadow DB to open the second session — so it must be a DSN
-    /// the second connection can reuse with only the database name changed
-    /// (same host/port/user/password).
-    pub admin_dsn: String,
-    /// The prefix for the throwaway database name, e.g. `"zsmig_shadow_"`. The
-    /// full name is `<prefix><rand>`; [`sweep_leaked_shadows`] matches `<prefix>%`
-    /// to reap crash-leaked clones.
-    pub db_name_prefix: String,
-}
-
-/// The per-migration outcome of a dry-run apply.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MigrationResult {
-    /// The migration's version (`mig_…`).
-    pub version: String,
-    /// Whether this migration's `up` applied cleanly on the shadow.
-    pub applied_ok: bool,
-    /// The error (guard denial, non-idempotent non-txn, or a DB failure) when
-    /// `applied_ok == false`.
-    pub error: Option<String>,
-}
-
-/// The result of a dry-run.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DryRunReport {
-    /// Overall success: every migration applied AND (for a declarative dry-run)
-    /// the resulting schema matched the desired snapshot.
-    pub ok: bool,
-    /// Per-migration outcome, in apply order. A denial / non-idempotent failure
-    /// that aborts the batch before any DB work still records the offending
-    /// version with `applied_ok == false` and an `error`.
-    pub per_migration: Vec<MigrationResult>,
-    /// For a declarative dry-run, the structural drift between the DESIRED schema
-    /// and the schema the shadow ended up with after applying the plan. `None`
-    /// for a plain [`dry_run`] (no desired schema to compare against), or `Some`
-    /// with a clean/non-clean drift for [`dry_run_declarative`].
-    pub resulting_drift: Option<StructuralDrift>,
-    /// Operational advisories (lock-heavy ops, destructive shapes, missing FK
-    /// indexes, …) per migration version. Advisory-only; never gates `ok`.
-    pub advisories: Vec<(String, Vec<Advisory>)>,
-    /// Whether the shadow DB + role teardown fully succeeded. `true` on the
-    /// clean path. `false` means a `DROP DATABASE` / `DROP ROLE` failed and a
-    /// shadow DB and/or cluster-global role may have leaked — the control plane
-    /// should trigger an immediate [`sweep_leaked_shadows`] rather than wait for
-    /// the periodic sweep (H2 fix). Note: `teardown_ok` does NOT feed `ok` (a
-    /// migration's correctness is independent of teardown hygiene); it is a
-    /// separate operational signal.
-    pub teardown_ok: bool,
-    /// The teardown failure message when `teardown_ok == false` (the
-    /// `DROP DATABASE` and/or `DROP ROLE` error). `None` on the clean path.
-    pub teardown_error: Option<String>,
-}
-
-/// A failure of the dry-run *harness itself*.
-///
-/// Distinct from a migration failing (that is captured in the [`DryRunReport`]):
-/// these are infrastructure faults — CREATE/DROP DATABASE, connecting to the
-/// shadow, provisioning the role, snapshotting the resulting schema.
-#[derive(Debug, thiserror::Error)]
-pub enum DryRunError {
-    /// `CREATE DATABASE` / `DROP DATABASE` or another admin-connection op failed.
-    /// A missing `CREATEDB` privilege on the admin role surfaces here.
-    #[error("shadow admin db error: {0}")]
-    Admin(#[source] compio_postgres::Error),
-    /// Opening the second (shadow) compio-postgres session failed.
-    #[error("connect to shadow db: {0}")]
-    Connect(#[from] ConnectError),
-    /// Provisioning the shadow schema or the least-privilege migrator role failed.
-    #[error("provision shadow: {0}")]
-    Provision(#[from] RoleError),
-    /// Introspecting the resulting shadow schema (declarative drift) failed.
-    #[error("snapshot shadow schema: {0}")]
-    Drift(#[from] DriftError),
-    /// Seeding the shadow with the current LIVE project schema failed — either
-    /// authoring the reconstruction migrations from the live snapshot
-    /// ([`SeedError::Author`]) or applying them on the shadow
-    /// ([`SeedError::Apply`]). A faithful INCREMENTAL declarative dry-run requires
-    /// the shadow to START from the live structure (so a plan targeting a
-    /// prior-deploy table applies cleanly), so a seed failure is a harness fault,
-    /// not a migration failure — it surfaces here rather than in the report.
-    #[error("seed shadow from live schema: {0}")]
-    Seed(#[source] SeedError),
-    /// The active [`MigrationBackend`](crate::backend::MigrationBackend) has **no
-    /// shadow dry-run capability** ([`shadow()`](crate::backend::MigrationBackend::shadow)
-    /// returned `None`) — e.g. the SQLite dev backend, which applies only TRUSTED
-    /// descriptor-generated DDL on a recoverable dev path, so a pre-apply shadow
-    /// clone adds little (a future untrusted/prod non-PG engine would provide one).
-    ///
-    /// This is the **honest** outcome the engine returns when a caller asks for a
-    /// dry-run on a backend that cannot perform one: it is an explicit error, NOT a
-    /// false-success [`DryRunReport`] — the caller must never believe a dry-run
-    /// happened when it did not. It is a deliberate capability gap, surfaced rather
-    /// than silently passed.
-    #[error("shadow dry-run unsupported on this backend (no ShadowDryRun capability)")]
-    ShadowUnsupported,
-}
-
-/// A failure to reconstruct the LIVE project structure inside the fresh shadow
-/// (the "Mode B snapshot-seed", required for a faithful incremental dry-run).
-#[derive(Debug, thiserror::Error)]
-pub enum SeedError {
-    /// The declarative author could not turn the live snapshot into the
-    /// reconstruction migrations (e.g. a live object name the author boundary
-    /// rejects). In practice this should not happen for a snapshot the platform
-    /// itself materialised, but it is surfaced rather than swallowed.
-    #[error("author seed migrations from live snapshot: {0}")]
-    Author(#[from] crate::render::declarative::DeclarativeError),
-    /// Applying the reconstruction migrations on the shadow failed (under the
-    /// shadow migrator role / guard, like any migration).
-    #[error("apply seed migrations on shadow: {0}")]
-    Apply(#[from] EngineError),
-}
 
 /// Build the shadow DSN from the admin DSN by swapping the database name.
 ///
@@ -354,11 +239,11 @@ fn shadow_executor_cfg(cfg: &ExecutorConfig, shadow_db: &str) -> Result<Executor
     match cfg.trust {
         crate::model::policy::TrustProfile::Platform => {
             // Platform source: mirror the operator-side admin-connection apply (§8).
-            // Mint a token via the CONFINED `platform_runner` seam (the shadow harness
-            // is operator-side, like the CLI runners). NO migrator role / SET ROLE, and
+            // Mint a token via the shadow operator seam (the shadow harness is
+            // operator-side, like the CLI runners). NO migrator role / SET ROLE, and
             // the SAME schema + extension allowlist as the source so the widened guard
             // and `search_path` are identical to the real Platform apply.
-            let cap = crate::command::runner::mint_shadow_operator_capability();
+            let cap = crate::model::capability::mint_shadow_operator_capability();
             let mut sc = ExecutorConfig::platform(
                 &cap,
                 shadow_db.to_string(),
@@ -381,7 +266,7 @@ fn shadow_executor_cfg(cfg: &ExecutorConfig, shadow_db: &str) -> Result<Executor
             // migrator role / SET ROLE (Trusted runs as the connecting role). The
             // shadow's own `guard_config()` returns the Trusted guard, so its
             // deny-list is OFF — identical to the real apply.
-            let cap = crate::command::runner::mint_shadow_operator_capability();
+            let cap = crate::model::capability::mint_shadow_operator_capability();
             let mut sc =
                 ExecutorConfig::trusted(&cap, shadow_db.to_string(), cfg.project_schema.clone());
             sc.pg.meta_schema.clone_from(&cfg.pg.meta_schema);
@@ -536,13 +421,13 @@ pub async fn dry_run_declarative(
 /// not exist`; so before applying it we reconstruct the live structure in the
 /// fresh shadow via [`seed_shadow_from_live`] (the exact mechanism
 /// [`dry_run_declarative`] uses) and only then run the UNMODIFIED
-/// [`apply`](crate::executor::apply) path over `migrations`.
+/// [`apply`](crate::apply::executor::apply) path over `migrations`.
 ///
 /// It is the generic peer of [`dry_run`] (which assumes the set is the WHOLE
 /// schema / a from-scratch deploy) and the non-declarative peer of
 /// [`dry_run_declarative`] (which validates a generated declarative plan against a
 /// desired snapshot). Use it when you have an ad-hoc migration set to validate
-/// against the live structure — e.g. the [`crate::submit`] adapter.
+/// against the live structure — e.g. the [`crate::ops::submit`] adapter.
 ///
 /// `Approval::Approved` is used for the shadow apply ONLY (a dry-run must preview a
 /// destructive set), constructed inside this function and never returned — it can
@@ -661,75 +546,6 @@ async fn dry_run_incremental_body(
         teardown_ok: true,
         teardown_error: None,
     })
-}
-
-// =============================================================================
-// The shadow dry-run CAPABILITY seam (multi-engine abstraction, C3).
-// =============================================================================
-
-/// The **shadow dry-run** capability — the dialect-neutral seam
-/// [`MigrationEngine::dry_run`](crate::engine::MigrationEngine::dry_run) /
-/// [`dry_run_declarative`](crate::engine::MigrationEngine::dry_run_declarative)
-/// drive a pre-apply preview through, **without ever holding a concrete
-/// connection** (C3: this REPLACES the `MigrationEngine::dry_run(admin_conn:
-/// &Client, …)` / `PostgresBackend::conn() -> &Client` leak — the last prominent
-/// PG-driver leak on the engine's public methods).
-///
-/// A backend that can dry-run untrusted/AI-authored DDL against a throwaway clone
-/// returns `Some(&dyn ShadowDryRun)` from
-/// [`MigrationBackend::shadow`](crate::backend::MigrationBackend::shadow); one that
-/// has no shadow path (SQLite — see that method's doc) returns `None`. The engine
-/// branches on `shadow()`, never on the dialect, and never touches a `Client`.
-///
-/// # The seam is the NEUTRAL intent, not the PG admin connection
-///
-/// The methods take the engine's neutral inputs (the planned [`Migration`]s, or a
-/// [`DeclarativeDeployPlan`] + [`DesiredSchema`], plus the [`ExecutorConfig`] /
-/// [`ShadowConfig`]). They do **not** take a `compio_postgres::Client`. The
-/// Postgres impl ([`PgShadow`]) owns its admin `Client` **internally** and runs
-/// the existing throwaway-database harness ([`dry_run`] / [`dry_run_declarative`])
-/// verbatim; a future untrusted/prod non-PG engine would lower the *same* inputs
-/// to its own shadow mechanism — which a raw `&Client` could never have admitted.
-///
-/// Returned as boxed futures so the trait is `dyn`-dispatchable
-/// (`Option<&dyn ShadowDryRun>`); a dry-run runs at deploy/preview time, never the
-/// apply hot path, so the box allocation is irrelevant (mirrors
-/// [`OnlineSchemaChange`](crate::expand_contract::OnlineSchemaChange)).
-#[allow(clippy::module_name_repetitions)]
-pub trait ShadowDryRun {
-    /// Dry-run a migration batch against a throwaway shadow DATABASE clone,
-    /// reporting per-migration success/failure WITHOUT touching the real schema.
-    ///
-    /// Byte-identical to the free [`dry_run`] harness: the PG impl forwards to it
-    /// verbatim. A *migration* failing is reported in the [`DryRunReport`]
-    /// (`ok == false`), not returned as an error; a [`DryRunError`] is a harness
-    /// fault (CREATE/DROP DATABASE, shadow connect, provisioning).
-    fn dry_run<'a>(
-        &'a self,
-        migrations: &'a [Migration],
-        cfg: &'a ExecutorConfig,
-        shadow_cfg: &'a ShadowConfig,
-        applied_by: &'a str,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<DryRunReport, DryRunError>> + 'a>,
-    >;
-
-    /// Dry-run a DECLARATIVE deploy plan against a shadow DATABASE seeded from the
-    /// live structure, validating the resulting schema against `desired`, WITHOUT
-    /// touching the real schema.
-    ///
-    /// Byte-identical to the free [`dry_run_declarative`] harness: the PG impl
-    /// forwards to it verbatim.
-    fn dry_run_declarative<'a>(
-        &'a self,
-        plan: &'a DeclarativeDeployPlan,
-        desired: &'a DesiredSchema,
-        cfg: &'a ExecutorConfig,
-        shadow_cfg: &'a ShadowConfig,
-        applied_by: &'a str,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<DryRunReport, DryRunError>> + 'a>,
-    >;
 }
 
 /// The Postgres [`ShadowDryRun`] — owns its admin [`Client`] internally (the
@@ -872,7 +688,7 @@ async fn open_and_provision_shadow(
 /// # Mechanism (snapshot → reconstruct-via-differ)
 ///
 /// The live structure is captured up-front by
-/// [`snapshot_schema`](crate::drift::snapshot_schema) (read-only, on the admin
+/// [`snapshot_schema`](crate::apply::drift::snapshot_schema) (read-only, on the admin
 /// connection — never the migrator role) and handed in as `live`. Here we turn
 /// that snapshot back into CREATE statements by REUSING the declarative differ:
 /// we diff `desired = live-snapshot` against `live = EMPTY`, which yields exactly
@@ -884,7 +700,7 @@ async fn open_and_provision_shadow(
 ///
 /// Ownership: every reconstructed table is attributed to `applied_by` (and the
 /// caller-supplied `live_ownership` map is left empty: every table is "new" on
-/// the empty shadow, so only [`enforce_ownership`](crate::declarative) on the
+/// the empty shadow, so only [`enforce_ownership`](crate::render::declarative) on the
 /// union side runs, and it passes because we own them all). This is sound for the
 /// shadow because it is a THROWAWAY — ownership there has no security meaning; the
 /// real ownership/cross-app gates already ran when the caller built `plan`.

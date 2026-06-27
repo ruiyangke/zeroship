@@ -18,7 +18,7 @@
 //! generated side runs the REAL `descriptors_to_create_ops` producer + the REAL
 //! `fold_to_field_defs` recovery seam — no shims.
 
-use zeroship_migrate::declarative::{descriptor_to_sdk_schema, CollectionDescriptor};
+use zeroship_migrate::render::declarative::{descriptor_to_sdk_schema, CollectionDescriptor};
 use zeroship_migrate::{descriptors_to_create_ops, fold_to_field_defs, SqlDialect};
 use zeroship_migrate_js::eval_schema_to_ir;
 

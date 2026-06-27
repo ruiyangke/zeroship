@@ -58,13 +58,15 @@
 use std::collections::{BTreeMap, HashSet};
 
 use serde_json::Value;
-use zeroship_migrate::declarative::{CollectionDescriptor, FieldDescriptor, IndexDescriptor};
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::apply::backend::sqlite::SqliteBackend as MigrateBackend;
+use zeroship_migrate::render::declarative::{
+    CollectionDescriptor, FieldDescriptor, IndexDescriptor,
+};
 use zeroship_migrate::{
     desired_snapshot, Approval, Checksum, ChecksumInput, DeclarativeApplyError, DeclarativeAuthor,
     ExecutorConfig, GuardConfig, Migration, MigrationEngine, MigrationFlags, MigrationId,
 };
-use zeroship_migrate::backend::MigrationBackend;
-use zeroship_migrate::backend_sqlite::SqliteBackend as MigrateBackend;
 use zeroship_schema::query::SqlDialect;
 
 use crate::backend::NamespaceManager;

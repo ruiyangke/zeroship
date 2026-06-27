@@ -13,7 +13,7 @@
 use zeroship_migrate::{
     Checksum, ChecksumInput, MigrationFlags, MigrationId, OnlinePhase,
 };
-use zeroship_migrate::ir::{CanonicalOpList, IrColumn, IrScalar, Op};
+use zeroship_migrate::model::ir::{CanonicalOpList, IrColumn, IrScalar, Op};
 
 // ---------------------------------------------------------------------------
 // Fixed, deterministic ids — `MigrationId` parses any well-formed `mig_…` id,
@@ -108,7 +108,7 @@ fn checksum_of_ir_byte_stable_golden() {
             name: "accounts".into(),
             columns: vec![IrColumn {
                 name: "id".into(),
-                ty: zeroship_migrate::ir::ColType::Int,
+                ty: zeroship_migrate::model::ir::ColType::Int,
                 nullable: Some(false),
                 default: None,
                 unique: Some(true), id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
@@ -162,7 +162,7 @@ fn checksum_of_ir_deterministic_and_sensitive() {
     let add_a = Op::AddColumn {
         table: "users".into(),
         column: "age".into(),
-        ty: zeroship_migrate::ir::ColType::Int,
+        ty: zeroship_migrate::model::ir::ColType::Int,
         nullable: Some(true),
         default: None,
         vector_metric: None,
@@ -175,7 +175,7 @@ fn checksum_of_ir_deterministic_and_sensitive() {
     let add_b = Op::AddColumn {
         table: "users".into(),
         column: "name".into(),
-        ty: zeroship_migrate::ir::ColType::Text,
+        ty: zeroship_migrate::model::ir::ColType::Text,
         nullable: Some(true),
         default: None,
         vector_metric: None,
@@ -264,7 +264,7 @@ fn checksum_of_ir_deterministic_and_sensitive() {
 #[test]
 fn checksum_of_ir_folds_scalars_and_ast_literals() {
     use std::collections::BTreeMap;
-    use zeroship_migrate::expr::{BinaryOp, Expr};
+    use zeroship_migrate::model::expr::{BinaryOp, Expr};
 
     let flags = MigrationFlags::default();
     let owner = "app_ir";
@@ -432,7 +432,7 @@ fn checksum_of_ir_is_identical_across_dialect_renders() {
 ///    pre-C1), so the new bytes are correct.
 #[test]
 fn checksum_of_ir_fk_actions_are_additive_neutral_and_sensitive() {
-    use zeroship_migrate::ir::{IrConstraint, IrConstraintKind, RefAction};
+    use zeroship_migrate::model::ir::{IrConstraint, IrConstraintKind, RefAction};
 
     let flags = MigrationFlags::default();
     let owner = "app_fk";
@@ -496,7 +496,7 @@ fn checksum_of_ir_jcs_is_key_sorted_stable() {
         name: "t".into(),
         columns: vec![IrColumn {
             name: "id".into(),
-            ty: zeroship_migrate::ir::ColType::Int,
+            ty: zeroship_migrate::model::ir::ColType::Int,
             nullable: Some(false),
             default: None,
             unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],

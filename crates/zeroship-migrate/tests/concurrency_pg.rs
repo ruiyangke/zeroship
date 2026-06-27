@@ -8,7 +8,7 @@
 //! same project.
 //!
 //! The H10 gap: `apply_declarative` used to drive each sub-batch through
-//! `executor::apply` / `run_expand`, each of which independently ACQUIRED and
+//! `apply::executor::apply` / `run_expand`, each of which independently ACQUIRED and
 //! RELEASED the project advisory lock. So between sub-batches the lock was FREE —
 //! a concurrent second deploy could interleave its own sub-batch, and a
 //! multi-rename declarative deploy was NOT serialized as a whole.
@@ -29,7 +29,7 @@ use std::rc::Rc;
 use compio_postgres::Client;
 use zeroship_migrate::{
     PostgresBackend,
-    desired_snapshot, migrator_role_name, provision_migrator, role::deprovision_migrator,
+    desired_snapshot, migrator_role_name, provision_migrator, apply::role::deprovision_migrator,
     snapshot_schema, Approval, CollectionDescriptor, DeclarativeAuthor, ExecutorConfig,
     FieldDescriptor, GuardConfig, MigrationEngine, RenameHint, SchemaSnapshot,
 };

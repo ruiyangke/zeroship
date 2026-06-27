@@ -39,7 +39,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use zeroship_bundle::manifest::MigrationFileEntry;
-use zeroship_migrate::ir::CanonicalOpList;
+use zeroship_migrate::model::ir::CanonicalOpList;
+use zeroship_migrate::plan::loader;
 use zeroship_migrate::{Checksum, MigrationFlags, MigrationIr};
 
 use crate::recorder_http::StructuredError;
@@ -348,14 +349,14 @@ fn suggest_stem(stem: &str) -> String {
     if stem.len() >= 15 && stem.as_bytes()[..14].iter().all(u8::is_ascii_digit) && stem.as_bytes()[14] == b'_' {
         let (v, rest) = stem.split_at(14);
         let desc = &rest[1..];
-        let norm = zeroship_migrate::loader::suggest_migration_name(desc);
+        let norm = loader::suggest_migration_name(desc);
         if norm.is_empty() {
             String::new()
         } else {
             format!("{v}_{norm}")
         }
     } else {
-        zeroship_migrate::loader::suggest_migration_name(stem)
+        loader::suggest_migration_name(stem)
     }
 }
 

@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use serde_json::json;
-use zeroship_migrate::ir::ExistenceGuard;
-use zeroship_migrate::ir_author::{IrAuthor, IrLowerError};
+use zeroship_migrate::model::ir::ExistenceGuard;
+use zeroship_migrate::render::lower::{IrAuthor, IrLowerError};
 use zeroship_migrate::{
     fold_ops, BinaryOp, ColType, ColumnOrExpr, ExclusionElement, ExclusionMethod,
     ExclusionOperator, Expr, IrConstraint, IrConstraintKind, IrScalar, LiveSchema, MigrationIr,

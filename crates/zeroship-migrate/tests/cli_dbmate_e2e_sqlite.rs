@@ -65,7 +65,7 @@ fn run_bin(args: &[&str]) -> (bool, String, String) {
 /// query through the binary's own `status` output where possible; table
 /// existence is verified structurally by re-opening with the public SqliteBackend.
 fn table_exists(app_file: &str, table: &str) -> bool {
-    use zeroship_migrate::backend_sqlite::Mode;
+    use zeroship_migrate::apply::backend::sqlite::Mode;
     use zeroship_migrate::SqliteBackend;
     let app = PathBuf::from(app_file);
     let journal = {

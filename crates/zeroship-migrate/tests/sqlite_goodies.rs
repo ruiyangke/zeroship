@@ -74,7 +74,7 @@ fn ownership_of(d: &zeroship_migrate::DesiredSchema) -> HashMap<String, String> 
 /// (engine mode lets the test issue the PRAGMA on `main`).
 async fn column_type(be: &SqliteBackend, table: &str, column: &str) -> String {
     be.actor()
-        .set_mode(zeroship_migrate::backend_sqlite::Mode::EngineJournal)
+        .set_mode(zeroship_migrate::apply::backend::sqlite::Mode::EngineJournal)
         .await
         .expect("engine mode");
     let info = be
@@ -231,7 +231,7 @@ async fn geopoint_field_applies_as_blob_and_drift_round_trips() {
     // spatial index object to assert here. We DO assert there is no *unexpected*
     // spatial vtable.)
     be.actor()
-        .set_mode(zeroship_migrate::backend_sqlite::Mode::EngineJournal)
+        .set_mode(zeroship_migrate::apply::backend::sqlite::Mode::EngineJournal)
         .await
         .expect("engine mode");
     let vtables = be
@@ -305,7 +305,7 @@ async fn fts_field_applies_cleanly_on_sqlite() {
 
     // REAL end-state: the FTS5 vtable + its three AFTER triggers exist.
     be.actor()
-        .set_mode(zeroship_migrate::backend_sqlite::Mode::EngineJournal)
+        .set_mode(zeroship_migrate::apply::backend::sqlite::Mode::EngineJournal)
         .await
         .expect("engine mode");
     let vtables = be

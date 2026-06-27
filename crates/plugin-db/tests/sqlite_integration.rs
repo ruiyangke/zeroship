@@ -9446,7 +9446,7 @@ fn p5_sqlite_register_model_still_auto_migrates() {
             .await
             .expect("read journal")
             .iter()
-            .filter(|e| e.phase == zeroship_migrate::journal::Phase::Completed)
+            .filter(|e| e.phase == zeroship_migrate::apply::journal::Phase::Completed)
             .count();
         assert!(
             completed >= 1,

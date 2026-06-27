@@ -4,11 +4,11 @@
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zeroship_migrate::backend::MigrationBackend;
-use zeroship_migrate::db::ExecutorConfig;
-use zeroship_migrate::journal::Phase;
-use zeroship_migrate::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
-use zeroship_migrate::precondition::{Precondition, PreconditionCheck};
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::conn::ExecutorConfig;
+use zeroship_migrate::apply::journal::Phase;
+use zeroship_migrate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
+use zeroship_migrate::model::precondition::{Precondition, PreconditionCheck};
 use zeroship_migrate::PreconditionVerdict;
 use zeroship_migrate::SqliteBackend;
 
@@ -518,7 +518,7 @@ async fn is_autocommit_detects_open_transaction() {
     // Open a transaction under engine mode (which the authorizer allows) — now the
     // connection is the WEDGED state the H1 fix detects.
     be.actor()
-        .set_mode(zeroship_migrate::backend_sqlite::Mode::EngineJournal)
+        .set_mode(zeroship_migrate::apply::backend::sqlite::Mode::EngineJournal)
         .await
         .expect("engine mode");
     be.actor().exec("BEGIN IMMEDIATE").await.expect("begin");

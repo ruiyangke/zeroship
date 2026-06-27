@@ -4,7 +4,7 @@
 //!
 //! This is the faithful peer of `bin_e2e_pg.rs` (which exercises the platform
 //! Flyway path): here we prove the GENERIC posture works end-to-end through the
-//! real `clap` parse → `run_config` (Trusted default) → `platform_runner::run_*`:
+//! real `clap` parse → `run_config` (Trusted default) → `command::runner::run_*`:
 //!
 //!   1. `new`     — creates a dbmate file in a temp `--dir` (offline, no DB).
 //!   2. (test writes a real `-- migrate:up`/`down` body into that file)

@@ -17,10 +17,10 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use zeroship_migrate::ir::{
+use zeroship_migrate::model::ir::{
     ColType, IrClassification, IrColumn, IrIndex, IrMask, IrMaskKind, MigrationIr, Op,
 };
-use zeroship_migrate::ir_author::IrAuthor;
+use zeroship_migrate::render::lower::IrAuthor;
 use zeroship_migrate::{
     CollectionDescriptor, DeclarativeAuthor, DesiredSchema, FieldDescriptor, IndexDescriptor,
     LiveSchema, SchemaSnapshot, TableSnapshot,
@@ -55,7 +55,7 @@ fn declarative_pairs_for(
     dialect: SqlDialect,
 ) -> Vec<(String, Option<String>)> {
     let desired: DesiredSchema =
-        zeroship_migrate::declarative::desired_snapshot_for_dialect(SCHEMA, descs, dialect)
+        zeroship_migrate::render::declarative::desired_snapshot_for_dialect(SCHEMA, descs, dialect)
             .expect("desired snapshot");
     let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, dialect);
     let plan = author
@@ -190,7 +190,7 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
     let mut live_snapshot = SchemaSnapshot::default();
     live_snapshot.tables.insert("authors".into(), empty_table_snapshot());
 
-    let desired = zeroship_migrate::declarative::desired_snapshot(SCHEMA, &[posts, authors])
+    let desired = zeroship_migrate::render::declarative::desired_snapshot(SCHEMA, &[posts, authors])
         .expect("desired snapshot");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("authors".to_string(), OWNER.to_string());
@@ -374,7 +374,7 @@ fn add_column_render_is_byte_identical_pg() {
         }],
         indexes: vec![],
     };
-    let desired = zeroship_migrate::declarative::desired_snapshot(SCHEMA, &[desc])
+    let desired = zeroship_migrate::render::declarative::desired_snapshot(SCHEMA, &[desc])
         .expect("desired snapshot");
     // Live = the SAME table with system fields but WITHOUT `nickname`.
     let live_desc = CollectionDescriptor {
@@ -383,7 +383,7 @@ fn add_column_render_is_byte_identical_pg() {
         fields: vec![],
         indexes: vec![],
     };
-    let live_full = zeroship_migrate::declarative::desired_snapshot(SCHEMA, &[live_desc])
+    let live_full = zeroship_migrate::render::declarative::desired_snapshot(SCHEMA, &[live_desc])
         .expect("live snapshot");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("people".to_string(), OWNER.to_string());
@@ -433,11 +433,11 @@ fn create_index_render_is_byte_identical_pg() {
     };
     // Diff against a live table that already has the columns but not the index, so
     // the ONLY emitted op is the CREATE INDEX.
-    let desired = zeroship_migrate::declarative::desired_snapshot(SCHEMA, std::slice::from_ref(&desc))
+    let desired = zeroship_migrate::render::declarative::desired_snapshot(SCHEMA, std::slice::from_ref(&desc))
         .expect("desired");
     let mut live_desc = desc.clone();
     live_desc.indexes = vec![];
-    let live_full = zeroship_migrate::declarative::desired_snapshot(SCHEMA, &[live_desc])
+    let live_full = zeroship_migrate::render::declarative::desired_snapshot(SCHEMA, &[live_desc])
         .expect("live");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("events".to_string(), OWNER.to_string());
@@ -511,7 +511,7 @@ fn ir_lower_one(op: Op, live: &BTreeSet<String>, dialect: SqlDialect) -> Vec<zer
 
 #[test]
 fn alter_column_type_render_is_byte_identical_pg() {
-    use zeroship_migrate::ir::{ColType, Op};
+    use zeroship_migrate::model::ir::{ColType, Op};
     // The differ emits an `ALTER COLUMN … TYPE` when a same-name column's type
     // changed live→desired. Live `qty` is `int`; desired is `number` (double
     // precision). Diff that one-column change.
@@ -527,8 +527,8 @@ fn alter_column_type_render_is_byte_identical_pg() {
         fields: vec![FieldDescriptor { name: "qty".into(), ty: "int".into(), ..Default::default() }],
         indexes: vec![],
     };
-    let desired = zeroship_migrate::declarative::desired_snapshot(SCHEMA, &[desired_desc]).expect("desired");
-    let live = zeroship_migrate::declarative::desired_snapshot(SCHEMA, &[live_desc]).expect("live");
+    let desired = zeroship_migrate::render::declarative::desired_snapshot(SCHEMA, &[desired_desc]).expect("desired");
+    let live = zeroship_migrate::render::declarative::desired_snapshot(SCHEMA, &[live_desc]).expect("live");
     let mut own = HashMap::new();
     own.insert("widgets".to_string(), OWNER.to_string());
     let plan = DeclarativeAuthor::new(SCHEMA, OWNER)
@@ -559,7 +559,7 @@ fn alter_column_type_render_is_byte_identical_pg() {
 
 #[test]
 fn alter_column_nullability_render_is_byte_identical_pg() {
-    use zeroship_migrate::ir::Op;
+    use zeroship_migrate::model::ir::Op;
     // SET NOT NULL: live `name` nullable, desired required. The differ emits
     // `ALTER COLUMN … SET NOT NULL`.
     let desired_desc = CollectionDescriptor {
@@ -574,8 +574,8 @@ fn alter_column_nullability_render_is_byte_identical_pg() {
         fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, ..Default::default() }],
         indexes: vec![],
     };
-    let desired = zeroship_migrate::declarative::desired_snapshot(SCHEMA, &[desired_desc]).expect("desired");
-    let live = zeroship_migrate::declarative::desired_snapshot(SCHEMA, &[live_desc]).expect("live");
+    let desired = zeroship_migrate::render::declarative::desired_snapshot(SCHEMA, &[desired_desc]).expect("desired");
+    let live = zeroship_migrate::render::declarative::desired_snapshot(SCHEMA, &[live_desc]).expect("live");
     let mut own = HashMap::new();
     own.insert("people".to_string(), OWNER.to_string());
     let plan = DeclarativeAuthor::new(SCHEMA, OWNER)
@@ -605,7 +605,7 @@ fn alter_column_nullability_render_is_byte_identical_pg() {
 
 #[test]
 fn add_constraint_fk_render_is_byte_identical_pg() {
-    use zeroship_migrate::ir::{IrConstraint, IrConstraintKind, Op};
+    use zeroship_migrate::model::ir::{IrConstraint, IrConstraintKind, Op};
     // A mutual-reference CYCLE (posts→authors, authors→posts) forces the differ
     // to DEFER the cycle-closing FK to a stand-alone `ALTER TABLE … ADD CONSTRAINT
     // … FOREIGN KEY` (it cannot inline both at CREATE). We compare the differ's
@@ -633,7 +633,7 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
         }],
         indexes: vec![],
     };
-    let desired = zeroship_migrate::declarative::desired_snapshot(SCHEMA, &[posts, authors]).expect("desired");
+    let desired = zeroship_migrate::render::declarative::desired_snapshot(SCHEMA, &[posts, authors]).expect("desired");
     let plan = DeclarativeAuthor::new(SCHEMA, OWNER)
         .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
         .expect("diff");
@@ -684,7 +684,7 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
 /// stand-alone FK add, unchanged).
 #[test]
 fn add_constraint_fk_renders_on_delete_cascade_pg() {
-    use zeroship_migrate::ir::{IrConstraint, IrConstraintKind, Op, RefAction};
+    use zeroship_migrate::model::ir::{IrConstraint, IrConstraintKind, Op, RefAction};
     let mut live = BTreeSet::new();
     live.insert("posts".to_string());
     live.insert("authors".to_string());
@@ -746,7 +746,7 @@ fn add_constraint_fk_renders_on_delete_cascade_pg() {
 
 #[test]
 fn standalone_add_constraint_fk_rejects_non_id_reference_columns_pg() {
-    use zeroship_migrate::ir::{IrConstraint, IrConstraintKind, Op};
+    use zeroship_migrate::model::ir::{IrConstraint, IrConstraintKind, Op};
     let mut live = BTreeSet::new();
     live.insert("posts".to_string());
     live.insert("authors".to_string());
@@ -791,7 +791,7 @@ fn standalone_add_constraint_fk_rejects_non_id_reference_columns_pg() {
 
 #[test]
 fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
-    use zeroship_migrate::ir::{IrConstraint, IrConstraintKind, Op};
+    use zeroship_migrate::model::ir::{IrConstraint, IrConstraintKind, Op};
     // UNIQUE/PK have no stand-alone differ counterpart (the differ inlines them at
     // CREATE / renders single-col UNIQUE as an index), so these compare the IR
     // lower against the shared `lower_add_constraint` render seam directly — the
@@ -869,8 +869,8 @@ fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
 #[allow(clippy::result_large_err)]
 #[test]
 fn standalone_alter_and_constraint_are_sqlite_rebuild_only() {
-    use zeroship_migrate::ir::{ColType, IrConstraint, IrConstraintKind, Op};
-    use zeroship_migrate::ir_author::IrLowerError;
+    use zeroship_migrate::model::ir::{ColType, IrConstraint, IrConstraintKind, Op};
+    use zeroship_migrate::render::lower::IrLowerError;
     // SQLite has no native ALTER COLUMN / ADD|DROP CONSTRAINT — the stand-alone IR
     // lower fails closed (the differ reconciles these via the 12-step rebuild,
     // which is not this pure-render lower's path). Assert each op family.
@@ -1037,7 +1037,7 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
     let mut live_snapshot = SchemaSnapshot::default();
     live_snapshot.tables.insert("authors".into(), empty_table_snapshot());
 
-    let desired = zeroship_migrate::declarative::desired_snapshot_for_dialect(
+    let desired = zeroship_migrate::render::declarative::desired_snapshot_for_dialect(
         SCHEMA,
         &[posts, authors],
         SqlDialect::Sqlite,
@@ -1208,7 +1208,7 @@ fn add_column_render_is_byte_identical_sqlite() {
         indexes: vec![],
     };
     let desired =
-        zeroship_migrate::declarative::desired_snapshot_for_dialect(SCHEMA, &[desc], SqlDialect::Sqlite)
+        zeroship_migrate::render::declarative::desired_snapshot_for_dialect(SCHEMA, &[desc], SqlDialect::Sqlite)
             .expect("desired snapshot");
     let live_desc = CollectionDescriptor {
         name: "people".into(),
@@ -1217,7 +1217,7 @@ fn add_column_render_is_byte_identical_sqlite() {
         indexes: vec![],
     };
     let live_full =
-        zeroship_migrate::declarative::desired_snapshot_for_dialect(SCHEMA, &[live_desc], SqlDialect::Sqlite)
+        zeroship_migrate::render::declarative::desired_snapshot_for_dialect(SCHEMA, &[live_desc], SqlDialect::Sqlite)
             .expect("live snapshot");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("people".to_string(), OWNER.to_string());
@@ -1264,12 +1264,12 @@ fn create_index_render_is_byte_identical_sqlite() {
         }],
     };
     let desired =
-        zeroship_migrate::declarative::desired_snapshot_for_dialect(SCHEMA, std::slice::from_ref(&desc), SqlDialect::Sqlite)
+        zeroship_migrate::render::declarative::desired_snapshot_for_dialect(SCHEMA, std::slice::from_ref(&desc), SqlDialect::Sqlite)
             .expect("desired");
     let mut live_desc = desc.clone();
     live_desc.indexes = vec![];
     let live_full =
-        zeroship_migrate::declarative::desired_snapshot_for_dialect(SCHEMA, &[live_desc], SqlDialect::Sqlite)
+        zeroship_migrate::render::declarative::desired_snapshot_for_dialect(SCHEMA, &[live_desc], SqlDialect::Sqlite)
             .expect("live");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("events".to_string(), OWNER.to_string());

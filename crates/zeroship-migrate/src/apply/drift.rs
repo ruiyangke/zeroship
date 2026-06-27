@@ -18,7 +18,7 @@
 //!   migration in the supplied set is an **orphan** ([`OrphanJournal`]) — the
 //!   bundle is missing a migration the database already has. This is the exact
 //!   comparison the executor's apply flow does as its abort-on-drift pre-check
-//!   (design §2.3 step 3); [`apply`](crate::apply) calls this function and aborts
+//!   (design §2.3 step 3); [`apply`](crate::apply()) calls this function and aborts
 //!   if it returns any [`ChecksumDrift`], so the report and the gate share one
 //!   implementation.
 //!
@@ -80,8 +80,8 @@ pub enum DriftError {
     #[error(transparent)]
     Journal(#[from] JournalError),
     /// A **dialect-neutral** backend error (non-Postgres
-    /// [`MigrationBackend`](crate::backend::MigrationBackend) impls). See
-    /// [`crate::executor::ApplyError::Backend`]. The Postgres impl never
+    /// [`MigrationBackend`](crate::apply::backend::MigrationBackend) impls). See
+    /// [`crate::apply::executor::ApplyError::Backend`]. The Postgres impl never
     /// constructs this arm.
     #[error("drift backend error: {0}")]
     Backend(String),
@@ -121,7 +121,7 @@ impl ChecksumDriftReport {
 /// rollback↔re-apply cycles (a re-applied migration's checksum is its newest
 /// incarnation, not a stale earlier one).
 ///
-/// This is the canonical comparison; [`apply`](crate::apply) calls it as its
+/// This is the canonical comparison; [`apply`](crate::apply()) calls it as its
 /// abort-on-drift pre-check (it aborts if [`checksum_drift`](ChecksumDriftReport::checksum_drift)
 /// is non-empty), so the report and the apply gate cannot diverge.
 ///
@@ -142,7 +142,7 @@ pub async fn check_checksum_drift(
 /// net-applied journal entries (already read by the dialect-coupled `applied`)
 /// against the supplied migration set, producing the [`ChecksumDriftReport`].
 ///
-/// Extracted so EVERY [`MigrationBackend`](crate::backend::MigrationBackend) impl
+/// Extracted so EVERY [`MigrationBackend`](crate::apply::backend::MigrationBackend) impl
 /// shares ONE comparison — the Postgres path and the SQLite path both call this
 /// with their own `applied()` read, so the repeatable-exemption / kind-mismatch /
 /// tamper / orphan rules can never diverge across dialects (design §2.7: the

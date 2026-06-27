@@ -468,22 +468,26 @@ async fn cmd_generate(
             return ExitCode::FAILURE;
         }
     };
-    let desired =
-        match zeroship_migrate::declarative::desired_snapshot(project_schema, &descriptors) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("generate: desired snapshot failed: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
-    let client = match zeroship_migrate::db::connect(database_url).await {
+    let desired = match zeroship_migrate::render::declarative::desired_snapshot(
+        project_schema,
+        &descriptors,
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("generate: desired snapshot failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let client = match zeroship_migrate::conn::connect(database_url).await {
         Ok(c) => c,
         Err(e) => {
             eprintln!("generate: db connect failed: {e}");
             return ExitCode::FAILURE;
         }
     };
-    let live = match zeroship_migrate::drift::snapshot_schema(&client, project_schema).await {
+    let live = match zeroship_migrate::apply::drift::snapshot_schema(&client, project_schema)
+        .await
+    {
         Ok(l) => l,
         Err(e) => {
             eprintln!("generate: live introspection failed: {e}");

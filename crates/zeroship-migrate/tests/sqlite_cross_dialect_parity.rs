@@ -26,12 +26,12 @@ use std::path::PathBuf;
 
 use compio_postgres::Client;
 use tempfile::TempDir;
-use zeroship_migrate::ir::{
+use zeroship_migrate::model::ir::{
     ForEach, RaiseLevel, SelectAst, SelectItem, TableRef, TriggerAction, TriggerEvent,
     TriggerStmt, TriggerTiming, ViewQuery,
 };
 use zeroship_migrate::{
-    provision_migrator, role::deprovision_migrator, Approval, BinaryOp, ColType, ColumnOrExpr,
+    provision_migrator, apply::role::deprovision_migrator, Approval, BinaryOp, ColType, ColumnOrExpr,
     ExclusionElement, ExclusionMethod, ExclusionOperator, Expr, GeneratedCol, GuardConfig,
     IdentityCol, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrFlagsOverride, IrIndex,
     IrLowerError, IrScalar, IrAuthor, LiveSchema, MigrationEngine, MigrationIr, Op, RefAction,
@@ -463,7 +463,7 @@ async fn pg_core_fingerprint(conn: &Client, schema: &str) -> BTreeSet<String> {
 
 async fn sqlite_rows(be: &SqliteBackend, sql: &str) -> Vec<Vec<Option<String>>> {
     be.actor()
-        .set_mode(zeroship_migrate::backend_sqlite::Mode::EngineJournal)
+        .set_mode(zeroship_migrate::apply::backend::sqlite::Mode::EngineJournal)
         .await
         .expect("engine mode");
     be.actor().query(sql).await.expect("sqlite parity query")
@@ -522,12 +522,7 @@ async fn sqlite_core_fingerprint(be: &SqliteBackend) -> BTreeSet<String> {
                 "account_id" => "bigint".to_string(),
                 "status" => "enum:app_status".to_string(),
                 "credit_cents" | "unit_cents" => "domain:positive_cents".to_string(),
-                _ => row[2]
-                    .as_deref()
-                    .unwrap_or_default()
-                    .to_ascii_lowercase()
-                    .replace("integer", "integer")
-                    .replace("text", "text"),
+                _ => row[2].as_deref().unwrap_or_default().to_ascii_lowercase(),
             };
             let required = if row[3].as_deref() == Some("1") || name == "id" {
                 "required"
@@ -702,7 +697,7 @@ fn sqlite_table_fk_and_unique_constraints_fail_closed_until_emitter_threads_them
         .lower(&ir("sqlite_fk_gap", vec![fk_op]), &LiveSchema::default())
         .expect_err("SQLite table-level FK is currently fail-closed");
     assert!(
-        matches!(fk_err, IrLowerError::UnsupportedOp(ref msg) if msg.contains("table-level FOREIGN KEY")),
+        matches!(fk_err, IrLowerError::UnsupportedOp(msg) if msg.contains("table-level FOREIGN KEY")),
         "unexpected SQLite FK error: {fk_err:?}"
     );
 
@@ -729,7 +724,7 @@ fn sqlite_table_fk_and_unique_constraints_fail_closed_until_emitter_threads_them
         )
         .expect_err("SQLite table-level UNIQUE is currently fail-closed");
     assert!(
-        matches!(unique_err, IrLowerError::UnsupportedOp(ref msg) if msg.contains("table-level UNIQUE")),
+        matches!(unique_err, IrLowerError::UnsupportedOp(msg) if msg.contains("table-level UNIQUE")),
         "unexpected SQLite UNIQUE error: {unique_err:?}"
     );
 }

@@ -9,7 +9,7 @@
 //! `IrAuthor` does **NOT** hand-construct snapshots, and does NOT re-spell the
 //! default / system-field / encryption-/comment-sentinel logic. It routes every
 //! op's fields through the SHARED, dialect-parameterized snapshot-builder
-//! [`crate::declarative::build_table_snapshot`] — the SAME builder the differ's
+//! [`crate::render::declarative::build_table_snapshot`] — the SAME builder the differ's
 //! `desired_snapshot_for_dialect` calls — and then renders the resulting
 //! [`TableSnapshot`] / [`ColumnSnapshot`] / [`IndexSnapshot`] through the SAME
 //! render methods the differ uses (`DeclarativeAuthor::lower_*`, which delegate to
@@ -75,7 +75,7 @@ enum LoweredOp {
     /// keeps the common `Ddl` arm cheap (`clippy::large_enum_variant`).
     Rename(Box<RenameStep>),
     /// **PR6a** — a DML op (`insert`/`update`/`del`/`backfill`) lowered through the
-    /// creator-DML assembler ([`crate::dml`]) into a [`PlanStep::Dml`]
+    /// creator-DML assembler ([`crate::render::dml`]) into a [`PlanStep::Dml`]
     /// (parameterized one-shot) or [`PlanStep::Backfill`] (PG batched). NOT
     /// fragment-guarded the way DDL is: a one-shot `Dml` step's values are NATIVE
     /// binds (never interpolated), so there is no rendered-literal fragment a guard
@@ -148,7 +148,7 @@ pub struct LiveSchema {
     pub table_snapshots: std::collections::BTreeMap<String, crate::model::snapshot::TableSnapshot>,
     /// **PR2 — the SQLite `renameColumn` rebuild facts.** The live per-table SDK
     /// schema `Value` (`table → registerModel-shaped JSON`), the SAME shape
-    /// [`crate::declarative::DesiredSchema`]'s `sqlite_schemas` carries. The SQLite
+    /// [`crate::render::declarative::DesiredSchema`]'s `sqlite_schemas` carries. The SQLite
     /// rebuild author renders the post-rename `CREATE TABLE` from this Value (with
     /// the renamed field key) through the shared `zeroship_schema::query` emitter,
     /// so the rebuilt table is byte-identical to what the declarative diff would
@@ -157,7 +157,7 @@ pub struct LiveSchema {
     /// **PR2 — the live per-table OWNER (`table → owning app`).** The SQLite
     /// `renameColumn` rebuild routes through the declarative differ, whose
     /// `enforce_ownership` REFUSES a structural change to a table the deploying app
-    /// does not own ([`crate::declarative::DeclarativeError::NotTableOwner`]). That
+    /// does not own ([`crate::render::declarative::DeclarativeError::NotTableOwner`]). That
     /// guard is only sound if it sees the REAL introspected owner — so the rebuild
     /// stamps the differ's ownership map from THIS map, NOT from the deploying app.
     /// A table whose owner is absent here is treated as foreign on a rename (fail
@@ -206,7 +206,7 @@ impl LiveSchema {
     /// from a raw SQLite-catalog introspection (masks/encryption/ref facets are not
     /// in `sqlite_master`); the descriptor set IS the authoritative source, so the
     /// dev/CLI deploy path threads it here. Routes through the SAME
-    /// [`crate::declarative::desired_snapshot_for_dialect`] the differ uses, so the
+    /// [`crate::render::declarative::desired_snapshot_for_dialect`] the differ uses, so the
     /// live facts the rename rebuild consumes are byte-identical to a `t.*`-diff's
     /// desired snapshot. Every table is owned by `owner_app` (the deploying app).
     ///
@@ -331,7 +331,7 @@ impl LiveSchema {
 
     /// The per-table live column set for the DML apply/render-seam ColRef
     /// resolution (rule (c), §3.3.1.1(c)). Projects [`Self::table_snapshots`] into a
-    /// `table → [column names]` map ([`crate::validate::validate_op_resolved`]'s
+    /// `table → [column names]` map ([`crate::model::validate::validate_op_resolved`]'s
     /// input). A table absent from `table_snapshots` is absent here too, so its DML
     /// op keeps the structural-only scope (the (c) check is SKIPPED — never weaker
     /// than the load-time gate). The column names include the platform system fields
@@ -367,14 +367,14 @@ pub struct IrAuthor {
     /// **PR10** — the connection/CLI-level DEFAULT schema (search_path-like), used
     /// when an op omits its own `schema` qualifier (§2.7). `None` ⇒ the dialect
     /// default (the `project_schema`). A `deployment` fact (mirrors how
-    /// `project_schema`/`search_path` live on [`crate::db::ExecutorConfig`], not on
+    /// `project_schema`/`search_path` live on [`crate::conn::ExecutorConfig`], not on
     /// the authored `.ir.json`), threaded in by the CLI/connection via
     /// [`IrAuthor::with_default_schema`].
     default_schema: Option<String>,
     /// **PR10 review (MED)** — the schema-confinement scope this author's
     /// [`default_schema`](Self::default_schema) is validated against at lower time
     /// (§2.7). The friendly cross-schema VALIDATE gate
-    /// ([`crate::validate::validate_op_schema_and_guard`]) inspects ONLY the op's own
+    /// ([`crate::model::validate::validate_op_schema_and_guard`]) inspects ONLY the op's own
     /// `schema()` qualifier — it never sees the connection
     /// [`default_schema`](Self::default_schema). So a `default_schema` pointing at a
     /// FOREIGN schema would slip the gate and render every guard-less op into that
@@ -422,7 +422,7 @@ pub enum IrLowerError {
         /// Why it cannot be rendered.
         reason: &'static str,
     },
-    /// A DDL op whose body carries a closed-AST [`crate::expr::Expr`] (a `CHECK`
+    /// A DDL op whose body carries a closed-AST [`crate::model::expr::Expr`] (a `CHECK`
     /// constraint predicate, or an `alterColumnType` `using` cast) that the
     /// Wave-C expression→SQL renderer must materialize. The op family lowers; the
     /// Expr-bearing variant waits on that renderer (the same wave the DML
@@ -446,7 +446,7 @@ pub enum IrLowerError {
     )]
     SqliteRebuildOnly(&'static str),
     /// **PR10 Part B** — a guarded op (`ifNotExists` on the `addConstraint` family)
-    /// whose constraint shape cannot produce a verifiable [`GuardProbe`] because the
+    /// whose constraint shape cannot produce a verifiable [`GuardProbe`](crate::model::probe::GuardProbe) because the
     /// CHECK body is a deferred-render closed-AST `Expr` (handled separately by
     /// [`ExprRenderDeferred`](Self::ExprRenderDeferred) before this is reached). This
     /// variant is reserved for any future guarded shape that lowers but cannot build
@@ -496,7 +496,7 @@ pub enum IrLowerError {
     /// **PR10 review (LOW, confinement defense-in-depth)** — an op carrying an
     /// EXPLICIT `schema()` qualifier that the author's confinement
     /// [`scope`](IrAuthor::scope) does NOT permit. The friendly op-level cross-schema
-    /// VALIDATE gate ([`crate::ir::validate_ir_scoped`]) already refuses this
+    /// VALIDATE gate ([`crate::model::validate::validate_ir_scoped`]) already refuses this
     /// fail-closed on every PRODUCTION path (`load_and_lower[_guarded]` →
     /// `load_ir_document` → `validate_ir_scoped` gates the explicit qualifier before
     /// lower). But the public [`lower`](IrAuthor::lower)/[`lower_steps`](IrAuthor::lower_steps)
@@ -570,7 +570,7 @@ pub enum IrLowerError {
     },
     /// **VENDOR** — rendering a vendor op to its Postgres DDL failed (an invalid
     /// identifier, an unrenderable policy/trigger predicate, an empty privilege/role
-    /// list). Carries the underlying [`crate::vendor::VendorError`].
+    /// list). Carries the underlying [`crate::render::vendor::VendorError`].
     #[error(transparent)]
     Vendor(#[from] crate::render::vendor::VendorError),
     /// A trigger action or facet is unsupported on the target dialect. Triggers are
@@ -633,7 +633,7 @@ pub enum IrLowerError {
     /// `Int` over a live `text` column) would otherwise author a mismatched
     /// `ADD COLUMN` + a cross-type dual-write copy with no rejection. This is the
     /// IR-path mirror of the declarative differ's
-    /// [`crate::declarative::DeclarativeError::RenameHintTypeMismatch`] — enforced
+    /// [`crate::render::declarative::DeclarativeError::RenameHintTypeMismatch`] — enforced
     /// IDENTICALLY on BOTH dialects (the single authoritative type source is the
     /// LIVE column, reconciled against the IR `ty`; neither leg silently uses one
     /// over the other). Carries the table, the column, and the two `data_type`s.
@@ -668,7 +668,7 @@ pub enum IrLowerError {
          alone"
     )]
     RenameNeedsLiveColumn(String, String),
-    /// **PR6a** — the structural expression validator ([`crate::validate`])
+    /// **PR6a** — the structural expression validator ([`crate::model::validate`])
     /// rejected an embedded closed-AST node of a DML op (`update`/`del`/`backfill`
     /// `set`/`where`/`filter`) BEFORE assembly: an out-of-policy node, an
     /// out-of-envelope synth, a non-portable cast. Boxed (the `AuthoringError`
@@ -676,7 +676,7 @@ pub enum IrLowerError {
     /// the boxed error's `Display`.
     #[error("IrAuthor::lower of a DML op: {0}")]
     DmlValidate(Box<crate::model::validate::AuthoringError>),
-    /// **PR6a** — the creator-DML assembler ([`crate::dml`]) rejected a DML op: a
+    /// **PR6a** — the creator-DML assembler ([`crate::render::dml`]) rejected a DML op: a
     /// malformed identifier, an empty/ragged insert, a SQLite `onConflict`
     /// (`dialect_scope = PgOnly`, §9), or a SQLite-targeted batched backfill (PR6b).
     /// All are HARD errors — a DML op is NEVER silently dropped or mis-applied.
@@ -933,7 +933,8 @@ pub struct LoweredArtifact {
     /// The lowered artifact as a single ordered [`AppliedPlan`] (§2.0 / §5.2):
     /// one `.ir.json` → ONE plan, whose `Ddl` steps are the lowered, guard-checked
     /// migrations (their `up` is provably the reassembly of the guarded fragments,
-    /// §6.1.1) and whose `checksum` is the dialect-neutral [`Checksum::of_ir`] over
+    /// §6.1.1) and whose `checksum` is the dialect-neutral
+    /// [`crate::model::migration::Checksum::of_ir`] over
     /// the op list (§2.4). The deploy path routes this plan's steps through
     /// `MigrationEngine::apply_plan` (§5.2). For PR1's pure-DDL ops every step is a
     /// `PlanStep::Ddl`; richer step kinds (Backfill/Dml/OnlineRename) arrive in
@@ -1094,7 +1095,7 @@ impl IrAuthor {
     /// advisory checksum-hint compare) and then LOWER the validated, owned IR to
     /// migrations. This is the single creator-facing entry the `.ir.json` deploy
     /// path calls — the peer of the platform `.sql` Flyway loader
-    /// ([`crate::loader::load_dir`]), which never routes IR.
+    /// ([`crate::plan::loader::load_dir`]), which never routes IR.
     ///
     /// `registry` is the project's table→owner map (drives the §8.6 ownership
     /// check); `live` the introspected [`LiveSchema`] facts — the tables already
@@ -1136,12 +1137,12 @@ impl IrAuthor {
 
     /// The PRODUCTION `.ir.json` deploy entry (§6.1.1 + §7.2): run the fail-closed
     /// LOAD GATE, then lower with **guard-per-fragment attribution**
-    /// ([`lower_guarded`]) so a guard denial carries the exact op-index + kind to
+    /// ([`Self::lower_guarded`]) so a guard denial carries the exact op-index + kind to
     /// the creator (the 422), not a bare whole-`up` denial. Returns the lowered
     /// migrations + the per-op fragments + the tables this artifact CREATES (for
     /// the deploy loop's cross-file registry/live-set advance).
     ///
-    /// This is the guard-attributed peer of [`load_and_lower`]: the deploy path
+    /// This is the guard-attributed peer of [`Self::load_and_lower`]: the deploy path
     /// calls THIS so the §6.1.1 attribution reaches a real deploy (the engine's
     /// subsequent whole-`up` guard is a belt-and-suspenders re-check, but the
     /// op-attributed denial happens HERE first).
@@ -1228,7 +1229,7 @@ impl IrAuthor {
     /// from the LIVE schema when the op omits the owning-table hint.
     ///
     /// `MigrationIr::touched_tables` under-reports a bare-name `dropIndex` (it has
-    /// no structured table — [`Op::touched_table`](crate::ir::Op::touched_table)
+    /// no structured table — [`Op::touched_table`](crate::model::ir::Op::touched_table)
     /// returns `None`), which would let a `op.dropIndex("idx_on_pending_table")`
     /// with no hint slip the §2.0.3(2) refusal (fail-OPEN). Here we union in the
     /// owner resolved from `live.table_snapshots` (the same introspection the
@@ -1328,7 +1329,7 @@ impl IrAuthor {
     /// Lower a validated [`MigrationIr`]'s ops to ONE [`AppliedPlan`] (§2.0 /
     /// §5.2) — the named-contract peer of [`lower`](Self::lower) (which returns the
     /// flat `Vec<Migration>` the §6.4 byte-identity goldens compare). The plan's
-    /// `checksum` is the dialect-neutral [`Checksum::of_ir`] anchor and each `Ddl`
+    /// `checksum` is the dialect-neutral [`crate::model::migration::Checksum::of_ir`] anchor and each `Ddl`
     /// step's journaled checksum is stamped with it (§5.3 — see
     /// [`assemble_plan`](Self::assemble_plan)). A `renameColumn` op lowers to a
     /// [`PlanStep::OnlineRename`] step (PR2), carried verbatim into the plan.
@@ -1502,7 +1503,7 @@ impl IrAuthor {
         // catalog probe (probe → shape-verify-or-fail → run/skip under the held
         // advisory lock), not a native `IF [NOT] EXISTS` clause. The guard's
         // DIRECTION was already checked legal at validate-time. Here we build a
-        // dialect-neutral [`crate::render::existence_probe::GuardProbe`] from the op (the arms
+        // dialect-neutral [`crate::model::probe::GuardProbe`] from the op (the arms
         // below have the columns/type/nullable in hand via the SAME shared snapshot
         // builders the lowering uses) and STAMP it onto each lowered `Migration`
         // unit; the executor reads the live catalog and `decide`s. A guard whose
@@ -1511,7 +1512,7 @@ impl IrAuthor {
         // existing object). `probe` is filled by the arms; the renameColumn / DML
         // early-returns build + stamp it inline before returning.
         let guard = op.existence_guard();
-        let mut probe: Option<crate::render::existence_probe::GuardProbe> = None;
+        let mut probe: Option<crate::model::probe::GuardProbe> = None;
         let mut migs: Vec<LoweredUnit> = match op {
             Op::CreateEnum { name, values, .. } => {
                 named_types.create_enum(name, &eff_schema, values)?;
@@ -1526,7 +1527,7 @@ impl IrAuthor {
             }
             Op::DropEnum { name, .. } => {
                 if let Some(g) = guard {
-                    probe = Some(crate::render::existence_probe::GuardProbe::NamedType {
+                    probe = Some(crate::model::probe::GuardProbe::NamedType {
                         schema: eff_schema.clone(),
                         name: name.clone(),
                         kind: "enum".to_string(),
@@ -1588,7 +1589,7 @@ impl IrAuthor {
             }
             Op::DropDomain { name, .. } => {
                 if let Some(g) = guard {
-                    probe = Some(crate::render::existence_probe::GuardProbe::NamedType {
+                    probe = Some(crate::model::probe::GuardProbe::NamedType {
                         schema: eff_schema.clone(),
                         name: name.clone(),
                         kind: "domain".to_string(),
@@ -1613,7 +1614,7 @@ impl IrAuthor {
             }
             Op::DropSequence { name, .. } => {
                 if let Some(g) = guard {
-                    probe = Some(crate::render::existence_probe::GuardProbe::Sequence {
+                    probe = Some(crate::model::probe::GuardProbe::Sequence {
                         schema: eff_schema.clone(),
                         name: name.clone(),
                         direction: g.into(),
@@ -1742,7 +1743,7 @@ impl IrAuthor {
                 // SatisfiedNoop, a genuine affinity change diverges. The guard probes the
                 // MAIN column (the sibling is an engine-managed implementation detail).
                 if let Some(g) = guard {
-                    probe = Some(crate::render::existence_probe::GuardProbe::Column {
+                    probe = Some(crate::model::probe::GuardProbe::Column {
                         schema: eff_schema.clone(),
                         table: table.clone(),
                         column: column.clone(),
@@ -1763,7 +1764,7 @@ impl IrAuthor {
                 // **PR10 Part B** — createIndex ifNotExists: verify (unique, columns)
                 // from the SAME index snapshot the CREATE renders from.
                 if let Some(g) = guard {
-                    probe = Some(crate::render::existence_probe::GuardProbe::Index {
+                    probe = Some(crate::model::probe::GuardProbe::Index {
                         schema: eff_schema.clone(),
                         table: table.clone(),
                         name: idx.name.clone(),
@@ -1776,7 +1777,7 @@ impl IrAuthor {
             Op::DropTable { table, .. } => {
                 // **PR10 Part B** — dropTable ifExists: presence-only (empty columns).
                 if let Some(g) = guard {
-                    probe = Some(crate::render::existence_probe::GuardProbe::Table {
+                    probe = Some(crate::model::probe::GuardProbe::Table {
                         schema: eff_schema.clone(),
                         table: table.clone(),
                         direction: g.into(),
@@ -1797,7 +1798,7 @@ impl IrAuthor {
                 // SOURCE table (empty columns), the SAME probe shape DropTable uses
                 // (an `ifExists` rename of an absent table is a SatisfiedNoop).
                 if let Some(g) = guard {
-                    probe = Some(crate::render::existence_probe::GuardProbe::Table {
+                    probe = Some(crate::model::probe::GuardProbe::Table {
                         schema: eff_schema.clone(),
                         table: table.clone(),
                         direction: g.into(),
@@ -1809,7 +1810,7 @@ impl IrAuthor {
             Op::DropColumn { table, column, .. } => {
                 // **PR10 Part B** — dropColumn ifExists: presence-only on the column.
                 if let Some(g) = guard {
-                    probe = Some(crate::render::existence_probe::GuardProbe::Column {
+                    probe = Some(crate::model::probe::GuardProbe::Column {
                         schema: eff_schema.clone(),
                         table: table.clone(),
                         column: column.clone(),
@@ -1855,7 +1856,7 @@ impl IrAuthor {
                     } else {
                         String::new()
                     };
-                    probe = Some(crate::render::existence_probe::GuardProbe::Index {
+                    probe = Some(crate::model::probe::GuardProbe::Index {
                         schema: eff_schema.clone(),
                         table: table_hint,
                         name: name.clone(),
@@ -1929,7 +1930,7 @@ impl IrAuthor {
                 // EXIST (presence-only — an alter intentionally CHANGES the shape, so
                 // there is nothing to shape-verify).
                 if let Some(g) = guard {
-                    probe = Some(crate::render::existence_probe::GuardProbe::ColumnPresence {
+                    probe = Some(crate::model::probe::GuardProbe::ColumnPresence {
                         schema: eff_schema.clone(),
                         table: table.clone(),
                         column: column.clone(),
@@ -1946,7 +1947,7 @@ impl IrAuthor {
                 )?;
                 // **PR10 Part B** — alterColumnNullability ifExists: presence-only.
                 if let Some(g) = guard {
-                    probe = Some(crate::render::existence_probe::GuardProbe::ColumnPresence {
+                    probe = Some(crate::model::probe::GuardProbe::ColumnPresence {
                         schema: eff_schema.clone(),
                         table: table.clone(),
                         column: column.clone(),
@@ -1996,7 +1997,7 @@ impl IrAuthor {
                 // catalog — derive it the SAME way `lower_add_constraint` does.
                 if let Some(g) = guard {
                     let (cname, ckind) = ir_constraint_name_and_kind(table, constraint);
-                    probe = Some(crate::render::existence_probe::GuardProbe::Constraint {
+                    probe = Some(crate::model::probe::GuardProbe::Constraint {
                         schema: eff_schema.clone(),
                         table: table.clone(),
                         name: cname,
@@ -2022,7 +2023,7 @@ impl IrAuthor {
                 )?;
                 // **PR10 Part B** — dropConstraint ifExists: presence-only on the name.
                 if let Some(g) = guard {
-                    probe = Some(crate::render::existence_probe::GuardProbe::Constraint {
+                    probe = Some(crate::model::probe::GuardProbe::Constraint {
                         schema: eff_schema.clone(),
                         table: table.clone(),
                         name: name.clone(),
@@ -2058,7 +2059,7 @@ impl IrAuthor {
             Op::DropView { name, .. } => {
                 enforce_vendor_capability_at_lower(op, Some(&self.scope))?;
                 if let Some(g) = guard {
-                    probe = Some(crate::render::existence_probe::GuardProbe::View {
+                    probe = Some(crate::model::probe::GuardProbe::View {
                         schema: eff_schema.clone(),
                         name: name.clone(),
                         direction: g.into(),
@@ -2192,16 +2193,16 @@ impl IrAuthor {
     }
 
     /// **§PR6a — lower a DML op** (`insert`/`update`/`del`/`backfill`) into a
-    /// [`PlanStep`] via the creator-DML assembler ([`crate::dml`]).
+    /// [`PlanStep`] via the creator-DML assembler ([`crate::render::dml`]).
     ///
     /// The closed-AST expression slots (`update`/`del`/`backfill` `set`/`where`/
     /// `filter`) are gated in TWO layers, BOTH before any SQL is assembled:
     ///
-    /// 1. STRUCTURALLY by [`crate::validate::validate_op`] (the (a)/(b)/(d) checks —
+    /// 1. STRUCTURALLY by [`crate::model::validate::validate_op`] (the (a)/(b)/(d) checks —
     ///    node allow-list, synth envelope, portable cast); a non-portable /
     ///    out-of-policy node is rejected up front.
     /// 2. RULE (c) — `ColRef` RESOLUTION against the live target table — by
-    ///    [`crate::validate::validate_op_resolved`], using the introspected
+    ///    [`crate::model::validate::validate_op_resolved`], using the introspected
     ///    [`LiveSchema::table_snapshots`] (the SAME live facts the rename/diff path
     ///    consults). A `ColRef` to a column that does NOT exist on the enclosing
     ///    target table (or a synthesized cross-table reference) is rejected with the
@@ -2215,10 +2216,10 @@ impl IrAuthor {
     ///    remain the backstop.
     ///
     /// Portability boundaries (§9), all HARD errors (never silent):
-    /// - `insert { onConflict }` on **SQLite** → [`crate::dml::DmlError::OnConflictNotPortable`].
+    /// - `insert { onConflict }` on **SQLite** → [`crate::render::dml::DmlError::OnConflictNotPortable`].
     ///
     /// A **batched** `backfill` / `update { batch }` is PORTABLE on BOTH backends
-    /// since PR6b (PG `backfill.rs`, SQLite `backend_sqlite::backfill_sql`) — it is
+    /// since PR6b (PG `backfill.rs`, SQLite `apply::backend::sqlite::backfill_sql`) — it is
     /// no longer a SQLite hard error.
     ///
     /// # Errors
@@ -2358,18 +2359,18 @@ impl IrAuthor {
     }
 
     /// Lower a `backfill` (or batched `update`) into a [`PlanStep::Backfill`]. The
-    /// `set`/`filter` render to INLINE SQL strings ([`crate::dml::assemble_backfill_clauses`])
-    /// the [`crate::render::plan::BackfillSpec`] executor consumes (it guard-checks /
+    /// `set`/`filter` render to INLINE SQL strings ([`crate::render::dml::assemble_backfill_clauses`])
+    /// the [`crate::model::backfill::BackfillSpec`] executor consumes (it guard-checks /
     /// authorizer-vets the assembled `UPDATE` before any batch).
     ///
     /// **PORTABLE on BOTH backends** since PR6b: PG via the writable-CTE windowed
     /// `UPDATE` executor (`backfill.rs`), SQLite via the batched per-batch-txn
-    /// executor (`backend_sqlite::backfill_sql`, §2.3.1). The inline `set`/`filter`
+    /// executor (`apply::backend::sqlite::backfill_sql`, §2.3.1). The inline `set`/`filter`
     /// are dialect-rendered (the §9 `c.fn.splitPart` lowering, NULL-skipping
     /// `concatWs`, etc. differ per dialect) — but both legs consume the same
     /// `BackfillSpec` shape, so the plan step is uniform.
     ///
-    /// **#149** — the backfill EXECUTOR ([`crate::render::plan::BackfillSpec`]) now
+    /// **#149** — the backfill EXECUTOR ([`crate::model::backfill::BackfillSpec`]) now
     /// carries a per-spec `schema`, so a schema-qualified batched backfill/update
     /// RUNS (it no longer fails closed at lower). The spec's `schema` is set from
     /// `eff_schema` (§2.7), which the cross-schema scope gate (`permits`) has
@@ -2413,7 +2414,7 @@ impl IrAuthor {
             crate::render::dml::assemble_backfill_clauses(self.dialect, table, set, filter)
                 .map_err(IrLowerError::DmlAssemble)?;
         let batch_size = u32::try_from(batch_size).unwrap_or(u32::MAX).max(1);
-        let spec = crate::render::plan::BackfillSpec {
+        let spec = crate::model::backfill::BackfillSpec {
             schema: eff_schema.to_string(),
             table: table.to_string(),
             cursor_column: cursor_column.to_string(),
@@ -2610,7 +2611,7 @@ impl IrAuthor {
     /// extra index to appear in the live catalog.
     ///
     /// Each spec is built byte-identically to its stand-alone-op equivalent (a
-    /// table-level FK reuses [`crate::declarative::ir_fk_constraint_snapshot`], a
+    /// table-level FK reuses [`crate::render::declarative::ir_fk_constraint_snapshot`], a
     /// UNIQUE reuses the `UNIQUE (cols)` body + `<table>_<cols>_key` derived name a
     /// stand-alone `addConstraint(unique)` uses), so an op-authored table and the
     /// differ's equivalent re-diff clean.
@@ -3034,7 +3035,7 @@ impl IrAuthor {
     /// `information_schema` `data_type` and reconciled against the LIVE `from`
     /// column's actual type ([`LiveSchema::table_snapshots`]). A mismatch is rejected
     /// ([`IrLowerError::RenameTypeMismatch`]) — the IR-path mirror of the declarative
-    /// differ's [`crate::declarative::DeclarativeError::RenameHintTypeMismatch`]. A
+    /// differ's [`crate::render::declarative::DeclarativeError::RenameHintTypeMismatch`]. A
     /// pure rename mirrors values across the two columns and cannot also change the
     /// type, so the live column is the single authoritative type source on BOTH
     /// dialects (neither leg silently trusts the IR `ty`). The live `from` column is
@@ -3329,7 +3330,7 @@ impl IrAuthor {
 /// migrations whose `up` carries NO interior `;\n` (a plain column, an encrypted
 /// column → `CREATE;\nCOMMENT`). The PRODUCTION guarded path
 /// ([`IrAuthor::lower_guarded`]) NO LONGER splits textually — it carries the
-/// renderer's STRUCTURAL per-statement list ([`crate::declarative::LoweredUnit`])
+/// renderer's STRUCTURAL per-statement list ([`crate::render::declarative::LoweredUnit`])
 /// instead, so a string-literal column DEFAULT whose value itself contains `;\n`
 /// (e.g. `DEFAULT 'a;\nb'`) is never broken mid-statement. This helper would
 /// over-split such an `up`; it is kept only for tests that do not exercise that
@@ -4138,7 +4139,7 @@ fn dml_id_from_seed(tag: &str, seed: &[u8]) -> crate::model::migration::Migratio
 
 /// The op kind tag for §6.1.1 attribution — the human-facing name the guard
 /// denial / status surface leads with. Also consumed by the PR14 offline
-/// [`sql_preview`](crate::sql_preview) to label each op in the `--sql` plan preview.
+/// [`sql_preview`](crate::render::sql_preview) to label each op in the `--sql` plan preview.
 #[must_use]
 pub const fn op_kind_tag(op: &Op) -> &'static str {
     match op {
@@ -4541,7 +4542,7 @@ pub(crate) fn derived_exclusion_constraint_name(
 
 /// A deterministic constraint name for an unnamed UNIQUE/PK add:
 /// `<table>_<cols>_<suffix>` (`key` for UNIQUE, `pkey` for PRIMARY KEY), capped to
-/// the server-side identifier limit via [`crate::author::cap_ident_name`] so the
+/// the server-side identifier limit via [`crate::plan::author::cap_ident_name`] so the
 /// authored name matches what PG stores (an un-capped name would be truncated on
 /// CREATE and never round-trip).
 ///
@@ -4553,7 +4554,7 @@ pub(crate) fn derived_constraint_name(table: &str, cols: &[String], suffix: &str
 
 /// **PR10 Part B** — the catalog `(name, kind)` an `addConstraint` op will create,
 /// derived the SAME way [`IrAuthor::lower_add_constraint`] derives them, so the
-/// stamped [`crate::guard_probe::GuardProbe::Constraint`] names the constraint the
+/// stamped [`crate::render::existence_probe::GuardProbe::Constraint`] names the constraint the
 /// executor will see in the live `information_schema` / `pg_get_constraintdef`.
 /// `kind` is the PG catalog spelling (`information_schema.table_constraints`):
 /// `PRIMARY KEY` / `FOREIGN KEY` / `UNIQUE` / `CHECK`. A CHECK constraint never
@@ -4705,7 +4706,7 @@ mod tests {
 
     /// REGRESSION (mig-first P1 critique, Finding #4): the lower's createTable
     /// table-level UNIQUE `definition` is spelled via the SHARED
-    /// [`crate::declarative::constraintdef_cols`] — the SAME helper the offline fold
+    /// [`crate::render::declarative::constraintdef_cols`] — the SAME helper the offline fold
     /// uses — so the lower's snapshot half and the fold cannot drift on the body. The
     /// CREATE DDL inlines that definition (`CONSTRAINT <name> UNIQUE (cols)`), so a
     /// safe lowercase column renders BARE (`UNIQUE (handle)`), matching live
@@ -5240,9 +5241,9 @@ mod tests {
             .find_map(|m| m.existence_guard.clone())
             .expect("a guarded createTable must stamp a probe on its Migration");
         match probe {
-            crate::render::existence_probe::GuardProbe::Table { table, direction, expect_columns, .. } => {
+            crate::model::probe::GuardProbe::Table { table, direction, expect_columns, .. } => {
                 assert_eq!(table, "t");
-                assert_eq!(direction, crate::render::existence_probe::GuardDir::IfNotExists);
+                assert_eq!(direction, crate::model::probe::GuardDir::IfNotExists);
                 assert!(
                     expect_columns.iter().any(|ec| ec.name == "x"),
                     "the table probe must carry the declared column shape, got {expect_columns:?}"
@@ -5906,7 +5907,7 @@ mod tests {
         );
     }
 
-    // PR7 code-critic LOW (collision-guard redundancy, ir_author.rs lower_rename):
+    // PR7 code-critic LOW (collision-guard redundancy, render::lower rename lowering):
     // the rename-to-EXISTING-column collision guard must run UNCONDITIONALLY against
     // the live snapshot bound by the from-check — NOT inside a second `if let Some`
     // wrapper around a fresh fallible `table_snapshots` lookup, whose None arm implies
@@ -6227,7 +6228,7 @@ mod tests {
             },
             expand: Vec::new(),
             contract: Vec::new(),
-            backfill: crate::render::plan::BackfillSpec {
+            backfill: crate::model::backfill::BackfillSpec {
                 schema: "app".into(),
                 table: "t".into(),
                 cursor_column: "id".into(),

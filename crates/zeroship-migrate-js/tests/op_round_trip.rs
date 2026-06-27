@@ -32,7 +32,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use zeroship_migrate::ir::CanonicalOpList;
+use zeroship_migrate::model::ir::CanonicalOpList;
 use zeroship_migrate::{Checksum, MigrationFlags, MigrationIr};
 use zeroship_migrate_js::record_migration_to_json;
 

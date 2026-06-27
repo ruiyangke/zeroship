@@ -22,11 +22,11 @@
 
 use compio_postgres::Client;
 use zeroship_migrate::{ColumnSnapshot, TableSnapshot};
-use zeroship_migrate::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
-use zeroship_migrate::ir_author::{IrAuthor, LiveSchema};
+use zeroship_migrate::model::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
+use zeroship_migrate::render::lower::{IrAuthor, LiveSchema};
 use zeroship_migrate::PlanStep;
 use zeroship_migrate::{
-    provision_migrator, role::deprovision_migrator, ApplyError, Approval, ApprovalScope,
+    provision_migrator, apply::role::deprovision_migrator, ApplyError, Approval, ApprovalScope,
     DeclarativeApplyError, EngineError, ExecutorConfig, MigrationEngine, PostgresBackend,
     SqlDialect,
 };
@@ -241,23 +241,23 @@ async fn create_members(engine: &MigrationEngine, be: &PostgresBackend<'_>, cfg:
         "CREATE TABLE {s}.members (id bigint PRIMARY KEY, email text, legacy text); \
          INSERT INTO {s}.members (id, email, legacy) VALUES (1,'a@x.test','x'),(2,'b@x.test','y')"
     );
-    let m = zeroship_migrate::migration::Migration {
-        version: zeroship_migrate::migration::MigrationId::generate(),
+    let m = zeroship_migrate::model::migration::Migration {
+        version: zeroship_migrate::model::migration::MigrationId::generate(),
         name: "create_members".into(),
         up,
         down: None,
-        checksum: zeroship_migrate::migration::Checksum::of(
-            &zeroship_migrate::migration::ChecksumInput {
+        checksum: zeroship_migrate::model::migration::Checksum::of(
+            &zeroship_migrate::model::migration::ChecksumInput {
                 up: "create_members",
                 down: None,
-                flags: &zeroship_migrate::migration::MigrationFlags::default(),
+                flags: &zeroship_migrate::model::migration::MigrationFlags::default(),
                 owner_app: "app_test",
                 depends_on: &[],
                 supersedes: &[],
                 preconditions: &[],
             },
         ),
-        flags: zeroship_migrate::migration::MigrationFlags::default(),
+        flags: zeroship_migrate::model::migration::MigrationFlags::default(),
         owner_app: "app_test".into(),
         depends_on: vec![],
         supersedes: vec![],
@@ -271,7 +271,7 @@ async fn create_members(engine: &MigrationEngine, be: &PostgresBackend<'_>, cfg:
             be,
             cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("create members");
@@ -325,7 +325,7 @@ async fn approving_rename_version_does_not_authorize_co_bundled_dropcolumn() {
             &be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
             None,
         )
         .await
@@ -376,7 +376,7 @@ async fn approving_the_exact_destructive_version_authorizes_only_that_op() {
             &be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
             None,
         )
         .await
@@ -399,7 +399,7 @@ async fn approving_the_exact_destructive_version_authorizes_only_that_op() {
             &be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
             None,
         )
         .await
@@ -438,7 +438,7 @@ async fn unscoped_empty_scope_authorizes_no_destructive_op() {
             &be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
             None,
         )
         .await
@@ -478,7 +478,7 @@ async fn approval_scope_all_preserves_legacy_blanket_behavior() {
             &be,
             &cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
             None,
         )
         .await

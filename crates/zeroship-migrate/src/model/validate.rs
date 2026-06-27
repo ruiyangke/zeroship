@@ -1,7 +1,7 @@
 //! The STRUCTURAL expression-AST validator + the structured-error envelope
 //! (design §3.3.1.1 / §8.8).
 //!
-//! The closed expression AST ([`crate::expr::Expr`]) is **constructed in JS and
+//! The closed expression AST ([`crate::model::expr::Expr`]) is **constructed in JS and
 //! serialized to IR — never parsed from text** (§3.3.1.1). So validation is a
 //! purely STRUCTURAL allow-list walk over the deserialized tree:
 //!
@@ -21,7 +21,7 @@
 //!   column not on the target table is a hard error (injection defense + the
 //!   capability boundary).
 //! - **(d)** a `Cast` target is a portable type — guaranteed by the closed
-//!   [`crate::expr::CastTarget`] enum, so this is structurally total.
+//!   [`crate::model::expr::CastTarget`] enum, so this is structurally total.
 //!
 //! There is **NO lexer, NO Pratt/precedence parser, NO `libpg_query`, NO
 //! differential fuzzer** — HIGH-1 is dissolved, not mitigated (§3.3.1.1). The
@@ -35,6 +35,12 @@
 //! [`TargetScope::structural_only`] here and the seam re-runs the walk with a
 //! resolved column set. A self-contained `createTable` DOES resolve (c) against
 //! its own declared columns at load.
+//!
+//! LAYERING EXCEPTION (A3): raw view-body validation calls the guard's read-only
+//! body scanner after the structural `SELECT` checks. That scanner is real
+//! deny-list security logic, so moving it down into `model` would put guard policy
+//! in the data layer. Until a separate analysis pass above `model` + `guard`
+//! walks raw view bodies, this is the one deliberate `model -> guard` edge.
 
 use crate::model::expr::{CaseBranch, Expr, SynthFn};
 use pg_query::protobuf::node::Node as NodeEnum;
@@ -80,7 +86,7 @@ pub const CODE_GUARD_DIRECTION: &str = "GUARD_DIRECTION";
 pub const CODE_INVALID_ID_PREFIX: &str = "INVALID_ID_PREFIX";
 /// **Migration-first P2a (§4)** — a `vector_metric` carried on a column that is
 /// NOT a `ColType::Vector`. The metric is structurally bounded by the closed
-/// [`crate::ir::VectorMetric`] enum at deserialize; this is the co-occurrence
+/// [`crate::model::ir::VectorMetric`] enum at deserialize; this is the co-occurrence
 /// rule (the metric is meaningless without a vector type, and would otherwise be
 /// a silent dead field a hand-crafted artifact could ride in on).
 pub const CODE_VECTOR_METRIC_MISPLACED: &str = "VECTOR_METRIC_MISPLACED";
@@ -89,7 +95,7 @@ pub const CODE_VECTOR_METRIC_MISPLACED: &str = "VECTOR_METRIC_MISPLACED";
 pub const CODE_COLUMN_FACET_CONFLICT: &str = "COLUMN_FACET_CONFLICT";
 /// **VENDOR (`@zeroship/migrate/pg`)** — a privileged vendor op (role/grant/RLS/
 /// policy/trigger/function/extension/schema/`pg.sql`) whose required
-/// [`VendorCapability`](crate::capability::VendorCapability) is NOT granted by the
+/// [`VendorCapability`](crate::model::capability::VendorCapability) is NOT granted by the
 /// active capability set (vendor spec §3.2). The Confined creator/AI posture
 /// grants NO vendor capability, so EVERY vendor op is refused fail-closed at
 /// validate, BEFORE lower — the #1 invariant (gate 1). The redundant lower gate
@@ -280,14 +286,14 @@ pub fn validate_expr(
     ctx.walk(expr)
 }
 
-/// Walk an entire [`MigrationIr`](crate::ir::MigrationIr) and validate EVERY
+/// Walk an entire [`MigrationIr`](crate::model::ir::MigrationIr) and validate EVERY
 /// embedded expression-AST node against `target_dialect` — the §3.3.1.1 "the
 /// Rust validator is the authoritative STRUCTURAL gate" obligation made
 /// operative. Checks (a)/(b)/(d) run at load for every Expr slot; check (c)
 /// (`ColRef` resolution) runs here only for a self-contained `createTable`, and
 /// otherwise at the apply/render seam (see the module note).
 ///
-/// This is the walker that enumerates each [`Op`](crate::ir::Op) variant's
+/// This is the walker that enumerates each [`Op`](crate::model::ir::Op) variant's
 /// expression positions and calls [`validate_expr`] per node with the enclosing
 /// op's index + single target table as scope:
 ///
@@ -353,7 +359,7 @@ pub fn validate_ir_scoped(
     Ok(())
 }
 
-/// Validate every expression slot of a single [`Op`](crate::ir::Op) at
+/// Validate every expression slot of a single [`Op`](crate::model::ir::Op) at
 /// `op_index`. The per-variant Expr enumeration the SOLE-gate property needs;
 /// see [`validate_ir`] for the slot map.
 ///
@@ -438,7 +444,7 @@ pub fn validate_op_scoped(
             // `WHERE deleted_at IS NULL`, or a Check on `id`/`created_at` — must
             // resolve, not be falsely rejected (rule (c) is enforceable here).
             let mut cols: Vec<String> =
-                crate::render::declarative::SYSTEM_FIELD_NAMES.iter().map(|s| (*s).to_string()).collect();
+                crate::model::ir::SYSTEM_FIELD_NAMES.iter().map(|s| (*s).to_string()).collect();
             cols.extend(columns.iter().map(|c| c.name.clone()));
             let scope = TargetScope::new(name, &cols);
             for ix in indexes {
@@ -772,15 +778,15 @@ pub fn validate_op_scoped(
 }
 
 /// **VENDOR (`@zeroship/migrate/pg`)** — the capability-composition gate (vendor
-/// spec §3.2 gate 1). For every VENDOR [`Op`](crate::ir::Op) variant:
+/// spec §3.2 gate 1). For every VENDOR [`Op`](crate::model::ir::Op) variant:
 ///
 /// 1. **SQLite refusal** — every vendor op is `dialect_scope = PgOnly` (no SQLite
 ///    analogue, §4.3); a SQLite target is refused [`CODE_UNSUPPORTED`] `{kind:"op"}`
 ///    at load, never silently skipped.
 /// 2. **Capability gate** — the active
-///    [`VendorCapabilities`](crate::capability::VendorCapabilities), derived from the
+///    [`VendorCapabilities`](crate::model::capability::VendorCapabilities), derived from the
 ///    threaded [`SchemaScope`](crate::model::policy::SchemaScope), must GRANT the op's
-///    required [`VendorCapability`](crate::capability::VendorCapability). The
+///    required [`VendorCapability`](crate::model::capability::VendorCapability). The
 ///    Confined `Single` scope grants nothing ⇒ every vendor op is
 ///    [`CODE_VENDOR_OP_DENIED`]. The gate keys on the CAPABILITY FLAG
 ///    (`caps.grants(cap)`), not on a hard-coded profile name.
@@ -949,6 +955,8 @@ pub(crate) fn validate_raw_view_body_sql(
             "drop the INTO clause; a view body must be read-only",
         ));
     }
+    // LAYERING EXCEPTION (A3): keep the deny-list scanner in `guard`; duplicating
+    // or moving that security policy into `model` would be the worse boundary.
     crate::guard::check_raw_view_body_text(sql, sql, schema_scope).map_err(|e| {
         view_body_error(
             target_dialect,
@@ -1343,7 +1351,7 @@ fn is_safe_schema_ident(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// **Migration-first P2a (§4)** — validate one [`IrColumn`](crate::ir::IrColumn)'s
+/// **Migration-first P2a (§4)** — validate one [`IrColumn`](crate::model::ir::IrColumn)'s
 /// declared-only facets (`id_prefix` / `vector_metric`) against their bounds.
 ///
 /// Two fail-closed checks, with the IR's hand-crafted-`.ir.json` threat model in
@@ -1358,7 +1366,7 @@ fn is_safe_schema_ident(s: &str) -> bool {
 ///    A reserved/malformed/over-long prefix is [`CODE_INVALID_ID_PREFIX`], refused
 ///    BEFORE lower — never a render-time surprise minting colliding `usr_…` ids.
 /// 2. **`vector_metric`** — structurally bounded by the closed
-///    [`crate::ir::VectorMetric`] enum at deserialize; the only authoring error
+///    [`crate::model::ir::VectorMetric`] enum at deserialize; the only authoring error
 ///    left is CO-OCCURRENCE: a metric carried on a non-`Vector` column is
 ///    meaningless (the opclass has no vector to apply to) and is refused
 ///    ([`CODE_VECTOR_METRIC_MISPLACED`]) so a hand-crafted artifact cannot ride a
@@ -1590,7 +1598,7 @@ pub fn validate_ir_resolved(
 /// peer of [`validate_ir_resolved`]: re-run the expression-AST walk for ONE op with
 /// a RESOLVING [`TargetScope`] when its target table's live column set is known.
 ///
-/// This is the seam the DML LOWER calls ([`crate::ir_author::IrAuthor::lower_dml_op`]):
+/// This is the seam the DML LOWER calls ([`crate::render::lower::IrAuthor::lower_dml_op`]):
 /// at lower/apply the live schema HAS been introspected, so each DML op
 /// (`update`/`delete`/`backfill`) / `alterColumnType` resolves its embedded
 /// `ColRef`s against the live target-table columns BEFORE the SQL template is

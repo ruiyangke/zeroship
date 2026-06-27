@@ -1,3 +1,4 @@
+pub mod backfill;
 pub mod capability;
 pub mod expr;
 pub mod ir;
@@ -5,5 +6,6 @@ pub mod load;
 pub mod migration;
 pub mod policy;
 pub mod precondition;
+pub mod probe;
 pub mod snapshot;
 pub mod validate;

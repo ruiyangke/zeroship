@@ -7,11 +7,13 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use zeroship_migrate::declarative::{
-    is_system_managed_constraint, is_system_managed_index, DesiredSchema, SYSTEM_FIELD_NAMES,
+use zeroship_migrate::model::ir::{
+    ColType, IrColumn, IrDefault, Op, SynthDefaultFn, CURRENT_IR_VERSION, SYSTEM_FIELD_NAMES,
 };
-use zeroship_migrate::ir::{ColType, IrColumn, IrDefault, Op, SynthDefaultFn};
-use zeroship_migrate::loader::{is_valid_migration_name, suggest_migration_name};
+use zeroship_migrate::plan::loader::{is_valid_migration_name, suggest_migration_name};
+use zeroship_migrate::render::declarative::{
+    is_system_managed_constraint, is_system_managed_index, DesiredSchema,
+};
 use zeroship_migrate::{
     ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, MigrationIr, SchemaSnapshot, TableSnapshot,
 };
@@ -491,7 +493,7 @@ pub fn generate_ops(
     let is_empty = ops.is_empty();
 
     let ir = MigrationIr {
-        ir_version: zeroship_migrate::ir::CURRENT_IR_VERSION,
+        ir_version: CURRENT_IR_VERSION,
         name: name.to_string(),
         owner_app: owner_app.to_string(),
         ops: ops.clone(),

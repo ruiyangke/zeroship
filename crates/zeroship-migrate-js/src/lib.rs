@@ -4,7 +4,7 @@
 //! Atlas's real shape is *many schema front-ends (HCL / SQL / ORM providers)
 //! → one internal representation → one diff/migrate engine.* `zeroship-migrate`
 //! adopts the same shape with the **descriptor IR**
-//! ([`zeroship_migrate::declarative::CollectionDescriptor`]) as the internal
+//! ([`zeroship_migrate::render::declarative::CollectionDescriptor`]) as the internal
 //! representation. This crate is the **JS/TS front-end**: it evaluates a
 //! creator `schema.js` (the `@zeroship/db` `t.*` DSL) inside
 //! zeroship-runtime's V8 sandbox and lowers it to that IR, then drives the

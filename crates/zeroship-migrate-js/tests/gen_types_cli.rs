@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use zeroship_migrate::ir::{ColType, IrColumn, MigrationIr, Op};
+use zeroship_migrate::model::ir::{ColType, IrColumn, MigrationIr, Op};
 use zeroship_migrate::CURRENT_IR_VERSION;
 use zeroship_migrate_js::{
     check_artifacts, load_dir_ops, render_artifacts, write_artifacts, ENV_DTS_FILE,

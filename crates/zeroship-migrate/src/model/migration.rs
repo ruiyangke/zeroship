@@ -198,13 +198,13 @@ pub struct MigrationFlags {
     /// Must be confirmed before apply (AI never auto-applies destructive).
     pub requires_approval: bool,
     /// Optional per-migration `statement_timeout`, in **milliseconds**. `None`
-    /// falls back to [`crate::db::ExecutorConfig::statement_timeout`]. A long
+    /// falls back to [`crate::conn::PgConfinement::statement_timeout`]. A long
     /// backfill or a big concurrent index sets its own higher ceiling so the
     /// conservative executor default does not kill it mid-flight.
     pub timeout_ms: Option<u64>,
     /// Optional per-migration `lock_timeout`, in **milliseconds**. `None` falls
     /// back to the SHORT executor-wide default
-    /// ([`crate::db::ExecutorConfig::lock_timeout`], 3s — the lock-safety
+    /// ([`crate::conn::PgConfinement::lock_timeout`], 3s — the lock-safety
     /// envelope). This is the per-deploy maintenance-window knob: a planned
     /// migration that legitimately needs to wait longer to acquire its lock
     /// (run during a quiet window where a brief stall is acceptable) raises ONLY
@@ -411,7 +411,7 @@ impl Checksum {
     /// canonical op-list region (§2.4 point 2) in PLACE OF the `up`/`down`
     /// region, then the SAME [`fold_common`] tail as [`Checksum::of`].
     ///
-    /// The op-list region is [`CanonicalOpList::canonical_bytes`]: an op count,
+    /// The op-list region is [`crate::model::ir::CanonicalOpList::canonical_bytes`]: an op count,
     /// then each `Op`'s RFC 8785 (JCS) bytes length-prefixed in op order — so a
     /// reorder/insert, an `Insert` row scalar change, or a change to an embedded
     /// expression-AST `Literal` (all fold, since they live inside the op value)
@@ -585,14 +585,14 @@ pub struct Migration {
     /// net-applied. The executor's pending computation honors this, so on a fresh
     /// DB applying `S` runs `S.up` once and the superseded `v1..vN` are skipped
     /// (never double-applied), while on an existing DB that already ran `v1..vN`
-    /// the squash is recorded WITHOUT running `S.up` (see [`crate::squash`]).
+    /// the squash is recorded WITHOUT running `S.up` (see [`crate::ops::squash`]).
     #[serde(default)]
     pub supersedes: Vec<MigrationId>,
     /// Optional **preconditions** (v3 Plan D): assertions evaluated against the
     /// live DB BEFORE this migration's `up` runs, gating whether it applies.
     /// Empty (the default) = unconditional apply. Each [`PreconditionCheck`]
-    /// carries an assertion ([`Precondition`](crate::precondition::Precondition))
-    /// and an unmet policy ([`OnUnmet`](crate::precondition::OnUnmet)): `Halt`
+    /// carries an assertion ([`Precondition`](crate::model::precondition::Precondition))
+    /// and an unmet policy ([`OnUnmet`](crate::model::precondition::OnUnmet)): `Halt`
     /// (fail-closed — abort the apply, nothing applied) or `Skip` (leave this
     /// migration pending, re-evaluate next deploy). Folded into [`checksum`] so a
     /// precondition change is drift, exactly like an SQL change.
@@ -604,7 +604,7 @@ pub struct Migration {
     /// onto this migration at IR-lower time when its source op carried an
     /// `existence_guard` (`ifNotExists`/`ifExists`). At apply time the executor
     /// reads the live catalog under the held project advisory lock + the open
-    /// per-step transaction and [`decide`](crate::guard_probe::decide)s whether to
+    /// per-step transaction and [`decide`](crate::render::existence_probe::decide)s whether to
     /// run the `up` bare, journal a satisfied no-op (skip the `up`), or fail closed
     /// on a shape divergence. `None` for an unguarded migration and for every
     /// `.sql`-path / declarative migration.
@@ -617,7 +617,7 @@ pub struct Migration {
     /// `skip_serializing_if = "Option::is_none"` so the on-disk wire is unchanged
     /// when unset; it round-trips only the in-memory plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub existence_guard: Option<crate::render::existence_probe::GuardProbe>,
+    pub existence_guard: Option<crate::model::probe::GuardProbe>,
 }
 
 impl Migration {

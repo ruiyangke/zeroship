@@ -9,11 +9,11 @@
 //! functions an author may BUILD; they are distinct lists.
 
 use std::collections::BTreeMap;
-use zeroship_migrate::dml::assemble_backfill_clauses;
-use zeroship_migrate::expr::{Expr, SynthFn};
-use zeroship_migrate::ir::IrScalar;
-use zeroship_migrate::ir_load::load_ir_document;
-use zeroship_migrate::validate::Dialect;
+use zeroship_migrate::render::dml::assemble_backfill_clauses;
+use zeroship_migrate::model::expr::{Expr, SynthFn};
+use zeroship_migrate::model::ir::IrScalar;
+use zeroship_migrate::model::load::load_ir_document;
+use zeroship_migrate::model::validate::Dialect;
 use zeroship_migrate::SqlDialect;
 
 const APP: &str = "app_grammar";

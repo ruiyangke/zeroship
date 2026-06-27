@@ -4,12 +4,14 @@
 //! This crate implements the **security core** + the **migration unit** (the
 //! migration data types §2.1 and the parse-time SQL security guard §1.4
 //! deny-list / §1.5 cross-schema confinement), and the **Postgres executor**
-//! (§2.3): the append-only journal ([`journal`]), the project advisory lock,
-//! and the apply flow ([`executor::apply`]) — transactional + two-phase
+//! (§2.3): the append-only journal ([`apply::journal`](crate::apply::journal)),
+//! the project advisory lock, and the apply flow
+//! ([`apply::executor::apply`](crate::apply::executor::apply)) — transactional + two-phase
 //! non-transactional with idempotent recovery, the guard wired in front of
 //! every `up`, and a drift/tamper checksum check — the least-privilege
-//! `migrator` role ([`role`]), and the **public authoring pipeline + engine
-//! API** ([`author`] + [`engine`]).
+//! `migrator` role ([`apply::role`](crate::apply::role)), and the **public
+//! authoring pipeline + engine API** ([`plan::author`](crate::plan::author) +
+//! [`engine`]).
 //!
 //! # The pipeline
 //!
@@ -28,7 +30,7 @@
 //!    approval requirement, and guard *denials*.
 //! 3. [`MigrationEngine::apply`] is the **gate** ([`Approval`]): it refuses a
 //!    denied plan, refuses a destructive plan without approval, and otherwise
-//!    delegates to [`executor::apply`] — which **independently re-runs the
+//!    delegates to [`apply::executor::apply`](crate::apply::executor::apply) — which **independently re-runs the
 //!    guard and the least-privilege `migrator` role** (defense in depth: the
 //!    engine gate is an additional check, not a replacement for lines 1 & 2).
 //!
@@ -72,19 +74,6 @@ pub mod plan;
 pub mod render;
 
 pub use analysis::{analyze, classify};
-pub use apply::{backend, baseline, drift, executor, journal, role};
-pub use apply::backend::sqlite as backend_sqlite;
-pub use command::ir_apply;
-pub use conn as db;
-pub use model::{
-    capability, expr, ir, load as ir_load, migration, precondition, validate,
-};
-pub use ops::{backfill, expand_contract, shadow, squash, status, submit};
-pub use plan::{author, loader, manifest, pending};
-pub use render::{
-    declarative, dml, existence_probe as guard_probe, fold, lower as ir_author, sql_preview,
-    vendor,
-};
 
 // ---------------------------------------------------------------------------
 // Public API surface — re-exports (later plans depend on these names).
@@ -93,13 +82,17 @@ pub use render::{
 pub use analysis::analyze::{analyze, analyze_migration, Advisory, Severity};
 pub use approval::{Approval, ApprovalScope};
 pub use apply::backend::{
-    CrossDeployObligations, MigrationBackend, PgSessionSnapshot, PostgresBackend,
+    BackfillError, BackfillOutcome, CrossDeployObligations, DryRunError, DryRunReport,
+    MigrationBackend, MigrationResult, OnlineSchemaChange, PgSessionSnapshot, PostgresBackend,
+    SeedError, ShadowConfig, ShadowDryRun,
 };
 pub use apply::backend::sqlite::{RebuildError, SqliteActorError, SqliteBackend};
+pub use apply::backend::postgres::online::PgOnline;
+pub use apply::backend::postgres::shadow::PgShadow;
 pub use apply::baseline::{BaselineError, BaselineOutcome};
-pub use ops::backfill::{
+pub use apply::backend::postgres::backfill::{
     backfill_progress, ensure_backfill_progress, list_backfills, run_backfill,
-    run_backfill_bounded, BackfillError, BackfillOutcome, BackfillProgress,
+    run_backfill_bounded, BackfillProgress,
 };
 pub use plan::author::{
     AuthorError, AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor,
@@ -118,7 +111,6 @@ pub use engine::{
     DeclarativeDeployPlan, EngineError, MigrationEngine, MigrationPlan, OnlineError,
     PlannedMigration, RollbackEngineError,
 };
-pub use ops::expand_contract::{OnlineSchemaChange, PgOnline};
 pub use render::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
 };
@@ -147,11 +139,6 @@ pub use model::policy::{SchemaScope, TrustProfile};
 // The deploy-target dialect (§2.4.1) — re-exported so the control-plane deploy
 // path can thread it into `IrAuthor::new` without depending on `zeroship-schema`.
 pub use zeroship_schema::query::SqlDialect;
-// `OperatorCapability` the TYPE is re-exported crate-wide so the `platform(...)`
-// and `trusted(...)` constructors can name it in their signatures; its `new()`
-// mint stays private to `command::runner` (design §4.1 / §5).
-#[allow(unused_imports)]
-pub(crate) use guard::OperatorCapability;
 pub use apply::journal::{
     applied, applied_count, ensure_journal, history as journal_history,
     latest_completed_checksums, net_rolled_back, outstanding_pending_contracts,
@@ -201,7 +188,7 @@ pub use model::ir::{
 };
 // The fail-closed `.ir.json` load gate (§5.2/§5.3/§8.6): deserialize →
 // `ir_version` → `validate_ir` → server-stamped ownership → advisory checksum-hint
-// compare. The loader's IR branch ([`ir_author::IrAuthor::load_and_lower`]) runs
+// compare. The loader's IR branch ([`render::lower::IrAuthor::load_and_lower`]) runs
 // this gate and then lowers the validated, owned IR to migrations (§7.2).
 pub use model::load::{
     enforce_ir_ownership, hint_domain_uncomputable_field, load_ir_document,
@@ -237,7 +224,9 @@ pub use model::validate::{
 // (re-exported from `engine`, unchanged): these are the net-new ordered
 // EXECUTION artifact + its steps. `+AppliedPlan, +PlanStep, +RenameStep` added;
 // `MigrationPlan` kept.
-pub use render::plan::{AppliedPlan, BackfillSpec, NotSingleStep, SqliteRebuildSpec};
+pub use model::backfill::BackfillSpec;
+pub use model::probe::{ExpectColumn, GuardDir, GuardProbe};
+pub use render::plan::{AppliedPlan, NotSingleStep, SqliteRebuildSpec};
 pub use render::step::{tables_touched_by, BindValue, DialectScope, PlanStep, RenameStep};
 // PR14 — the OFFLINE `--sql` plan preview (operator go-live review). A pure,
 // DB-free surfacing/formatting layer over the SQL `IrAuthor::lower_*` already
@@ -249,9 +238,8 @@ pub use render::sql_preview::{
 pub use apply::precondition::{evaluate as evaluate_precondition, PreconditionError};
 pub use model::precondition::{CmpOp, OnUnmet, Precondition, PreconditionCheck};
 pub use apply::role::{deprovision_migrator, migrator_role_name, provision_migrator, RoleError};
-pub use ops::shadow::{
-    dry_run, dry_run_declarative, dry_run_incremental, sweep_leaked_shadows, DryRunError,
-    DryRunReport, MigrationResult, PgShadow, ShadowConfig, ShadowDryRun,
+pub use apply::backend::postgres::shadow::{
+    dry_run, dry_run_declarative, dry_run_incremental, sweep_leaked_shadows,
 };
 #[doc(hidden)]
-pub use ops::shadow::arm_panic_after_provision;
+pub use apply::backend::postgres::shadow::arm_panic_after_provision;

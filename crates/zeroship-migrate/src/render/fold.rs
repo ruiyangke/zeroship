@@ -2,7 +2,7 @@
 //!
 //! [`fold_ops`] replays an ordered [`Op`] list into a [`SchemaSnapshot`] — PURE,
 //! offline, NO database I/O. It is the offline companion of the live
-//! [`snapshot_schema`](crate::drift::snapshot_schema): the SAME `SchemaSnapshot`
+//! [`snapshot_schema`](crate::apply::drift::snapshot_schema): the SAME `SchemaSnapshot`
 //! output, sourced from the migration set instead of `pg_catalog`. The
 //! migration-first design (`docs/proposals/2026-06-25-migration-first-schema.md`
 //! §2.1) makes the `op.*` migrations the SOLE source of truth, and "the current
@@ -13,10 +13,10 @@
 //!
 //! The fold does NOT re-implement column / type / default / sentinel shaping. It
 //! REUSES the SHARED snapshot-builder the differ + the IR lower both use
-//! ([`build_table_snapshot`](crate::declarative::build_table_snapshot),
-//! [`ir_fk_constraint_snapshot`](crate::declarative::ir_fk_constraint_snapshot),
-//! [`ir_column_to_field`](crate::ir_author::ir_column_to_field),
-//! [`create_index_snapshot`](crate::ir_author::create_index_snapshot), …). Because
+//! ([`build_table_snapshot`](crate::render::declarative::build_table_snapshot),
+//! [`ir_fk_constraint_snapshot`](crate::render::declarative::ir_fk_constraint_snapshot),
+//! [`ir_column_to_field`](crate::render::lower::ir_column_to_field),
+//! [`create_index_snapshot`](crate::render::lower::create_index_snapshot), …). Because
 //! the engine APPLIES the same ops the fold replays through that builder, and the
 //! differ's `desired_snapshot` is already round-trip-proven equal to
 //! `snapshot_schema(live)` (the `declarative_pg` round-trip tests), the folded
@@ -237,7 +237,7 @@ fn fold_lower_error(e: IrLowerError) -> FoldError {
 ///
 /// **Why this is required (review HIGH).** A FK `definition` embeds the referenced
 /// table by name (`FOREIGN KEY (col) REFERENCES <schema>.<target>(id) …`, built by
-/// [`crate::declarative::ir_fk_constraint_snapshot`]). Live PG renders that body
+/// [`crate::render::declarative::ir_fk_constraint_snapshot`]). Live PG renders that body
 /// via `pg_get_constraintdef(oid)`, which resolves the referenced relation by OID,
 /// so after `RENAME TO` the referencing FK reports the NEW name. If the fold left
 /// the FK pointing at the OLD name, `fold_ops != snapshot_schema(live)` for EVERY
@@ -276,7 +276,7 @@ fn rewrite_incoming_fk_targets(
 
 /// Replay an ordered [`Op`] list into the current logical [`SchemaSnapshot`].
 /// Pure, offline, NO DB I/O — the offline companion of the live
-/// [`snapshot_schema`](crate::drift::snapshot_schema).
+/// [`snapshot_schema`](crate::apply::drift::snapshot_schema).
 ///
 /// `dialect` selects the per-dialect shaping the shared builder applies (PG vs
 /// SQLite FTS folding, etc.); `project_schema` is embedded in FK `definition`s
@@ -394,7 +394,7 @@ pub fn fold_ops(
             Op::DropTable { table, .. } => {
                 // Remove ONLY the target table. We do NOT cascade-drop FK constraints
                 // on OTHER tables that reference it, and that is faithful (not a hole):
-                // the lower IGNORES the op's `cascade` flag (`ir_author.rs`
+                // the lower IGNORES the op's `cascade` flag (`render::lower`
                 // `lower_drop_table` emits `DROP TABLE <t>`, never `… CASCADE`), so a
                 // drop of a still-referenced table FAILS at apply. A folded state with a
                 // referencing FK left dangling is therefore UNREACHABLE — the engine
@@ -1057,7 +1057,7 @@ fn apply_fold_named_type_column_metadata(
 /// against the apply path. They DELIBERATELY differ on one point — NOT "byte
 /// identical": for a table-level UNIQUE the fold ALSO materializes the implicit
 /// unique index, whereas the lower pushes only the `ConstraintSnapshot`
-/// (`ir_author.rs` ~2057-2070, no index). The reason is that the two snapshots
+/// (`render::lower` ~2057-2070, no index). The reason is that the two snapshots
 /// model different things:
 /// - the lower's is an EMISSION PLAN — `snap.indexes` drives `CREATE INDEX`, and PG
 ///   auto-creates the constraint's implicit index, so emitting it would duplicate;
@@ -1077,7 +1077,7 @@ fn apply_fold_named_type_column_metadata(
 /// - a partial-index `where` is refused (closed-AST predicate);
 /// - on **SQLite**, a table-level FOREIGN KEY, a table-level UNIQUE, and a
 ///   non-btree index `using` are refused — BYTE-FOR-BYTE parity with the lower
-///   ([`crate::ir_author::IrAuthor::fold_create_table_specs`]).
+///   ([`crate::render::lower::IrAuthor::fold_create_table_specs`]).
 ///
 /// The SQLite refusals are NOT cosmetic: in the migration-first model the fold is
 /// the SOLE source of truth for gen-types. The lower (= the apply path) REFUSES
@@ -1634,7 +1634,8 @@ fn recover_fk_policy(
 ///   the reconstructed map matches the FOLDED logical state, never a stale
 ///   createTable snapshot.
 ///
-/// The returned `Value` per table is exactly what [`descriptor_to_sdk_schema`]
+/// The returned `Value` per table is exactly what
+/// [`descriptor_to_sdk_schema`](crate::render::declarative::descriptor_to_sdk_schema)
 /// emits — the SAME shape the declarative differ consumes losslessly — so P2b's
 /// `.d.ts` emitter maps `descriptor → t.*()` builder calls off one facet table.
 ///
@@ -1937,7 +1938,7 @@ impl std::fmt::Display for ProduceError {
 impl std::error::Error for ProduceError {}
 
 /// Map a descriptor `(type_token, references?)` back to the closed [`ColType`] — the
-/// structural inverse of [`col_type_to_token`](crate::ir_author). The token-set is the
+/// structural inverse of [`col_type_to_token`](crate::render::lower). The token-set is the
 /// SDK `FieldDef` spelling the descriptor carries (`ir_column_to_field` produces it).
 ///
 /// Canonicalisation note (keystone fidelity): the forward map is many-to-one
@@ -1985,7 +1986,7 @@ fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<
 }
 
 /// Build a closed-AST `Literal` from a descriptor's JSON facet value (`enum` member /
-/// `min`/`max` bound), or `None` if the value has no [`crate::ir::IrScalar`] image.
+/// `min`/`max` bound), or `None` if the value has no [`crate::model::ir::IrScalar`] image.
 /// The inverse of [`ir_scalar_to_json`].
 fn json_to_ir_scalar(v: &serde_json::Value) -> Option<crate::model::ir::IrScalar> {
     use crate::model::ir::IrScalar;
@@ -2112,7 +2113,7 @@ fn facet_check_constraints(
 /// generates, threading EVERY facet the SDK type inference consumes:
 ///
 /// - **type / ref / vector dims / encrypted** — onto the [`IrColumn`]'s [`ColType`]
-///   (the inverse of [`col_type_to_token`](crate::ir_author));
+///   (the inverse of [`col_type_to_token`](crate::render::lower));
 /// - **idPrefix / vectorMetric** — onto the §2b carried [`IrColumn`] fields;
 /// - **required / unique** — onto `nullable` / `unique`;
 /// - **default** — onto `default` (a typed literal);
@@ -2220,7 +2221,7 @@ fn parse_ref_action(token: &str) -> Option<RefAction> {
 }
 
 /// Parse a descriptor `vector_metric` token (`cosine`/`l2`/`innerProduct`) back to
-/// the closed [`crate::ir::VectorMetric`] enum. An out-of-set token yields `None`
+/// the closed [`crate::model::ir::VectorMetric`] enum. An out-of-set token yields `None`
 /// (the column then carries no metric — the kernel default), never a panic.
 fn parse_vector_metric_token(token: &str) -> Option<crate::model::ir::VectorMetric> {
     use crate::model::ir::VectorMetric;
@@ -2232,12 +2233,12 @@ fn parse_vector_metric_token(token: &str) -> Option<crate::model::ir::VectorMetr
     }
 }
 
-/// **#174** — extract a STANDALONE [`crate::ir::IrMask`] from a descriptor's
+/// **#174** — extract a STANDALONE [`crate::model::ir::IrMask`] from a descriptor's
 /// `mask` JSON (`{ kind, classification }`), to carry on the produced [`IrColumn`].
 ///
 /// Returns `None` when the field carries no mask, OR when the mask is exactly the
 /// ENCRYPTED auto-mask (`{ full, pii }`) ON AN ENCRYPTED column — that mask is RE-IMPLIED
-/// by the `ColType::Encrypted` carrier in [`crate::ir_author::ir_column_to_field`], so
+/// by the `ColType::Encrypted` carrier in [`crate::render::lower::ir_column_to_field`], so
 /// carrying it here would double-source it and perturb the keystone (the encrypted
 /// auto-mask must come from the carrier, not the mask facet). A standalone mask on a
 /// plaintext column, or a NON-default mask on an encrypted column (an explicit override),
@@ -2261,7 +2262,7 @@ fn standalone_mask_facet(f: &crate::render::declarative::FieldDescriptor) -> Opt
 }
 
 /// Parse an SDK/IR-wire mask `kind` token (kebab `date-year`/`date-decade`; camelCase
-/// otherwise) back to the closed [`crate::ir::IrMaskKind`]. Out-of-set ⇒ `None`.
+/// otherwise) back to the closed [`crate::model::ir::IrMaskKind`]. Out-of-set ⇒ `None`.
 fn parse_mask_kind_token(token: &str) -> Option<crate::model::ir::IrMaskKind> {
     use crate::model::ir::IrMaskKind;
     Some(match token {
@@ -2278,7 +2279,7 @@ fn parse_mask_kind_token(token: &str) -> Option<crate::model::ir::IrMaskKind> {
 }
 
 /// Parse an SDK/IR-wire `classification` token back to the closed
-/// [`crate::ir::IrClassification`]. Out-of-set ⇒ `None`.
+/// [`crate::model::ir::IrClassification`]. Out-of-set ⇒ `None`.
 fn parse_classification_token(token: &str) -> Option<crate::model::ir::IrClassification> {
     use crate::model::ir::IrClassification;
     Some(match token {
@@ -2292,7 +2293,7 @@ fn parse_classification_token(token: &str) -> Option<crate::model::ir::IrClassif
     })
 }
 
-/// Map a descriptor `default` JSON value to a closed-AST [`crate::ir::IrScalar`] for an
+/// Map a descriptor `default` JSON value to a closed-AST [`crate::model::ir::IrScalar`] for an
 /// `IrDefault::Literal`. The inverse of `ir_default_to_value`; a non-scalar default
 /// (array/object/null) maps to `IrScalar::Null` (the SDK never authors those as a
 /// column default, and the keystone fixtures use scalar defaults).
@@ -3497,7 +3498,7 @@ mod tests {
     }
 
     /// REGRESSION (Finding #2): a createTable TABLE-LEVEL FOREIGN KEY is refused on
-    /// SQLite — byte-for-byte parity with the lower (`ir_author.rs`), which never
+    /// SQLite — byte-for-byte parity with the lower (`render::lower`), which never
     /// threads a table-level FK into the SQLite emitter. Pre-fix the fold ACCEPTED
     /// it (fail-open: a schema the engine can never apply on SQLite).
     #[test]

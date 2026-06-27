@@ -23,7 +23,9 @@
 //! SURVIVES descriptors → ops → fold and reappears on the recovered FieldDef. (The
 //! live-PG `__zsmask` sentinel round-trip is pinned by `mask_addcol_pg.rs`.)
 
-use zeroship_migrate::declarative::{descriptor_to_sdk_schema, CollectionDescriptor, FieldDescriptor};
+use zeroship_migrate::render::declarative::{
+    descriptor_to_sdk_schema, CollectionDescriptor, FieldDescriptor,
+};
 use zeroship_migrate::{descriptors_to_create_ops, fold_to_field_defs, SqlDialect};
 
 const SCHEMA: &str = "public";

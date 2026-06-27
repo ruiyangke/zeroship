@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zeroship_migrate::{
-    executor::LockMode, fold_ops, ir::Op, sqlite_canonical_type, Approval, ExecutorConfig,
+    apply::executor::LockMode, fold_ops, model::ir::Op, sqlite_canonical_type, Approval, ExecutorConfig,
     IrAuthor, LiveSchema, MigrationEngine, SchemaSnapshot, SqlDialect, SqliteBackend,
 };
 
@@ -62,10 +62,10 @@ async fn apply_doc(
     approval: Approval,
 ) -> Vec<Op> {
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
-    let document = zeroship_migrate::ir_load::load_ir_document(
+    let document = zeroship_migrate::model::load::load_ir_document(
         ir,
         APP,
-        zeroship_migrate::validate::Dialect::Sqlite,
+        zeroship_migrate::model::validate::Dialect::Sqlite,
         reg,
         None,
     )

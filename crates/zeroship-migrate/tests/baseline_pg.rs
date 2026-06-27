@@ -10,11 +10,11 @@
 use std::time::Duration;
 
 use compio_postgres::Client;
-use zeroship_migrate::baseline::{BaselineError, BaselineOutcome};
-use zeroship_migrate::migration::Checksum;
+use zeroship_migrate::apply::baseline::{BaselineError, BaselineOutcome};
+use zeroship_migrate::model::migration::Checksum;
 use zeroship_migrate::{
-    apply, ensure_journal, journal, Approval, ExecutorConfig, Migration, MigrationBackend,
-    MigrationFlags, MigrationId, PostgresBackend,
+    apply, ensure_journal, Approval, ExecutorConfig, Migration, MigrationBackend, MigrationFlags,
+    MigrationId, PostgresBackend,
 };
 
 const DEFAULT_DSN: &str =
@@ -164,7 +164,7 @@ async fn baseline_records_completed_without_running_up() {
     assert!(table_exists(&conn, &cfg.project_schema, "users").await);
 
     // The journal records it net-applied as a baseline.
-    let applied = journal::applied(&conn, &cfg).await.expect("applied");
+    let applied = apply::journal::applied(&conn, &cfg).await.expect("applied");
     assert_eq!(applied.len(), 1);
     assert_eq!(applied[0].version, v.as_str());
     let kind: String = conn
@@ -295,7 +295,7 @@ async fn baseline_guard_denies_cross_schema_up() {
         "got {err:?}"
     );
     // Nothing journaled.
-    let applied = journal::applied(&conn, &cfg).await.unwrap_or_default();
+    let applied = apply::journal::applied(&conn, &cfg).await.unwrap_or_default();
     assert!(applied.is_empty());
 
     drop_schemas(&conn, &cfg).await;

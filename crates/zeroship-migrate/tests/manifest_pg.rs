@@ -18,9 +18,9 @@ use std::collections::HashMap;
 use compio_postgres::Client;
 use zeroship_migrate::{
     PostgresBackend,
-    author::{AuthorRequest, Column, DeterministicAuthor, MigrationAuthor},
+    plan::author::{AuthorRequest, Column, DeterministicAuthor, MigrationAuthor},
     compute_manifest, desired_snapshot, migrator_role_name, provision_migrator,
-    role::deprovision_migrator, snapshot_schema, Approval, CollectionDescriptor,
+    apply::role::deprovision_migrator, snapshot_schema, Approval, CollectionDescriptor,
     DeclarativeApplyError, DeclarativeAuthor, EngineError, ExecutorConfig, FieldDescriptor,
     GuardConfig, ManifestHash, Migration, MigrationEngine, RenameHint, SchemaSnapshot,
 };

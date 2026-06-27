@@ -4,7 +4,7 @@
 //! repeatable, the drift/tamper gate, squash/expand gates, `order_pending`, the
 //! FIRST/SECOND pass, the repeatable phase, rollback selection + reverse-topo
 //! ordering — is dialect-agnostic and stays single-sourced in
-//! [`crate::executor`]. Everything the orchestration touches that is
+//! [`crate::apply::executor`]. Everything the orchestration touches that is
 //! **dialect-coupled** lives behind this trait:
 //!
 //! - **connection / session I/O** — the project lock
@@ -25,7 +25,7 @@
 //! - **drift schema introspection** — `snapshot_schema` over
 //!   `information_schema`/`pg_catalog` (PG) vs `sqlite_master` + PRAGMAs (SQLite);
 //!   the checksum/tamper comparison itself is dialect-agnostic and stays generic
-//!   ([`crate::drift::check_checksum_drift`]).
+//!   ([`crate::apply::drift::check_checksum_drift`]).
 //!
 //! **P1 (this phase): Postgres is the FIRST AND ONLY impl.** [`PostgresBackend`]
 //! is the regression bar — every method below moves the EXISTING executor /
@@ -37,9 +37,14 @@
 //! native `async fn` in trait (Rust ≥ 1.75) is used directly — no boxing, no
 //! `dyn`, no `async-trait` allocation on the apply hot path.
 
+pub mod capability;
 pub mod postgres;
 pub mod sqlite;
 
+pub use capability::{
+    BackfillError, BackfillOutcome, BackfillSpec, DryRunError, DryRunReport, MigrationResult,
+    OnlineSchemaChange, SeedError, ShadowConfig, ShadowDryRun,
+};
 pub use postgres::PostgresBackend;
 
 use std::future::Future;
@@ -52,7 +57,7 @@ use crate::apply::executor::{ApplyError, RollbackError};
 use crate::apply::journal::{self, AppliedEntry, JournalError};
 use crate::model::migration::Migration;
 use crate::model::snapshot::SchemaSnapshot;
-use crate::render::plan::{BackfillSpec, SqliteRebuildSpec};
+use crate::render::plan::SqliteRebuildSpec;
 use crate::render::step::BindValue;
 use zeroship_schema::query::SqlDialect;
 
@@ -299,17 +304,17 @@ pub trait MigrationBackend {
 
     /// Journal a **squash** as a `completed` `kind='squash'` event WITHOUT running
     /// its `up`, plus the `S → v_i` supersession edges — the dialect-coupled write
-    /// behind the generic [`crate::squash::squash`] (multi-engine abstraction C3).
+    /// behind the generic [`crate::ops::squash::squash`] (multi-engine abstraction C3).
     ///
     /// Called only after the generic body has verified, under the project lock,
     /// that ALL of `supersedes` are net-applied (the existing-DB squash path). The
-    /// PG impl delegates to [`crate::journal::record_baseline`] with
+    /// PG impl delegates to [`crate::apply::journal::record_baseline`] with
     /// `kind='squash'`; a SQLite impl writes the same row+edges atomically through
     /// its actor. The connection / `pg_advisory_lock` never cross this surface.
     ///
     /// # Errors
     /// [`ApplyError::Db`] (PG) or [`ApplyError::Backend`] (non-PG) on a write
-    /// failure; the dialect-neutral [`crate::executor::ApplyError`] is what crosses
+    /// failure; the dialect-neutral [`crate::apply::executor::ApplyError`] is what crosses
     /// the trait.
     async fn record_squash(
         &self,
@@ -342,7 +347,7 @@ pub trait MigrationBackend {
     /// **PR9b — per-version approval scope (executor-layer defense in depth).** A
     /// rebuild on a populated table is destructive (drop + recreate + copy), so when
     /// `m.flags.destructive` (always true for a `SqliteRebuild` by construction,
-    /// [`crate::declarative`]) the `scope` must admit `m.version` — mirroring
+    /// [`crate::render::declarative`]) the `scope` must admit `m.version` — mirroring
     /// [`PlanStep::approval_scope_version`](crate::render::step::PlanStep::approval_scope_version)'s
     /// rule. The engine's `apply_plan` gate runs first; this is the independent
     /// executor-layer check so a direct seam caller (driving `rebuild_one` without the
@@ -366,7 +371,7 @@ pub trait MigrationBackend {
     /// Drive a single **batched data backfill** step (`op.*` DSL §2.0,
     /// [`PlanStep::Backfill`](crate::render::step::PlanStep::Backfill)) through the
     /// dialect seam, journaling the spec's marker version. On Postgres this
-    /// delegates to the existing [`run_backfill`](crate::backfill::run_backfill)
+    /// delegates to the existing [`run_backfill`](crate::apply::backend::postgres::backfill::run_backfill)
     /// (writable-CTE windowed `UPDATE`). On SQLite the batched-backfill executor
     /// is **net-new and committed for PR6b** — until it lands, the SQLite arm
     /// fails closed with a clear [`ApplyError::Backend`] rather than silently
@@ -374,7 +379,7 @@ pub trait MigrationBackend {
     /// error, never a silent mis-apply, §6/§10 PR6a-PR6b).
     ///
     /// `lock_mode` mirrors the per-`Migration` apply: under
-    /// [`LockMode::AlreadyHeld`](crate::executor::LockMode) the caller already
+    /// [`LockMode::AlreadyHeld`](crate::apply::executor::LockMode) the caller already
     /// holds the project lock for the whole deploy (the PG per-batch
     /// `pg_advisory_xact_lock` inside the backfill is re-entrant under it).
     ///
@@ -390,7 +395,7 @@ pub trait MigrationBackend {
     /// `scope` is threaded for seam-signature symmetry with the destructive seam
     /// methods (and forward-proofing) and consulted only if a backfill ever becomes
     /// scope-gated. The data-mutating EXPAND backfill rides
-    /// [`OnlineSchemaChange::run_online`](crate::expand_contract::OnlineSchemaChange::run_online),
+    /// [`OnlineSchemaChange::run_online`](crate::apply::backend::OnlineSchemaChange::run_online),
     /// NOT this method.
     async fn run_backfill_step(
         &self,
@@ -417,10 +422,10 @@ pub trait MigrationBackend {
     ///
     /// `destructive` carries the step's data-loss flag (a `delete`). The
     /// implementation re-runs the approval gate as **defense in depth**: a
-    /// destructive DML under any approval other than [`Approval::Approved`] is
+    /// destructive DML under any approval other than [`crate::approval::Approval::Approved`] is
     /// refused with [`ApplyError::ApprovalRequired`] BEFORE the template executes,
     /// mirroring the per-`Migration` gate in
-    /// [`apply_with_lock_backend`](crate::executor::apply_with_lock_backend). The
+    /// [`apply_with_lock_backend`](crate::apply::executor::apply_with_lock_backend). The
     /// engine's [`apply_plan`](crate::engine::MigrationEngine::apply_plan) gate runs
     /// first; this is the independent executor-layer check so a direct seam caller
     /// cannot bypass it.
@@ -430,12 +435,12 @@ pub trait MigrationBackend {
     /// `version` — mirroring
     /// [`PlanStep::approval_scope_version`](crate::render::step::PlanStep::approval_scope_version)'s
     /// rule for `Dml`. So a direct seam caller driving `run_dml_step` with blanket
-    /// [`Approval::Approved`] but an [`ApprovalScope::Versions`] set that omits this
+    /// [`crate::approval::Approval::Approved`] but an [`crate::approval::ApprovalScope::Versions`] set that omits this
     /// `version` is refused with [`ApplyError::ApprovalNotScoped`] BEFORE the template
     /// executes — the executor-layer mirror of the engine's per-version scope gate.
     ///
     /// `owner_app` is the declaring app's identity — it is folded into the journal
-    /// [`ChecksumInput`](crate::migration::ChecksumInput) so two DML steps with an
+    /// [`ChecksumInput`](crate::model::migration::ChecksumInput) so two DML steps with an
     /// identical `(template, binds)` authored by DIFFERENT apps hash to DIFFERENT
     /// journal checksums (correct multi-tenant journal identity/attribution for
     /// PR6a's creator-DML assembler).
@@ -468,7 +473,7 @@ pub trait MigrationBackend {
     ///
     /// `Some(&dyn OnlineSchemaChange)` for an engine that drives zero-downtime
     /// online operations (Postgres — expand-contract rename via dual-write trigger
-    /// plus paged backfill; the [`PgOnline`](crate::expand_contract::PgOnline) impl
+    /// plus paged backfill; the [`PgOnline`](crate::apply::backend::postgres::online::PgOnline) impl
     /// owns its `Client` **internally**, so the connection NEVER appears on this
     /// neutral trait surface). `None` for an engine with no online path (SQLite,
     /// where every existing-table change, rename included, is routed to a
@@ -480,13 +485,13 @@ pub trait MigrationBackend {
     /// `online().is_some()`, never holding a concrete connection, and a backend
     /// with no online capability MUST receive an empty `renames` (asserted at the
     /// call site — a non-empty rename set with `online() == None` is a routing bug).
-    fn online(&self) -> Option<&dyn crate::ops::expand_contract::OnlineSchemaChange>;
+    fn online(&self) -> Option<&dyn crate::apply::backend::capability::OnlineSchemaChange>;
 
     /// The **shadow dry-run capability** (multi-engine abstraction C3).
     ///
     /// `Some(&dyn ShadowDryRun)` for an engine that can preview a migration batch
     /// against a throwaway shadow clone before the real apply (Postgres — the
-    /// [`PgShadow`](crate::shadow::PgShadow) impl owns its admin `Client`
+    /// [`PgShadow`](crate::apply::backend::postgres::shadow::PgShadow) impl owns its admin `Client`
     /// **internally**, so the connection NEVER appears on this neutral trait
     /// surface). `None` for an engine with no shadow path.
     ///
@@ -496,7 +501,7 @@ pub trait MigrationBackend {
     /// [`dry_run_declarative`](crate::engine::MigrationEngine::dry_run_declarative)
     /// branch on `shadow().is_some()`, never holding a concrete connection, and a
     /// backend with no shadow capability surfaces a clear
-    /// [`DryRunError::ShadowUnsupported`](crate::shadow::DryRunError::ShadowUnsupported)
+    /// [`DryRunError::ShadowUnsupported`](crate::apply::backend::DryRunError::ShadowUnsupported)
     /// rather than a false-success report.
     ///
     /// # Why SQLite is `None` (a deliberate capability gap, not a silent hole)
@@ -511,7 +516,7 @@ pub trait MigrationBackend {
     /// `ShadowDryRun`. So `None` here is honest: a caller that asks for a dry-run
     /// on SQLite gets the explicit `ShadowUnsupported` outcome, never a fake
     /// "dry-run passed".
-    fn shadow(&self) -> Option<&dyn crate::ops::shadow::ShadowDryRun>;
+    fn shadow(&self) -> Option<&dyn crate::apply::backend::capability::ShadowDryRun>;
 
     // -- baseline / adoption ------------------------------------------------
 

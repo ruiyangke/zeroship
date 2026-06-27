@@ -26,9 +26,9 @@ use std::path::PathBuf;
 
 use compio_postgres::Client;
 use tempfile::TempDir;
-use zeroship_migrate::backend_sqlite::Mode;
+use zeroship_migrate::apply::backend::sqlite::Mode;
 use zeroship_migrate::{
-    executor::LockMode, provision_migrator, role::deprovision_migrator, Approval, ExecutorConfig,
+    apply::executor::LockMode, provision_migrator, apply::role::deprovision_migrator, Approval, ExecutorConfig,
     IrAuthor, LiveSchema, MigrationEngine, SqlDialect, SqliteBackend,
 };
 
@@ -121,10 +121,10 @@ async fn pg_apply(
     approval: Approval,
 ) {
     let author = IrAuthor::new(cfg.project_schema.clone(), APP, SqlDialect::Postgres);
-    let document = zeroship_migrate::ir_load::load_ir_document(
+    let document = zeroship_migrate::model::load::load_ir_document(
         ir,
         APP,
-        zeroship_migrate::validate::Dialect::Postgres,
+        zeroship_migrate::model::validate::Dialect::Postgres,
         reg,
         None,
     )
@@ -164,10 +164,10 @@ async fn sqlite_apply(
     approval: Approval,
 ) {
     let author = IrAuthor::new(cfg.project_schema.clone(), APP, SqlDialect::Sqlite);
-    let document = zeroship_migrate::ir_load::load_ir_document(
+    let document = zeroship_migrate::model::load::load_ir_document(
         ir,
         APP,
-        zeroship_migrate::validate::Dialect::Sqlite,
+        zeroship_migrate::model::validate::Dialect::Sqlite,
         reg,
         None,
     )

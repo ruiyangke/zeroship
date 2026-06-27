@@ -52,7 +52,7 @@ fn rb_err(e: SqliteActorError) -> RollbackError {
 
 /// Roll back ONE migration's `down` transactionally + journal a `rolled_back`
 /// event (design §2.7, P5 additive). Mirrors the PG
-/// [`rollback_one_transactional`](crate::executor::pg::rollback_one_transactional)
+/// [`rollback_one_transactional`](crate::apply::executor::pg::rollback_one_transactional)
 /// semantics, dialect-translated.
 ///
 /// Preconditions (the caller, the generic executor, has already established): the

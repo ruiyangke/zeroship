@@ -25,15 +25,16 @@
 
 use compio_postgres::Client;
 use zeroship_migrate::{
-    executor::ApplyError,
-    ir::{
+    model::ir::{
         ColType, ExistenceGuard, IrColumn, IrConstraint, IrConstraintKind, MigrationIr, Op,
         SelectAst, SelectItem, TableRef, ViewQuery,
     },
-    ir_author::{IrAuthor, LiveSchema},
-    provision_migrator, record_started, role::deprovision_migrator, Approval, EngineError,
+    render::lower::{IrAuthor, LiveSchema},
+    ApplyError, Approval, EngineError,
     ExecutorConfig, MigrationEngine, PlanStep,
 };
+use zeroship_migrate::apply::role::deprovision_migrator;
+use zeroship_migrate::{provision_migrator, record_started};
 use zeroship_schema::query::SqlDialect;
 
 const DEFAULT_DSN: &str =
@@ -230,7 +231,7 @@ async fn apply(
             &zeroship_migrate::PostgresBackend::new(conn),
             cfg,
             "app_test",
-            zeroship_migrate::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .map(|_| ())

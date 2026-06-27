@@ -29,12 +29,12 @@
 use std::collections::HashMap;
 
 use compio_postgres::Client;
-use zeroship_migrate::executor::ApplyError;
-use zeroship_migrate::baseline::BaselineOutcome;
+use zeroship_migrate::apply::executor::ApplyError;
+use zeroship_migrate::apply::baseline::BaselineOutcome;
 use zeroship_migrate::{
     MigrationBackend, PostgresBackend,
     analyze_migration, check_checksum_drift, compute_manifest, desired_snapshot,
-    diff_snapshots, history, migrator_role_name, provision_migrator, role::deprovision_migrator,
+    diff_snapshots, history, migrator_role_name, provision_migrator, apply::role::deprovision_migrator,
     snapshot_schema, squash, status, Approval, Checksum, ChecksumInput, CollectionDescriptor,
     DeclarativeError, EngineError, ExecutorConfig, FieldDescriptor, GuardConfig, HistoryKind,
     ManifestHash, Migration, MigrationEngine, MigrationFlags, MigrationId, OnUnmet, Precondition,
@@ -49,7 +49,7 @@ async fn baseline(
     cfg: &ExecutorConfig,
     m: &Migration,
     applied_by: &str,
-) -> Result<BaselineOutcome, zeroship_migrate::baseline::BaselineError> {
+) -> Result<BaselineOutcome, zeroship_migrate::apply::baseline::BaselineError> {
     PostgresBackend::new(conn)
         .baseline_one(cfg, m, applied_by)
         .await
@@ -202,7 +202,7 @@ async fn applied_versions(conn: &Client, cfg: &ExecutorConfig) -> Vec<String> {
         .await
         .expect("read journal")
         .into_iter()
-        .filter(|e| matches!(e.phase, zeroship_migrate::journal::Phase::Completed))
+        .filter(|e| matches!(e.phase, zeroship_migrate::apply::journal::Phase::Completed))
         .map(|e| e.version)
         .collect();
     v.sort();

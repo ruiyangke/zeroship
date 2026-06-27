@@ -1,18 +1,18 @@
-//! The OPERATOR-SIDE runner — the single place a [`OperatorCapability`] is minted
-//! (design §5 / §9, Phase 3).
+//! The OPERATOR-SIDE runner — the single production caller that mints an
+//! [`OperatorCapability`] for CLI configs (design §5 / §9, Phase 3).
 //!
 //! This module backs the `zeroship-migrate` CLI binary (`src/bin/zeroship-migrate.rs`).
 //! The bin's `main` is a THIN arg-parser; it delegates to the `run_*` functions
-//! here. Those functions mint the [`OperatorCapability`] token INTERNALLY (via the
-//! `pub(super)`-private [`OperatorCapability::new`]) and build the Platform
-//! [`GuardConfig`](crate::guard::GuardConfig) / [`ExecutorConfig`](crate::db::ExecutorConfig).
+//! here. Those functions mint the [`OperatorCapability`] token internally and
+//! build the Platform [`GuardConfig`](crate::guard::GuardConfig) /
+//! [`ExecutorConfig`](crate::conn::ExecutorConfig).
 //!
-//! THE SECURITY-CRITICAL INVARIANT (design §5): the token mint is confined to this
-//! module. `submit_migration` / `engine` / any external crate cannot reach it —
-//! `new()` is `pub(super)` (visible only within `guard`), the `for_test` seam is
-//! `#[cfg(test)]`-only, and `TrustProfile::Platform` is un-nameable externally
-//! (`#[non_exhaustive]` + private `GuardConfig` fields). So a Platform guard is a
-//! *capability you are granted by holding a token you can only mint here*.
+//! THE SECURITY-CRITICAL INVARIANT (design §5): operator tokens are minted only
+//! through named in-crate seams. This runner is the single production caller for
+//! CLI configs; the shadow harness has its own explicit
+//! [`mint_shadow_operator_capability`](crate::model::capability::mint_shadow_operator_capability)
+//! seam, and the test seam is `#[cfg(test)]`-only. External crates cannot name the
+//! token or construct privileged configs, and creator paths never receive one.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -26,60 +26,11 @@ use crate::engine::{EngineError, MigrationEngine, MigrationPlan, RollbackEngineE
 use crate::apply::executor::{
     ApplyOutcome, RollbackError, RollbackOutcome, RollbackRequest, RollbackTarget,
 };
+use crate::model::capability::OperatorCapability;
 use crate::model::migration::{migration_id_for_version, MigrationId};
 use crate::plan::loader::{load_dir, LoaderError};
 use crate::ops::status::{status, status_via_backend, MigrationStatus, StatusError};
 use crate::Approval;
-
-/// A zero-sized Platform capability token. Its `new()` is `pub(super)`, so only
-/// the `guard` module (and this submodule, which IS the operator runner) can mint
-/// it — the CLI entrypoints below are the only real callers.
-///
-/// `Clone` is sound: it is a ZST and cloning does not widen authority — you can
-/// only clone a token you *already hold*, and you can only hold one by minting it
-/// here. It rides on a Platform-built [`crate::guard::GuardConfig`] /
-/// [`crate::db::ExecutorConfig`] so the executor's internal guard builds can
-/// re-derive a Platform `GuardConfig` without a fresh out-of-band mint.
-#[derive(Debug, Clone)]
-pub(crate) struct OperatorCapability(());
-
-impl OperatorCapability {
-    /// The single production mint site, private to the `guard` module
-    /// (`pub(super)`). The CLI `run_*` functions below are its only callers; the
-    /// creator path (`submit`/`engine`) cannot reach it.
-    pub(super) const fn new() -> Self {
-        Self(())
-    }
-
-    /// **Test-only `pub(crate)` seam.** Lets in-crate guard tests exercise the
-    /// Platform profile. This is the ONLY way any module other than the runner can
-    /// obtain a token, and it is `#[cfg(test)]`-gated so it does not exist in a
-    /// release build — the production mint site stays the `pub(super)` `new` above.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) const fn for_test() -> Self {
-        Self::new()
-    }
-}
-
-/// Mint a [`OperatorCapability`] for the OPERATOR-SIDE shadow dry-run harness
-/// ([`crate::shadow`]).
-///
-/// The shadow harness must mirror the SOURCE config's trust profile so a
-/// privileged set dry-runs faithfully: for a Platform source it builds the
-/// shadow's own Platform [`ExecutorConfig`] (admin connection, NO migrator
-/// `SET ROLE`, §8); for a Trusted source (the public dbmate-like posture) it
-/// builds the shadow's own Trusted config (connecting-role apply, deny-list
-/// OFF) — both require an operator token. The token mint stays CONFINED to the
-/// `guard` module — `OperatorCapability::new()` remains `pub(super)`; this is a
-/// single named `pub(crate)` seam the harness (also operator-side, like the CLI
-/// runners) calls, rather than widening `new()` itself. The shadow is a throwaway
-/// DB the operator owns, so reproducing the source's profile on it is NOT a
-/// privilege escalation — it reproduces the real apply on a clone.
-#[must_use]
-pub(crate) const fn mint_shadow_operator_capability() -> OperatorCapability {
-    OperatorCapability::new()
-}
 
 /// The trust profile the runner builds its configs under (design §9 `--profile`).
 ///
@@ -184,7 +135,7 @@ pub struct ResolveOutcome {
 #[derive(Debug)]
 pub struct ValidateReport {
     /// The shadow-DB dry-run outcome (each file applied on a throwaway clone).
-    pub dry_run: crate::ops::shadow::DryRunReport,
+    pub dry_run: crate::apply::backend::DryRunReport,
     /// Checksum / orphan drift of the journal vs. the supplied set.
     pub drift: ChecksumDriftReport,
     /// `true` if the loaded plan is destructive (the H1 gate would refuse `migrate`
@@ -219,7 +170,7 @@ pub enum RunError {
     #[error("status: {0}")]
     Status(#[from] StatusError),
     /// A journal bootstrap/read failed directly (the SQLite leg drives the
-    /// backend's journal methods, which surface [`JournalError`]).
+    /// backend's journal methods, which surface [`crate::apply::journal::JournalError`]).
     #[error("journal: {0}")]
     Journal(#[from] crate::apply::journal::JournalError),
     /// A drift query failed.
@@ -227,7 +178,7 @@ pub enum RunError {
     Drift(#[from] DriftError),
     /// The shadow dry-run harness failed.
     #[error("dry-run: {0}")]
-    DryRun(#[from] crate::ops::shadow::DryRunError),
+    DryRun(#[from] crate::apply::backend::DryRunError),
     /// Rollback failed (the PG engine-driven rollback path).
     #[error("rollback: {0}")]
     Rollback(#[from] RollbackEngineError),
@@ -622,11 +573,11 @@ fn open_sqlite_backend(app: &Path) -> Result<SqliteBackend, RunError> {
 }
 
 /// Build the [`ExecutorConfig`] for a run, minting the [`OperatorCapability`]
-/// internally when `profile == Platform`. THIS is the confined token mint.
+/// internally for operator profiles. This is the named CLI-runner mint seam.
 fn build_exec_cfg(cfg: &RunConfig) -> ExecutorConfig {
     let mut exec = match cfg.profile {
         RunProfile::Platform => {
-            // The single token mint (design §5). No other module can reach `new()`.
+            // Named CLI-runner mint seam (design §5).
             let cap = OperatorCapability::new();
             ExecutorConfig::platform(
                 &cap,
@@ -637,8 +588,7 @@ fn build_exec_cfg(cfg: &RunConfig) -> ExecutorConfig {
             )
         }
         RunProfile::Trusted => {
-            // The single token mint (design §5), shared with Platform. No other
-            // module can reach `new()`.
+            // Named CLI-runner mint seam (design §5), shared with Platform.
             let cap = OperatorCapability::new();
             ExecutorConfig::trusted(&cap, cfg.project_id.clone(), cfg.project_schema.clone())
         }
@@ -939,7 +889,10 @@ pub async fn run_resolve_pending(
         // (`abort_same_deploy_expands`) drives — so the CLI `--abort` and the
         // automatic recovery can never drift in what they emit (C1 drop trigger+fn,
         // then `DROP COLUMN IF EXISTS <to>`, both idempotent on resume).
-        let steps = crate::ops::expand_contract::build_abort_steps(&exec_cfg.project_schema, &pc)
+        let steps = crate::apply::backend::postgres::online::build_abort_steps(
+            &exec_cfg.project_schema,
+            &pc,
+        )
             .map_err(|e| RunError::ResolvePending(format!("re-author abort: {e}")))?;
         (steps, crate::apply::journal::Resolution::Aborted)
     };
@@ -1010,7 +963,7 @@ pub async fn run_resolve_pending(
     }))
 }
 
-/// Build a PLAIN, phase-less [`Migration`](crate::migration::Migration) for the
+/// Build a PLAIN, phase-less [`Migration`](crate::model::migration::Migration) for the
 /// resolve-pending drops — a fresh-id, approval-gated (and optionally destructive)
 /// DDL whose `up` is the re-derived contract/abort SQL. Phase-less so the
 /// executor's expand-contract gate does NOT re-gate it on journaled E-phase
@@ -1106,7 +1059,7 @@ async fn run_validate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
 
     // Dry-run on a THROWAWAY shadow database (CREATE/DROP DATABASE on a clone) —
     // the real DB sees no migration DDL.
-    let shadow_cfg = crate::ops::shadow::ShadowConfig {
+    let shadow_cfg = crate::apply::backend::ShadowConfig {
         admin_dsn: cfg.database_url.clone(),
         db_name_prefix: "zsmig_shadow_".to_string(),
     };
@@ -1228,7 +1181,7 @@ async fn sqlite_shadow_dry_run(
     migrations: &[crate::model::migration::Migration],
     exec_cfg: &ExecutorConfig,
     guard_cfg: &crate::guard::GuardConfig,
-) -> Result<crate::ops::shadow::DryRunReport, RunError> {
+) -> Result<crate::apply::backend::DryRunReport, RunError> {
     // No pre-cleanup blow-away: the shadow path is unique per invocation, so the
     // file does not pre-exist (and a fixed-name blow-away would delete a concurrent
     // run's in-flight shadow). Open the fresh clone directly.
@@ -1249,7 +1202,7 @@ async fn sqlite_shadow_dry_run(
     {
         Ok(outcome) => {
             for v in outcome.applied.iter().chain(outcome.recovered.iter()) {
-                per_migration.push(crate::ops::shadow::MigrationResult {
+                per_migration.push(crate::apply::backend::MigrationResult {
                     version: v.clone(),
                     applied_ok: true,
                     error: None,
@@ -1271,7 +1224,7 @@ async fn sqlite_shadow_dry_run(
                 let version = p.migration.version.as_str().to_string();
                 if committed.contains(&version) {
                     // Applied before the failure → success-prefix entry.
-                    per_migration.push(crate::ops::shadow::MigrationResult {
+                    per_migration.push(crate::apply::backend::MigrationResult {
                         version,
                         applied_ok: true,
                         error: None,
@@ -1280,7 +1233,7 @@ async fn sqlite_shadow_dry_run(
                     // The first not-committed plan item is the one that failed; the
                     // engine aborts the batch on the first failure, so nothing after
                     // it ran. Attribute the error here and stop.
-                    per_migration.push(crate::ops::shadow::MigrationResult {
+                    per_migration.push(crate::apply::backend::MigrationResult {
                         version,
                         applied_ok: false,
                         error: Some(e.to_string()),
@@ -1292,7 +1245,7 @@ async fn sqlite_shadow_dry_run(
             // (e.g. a post-loop engine error), still surface the failure with a
             // batch-level entry so `ok=false` is never silently empty.
             if per_migration.iter().all(|r| r.applied_ok) {
-                per_migration.push(crate::ops::shadow::MigrationResult {
+                per_migration.push(crate::apply::backend::MigrationResult {
                     version: plan
                         .items
                         .first()
@@ -1304,7 +1257,7 @@ async fn sqlite_shadow_dry_run(
         }
     }
 
-    Ok(crate::ops::shadow::DryRunReport {
+    Ok(crate::apply::backend::DryRunReport {
         ok,
         per_migration,
         resulting_drift: None,
@@ -1415,7 +1368,7 @@ pub async fn run_dump_trailer(cfg: &RunConfig) -> Result<Vec<TrailerEntry>, RunE
 
 /// PG net-applied `(version, checksum, name)` for the dump trailer — per version the
 /// LATEST event must be `applied`; its name/checksum are read from that completed
-/// event. Mirrors [`crate::journal::applied`]'s DISTINCT-ON-latest logic, additionally
+/// event. Mirrors [`crate::apply::journal::applied`]'s DISTINCT-ON-latest logic, additionally
 /// carrying `name` (which `AppliedEntry` does not). Ordered by version.
 async fn pg_net_applied_trailer(
     conn: &compio_postgres::Client,
@@ -1648,7 +1601,7 @@ pub struct LoadOutcome {
 ///    `schema.sql` to `psql`).
 /// 2. **Reconstruct the journal** — record each trailer version as a
 ///    `baseline`-kind `completed` event (recorded-not-run) via the SAME immutable
-///    journal path [`baseline`](crate::baseline) uses, so the versions end up
+///    journal path [`baseline`](crate::apply::baseline) uses, so the versions end up
 ///    net-applied and a subsequent `migrate` runs only the genuinely-pending ones.
 ///    Each version's name + checksum is sourced from its migration file in `--dir`
 ///    (so the recorded checksum matches the file and drift stays clean).

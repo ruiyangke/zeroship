@@ -20,8 +20,8 @@
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zeroship_migrate::backend_sqlite::actor::SqliteActorError;
-use zeroship_migrate::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
+use zeroship_migrate::apply::backend::sqlite::actor::SqliteActorError;
+use zeroship_migrate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
 use zeroship_migrate::SqliteBackend;
 
 /// A tenant's two file paths inside a fresh temp dir.

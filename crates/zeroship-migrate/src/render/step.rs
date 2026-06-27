@@ -3,7 +3,7 @@
 use crate::model::migration::{Migration, MigrationId};
 use crate::render::declarative::SqliteRebuild;
 use crate::render::expand_contract::{ExpandContractPlan, OnlineIntent};
-use crate::render::plan::BackfillSpec;
+use crate::model::backfill::BackfillSpec;
 
 /// The dialect reach of an applied plan, derived from its ops (§2.0). A separate,
 /// journaled facet — **not** folded into the identity checksum.

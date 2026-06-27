@@ -4,22 +4,17 @@
 //! eval + lowering in isolation.
 
 use zeroship_migrate_js::eval_schema_to_ir;
+use zeroship_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor};
 
 const SAMPLE: &str = include_str!("fixtures/sample_schema.js");
 
-fn collection<'a>(
-    ir: &'a [zeroship_migrate::declarative::CollectionDescriptor],
-    name: &str,
-) -> &'a zeroship_migrate::declarative::CollectionDescriptor {
+fn collection<'a>(ir: &'a [CollectionDescriptor], name: &str) -> &'a CollectionDescriptor {
     ir.iter()
         .find(|c| c.name == name)
         .unwrap_or_else(|| panic!("collection {name} not in IR"))
 }
 
-fn field<'a>(
-    c: &'a zeroship_migrate::declarative::CollectionDescriptor,
-    name: &str,
-) -> &'a zeroship_migrate::declarative::FieldDescriptor {
+fn field<'a>(c: &'a CollectionDescriptor, name: &str) -> &'a FieldDescriptor {
     c.fields
         .iter()
         .find(|f| f.name == name)

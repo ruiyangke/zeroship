@@ -113,7 +113,14 @@ pub enum OnUnmet {
     /// that succeeded before the halt stay applied. Halt is fail-forward-stop,
     /// not a batch-wide rollback.
     ///
-    /// [`PreconditionFailed`]: crate::executor::ApplyError::PreconditionFailed
+    #[cfg_attr(
+        doc,
+        doc = "[`PreconditionFailed`]: crate::apply::executor::ApplyError::PreconditionFailed"
+    )]
+    #[cfg_attr(
+        not(doc),
+        doc = "[`PreconditionFailed`]: crate::executor::ApplyError::PreconditionFailed"
+    )]
     #[default]
     Halt,
     /// Skip THIS migration this run (do not apply it, do not journal it — it
@@ -121,7 +128,14 @@ pub enum OnUnmet {
     /// the rest of the batch. The "apply this once the DB reaches shape X"
     /// idempotent-deploy primitive. A skipped migration's dependents do not run
     /// this batch either (a dependent of a not-yet-applied migration is blocked
-    /// by the dependency ordering — see [`crate::executor::order_pending`]).
+    #[cfg_attr(
+        doc,
+        doc = "by the dependency ordering — see [`crate::apply::executor::order_pending`])."
+    )]
+    #[cfg_attr(
+        not(doc),
+        doc = "by the dependency ordering — see [`crate::executor::order_pending`])."
+    )]
     ///
     /// **Skip relies on COMPLETE `depends_on`.** The transitive-skip above only
     /// follows DECLARED dependencies: a later migration that actually depends on
@@ -135,7 +149,14 @@ pub enum OnUnmet {
     Skip,
 }
 
-/// One precondition + its unmet policy, carried by a [`Migration`](crate::migration::Migration).
+#[cfg_attr(
+    doc,
+    doc = "One precondition + its unmet policy, carried by a [`Migration`](crate::model::migration::Migration)."
+)]
+#[cfg_attr(
+    not(doc),
+    doc = "One precondition + its unmet policy, carried by a [`Migration`](crate::migration::Migration)."
+)]
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]

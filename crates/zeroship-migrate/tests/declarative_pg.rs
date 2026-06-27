@@ -13,7 +13,7 @@ use compio_postgres::Client;
 use zeroship_migrate::{
     PostgresBackend,
     apply as executor_apply, desired_snapshot, diff_snapshots, migrator_role_name,
-    provision_migrator, role::deprovision_migrator, snapshot_schema, Approval, CollectionDescriptor,
+    provision_migrator, apply::role::deprovision_migrator, snapshot_schema, Approval, CollectionDescriptor,
     DeclarativeAuthor, DeclarativeError, DesiredSchema, EngineError, ExecutorConfig, FieldDescriptor,
     GuardConfig,
     IndexDescriptor, Migration, MigrationEngine, OnlinePhase, RenameHint, SchemaSnapshot,

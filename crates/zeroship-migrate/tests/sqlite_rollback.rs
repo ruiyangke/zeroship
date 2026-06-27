@@ -6,9 +6,9 @@
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zeroship_migrate::executor::RollbackError;
-use zeroship_migrate::journal::Phase;
-use zeroship_migrate::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
+use zeroship_migrate::apply::executor::RollbackError;
+use zeroship_migrate::apply::journal::Phase;
+use zeroship_migrate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
 use zeroship_migrate::SqliteBackend;
 
 struct Paths {

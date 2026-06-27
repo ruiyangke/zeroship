@@ -10,8 +10,8 @@
 
 use compio_postgres::Client;
 use zeroship_migrate::{
-    drift::snapshot_schema, executor::LockMode, fold_ops, ir::Op, provision_migrator,
-    role::deprovision_migrator, Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine,
+    apply::drift::snapshot_schema, apply::executor::LockMode, fold_ops, model::ir::Op, provision_migrator,
+    apply::role::deprovision_migrator, Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine,
     PostgresBackend, SchemaSnapshot, SqlDialect,
 };
 
@@ -93,10 +93,10 @@ async fn apply_doc(
     let live_snap = snapshot_schema(conn, &cfg.project_schema).await.unwrap();
     let live = live_from_snapshot(&live_snap, APP);
     let author = IrAuthor::new(cfg.project_schema.clone(), APP, SqlDialect::Postgres);
-    let document = zeroship_migrate::ir_load::load_ir_document(
+    let document = zeroship_migrate::model::load::load_ir_document(
         ir,
         APP,
-        zeroship_migrate::validate::Dialect::Postgres,
+        zeroship_migrate::model::validate::Dialect::Postgres,
         reg,
         None,
     )

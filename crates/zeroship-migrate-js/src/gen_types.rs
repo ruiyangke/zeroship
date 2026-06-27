@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use zeroship_migrate::ir::{MigrationIr, Op};
+use zeroship_migrate::model::ir::{MigrationIr, Op};
 use zeroship_migrate::SqlDialect;
 
 use crate::discover_migrations;

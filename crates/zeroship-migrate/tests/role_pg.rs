@@ -16,7 +16,7 @@
 
 use compio_postgres::Client;
 use zeroship_migrate::{
-    apply, ensure_journal, migrator_role_name, provision_migrator, role::deprovision_migrator,
+    apply, ensure_journal, migrator_role_name, provision_migrator, apply::role::deprovision_migrator,
     Approval, Checksum, ExecutorConfig, Migration, MigrationFlags, MigrationId,
 };
 

@@ -7,7 +7,7 @@
 //!
 //! # What it adds on top of the per-migration checksum
 //!
-//! The per-migration [`Checksum`] already covers a single migration's *content*
+//! The per-migration [`Checksum`](crate::model::migration::Checksum) already covers a single migration's *content*
 //! (`up` + `down` + preconditions). It catches **drift** — an already-applied
 //! migration whose definition was edited after the fact. What it does NOT catch
 //! is **set-level** tampering of the SUPPLIED bundle before anything is applied:
@@ -50,7 +50,7 @@
 //! checksum `bc`, and two short migrations can never collide with one long one.
 //!
 //! A leading domain-separation constant means this hash can never be confused
-//! with a per-migration [`Checksum`] or any other SHA-256 use in the crate. The
+//! with a per-migration [`Checksum`](crate::model::migration::Checksum) or any other SHA-256 use in the crate. The
 //! fold is over the per-migration `checksum` (NOT the raw `up`/`down` text) so
 //! it is cheap and reuses the already-tamper-evident content hash.
 //!
@@ -85,7 +85,7 @@ use crate::model::migration::Migration;
 /// Domain-separation prefix for the set-level manifest hash.
 ///
 /// Folded in first so a [`ManifestHash`] can never be confused with a
-/// per-migration [`Checksum`](crate::migration::Checksum) (different domain) even
+/// per-migration [`Checksum`](crate::model::migration::Checksum) (different domain) even
 /// if the remaining bytes somehow coincided. Versioned (`v1`) so the hash domain
 /// can evolve deliberately (pre-launch: no persisted manifests to preserve).
 const MANIFEST_DOMAIN: &[u8] = b"zeroship-migrate/manifest/v1";
@@ -121,9 +121,9 @@ impl ManifestHash {
 ///
 /// The manifest is over the order the executor will actually RUN, NOT the cosmetic
 /// slice order in which the migrations were supplied. Before folding, the set is
-/// sorted into the same order [`order_pending`](crate::executor::order_pending)
+/// sorted into the same order [`order_pending`](crate::apply::executor::order_pending)
 /// produces — a `depends_on` topological sort, UUIDv7-version-tiebroken — via the
-/// SHARED [`canonical_set_order`](crate::executor::canonical_set_order), so the
+/// SHARED [`canonical_set_order`](crate::apply::executor::canonical_set_order), so the
 /// order the manifest blesses can never diverge from the order the executor runs.
 ///
 /// Two consequences:

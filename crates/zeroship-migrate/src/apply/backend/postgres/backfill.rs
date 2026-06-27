@@ -11,7 +11,7 @@
 //! # Why this is shaped the way it is
 //!
 //! - **Each batch is its own `BEGIN; … COMMIT`** under the migrator role with a
-//!   `SET LOCAL statement_timeout`, mirroring [`crate::executor::apply`]'s
+//!   `SET LOCAL statement_timeout`, mirroring [`crate::apply::executor::apply`]'s
 //!   transactional path. The loop never holds one big transaction, so it is
 //!   non-blocking: every batch commits and releases its row locks before the
 //!   next starts.
@@ -59,137 +59,10 @@ use compio_postgres::Client;
 use serde_json::Value;
 
 use crate::approval::Approval;
+use crate::apply::backend::capability::{BackfillError, BackfillOutcome, BackfillSpec};
 use crate::conn::ExecutorConfig;
-use crate::guard::{GuardError, SqlGuard};
+use crate::guard::SqlGuard;
 use crate::apply::journal::JournalError;
-use crate::render::plan::BackfillSpec;
-
-/// What [`run_backfill`] did.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BackfillOutcome {
-    /// The backfill's stable id (the progress-row key).
-    pub backfill_id: String,
-    /// Number of batches committed **this run** (excludes batches a prior,
-    /// resumed run committed).
-    pub batches: u64,
-    /// Number of rows updated **this run**.
-    pub rows_updated: u64,
-    /// `true` if a prior run's progress row was found and this run resumed from
-    /// its committed cursor (vs. starting fresh).
-    pub resumed: bool,
-    /// `true` when the backfill reached the end of the table (a batch updated
-    /// fewer than `batch_size` rows) — the progress row is marked complete.
-    pub complete: bool,
-}
-
-/// Error from [`run_backfill`].
-#[derive(Debug, thiserror::Error)]
-pub enum BackfillError {
-    /// A database error outside a guarded/progress step.
-    #[error("db error: {0}")]
-    Db(#[from] compio_postgres::Error),
-    /// A progress / journal-schema operation failed.
-    #[error(transparent)]
-    Journal(#[from] JournalError),
-    /// A test-only injected fault (simulated crash) at a batch boundary. Inert in
-    /// production (no fault is ever armed); see [`crate::fault`].
-    #[error("backfill fault-injection: {0}")]
-    Fault(String),
-    /// A backfill is destructive-ish data mutation, so it requires
-    /// [`Approval::Approved`]. With [`Approval::None`] this is refused before any
-    /// batch runs — the executor's own defense-in-depth approval gate (design
-    /// §1.6), independent of any engine-layer gate.
-    #[error("backfill requires Approval::Approved (it mutates table data) but it was not given")]
-    ApprovalRequired,
-    /// The [`BackfillSpec::table`] or [`BackfillSpec::cursor_column`] is not a
-    /// valid bare SQL identifier (it is empty, schema-qualified, or contains
-    /// characters outside `[A-Za-z_][A-Za-z0-9_]*`). Rejected before any SQL is
-    /// assembled — an injection attempt via the identifier cannot reach the DB.
-    #[error("invalid identifier for {what}: {value:?} (must be a bare [A-Za-z_][A-Za-z0-9_]* identifier)")]
-    InvalidIdentifier {
-        /// Which field was invalid (`"table"` / `"cursor_column"`).
-        what: &'static str,
-        /// The offending value.
-        value: String,
-    },
-    /// [`BackfillSpec::batch_size`] was zero.
-    #[error("batch_size must be non-zero")]
-    InvalidBatchSize,
-    /// The assembled `UPDATE` (engine cursor window + authored transform + filter)
-    /// was denied by the SQL guard — the whole backfill aborts before any batch
-    /// runs, nothing is mutated.
-    #[error("backfill assembled statement denied by guard: {source}")]
-    Guard {
-        /// The underlying guard rejection.
-        #[source]
-        source: GuardError,
-    },
-    /// The target table or cursor column does not exist in the project schema, or
-    /// the column's type could not be resolved for the cursor cast. Aborts before
-    /// any batch runs.
-    #[error("backfill target not found: {0}")]
-    TargetNotFound(String),
-    /// The [`BackfillSpec::cursor_column`] is not safe to page on: it is NOT
-    /// backed by a single-column `PRIMARY KEY` / `UNIQUE` index, or it is
-    /// nullable. The whole batched design's exactly-once + non-blocking +
-    /// filter-honoring correctness rests on a UNIQUE NOT NULL cursor — the UPDATE
-    /// matches `cursor IN (window keys)`, so a NON-unique cursor over-matches
-    /// every row sharing a key (updating far more than `batch_size` rows in one
-    /// txn, defeating the bound, and mutating rows that do NOT match the authored
-    /// filter), and a NULL cursor value is silently never paged. Rejected in
-    /// pre-flight before any batch runs.
-    #[error("cursor_column {cursor_column:?} on {table:?} is not safe to page on ({reason}); page on the table's PRIMARY KEY")]
-    CursorNotUniqueNotNull {
-        /// The target table.
-        table: String,
-        /// The offending cursor column.
-        cursor_column: String,
-        /// Why it was rejected (`"not backed by a single-column PRIMARY KEY or UNIQUE index"` / `"it is nullable"`).
-        reason: &'static str,
-    },
-    /// The authored [`BackfillSpec::set_clause`] assigns the
-    /// [`BackfillSpec::cursor_column`] itself. Mutating the cursor column breaks
-    /// paging: the window reads pre-update cursor values and advances to their
-    /// max, but the UPDATE changed those values, so rows whose cursor increased
-    /// re-enter a later window (`cursor > old_max`) — re-processed, looping, and
-    /// double-applying a non-idempotent transform. Rejected in pre-flight.
-    #[error("set_clause assigns the cursor_column {cursor_column:?}; a backfill must not mutate the column it pages on (author a separate migration / page on an immutable key)")]
-    CursorColumnMutated {
-        /// The cursor column the transform illegally assigns.
-        cursor_column: String,
-    },
-    /// A batch's `UPDATE` failed at execution (after the guard passed). The batch
-    /// transaction was rolled back, so its progress was NOT advanced — the
-    /// backfill is left at the last committed cursor and is safely resumable.
-    #[error("backfill batch failed at cursor {at_cursor:?}: {source}")]
-    BatchFailed {
-        /// The last committed cursor when the failing batch started (`None` =
-        /// from the beginning).
-        at_cursor: Option<String>,
-        /// The DB error from the failed batch.
-        #[source]
-        source: compio_postgres::Error,
-    },
-    /// The SQLite analog of [`BackfillError::BatchFailed`] (PR6b): a batch's
-    /// `UPDATE … RETURNING` failed on the SQLite backfill executor. The batch
-    /// transaction was rolled back (progress NOT advanced), so the backfill is left
-    /// at the last committed cursor and is safely resumable. Carries a neutral
-    /// `String` message (the SQLite actor error is dialect-neutral, never a
-    /// `compio_postgres::Error`).
-    #[error("sqlite backfill batch failed at cursor {at_cursor:?}: {source_msg}")]
-    SqliteBatchFailed {
-        /// The last committed cursor when the failing batch started.
-        at_cursor: Option<String>,
-        /// The SQLite error message from the failed batch.
-        source_msg: String,
-    },
-    /// The SQLite migration connection wedged during a batch (a failed batch left a
-    /// transaction open — ROLLBACK errored or autocommit could not be re-confirmed,
-    /// H1). The connection can no longer be safely reused; the caller must tear it
-    /// down before the next apply. Distinct from a resumable batch failure.
-    #[error("sqlite backfill connection poisoned: {0}")]
-    SqlitePoisoned(String),
-}
 
 /// Validate a bare SQL identifier: non-empty, starts with a letter/underscore,
 /// and contains only `[A-Za-z0-9_]`. This rejects schema-qualified names
@@ -212,7 +85,7 @@ fn validate_ident(what: &'static str, value: &str) -> Result<(), BackfillError> 
 }
 
 /// Double-quote an identifier. Routes through the ONE crate-shared engine seam
-/// ([`crate::dml::quote_ident_checked`]) so it is byte-identical to (and uniformly
+/// ([`crate::render::dml::quote_ident_checked`]) so it is byte-identical to (and uniformly
 /// self-defending with) the `author`/`role`/`journal`/`dml` quoting — fail-closed
 /// on an empty / NUL identifier (the bytes `"`-doubling cannot neutralise).
 /// Author-supplied identifiers (table / cursor column) have already passed
@@ -427,7 +300,7 @@ pub async fn backfill_progress(
 }
 
 /// List EVERY backfill for the project (the project-wide observability surface,
-/// alongside Plan 6's [`crate::status::status`]), in `started_at` order.
+/// alongside Plan 6's [`crate::ops::status::status`]), in `started_at` order.
 ///
 /// **Read-only.** Bootstraps the progress table idempotently first. A control
 /// plane / dashboard reads this to show in-flight + completed backfills with
@@ -1034,7 +907,7 @@ async fn run_one_batch(
 #[allow(clippy::future_not_send)] // compio single-thread runtime; the stack is !Send by design.
 mod cross_schema_backfill_pg {
     use super::*;
-    use crate::guard::OperatorCapability;
+    use crate::model::capability::OperatorCapability;
 
     const DEFAULT_DSN: &str =
         "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_migrate_test";

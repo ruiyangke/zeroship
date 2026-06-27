@@ -3,8 +3,8 @@
 //!
 //! This module is a **surfacing / formatting layer over the SQL the engine ALREADY
 //! lowers** — it re-implements NOTHING. Given a lowered [`AppliedPlan`] (from
-//! [`loader::load_dir`](crate::loader::load_dir) for a `.sql` artifact, or from
-//! [`IrAuthor::lower_plan`](crate::ir_author::IrAuthor::lower_plan) for an
+//! [`loader::load_dir`](crate::plan::loader::load_dir) for a `.sql` artifact, or from
+//! [`IrAuthor::lower_plan`](crate::render::lower::IrAuthor::lower_plan) for an
 //! `.ir.json`), it walks the steps and prints the SQL strings already held in each
 //! step (`Migration.up`, `PlanStep::Dml.template`) verbatim. It NEVER renders SQL
 //! itself.
@@ -15,7 +15,7 @@
 //! `addForeignKey`/`addUnique`/`addCheck`/`dropConstraint`/`createIndex`/
 //! `dropIndex` + one-shot `insert`/`update`/`delete` — render their REAL SQL: their
 //! `up`/`template` is fully determined offline (`IrAuthor::lower_*` lowers them with
-//! an EMPTY [`LiveSchema`](crate::ir_author::LiveSchema), needing no DB).
+//! an EMPTY [`LiveSchema`](crate::render::lower::LiveSchema), needing no DB).
 //!
 //! DB-STATE-DEPENDENT ops CANNOT be faithfully rendered offline. For these the
 //! preview emits a CLEARLY-LABELED `-- [runtime-resolved] …` comment line and
@@ -25,17 +25,17 @@
 //!   runtime BACKFILL (`BackfillSpec`, exact statement stream depends on live row
 //!   count / PK ranges) and a cross-deploy CONTRACT cutover; SQLite needs the live
 //!   12-step rebuild (it does not even lower offline — fails closed with
-//!   [`IrLowerError::SqliteRenameNeedsLiveTable`](crate::ir_author::IrLowerError)).
+//!   [`IrLowerError::SqliteRenameNeedsLiveTable`](crate::render::lower::IrLowerError)).
 //! - **`backfill`** — a runtime windowed loop.
 //! - **any existence-guard-carrying op** (`ifNotExists`/`ifExists`) — the apply is
 //!   a runtime catalog probe + run / satisfied-noop / fail-drift decision
-//!   ([`guard_probe`](crate::guard_probe), explicitly NOT offline-renderable). The
+//!   ([`guard_probe`](crate::render::existence_probe), explicitly NOT offline-renderable). The
 //!   bare DDL `up` IS real SQL the apply runs when the probe says "run", so we
 //!   print it under the label — but we do NOT invent an `IF [NOT] EXISTS` clause
 //!   the engine never emits.
 //! - **stand-alone SQLite `alterColumn*` / `addConstraint` / `dropConstraint`** —
 //!   reconciled by the live 12-step rebuild; do not lower offline
-//!   ([`IrLowerError::SqliteRebuildOnly`](crate::ir_author::IrLowerError)).
+//!   ([`IrLowerError::SqliteRebuildOnly`](crate::render::lower::IrLowerError)).
 //!
 //! The preview is HONEST that it shows the offline-renderable subset and labels the
 //! rest; the header + trailing summary state exactly that.
@@ -545,8 +545,8 @@ fn quote_dotted(parts: &[&str]) -> String {
 }
 
 /// The human probe-kind tag for a guarded DDL step with no op context.
-fn probe_kind(p: &crate::render::existence_probe::GuardProbe) -> &str {
-    use crate::render::existence_probe::GuardProbe;
+fn probe_kind(p: &crate::model::probe::GuardProbe) -> &str {
+    use crate::model::probe::GuardProbe;
     match p {
         GuardProbe::Table { .. } => "table",
         GuardProbe::Column { .. } => "column",
@@ -562,7 +562,7 @@ fn probe_kind(p: &crate::render::existence_probe::GuardProbe) -> &str {
 /// A placeholder `ExistenceGuard` direction derived from a migration's probe, used
 /// only on the op-less path where we know a guard exists but not its op direction.
 fn guard_dir(m: &crate::model::migration::Migration) -> ExistenceGuard {
-    use crate::render::existence_probe::{GuardDir, GuardProbe};
+    use crate::model::probe::{GuardDir, GuardProbe};
     let dir = match &m.existence_guard {
         Some(
             GuardProbe::Table { direction, .. }

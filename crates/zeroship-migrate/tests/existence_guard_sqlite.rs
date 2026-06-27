@@ -21,16 +21,16 @@
 //! every type (timestamp/jsonb/text/ref all fold to the `text` affinity and match),
 //! while a GENUINE affinity change (string→number, text↔real) still fails closed.
 
-use zeroship_migrate::backend::MigrationBackend;
-use zeroship_migrate::db::ExecutorConfig;
-use zeroship_migrate::executor::ApplyError;
-use zeroship_migrate::ir::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::conn::ExecutorConfig;
+use zeroship_migrate::apply::executor::ApplyError;
+use zeroship_migrate::model::ir::{
     ColType, ExistenceGuard, IrColumn, MigrationIr, Op, SelectAst, SelectItem, TableRef,
     ViewQuery,
 };
-use zeroship_migrate::ir_author::{IrAuthor, LiveSchema};
-use zeroship_migrate::journal::Phase;
-use zeroship_migrate::migration::Migration;
+use zeroship_migrate::render::lower::{IrAuthor, LiveSchema};
+use zeroship_migrate::apply::journal::Phase;
+use zeroship_migrate::model::migration::Migration;
 use zeroship_migrate::SqliteBackend;
 use zeroship_schema::query::SqlDialect;
 use std::path::PathBuf;

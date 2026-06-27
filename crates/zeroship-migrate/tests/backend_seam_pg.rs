@@ -15,8 +15,8 @@
 //! Requires `zeroship_migrate_test` on :5440 (same harness as `executor_pg`).
 
 use compio_postgres::Client;
-use zeroship_migrate::backend::{MigrationBackend, PostgresBackend};
-use zeroship_migrate::migration::Checksum;
+use zeroship_migrate::apply::backend::{MigrationBackend, PostgresBackend};
+use zeroship_migrate::model::migration::Checksum;
 use zeroship_migrate::{
     apply, Approval, ExecutorConfig, Migration, MigrationFlags, MigrationId,
 };

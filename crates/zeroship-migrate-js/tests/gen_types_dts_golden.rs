@@ -14,8 +14,8 @@
 //! FAITHFUL: the op stream is folded through the REAL `fold_to_field_defs` seam and
 //! the REAL `render_artifacts` emitter — no stubs.
 
-use zeroship_migrate::expr::{BinaryOp, Expr};
-use zeroship_migrate::ir::{
+use zeroship_migrate::model::expr::{BinaryOp, Expr};
+use zeroship_migrate::model::ir::{
     ColType, IrColumn, IrConstraint, IrConstraintKind, IrScalar, Op, RefAction, VectorMetric,
 };
 use zeroship_migrate_js::render_artifacts;

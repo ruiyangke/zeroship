@@ -22,15 +22,15 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zeroship_migrate::declarative::{
+use zeroship_migrate::render::declarative::{
     desired_snapshot_for_dialect, CollectionDescriptor, FieldDescriptor,
 };
-use zeroship_migrate::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
-use zeroship_migrate::ir_author::{IrAuthor, IrLowerError, LiveSchema};
-use zeroship_migrate::backend_sqlite::Mode;
+use zeroship_migrate::model::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
+use zeroship_migrate::render::lower::{IrAuthor, IrLowerError, LiveSchema};
+use zeroship_migrate::apply::backend::sqlite::Mode;
 use zeroship_migrate::{PlanStep, RenameStep};
 use zeroship_migrate::{
-    executor::LockMode, Approval, ExecutorConfig, MigrationBackend, MigrationEngine, SqlDialect,
+    apply::executor::LockMode, Approval, ExecutorConfig, MigrationBackend, MigrationEngine, SqlDialect,
     SqliteBackend,
 };
 use zeroship_schema::query::SqlDialect as SchemaDialect;
@@ -126,10 +126,10 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let engine = MigrationEngine::new();
     for d in descriptors {
-        let cols: Vec<zeroship_migrate::ir::IrColumn> = d
+        let cols: Vec<zeroship_migrate::model::ir::IrColumn> = d
             .fields
             .iter()
-            .map(|f| zeroship_migrate::ir::IrColumn {
+            .map(|f| zeroship_migrate::model::ir::IrColumn {
                 name: f.name.clone(),
                 ty: ColType::Text, // the e2e tables use text fields
                 nullable: Some(!f.required),
@@ -212,7 +212,7 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
         .await
         .expect("journal before rename")
         .into_iter()
-        .filter(|e| matches!(e.phase, zeroship_migrate::journal::Phase::Completed))
+        .filter(|e| matches!(e.phase, zeroship_migrate::apply::journal::Phase::Completed))
         .map(|e| e.version.as_str().to_string())
         .collect();
 
@@ -260,7 +260,7 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
     let applied = be.applied(&exec_cfg()).await.expect("journal");
     assert!(
         applied.iter().any(|e| e.version == rebuild_version
-            && matches!(e.phase, zeroship_migrate::journal::Phase::Completed)),
+            && matches!(e.phase, zeroship_migrate::apply::journal::Phase::Completed)),
         "the rebuild migration is journaled completed (rebuild_one path)"
     );
     // And NO PG expand-contract sub-step ever journaled (the run_online path was
@@ -271,7 +271,7 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
     // as *additional, distinct* versions; their absence is the load-bearing proof.
     let after: std::collections::BTreeSet<String> = applied
         .iter()
-        .filter(|e| matches!(e.phase, zeroship_migrate::journal::Phase::Completed))
+        .filter(|e| matches!(e.phase, zeroship_migrate::apply::journal::Phase::Completed))
         .map(|e| e.version.as_str().to_string())
         .collect();
     let added: std::collections::BTreeSet<String> =
@@ -305,7 +305,7 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
             owner_app: APP.into(),
             ops: vec![Op::CreateTable {
                 name: "events".into(),
-                columns: vec![zeroship_migrate::ir::IrColumn {
+                columns: vec![zeroship_migrate::model::ir::IrColumn {
                     name: "count".into(),
                     ty: ColType::Int,
                     nullable: Some(false),

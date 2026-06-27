@@ -33,7 +33,7 @@
 //! module loader compiles raw source straight to a V8 module and has no
 //! transpile step. See the crate README / the P3 report for the gap.
 
-use zeroship_migrate::declarative::CollectionDescriptor;
+use zeroship_migrate::render::declarative::CollectionDescriptor;
 use zeroship_runtime::{ModuleEntry, Runtime};
 
 /// The IR adapter glue (the entry module of the eval graph). Imports the

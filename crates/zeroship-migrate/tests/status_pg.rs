@@ -5,7 +5,7 @@
 //! clean.
 
 use compio_postgres::Client;
-use zeroship_migrate::migration::Checksum;
+use zeroship_migrate::model::migration::Checksum;
 use zeroship_migrate::{
     apply, history, rollback, status, Approval, ExecutorConfig, HistoryKind, Migration,
     MigrationFlags, MigrationId, RollbackRequest, RollbackTarget,

@@ -23,7 +23,7 @@
 
 use compio_postgres::Client;
 use zeroship_migrate::{
-    migration::Migration, provision_migrator, role::deprovision_migrator, Approval, ExecutorConfig,
+    model::migration::Migration, provision_migrator, apply::role::deprovision_migrator, Approval, ExecutorConfig,
     GuardConfig, MigrationEngine,
 };
 
@@ -202,7 +202,7 @@ async fn platform_flyway_loader_generalization_is_apply_identical() {
 
         // Path A — the POST-change platform loader: `load_dir` →
         // `single_step_migration()` (exactly what the production `load_dir_flat`
-        // does in `platform_runner::run_migrate_pg`).
+        // does in `command::runner::run_migrate_pg`).
         let cfg_a = cfg_for(&token());
         setup(&conn, &cfg_a).await;
         let plans = zeroship_migrate::load_dir(dir.path()).expect("load_dir (plans)");
