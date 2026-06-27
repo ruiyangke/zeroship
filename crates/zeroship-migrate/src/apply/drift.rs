@@ -40,7 +40,7 @@ use crate::apply::journal::{self, AppliedEntry, JournalError, Phase};
 use crate::model::migration::Migration;
 use crate::model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, NamedTypeSnapshot, SchemaSnapshot,
-    TableSnapshot, ViewSnapshot,
+    SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
 
 // ---------------------------------------------------------------------------
@@ -503,6 +503,10 @@ pub async fn snapshot_schema(
              JOIN pg_am am ON am.oid = ic.relam \
              JOIN pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = $1 AND x.indisvalid = true \
+               AND NOT EXISTS ( \
+                 SELECT 1 FROM pg_constraint con \
+                 WHERE con.conindid = x.indexrelid AND con.contype = 'x' \
+               ) \
              ORDER BY c.relname, ic.relname",
             &[&project_schema],
         )
@@ -543,19 +547,19 @@ pub async fn snapshot_schema(
     // whose predicate was rewritten out-of-band is surfaced by the attribute diff
     // (#1). `contype` is mapped to the same human label information_schema reports
     // (`PRIMARY KEY` / `FOREIGN KEY` / `UNIQUE` / `CHECK`) so `kind` is unchanged.
-    let con_rows = conn
+    let constraint_rows = conn
         .query(
             "SELECT c.relname AS table_name, con.conname AS constraint_name, \
                     con.contype AS contype, pg_get_constraintdef(con.oid) AS definition \
              FROM pg_constraint con \
              JOIN pg_class c ON c.oid = con.conrelid \
              JOIN pg_namespace n ON n.oid = con.connamespace \
-             WHERE n.nspname = $1 AND con.contype IN ('p', 'f', 'u', 'c') \
+             WHERE n.nspname = $1 AND con.contype IN ('p', 'f', 'u', 'c', 'x') \
              ORDER BY c.relname, con.conname",
             &[&project_schema],
         )
         .await?;
-    for r in &con_rows {
+    for r in &constraint_rows {
         let table: String = r.get("table_name");
         if let Some(t) = tables.get_mut(&table) {
             let contype: i8 = r.get("contype");
@@ -564,6 +568,7 @@ pub async fn snapshot_schema(
                 Some('f') => "FOREIGN KEY",
                 Some('u') => "UNIQUE",
                 Some('c') => "CHECK",
+                Some('x') => "EXCLUDE",
                 _ => "UNKNOWN",
             };
             t.constraints.push(ConstraintSnapshot {
@@ -574,10 +579,32 @@ pub async fn snapshot_schema(
         }
     }
 
+    let seq_rows = conn
+        .query(
+            "SELECT c.relname AS sequence_name \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relkind = 'S' \
+               AND NOT EXISTS ( \
+                 SELECT 1 FROM pg_depend d \
+                 WHERE d.classid = 'pg_class'::regclass \
+                   AND d.objid = c.oid \
+                   AND d.deptype = 'i' \
+               ) \
+             ORDER BY c.relname",
+            &[&project_schema],
+        )
+        .await?;
+    let mut sequences = std::collections::BTreeMap::new();
+    for r in &seq_rows {
+        sequences.insert(r.get("sequence_name"), SequenceSnapshot::default());
+    }
+
     Ok(SchemaSnapshot {
         tables,
         views,
         named_types,
+        sequences,
     })
 }
 
@@ -656,6 +683,16 @@ pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> Str
                 expected: exp_ty.kind.clone(),
                 actual: act_ty.kind.clone(),
             });
+        }
+    }
+    for name in expected.sequences.keys() {
+        if !actual.sequences.contains_key(name) {
+            missing.push(format!("sequence {name}"));
+        }
+    }
+    for name in actual.sequences.keys() {
+        if !expected.sequences.contains_key(name) {
+            unexpected.push(format!("sequence {name}"));
         }
     }
     for (name, exp_v) in &expected.views {

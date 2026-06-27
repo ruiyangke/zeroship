@@ -56,7 +56,8 @@ const TS = {
     "createTable", "dropTable", "renameTable", "addColumn", "dropColumn", "createIndex",
     "dropIndex", "alterColumnType", "alterColumnNullability", "renameColumn", "addConstraint",
     "dropConstraint", "insert", "update", "delete", "backfill", "createView", "dropView",
-    "createEnum", "dropEnum", "createDomain", "dropDomain", "createTrigger", "dropTrigger",
+    "createEnum", "dropEnum", "createDomain", "dropDomain", "createSequence",
+    "alterSequence", "dropSequence", "createTrigger", "dropTrigger",
     "createSchema", "dropSchema", "createExtension", "dropExtension", "createRole",
     "alterRole", "dropRole", "dropOwnedBy", "grant", "revoke", "enableRls", "forceRls",
     "disableRls", "noForceRls", "createPolicy", "dropPolicy", "createFunction",
@@ -71,7 +72,7 @@ const TS = {
     "uuid", "bytea", "geoPoint",
   ].sort(),
   // IrConstraintKind tags.
-  IrConstraintKind: ["pk", "fk", "unique", "check"].sort(),
+  IrConstraintKind: ["pk", "fk", "unique", "check", "exclusion"].sort(),
   // §A2 — trigger action/body tags.
   TriggerAction: ["executeFunction", "body"].sort(),
   TriggerStmt: ["insert", "update", "delete", "select", "raise"].sort(),
@@ -88,6 +89,8 @@ const TS = {
   SynthDefaultFn: ["now", "genRandomUuid"].sort(),
   CastTarget: ["text", "integer", "real", "boolean", "blob", "uuid"].sort(),
   IndexMethod: ["btree", "gin", "gist", "ivfflat", "hnsw", "fts5"].sort(),
+  ExclusionMethod: ["gist", "spgist", "btree"].sort(),
+  ExclusionOperator: ["&&", "=", "<>", "<", ">", "<=", ">="].sort(),
   // **PR10** — the closed existence-guard token set (`ir.ts` `ExistenceGuard`).
   ExistenceGuard: ["ifNotExists", "ifExists"].sort(),
   // **C1** — the closed FK referential-action token set (`ir.ts` `RefAction`).
@@ -140,6 +143,9 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   dropEnum: ["existenceGuard", "name", "schema"].sort(),
   createDomain: ["as", "check", "default", "name", "notNull", "schema"].sort(),
   dropDomain: ["existenceGuard", "name", "schema"].sort(),
+  createSequence: ["as", "cache", "cycle", "increment", "maxValue", "minValue", "name", "ownedBy", "schema", "start"].sort(),
+  alterSequence: ["cache", "cycle", "increment", "maxValue", "minValue", "name", "ownedBy", "restart", "schema"].sort(),
+  dropSequence: ["existenceGuard", "name", "schema"].sort(),
   createTrigger: ["action", "events", "forEach", "name", "schema", "table", "timing", "when"].sort(),
   dropTrigger: ["ifExists", "name", "schema", "table"].sort(),
   createSchema: ["authorization", "ifNotExists", "name"].sort(),
@@ -206,6 +212,8 @@ test("closed string-enum tokens match the schema", () => {
     "SynthDefaultFn",
     "CastTarget",
     "IndexMethod",
+    "ExclusionMethod",
+    "ExclusionOperator",
     "TriggerTiming",
     "TriggerEvent",
     "ForEach",

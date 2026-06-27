@@ -527,6 +527,26 @@ export function pgDomain(name) {
   return handle;
 }
 
+export function sequence(name) {
+  requireString(name, "sequence(name)");
+  const handle = {
+    name,
+    create(args = {}) {
+      recordCreateSequence(name, args);
+      return handle;
+    },
+    alter(args) {
+      recordAlterSequence(name, args);
+      return handle;
+    },
+    drop(args = {}) {
+      recordDropSequence(name, args);
+      return handle;
+    },
+  };
+  return handle;
+}
+
 // ===========================================================================
 // (B continued) The single-handle fluent `(c) => Expr` builder (§3.6). `c` is
 // BOTH a column-accessor function (`c("name")` → a chainable ColRef) and the
@@ -782,6 +802,61 @@ function recordDropDomain(name, args = {}) {
   );
 }
 
+function recordCreateSequence(name, args = {}) {
+  requireString(name, "sequence(name)");
+  if (args === null || typeof args !== "object") {
+    throw structuredError("OP_INVALID", "sequence(name).create(args) needs an object");
+  }
+  pushOrDeferUp(
+    compact({
+      op: "createSequence",
+      name,
+      schema: args.schema,
+      as: args.as === undefined ? undefined : colTypeOf(args.as),
+      increment: args.increment,
+      start: args.start,
+      minValue: args.minValue,
+      maxValue: args.maxValue,
+      cache: args.cache,
+      cycle: args.cycle,
+      ownedBy: args.ownedBy,
+    }),
+  );
+}
+
+function recordAlterSequence(name, args) {
+  requireString(name, "sequence(name)");
+  if (!args || typeof args !== "object") {
+    throw structuredError("OP_INVALID", "sequence(name).alter(args) needs an object");
+  }
+  push(
+    compact({
+      op: "alterSequence",
+      name,
+      schema: args.schema,
+      increment: args.increment,
+      restart: args.restart,
+      minValue: args.minValue,
+      maxValue: args.maxValue,
+      cache: args.cache,
+      cycle: args.cycle,
+      ownedBy: args.ownedBy,
+    }),
+  );
+}
+
+function recordDropSequence(name, args = {}) {
+  requireString(name, "sequence(name)");
+  push(
+    compact({
+      op: "dropSequence",
+      name,
+      schema: args.schema,
+      existenceGuard: ifExistsGuard(args.ifExists),
+    }),
+  );
+}
+
 // ===========================================================================
 // (D) The internal op-construction helpers (the single source of truth). These
 // build + push the EXACT canonical op object the Rust closed `Op` enum /
@@ -817,6 +892,9 @@ function recordCreateTable(name, args) {
   }
   for (const ck of args.checks || []) {
     constraints.push(compact({ name: ck.name, kind: { kind: "check", expr: resolveExpr(ck.expr) } }));
+  }
+  for (const exclusion of args.exclusions || []) {
+    constraints.push(exclusionConstraintFromSpec(exclusion));
   }
   for (const fkSpec of args.foreignKeys || []) {
     constraints.push(
@@ -1035,6 +1113,60 @@ function recordAddCheck(table, name, args) {
       op: "addConstraint",
       table,
       constraint: compact({ name, kind: { kind: "check", expr: resolveExpr(args.expr) } }),
+      schema: args.schema,
+      existenceGuard: ifNotExistsGuard(args.ifNotExists),
+    }),
+  );
+}
+
+function exclusionConstraintFromSpec(spec) {
+  if (!spec || typeof spec !== "object" || !Array.isArray(spec.elements)) {
+    throw structuredError(
+      "OP_INVALID",
+      ".exclusion(name).add needs { elements: [{ target, operator }], ... }",
+    );
+  }
+  return compact({
+    name: spec.name,
+    kind: compact({
+      kind: "exclusion",
+      usingMethod: spec.using,
+      elements: spec.elements.map(exclusionElementToIr),
+      wherePredicate: resolveExpr(spec.where),
+      deferrable: spec.deferrable,
+      initiallyDeferred: spec.initiallyDeferred,
+    }),
+  });
+}
+
+function exclusionElementToIr(element) {
+  if (!element || typeof element !== "object") {
+    throw structuredError("OP_INVALID", "exclusion element must be { target, operator }");
+  }
+  return {
+    target: exclusionTargetToIr(element.target),
+    operator: element.operator,
+  };
+}
+
+function exclusionTargetToIr(target) {
+  if (typeof target === "string") {
+    requireString(target, "exclusion target column");
+    return { kind: "column", name: target };
+  }
+  const expr = resolveExpr(target);
+  if (!expr) {
+    throw structuredError("OP_INVALID", "exclusion target must be a column name or expression");
+  }
+  return { kind: "expr", expr };
+}
+
+function recordAddExclusion(table, name, args) {
+  push(
+    compact({
+      op: "addConstraint",
+      table,
+      constraint: exclusionConstraintFromSpec({ ...args, name }),
       schema: args.schema,
       existenceGuard: ifNotExistsGuard(args.ifNotExists),
     }),
@@ -1567,6 +1699,17 @@ export function table(name, opts = {}) {
         add(args) {
           terminateSelector(id);
           recordAddCheck(name, ckName, { ...args, schema: pickSchema(args, dflt) });
+          return handle;
+        },
+      };
+    },
+    exclusion(exName) {
+      requireString(exName, ".exclusion(name)");
+      const id = registerSelector("exclusion", exName);
+      return {
+        add(args) {
+          terminateSelector(id);
+          recordAddExclusion(name, exName, { ...args, schema: pickSchema(args, dflt) });
           return handle;
         },
       };

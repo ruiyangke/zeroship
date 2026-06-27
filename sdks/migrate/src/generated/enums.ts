@@ -150,6 +150,18 @@ export type ExistenceGuard = "ifNotExists" | "ifExists";
 export type RefAction = "cascade" | "restrict" | "setNull" | "setDefault" | "noAction";
 
 /**
+ * CLOSED exclusion access-method set. PostgreSQL supports more methods, but the
+ * IR only admits the audited methods below.
+ */
+export type ExclusionMethod = "gist" | "spgist" | "btree";
+
+/**
+ * CLOSED exclusion-operator set. The SQL operator spelling is rendered from
+ * this enum, never carried as an arbitrary string.
+ */
+export type ExclusionOperator = "&&" | "=" | "<>" | "<" | ">" | "<=" | ">=";
+
+/**
  * The CLOSED trigger-timing lexicon (`BEFORE`/`AFTER`/`INSTEAD OF`).
  */
 export type TriggerTiming = "before" | "after" | "insteadOf";

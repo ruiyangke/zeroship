@@ -56,6 +56,9 @@ const ENUM_DEFS = [
   // `setNull`/`setDefault`/`noAction`). A closed string-enum; consumed by the
   // hand-authored `ir.ts` `IrConstraintKind` fk variant.
   "RefAction",
+  // §B — closed exclusion-constraint facets.
+  "ExclusionMethod",
+  "ExclusionOperator",
   // §A2 — closed trigger facet/action body tokens.
   "TriggerTiming",
   "TriggerEvent",

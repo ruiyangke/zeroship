@@ -15,6 +15,8 @@ import type {
   Classification,
   ColType,
   Expr,
+  ExclusionMethod,
+  ExclusionOperator,
   IrBatch,
   IrScalar,
   Join,
@@ -38,6 +40,8 @@ import type {
 export type {
   ColType,
   Expr,
+  ExclusionMethod,
+  ExclusionOperator,
   IrBatch,
   IrScalar,
   Join,
@@ -235,6 +239,46 @@ export interface DomainHandle {
   readonly name: string;
   create(args: CreateDomainArgs): DomainHandle;
   drop(args?: DropDomainArgs): DomainHandle;
+}
+
+export interface SequenceOwnedBy {
+  table: string;
+  column: string;
+}
+
+export interface CreateSequenceArgs {
+  as?: ColumnDef | ColType;
+  increment?: number;
+  start?: number;
+  minValue?: number | null;
+  maxValue?: number | null;
+  cache?: number;
+  cycle?: boolean;
+  ownedBy?: SequenceOwnedBy | null;
+  schema?: string;
+}
+
+export interface AlterSequenceArgs {
+  increment?: number;
+  restart?: number | null;
+  minValue?: number | null;
+  maxValue?: number | null;
+  cache?: number;
+  cycle?: boolean;
+  ownedBy?: SequenceOwnedBy | null;
+  schema?: string;
+}
+
+export interface DropSequenceArgs {
+  schema?: string;
+  ifExists?: boolean;
+}
+
+export interface SequenceHandle {
+  readonly name: string;
+  create(args?: CreateSequenceArgs): SequenceHandle;
+  alter(args: AlterSequenceArgs): SequenceHandle;
+  drop(args?: DropSequenceArgs): SequenceHandle;
 }
 
 // ── Scalars / rows ──
@@ -530,6 +574,26 @@ export interface TableOptions {
   schema?: string;
 }
 
+export type ExclusionTarget = string | ExprFn | ExprChain | Expr;
+
+export interface ExclusionElementArg {
+  target: ExclusionTarget;
+  operator: ExclusionOperator;
+}
+
+export interface ExclusionConstraintArgs {
+  using?: ExclusionMethod;
+  elements: ExclusionElementArg[];
+  where?: ExprFn | ExprChain | Expr;
+  deferrable?: boolean;
+  initiallyDeferred?: boolean;
+}
+
+export type ExclusionAddArgs = ExclusionConstraintArgs & {
+  ifNotExists?: boolean;
+  schema?: string;
+};
+
 /** The all-object `create({...})` payload (§3.1). Table-level constraints/indexes
  *  are FIELDS (no `build` callback — "no exceptions"); each carries a required
  *  `name` (name-first, §3.4).
@@ -572,6 +636,7 @@ export interface CreateTableArgs {
     onDelete?: RefAction;
     onUpdate?: RefAction;
   }>;
+  exclusions?: Array<{ name: string } & ExclusionConstraintArgs>;
   indexes?: Array<{
     name: string;
     columns: string[];
@@ -621,6 +686,12 @@ export interface UniqueRef {
 /** The `.check(name)` selector sub-handle (§3.3). */
 export interface CheckRef {
   add(args: { expr: ExprFn; ifNotExists?: boolean; schema?: string }): TableHandle;
+}
+
+/** The `.exclusion(name)` selector sub-handle (§3.3). PostgreSQL renders native
+ *  `EXCLUDE`; SQLite/MySQL fail closed. */
+export interface ExclusionRef {
+  add(args: ExclusionAddArgs): TableHandle;
 }
 
 /** The `.constraint(name)` selector sub-handle (§3.3) — kind-agnostic drop by
@@ -678,6 +749,7 @@ export interface TableHandle {
   foreignKey(name: string): ForeignKeyRef;
   unique(name: string): UniqueRef;
   check(name: string): CheckRef;
+  exclusion(name: string): ExclusionRef;
   constraint(name: string): ConstraintRef;
   index(name: string): IndexRef;
 

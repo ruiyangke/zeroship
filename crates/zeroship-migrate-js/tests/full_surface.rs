@@ -7,7 +7,7 @@
 //! These complement `op_round_trip.rs` (the golden-corpus value-equality gate over
 //! the full fluent fixtures) with targeted, single-behavior regression assertions.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use zeroship_migrate_js::{lint_migration_determinism, record_migration_to_ir};
 
 const OWNER: &str = "app_pr3";
@@ -553,6 +553,88 @@ fn twin_add_constraint_family_carries_schema_and_guard() {
     let op = op_named(&ck_ir, "addConstraint");
     assert_schema(op, "app2");
     assert_guard(op, "ifNotExists");
+}
+
+/// Sequences are standalone top-level ops; exclusion constraints are table
+/// constraints with a CLOSED operator token set. The V8 recorder must emit the
+/// exact nested IR shape the Rust loader deserializes.
+#[test]
+fn sequences_and_exclusion_constraints_record_canonical_ir() {
+    let src = r#"
+        import { sequence, table, t } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            sequence("invoice_seq").create({
+                as: t.bigInt(),
+                increment: 5,
+                start: 100,
+                cache: 10,
+                cycle: true,
+                ownedBy: { table: "invoices", column: "id" },
+                schema: "app2",
+            });
+            sequence("invoice_seq").alter({
+                increment: 7,
+                restart: 200,
+                minValue: 1,
+                maxValue: 999,
+                cache: 20,
+                cycle: false,
+                ownedBy: null,
+                schema: "app2",
+            });
+            sequence("invoice_seq").drop({ schema: "app2", ifExists: true });
+            table("bookings", { schema: "app2" }).exclusion("bookings_no_overlap").add({
+                using: "gist",
+                elements: [
+                    { target: "room", operator: "=" },
+                    { target: "during", operator: "&&" },
+                ],
+                where: (c) => c("cancelled").eq(false),
+                deferrable: true,
+                ifNotExists: true,
+            });
+        }};
+    "#;
+    let ir = record(src, "seq_excl");
+    assert_eq!(
+        ops(&ir)[0],
+        json!({
+            "op": "createSequence",
+            "name": "invoice_seq",
+            "schema": "app2",
+            "as": "bigInt",
+            "increment": 5,
+            "start": 100,
+            "cache": 10,
+            "cycle": true,
+            "ownedBy": { "table": "invoices", "column": "id" }
+        })
+    );
+    assert_eq!(ops(&ir)[1].get("ownedBy"), Some(&Value::Null));
+    assert_eq!(ops(&ir)[2].get("op").and_then(Value::as_str), Some("dropSequence"));
+    assert_guard(&ops(&ir)[2], "ifExists");
+
+    let exclusion = &ops(&ir)[3];
+    assert_eq!(exclusion.get("op").and_then(Value::as_str), Some("addConstraint"));
+    assert_guard(exclusion, "ifNotExists");
+    assert_eq!(
+        exclusion.get("constraint").and_then(|c| c.get("kind")),
+        Some(&json!({
+            "kind": "exclusion",
+            "usingMethod": "gist",
+            "elements": [
+                { "target": { "kind": "column", "name": "room" }, "operator": "=" },
+                { "target": { "kind": "column", "name": "during" }, "operator": "&&" }
+            ],
+            "wherePredicate": {
+                "node": "binOp",
+                "op": "eq",
+                "lhs": { "node": "colRef", "name": "cancelled" },
+                "rhs": { "node": "literal", "value": false }
+            },
+            "deferrable": true
+        }))
+    );
 }
 
 /// `dropConstraint(table, name, { schema, ifExists })` records the schema

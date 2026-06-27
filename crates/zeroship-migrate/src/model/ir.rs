@@ -47,7 +47,7 @@ use std::collections::BTreeMap;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::model::expr::{Expr, SynthFn};
 use crate::model::migration::OnlinePhase;
@@ -71,6 +71,14 @@ pub const EXPR_INVALID_NUMERIC: &str = "EXPR_INVALID_NUMERIC";
 /// "wire-format versioning is code-evolution discipline, not user-compat" stance.
 /// A bump MUST be checksum-neutral for already-applied artifacts (§5.3).
 pub const CURRENT_IR_VERSION: u32 = 4;
+
+fn deserialize_present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
 
 /// A [`MigrationIr`] declared an `ir_version` this engine build does not
 /// understand — a FUTURE version `> CURRENT_IR_VERSION` (§5.3, design line 888).
@@ -689,6 +697,77 @@ impl RefAction {
     }
 }
 
+/// The CLOSED target shape for an exclusion-constraint element. A target is
+/// either a quoted column name or a closed expression AST; never raw SQL.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum ColumnOrExpr {
+    /// A table column target.
+    Column {
+        /// Column name.
+        name: String,
+    },
+    /// A closed expression target.
+    Expr {
+        /// Expression AST.
+        expr: Expr,
+    },
+}
+
+/// CLOSED exclusion access-method set. PostgreSQL supports more methods, but the
+/// IR only admits the audited methods below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ExclusionMethod {
+    /// GiST (the default and common range/geometry exclusion method).
+    Gist,
+    /// SP-GiST.
+    Spgist,
+    /// B-tree.
+    Btree,
+}
+
+fn default_exclusion_method() -> ExclusionMethod {
+    ExclusionMethod::Gist
+}
+
+/// CLOSED exclusion-operator set. The SQL operator spelling is rendered from
+/// this enum, never carried as an arbitrary string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ExclusionOperator {
+    /// `&&`
+    #[serde(rename = "&&")]
+    Overlaps,
+    /// `=`
+    #[serde(rename = "=")]
+    Equal,
+    /// `<>`
+    #[serde(rename = "<>")]
+    NotEqual,
+    /// `<`
+    #[serde(rename = "<")]
+    Less,
+    /// `>`
+    #[serde(rename = ">")]
+    Greater,
+    /// `<=`
+    #[serde(rename = "<=")]
+    LessEqual,
+    /// `>=`
+    #[serde(rename = ">=")]
+    GreaterEqual,
+}
+
+/// One `(target WITH operator)` element inside an exclusion constraint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExclusionElement {
+    /// Column or closed expression target.
+    pub target: ColumnOrExpr,
+    /// CLOSED operator token.
+    pub operator: ExclusionOperator,
+}
+
 /// The kind of a table constraint. CLOSED enum, internally tagged on `"kind"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
@@ -726,6 +805,24 @@ pub enum IrConstraintKind {
         /// The check expression (a boolean closed-AST node).
         expr: Expr,
     },
+    /// PostgreSQL exclusion constraint (`EXCLUDE USING …`). Operators and
+    /// expression targets are closed tokens/ASTs, never raw SQL.
+    Exclusion {
+        /// Access method. Defaults to GiST on the wire when omitted.
+        #[serde(default = "default_exclusion_method")]
+        using_method: ExclusionMethod,
+        /// `(target WITH operator)` elements.
+        elements: Vec<ExclusionElement>,
+        /// Optional partial-exclusion predicate.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        where_predicate: Option<Expr>,
+        /// Optional `DEFERRABLE` flag.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deferrable: Option<bool>,
+        /// Optional `INITIALLY DEFERRED` flag. Meaningful only when deferrable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initially_deferred: Option<bool>,
+    },
 }
 
 /// A named table constraint.
@@ -742,6 +839,16 @@ pub struct IrConstraint {
     pub name: Option<String>,
     /// The constraint kind + its operands (a nested, internally-tagged object).
     pub kind: IrConstraintKind,
+}
+
+/// Optional sequence ownership target (`OWNED BY table.column`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SequenceOwnedBy {
+    /// Owning table.
+    pub table: String,
+    /// Owning column.
+    pub column: String,
 }
 
 /// The CLOSED index-method lexicon (§3.3.1 `createIndex` `using` union, design
@@ -1830,6 +1937,115 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
     },
+    /// Create a standalone sequence. PostgreSQL renders it natively; SQLite/MySQL
+    /// refuse fail-closed because their auto-increment features are not general
+    /// sequence objects.
+    CreateSequence {
+        /// Sequence name.
+        name: String,
+        /// Optional schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// Optional sequence integer type (`int`/`bigInt` today).
+        #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
+        as_type: Option<ColType>,
+        /// Optional increment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        increment: Option<i64>,
+        /// Optional start value.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start: Option<i64>,
+        /// Optional minimum value. `null` means `NO MINVALUE`; absent omits the
+        /// clause.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_nullable",
+            skip_serializing_if = "Option::is_none"
+        )]
+        min_value: Option<Option<i64>>,
+        /// Optional maximum value. `null` means `NO MAXVALUE`; absent omits the
+        /// clause.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_nullable",
+            skip_serializing_if = "Option::is_none"
+        )]
+        max_value: Option<Option<i64>>,
+        /// Optional cache size.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache: Option<i64>,
+        /// Optional cycle flag (`true` → `CYCLE`, `false` → `NO CYCLE`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cycle: Option<bool>,
+        /// Optional ownership. `null` means `OWNED BY NONE`; absent omits the
+        /// clause.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_nullable",
+            skip_serializing_if = "Option::is_none"
+        )]
+        owned_by: Option<Option<SequenceOwnedBy>>,
+    },
+    /// Alter a standalone sequence.
+    AlterSequence {
+        /// Sequence name.
+        name: String,
+        /// Optional schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// Optional increment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        increment: Option<i64>,
+        /// Optional restart. `null` means bare `RESTART`; a value renders
+        /// `RESTART WITH n`; absent omits the clause.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_nullable",
+            skip_serializing_if = "Option::is_none"
+        )]
+        restart: Option<Option<i64>>,
+        /// Optional minimum value. `null` means `NO MINVALUE`; absent omits the
+        /// clause.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_nullable",
+            skip_serializing_if = "Option::is_none"
+        )]
+        min_value: Option<Option<i64>>,
+        /// Optional maximum value. `null` means `NO MAXVALUE`; absent omits the
+        /// clause.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_nullable",
+            skip_serializing_if = "Option::is_none"
+        )]
+        max_value: Option<Option<i64>>,
+        /// Optional cache size.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache: Option<i64>,
+        /// Optional cycle flag (`true` → `CYCLE`, `false` → `NO CYCLE`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cycle: Option<bool>,
+        /// Optional ownership. `null` means `OWNED BY NONE`; absent omits the
+        /// clause.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_nullable",
+            skip_serializing_if = "Option::is_none"
+        )]
+        owned_by: Option<Option<SequenceOwnedBy>>,
+    },
+    /// Drop a standalone sequence.
+    DropSequence {
+        /// Sequence name.
+        name: String,
+        /// Optional schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// `ifExists` drop guard.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
+    },
 
     // ──────────────────────────────────────────────────────────────────────
     // VENDOR (`@zeroship/migrate/pg`) — Postgres-ONLY privileged primitives
@@ -2167,7 +2383,10 @@ impl Op {
             | Op::CreateEnum { .. }
             | Op::DropEnum { .. }
             | Op::CreateDomain { .. }
-            | Op::DropDomain { .. } => Vec::new(),
+            | Op::DropDomain { .. }
+            | Op::CreateSequence { .. }
+            | Op::AlterSequence { .. }
+            | Op::DropSequence { .. } => Vec::new(),
             Op::CreateView {
                 query: ViewQuery::Structured { .. },
                 materialized,
@@ -2247,7 +2466,10 @@ impl Op {
             | Op::CreateEnum { .. }
             | Op::DropEnum { .. }
             | Op::CreateDomain { .. }
-            | Op::DropDomain { .. } => None,
+            | Op::DropDomain { .. }
+            | Op::CreateSequence { .. }
+            | Op::AlterSequence { .. }
+            | Op::DropSequence { .. } => None,
             // The owning table is an optional dialect hint on a DROP INDEX; when
             // present it is the touched table, otherwise the op names only the
             // index (resolved against the live schema downstream).
@@ -2307,7 +2529,10 @@ impl Op {
             | Op::CreateEnum { schema, .. }
             | Op::DropEnum { schema, .. }
             | Op::CreateDomain { schema, .. }
-            | Op::DropDomain { schema, .. } => schema.as_deref(),
+            | Op::DropDomain { schema, .. }
+            | Op::CreateSequence { schema, .. }
+            | Op::AlterSequence { schema, .. }
+            | Op::DropSequence { schema, .. } => schema.as_deref(),
             // VENDOR — ops carrying a schema QUALIFIER expose it for cross-schema
             // confinement + effective-schema resolution.
             Op::CreateExtension { schema, .. }
@@ -2368,14 +2593,17 @@ impl Op {
             | Op::DropConstraint { existence_guard, .. }
             | Op::DropView { existence_guard, .. }
             | Op::DropEnum { existence_guard, .. }
-            | Op::DropDomain { existence_guard, .. } => *existence_guard,
+            | Op::DropDomain { existence_guard, .. }
+            | Op::DropSequence { existence_guard, .. } => *existence_guard,
             Op::Insert { .. }
             | Op::Update { .. }
             | Op::Delete { .. }
             | Op::Backfill { .. }
             | Op::CreateView { .. }
             | Op::CreateEnum { .. }
-            | Op::CreateDomain { .. } => None,
+            | Op::CreateDomain { .. }
+            | Op::CreateSequence { .. }
+            | Op::AlterSequence { .. } => None,
             // VENDOR — the existence guard is a NATIVE clause (`IF [NOT] EXISTS`) or
             // an engine-synthesized `pg_roles` probe rendered inline by the vendor
             // lowering, NOT the catalog-probe `ExistenceGuard` mechanism. None here.
@@ -2425,14 +2653,17 @@ impl Op {
             | Op::DropConstraint { .. }
             | Op::DropView { .. }
             | Op::DropEnum { .. }
-            | Op::DropDomain { .. } => Some(ExistenceGuard::IfExists),
+            | Op::DropDomain { .. }
+            | Op::DropSequence { .. } => Some(ExistenceGuard::IfExists),
             Op::Insert { .. }
             | Op::Update { .. }
             | Op::Delete { .. }
             | Op::Backfill { .. }
             | Op::CreateView { .. }
             | Op::CreateEnum { .. }
-            | Op::CreateDomain { .. } => None,
+            | Op::CreateDomain { .. }
+            | Op::CreateSequence { .. }
+            | Op::AlterSequence { .. } => None,
             // VENDOR — vendor ops carry no `ExistenceGuard` (native clause instead).
             Op::CreateSchema { .. }
             | Op::DropSchema { .. }

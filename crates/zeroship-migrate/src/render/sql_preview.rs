@@ -485,7 +485,10 @@ fn op_subject(op: &Op) -> String {
         Op::CreateEnum { name, .. }
         | Op::DropEnum { name, .. }
         | Op::CreateDomain { name, .. }
-        | Op::DropDomain { name, .. } => quote_dotted(&[name]),
+        | Op::DropDomain { name, .. }
+        | Op::CreateSequence { name, .. }
+        | Op::AlterSequence { name, .. }
+        | Op::DropSequence { name, .. } => quote_dotted(&[name]),
         Op::AddConstraint { table, .. } => quote_dotted(&[table]),
         Op::DropConstraint { table, name, .. } => quote_dotted(&[table, name]),
         Op::Insert { table, .. } | Op::Update { table, .. } | Op::Delete { table, .. } => {
@@ -550,6 +553,7 @@ fn probe_kind(p: &crate::render::existence_probe::GuardProbe) -> &str {
         GuardProbe::Index { .. } => "index",
         GuardProbe::Constraint { .. } => "constraint",
         GuardProbe::View { .. } => "view",
+        GuardProbe::Sequence { .. } => "sequence",
         GuardProbe::NamedType { kind, .. } => kind,
         GuardProbe::ColumnPresence { .. } => "column-presence",
     }
@@ -560,13 +564,16 @@ fn probe_kind(p: &crate::render::existence_probe::GuardProbe) -> &str {
 fn guard_dir(m: &crate::model::migration::Migration) -> ExistenceGuard {
     use crate::render::existence_probe::{GuardDir, GuardProbe};
     let dir = match &m.existence_guard {
-        Some(GuardProbe::Table { direction, .. })
-        | Some(GuardProbe::Column { direction, .. })
-        | Some(GuardProbe::Index { direction, .. })
-        | Some(GuardProbe::Constraint { direction, .. })
-        | Some(GuardProbe::View { direction, .. })
-        | Some(GuardProbe::NamedType { direction, .. })
-        | Some(GuardProbe::ColumnPresence { direction, .. }) => *direction,
+        Some(
+            GuardProbe::Table { direction, .. }
+            | GuardProbe::Column { direction, .. }
+            | GuardProbe::Index { direction, .. }
+            | GuardProbe::Constraint { direction, .. }
+            | GuardProbe::View { direction, .. }
+            | GuardProbe::Sequence { direction, .. }
+            | GuardProbe::NamedType { direction, .. }
+            | GuardProbe::ColumnPresence { direction, .. },
+        ) => *direction,
         None => GuardDir::IfNotExists,
     };
     match dir {

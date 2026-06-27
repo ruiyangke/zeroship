@@ -249,6 +249,12 @@ impl PartialEq for ViewSnapshot {
 }
 impl Eq for ViewSnapshot {}
 
+/// A deterministic snapshot of a standalone sequence. This is intentionally
+/// existence-only for now; option-level sequence drift can be added once live
+/// introspection and offline fold both carry the same normalized attributes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SequenceSnapshot {}
+
 /// A deterministic snapshot of a project schema's structure.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SchemaSnapshot {
@@ -258,6 +264,8 @@ pub struct SchemaSnapshot {
     pub views: BTreeMap<String, ViewSnapshot>,
     /// Named enum/domain types in the schema, keyed + ordered by name.
     pub named_types: BTreeMap<String, NamedTypeSnapshot>,
+    /// Standalone sequences in the schema, keyed + ordered by name.
+    pub sequences: BTreeMap<String, SequenceSnapshot>,
 }
 
 /// A schema-level named type. The engine only needs the object class for drift and

@@ -22,6 +22,8 @@ import type {
   CastTarget,
   CmpOp,
   ExistenceGuard,
+  ExclusionMethod,
+  ExclusionOperator,
   ForEach,
   FuncArgMode,
   FuncLanguage,
@@ -48,6 +50,8 @@ export type {
   CastTarget,
   CmpOp,
   ExistenceGuard,
+  ExclusionMethod,
+  ExclusionOperator,
   ForEach,
   FuncArgMode,
   FuncLanguage,
@@ -192,12 +196,37 @@ export type IrConstraintKind =
   | { kind: "pk"; columns: string[] }
   | { kind: "fk"; columns: string[]; referencesTable: string; referencesColumns: string[]; onDelete?: RefAction | null; onUpdate?: RefAction | null }
   | { kind: "unique"; columns: string[] }
-  | { kind: "check"; expr: Expr };
+  | { kind: "check"; expr: Expr }
+  | {
+      kind: "exclusion";
+      usingMethod?: ExclusionMethod;
+      elements: ExclusionElement[];
+      wherePredicate?: Expr | null;
+      deferrable?: boolean | null;
+      initiallyDeferred?: boolean | null;
+    };
+
+/** Exclusion target: a column name or a closed expression AST. */
+export type ColumnOrExpr =
+  | { kind: "column"; name: string }
+  | { kind: "expr"; expr: Expr };
+
+/** One `(target WITH operator)` element in an exclusion constraint. */
+export interface ExclusionElement {
+  target: ColumnOrExpr;
+  operator: ExclusionOperator;
+}
 
 /** A named table constraint (the `kind` is a nested internally-tagged object). */
 export interface IrConstraint {
   name?: string | null;
   kind: IrConstraintKind;
+}
+
+/** Optional sequence ownership target. */
+export interface SequenceOwnedBy {
+  table: string;
+  column: string;
 }
 
 /** An index definition inside a `createTable` op. */
@@ -332,6 +361,32 @@ export type Op =
   | { op: "dropEnum"; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "createDomain"; name: string; schema?: string | null; as: ColType; check?: Expr | null; default?: IrDefault | null; notNull?: boolean | null }
   | { op: "dropDomain"; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | {
+      op: "createSequence";
+      name: string;
+      schema?: string | null;
+      as?: ColType | null;
+      increment?: number | null;
+      start?: number | null;
+      minValue?: number | null;
+      maxValue?: number | null;
+      cache?: number | null;
+      cycle?: boolean | null;
+      ownedBy?: SequenceOwnedBy | null;
+    }
+  | {
+      op: "alterSequence";
+      name: string;
+      schema?: string | null;
+      increment?: number | null;
+      restart?: number | null;
+      minValue?: number | null;
+      maxValue?: number | null;
+      cache?: number | null;
+      cycle?: boolean | null;
+      ownedBy?: SequenceOwnedBy | null;
+    }
+  | { op: "dropSequence"; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | {
       op: "createTrigger";
       name: string;

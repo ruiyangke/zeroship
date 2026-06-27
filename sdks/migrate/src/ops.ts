@@ -36,8 +36,10 @@ import type {
   ColumnRef,
   ConstraintRef,
   CreateRawViewArgs,
+  AlterSequenceArgs,
   CreateDomainArgs,
   CreateEnumArgs,
+  CreateSequenceArgs,
   CreateTablePolicyArgs,
   CreateTriggerArgs,
   CreateTableArgs,
@@ -48,7 +50,12 @@ import type {
   DropTablePolicyArgs,
   DropDomainArgs,
   DropEnumArgs,
+  DropSequenceArgs,
   DropViewArgs,
+  ExclusionAddArgs,
+  ExclusionConstraintArgs,
+  ExclusionElementArg,
+  ExclusionRef,
   Expr,
   ExprBuilder,
   ExprChain as ExprChainType,
@@ -71,6 +78,7 @@ import type {
   ScalarValue,
   SelectAst,
   SelectItem,
+  SequenceHandle,
   TableHandle,
   TableOptions,
   TableRef,
@@ -604,6 +612,26 @@ export function pgDomain(name: string): DomainHandle {
   return handle;
 }
 
+export function sequence(name: string): SequenceHandle {
+  requireString(name, "sequence(name)");
+  const handle: SequenceHandle = {
+    name,
+    create(args: CreateSequenceArgs = {}) {
+      recordCreateSequence(name, args);
+      return handle;
+    },
+    alter(args: AlterSequenceArgs) {
+      recordAlterSequence(name, args);
+      return handle;
+    },
+    drop(args: DropSequenceArgs = {}) {
+      recordDropSequence(name, args);
+      return handle;
+    },
+  };
+  return handle;
+}
+
 // ── (A) The shared `@zeroship/db` lexicon bridge (PR5) ──
 
 /**
@@ -827,6 +855,61 @@ function recordDropDomain(name: string, args: DropDomainArgs = {}): void {
   );
 }
 
+function recordCreateSequence(name: string, args: CreateSequenceArgs = {}): void {
+  requireString(name, "sequence(name)");
+  if (args === null || typeof args !== "object") {
+    throw structuredError("OP_INVALID", "sequence(name).create(args) needs an object");
+  }
+  pushOrDeferUp(
+    compact({
+      op: "createSequence",
+      name,
+      schema: args.schema,
+      as: args.as === undefined ? undefined : colTypeOf(args.as),
+      increment: args.increment,
+      start: args.start,
+      minValue: args.minValue,
+      maxValue: args.maxValue,
+      cache: args.cache,
+      cycle: args.cycle,
+      ownedBy: args.ownedBy,
+    }),
+  );
+}
+
+function recordAlterSequence(name: string, args: AlterSequenceArgs): void {
+  requireString(name, "sequence(name)");
+  if (!args || typeof args !== "object") {
+    throw structuredError("OP_INVALID", "sequence(name).alter(args) needs an object");
+  }
+  push(
+    compact({
+      op: "alterSequence",
+      name,
+      schema: args.schema,
+      increment: args.increment,
+      restart: args.restart,
+      minValue: args.minValue,
+      maxValue: args.maxValue,
+      cache: args.cache,
+      cycle: args.cycle,
+      ownedBy: args.ownedBy,
+    }),
+  );
+}
+
+function recordDropSequence(name: string, args: DropSequenceArgs = {}): void {
+  requireString(name, "sequence(name)");
+  push(
+    compact({
+      op: "dropSequence",
+      name,
+      schema: args.schema,
+      existenceGuard: ifExistsGuard(args.ifExists),
+    }),
+  );
+}
+
 // ── (D) The internal op-construction helpers (the single source of truth) ──
 //
 // These build + push the EXACT canonical op object the Rust `Op` enum / the
@@ -856,6 +939,9 @@ function recordCreateTable(name: string, args: CreateTableArgs): void {
   }
   for (const ck of args.checks ?? []) {
     constraints.push(compact({ name: ck.name, kind: { kind: "check", expr: resolveExpr(ck.expr) } }));
+  }
+  for (const exclusion of args.exclusions ?? []) {
+    constraints.push(exclusionConstraintFromSpec(exclusion));
   }
   for (const fkSpec of args.foreignKeys ?? []) {
     constraints.push(
@@ -1129,6 +1215,72 @@ function recordAddCheck(
       op: "addConstraint",
       table,
       constraint: compact({ name, kind: { kind: "check", expr: resolveExpr(args.expr) } }),
+      schema: args.schema,
+      existenceGuard: ifNotExistsGuard(args.ifNotExists),
+    }),
+  );
+}
+
+function exclusionConstraintFromSpec(
+  spec: { name?: string } & ExclusionConstraintArgs,
+): Node {
+  if (!spec || typeof spec !== "object" || !Array.isArray(spec.elements)) {
+    throw structuredError(
+      "OP_INVALID",
+      ".exclusion(name).add needs { elements: [{ target, operator }], ... }",
+    );
+  }
+  return compact({
+    name: spec.name,
+    kind: compact({
+      kind: "exclusion",
+      usingMethod: spec.using,
+      elements: spec.elements.map(exclusionElementToIr),
+      wherePredicate: resolveExpr(spec.where as ExprFn | ExprChainType | Node | undefined),
+      deferrable: spec.deferrable,
+      initiallyDeferred: spec.initiallyDeferred,
+    }),
+  });
+}
+
+function exclusionElementToIr(element: ExclusionElementArg): Node {
+  if (!element || typeof element !== "object") {
+    throw structuredError(
+      "OP_INVALID",
+      "exclusion element must be { target, operator }",
+    );
+  }
+  return {
+    target: exclusionTargetToIr(element.target),
+    operator: element.operator,
+  };
+}
+
+function exclusionTargetToIr(target: ExclusionElementArg["target"]): Node {
+  if (typeof target === "string") {
+    requireString(target, "exclusion target column");
+    return { kind: "column", name: target };
+  }
+  const expr = resolveExpr(target as ExprFn | ExprChainType | Node | undefined);
+  if (!expr) {
+    throw structuredError("OP_INVALID", "exclusion target must be a column name or expression");
+  }
+  return {
+    kind: "expr",
+    expr,
+  };
+}
+
+function recordAddExclusion(
+  table: string,
+  name: string,
+  args: ExclusionAddArgs,
+): void {
+  push(
+    compact({
+      op: "addConstraint",
+      table,
+      constraint: exclusionConstraintFromSpec({ ...args, name }),
       schema: args.schema,
       existenceGuard: ifNotExistsGuard(args.ifNotExists),
     }),
@@ -1732,6 +1884,17 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
         add(args) {
           terminateSelector(id);
           recordAddCheck(name, ckName, { ...args, schema: pickSchema(args, dflt) });
+          return handle;
+        },
+      };
+    },
+    exclusion(exName): ExclusionRef {
+      requireString(exName, ".exclusion(name)");
+      const id = registerSelector("exclusion", exName);
+      return {
+        add(args) {
+          terminateSelector(id);
+          recordAddExclusion(name, exName, { ...args, schema: pickSchema(args, dflt) });
           return handle;
         },
       };
