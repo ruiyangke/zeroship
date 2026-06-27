@@ -1969,6 +1969,50 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
             process.set(scope, key.into(), arch.into());
         }
 
+        // process.hrtime - required by real npm drivers that use monotonic
+        // millisecond deadlines instead of wall-clock Date timestamps.
+        {
+            let src = v8::String::new(
+                scope,
+                r#"(p, g) => {
+                  const originMs = g.performance && typeof g.performance.now === "function"
+                    ? g.performance.now()
+                    : Date.now();
+                  const billion = 1000000000n;
+                  const million = 1000000n;
+                  function nowNs() {
+                    const nowMs = g.performance && typeof g.performance.now === "function"
+                      ? g.performance.now()
+                      : Date.now();
+                    const deltaMs = Math.max(0, nowMs - originMs);
+                    return BigInt(Math.floor(deltaMs * 1000000));
+                  }
+                  function tuple(ns) {
+                    return [Number(ns / billion), Number(ns % billion)];
+                  }
+                  p.hrtime = function(previous) {
+                    let ns = nowNs();
+                    if (previous !== undefined) {
+                      if (!Array.isArray(previous) || previous.length < 2) {
+                        throw new TypeError("process.hrtime() previous value must be a [seconds, nanoseconds] tuple");
+                      }
+                      ns -= BigInt(Number(previous[0])) * billion + BigInt(Number(previous[1]));
+                      if (ns < 0n) ns = 0n;
+                    }
+                    return tuple(ns);
+                  };
+                  p.hrtime.bigint = function() {
+                    return nowNs();
+                  };
+                }"#,
+            )
+            .unwrap();
+            let script = v8::Script::compile(scope, src, None).unwrap();
+            let factory: v8::Local<v8::Function> = script.run(scope).unwrap().try_into().unwrap();
+            let undef = v8::undefined(scope).into();
+            factory.call(scope, undef, &[process.into(), global.into()]);
+        }
+
         // process.stdout / process.stderr — imported Node packages often
         // probe stdio metadata during module initialization (for example
         // `debug` checks `process.stderr.fd` before deciding whether to

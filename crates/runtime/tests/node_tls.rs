@@ -574,6 +574,60 @@ return new Promise((resolve) => {{
 }
 
 #[test]
+fn starttls_socket_upgrade_buffers_immediate_write_until_secure() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set(true);
+    let result = compio::runtime::Runtime::new().unwrap().block_on(async {
+        let cert = test_cert();
+        let ca_json = serde_json::to_string(&cert.ca_pem).unwrap();
+        let addr = spawn_tls_server(cert.clone(), TlsServerMode::StartTlsEcho).await;
+        let result = run_js_module(
+            wrap_module(
+                r#"import net from "node:net"; import tls from "node:tls";"#,
+                &format!(
+                    r#"
+return new Promise((resolve) => {{
+    const plain = net.createConnection({{ host: "127.0.0.1", port: {} }});
+    plain.on("connect", () => plain.write("STARTTLS\n"));
+    plain.once("data", (chunk) => {{
+        if (chunk.toString() !== "READY\n") {{
+            resolve("bad-ready:" + chunk.toString());
+            return;
+        }}
+        const s = tls.connect({{
+            socket: plain,
+            servername: "db.local.test",
+            ca: {},
+        }});
+        let data = "";
+        s.write("upgraded");
+        s.on("data", (buf) => {{
+            data += buf.toString();
+            s.end();
+        }});
+        s.on("close", () => resolve(`secure=${{s.encrypted}};authorized=${{s.authorized}};data=${{data}}`));
+        s.on("error", (err) => resolve(`tls-error:${{err.code}}:${{err.message}}`));
+    }});
+    plain.on("error", (err) => resolve(`plain-error:${{err.code}}:${{err.message}}`));
+    setTimeout(() => resolve("timeout"), 3000);
+}});
+"#,
+                    addr.port(),
+                    ca_json
+                ),
+            ),
+            allowlist(addr, 4),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_seen_sni(&cert, "db.local.test");
+        result
+    });
+    assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
+    assert_eq!(result.body, "secure=true;authorized=true;data=upgraded");
+}
+
+#[test]
 fn default_rejects_self_signed_without_ca() {
     let _lock = lock_env();
     let _env = EnvGuard::set(true);

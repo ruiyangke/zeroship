@@ -50,6 +50,7 @@
       } else {
         super();
       }
+      this._sourceSocket = sourceSocket || null;
       this.encrypted = true;
       this.authorized = false;
       this.authorizationError = null;
@@ -59,6 +60,12 @@
         this.connecting = false;
         this.pending = false;
         this.readyState = "open";
+        this._flushPendingWrites();
+      });
+      this.on("close", (hadError) => {
+        if (this._sourceSocket && !this._sourceSocket.destroyed) {
+          this._sourceSocket.__zsEmit.call(this._sourceSocket, "close", Boolean(hadError));
+        }
       });
     }
 

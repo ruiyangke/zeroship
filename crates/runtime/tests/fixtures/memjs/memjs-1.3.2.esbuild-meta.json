@@ -1,0 +1,275 @@
+{
+  "inputs": {
+    "node_modules/memjs/lib/memjs/protocol.js": {
+      "bytes": 793,
+      "imports": [],
+      "format": "cjs"
+    },
+    "shims/net.js": {
+      "bytes": 116,
+      "imports": [
+        {
+          "path": "node:net",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:net",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:net",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "format": "esm"
+    },
+    "shims/events.js": {
+      "bytes": 125,
+      "imports": [
+        {
+          "path": "node:events",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:events",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:events",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "format": "esm"
+    },
+    "shims/util.js": {
+      "bytes": 119,
+      "imports": [
+        {
+          "path": "node:util",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:util",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:util",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "format": "esm"
+    },
+    "node_modules/memjs/lib/memjs/header.js": {
+      "bytes": 1303,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/memjs/lib/memjs/utils.js": {
+      "bytes": 3357,
+      "imports": [
+        {
+          "path": "node_modules/memjs/lib/memjs/header.js",
+          "kind": "require-call",
+          "original": "./header"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/memjs/lib/memjs/server.js": {
+      "bytes": 7157,
+      "imports": [
+        {
+          "path": "shims/net.js",
+          "kind": "require-call",
+          "original": "net"
+        },
+        {
+          "path": "shims/events.js",
+          "kind": "require-call",
+          "original": "events"
+        },
+        {
+          "path": "shims/util.js",
+          "kind": "require-call",
+          "original": "util"
+        },
+        {
+          "path": "node_modules/memjs/lib/memjs/utils.js",
+          "kind": "require-call",
+          "original": "./utils"
+        },
+        {
+          "path": "node_modules/memjs/lib/memjs/utils.js",
+          "kind": "require-call",
+          "original": "./utils"
+        },
+        {
+          "path": "node_modules/memjs/lib/memjs/utils.js",
+          "kind": "require-call",
+          "original": "./utils"
+        },
+        {
+          "path": "node_modules/memjs/lib/memjs/utils.js",
+          "kind": "require-call",
+          "original": "./utils"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/memjs/lib/memjs/noop-serializer.js": {
+      "bytes": 265,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/memjs/lib/memjs/memjs.js": {
+      "bytes": 28633,
+      "imports": [
+        {
+          "path": "node_modules/memjs/lib/memjs/protocol.js",
+          "kind": "require-call",
+          "original": "./protocol"
+        },
+        {
+          "path": "node_modules/memjs/lib/memjs/server.js",
+          "kind": "require-call",
+          "original": "./server"
+        },
+        {
+          "path": "node_modules/memjs/lib/memjs/noop-serializer.js",
+          "kind": "require-call",
+          "original": "./noop-serializer"
+        },
+        {
+          "path": "node_modules/memjs/lib/memjs/utils.js",
+          "kind": "require-call",
+          "original": "./utils"
+        },
+        {
+          "path": "node_modules/memjs/lib/memjs/utils.js",
+          "kind": "require-call",
+          "original": "./utils"
+        },
+        {
+          "path": "node_modules/memjs/lib/memjs/utils.js",
+          "kind": "require-call",
+          "original": "./utils"
+        },
+        {
+          "path": "node_modules/memjs/lib/memjs/utils.js",
+          "kind": "require-call",
+          "original": "./utils"
+        },
+        {
+          "path": "node_modules/memjs/lib/memjs/utils.js",
+          "kind": "require-call",
+          "original": "./utils"
+        },
+        {
+          "path": "node_modules/memjs/lib/memjs/utils.js",
+          "kind": "require-call",
+          "original": "./utils"
+        },
+        {
+          "path": "node_modules/memjs/lib/memjs/header.js",
+          "kind": "require-call",
+          "original": "./header"
+        }
+      ],
+      "format": "cjs"
+    }
+  },
+  "outputs": {
+    "memjs-1.3.2.bundle.mjs": {
+      "imports": [
+        {
+          "path": "node:net",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:net",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:net",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:events",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:events",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:events",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:util",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:util",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:util",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "exports": [
+        "default"
+      ],
+      "entryPoint": "node_modules/memjs/lib/memjs/memjs.js",
+      "inputs": {
+        "node_modules/memjs/lib/memjs/protocol.js": {
+          "bytesInOutput": 849
+        },
+        "shims/net.js": {
+          "bytesInOutput": 328
+        },
+        "shims/events.js": {
+          "bytesInOutput": 371
+        },
+        "shims/util.js": {
+          "bytesInOutput": 345
+        },
+        "node_modules/memjs/lib/memjs/header.js": {
+          "bytesInOutput": 1287
+        },
+        "node_modules/memjs/lib/memjs/utils.js": {
+          "bytesInOutput": 3674
+        },
+        "node_modules/memjs/lib/memjs/server.js": {
+          "bytesInOutput": 7258
+        },
+        "node_modules/memjs/lib/memjs/noop-serializer.js": {
+          "bytesInOutput": 382
+        },
+        "node_modules/memjs/lib/memjs/memjs.js": {
+          "bytesInOutput": 22470
+        }
+      },
+      "bytes": 38526
+    }
+  }
+}

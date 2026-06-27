@@ -52,16 +52,23 @@
       this._timeoutId = null;
       this._encoding = null;
       this._encryptedOverride = undefined;
+      this._pendingWriteQueue = [];
+      this._pendingEnd = false;
 
       this.on("connect", () => {
         this.connecting = false;
         this.pending = false;
         this.readyState = "open";
+        this._flushPendingWrites();
       });
       this.on("ready", () => {
         this.connecting = false;
         this.pending = false;
         this.readyState = "open";
+        this._flushPendingWrites();
+      });
+      this.on("secureConnect", () => {
+        this._flushPendingWrites();
       });
       this.on("end", () => {
         this.readable = false;
@@ -81,6 +88,8 @@
           clearTimeout(this._timeoutId);
           this._timeoutId = null;
         }
+        this._pendingWriteQueue = [];
+        this._pendingEnd = false;
       });
     }
 
@@ -120,7 +129,24 @@
         cb = encoding;
         encoding = undefined;
       }
+      if (this._isOpening()) {
+        this._pendingWriteQueue.push([data, encoding, cb]);
+        return true;
+      }
       return this._writeNow(data, encoding, cb);
+    }
+
+    _flushPendingWrites() {
+      if (this._isOpening()) return;
+      const queue = this._pendingWriteQueue;
+      this._pendingWriteQueue = [];
+      for (const item of queue) {
+        this._writeNow(item[0], item[1], item[2]);
+      }
+      if (this._pendingEnd) {
+        this._pendingEnd = false;
+        this._native.end();
+      }
     }
 
     end(data, encoding, cb) {
@@ -132,8 +158,16 @@
         cb = encoding;
         encoding = undefined;
       }
-      if (data !== undefined && data !== null) this.write(data, encoding);
       if (typeof cb === "function") this.once("close", cb);
+      if (this._isOpening()) {
+        if (data !== undefined && data !== null) this._pendingWriteQueue.push([data, encoding, undefined]);
+        this._pendingEnd = true;
+        this.writable = false;
+        this.writableEnded = true;
+        this.readyState = this.readyState === "readOnly" ? "closed" : "writeOnly";
+        return this;
+      }
+      if (data !== undefined && data !== null) this.write(data, encoding);
       this._native.end();
       this.writable = false;
       this.writableEnded = true;
@@ -148,6 +182,8 @@
       this.writable = false;
       this.readableDestroyed = true;
       this.writableDestroyed = true;
+      this._pendingWriteQueue = [];
+      this._pendingEnd = false;
       this._native.destroy();
       return this;
     }
