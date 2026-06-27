@@ -276,6 +276,7 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8], app_limits: AppRuntimeLimits)
         cache.isolates.remove(&app_id);
 
         let plugins = create_plugins();
+        let meter = METER.with(|m| m.borrow().clone());
         let mut env_vars = HashMap::new();
         env_vars.insert("APP_ID".to_string(), app_id.to_string());
 
@@ -284,13 +285,16 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8], app_limits: AppRuntimeLimits)
         // every in-flight `AbortController` with `crate::rpc::abort`,
         // keyed by `(app_id, request_id)`. `evict_lru` walks that
         // registry on eviction.
-        let runtime = Runtime::builder()
+        let mut builder = Runtime::builder()
             .modules(modules)
             .env_vars(env_vars)
             .limits(limits)
             .plugins(plugins)
-            .app_id(app_id)
-            .build();
+            .app_id(app_id);
+        if let Some(meter) = meter {
+            builder = builder.meter(meter);
+        }
+        let runtime = builder.build();
 
         // Exit isolate so other isolates can be created/entered on this thread.
         // The handler will enter/exit around each call_fetch_handler call.
@@ -475,7 +479,7 @@ mod tests {
 
     fn test_net_runtime() -> Runtime {
         let runtime = Runtime::builder()
-            .net_policy(zeroship_runtime::NetPolicy::Trusted { max_sockets: 8 })
+            .net_policy(zeroship_runtime::NetPolicy::trusted(8, 1024 * 1024))
             .build();
         runtime.exit_isolate();
         runtime

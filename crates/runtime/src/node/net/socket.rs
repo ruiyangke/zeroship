@@ -51,7 +51,13 @@ impl NativeSocket {
     }
 
     #[v8_method]
-    fn connect(&self, host: String, port: u32) -> Result<(), OpError> {
+    fn connect(
+        &self,
+        scope: &mut v8::PinScope,
+        host: String,
+        port: u32,
+    ) -> Result<(), OpError> {
+        validate_connect_kind(scope, "node:net.connect")?;
         let port = u16::try_from(port).map_err(|_| {
             OpError::range_error("Socket.connect port must be between 0 and 65535")
         })?;
@@ -103,12 +109,14 @@ impl NativeSocket {
     #[v8_name = "connectTls"]
     fn connect_tls(
         &self,
+        scope: &mut v8::PinScope,
         host: String,
         port: u32,
         servername: String,
         reject_unauthorized: bool,
         ca_pem: Option<String>,
     ) -> Result<(), OpError> {
+        validate_connect_kind(scope, "node:tls.connect")?;
         let port = u16::try_from(port).map_err(|_| {
             OpError::range_error("tls.connect port must be between 0 and 65535")
         })?;
@@ -164,10 +172,12 @@ impl NativeSocket {
     #[v8_name = "startTls"]
     fn start_tls(
         &self,
+        scope: &mut v8::PinScope,
         servername: String,
         reject_unauthorized: bool,
         ca_pem: Option<String>,
     ) -> Result<(), OpError> {
+        validate_connect_kind(scope, "node:tls.startTls")?;
         validate_tls_policy(&self.state, reject_unauthorized)?;
         super::state::queue_start_tls(
             &self.state,
@@ -325,22 +335,41 @@ fn capability_violation(message: impl Into<String>) -> OpError {
     OpError::coded("capability_violation", message.into(), None::<String>)
 }
 
+fn validate_connect_kind(scope: &mut v8::PinScope, violated: &str) -> Result<(), OpError> {
+    use crate::rpc::ProcedureKind;
+
+    let Some(kind) = crate::rpc::current_kind() else {
+        return Ok(());
+    };
+    let wrapper = match kind {
+        ProcedureKind::Query => "query",
+        ProcedureKind::Mutation => "mutation",
+        ProcedureKind::Action | ProcedureKind::Stream | ProcedureKind::Subscription => {
+            return Ok(());
+        }
+    };
+    let remediation = "Move raw socket access into an action/stream/subscription handler or a trusted platform context.";
+    let violation =
+        crate::rpc::build_capability_violation(scope, wrapper, violated, remediation);
+    Err(OpError::js_value(
+        scope,
+        violation.into(),
+        format!("capability_violation: {wrapper} handlers cannot call {violated}"),
+    ))
+}
+
 #[cfg(feature = "runtime_native_websocket")]
-fn validate_tls_policy(state: &SharedState, reject_unauthorized: bool) -> Result<(), OpError> {
+fn validate_tls_policy(_state: &SharedState, reject_unauthorized: bool) -> Result<(), OpError> {
     if reject_unauthorized {
         return Ok(());
     }
-    let allowed = std::env::var_os("ZEROSHIP_DEV").is_some()
-        || matches!(
-            state.borrow().net_policy,
-            crate::transport::net_policy::NetPolicy::Trusted { .. }
-        );
+    let allowed = std::env::var_os("ZEROSHIP_DEV").is_some();
     if allowed {
         Ok(())
     } else {
         Err(OpError::node(
             "ERR_TLS_REJECT_UNAUTHORIZED_DISABLED",
-            "rejectUnauthorized:false is only allowed in Trusted or ZEROSHIP_DEV runtimes",
+            "rejectUnauthorized:false is only allowed when ZEROSHIP_DEV is set",
         ))
     }
 }

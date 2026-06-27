@@ -293,15 +293,16 @@ async fn drive_fetch_outcome(outcome: FetchOutcome, max_wait: Duration) -> JsRes
 }
 
 fn allowlist(addr: SocketAddr, max_sockets: u32) -> NetPolicy {
-    NetPolicy::Allowlist {
-        entries: vec![HostPort::new("127.0.0.1", addr.port())],
+    NetPolicy::allowlist(
+        vec![HostPort::new("127.0.0.1", addr.port())],
         max_sockets,
-        egress_ceiling_bytes: 1024 * 1024,
-    }
+        1024 * 1024,
+    )
+    .unwrap()
 }
 
 fn trusted(max_sockets: u32) -> NetPolicy {
-    NetPolicy::Trusted { max_sockets }
+    NetPolicy::trusted(max_sockets, 1024 * 1024)
 }
 
 fn tls_module(body: &str) -> String {
@@ -468,11 +469,8 @@ try {
 }
 "#,
             ),
-            NetPolicy::Allowlist {
-                entries: vec![HostPort::new("127.0.0.1", 443)],
-                max_sockets: 4,
-                egress_ceiling_bytes: 1024 * 1024,
-            },
+            NetPolicy::allowlist(vec![HostPort::new("127.0.0.1", 443)], 4, 1024 * 1024)
+                .unwrap(),
             Duration::from_secs(3),
         )
         .await
@@ -488,7 +486,7 @@ try {
 }
 
 #[test]
-fn reject_unauthorized_false_trusted_permitted() {
+fn reject_unauthorized_false_dev_only_permitted() {
     let _lock = lock_env();
     let _env = EnvGuard::set(true);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {

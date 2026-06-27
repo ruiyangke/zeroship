@@ -1091,7 +1091,11 @@ mod tests {
     #[test]
     fn free_native_ws_state_also_drops_cached_wrapper() {
         init_v8();
-        let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(HashMap::new(), None)));
+        let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(
+            HashMap::new(),
+            None,
+            None,
+        )));
         let mut isolate = v8::Isolate::new(Default::default());
 
         v8::scope!(let handle_scope, &mut isolate);

@@ -6850,6 +6850,7 @@ dependencies = [
  "uuid",
  "v8",
  "zeroship-core",
+ "zeroship-metering",
  "zeroship-runtime-macros",
 ]
 

@@ -638,6 +638,13 @@ pub struct RuntimeState {
     pub native_socket_last_activity: Option<Instant>,
     /// Per-runtime accepted outbound bytes for Allowlist egress ceiling.
     pub native_net_egress_bytes: u64,
+    /// Once the runtime crosses its hard native-net egress ceiling, refuse
+    /// additional socket opens/writes for this isolate.
+    pub native_net_egress_exhausted: bool,
+    /// Server-stamped per-app meter handle. Native `node:net` records accepted
+    /// outbound bytes into the fixed `egress_bytes` spend metric through this
+    /// handle; absent in meter-less test harnesses.
+    pub meter: Option<zeroship_metering::MeterHandle>,
 
     /// Explicit isolate leases held by trusted callers such as the future
     /// migrate executor. A leased runtime is un-evictable by the worker LRU.
@@ -670,7 +677,11 @@ impl RuntimeState {
     }
 
     /// Create a new `RuntimeState` seeded with the given environment variables.
-    pub fn new(env_vars: HashMap<String, String>, _server_handle: Option<()>) -> Self {
+    pub fn new(
+        env_vars: HashMap<String, String>,
+        _server_handle: Option<()>,
+        meter: Option<zeroship_metering::MeterHandle>,
+    ) -> Self {
         Self {
             pending_resolvers: HashMap::new(),
             next_op_id: 1,
@@ -730,6 +741,8 @@ impl RuntimeState {
             active_native_sockets: 0,
             native_socket_last_activity: None,
             native_net_egress_bytes: 0,
+            native_net_egress_exhausted: false,
+            meter,
             isolate_lease_count: 0,
 
             perf_epoch: std::time::Instant::now(),

@@ -11,13 +11,18 @@ model" in `AGENTS.md`.
 ## Producer — metering is infrastructure (no `env.meter`)
 
 **There is no creator-facing `env.meter` API.** The billing signal is
-platform-measured so app code can neither forge nor suppress it. Two producers
+platform-measured so app code can neither forge nor suppress it. Three producers
 feed one process-wide `Meter`:
 
 1. **The worker** emits the five fixed platform counters (`requests`, `cpu_us`,
    `wall_us`, `egress_bytes`, `ingress_bytes`) once per dispatched request via
    `cache::record_request` → `Meter::record_request`.
-2. **The trusted data primitives** (`env.db`, `env.kv`, `env.storage`) emit raw
+2. **Native raw TCP** (`node:net`/`node:tls`) emits accepted outbound socket
+   bytes through the same server-stamped `MeterHandle` into fixed
+   `egress_bytes` (the spend-enforced metric the gateway path already uses)
+   and a `net_egress_bytes` attribution metric. The socket path also enforces
+   hard per-socket/per-app egress ceilings before billing is involved.
+3. **The trusted data primitives** (`env.db`, `env.kv`, `env.storage`) emit raw
    usage metrics at their op boundary, **in the success arm only** (a failed op
    is not billable), through a `MeterHandle` bound to the isolate's
    server-injected `app_id`:

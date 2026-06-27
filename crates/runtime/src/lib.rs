@@ -167,7 +167,7 @@ pub mod webidl;
 // Back-compat re-exports for the SSRF helper (was `crate::fetch`) and the
 // kernel HTTP bridge (was `crate::http`). Both moved under `transport/`.
 pub use transport::handler as http;
-pub use transport::net_policy::{HostPort, NetPolicy};
+pub use transport::net_policy::{HostPort, NetPolicy, ReviewedAllowlist};
 pub use transport::ssrf as fetch;
 
 // Back-compat re-exports for modules now grouped under `web/`.

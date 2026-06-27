@@ -1,7 +1,6 @@
 (function () {
   const EventEmitter = globalThis.__zsEventEmitter;
   const NativeSocket = globalThis.__zsNativeSocket;
-  const HIGH_WATER_MARK = 16 * 1024;
 
   function normalizeArgs(args) {
     let cb;
@@ -53,21 +52,16 @@
       this._timeoutId = null;
       this._encoding = null;
       this._encryptedOverride = undefined;
-      this._pendingWrites = [];
-      this._pendingBytes = 0;
-      this._pendingEnd = false;
 
       this.on("connect", () => {
         this.connecting = false;
         this.pending = false;
         this.readyState = "open";
-        this._flushPending();
       });
       this.on("ready", () => {
         this.connecting = false;
         this.pending = false;
         this.readyState = "open";
-        this._flushPending();
       });
       this.on("end", () => {
         this.readable = false;
@@ -105,13 +99,6 @@
       return this;
     }
 
-    _estimateWriteSize(data) {
-      if (typeof data === "string") return new TextEncoder().encode(data).byteLength;
-      if (data && typeof data.byteLength === "number") return data.byteLength;
-      if (data && typeof data.length === "number") return data.length;
-      return String(data).length;
-    }
-
     _isOpening() {
       return this.connecting || this.readyState === "opening";
     }
@@ -128,37 +115,10 @@
       return ok;
     }
 
-    _flushPending() {
-      if (this._flushingPending) return;
-      this._flushingPending = true;
-      try {
-        const writes = this._pendingWrites;
-        this._pendingWrites = [];
-        this._pendingBytes = 0;
-        for (const item of writes) {
-          this._writeNow(item.data, item.encoding, item.cb);
-        }
-        if (this._pendingEnd) {
-          this._pendingEnd = false;
-          this._native.end();
-          this.writable = false;
-          this.writableEnded = true;
-          this.readyState = "writeOnly";
-        }
-      } finally {
-        this._flushingPending = false;
-      }
-    }
-
     write(data, encoding, cb) {
       if (typeof encoding === "function") {
         cb = encoding;
         encoding = undefined;
-      }
-      if (this._isOpening()) {
-        this._pendingBytes += this._estimateWriteSize(data);
-        this._pendingWrites.push({ data, encoding, cb });
-        return this._pendingBytes <= HIGH_WATER_MARK;
       }
       return this._writeNow(data, encoding, cb);
     }
@@ -174,14 +134,10 @@
       }
       if (data !== undefined && data !== null) this.write(data, encoding);
       if (typeof cb === "function") this.once("close", cb);
-      if (this._isOpening()) {
-        this._pendingEnd = true;
-      } else {
-        this._native.end();
-        this.writable = false;
-        this.writableEnded = true;
-        this.readyState = this.readyState === "readOnly" ? "closed" : "writeOnly";
-      }
+      this._native.end();
+      this.writable = false;
+      this.writableEnded = true;
+      this.readyState = this.readyState === "readOnly" ? "closed" : "writeOnly";
       return this;
     }
 

@@ -1,10 +1,18 @@
 //! Outbound raw-TCP policy for `node:net`.
 //!
-//! The policy is a host-construction property: app JavaScript cannot
+//! The policy is a trusted-Rust construction property: app JavaScript cannot
 //! request or widen it. `Denied` is the default and makes `node:net`
-//! unresolvable. `Allowlist` narrows connect targets to reviewed
-//! host:port entries; `Trusted` skips host matching but still goes
-//! through SSRF and socket caps.
+//! unresolvable. `Allowlist` narrows connect targets to operator-reviewed
+//! host:port entries; `Trusted` skips host matching but still goes through
+//! SSRF, socket caps, and egress caps.
+//!
+//! The allowlist is deliberately scoped as a compromised-dependency
+//! blast-radius control, not a malicious-creator exfiltration control. Runtime
+//! construction must receive reviewed entries from the operator/control-plane
+//! path; creator code never self-declares them. Broad wildcards and wildcards
+//! fronting shared infrastructure are rejected at construction time. The
+//! malicious-creator controls are egress attribution, spend enforcement, and
+//! hard egress ceilings.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -19,12 +27,13 @@ static GLOBAL_ACTIVE_SOCKETS: AtomicU32 = AtomicU32::new(0);
 pub enum NetPolicy {
     Denied,
     Allowlist {
-        entries: Vec<HostPort>,
+        entries: ReviewedAllowlist,
         max_sockets: u32,
         egress_ceiling_bytes: u64,
     },
     Trusted {
         max_sockets: u32,
+        egress_ceiling_bytes: u64,
     },
 }
 
@@ -42,7 +51,7 @@ impl NetPolicy {
     pub fn max_sockets(&self) -> u32 {
         match self {
             Self::Denied => 0,
-            Self::Allowlist { max_sockets, .. } | Self::Trusted { max_sockets } => *max_sockets,
+            Self::Allowlist { max_sockets, .. } | Self::Trusted { max_sockets, .. } => *max_sockets,
         }
     }
 
@@ -51,8 +60,12 @@ impl NetPolicy {
             Self::Allowlist {
                 egress_ceiling_bytes,
                 ..
+            }
+            | Self::Trusted {
+                egress_ceiling_bytes,
+                ..
             } => Some(*egress_ceiling_bytes),
-            Self::Denied | Self::Trusted { .. } => None,
+            Self::Denied => None,
         }
     }
 
@@ -62,6 +75,52 @@ impl NetPolicy {
             Self::Trusted { .. } => true,
             Self::Allowlist { entries, .. } => entries.iter().any(|e| e.matches(host, port)),
         }
+    }
+
+    pub fn allowlist(
+        entries: Vec<HostPort>,
+        max_sockets: u32,
+        egress_ceiling_bytes: u64,
+    ) -> Result<Self, String> {
+        Ok(Self::Allowlist {
+            entries: ReviewedAllowlist::operator_reviewed(entries)?,
+            max_sockets,
+            egress_ceiling_bytes,
+        })
+    }
+
+    pub fn trusted(max_sockets: u32, egress_ceiling_bytes: u64) -> Self {
+        Self::Trusted {
+            max_sockets,
+            egress_ceiling_bytes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewedAllowlist {
+    entries: Vec<HostPort>,
+}
+
+impl ReviewedAllowlist {
+    /// Construct an operator/control-plane reviewed allowlist.
+    ///
+    /// This is intentionally not a JS/user-code surface. It validates every
+    /// entry before a runtime ever sees it, rejecting broad wildcards and
+    /// wildcard entries that front shared infrastructure.
+    pub fn operator_reviewed(entries: Vec<HostPort>) -> Result<Self, String> {
+        for entry in &entries {
+            entry.validate_reviewed()?;
+        }
+        Ok(Self { entries })
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &HostPort> {
+        self.entries.iter()
+    }
+
+    pub fn as_slice(&self) -> &[HostPort] {
+        &self.entries
     }
 }
 
@@ -73,10 +132,14 @@ pub struct HostPort {
 
 impl HostPort {
     pub fn new(host: impl Into<String>, port: u16) -> Self {
-        Self {
-            host: normalize_host(&host.into()),
-            port,
-        }
+        Self::try_new(host, port).expect("invalid node:net allowlist entry")
+    }
+
+    pub fn try_new(host: impl Into<String>, port: u16) -> Result<Self, String> {
+        let host = normalize_host(&host.into());
+        let entry = Self { host, port };
+        entry.validate_reviewed()?;
+        Ok(entry)
     }
 
     pub fn host(&self) -> &str {
@@ -99,6 +162,29 @@ impl HostPort {
         }
         self.host == host
     }
+
+    fn validate_reviewed(&self) -> Result<(), String> {
+        if self.port == 0 {
+            return Err("allowlist port must be between 1 and 65535".to_string());
+        }
+        if self.host.is_empty() {
+            return Err("allowlist host must not be empty".to_string());
+        }
+        if self.host == "*" {
+            return Err("bare '*' is not a valid node:net allowlist host".to_string());
+        }
+        let star_count = self.host.bytes().filter(|b| *b == b'*').count();
+        if star_count > 0 && !self.host.starts_with("*.") {
+            return Err(format!(
+                "wildcard allowlist host '{}' must use the '*.example.com' form",
+                self.host
+            ));
+        }
+        if let Some(suffix) = self.host.strip_prefix("*.") {
+            validate_wildcard_suffix(suffix)?;
+        }
+        Ok(())
+    }
 }
 
 fn normalize_host(host: &str) -> String {
@@ -108,6 +194,43 @@ fn normalize_host(host: &str) -> String {
         .trim_end_matches('.')
         .to_ascii_lowercase()
 }
+
+fn validate_wildcard_suffix(suffix: &str) -> Result<(), String> {
+    if suffix.is_empty() || !suffix.contains('.') {
+        return Err("wildcard allowlist suffix must contain at least two labels".to_string());
+    }
+    if suffix.parse::<std::net::IpAddr>().is_ok() {
+        return Err("wildcard allowlist suffix must be a DNS name, not an IP".to_string());
+    }
+    if FRONTABLE_WILDCARD_SUFFIXES
+        .iter()
+        .any(|blocked| suffix == *blocked || suffix.ends_with(&format!(".{blocked}")))
+    {
+        return Err(format!(
+            "wildcard allowlist suffix '{suffix}' fronts shared infrastructure"
+        ));
+    }
+    Ok(())
+}
+
+/// Operator-curated suffixes where a wildcard would authorize arbitrary
+/// third-party tenants behind shared infrastructure. Exact host entries remain
+/// possible for reviewed destinations; broad wildcards are refused.
+const FRONTABLE_WILDCARD_SUFFIXES: &[&str] = &[
+    "workers.dev",
+    "pages.dev",
+    "vercel.app",
+    "netlify.app",
+    "herokuapp.com",
+    "fly.dev",
+    "railway.app",
+    "render.com",
+    "onrender.com",
+    "neon.tech",
+    "supabase.co",
+    "amazonaws.com",
+    "cloudfront.net",
+];
 
 pub(crate) fn try_acquire_global_socket() -> Result<(), String> {
     let cap = configured_global_max_sockets();
@@ -160,8 +283,17 @@ mod tests {
     #[test]
     fn hostport_exact_and_wildcard_match() {
         assert!(HostPort::new("DB.Example.COM.", 5432).matches("db.example.com", 5432));
-        assert!(HostPort::new("*.neon.tech", 5432).matches("a.neon.tech", 5432));
-        assert!(!HostPort::new("*.neon.tech", 5432).matches("neon.tech", 5432));
-        assert!(!HostPort::new("*.neon.tech", 5432).matches("a.neon.tech", 5433));
+        assert!(HostPort::new("*.db.example.com", 5432).matches("a.db.example.com", 5432));
+        assert!(!HostPort::new("*.db.example.com", 5432).matches("db.example.com", 5432));
+        assert!(!HostPort::new("*.db.example.com", 5432).matches("a.db.example.com", 5433));
+    }
+
+    #[test]
+    fn allowlist_rejects_bare_and_fronting_wildcards() {
+        assert!(HostPort::try_new("*", 443).is_err());
+        assert!(HostPort::try_new("*.com", 443).is_err());
+        assert!(HostPort::try_new("*.workers.dev", 443).is_err());
+        assert!(HostPort::try_new("*.neon.tech", 5432).is_err());
+        assert!(HostPort::try_new("db.neon.tech", 5432).is_ok());
     }
 }

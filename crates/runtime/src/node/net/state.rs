@@ -24,6 +24,7 @@ const RECV_BACKPRESSURE_RESUME: usize = 128;
 const READ_CHUNK_SIZE: usize = 16 * 1024;
 pub(crate) const HIGH_WATER_MARK: u64 = 16 * 1024;
 const OUTBOUND_HARD_CAP: u64 = 1024 * 1024;
+const OUTBOUND_QUEUE_CAP: usize = 127;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -72,6 +73,8 @@ pub struct NativeSocketState {
     pub counted: bool,
     pub had_error: bool,
     pub write_tx: Option<mpsc::Sender<WriteCmd>>,
+    pub pending_writes: VecDeque<Vec<u8>>,
+    pub pending_end: bool,
     pub buffered_amount: u64,
     pub drain_pending: bool,
     pub egress_total: u64,
@@ -97,6 +100,8 @@ impl NativeSocketState {
             counted: false,
             had_error: false,
             write_tx: None,
+            pending_writes: VecDeque::new(),
+            pending_end: false,
             buffered_amount: 0,
             drain_pending: false,
             egress_total: 0,
@@ -189,6 +194,8 @@ fn push_error_and_close(state: &SharedState, socket_id: u32, message: String, co
         s.had_error = true;
         s.destroyed = true;
         s.write_tx = None;
+        s.pending_writes.clear();
+        s.pending_end = false;
     }
     push_event(
         state,
@@ -212,6 +219,8 @@ fn push_close_once(state: &SharedState, socket_id: u32, had_error: bool) {
             s.connecting = false;
             s.connected = false;
             s.write_tx = None;
+            s.pending_writes.clear();
+            s.pending_end = false;
             s.buffered_amount = 0;
             s.drain_pending = false;
             true
@@ -252,6 +261,8 @@ pub fn destroy_socket(state: &SharedState, socket_id: u32) {
         }
         s.destroyed = true;
         s.write_tx = None;
+        s.pending_writes.clear();
+        s.pending_end = false;
         s.recv_backpressure_waker.take()
     } else {
         None
@@ -308,12 +319,22 @@ pub fn queue_write(
     bytes: Vec<u8>,
 ) -> Result<bool, String> {
     let n = bytes.len() as u64;
-    let (mut tx, over_hwm) = {
+    let (tx, over_hwm) = {
         let socket = lookup_native_socket_state(state, socket_id)
             .ok_or_else(|| "Socket is closed".to_string())?;
         let mut sock = socket.borrow_mut();
         if sock.destroyed || sock.ended {
             return Err("write after end".to_string());
+        }
+        if state.borrow().native_net_egress_exhausted {
+            drop(sock);
+            push_error_and_close(
+                state,
+                socket_id,
+                "node:net egress ceiling exceeded".to_string(),
+                "ERR_NET_EGRESS_CAP",
+            );
+            return Ok(false);
         }
         let next_buffered = sock.buffered_amount.saturating_add(n);
         if next_buffered > OUTBOUND_HARD_CAP {
@@ -328,8 +349,10 @@ pub fn queue_write(
         }
         let ceiling = { state.borrow().net_policy.egress_ceiling_bytes() };
         if let Some(ceiling) = ceiling {
+            let next_socket = sock.egress_total.saturating_add(n);
             let next_app = { state.borrow().native_net_egress_bytes.saturating_add(n) };
-            if next_app > ceiling {
+            if next_socket > ceiling || next_app > ceiling {
+                state.borrow_mut().native_net_egress_exhausted = true;
                 drop(sock);
                 push_error_and_close(
                     state,
@@ -339,7 +362,6 @@ pub fn queue_write(
                 );
                 return Ok(false);
             }
-            state.borrow_mut().native_net_egress_bytes = next_app;
         }
         sock.egress_total = sock.egress_total.saturating_add(n);
         sock.buffered_amount = next_buffered;
@@ -347,18 +369,60 @@ pub fn queue_write(
         if over_hwm {
             sock.drain_pending = true;
         }
-        let tx = sock
-            .write_tx
-            .clone()
-            .ok_or_else(|| "Socket is not connected".to_string())?;
-        (tx, over_hwm)
+        if let Some(tx) = sock.write_tx.clone() {
+            if let Some(ceiling) = ceiling {
+                let next_app = state.borrow().native_net_egress_bytes.saturating_add(n);
+                debug_assert!(next_app <= ceiling);
+                state.borrow_mut().native_net_egress_bytes = next_app;
+            }
+            (Some(tx), over_hwm)
+        } else if sock.connecting {
+            if sock.pending_writes.len() >= OUTBOUND_QUEUE_CAP {
+                sock.egress_total = sock.egress_total.saturating_sub(n);
+                sock.buffered_amount = sock.buffered_amount.saturating_sub(n);
+                sock.drain_pending = sock.buffered_amount >= HIGH_WATER_MARK;
+                drop(sock);
+                push_error_and_close(
+                    state,
+                    socket_id,
+                    "node:net outbound write queue hard cap exceeded".to_string(),
+                    "ERR_NET_WRITE_CAP",
+                );
+                return Ok(false);
+            }
+            if let Some(ceiling) = ceiling {
+                let next_app = state.borrow().native_net_egress_bytes.saturating_add(n);
+                debug_assert!(next_app <= ceiling);
+                state.borrow_mut().native_net_egress_bytes = next_app;
+            }
+            sock.pending_writes.push_back(bytes);
+            record_net_egress(state, n);
+            return Ok(!over_hwm);
+        } else {
+            sock.egress_total = sock.egress_total.saturating_sub(n);
+            sock.buffered_amount = sock.buffered_amount.saturating_sub(n);
+            return Err("Socket is not connected".to_string());
+        }
     };
 
+    let Some(mut tx) = tx else {
+        return Err("Socket is not connected".to_string());
+    };
     match tx.try_send(WriteCmd::Data(bytes)) {
-        Ok(()) => Ok(!over_hwm),
+        Ok(()) => {
+            record_net_egress(state, n);
+            Ok(!over_hwm)
+        }
         Err(e) => {
             decrement_buffered_amount(state, socket_id, n);
-            Err(format!("write queue closed: {e:?}"))
+            rollback_egress(state, socket_id, n);
+            push_error_and_close(
+                state,
+                socket_id,
+                format!("node:net outbound write queue refused data: {e:?}"),
+                "ERR_NET_WRITE_CAP",
+            );
+            Ok(false)
         }
     }
 }
@@ -369,9 +433,14 @@ pub fn queue_end(state: &SharedState, socket_id: u32) -> Result<(), String> {
             .ok_or_else(|| "Socket is closed".to_string())?;
         let mut s = socket.borrow_mut();
         s.ended = true;
-        s.write_tx
-            .clone()
-            .ok_or_else(|| "Socket is not connected".to_string())?
+        if let Some(tx) = s.write_tx.clone() {
+            tx
+        } else if s.connecting {
+            s.pending_end = true;
+            return Ok(());
+        } else {
+            return Err("Socket is not connected".to_string());
+        }
     };
     tx.try_send(WriteCmd::End)
         .map_err(|e| format!("end queue closed: {e:?}"))
@@ -419,16 +488,26 @@ pub fn spawn_connect_task(state: SharedState, socket_id: u32, host: String, port
             return;
         };
         let (tx, rx) = mpsc::channel::<WriteCmd>(128);
-        if let Some(socket) = lookup_native_socket_state(&state, socket_id) {
-            let mut s = socket.borrow_mut();
-            if s.destroyed {
-                release_socket_slot(&state, socket_id);
+        let (pending_writes, pending_end) =
+            if let Some(socket) = lookup_native_socket_state(&state, socket_id) {
+                let mut s = socket.borrow_mut();
+                if s.destroyed {
+                    release_socket_slot(&state, socket_id);
+                    return;
+                }
+                s.remote = Some(addr);
+                s.write_tx = Some(tx.clone());
+                s.connecting = false;
+                s.connected = true;
+                let pending_writes: Vec<Vec<u8>> = s.pending_writes.drain(..).collect();
+                let pending_end = s.pending_end;
+                s.pending_end = false;
+                (pending_writes, pending_end)
+            } else {
                 return;
-            }
-            s.remote = Some(addr);
-            s.write_tx = Some(tx);
-            s.connecting = false;
-            s.connected = true;
+            };
+        if !drain_pending_to_writer(&state, socket_id, tx, pending_writes, pending_end) {
+            return;
         }
 
         mark_socket_activity(&state);
@@ -495,17 +574,27 @@ pub fn spawn_tls_connect_task(
         };
 
         let (tx, rx) = mpsc::channel::<WriteCmd>(128);
-        if let Some(socket) = lookup_native_socket_state(&state, socket_id) {
-            let mut s = socket.borrow_mut();
-            if s.destroyed {
-                release_socket_slot(&state, socket_id);
+        let (pending_writes, pending_end) =
+            if let Some(socket) = lookup_native_socket_state(&state, socket_id) {
+                let mut s = socket.borrow_mut();
+                if s.destroyed {
+                    release_socket_slot(&state, socket_id);
+                    return;
+                }
+                s.remote = Some(addr);
+                s.write_tx = Some(tx.clone());
+                s.connecting = false;
+                s.connected = true;
+                s.encrypted = true;
+                let pending_writes: Vec<Vec<u8>> = s.pending_writes.drain(..).collect();
+                let pending_end = s.pending_end;
+                s.pending_end = false;
+                (pending_writes, pending_end)
+            } else {
                 return;
-            }
-            s.remote = Some(addr);
-            s.write_tx = Some(tx);
-            s.connecting = false;
-            s.connected = true;
-            s.encrypted = true;
+            };
+        if !drain_pending_to_writer(&state, socket_id, tx, pending_writes, pending_end) {
+            return;
         }
 
         mark_socket_activity(&state);
@@ -528,6 +617,36 @@ pub fn spawn_tls_connect_task(
     compio::runtime::spawn(crate::panic_util::guard("node-tls-connect", task)).detach();
 }
 
+fn drain_pending_to_writer(
+    state: &SharedState,
+    socket_id: u32,
+    mut tx: mpsc::Sender<WriteCmd>,
+    pending_writes: Vec<Vec<u8>>,
+    pending_end: bool,
+) -> bool {
+    for bytes in pending_writes {
+        if let Err(e) = tx.try_send(WriteCmd::Data(bytes)) {
+            push_error_and_close(
+                state,
+                socket_id,
+                format!("node:net outbound write queue refused pending data: {e:?}"),
+                "ERR_NET_WRITE_CAP",
+            );
+            return false;
+        }
+    }
+    if pending_end && let Err(e) = tx.try_send(WriteCmd::End) {
+        push_error_and_close(
+            state,
+            socket_id,
+            format!("node:net outbound write queue refused pending end: {e:?}"),
+            "ERR_NET_WRITE_CAP",
+        );
+        return false;
+    }
+    true
+}
+
 async fn connect_tcp(
     state: &SharedState,
     socket_id: u32,
@@ -536,8 +655,20 @@ async fn connect_tcp(
 ) -> Option<(std::net::SocketAddr, TcpStream)> {
     let resolve_host = host.clone();
     let resolved = compio::time::timeout(
-        RESOLVE_TIMEOUT,
+        resolve_timeout(),
         compio::runtime::spawn_blocking(move || {
+            #[cfg(debug_assertions)]
+            if std::env::var("ZEROSHIP_NET_TEST_DNS_HANG_HOST")
+                .ok()
+                .as_deref()
+                == Some(resolve_host.as_str())
+            {
+                let ms = std::env::var("ZEROSHIP_NET_TEST_DNS_HANG_MS")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(250);
+                std::thread::sleep(Duration::from_millis(ms));
+            }
             crate::fetch::resolve_and_check_ssrf(&resolve_host, port)
         }),
     )
@@ -591,6 +722,15 @@ async fn connect_tcp(
         }
     }
     Some((addr, tcp))
+}
+
+fn resolve_timeout() -> Duration {
+    std::env::var("ZEROSHIP_NET_RESOLVE_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(RESOLVE_TIMEOUT)
 }
 
 async fn await_recv_ready(socket_state: &Rc<RefCell<NativeSocketState>>) -> bool {
@@ -939,6 +1079,23 @@ fn decrement_buffered_amount(state: &SharedState, socket_id: u32, n: u64) {
     }
 }
 
+fn rollback_egress(state: &SharedState, socket_id: u32, n: u64) {
+    if let Some(socket) = lookup_native_socket_state(state, socket_id) {
+        let mut socket = socket.borrow_mut();
+        socket.egress_total = socket.egress_total.saturating_sub(n);
+    }
+    let mut s = state.borrow_mut();
+    s.native_net_egress_bytes = s.native_net_egress_bytes.saturating_sub(n);
+}
+
+fn record_net_egress(state: &SharedState, n: u64) {
+    let meter = { state.borrow().meter.clone() };
+    if let Some(meter) = meter {
+        meter.record("egress_bytes", n);
+        meter.record("net_egress_bytes", n);
+    }
+}
+
 fn pending_data_events(state: &SharedState, socket_id: u32) -> bool {
     lookup_native_socket_state(state, socket_id)
         .map(|socket| {
@@ -969,6 +1126,9 @@ pub fn reserve_socket_slot(state: &SharedState, socket_id: u32) -> Result<(), St
     }
     {
         let s = state.borrow();
+        if s.native_net_egress_exhausted {
+            return Err("node:net egress ceiling exceeded".to_string());
+        }
         if s.active_native_sockets >= max {
             return Err(format!("per-app node:net socket cap exceeded ({max})"));
         }

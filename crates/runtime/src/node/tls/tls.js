@@ -59,7 +59,6 @@
         this.connecting = false;
         this.pending = false;
         this.readyState = "open";
-        this._flushPending();
       });
     }
 

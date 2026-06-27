@@ -710,7 +710,7 @@ mod tests {
     use std::collections::HashMap;
 
     fn test_state() -> SharedState {
-        Rc::new(RefCell::new(RuntimeState::new(HashMap::new(), None)))
+        Rc::new(RefCell::new(RuntimeState::new(HashMap::new(), None, None)))
     }
 
     #[test]

@@ -73,11 +73,14 @@ async fn run_pg_js(module_src: String, max_wait: Duration) -> JsResult {
     ];
     let runtime = Runtime::builder()
         .modules(modules)
-        .net_policy(NetPolicy::Allowlist {
-            entries: vec![HostPort::new(PG_HOST, PG_PORT)],
-            max_sockets: 8,
-            egress_ceiling_bytes: 8 * 1024 * 1024,
-        })
+        .net_policy(
+            NetPolicy::allowlist(
+                vec![HostPort::new(PG_HOST, PG_PORT)],
+                8,
+                8 * 1024 * 1024,
+            )
+            .unwrap(),
+        )
         .build();
     runtime.start_pump();
 

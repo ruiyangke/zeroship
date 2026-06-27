@@ -479,6 +479,7 @@ pub struct RuntimeBuilder {
     limits: RuntimeLimits,
     plugins: Vec<Arc<dyn NativePlugin>>,
     app_id: Option<uuid::Uuid>,
+    meter: Option<Arc<zeroship_metering::Meter>>,
     net_policy: NetPolicy,
     /// Idle-GC threshold override (ms). `None` → `DEFAULT_IDLE_GC_AFTER`.
     /// Lives on the builder (not `RuntimeLimits`) because it's a runtime
@@ -557,6 +558,16 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Bind the process-wide infrastructure meter to this runtime's app.
+    ///
+    /// `node:net` uses this to stamp accepted outbound bytes into the fixed
+    /// `egress_bytes` spend metric. The handle is built only when `app_id` is
+    /// also set, preserving the server-injected attribution boundary.
+    pub fn meter(mut self, meter: Arc<zeroship_metering::Meter>) -> Self {
+        self.meter = Some(meter);
+        self
+    }
+
     /// Set the raw TCP policy for `node:net`. The default is
     /// `NetPolicy::Denied`, which makes `node:net` unresolvable.
     pub fn net_policy(mut self, policy: NetPolicy) -> Self {
@@ -590,6 +601,7 @@ impl RuntimeBuilder {
             limits.heap_limit_bytes,
             self.plugins,
             app_id,
+            self.meter,
             self.net_policy,
             idle_gc_after,
         );
@@ -822,6 +834,7 @@ impl RuntimeInner {
         heap_limit_bytes: Option<usize>,
         plugins: Vec<Arc<dyn NativePlugin>>,
         app_id: Option<uuid::Uuid>,
+        meter: Option<Arc<zeroship_metering::Meter>>,
         net_policy: NetPolicy,
         idle_gc_after: Duration,
     ) -> Self {
@@ -925,7 +938,14 @@ impl RuntimeInner {
         );
 
         // Create RuntimeState (no server_handle -- compio, not tokio)
-        let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(env_vars, None)));
+        let meter_handle = app_id
+            .zip(meter)
+            .map(|(id, meter)| zeroship_metering::MeterHandle::new(meter, id.to_string()));
+        let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(
+            env_vars,
+            None,
+            meter_handle,
+        )));
         state.borrow_mut().set_net_policy(net_policy);
         isolate.set_slot(state.clone());
 
