@@ -543,10 +543,12 @@ pub async fn snapshot_schema(
     }
 
     // Constraints via pg_catalog (schema BOUND $1 on the namespace name). We read
-    // the constraint BODY from `pg_get_constraintdef(oid)` so a same-name CHECK
-    // whose predicate was rewritten out-of-band is surfaced by the attribute diff
-    // (#1). `contype` is mapped to the same human label information_schema reports
-    // (`PRIMARY KEY` / `FOREIGN KEY` / `UNIQUE` / `CHECK`) so `kind` is unchanged.
+    // byte-comparable constraint bodies from `pg_get_constraintdef(oid)` so a
+    // same-name CHECK whose predicate was rewritten out-of-band is surfaced by the
+    // attribute diff (#1). EXCLUDE bodies are not byte-comparable with the authored
+    // IR render, so they are presence/kind-only. `contype` is mapped to the same
+    // human label information_schema reports (`PRIMARY KEY` / `FOREIGN KEY` /
+    // `UNIQUE` / `CHECK` / `EXCLUDE`) so `kind` is unchanged.
     let constraint_rows = conn
         .query(
             "SELECT c.relname AS table_name, con.conname AS constraint_name, \
@@ -571,10 +573,15 @@ pub async fn snapshot_schema(
                 Some('x') => "EXCLUDE",
                 _ => "UNKNOWN",
             };
+            let definition = if constraint_definition_is_comparable(kind) {
+                r.get("definition")
+            } else {
+                String::new()
+            };
             t.constraints.push(ConstraintSnapshot {
                 name: r.get("constraint_name"),
                 kind: kind.to_string(),
-                definition: r.get("definition"),
+                definition,
             });
         }
     }
@@ -629,9 +636,9 @@ pub async fn snapshot_schema(
 ///
 /// Same-name objects present on BOTH sides are compared ATTRIBUTE-BY-ATTRIBUTE
 /// (#1): columns by `data_type` + `nullable`, indexes by `unique` + `columns`,
-/// constraints by `kind` + `definition`. Any divergence becomes an
-/// [`AlteredObject`] — closing the out-of-band-`ALTER` blind spot that pure name
-/// diffing left open.
+/// constraints by `kind` plus byte-comparable `definition` bodies. Any divergence
+/// becomes an [`AlteredObject`] — closing the out-of-band-`ALTER` blind spot that
+/// pure name diffing left open.
 #[must_use]
 pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> StructuralDrift {
     let mut missing = Vec::new();
@@ -831,16 +838,29 @@ fn diff_attrs(
         }
     }
 
-    // Constraints: kind + definition (definition closes the CHECK-body hole).
+    // Constraints: kind + byte-comparable definition bodies. EXCLUDE definitions
+    // are intentionally presence/kind-only: PG canonicalizes them differently from
+    // the authored IR render, and this engine cannot normalize them to a proven
+    // comparable form. The existence guard still fails closed for same-name
+    // unprovable constraints; structural drift must not false-positive after a
+    // clean apply + re-introspection.
     let act_con: BTreeMap<&str, &ConstraintSnapshot> =
         act_t.constraints.iter().map(|c| (c.name.as_str(), c)).collect();
     for ec in &exp_t.constraints {
         if let Some(ac) = act_con.get(ec.name.as_str()) {
             let obj = format!("constraint {}", ec.name);
             push(&obj, "kind", &ec.kind, &ac.kind);
-            push(&obj, "definition", &ec.definition, &ac.definition);
+            if constraint_definition_is_comparable(&ec.kind)
+                && constraint_definition_is_comparable(&ac.kind)
+            {
+                push(&obj, "definition", &ec.definition, &ac.definition);
+            }
         }
     }
+}
+
+fn constraint_definition_is_comparable(kind: &str) -> bool {
+    kind != "EXCLUDE"
 }
 
 /// Diff two name lists belonging to one table, pushing qualified names into the

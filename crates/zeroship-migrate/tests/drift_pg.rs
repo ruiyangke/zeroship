@@ -786,6 +786,69 @@ async fn diff_reports_altered_check_constraint_definition() {
     drop_schemas(&conn, &cfg).await;
 }
 
+#[compio::test]
+async fn exclusion_constraint_reintrospection_does_not_false_drift_or_tamper() {
+    // Apply an EXCLUDE constraint through the journal, then compare the authored
+    // body spelling against fresh `pg_get_constraintdef` introspection. PG
+    // canonicalizes exclusion definitions (notably identifier quoting), so this
+    // must compare on presence/name + kind without treating the body as tamper.
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let sch = &cfg.project_schema;
+    let up = format!(
+        "CREATE TABLE \"{sch}\".\"bookings\" (period tsrange NOT NULL); \
+         ALTER TABLE \"{sch}\".\"bookings\" ADD CONSTRAINT bookings_no_overlap \
+         EXCLUDE USING gist (\"period\" WITH &&);"
+    );
+    let m = mig(MigrationId::generate(), "add_exclusion_constraint", &up);
+    let set = vec![m];
+    apply(&conn, &cfg, &set, Approval::Approved, "actor")
+        .await
+        .expect("apply exclusion constraint");
+
+    let checksum = check_checksum_drift(&conn, &cfg, &set)
+        .await
+        .expect("checksum drift");
+    assert!(checksum.is_clean(), "same migration set must not report tamper: {checksum:?}");
+
+    let actual = snapshot_schema(&conn, sch).await.expect("actual");
+    let live_table = actual.tables.get("bookings").expect("bookings live");
+    let live_constraint = live_table
+        .constraints
+        .iter()
+        .find(|c| c.name == "bookings_no_overlap")
+        .expect("exclusion constraint live");
+    assert_eq!(live_constraint.kind, "EXCLUDE");
+
+    let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
+    tables.insert(
+        "bookings".to_string(),
+        TableSnapshot {
+            columns: live_table.columns.clone(),
+            indexes: live_table.indexes.clone(),
+            constraints: vec![ConstraintSnapshot {
+                name: "bookings_no_overlap".into(),
+                kind: "EXCLUDE".into(),
+                definition: r#"EXCLUDE USING gist ("period" WITH &&)"#.into(),
+            }],
+            stored_create_sql: None,
+        },
+    );
+    let expected = SchemaSnapshot { tables, ..Default::default() };
+
+    let drift = diff_snapshots(&expected, &actual);
+    assert!(
+        drift.is_clean(),
+        "exclusion body canonicalization must not false-report structural drift: {drift:?}"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
 // ---------------------------------------------------------------------------
 // T12 — access-method / expression drift (the index-method blind spot).
 // ---------------------------------------------------------------------------

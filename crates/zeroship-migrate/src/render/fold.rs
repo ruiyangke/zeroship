@@ -1178,8 +1178,7 @@ fn fold_create_table_specs(
                     || derived_exclusion_constraint_name(table, elements),
                     str::to_string,
                 );
-                let definition = render_exclusion_constraint_body(&c.kind, dialect)
-                    .map_err(fold_lower_error)?;
+                render_exclusion_constraint_body(&c.kind, dialect).map_err(fold_lower_error)?;
                 push_folded_constraint(
                     table,
                     snap,
@@ -1187,7 +1186,10 @@ fn fold_create_table_specs(
                         constraint: ConstraintSnapshot {
                             name,
                             kind: "EXCLUDE".to_string(),
-                            definition,
+                            // PG canonicalizes exclusion bodies differently from the
+                            // authored render. Drift tracks EXCLUDE by presence/name +
+                            // kind only, matching `snapshot_schema`.
+                            definition: String::new(),
                         },
                         index: None,
                     },
@@ -1375,13 +1377,15 @@ fn add_constraint_snapshot(
                 || derived_exclusion_constraint_name(table, elements),
                 str::to_string,
             );
-            let definition =
-                render_exclusion_constraint_body(&constraint.kind, dialect).map_err(fold_lower_error)?;
+            render_exclusion_constraint_body(&constraint.kind, dialect).map_err(fold_lower_error)?;
             Ok(FoldedConstraint {
                 constraint: ConstraintSnapshot {
                     name: cname,
                     kind: "EXCLUDE".to_string(),
-                    definition,
+                    // PG canonicalizes exclusion bodies differently from the authored
+                    // render. Drift tracks EXCLUDE by presence/name + kind only,
+                    // matching `snapshot_schema`.
+                    definition: String::new(),
                 },
                 index: None,
             })

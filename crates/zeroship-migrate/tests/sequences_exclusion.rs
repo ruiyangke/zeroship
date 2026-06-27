@@ -6,7 +6,7 @@ use zeroship_migrate::ir_author::{IrAuthor, IrLowerError};
 use zeroship_migrate::{
     fold_ops, BinaryOp, ColType, ColumnOrExpr, ExclusionElement, ExclusionMethod,
     ExclusionOperator, Expr, IrConstraint, IrConstraintKind, IrScalar, LiveSchema, MigrationIr,
-    Op, SequenceOwnedBy,
+    Op, ScalarFn, SequenceOwnedBy,
 };
 use zeroship_schema::query::SqlDialect;
 
@@ -179,6 +179,51 @@ fn postgres_renders_exclusion_constraint() {
         migrations[0].down.as_deref(),
         Some(r#"ALTER TABLE "app"."bookings" DROP CONSTRAINT "bookings_no_overlap""#)
     );
+}
+
+#[test]
+fn postgres_parenthesizes_expression_exclusion_targets_only() {
+    let mut live = BTreeSet::new();
+    live.insert("bookings".to_string());
+    let migrations = lower(
+        vec![Op::AddConstraint {
+            table: "bookings".into(),
+            constraint: IrConstraint {
+                name: Some("bookings_room_lower_excl".into()),
+                kind: IrConstraintKind::Exclusion {
+                    using_method: ExclusionMethod::Gist,
+                    elements: vec![
+                        ExclusionElement {
+                            target: ColumnOrExpr::Column { name: "room".into() },
+                            operator: ExclusionOperator::Equal,
+                        },
+                        ExclusionElement {
+                            target: ColumnOrExpr::Expr {
+                                expr: Expr::FnCall {
+                                    r#fn: ScalarFn::Lower,
+                                    args: vec![Expr::col("room")],
+                                },
+                            },
+                            operator: ExclusionOperator::Equal,
+                        },
+                    ],
+                    where_predicate: None,
+                    deferrable: None,
+                    initially_deferred: None,
+                },
+            },
+            schema: None,
+            existence_guard: None,
+        }],
+        SqlDialect::Postgres,
+        &live,
+    );
+
+    assert_eq!(
+        migrations[0].up,
+        r#"ALTER TABLE "app"."bookings" ADD CONSTRAINT "bookings_room_lower_excl" EXCLUDE USING gist ("room" WITH =, (lower("room")) WITH =)"#
+    );
+    pg_query::parse(&migrations[0].up).expect("rendered exclusion expression target parses");
 }
 
 #[test]
