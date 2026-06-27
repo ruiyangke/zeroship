@@ -1,24 +1,63 @@
 (function () {
   const Socket = globalThis.__zsNetSocket;
-  const decoder = new TextDecoder();
+  const pemDecoder = new TextDecoder("utf-8", { fatal: true });
+
+  function tlsError(code, message) {
+    const err = new Error(message);
+    err.code = code;
+    return err;
+  }
+
+  function assertPemCa(ca) {
+    if (ca == null || ca === "") return undefined;
+    if (
+      !String(ca).includes("-----BEGIN CERTIFICATE-----") ||
+      !String(ca).includes("-----END CERTIFICATE-----")
+    ) {
+      throw tlsError("ERR_TLS_CA_INVALID", "ca must contain PEM-encoded certificates");
+    }
+    return String(ca);
+  }
+
+  function decodeCaBytes(bytes) {
+    try {
+      return pemDecoder.decode(bytes);
+    } catch (_) {
+      throw tlsError("ERR_TLS_CA_INVALID", "ca must contain PEM-encoded certificates");
+    }
+  }
 
   function normalizeCa(ca) {
     if (ca == null) return undefined;
     if (Array.isArray(ca)) {
       return ca.map(normalizeCa).filter((v) => v != null && v !== "").join("\n");
     }
-    if (typeof ca === "string") return ca;
-    if (ca instanceof ArrayBuffer) return decoder.decode(new Uint8Array(ca));
-    if (ArrayBuffer.isView(ca)) {
-      return decoder.decode(new Uint8Array(ca.buffer, ca.byteOffset, ca.byteLength));
+    if (typeof ca === "string") return assertPemCa(ca);
+    if (ca instanceof ArrayBuffer) {
+      return assertPemCa(decodeCaBytes(new Uint8Array(ca)));
     }
-    return String(ca);
+    if (ArrayBuffer.isView(ca)) {
+      return assertPemCa(decodeCaBytes(new Uint8Array(ca.buffer, ca.byteOffset, ca.byteLength)));
+    }
+    return assertPemCa(String(ca));
+  }
+
+  function rejectClientAuthOptions(options) {
+    for (const key of ["cert", "key", "passphrase", "pfx"]) {
+      if (options[key] != null) {
+        throw tlsError(
+          "ERR_NOT_IMPLEMENTED",
+          `tls.connect ${key} client-certificate option is not implemented`,
+        );
+      }
+    }
   }
 
   function normalizeOptions(options) {
     if (!options || typeof options !== "object") {
       throw new TypeError("tls.connect options must be an object");
     }
+    rejectClientAuthOptions(options);
     const socket = options.socket || undefined;
     const host = String(options.host || options.hostname || "localhost");
     const port = Number(options.port);
@@ -51,7 +90,6 @@
         super();
       }
       this._sourceSocket = sourceSocket || null;
-      this.encrypted = true;
       this.authorized = false;
       this.authorizationError = null;
       this._secureConnecting = false;
@@ -85,22 +123,15 @@
       this.destroyed = false;
       this.readyState = "opening";
       this._native.validateTls(opts.rejectUnauthorized);
-      deferNativeStart(() => {
-        this._native.connectTls(
-          opts.host,
-          opts.port,
-          opts.servername,
-          opts.rejectUnauthorized,
-          opts.ca,
-        );
-      });
+      this._native.connectTls(
+        opts.host,
+        opts.port,
+        opts.servername,
+        opts.rejectUnauthorized,
+        opts.ca,
+      );
       return this;
     }
-  }
-
-  function deferNativeStart(fn) {
-    if (typeof queueMicrotask === "function") queueMicrotask(fn);
-    else Promise.resolve().then(fn);
   }
 
   function startTls(opts, cb) {
@@ -111,9 +142,7 @@
     socket.pending = true;
     socket.readyState = "opening";
     socket._native.validateTls(opts.rejectUnauthorized);
-    deferNativeStart(() => {
-      socket._native.startTls(opts.servername, opts.rejectUnauthorized, opts.ca);
-    });
+    socket._native.startTls(opts.servername, opts.rejectUnauthorized, opts.ca);
     return socket;
   }
 

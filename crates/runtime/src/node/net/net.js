@@ -51,7 +51,6 @@
       this.readableDestroyed = this.destroyed;
       this._timeoutId = null;
       this._encoding = null;
-      this._encryptedOverride = undefined;
       this._pendingWriteQueue = [];
       this._pendingEnd = false;
 
@@ -235,11 +234,9 @@
     get bytesRead() { return this._native.bytesRead; }
     get bytesWritten() { return this._native.bytesWritten; }
     get encrypted() {
-      return this._encryptedOverride === undefined
-        ? Boolean(this._native.encrypted)
-        : Boolean(this._encryptedOverride);
+      return Boolean(this._native.encrypted);
     }
-    set encrypted(value) { this._encryptedOverride = Boolean(value); }
+    set encrypted(_value) {}
   }
 
   function createConnection(...args) {

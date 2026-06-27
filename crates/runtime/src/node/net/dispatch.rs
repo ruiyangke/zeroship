@@ -9,13 +9,11 @@ pub fn dispatch_pending_socket_events(
     state: &SharedState,
     socket_id: u32,
 ) {
-    let events = state::drain_events(state, socket_id);
+    let mut events: std::collections::VecDeque<_> =
+        state::drain_events(state, socket_id).into();
     if events.is_empty() {
         return;
     }
-    let has_close = events
-        .iter()
-        .any(|event| matches!(event, SocketEvent::Close { .. }));
 
     let wrapper_g = {
         let s = state.borrow();
@@ -26,11 +24,27 @@ pub fn dispatch_pending_socket_events(
     };
     let wrapper = v8::Local::new(scope, wrapper_g);
 
-    for event in events {
+    let mut dispatched_close = false;
+    while let Some(event) = events.pop_front() {
+        if matches!(event, SocketEvent::Data(_)) && state::socket_paused(state, socket_id) {
+            events.push_front(event);
+            state::requeue_front_events(state, socket_id, events);
+            return;
+        }
+        let is_data = matches!(event, SocketEvent::Data(_));
+        let is_close = matches!(event, SocketEvent::Close { .. });
         dispatch_one(scope, wrapper, event);
+        if is_close {
+            dispatched_close = true;
+            break;
+        }
+        if is_data && state::socket_paused(state, socket_id) && !events.is_empty() {
+            state::requeue_front_events(state, socket_id, events);
+            return;
+        }
     }
 
-    if has_close {
+    if dispatched_close {
         state::free_native_socket_state(state, socket_id);
     }
 }

@@ -92,7 +92,10 @@ fn parse_ca_certs(input: &str) -> io::Result<Vec<CertificateDer<'static>>> {
     if trimmed.is_empty() {
         return Ok(Vec::new());
     }
-    Ok(vec![CertificateDer::from(trimmed.as_bytes().to_vec())])
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "ca must contain PEM-encoded certificates",
+    ))
 }
 
 #[derive(Debug)]

@@ -68,6 +68,7 @@ enum ServerMode {
     Echo,
     Idle,
     SendOnConnect(&'static [u8]),
+    SendLargeOnConnect(usize),
     FullDuplexStress { send_bytes: usize, read_bytes: usize },
 }
 
@@ -110,6 +111,11 @@ async fn handle_test_connection(mut stream: TcpStream, mode: ServerMode) {
         }
         ServerMode::SendOnConnect(bytes) => {
             let _ = stream.write_all(bytes.to_vec()).await;
+            compio::time::sleep(Duration::from_secs(30)).await;
+        }
+        ServerMode::SendLargeOnConnect(bytes) => {
+            let _ = stream.write_all(vec![b'x'; bytes]).await;
+            let _ = stream.flush().await;
             compio::time::sleep(Duration::from_secs(30)).await;
         }
         ServerMode::FullDuplexStress { send_bytes, read_bytes } => {
@@ -248,6 +254,56 @@ fn allowlist(addr: SocketAddr, max_sockets: u32) -> NetPolicy {
         1024 * 1024,
     )
     .unwrap()
+}
+
+#[test]
+fn node_events_common_compat_surface() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set(true, None);
+    let result = compio::runtime::Runtime::new().unwrap().block_on(async {
+        run_js_module(
+            wrap_module(
+                r#"import events, { EventEmitter, errorMonitor } from "node:events";"#,
+                r#"
+const ee = new EventEmitter();
+const calls = [];
+ee.on("newListener", (name) => calls.push("new:" + String(name)));
+ee.prependListener("work", () => calls.push("first"));
+ee.on("work", () => calls.push("second"));
+ee.once("work", () => calls.push("once"));
+const before = [
+    ee.rawListeners("work").length,
+    ee.listeners("work").length,
+    ee.eventNames().map(String).sort().join(","),
+    typeof errorMonitor,
+    typeof events.setMaxListeners,
+    typeof events.captureRejections,
+].join("/");
+ee.setMaxListeners(0);
+events.setMaxListeners(2, ee);
+ee.on(errorMonitor, () => calls.push("monitor"));
+ee.on("error", () => calls.push("error"));
+ee.emit("work");
+ee.emit("error", new Error("handled"));
+return `${before};max=${ee.getMaxListeners()};count=${EventEmitter.listenerCount(ee, "work")};calls=${calls.join("|")}`;
+"#,
+            ),
+            trusted(1),
+            Duration::from_secs(3),
+        )
+        .await
+    });
+    assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
+    assert!(
+        result.body.contains("3/3/")
+            && result.body.contains("/symbol/function/boolean")
+            && result.body.contains("max=2")
+            && result.body.contains("count=2")
+            && result.body.contains("first|second|once")
+            && result.body.contains("monitor|error"),
+        "expected node:events common surface, got: {}",
+        result.body
+    );
 }
 
 #[test]
@@ -456,6 +512,62 @@ return new Promise((resolve) => {{
     assert_eq!(
         result.body, "before=;data=paused",
         "pause/resume should hold data until resume"
+    );
+}
+
+#[test]
+fn socket_pause_inside_data_handler_defers_queued_chunks_until_resume() {
+    const TOTAL_BYTES: usize = 512 * 1024;
+
+    let _lock = lock_env();
+    let _env = EnvGuard::set(true, None);
+    let result = compio::runtime::Runtime::new().unwrap().block_on(async {
+        let addr = spawn_tcp_server(ServerMode::SendLargeOnConnect(TOTAL_BYTES)).await;
+        run_net_js(
+            &format!(
+                r#"
+return new Promise((resolve) => {{
+    const s = net.createConnection({{ host: "127.0.0.1", port: {} }});
+    let chunks = 0;
+    let bytes = 0;
+    let beforeResume = null;
+    s.on("data", (chunk) => {{
+        chunks++;
+        bytes += chunk.length;
+        if (chunks === 1) {{
+            s.pause();
+            setTimeout(() => {{
+                beforeResume = `${{chunks}}:${{bytes}}`;
+                s.resume();
+            }}, 100);
+        }}
+        if (bytes >= {}) {{
+            s.destroy();
+            resolve(`before=${{beforeResume}};chunks=${{chunks}};bytes=${{bytes}}`);
+        }}
+    }});
+    s.on("error", (err) => resolve(`error:${{err.code}}:${{err.message}}`));
+    setTimeout(() => resolve(`timeout;before=${{beforeResume}};chunks=${{chunks}};bytes=${{bytes}}`), 3000);
+}});
+"#,
+                addr.port(),
+                TOTAL_BYTES
+            ),
+            allowlist(addr, 4),
+            Duration::from_secs(5),
+        )
+        .await
+    });
+    assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
+    assert!(
+        result.body.starts_with("before=1:"),
+        "pause inside the first data handler should suppress queued chunks until resume, got: {}",
+        result.body
+    );
+    assert!(
+        result.body.contains(&format!("bytes={TOTAL_BYTES}")),
+        "expected all bytes after resume, got: {}",
+        result.body
     );
 }
 

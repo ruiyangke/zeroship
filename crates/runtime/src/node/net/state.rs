@@ -18,5 +18,5 @@ pub use super::driver::WriteCmd;
 pub use super::registry::{
     NativeSocketState, SocketEvent, alloc_native_socket_id, attach_wrapper, destroy_all_sockets,
     destroy_socket, drain_events, free_native_socket_state, lookup_native_socket_state,
-    pause_socket, resume_socket,
+    pause_socket, requeue_front_events, resume_socket, socket_paused,
 };

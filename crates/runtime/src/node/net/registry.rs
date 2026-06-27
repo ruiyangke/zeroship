@@ -145,6 +145,27 @@ pub fn drain_events(state: &SharedState, socket_id: u32) -> Vec<SocketEvent> {
     byte_pump::drain_events(lookup_native_socket_state(state, socket_id))
 }
 
+pub fn requeue_front_events(
+    state: &SharedState,
+    socket_id: u32,
+    events: impl IntoIterator<Item = SocketEvent>,
+) {
+    let Some(socket) = lookup_native_socket_state(state, socket_id) else {
+        return;
+    };
+    let mut events: Vec<_> = events.into_iter().collect();
+    let mut s = socket.borrow_mut();
+    while let Some(event) = events.pop() {
+        s.events.push_front(event);
+    }
+}
+
+pub fn socket_paused(state: &SharedState, socket_id: u32) -> bool {
+    lookup_native_socket_state(state, socket_id)
+        .map(|socket| socket.borrow().paused)
+        .unwrap_or(false)
+}
+
 pub(super) fn push_event(state: &SharedState, socket_id: u32, event: SocketEvent) {
     let Some(socket) = lookup_native_socket_state(state, socket_id) else {
         return;
@@ -215,15 +236,20 @@ pub fn pause_socket(state: &SharedState, socket_id: u32) {
 }
 
 pub fn resume_socket(state: &SharedState, socket_id: u32) {
-    let waker = if let Some(socket) = lookup_native_socket_state(state, socket_id) {
-        let mut s = socket.borrow_mut();
-        s.paused = false;
-        s.recv_backpressure_waker.take()
-    } else {
-        None
-    };
+    let (waker, has_queued_events) =
+        if let Some(socket) = lookup_native_socket_state(state, socket_id) {
+            let mut s = socket.borrow_mut();
+            s.paused = false;
+            let has_queued_events = !s.events.is_empty();
+            (s.recv_backpressure_waker.take(), has_queued_events)
+        } else {
+            (None, false)
+        };
     if let Some(w) = waker {
         w.wake();
+    }
+    if has_queued_events {
+        byte_pump::schedule_event_op(state, OpResult::SocketEvent { socket_id });
     }
 }
 

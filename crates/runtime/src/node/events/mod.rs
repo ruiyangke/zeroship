@@ -71,5 +71,16 @@ fn evaluate<'s>(
 }
 
 fn export_names() -> &'static [&'static str] {
-    &["EventEmitter", "default"]
+    &[
+        "EventEmitter",
+        "errorMonitor",
+        "captureRejectionSymbol",
+        "listenerCount",
+        "getEventListeners",
+        "setMaxListeners",
+        "getMaxListeners",
+        "defaultMaxListeners",
+        "captureRejections",
+        "default",
+    ]
 }

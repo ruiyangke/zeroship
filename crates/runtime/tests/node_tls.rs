@@ -1,6 +1,6 @@
 #![allow(unsafe_code)]
 
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
@@ -195,6 +195,11 @@ fn assert_seen_sni(cert: &TestCert, expected: &str) {
     );
 }
 
+fn unused_loopback_port() -> u16 {
+    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind unused port");
+    listener.local_addr().expect("unused port addr").port()
+}
+
 #[derive(Clone, Copy)]
 enum TlsServerMode {
     DirectEcho,
@@ -386,6 +391,171 @@ fn trusted(max_sockets: u32) -> NetPolicy {
 
 fn tls_module(body: &str) -> String {
     wrap_module(r#"import tls from "node:tls";"#, body)
+}
+
+#[test]
+fn tls_connect_admission_errors_match_plain_net_synchronously() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set(true);
+    let result = compio::runtime::Runtime::new().unwrap().block_on(async {
+        let cert = test_cert();
+        let allowed = spawn_tls_server(cert, TlsServerMode::DirectEcho).await;
+        let blocked_port = {
+            let mut port = unused_loopback_port();
+            while port == allowed.port() {
+                port = unused_loopback_port();
+            }
+            port
+        };
+        run_js_module(
+            wrap_module(
+                r#"import net from "node:net"; import tls from "node:tls";"#,
+                &format!(
+                    r#"
+function attempt(label, fn) {{
+    try {{
+        fn();
+        return `${{label}}:allowed`;
+    }} catch (err) {{
+        return `${{label}}:${{err.code}}:${{err.message}}`;
+    }}
+}}
+
+function attemptQuery(label, fn) {{
+    const tok = globalThis.__zsEnterKind("query");
+    try {{
+        return attempt(label, fn);
+    }} finally {{
+        globalThis.__zsExitKind(tok);
+    }}
+}}
+
+return [
+    attempt("net-allowlist", () => net.connect({{ host: "127.0.0.1", port: {} }})),
+    attempt("tls-allowlist", () => tls.connect({{ host: "127.0.0.1", port: {}, servername: "db.local.test" }})),
+    attemptQuery("net-query", () => net.connect({{ host: "127.0.0.1", port: {} }})),
+    attemptQuery("tls-query", () => tls.connect({{ host: "127.0.0.1", port: {}, servername: "db.local.test" }})),
+].join("|");
+"#,
+                    blocked_port,
+                    blocked_port,
+                    allowed.port(),
+                    allowed.port()
+                ),
+            ),
+            allowlist(allowed, 8),
+            Duration::from_secs(3),
+        )
+        .await
+    });
+    assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
+    for label in ["net-allowlist", "tls-allowlist", "net-query", "tls-query"] {
+        assert!(
+            result.body.contains(&format!("{label}:capability_violation")),
+            "expected synchronous capability violation for {label}, got: {}",
+            result.body
+        );
+    }
+    assert!(
+        !result.body.contains(":allowed"),
+        "admission failures must not be deferred past the call site: {}",
+        result.body
+    );
+}
+
+#[test]
+fn tls_rejects_non_pem_ca_and_client_auth_options_synchronously() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set(true);
+    let result = compio::runtime::Runtime::new().unwrap().block_on(async {
+        run_js_module(
+            tls_module(
+                r#"
+function attempt(label, options) {
+    try {
+        tls.connect(options);
+        return `${label}:allowed`;
+    } catch (err) {
+        return `${label}:${err.code}:${err.message}`;
+    }
+}
+
+return [
+    attempt("bad-ca", {
+        host: "127.0.0.1",
+        port: 443,
+        servername: "db.local.test",
+        ca: new Uint8Array([1, 2, 3]),
+    }),
+    attempt("cert", {
+        host: "127.0.0.1",
+        port: 443,
+        servername: "db.local.test",
+        cert: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----",
+    }),
+    attempt("key", {
+        host: "127.0.0.1",
+        port: 443,
+        servername: "db.local.test",
+        key: "-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----",
+    }),
+].join("|");
+"#,
+            ),
+            NetPolicy::allowlist(vec![HostPort::new("127.0.0.1", 443)], 4, 1024 * 1024)
+                .unwrap(),
+            Duration::from_secs(3),
+        )
+        .await
+    });
+    assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
+    assert!(
+        result.body.contains("bad-ca:ERR_TLS_CA_INVALID")
+            && result.body.contains("cert:ERR_NOT_IMPLEMENTED")
+            && result.body.contains("key:ERR_NOT_IMPLEMENTED"),
+        "expected clear sync TLS option rejections, got: {}",
+        result.body
+    );
+}
+
+#[test]
+fn tls_encrypted_reflects_native_handshake_state() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set(true);
+    let result = compio::runtime::Runtime::new().unwrap().block_on(async {
+        let cert = test_cert();
+        let ca_json = serde_json::to_string(&cert.ca_pem).unwrap();
+        let addr = spawn_tls_server(cert, TlsServerMode::DirectEcho).await;
+        run_js_module(
+            tls_module(&format!(
+                r#"
+return new Promise((resolve) => {{
+    const s = tls.connect({{
+        host: "127.0.0.1",
+        port: {},
+        servername: "db.local.test",
+        ca: {},
+    }});
+    const before = s.encrypted;
+    s.on("secureConnect", () => {{
+        const after = s.encrypted;
+        s.destroy();
+        resolve(`before=${{before}};after=${{after}}`);
+    }});
+    s.on("error", (err) => resolve(`error:${{err.code}}:${{err.message}}`));
+    setTimeout(() => resolve(`timeout:before=${{before}}`), 3000);
+}});
+"#,
+                addr.port(),
+                ca_json
+            )),
+            allowlist(addr, 4),
+            Duration::from_secs(5),
+        )
+        .await
+    });
+    assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
+    assert_eq!(result.body, "before=false;after=true");
 }
 
 #[test]
