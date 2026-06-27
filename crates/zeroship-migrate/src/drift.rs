@@ -733,6 +733,11 @@ pub async fn snapshot_schema(
     // diff (#fts-declarative). `pg_get_expr` renders the canonical, re-parse-stable
     // spelling, so a desired snapshot the author builds with the SAME spelling
     // re-diffs to zero.
+    //
+    // INVALID indexes are intentionally absent from the structural snapshot. They
+    // are not usable implementations of a declared index, and treating them as
+    // present would let guarded two-phase `CREATE INDEX CONCURRENTLY` falsely
+    // `SatisfiedNoop` instead of entering recovery and rebuilding.
     let idx_rows = conn
         .query(
             "SELECT c.relname AS table_name, ic.relname AS index_name, x.indisunique, \
@@ -751,7 +756,7 @@ pub async fn snapshot_schema(
              JOIN pg_class ic ON ic.oid = x.indexrelid \
              JOIN pg_am am ON am.oid = ic.relam \
              JOIN pg_namespace n ON n.oid = c.relnamespace \
-             WHERE n.nspname = $1 \
+             WHERE n.nspname = $1 AND x.indisvalid = true \
              ORDER BY c.relname, ic.relname",
             &[&project_schema],
         )
