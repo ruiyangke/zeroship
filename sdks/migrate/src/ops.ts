@@ -36,11 +36,13 @@ import type {
   ColumnRef,
   ConstraintRef,
   CreateRawViewArgs,
+  CreateTablePolicyArgs,
   CreateTriggerArgs,
   CreateTableArgs,
   CreateViewArgs,
   DelArgs,
   DeterminismFinding,
+  DropTablePolicyArgs,
   DropViewArgs,
   Expr,
   ExprBuilder,
@@ -158,6 +160,11 @@ function recorder(): Recorder {
 function push(op: Node): Node {
   recorder().ops.push(op);
   return op;
+}
+
+/** Internal hook used only by the `@zeroship/migrate/pg` subpath. */
+export function __pgPush(op: Node): Node {
+  return push(op);
 }
 
 /** Register a handed-out selector; returns its id (used at terminate). */
@@ -606,6 +613,15 @@ const fn: FnNamespace = {
   abs: (e) => chain({ node: "fnCall", fn: "abs", args: [exprArg(e)] }),
   coalesce: (...args) => chain({ node: "fnCall", fn: "coalesce", args: args.map(exprArg) }),
   nullif: (a, b) => chain({ node: "fnCall", fn: "nullif", args: [exprArg(a), exprArg(b)] }),
+  currentSetting: (name, missingOk) =>
+    chain({
+      node: "fnCall",
+      fn: "currentSetting",
+      args: missingOk === undefined
+        ? [{ node: "literal", value: name }]
+        : [{ node: "literal", value: name }, { node: "literal", value: missingOk }],
+    }),
+  currentUser: () => chain({ node: "fnCall", fn: "currentUser", args: [] }),
   concatWs: (sep, ...parts) => chain({ node: "fnSynth", fn: "concatWs", args: [exprArg(sep), ...parts.map(exprArg)] }),
   case: (branches, elseVal) => {
     if (!Array.isArray(branches)) {
@@ -651,6 +667,11 @@ function resolveExpr(slot: ExprFn | ExprChainType | Node | undefined): Node | un
   if (slot instanceof ExprChainImpl) return slot.__node;
   if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") return slot as Node;
   throw structuredError("OP_INVALID", "expression slot must be a (c) => Expr callback or a built expression");
+}
+
+/** Internal hook used only by the `@zeroship/migrate/pg` subpath. */
+export function __pgResolveExpr(slot: ExprFn | ExprChainType | Expr | undefined): Node | undefined {
+  return resolveExpr(slot as ExprFn | ExprChainType | Node | undefined);
 }
 
 function resolveSet(set: Record<string, ExprFn>): Record<string, Node> {
@@ -1630,6 +1651,49 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
     },
     backfill(args) {
       recordBackfill(name, { ...args, schema: pickSchema(args, dflt) });
+      return handle;
+    },
+
+    // `@zeroship/migrate/pg` — table-scoped privileged primitives.
+    enableRowLevelSecurity() {
+      push(compact({ op: "enableRls", table: name, schema: dflt }));
+      return handle;
+    },
+    forceRowLevelSecurity() {
+      push(compact({ op: "forceRls", table: name, schema: dflt }));
+      return handle;
+    },
+    disableRowLevelSecurity() {
+      push(compact({ op: "disableRls", table: name, schema: dflt }));
+      return handle;
+    },
+    noForceRowLevelSecurity() {
+      push(compact({ op: "noForceRls", table: name, schema: dflt }));
+      return handle;
+    },
+    createPolicy(args: CreateTablePolicyArgs) {
+      requireString(args.name, ".createPolicy({ name })");
+      push(compact({
+        op: "createPolicy",
+        name: args.name,
+        table: name,
+        schema: pickSchema(args, dflt),
+        forCmd: args.for || "all",
+        to: args.to,
+        using: resolveExpr(args.using),
+        withCheck: resolveExpr(args.withCheck),
+      }));
+      return handle;
+    },
+    dropPolicy(args: DropTablePolicyArgs) {
+      requireString(args.name, ".dropPolicy({ name })");
+      push(compact({
+        op: "dropPolicy",
+        name: args.name,
+        table: name,
+        schema: pickSchema(args, dflt),
+        ifExists: args.ifExists,
+      }));
       return handle;
     },
     createTrigger(args) {

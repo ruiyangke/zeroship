@@ -22,6 +22,7 @@ import type {
   MaskKind,
   OrderDir,
   OrderItem,
+  PolicyCmd,
   RaiseLevel,
   SelectAst,
   SelectItem,
@@ -263,6 +264,10 @@ export interface FnNamespace {
   abs(e: unknown): ExprChain;
   coalesce(...args: unknown[]): ExprChain;
   nullif(a: unknown, b: unknown): ExprChain;
+  /** PG vendor scalar for RLS policies: current_setting(name, missing_ok?). */
+  currentSetting(name: string, missingOk?: boolean): ExprChain;
+  /** PG vendor scalar for RLS policies: current_user. */
+  currentUser(): ExprChain;
   /** NULL-skipping safe-join (renders byte-identically on PG/SQLite). */
   concatWs(sep: unknown, ...parts: unknown[]): ExprChain;
   /** The searched `CASE` form. */
@@ -399,6 +404,21 @@ export type CreateTriggerArgs =
   | (CreateTriggerBaseArgs & { body: (b: TriggerBodyBuilder) => TriggerStmt[]; execute?: never });
 
 export interface DropTriggerArgs {
+  name: string;
+  ifExists?: boolean;
+  schema?: string;
+}
+
+export interface CreateTablePolicyArgs {
+  name: string;
+  for?: PolicyCmd;
+  to?: string[];
+  using: ExprFn | ExprChain | Expr;
+  withCheck?: ExprFn | ExprChain | Expr;
+  schema?: string;
+}
+
+export interface DropTablePolicyArgs {
   name: string;
   ifExists?: boolean;
   schema?: string;
@@ -627,6 +647,14 @@ export interface TableHandle {
   update(args: UpdateArgs): TableHandle;
   del(args: DelArgs): TableHandle;
   backfill(args: BackfillArgs): TableHandle;
+
+  // `@zeroship/migrate/pg` — table-scoped privileged primitives.
+  enableRowLevelSecurity(): TableHandle;
+  forceRowLevelSecurity(): TableHandle;
+  disableRowLevelSecurity(): TableHandle;
+  noForceRowLevelSecurity(): TableHandle;
+  createPolicy(args: CreateTablePolicyArgs): TableHandle;
+  dropPolicy(args: DropTablePolicyArgs): TableHandle;
 
   // §A2 — cross-dialect core triggers.
   createTrigger(args: CreateTriggerArgs): TableHandle;

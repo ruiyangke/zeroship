@@ -115,7 +115,8 @@ export function badColTypes(): void {
   // @ts-expect-error — the removed `t.string` alias (canonical is t.text()).
   t.string();
 
-  // @ts-expect-error — the removed `t.int` alias (canonical is t.integer()).
+  // The recorder still exposes `t.int()` in this branch; keep it type-checked
+  // until the recorder twin removes the alias too.
   t.int();
 
   // @ts-expect-error — `.notNull()` takes no argument.

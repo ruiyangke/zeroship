@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { t, table } from "../src/index.js";
+import { pg } from "../src/pg.js";
 import { __begin, __drain } from "../src/ops.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -175,5 +176,89 @@ test("ddl_rename_table fluent-recorded ops equal the committed golden", async ()
     table("orders").rename({ to: "purchases", ifExists: true, schema: "reporting" });
   });
   const g = await golden("ddl_rename_table");
+  assert.deepEqual(normalizeOps(ops), normalizeOps(g.ops));
+});
+
+test("pg_vendor typed pg surface records ops equal the committed golden", async () => {
+  const ops = record(() => {
+    pg.createExtension({ name: "citext", ifNotExists: true });
+    pg.dropExtension({ name: "citext", ifExists: true });
+    pg.createSchema({ name: "zeroship", ifNotExists: true });
+    pg.dropSchema({ name: "zeroship", ifExists: true, cascade: true });
+
+    pg.createRole({
+      name: "zeroship_auth",
+      login: true,
+      password: "zeroship_auth",
+      bypassRls: true,
+      setSearchPath: ["zeroship", "public"],
+      ifNotExists: true,
+    });
+    pg.alterRole({ name: "zeroship_auth", setSearchPath: ["zeroship", "public"] });
+    pg.dropRole({ name: "zeroship_auth", ifExists: true });
+    pg.dropOwnedBy({ roles: ["zeroship_auth"] });
+
+    pg.grant({
+      privileges: ["select", "insert", "update", "delete"],
+      on: { kind: "table", names: ["users"], schema: "zeroship" },
+      to: ["zeroship_auth"],
+    });
+    pg.revoke({
+      privileges: ["update", "delete", "truncate"],
+      on: { kind: "table", names: ["audit_events"], schema: "zeroship" },
+      from: ["public"],
+    });
+
+    const secrets = table("app_secrets", { schema: "zeroship" });
+    secrets.enableRowLevelSecurity();
+    secrets.forceRowLevelSecurity();
+    secrets.createPolicy({
+      name: "tenant_isolation",
+      for: "all",
+      using: (c) =>
+        c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("text")),
+      withCheck: (c) =>
+        c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("text")),
+    });
+    secrets.dropPolicy({ name: "tenant_isolation", ifExists: true });
+    secrets.disableRowLevelSecurity();
+    secrets.noForceRowLevelSecurity();
+
+    pg.createFunction({
+      name: "audit_events_block_tamper",
+      schema: "zeroship",
+      returns: "trigger",
+      language: "plpgsql",
+      replace: true,
+      body: "BEGIN RAISE EXCEPTION 'audit_events is append-only'; END;",
+    });
+
+    const audit = table("audit_events", { schema: "zeroship" });
+    audit.createTrigger({
+      name: "audit_events_block_update",
+      timing: "before",
+      events: ["update", "delete"],
+      forEach: "row",
+      execute: "audit_events_block_tamper",
+      when: (c) => c("app_id").isNotNull(),
+    });
+    audit.createTrigger({
+      name: "audit_events_append_only",
+      timing: "before",
+      events: ["update"],
+      forEach: "row",
+      body: (b) => [b.raise({ level: "abort", message: "append-only", errcode: "P0001" })],
+    });
+    audit.dropTrigger({ name: "audit_events_block_update", ifExists: true });
+
+    pg.dropFunction({
+      name: "audit_events_block_tamper",
+      schema: "zeroship",
+      ifExists: true,
+    });
+
+    pg.sql`SELECT set_config('zeroship.tenant_app', ${"app_demo"}, false)`;
+  });
+  const g = await golden("pg_vendor");
   assert.deepEqual(normalizeOps(ops), normalizeOps(g.ops));
 });
