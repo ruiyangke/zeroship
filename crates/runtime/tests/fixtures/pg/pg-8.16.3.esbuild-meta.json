@@ -1,0 +1,1064 @@
+{
+  "inputs": {
+    "shims/events.js": {
+      "bytes": 86,
+      "imports": [
+        {
+          "path": "node:events",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:events",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "format": "esm"
+    },
+    "node_modules/postgres-array/index.js": {
+      "bytes": 2320,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/pg-types/lib/arrayParser.js": {
+      "bytes": 208,
+      "imports": [
+        {
+          "path": "node_modules/postgres-array/index.js",
+          "kind": "require-call",
+          "original": "postgres-array"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/postgres-date/index.js": {
+      "bytes": 2676,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/xtend/mutable.js": {
+      "bytes": 369,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/postgres-interval/index.js": {
+      "bytes": 3413,
+      "imports": [
+        {
+          "path": "node_modules/xtend/mutable.js",
+          "kind": "require-call",
+          "original": "xtend/mutable"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/postgres-bytea/index.js": {
+      "bytes": 863,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/pg-types/lib/textParsers.js": {
+      "bytes": 5367,
+      "imports": [
+        {
+          "path": "node_modules/postgres-array/index.js",
+          "kind": "require-call",
+          "original": "postgres-array"
+        },
+        {
+          "path": "node_modules/pg-types/lib/arrayParser.js",
+          "kind": "require-call",
+          "original": "./arrayParser"
+        },
+        {
+          "path": "node_modules/postgres-date/index.js",
+          "kind": "require-call",
+          "original": "postgres-date"
+        },
+        {
+          "path": "node_modules/postgres-interval/index.js",
+          "kind": "require-call",
+          "original": "postgres-interval"
+        },
+        {
+          "path": "node_modules/postgres-bytea/index.js",
+          "kind": "require-call",
+          "original": "postgres-bytea"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pg-int8/index.js": {
+      "bytes": 1572,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/pg-types/lib/binaryParsers.js": {
+      "bytes": 6063,
+      "imports": [
+        {
+          "path": "node_modules/pg-int8/index.js",
+          "kind": "require-call",
+          "original": "pg-int8"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pg-types/lib/builtins.js": {
+      "bytes": 1564,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/pg-types/index.js": {
+      "bytes": 1214,
+      "imports": [
+        {
+          "path": "node_modules/pg-types/lib/textParsers.js",
+          "kind": "require-call",
+          "original": "./lib/textParsers"
+        },
+        {
+          "path": "node_modules/pg-types/lib/binaryParsers.js",
+          "kind": "require-call",
+          "original": "./lib/binaryParsers"
+        },
+        {
+          "path": "node_modules/pg-types/lib/arrayParser.js",
+          "kind": "require-call",
+          "original": "./lib/arrayParser"
+        },
+        {
+          "path": "node_modules/pg-types/lib/builtins.js",
+          "kind": "require-call",
+          "original": "./lib/builtins"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pg/lib/defaults.js": {
+      "bytes": 2426,
+      "imports": [
+        {
+          "path": "node_modules/pg-types/index.js",
+          "kind": "require-call",
+          "original": "pg-types"
+        }
+      ],
+      "format": "cjs"
+    },
+    "shims/util.js": {
+      "bytes": 78,
+      "imports": [
+        {
+          "path": "node:util",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:util",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "format": "esm"
+    },
+    "node_modules/pg/lib/utils.js": {
+      "bytes": 5642,
+      "imports": [
+        {
+          "path": "node_modules/pg/lib/defaults.js",
+          "kind": "require-call",
+          "original": "./defaults"
+        },
+        {
+          "path": "shims/util.js",
+          "kind": "require-call",
+          "original": "util"
+        }
+      ],
+      "format": "cjs"
+    },
+    "shims/crypto.js": {
+      "bytes": 86,
+      "imports": [
+        {
+          "path": "node:crypto",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:crypto",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "format": "esm"
+    },
+    "node_modules/pg/lib/crypto/utils-legacy.js": {
+      "bytes": 1215,
+      "imports": [
+        {
+          "path": "shims/crypto.js",
+          "kind": "require-call",
+          "original": "crypto"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pg/lib/crypto/utils-webcrypto.js": {
+      "bytes": 2649,
+      "imports": [
+        {
+          "path": "shims/crypto.js",
+          "kind": "require-call",
+          "original": "crypto"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pg/lib/crypto/utils.js": {
+      "bytes": 341,
+      "imports": [
+        {
+          "path": "node_modules/pg/lib/crypto/utils-legacy.js",
+          "kind": "require-call",
+          "original": "./utils-legacy"
+        },
+        {
+          "path": "node_modules/pg/lib/crypto/utils-webcrypto.js",
+          "kind": "require-call",
+          "original": "./utils-webcrypto"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pg/lib/crypto/cert-signatures.js": {
+      "bytes": 4096,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/pg/lib/crypto/sasl.js": {
+      "bytes": 7423,
+      "imports": [
+        {
+          "path": "node_modules/pg/lib/crypto/utils.js",
+          "kind": "require-call",
+          "original": "./utils"
+        },
+        {
+          "path": "node_modules/pg/lib/crypto/cert-signatures.js",
+          "kind": "require-call",
+          "original": "./cert-signatures"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pg/lib/type-overrides.js": {
+      "bytes": 770,
+      "imports": [
+        {
+          "path": "node_modules/pg-types/index.js",
+          "kind": "require-call",
+          "original": "pg-types"
+        }
+      ],
+      "format": "cjs"
+    },
+    "shims/dns.js": {
+      "bytes": 150,
+      "imports": [],
+      "format": "esm"
+    },
+    "shims/fs.js": {
+      "bytes": 314,
+      "imports": [],
+      "format": "esm"
+    },
+    "node_modules/pg-connection-string/index.js": {
+      "bytes": 7467,
+      "imports": [
+        {
+          "path": "shims/fs.js",
+          "kind": "require-call",
+          "original": "fs"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pg/lib/connection-parameters.js": {
+      "bytes": 5248,
+      "imports": [
+        {
+          "path": "shims/dns.js",
+          "kind": "require-call",
+          "original": "dns"
+        },
+        {
+          "path": "node_modules/pg/lib/defaults.js",
+          "kind": "require-call",
+          "original": "./defaults"
+        },
+        {
+          "path": "node_modules/pg-connection-string/index.js",
+          "kind": "require-call",
+          "original": "pg-connection-string"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pg/lib/result.js": {
+      "bytes": 2812,
+      "imports": [
+        {
+          "path": "node_modules/pg-types/index.js",
+          "kind": "require-call",
+          "original": "pg-types"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pg/lib/query.js": {
+      "bytes": 7314,
+      "imports": [
+        {
+          "path": "shims/events.js",
+          "kind": "require-call",
+          "original": "events"
+        },
+        {
+          "path": "node_modules/pg/lib/result.js",
+          "kind": "require-call",
+          "original": "./result"
+        },
+        {
+          "path": "node_modules/pg/lib/utils.js",
+          "kind": "require-call",
+          "original": "./utils"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pg-protocol/dist/messages.js": {
+      "bytes": 4973,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/pg-protocol/dist/buffer-writer.js": {
+      "bytes": 3814,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/pg-protocol/dist/serializer.js": {
+      "bytes": 7059,
+      "imports": [
+        {
+          "path": "node_modules/pg-protocol/dist/buffer-writer.js",
+          "kind": "require-call",
+          "original": "./buffer-writer"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pg-protocol/dist/buffer-reader.js": {
+      "bytes": 1600,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/pg-protocol/dist/parser.js": {
+      "bytes": 13445,
+      "imports": [
+        {
+          "path": "node_modules/pg-protocol/dist/messages.js",
+          "kind": "require-call",
+          "original": "./messages"
+        },
+        {
+          "path": "node_modules/pg-protocol/dist/buffer-reader.js",
+          "kind": "require-call",
+          "original": "./buffer-reader"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pg-protocol/dist/index.js": {
+      "bytes": 775,
+      "imports": [
+        {
+          "path": "node_modules/pg-protocol/dist/messages.js",
+          "kind": "require-call",
+          "original": "./messages"
+        },
+        {
+          "path": "node_modules/pg-protocol/dist/serializer.js",
+          "kind": "require-call",
+          "original": "./serializer"
+        },
+        {
+          "path": "node_modules/pg-protocol/dist/parser.js",
+          "kind": "require-call",
+          "original": "./parser"
+        }
+      ],
+      "format": "cjs"
+    },
+    "shims/net.js": {
+      "bytes": 74,
+      "imports": [
+        {
+          "path": "node:net",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:net",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "format": "esm"
+    },
+    "shims/tls.js": {
+      "bytes": 74,
+      "imports": [
+        {
+          "path": "node:tls",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:tls",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "format": "esm"
+    },
+    "node_modules/pg-cloudflare/dist/empty.js": {
+      "bytes": 258,
+      "imports": [],
+      "format": "cjs"
+    },
+    "node_modules/pg/lib/stream.js": {
+      "bytes": 2132,
+      "imports": [
+        {
+          "path": "shims/net.js",
+          "kind": "require-call",
+          "original": "net"
+        },
+        {
+          "path": "shims/tls.js",
+          "kind": "require-call",
+          "original": "tls"
+        },
+        {
+          "path": "node_modules/pg-cloudflare/dist/empty.js",
+          "kind": "require-call",
+          "original": "pg-cloudflare"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pg/lib/connection.js": {
+      "bytes": 5175,
+      "imports": [
+        {
+          "path": "shims/events.js",
+          "kind": "require-call",
+          "original": "events"
+        },
+        {
+          "path": "node_modules/pg-protocol/dist/index.js",
+          "kind": "require-call",
+          "original": "pg-protocol"
+        },
+        {
+          "path": "node_modules/pg/lib/stream.js",
+          "kind": "require-call",
+          "original": "./stream"
+        },
+        {
+          "path": "shims/net.js",
+          "kind": "require-call",
+          "original": "net"
+        }
+      ],
+      "format": "cjs"
+    },
+    "shims/path.js": {
+      "bytes": 78,
+      "imports": [
+        {
+          "path": "node:path",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:path",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "format": "esm"
+    },
+    "shims/stream.js": {
+      "bytes": 315,
+      "imports": [
+        {
+          "path": "node:events",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "format": "esm"
+    },
+    "shims/string_decoder.js": {
+      "bytes": 260,
+      "imports": [],
+      "format": "esm"
+    },
+    "node_modules/split2/index.js": {
+      "bytes": 3764,
+      "imports": [
+        {
+          "path": "shims/stream.js",
+          "kind": "require-call",
+          "original": "stream"
+        },
+        {
+          "path": "shims/string_decoder.js",
+          "kind": "require-call",
+          "original": "string_decoder"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pgpass/lib/helper.js": {
+      "bytes": 5488,
+      "imports": [
+        {
+          "path": "shims/path.js",
+          "kind": "require-call",
+          "original": "path"
+        },
+        {
+          "path": "shims/stream.js",
+          "kind": "require-call",
+          "original": "stream"
+        },
+        {
+          "path": "node_modules/split2/index.js",
+          "kind": "require-call",
+          "original": "split2"
+        },
+        {
+          "path": "shims/util.js",
+          "kind": "require-call",
+          "original": "util"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pgpass/lib/index.js": {
+      "bytes": 467,
+      "imports": [
+        {
+          "path": "shims/path.js",
+          "kind": "require-call",
+          "original": "path"
+        },
+        {
+          "path": "shims/fs.js",
+          "kind": "require-call",
+          "original": "fs"
+        },
+        {
+          "path": "node_modules/pgpass/lib/helper.js",
+          "kind": "require-call",
+          "original": "./helper.js"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pg/lib/client.js": {
+      "bytes": 18759,
+      "imports": [
+        {
+          "path": "shims/events.js",
+          "kind": "require-call",
+          "original": "events"
+        },
+        {
+          "path": "node_modules/pg/lib/utils.js",
+          "kind": "require-call",
+          "original": "./utils"
+        },
+        {
+          "path": "node_modules/pg/lib/crypto/sasl.js",
+          "kind": "require-call",
+          "original": "./crypto/sasl"
+        },
+        {
+          "path": "node_modules/pg/lib/type-overrides.js",
+          "kind": "require-call",
+          "original": "./type-overrides"
+        },
+        {
+          "path": "node_modules/pg/lib/connection-parameters.js",
+          "kind": "require-call",
+          "original": "./connection-parameters"
+        },
+        {
+          "path": "node_modules/pg/lib/query.js",
+          "kind": "require-call",
+          "original": "./query"
+        },
+        {
+          "path": "node_modules/pg/lib/defaults.js",
+          "kind": "require-call",
+          "original": "./defaults"
+        },
+        {
+          "path": "node_modules/pg/lib/connection.js",
+          "kind": "require-call",
+          "original": "./connection"
+        },
+        {
+          "path": "node_modules/pg/lib/crypto/utils.js",
+          "kind": "require-call",
+          "original": "./crypto/utils"
+        },
+        {
+          "path": "node_modules/pgpass/lib/index.js",
+          "kind": "require-call",
+          "original": "pgpass"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pg-pool/index.js": {
+      "bytes": 14460,
+      "imports": [
+        {
+          "path": "shims/events.js",
+          "kind": "require-call",
+          "original": "events"
+        },
+        {
+          "path": "node_modules/pg/lib/index.js",
+          "kind": "require-call",
+          "original": "pg"
+        }
+      ],
+      "format": "cjs"
+    },
+    "shims/pg-native.js": {
+      "bytes": 99,
+      "imports": []
+    },
+    "node_modules/pg/lib/native/query.js": {
+      "bytes": 4757,
+      "imports": [
+        {
+          "path": "shims/events.js",
+          "kind": "require-call",
+          "original": "events"
+        },
+        {
+          "path": "shims/util.js",
+          "kind": "require-call",
+          "original": "util"
+        },
+        {
+          "path": "node_modules/pg/lib/utils.js",
+          "kind": "require-call",
+          "original": "../utils"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pg/lib/native/client.js": {
+      "bytes": 8066,
+      "imports": [
+        {
+          "path": "shims/pg-native.js",
+          "kind": "require-call",
+          "original": "pg-native"
+        },
+        {
+          "path": "node_modules/pg/lib/type-overrides.js",
+          "kind": "require-call",
+          "original": "../type-overrides"
+        },
+        {
+          "path": "shims/events.js",
+          "kind": "require-call",
+          "original": "events"
+        },
+        {
+          "path": "shims/util.js",
+          "kind": "require-call",
+          "original": "util"
+        },
+        {
+          "path": "node_modules/pg/lib/connection-parameters.js",
+          "kind": "require-call",
+          "original": "../connection-parameters"
+        },
+        {
+          "path": "node_modules/pg/lib/native/query.js",
+          "kind": "require-call",
+          "original": "./query"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pg/lib/native/index.js": {
+      "bytes": 50,
+      "imports": [
+        {
+          "path": "node_modules/pg/lib/native/client.js",
+          "kind": "require-call",
+          "original": "./client"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pg/lib/index.js": {
+      "bytes": 1728,
+      "imports": [
+        {
+          "path": "node_modules/pg/lib/client.js",
+          "kind": "require-call",
+          "original": "./client"
+        },
+        {
+          "path": "node_modules/pg/lib/defaults.js",
+          "kind": "require-call",
+          "original": "./defaults"
+        },
+        {
+          "path": "node_modules/pg/lib/connection.js",
+          "kind": "require-call",
+          "original": "./connection"
+        },
+        {
+          "path": "node_modules/pg/lib/result.js",
+          "kind": "require-call",
+          "original": "./result"
+        },
+        {
+          "path": "node_modules/pg/lib/utils.js",
+          "kind": "require-call",
+          "original": "./utils"
+        },
+        {
+          "path": "node_modules/pg-pool/index.js",
+          "kind": "require-call",
+          "original": "pg-pool"
+        },
+        {
+          "path": "node_modules/pg/lib/type-overrides.js",
+          "kind": "require-call",
+          "original": "./type-overrides"
+        },
+        {
+          "path": "node_modules/pg-protocol/dist/index.js",
+          "kind": "require-call",
+          "original": "pg-protocol"
+        },
+        {
+          "path": "node_modules/pg/lib/utils.js",
+          "kind": "require-call",
+          "original": "./utils"
+        },
+        {
+          "path": "node_modules/pg-types/index.js",
+          "kind": "require-call",
+          "original": "pg-types"
+        },
+        {
+          "path": "node_modules/pg/lib/native/index.js",
+          "kind": "require-call",
+          "original": "./native"
+        },
+        {
+          "path": "node_modules/pg/lib/native/index.js",
+          "kind": "require-call",
+          "original": "./native"
+        }
+      ],
+      "format": "cjs"
+    },
+    "node_modules/pg/esm/index.mjs": {
+      "bytes": 579,
+      "imports": [
+        {
+          "path": "node_modules/pg/lib/index.js",
+          "kind": "import-statement",
+          "original": "../lib/index.js"
+        }
+      ],
+      "format": "esm"
+    },
+    "pg-entry.mjs": {
+      "bytes": 65,
+      "imports": [
+        {
+          "path": "node_modules/pg/esm/index.mjs",
+          "kind": "import-statement",
+          "original": "pg"
+        },
+        {
+          "path": "node_modules/pg/esm/index.mjs",
+          "kind": "import-statement",
+          "original": "pg"
+        }
+      ],
+      "format": "esm"
+    }
+  },
+  "outputs": {
+    "pg.bundle.mjs": {
+      "imports": [
+        {
+          "path": "node:events",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:events",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:util",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:util",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:crypto",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:crypto",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:net",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:net",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:tls",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:tls",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:path",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:path",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:events",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "exports": [
+        "Client",
+        "Pool",
+        "default"
+      ],
+      "entryPoint": "pg-entry.mjs",
+      "inputs": {
+        "shims/events.js": {
+          "bytesInOutput": 328
+        },
+        "node_modules/postgres-array/index.js": {
+          "bytesInOutput": 2816
+        },
+        "node_modules/pg-types/lib/arrayParser.js": {
+          "bytesInOutput": 356
+        },
+        "node_modules/postgres-date/index.js": {
+          "bytesInOutput": 2638
+        },
+        "node_modules/xtend/mutable.js": {
+          "bytesInOutput": 479
+        },
+        "node_modules/postgres-interval/index.js": {
+          "bytesInOutput": 3291
+        },
+        "node_modules/postgres-bytea/index.js": {
+          "bytesInOutput": 1063
+        },
+        "node_modules/pg-types/lib/textParsers.js": {
+          "bytesInOutput": 5821
+        },
+        "node_modules/pg-int8/index.js": {
+          "bytesInOutput": 1982
+        },
+        "node_modules/pg-types/lib/binaryParsers.js": {
+          "bytesInOutput": 6468
+        },
+        "node_modules/pg-types/lib/builtins.js": {
+          "bytesInOutput": 1336
+        },
+        "node_modules/pg-types/index.js": {
+          "bytesInOutput": 1152
+        },
+        "node_modules/pg/lib/defaults.js": {
+          "bytesInOutput": 2616
+        },
+        "shims/util.js": {
+          "bytesInOutput": 300
+        },
+        "node_modules/pg/lib/utils.js": {
+          "bytesInOutput": 5460
+        },
+        "shims/crypto.js": {
+          "bytesInOutput": 328
+        },
+        "node_modules/pg/lib/crypto/utils-legacy.js": {
+          "bytesInOutput": 1225
+        },
+        "node_modules/pg/lib/crypto/utils-webcrypto.js": {
+          "bytesInOutput": 2023
+        },
+        "node_modules/pg/lib/crypto/utils.js": {
+          "bytesInOutput": 385
+        },
+        "node_modules/pg/lib/crypto/cert-signatures.js": {
+          "bytesInOutput": 4302
+        },
+        "node_modules/pg/lib/crypto/sasl.js": {
+          "bytesInOutput": 7532
+        },
+        "node_modules/pg/lib/type-overrides.js": {
+          "bytesInOutput": 1009
+        },
+        "shims/dns.js": {
+          "bytesInOutput": 320
+        },
+        "shims/fs.js": {
+          "bytesInOutput": 524
+        },
+        "node_modules/pg-connection-string/index.js": {
+          "bytesInOutput": 6865
+        },
+        "node_modules/pg/lib/connection-parameters.js": {
+          "bytesInOutput": 5312
+        },
+        "node_modules/pg/lib/result.js": {
+          "bytesInOutput": 2858
+        },
+        "node_modules/pg/lib/query.js": {
+          "bytesInOutput": 6299
+        },
+        "node_modules/pg-protocol/dist/messages.js": {
+          "bytesInOutput": 5462
+        },
+        "node_modules/pg-protocol/dist/buffer-writer.js": {
+          "bytesInOutput": 3572
+        },
+        "node_modules/pg-protocol/dist/serializer.js": {
+          "bytesInOutput": 6667
+        },
+        "node_modules/pg-protocol/dist/buffer-reader.js": {
+          "bytesInOutput": 1651
+        },
+        "node_modules/pg-protocol/dist/parser.js": {
+          "bytesInOutput": 11188
+        },
+        "node_modules/pg-protocol/dist/index.js": {
+          "bytesInOutput": 889
+        },
+        "shims/net.js": {
+          "bytesInOutput": 286
+        },
+        "shims/tls.js": {
+          "bytesInOutput": 286
+        },
+        "node_modules/pg-cloudflare/dist/empty.js": {
+          "bytesInOutput": 208
+        },
+        "node_modules/pg/lib/stream.js": {
+          "bytesInOutput": 2003
+        },
+        "node_modules/pg/lib/connection.js": {
+          "bytesInOutput": 5727
+        },
+        "shims/path.js": {
+          "bytesInOutput": 300
+        },
+        "shims/stream.js": {
+          "bytesInOutput": 640
+        },
+        "shims/string_decoder.js": {
+          "bytesInOutput": 599
+        },
+        "node_modules/split2/index.js": {
+          "bytesInOutput": 3040
+        },
+        "node_modules/pgpass/lib/helper.js": {
+          "bytesInOutput": 5384
+        },
+        "node_modules/pgpass/lib/index.js": {
+          "bytesInOutput": 629
+        },
+        "node_modules/pg/lib/client.js": {
+          "bytesInOutput": 19052
+        },
+        "node_modules/pg-pool/index.js": {
+          "bytesInOutput": 14980
+        },
+        "shims/pg-native.js": {
+          "bytesInOutput": 181
+        },
+        "node_modules/pg/lib/native/query.js": {
+          "bytesInOutput": 4895
+        },
+        "node_modules/pg/lib/native/client.js": {
+          "bytesInOutput": 7832
+        },
+        "node_modules/pg/lib/native/index.js": {
+          "bytesInOutput": 159
+        },
+        "node_modules/pg/lib/index.js": {
+          "bytesInOutput": 1921
+        },
+        "node_modules/pg/esm/index.mjs": {
+          "bytesInOutput": 589
+        },
+        "pg-entry.mjs": {
+          "bytesInOutput": 0
+        }
+      },
+      "bytes": 177014
+    }
+  }
+}

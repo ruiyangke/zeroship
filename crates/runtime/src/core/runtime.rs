@@ -219,6 +219,24 @@ impl InnerProbe {
     }
 }
 
+/// RAII guard for an explicit isolate lease.
+///
+/// While at least one lease is alive, worker LRU eviction must treat the
+/// runtime as un-evictable. The guard holds a `Runtime` clone so the isolate
+/// itself also remains alive for the trusted caller holding the lease.
+#[must_use = "dropping the guard releases the isolate lease"]
+pub struct RuntimeLease {
+    runtime: Runtime,
+}
+
+impl Drop for RuntimeLease {
+    fn drop(&mut self) {
+        let state = self.runtime.state();
+        let mut s = state.borrow_mut();
+        s.isolate_lease_count = s.isolate_lease_count.saturating_sub(1);
+    }
+}
+
 impl Runtime {
     /// Start building a new `Runtime`. See [`RuntimeBuilder`].
     pub fn builder() -> RuntimeBuilder {
@@ -403,6 +421,49 @@ impl Runtime {
     /// before/after — is flaky on a small heap).
     pub fn idle_gc_fire_count(&self) -> u64 {
         self.inner.borrow().idle_gc_fire_count.get()
+    }
+
+    /// Hold an explicit lease that makes this isolate un-evictable by the
+    /// worker cache until the returned guard is dropped.
+    pub fn lease_isolate(&self) -> RuntimeLease {
+        {
+            let state = self.state();
+            let mut s = state.borrow_mut();
+            s.isolate_lease_count = s.isolate_lease_count.saturating_add(1);
+        }
+        RuntimeLease {
+            runtime: self.clone(),
+        }
+    }
+
+    /// Number of active isolate leases.
+    pub fn isolate_lease_count(&self) -> u32 {
+        self.state().borrow().isolate_lease_count
+    }
+
+    /// True when this runtime has at least one active isolate lease.
+    pub fn is_isolate_leased(&self) -> bool {
+        self.isolate_lease_count() > 0
+    }
+
+    /// Number of open native `node:net` sockets counted against this runtime.
+    pub fn active_native_socket_count(&self) -> u32 {
+        self.state().borrow().active_native_sockets
+    }
+
+    /// Last successful native socket activity timestamp, if any.
+    pub fn last_native_socket_activity(&self) -> Option<Instant> {
+        self.state().borrow().native_socket_last_activity
+    }
+
+    /// Gracefully close every native `node:net` socket before isolate eviction.
+    ///
+    /// This drives the same socket destroy path as JS `socket.destroy()`: the
+    /// driver observes the destroyed flag and shuts down the underlying stream
+    /// instead of having the runtime drop abruptly under an open DB socket.
+    pub fn close_native_sockets_for_eviction(&self) -> usize {
+        let state = self.state();
+        crate::node::net::state::destroy_all_sockets(&state)
     }
 }
 

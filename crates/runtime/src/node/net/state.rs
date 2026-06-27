@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::rc::Rc;
 use std::task::Waker;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use compio::buf::{IoBuf, IoBufMut};
 use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -177,6 +177,10 @@ fn push_event(state: &SharedState, socket_id: u32, event: SocketEvent) {
         Box::pin(async move { OpResult::SocketEvent { socket_id: id } });
     state.borrow_mut().spawned_ops.push(fut);
     state.borrow().notify_pump();
+}
+
+fn mark_socket_activity(state: &SharedState) {
+    state.borrow_mut().native_socket_last_activity = Some(Instant::now());
 }
 
 fn push_error_and_close(state: &SharedState, socket_id: u32, message: String, code: &str) {
@@ -427,6 +431,7 @@ pub fn spawn_connect_task(state: SharedState, socket_id: u32, host: String, port
             s.connected = true;
         }
 
+        mark_socket_activity(&state);
         push_event(&state, socket_id, SocketEvent::Connect);
         push_event(&state, socket_id, SocketEvent::Ready);
         run_socket_driver(state, socket_id, SocketStream::Plain(tcp), rx).await;
@@ -503,6 +508,7 @@ pub fn spawn_tls_connect_task(
             s.encrypted = true;
         }
 
+        mark_socket_activity(&state);
         push_event(&state, socket_id, SocketEvent::Connect);
         push_event(&state, socket_id, SocketEvent::Ready);
         push_event(
@@ -739,6 +745,7 @@ async fn run_socket_driver(
                 if let Some(socket) = lookup_native_socket_state(&state, socket_id) {
                     socket.borrow_mut().bytes_read += n as u64;
                 }
+                mark_socket_activity(&state);
                 push_event(&state, socket_id, SocketEvent::Data(data));
             }
         }
@@ -786,6 +793,7 @@ async fn handle_driver_command(
                 let mut s = socket.borrow_mut();
                 s.bytes_written = s.bytes_written.saturating_add(n);
             }
+            mark_socket_activity(state);
             decrement_buffered_amount(state, socket_id, n);
             true
         }
@@ -997,4 +1005,13 @@ pub fn release_socket_slot(state: &SharedState, socket_id: u32) {
         }
         crate::transport::net_policy::release_global_socket();
     }
+}
+
+pub fn destroy_all_sockets(state: &SharedState) -> usize {
+    let ids: Vec<u32> = state.borrow().native_sockets.keys().copied().collect();
+    let count = ids.len();
+    for socket_id in ids {
+        destroy_socket(state, socket_id);
+    }
+    count
 }

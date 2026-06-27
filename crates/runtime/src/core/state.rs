@@ -9,7 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::Waker;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // TimerCallback (absorbed from v8/timers.rs)
@@ -631,8 +631,17 @@ pub struct RuntimeState {
     /// Per-runtime concurrent raw TCP sockets that have passed the
     /// connect-time policy check and have not yet closed.
     pub active_native_sockets: u32,
+    /// Most recent successful read/write/connect activity on any open
+    /// native `node:net` socket. Worker LRU eviction folds this into the
+    /// isolate's `last_used` timestamp so an active DB connection does not
+    /// look idle just because no HTTP request is currently entering V8.
+    pub native_socket_last_activity: Option<Instant>,
     /// Per-runtime accepted outbound bytes for Allowlist egress ceiling.
     pub native_net_egress_bytes: u64,
+
+    /// Explicit isolate leases held by trusted callers such as the future
+    /// migrate executor. A leased runtime is un-evictable by the worker LRU.
+    pub isolate_lease_count: u32,
 
     /// Per-isolate time origin for `performance.now()`. Set once at Runtime
     /// creation. Prevents cross-app timing side-channels.
@@ -719,7 +728,9 @@ impl RuntimeState {
             next_native_socket_id: 1,
             native_socket_wrappers: HashMap::new(),
             active_native_sockets: 0,
+            native_socket_last_activity: None,
             native_net_egress_bytes: 0,
+            isolate_lease_count: 0,
 
             perf_epoch: std::time::Instant::now(),
             pump_notify_tx: None,

@@ -260,9 +260,16 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8], app_limits: AppRuntimeLimits)
         let mut cache = c.borrow_mut();
         let cache = cache.as_mut().unwrap();
 
-        // Evict LRU if at capacity
+        // Evict LRU if at capacity.
         if cache.isolates.len() >= cache.max_size && !cache.isolates.contains_key(&app_id) {
-            evict_lru(cache);
+            if !evict_lru(cache) {
+                tracing::warn!(
+                    app_id = %app_id,
+                    max_size = cache.max_size,
+                    "worker: isolate cache full and every isolate is leased; load deferred"
+                );
+                return false;
+            }
         }
 
         // Remove old runtime if exists
@@ -388,8 +395,25 @@ pub fn remove_loaded_meta(app_id: &Uuid) {
     });
 }
 
-fn evict_lru(cache: &mut AppCache) {
-    if let Some((&oldest_id, _)) = cache.isolates.iter().min_by_key(|(_, e)| e.last_used) {
+fn evict_lru(cache: &mut AppCache) -> bool {
+    refresh_socket_activity(cache);
+
+    let Some(oldest_id) = cache
+        .isolates
+        .iter()
+        .filter(|(_, entry)| !entry.runtime.is_isolate_leased())
+        .min_by_key(|(_, entry)| {
+            (
+                entry.runtime.active_native_socket_count() > 0,
+                entry.last_used,
+            )
+        })
+        .map(|(id, _)| *id)
+    else {
+        return false;
+    };
+
+    {
         tracing::info!(app_id = %oldest_id, "worker: evicting LRU isolate");
         crate::metrics::inc(&crate::metrics::LRU_EVICTIONS_TOTAL);
 
@@ -401,6 +425,16 @@ fn evict_lru(cache: &mut AppCache) {
         // abort fan-out; a drain timer and explicit disposed state can
         // be added later if eviction needs to become more graceful.
         if let Some(entry) = cache.isolates.get(&oldest_id) {
+            let active_sockets = entry.runtime.active_native_socket_count();
+            if active_sockets > 0 {
+                let closed = entry.runtime.close_native_sockets_for_eviction();
+                tracing::info!(
+                    app_id = %oldest_id,
+                    active_sockets,
+                    closed,
+                    "worker: closing native sockets before isolate eviction"
+                );
+            }
             entry.runtime.with_scope(|scope| {
                 zeroship_runtime::rpc::abort::entered_for_eviction(scope, oldest_id);
             });
@@ -413,13 +447,43 @@ fn evict_lru(cache: &mut AppCache) {
         // GCs SharedEnvs against the known-app set every cycle, so an
         // app deleted from control plane gets cleaned up there.
     }
+    true
+}
+
+fn refresh_socket_activity(cache: &mut AppCache) {
+    for entry in cache.isolates.values_mut() {
+        if let Some(activity) = entry.runtime.last_native_socket_activity() {
+            if activity > entry.last_used {
+                entry.last_used = activity;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
     use super::*;
+
+    fn test_runtime() -> Runtime {
+        let runtime = Runtime::builder().build();
+        runtime.exit_isolate();
+        runtime
+    }
+
+    fn test_net_runtime() -> Runtime {
+        let runtime = Runtime::builder()
+            .net_policy(zeroship_runtime::NetPolicy::Trusted { max_sockets: 8 })
+            .build();
+        runtime.exit_isolate();
+        runtime
+    }
+
+    fn entry(runtime: Runtime, last_used: Instant) -> IsolateEntry {
+        IsolateEntry { runtime, last_used }
+    }
 
     /// Slice 1a regression guard: every Runtime the worker builds must
     /// carry the `auth` namespace so `env.auth.getUser()` resolves for
@@ -519,5 +583,127 @@ mod tests {
         })
         .join()
         .expect("degrade guard thread panicked");
+    }
+
+    #[test]
+    fn evict_lru_prefers_idle_socketless_isolate_over_active_socketed_isolate() {
+        std::thread::spawn(|| {
+            let now = Instant::now();
+            let socketed_id = Uuid::new_v4();
+            let socketless_id = Uuid::new_v4();
+            let socketed = test_runtime();
+            {
+                let state = socketed.state();
+                let mut s = state.borrow_mut();
+                s.active_native_sockets = 1;
+                s.native_socket_last_activity = Some(now);
+            }
+            let socketless = test_runtime();
+            let mut cache = AppCache {
+                isolates: HashMap::new(),
+                max_size: 2,
+            };
+            cache.isolates.insert(
+                socketed_id,
+                entry(socketed, now - Duration::from_secs(600)),
+            );
+            cache.isolates.insert(
+                socketless_id,
+                entry(socketless, now - Duration::from_secs(1)),
+            );
+
+            assert!(evict_lru(&mut cache));
+            assert!(
+                cache.isolates.contains_key(&socketed_id),
+                "socketed, recently-active isolate must remain cached"
+            );
+            assert!(
+                !cache.isolates.contains_key(&socketless_id),
+                "socketless isolate should be the preferred LRU victim"
+            );
+            assert_eq!(
+                cache.isolates[&socketed_id].last_used, now,
+                "socket activity should refresh the worker LRU timestamp"
+            );
+        })
+        .join()
+        .expect("socket-aware eviction test thread panicked");
+    }
+
+    #[test]
+    fn evict_lru_never_evicts_leased_isolate() {
+        std::thread::spawn(|| {
+            let now = Instant::now();
+            let leased_id = Uuid::new_v4();
+            let victim_id = Uuid::new_v4();
+            let leased = test_runtime();
+            let lease = leased.lease_isolate();
+            assert_eq!(leased.isolate_lease_count(), 1);
+            let victim = test_runtime();
+            let mut cache = AppCache {
+                isolates: HashMap::new(),
+                max_size: 2,
+            };
+            cache.isolates.insert(
+                leased_id,
+                entry(leased.clone(), now - Duration::from_secs(600)),
+            );
+            cache.isolates.insert(victim_id, entry(victim, now));
+
+            assert!(evict_lru(&mut cache));
+            assert!(
+                cache.isolates.contains_key(&leased_id),
+                "leased isolate must be un-evictable while the lease is held"
+            );
+            assert!(
+                !cache.isolates.contains_key(&victim_id),
+                "non-leased isolate should be evicted instead"
+            );
+            drop(lease);
+            assert_eq!(leased.isolate_lease_count(), 0);
+        })
+        .join()
+        .expect("lease eviction test thread panicked");
+    }
+
+    #[test]
+    fn evict_lru_closes_socketed_isolate_before_removal() {
+        std::thread::spawn(|| {
+            let now = Instant::now();
+            let app_id = Uuid::new_v4();
+            let runtime = test_net_runtime();
+            let state = runtime.state();
+            let socket_id = zeroship_runtime::node::net::state::alloc_native_socket_id(&state);
+            zeroship_runtime::node::net::state::reserve_socket_slot(&state, socket_id)
+                .expect("reserve test socket slot");
+            assert_eq!(runtime.active_native_socket_count(), 1);
+
+            let mut cache = AppCache {
+                isolates: HashMap::new(),
+                max_size: 1,
+            };
+            cache
+                .isolates
+                .insert(app_id, entry(runtime.clone(), now - Duration::from_secs(60)));
+
+            assert!(evict_lru(&mut cache));
+            assert!(!cache.isolates.contains_key(&app_id));
+            assert_eq!(
+                runtime.active_native_socket_count(),
+                0,
+                "socket slot should be released before isolate removal"
+            );
+            let socket =
+                zeroship_runtime::node::net::state::lookup_native_socket_state(&state, socket_id)
+                    .expect("socket state remains inspectable through runtime clone");
+            let socket = socket.borrow();
+            assert!(socket.destroyed, "eviction must destroy open sockets");
+            assert!(
+                socket.close_emitted,
+                "eviction should enqueue the close path before dropping the runtime"
+            );
+        })
+        .join()
+        .expect("socket close eviction test thread panicked");
     }
 }

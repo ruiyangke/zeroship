@@ -44,6 +44,12 @@
       this.destroyed = adoptedFrom ? Boolean(adoptedFrom.destroyed) : false;
       this.pending = adoptedFrom ? Boolean(adoptedFrom.pending) : true;
       this.readyState = adoptedFrom ? String(adoptedFrom.readyState || "open") : "closed";
+      this.readable = !this.destroyed;
+      this.writable = !this.destroyed;
+      this.writableEnded = false;
+      this.writableDestroyed = this.destroyed;
+      this.readableEnded = false;
+      this.readableDestroyed = this.destroyed;
       this._timeoutId = null;
       this._encoding = null;
       this._encryptedOverride = undefined;
@@ -64,12 +70,18 @@
         this._flushPending();
       });
       this.on("end", () => {
+        this.readable = false;
+        this.readableEnded = true;
         if (!this.destroyed) this.readyState = "readOnly";
       });
       this.on("close", () => {
         this.connecting = false;
         this.pending = false;
         this.destroyed = true;
+        this.readable = false;
+        this.writable = false;
+        this.readableDestroyed = true;
+        this.writableDestroyed = true;
         this.readyState = "closed";
         if (this._timeoutId !== null) {
           clearTimeout(this._timeoutId);
@@ -84,6 +96,10 @@
       this.connecting = true;
       this.pending = true;
       this.destroyed = false;
+      this.readable = true;
+      this.writable = true;
+      this.readableDestroyed = false;
+      this.writableDestroyed = false;
       this.readyState = "opening";
       this._native.connect(host, port);
       return this;
@@ -125,6 +141,8 @@
         if (this._pendingEnd) {
           this._pendingEnd = false;
           this._native.end();
+          this.writable = false;
+          this.writableEnded = true;
           this.readyState = "writeOnly";
         }
       } finally {
@@ -160,6 +178,8 @@
         this._pendingEnd = true;
       } else {
         this._native.end();
+        this.writable = false;
+        this.writableEnded = true;
         this.readyState = this.readyState === "readOnly" ? "closed" : "writeOnly";
       }
       return this;
@@ -168,6 +188,10 @@
     destroy(err) {
       if (this.destroyed) return this;
       if (err) this.emit("error", err);
+      this.readable = false;
+      this.writable = false;
+      this.readableDestroyed = true;
+      this.writableDestroyed = true;
       this._native.destroy();
       return this;
     }
