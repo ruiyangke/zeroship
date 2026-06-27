@@ -71,6 +71,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::dialect_renderer::{Capability, DialectSupports};
 use zeroship_schema::query::SqlDialect;
 
 use crate::expr::{BinaryOp, Expr, ScalarFn, SynthFn, UnaryOp};
@@ -734,7 +735,7 @@ pub fn assemble_insert(
     );
 
     if let Some(oc) = on_conflict {
-        if dialect == SqlDialect::Sqlite {
+        if !dialect.supports(Capability::InsertOnConflictClause) {
             return Err(DmlError::OnConflictNotPortable { table: table.to_string() });
         }
         template.push_str(&render_on_conflict(oc, &mut ctx)?);

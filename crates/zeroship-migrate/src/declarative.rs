@@ -39,6 +39,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Deserialize;
 
+use crate::dialect_renderer::{Capability, DialectSupports};
 use crate::drift::{
     ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot, IndexSnapshot, SchemaSnapshot,
     TableSnapshot,
@@ -1094,7 +1095,7 @@ fn generated_column_snapshot(
     generated: &crate::ir::GeneratedCol,
     dialect: SqlDialect,
 ) -> Result<GeneratedColumnSnapshot, DeclarativeError> {
-    if matches!(dialect, SqlDialect::Postgres) && !generated.stored {
+    if !generated.stored && !dialect.supports(Capability::VirtualGeneratedColumn) {
         return Err(DeclarativeError::Invalid(
             r#"UNSUPPORTED { kind: "virtualColumn", dialect: "pg" }"#.to_string(),
         ));
@@ -2963,7 +2964,7 @@ impl DeclarativeAuthor {
                         inline_fks.push(c);
                     }
                     other => {
-                        if is_sqlite {
+                        if !self.dialect.supports(Capability::AlterTableAddConstraint) {
                             // SQLite cannot ADD CONSTRAINT later → fail closed.
                             return Err(DeclarativeError::SqliteDeferredFkUnsupported {
                                 table: (*table).clone(),
@@ -4773,7 +4774,7 @@ impl DeclarativeAuthor {
                 .is_some_and(|tt| tt == table || live_tables.contains(tt));
             if inlinable {
                 inline_fks.push(c);
-            } else if is_sqlite {
+            } else if !self.dialect.supports(Capability::AlterTableAddConstraint) {
                 return Err(DeclarativeError::SqliteDeferredFkUnsupported {
                     table: table.to_string(),
                     target: target.unwrap_or_default(),

@@ -2,8 +2,83 @@ use zeroship_schema::query::SqlDialect;
 
 use crate::dml::{self, DmlError};
 use crate::expr::CastTarget;
-use crate::ir::{Op, TableRef};
+use crate::ir::{Op, TableRef, TriggerAction};
 use crate::ir_author::IrLowerError;
+
+/// Closed set of dialect feature predicates used by the migration lowerer.
+///
+/// Keep this enum closed. The exhaustive [`DialectSupports::supports`] matrix
+/// below is the single place a new dialect declares its feature surface; do not
+/// add wildcard arms there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Capability {
+    NonPkIdentity,
+    VirtualGeneratedColumn,
+    CrossSchemaDdl,
+    TableLevelForeignKey,
+    TableLevelUnique,
+    NonBtreeIndexMethod,
+    NativeAlterColumn,
+    AlterTableAddConstraint,
+    AlterTableDropConstraint,
+    InsertOnConflictClause,
+    PostgresVendorPrimitives,
+    MaterializedView,
+    CreateOrReplaceView,
+    TriggerTruncateEvent,
+    TriggerStatementForEach,
+    TriggerExecuteFunction,
+    TriggerBody,
+}
+
+pub(crate) trait DialectSupports {
+    fn supports(self, cap: Capability) -> bool;
+}
+
+impl DialectSupports for SqlDialect {
+    fn supports(self, cap: Capability) -> bool {
+        match self {
+            SqlDialect::Postgres => match cap {
+                Capability::NonPkIdentity => true,
+                Capability::VirtualGeneratedColumn => false,
+                Capability::CrossSchemaDdl => true,
+                Capability::TableLevelForeignKey => true,
+                Capability::TableLevelUnique => true,
+                Capability::NonBtreeIndexMethod => true,
+                Capability::NativeAlterColumn => true,
+                Capability::AlterTableAddConstraint => true,
+                Capability::AlterTableDropConstraint => true,
+                Capability::InsertOnConflictClause => true,
+                Capability::PostgresVendorPrimitives => true,
+                Capability::MaterializedView => true,
+                Capability::CreateOrReplaceView => true,
+                Capability::TriggerTruncateEvent => true,
+                Capability::TriggerStatementForEach => true,
+                Capability::TriggerExecuteFunction => true,
+                Capability::TriggerBody => false,
+            },
+            SqlDialect::Sqlite => match cap {
+                Capability::NonPkIdentity => false,
+                Capability::VirtualGeneratedColumn => true,
+                Capability::CrossSchemaDdl => false,
+                Capability::TableLevelForeignKey => false,
+                Capability::TableLevelUnique => false,
+                Capability::NonBtreeIndexMethod => false,
+                Capability::NativeAlterColumn => false,
+                Capability::AlterTableAddConstraint => false,
+                Capability::AlterTableDropConstraint => false,
+                Capability::InsertOnConflictClause => false,
+                Capability::PostgresVendorPrimitives => false,
+                Capability::MaterializedView => false,
+                Capability::CreateOrReplaceView => false,
+                Capability::TriggerTruncateEvent => false,
+                Capability::TriggerStatementForEach => false,
+                Capability::TriggerExecuteFunction => false,
+                Capability::TriggerBody => true,
+            },
+        }
+    }
+}
 
 /// Dialect-specific DML/view/trigger rendering.
 ///
@@ -92,7 +167,13 @@ impl DmlRenderer for PostgresDmlRenderer {
         "gen_random_uuid()".to_string()
     }
 
-    fn validate_view_materialized(&self, _materialized: bool) -> Result<(), IrLowerError> {
+    fn validate_view_materialized(&self, materialized: bool) -> Result<(), IrLowerError> {
+        if materialized && !SqlDialect::Postgres.supports(Capability::MaterializedView) {
+            return Err(IrLowerError::ViewUnsupported {
+                kind: "materializedView",
+                dialect: SqlDialect::Postgres,
+            });
+        }
         Ok(())
     }
 
@@ -104,7 +185,7 @@ impl DmlRenderer for PostgresDmlRenderer {
         let mut create = String::from("CREATE ");
         if materialized {
             create.push_str("MATERIALIZED VIEW ");
-        } else if replace {
+        } else if replace && SqlDialect::Postgres.supports(Capability::CreateOrReplaceView) {
             create.push_str("OR REPLACE VIEW ");
         } else {
             create.push_str("VIEW ");
@@ -149,6 +230,14 @@ impl DmlRenderer for PostgresDmlRenderer {
         op: &Op,
         eff_schema: &str,
     ) -> Result<Vec<crate::vendor::VendorStatement>, IrLowerError> {
+        if let Op::CreateTrigger { action: TriggerAction::Body { .. }, .. } = op {
+            if !SqlDialect::Postgres.supports(Capability::TriggerBody) {
+                return Err(IrLowerError::TriggerUnsupported {
+                    kind: "triggerBody",
+                    dialect: SqlDialect::Postgres,
+                });
+            }
+        }
         let stmts = match crate::vendor::render_vendor_op(op, eff_schema) {
             Ok(stmts) => stmts,
             Err(crate::vendor::VendorError::UnsupportedTriggerAction { kind }) => {
@@ -243,7 +332,7 @@ impl DmlRenderer for SqliteDmlRenderer {
     }
 
     fn validate_view_materialized(&self, materialized: bool) -> Result<(), IrLowerError> {
-        if materialized {
+        if materialized && !SqlDialect::Sqlite.supports(Capability::MaterializedView) {
             return Err(IrLowerError::ViewUnsupported {
                 kind: "materializedView",
                 dialect: SqlDialect::Sqlite,
@@ -263,7 +352,7 @@ impl DmlRenderer for SqliteDmlRenderer {
     }
 
     fn view_replace_prelude(&self, qname: &str, replace: bool) -> Vec<String> {
-        if replace {
+        if replace && !SqlDialect::Sqlite.supports(Capability::CreateOrReplaceView) {
             vec![format!("DROP VIEW IF EXISTS {qname}")]
         } else {
             Vec::new()
@@ -307,9 +396,94 @@ impl DmlRenderer for SqliteDmlRenderer {
 mod tests {
     use super::*;
 
+    const ALL_CAPABILITIES: &[Capability] = &[
+        Capability::NonPkIdentity,
+        Capability::VirtualGeneratedColumn,
+        Capability::CrossSchemaDdl,
+        Capability::TableLevelForeignKey,
+        Capability::TableLevelUnique,
+        Capability::NonBtreeIndexMethod,
+        Capability::NativeAlterColumn,
+        Capability::AlterTableAddConstraint,
+        Capability::AlterTableDropConstraint,
+        Capability::InsertOnConflictClause,
+        Capability::PostgresVendorPrimitives,
+        Capability::MaterializedView,
+        Capability::CreateOrReplaceView,
+        Capability::TriggerTruncateEvent,
+        Capability::TriggerStatementForEach,
+        Capability::TriggerExecuteFunction,
+        Capability::TriggerBody,
+    ];
+
     #[test]
     fn dispatch_returns_expected_dml_renderer() {
         assert_eq!(renderer(SqlDialect::Postgres).synth_now(), "now()");
         assert_eq!(renderer(SqlDialect::Sqlite).synth_now(), "CURRENT_TIMESTAMP");
+    }
+
+    #[test]
+    fn dialect_capability_matrix_is_explicit() {
+        // This matrix pins the feature surface for every closed dialect. A new
+        // dialect must answer every Capability in `DialectSupports::supports`;
+        // update this test alongside that single declaration point.
+        let expected = [
+            (
+                SqlDialect::Postgres,
+                [
+                    (Capability::NonPkIdentity, true),
+                    (Capability::VirtualGeneratedColumn, false),
+                    (Capability::CrossSchemaDdl, true),
+                    (Capability::TableLevelForeignKey, true),
+                    (Capability::TableLevelUnique, true),
+                    (Capability::NonBtreeIndexMethod, true),
+                    (Capability::NativeAlterColumn, true),
+                    (Capability::AlterTableAddConstraint, true),
+                    (Capability::AlterTableDropConstraint, true),
+                    (Capability::InsertOnConflictClause, true),
+                    (Capability::PostgresVendorPrimitives, true),
+                    (Capability::MaterializedView, true),
+                    (Capability::CreateOrReplaceView, true),
+                    (Capability::TriggerTruncateEvent, true),
+                    (Capability::TriggerStatementForEach, true),
+                    (Capability::TriggerExecuteFunction, true),
+                    (Capability::TriggerBody, false),
+                ],
+            ),
+            (
+                SqlDialect::Sqlite,
+                [
+                    (Capability::NonPkIdentity, false),
+                    (Capability::VirtualGeneratedColumn, true),
+                    (Capability::CrossSchemaDdl, false),
+                    (Capability::TableLevelForeignKey, false),
+                    (Capability::TableLevelUnique, false),
+                    (Capability::NonBtreeIndexMethod, false),
+                    (Capability::NativeAlterColumn, false),
+                    (Capability::AlterTableAddConstraint, false),
+                    (Capability::AlterTableDropConstraint, false),
+                    (Capability::InsertOnConflictClause, false),
+                    (Capability::PostgresVendorPrimitives, false),
+                    (Capability::MaterializedView, false),
+                    (Capability::CreateOrReplaceView, false),
+                    (Capability::TriggerTruncateEvent, false),
+                    (Capability::TriggerStatementForEach, false),
+                    (Capability::TriggerExecuteFunction, false),
+                    (Capability::TriggerBody, true),
+                ],
+            ),
+        ];
+
+        for (dialect, capabilities) in expected {
+            for (cap, supported) in capabilities {
+                assert_eq!(
+                    dialect.supports(cap),
+                    supported,
+                    "{dialect:?} support for {cap:?}"
+                );
+            }
+        }
+
+        assert_eq!(ALL_CAPABILITIES.len(), expected[0].1.len());
     }
 }

@@ -32,6 +32,7 @@ use crate::declarative::{
     build_table_snapshot, CollectionDescriptor, DeclarativeAuthor, DeclarativeError,
     FieldDescriptor, LoweredUnit,
 };
+use crate::dialect_renderer::{Capability, DialectSupports};
 use crate::drift::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, TableSnapshot};
 use crate::guard::{guard_for, GuardConfig, GuardError};
 use crate::ir::{
@@ -1280,7 +1281,7 @@ impl IrAuthor {
         // target. Refuse rather than re-pin to `main`. (`effective_schema` has
         // already canonicalized a case-variant of `project_schema` back to the
         // project casing, so this compares against the canonical project schema.)
-        if matches!(self.dialect, SqlDialect::Sqlite)
+        if !self.dialect.supports(Capability::CrossSchemaDdl)
             && !eff_schema.eq_ignore_ascii_case(&self.project_schema)
         {
             return Err(IrLowerError::SqliteSchemaUnsupported(eff_schema));
@@ -1531,7 +1532,7 @@ impl IrAuthor {
                 // structure (not available in this pure-render lower). So stand-alone
                 // alterColumnType lowers on PG only; on SQLite it routes through the
                 // declarative diff rebuild seam (fail-closed here).
-                self.require_pg_for("alterColumnType")?;
+                self.require_capability_for(Capability::NativeAlterColumn, "alterColumnType")?;
                 // A `using` cast is a closed-AST `Expr`; rendering an `Expr` to SQL is
                 // the Wave-C expression renderer (the same wave the DML executors wait
                 // on). Until it lands, a cast-bearing type change cannot lower.
@@ -1558,7 +1559,10 @@ impl IrAuthor {
             }
             Op::AlterColumnNullability { table, column, nullable, .. } => {
                 // Same SQLite rebuild constraint as alterColumnType.
-                self.require_pg_for("alterColumnNullability")?;
+                self.require_capability_for(
+                    Capability::NativeAlterColumn,
+                    "alterColumnNullability",
+                )?;
                 // **PR10 Part B** — alterColumnNullability ifExists: presence-only.
                 if let Some(g) = guard {
                     probe = Some(crate::guard_probe::GuardProbe::ColumnPresence {
@@ -1631,7 +1635,10 @@ impl IrAuthor {
             }
             Op::DropConstraint { table, name, .. } => {
                 // SQLite has no `ALTER TABLE … DROP CONSTRAINT` (rebuild-only); PG only.
-                self.require_pg_for("dropConstraint")?;
+                self.require_capability_for(
+                    Capability::AlterTableDropConstraint,
+                    "dropConstraint",
+                )?;
                 // **PR10 Part B** — dropConstraint ifExists: presence-only on the name.
                 if let Some(g) = guard {
                     probe = Some(crate::guard_probe::GuardProbe::Constraint {
@@ -1712,7 +1719,7 @@ impl IrAuthor {
             | Op::CreateFunction { .. }
             | Op::DropFunction { .. }
             | Op::PgRaw { .. } => {
-                if matches!(self.dialect, SqlDialect::Sqlite) {
+                if !self.dialect.supports(Capability::PostgresVendorPrimitives) {
                     return Err(IrLowerError::VendorPgOnly(op_kind_tag(op)));
                 }
                 enforce_vendor_capability_at_lower(op, Some(&self.scope))?;
@@ -2243,7 +2250,6 @@ impl IrAuthor {
         constraints: &[IrConstraint],
         indexes: &[IrIndex],
     ) -> Result<(), IrLowerError> {
-        let is_sqlite = matches!(self.dialect, SqlDialect::Sqlite);
         for c in constraints {
             match &c.kind {
                 IrConstraintKind::Pk { columns } => {
@@ -2274,7 +2280,7 @@ impl IrAuthor {
                     on_delete,
                     on_update,
                 } => {
-                    if is_sqlite {
+                    if !self.dialect.supports(Capability::TableLevelForeignKey) {
                         return Err(IrLowerError::UnsupportedOp(
                             "createTable table-level FOREIGN KEY on SQLite (the SQLite \
                              CREATE renders from the descriptor; a table-level FK is \
@@ -2312,7 +2318,7 @@ impl IrAuthor {
                     snap.constraints.push(fk);
                 }
                 IrConstraintKind::Unique { columns } => {
-                    if is_sqlite {
+                    if !self.dialect.supports(Capability::TableLevelUnique) {
                         return Err(IrLowerError::UnsupportedOp(
                             "createTable table-level UNIQUE on SQLite (the SQLite \
                              CREATE renders from the descriptor; a table-level UNIQUE \
@@ -2346,7 +2352,7 @@ impl IrAuthor {
                 return Err(IrLowerError::ExprRenderDeferred("createTable index where"));
             }
             let access = ix.using.map_or("btree", index_method_access);
-            if is_sqlite && access != "btree" {
+            if !self.dialect.supports(Capability::NonBtreeIndexMethod) && access != "btree" {
                 return Err(IrLowerError::UnsupportedOp(
                     "createTable non-btree index `using` on SQLite (later wave)",
                 ));
@@ -2424,7 +2430,7 @@ impl IrAuthor {
         generated: Option<&crate::ir::GeneratedCol>,
         identity: Option<crate::ir::IdentityCol>,
     ) -> Result<(ColumnSnapshot, Option<ColumnSnapshot>), IrLowerError> {
-        if matches!(self.dialect, SqlDialect::Sqlite) && identity.is_some() {
+        if !self.dialect.supports(Capability::NonPkIdentity) && identity.is_some() {
             return Err(IrLowerError::ColumnUnsupported {
                 kind: "identity",
                 dialect: self.dialect,
@@ -2655,15 +2661,20 @@ impl IrAuthor {
         }
     }
 
-    /// Fail closed unless the target dialect is Postgres — the stand-alone
-    /// `alterColumn*` / `addConstraint` / `dropConstraint` render coverage (§6) is
-    /// PG-native; SQLite reconciles these via the 12-step rebuild in the
-    /// declarative diff path (which needs full live structure, not this
+    /// Fail closed unless the target dialect supports the requested native feature
+    /// — the stand-alone `alterColumn*` / `addConstraint` / `dropConstraint` render
+    /// coverage (§6) is PG-native; SQLite reconciles these via the 12-step rebuild
+    /// in the declarative diff path (which needs full live structure, not this
     /// pure-render lower). See [`IrLowerError::SqliteRebuildOnly`].
-    fn require_pg_for(&self, op: &'static str) -> Result<(), IrLowerError> {
-        match self.dialect {
-            SqlDialect::Postgres => Ok(()),
-            SqlDialect::Sqlite => Err(IrLowerError::SqliteRebuildOnly(op)),
+    fn require_capability_for(
+        &self,
+        cap: Capability,
+        op: &'static str,
+    ) -> Result<(), IrLowerError> {
+        if self.dialect.supports(cap) {
+            Ok(())
+        } else {
+            Err(IrLowerError::SqliteRebuildOnly(op))
         }
     }
 
@@ -2681,7 +2692,10 @@ impl IrAuthor {
         table: &str,
         constraint: &IrConstraint,
     ) -> Result<Vec<LoweredUnit>, IrLowerError> {
-        self.require_pg_for("addConstraint")?;
+        self.require_capability_for(
+            Capability::AlterTableAddConstraint,
+            "addConstraint",
+        )?;
         let name = constraint.name.as_deref();
         let mig = match &constraint.kind {
             IrConstraintKind::Fk {
@@ -2980,24 +2994,39 @@ pub(crate) fn render_sqlite_trigger_op(
                     what: "trigger events",
                 }));
             }
-            if events.iter().any(|e| matches!(e, TriggerEvent::Truncate)) {
+            if events.iter().any(|e| matches!(e, TriggerEvent::Truncate))
+                && !SqlDialect::Sqlite.supports(Capability::TriggerTruncateEvent)
+            {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind: "triggerEventTruncate",
                     dialect: SqlDialect::Sqlite,
                 });
             }
-            if matches!(for_each, ForEach::Statement) {
+            if matches!(for_each, ForEach::Statement)
+                && !SqlDialect::Sqlite.supports(Capability::TriggerStatementForEach)
+            {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind: "forEachStatement",
                     dialect: SqlDialect::Sqlite,
                 });
             }
             let TriggerAction::Body { statements } = action else {
+                if !SqlDialect::Sqlite.supports(Capability::TriggerExecuteFunction) {
+                    return Err(IrLowerError::TriggerUnsupported {
+                        kind: "executeFunction",
+                        dialect: SqlDialect::Sqlite,
+                    });
+                }
+                return Err(IrLowerError::UnsupportedOp(
+                    "SQLite trigger action routed past capability check",
+                ));
+            };
+            if !SqlDialect::Sqlite.supports(Capability::TriggerBody) {
                 return Err(IrLowerError::TriggerUnsupported {
-                    kind: "executeFunction",
+                    kind: "triggerBody",
                     dialect: SqlDialect::Sqlite,
                 });
-            };
+            }
             if statements.is_empty() {
                 return Err(IrLowerError::Vendor(crate::vendor::VendorError::EmptyList {
                     what: "trigger body statements",
@@ -3749,6 +3778,51 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         }
+    }
+
+    #[test]
+    fn sqlite_non_pk_identity_reject_is_capability_gated() {
+        use crate::dialect_renderer::{Capability, DialectSupports};
+
+        assert!(!SqlDialect::Sqlite.supports(Capability::NonPkIdentity));
+
+        let ir = MigrationIr {
+            ir_version: 1,
+            name: "m".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::AddColumn {
+                table: "events".into(),
+                column: "seq".into(),
+                ty: ColType::BigInt,
+                nullable: Some(false),
+                default: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: Some(crate::ir::IdentityCol { always: false }),
+                schema: None,
+                existence_guard: None,
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+
+        let err = IrAuthor::new("app", "app_a", SqlDialect::Sqlite)
+            .lower(&ir, &LiveSchema::default())
+            .expect_err(
+                "SQLite must reject non-PK identity through Capability::NonPkIdentity",
+            );
+        assert!(matches!(
+            err,
+            IrLowerError::ColumnUnsupported {
+                kind: "identity",
+                dialect: SqlDialect::Sqlite,
+                reason: Some(reason),
+            } if reason.contains("non-PK identity")
+        ));
     }
 
     /// REGRESSION (mig-first P1 critique, Finding #4): the lower's createTable
